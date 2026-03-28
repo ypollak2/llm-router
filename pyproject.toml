@@ -11,6 +11,13 @@ dependencies = [
     "aiosqlite>=0.20.0",
 ]
 
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "ruff>=0.4",
+]
+
 [project.scripts]
 llm-router = "llm_router.server:main"
 llm-router-onboard = "llm_router.onboard:main"
