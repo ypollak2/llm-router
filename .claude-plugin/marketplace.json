@@ -1,0 +1,20 @@
+{
+  "name": "llm-router",
+  "owner": {
+    "name": "ypollak2"
+  },
+  "plugins": [
+    {
+      "name": "llm-router",
+      "source": "./",
+      "description": "Route text, image, video, and audio tasks to 20+ AI providers with smart routing, budget control, and multi-step orchestration",
+      "version": "0.1.0",
+      "author": {
+        "name": "ypollak2"
+      },
+      "homepage": "https://github.com/ypollak2/llm-router",
+      "repository": "https://github.com/ypollak2/llm-router",
+      "license": "MIT"
+    }
+  ]
+}

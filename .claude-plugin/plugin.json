@@ -1,14 +1,11 @@
 {
   "name": "llm-router",
   "version": "0.1.0",
-  "description": "Multi-LLM router — route tasks to Gemini, GPT, Perplexity with configurable profiles, cost tracking, and autonomous orchestration",
+  "description": "Route text, image, video, and audio tasks to 20+ AI providers with smart routing, budget control, and multi-step orchestration",
   "author": {
     "name": "ypollak2"
   },
-  "agents": [
-    "./agents/llm-orchestrator.md"
-  ],
-  "skills": [
-    "./skills/route.md"
-  ]
+  "homepage": "https://github.com/ypollak2/llm-router",
+  "repository": "https://github.com/ypollak2/llm-router",
+  "license": "MIT"
 }

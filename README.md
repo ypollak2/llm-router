@@ -76,16 +76,27 @@ Restart Claude Code. You now have **14 new tools** available.
 
 ### Install as Claude Code Plugin
 
-LLM Router works as both an MCP server and a Claude Code plugin. The plugin adds:
-- **`/route` skill** — Smart task classification and routing in one command
-- **LLM Orchestrator agent** — Autonomous multi-step task decomposition across models
+```bash
+# 1. Add the marketplace
+/plugin marketplace add ypollak2/llm-router
 
-The plugin is automatically installed by `./scripts/install.sh`. You can also manually add it:
+# 2. Install the plugin
+/plugin install llm-router@llm-router
+```
+
+Or install manually from source:
 
 ```bash
-# Add MCP server to Claude Code config
-claude mcp add llm-router -- uv run --directory /path/to/llm-router llm-router
+git clone https://github.com/ypollak2/llm-router.git
+cd llm-router
+uv sync
+./scripts/install.sh
 ```
+
+The plugin adds:
+- **14 MCP tools** — Routing for text, image, video, and audio across 20+ providers
+- **`/route` skill** — Smart task classification and routing in one command
+- **LLM Orchestrator agent** — Autonomous multi-step task decomposition across models
 
 ---
 
