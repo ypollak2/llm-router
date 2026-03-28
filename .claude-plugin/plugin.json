@@ -1,0 +1,14 @@
+{
+  "name": "llm-router",
+  "version": "0.1.0",
+  "description": "Multi-LLM router — route tasks to Gemini, GPT, Perplexity with configurable profiles, cost tracking, and autonomous orchestration",
+  "author": {
+    "name": "ypollak2"
+  },
+  "agents": [
+    "./agents/llm-orchestrator.md"
+  ],
+  "skills": [
+    "./skills/route.md"
+  ]
+}
