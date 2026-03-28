@@ -284,20 +284,34 @@ llm_health()
 
 ---
 
-## Self-Hosted vs Cloud
+## Pricing
 
-| | Self-Hosted (Open Source) | Cloud (Coming Soon) |
-|--|---------------------------|---------------------|
-| **Price** | Free forever | Free / Pro $9/mo / Team $29/mo |
-| **Providers** | All — bring your own keys | All — bring your own keys |
-| **Routing** | All profiles | Free: 1 provider. Pro+: all |
-| **Budget tracking** | Local SQLite | Cloud dashboard |
-| **Benchmarks** | Manual update | Auto-updated weekly |
-| **Multimodal** | Full access | Free: text. Pro+: all |
-| **Requests** | Unlimited | Free: 100/day. Pro+: unlimited |
-| **Support** | GitHub Issues | Email + priority |
+**Everything routes for free.** Pay for the intelligence that makes routing smarter and cheaper.
 
-> The open-source version is **fully featured**. Cloud adds convenience, team features, and automatic benchmark updates.
+| | Free | Pro ($12/mo) | Team ($39/mo) |
+|--|------|-------------|---------------|
+| **All 20+ providers** | BYOK | BYOK + Credits | BYOK + Credits |
+| **All modalities** | Text, image, video, audio | Same | Same |
+| **Basic routing** | 3 built-in profiles | Same + custom profiles | Shared team profiles |
+| **Multi-step orchestration** | - | Auto-chain tasks across models | + batch jobs, scheduling |
+| **Budget optimizer** | - | Monthly budget with auto-downshift | Per-project budgets |
+| **Quality benchmarks** | - | Weekly auto-updated routing | Same |
+| **Synergy detection** | - | "Chain X→Y saves 30%" recommendations | Same |
+| **Analytics** | Total spend | Full breakdown, trends, projections | Team-wide, chargeback |
+| **Savings reports** | - | "You saved $127 this month" | Team savings |
+| **Universal credits** | - | $5/mo included (buy more anytime) | $15/mo included |
+| **Support** | GitHub Issues | Email | Priority + onboarding |
+
+### Universal Credits
+
+Tired of managing 10+ API keys? Buy LLM Router credits and let the router handle it:
+
+- **$1 credit = $1.10-$1.15 of API value** (we optimize your spend)
+- Credits work across all providers — one balance, zero key management
+- Pro includes $5/mo, Team includes $15/mo — buy more anytime
+- Unused credits roll over month to month
+
+> The open-source self-hosted version is **fully featured** for routing. Cloud adds the intelligence layer (benchmarks, budget optimization, orchestration) and credits convenience.
 
 ---
 
