@@ -70,10 +70,11 @@ async def test_raises_when_all_fail(mock_env):
 
 @pytest.mark.asyncio
 async def test_no_providers_configured(monkeypatch):
-    # Explicitly clear all API keys
+    # Explicitly clear all API keys and prevent .env file loading
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     monkeypatch.delenv("PERPLEXITY_API_KEY", raising=False)
+    monkeypatch.chdir("/tmp")  # no .env file here
     with pytest.raises(ValueError, match="No available models"):
         await route_and_call(TaskType.QUERY, "Hello")
 
