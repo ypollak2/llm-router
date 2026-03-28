@@ -41,6 +41,10 @@ PRO_FEATURES = {
 }
 
 
+class BudgetExceededError(RuntimeError):
+    """Raised when the monthly budget limit has been reached."""
+
+
 @dataclass(frozen=True)
 class LLMResponse:
     content: str

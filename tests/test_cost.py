@@ -1,7 +1,5 @@
 """Tests for cost tracking."""
 
-import asyncio
-from pathlib import Path
 
 import pytest
 

@@ -7,11 +7,11 @@ import logging
 from mcp.server.fastmcp import FastMCP
 
 from llm_router.config import get_config
-from llm_router.cost import get_usage_summary
+from llm_router.cost import get_monthly_spend, get_usage_summary
 from llm_router.health import get_tracker
 from llm_router.orchestrator import PIPELINE_TEMPLATES, auto_orchestrate, run_pipeline
 from llm_router.router import route_and_call
-from llm_router.types import PipelineStep, RoutingProfile, TaskType, Tier, PRO_FEATURES
+from llm_router.types import RoutingProfile, TaskType, Tier, PRO_FEATURES
 
 logging.basicConfig(level=logging.INFO, format="%(name)s | %(message)s")
 
@@ -250,10 +250,29 @@ async def llm_orchestrate(
     Chains research, analysis, generation, and coding steps together, routing each
     to the optimal model. Use templates for common patterns or let the AI decompose.
 
+    Free tier: up to 2-step pipelines. Pro tier: unlimited steps + auto-decomposition.
+
     Args:
         task: Description of the complex task to accomplish.
         template: Optional pipeline template: "research_report", "competitive_analysis", "content_pipeline", "code_review_fix". Omit for auto-decomposition.
     """
+    config = get_config()
+
+    # Auto-decomposition requires Pro
+    if not template:
+        tier_error = _check_tier("multi_step")
+        if tier_error:
+            return tier_error
+
+    # Free tier: templates limited to 2-step max
+    if template and template in PIPELINE_TEMPLATES:
+        steps = PIPELINE_TEMPLATES[template]
+        if config.llm_router_tier == Tier.FREE and len(steps) > 2:
+            return (
+                f"Template '{template}' has {len(steps)} steps — free tier allows up to 2. "
+                "Upgrade to Pro for unlimited pipeline steps: https://llm-router.dev/pricing"
+            )
+
     if template and template in PIPELINE_TEMPLATES:
         steps = PIPELINE_TEMPLATES[template]
         result = await run_pipeline(steps, task)
@@ -311,7 +330,23 @@ async def llm_usage(period: str = "today") -> str:
     Args:
         period: Time period — "today", "week", "month", or "all".
     """
-    return await get_usage_summary(period)
+    summary = await get_usage_summary(period)
+
+    # Append budget status if a budget is configured
+    config = get_config()
+    if config.llm_router_monthly_budget > 0:
+        monthly_spend = await get_monthly_spend()
+        budget = config.llm_router_monthly_budget
+        remaining = max(0, budget - monthly_spend)
+        pct = (monthly_spend / budget * 100) if budget > 0 else 0
+        summary += (
+            f"\n\n### Budget Status\n"
+            f"Monthly budget: ${budget:.2f}\n"
+            f"Spent this month: ${monthly_spend:.4f} ({pct:.1f}%)\n"
+            f"Remaining: ${remaining:.4f}"
+        )
+
+    return summary
 
 
 @mcp.tool()

@@ -1,11 +1,9 @@
 """Tests for MCP server tool registration and basic functionality."""
 
-from unittest.mock import AsyncMock, patch
 
 import pytest
 
 from llm_router.server import mcp
-from llm_router.types import LLMResponse
 
 
 def test_all_tools_registered():

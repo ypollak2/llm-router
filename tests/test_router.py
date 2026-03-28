@@ -1,6 +1,6 @@
 """Tests for core routing logic."""
 
-from unittest.mock import AsyncMock, patch
+from unittest.mock import patch
 
 import pytest
 
@@ -20,7 +20,7 @@ async def test_routes_to_first_available_model(mock_env, mock_acompletion):
 
 @pytest.mark.asyncio
 async def test_model_override_bypasses_routing(mock_env, mock_acompletion):
-    resp = await route_and_call(
+    await route_and_call(
         TaskType.QUERY, "Hello",
         model_override="openai/gpt-4o",
     )

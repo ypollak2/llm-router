@@ -110,7 +110,7 @@ def main() -> None:
     print(f"   Configured: {', '.join(configured) or 'none'}")
     if skipped:
         print(f"   Skipped: {', '.join(skipped)}")
-    print(f"\n   You need at least 1 provider configured to use LLM Router.")
+    print("\n   You need at least 1 provider configured to use LLM Router.")
 
     if not configured:
         print("\n   ⚠ No API keys configured! Run this again when you have keys.")

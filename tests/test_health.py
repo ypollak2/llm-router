@@ -1,7 +1,6 @@
 """Tests for health tracking and circuit breaker."""
 
 import time
-from unittest.mock import patch
 
 from llm_router.health import HealthTracker, ProviderHealth
 

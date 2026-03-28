@@ -8,7 +8,7 @@ from llm_router import cost, media, providers
 from llm_router.config import get_config
 from llm_router.health import get_tracker
 from llm_router.profiles import get_model_chain, provider_from_model
-from llm_router.types import LLMResponse, RoutingProfile, TaskType
+from llm_router.types import BudgetExceededError, LLMResponse, RoutingProfile, TaskType
 
 log = logging.getLogger("llm_router")
 
@@ -35,6 +35,16 @@ async def route_and_call(
     config = get_config()
     profile = profile or config.llm_router_profile
     tracker = get_tracker()
+
+    # Budget enforcement — block calls if monthly budget is exceeded
+    if config.llm_router_monthly_budget > 0:
+        monthly_spend = await cost.get_monthly_spend()
+        if monthly_spend >= config.llm_router_monthly_budget:
+            raise BudgetExceededError(
+                f"Monthly budget of ${config.llm_router_monthly_budget:.2f} exceeded "
+                f"(spent: ${monthly_spend:.2f}). "
+                "Increase budget via LLM_ROUTER_MONTHLY_BUDGET or wait until next month."
+            )
 
     if model_override:
         models_to_try = [model_override]

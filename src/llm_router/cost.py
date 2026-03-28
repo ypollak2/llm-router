@@ -64,6 +64,20 @@ async def log_usage(
         await db.close()
 
 
+async def get_monthly_spend() -> float:
+    """Get total USD spent in the current calendar month."""
+    db = await _get_db()
+    try:
+        cursor = await db.execute(
+            "SELECT COALESCE(SUM(cost_usd), 0) FROM usage "
+            "WHERE timestamp >= datetime('now', 'start of month')"
+        )
+        row = await cursor.fetchone()
+        return float(row[0]) if row else 0.0
+    finally:
+        await db.close()
+
+
 async def get_usage_summary(period: str = "today") -> str:
     """Get a human-readable usage summary.
 

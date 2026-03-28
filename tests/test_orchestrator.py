@@ -1,6 +1,6 @@
 """Tests for multi-step orchestration."""
 
-from unittest.mock import AsyncMock, patch
+from unittest.mock import patch
 
 import pytest
 
@@ -9,7 +9,7 @@ from llm_router.orchestrator import (
     auto_orchestrate,
     run_pipeline,
 )
-from llm_router.types import PipelineStep, RoutingProfile, TaskType
+from llm_router.types import PipelineStep, TaskType
 
 
 @pytest.fixture
@@ -23,7 +23,7 @@ def mock_route(mock_litellm_response):
         from llm_router.types import LLMResponse
         return LLMResponse(
             content=f"Step {call_count} result for {task_type.value}",
-            model=f"openai/gpt-4o",
+            model="openai/gpt-4o",
             input_tokens=100,
             output_tokens=50,
             cost_usd=0.001,
@@ -54,7 +54,7 @@ class TestRunPipeline:
             PipelineStep(task_type=TaskType.RESEARCH, prompt_template="Find: {input}"),
             PipelineStep(task_type=TaskType.ANALYZE, prompt_template="Analyze: {previous_result}"),
         ]
-        result = await run_pipeline(steps, "competitors")
+        await run_pipeline(steps, "competitors")
 
         # Second call should have received the first step's output in its prompt
         calls = mock_route.call_args_list
