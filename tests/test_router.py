@@ -15,7 +15,7 @@ async def test_routes_to_first_available_model(mock_env, mock_acompletion):
     assert resp.content == "Mock response"
     # Should have called acompletion with the first model in budget/query chain
     call_kwargs = mock_acompletion.call_args
-    assert "gemini/gemini-2.0-flash" in call_kwargs.kwargs["model"]
+    assert "gemini/gemini-2.5-flash" in call_kwargs.kwargs["model"]
 
 
 @pytest.mark.asyncio

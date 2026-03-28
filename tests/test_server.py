@@ -13,8 +13,9 @@ def test_all_tools_registered():
     names = {t.name for t in tools}
     expected = {
         "llm_query", "llm_research", "llm_generate",
-        "llm_analyze", "llm_code", "llm_set_profile",
-        "llm_usage", "llm_health",
+        "llm_analyze", "llm_code", "llm_image", "llm_video", "llm_audio",
+        "llm_orchestrate", "llm_pipeline_templates",
+        "llm_set_profile", "llm_usage", "llm_health", "llm_providers",
     }
     assert expected == names
 
