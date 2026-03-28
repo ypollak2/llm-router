@@ -14,10 +14,7 @@ from llm_router.types import RoutingProfile, TaskType
 
 logging.basicConfig(level=logging.INFO, format="%(name)s | %(message)s")
 
-mcp = FastMCP(
-    "llm-router",
-    description="Multi-LLM router — query, research, generate, analyze, code across Gemini/GPT/Perplexity",
-)
+mcp = FastMCP("llm-router")
 
 
 # ── Task Tools ───────────────────────────────────────────────────────────────
