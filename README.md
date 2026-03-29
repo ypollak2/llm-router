@@ -443,14 +443,19 @@ See [ROADMAP.md](ROADMAP.md) for the detailed roadmap with phases and priorities
 - [x] Per-provider budget limits
 - [x] ASCII box-drawing dashboard (terminal-friendly, no Unicode issues)
 
-### Next Up
+### Next Up (v0.3 — Caching & Automation)
 
+- [ ] Prompt caching (exact-match hash + semantic similarity)
 - [ ] Periodic usage pulse (auto-refresh during sessions)
 - [ ] Streaming responses
-- [ ] Gemini Imagen/Veo API integration via LiteLLM
-- [ ] Web dashboard for usage analytics
-- [ ] PyPI package distribution
-- [ ] Automatic Playwright refresh hook for Claude usage
+- [ ] Auto-refresh Claude usage via Playwright hook
+
+### Planned (v0.4 — Smart Classification)
+
+- [ ] Embedding-based classifier (`all-MiniLM-L6-v2` + LogisticRegression, <15ms local inference)
+- [ ] Context compaction (structural + opt-in LLM summarization)
+- [ ] Classification quality framework (decision logging, outcome tracking, A/B testing)
+- [ ] `llm_quality_report` tool — routing accuracy, savings metrics, downshift harm rate
 
 ---
 

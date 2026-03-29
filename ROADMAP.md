@@ -57,22 +57,70 @@ Smart routing that understands Claude subscription state, integrates local agent
 
 ---
 
-## Phase 3: Automation & Polish — IN PROGRESS
+## Phase 3: Caching & Automation (v0.3) — IN PROGRESS
 
-Automatic usage refresh, periodic updates, and smoother UX.
+Prompt caching, automatic usage refresh, and smoother UX.
 
 | Feature | Priority | Status |
 |---------|----------|--------|
+| **Prompt cache — exact match** (SHA-256 hash, in-memory LRU, 1h TTL) | High | Planned |
+| **`llm_cache_stats` MCP tool** — expose hit rate, size, entries | High | Planned |
 | Periodic usage pulse (`/usage-pulse` via `/loop`) | High | Skill created, needs hook wiring |
 | Auto-refresh Claude usage via Playwright hook | High | Planned |
 | Streaming responses for long-running LLM calls | Medium | Planned |
 | `llm_setup(action='test')` — verify key validity | Medium | Planned |
 | Rate limit detection and automatic provider switching | Medium | Planned |
-| Smart classifier caching (avoid re-classifying identical prompts) | Low | Planned |
+
+### Cache Design (v0.3)
+
+- **Two-tier cache**: Exact match (hash of prompt + quality_mode + min_model) for O(1) lookup, plus semantic similarity (cosine over embeddings, threshold 0.95) when embedding classifier is available (Phase 4).
+- **Caches `ClassificationResult`**, not `RoutingRecommendation` — budget pressure is applied fresh every time, so cached results stay valid even as quota changes.
+- **In-memory LRU**: Max 1,000 entries (~1.5MB with embeddings), 1-hour TTL, `asyncio.Lock` for thread safety. No external dependencies.
+- **Zero overhead for misses**: Hash lookup is O(1). Short prompts that never repeat skip caching entirely.
 
 ---
 
-## Phase 4: Media & Multimodal
+## Phase 4: Smart Classification (v0.4)
+
+Replace heuristic LLM-based classification with fast local embeddings, add context compaction, and build a quality framework for systematic evaluation.
+
+| Feature | Priority | Status |
+|---------|----------|--------|
+| **Embedding-based classifier** — `all-MiniLM-L6-v2` + LogisticRegression, <15ms | High | Planned |
+| **Training pipeline** — bootstrap 500+ labeled prompts from LLM classifier | High | Planned |
+| **Structural context compaction** — collapse whitespace, dedup, truncate long blocks | High | Planned |
+| **Quality logging** — log every routing decision to SQLite `routing_decisions` table | High | Planned |
+| **`llm_quality_report` MCP tool** — classification accuracy, savings, downshift harm rate | Medium | Planned |
+| **LLM-based context compaction** — summarize bloated prompts via cheap model (opt-in) | Medium | Planned |
+| **Semantic prompt cache** — cosine similarity over embeddings (extends Phase 3 cache) | Medium | Planned |
+| **A/B testing** — run embedding + LLM classifiers in parallel on 10% sample, log disagreements | Medium | Planned |
+| **`llm_compact` MCP tool** — manual prompt compaction for testing | Low | Planned |
+
+### Embedding Classifier Design (v0.4)
+
+- **Model**: `all-MiniLM-L6-v2` (22M params, 384-dim vectors, ~80MB). Prefer ONNX runtime (~200MB) over full torch (~2GB) to keep the server lightweight.
+- **Approach**: Encode prompt → LogisticRegression predicts complexity (simple/moderate/complex) and task_type (5 classes) → calibrated confidence via `predict_proba`.
+- **Training**: Bootstrap labeled data from existing LLM classifier on ~500 curated prompts, train sklearn model, store in `~/.llm-router/models/`. Quality framework (below) provides human-corrected labels over time.
+- **Fallback**: If embedding model unavailable or confidence < 0.7, silently fall back to LLM classifier. Zero behavior change for users who don't opt in.
+- **New optional deps**: `onnxruntime`, `scikit-learn` (in `[project.optional-dependencies] ml` group).
+
+### Context Compaction Design (v0.4)
+
+- **When**: Prompt exceeds 4,000 tokens (estimated via `len(text) // 4` or `tiktoken`).
+- **Strategy 1 — Structural** (free, default): Collapse redundant whitespace, strip code comments, deduplicate repeated sections, truncate long code blocks to first/last N lines.
+- **Strategy 2 — LLM summarization** (opt-in `compaction_mode=full`): Send to a cheap classifier model with "summarize preserving all actionable requirements, code refs, and constraints."
+- **Never removes**: Code snippets, error messages, stack traces, file paths, explicit constraints.
+- **Config**: `compaction_mode` = `off` | `structural` | `full`, `compaction_threshold` = 4000 tokens.
+
+### Quality Framework Design (v0.4)
+
+- **Decision logging**: Every classify + route → SQLite row with prompt hash, complexity, classifier type (embedding/llm/cached), recommended model, budget state, outcome (success/retry).
+- **Metrics**: Classification accuracy, cost savings vs opus-baseline, downshift harm rate, classifier agreement rate.
+- **A/B testing**: When both classifiers exist, 10% sample runs both. Secondary is for logging only — primary always routes. Disagreements stored for review.
+
+---
+
+## Phase 5: Media & Multimodal
 
 Deep integration with media generation APIs.
 
@@ -87,7 +135,7 @@ Deep integration with media generation APIs.
 
 ---
 
-## Phase 5: Distribution & Community
+## Phase 6: Distribution & Community
 
 Making it easy for others to install and use.
 
@@ -103,7 +151,7 @@ Making it easy for others to install and use.
 
 ---
 
-## Phase 6: Advanced Routing
+## Phase 7: Advanced Routing
 
 Smarter model selection based on learned patterns.
 
