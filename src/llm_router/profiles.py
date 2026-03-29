@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from llm_router.types import RoutingProfile, TaskType
+from llm_router.types import Complexity, RoutingProfile, TaskType
 
 # Each entry is an ordered list of model IDs (LiteLLM format for text,
 # provider/model for media). Router tries them in order, falling back on failure.
@@ -142,6 +142,28 @@ ROUTING_TABLE: dict[tuple[RoutingProfile, TaskType], list[str]] = {
         "openai/tts-1-hd",
     ],
 }
+
+
+# ── Classifier model preferences (cheapest/fastest first) ────────────────────
+CLASSIFIER_MODELS: list[str] = [
+    "groq/llama-3.3-70b-versatile",
+    "openai/gpt-4o-mini",
+    "deepseek/deepseek-chat",
+    "mistral/mistral-small-latest",
+    "gemini/gemini-2.5-flash",  # thinking model — truncated JSON handled by parser
+]
+
+# ── Complexity → Profile mapping ─────────────────────────────────────────────
+COMPLEXITY_TO_PROFILE: dict[Complexity, RoutingProfile] = {
+    Complexity.SIMPLE: RoutingProfile.BUDGET,
+    Complexity.MODERATE: RoutingProfile.BALANCED,
+    Complexity.COMPLEX: RoutingProfile.PREMIUM,
+}
+
+
+def complexity_to_profile(complexity: Complexity) -> RoutingProfile:
+    """Map a complexity level to the appropriate routing profile."""
+    return COMPLEXITY_TO_PROFILE[complexity]
 
 
 def get_model_chain(profile: RoutingProfile, task_type: TaskType) -> list[str]:

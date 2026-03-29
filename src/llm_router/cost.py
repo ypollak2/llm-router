@@ -5,7 +5,7 @@ from __future__ import annotations
 import aiosqlite
 
 from llm_router.config import get_config
-from llm_router.types import LLMResponse, RoutingProfile, TaskType
+from llm_router.types import LLMResponse, RoutingProfile, TaskType, colorize_model
 
 CREATE_TABLE = """
 CREATE TABLE IF NOT EXISTS usage (
@@ -23,6 +23,16 @@ CREATE TABLE IF NOT EXISTS usage (
 )
 """
 
+CREATE_CLAUDE_USAGE_TABLE = """
+CREATE TABLE IF NOT EXISTS claude_usage (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp TEXT DEFAULT (datetime('now')),
+    model TEXT NOT NULL,
+    tokens_used INTEGER NOT NULL,
+    complexity TEXT NOT NULL
+)
+"""
+
 
 async def _get_db() -> aiosqlite.Connection:
     config = get_config()
@@ -30,6 +40,7 @@ async def _get_db() -> aiosqlite.Connection:
     db = await aiosqlite.connect(str(config.llm_router_db_path))
     await db.execute("PRAGMA journal_mode=WAL")
     await db.execute(CREATE_TABLE)
+    await db.execute(CREATE_CLAUDE_USAGE_TABLE)
     await db.commit()
     return db
 
@@ -121,7 +132,7 @@ async def get_usage_summary(period: str = "today") -> str:
         )
         rows = await cursor.fetchall()
         for model, calls, cost, tokens in rows:
-            lines.append(f"- {model}: {calls} calls, ${cost:.4f}, {tokens:,} tokens")
+            lines.append(f"- {colorize_model(model)}: {calls} calls, ${cost:.4f}, {tokens:,} tokens")
 
         lines.append("")
         lines.append("### By Profile")
@@ -136,5 +147,49 @@ async def get_usage_summary(period: str = "today") -> str:
             lines.append(f"- {profile}: {calls} calls, ${cost:.4f}")
 
         return "\n".join(lines)
+    finally:
+        await db.close()
+
+
+# ── Claude Code token tracking ───────────────────────────────────────────────
+
+
+async def log_claude_usage(model: str, tokens_used: int, complexity: str) -> None:
+    """Log Claude Code model usage (haiku/sonnet/opus) for budget tracking."""
+    db = await _get_db()
+    try:
+        await db.execute(
+            "INSERT INTO claude_usage (model, tokens_used, complexity) VALUES (?, ?, ?)",
+            (model, tokens_used, complexity),
+        )
+        await db.commit()
+    finally:
+        await db.close()
+
+
+async def get_daily_claude_tokens() -> int:
+    """Get total Claude Code tokens used today."""
+    db = await _get_db()
+    try:
+        cursor = await db.execute(
+            "SELECT COALESCE(SUM(tokens_used), 0) FROM claude_usage "
+            "WHERE date(timestamp) = date('now')"
+        )
+        row = await cursor.fetchone()
+        return int(row[0]) if row else 0
+    finally:
+        await db.close()
+
+
+async def get_daily_claude_breakdown() -> dict[str, int]:
+    """Get today's Claude token usage broken down by model."""
+    db = await _get_db()
+    try:
+        cursor = await db.execute(
+            "SELECT model, SUM(tokens_used) FROM claude_usage "
+            "WHERE date(timestamp) = date('now') GROUP BY model"
+        )
+        rows = await cursor.fetchall()
+        return {model: int(tokens) for model, tokens in rows}
     finally:
         await db.close()

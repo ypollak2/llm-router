@@ -6,7 +6,7 @@ from pathlib import Path
 
 from pydantic_settings import BaseSettings
 
-from llm_router.types import RoutingProfile, Tier
+from llm_router.types import QualityMode, RoutingProfile, Tier
 
 
 class RouterConfig(BaseSettings):
@@ -34,6 +34,11 @@ class RouterConfig(BaseSettings):
     llm_router_tier: Tier = Tier.FREE
     llm_router_db_path: Path = Path.home() / ".llm-router" / "usage.db"
     llm_router_monthly_budget: float = 0.0  # 0 = unlimited
+
+    # ── Smart routing settings ──
+    daily_token_budget: int = 0             # 0 = unlimited, e.g. 1000000
+    quality_mode: QualityMode = QualityMode.BALANCED
+    min_model: str = "haiku"                # floor: never route below this
 
     # ── Health check settings ──
     health_failure_threshold: int = 3

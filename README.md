@@ -70,7 +70,7 @@ uv run llm-router-onboard
 ./scripts/install.sh
 ```
 
-Restart Claude Code. You now have **14 new tools** available.
+Restart Claude Code. You now have **17 new tools** available.
 
 > **Start for free**: Google's Gemini API has a [free tier](https://aistudio.google.com/apikey) with 1M tokens/day — no credit card needed. [Groq](https://console.groq.com/keys) also offers a generous free tier with ultra-fast inference.
 
@@ -94,8 +94,9 @@ uv sync
 ```
 
 The plugin adds:
-- **14 MCP tools** — Routing for text, image, video, and audio across 20+ providers
+- **17 MCP tools** — Smart routing, text, image, video, audio across 20+ providers
 - **`/route` skill** — Smart task classification and routing in one command
+- **Smart classifier** — Auto-picks Claude Haiku/Sonnet/Opus based on complexity and budget
 - **LLM Orchestrator agent** — Autonomous multi-step task decomposition across models
 
 ---
@@ -145,6 +146,58 @@ The router makes two decisions for every request:
 
 ---
 
+## Smart Routing (Claude Code Models)
+
+Use Claude Code's own models (Haiku/Sonnet/Opus) **without extra API keys** via the smart classifier:
+
+```
+llm_classify("What is the capital of France?")
+# -> simple (99%) -> haiku (free via Claude Code subscription)
+
+llm_classify("Write a REST API with auth and pagination")
+# -> moderate (98%) -> sonnet (free via Claude Code subscription)
+
+llm_classify("Design a distributed CQRS architecture")
+# -> complex (85%) -> opus (you're already here)
+```
+
+### Provider Indicators
+
+Each provider gets a colored emoji for instant identification:
+
+| Provider | Icon | Provider | Icon |
+|----------|------|----------|------|
+| OpenAI | `green circle` | Perplexity | `orange circle` |
+| Gemini | `blue circle` | Anthropic | `purple circle` |
+| Mistral | `red circle` | DeepSeek | `star-struck` |
+| Groq | `yellow circle` | xAI | `white circle` |
+
+### Progressive Budget Downshift
+
+Set a daily token budget and the router automatically shifts to cheaper models as you approach the limit:
+
+```bash
+# In .env
+DAILY_TOKEN_BUDGET=1000000   # tokens per day, 0 = unlimited
+QUALITY_MODE=balanced        # best | balanced | conserve
+MIN_MODEL=haiku              # floor: never route below this
+```
+
+| Budget Used | Effect |
+|-------------|--------|
+| 0-50% | No change — ideal model for complexity |
+| 50-80% | Downshift by 1 tier (opus -> sonnet, sonnet -> haiku) |
+| 80-95% | Downshift by 2 tiers (opus -> haiku) + warning |
+| 95%+ | Max downshift + asks user before proceeding |
+
+```
+llm_classify("Complex task here")
+# -> complex -> sonnet (downshifted from opus)
+#    budget: [three-fifths bar] 60% | warning: downshifted from opus
+```
+
+---
+
 ## Providers
 
 ### Text & Code LLMs
@@ -191,20 +244,28 @@ The router makes two decisions for every request:
 
 ## MCP Tools
 
-Once installed, Claude Code gets these 14 tools:
+Once installed, Claude Code gets these 17 tools:
 
 | Tool | What It Does |
 |------|-------------|
+| **Smart Routing** | |
+| `llm_classify` | Classify complexity + recommend model (Claude Code or external) with budget awareness |
+| `llm_route` | Auto-classify, then route to the best external LLM |
+| `llm_track_usage` | Report Claude Code token usage for budget tracking |
+| **Text & Code** | |
 | `llm_query` | General questions — auto-routed to the best text LLM |
 | `llm_research` | Search-augmented answers via Perplexity |
 | `llm_generate` | Creative content — writing, summaries, brainstorming |
 | `llm_analyze` | Deep reasoning — analysis, debugging, problem decomposition |
 | `llm_code` | Coding tasks — generation, refactoring, algorithms |
+| **Media** | |
 | `llm_image` | Image generation — auto-picks DALL-E, Flux, or SD |
 | `llm_video` | Video generation — routes to Runway, Kling, etc. |
 | `llm_audio` | Voice/audio — TTS via ElevenLabs or OpenAI |
+| **Orchestration** | |
 | `llm_orchestrate` | Multi-step pipelines across multiple models |
 | `llm_pipeline_templates` | List available orchestration templates |
+| **Management** | |
 | `llm_set_profile` | Switch routing profile (budget / balanced / premium) |
 | `llm_usage` | View costs, token counts, per-model breakdown |
 | `llm_health` | Check provider availability and circuit breaker status |
@@ -304,6 +365,11 @@ ELEVENLABS_API_KEY=...
 # Router config
 LLM_ROUTER_PROFILE=balanced        # budget | balanced | premium
 LLM_ROUTER_MONTHLY_BUDGET=0        # USD, 0 = unlimited
+
+# Smart routing (Claude Code model selection)
+DAILY_TOKEN_BUDGET=0               # tokens/day, 0 = unlimited
+QUALITY_MODE=balanced              # best | balanced | conserve
+MIN_MODEL=haiku                    # floor: haiku | sonnet | opus
 ```
 
 See [.env.example](.env.example) for the full list of supported providers.
@@ -357,6 +423,11 @@ uv run ruff check src/
 - [x] Claude Code plugin with orchestrator agent and /route skill
 - [x] Freemium tier gating
 - [x] CI with GitHub Actions
+- [x] Smart routing with complexity classification
+- [x] Progressive budget-aware model downshifting
+- [x] Claude Code model integration (haiku/sonnet/opus) — no extra API keys
+- [x] Provider emoji indicators for visual identification
+- [x] Quality mode and minimum model floor settings
 - [ ] Streaming responses
 - [ ] Weekly quality benchmark updates
 - [ ] Web dashboard for usage analytics

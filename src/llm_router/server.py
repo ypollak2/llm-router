@@ -4,14 +4,23 @@ from __future__ import annotations
 
 import logging
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp import Context, FastMCP
 
+from llm_router.classifier import classify_complexity
 from llm_router.config import get_config
-from llm_router.cost import get_monthly_spend, get_usage_summary
+from llm_router.cost import (
+    get_daily_claude_breakdown, get_daily_claude_tokens,
+    get_monthly_spend, get_usage_summary, log_claude_usage,
+)
 from llm_router.health import get_tracker
+from llm_router.model_selector import select_model
 from llm_router.orchestrator import PIPELINE_TEMPLATES, auto_orchestrate, run_pipeline
+from llm_router.profiles import complexity_to_profile
 from llm_router.router import route_and_call
-from llm_router.types import RoutingProfile, TaskType, Tier, PRO_FEATURES
+from llm_router.types import (
+    ClassificationResult, Complexity, QualityMode, RoutingProfile, TaskType,
+    Tier, PRO_FEATURES, colorize_provider, _budget_bar,
+)
 
 logging.basicConfig(level=logging.INFO, format="%(name)s | %(message)s")
 
@@ -29,12 +38,238 @@ def _check_tier(feature: str) -> str | None:
     return None
 
 
+# ── Smart Router ─────────────────────────────────────────────────────────────
+
+
+@mcp.tool()
+async def llm_classify(
+    prompt: str,
+    ctx: Context,
+    quality: str | None = None,
+    min_model: str | None = None,
+) -> str:
+    """Classify a prompt's complexity and recommend which model to use.
+
+    Returns a smart recommendation considering complexity, daily token budget,
+    quality preference, and minimum model floor. Includes budget usage bar.
+
+    The recommendation progressively downshifts models as budget depletes:
+    - 0-50% budget used: no change (use ideal model for complexity)
+    - 50-80%: downshift by 1 tier (opus→sonnet, sonnet→haiku)
+    - 80-95%: downshift by 2 tiers (opus→haiku)
+    - 95%+: maximum downshift, warns user
+
+    Args:
+        prompt: The task or question to classify.
+        quality: Override quality mode — "best", "balanced", or "conserve".
+        min_model: Override minimum model floor — "haiku", "sonnet", or "opus".
+    """
+    config = get_config()
+
+    # Classify complexity
+    try:
+        classification = await classify_complexity(prompt)
+    except Exception as e:
+        await ctx.warning(f"Classification failed: {e}")
+        classification = ClassificationResult(
+            complexity=Complexity.MODERATE,
+            confidence=0.0,
+            reasoning=f"error fallback: {e}",
+            inferred_task_type=None,
+            classifier_model="none",
+            classifier_cost_usd=0.0,
+            classifier_latency_ms=0.0,
+        )
+
+    # Compute budget pressure
+    budget_pct = 0.0
+    daily_tokens = await get_daily_claude_tokens()
+    if config.daily_token_budget > 0:
+        budget_pct = daily_tokens / config.daily_token_budget
+
+    # Resolve quality mode and min_model
+    q_mode = QualityMode(quality) if quality else config.quality_mode
+    floor = min_model or config.min_model
+
+    # Get smart recommendation
+    rec = select_model(classification, budget_pct, q_mode, floor)
+
+    task = classification.inferred_task_type.value if classification.inferred_task_type else "query"
+    profile = complexity_to_profile(classification.complexity)
+
+    lines = [
+        rec.header(),
+        "",
+        f"**Recommended action:**",
+        f"- Claude Code: use Agent tool with `model: \"{rec.recommended_model}\"` (free)",
+        f"- External LLM: use `llm_route` with profile `{profile.value}`",
+        f"- Task type: `{task}`",
+        f"- Reasoning: {rec.reasoning}",
+    ]
+
+    if config.daily_token_budget > 0:
+        remaining = max(0, config.daily_token_budget - daily_tokens)
+        lines.append(
+            f"- Token budget: {daily_tokens:,} / {config.daily_token_budget:,} "
+            f"({remaining:,} remaining)"
+        )
+
+    if budget_pct >= 0.95:
+        lines.append(
+            f"\n\u26a0\ufe0f **Budget nearly exhausted ({budget_pct:.0%}).** "
+            f"Consider using external LLMs or waiting until tomorrow."
+        )
+    elif budget_pct >= 0.80:
+        lines.append(
+            f"\n\u26a0\ufe0f Budget running low ({budget_pct:.0%}). "
+            f"Model downshifted from {rec.base_model} to {rec.recommended_model}."
+        )
+
+    return "\n".join(lines)
+
+
+@mcp.tool()
+async def llm_track_usage(
+    model: str,
+    tokens_used: int,
+    complexity: str = "moderate",
+) -> str:
+    """Report Claude Code model token usage for budget tracking.
+
+    Call this after using an Agent with haiku/sonnet to track token consumption
+    against the daily budget. This enables progressive model downshifting.
+
+    Args:
+        model: The Claude model used — "haiku", "sonnet", or "opus".
+        tokens_used: Approximate tokens consumed by the Agent call.
+        complexity: The task complexity that was routed — "simple", "moderate", "complex".
+    """
+    if model not in ("haiku", "sonnet", "opus"):
+        return f"Invalid model: {model}. Use haiku, sonnet, or opus."
+
+    await log_claude_usage(model, tokens_used, complexity)
+
+    config = get_config()
+    daily_total = await get_daily_claude_tokens()
+    breakdown = await get_daily_claude_breakdown()
+
+    lines = [f"Logged {tokens_used:,} tokens for {model}."]
+
+    if config.daily_token_budget > 0:
+        remaining = max(0, config.daily_token_budget - daily_total)
+        pct = daily_total / config.daily_token_budget
+        lines.append(f"Daily budget: {_budget_bar(pct)} {pct:.0%} ({remaining:,} tokens remaining)")
+    else:
+        lines.append(f"Daily total: {daily_total:,} tokens (no budget limit set)")
+
+    if breakdown:
+        model_parts = [f"{m}: {t:,}" for m, t in sorted(breakdown.items())]
+        lines.append(f"Breakdown: {' | '.join(model_parts)}")
+
+    return "\n".join(lines)
+
+
+@mcp.tool()
+async def llm_route(
+    prompt: str,
+    ctx: Context,
+    task_type: str | None = None,
+    complexity_override: str | None = None,
+    system_prompt: str | None = None,
+    temperature: float | None = None,
+    max_tokens: int | None = None,
+) -> str:
+    """Smart router — classifies task complexity, then routes to the optimal external LLM.
+
+    Uses a cheap classifier to assess complexity, then picks the right model tier:
+    - simple → budget models (Gemini Flash, GPT-4o-mini)
+    - moderate → balanced models (GPT-4o, Sonnet, Gemini Pro)
+    - complex → premium models (o3, Opus)
+
+    For routing to Claude Code's own models (haiku/sonnet) without API keys,
+    use llm_classify instead and follow its recommendation.
+
+    Args:
+        prompt: The task or question to route.
+        task_type: Optional hint — "query", "research", "generate", "analyze", "code". Auto-detected if omitted.
+        complexity_override: Skip classification — force "simple", "moderate", or "complex".
+        system_prompt: Optional system instructions.
+        temperature: Sampling temperature (0.0-2.0).
+        max_tokens: Maximum output tokens.
+    """
+    # Step 1: Classify complexity (or use override)
+    if complexity_override:
+        try:
+            complexity = Complexity(complexity_override.lower())
+        except ValueError:
+            return f"Invalid complexity: {complexity_override}. Choose: simple, moderate, complex."
+        classification = ClassificationResult(
+            complexity=complexity,
+            confidence=1.0,
+            reasoning="user override",
+            inferred_task_type=TaskType(task_type) if task_type else None,
+            classifier_model="override",
+            classifier_cost_usd=0.0,
+            classifier_latency_ms=0.0,
+        )
+    else:
+        try:
+            classification = await classify_complexity(prompt)
+        except Exception as e:
+            await ctx.warning(f"Classification failed: {e} — defaulting to moderate")
+            classification = ClassificationResult(
+                complexity=Complexity.MODERATE,
+                confidence=0.0,
+                reasoning=f"error fallback: {e}",
+                inferred_task_type=None,
+                classifier_model="none",
+                classifier_cost_usd=0.0,
+                classifier_latency_ms=0.0,
+            )
+
+    # Step 2: Resolve task type and profile
+    resolved_task_type = (
+        TaskType(task_type) if task_type
+        else classification.inferred_task_type
+        or TaskType.QUERY
+    )
+    profile = complexity_to_profile(classification.complexity)
+
+    await ctx.info(
+        f"Classified as {classification.complexity.value} "
+        f"({classification.confidence:.0%}) → {profile.value} profile"
+    )
+
+    # Step 3: Route and call
+    resp = await route_and_call(
+        resolved_task_type, prompt,
+        profile=profile,
+        system_prompt=system_prompt,
+        temperature=temperature,
+        max_tokens=max_tokens,
+        ctx=ctx,
+    )
+
+    # Step 4: Build response with classification + routing info
+    total_cost = classification.classifier_cost_usd + resp.cost_usd
+    lines = [
+        classification.header(),
+        resp.header(),
+        f"> **Total cost: ${total_cost:.6f}**",
+        "",
+        resp.content,
+    ]
+
+    return "\n".join(lines)
+
+
 # ── Text LLM Tools ───────────────────────────────────────────────────────────
 
 
 @mcp.tool()
 async def llm_query(
     prompt: str,
+    ctx: Context,
     model: str | None = None,
     system_prompt: str | None = None,
     temperature: float | None = None,
@@ -54,14 +289,15 @@ async def llm_query(
     resp = await route_and_call(
         TaskType.QUERY, prompt,
         model_override=model, system_prompt=system_prompt,
-        temperature=temperature, max_tokens=max_tokens,
+        temperature=temperature, max_tokens=max_tokens, ctx=ctx,
     )
-    return f"{resp.content}\n\n---\n{resp.summary()}"
+    return f"{resp.header()}\n\n{resp.content}"
 
 
 @mcp.tool()
 async def llm_research(
     prompt: str,
+    ctx: Context,
     system_prompt: str | None = None,
     max_tokens: int | None = None,
 ) -> str:
@@ -77,18 +313,18 @@ async def llm_research(
     resp = await route_and_call(
         TaskType.RESEARCH, prompt,
         system_prompt=system_prompt, max_tokens=max_tokens,
-        temperature=0.3,
+        temperature=0.3, ctx=ctx,
     )
-    result = resp.content
+    result = resp.header() + "\n\n" + resp.content
     if resp.citations:
         result += "\n\n**Sources:**\n" + "\n".join(f"- {c}" for c in resp.citations)
-    result += f"\n\n---\n{resp.summary()}"
     return result
 
 
 @mcp.tool()
 async def llm_generate(
     prompt: str,
+    ctx: Context,
     system_prompt: str | None = None,
     temperature: float | None = None,
     max_tokens: int | None = None,
@@ -106,14 +342,15 @@ async def llm_generate(
     resp = await route_and_call(
         TaskType.GENERATE, prompt,
         system_prompt=system_prompt, temperature=temperature,
-        max_tokens=max_tokens,
+        max_tokens=max_tokens, ctx=ctx,
     )
-    return f"{resp.content}\n\n---\n{resp.summary()}"
+    return f"{resp.header()}\n\n{resp.content}"
 
 
 @mcp.tool()
 async def llm_analyze(
     prompt: str,
+    ctx: Context,
     system_prompt: str | None = None,
     max_tokens: int | None = None,
 ) -> str:
@@ -129,14 +366,15 @@ async def llm_analyze(
     resp = await route_and_call(
         TaskType.ANALYZE, prompt,
         system_prompt=system_prompt, temperature=0.3,
-        max_tokens=max_tokens,
+        max_tokens=max_tokens, ctx=ctx,
     )
-    return f"{resp.content}\n\n---\n{resp.summary()}"
+    return f"{resp.header()}\n\n{resp.content}"
 
 
 @mcp.tool()
 async def llm_code(
     prompt: str,
+    ctx: Context,
     system_prompt: str | None = None,
     max_tokens: int | None = None,
 ) -> str:
@@ -152,9 +390,9 @@ async def llm_code(
     resp = await route_and_call(
         TaskType.CODE, prompt,
         system_prompt=system_prompt, temperature=0.2,
-        max_tokens=max_tokens,
+        max_tokens=max_tokens, ctx=ctx,
     )
-    return f"{resp.content}\n\n---\n{resp.summary()}"
+    return f"{resp.header()}\n\n{resp.content}"
 
 
 # ── Media Tools ──────────────────────────────────────────────────────────────
@@ -163,6 +401,7 @@ async def llm_code(
 @mcp.tool()
 async def llm_image(
     prompt: str,
+    ctx: Context,
     model: str | None = None,
     size: str = "1024x1024",
     quality: str = "standard",
@@ -178,18 +417,18 @@ async def llm_image(
     resp = await route_and_call(
         TaskType.IMAGE, prompt,
         model_override=model,
-        media_params={"size": size, "quality": quality},
+        media_params={"size": size, "quality": quality}, ctx=ctx,
     )
-    result = resp.content
+    result = resp.header() + "\n\n" + resp.content
     if resp.media_url:
         result += f"\n\nImage URL: {resp.media_url}"
-    result += f"\n\n---\n{resp.summary()}"
     return result
 
 
 @mcp.tool()
 async def llm_video(
     prompt: str,
+    ctx: Context,
     model: str | None = None,
     duration: int = 5,
 ) -> str:
@@ -203,18 +442,18 @@ async def llm_video(
     resp = await route_and_call(
         TaskType.VIDEO, prompt,
         model_override=model,
-        media_params={"duration": duration},
+        media_params={"duration": duration}, ctx=ctx,
     )
-    result = resp.content
+    result = resp.header() + "\n\n" + resp.content
     if resp.media_url:
         result += f"\n\nVideo URL: {resp.media_url}"
-    result += f"\n\n---\n{resp.summary()}"
     return result
 
 
 @mcp.tool()
 async def llm_audio(
     text: str,
+    ctx: Context,
     model: str | None = None,
     voice: str = "alloy",
 ) -> str:
@@ -228,12 +467,11 @@ async def llm_audio(
     resp = await route_and_call(
         TaskType.AUDIO, text,
         model_override=model,
-        media_params={"voice": voice},
+        media_params={"voice": voice}, ctx=ctx,
     )
-    result = resp.content
+    result = resp.header() + "\n\n" + resp.content
     if resp.media_url:
         result += f"\n\nAudio: {resp.media_url}"
-    result += f"\n\n---\n{resp.summary()}"
     return result
 
 
@@ -367,7 +605,7 @@ async def llm_health() -> str:
         lines.append("No providers configured. Run `llm-router-onboard` to set up API keys.")
     else:
         for provider, status in report.items():
-            lines.append(f"- **{provider}**: {status}")
+            lines.append(f"- **{colorize_provider(provider)}**: {status}")
 
     return "\n".join(lines)
 
@@ -402,12 +640,12 @@ async def llm_providers() -> str:
     lines = ["## Supported Providers\n", "### Text & Code LLMs"]
     for provider, models in text_providers.items():
         status = "configured" if provider in available else "not configured"
-        lines.append(f"- **{provider}** ({status}): {models}")
+        lines.append(f"- **{colorize_provider(provider)}** ({status}): {models}")
 
     lines.append("\n### Media Generation")
     for provider, models in media_providers.items():
         status = "configured" if provider in available else "not configured"
-        lines.append(f"- **{provider}** ({status}): {models}")
+        lines.append(f"- **{colorize_provider(provider)}** ({status}): {models}")
 
     configured = len(available)
     total = len(set(text_providers) | set(media_providers))
