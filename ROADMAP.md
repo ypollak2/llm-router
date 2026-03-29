@@ -57,19 +57,20 @@ Smart routing that understands Claude subscription state, integrates local agent
 
 ---
 
-## Phase 3: Caching & Automation (v0.3) — IN PROGRESS
+## Phase 3: Caching & Automation (v0.3) — COMPLETE
 
 Prompt caching, automatic usage refresh, and smoother UX.
 
 | Feature | Priority | Status |
 |---------|----------|--------|
-| **Prompt cache — exact match** (SHA-256 hash, in-memory LRU, 1h TTL) | High | Planned |
-| **`llm_cache_stats` MCP tool** — expose hit rate, size, entries | High | Planned |
-| Periodic usage pulse (`/usage-pulse` via `/loop`) | High | Skill created, needs hook wiring |
-| Auto-refresh Claude usage via Playwright hook | High | Planned |
-| Streaming responses for long-running LLM calls | Medium | Planned |
-| `llm_setup(action='test')` — verify key validity | Medium | Planned |
-| Rate limit detection and automatic provider switching | Medium | Planned |
+| **Prompt cache — exact match** (SHA-256 hash, in-memory LRU, 1h TTL) | High | Done |
+| **`llm_cache_stats` + `llm_cache_clear` MCP tools** — expose hit rate, size, entries | High | Done |
+| **Auto-route hook** — UserPromptSubmit heuristic classifier, zero-latency routing hints | High | Done |
+| Periodic usage pulse (`/usage-pulse` via `/loop`) | High | Done |
+| Auto-refresh Claude usage via PostToolUse hook | High | Done |
+| Streaming responses (`llm_stream` tool + `call_llm_stream`) | Medium | Done |
+| `llm_setup(action='test')` — verify key validity | Medium | Done |
+| Rate limit detection (429/rate_limit, 15s cooldown) | Medium | Done |
 
 ### Cache Design (v0.3)
 
@@ -141,7 +142,7 @@ Making it easy for others to install and use.
 
 | Feature | Priority | Status |
 |---------|----------|--------|
-| PyPI package distribution (`pip install llm-router`) | High | Planned |
+| PyPI package distribution (`pip install claude-code-llm-router`) | High | Done |
 | One-command install script for Claude Code | High | Done (./scripts/install.sh) |
 | Web dashboard for usage analytics | Medium | Planned |
 | Weekly quality benchmark updates | Medium | Planned |

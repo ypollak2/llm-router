@@ -52,7 +52,17 @@ Most providers work through LiteLLM with zero custom code — just add the model
 | `provider_budget.py` | Per-provider budget tracking and enforcement |
 | `orchestrator.py` | Multi-step pipeline execution across providers |
 | `cost_tracker.py` | SQLite-based cost and token tracking |
-| `health.py` | Provider health checks with circuit breaker pattern |
+| `health.py` | Provider health checks with circuit breaker pattern (incl. rate limit detection) |
+| `cache.py` | Prompt classification cache (SHA-256 exact-match, LRU, 1h TTL) |
+| `classifier.py` | LLM-based complexity classification (integrates with cache) |
+
+## Hook Testing
+
+The auto-route hook (`.claude/hooks/auto-route.py`) is a `UserPromptSubmit` hook that runs on every prompt. When modifying it:
+
+- Test with various prompt types (research, code, analysis, simple queries)
+- Verify it runs in ~0ms (heuristic only, no LLM calls)
+- Ensure it gracefully handles edge cases (empty prompts, very long prompts)
 
 ## Pull Request Guidelines
 

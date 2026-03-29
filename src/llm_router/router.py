@@ -16,6 +16,19 @@ log = logging.getLogger("llm_router")
 # Task types that use media generation instead of LiteLLM
 MEDIA_TASK_TYPES = {TaskType.IMAGE, TaskType.VIDEO, TaskType.AUDIO}
 
+# Strings that indicate a rate-limit (429) error in various provider SDKs
+_RATE_LIMIT_MARKERS = ("rate limit", "rate_limit", "429", "too many requests", "quota exceeded")
+
+
+def _is_rate_limit_error(exc: Exception) -> bool:
+    """Detect if an exception is a rate-limit error from any provider."""
+    exc_str = str(exc).lower()
+    exc_type = type(exc).__name__.lower()
+    return (
+        any(m in exc_str for m in _RATE_LIMIT_MARKERS)
+        or "ratelimit" in exc_type
+    )
+
 
 async def _notify(ctx: Any | None, level: str, message: str) -> None:
     """Send a log notification via MCP context if available."""
@@ -107,9 +120,15 @@ async def route_and_call(
             return response
 
         except Exception as e:
-            await _notify(ctx, "warning", f"{model} failed: {e} — trying next...")
-            log.warning("Model %s failed: %s", model, e)
-            tracker.record_failure(provider)
+            is_rate_limit = _is_rate_limit_error(e)
+            if is_rate_limit:
+                await _notify(ctx, "warning", f"{model} rate-limited — switching provider...")
+                log.warning("Rate limit on %s, switching to next", model)
+                tracker.record_rate_limit(provider)
+            else:
+                await _notify(ctx, "warning", f"{model} failed: {e} — trying next...")
+                log.warning("Model %s failed: %s", model, e)
+                tracker.record_failure(provider)
             last_error = e
             continue
 

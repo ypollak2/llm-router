@@ -67,6 +67,89 @@ with open(config_path, 'w') as f:
 print('Added llm-router to', config_path)
 "
 
+# Install auto-routing hook
+HOOKS_DIR="$HOME/.claude/hooks"
+HOOK_SRC="$PROJECT_DIR/.claude/hooks/auto-route.py"
+HOOK_DST="$HOOKS_DIR/llm-router-auto-route.py"
+
+if [ -f "$HOOK_SRC" ]; then
+    mkdir -p "$HOOKS_DIR"
+    cp "$HOOK_SRC" "$HOOK_DST"
+    chmod +x "$HOOK_DST"
+
+    # Add UserPromptSubmit hook to global settings if not already present
+    python3 -c "
+import json, os
+
+settings_path = os.path.expanduser('~/.claude/settings.json')
+if os.path.exists(settings_path):
+    with open(settings_path) as f:
+        settings = json.load(f)
+else:
+    settings = {}
+
+hooks = settings.setdefault('hooks', {})
+ups_hooks = hooks.setdefault('UserPromptSubmit', [])
+
+hook_cmd = 'python3 $HOOK_DST'
+already = any(
+    h.get('hooks', [{}])[0].get('command', '') == hook_cmd
+    for h in ups_hooks if isinstance(h, dict)
+)
+
+if not already:
+    ups_hooks.append({
+        'matcher': '',
+        'hooks': [{'type': 'command', 'command': hook_cmd}]
+    })
+    with open(settings_path, 'w') as f:
+        json.dump(settings, f, indent=2)
+    print('Installed auto-routing hook')
+else:
+    print('Auto-routing hook already installed')
+"
+fi
+
+# Install usage-refresh hook (PostToolUse)
+USAGE_HOOK_SRC="$PROJECT_DIR/.claude/hooks/usage-refresh.py"
+USAGE_HOOK_DST="$HOOKS_DIR/llm-router-usage-refresh.py"
+
+if [ -f "$USAGE_HOOK_SRC" ]; then
+    cp "$USAGE_HOOK_SRC" "$USAGE_HOOK_DST"
+    chmod +x "$USAGE_HOOK_DST"
+
+    python3 -c "
+import json, os
+
+settings_path = os.path.expanduser('~/.claude/settings.json')
+if os.path.exists(settings_path):
+    with open(settings_path) as f:
+        settings = json.load(f)
+else:
+    settings = {}
+
+hooks = settings.setdefault('hooks', {})
+ptu_hooks = hooks.setdefault('PostToolUse', [])
+
+hook_cmd = 'python3 $USAGE_HOOK_DST'
+already = any(
+    h.get('hooks', [{}])[0].get('command', '') == hook_cmd
+    for h in ptu_hooks if isinstance(h, dict)
+)
+
+if not already:
+    ptu_hooks.append({
+        'matcher': 'llm_',
+        'hooks': [{'type': 'command', 'command': hook_cmd}]
+    })
+    with open(settings_path, 'w') as f:
+        json.dump(settings, f, indent=2)
+    print('Installed usage-refresh hook')
+else:
+    print('Usage-refresh hook already installed')
+"
+fi
+
 echo ""
 echo "Done! Restart Claude Code to load the LLM Router MCP server."
 echo ""

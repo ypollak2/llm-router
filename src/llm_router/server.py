@@ -6,6 +6,8 @@ import logging
 
 from mcp.server.fastmcp import Context, FastMCP
 
+from llm_router import providers
+from llm_router.cache import get_cache
 from llm_router.classifier import classify_complexity
 from llm_router.codex_agent import is_codex_available, run_codex
 from llm_router.provider_budget import get_provider_budgets, rank_external_models
@@ -328,6 +330,93 @@ async def llm_route(
     ]
 
     return "\n".join(lines)
+
+
+# ── Streaming ────────────────────────────────────────────────────────────────
+
+
+@mcp.tool()
+async def llm_stream(
+    prompt: str,
+    ctx: Context,
+    task_type: str = "query",
+    model: str | None = None,
+    system_prompt: str | None = None,
+    temperature: float | None = None,
+    max_tokens: int | None = None,
+) -> str:
+    """Stream an LLM response for long-running tasks — shows output as it arrives.
+
+    Uses the same routing logic as llm_route but streams chunks instead of
+    waiting for the full response. Ideal for long-form generation, research
+    summaries, or any task where seeing partial output early is valuable.
+
+    Args:
+        prompt: The task or question to stream.
+        task_type: Task type hint — "query", "research", "generate", "analyze", "code".
+        model: Optional model override (e.g. "openai/gpt-4o", "gemini/gemini-2.5-flash").
+        system_prompt: Optional system instructions.
+        temperature: Sampling temperature (0.0-2.0).
+        max_tokens: Maximum output tokens.
+    """
+    import json as _json
+
+    from llm_router.profiles import get_model_chain, provider_from_model
+
+    resolved_task = TaskType(task_type) if task_type else TaskType.QUERY
+    config = get_config()
+    profile = config.llm_router_profile
+
+    # Determine model to use
+    if model:
+        target_model = model
+    else:
+        chain = get_model_chain(resolved_task, profile)
+        target_model = chain[0] if chain else "gemini/gemini-2.5-flash"
+
+    messages: list[dict[str, str]] = []
+    if system_prompt:
+        messages.append({"role": "system", "content": system_prompt})
+    messages.append({"role": "user", "content": prompt})
+
+    await ctx.info(f"Streaming from {target_model}...")
+
+    # Collect streamed content
+    from llm_router.providers import call_llm_stream
+
+    collected: list[str] = []
+    meta = {}
+
+    async for chunk in call_llm_stream(
+        target_model,
+        messages,
+        temperature=temperature,
+        max_tokens=max_tokens,
+    ):
+        if chunk.startswith("\n[META]"):
+            meta = _json.loads(chunk[7:])
+        else:
+            collected.append(chunk)
+
+    content = "".join(collected)
+
+    # Log usage
+    if meta:
+        from llm_router.cost import log_usage
+        await log_usage(
+            provider=meta.get("provider", provider_from_model(target_model)),
+            model=target_model,
+            input_tokens=meta.get("input_tokens", 0),
+            output_tokens=meta.get("output_tokens", 0),
+            cost_usd=meta.get("cost_usd", 0.0),
+            task_type=resolved_task.value,
+        )
+
+    cost_str = f"${meta.get('cost_usd', 0):.6f}" if meta else "$?.??????"
+    latency_str = f"{meta.get('latency_ms', 0):.0f}ms" if meta else "?ms"
+    header = f"> **Streamed from {target_model}** | {cost_str} | {latency_str}"
+
+    return f"{header}\n\n{content}"
 
 
 # ── Text LLM Tools ───────────────────────────────────────────────────────────
@@ -754,6 +843,40 @@ async def llm_usage(period: str = "today") -> str:
 
 
 @mcp.tool()
+async def llm_cache_stats() -> str:
+    """Show prompt classification cache statistics — hit rate, entries, memory usage.
+
+    The cache stores ClassificationResult objects keyed by SHA-256(prompt + quality_mode + min_model).
+    Budget pressure is always applied fresh, so cached classifications stay valid.
+    """
+    cache = get_cache()
+    stats = await cache.get_stats()
+
+    hit_rate = stats["hit_rate"]
+    lines = [
+        "## Classification Cache",
+        "",
+        f"Entries:     {stats['entries']} / {stats['max_entries']}",
+        f"TTL:         {stats['ttl_seconds']}s",
+        f"Hit rate:    {hit_rate} ({stats['hits']} hits, {stats['misses']} misses)",
+        f"Evictions:   {stats['evictions']}",
+        f"Memory:      ~{stats['memory_estimate_kb']} KB",
+    ]
+    if stats["entries"] > 0:
+        lines.append(f"Oldest:      {stats['oldest_entry_age_hours']:.2f}h ago")
+
+    return "\n".join(lines)
+
+
+@mcp.tool()
+async def llm_cache_clear() -> str:
+    """Clear the prompt classification cache."""
+    cache = get_cache()
+    count = await cache.clear()
+    return f"Cleared {count} cached classification entries."
+
+
+@mcp.tool()
 async def llm_health() -> str:
     """Check the health status of all configured LLM providers."""
     config = get_config()
@@ -864,8 +987,19 @@ async def llm_update_usage(data: dict) -> str:
     Args:
         data: JSON response from the claude.ai usage API (via browser_evaluate).
     """
+    import os
+    import time
+
     global _last_usage
     _last_usage = parse_api_response(data)
+
+    # Write refresh timestamp for the usage-refresh hook
+    state_dir = os.path.expanduser("~/.llm-router")
+    os.makedirs(state_dir, exist_ok=True)
+    state_file = os.path.join(state_dir, "usage_last_refresh.txt")
+    with open(state_file, "w") as f:
+        f.write(str(time.time()))
+
     return _last_usage.summary()
 
 
@@ -1063,11 +1197,12 @@ async def llm_setup(
     - "guide": Step-by-step guide to add recommended free/cheap providers
     - "discover": Scan for existing API keys in environment (safe, read-only)
     - "add": Add an API key for a provider (writes to .env file securely)
+    - "test": Validate API keys with a minimal call (tests configured or specific provider)
     - "provider": Show details about a specific provider
 
     Args:
-        action: What to do — "status", "guide", "discover", "add", or "provider".
-        provider: Provider name (for "add" and "provider" actions).
+        action: What to do — "status", "guide", "discover", "add", "test", or "provider".
+        provider: Provider name (for "add", "test", and "provider" actions).
         api_key: API key value (for "add" action only). Key is validated before saving.
     """
     if action == "status":
@@ -1076,6 +1211,8 @@ async def llm_setup(
         return _setup_guide()
     elif action == "discover":
         return await _setup_discover()
+    elif action == "test":
+        return await _setup_test(provider)
     elif action == "add":
         if not provider:
             return "Specify a provider name. Run `llm_setup(action='status')` to see available providers."
@@ -1094,7 +1231,7 @@ async def llm_setup(
     elif action == "provider":
         return _setup_provider_detail(provider)
     else:
-        return f"Unknown action: {action}. Use: status, guide, discover, add, or provider."
+        return f"Unknown action: {action}. Use: status, guide, discover, add, test, or provider."
 
 
 def _setup_status() -> str:
@@ -1320,6 +1457,62 @@ def _setup_add(provider: str, api_key: str) -> str:
         f"Run `llm_health()` to verify the key works."
         f"{gitignore_warning}"
     )
+
+
+# Minimal test models per provider — cheapest/fastest for key validation
+_TEST_MODELS: dict[str, str] = {
+    "openai": "openai/gpt-4o-mini",
+    "gemini": "gemini/gemini-2.5-flash-lite",
+    "groq": "groq/llama-3.3-70b-versatile",
+    "deepseek": "deepseek/deepseek-chat",
+    "mistral": "mistral/mistral-small-latest",
+    "perplexity": "perplexity/sonar",
+    "anthropic": "anthropic/claude-haiku-4-5-20251001",
+    "together": "together_ai/meta-llama/Llama-3.3-70B-Instruct-Turbo",
+    "xai": "xai/grok-2-latest",
+    "cohere": "cohere/command-r",
+}
+
+
+async def _setup_test(provider: str | None) -> str:
+    """Validate API key(s) with a minimal LLM call (~$0.0001 each)."""
+    config = get_config()
+    configured = config.available_providers
+
+    if provider:
+        # Test a specific provider
+        if provider not in _TEST_MODELS:
+            return f"No test model configured for '{provider}'. Testable: {', '.join(sorted(_TEST_MODELS))}"
+        if provider not in configured:
+            return f"Provider '{provider}' is not configured. Add a key first: `llm_setup(action='add', provider='{provider}')`"
+        providers_to_test = [provider]
+    else:
+        # Test all configured text providers
+        providers_to_test = [p for p in sorted(configured) if p in _TEST_MODELS]
+        if not providers_to_test:
+            return "No testable text providers configured. Run `llm_setup(action='status')` to see available providers."
+
+    results: list[str] = ["## API Key Validation\n"]
+    test_prompt = "Reply with exactly: OK"
+    test_messages = [{"role": "user", "content": test_prompt}]
+
+    for p in providers_to_test:
+        model = _TEST_MODELS[p]
+        try:
+            resp = await providers.call_llm(
+                model=model, messages=test_messages, temperature=0, max_tokens=5,
+            )
+            results.append(f"- **{p}**: Valid ({model}, ${resp.cost_usd:.6f}, {resp.latency_ms:.0f}ms)")
+        except Exception as e:
+            err_str = str(e)
+            if "auth" in err_str.lower() or "api key" in err_str.lower() or "invalid" in err_str.lower():
+                results.append(f"- **{p}**: INVALID KEY ({e})")
+            elif "rate" in err_str.lower() or "429" in err_str:
+                results.append(f"- **{p}**: Valid (rate-limited, key works but quota exceeded)")
+            else:
+                results.append(f"- **{p}**: ERROR ({e})")
+
+    return "\n".join(results)
 
 
 def _setup_provider_detail(provider: str | None) -> str:

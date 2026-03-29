@@ -7,6 +7,7 @@ import logging
 import re
 
 from llm_router import providers
+from llm_router.cache import get_cache
 from llm_router.config import get_config
 from llm_router.profiles import CLASSIFIER_MODELS, provider_from_model
 from llm_router.types import ClassificationResult, Complexity, TaskType
@@ -69,11 +70,23 @@ def _parse_truncated_json(raw: str) -> dict | None:
     return None
 
 
-async def classify_complexity(prompt: str) -> ClassificationResult:
+async def classify_complexity(
+    prompt: str,
+    quality_mode: str = "balanced",
+    min_model: str = "haiku",
+) -> ClassificationResult:
     """Classify a prompt's complexity using the cheapest available model.
 
+    Results are cached by (prompt, quality_mode, min_model) hash for O(1) repeat lookups.
     On failure, returns a moderate/balanced fallback so routing always proceeds.
     """
+    # Check cache first
+    cache = get_cache()
+    cached = await cache.get(prompt, quality_mode, min_model)
+    if cached is not None:
+        log.info("Classification cache hit (%.0f%% confidence)", cached.confidence * 100)
+        return cached
+
     config = get_config()
     available = config.available_providers
 
@@ -113,7 +126,7 @@ async def classify_complexity(prompt: str) -> ClassificationResult:
             confidence = min(1.0, max(0.0, float(parsed.get("confidence", 0.5))))
             reasoning = parsed.get("reasoning", "")
 
-            return ClassificationResult(
+            result = ClassificationResult(
                 complexity=complexity,
                 confidence=confidence,
                 reasoning=reasoning,
@@ -122,6 +135,9 @@ async def classify_complexity(prompt: str) -> ClassificationResult:
                 classifier_cost_usd=resp.cost_usd,
                 classifier_latency_ms=resp.latency_ms,
             )
+            # Cache successful classification
+            await cache.put(prompt, result, quality_mode, min_model)
+            return result
 
         except Exception as e:
             log.warning("Classifier model %s failed: %s", model, e)

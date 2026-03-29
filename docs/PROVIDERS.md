@@ -189,8 +189,12 @@ After configuring keys, verify with:
 ```
 # In Claude Code:
 Use llm_setup with action="status"    # see all configured providers
+Use llm_setup with action="test"      # validate API keys with minimal LLM calls (~$0.0001 each)
+Use llm_setup with action="test" provider="gemini"  # test a specific provider only
 Use llm_health to check provider status  # verify connectivity
 ```
+
+The `test` action sends a tiny request to each provider to confirm the key is valid and the account is active. Cost is negligible (~$0.0001 per provider tested).
 
 Or from the command line:
 ```bash

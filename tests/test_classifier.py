@@ -7,8 +7,18 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
+from llm_router.cache import get_cache
 from llm_router.classifier import _parse_classification, classify_complexity
 from llm_router.types import Complexity, LLMResponse, TaskType
+
+
+@pytest.fixture(autouse=True)
+async def clear_cache():
+    """Clear classification cache between tests to prevent cross-contamination."""
+    cache = get_cache()
+    await cache.clear()
+    yield
+    await cache.clear()
 
 
 # ── JSON parsing tests ───────────────────────────────────────────────────────

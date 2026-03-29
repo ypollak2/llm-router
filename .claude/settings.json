@@ -1,0 +1,26 @@
+{
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 /Users/yali.pollak/Projects/llm-router/.claude/hooks/auto-route.py"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "llm_",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 /Users/yali.pollak/Projects/llm-router/.claude/hooks/usage-refresh.py"
+          }
+        ]
+      }
+    ]
+  }
+}

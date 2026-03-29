@@ -27,6 +27,7 @@
   <img src="https://img.shields.io/badge/python-3.10%E2%80%933.13-blue?style=flat-square" alt="Python">
   <img src="https://img.shields.io/badge/MCP-1.0+-purple?style=flat-square" alt="MCP">
   <img src="https://img.shields.io/badge/providers-20+-orange?style=flat-square" alt="Providers">
+  <a href="https://pypi.org/project/claude-code-llm-router/"><img src="https://img.shields.io/pypi/v/claude-code-llm-router?style=flat-square&label=PyPI" alt="PyPI"></a>
 </p>
 
 ---
@@ -70,13 +71,19 @@ Most AI tasks don't need the most powerful model. The router matches complexity 
 
 ## Quick Start
 
-### Option A: Claude Code Plugin (Recommended)
+### Option A: PyPI (Recommended)
+
+```bash
+pip install claude-code-llm-router
+```
+
+### Option B: Claude Code Plugin
 
 ```bash
 claude plugin add ypollak2/llm-router
 ```
 
-### Option B: Manual Install
+### Option C: Manual Install
 
 ```bash
 git clone https://github.com/ypollak2/llm-router.git
@@ -95,9 +102,13 @@ uv sync
 
 ### What You Get
 
-- **20 MCP tools** — Smart routing, text, image, video, audio, setup, usage monitoring
+- **22 MCP tools** — Smart routing, text, image, video, audio, setup, usage monitoring, cache management
 - **`/route` skill** — Smart task classification and routing in one command
 - **Smart classifier** — Auto-picks Claude Haiku/Sonnet/Opus based on complexity
+- **Prompt classification cache** — SHA-256 exact-match LRU cache (1000 entries, 1h TTL) for instant repeat classifications
+- **Auto-route hook** — Zero-latency `UserPromptSubmit` hook that detects task type and complexity, injecting routing hints automatically
+- **Rate limit detection** — Catches 429/rate_limit errors with smart cooldowns (15s for rate limits vs 60s for hard failures)
+- **Key validation** — `llm_setup(action='test')` validates API keys with minimal LLM calls (~$0.0001 each)
 - **Claude subscription monitoring** — Live session/weekly usage from claude.ai
 - **Codex desktop integration** — Route tasks to local OpenAI Codex (free)
 - **LLM Orchestrator agent** — Autonomous multi-step task decomposition across models
@@ -238,7 +249,7 @@ Fetched via Playwright from claude.ai's internal JSON API (same data the setting
 
 ## MCP Tools
 
-Once installed, Claude Code gets these 20 tools:
+Once installed, Claude Code gets these 23 tools:
 
 | Tool | What It Does |
 |------|-------------|
@@ -259,11 +270,16 @@ Once installed, Claude Code gets these 20 tools:
 | **Orchestration** | |
 | `llm_orchestrate` | Multi-step pipelines across multiple models |
 | `llm_pipeline_templates` | List available orchestration templates |
+| **Cache** | |
+| `llm_cache_stats` | View cache hit rate, entries, memory estimate, evictions |
+| `llm_cache_clear` | Clear the classification cache |
+| **Streaming** | |
+| `llm_stream` | Stream LLM responses for long-running tasks — output as it arrives |
 | **Monitoring & Setup** | |
 | `llm_check_usage` | Check live Claude subscription usage (session %, weekly %) |
 | `llm_update_usage` | Feed live usage data from claude.ai into the router |
 | `llm_codex` | Route tasks to local Codex desktop agent (free, uses OpenAI sub) |
-| `llm_setup` | Discover API keys, add providers, get setup guides |
+| `llm_setup` | Discover API keys, add providers, get setup guides, validate keys (`action='test'`) |
 | `llm_set_profile` | Switch routing profile (budget / balanced / premium) |
 | `llm_usage` | Unified dashboard — Claude sub, Codex, APIs, savings in one view |
 | `llm_health` | Check provider availability and circuit breaker status |
@@ -419,7 +435,7 @@ uv run ruff check src/
 
 See [ROADMAP.md](ROADMAP.md) for the detailed roadmap with phases and priorities.
 
-### Completed (v0.1 + v0.2)
+### Completed (v0.1 + v0.2 + v0.3)
 
 - [x] Core text LLM routing (10+ providers)
 - [x] Configurable profiles (budget / balanced / premium)
@@ -442,10 +458,15 @@ See [ROADMAP.md](ROADMAP.md) for the detailed roadmap with phases and priorities
 - [x] `llm_setup` tool for API discovery and secure key management
 - [x] Per-provider budget limits
 - [x] ASCII box-drawing dashboard (terminal-friendly, no Unicode issues)
+- [x] Prompt classification cache (SHA-256 exact-match, in-memory LRU, 1h TTL)
+- [x] `llm_cache_stats` + `llm_cache_clear` MCP tools
+- [x] Auto-route hook (UserPromptSubmit heuristic classifier, zero-latency)
+- [x] Rate limit detection with smart cooldowns (15s rate limit vs 60s hard failure)
+- [x] `llm_setup(action='test')` — API key validation with minimal LLM calls
+- [x] Published to PyPI as `claude-code-llm-router`
 
-### Next Up (v0.3 — Caching & Automation)
+### Next Up (v0.3 continued — Caching & Automation)
 
-- [ ] Prompt caching (exact-match hash + semantic similarity)
 - [ ] Periodic usage pulse (auto-refresh during sessions)
 - [ ] Streaming responses
 - [ ] Auto-refresh Claude usage via Playwright hook

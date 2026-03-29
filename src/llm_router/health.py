@@ -8,15 +8,22 @@ from dataclasses import dataclass, field
 from llm_router.config import get_config
 
 
+RATE_LIMIT_COOLDOWN_SECONDS = 15  # shorter cooldown for rate limits vs hard failures
+
+
 @dataclass
 class ProviderHealth:
     consecutive_failures: int = 0
     last_failure_time: float = 0.0
     total_calls: int = 0
     total_failures: int = 0
+    rate_limited: bool = False
+    rate_limit_time: float = 0.0
+    rate_limit_count: int = 0
 
     def record_success(self) -> None:
         self.consecutive_failures = 0
+        self.rate_limited = False
         self.total_calls += 1
 
     def record_failure(self) -> None:
@@ -25,7 +32,21 @@ class ProviderHealth:
         self.total_calls += 1
         self.last_failure_time = time.monotonic()
 
+    def record_rate_limit(self) -> None:
+        """Record a 429/rate-limit error — uses shorter cooldown than hard failures."""
+        self.rate_limited = True
+        self.rate_limit_time = time.monotonic()
+        self.rate_limit_count += 1
+        self.total_calls += 1
+
     def is_healthy(self) -> bool:
+        # Check rate limit first (shorter cooldown)
+        if self.rate_limited:
+            elapsed = time.monotonic() - self.rate_limit_time
+            if elapsed < RATE_LIMIT_COOLDOWN_SECONDS:
+                return False
+            self.rate_limited = False
+
         config = get_config()
         if self.consecutive_failures < config.health_failure_threshold:
             return True
@@ -39,6 +60,10 @@ class ProviderHealth:
 
     @property
     def status(self) -> str:
+        if self.rate_limited:
+            elapsed = time.monotonic() - self.rate_limit_time
+            remaining = max(0, RATE_LIMIT_COOLDOWN_SECONDS - elapsed)
+            return f"rate-limited ({remaining:.0f}s remaining)"
         if self.is_healthy():
             return "healthy"
         return f"unhealthy (failures={self.consecutive_failures})"
@@ -61,6 +86,9 @@ class HealthTracker:
 
     def record_failure(self, provider: str) -> None:
         self._get(provider).record_failure()
+
+    def record_rate_limit(self, provider: str) -> None:
+        self._get(provider).record_rate_limit()
 
     def status_report(self) -> dict[str, str]:
         config = get_config()

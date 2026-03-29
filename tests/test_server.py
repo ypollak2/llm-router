@@ -10,12 +10,13 @@ def test_all_tools_registered():
     tools = mcp._tool_manager.list_tools()
     names = {t.name for t in tools}
     expected = {
-        "llm_classify", "llm_track_usage", "llm_route",
+        "llm_classify", "llm_track_usage", "llm_route", "llm_stream",
         "llm_query", "llm_research", "llm_generate",
         "llm_analyze", "llm_code", "llm_image", "llm_video", "llm_audio",
         "llm_orchestrate", "llm_pipeline_templates",
         "llm_set_profile", "llm_usage", "llm_health", "llm_providers",
         "llm_check_usage", "llm_update_usage", "llm_codex", "llm_setup",
+        "llm_cache_stats", "llm_cache_clear",
     }
     assert expected == names
 
