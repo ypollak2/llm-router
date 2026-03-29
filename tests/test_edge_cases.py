@@ -324,13 +324,19 @@ class TestAutoRouteHookEdgeCases:
             return None
         return json.loads(result.stdout)
 
-    def test_mixed_signals_local_wins(self):
-        """'edit' keyword should suppress routing even with 'analyze'."""
-        assert self._run_hook("edit the file and analyze the changes") is None
+    def test_mixed_signals_routes_best_match(self):
+        """With the new permissive routing, mixed signals still route."""
+        out = self._run_hook("edit the file and analyze the changes")
+        assert out is not None
+        hint = out["hookSpecificOutput"]["contextForAgent"]
+        assert "[ROUTE: analyze/" in hint
 
-    def test_code_fence_not_routed(self):
-        """Code in backticks that mentions 'implement' shouldn't route."""
-        assert self._run_hook("fix `implement_auth()` in server.py") is None
+    def test_code_fix_routes(self):
+        """'fix' with code references now routes to code task type."""
+        out = self._run_hook("fix `implement_auth()` in server.py")
+        assert out is not None
+        hint = out["hookSpecificOutput"]["contextForAgent"]
+        assert "[ROUTE:" in hint
 
     def test_long_prompt_classified_complex(self):
         """Very long prompts (>500 chars) should be classified as complex."""

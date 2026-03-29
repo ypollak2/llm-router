@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""UserPromptSubmit hook — auto-classifies user prompts and injects routing hints.
+"""UserPromptSubmit hook — auto-classifies ALL user prompts and injects routing hints.
 
 Reads the user's message from stdin (JSON), runs a fast heuristic classifier,
 and returns a routing hint as contextForAgent so Claude knows which llm_* tool
@@ -7,6 +7,9 @@ to use without an extra round-trip.
 
 Fast path (~0ms): Uses keyword/pattern heuristics, no LLM call.
 The LLM-based classifier runs later inside the MCP tool if needed.
+
+Design: Routes EVERYTHING except truly local shell/git/filesystem operations.
+If in doubt, route — the LLM router will pick the best model.
 """
 
 import json
@@ -26,28 +29,36 @@ RESEARCH_PATTERNS = re.compile(
 GENERATE_PATTERNS = re.compile(
     r"\b(write|draft|create|compose|generate text|brainstorm|"
     r"blog post|article|email|letter|story|poem|tweet|post|"
-    r"marketing copy|tagline|slogan|headline)\b",
+    r"marketing copy|tagline|slogan|headline|summary|summarize|"
+    r"rewrite|translate|paraphrase)\b",
     re.IGNORECASE,
 )
 
 ANALYZE_PATTERNS = re.compile(
     r"\b(analyze|evaluate|assess|review|critique|debug|diagnose|"
     r"explain why|root cause|investigate|audit|compare and contrast|"
-    r"pros and cons|trade-?offs?|deep dive)\b",
+    r"pros and cons|trade-?offs?|deep dive|what do you think|"
+    r"help me understand|break down|walk me through)\b",
     re.IGNORECASE,
 )
 
 CODE_PATTERNS = re.compile(
     r"\b(implement|refactor|write (a |the )?(function|class|module|api|endpoint)|"
     r"code (a |the )?|build (a |the )?|create (a |the )?(script|program|app|service)|"
-    r"algorithm|data structure|optimize (the |this )?code|port .+ to)\b",
+    r"algorithm|data structure|optimize (the |this )?code|port .+ to|"
+    r"fix (the |this |a )?(\w+ )*(bug|error|issue|crash)|"
+    r"add (a |the )?(\w+ )*(feature|method|test)|"
+    r"update (the |this )?(\w+ )*(code|logic|function)|"
+    r"change (the |this )?(\w+ )*(behavior|implementation)|"
+    r"modify (the |this )?|improve (the |this )?|extend|enhance|migrate|"
+    r"set up|configure|scaffold|boilerplate|template)\b",
     re.IGNORECASE,
 )
 
 QUERY_PATTERNS = re.compile(
-    r"\b(what is|who is|when did|where is|how does|how do you|"
-    r"define|explain|describe|tell me about|what are the|"
-    r"difference between|meaning of)\b",
+    r"\b(what is|who is|when did|where is|how does|how do you|how can|"
+    r"define|explain|describe|tell me about|what are the|can you|"
+    r"difference between|meaning of|why does|why is|is it possible)\b",
     re.IGNORECASE,
 )
 
@@ -57,40 +68,48 @@ IMAGE_PATTERNS = re.compile(
     re.IGNORECASE,
 )
 
-# Signals that the user wants Claude to act directly (NOT route externally)
-LOCAL_PATTERNS = re.compile(
-    r"\b(edit |fix |change |update |modify |delete |remove |add .+ to |"
-    r"commit|push|pull|merge|deploy|run |install |test |lint |"
-    r"read |open |show me |list |find (file|class|function)|"
-    r"git |npm |pip |uv |cargo |make |docker )\b",
+# ONLY skip truly local shell/filesystem/git operations that Claude handles directly.
+# These are operations that don't need any LLM — they're mechanical commands.
+SKIP_PATTERNS = re.compile(
+    r"^/(route|help|clear|compact|init|login|doctor|memory|model|cost|config|permissions|review|status|mcp|bug)\b|"
+    r"^\s*(git |npm |pip |uv |cargo |make |docker |brew |curl |wget |chmod |mkdir |rm |mv |cp |ls |cd |cat |grep )\b|"
+    r"^\s*(commit|push|pull|merge|deploy|rebase|stash|cherry-?pick)\b|"
+    r"^\s*(show me the |read |open |list files|find file|find class|find function)\b",
     re.IGNORECASE,
 )
 
 COMPLEXITY_SIGNALS_COMPLEX = re.compile(
     r"\b(architect|design system|from scratch|end-to-end|comprehensive|"
     r"novel approach|research paper|synthesis|multi-step|workflow|pipeline|"
-    r"in-depth|thorough|detailed plan)\b",
+    r"in-depth|thorough|detailed plan|full implementation|production|"
+    r"scalable|distributed|microservice|security audit)\b",
     re.IGNORECASE,
 )
 
 COMPLEXITY_SIGNALS_SIMPLE = re.compile(
     r"\b(quick|simple|short|one-liner|brief|what is|how to|define|"
-    r"summarize|tldr|eli5|just|only)\b",
+    r"summarize|tldr|eli5|just|only|small|tiny|minor)\b",
     re.IGNORECASE,
 )
 
 
 def classify_prompt(text: str) -> dict | None:
-    """Fast heuristic classification. Returns None if no clear routing signal."""
-    # Skip if it looks like a local/direct task
-    if LOCAL_PATTERNS.search(text):
+    """Fast heuristic classification. Returns None only for truly local/shell tasks."""
+    stripped = text.strip()
+
+    # Skip slash commands and truly local shell operations
+    if SKIP_PATTERNS.search(stripped):
         return None
 
-    # Skip very short prompts (likely conversational)
-    if len(text.strip()) < 15:
+    # Skip very short prompts (likely conversational or confirmations)
+    if len(stripped) < 10:
         return None
 
-    # Determine task type
+    # Skip empty / whitespace-only
+    if not stripped:
+        return None
+
+    # Determine task type — try each pattern
     task_type = None
     if IMAGE_PATTERNS.search(text):
         task_type = "image"
@@ -102,10 +121,14 @@ def classify_prompt(text: str) -> dict | None:
         task_type = "analyze"
     elif GENERATE_PATTERNS.search(text):
         task_type = "generate"
+    elif QUERY_PATTERNS.search(text):
+        task_type = "query"
 
+    # If no pattern matched, default to llm_route (let the LLM classifier decide)
     if task_type is None:
-        if QUERY_PATTERNS.search(text):
-            task_type = "query"
+        # Only route if the prompt is substantial enough
+        if len(stripped) >= 20:
+            task_type = "auto"
         else:
             return None
 
@@ -133,6 +156,7 @@ TOOL_MAP = {
     "code": "llm_code",
     "query": "llm_query",
     "image": "llm_image",
+    "auto": "llm_route",
 }
 
 
@@ -142,15 +166,12 @@ def main():
     except (json.JSONDecodeError, EOFError):
         sys.exit(0)
 
-    # Extract user message from the hook payload
-    # UserPromptSubmit provides: { "session_id", "prompt", ... }
     prompt = hook_input.get("prompt", "")
     if not prompt:
         sys.exit(0)
 
     result = classify_prompt(prompt)
     if result is None:
-        # No clear routing signal — let Claude handle normally
         sys.exit(0)
 
     task_type = result["task_type"]
@@ -159,13 +180,12 @@ def main():
 
     hint = (
         f"[ROUTE: {task_type}/{complexity}] "
-        f"This task matches external LLM routing. "
-        f"Recommended: use `{tool}` tool"
+        f"Auto-route this task to external LLM. "
+        f"Use `{tool}` tool"
         f"{f' with complexity_override={complexity}' if tool == 'llm_route' else ''}. "
-        f"The user's prompt has been pre-classified as {complexity} {task_type}."
+        f"Pre-classified as {complexity} {task_type}."
     )
 
-    # Output hook response with context injection
     output = {
         "hookSpecificOutput": {
             "hookEventName": "UserPromptSubmit",

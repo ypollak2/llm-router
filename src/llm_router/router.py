@@ -1,4 +1,13 @@
-"""Core routing logic — selects model and executes with fallback."""
+"""Core routing logic — selects model and executes with fallback.
+
+This module is the central dispatch layer of llm-router. It receives a
+(task_type, prompt) pair, resolves the best model chain from profiles,
+enforces budget limits, and walks the chain until one model succeeds.
+
+Text tasks are dispatched through LiteLLM (unified OpenAI-compatible SDK).
+Media tasks (image/video/audio) bypass LiteLLM and call provider-specific
+generation APIs directly, because LiteLLM has no media generation support.
+"""
 
 from __future__ import annotations
 
@@ -13,15 +22,31 @@ from llm_router.types import BudgetExceededError, LLMResponse, RoutingProfile, T
 
 log = logging.getLogger("llm_router")
 
-# Task types that use media generation instead of LiteLLM
+# Task types routed to provider-specific media APIs instead of LiteLLM.
+# LiteLLM only supports text completion; media generation requires direct
+# calls to each provider's SDK (DALL-E, Flux, Runway, ElevenLabs, etc.).
 MEDIA_TASK_TYPES = {TaskType.IMAGE, TaskType.VIDEO, TaskType.AUDIO}
 
-# Strings that indicate a rate-limit (429) error in various provider SDKs
+# Substrings checked against exception messages and type names to detect
+# rate-limit (HTTP 429) errors. Each provider SDK formats these differently
+# (OpenAI says "Rate limit", Anthropic uses "rate_limit", etc.), so we
+# check multiple markers to catch them all reliably.
 _RATE_LIMIT_MARKERS = ("rate limit", "rate_limit", "429", "too many requests", "quota exceeded")
 
 
 def _is_rate_limit_error(exc: Exception) -> bool:
-    """Detect if an exception is a rate-limit error from any provider."""
+    """Detect if an exception is a rate-limit (HTTP 429) error from any provider.
+
+    Checks both the exception message string and the exception class name,
+    because some SDKs use dedicated exception types (e.g. ``RateLimitError``)
+    while others embed the status code in a generic error message.
+
+    Args:
+        exc: The exception raised during an LLM or media API call.
+
+    Returns:
+        True if the error indicates rate limiting, False otherwise.
+    """
     exc_str = str(exc).lower()
     exc_type = type(exc).__name__.lower()
     return (
@@ -31,7 +56,21 @@ def _is_rate_limit_error(exc: Exception) -> bool:
 
 
 async def _notify(ctx: Any | None, level: str, message: str) -> None:
-    """Send a log notification via MCP context if available."""
+    """Send a log notification to the MCP client if a context object is available.
+
+    MCP tool handlers receive a ``ctx`` (RequestContext) that exposes
+    ``ctx.info()``, ``ctx.warning()``, etc. for streaming progress back to the
+    caller. When ``route_and_call`` is invoked outside an MCP handler (e.g.
+    from tests or the CLI), ``ctx`` is None and this is a no-op.
+
+    Errors are silently swallowed so that notification failures never abort
+    the routing pipeline.
+
+    Args:
+        ctx: MCP RequestContext or None when called outside MCP.
+        level: Log level method name on ctx (``"info"``, ``"warning"``, etc.).
+        message: Human-readable progress message.
+    """
     if ctx is None:
         return
     try:
@@ -54,8 +93,40 @@ async def route_and_call(
 ) -> LLMResponse:
     """Route a request to the best available model and return the response.
 
-    Handles both text LLMs (via LiteLLM) and media generation (via direct APIs).
-    Tries models in the profile's preference order, skipping unhealthy providers.
+    Full routing flow:
+      1. **Budget check** — if a monthly budget is configured and exceeded,
+         raise ``BudgetExceededError`` immediately (fail-fast).
+      2. **Model chain** — resolve the ordered list of candidate models from
+         the routing profile, or use ``model_override`` if provided.
+      3. **Provider filter** — drop any models whose provider has no API key.
+      4. **Health check** — skip providers the circuit breaker has marked
+         unhealthy (too many recent failures).
+      5. **Dispatch** — call the model via ``_call_text`` (LiteLLM) or
+         ``_call_media`` (direct API), depending on ``task_type``.
+      6. **Fallback** — on failure, record the error in the health tracker
+         and try the next model in the chain.
+      7. **Cost logging** — on success, log token usage and cost to SQLite.
+
+    Args:
+        task_type: What kind of task this is (query, code, image, etc.).
+        prompt: The user's prompt text.
+        profile: Routing profile override (budget/balanced/premium).
+            Defaults to the profile set in config.
+        system_prompt: Optional system prompt prepended to text LLM calls.
+        model_override: Force a specific model, bypassing the routing table.
+        temperature: Sampling temperature override for text calls.
+        max_tokens: Max output tokens override for text calls.
+        media_params: Extra keyword arguments forwarded to media generators
+            (e.g. image size, video duration).
+        ctx: MCP RequestContext for streaming progress notifications.
+
+    Returns:
+        An ``LLMResponse`` with the model output, cost, and latency.
+
+    Raises:
+        BudgetExceededError: Monthly spend has reached the configured limit.
+        ValueError: No models available for the given task/profile combo.
+        RuntimeError: All candidate models failed (wraps the last error).
     """
     config = get_config()
     profile = profile or config.llm_router_profile
@@ -146,13 +217,32 @@ async def _call_text(
     max_tokens: int | None,
     task_type: TaskType,
 ) -> LLMResponse:
-    """Route a text LLM call through LiteLLM."""
+    """Dispatch a text completion call through LiteLLM's unified API.
+
+    Builds the messages list (optional system + user), adds task-specific
+    parameters, and delegates to ``providers.call_llm``.  LiteLLM handles
+    provider-specific auth and request formatting transparently.
+
+    Args:
+        model: LiteLLM model identifier (e.g. ``"openai/gpt-4o"``).
+        prompt: The user's prompt text.
+        system_prompt: Optional system message prepended to the conversation.
+        temperature: Sampling temperature (None = provider default).
+        max_tokens: Maximum output tokens (None = provider default).
+        task_type: Used to inject task-specific parameters (e.g. research
+            tasks add a recency filter for Perplexity).
+
+    Returns:
+        An ``LLMResponse`` with the generated text, cost, and latency.
+    """
     messages: list[dict[str, str]] = []
     if system_prompt:
         messages.append({"role": "system", "content": system_prompt})
     messages.append({"role": "user", "content": prompt})
 
     extra = {}
+    # Perplexity's sonar models support a recency filter that limits
+    # search results to the last week, keeping research answers current.
     if task_type == TaskType.RESEARCH:
         extra["extra_body"] = {"search_recency_filter": "week"}
 
@@ -172,7 +262,28 @@ async def _call_media(
     prompt: str,
     params: dict | None,
 ) -> LLMResponse:
-    """Route a media generation call to the appropriate provider."""
+    """Dispatch a media generation call to the appropriate provider SDK.
+
+    Unlike text calls, media generation bypasses LiteLLM entirely. Each
+    provider (fal, OpenAI, Stability, etc.) has its own generator function
+    registered in ``media.IMAGE_GENERATORS``, ``media.VIDEO_GENERATORS``,
+    or ``media.AUDIO_GENERATORS``. This function looks up the correct
+    generator by provider name and forwards the prompt and params.
+
+    Args:
+        task_type: The media modality (IMAGE, VIDEO, or AUDIO).
+        provider: Provider name extracted from the model string.
+        model_name: Model name without the provider prefix.
+        prompt: The generation prompt.
+        params: Optional provider-specific parameters (size, duration, etc.).
+
+    Returns:
+        An ``LLMResponse`` with ``media_url`` set to the generated asset URL.
+
+    Raises:
+        ValueError: No generator registered for the provider, or unknown
+            media task type.
+    """
     params = params or {}
 
     if task_type == TaskType.IMAGE:

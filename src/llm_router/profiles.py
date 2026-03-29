@@ -1,11 +1,31 @@
-"""Routing profiles — maps (profile, task_type) to ordered model preferences."""
+"""Routing profiles — maps (profile, task_type) to ordered model preferences.
+
+This module defines the static routing tables that power the multi-provider
+fallback chain. For every (RoutingProfile, TaskType) pair, there is an ordered
+list of models to try. The router walks this list top-to-bottom, skipping
+unhealthy providers, until one succeeds.
+
+Three profile tiers exist:
+  - **BUDGET**: cheapest models that still produce usable results. Prioritizes
+    free/low-cost providers (Gemini Flash, Groq, DeepSeek).
+  - **BALANCED**: quality/cost sweet spot. Uses mid-tier models from major
+    providers (GPT-4o, Claude Sonnet, Gemini Pro).
+  - **PREMIUM**: best available quality, cost secondary. Uses frontier models
+    (o3, Claude Opus, Gemini Pro).
+
+Model IDs use LiteLLM's ``provider/model`` format for text models and the
+same convention for media models (though media bypasses LiteLLM).
+"""
 
 from __future__ import annotations
 
 from llm_router.types import Complexity, RoutingProfile, TaskType
 
-# Each entry is an ordered list of model IDs (LiteLLM format for text,
-# provider/model for media). Router tries them in order, falling back on failure.
+# Master routing table: maps (profile, task_type) -> ordered model chain.
+# Each entry is a list of model IDs in LiteLLM's "provider/model" format.
+# The router tries models in order, falling back to the next on failure or
+# rate-limiting. Models are ordered by preference within each tier (best
+# fit first, broadest fallback last).
 
 ROUTING_TABLE: dict[tuple[RoutingProfile, TaskType], list[str]] = {
     # ═══════════════════════════════════════════════════════════════════
@@ -151,8 +171,14 @@ ROUTING_TABLE: dict[tuple[RoutingProfile, TaskType], list[str]] = {
 
 
 # ── Classifier model preferences (cheapest/fastest first) ────────────────────
-# Prefer non-thinking models for classification — thinking models (e.g.
-# gemini-2.5-flash) burn tokens on internal reasoning and truncate JSON output.
+# These models are used exclusively by the complexity classifier, NOT for
+# user-facing responses. They are ordered cheapest-first because classification
+# is a low-stakes, structured-output task that doesn't need frontier quality.
+#
+# IMPORTANT: Non-thinking models are strongly preferred here. Thinking models
+# (e.g. gemini-2.5-flash, deepseek-reasoner) spend most of their output budget
+# on internal chain-of-thought reasoning, which often causes the actual JSON
+# response to be truncated — triggering the _parse_truncated_json fallback.
 CLASSIFIER_MODELS: list[str] = [
     "gemini/gemini-2.5-flash-lite",  # non-thinking, fastest, cheapest
     "groq/llama-3.3-70b-versatile",
@@ -161,7 +187,12 @@ CLASSIFIER_MODELS: list[str] = [
     "mistral/mistral-small-latest",
 ]
 
-# ── Complexity → Profile mapping ─────────────────────────────────────────────
+# ── Complexity -> Profile mapping ─────────────────────────────────────────────
+# Maps classifier output to routing profile. The rationale is straightforward:
+# simple tasks don't need expensive models (budget), moderate tasks benefit
+# from mid-tier quality (balanced), and complex tasks warrant frontier models
+# (premium). This mapping is the bridge between the classifier and the
+# routing table.
 COMPLEXITY_TO_PROFILE: dict[Complexity, RoutingProfile] = {
     Complexity.SIMPLE: RoutingProfile.BUDGET,
     Complexity.MODERATE: RoutingProfile.BALANCED,
@@ -170,15 +201,42 @@ COMPLEXITY_TO_PROFILE: dict[Complexity, RoutingProfile] = {
 
 
 def complexity_to_profile(complexity: Complexity) -> RoutingProfile:
-    """Map a complexity level to the appropriate routing profile."""
+    """Map a complexity level to the appropriate routing profile.
+
+    Args:
+        complexity: The classified complexity tier.
+
+    Returns:
+        The routing profile that best matches the complexity level.
+    """
     return COMPLEXITY_TO_PROFILE[complexity]
 
 
 def get_model_chain(profile: RoutingProfile, task_type: TaskType) -> list[str]:
-    """Get the ordered model preference chain for a profile + task type."""
+    """Get the ordered model preference chain for a profile + task type.
+
+    Falls back to ``["openai/gpt-4o"]`` if no entry exists in the routing
+    table, which should only happen if a new TaskType is added without
+    updating the table.
+
+    Args:
+        profile: The routing profile (budget/balanced/premium).
+        task_type: The task type (query/research/generate/analyze/code/image/video/audio).
+
+    Returns:
+        Ordered list of model IDs to try, best-fit first.
+    """
     return ROUTING_TABLE.get((profile, task_type), ["openai/gpt-4o"])
 
 
 def provider_from_model(model: str) -> str:
-    """Extract provider name from model string (e.g. 'openai/gpt-4o' → 'openai')."""
+    """Extract the provider name from a ``provider/model`` string.
+
+    Args:
+        model: Model identifier (e.g. ``"openai/gpt-4o"``).
+
+    Returns:
+        Provider name (e.g. ``"openai"``), or ``"unknown"`` if the string
+        has no ``/`` separator.
+    """
     return model.split("/")[0] if "/" in model else "unknown"

@@ -1,4 +1,14 @@
-"""Cost tracking with SQLite persistence."""
+"""Cost tracking with SQLite persistence.
+
+Stores two categories of usage data in a local SQLite database:
+1. **External LLM usage** (``usage`` table): Every call routed through LiteLLM,
+   with model, tokens, cost, latency, and routing profile.
+2. **Claude Code usage** (``claude_usage`` table): Token consumption by Claude
+   Code models, with savings calculated against an Opus baseline.
+
+The database uses WAL journal mode for concurrent read performance and applies
+schema migrations idempotently on every connection.
+"""
 
 from __future__ import annotations
 
@@ -25,6 +35,9 @@ CREATE TABLE IF NOT EXISTS usage (
     success INTEGER NOT NULL DEFAULT 1
 )
 """
+"""Schema for the ``usage`` table tracking external LLM calls. Each row captures
+a single LiteLLM API call with its routing context (task_type, profile) and
+outcome (tokens, cost, latency, success flag)."""
 
 CREATE_CLAUDE_USAGE_TABLE = """
 CREATE TABLE IF NOT EXISTS claude_usage (
@@ -37,18 +50,34 @@ CREATE TABLE IF NOT EXISTS claude_usage (
     time_saved_sec REAL NOT NULL DEFAULT 0
 )
 """
+"""Schema for the ``claude_usage`` table tracking Claude Code model token
+consumption. Includes computed savings columns comparing actual model cost/speed
+against an Opus baseline."""
 
 
 MIGRATE_CLAUDE_USAGE_ADD_SAVINGS = [
     "ALTER TABLE claude_usage ADD COLUMN cost_saved_usd REAL NOT NULL DEFAULT 0",
     "ALTER TABLE claude_usage ADD COLUMN time_saved_sec REAL NOT NULL DEFAULT 0",
 ]
+"""Idempotent migration statements that add savings columns to older databases.
+Each statement is wrapped in a try/except so it silently succeeds if the column
+already exists. This avoids needing a formal migration framework."""
 
 
 async def _get_db() -> aiosqlite.Connection:
+    """Open (or create) the SQLite database and apply all migrations.
+
+    Creates the parent directory if needed, enables WAL journal mode for
+    better concurrent read performance, creates both tables if they don't
+    exist, and runs all idempotent ALTER TABLE migrations.
+
+    Returns:
+        An open aiosqlite connection. Caller is responsible for closing it.
+    """
     config = get_config()
     config.llm_router_db_path.parent.mkdir(parents=True, exist_ok=True)
     db = await aiosqlite.connect(str(config.llm_router_db_path))
+    # WAL mode allows concurrent readers while a writer is active
     await db.execute("PRAGMA journal_mode=WAL")
     await db.execute(CREATE_TABLE)
     await db.execute(CREATE_CLAUDE_USAGE_TABLE)
@@ -68,7 +97,19 @@ async def log_usage(
     profile: RoutingProfile,
     success: bool = True,
 ) -> None:
-    """Log a completed LLM call to the usage database."""
+    """Persist a completed external LLM call to the usage database.
+
+    Called after every LiteLLM API call (successful or failed) to maintain
+    a complete audit trail for cost reporting and provider analytics.
+
+    Args:
+        response: The LLMResponse from the completed call, containing model,
+            provider, token counts, cost, and latency.
+        task_type: The classified task type (e.g. code, research, analysis).
+        profile: The active routing profile (e.g. balanced, speed, quality).
+        success: Whether the call completed successfully. Failed calls are
+            still logged for observability but flagged with success=0.
+    """
     db = await _get_db()
     try:
         await db.execute(
@@ -93,7 +134,11 @@ async def log_usage(
 
 
 async def get_monthly_spend() -> float:
-    """Get total USD spent in the current calendar month."""
+    """Get total USD spent on external LLMs in the current calendar month.
+
+    Returns:
+        Total spend as a float. Returns 0.0 if no usage data exists.
+    """
     db = await _get_db()
     try:
         cursor = await db.execute(
@@ -107,10 +152,16 @@ async def get_monthly_spend() -> float:
 
 
 async def get_usage_summary(period: str = "today") -> str:
-    """Get a human-readable usage summary.
+    """Build a human-readable usage summary with per-model and per-profile breakdowns.
 
     Args:
-        period: "today", "week", "month", or "all"
+        period: Time window to summarize. One of ``"today"``, ``"week"``
+            (last 7 days), ``"month"`` (last 30 days), or ``"all"`` (lifetime).
+
+    Returns:
+        A multi-line markdown-formatted string with total calls, tokens, cost,
+        average latency, and breakdowns by model and routing profile.
+        Returns a "no data" message if no usage exists for the period.
     """
     where = {
         "today": "WHERE date(timestamp) = date('now')",
@@ -172,9 +223,20 @@ async def get_usage_summary(period: str = "today") -> str:
 
 
 def calc_savings(model: str, tokens_used: int) -> tuple[float, float]:
-    """Calculate cost and time savings vs always using opus.
+    """Calculate cost and time savings compared to always using Opus.
 
-    Returns (cost_saved_usd, time_saved_sec).
+    The Opus model serves as the quality ceiling baseline. Any cheaper/faster
+    model that was used instead yields savings. If the model IS Opus, savings
+    are zero by definition.
+
+    Args:
+        model: The model that was actually used (e.g. "haiku", "sonnet").
+        tokens_used: Total tokens consumed by this call.
+
+    Returns:
+        A tuple of (cost_saved_usd, time_saved_sec), both clamped to >= 0.
+        Cost savings use per-1K-token rates from ``MODEL_COST_PER_1K``.
+        Time savings use tokens-per-second rates from ``MODEL_SPEED_TPS``.
     """
     baseline = "opus"
     if model == baseline:
@@ -193,9 +255,19 @@ def calc_savings(model: str, tokens_used: int) -> tuple[float, float]:
 
 
 async def log_claude_usage(model: str, tokens_used: int, complexity: str) -> dict:
-    """Log Claude Code model usage and calculate savings vs opus.
+    """Log a Claude Code model invocation and its savings vs. Opus.
 
-    Returns dict with cost_saved_usd and time_saved_sec for this call.
+    Calculates cost and time savings, persists the record to the
+    ``claude_usage`` table, and returns the savings for immediate display.
+
+    Args:
+        model: The Claude model used (e.g. "haiku", "sonnet", "opus").
+        tokens_used: Total tokens consumed.
+        complexity: Classified complexity level (e.g. "simple", "moderate",
+            "complex") for analytics grouping.
+
+    Returns:
+        Dict with ``cost_saved_usd`` and ``time_saved_sec`` for this call.
     """
     cost_saved, time_saved = calc_savings(model, tokens_used)
 
@@ -214,7 +286,11 @@ async def log_claude_usage(model: str, tokens_used: int, complexity: str) -> dic
 
 
 async def get_daily_claude_tokens() -> int:
-    """Get total Claude Code tokens used today."""
+    """Get the total number of Claude Code tokens consumed today (UTC).
+
+    Returns:
+        Token count as an integer. Returns 0 if no usage today.
+    """
     db = await _get_db()
     try:
         cursor = await db.execute(
@@ -228,7 +304,12 @@ async def get_daily_claude_tokens() -> int:
 
 
 async def get_daily_claude_breakdown() -> dict[str, int]:
-    """Get today's Claude token usage broken down by model."""
+    """Get today's Claude Code token usage broken down by model.
+
+    Returns:
+        Dict mapping model name (e.g. "haiku") to total tokens used today.
+        Empty dict if no usage exists.
+    """
     db = await _get_db()
     try:
         cursor = await db.execute(
@@ -242,10 +323,21 @@ async def get_daily_claude_breakdown() -> dict[str, int]:
 
 
 async def get_savings_summary(period: str = "today") -> dict:
-    """Get cumulative savings for a period.
+    """Get cumulative savings for a given time period.
 
-    Returns dict with total_calls, total_tokens, cost_saved_usd,
-    time_saved_sec, and per-model breakdown.
+    Queries the ``claude_usage`` table for aggregate savings and a per-model
+    breakdown. Handles backward compatibility with older databases that may
+    lack the savings columns by catching query errors gracefully.
+
+    Args:
+        period: Time window. One of ``"today"``, ``"week"`` (last 7 days),
+            ``"month"`` (last 30 days), or ``"all"`` (lifetime).
+
+    Returns:
+        Dict with keys: ``total_calls``, ``total_tokens``, ``cost_saved_usd``,
+        ``time_saved_sec``, and ``by_model`` (a nested dict with per-model
+        calls, tokens, cost_saved, and time_saved). Returns zeroed-out values
+        if no data exists or the query fails.
     """
     where = {
         "today": "WHERE date(timestamp) = date('now')",

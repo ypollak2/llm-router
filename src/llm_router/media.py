@@ -15,9 +15,24 @@ from llm_router.config import get_config
 from llm_router.types import LLMResponse
 
 _client: httpx.AsyncClient | None = None
+"""Module-level singleton for the shared httpx async client.
+
+Lazily initialized on first use via ``_get_client()``.  A single client
+is reused across all media requests to leverage HTTP/2 connection pooling
+and avoid per-request TLS handshake overhead.
+"""
 
 
 def _get_client() -> httpx.AsyncClient:
+    """Return the shared async HTTP client, creating it on first call.
+
+    The client uses a 120-second timeout because media generation APIs
+    (especially video) can take well over a minute to return even a
+    queue-submission response.
+
+    Returns:
+        The module-level singleton ``httpx.AsyncClient``.
+    """
     global _client
     if _client is None:
         _client = httpx.AsyncClient(timeout=120.0)
@@ -30,7 +45,26 @@ def _get_client() -> httpx.AsyncClient:
 async def generate_image_openai(
     prompt: str, model: str = "dall-e-3", size: str = "1024x1024", quality: str = "standard",
 ) -> LLMResponse:
-    """Generate an image using OpenAI's DALL-E API."""
+    """Generate an image via the OpenAI DALL-E REST API.
+
+    Calls ``POST /v1/images/generations``.  DALL-E 3 may revise the prompt
+    for safety/quality; the revised prompt is included in the response content.
+
+    Pricing (per image):
+        - dall-e-3 standard: $0.040
+        - dall-e-3 hd:       $0.080
+        - dall-e-2:          $0.020
+
+    Args:
+        prompt: Text description of the desired image.
+        model: DALL-E model variant (``"dall-e-3"`` or ``"dall-e-2"``).
+        size: Output dimensions (e.g. ``"1024x1024"``, ``"1792x1024"``).
+        quality: ``"standard"`` or ``"hd"`` (DALL-E 3 only; hd doubles cost).
+
+    Returns:
+        An ``LLMResponse`` with ``media_url`` set to the generated image URL.
+        ``input_tokens`` and ``output_tokens`` are 0 (image APIs are per-image).
+    """
     config = get_config()
     client = _get_client()
     start = time.monotonic()
@@ -67,7 +101,28 @@ async def generate_image_openai(
 async def generate_image_fal(
     prompt: str, model: str = "flux-pro", size: str = "landscape_16_9",
 ) -> LLMResponse:
-    """Generate an image using fal.ai (Flux, SD, etc.)."""
+    """Generate an image via the fal.ai queue API (Flux, Stable Diffusion, etc.).
+
+    Submits a generation request to fal's queue endpoint.  If the response
+    contains a ``request_id`` (async job), polls ``/status`` every 2 seconds
+    for up to 60 iterations (2 minutes) until the job completes.
+
+    Pricing (per image, approximate):
+        - flux-pro:     $0.050
+        - flux-dev:     $0.025
+        - flux-schnell: $0.003
+
+    Args:
+        prompt: Text description of the desired image.
+        model: fal model name — ``"flux-pro"``, ``"flux-dev"``, or
+            ``"flux-schnell"``.  Other names are passed through as
+            ``fal-ai/{model}``.
+        size: fal image size preset (e.g. ``"landscape_16_9"``,
+            ``"square_hd"``).
+
+    Returns:
+        An ``LLMResponse`` with ``media_url`` set to the hosted image URL.
+    """
     config = get_config()
     client = _get_client()
     start = time.monotonic()
@@ -88,11 +143,12 @@ async def generate_image_fal(
     data = resp.json()
     elapsed = (time.monotonic() - start) * 1000
 
-    # fal may return a request_id for async jobs
+    # fal uses an async queue model: the initial POST returns a request_id,
+    # and we must poll /status until completion.  2-second intervals balance
+    # responsiveness against rate limits on the status endpoint.
     if "request_id" in data:
-        # Poll for result
         request_id = data["request_id"]
-        for _ in range(60):  # max 60 polls
+        for _ in range(60):  # max 60 polls (~2 min ceiling)
             import asyncio
             await asyncio.sleep(2)
             status_resp = await client.get(
@@ -130,7 +186,24 @@ async def generate_image_fal(
 async def generate_image_stability(
     prompt: str, model: str = "stable-diffusion-3", size: str = "1024x1024",
 ) -> LLMResponse:
-    """Generate an image using Stability AI."""
+    """Generate an image via the Stability AI REST API (Stable Diffusion 3).
+
+    Calls the ``/v2beta/stable-image/generate/sd3`` endpoint.  Unlike
+    OpenAI/fal, Stability returns the image as a base64-encoded PNG in
+    the response body (no hosted URL).  The ``media_url`` field contains
+    a truncated data-URI for preview; the full base64 payload is available
+    in the raw response.
+
+    Pricing: ~$0.03 per image for SD3.
+
+    Args:
+        prompt: Text description of the desired image.
+        model: Model name (currently only ``"stable-diffusion-3"``).
+        size: Output dimensions as ``"WIDTHxHEIGHT"`` (e.g. ``"1024x1024"``).
+
+    Returns:
+        An ``LLMResponse`` with a truncated base64 data-URI in ``media_url``.
+    """
     config = get_config()
     client = _get_client()
     start = time.monotonic()
@@ -171,7 +244,24 @@ async def generate_image_stability(
 async def generate_video_fal(
     prompt: str, model: str = "kling-video", duration: int = 5,
 ) -> LLMResponse:
-    """Generate a video using fal.ai (Kling, minimax, etc.)."""
+    """Generate a video via the fal.ai queue API (Kling, minimax, etc.).
+
+    Video generation is always asynchronous.  After submitting the job,
+    polls ``/status`` every 2 seconds for up to 90 iterations (3 minutes)
+    to accommodate the longer render times of video models.
+
+    Pricing (per video, approximate):
+        - kling-video:   $0.30
+        - minimax-video: $0.20
+
+    Args:
+        prompt: Text description of the desired video.
+        model: fal video model — ``"kling-video"`` or ``"minimax-video"``.
+        duration: Desired video length in seconds (default 5).
+
+    Returns:
+        An ``LLMResponse`` with ``media_url`` set to the hosted video URL.
+    """
     config = get_config()
     client = _get_client()
     start = time.monotonic()
@@ -190,12 +280,14 @@ async def generate_video_fal(
     resp.raise_for_status()
     data = resp.json()
 
-    # Video generation is always async — poll for result
+    # Video generation is always async — poll for result.
+    # 2-second intervals keep us under fal's rate limits while still
+    # detecting completion promptly.  90 iterations = ~3 min ceiling.
     request_id = data.get("request_id", "")
     video_url = ""
     if request_id:
         import asyncio
-        for _ in range(90):  # up to 3 minutes
+        for _ in range(90):
             await asyncio.sleep(2)
             status_resp = await client.get(
                 f"https://queue.fal.run/{endpoint}/requests/{request_id}/status",
@@ -231,7 +323,24 @@ async def generate_video_fal(
 async def generate_video_runway(
     prompt: str, model: str = "gen3a_turbo", duration: int = 5,
 ) -> LLMResponse:
-    """Generate a video using Runway API."""
+    """Generate a video via the Runway ML REST API (Gen-3 Alpha).
+
+    Submits a generation task to ``/v1/image_to_video``, then polls
+    ``/v1/tasks/{id}`` every 2 seconds for up to 90 iterations (3 min).
+
+    Pricing (per video, approximate):
+        - gen3a_turbo: $0.25
+        - gen3a:       $0.50
+
+    Args:
+        prompt: Text description of the desired video.
+        model: Runway model variant — ``"gen3a_turbo"`` (fast) or ``"gen3a"``
+            (higher quality).
+        duration: Desired video length in seconds (default 5).
+
+    Returns:
+        An ``LLMResponse`` with ``media_url`` set to the hosted video URL.
+    """
     config = get_config()
     client = _get_client()
     start = time.monotonic()
@@ -248,7 +357,7 @@ async def generate_video_runway(
     data = resp.json()
     task_id = data.get("id", "")
 
-    # Poll for completion
+    # Poll for completion — same 2s/90-iteration pattern as fal
     import asyncio
     video_url = ""
     for _ in range(90):
@@ -286,7 +395,28 @@ async def generate_video_runway(
 async def generate_audio_openai(
     text: str, model: str = "tts-1", voice: str = "alloy",
 ) -> LLMResponse:
-    """Generate speech using OpenAI TTS."""
+    """Generate speech audio via the OpenAI TTS REST API.
+
+    Calls ``POST /v1/audio/speech``.  The response body is raw MP3 audio
+    bytes, which are base64-encoded and returned as a truncated data-URI
+    in ``media_url``.
+
+    Pricing (per-character, billed per 1M characters):
+        - tts-1:    $15.00 / 1M chars
+        - tts-1-hd: $30.00 / 1M chars
+
+    Args:
+        text: The text to synthesize into speech.
+        model: TTS model — ``"tts-1"`` (fast) or ``"tts-1-hd"`` (higher
+            quality).
+        voice: Voice preset — ``"alloy"``, ``"echo"``, ``"fable"``,
+            ``"onyx"``, ``"nova"``, or ``"shimmer"``.
+
+    Returns:
+        An ``LLMResponse`` with ``input_tokens`` set to the character count
+        (used for cost calculation) and ``media_url`` containing a truncated
+        base64 data-URI of the MP3 audio.
+    """
     config = get_config()
     client = _get_client()
     start = time.monotonic()
@@ -319,7 +449,24 @@ async def generate_audio_openai(
 async def generate_audio_elevenlabs(
     text: str, voice_id: str = "21m00Tcm4TlvDq8ikWAM", model: str = "eleven_multilingual_v2",
 ) -> LLMResponse:
-    """Generate speech using ElevenLabs."""
+    """Generate speech audio via the ElevenLabs text-to-speech API.
+
+    Calls ``POST /v1/text-to-speech/{voice_id}``.  Returns raw MP3 audio
+    bytes, base64-encoded into a truncated data-URI.
+
+    Pricing: ~$0.30 per 1,000 characters.
+
+    Args:
+        text: The text to synthesize into speech.
+        voice_id: ElevenLabs voice identifier. The default
+            (``"21m00Tcm4TlvDq8ikWAM"``) is the "Rachel" preset voice.
+        model: ElevenLabs model — ``"eleven_multilingual_v2"`` supports
+            29 languages with voice cloning.
+
+    Returns:
+        An ``LLMResponse`` with ``input_tokens`` set to the character count
+        and ``media_url`` containing a truncated base64 data-URI.
+    """
     config = get_config()
     client = _get_client()
     start = time.monotonic()
@@ -356,20 +503,29 @@ async def generate_audio_elevenlabs(
 
 
 # ── Dispatcher ───────────────────────────────────────────────────────────────
+#
+# These dictionaries map a provider prefix (e.g. "openai", "fal") to the
+# corresponding async generator function.  The router uses these to dispatch
+# media generation requests: it splits a model string like "fal/flux-pro"
+# on the "/" separator, looks up the prefix in the appropriate dict, and
+# calls the matched function.  This keeps the routing logic decoupled from
+# individual provider implementations.
 
-# Maps model prefix → generator function
 IMAGE_GENERATORS = {
     "openai": generate_image_openai,
     "fal": generate_image_fal,
     "stability": generate_image_stability,
 }
+"""Provider-prefix to image generation function mapping."""
 
 VIDEO_GENERATORS = {
     "fal": generate_video_fal,
     "runway": generate_video_runway,
 }
+"""Provider-prefix to video generation function mapping."""
 
 AUDIO_GENERATORS = {
     "openai": generate_audio_openai,
     "elevenlabs": generate_audio_elevenlabs,
 }
+"""Provider-prefix to audio generation function mapping."""

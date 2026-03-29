@@ -1,4 +1,14 @@
-"""Complexity classifier — scores prompts as simple/moderate/complex."""
+"""Complexity classifier — scores prompts as simple/moderate/complex.
+
+Uses the cheapest available LLM to classify a user prompt into a complexity
+tier (simple/moderate/complex) and infer a task type (query/research/generate/
+analyze/code). The classification drives downstream model selection: simple
+tasks get cheap models, complex tasks get powerful ones.
+
+Results are cached by prompt hash so repeated/similar prompts skip the LLM
+call entirely. On total failure, a safe ``moderate`` fallback ensures routing
+always proceeds.
+"""
 
 from __future__ import annotations
 
@@ -14,6 +24,10 @@ from llm_router.types import ClassificationResult, Complexity, TaskType
 
 log = logging.getLogger("llm_router.classifier")
 
+# System prompt sent to the classifier LLM. Instructs it to return a
+# single JSON object with exactly four fields. The prompt is intentionally
+# terse and includes a concrete example to maximize compliance with the
+# structured output format, even from small/cheap models.
 CLASSIFIER_SYSTEM_PROMPT = """\
 Classify task complexity and type. Respond with ONLY a single-line JSON object. No markdown, no explanation.
 
@@ -22,11 +36,33 @@ Task type: "query", "research", "generate", "analyze", "code"
 
 Example: {"complexity":"simple","task_type":"query","confidence":0.95,"reasoning":"factual lookup"}"""
 
+# Text-only task types that the classifier is allowed to infer. Media types
+# (IMAGE, VIDEO, AUDIO) are excluded because they are determined by the
+# caller based on explicit user intent, not inferred from prompt content.
 VALID_TASK_TYPES = {t.value for t in TaskType if t not in (TaskType.IMAGE, TaskType.VIDEO, TaskType.AUDIO)}
 
 
 def _parse_classification(raw: str) -> dict:
-    """Extract JSON from classifier response, handling markdown fences and truncation."""
+    """Extract a JSON dict from the classifier's response text.
+
+    Uses a 4-tier parsing strategy, from strictest to most lenient:
+      1. **Direct parse** — the response is clean JSON (ideal case).
+      2. **Fence extraction** — the model wrapped JSON in markdown code fences
+         (common with instruction-tuned models).
+      3. **Regex extraction** — find the first ``{...}`` substring (handles
+         models that add preamble text before the JSON).
+      4. **Truncated JSON** — extract individual key-value pairs via regex
+         when the JSON is incomplete (see ``_parse_truncated_json``).
+
+    Args:
+        raw: The raw text content from the classifier LLM response.
+
+    Returns:
+        A dict with at least a ``"complexity"`` key.
+
+    Raises:
+        ValueError: None of the 4 strategies could extract valid data.
+    """
     # Try direct parse
     try:
         return json.loads(raw.strip())
@@ -54,7 +90,24 @@ def _parse_classification(raw: str) -> dict:
 
 
 def _parse_truncated_json(raw: str) -> dict | None:
-    """Extract fields from truncated JSON like {"complexity":"complex","task_type":"code."""
+    """Extract individual fields from truncated/malformed JSON via regex.
+
+    Thinking models (e.g. Gemini 2.5 Flash with thinking enabled) sometimes
+    use most of their output budget on internal chain-of-thought reasoning,
+    leaving the actual JSON response truncated mid-string — for example:
+    ``{"complexity":"complex","task_type":"code``  (missing closing braces).
+
+    This function salvages whatever key-value pairs are present by matching
+    each expected field individually with regex, rather than requiring valid
+    JSON structure.
+
+    Args:
+        raw: The raw (possibly truncated) response text.
+
+    Returns:
+        A dict with extracted fields if at least ``"complexity"`` was found,
+        or None if the response is too garbled to extract anything useful.
+    """
     result = {}
     for key in ("complexity", "task_type", "confidence", "reasoning"):
         match = re.search(rf'"{key}"\s*:\s*"([^"]*)"', raw)
@@ -75,10 +128,31 @@ async def classify_complexity(
     quality_mode: str = "balanced",
     min_model: str = "haiku",
 ) -> ClassificationResult:
-    """Classify a prompt's complexity using the cheapest available model.
+    """Classify a prompt's complexity using the cheapest available classifier model.
 
-    Results are cached by (prompt, quality_mode, min_model) hash for O(1) repeat lookups.
-    On failure, returns a moderate/balanced fallback so routing always proceeds.
+    Flow:
+      1. **Cache check** — look up the (prompt, quality_mode, min_model) hash
+         in the LRU cache. On hit, return immediately (no LLM call).
+      2. **Model chain** — iterate through ``CLASSIFIER_MODELS`` in order
+         (cheapest first), skipping any whose provider lacks an API key.
+      3. **LLM call** — send the prompt with ``CLASSIFIER_SYSTEM_PROMPT`` at
+         temperature 0 for deterministic output.
+      4. **Parse** — extract the JSON classification via ``_parse_classification``.
+      5. **Cache store** — persist the result for future lookups.
+      6. **Fallback** — if all models fail, return a safe moderate/balanced
+         result so the routing pipeline never stalls.
+
+    Args:
+        prompt: The user's prompt text to classify.
+        quality_mode: Routing quality preference (used as part of the cache key
+            because the same prompt may be classified differently under
+            different quality modes in future versions).
+        min_model: Minimum model floor (included in the cache key for the same
+            reason as quality_mode).
+
+    Returns:
+        A ``ClassificationResult`` with complexity, confidence, task type,
+        and metadata about the classifier call (model, cost, latency).
     """
     # Check cache first
     cache = get_cache()
@@ -149,7 +223,18 @@ async def classify_complexity(
 
 
 def _fallback_result(reason: str) -> ClassificationResult:
-    """Safe fallback — moderate complexity, balanced profile."""
+    """Create a safe fallback classification when all classifier models fail.
+
+    Returns ``moderate`` complexity with zero confidence, which maps to the
+    ``balanced`` routing profile. This is the safest middle ground: it avoids
+    over-spending (opus) while still providing reasonable quality (sonnet).
+
+    Args:
+        reason: Human-readable explanation of why fallback was triggered.
+
+    Returns:
+        A ``ClassificationResult`` with moderate complexity and zero confidence.
+    """
     return ClassificationResult(
         complexity=Complexity.MODERATE,
         confidence=0.0,

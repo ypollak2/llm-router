@@ -1,4 +1,14 @@
-"""LiteLLM wrapper for unified LLM API calls."""
+"""LiteLLM wrapper for unified LLM API calls.
+
+Provides two entry points for calling any LLM through LiteLLM's unified API:
+- ``call_llm``: Standard request/response (returns full ``LLMResponse``).
+- ``call_llm_stream``: Streaming variant that yields content chunks, ending
+  with a JSON metadata trailer for the caller to parse.
+
+Both functions handle OpenAI reasoning model quirks (temperature=1 requirement),
+apply config defaults, and extract provider-specific features like Perplexity
+citations.
+"""
 
 from __future__ import annotations
 
@@ -10,7 +20,8 @@ import litellm
 from llm_router.config import get_config
 from llm_router.types import LLMResponse
 
-# Suppress LiteLLM's verbose logging
+# LiteLLM emits noisy debug output by default (model mappings, retries, etc.)
+# that clutters MCP server logs. Suppressing it keeps logs focused on routing.
 litellm.suppress_debug_info = True
 
 
@@ -24,12 +35,34 @@ async def call_llm(
 ) -> LLMResponse:
     """Call an LLM via LiteLLM and return a standardized response.
 
+    Flow:
+    1. Apply config defaults for temperature and max_tokens if not provided.
+    2. Detect OpenAI reasoning models (o1/o3/o4 series) and force temperature=1,
+       which is the only value these models accept.
+    3. Send the request to LiteLLM's async completion API.
+    4. Extract cost via LiteLLM's built-in cost calculator.
+    5. Extract Perplexity-specific citations if present.
+    6. Return a unified ``LLMResponse`` with all metadata.
+
     Args:
-        model: LiteLLM model string (e.g. "gemini/gemini-2.5-flash").
-        messages: Chat messages in OpenAI format.
-        temperature: Sampling temperature (uses config default if None).
-        max_tokens: Max output tokens (uses config default if None).
-        extra_params: Provider-specific params passed to LiteLLM.
+        model: LiteLLM model string (e.g. ``"gemini/gemini-2.5-flash"``).
+            Must include the provider prefix for non-OpenAI models.
+        messages: Chat messages in OpenAI format
+            (list of ``{"role": "...", "content": "..."}`` dicts).
+        temperature: Sampling temperature override. Uses ``config.default_temperature``
+            if None. Ignored (forced to 1) for reasoning models.
+        max_tokens: Max output tokens override. Uses ``config.default_max_tokens``
+            if None or 0.
+        extra_params: Provider-specific parameters passed through to LiteLLM
+            (e.g. ``{"top_p": 0.9}``). Merged into the call kwargs.
+
+    Returns:
+        An ``LLMResponse`` containing the generated content, token counts,
+        cost, latency, provider name, and any citations.
+
+    Raises:
+        litellm.exceptions.APIError: On provider API errors (4xx/5xx).
+        asyncio.TimeoutError: If the call exceeds ``config.request_timeout``.
     """
     config = get_config()
     temperature = temperature if temperature is not None else config.default_temperature
@@ -59,10 +92,10 @@ async def call_llm(
     content = response.choices[0].message.content or ""
     usage = response.usage
 
-    # LiteLLM provides cost calculation
+    # LiteLLM provides cost calculation based on its internal pricing tables
     cost = litellm.completion_cost(completion_response=response)
 
-    # Extract citations from Perplexity responses
+    # Perplexity models return source citations alongside the response
     citations: list[str] = []
     if hasattr(response, "citations"):
         citations = response.citations or []
@@ -91,15 +124,26 @@ async def call_llm_stream(
 ) -> AsyncIterator[str]:
     """Stream an LLM response via LiteLLM, yielding content chunks.
 
-    Yields text chunks as they arrive. The final yielded item is a JSON metadata
-    line prefixed with ``\\n[META]`` containing model, tokens, cost, and latency.
+    Yields text chunks as they arrive from the provider. After all content
+    chunks, yields a final ``\\n[META]{...}`` trailer line containing a JSON
+    object with model, provider, token counts, cost, and latency. Callers
+    should detect the ``[META]`` prefix to separate content from metadata.
+
+    Unlike ``call_llm``, cost is estimated from token counts rather than
+    calculated from the full response object, because LiteLLM's streaming
+    API doesn't provide a complete response for its cost calculator. Token
+    counts come from the final chunk's usage field (if the provider sends it).
 
     Args:
-        model: LiteLLM model string (e.g. "gemini/gemini-2.5-flash").
+        model: LiteLLM model string (e.g. ``"gemini/gemini-2.5-flash"``).
         messages: Chat messages in OpenAI format.
-        temperature: Sampling temperature (uses config default if None).
-        max_tokens: Max output tokens (uses config default if None).
-        extra_params: Provider-specific params passed to LiteLLM.
+        temperature: Sampling temperature override. Uses config default if None.
+        max_tokens: Max output tokens override. Uses config default if None.
+        extra_params: Provider-specific parameters passed through to LiteLLM.
+
+    Yields:
+        Content text chunks as they arrive, followed by a single
+        ``\\n[META]{...}`` JSON metadata line as the final item.
     """
     import json
 
@@ -137,7 +181,7 @@ async def call_llm_stream(
             collected_content.append(delta.content)
             yield delta.content
 
-        # Final chunk often carries usage info
+        # The final chunk from most providers carries aggregated usage info
         if hasattr(chunk, "usage") and chunk.usage:
             input_tokens = chunk.usage.prompt_tokens or 0
             output_tokens = chunk.usage.completion_tokens or 0
@@ -145,8 +189,8 @@ async def call_llm_stream(
     elapsed_ms = (time.monotonic() - start) * 1000
     full_content = "".join(collected_content)
 
-    # Estimate cost — litellm.completion_cost needs a full response object,
-    # so we estimate from token counts when streaming
+    # Estimate cost from token counts — litellm.completion_cost needs a full
+    # response object which isn't available in streaming mode
     try:
         cost = litellm.completion_cost(
             model=model,

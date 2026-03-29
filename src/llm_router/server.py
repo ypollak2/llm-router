@@ -1,4 +1,23 @@
-"""FastMCP server — exposes LLM routing tools to Claude Code."""
+"""FastMCP server — the MCP entry point that exposes LLM routing tools to Claude Code.
+
+This module registers all ``@mcp.tool()`` functions that Claude Code can call.
+Tools are grouped into sections:
+
+- **Smart Router** — ``llm_classify``, ``llm_track_usage``, ``llm_route``
+- **Streaming** — ``llm_stream``
+- **Text LLM Tools** — ``llm_query``, ``llm_research``, ``llm_generate``,
+  ``llm_analyze``, ``llm_code``
+- **Media Tools** — ``llm_image``, ``llm_video``, ``llm_audio``
+- **Orchestration** — ``llm_orchestrate``, ``llm_pipeline_templates``
+- **Management** — ``llm_set_profile``, ``llm_usage``, ``llm_cache_stats``,
+  ``llm_cache_clear``, ``llm_health``, ``llm_providers``
+- **Subscription Usage** — ``llm_check_usage``, ``llm_update_usage``
+- **Codex** — ``llm_codex``
+- **API Setup** — ``llm_setup`` (status/guide/discover/add/test/provider)
+
+All tools return formatted strings (not structured data) because MCP tool
+responses are displayed directly to the user in the Claude Code UI.
+"""
 
 from __future__ import annotations
 
@@ -35,7 +54,18 @@ mcp = FastMCP("llm-router")
 
 
 def _check_tier(feature: str) -> str | None:
-    """Check if the current tier allows a feature. Returns error message or None."""
+    """Gate a feature behind the Pro subscription tier.
+
+    Looks up ``feature`` in the ``PRO_FEATURES`` set.  If the user is on the
+    free tier and the feature is Pro-only, returns a human-readable upgrade
+    prompt.  Otherwise returns ``None`` (access granted).
+
+    Args:
+        feature: Internal feature name (e.g. ``"multi_step"``).
+
+    Returns:
+        An error message string if access is denied, or ``None`` if allowed.
+    """
     config = get_config()
     if config.llm_router_tier == Tier.FREE and feature in PRO_FEATURES:
         return (
@@ -229,7 +259,14 @@ async def llm_track_usage(
 
 
 def _format_time(seconds: float) -> str:
-    """Format seconds into a human-readable string."""
+    """Format a duration in seconds into a compact human-readable string.
+
+    Args:
+        seconds: Duration to format.
+
+    Returns:
+        A string like ``"12.3s"``, ``"2.1m"``, or ``"1.5h"``.
+    """
     if seconds < 60:
         return f"{seconds:.1f}s"
     minutes = seconds / 60
@@ -946,7 +983,11 @@ async def llm_providers() -> str:
 # ── Subscription Usage (Live) ─────────────────────────────────────────────────
 
 
-# Cache to avoid hammering claude.ai on every call
+# Cached result from the most recent ``llm_update_usage`` call.
+# Avoids repeatedly fetching from claude.ai.  This is populated by
+# ``llm_update_usage`` (which the user triggers via Playwright) and
+# consumed by ``llm_classify`` for real-time budget pressure calculations
+# and by ``llm_usage`` / ``llm_check_usage`` for dashboard display.
 _last_usage: ClaudeSubscriptionUsage | None = None
 
 
@@ -993,7 +1034,8 @@ async def llm_update_usage(data: dict) -> str:
     global _last_usage
     _last_usage = parse_api_response(data)
 
-    # Write refresh timestamp for the usage-refresh hook
+    # Write refresh timestamp so the usage-refresh hook knows when data
+    # was last fetched and can decide whether to prompt for a re-fetch.
     state_dir = os.path.expanduser("~/.llm-router")
     os.makedirs(state_dir, exist_ok=True)
     state_file = os.path.join(state_dir, "usage_last_refresh.txt")
@@ -1044,7 +1086,12 @@ async def llm_codex(
 # ── API Setup & Discovery ────────────────────────────────────────────────────
 
 
-# Provider registry — signup URLs, free tier info, and capabilities
+# Provider registry — the authoritative catalog of all supported providers.
+# Each entry stores metadata used by ``llm_setup`` actions: signup URL,
+# environment variable name, free-tier availability, capability tags,
+# pricing summary, and whether the provider is recommended for new users.
+# This dict is read-only at runtime; it drives the status, guide, discover,
+# add, test, and provider-detail sub-commands.
 _PROVIDER_REGISTRY: dict[str, dict] = {
     "gemini": {
         "name": "Google Gemini",
@@ -1235,7 +1282,12 @@ async def llm_setup(
 
 
 def _setup_status() -> str:
-    """Show current provider configuration status."""
+    """Build a markdown report of configured vs. missing providers.
+
+    Returns:
+        Formatted markdown with sections for configured providers,
+        recommended additions, and other available providers.
+    """
     config = get_config()
     configured = config.available_providers
     lines = ["# API Provider Status\n"]
@@ -1276,7 +1328,13 @@ def _setup_status() -> str:
 
 
 def _setup_guide() -> str:
-    """Step-by-step guide to get started with the cheapest/free providers."""
+    """Return a static markdown quick-start guide for new users.
+
+    Returns:
+        Multi-section guide covering Gemini (free), Groq (free),
+        DeepSeek (cheap), and OpenAI (optional), plus budget protection
+        and security notes.
+    """
     return """# Quick Start Guide — Get Running in 5 Minutes
 
 ## Step 1: Gemini (FREE — best starting point)
@@ -1326,7 +1384,16 @@ LLM_ROUTER_MONTHLY_BUDGET=20.00
 
 
 async def _setup_discover() -> str:
-    """Scan for existing API keys in environment and common config files."""
+    """Scan environment variables and common .env file locations for API keys.
+
+    This is a read-only, local-only operation.  No keys are transmitted or
+    logged; they are masked (first 4 + last 4 chars) in the output.
+
+    Returns:
+        A markdown report listing discovered keys with their source
+        (environment variable or file path) and whether they are already
+        loaded by the router.
+    """
     import os
     from pathlib import Path
 
@@ -1389,14 +1456,37 @@ async def _setup_discover() -> str:
 
 
 def _mask_key(key: str) -> str:
-    """Mask an API key for safe display — show only first 4 and last 4 chars."""
+    """Mask an API key for safe display, preserving only edge characters.
+
+    Args:
+        key: The raw API key string.
+
+    Returns:
+        A masked string showing the first 4 and last 4 characters
+        (or first 3 and last 2 for keys <= 12 chars) with ``***`` in between.
+    """
     if len(key) <= 12:
         return key[:3] + "***" + key[-2:]
     return key[:4] + "***" + key[-4:]
 
 
 def _setup_add(provider: str, api_key: str) -> str:
-    """Add an API key to the .env file securely."""
+    """Write an API key to the project ``.env`` file and reload config.
+
+    Performs basic validation (minimum length, no whitespace), then either
+    updates an existing line or appends a new one.  After writing, sets the
+    environment variable in the current process and forces a config reload
+    so the new key is available immediately.  Also checks ``.gitignore``
+    and warns if ``.env`` is unprotected.
+
+    Args:
+        provider: Provider name (must exist in ``_PROVIDER_REGISTRY``).
+        api_key: The raw API key value.
+
+    Returns:
+        A confirmation message with the masked key and file path, plus
+        a ``.gitignore`` warning if applicable.
+    """
     from pathlib import Path
 
     reg = _PROVIDER_REGISTRY.get(provider)
@@ -1459,7 +1549,9 @@ def _setup_add(provider: str, api_key: str) -> str:
     )
 
 
-# Minimal test models per provider — cheapest/fastest for key validation
+# Cheapest/fastest model per provider, used exclusively for API key validation.
+# Each test call sends a trivial 2-token prompt ("Reply with exactly: OK")
+# with max_tokens=5, costing ~$0.0001 per provider.
 _TEST_MODELS: dict[str, str] = {
     "openai": "openai/gpt-4o-mini",
     "gemini": "gemini/gemini-2.5-flash-lite",
@@ -1475,7 +1567,19 @@ _TEST_MODELS: dict[str, str] = {
 
 
 async def _setup_test(provider: str | None) -> str:
-    """Validate API key(s) with a minimal LLM call (~$0.0001 each)."""
+    """Validate API key(s) by making a minimal LLM call (~$0.0001 each).
+
+    Sends a trivial prompt to the cheapest model for each provider and
+    interprets the result: success, invalid key (auth error), rate-limited
+    (key works but quota exceeded), or other error.
+
+    Args:
+        provider: Specific provider to test, or ``None`` to test all
+            configured text providers.
+
+    Returns:
+        A markdown report with pass/fail status for each tested provider.
+    """
     config = get_config()
     configured = config.available_providers
 
@@ -1516,7 +1620,15 @@ async def _setup_test(provider: str | None) -> str:
 
 
 def _setup_provider_detail(provider: str | None) -> str:
-    """Show detailed info about a specific provider."""
+    """Return detailed information about a single provider.
+
+    Args:
+        provider: Provider name to look up, or ``None`` (returns a hint).
+
+    Returns:
+        A markdown card with status, pricing, capabilities, signup URL,
+        and setup instructions if the provider is not yet configured.
+    """
     if not provider:
         return "Specify a provider name. Example: `llm_setup(action='provider', provider='gemini')`"
 
@@ -1556,7 +1668,15 @@ def _setup_provider_detail(provider: str | None) -> str:
 
 @mcp.resource("llm-router://status")
 def router_status() -> str:
-    """Current router status — profile, providers, tier, health."""
+    """MCP resource returning a plain-text snapshot of the router's current state.
+
+    Includes the active profile, subscription tier, configured provider
+    counts (text and media), optional monthly budget, and per-provider
+    circuit-breaker health status.
+
+    Returns:
+        A newline-delimited plain-text summary (not markdown).
+    """
     config = get_config()
     tracker = get_tracker()
     report = tracker.status_report()
@@ -1575,6 +1695,7 @@ def router_status() -> str:
 
 
 def main():
+    """Start the MCP server (stdio transport by default)."""
     mcp.run()
 
 

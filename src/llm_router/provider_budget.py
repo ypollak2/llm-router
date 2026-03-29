@@ -1,4 +1,4 @@
-"""Provider budget tracking — know how much you have left on each external LLM.
+"""Provider budget tracking -- know how much you have left on each external LLM.
 
 Tracks per-provider monthly spend from the usage DB, and compares against
 user-configured monthly limits per provider. Used to pick the best external
@@ -15,7 +15,8 @@ from llm_router.config import get_config
 
 
 # Known cost tiers for external models (approximate $/1K tokens blended).
-# Used to estimate remaining capacity from budget headroom.
+# "Blended" means an average of input and output token costs, weighted toward
+# typical usage patterns. Used to estimate remaining capacity from budget headroom.
 EXTERNAL_MODEL_COST: dict[str, float] = {
     # OpenAI
     "openai/gpt-4o": 0.0075,
@@ -38,6 +39,9 @@ EXTERNAL_MODEL_COST: dict[str, float] = {
     # Groq (free tier / very cheap)
     "groq/llama-3.3-70b-versatile": 0.0003,
 }
+"""Approximate blended cost per 1K tokens for each external model. Used by
+``rank_external_models`` to break ties between models of equal quality and
+by budget calculations to estimate how many tokens remaining budget can buy."""
 
 # Quality score for complex task routing (0-1, higher = better for complex tasks)
 EXTERNAL_MODEL_QUALITY: dict[str, float] = {
@@ -53,35 +57,74 @@ EXTERNAL_MODEL_QUALITY: dict[str, float] = {
     "perplexity/sonar-pro": 0.80,
     "perplexity/sonar": 0.65,
 }
+"""Subjective quality scores (0.0-1.0) reflecting each model's capability on
+complex coding and analysis tasks. Used by ``rank_external_models`` as the
+primary sort key -- higher-quality models are preferred when budget allows."""
 
 
 @dataclass
 class ProviderBudget:
-    """Budget status for a single provider."""
+    """Budget status for a single external LLM provider.
+
+    Combines the user-configured monthly spending limit with actual spend
+    from the usage database to provide remaining-budget calculations.
+
+    Attributes:
+        provider: Provider name (e.g. "openai", "gemini").
+        monthly_limit: Maximum USD to spend per month. 0 means unlimited
+            (no budget cap configured).
+        spent_this_month: USD spent so far this calendar month, from the
+            usage database.
+        is_available: Whether an API key is configured for this provider.
+    """
+
     provider: str
-    monthly_limit: float     # USD, 0 = unlimited
-    spent_this_month: float  # USD from usage DB
-    is_available: bool       # has API key
+    monthly_limit: float
+    spent_this_month: float
+    is_available: bool
 
     @property
     def remaining(self) -> float:
+        """USD remaining in this month's budget.
+
+        Returns:
+            ``float('inf')`` if no limit is set (monthly_limit <= 0),
+            otherwise the difference clamped to >= 0.
+        """
         if self.monthly_limit <= 0:
             return float("inf")
         return max(0.0, self.monthly_limit - self.spent_this_month)
 
     @property
     def pct_used(self) -> float:
+        """Fraction of monthly budget consumed, 0.0-1.0.
+
+        Returns:
+            0.0 if no limit is set, otherwise spent/limit clamped to <= 1.0.
+        """
         if self.monthly_limit <= 0:
             return 0.0
         return min(1.0, self.spent_this_month / self.monthly_limit)
 
     @property
     def has_budget(self) -> bool:
+        """Whether this provider can accept new calls.
+
+        True if the provider has an API key AND either has no budget limit
+        or has remaining budget.
+        """
         return self.is_available and (self.monthly_limit <= 0 or self.remaining > 0)
 
 
 async def get_provider_spend() -> dict[str, float]:
-    """Get this month's spend per provider from the usage DB."""
+    """Query this month's cumulative spend per provider from the usage database.
+
+    Reads from the ``usage`` table (external LLM calls only). Returns an empty
+    dict if the database file doesn't exist yet (first run).
+
+    Returns:
+        Dict mapping provider name to USD spent this calendar month.
+    """
     config = get_config()
     db_path = config.llm_router_db_path
     if not db_path.exists():
@@ -101,11 +144,23 @@ async def get_provider_spend() -> dict[str, float]:
 
 
 async def get_provider_budgets() -> dict[str, ProviderBudget]:
-    """Get budget status for all configured providers."""
+    """Build budget status for all configured external providers.
+
+    Monthly budget limits are read from environment variables following the
+    naming convention ``LLM_ROUTER_BUDGET_<PROVIDER>=<USD>``, e.g.
+    ``LLM_ROUTER_BUDGET_OPENAI=10.00``. A value of 0 (or missing env var)
+    means unlimited.
+
+    Anthropic (Claude) is excluded because its budget is tracked separately
+    via the subscription usage system (``claude_usage.py``).
+
+    Returns:
+        Dict mapping provider name to its ``ProviderBudget``.
+    """
     config = get_config()
     spend = await get_provider_spend()
 
-    # Provider monthly limits — configurable via env vars.
+    # Provider monthly limits -- configurable via env vars.
     # Format: LLM_ROUTER_BUDGET_OPENAI=10.00 (USD/month)
     import os
     limits: dict[str, float] = {}
@@ -119,7 +174,7 @@ async def get_provider_budgets() -> dict[str, ProviderBudget]:
 
     budgets = {}
     for provider in config.available_providers:
-        # Skip Claude — it's tracked separately via subscription
+        # Skip Claude -- it's tracked separately via subscription
         if provider == "anthropic":
             continue
         budgets[provider] = ProviderBudget(
@@ -137,10 +192,26 @@ def rank_external_models(
     task_type: str = "code",
     min_quality: float = 0.80,
 ) -> list[tuple[str, float, float]]:
-    """Rank available external models for complex task fallback.
+    """Rank available external models for complex task fallback routing.
 
-    Returns list of (model, quality_score, cost_per_1k) sorted by
-    quality descending, filtered by provider budget availability.
+    Filters models by minimum quality score and provider budget availability,
+    then sorts by quality descending (best model first) with cost ascending
+    as a tiebreaker (cheaper preferred among equals).
+
+    Also injects Codex local agent models as free candidates if the Codex CLI
+    is installed, since they use the user's OpenAI subscription at no
+    additional API cost.
+
+    Args:
+        budgets: Provider budget status from ``get_provider_budgets()``.
+        task_type: The task type being routed (currently unused but reserved
+            for future task-specific quality adjustments).
+        min_quality: Minimum quality score threshold (0.0-1.0). Models below
+            this are excluded from candidates.
+
+    Returns:
+        List of ``(model_string, quality_score, cost_per_1k)`` tuples sorted
+        by quality descending, then cost ascending.
     """
     candidates = []
 
@@ -156,7 +227,7 @@ def rank_external_models(
         cost = EXTERNAL_MODEL_COST.get(model, 0.01)
         candidates.append((model, quality, cost))
 
-    # Add Codex local agent as a candidate (free — uses OpenAI subscription)
+    # Add Codex local agent as a candidate (free -- uses OpenAI subscription)
     from llm_router.codex_agent import is_codex_available
     if is_codex_available():
         candidates.append(("codex/gpt-5.4", 0.97, 0.0))   # free, very capable

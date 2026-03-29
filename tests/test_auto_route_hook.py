@@ -76,10 +76,37 @@ class TestAutoRouteClassification:
         hint = _extract_hint(out)
         assert "simple" in hint
 
+    def test_fix_bug_with_intermediate_words(self):
+        """Regression: 'fix the authentication bug' must match CODE_PATTERNS."""
+        out = run_hook("fix the authentication bug in the login flow")
+        assert out is not None
+        hint = _extract_hint(out)
+        assert "[ROUTE: code/" in hint
+        assert "llm_code" in hint
+
+    def test_code_modify_prompt(self):
+        out = run_hook("modify the authentication middleware to support OAuth")
+        assert out is not None
+        hint = _extract_hint(out)
+        assert "[ROUTE: code/" in hint
+
+    def test_code_enhance_prompt(self):
+        out = run_hook("enhance the caching layer for better throughput")
+        assert out is not None
+        hint = _extract_hint(out)
+        assert "[ROUTE: code/" in hint
+
+    def test_auto_fallback_for_unmatched_long_prompt(self):
+        """Prompts >=20 chars with no pattern match route to llm_route."""
+        out = run_hook("I need help with something interesting today")
+        assert out is not None
+        hint = _extract_hint(out)
+        assert "[ROUTE: auto/" in hint
+        assert "llm_route" in hint
+
 
 class TestAutoRouteSkips:
-    def test_local_file_edit(self):
-        assert run_hook("fix the bug in server.py") is None
+    """Only truly mechanical shell/git/filesystem operations should be skipped."""
 
     def test_git_command(self):
         assert run_hook("git push origin main") is None
@@ -90,11 +117,44 @@ class TestAutoRouteSkips:
     def test_empty_prompt(self):
         assert run_hook("") is None
 
-    def test_install_command(self):
-        assert run_hook("install the new dependency") is None
-
-    def test_run_tests(self):
-        assert run_hook("run the tests for classifier") is None
-
     def test_read_file(self):
         assert run_hook("read the config.py file") is None
+
+    def test_slash_command(self):
+        assert run_hook("/help") is None
+
+    def test_npm_command(self):
+        assert run_hook("npm install express") is None
+
+    def test_pip_command(self):
+        assert run_hook("pip install requests") is None
+
+    def test_commit_command(self):
+        assert run_hook("commit these changes") is None
+
+    def test_short_ambiguous(self):
+        """Short prompts (<10 chars) are skipped."""
+        assert run_hook("ok cool") is None
+
+
+class TestAutoRouteNowRoutes:
+    """Tasks that the OLD hook skipped but the NEW hook correctly routes."""
+
+    def test_fix_bug_routes(self):
+        """'fix the bug in server.py' is a code task, not a local skip."""
+        out = run_hook("fix the bug in server.py")
+        assert out is not None
+        hint = _extract_hint(out)
+        assert "[ROUTE: code/" in hint
+
+    def test_update_logic_routes(self):
+        out = run_hook("update the authentication logic to use JWT tokens")
+        assert out is not None
+        hint = _extract_hint(out)
+        assert "[ROUTE: code/" in hint
+
+    def test_improve_performance_routes(self):
+        out = run_hook("improve the database query performance")
+        assert out is not None
+        hint = _extract_hint(out)
+        assert "[ROUTE: code/" in hint

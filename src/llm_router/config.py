@@ -1,4 +1,18 @@
-"""Configuration loaded from environment variables."""
+"""Configuration loaded from environment variables.
+
+Uses Pydantic Settings to load API keys and router preferences from
+environment variables (and optionally a ``.env`` file). The configuration
+is accessed via the ``get_config()`` singleton, which also calls
+``apply_keys_to_env()`` on first load to export keys into ``os.environ``
+where LiteLLM expects them.
+
+Configuration is organized into five sections:
+  1. **Text LLM providers** — API keys for OpenAI, Anthropic, Gemini, etc.
+  2. **Media providers** — API keys for fal, Stability, ElevenLabs, etc.
+  3. **Router settings** — profile, tier, budget, database path.
+  4. **Smart routing** — token budget, quality mode, min model floor.
+  5. **Health / defaults** — circuit breaker tuning, request defaults.
+"""
 
 from __future__ import annotations
 
@@ -10,6 +24,13 @@ from llm_router.types import QualityMode, RoutingProfile, Tier
 
 
 class RouterConfig(BaseSettings):
+    """Central configuration for the LLM Router.
+
+    All fields are loaded from environment variables (case-insensitive) or a
+    ``.env`` file. Providers with empty API keys are considered unconfigured
+    and excluded from routing.
+    """
+
     # ── Text LLM providers ──
     openai_api_key: str = ""
     gemini_api_key: str = ""
@@ -51,7 +72,13 @@ class RouterConfig(BaseSettings):
 
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
 
-    # Map of env var field name → (provider name, LiteLLM env var name)
+    # Maps each Pydantic field name to (provider_name, litellm_env_var).
+    # This dual mapping serves two purposes:
+    #   1. provider_name: used by available_providers to check which providers
+    #      have keys configured.
+    #   2. litellm_env_var: the specific env var name that LiteLLM expects
+    #      (which sometimes differs from our field name, e.g.
+    #      perplexity_api_key -> PERPLEXITYAI_API_KEY).
     _PROVIDER_MAP: dict[str, tuple[str, str]] = {
         "openai_api_key": ("openai", "OPENAI_API_KEY"),
         "gemini_api_key": ("gemini", "GEMINI_API_KEY"),
@@ -72,6 +99,14 @@ class RouterConfig(BaseSettings):
 
     @property
     def available_providers(self) -> set[str]:
+        """Return the set of all providers that have a non-empty API key configured.
+
+        This includes both text and media providers. Used by the router to
+        filter the model chain to only models whose provider is available.
+
+        Returns:
+            Set of provider name strings (e.g. ``{"openai", "anthropic", "fal"}``).
+        """
         providers = set()
         for field_name, (provider_name, _) in self._PROVIDER_MAP.items():
             if getattr(self, field_name, ""):
@@ -80,6 +115,14 @@ class RouterConfig(BaseSettings):
 
     @property
     def text_providers(self) -> set[str]:
+        """Return available providers that support text LLM completion.
+
+        Note that OpenAI and Gemini appear in both text and media sets,
+        since they offer both capabilities.
+
+        Returns:
+            Subset of ``available_providers`` that support text generation.
+        """
         return self.available_providers & {
             "openai", "gemini", "perplexity", "anthropic",
             "mistral", "deepseek", "groq", "together", "xai", "cohere",
@@ -87,12 +130,25 @@ class RouterConfig(BaseSettings):
 
     @property
     def media_providers(self) -> set[str]:
+        """Return available providers that support media generation (image/video/audio).
+
+        Returns:
+            Subset of ``available_providers`` that support media generation.
+        """
         return self.available_providers & {
             "openai", "gemini", "fal", "stability", "elevenlabs", "runway", "replicate",
         }
 
     def apply_keys_to_env(self) -> None:
-        """Set API keys as environment variables for LiteLLM."""
+        """Export all configured API keys into ``os.environ``.
+
+        LiteLLM reads API keys from environment variables at call time rather
+        than accepting them as constructor arguments. This method bridges the
+        gap by copying keys from our Pydantic config into the environment
+        using the LiteLLM-expected variable names (from ``_PROVIDER_MAP``).
+
+        Called automatically by ``get_config()`` on first load.
+        """
         import os
         for field_name, (_, env_var) in self._PROVIDER_MAP.items():
             value = getattr(self, field_name, "")
@@ -104,6 +160,15 @@ _config: RouterConfig | None = None
 
 
 def get_config() -> RouterConfig:
+    """Return the singleton ``RouterConfig`` instance.
+
+    On first call, loads configuration from environment variables / ``.env``
+    and exports API keys into ``os.environ`` for LiteLLM. Subsequent calls
+    return the cached instance.
+
+    Returns:
+        The global ``RouterConfig`` singleton.
+    """
     global _config
     if _config is None:
         _config = RouterConfig()

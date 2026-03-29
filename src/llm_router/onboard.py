@@ -1,4 +1,10 @@
-"""Interactive onboarding — helps users configure API keys."""
+"""Interactive onboarding wizard — helps users configure API keys and routing profile.
+
+Run as a CLI entry point (``llm-router-onboard``) to launch the setup wizard.
+The wizard reads any existing ``.env`` in the current directory, prompts the
+user to add or update API keys for each supported provider, selects a routing
+profile, and writes the final ``.env`` file.
+"""
 
 from __future__ import annotations
 
@@ -22,16 +28,42 @@ PROVIDERS = {
         "models": "Sonar, Sonar Pro (search-augmented)",
     },
 }
+"""Provider definitions for the onboarding wizard.
+
+Each key is an environment variable name; the value dict contains the
+human-readable provider name, the signup URL where the user can obtain an
+API key, and a summary of available models.  The wizard iterates this dict
+to present each provider in turn.
+"""
 
 PROFILES = {
     "budget": "Cheapest models — Gemini Flash, GPT-4o-mini, Sonar",
     "balanced": "Best quality/cost ratio — Gemini Pro, GPT-4o, Sonar Pro",
     "premium": "Best available — o3, Gemini 2.5 Pro, Sonar Pro",
 }
+"""Available routing profiles and their human-readable descriptions.
+
+The selected profile is written to ``.env`` as ``LLM_ROUTER_PROFILE`` and
+controls which model tier the router defaults to for each task type.
+"""
 
 
 def main() -> None:
-    """Interactive CLI onboarding for LLM Router."""
+    """Run the interactive CLI onboarding wizard for LLM Router.
+
+    Flow:
+        1. Read existing ``.env`` in the current directory (if present) to
+           pre-populate current key values.
+        2. For each provider in ``PROVIDERS``, show its name, available
+           models, and signup URL.  If a key already exists, offer to keep
+           it; otherwise prompt for a new key (or skip).
+        3. Prompt for a routing profile selection from ``PROFILES``,
+           defaulting to the previously configured profile or ``"balanced"``.
+        4. Write all keys and the selected profile to ``.env`` with
+           comments linking to each provider's signup page.
+        5. Print a summary of configured vs. skipped providers and next
+           steps.  Exit with code 1 if no providers were configured.
+    """
     env_path = Path.cwd() / ".env"
     print("\n╔══════════════════════════════════════════╗")
     print("║        LLM Router — Setup Wizard         ║")

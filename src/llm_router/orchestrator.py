@@ -20,7 +20,17 @@ from llm_router.types import (
 
 log = logging.getLogger("llm_router.orchestrator")
 
-# Pre-built pipeline templates for common multi-step tasks
+# Pre-built pipeline templates for common multi-step tasks.
+#
+# Each template is an ordered list of ``PipelineStep`` objects that the
+# ``run_pipeline`` function executes sequentially, passing results between
+# steps via template variable substitution.
+#
+# Templates:
+#   research_report      — 3 steps: Research → Analyze → Write Report
+#   competitive_analysis — 4 steps: Find competitors → Find reviews → SWOT → Report
+#   content_pipeline     — 4 steps: Research → Write → Review → Polish
+#   code_review_fix      — 3 steps: Review code → Fix issues → Write tests
 PIPELINE_TEMPLATES: dict[str, list[PipelineStep]] = {
     "research_report": [
         PipelineStep(
@@ -97,12 +107,27 @@ async def run_pipeline(
     *,
     profile: RoutingProfile | None = None,
 ) -> PipelineResult:
-    """Execute a multi-step pipeline, passing results between steps.
+    """Execute a multi-step pipeline, routing each step to the optimal model.
 
-    Each step's prompt_template can use:
-    - {input}: the original user input
-    - {previous_result}: output from the previous step
-    - {step_N}: output from step N (0-indexed)
+    Steps run sequentially.  Each step's ``prompt_template`` supports three
+    variable placeholders that are resolved before the LLM call:
+
+        - ``{input}``: the original user input (``initial_input``), available
+          in every step.
+        - ``{previous_result}``: the content output from the immediately
+          preceding step (or ``initial_input`` for the first step).
+        - ``{step_N}``: the content output from step *N* (0-indexed), allowing
+          any step to reference any earlier step's output.
+
+    Args:
+        steps: Ordered list of pipeline steps to execute.
+        initial_input: The original user task/prompt.
+        profile: Routing profile override.  Falls back to the global config
+            profile if ``None``.
+
+    Returns:
+        A ``PipelineResult`` with cumulative cost/latency, per-step responses,
+        and ``final_content`` set to the last step's output.
     """
     config = get_config()
     profile = profile or config.llm_router_profile
@@ -145,7 +170,33 @@ async def auto_orchestrate(
 ) -> PipelineResult:
     """Automatically decompose a complex task into pipeline steps and execute.
 
-    Uses a fast LLM to analyze the task and create a pipeline, then executes it.
+    Operates in two phases:
+
+    1. **Decomposition** — Sends the task to a cheap/fast model (forced to
+       ``RoutingProfile.BUDGET``) with instructions to break it into 2-5
+       sequential steps as a JSON array.  BUDGET is used here because the
+       decomposition prompt is a structured classification task that doesn't
+       benefit from premium models.
+
+    2. **Execution** — Parses the JSON steps into ``PipelineStep`` objects
+       and feeds them to ``run_pipeline``, which routes each step to the
+       optimal model per the user's profile.
+
+    If the decomposition response can't be parsed (e.g. the LLM returns
+    malformed JSON or wraps it in markdown code fences), falls back to a
+    single GENERATE step with the original input.
+
+    The decomposition step's cost and latency are added to the final result
+    for accurate total accounting.
+
+    Args:
+        task_description: Natural-language description of the complex task.
+        profile: Routing profile override for the execution phase.  Falls
+            back to the global config profile if ``None``.
+
+    Returns:
+        A ``PipelineResult`` whose ``steps`` list includes the decomposition
+        response at index 0, followed by the execution step responses.
     """
     config = get_config()
     profile = profile or config.llm_router_profile
@@ -174,10 +225,11 @@ Task: {task_description}"""
         temperature=0.2,
     )
 
-    # Parse the pipeline steps
+    # Parse the pipeline steps.
+    # LLMs frequently wrap JSON in markdown code fences (```json ... ```),
+    # so we strip those before parsing.
     try:
         content = decompose_response.content.strip()
-        # Extract JSON from markdown code blocks if present
         if "```" in content:
             content = content.split("```")[1]
             if content.startswith("json"):
