@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
 
 from llm_router.model_selector import select_model, _downshift_amount
 from llm_router.types import (

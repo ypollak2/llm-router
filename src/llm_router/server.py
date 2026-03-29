@@ -7,15 +7,15 @@ import logging
 from mcp.server.fastmcp import Context, FastMCP
 
 from llm_router.classifier import classify_complexity
-from llm_router.codex_agent import find_codex_binary, is_codex_available, run_codex
+from llm_router.codex_agent import is_codex_available, run_codex
 from llm_router.provider_budget import get_provider_budgets, rank_external_models
 from llm_router.claude_usage import (
-    FETCH_USAGE_JS, ClaudeSubscriptionUsage, parse_api_response, parse_usage_texts,
+    FETCH_USAGE_JS, ClaudeSubscriptionUsage, parse_api_response,
 )
 from llm_router.config import get_config
 from llm_router.cost import (
     get_daily_claude_breakdown, get_daily_claude_tokens,
-    get_monthly_spend, get_savings_summary, get_usage_summary, log_claude_usage,
+    get_monthly_spend, get_savings_summary, log_claude_usage,
 )
 from llm_router.health import get_tracker
 from llm_router.model_selector import select_model

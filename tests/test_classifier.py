@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 import json
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
 from llm_router.classifier import _parse_classification, classify_complexity
-from llm_router.types import ClassificationResult, Complexity, LLMResponse, TaskType
+from llm_router.types import Complexity, LLMResponse, TaskType
 
 
 # ── JSON parsing tests ───────────────────────────────────────────────────────

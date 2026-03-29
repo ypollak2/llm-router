@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -90,7 +89,7 @@ async def test_route_with_complexity_override(mock_env, mock_ctx):
          patch("llm_router.server.route_and_call", new_callable=AsyncMock, return_value=response) as mock_route:
 
         from llm_router.server import llm_route
-        result = await llm_route("Some prompt", mock_ctx, complexity_override="simple")
+        await llm_route("Some prompt", mock_ctx, complexity_override="simple")
 
         # Classifier should NOT be called
         mock_classify.assert_not_called()
@@ -114,7 +113,7 @@ async def test_route_uses_inferred_task_type(mock_env, mock_ctx):
          patch("llm_router.server.route_and_call", new_callable=AsyncMock, return_value=response) as mock_route:
 
         from llm_router.server import llm_route
-        result = await llm_route("Write a Python function to sort a list", mock_ctx)
+        await llm_route("Write a Python function to sort a list", mock_ctx)
 
         # Should use the inferred task_type from classifier
         call_args = mock_route.call_args
@@ -130,7 +129,7 @@ async def test_route_explicit_task_type_overrides_inferred(mock_env, mock_ctx):
          patch("llm_router.server.route_and_call", new_callable=AsyncMock, return_value=response) as mock_route:
 
         from llm_router.server import llm_route
-        result = await llm_route("Write a poem about code", mock_ctx, task_type="generate")
+        await llm_route("Write a poem about code", mock_ctx, task_type="generate")
 
         call_args = mock_route.call_args
         assert call_args[0][0] == TaskType.GENERATE

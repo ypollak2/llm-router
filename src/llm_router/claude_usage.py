@@ -280,13 +280,16 @@ def parse_usage_texts(texts: list[str]) -> ClaudeSubscriptionUsage:
         t = texts[i].strip()
         if t == "Current session" and i + 2 < len(texts):
             session = UsageLimit("Session", find_pct(texts[i + 2]), texts[i + 1].strip())
-            i += 3; continue
+            i += 3
+            continue
         if t == "All models" and i + 2 < len(texts):
             weekly_all = UsageLimit("Weekly (all)", find_pct(texts[i + 2]), texts[i + 1].strip())
-            i += 3; continue
+            i += 3
+            continue
         if t == "Sonnet only" and i + 2 < len(texts):
             weekly_sonnet = UsageLimit("Weekly (Sonnet)", find_pct(texts[i + 2]), texts[i + 1].strip())
-            i += 3; continue
+            i += 3
+            continue
         if t == "Monthly spend limit" and i > 0:
             spend_limit = find_dollar(texts[i - 1])
         if "Current balance" in t:

@@ -5,7 +5,7 @@ from __future__ import annotations
 
 from llm_router.types import (
     CLAUDE_MODELS, COMPLEXITY_BASE_MODEL, ClassificationResult,
-    Complexity, QualityMode, RoutingRecommendation,
+    QualityMode, RoutingRecommendation,
 )
 
 
