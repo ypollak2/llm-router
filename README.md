@@ -39,61 +39,70 @@ You use Claude Code (or any MCP client). You also have access to GPT-4o, Gemini,
 
 ```
 You:     "Research the latest AI funding rounds"
-Router:  -> Perplexity Sonar Pro (search-augmented, best for current facts)
+Router:  → Perplexity Sonar Pro (search-augmented, best for current facts)
 
 You:     "Generate a hero image for the landing page"
-Router:  -> Flux Pro via fal.ai (best quality/cost for images)
+Router:  → Flux Pro via fal.ai (best quality/cost for images)
 
 You:     "Write unit tests for the auth module"
-Router:  -> Claude Sonnet (top coding model, within budget)
+Router:  → Claude Sonnet (top coding model, within budget)
 
 You:     "Create a 5-second product demo clip"
-Router:  -> Kling 2.0 via fal.ai (best value for short video)
+Router:  → Kling 2.0 via fal.ai (best value for short video)
 ```
+
+### Why It Saves 40–70%
+
+Most AI tasks don't need the most powerful model. The router matches complexity to capability automatically:
+
+```mermaid
+pie title Typical Task Distribution
+    "Simple (Haiku/Flash)" : 60
+    "Moderate (Sonnet/GPT-4o)" : 30
+    "Complex (Opus/o3)" : 10
+```
+
+| | Without Router | With Router |
+|--|---------------|-------------|
+| Simple tasks (60%) | Opus $$$$ | Haiku $ |
+| Moderate tasks (30%) | Opus $$$$ | Sonnet $$ |
+| Complex tasks (10%) | Opus $$$$ | Opus $$$$ |
+| **Monthly estimate** | **~$50** | **~$15–20** |
 
 ---
 
 ## Quick Start
 
-**Prerequisites**: Python 3.10+ and [uv](https://docs.astral.sh/uv/)
+### Option A: Claude Code Plugin (Recommended)
 
 ```bash
-# Clone and install
+claude plugin add ypollak2/llm-router
+```
+
+### Option B: Manual Install
+
+```bash
 git clone https://github.com/ypollak2/llm-router.git
 cd llm-router
 uv sync
-
-# Set up API keys (interactive wizard)
-uv run llm-router-onboard
-
-# Add to Claude Code as MCP server + plugin
-./scripts/install.sh
+./scripts/install.sh    # registers as MCP server in Claude Code
 ```
 
-Restart Claude Code. You now have **20 new tools** available.
+### Get Running in 3 Steps
+
+```mermaid
+graph LR
+    A["<b>1. Install</b><br/>claude plugin add<br/>ypollak2/llm-router"] --> B["<b>2. Add a Key</b><br/>llm_setup action=discover<br/><i>or add Gemini free tier</i>"]
+    B --> C["<b>3. Route</b><br/>llm_route prompt=...<br/><i>auto-picks best model</i>"]
+    style A fill:#e8f5e9,stroke:#4caf50
+    style B fill:#e3f2fd,stroke:#2196f3
+    style C fill:#f3e5f5,stroke:#9c27b0
+```
 
 > **Start for free**: Google's Gemini API has a [free tier](https://aistudio.google.com/apikey) with 1M tokens/day — no credit card needed. [Groq](https://console.groq.com/keys) also offers a generous free tier with ultra-fast inference.
 
-### Install as Claude Code Plugin
+### What You Get
 
-```bash
-# 1. Add the marketplace
-/plugin marketplace add ypollak2/llm-router
-
-# 2. Install the plugin
-/plugin install llm-router@llm-router
-```
-
-Or install manually from source:
-
-```bash
-git clone https://github.com/ypollak2/llm-router.git
-cd llm-router
-uv sync
-./scripts/install.sh
-```
-
-The plugin adds:
 - **20 MCP tools** — Smart routing, text, image, video, audio, setup, usage monitoring
 - **`/route` skill** — Smart task classification and routing in one command
 - **Smart classifier** — Auto-picks Claude Haiku/Sonnet/Opus based on complexity
@@ -105,46 +114,61 @@ The plugin adds:
 
 ## How It Works
 
-```
-                         +-------------------------------------+
-                         |      Claude Code / MCP Client        |
-                         +----------------+--------------------+
-                                          | MCP Protocol
-                         +----------------v--------------------+
-                         |        LLM Router Server             |
-                         |                                      |
-                         |  +----------+  +-----------------+   |
-                         |  | Budget   |  | Health          |   |
-                         |  | Tracker  |  | Circuit Breaker |   |
-                         |  +----+-----+  +----+------------+   |
-                         |       |              |                |
-                         |  +----v--------------v-----------+   |
-                         |  |        Smart Router            |   |
-                         |  |    profile + budget + health   |   |
-                         |  +--+---+---+---+---+---+--------+   |
-                         |     |   |   |   |   |   |            |
-                         +-----+---+---+---+---+---+------------+
-                               |   |   |   |   |   |
-              +----------------+   |   |   |   |   +----------------+
-              |                |   |   |   |   |                    |
-         +----v----+    +-----v---v+  +v---v-+ |  +-----v-----+ +--v-------+
-         | OpenAI  |    |  Google  |  |Perpl- | |  | fal.ai    | |  Runway  |
-         | GPT/o3  |    |  Gemini  |  |exity  | |  | Flux/     | |  Kling   |
-         | DALL-E  |    |  Flash   |  |Sonar  | |  | Stability | |          |
-         | TTS     |    |  Pro     |  |       | |  |           | |          |
-         +---------+    +----------+  +-------+ |  +-----------+ +----------+
-                                                 |
-                                      +----------v----------+
-                                      |  Mistral / Deepseek |
-                                      |  Groq / Together    |
-                                      |  ElevenLabs / xAI   |
-                                      +---------------------+
+### Architecture
+
+```mermaid
+flowchart TB
+    subgraph Client["Claude Code / MCP Client"]
+        U["Your Prompt"]
+    end
+
+    subgraph Router["LLM Router Server"]
+        CL["Complexity Classifier<br/><i>simple · moderate · complex</i>"]
+        MS["Model Selector<br/><i>profile + budget + health</i>"]
+        BP["Budget Pressure<br/><i>Claude sub · API spend</i>"]
+        HC["Health Monitor<br/><i>circuit breakers</i>"]
+    end
+
+    subgraph Providers["20+ Providers"]
+        direction LR
+        T["Text & Code<br/>OpenAI · Gemini · Perplexity<br/>Mistral · Deepseek · Groq"]
+        I["Image<br/>Imagen 3 · DALL-E<br/>Flux · Stable Diffusion"]
+        V["Video<br/>Veo 2 · Runway<br/>Kling · minimax"]
+        A["Audio<br/>ElevenLabs<br/>OpenAI TTS"]
+        L["Local<br/>Codex Desktop<br/>(free)"]
+    end
+
+    U --> CL --> MS
+    BP --> MS
+    HC --> MS
+    MS --> T & I & V & A & L
+
+    style Client fill:#f5f5f5,stroke:#999
+    style Router fill:#e8eaf6,stroke:#3f51b5
+    style Providers fill:#fff3e0,stroke:#ff9800
 ```
 
-The router makes two decisions for every request:
+### Routing Decision Flow
 
-1. **What type of task?** Text, image, video, audio, research, or code
-2. **Which model fits your profile + budget?** Tries models in preference order, skips unhealthy providers, stays within budget
+```mermaid
+flowchart TD
+    P["Incoming Prompt"] --> C{"Classify<br/>Complexity"}
+    C -->|Simple| H["Haiku / Gemini Flash<br/><i>commit messages, renames, simple Q&A</i>"]
+    C -->|Moderate| S["Sonnet / GPT-4o<br/><i>code generation, refactoring, writing</i>"]
+    C -->|Complex| O["Opus / o3<br/><i>architecture, debugging, deep analysis</i>"]
+
+    O --> B{"Claude Quota<br/>> 85%?"}
+    B -->|No| DONE["Route to Claude"]
+    B -->|Yes| T{"Reset in<br/>< 30 min?"}
+    T -->|Yes| DONE
+    T -->|No| F["Fallback: Codex (free)<br/>OpenAI API · Gemini API"]
+
+    style H fill:#c8e6c9,stroke:#4caf50
+    style S fill:#bbdefb,stroke:#2196f3
+    style O fill:#e1bee7,stroke:#9c27b0
+    style F fill:#fff9c4,stroke:#ffc107
+    style DONE fill:#e8f5e9,stroke:#4caf50
+```
 
 ---
 
@@ -154,25 +178,14 @@ Use Claude Code's own models (Haiku/Sonnet/Opus) **without extra API keys** via 
 
 ```
 llm_classify("What is the capital of France?")
-# -> simple (99%) -> haiku (free via Claude Code subscription)
+→ [S] simple (99%) → haiku
 
 llm_classify("Write a REST API with auth and pagination")
-# -> moderate (98%) -> sonnet (free via Claude Code subscription)
+→ [M] moderate (98%) → sonnet
 
 llm_classify("Design a distributed CQRS architecture")
-# -> complex (85%) -> opus (you're already here)
+→ [C] complex (85%) → opus
 ```
-
-### Provider Indicators
-
-Each provider gets a colored emoji for instant identification:
-
-| Provider | Icon | Provider | Icon |
-|----------|------|----------|------|
-| OpenAI | `green circle` | Perplexity | `orange circle` |
-| Gemini | `blue circle` | Anthropic | `purple circle` |
-| Mistral | `red circle` | DeepSeek | `star-struck` |
-| Groq | `yellow circle` | xAI | `white circle` |
 
 ### Complexity-First Routing
 
@@ -312,6 +325,25 @@ Once installed, Claude Code gets these 20 tools:
 
 ## Routing Profiles
 
+```mermaid
+graph LR
+    subgraph Budget["Budget Profile 💰"]
+        B1["Gemini Flash<br/>GPT-4o-mini<br/>Deepseek"]
+    end
+    subgraph Balanced["Balanced Profile ⚖️"]
+        B2["GPT-4o<br/>Claude Sonnet<br/>Gemini Pro"]
+    end
+    subgraph Premium["Premium Profile 🎯"]
+        B3["Claude Opus<br/>o3<br/>Gemini 2.5 Pro"]
+    end
+
+    Budget -.->|"more quality ➜"| Balanced -.->|"more quality ➜"| Premium
+
+    style Budget fill:#c8e6c9,stroke:#4caf50
+    style Balanced fill:#bbdefb,stroke:#2196f3
+    style Premium fill:#e1bee7,stroke:#9c27b0
+```
+
 Three built-in profiles control the cost/quality tradeoff:
 
 | | Budget | Balanced | Premium |
@@ -367,18 +399,28 @@ Remaining: $46.5800
 
 Chain tasks across different models in a pipeline:
 
+```mermaid
+graph LR
+    A["Research<br/><b>Perplexity</b><br/>Sonar Pro"] -->|findings| B["Analyze<br/><b>OpenAI</b><br/>GPT-4o"]
+    B -->|insights| C["Write<br/><b>Gemini</b><br/>2.5 Pro"]
+
+    style A fill:#fff3e0,stroke:#ff9800
+    style B fill:#e8f5e9,stroke:#4caf50
+    style C fill:#e3f2fd,stroke:#2196f3
+```
+
 ```
 llm_orchestrate("Research AI trends and write a report", template="research_report")
-
-# Pipeline: Research (Perplexity) -> Analyze (GPT-4o) -> Write (Gemini Pro)
-# Each step feeds its output to the next
 ```
 
 Built-in templates:
-- `research_report` — Research -> Analyze -> Write (3 steps)
-- `competitive_analysis` — Multi-source research -> SWOT -> Report (4 steps)
-- `content_pipeline` — Research -> Draft -> Review -> Polish (4 steps)
-- `code_review_fix` — Review -> Fix -> Test (3 steps)
+
+| Template | Steps | Pipeline |
+|----------|-------|----------|
+| `research_report` | 3 | Research → Analyze → Write |
+| `competitive_analysis` | 4 | Multi-source research → SWOT → Report |
+| `content_pipeline` | 4 | Research → Draft → Review → Polish |
+| `code_review_fix` | 3 | Review → Fix → Test |
 
 ---
 
