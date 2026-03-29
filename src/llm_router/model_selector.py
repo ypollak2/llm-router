@@ -9,13 +9,13 @@ from llm_router.types import (
 )
 
 
-# Budget pressure thresholds for progressive downshift
-# At each threshold, the model drops one tier from the base recommendation
+# Budget pressure thresholds — late safety net only.
+# Primary routing is complexity-based (simple→haiku, moderate→sonnet, complex→opus).
+# Downshift only kicks in when limits are genuinely running out.
 PRESSURE_THRESHOLDS = [
-    (0.50, 0),   # 0-50% used: no downshift
-    (0.80, 1),   # 50-80% used: downshift by 1 (opus→sonnet, sonnet→haiku)
-    (0.95, 2),   # 80-95% used: downshift by 2 (opus→haiku)
-    (1.00, 2),   # 95-100%: max downshift
+    (0.85, 0),   # 0-85% used: no downshift — complexity routing handles it
+    (0.95, 1),   # 85-95% used: downshift by 1 (opus→sonnet, sonnet→haiku)
+    (1.00, 2),   # 95-100%: downshift by 2 (opus→haiku)
 ]
 
 
@@ -65,21 +65,18 @@ def select_model(
         recommended_idx = max(min_idx, base_idx - 1)
         reasoning = f"quality_mode=conserve: using cheapest viable ({CLAUDE_MODELS[recommended_idx]})"
     else:
-        # Balanced: apply budget pressure
-        if budget_pct_used <= 0:
-            # No budget configured — use base model
-            recommended_idx = base_idx
-            reasoning = f"no budget limit: {base_model} matches {complexity} complexity"
-        else:
+        # Balanced: complexity picks the model, budget is a late safety net
+        recommended_idx = base_idx
+        reasoning = f"{base_model} matches {complexity} complexity"
+
+        if budget_pct_used > 0:
             shift = _downshift_amount(budget_pct_used)
-            recommended_idx = max(0, base_idx - shift)
-            if shift > 0 and recommended_idx < base_idx:
+            if shift > 0:
+                recommended_idx = max(0, base_idx - shift)
                 reasoning = (
-                    f"budget pressure ({budget_pct_used:.0%} used): "
+                    f"budget safety ({budget_pct_used:.0%} used): "
                     f"downshifted {base_model}→{CLAUDE_MODELS[recommended_idx]}"
                 )
-            else:
-                reasoning = f"{base_model} matches {complexity} complexity"
 
     # Enforce minimum model floor
     if recommended_idx < min_idx:

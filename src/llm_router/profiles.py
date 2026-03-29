@@ -41,11 +41,13 @@ ROUTING_TABLE: dict[tuple[RoutingProfile, TaskType], list[str]] = {
     ],
     (RoutingProfile.BUDGET, TaskType.IMAGE): [
         "fal/flux-dev",
+        "gemini/imagen-3-fast",
         "stability/stable-diffusion-3",
         "openai/dall-e-2",
     ],
     (RoutingProfile.BUDGET, TaskType.VIDEO): [
         "fal/minimax-video",
+        "gemini/veo-2",
         "replicate/minimax-video",
     ],
     (RoutingProfile.BUDGET, TaskType.AUDIO): [
@@ -86,11 +88,13 @@ ROUTING_TABLE: dict[tuple[RoutingProfile, TaskType], list[str]] = {
     ],
     (RoutingProfile.BALANCED, TaskType.IMAGE): [
         "fal/flux-pro",
+        "gemini/imagen-3",
         "openai/dall-e-3",
         "stability/stable-diffusion-3",
     ],
     (RoutingProfile.BALANCED, TaskType.VIDEO): [
         "fal/kling-video",
+        "gemini/veo-2",
         "runway/gen3a_turbo",
         "replicate/minimax-video",
     ],
@@ -129,11 +133,13 @@ ROUTING_TABLE: dict[tuple[RoutingProfile, TaskType], list[str]] = {
         "openai/gpt-4o",
     ],
     (RoutingProfile.PREMIUM, TaskType.IMAGE): [
+        "gemini/imagen-3",
         "openai/dall-e-3",
         "fal/flux-pro",
         "stability/stable-diffusion-3-ultra",
     ],
     (RoutingProfile.PREMIUM, TaskType.VIDEO): [
+        "gemini/veo-2",
         "runway/gen3a",
         "fal/kling-video",
     ],
@@ -145,12 +151,14 @@ ROUTING_TABLE: dict[tuple[RoutingProfile, TaskType], list[str]] = {
 
 
 # ── Classifier model preferences (cheapest/fastest first) ────────────────────
+# Prefer non-thinking models for classification — thinking models (e.g.
+# gemini-2.5-flash) burn tokens on internal reasoning and truncate JSON output.
 CLASSIFIER_MODELS: list[str] = [
+    "gemini/gemini-2.5-flash-lite",  # non-thinking, fastest, cheapest
     "groq/llama-3.3-70b-versatile",
     "openai/gpt-4o-mini",
     "deepseek/deepseek-chat",
     "mistral/mistral-small-latest",
-    "gemini/gemini-2.5-flash",  # thinking model — truncated JSON handled by parser
 ]
 
 # ── Complexity → Profile mapping ─────────────────────────────────────────────

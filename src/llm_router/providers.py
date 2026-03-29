@@ -24,7 +24,7 @@ async def call_llm(
     """Call an LLM via LiteLLM and return a standardized response.
 
     Args:
-        model: LiteLLM model string (e.g. "gemini/gemini-2.0-flash").
+        model: LiteLLM model string (e.g. "gemini/gemini-2.5-flash").
         messages: Chat messages in OpenAI format.
         temperature: Sampling temperature (uses config default if None).
         max_tokens: Max output tokens (uses config default if None).
@@ -33,6 +33,12 @@ async def call_llm(
     config = get_config()
     temperature = temperature if temperature is not None else config.default_temperature
     max_tokens = max_tokens or config.default_max_tokens
+
+    # O-series reasoning models only accept temperature=1
+    model_name = model.split("/", 1)[-1] if "/" in model else model
+    is_reasoning = model_name.startswith(("o1", "o3", "o4"))
+    if is_reasoning:
+        temperature = 1
 
     start = time.monotonic()
 

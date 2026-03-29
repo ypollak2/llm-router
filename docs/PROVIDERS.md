@@ -96,7 +96,29 @@ The interactive wizard walks you through each provider. Or manually create a `.e
 
 ---
 
+## Automated Key Discovery
+
+The `llm_setup` tool can scan your laptop for existing API keys (environment variables and `.env` files) — no data leaves your machine.
+
+```
+# In Claude Code:
+Use llm_setup with action="discover"   # find existing keys
+Use llm_setup with action="status"     # see which providers are configured
+Use llm_setup with action="guide" provider="gemini"  # setup instructions
+Use llm_setup with action="add" provider="gemini" api_key="AIza..."  # save key to .env
+```
+
+All operations are local-only. Keys are masked in output and `.gitignore` protection is verified on write.
+
+---
+
 ## Image Generation
+
+### Google Gemini — Imagen 3
+
+Uses the same `GEMINI_API_KEY` configured above.
+
+**Models**: Imagen 3 (high quality), Imagen 3 Fast (lower latency). Included in Gemini API free tier.
 
 ### fal.ai (Recommended)
 
@@ -117,6 +139,12 @@ The interactive wizard walks you through each provider. Or manually create a `.e
 ---
 
 ## Video Generation
+
+### Google Gemini — Veo 2
+
+Uses the same `GEMINI_API_KEY` configured above.
+
+**Models**: Veo 2. High-quality video generation via Gemini API.
 
 ### Runway
 
@@ -158,15 +186,15 @@ Uses the same `OPENAI_API_KEY` configured above.
 
 After configuring keys, verify with:
 
-```bash
-# Check which providers are active
-# (in Claude Code, use the llm_health tool)
-uv run python -c "from llm_router.config import get_config; c = get_config(); print(f'Providers: {c.available_providers}')"
+```
+# In Claude Code:
+Use llm_setup with action="status"    # see all configured providers
+Use llm_health to check provider status  # verify connectivity
 ```
 
-Or in Claude Code:
-```
-Use llm_health to check provider status
+Or from the command line:
+```bash
+uv run python -c "from llm_router.config import get_config; c = get_config(); print(f'Providers: {c.available_providers}')"
 ```
 
 ---

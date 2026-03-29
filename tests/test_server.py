@@ -15,6 +15,7 @@ def test_all_tools_registered():
         "llm_analyze", "llm_code", "llm_image", "llm_video", "llm_audio",
         "llm_orchestrate", "llm_pipeline_templates",
         "llm_set_profile", "llm_usage", "llm_health", "llm_providers",
+        "llm_check_usage", "llm_update_usage", "llm_codex", "llm_setup",
     }
     assert expected == names
 
@@ -46,7 +47,7 @@ class TestUsage:
         monkeypatch.setenv("LLM_ROUTER_DB_PATH", str(tmp_path / "test.db"))
         from llm_router.server import llm_usage
         result = await llm_usage("all")
-        assert "No usage data" in result
+        assert "Usage Dashboard" in result
 
 
 class TestHealth:

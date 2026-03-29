@@ -113,8 +113,8 @@ class TestBudgetInUsage:
 
         from llm_router.server import llm_usage
         result = await llm_usage("all")
-        assert "Budget Status" in result
-        assert "Monthly budget: $20.00" in result
+        assert "MONTHLY BUDGET" in result
+        assert "20.00" in result
 
     @pytest.mark.asyncio
     async def test_usage_hides_budget_when_unlimited(self, mock_env, monkeypatch, tmp_path):

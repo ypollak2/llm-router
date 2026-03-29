@@ -32,7 +32,7 @@ class TestGetModelChain:
 class TestProviderFromModel:
     def test_extracts_provider(self):
         assert provider_from_model("openai/gpt-4o") == "openai"
-        assert provider_from_model("gemini/gemini-2.0-flash") == "gemini"
+        assert provider_from_model("gemini/gemini-2.5-flash") == "gemini"
         assert provider_from_model("perplexity/sonar") == "perplexity"
 
     def test_unknown_format(self):

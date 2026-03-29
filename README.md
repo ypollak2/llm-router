@@ -70,7 +70,7 @@ uv run llm-router-onboard
 ./scripts/install.sh
 ```
 
-Restart Claude Code. You now have **17 new tools** available.
+Restart Claude Code. You now have **20 new tools** available.
 
 > **Start for free**: Google's Gemini API has a [free tier](https://aistudio.google.com/apikey) with 1M tokens/day — no credit card needed. [Groq](https://console.groq.com/keys) also offers a generous free tier with ultra-fast inference.
 
@@ -94,9 +94,11 @@ uv sync
 ```
 
 The plugin adds:
-- **17 MCP tools** — Smart routing, text, image, video, audio across 20+ providers
+- **20 MCP tools** — Smart routing, text, image, video, audio, setup, usage monitoring
 - **`/route` skill** — Smart task classification and routing in one command
-- **Smart classifier** — Auto-picks Claude Haiku/Sonnet/Opus based on complexity and budget
+- **Smart classifier** — Auto-picks Claude Haiku/Sonnet/Opus based on complexity
+- **Claude subscription monitoring** — Live session/weekly usage from claude.ai
+- **Codex desktop integration** — Route tasks to local OpenAI Codex (free)
 - **LLM Orchestrator agent** — Autonomous multi-step task decomposition across models
 
 ---
@@ -172,29 +174,58 @@ Each provider gets a colored emoji for instant identification:
 | Mistral | `red circle` | DeepSeek | `star-struck` |
 | Groq | `yellow circle` | xAI | `white circle` |
 
-### Progressive Budget Downshift
+### Complexity-First Routing
 
-Set a daily token budget and the router automatically shifts to cheaper models as you approach the limit:
+Complexity drives model selection — this is the real savings mechanism. You don't need opus for "what time is it?" and you don't want haiku for architecture design. Budget pressure is a late safety net, not the primary router.
 
 ```bash
 # In .env
-DAILY_TOKEN_BUDGET=1000000   # tokens per day, 0 = unlimited
 QUALITY_MODE=balanced        # best | balanced | conserve
 MIN_MODEL=haiku              # floor: never route below this
 ```
 
-| Budget Used | Effect |
+| Claude Usage | Effect |
 |-------------|--------|
-| 0-50% | No change — ideal model for complexity |
-| 50-80% | Downshift by 1 tier (opus -> sonnet, sonnet -> haiku) |
-| 80-95% | Downshift by 2 tiers (opus -> haiku) + warning |
-| 95%+ | Max downshift + asks user before proceeding |
+| 0-85% | No downshift — complexity routing handles efficiency |
+| 85-95% | Downshift by 1 tier + suggest external fallback |
+| 95%+ | Downshift by 2 tiers + recommend external (Codex, OpenAI, Gemini) |
+
+Budget pressure comes from **real Claude subscription data** (session %, weekly %) fetched live from claude.ai. The router also factors in **time until session reset** — if you're at 90% but the session resets in 5 minutes, no downshift needed.
+
+### External Fallback
+
+When Claude quota is tight (85%+), the router ranks available external models:
 
 ```
-llm_classify("Complex task here")
+llm_classify("Design auth architecture")
 # -> complex -> sonnet (downshifted from opus)
-#    budget: [three-fifths bar] 60% | warning: downshifted from opus
+#    pressure: [========..] 90%
+#    >> fallback: codex/gpt-5.4 (free, preserves Claude quota)
 ```
+
+- **Codex (local)**: Free — uses your OpenAI desktop subscription
+- **OpenAI API**: GPT-4o, o3 (ranked by quality, filtered by budget)
+- **Gemini API**: gemini-2.5-pro, gemini-2.5-flash
+
+Per-provider budgets via `LLM_ROUTER_BUDGET_OPENAI=10.00`, `LLM_ROUTER_BUDGET_GEMINI=5.00`.
+
+### Claude Subscription Monitoring
+
+Live usage data from your claude.ai account — no guessing:
+
+```
++----------------------------------------------------------+
+|                Claude Subscription (Live)                |
++----------------------------------------------------------+
+|   Session      [====........]  35%  resets in 3h 7m      |
+|   Weekly (all) [===.........]  23%  resets Fri 01:00 PM  |
+|   Sonnet only  [===.........]  26%  resets Wed 10:00 AM  |
++----------------------------------------------------------+
+|   OK 35% pressure -- full model selection                |
++----------------------------------------------------------+
+```
+
+Fetched via Playwright from claude.ai's internal JSON API (same data the settings page uses). One `browser_evaluate` call, cached in memory for routing decisions.
 
 ---
 
@@ -219,6 +250,7 @@ llm_classify("Complex task here")
 
 | Provider | Models | Best For |
 |----------|--------|----------|
+| **Google Gemini** | Imagen 3 | High quality, integrated with text models |
 | **fal.ai** | Flux Pro, Flux Dev | Quality/cost ratio, fast generation |
 | **OpenAI** | DALL-E 3, DALL-E 2 | Prompt adherence, text in images |
 | **Stability AI** | Stable Diffusion 3 | Fine control, open weights |
@@ -227,6 +259,7 @@ llm_classify("Complex task here")
 
 | Provider | Models | Best For |
 |----------|--------|----------|
+| **Google Gemini** | Veo 2 | Integrated with Gemini ecosystem |
 | **Runway** | Gen-3 Alpha | Professional quality, motion control |
 | **fal.ai** | Kling, minimax | Value, fast generation |
 | **Replicate** | Various | Open-source video models |
@@ -244,12 +277,12 @@ llm_classify("Complex task here")
 
 ## MCP Tools
 
-Once installed, Claude Code gets these 17 tools:
+Once installed, Claude Code gets these 20 tools:
 
 | Tool | What It Does |
 |------|-------------|
 | **Smart Routing** | |
-| `llm_classify` | Classify complexity + recommend model (Claude Code or external) with budget awareness |
+| `llm_classify` | Classify complexity + recommend model with time-aware budget pressure |
 | `llm_route` | Auto-classify, then route to the best external LLM |
 | `llm_track_usage` | Report Claude Code token usage for budget tracking |
 | **Text & Code** | |
@@ -259,15 +292,19 @@ Once installed, Claude Code gets these 17 tools:
 | `llm_analyze` | Deep reasoning — analysis, debugging, problem decomposition |
 | `llm_code` | Coding tasks — generation, refactoring, algorithms |
 | **Media** | |
-| `llm_image` | Image generation — auto-picks DALL-E, Flux, or SD |
-| `llm_video` | Video generation — routes to Runway, Kling, etc. |
+| `llm_image` | Image generation — Gemini Imagen, DALL-E, Flux, or SD |
+| `llm_video` | Video generation — Gemini Veo, Runway, Kling, etc. |
 | `llm_audio` | Voice/audio — TTS via ElevenLabs or OpenAI |
 | **Orchestration** | |
 | `llm_orchestrate` | Multi-step pipelines across multiple models |
 | `llm_pipeline_templates` | List available orchestration templates |
-| **Management** | |
+| **Monitoring & Setup** | |
+| `llm_check_usage` | Check live Claude subscription usage (session %, weekly %) |
+| `llm_update_usage` | Feed live usage data from claude.ai into the router |
+| `llm_codex` | Route tasks to local Codex desktop agent (free, uses OpenAI sub) |
+| `llm_setup` | Discover API keys, add providers, get setup guides |
 | `llm_set_profile` | Switch routing profile (budget / balanced / premium) |
-| `llm_usage` | View costs, token counts, per-model breakdown |
+| `llm_usage` | Unified dashboard — Claude sub, Codex, APIs, savings in one view |
 | `llm_health` | Check provider availability and circuit breaker status |
 | `llm_providers` | List all supported and configured providers |
 
@@ -282,8 +319,8 @@ Three built-in profiles control the cost/quality tradeoff:
 | **Text** | Gemini Flash, GPT-4o-mini | GPT-4o, Claude Sonnet | o3, Claude Opus |
 | **Research** | Perplexity Sonar | Sonar Pro | Sonar Pro |
 | **Code** | Deepseek, Gemini Flash | Claude Sonnet, GPT-4o | Claude Opus, o3 |
-| **Image** | Flux Dev, SD3 | Flux Pro, DALL-E 3 | DALL-E 3 |
-| **Video** | minimax | Kling, Runway Turbo | Runway Gen-3 |
+| **Image** | Flux Dev, Imagen 3 Fast | Flux Pro, Imagen 3, DALL-E 3 | Imagen 3, DALL-E 3 |
+| **Video** | minimax, Veo 2 | Kling, Veo 2, Runway Turbo | Veo 2, Runway Gen-3 |
 | **Audio** | OpenAI TTS | ElevenLabs | ElevenLabs |
 
 Switch anytime:
@@ -411,27 +448,40 @@ uv run ruff check src/
 
 ## Roadmap
 
-- [x] Core text LLM routing (10 providers)
+See [ROADMAP.md](ROADMAP.md) for the detailed roadmap with phases and priorities.
+
+### Completed (v0.1 + v0.2)
+
+- [x] Core text LLM routing (10+ providers)
 - [x] Configurable profiles (budget / balanced / premium)
 - [x] Cost tracking with SQLite
 - [x] Health checks with circuit breaker
-- [x] Image generation routing (DALL-E, Flux, Stable Diffusion)
-- [x] Video generation routing (Runway, Kling, minimax)
+- [x] Image generation (Gemini Imagen 3, DALL-E, Flux, SD)
+- [x] Video generation (Gemini Veo 2, Runway, Kling, minimax)
 - [x] Audio/voice routing (ElevenLabs, OpenAI TTS)
 - [x] Monthly budget enforcement
 - [x] Multi-step orchestration with pipeline templates
 - [x] Claude Code plugin with orchestrator agent and /route skill
 - [x] Freemium tier gating
 - [x] CI with GitHub Actions
-- [x] Smart routing with complexity classification
-- [x] Progressive budget-aware model downshifting
-- [x] Claude Code model integration (haiku/sonnet/opus) — no extra API keys
-- [x] Provider emoji indicators for visual identification
-- [x] Quality mode and minimum model floor settings
+- [x] Smart complexity-first routing (simple->haiku, moderate->sonnet, complex->opus)
+- [x] Live Claude subscription monitoring (session %, weekly %, Sonnet %)
+- [x] Time-aware budget pressure (factors in session reset proximity)
+- [x] External fallback ranking when Claude is tight (Codex, OpenAI, Gemini)
+- [x] Codex desktop integration (local agent, free via OpenAI subscription)
+- [x] Unified usage dashboard (Claude sub + Codex + APIs + savings)
+- [x] `llm_setup` tool for API discovery and secure key management
+- [x] Per-provider budget limits
+- [x] ASCII box-drawing dashboard (terminal-friendly, no Unicode issues)
+
+### Next Up
+
+- [ ] Periodic usage pulse (auto-refresh during sessions)
 - [ ] Streaming responses
-- [ ] Weekly quality benchmark updates
+- [ ] Gemini Imagen/Veo API integration via LiteLLM
 - [ ] Web dashboard for usage analytics
 - [ ] PyPI package distribution
+- [ ] Automatic Playwright refresh hook for Claude usage
 
 ---
 

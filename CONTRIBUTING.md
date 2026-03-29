@@ -32,11 +32,27 @@ uv run ruff check src/
 
 1. Add the model mapping to `src/llm_router/profiles.py`
 2. Add the provider's API key to `src/llm_router/config.py`
-3. Update the onboarding wizard in `src/llm_router/onboard.py`
-4. Add integration tests in `tests/test_integration.py`
-5. Update `docs/PROVIDERS.md` with setup instructions
+3. Add the provider to `_PROVIDER_REGISTRY` in `src/llm_router/server.py` (for `llm_setup`)
+4. Update the onboarding wizard in `src/llm_router/onboard.py`
+5. Add integration tests in `tests/test_integration.py`
+6. Update `docs/PROVIDERS.md` with setup instructions
 
 Most providers work through LiteLLM with zero custom code — just add the model string and key.
+
+## Key Modules
+
+| Module | Purpose |
+|--------|---------|
+| `server.py` | MCP tool definitions (20 tools), `llm_setup` provider registry |
+| `router.py` | Complexity classification and model selection logic |
+| `profiles.py` | Model lists per routing profile (budget/balanced/premium) |
+| `config.py` | Environment-based configuration, provider detection |
+| `claude_usage.py` | Claude subscription usage parsing, time-aware pressure |
+| `codex_agent.py` | Codex desktop CLI integration (local, free via OpenAI sub) |
+| `provider_budget.py` | Per-provider budget tracking and enforcement |
+| `orchestrator.py` | Multi-step pipeline execution across providers |
+| `cost_tracker.py` | SQLite-based cost and token tracking |
+| `health.py` | Provider health checks with circuit breaker pattern |
 
 ## Pull Request Guidelines
 

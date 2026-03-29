@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from typing import Any
 
 from llm_router import cost, media, providers
 from llm_router.config import get_config
@@ -16,6 +17,16 @@ log = logging.getLogger("llm_router")
 MEDIA_TASK_TYPES = {TaskType.IMAGE, TaskType.VIDEO, TaskType.AUDIO}
 
 
+async def _notify(ctx: Any | None, level: str, message: str) -> None:
+    """Send a log notification via MCP context if available."""
+    if ctx is None:
+        return
+    try:
+        await getattr(ctx, level)(message)
+    except Exception:
+        pass
+
+
 async def route_and_call(
     task_type: TaskType,
     prompt: str,
@@ -26,6 +37,7 @@ async def route_and_call(
     temperature: float | None = None,
     max_tokens: int | None = None,
     media_params: dict | None = None,
+    ctx: Any | None = None,
 ) -> LLMResponse:
     """Route a request to the best available model and return the response.
 
@@ -64,14 +76,19 @@ async def route_and_call(
             "Run `llm-router-onboard` to configure API keys."
         )
 
+    await _notify(ctx, "info", f"Routing {task_type.value} [{profile.value}] → candidates: {', '.join(models_to_try)}")
+
     last_error: Exception | None = None
     for model in models_to_try:
         provider = provider_from_model(model)
         model_name = model.split("/", 1)[1] if "/" in model else model
 
         if not tracker.is_healthy(provider):
+            await _notify(ctx, "warning", f"Skipping {provider} (unhealthy)")
             log.info("Skipping unhealthy provider: %s", provider)
             continue
+
+        await _notify(ctx, "info", f"Calling {model}...")
 
         try:
             if task_type in MEDIA_TASK_TYPES:
@@ -83,9 +100,14 @@ async def route_and_call(
 
             tracker.record_success(provider)
             await cost.log_usage(response, task_type, profile)
+            await _notify(
+                ctx, "info",
+                f"Done → {model} | ${response.cost_usd:.6f} | {response.latency_ms:.0f}ms"
+            )
             return response
 
         except Exception as e:
+            await _notify(ctx, "warning", f"{model} failed: {e} — trying next...")
             log.warning("Model %s failed: %s", model, e)
             tracker.record_failure(provider)
             last_error = e

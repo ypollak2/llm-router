@@ -38,8 +38,8 @@ async def test_real_gemini_query():
     resp = await route_and_call(
         TaskType.QUERY,
         "What is 2+2? Reply with just the number.",
-        model_override="gemini/gemini-2.0-flash",
-        max_tokens=10,
+        model_override="gemini/gemini-2.5-flash",
+        max_tokens=100,
     )
     assert "4" in resp.content
     assert resp.input_tokens > 0
@@ -59,7 +59,7 @@ async def test_real_perplexity_research():
     print(f"\nPerplexity: {resp.summary()}")
 
 
-@pytest.mark.skipif(not has_openai, reason="OPENAI_API_KEY not set")
+@pytest.mark.skipif(not has_gemini, reason="GEMINI_API_KEY not set")
 @pytest.mark.asyncio
 async def test_real_routing_budget():
     """Test that budget profile auto-routes correctly."""
@@ -67,7 +67,7 @@ async def test_real_routing_budget():
         TaskType.CODE,
         "Write a Python function that returns True. Just the function, nothing else.",
         profile=RoutingProfile.BUDGET,
-        max_tokens=50,
+        max_tokens=150,
     )
     assert "def" in resp.content.lower() or "true" in resp.content.lower()
     print(f"\nBudget/Code routed to: {resp.model} — {resp.summary()}")

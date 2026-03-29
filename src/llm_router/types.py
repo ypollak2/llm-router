@@ -101,12 +101,12 @@ class ClassificationResult:
     classifier_latency_ms: float
 
     def header(self) -> str:
-        icon = COMPLEXITY_ICONS.get(self.complexity.value, "\u2b1c")
+        tag = {"simple": "[S]", "moderate": "[M]", "complex": "[C]"}.get(self.complexity.value, "[?]")
         task = self.inferred_task_type.value if self.inferred_task_type else "auto"
         return (
-            f"{icon} **{self.complexity.value}** ({self.confidence:.0%}) "
+            f"{tag} {self.complexity.value} ({self.confidence:.0%}) "
             f"| task: {task} "
-            f"| classifier: {colorize_model(self.classifier_model)} "
+            f"| via {self.classifier_model} "
             f"(${self.classifier_cost_usd:.6f}, {self.classifier_latency_ms:.0f}ms)"
         )
 
@@ -125,6 +125,22 @@ MODEL_QUALITY: dict[str, float] = {
     "haiku": 0.6,
     "sonnet": 0.85,
     "opus": 1.0,
+}
+
+# Cost per 1K tokens (blended input/output average) for savings calculation.
+# Based on Anthropic API pricing — even under subscription, this reflects
+# the economic value of routing to cheaper models.
+MODEL_COST_PER_1K: dict[str, float] = {
+    "haiku": 0.001,    # $1/M input, $5/M output → ~$0.001/1K blended
+    "sonnet": 0.009,   # $3/M input, $15/M output → ~$0.009/1K blended
+    "opus": 0.045,     # $15/M input, $75/M output → ~$0.045/1K blended
+}
+
+# Speed estimates (tokens per second) for time savings calculation.
+MODEL_SPEED_TPS: dict[str, float] = {
+    "haiku": 200.0,    # fastest
+    "sonnet": 120.0,   # mid
+    "opus": 60.0,      # slowest, deepest reasoning
 }
 
 # Baseline model per complexity (before budget pressure)
@@ -146,27 +162,31 @@ class RoutingRecommendation:
     quality_mode: QualityMode
     min_model: str               # floor — never go below this
     reasoning: str
+    external_fallback: str | None = None  # e.g. "openai/gpt-4o" when Claude is tight
 
     def header(self) -> str:
-        icon = COMPLEXITY_ICONS.get(self.classification.complexity.value, "\u2b1c")
-        model_icons = {"haiku": "\U0001f7e1", "sonnet": "\U0001f535", "opus": "\U0001f7e3"}
-        model_icon = model_icons.get(self.recommended_model, "\u2b1c")
-        budget_bar = _budget_bar(self.budget_pct_used)
+        tag = {"simple": "[S]", "moderate": "[M]", "complex": "[C]"}.get(
+            self.classification.complexity.value, "[?]",
+        )
+        model_tag = {"haiku": "H", "sonnet": "S", "opus": "O"}.get(self.recommended_model, "?")
+        bar = _budget_bar(self.budget_pct_used, 10)
 
         parts = [
-            f"{icon} **{self.classification.complexity.value}** ({self.classification.confidence:.0%})",
-            f"→ {model_icon} **{self.recommended_model}**",
-            f"| budget: {budget_bar} {self.budget_pct_used:.0%}",
+            f"{tag} {self.classification.complexity.value} ({self.classification.confidence:.0%})",
+            f"-> [{model_tag}] {self.recommended_model}",
+            f"| pressure: {bar} {self.budget_pct_used:.0%}",
         ]
         if self.was_downshifted:
-            parts.append(f"| \u26a0\ufe0f downshifted from {self.base_model}")
+            parts.append(f"| !! downshifted from {self.base_model}")
+        if self.external_fallback:
+            parts.append(f"| >> fallback: {self.external_fallback}")
         return " ".join(parts)
 
 
-def _budget_bar(pct: float) -> str:
-    """Render a 5-char budget bar: [███░░]"""
-    filled = round(pct * 5)
-    return "[" + "\u2588" * filled + "\u2591" * (5 - filled) + "]"
+def _budget_bar(pct: float, width: int = 20) -> str:
+    """Render an ASCII progress bar: [========............] 40%"""
+    filled = round(pct * width)
+    return "[" + "=" * filled + "." * (width - filled) + "]"
 
 
 class BudgetExceededError(RuntimeError):

@@ -46,7 +46,7 @@ async def test_multiple_entries(temp_db):
     for i in range(3):
         resp = LLMResponse(
             content=f"test-{i}",
-            model="gemini/gemini-2.0-flash",
+            model="gemini/gemini-2.5-flash",
             input_tokens=50,
             output_tokens=25,
             cost_usd=0.0001,

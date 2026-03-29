@@ -88,7 +88,7 @@ class RouterConfig(BaseSettings):
     @property
     def media_providers(self) -> set[str]:
         return self.available_providers & {
-            "openai", "fal", "stability", "elevenlabs", "runway", "replicate",
+            "openai", "gemini", "fal", "stability", "elevenlabs", "runway", "replicate",
         }
 
     def apply_keys_to_env(self) -> None:
