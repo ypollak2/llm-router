@@ -40,6 +40,7 @@ ROUTING_TABLE: dict[tuple[RoutingProfile, TaskType], list[str]] = {
     (RoutingProfile.BUDGET, TaskType.RESEARCH): [
         "perplexity/sonar",
         "gemini/gemini-2.5-flash",
+        "openai/gpt-4o-mini",
     ],
     (RoutingProfile.BUDGET, TaskType.GENERATE): [
         "gemini/gemini-2.5-flash",
@@ -87,6 +88,8 @@ ROUTING_TABLE: dict[tuple[RoutingProfile, TaskType], list[str]] = {
     (RoutingProfile.BALANCED, TaskType.RESEARCH): [
         "perplexity/sonar-pro",
         "perplexity/sonar",
+        "gemini/gemini-2.5-pro",
+        "openai/gpt-4o",
     ],
     (RoutingProfile.BALANCED, TaskType.GENERATE): [
         "gemini/gemini-2.5-pro",
@@ -135,6 +138,8 @@ ROUTING_TABLE: dict[tuple[RoutingProfile, TaskType], list[str]] = {
     (RoutingProfile.PREMIUM, TaskType.RESEARCH): [
         "perplexity/sonar-pro",
         "perplexity/sonar",
+        "openai/o3",
+        "gemini/gemini-2.5-pro",
     ],
     (RoutingProfile.PREMIUM, TaskType.GENERATE): [
         "anthropic/claude-opus-4-6",
