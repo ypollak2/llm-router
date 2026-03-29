@@ -145,6 +145,8 @@ class TestRouterRateLimitSwitching:
             mock_config.return_value.llm_router_profile = RoutingProfile.BUDGET
             mock_config.return_value.llm_router_monthly_budget = 0
             mock_config.return_value.available_providers = {"gemini", "openai"}
+            mock_config.return_value.compaction_mode = "off"
+            mock_config.return_value.compaction_threshold = 4000
 
             tracker = HealthTracker()
             mock_get_tracker.return_value = tracker
@@ -176,6 +178,8 @@ class TestRouterRateLimitSwitching:
             mock_config.return_value.llm_router_profile = RoutingProfile.BUDGET
             mock_config.return_value.llm_router_monthly_budget = 0
             mock_config.return_value.available_providers = {"openai"}
+            mock_config.return_value.compaction_mode = "off"
+            mock_config.return_value.compaction_threshold = 4000
 
             tracker = HealthTracker()
             mock_get_tracker.return_value = tracker

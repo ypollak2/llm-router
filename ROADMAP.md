@@ -81,21 +81,24 @@ Prompt caching, automatic usage refresh, and smoother UX.
 
 ---
 
-## Phase 4: Smart Classification (v0.4)
+## Phase 4: Quality & Global Enforcement (v0.4) — COMPLETE
 
-Replace heuristic LLM-based classification with fast local embeddings, add context compaction, and build a quality framework for systematic evaluation.
+Context compaction, quality analytics, savings persistence, Gemini media, and global hook enforcement.
 
 | Feature | Priority | Status |
 |---------|----------|--------|
-| **Embedding-based classifier** — `all-MiniLM-L6-v2` + LogisticRegression, <15ms | High | Planned |
-| **Training pipeline** — bootstrap 500+ labeled prompts from LLM classifier | High | Planned |
-| **Structural context compaction** — collapse whitespace, dedup, truncate long blocks | High | Planned |
-| **Quality logging** — log every routing decision to SQLite `routing_decisions` table | High | Planned |
-| **`llm_quality_report` MCP tool** — classification accuracy, savings, downshift harm rate | Medium | Planned |
-| **LLM-based context compaction** — summarize bloated prompts via cheap model (opt-in) | Medium | Planned |
-| **Semantic prompt cache** — cosine similarity over embeddings (extends Phase 3 cache) | Medium | Planned |
-| **A/B testing** — run embedding + LLM classifiers in parallel on 10% sample, log disagreements | Medium | Planned |
-| **`llm_compact` MCP tool** — manual prompt compaction for testing | Low | Planned |
+| **Structural context compaction** — 5 strategies: whitespace, comments, dedup, truncation, stack traces | High | Done |
+| **Quality logging** — `routing_decisions` SQLite table (21 columns per decision) | High | Done |
+| **`llm_quality_report` MCP tool** — classifier breakdown, task types, model usage, downshift rate | High | Done |
+| **Savings persistence** — JSONL → SQLite import, lifetime per-session analytics | High | Done |
+| **Gemini Imagen 3** — Direct REST API (predict endpoint, aspect ratio mapping) | High | Done |
+| **Gemini Veo 2** — Long-running prediction with async polling | High | Done |
+| **Global hook installer** — `llm_setup(action='install_hooks')` + `llm-router-install-hooks` CLI | High | Done |
+| **Global routing rules** — `~/.claude/rules/llm-router.md` enforces routing hints | High | Done |
+| **Embedding-based classifier** — `all-MiniLM-L6-v2` + LogisticRegression | Medium | Deferred to v0.5 |
+| **LLM-based context compaction** — summarize via cheap model (opt-in) | Medium | Deferred to v0.5 |
+| **Semantic prompt cache** — cosine similarity over embeddings | Medium | Deferred to v0.5 |
+| **A/B testing** — parallel classifiers, log disagreements | Medium | Deferred to v0.5 |
 
 ### Embedding Classifier Design (v0.4)
 
@@ -127,8 +130,8 @@ Deep integration with media generation APIs.
 
 | Feature | Priority | Status |
 |---------|----------|--------|
-| Gemini Imagen 3 API integration (via LiteLLM or direct) | High | Routing added, API integration TBD |
-| Gemini Veo 2 API integration | High | Routing added, API integration TBD |
+| Gemini Imagen 3 API integration | High | Done (v0.4) |
+| Gemini Veo 2 API integration | High | Done (v0.4) |
 | Image editing / inpainting routing | Medium | Planned |
 | Voice cloning workflow (ElevenLabs) | Medium | Planned |
 | Music generation routing (Suno, Udio) | Low | Planned |
@@ -144,6 +147,7 @@ Making it easy for others to install and use.
 |---------|----------|--------|
 | PyPI package distribution (`pip install claude-code-llm-router`) | High | Done |
 | One-command install script for Claude Code | High | Done (./scripts/install.sh) |
+| Global hook installer (MCP tool + CLI) | High | Done (v0.4) |
 | Web dashboard for usage analytics | Medium | Planned |
 | Weekly quality benchmark updates | Medium | Planned |
 | Plugin marketplace listing | Medium | Done (.claude-plugin/) |

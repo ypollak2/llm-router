@@ -1,6 +1,6 @@
 [project]
 name = "claude-code-llm-router"
-version = "0.2.0"
+version = "0.4.0"
 description = "Multi-LLM router MCP server for Claude Code — smart complexity routing, Claude subscription monitoring, Codex integration, 20+ providers"
 readme = "README.md"
 license = "MIT"
@@ -45,6 +45,7 @@ Changelog = "https://github.com/ypollak2/llm-router/blob/main/CHANGELOG.md"
 [project.scripts]
 llm-router = "llm_router.server:main"
 llm-router-onboard = "llm_router.onboard:main"
+llm-router-install-hooks = "llm_router.install_hooks:main"
 
 [build-system]
 requires = ["hatchling"]
@@ -52,6 +53,10 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/llm_router"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"src/llm_router/hooks" = "llm_router/hooks"
+"src/llm_router/rules" = "llm_router/rules"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

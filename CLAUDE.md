@@ -53,19 +53,24 @@ uv run llm-router
 
 ## Architecture
 
-- `src/llm_router/server.py` — MCP tool definitions (FastMCP)
-- `src/llm_router/router.py` — Core routing with fallback chains
+- `src/llm_router/server.py` — MCP tool definitions (FastMCP, 24 tools)
+- `src/llm_router/router.py` — Core routing with fallback chains + context compaction
 - `src/llm_router/classifier.py` — LLM-based complexity classification
 - `src/llm_router/model_selector.py` — Budget-aware model selection
 - `src/llm_router/profiles.py` — Routing tables per profile/task_type
 - `src/llm_router/types.py` — All dataclasses and enums (frozen)
 - `src/llm_router/config.py` — Pydantic settings from env vars
-- `src/llm_router/cost.py` — SQLite usage tracking
-- `src/llm_router/health.py` — Circuit breaker per provider
+- `src/llm_router/cost.py` — SQLite usage tracking + savings persistence
+- `src/llm_router/health.py` — Circuit breaker per provider + rate limit detection
 - `src/llm_router/claude_usage.py` — Live Claude subscription monitoring
 - `src/llm_router/provider_budget.py` — External provider budgets
 - `src/llm_router/codex_agent.py` — Local Codex integration
 - `src/llm_router/cache.py` — Prompt classification cache (SHA-256 + LRU)
+- `src/llm_router/compaction.py` — Structural context compaction (5 strategies)
+- `src/llm_router/quality.py` — Routing decision logging + quality reports
+- `src/llm_router/install_hooks.py` — Global hook installer (CLI + MCP action)
+- `src/llm_router/hooks/` — Bundled hook scripts (auto-route, usage-refresh)
+- `src/llm_router/rules/` — Global routing rules for Claude Code
 
 ## Patterns
 

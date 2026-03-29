@@ -12,6 +12,10 @@ schema migrations idempotently on every connection.
 
 from __future__ import annotations
 
+import hashlib
+import json
+from pathlib import Path
+
 import aiosqlite
 
 from llm_router.config import get_config
@@ -55,6 +59,54 @@ consumption. Includes computed savings columns comparing actual model cost/speed
 against an Opus baseline."""
 
 
+CREATE_ROUTING_DECISIONS_TABLE = """
+CREATE TABLE IF NOT EXISTS routing_decisions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp TEXT DEFAULT (datetime('now')),
+    prompt_hash TEXT,
+    task_type TEXT,
+    profile TEXT,
+    classifier_type TEXT,
+    classifier_model TEXT,
+    classifier_confidence REAL,
+    classifier_latency_ms REAL,
+    complexity TEXT,
+    recommended_model TEXT,
+    base_model TEXT,
+    was_downshifted INTEGER,
+    budget_pct_used REAL,
+    quality_mode TEXT,
+    final_model TEXT,
+    final_provider TEXT,
+    success INTEGER,
+    input_tokens INTEGER,
+    output_tokens INTEGER,
+    cost_usd REAL,
+    latency_ms REAL
+)
+"""
+"""Schema for the ``routing_decisions`` table tracking every routing decision
+with full classification, recommendation, and outcome data for quality analysis."""
+
+CREATE_SAVINGS_STATS_TABLE = """
+CREATE TABLE IF NOT EXISTS savings_stats (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    task_type TEXT NOT NULL,
+    estimated_claude_cost_saved REAL NOT NULL,
+    external_cost REAL NOT NULL,
+    model_used TEXT NOT NULL
+)
+"""
+"""Schema for the ``savings_stats`` table tracking per-call routing savings.
+Each row represents one routed call logged by the PostToolUse hook via JSONL,
+then imported into SQLite by the MCP server for lifetime analytics."""
+
+SAVINGS_LOG_PATH = Path.home() / ".llm-router" / "savings_log.jsonl"
+"""Path to the JSONL file written by the PostToolUse hook for async import."""
+
+
 MIGRATE_CLAUDE_USAGE_ADD_SAVINGS = [
     "ALTER TABLE claude_usage ADD COLUMN cost_saved_usd REAL NOT NULL DEFAULT 0",
     "ALTER TABLE claude_usage ADD COLUMN time_saved_sec REAL NOT NULL DEFAULT 0",
@@ -81,6 +133,8 @@ async def _get_db() -> aiosqlite.Connection:
     await db.execute("PRAGMA journal_mode=WAL")
     await db.execute(CREATE_TABLE)
     await db.execute(CREATE_CLAUDE_USAGE_TABLE)
+    await db.execute(CREATE_ROUTING_DECISIONS_TABLE)
+    await db.execute(CREATE_SAVINGS_STATS_TABLE)
     # Migrate: add savings columns if missing
     for stmt in MIGRATE_CLAUDE_USAGE_ADD_SAVINGS:
         try:
@@ -215,6 +269,199 @@ async def get_usage_summary(period: str = "today") -> str:
             lines.append(f"- {profile}: {calls} calls, ${cost:.4f}")
 
         return "\n".join(lines)
+    finally:
+        await db.close()
+
+
+# ── Routing decision logging ─────────────────────────────────────────────────
+
+
+def _prompt_hash(prompt: str) -> str:
+    """SHA-256 hash of the first 500 characters of a prompt.
+
+    Provides a stable, privacy-preserving identifier for correlating
+    repeated prompts without storing raw text.
+
+    Args:
+        prompt: The raw prompt text.
+
+    Returns:
+        Hex-encoded SHA-256 digest of prompt[:500].
+    """
+    return hashlib.sha256(prompt[:500].encode("utf-8")).hexdigest()
+
+
+async def log_routing_decision(
+    *,
+    prompt: str,
+    task_type: str,
+    profile: str,
+    classifier_type: str,
+    classifier_model: str | None,
+    classifier_confidence: float,
+    classifier_latency_ms: float,
+    complexity: str,
+    recommended_model: str,
+    base_model: str,
+    was_downshifted: bool,
+    budget_pct_used: float,
+    quality_mode: str,
+    final_model: str,
+    final_provider: str,
+    success: bool,
+    input_tokens: int,
+    output_tokens: int,
+    cost_usd: float,
+    latency_ms: float,
+) -> None:
+    """Persist a complete routing decision to the routing_decisions table.
+
+    Captures the full lifecycle of a routing decision: classification input,
+    model selection reasoning, and execution outcome. Used by
+    ``get_quality_report`` for analytics.
+
+    Args:
+        prompt: Raw prompt text (hashed before storage).
+        task_type: Classified task type (e.g. "query", "code").
+        profile: Active routing profile (e.g. "balanced", "budget").
+        classifier_type: How classification was done (heuristic/llm/cached/hook).
+        classifier_model: Which model classified, or None for non-LLM classifiers.
+        classifier_confidence: Classifier confidence (0.0-1.0).
+        classifier_latency_ms: Classification latency in milliseconds.
+        complexity: Classified complexity (simple/moderate/complex).
+        recommended_model: Model recommended by the selector.
+        base_model: What complexity alone would pick (before budget adjustment).
+        was_downshifted: Whether budget pressure caused a cheaper model.
+        budget_pct_used: Fraction of budget consumed at decision time.
+        quality_mode: Active quality mode (best/balanced/conserve).
+        final_model: The model that actually executed the request.
+        final_provider: Provider of the final model.
+        success: Whether the call completed successfully.
+        input_tokens: Input tokens consumed.
+        output_tokens: Output tokens generated.
+        cost_usd: Total cost of the LLM call.
+        latency_ms: Total latency of the LLM call.
+    """
+    db = await _get_db()
+    try:
+        await db.execute(
+            """INSERT INTO routing_decisions
+               (prompt_hash, task_type, profile, classifier_type, classifier_model,
+                classifier_confidence, classifier_latency_ms, complexity,
+                recommended_model, base_model, was_downshifted, budget_pct_used,
+                quality_mode, final_model, final_provider, success,
+                input_tokens, output_tokens, cost_usd, latency_ms)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                _prompt_hash(prompt),
+                task_type,
+                profile,
+                classifier_type,
+                classifier_model,
+                classifier_confidence,
+                classifier_latency_ms,
+                complexity,
+                recommended_model,
+                base_model,
+                1 if was_downshifted else 0,
+                budget_pct_used,
+                quality_mode,
+                final_model,
+                final_provider,
+                1 if success else 0,
+                input_tokens,
+                output_tokens,
+                cost_usd,
+                latency_ms,
+            ),
+        )
+        await db.commit()
+    finally:
+        await db.close()
+
+
+async def get_quality_report(days: int = 7) -> dict:
+    """Build a quality analytics report from routing decision history.
+
+    Aggregates routing decisions over the given time window into a summary
+    dict with breakdowns by classifier type, task type, and model.
+
+    Args:
+        days: Number of days to include in the report (default 7).
+
+    Returns:
+        Dict with keys: ``total_decisions``, ``by_classifier``, ``by_task_type``,
+        ``avg_confidence``, ``downshift_rate``, ``avg_latency_ms``,
+        ``total_cost_usd``, ``total_tokens``, ``success_rate``, ``by_model``.
+        Returns zeroed values if no data exists.
+    """
+    where = f"WHERE timestamp >= datetime('now', '-{days} days')"
+
+    db = await _get_db()
+    try:
+        # Totals
+        cursor = await db.execute(
+            f"""SELECT COUNT(*), AVG(classifier_confidence),
+                AVG(CAST(was_downshifted AS REAL)), AVG(latency_ms),
+                COALESCE(SUM(cost_usd), 0),
+                COALESCE(SUM(input_tokens + output_tokens), 0),
+                AVG(CAST(success AS REAL))
+                FROM routing_decisions {where}"""
+        )
+        row = await cursor.fetchone()
+        if not row or row[0] == 0:
+            return {
+                "total_decisions": 0,
+                "by_classifier": {},
+                "by_task_type": {},
+                "avg_confidence": 0.0,
+                "downshift_rate": 0.0,
+                "avg_latency_ms": 0.0,
+                "total_cost_usd": 0.0,
+                "total_tokens": 0,
+                "success_rate": 0.0,
+                "by_model": {},
+            }
+
+        total, avg_conf, downshift_rate, avg_lat, total_cost, total_tok, success_rate = row
+
+        # By classifier type
+        cursor = await db.execute(
+            f"SELECT classifier_type, COUNT(*) FROM routing_decisions {where} "
+            "GROUP BY classifier_type ORDER BY COUNT(*) DESC"
+        )
+        by_classifier = {r[0]: r[1] for r in await cursor.fetchall()}
+
+        # By task type
+        cursor = await db.execute(
+            f"SELECT task_type, COUNT(*) FROM routing_decisions {where} "
+            "GROUP BY task_type ORDER BY COUNT(*) DESC"
+        )
+        by_task_type = {r[0]: r[1] for r in await cursor.fetchall()}
+
+        # By model
+        cursor = await db.execute(
+            f"""SELECT final_model, COUNT(*), AVG(latency_ms), COALESCE(SUM(cost_usd), 0)
+                FROM routing_decisions {where}
+                GROUP BY final_model ORDER BY COUNT(*) DESC"""
+        )
+        by_model = {
+            r[0]: {"count": r[1], "avg_latency": float(r[2]), "total_cost": float(r[3])}
+            for r in await cursor.fetchall()
+        }
+
+        return {
+            "total_decisions": int(total),
+            "by_classifier": by_classifier,
+            "by_task_type": by_task_type,
+            "avg_confidence": float(avg_conf or 0),
+            "downshift_rate": float(downshift_rate or 0),
+            "avg_latency_ms": float(avg_lat or 0),
+            "total_cost_usd": float(total_cost),
+            "total_tokens": int(total_tok),
+            "success_rate": float(success_rate or 0),
+            "by_model": by_model,
+        }
     finally:
         await db.close()
 
@@ -390,3 +637,174 @@ async def get_savings_summary(period: str = "today") -> dict:
         }
     finally:
         await db.close()
+
+
+# ── Routing savings persistence ──────────────────────────────────────────────
+
+
+async def log_savings(
+    task_type: str,
+    estimated_saved: float,
+    external_cost: float,
+    model: str,
+    session_id: str,
+) -> None:
+    """Persist a single routing-savings record to the ``savings_stats`` table.
+
+    Called by ``import_savings_log`` after reading lines from the JSONL file
+    written by the PostToolUse hook.
+
+    Args:
+        task_type: The classified task type (e.g. "code", "research").
+        estimated_saved: Estimated Claude API cost avoided by routing externally.
+        external_cost: Actual cost incurred on the external provider.
+        model: The external model that handled the request.
+        session_id: Opaque identifier grouping calls within one Claude Code session.
+    """
+    from datetime import datetime, timezone
+
+    db = await _get_db()
+    try:
+        await db.execute(
+            "INSERT INTO savings_stats "
+            "(timestamp, session_id, task_type, estimated_claude_cost_saved, external_cost, model_used) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                datetime.now(timezone.utc).isoformat(),
+                session_id,
+                task_type,
+                estimated_saved,
+                external_cost,
+                model,
+            ),
+        )
+        await db.commit()
+    finally:
+        await db.close()
+
+
+async def get_lifetime_savings_summary(days: int = 30) -> dict:
+    """Return aggregate routing savings over the last *days* days.
+
+    Queries the ``savings_stats`` table for totals and a per-session breakdown.
+
+    Args:
+        days: Look-back window in days.  Use 0 for all-time.
+
+    Returns:
+        Dict with ``total_saved``, ``total_external_cost``, ``net_savings``,
+        ``tasks_routed``, and ``by_session`` (list of per-session dicts).
+    """
+    where = (
+        f"WHERE timestamp >= datetime('now', '-{days} days')"
+        if days > 0
+        else ""
+    )
+    empty: dict = {
+        "total_saved": 0.0,
+        "total_external_cost": 0.0,
+        "net_savings": 0.0,
+        "tasks_routed": 0,
+        "by_session": [],
+    }
+
+    db = await _get_db()
+    try:
+        cursor = await db.execute(
+            f"SELECT COUNT(*), COALESCE(SUM(estimated_claude_cost_saved), 0), "
+            f"COALESCE(SUM(external_cost), 0) FROM savings_stats {where}"
+        )
+        row = await cursor.fetchone()
+        if not row or row[0] == 0:
+            return empty
+
+        tasks_routed, total_saved, total_external = row
+
+        cursor = await db.execute(
+            f"SELECT session_id, COUNT(*), "
+            f"COALESCE(SUM(estimated_claude_cost_saved), 0), "
+            f"COALESCE(SUM(external_cost), 0), "
+            f"MIN(timestamp), MAX(timestamp) "
+            f"FROM savings_stats {where} "
+            f"GROUP BY session_id ORDER BY MAX(timestamp) DESC"
+        )
+        sessions = await cursor.fetchall()
+        by_session = [
+            {
+                "session_id": sid,
+                "tasks": int(cnt),
+                "saved": float(saved),
+                "external_cost": float(ext),
+                "first_seen": first,
+                "last_seen": last,
+            }
+            for sid, cnt, saved, ext, first, last in sessions
+        ]
+
+        return {
+            "total_saved": float(total_saved),
+            "total_external_cost": float(total_external),
+            "net_savings": float(total_saved) - float(total_external),
+            "tasks_routed": int(tasks_routed),
+            "by_session": by_session,
+        }
+    finally:
+        await db.close()
+
+
+async def import_savings_log() -> int:
+    """Import savings records from the JSONL file into SQLite, then truncate.
+
+    The PostToolUse hook appends one JSON line per routed call to
+    ``~/.llm-router/savings_log.jsonl``.  This function reads all lines,
+    inserts them into the ``savings_stats`` table, and truncates the file.
+
+    Returns:
+        Number of records imported.
+    """
+    if not SAVINGS_LOG_PATH.exists():
+        return 0
+
+    try:
+        raw = SAVINGS_LOG_PATH.read_text()
+    except OSError:
+        return 0
+
+    lines = [ln.strip() for ln in raw.splitlines() if ln.strip()]
+    if not lines:
+        return 0
+
+    from datetime import datetime, timezone
+
+    db = await _get_db()
+    imported = 0
+    try:
+        for line in lines:
+            try:
+                entry = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            await db.execute(
+                "INSERT INTO savings_stats "
+                "(timestamp, session_id, task_type, estimated_claude_cost_saved, "
+                "external_cost, model_used) VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    entry.get("timestamp", datetime.now(timezone.utc).isoformat()),
+                    entry.get("session_id", "unknown"),
+                    entry.get("task_type", "unknown"),
+                    float(entry.get("estimated_saved", 0.0)),
+                    float(entry.get("external_cost", 0.0)),
+                    entry.get("model", "unknown"),
+                ),
+            )
+            imported += 1
+        await db.commit()
+        # Truncate only after successful commit — prevents data loss
+        try:
+            SAVINGS_LOG_PATH.write_text("")
+        except OSError:
+            pass
+    finally:
+        await db.close()
+
+    return imported

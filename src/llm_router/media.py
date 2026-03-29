@@ -502,6 +502,161 @@ async def generate_audio_elevenlabs(
     )
 
 
+# ── Gemini Media Generation ───────────────────────────────────────────────────
+
+
+async def generate_image_gemini(
+    prompt: str,
+    *,
+    model: str = "imagen-3",
+    size: str = "1024x1024",
+    quality: str = "standard",
+) -> LLMResponse:
+    """Generate an image via the Google Gemini Imagen 3 REST API.
+
+    Calls the ``predict`` endpoint on the Generative Language API.  The
+    response contains a base64-encoded PNG in ``predictions[0].bytesBase64Encoded``,
+    which is returned as a data URI in ``media_url``.
+
+    Pricing (per image, approximate):
+        - imagen-3:       $0.040
+        - imagen-3-fast:  $0.020
+
+    Args:
+        prompt: Text description of the desired image.
+        model: Imagen model variant (``"imagen-3"`` or ``"imagen-3-fast"``).
+        size: Output dimensions as ``"WIDTHxHEIGHT"`` (used for aspect ratio).
+        quality: ``"standard"`` or ``"hd"`` (reserved for future use).
+    """
+    config = get_config()
+    client = _get_client()
+    start = time.monotonic()
+
+    # Map WxH to aspect ratio string
+    aspect_map = {
+        "1024x1024": "1:1",
+        "1792x1024": "16:9",
+        "1024x1792": "9:16",
+        "1536x1024": "3:2",
+        "1024x1536": "2:3",
+    }
+    aspect_ratio = aspect_map.get(size, "1:1")
+
+    resp = await client.post(
+        f"https://generativelanguage.googleapis.com/v1beta/models/{model}:predict",
+        params={"key": config.gemini_api_key},
+        json={
+            "instances": [{"prompt": prompt}],
+            "parameters": {
+                "sampleCount": 1,
+                "aspectRatio": aspect_ratio,
+                "personGeneration": "allow_all",
+            },
+        },
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    elapsed = (time.monotonic() - start) * 1000
+
+    image_b64 = ""
+    predictions = data.get("predictions", [])
+    if predictions:
+        image_b64 = predictions[0].get("bytesBase64Encoded", "")
+
+    cost = {"imagen-3": 0.04, "imagen-3-fast": 0.02}.get(model, 0.04)
+
+    return LLMResponse(
+        content=f"Image generated with Gemini {model}",
+        model=f"gemini/{model}",
+        input_tokens=0,
+        output_tokens=0,
+        cost_usd=cost,
+        latency_ms=elapsed,
+        provider="gemini",
+        media_url=f"data:image/png;base64,{image_b64}" if image_b64 else "",
+    )
+
+
+async def generate_video_gemini(
+    prompt: str,
+    *,
+    model: str = "veo-2",
+    duration: int = 5,
+) -> LLMResponse:
+    """Generate a video via the Google Gemini Veo 2 REST API.
+
+    Submits a long-running prediction to ``predictLongRunning``, then polls
+    the operation endpoint every 5 seconds for up to 60 iterations (5 min)
+    until the video is ready.
+
+    Pricing: ~$0.35 per second of generated video.
+
+    Args:
+        prompt: Text description of the desired video.
+        model: Veo model variant (``"veo-2"``).
+        duration: Desired video length in seconds (default 5).
+    """
+    config = get_config()
+    client = _get_client()
+    start = time.monotonic()
+
+    # Veo 2 uses the veo-002 model identifier in the API
+    api_model = "veo-002"
+
+    resp = await client.post(
+        f"https://generativelanguage.googleapis.com/v1beta/models/{api_model}:predictLongRunning",
+        params={"key": config.gemini_api_key},
+        json={
+            "instances": [{"prompt": prompt}],
+            "parameters": {
+                "aspectRatio": "16:9",
+                "durationSeconds": duration,
+            },
+        },
+    )
+    resp.raise_for_status()
+    data = resp.json()
+
+    # The response contains an operation name to poll
+    operation_name = data.get("name", "")
+    video_b64 = ""
+
+    if operation_name:
+        import asyncio
+        for _ in range(60):  # max 60 polls (~5 min ceiling)
+            await asyncio.sleep(5)
+            poll_resp = await client.get(
+                f"https://generativelanguage.googleapis.com/v1beta/{operation_name}",
+                params={"key": config.gemini_api_key},
+            )
+            poll_data = poll_resp.json()
+            if poll_data.get("done"):
+                # Extract video data from the completed operation
+                response_payload = poll_data.get("response", {})
+                predictions = response_payload.get("predictions", [])
+                if predictions:
+                    video_b64 = predictions[0].get("bytesBase64Encoded", "")
+                break
+
+    elapsed = (time.monotonic() - start) * 1000
+    cost = 0.35 * duration  # ~$0.35 per second of video
+
+    media_url = ""
+    if video_b64:
+        media_url = f"data:video/mp4;base64,{video_b64}"
+
+    return LLMResponse(
+        content=f"Video generated with Gemini {model} ({duration}s)",
+        model=f"gemini/{model}",
+        input_tokens=0,
+        output_tokens=0,
+        cost_usd=cost,
+        latency_ms=elapsed,
+        provider="gemini",
+        media_url=media_url,
+    )
+
+
 # ── Dispatcher ───────────────────────────────────────────────────────────────
 #
 # These dictionaries map a provider prefix (e.g. "openai", "fal") to the
@@ -515,12 +670,14 @@ IMAGE_GENERATORS = {
     "openai": generate_image_openai,
     "fal": generate_image_fal,
     "stability": generate_image_stability,
+    "gemini": generate_image_gemini,
 }
 """Provider-prefix to image generation function mapping."""
 
 VIDEO_GENERATORS = {
     "fal": generate_video_fal,
     "runway": generate_video_runway,
+    "gemini": generate_video_gemini,
 }
 """Provider-prefix to video generation function mapping."""
 

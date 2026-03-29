@@ -15,6 +15,7 @@ import logging
 from typing import Any
 
 from llm_router import cost, media, providers
+from llm_router.compaction import compact_structural
 from llm_router.config import get_config
 from llm_router.health import get_tracker
 from llm_router.profiles import get_model_chain, provider_from_model
@@ -90,6 +91,7 @@ async def route_and_call(
     max_tokens: int | None = None,
     media_params: dict | None = None,
     ctx: Any | None = None,
+    classification_data: dict | None = None,
 ) -> LLMResponse:
     """Route a request to the best available model and return the response.
 
@@ -119,6 +121,9 @@ async def route_and_call(
         media_params: Extra keyword arguments forwarded to media generators
             (e.g. image size, video duration).
         ctx: MCP RequestContext for streaming progress notifications.
+        classification_data: Optional dict with classification and recommendation
+            metadata for quality logging. When provided, a routing decision is
+            logged to the ``routing_decisions`` table after a successful call.
 
     Returns:
         An ``LLMResponse`` with the model output, cost, and latency.
@@ -140,6 +145,28 @@ async def route_and_call(
                 f"Monthly budget of ${config.llm_router_monthly_budget:.2f} exceeded "
                 f"(spent: ${monthly_spend:.2f}). "
                 "Increase budget via LLM_ROUTER_MONTHLY_BUDGET or wait until next month."
+            )
+
+    # Structural compaction — shrink prompt before sending to external LLMs
+    # Guard: compaction_mode/threshold may be MagicMock in test mocks
+    compaction_mode = getattr(config, "compaction_mode", "structural")
+    compaction_threshold = getattr(config, "compaction_threshold", 4000)
+    if (
+        isinstance(compaction_mode, str)
+        and compaction_mode != "off"
+        and isinstance(compaction_threshold, int)
+        and task_type not in MEDIA_TASK_TYPES
+    ):
+        prompt, compaction_result = await compact_structural(
+            prompt, compaction_threshold,
+        )
+        if compaction_result.tokens_saved_estimate > 0:
+            log.info(
+                "Compacted prompt: %d→%d chars (~%d tokens saved) [%s]",
+                compaction_result.original_length,
+                compaction_result.compacted_length,
+                compaction_result.tokens_saved_estimate,
+                ", ".join(compaction_result.strategies_applied),
             )
 
     if model_override:
@@ -184,6 +211,35 @@ async def route_and_call(
 
             tracker.record_success(provider)
             await cost.log_usage(response, task_type, profile)
+
+            # Log routing decision for quality analytics
+            if classification_data:
+                try:
+                    await cost.log_routing_decision(
+                        prompt=prompt,
+                        task_type=classification_data.get("task_type", task_type.value),
+                        profile=classification_data.get("profile", profile.value),
+                        classifier_type=classification_data.get("classifier_type", "unknown"),
+                        classifier_model=classification_data.get("classifier_model"),
+                        classifier_confidence=classification_data.get("classifier_confidence", 0.0),
+                        classifier_latency_ms=classification_data.get("classifier_latency_ms", 0.0),
+                        complexity=classification_data.get("complexity", "moderate"),
+                        recommended_model=classification_data.get("recommended_model", model),
+                        base_model=classification_data.get("base_model", model),
+                        was_downshifted=classification_data.get("was_downshifted", False),
+                        budget_pct_used=classification_data.get("budget_pct_used", 0.0),
+                        quality_mode=classification_data.get("quality_mode", "balanced"),
+                        final_model=response.model,
+                        final_provider=response.provider,
+                        success=True,
+                        input_tokens=response.input_tokens,
+                        output_tokens=response.output_tokens,
+                        cost_usd=response.cost_usd,
+                        latency_ms=response.latency_ms,
+                    )
+                except Exception as e:
+                    log.warning("Failed to log routing decision: %s", e)
+
             await _notify(
                 ctx, "info",
                 f"Done → {model} | ${response.cost_usd:.6f} | {response.latency_ms:.0f}ms"

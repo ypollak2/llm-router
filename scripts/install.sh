@@ -150,6 +150,17 @@ else:
 "
 fi
 
+# Install routing rules globally
+RULES_DIR="$HOME/.claude/rules"
+RULES_SRC="$PROJECT_DIR/src/llm_router/rules/llm-router.md"
+RULES_DST="$RULES_DIR/llm-router.md"
+
+if [ -f "$RULES_SRC" ]; then
+    mkdir -p "$RULES_DIR"
+    cp "$RULES_SRC" "$RULES_DST"
+    echo "Installed routing rules → $RULES_DST"
+fi
+
 echo ""
 echo "Done! Restart Claude Code to load the LLM Router MCP server."
 echo ""

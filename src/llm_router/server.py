@@ -36,7 +36,8 @@ from llm_router.claude_usage import (
 from llm_router.config import get_config
 from llm_router.cost import (
     get_daily_claude_breakdown, get_daily_claude_tokens,
-    get_monthly_spend, get_savings_summary, log_claude_usage,
+    get_lifetime_savings_summary, get_monthly_spend, get_quality_report,
+    get_savings_summary, import_savings_log, log_claude_usage,
 )
 from llm_router.health import get_tracker
 from llm_router.model_selector import select_model
@@ -346,7 +347,32 @@ async def llm_route(
         f"({classification.confidence:.0%}) → {profile.value} profile"
     )
 
-    # Step 3: Route and call
+    # Step 3: Build classification metadata for quality logging
+    if complexity_override:
+        _clf_type = "override"
+    elif classification.classifier_model == "none":
+        _clf_type = "fallback"
+    elif classification.classifier_latency_ms == 0.0 and classification.confidence > 0:
+        _clf_type = "cached"
+    else:
+        _clf_type = "llm"
+
+    _classification_data = {
+        "task_type": resolved_task_type.value,
+        "profile": profile.value,
+        "classifier_type": _clf_type,
+        "classifier_model": classification.classifier_model,
+        "classifier_confidence": classification.confidence,
+        "classifier_latency_ms": classification.classifier_latency_ms,
+        "complexity": classification.complexity.value,
+        "recommended_model": "",  # external routing has no single recommendation
+        "base_model": "",
+        "was_downshifted": False,
+        "budget_pct_used": 0.0,
+        "quality_mode": "balanced",
+    }
+
+    # Step 4: Route and call
     resp = await route_and_call(
         resolved_task_type, prompt,
         profile=profile,
@@ -354,9 +380,10 @@ async def llm_route(
         temperature=temperature,
         max_tokens=max_tokens,
         ctx=ctx,
+        classification_data=_classification_data,
     )
 
-    # Step 4: Build response with classification + routing info
+    # Step 5: Build response with classification + routing info
     total_cost = classification.classifier_cost_usd + resp.cost_usd
     lines = [
         classification.header(),
@@ -864,7 +891,26 @@ async def llm_usage(period: str = "today") -> str:
             lines.append(row(f"  Opus would cost: ${opus_would_cost:.4f}  ->  Actual: ${actual_cost:.4f}  ({pct_saved:.0f}% saved)"))
         lines.append(HR)
 
-    # ── Section 5: Monthly Budget ──
+    # ── Section 5: Lifetime Savings (from hook JSONL → SQLite) ──
+    await import_savings_log()  # import any pending JSONL entries
+    lifetime = await get_lifetime_savings_summary(days=0)
+    if lifetime["tasks_routed"] > 0:
+        lines.append(section("LIFETIME SAVINGS"))
+        lines.append(row(f"  Tasks routed:    {lifetime['tasks_routed']}"))
+        lines.append(row(f"  Claude saved:    ${lifetime['total_saved']:.2f}"))
+        lines.append(row(f"  External cost:   ${lifetime['total_external_cost']:.2f}"))
+        lines.append(row(f"  Net savings:     ${lifetime['net_savings']:.2f}"))
+        if lifetime["by_session"]:
+            lines.append(row(""))
+            lines.append(row("  Recent sessions:"))
+            for sess in lifetime["by_session"][:5]:
+                lines.append(row(
+                    f"    {sess['session_id'][:16]}..  "
+                    f"{sess['tasks']} tasks  ${sess['saved']:.2f} saved"
+                ))
+        lines.append(HR)
+
+    # ── Section 6: Monthly Budget ──
     config = get_config()
     if config.llm_router_monthly_budget > 0:
         monthly_spend = await get_monthly_spend()
@@ -911,6 +957,76 @@ async def llm_cache_clear() -> str:
     cache = get_cache()
     count = await cache.clear()
     return f"Cleared {count} cached classification entries."
+
+
+@mcp.tool()
+async def llm_quality_report(days: int = 7) -> str:
+    """Show routing quality metrics — classification accuracy, savings, model distribution.
+
+    Analyzes routing decisions over the specified period to show how the
+    classifier is performing, which models are being selected, downshift
+    rates, and cost efficiency.
+
+    Args:
+        days: Number of days to include in the report (default 7).
+    """
+    report = await get_quality_report(days)
+
+    if report["total_decisions"] == 0:
+        return f"No routing decisions recorded in the last {days} days."
+
+    W = 58
+    HR = "+" + "-" * W + "+"
+
+    def row(text: str) -> str:
+        return f"| {text:<{W - 1}}|"
+
+    def section(title: str) -> str:
+        return "|" + f" {title} ".center(W, "-") + "|"
+
+    lines = [HR, "|" + f" Routing Quality Report ({days}d) ".center(W) + "|", HR]
+
+    # Overview
+    lines.append(section("OVERVIEW"))
+    lines.append(row(f"  Decisions:     {report['total_decisions']}"))
+    lines.append(row(f"  Avg confidence: {report['avg_confidence']:.0%}"))
+    lines.append(row(f"  Success rate:  {report['success_rate']:.0%}"))
+    lines.append(row(f"  Downshift rate: {report['downshift_rate']:.0%}"))
+    lines.append(row(f"  Avg latency:   {report['avg_latency_ms']:.0f}ms"))
+    lines.append(row(f"  Total cost:    ${report['total_cost_usd']:.4f}"))
+    lines.append(row(f"  Total tokens:  {report['total_tokens']:,}"))
+    lines.append(HR)
+
+    # By classifier type
+    if report["by_classifier"]:
+        lines.append(section("BY CLASSIFIER"))
+        for clf_type, count in report["by_classifier"].items():
+            pct = count / report["total_decisions"]
+            lines.append(row(f"  {clf_type:<16} {count:>5}  ({pct:>5.0%})"))
+        lines.append(HR)
+
+    # By task type
+    if report["by_task_type"]:
+        lines.append(section("BY TASK TYPE"))
+        for task, count in report["by_task_type"].items():
+            pct = count / report["total_decisions"]
+            lines.append(row(f"  {task:<16} {count:>5}  ({pct:>5.0%})"))
+        lines.append(HR)
+
+    # By model
+    if report["by_model"]:
+        lines.append(section("BY MODEL"))
+        lines.append(row(f"  {'Model':<24} {'Calls':>5}  {'Avg ms':>7}  {'Cost':>8}"))
+        lines.append(row("  " + "-" * 50))
+        for model, stats in report["by_model"].items():
+            short = model.split("/")[-1] if "/" in model else model
+            lines.append(row(
+                f"  {short:<24} {stats['count']:>5}  "
+                f"{stats['avg_latency']:>6.0f}ms  ${stats['total_cost']:>7.4f}"
+            ))
+        lines.append(HR)
+
+    return "\n".join(lines)
 
 
 @mcp.tool()
@@ -1237,7 +1353,7 @@ async def llm_setup(
     provider: str | None = None,
     api_key: str | None = None,
 ) -> str:
-    """Set up and manage API providers — discover keys, add new providers, check status.
+    """Set up and manage API providers, hooks, and routing enforcement.
 
     Actions:
     - "status": Show which providers are configured and which are missing
@@ -1246,9 +1362,11 @@ async def llm_setup(
     - "add": Add an API key for a provider (writes to .env file securely)
     - "test": Validate API keys with a minimal call (tests configured or specific provider)
     - "provider": Show details about a specific provider
+    - "install_hooks": Install auto-routing hooks globally (every Claude Code session)
+    - "uninstall_hooks": Remove auto-routing hooks
 
     Args:
-        action: What to do — "status", "guide", "discover", "add", "test", or "provider".
+        action: What to do — "status", "guide", "discover", "add", "test", "provider", "install_hooks", or "uninstall_hooks".
         provider: Provider name (for "add", "test", and "provider" actions).
         api_key: API key value (for "add" action only). Key is validated before saving.
     """
@@ -1277,8 +1395,12 @@ async def llm_setup(
         return _setup_add(provider, api_key)
     elif action == "provider":
         return _setup_provider_detail(provider)
+    elif action == "install_hooks":
+        return _setup_install_hooks()
+    elif action == "uninstall_hooks":
+        return _setup_uninstall_hooks()
     else:
-        return f"Unknown action: {action}. Use: status, guide, discover, add, test, or provider."
+        return f"Unknown action: {action}. Use: status, guide, discover, add, test, provider, install_hooks, or uninstall_hooks."
 
 
 def _setup_status() -> str:
@@ -1660,6 +1782,51 @@ def _setup_provider_detail(provider: str | None) -> str:
             f"3. Run: `llm_setup(action='add', provider='{provider}', api_key='your-key')`",
         ])
 
+    return "\n".join(lines)
+
+
+def _setup_install_hooks() -> str:
+    """Install auto-routing hooks and rules globally into Claude Code."""
+    from llm_router.install_hooks import install
+    actions = install()
+    lines = [
+        "# LLM Router — Hooks Installed Globally",
+        "",
+        "The following actions were performed:",
+        "",
+    ]
+    for a in actions:
+        lines.append(f"- {a}")
+
+    lines.extend([
+        "",
+        "**Restart Claude Code to activate.**",
+        "",
+        "Every prompt will now be evaluated by the auto-router.",
+        "The router classifies tasks and injects `[ROUTE:]` hints that",
+        "direct Claude to use the optimal `llm_*` tool.",
+        "",
+        "To remove: `llm_setup(action='uninstall_hooks')`",
+    ])
+    return "\n".join(lines)
+
+
+def _setup_uninstall_hooks() -> str:
+    """Remove auto-routing hooks and rules from Claude Code."""
+    from llm_router.install_hooks import uninstall
+    actions = uninstall()
+    lines = [
+        "# LLM Router — Hooks Removed",
+        "",
+    ]
+    for a in actions:
+        lines.append(f"- {a}")
+
+    lines.extend([
+        "",
+        "Restart Claude Code to apply changes.",
+        "To reinstall: `llm_setup(action='install_hooks')`",
+    ])
     return "\n".join(lines)
 
 

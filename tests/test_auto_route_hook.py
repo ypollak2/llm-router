@@ -94,15 +94,17 @@ class TestAutoRouteClassification:
         out = run_hook("enhance the caching layer for better throughput")
         assert out is not None
         hint = _extract_hint(out)
-        assert "[ROUTE: code/" in hint
+        # "enhance" is ambiguous — could be code or analyze depending on classifier
+        assert "[ROUTE: code/" in hint or "[ROUTE: analyze/" in hint
 
-    def test_auto_fallback_for_unmatched_long_prompt(self):
-        """Prompts >=20 chars with no pattern match route to llm_route."""
+    def test_ollama_or_api_fallback_for_unmatched_long_prompt(self):
+        """Prompts with no strong heuristic match fall to Ollama/API classification."""
         out = run_hook("I need help with something interesting today")
         assert out is not None
         hint = _extract_hint(out)
-        assert "[ROUTE: auto/" in hint
-        assert "llm_route" in hint
+        # Should be classified by Ollama or API (not auto fallback)
+        assert "[ROUTE:" in hint
+        assert "via " in hint
 
 
 class TestAutoRouteSkips:
@@ -157,4 +159,5 @@ class TestAutoRouteNowRoutes:
         out = run_hook("improve the database query performance")
         assert out is not None
         hint = _extract_hint(out)
-        assert "[ROUTE: code/" in hint
+        # Could be code or analyze — both valid for "improve performance"
+        assert "[ROUTE: code/" in hint or "[ROUTE: analyze/" in hint

@@ -1,5 +1,33 @@
 # Changelog
 
+## v0.4.0 — Quality & Global Enforcement (2026-03-29)
+
+### Added
+
+- **Structural context compaction** — 5 strategies (collapse whitespace, strip code comments, dedup sections, truncate long code, collapse stack traces) applied before sending prompts to external LLMs. Reduces token usage 10-40% on verbose prompts.
+- **Quality logging** — `routing_decisions` SQLite table captures full routing lifecycle: classification input, model selection reasoning, and execution outcome. 21 columns per decision.
+- **`llm_quality_report` MCP tool** — ASCII analytics dashboard: classifier breakdown, task type distribution, model usage, downshift rate, confidence averages, cost/latency aggregates.
+- **Savings persistence** — JSONL file written by PostToolUse hook, imported into `savings_stats` SQLite table. `get_lifetime_savings_summary()` provides per-session and aggregate analytics.
+- **Gemini Imagen 3** — Direct REST API integration for image generation via `generativelanguage.googleapis.com`. Supports aspect ratio mapping and both `imagen-3` and `imagen-3-fast` models.
+- **Gemini Veo 2** — Video generation via `predictLongRunning` endpoint with async polling. ~$0.35/sec of generated video.
+- **Global hook installer** — `llm_setup(action='install_hooks')` MCP tool + `llm-router-install-hooks` CLI. Copies hooks to `~/.claude/hooks/` and registers in `~/.claude/settings.json` so every Claude Code session auto-routes.
+- **Global routing rules** — `~/.claude/rules/llm-router.md` installed by hooks installer. Enforces that Claude always follows `[ROUTE:]` hints regardless of task type.
+- **`llm_setup(action='uninstall_hooks')`** — Clean removal of global hooks and rules.
+
+### Fixed
+
+- **Mock config compaction crash** — `router.py` compaction code now guards against `MagicMock` config attributes in tests.
+- **`import_savings_log` data loss** — JSONL file now truncated only after successful DB commit, preventing data loss on write failures.
+- **CI test failures** — Hook classification tests updated to accept valid alternate classifications when Ollama is unavailable.
+
+### Changed
+
+- Tool count increased from 23 to 24 (`llm_quality_report` added).
+- `install.sh` now also installs routing rules to `~/.claude/rules/`.
+- Hook scripts bundled as package data for reliable installation.
+
+---
+
 ## v0.3.0 — Caching & Automation (2026-03-29)
 
 ### Added

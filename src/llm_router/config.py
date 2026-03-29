@@ -61,6 +61,10 @@ class RouterConfig(BaseSettings):
     quality_mode: QualityMode = QualityMode.BALANCED
     min_model: str = "haiku"                # floor: never route below this
 
+    # ── Compaction settings ──
+    compaction_mode: str = "structural"  # off | structural | full
+    compaction_threshold: int = 4000     # token threshold to trigger compaction
+
     # ── Health check settings ──
     health_failure_threshold: int = 3
     health_cooldown_seconds: int = 60

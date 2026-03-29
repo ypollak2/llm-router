@@ -98,11 +98,25 @@ uv sync
   <img src="docs/images/quickstart.svg" alt="Quick Start" width="700" />
 </p>
 
+### Enable Global Auto-Routing
+
+Make the router evaluate **every prompt** across all projects:
+
+```bash
+# From the MCP tool:
+llm_setup(action='install_hooks')
+
+# Or from the CLI:
+llm-router-install-hooks
+```
+
+This installs hooks + rules to `~/.claude/` so every Claude Code session auto-routes tasks to the optimal model.
+
 > **Start for free**: Google's Gemini API has a [free tier](https://aistudio.google.com/apikey) with 1M tokens/day — no credit card needed. [Groq](https://console.groq.com/keys) also offers a generous free tier with ultra-fast inference.
 
 ### What You Get
 
-- **23 MCP tools** — Smart routing, text, image, video, audio, streaming, setup, usage monitoring, cache management
+- **24 MCP tools** — Smart routing, text, image, video, audio, streaming, setup, quality analytics, usage monitoring, cache management
 - **`/route` skill** — Smart task classification and routing in one command
 - **Smart classifier** — Auto-picks Claude Haiku/Sonnet/Opus based on complexity
 - **Prompt classification cache** — SHA-256 exact-match LRU cache (1000 entries, 1h TTL) for instant repeat classifications
@@ -252,7 +266,7 @@ Fetched via Playwright from claude.ai's internal JSON API (same data the setting
 
 ## MCP Tools
 
-Once installed, Claude Code gets these 23 tools:
+Once installed, Claude Code gets these 24 tools:
 
 | Tool | What It Does |
 |------|-------------|
@@ -282,7 +296,8 @@ Once installed, Claude Code gets these 23 tools:
 | `llm_check_usage` | Check live Claude subscription usage (session %, weekly %) |
 | `llm_update_usage` | Feed live usage data from claude.ai into the router |
 | `llm_codex` | Route tasks to local Codex desktop agent (free, uses OpenAI sub) |
-| `llm_setup` | Discover API keys, add providers, get setup guides, validate keys (`action='test'`) |
+| `llm_setup` | Discover API keys, add providers, get setup guides, validate keys, install global hooks |
+| `llm_quality_report` | Routing accuracy, classifier stats, savings metrics, downshift rate |
 | `llm_set_profile` | Switch routing profile (budget / balanced / premium) |
 | `llm_usage` | Unified dashboard — Claude sub, Codex, APIs, savings in one view |
 | `llm_health` | Check provider availability and circuit breaker status |
@@ -471,13 +486,19 @@ See [ROADMAP.md](ROADMAP.md) for the detailed roadmap with phases and priorities
 - [x] Published to PyPI as `claude-code-llm-router`
 - [x] Multi-layer auto-classification: scoring heuristic → Ollama local LLM (qwen3.5) → cheap API (Gemini Flash/GPT-4o-mini)
 - [x] Savings awareness (PostToolUse hook tracks routed calls, periodic cost savings reminders)
+- [x] Structural context compaction (5 strategies: whitespace, comments, dedup, truncation, stack traces)
+- [x] Quality logging (`routing_decisions` table + `llm_quality_report` tool)
+- [x] Savings persistence (JSONL + SQLite import, lifetime analytics)
+- [x] Gemini media APIs (Imagen 3 images, Veo 2 video)
+- [x] Global hook installer (`llm_setup(action='install_hooks')` + `llm-router-install-hooks` CLI)
+- [x] Global routing rules (auto-installed to `~/.claude/rules/llm-router.md`)
 
-### Next Up (v0.4 — Smart Classification)
+### Next Up (v0.5 — Evaluation & Learning)
 
-- [x] ~~Embedding-based classifier~~ Replaced by scoring heuristic + Ollama local LLM chain (more accurate, simpler)
-- [ ] Context compaction (structural + opt-in LLM summarization)
-- [ ] Classification quality framework (decision logging, outcome tracking, A/B testing)
-- [ ] `llm_quality_report` tool — routing accuracy, savings metrics, downshift harm rate
+- [ ] Classification outcome tracking (was the routed model's response good?)
+- [ ] A/B testing framework for routing decisions
+- [ ] Adaptive routing based on historical success rates
+- [ ] LLM-based context compaction (optional, beyond structural)
 
 ---
 
