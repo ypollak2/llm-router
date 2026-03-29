@@ -102,11 +102,13 @@ uv sync
 
 ### What You Get
 
-- **22 MCP tools** — Smart routing, text, image, video, audio, setup, usage monitoring, cache management
+- **23 MCP tools** — Smart routing, text, image, video, audio, streaming, setup, usage monitoring, cache management
 - **`/route` skill** — Smart task classification and routing in one command
 - **Smart classifier** — Auto-picks Claude Haiku/Sonnet/Opus based on complexity
 - **Prompt classification cache** — SHA-256 exact-match LRU cache (1000 entries, 1h TTL) for instant repeat classifications
 - **Auto-route hook** — Zero-latency `UserPromptSubmit` hook that detects task type and complexity, injecting routing hints automatically
+- **Streaming responses** — `llm_stream` tool for long-running tasks, shows output as it arrives
+- **Usage auto-refresh** — `PostToolUse` hook detects stale Claude subscription data (>15 min) and nudges for refresh
 - **Rate limit detection** — Catches 429/rate_limit errors with smart cooldowns (15s for rate limits vs 60s for hard failures)
 - **Key validation** — `llm_setup(action='test')` validates API keys with minimal LLM calls (~$0.0001 each)
 - **Claude subscription monitoring** — Live session/weekly usage from claude.ai
@@ -435,7 +437,7 @@ uv run ruff check src/
 
 See [ROADMAP.md](ROADMAP.md) for the detailed roadmap with phases and priorities.
 
-### Completed (v0.1 + v0.2 + v0.3)
+### Completed (v0.1 Foundation + v0.2 Intelligence + v0.3 Caching & Automation)
 
 - [x] Core text LLM routing (10+ providers)
 - [x] Configurable profiles (budget / balanced / premium)
@@ -463,15 +465,11 @@ See [ROADMAP.md](ROADMAP.md) for the detailed roadmap with phases and priorities
 - [x] Auto-route hook (UserPromptSubmit heuristic classifier, zero-latency)
 - [x] Rate limit detection with smart cooldowns (15s rate limit vs 60s hard failure)
 - [x] `llm_setup(action='test')` — API key validation with minimal LLM calls
+- [x] Streaming responses (`llm_stream` tool + `call_llm_stream()` async generator)
+- [x] Usage auto-refresh hook (PostToolUse staleness detection + usage pulse wiring)
 - [x] Published to PyPI as `claude-code-llm-router`
 
-### Next Up (v0.3 continued — Caching & Automation)
-
-- [ ] Periodic usage pulse (auto-refresh during sessions)
-- [ ] Streaming responses
-- [ ] Auto-refresh Claude usage via Playwright hook
-
-### Planned (v0.4 — Smart Classification)
+### Next Up (v0.4 — Smart Classification)
 
 - [ ] Embedding-based classifier (`all-MiniLM-L6-v2` + LogisticRegression, <15ms local inference)
 - [ ] Context compaction (structural + opt-in LLM summarization)
