@@ -1,8 +1,26 @@
 [project]
-name = "llm-router"
+name = "claude-code-llm-router"
 version = "0.2.0"
-description = "Multi-LLM router MCP server — smart complexity routing, Claude subscription monitoring, Codex integration, 20+ providers"
+description = "Multi-LLM router MCP server for Claude Code — smart complexity routing, Claude subscription monitoring, Codex integration, 20+ providers"
+readme = "README.md"
+license = "MIT"
 requires-python = ">=3.10,<3.14"
+authors = [
+    { name = "ypollak2", email = "ypollak2@users.noreply.github.com" },
+]
+keywords = ["llm", "mcp", "claude", "router", "ai", "openai", "gemini", "litellm", "claude-code"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Libraries",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
 dependencies = [
     "mcp>=1.0.0",
     "litellm>=1.50.0",
@@ -17,6 +35,12 @@ dev = [
     "pytest-asyncio>=0.23",
     "ruff>=0.4",
 ]
+
+[project.urls]
+Homepage = "https://github.com/ypollak2/llm-router"
+Repository = "https://github.com/ypollak2/llm-router"
+Issues = "https://github.com/ypollak2/llm-router/issues"
+Changelog = "https://github.com/ypollak2/llm-router/blob/main/CHANGELOG.md"
 
 [project.scripts]
 llm-router = "llm_router.server:main"
