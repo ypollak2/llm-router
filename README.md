@@ -55,12 +55,9 @@ Router:  → Kling 2.0 via fal.ai (best value for short video)
 
 Most AI tasks don't need the most powerful model. The router matches complexity to capability automatically:
 
-```mermaid
-pie title Typical Task Distribution
-    "Simple (Haiku/Flash)" : 60
-    "Moderate (Sonnet/GPT-4o)" : 30
-    "Complex (Opus/o3)" : 10
-```
+<p align="center">
+  <img src="docs/images/savings.svg" alt="Task Distribution" width="400" />
+</p>
 
 | | Without Router | With Router |
 |--|---------------|-------------|
@@ -90,14 +87,9 @@ uv sync
 
 ### Get Running in 3 Steps
 
-```mermaid
-graph LR
-    A["<b>1. Install</b><br/>claude plugin add<br/>ypollak2/llm-router"] --> B["<b>2. Add a Key</b><br/>llm_setup action=discover<br/><i>or add Gemini free tier</i>"]
-    B --> C["<b>3. Route</b><br/>llm_route prompt=...<br/><i>auto-picks best model</i>"]
-    style A fill:#e8f5e9,stroke:#4caf50
-    style B fill:#e3f2fd,stroke:#2196f3
-    style C fill:#f3e5f5,stroke:#9c27b0
-```
+<p align="center">
+  <img src="docs/images/quickstart.svg" alt="Quick Start" width="700" />
+</p>
 
 > **Start for free**: Google's Gemini API has a [free tier](https://aistudio.google.com/apikey) with 1M tokens/day — no credit card needed. [Groq](https://console.groq.com/keys) also offers a generous free tier with ultra-fast inference.
 
@@ -116,59 +108,15 @@ graph LR
 
 ### Architecture
 
-```mermaid
-flowchart TB
-    subgraph Client["Claude Code / MCP Client"]
-        U["Your Prompt"]
-    end
-
-    subgraph Router["LLM Router Server"]
-        CL["Complexity Classifier<br/><i>simple · moderate · complex</i>"]
-        MS["Model Selector<br/><i>profile + budget + health</i>"]
-        BP["Budget Pressure<br/><i>Claude sub · API spend</i>"]
-        HC["Health Monitor<br/><i>circuit breakers</i>"]
-    end
-
-    subgraph Providers["20+ Providers"]
-        direction LR
-        T["Text & Code<br/>OpenAI · Gemini · Perplexity<br/>Mistral · Deepseek · Groq"]
-        I["Image<br/>Imagen 3 · DALL-E<br/>Flux · Stable Diffusion"]
-        V["Video<br/>Veo 2 · Runway<br/>Kling · minimax"]
-        A["Audio<br/>ElevenLabs<br/>OpenAI TTS"]
-        L["Local<br/>Codex Desktop<br/>(free)"]
-    end
-
-    U --> CL --> MS
-    BP --> MS
-    HC --> MS
-    MS --> T & I & V & A & L
-
-    style Client fill:#f5f5f5,stroke:#999
-    style Router fill:#e8eaf6,stroke:#3f51b5
-    style Providers fill:#fff3e0,stroke:#ff9800
-```
+<p align="center">
+  <img src="docs/images/architecture.svg" alt="Architecture" width="700" />
+</p>
 
 ### Routing Decision Flow
 
-```mermaid
-flowchart TD
-    P["Incoming Prompt"] --> C{"Classify<br/>Complexity"}
-    C -->|Simple| H["Haiku / Gemini Flash<br/><i>commit messages, renames, simple Q&A</i>"]
-    C -->|Moderate| S["Sonnet / GPT-4o<br/><i>code generation, refactoring, writing</i>"]
-    C -->|Complex| O["Opus / o3<br/><i>architecture, debugging, deep analysis</i>"]
-
-    O --> B{"Claude Quota<br/>> 85%?"}
-    B -->|No| DONE["Route to Claude"]
-    B -->|Yes| T{"Reset in<br/>< 30 min?"}
-    T -->|Yes| DONE
-    T -->|No| F["Fallback: Codex (free)<br/>OpenAI API · Gemini API"]
-
-    style H fill:#c8e6c9,stroke:#4caf50
-    style S fill:#bbdefb,stroke:#2196f3
-    style O fill:#e1bee7,stroke:#9c27b0
-    style F fill:#fff9c4,stroke:#ffc107
-    style DONE fill:#e8f5e9,stroke:#4caf50
-```
+<p align="center">
+  <img src="docs/images/routing-flow.svg" alt="Routing Flow" width="600" />
+</p>
 
 ---
 
@@ -325,24 +273,9 @@ Once installed, Claude Code gets these 20 tools:
 
 ## Routing Profiles
 
-```mermaid
-graph LR
-    subgraph Budget["Budget Profile 💰"]
-        B1["Gemini Flash<br/>GPT-4o-mini<br/>Deepseek"]
-    end
-    subgraph Balanced["Balanced Profile ⚖️"]
-        B2["GPT-4o<br/>Claude Sonnet<br/>Gemini Pro"]
-    end
-    subgraph Premium["Premium Profile 🎯"]
-        B3["Claude Opus<br/>o3<br/>Gemini 2.5 Pro"]
-    end
-
-    Budget -.->|"more quality ➜"| Balanced -.->|"more quality ➜"| Premium
-
-    style Budget fill:#c8e6c9,stroke:#4caf50
-    style Balanced fill:#bbdefb,stroke:#2196f3
-    style Premium fill:#e1bee7,stroke:#9c27b0
-```
+<p align="center">
+  <img src="docs/images/profiles.svg" alt="Routing Profiles" width="700" />
+</p>
 
 Three built-in profiles control the cost/quality tradeoff:
 
@@ -399,15 +332,9 @@ Remaining: $46.5800
 
 Chain tasks across different models in a pipeline:
 
-```mermaid
-graph LR
-    A["Research<br/><b>Perplexity</b><br/>Sonar Pro"] -->|findings| B["Analyze<br/><b>OpenAI</b><br/>GPT-4o"]
-    B -->|insights| C["Write<br/><b>Gemini</b><br/>2.5 Pro"]
-
-    style A fill:#fff3e0,stroke:#ff9800
-    style B fill:#e8f5e9,stroke:#4caf50
-    style C fill:#e3f2fd,stroke:#2196f3
-```
+<p align="center">
+  <img src="docs/images/orchestration.svg" alt="Orchestration Pipeline" width="600" />
+</p>
 
 ```
 llm_orchestrate("Research AI trends and write a report", template="research_report")
