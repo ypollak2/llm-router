@@ -1,0 +1,42 @@
+%%{init: {'theme': 'base', 'themeVariables': {'primaryColor': '#ECECFF', 'primaryBorderColor': '#9370DB'}}}%%
+flowchart TD
+    P["User Prompt"] --> SK{"Skip Pattern?"}
+    SK -->|Yes| LOCAL["Stay Local<br/>Claude handles directly"]
+    SK -->|No| HS["Heuristic Scoring<br/>Intent +3 · Topic +2 · Format +1"]
+
+    HS --> HC{"Score ≥ 4?"}
+    HC -->|"Yes (instant)"| ROUTE
+
+    HC -->|No| OL["Ollama Local LLM<br/>qwen3.5 · chat API · think=False"]
+    OL --> OC{"Category<br/>found?"}
+    OC -->|"Yes (~1s, free)"| ROUTE
+
+    OC -->|No| API["Cheap API Model<br/>Gemini Flash → GPT-4o-mini"]
+    API --> AC{"Category<br/>found?"}
+    AC -->|"Yes (~$0.0001)"| ROUTE
+
+    AC -->|No| WH{"Weak Heuristic<br/>Score > 0?"}
+    WH -->|Yes| ROUTE
+    WH -->|No| AUTO["Auto Fallback<br/>llm_route decides"]
+    AUTO --> ROUTE
+
+    ROUTE["Route to Tool"]
+    ROUTE --> |research| RES["llm_research"]
+    ROUTE --> |generate| GEN["llm_generate"]
+    ROUTE --> |analyze| ANA["llm_analyze"]
+    ROUTE --> |code| COD["llm_code"]
+    ROUTE --> |query| QRY["llm_query"]
+    ROUTE --> |image| IMG["llm_image"]
+
+    style LOCAL fill:#e8f5e9,stroke:#4caf50
+    style ROUTE fill:#bbdefb,stroke:#2196f3
+    style HS fill:#fff9c4,stroke:#ffc107
+    style OL fill:#e1bee7,stroke:#9c27b0
+    style API fill:#ffe0b2,stroke:#ff9800
+    style AUTO fill:#ffcdd2,stroke:#f44336
+    style RES fill:#c8e6c9,stroke:#4caf50
+    style GEN fill:#c8e6c9,stroke:#4caf50
+    style ANA fill:#c8e6c9,stroke:#4caf50
+    style COD fill:#c8e6c9,stroke:#4caf50
+    style QRY fill:#c8e6c9,stroke:#4caf50
+    style IMG fill:#c8e6c9,stroke:#4caf50

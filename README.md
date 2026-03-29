@@ -106,9 +106,10 @@ uv sync
 - **`/route` skill** — Smart task classification and routing in one command
 - **Smart classifier** — Auto-picks Claude Haiku/Sonnet/Opus based on complexity
 - **Prompt classification cache** — SHA-256 exact-match LRU cache (1000 entries, 1h TTL) for instant repeat classifications
-- **Auto-route hook** — Zero-latency `UserPromptSubmit` hook that detects task type and complexity, injecting routing hints automatically
+- **Auto-route hook** — Multi-layer `UserPromptSubmit` classifier: heuristic scoring (instant) → Ollama local LLM (free, ~1s) → cheap API (Gemini Flash/GPT-4o-mini, ~$0.0001) → auto fallback
 - **Streaming responses** — `llm_stream` tool for long-running tasks, shows output as it arrives
 - **Usage auto-refresh** — `PostToolUse` hook detects stale Claude subscription data (>15 min) and nudges for refresh
+- **Savings awareness** — Every 5th routed task, shows estimated Claude API costs and rate limit capacity saved
 - **Rate limit detection** — Catches 429/rate_limit errors with smart cooldowns (15s for rate limits vs 60s for hard failures)
 - **Key validation** — `llm_setup(action='test')` validates API keys with minimal LLM calls (~$0.0001 each)
 - **Claude subscription monitoring** — Live session/weekly usage from claude.ai
@@ -468,10 +469,12 @@ See [ROADMAP.md](ROADMAP.md) for the detailed roadmap with phases and priorities
 - [x] Streaming responses (`llm_stream` tool + `call_llm_stream()` async generator)
 - [x] Usage auto-refresh hook (PostToolUse staleness detection + usage pulse wiring)
 - [x] Published to PyPI as `claude-code-llm-router`
+- [x] Multi-layer auto-classification: scoring heuristic → Ollama local LLM (qwen3.5) → cheap API (Gemini Flash/GPT-4o-mini)
+- [x] Savings awareness (PostToolUse hook tracks routed calls, periodic cost savings reminders)
 
 ### Next Up (v0.4 — Smart Classification)
 
-- [ ] Embedding-based classifier (`all-MiniLM-L6-v2` + LogisticRegression, <15ms local inference)
+- [x] ~~Embedding-based classifier~~ Replaced by scoring heuristic + Ollama local LLM chain (more accurate, simpler)
 - [ ] Context compaction (structural + opt-in LLM summarization)
 - [ ] Classification quality framework (decision logging, outcome tracking, A/B testing)
 - [ ] `llm_quality_report` tool — routing accuracy, savings metrics, downshift harm rate

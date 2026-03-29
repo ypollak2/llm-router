@@ -1,150 +1,513 @@
 #!/usr/bin/env python3
-"""UserPromptSubmit hook — auto-classifies ALL user prompts and injects routing hints.
+"""UserPromptSubmit hook — scoring classifier with Ollama + API fallback chain.
 
-Reads the user's message from stdin (JSON), runs a fast heuristic classifier,
-and returns a routing hint as contextForAgent so Claude knows which llm_* tool
-to use without an extra round-trip.
+Classification chain (stops at first success):
+  1. Skip patterns → truly local operations, no routing
+  2. Heuristic scoring (instant, free) → high-confidence match routes immediately
+  3. Ollama local LLM (free, 1-3s) → catches what heuristics miss
+  4. Cheap API model (GPT-4o-mini/Gemini Flash, ~$0.0001) → when Ollama unavailable
+  5. Weak heuristic match (score > 0 but below threshold)
+  6. Auto fallback → llm_route (LLM router's own classifier)
 
-Fast path (~0ms): Uses keyword/pattern heuristics, no LLM call.
-The LLM-based classifier runs later inside the MCP tool if needed.
-
-Design: Routes EVERYTHING except truly local shell/git/filesystem operations.
-If in doubt, route — the LLM router will pick the best model.
+Scoring uses three signal layers:
+  Intent patterns  (+3) — action verbs, clear task markers
+  Topic patterns   (+2) — domain-specific nouns and terms
+  Format patterns  (+1) — structural cues, temporal markers
 """
 
+from __future__ import annotations
+
 import json
+import os
 import re
 import sys
+import urllib.request
+from pathlib import Path
+
+# ── .env loader (reads llm-router's .env for API keys) ──────────────────────
+
+_ENV_PATHS = [
+    Path(__file__).resolve().parent.parent.parent / ".env",  # project root .env
+    Path.home() / ".env",
+]
 
 
-# ── Heuristic Classifier ────────────────────────────────────────────────────
+def _load_dotenv() -> None:
+    """Load key=value pairs from .env files into os.environ (no override)."""
+    for env_path in _ENV_PATHS:
+        if not env_path.exists():
+            continue
+        try:
+            for line in env_path.read_text().splitlines():
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, _, value = line.partition("=")
+                key = key.strip()
+                value = value.strip().strip("\"'")
+                if key and key not in os.environ:
+                    os.environ[key] = value
+        except OSError:
+            pass
 
-RESEARCH_PATTERNS = re.compile(
-    r"\b(research|latest|current|news|trending|find out|look up|search for|"
-    r"what happened|who is|what is the latest|compare .+ (to|with|vs)|"
-    r"market analysis|competitive|benchmark)\b",
-    re.IGNORECASE,
-)
 
-GENERATE_PATTERNS = re.compile(
-    r"\b(write|draft|create|compose|generate text|brainstorm|"
-    r"blog post|article|email|letter|story|poem|tweet|post|"
-    r"marketing copy|tagline|slogan|headline|summary|summarize|"
-    r"rewrite|translate|paraphrase)\b",
-    re.IGNORECASE,
-)
+_load_dotenv()
 
-ANALYZE_PATTERNS = re.compile(
-    r"\b(analyze|evaluate|assess|review|critique|debug|diagnose|"
-    r"explain why|root cause|investigate|audit|compare and contrast|"
-    r"pros and cons|trade-?offs?|deep dive|what do you think|"
-    r"help me understand|break down|walk me through)\b",
-    re.IGNORECASE,
-)
+# ── Config ───────────────────────────────────────────────────────────────────
 
-CODE_PATTERNS = re.compile(
-    r"\b(implement|refactor|write (a |the )?(function|class|module|api|endpoint)|"
-    r"code (a |the )?|build (a |the )?|create (a |the )?(script|program|app|service)|"
-    r"algorithm|data structure|optimize (the |this )?code|port .+ to|"
-    r"fix (the |this |a )?(\w+ )*(bug|error|issue|crash)|"
-    r"add (a |the )?(\w+ )*(feature|method|test)|"
-    r"update (the |this )?(\w+ )*(code|logic|function)|"
-    r"change (the |this )?(\w+ )*(behavior|implementation)|"
-    r"modify (the |this )?|improve (the |this )?|extend|enhance|migrate|"
-    r"set up|configure|scaffold|boilerplate|template)\b",
-    re.IGNORECASE,
-)
+OLLAMA_MODEL = os.environ.get("LLM_ROUTER_OLLAMA_MODEL", "qwen3.5:latest")
+OLLAMA_URL = os.environ.get("LLM_ROUTER_OLLAMA_URL", "http://localhost:11434")
+OLLAMA_TIMEOUT = int(os.environ.get("LLM_ROUTER_OLLAMA_TIMEOUT", "5"))
+CONFIDENCE_THRESHOLD = int(os.environ.get("LLM_ROUTER_CONFIDENCE_THRESHOLD", "4"))
 
-QUERY_PATTERNS = re.compile(
-    r"\b(what is|who is|when did|where is|how does|how do you|how can|"
-    r"define|explain|describe|tell me about|what are the|can you|"
-    r"difference between|meaning of|why does|why is|is it possible)\b",
-    re.IGNORECASE,
-)
+# API keys for cheap fallback (read from env or .env files)
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "") or os.environ.get("GOOGLE_API_KEY", "")
 
-IMAGE_PATTERNS = re.compile(
-    r"\b(generate (an? )?image|create (an? )?(image|picture|illustration|logo|icon)|"
-    r"draw|design (a |an )?|visual|artwork|photo of)\b",
-    re.IGNORECASE,
-)
+# ── Skip Patterns (truly local operations) ───────────────────────────────────
 
-# ONLY skip truly local shell/filesystem/git operations that Claude handles directly.
-# These are operations that don't need any LLM — they're mechanical commands.
 SKIP_PATTERNS = re.compile(
-    r"^/(route|help|clear|compact|init|login|doctor|memory|model|cost|config|permissions|review|status|mcp|bug)\b|"
-    r"^\s*(git |npm |pip |uv |cargo |make |docker |brew |curl |wget |chmod |mkdir |rm |mv |cp |ls |cd |cat |grep )\b|"
-    r"^\s*(commit|push|pull|merge|deploy|rebase|stash|cherry-?pick)\b|"
-    r"^\s*(show me the |read |open |list files|find file|find class|find function)\b",
+    r"^/(?:route|help|clear|compact|init|login|doctor|memory|model|cost|config|"
+    r"permissions|review|status|mcp|bug|learn|verify|tdd|plan|eval|claw|loop|"
+    r"checkpoint|save-session|resume-session|sessions|instinct|skill|usage)\b|"
+    r"^\s*(?:git |npm |pip |uv |cargo |make |docker |brew |curl |wget |"
+    r"chmod |mkdir |rm |mv |cp |ls |cd |cat |grep |rtk )\b|"
+    r"^\s*(?:commit|push|pull|merge|deploy|rebase|stash|cherry-?pick)\b|"
+    r"^\s*(?:show me the |read |open |list files|find file|find class|find function)\b|"
+    r"^\s*(?:yes|no|ok|sure|thanks|thank you|y|n|k|go ahead|do it|looks good|lgtm)\s*$",
     re.IGNORECASE,
 )
 
-COMPLEXITY_SIGNALS_COMPLEX = re.compile(
-    r"\b(architect|design system|from scratch|end-to-end|comprehensive|"
+# ── Signal Patterns ──────────────────────────────────────────────────────────
+
+SIGNALS: dict[str, dict[str, re.Pattern]] = {
+    "image": {
+        "intent": re.compile(
+            r"\b(?:generate (?:an? )?(?:image|picture|photo|illustration|graphic)|"
+            r"create (?:an? )?(?:image|picture|illustration|logo|"
+            r"icon|graphic|banner|thumbnail|avatar|mockup|diagram)|"
+            r"draw (?:a |an |the |me )?|design (?:a |an )?(?:visual|poster|flyer|card|cover)|"
+            r"make (?:a |an )?(?:image|picture|photo|illustration)|"
+            r"render|visualize|sketch)\b",
+            re.IGNORECASE,
+        ),
+        "topic": re.compile(
+            r"\b(?:artwork|portrait|landscape|scenery|sunset|sunrise|mountain|ocean|forest|city|"
+            r"pixel art|wallpaper|infographic|"
+            r"meme|sticker|sprite|texture|concept art|"
+            r"photorealistic|cartoon|anime|watercolor|oil painting|abstract|"
+            r"dall-?e|midjourney|stable diffusion|flux)\b",
+            re.IGNORECASE,
+        ),
+        "format": re.compile(
+            r"\b(?:in the style of|aesthetic|color palette|aspect ratio|"
+            r"resolution|4k|hd|minimalist|flat design|artistic)\b",
+            re.IGNORECASE,
+        ),
+    },
+    "research": {
+        "intent": re.compile(
+            r"\b(?:research|look up|look into|search for|find out|investigate|discover|"
+            r"what(?:'s| is) (?:the )?(?:latest|newest|most recent|current)|"
+            r"what happened|who (?:won|raised|acquired|launched|announced|released|founded|created)|"
+            r"how (?:much|many) (?:did|has|have|does|were|are|is|was)|"
+            r"market analysis|competitive analysis|benchmark|survey|report on|"
+            r"check (?:the |if |whether ))\b",
+            re.IGNORECASE,
+        ),
+        "topic": re.compile(
+            r"\b(?:funding|fundraise|raised|investment|investor|valuation|ipo|"
+            r"series [a-f]|seed round|venture capital|vc|startup|unicorn|"
+            r"acquisition|merger|m&a|revenue|growth|market share|"
+            r"industry|sector|economy|stock|earnings|quarterly|"
+            r"news|announcement|launch|release|update|"
+            r"trend|trending|viral|popular|emerging|"
+            r"report|study|survey|statistics|data|ranking|ranked|"
+            r"regulation|policy|law|legislation|bill|ruling|"
+            r"election|political|geopolitical|conflict|"
+            r"climate|weather|disaster|pandemic|outbreak|"
+            r"sports|championship|tournament|olympics|"
+            r"award|prize|winner|nominee|"
+            r"company|companies|brand|corporation|firm|"
+            r"ceo|founder|executive|leader|"
+            r"price|pricing|cost|rate|fee|salary|compensation|"
+            r"ai|artificial intelligence|machine learning|llm|gpt|"
+            r"crypto|bitcoin|ethereum|blockchain|nft|"
+            r"real estate|housing|mortgage|rent)\b",
+            re.IGNORECASE,
+        ),
+        "format": re.compile(
+            r"\b(?:top \d+|best \d+|worst \d+|biggest \d+|largest \d+|"
+            r"latest|recent|this (?:week|month|year|quarter)|"
+            r"in (?:january|february|march|april|may|june|july|august|"
+            r"september|october|november|december)|"
+            r"in 20\d{2}|today|yesterday|last (?:week|month|year)|"
+            r"currently|right now|as of|breaking|"
+            r"list of|ranked|ranking|leaderboard|comparison|"
+            r"around the world|globally|worldwide)\b",
+            re.IGNORECASE,
+        ),
+    },
+    "code": {
+        "intent": re.compile(
+            r"\b(?:implement|refactor|write (?:a |the )?(?:function|class|module|api|"
+            r"endpoint|script|program|test|hook|component|service)|"
+            r"build (?:a |the )?(?:app|service|tool|cli|library|package|component|feature)|"
+            r"scaffold|boilerplate|port .+ to|migrate|"
+            r"fix (?:the |this |a )?(?:\w+ )*(?:bug|error|issue|crash|failing test|exception)|"
+            r"add (?:a |the )?(?:\w+ )*(?:feature|method|test|endpoint|route|handler|middleware)|"
+            r"update (?:the |this )?(?:\w+ )*(?:code|logic|function|implementation)|"
+            r"modify (?:the |this )|extend (?:the |this )|"
+            r"optimize (?:the |this )?(?:code|query|performance|function)|"
+            r"set up|configure|install|bootstrap|initialize|"
+            r"create (?:(?:a |the )?\w+ )*(?:function|class|module|component|hook|test|script|program|service|tool))\b",
+            re.IGNORECASE,
+        ),
+        "topic": re.compile(
+            r"\b(?:function|class|method|constructor|interface|enum|struct|"
+            r"module|package|library|dependency|"
+            r"endpoint|route|handler|middleware|controller|resolver|"
+            r"database|schema|migration|orm|"
+            r"test|spec|coverage|assertion|mock|fixture|"
+            r"algorithm|data structure|linked list|hash map|binary tree|"
+            r"authentication|authorization|jwt|oauth|"
+            r"cache|queue|worker|cron|webhook|"
+            r"dockerfile|ci/cd|pipeline|github actions|"
+            r"linter|formatter|type checker|compiler|bundler)\b",
+            re.IGNORECASE,
+        ),
+        "format": re.compile(
+            r"\b(?:in (?:python|typescript|javascript|rust|go|java|kotlin|swift|c\+\+|ruby|php)|"
+            r"using (?:react|vue|angular|express|django|flask|fastapi|spring|nextjs)|"
+            r"with (?:tests|types|error handling|logging|documentation)|"
+            r"async|sync|concurrent|parallel|recursive|iterative)\b",
+            re.IGNORECASE,
+        ),
+    },
+    "analyze": {
+        "intent": re.compile(
+            r"\b(?:analyze|evaluate|assess|review (?:the |this |my )|"
+            r"critique|debug|diagnose|"
+            r"explain why|root cause|investigate|audit|"
+            r"compare (?:and contrast |.+ (?:to|with|vs|versus) )|"
+            r"pros and cons|trade-?offs?|advantages|disadvantages|"
+            r"deep dive|what do you think|what(?:'s| is) (?:your |the )?(?:opinion|take|assessment)|"
+            r"help me understand|break down|walk me through|"
+            r"should (?:I|we)|which (?:is|should|would) (?:be )?(?:better|best|preferred)|"
+            r"why (?:did|does|is|was|would|should)|"
+            r"what went wrong|what caused|how to improve|"
+            r"is (?:it |.{1,30} )?worth|does it make sense)\b",
+            re.IGNORECASE,
+        ),
+        "topic": re.compile(
+            r"\b(?:performance|bottleneck|latency|throughput|efficiency|"
+            r"security|vulnerability|risk|threat|exposure|"
+            r"architecture|system design|design pattern|approach|strategy|"
+            r"cost-benefit|roi|impact|outcome|"
+            r"quality|reliability|scalability|maintainability|"
+            r"trade-?off|decision|choice|option|alternative|"
+            r"root cause|failure|incident|outage|regression|"
+            r"error|exception|stack trace|traceback|crash|panic|segfault|"
+            r"metric|kpi|benchmark|baseline|target|"
+            r"code review|pull request|diff|changeset)\b",
+            re.IGNORECASE,
+        ),
+        "format": re.compile(
+            r"\b(?:step by step|in detail|thoroughly|comprehensively|"
+            r"with examples|with evidence|with data|"
+            r"strengths and weaknesses|swot|"
+            r"short-term|long-term|immediate|strategic)\b",
+            re.IGNORECASE,
+        ),
+    },
+    "generate": {
+        "intent": re.compile(
+            r"\b(?:write (?:(?:me |us )?(?:a |an |the )?)?(?:blog|article|email|letter|story|poem|"
+            r"tweet|post|description|pitch|proposal|speech|script|outline|"
+            r"summary|bio|resume|cover letter|announcement|press release|"
+            r"newsletter|report|whitepaper|message|response|reply|comment|"
+            r"review|testimonial|caption|title|headline|tagline|slogan|"
+            r"prompt|template|checklist|guide|tutorial)|"
+            r"draft (?:a |an |the |me )?|compose|brainstorm|come up with|"
+            r"generate (?:a |some )?(?:text|content|copy|ideas|names|titles)|"
+            r"rewrite|translate|paraphrase|rephrase|"
+            r"edit (?:the |this )?(?:text|copy|content|writing)|"
+            r"make (?:it |this )?(?:sound|more|less )|"
+            r"summarize (?:this|the|a )|"
+            r"create (?:a |an )?(?:list|outline|plan|agenda|schedule))\b",
+            re.IGNORECASE,
+        ),
+        "topic": re.compile(
+            r"\b(?:blog post|article|essay|email|newsletter|"
+            r"marketing copy|ad copy|social media|content strategy|"
+            r"creative writing|fiction|non-fiction|narrative|"
+            r"documentation|readme|changelog|release notes|"
+            r"presentation|slide deck|pitch deck|"
+            r"contract|agreement|terms of service|privacy policy|"
+            r"recipe|itinerary|playlist|agenda)\b",
+            re.IGNORECASE,
+        ),
+        "format": re.compile(
+            r"\b(?:formal|informal|casual|professional|friendly|persuasive|"
+            r"concise|verbose|detailed|brief|"
+            r"bullet points|numbered list|markdown|html|"
+            r"for (?:an? )?(?:audience|reader|customer|client|user)|"
+            r"word count|characters|paragraphs|sections|tone|voice)\b",
+            re.IGNORECASE,
+        ),
+    },
+}
+
+# ── Complexity Patterns ──────────────────────────────────────────────────────
+
+COMPLEXITY_COMPLEX = re.compile(
+    r"\b(?:architect|design system|from scratch|end-to-end|comprehensive|"
     r"novel approach|research paper|synthesis|multi-step|workflow|pipeline|"
     r"in-depth|thorough|detailed plan|full implementation|production|"
-    r"scalable|distributed|microservice|security audit)\b",
+    r"scalable|distributed|microservice|security audit|"
+    r"compare multiple|across all|entire|complete)\b",
     re.IGNORECASE,
 )
 
-COMPLEXITY_SIGNALS_SIMPLE = re.compile(
-    r"\b(quick|simple|short|one-liner|brief|what is|how to|define|"
+COMPLEXITY_SIMPLE = re.compile(
+    r"\b(?:quick|simple|short|one-liner|brief|"
     r"summarize|tldr|eli5|just|only|small|tiny|minor)\b",
     re.IGNORECASE,
 )
 
+# ── Scoring Engine ───────────────────────────────────────────────────────────
+
+INTENT_WEIGHT = 3
+TOPIC_WEIGHT = 2
+FORMAT_WEIGHT = 1
+
+LAYER_WEIGHTS = {
+    "intent": INTENT_WEIGHT,
+    "topic": TOPIC_WEIGHT,
+    "format": FORMAT_WEIGHT,
+}
+
+
+def score_categories(text: str) -> dict[str, int]:
+    """Score each category using three signal layers."""
+    scores: dict[str, int] = {}
+    for category, layers in SIGNALS.items():
+        total = 0
+        for layer_name, weight in LAYER_WEIGHTS.items():
+            pattern = layers.get(layer_name)
+            if pattern:
+                matches = pattern.findall(text)
+                unique = len({m.lower() if isinstance(m, str) else m[0].lower() for m in matches})
+                total += unique * weight
+        scores[category] = total
+    return scores
+
+
+# ── LLM Classifiers ─────────────────────────────────────────────────────────
+
+CLASSIFY_PROMPT = (
+    "Classify this user prompt into exactly ONE category. "
+    "Reply with ONLY the category name, nothing else.\n\n"
+    "Categories:\n"
+    "- research: Current events, news, facts, market data, trends, real-world lookups, statistics\n"
+    "- generate: Writing, drafting, content creation, brainstorming, emails, articles, summaries\n"
+    "- analyze: Evaluation, debugging, comparison, deep reasoning, trade-offs, code review\n"
+    "- code: Programming, implementation, building software, fixing bugs, refactoring\n"
+    "- query: Simple factual questions, definitions, explanations, how things work\n"
+    "- image: Image/visual generation, design, artwork creation\n\n"
+    "User prompt: {prompt}\n\n"
+    "Category:"
+)
+
+VALID_CATEGORIES = {"research", "generate", "analyze", "code", "query", "image"}
+
+
+def _extract_category(raw: str) -> str | None:
+    """Extract a valid category name from LLM response text."""
+    for word in re.split(r"[\s,.\n/<>]+", raw.lower()):
+        cleaned = word.strip("*`'\"()-")
+        if cleaned in VALID_CATEGORIES:
+            return cleaned
+    return None
+
+
+OLLAMA_MODELS = [
+    OLLAMA_MODEL,       # Primary: qwen3.5 (or env override)
+    "qwen2.5:1.5b",    # Fallback: smaller, no thinking mode
+]
+
+
+def classify_with_ollama(text: str) -> str | None:
+    """Classify using local Ollama. Tries primary model, falls back to smaller.
+
+    Uses the chat API with think=False to disable thinking mode on reasoning
+    models (qwen3.5, etc.) — otherwise they waste the token budget on CoT.
+    """
+    for model in OLLAMA_MODELS:
+        try:
+            body = json.dumps({
+                "model": model,
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": "You are a task classifier. Reply with ONLY a single category name, nothing else.",
+                    },
+                    {
+                        "role": "user",
+                        "content": CLASSIFY_PROMPT.format(prompt=text[:500]),
+                    },
+                ],
+                "stream": False,
+                "think": False,
+                "options": {"temperature": 0, "num_predict": 10},
+            }).encode()
+            req = urllib.request.Request(
+                f"{OLLAMA_URL}/api/chat",
+                data=body,
+                headers={"Content-Type": "application/json"},
+            )
+            with urllib.request.urlopen(req, timeout=OLLAMA_TIMEOUT) as resp:
+                result = json.loads(resp.read())
+                content = result.get("message", {}).get("content", "")
+                category = _extract_category(content)
+                if category:
+                    return category
+        except Exception:
+            continue
+    return None
+
+
+def classify_with_openai(text: str) -> str | None:
+    """Classify using GPT-4o-mini. ~$0.0001 per call."""
+    if not OPENAI_API_KEY:
+        return None
+    try:
+        body = json.dumps({
+            "model": "gpt-4o-mini",
+            "messages": [
+                {"role": "system", "content": "You are a task classifier. Reply with ONLY a single category name."},
+                {"role": "user", "content": CLASSIFY_PROMPT.format(prompt=text[:500])},
+            ],
+            "temperature": 0,
+            "max_tokens": 10,
+        }).encode()
+        req = urllib.request.Request(
+            "https://api.openai.com/v1/chat/completions",
+            data=body,
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {OPENAI_API_KEY}",
+            },
+        )
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            result = json.loads(resp.read())
+            content = result["choices"][0]["message"]["content"]
+            return _extract_category(content)
+    except Exception:
+        return None
+
+
+def classify_with_gemini(text: str) -> str | None:
+    """Classify using Gemini Flash. Free tier / near-free."""
+    if not GEMINI_API_KEY:
+        return None
+    try:
+        body = json.dumps({
+            "contents": [{"parts": [{"text": CLASSIFY_PROMPT.format(prompt=text[:500])}]}],
+            "generationConfig": {"temperature": 0, "maxOutputTokens": 10},
+        }).encode()
+        req = urllib.request.Request(
+            f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEMINI_API_KEY}",
+            data=body,
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            result = json.loads(resp.read())
+            content = result["candidates"][0]["content"]["parts"][0]["text"]
+            return _extract_category(content)
+    except Exception:
+        return None
+
+
+# ── Complexity Classifier ────────────────────────────────────────────────────
+
+
+def classify_complexity(text: str, task_type: str) -> str:
+    """Determine task complexity from text signals."""
+    if COMPLEXITY_COMPLEX.search(text):
+        return "complex"
+    if COMPLEXITY_SIMPLE.search(text):
+        return "simple"
+    if len(text) > 500:
+        return "complex"
+    if len(text) > 150:
+        return "moderate"
+    return "simple" if task_type == "query" else "moderate"
+
+
+# ── Main Classifier ──────────────────────────────────────────────────────────
+
 
 def classify_prompt(text: str) -> dict | None:
-    """Fast heuristic classification. Returns None only for truly local/shell tasks."""
+    """Classify using heuristic scoring → Ollama → cheap API → weak heuristic → auto."""
     stripped = text.strip()
 
-    # Skip slash commands and truly local shell operations
+    if not stripped or len(stripped) < 8:
+        return None
     if SKIP_PATTERNS.search(stripped):
         return None
 
-    # Skip very short prompts (likely conversational or confirmations)
-    if len(stripped) < 10:
-        return None
+    # Layer 1: Heuristic scoring (instant, free)
+    scores = score_categories(text)
+    best_category = max(scores, key=scores.get)
+    best_score = scores[best_category]
 
-    # Skip empty / whitespace-only
-    if not stripped:
-        return None
+    if best_score >= CONFIDENCE_THRESHOLD:
+        return {
+            "task_type": best_category,
+            "complexity": classify_complexity(text, best_category),
+            "method": "heuristic",
+            "score": best_score,
+        }
 
-    # Determine task type — try each pattern
-    task_type = None
-    if IMAGE_PATTERNS.search(text):
-        task_type = "image"
-    elif RESEARCH_PATTERNS.search(text):
-        task_type = "research"
-    elif CODE_PATTERNS.search(text):
-        task_type = "code"
-    elif ANALYZE_PATTERNS.search(text):
-        task_type = "analyze"
-    elif GENERATE_PATTERNS.search(text):
-        task_type = "generate"
-    elif QUERY_PATTERNS.search(text):
-        task_type = "query"
+    # Layer 2: Ollama local LLM (free, 1-3s)
+    if len(stripped) >= 10:
+        ollama_result = classify_with_ollama(text)
+        if ollama_result:
+            return {
+                "task_type": ollama_result,
+                "complexity": classify_complexity(text, ollama_result),
+                "method": "ollama",
+            }
 
-    # If no pattern matched, default to llm_route (let the LLM classifier decide)
-    if task_type is None:
-        # Only route if the prompt is substantial enough
-        if len(stripped) >= 20:
-            task_type = "auto"
-        else:
-            return None
+    # Layer 3: Cheap API model (Gemini Flash first — free tier, then GPT-4o-mini)
+    if len(stripped) >= 10:
+        api_result = classify_with_gemini(text) or classify_with_openai(text)
+        if api_result:
+            return {
+                "task_type": api_result,
+                "complexity": classify_complexity(text, api_result),
+                "method": "api",
+            }
 
-    # Determine complexity
-    if COMPLEXITY_SIGNALS_COMPLEX.search(text):
-        complexity = "complex"
-    elif COMPLEXITY_SIGNALS_SIMPLE.search(text):
-        complexity = "simple"
-    elif len(text) > 500:
-        complexity = "complex"
-    elif len(text) > 150:
-        complexity = "moderate"
-    else:
-        complexity = "simple" if task_type == "query" else "moderate"
+    # Layer 4: Weak heuristic match (score > 0 but below threshold)
+    if best_score > 0:
+        return {
+            "task_type": best_category,
+            "complexity": classify_complexity(text, best_category),
+            "method": "heuristic-weak",
+            "score": best_score,
+        }
 
-    return {"task_type": task_type, "complexity": complexity}
+    # Layer 5: Truly unclassifiable — route to auto (llm_route decides)
+    if len(stripped) >= 20:
+        return {
+            "task_type": "auto",
+            "complexity": classify_complexity(text, "auto"),
+            "method": "fallback",
+        }
+
+    return None
 
 
 # ── Tool Mapping ─────────────────────────────────────────────────────────────
@@ -160,7 +523,10 @@ TOOL_MAP = {
 }
 
 
-def main():
+# ── Entry Point ──────────────────────────────────────────────────────────────
+
+
+def main() -> None:
     try:
         hook_input = json.load(sys.stdin)
     except (json.JSONDecodeError, EOFError):
@@ -176,10 +542,11 @@ def main():
 
     task_type = result["task_type"]
     complexity = result["complexity"]
+    method = result["method"]
     tool = TOOL_MAP.get(task_type, "llm_route")
 
     hint = (
-        f"[ROUTE: {task_type}/{complexity}] "
+        f"[ROUTE: {task_type}/{complexity} via {method}] "
         f"Auto-route this task to external LLM. "
         f"Use `{tool}` tool"
         f"{f' with complexity_override={complexity}' if tool == 'llm_route' else ''}. "

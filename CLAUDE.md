@@ -24,7 +24,13 @@ When a user's task would clearly benefit from an external LLM — research requi
 
 ### Routing Hint
 
-If a `[ROUTE: <task_type>/<complexity>]` hint appears at the start of the conversation context, use it to select the right tool and skip re-classification. This hint is injected by the auto-classify hook.
+If a `[ROUTE: <task_type>/<complexity> via <method>]` hint appears in the conversation context, use it to select the right tool and skip re-classification. The hint is injected by the UserPromptSubmit hook's multi-layer classifier:
+
+1. `via heuristic` — High-confidence pattern match (instant, free)
+2. `via ollama` — Local LLM classification via qwen3.5 (~1s, free)
+3. `via api` — Cheap API classification via Gemini Flash/GPT-4o-mini (~$0.0001)
+4. `via heuristic-weak` — Low-confidence pattern match
+5. `via fallback` — No classification; `llm_route` should do full analysis
 
 ## Development
 
