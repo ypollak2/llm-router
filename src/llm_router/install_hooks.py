@@ -108,8 +108,10 @@ def check_and_update_rules() -> str | None:
 
 # Hook definitions: (source_filename, dest_filename, event, matcher)
 _HOOK_DEFS = [
+    ("session-start.py", "llm-router-session-start.py", "SessionStart", ""),
     ("auto-route.py", "llm-router-auto-route.py", "UserPromptSubmit", ""),
     ("usage-refresh.py", "llm-router-usage-refresh.py", "PostToolUse", "llm_"),
+    ("session-end.py", "llm-router-session-end.py", "Stop", ""),
 ]
 
 

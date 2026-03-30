@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm-router-hook-version: 3
+# llm-router-hook-version: 4
 """UserPromptSubmit hook — scoring classifier with Ollama + API fallback chain.
 
 Classification chain (stops at first success):
@@ -549,17 +549,13 @@ def main() -> None:
     method = result["method"]
     tool = TOOL_MAP.get(task_type, "llm_route")
 
-    # Hard directive — unambiguous, no room to rationalize around it.
-    # Key additions vs. old soft hint:
-    #   - "MANDATORY" not "Auto-route"
-    #   - Explicit "No Agent subagents" prohibition (the #1 violation pattern)
-    #   - "cheap model's output IS your response" — frames the economic contract
+    # Single-line directive: maximum density, minimum tokens, unmissable.
+    # Forbidden list is on the same line — no skimming past it.
     complexity_flag = f" complexity_override={complexity}" if tool == "llm_route" else ""
     directive = (
-        f"⚡ MANDATORY ROUTE: {task_type}/{complexity} (classified via {method})\n"
-        f"Call `{tool}`{complexity_flag} as your FIRST and ONLY action.\n"
-        f"FORBIDDEN: Agent subagents · WebSearch · WebFetch · answering yourself · Bash research\n"
-        f"The cheap model's output IS your response. Do not add to it."
+        f"⚡ ROUTE→{tool}{complexity_flag} ({task_type}/{complexity} via {method}) | "
+        f"FORBIDDEN: self-answer · Agent subagents · WebSearch · WebFetch · Bash research | "
+        f"Call the tool NOW as your only action. Cheap model output IS your response."
     )
 
     output = {
