@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# llm-router-hook-version: 1
 """PostToolUse hook — usage refresh + periodic savings awareness.
 
 After any llm_* MCP tool call:

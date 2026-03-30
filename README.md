@@ -134,7 +134,7 @@ This installs hooks + rules to `~/.claude/` so every Claude Code session auto-ro
 - **`/route` skill** — Smart task classification and routing in one command
 - **Smart classifier** — Auto-picks Claude Haiku/Sonnet/Opus based on complexity
 - **Prompt classification cache** — SHA-256 exact-match LRU cache (1000 entries, 1h TTL) for instant repeat classifications
-- **Auto-route hook** — Multi-layer `UserPromptSubmit` classifier: heuristic scoring (instant) → Ollama local LLM (free, ~1s) → cheap API (Gemini Flash/GPT-4o-mini, ~$0.0001) → auto fallback
+- **Auto-route hook** — Multi-layer `UserPromptSubmit` classifier: routes **every prompt** (including codebase questions) through Haiku/Ollama first; heuristic scoring (instant) → Ollama local LLM (free, ~1s) → cheap API (Gemini Flash/GPT-4o-mini, ~$0.0001) → auto fallback. Hooks self-update after `pip upgrade` — no reinstall needed.
 - **Streaming responses** — `llm_stream` tool for long-running tasks, shows output as it arrives
 - **Usage auto-refresh** — `PostToolUse` hook detects stale Claude subscription data (>15 min) and nudges for refresh
 - **Savings awareness** — Every 5th routed task, shows estimated Claude API costs and rate limit capacity saved
@@ -159,6 +159,36 @@ This installs hooks + rules to `~/.claude/` so every Claude Code session auto-ro
 <p align="center">
   <img src="docs/images/routing-flow.svg" alt="Routing Flow" width="600" />
 </p>
+
+---
+
+## Auto-Route Hook — Every Prompt, Cheaper Model First
+
+The `UserPromptSubmit` hook intercepts **all prompts** — not just explicit routing requests — and classifies them before your top-tier model sees them. Simple tasks go straight to Haiku or a local Ollama model; only genuinely complex work escalates.
+
+### What gets routed
+
+| Prompt | Classified as | Model used |
+|--------|---------------|------------|
+| `why doesn't the router work?` | `analyze/moderate` | Haiku |
+| `how does benchmarks.py work?` | `query/simple` | Ollama / Haiku |
+| `fix the bug in profiles.py` | `code/moderate` | Haiku / Sonnet |
+| `implement a distributed cache` | `code/complex` | Sonnet / Opus |
+| `write a blog post about LLMs` | `generate/moderate` | Haiku / Gemini Flash |
+| `git status` (raw shell command) | *(skipped — terminal op)* | — |
+
+### Classification chain (stops at first success)
+
+```
+1. Heuristic scoring    instant, free   → high-confidence patterns route immediately
+2. Ollama local LLM     free, ~1s       → catches what heuristics miss
+3. Cheap API            ~$0.0001        → Gemini Flash / GPT-4o-mini fallback
+4. Query catch-all      instant, free   → any remaining question → Haiku
+```
+
+### Self-updating hooks
+
+Hook scripts are versioned (`# llm-router-hook-version: N`). On every MCP server startup, if the bundled version in the installed package is newer than what's in `~/.claude/hooks/`, it's automatically overwritten. **Existing users get classification improvements automatically after `pip install --upgrade claude-code-llm-router`** — no need to re-run `llm-router-install-hooks`.
 
 ---
 

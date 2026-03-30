@@ -53,12 +53,15 @@ logging.basicConfig(level=logging.INFO, format="%(name)s | %(message)s")
 
 mcp = FastMCP("llm-router")
 
-# Auto-update routing rules on startup if a newer version was installed via pip
+# Auto-update routing rules and hooks on startup if a newer version was installed via pip
 try:
     from llm_router.install_hooks import check_and_update_rules as _update_rules
+    from llm_router.install_hooks import check_and_update_hooks as _update_hooks
     _msg = _update_rules()
     if _msg:
         logging.getLogger("llm_router").info(_msg)
+    for _hmsg in _update_hooks():
+        logging.getLogger("llm_router").info(_hmsg)
 except Exception:
     pass
 

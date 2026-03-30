@@ -30,6 +30,7 @@ _RULES_DST = _CLAUDE_DIR / "rules"
 _SETTINGS_PATH = _CLAUDE_DIR / "settings.json"
 
 _RULES_VERSION_RE = re.compile(r"<!--\s*llm-router-rules-version:\s*(\d+)\s*-->")
+_HOOK_VERSION_RE = re.compile(r"#\s*llm-router-hook-version:\s*(\d+)")
 
 
 def _rules_version(path: Path) -> int:
@@ -40,6 +41,45 @@ def _rules_version(path: Path) -> int:
         return int(m.group(1)) if m else 0
     except (OSError, IndexError):
         return 0
+
+
+def _hook_version(path: Path) -> int:
+    """Return the version number from a hook's second comment line, or 0 if absent."""
+    try:
+        for line in path.read_text(encoding="utf-8").splitlines()[:5]:
+            m = _HOOK_VERSION_RE.search(line)
+            if m:
+                return int(m.group(1))
+        return 0
+    except OSError:
+        return 0
+
+
+def check_and_update_hooks() -> list[str]:
+    """Re-copy bundled hooks to ~/.claude/hooks/ if the installed versions are stale.
+
+    Returns a list of human-readable update messages (one per updated hook).
+    Called automatically on MCP server startup so existing users get hook updates
+    after ``pip install --upgrade claude-code-llm-router`` without re-running install.
+    Only overwrites hooks that were originally installed by llm-router (identified
+    by the ``# llm-router-hook-version:`` marker in the file).
+    """
+    updates: list[str] = []
+    for src_name, dst_name, _event, _matcher in _HOOK_DEFS:
+        src = _HOOKS_SRC / src_name
+        dst = _HOOKS_DST / dst_name
+        if not src.exists() or not dst.exists():
+            continue
+        src_v = _hook_version(src)
+        dst_v = _hook_version(dst)
+        if src_v <= dst_v:
+            continue
+        try:
+            shutil.copy2(src, dst)
+            updates.append(f"Updated {dst_name} v{dst_v} → v{src_v}")
+        except OSError as e:
+            updates.append(f"Failed to update {dst_name}: {e}")
+    return updates
 
 
 def check_and_update_rules() -> str | None:
