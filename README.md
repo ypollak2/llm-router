@@ -266,7 +266,7 @@ Fetched via Playwright from claude.ai's internal JSON API (same data the setting
 
 ## MCP Tools
 
-Once installed, Claude Code gets these 24 tools:
+Once installed, Claude Code gets these 25 tools:
 
 | Tool | What It Does |
 |------|-------------|
@@ -302,6 +302,10 @@ Once installed, Claude Code gets these 24 tools:
 | `llm_usage` | Unified dashboard — Claude sub, Codex, APIs, savings in one view |
 | `llm_health` | Check provider availability and circuit breaker status |
 | `llm_providers` | List all supported and configured providers |
+| **Session Memory** | |
+| `llm_save_session` | Summarize + persist current session for cross-session context injection |
+
+> **Context injection**: text tools (`llm_query`, `llm_research`, `llm_generate`, `llm_analyze`, `llm_code`) automatically prepend recent conversation history and previous session summaries to every external LLM call — so GPT-4o, Gemini, and Perplexity receive the same context you have. Pass `context="..."` to add caller-supplied context on top. Controlled by `LLM_ROUTER_CONTEXT_ENABLED` (default: on).
 
 ---
 
@@ -453,7 +457,7 @@ uv run ruff check src/
 
 See [ROADMAP.md](ROADMAP.md) for the detailed roadmap with phases and priorities.
 
-### Completed (v0.1 Foundation + v0.2 Intelligence + v0.3 Caching & Automation)
+### Completed (v0.1–v0.5)
 
 - [x] Core text LLM routing (10+ providers)
 - [x] Configurable profiles (budget / balanced / premium)
@@ -492,13 +496,17 @@ See [ROADMAP.md](ROADMAP.md) for the detailed roadmap with phases and priorities
 - [x] Gemini media APIs (Imagen 3 images, Veo 2 video)
 - [x] Global hook installer (`llm_setup(action='install_hooks')` + `llm-router-install-hooks` CLI)
 - [x] Global routing rules (auto-installed to `~/.claude/rules/llm-router.md`)
+- [x] Session context injection (ring buffer + SQLite summaries, injected into all text tools)
+- [x] `llm_save_session` MCP tool (auto-summarize + persist session for future context)
+- [x] Cross-session memory (previous session summaries prepended to external LLM calls)
+- [x] Auto-update routing rules (version header + silent update on MCP startup after pip upgrade)
+- [x] Token arbitrage enforcement — routing hint override bug fixed; simple tasks now correctly route to cheap models
 
-### Next Up (v0.5 — Evaluation & Learning)
+### Next Up (v0.6 — Evaluation & Learning)
 
 - [ ] Classification outcome tracking (was the routed model's response good?)
 - [ ] A/B testing framework for routing decisions
 - [ ] Adaptive routing based on historical success rates
-- [ ] LLM-based context compaction (optional, beyond structural)
 
 ---
 

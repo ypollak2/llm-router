@@ -1,3 +1,4 @@
+<!-- llm-router-rules-version: 2 -->
 # LLM Router — Global Routing Rules
 
 > Installed by llm-router. These rules ensure every task is evaluated for optimal model routing.
@@ -32,9 +33,19 @@ If no `[ROUTE:]` hint appears (hook not installed or prompt was skipped), use yo
 - Code generation for external model → `llm_code`
 - Simple factual questions → `llm_query`
 
+## Why Routing Saves Tokens Even for Simple Tasks
+
+The primary value is **token arbitrage**: cheap models (Gemini Flash, GPT-4o-mini, Haiku) cost
+~50-100x less than Opus. When a `[ROUTE: query/simple]` hint fires for a git commit message or
+a one-line answer, calling `llm_query` saves real subscription tokens — Opus only orchestrates,
+the cheap model generates the actual response.
+
+Do NOT treat tasks as "too simple to route" — simple tasks are exactly when routing saves the most.
+
 ## What NOT to Do
 
 - Do NOT ignore routing hints — ever
-- Do NOT decide that a task is "too simple" for routing — the router already made that decision
+- Do NOT decide that a task is "too simple" for routing — simple tasks are the best candidates
 - Do NOT skip routing because you're "already working on the codebase"
 - Do NOT re-classify tasks that have already been classified by the hook
+- Do NOT handle a task yourself because it seems "local" — local tasks still consume Opus tokens

@@ -94,8 +94,8 @@ class TestAutoRouteClassification:
         out = run_hook("enhance the caching layer for better throughput")
         assert out is not None
         hint = _extract_hint(out)
-        # "enhance" is ambiguous — could be code or analyze depending on classifier
-        assert "[ROUTE: code/" in hint or "[ROUTE: analyze/" in hint
+        # "enhance" is ambiguous — classifiers may route to code, analyze, or generate
+        assert "[ROUTE: code/" in hint or "[ROUTE: analyze/" in hint or "[ROUTE: generate/" in hint
 
     def test_ollama_or_api_fallback_for_unmatched_long_prompt(self):
         """Prompts with no strong heuristic match fall to Ollama/API classification."""

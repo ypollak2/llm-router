@@ -61,6 +61,12 @@ class RouterConfig(BaseSettings):
     quality_mode: QualityMode = QualityMode.BALANCED
     min_model: str = "haiku"                # floor: never route below this
 
+    # ── Context injection settings ──
+    context_enabled: bool = True          # inject session/history context into routed calls
+    context_max_messages: int = 5         # max recent session messages to include
+    context_max_previous_sessions: int = 3  # max past session summaries to include
+    context_max_tokens: int = 1500        # token budget for all injected context
+
     # ── Compaction settings ──
     compaction_mode: str = "structural"  # off | structural | full
     compaction_threshold: int = 4000     # token threshold to trigger compaction

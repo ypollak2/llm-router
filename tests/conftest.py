@@ -13,13 +13,16 @@ from llm_router.types import LLMResponse
 def _reset_singletons():
     """Reset module-level singletons between tests."""
     import llm_router.config as config_mod
+    import llm_router.context as context_mod
     import llm_router.health as health_mod
 
     config_mod._config = None
     health_mod._tracker = None
+    context_mod._session_buffer = None
     yield
     config_mod._config = None
     health_mod._tracker = None
+    context_mod._session_buffer = None
 
 
 @pytest.fixture

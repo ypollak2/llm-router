@@ -13,6 +13,7 @@ Can be run as:
 from __future__ import annotations
 
 import json
+import re
 import shutil
 from pathlib import Path
 
@@ -27,6 +28,43 @@ _CLAUDE_DIR = Path.home() / ".claude"
 _HOOKS_DST = _CLAUDE_DIR / "hooks"
 _RULES_DST = _CLAUDE_DIR / "rules"
 _SETTINGS_PATH = _CLAUDE_DIR / "settings.json"
+
+_RULES_VERSION_RE = re.compile(r"<!--\s*llm-router-rules-version:\s*(\d+)\s*-->")
+
+
+def _rules_version(path: Path) -> int:
+    """Return the version number embedded in a rules file, or 0 if absent."""
+    try:
+        first_line = path.read_text(encoding="utf-8").splitlines()[0]
+        m = _RULES_VERSION_RE.match(first_line)
+        return int(m.group(1)) if m else 0
+    except (OSError, IndexError):
+        return 0
+
+
+def check_and_update_rules() -> str | None:
+    """Re-copy bundled rules to ~/.claude/rules/ if the installed version is stale.
+
+    Returns a status message if an update was applied, None if already up-to-date.
+    Called automatically on MCP server startup so existing users get rule updates
+    after ``pip install --upgrade claude-code-llm-router`` without re-running install.
+    """
+    rules_src = _RULES_SRC / "llm-router.md"
+    rules_dst = _RULES_DST / "llm-router.md"
+
+    if not rules_src.exists():
+        return None
+
+    src_version = _rules_version(rules_src)
+    dst_version = _rules_version(rules_dst)
+
+    if src_version <= dst_version:
+        return None
+
+    _RULES_DST.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(rules_src, rules_dst)
+    return f"Updated routing rules v{dst_version} → v{src_version}"
+
 
 # Hook definitions: (source_filename, dest_filename, event, matcher)
 _HOOK_DEFS = [

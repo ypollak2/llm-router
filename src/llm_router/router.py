@@ -17,6 +17,7 @@ from typing import Any
 from llm_router import cost, media, providers
 from llm_router.compaction import compact_structural
 from llm_router.config import get_config
+from llm_router.context import build_context_messages, get_session_buffer
 from llm_router.health import get_tracker
 from llm_router.profiles import get_model_chain, provider_from_model
 from llm_router.types import BudgetExceededError, LLMResponse, RoutingProfile, TaskType
@@ -92,6 +93,7 @@ async def route_and_call(
     media_params: dict | None = None,
     ctx: Any | None = None,
     classification_data: dict | None = None,
+    caller_context: str | None = None,
 ) -> LLMResponse:
     """Route a request to the best available model and return the response.
 
@@ -124,6 +126,9 @@ async def route_and_call(
         classification_data: Optional dict with classification and recommendation
             metadata for quality logging. When provided, a routing decision is
             logged to the ``routing_decisions`` table after a successful call.
+        caller_context: Optional context string from the MCP tool caller
+            (e.g. recent conversation summary). Injected alongside session
+            buffer and persistent history into the LLM messages.
 
     Returns:
         An ``LLMResponse`` with the model output, cost, and latency.
@@ -207,10 +212,16 @@ async def route_and_call(
             else:
                 response = await _call_text(
                     model, prompt, system_prompt, temperature, max_tokens, task_type,
+                    caller_context=caller_context,
                 )
 
             tracker.record_success(provider)
             await cost.log_usage(response, task_type, profile)
+
+            # Record exchange in session buffer for future context injection
+            buf = get_session_buffer()
+            buf.record("user", prompt, task_type=task_type.value)
+            buf.record("assistant", response.content, task_type=task_type.value)
 
             # Log routing decision for quality analytics
             if classification_data:
@@ -272,12 +283,16 @@ async def _call_text(
     temperature: float | None,
     max_tokens: int | None,
     task_type: TaskType,
+    *,
+    caller_context: str | None = None,
 ) -> LLMResponse:
     """Dispatch a text completion call through LiteLLM's unified API.
 
-    Builds the messages list (optional system + user), adds task-specific
-    parameters, and delegates to ``providers.call_llm``.  LiteLLM handles
-    provider-specific auth and request formatting transparently.
+    Builds the messages list with optional context injection:
+      [system_prompt?] → [context_messages...] → [user_prompt]
+
+    Context messages include previous session summaries and recent
+    conversation history, assembled by ``build_context_messages()``.
 
     Args:
         model: LiteLLM model identifier (e.g. ``"openai/gpt-4o"``).
@@ -287,13 +302,28 @@ async def _call_text(
         max_tokens: Maximum output tokens (None = provider default).
         task_type: Used to inject task-specific parameters (e.g. research
             tasks add a recency filter for Perplexity).
+        caller_context: Optional caller-supplied context string.
 
     Returns:
         An ``LLMResponse`` with the generated text, cost, and latency.
     """
+    config = get_config()
     messages: list[dict[str, str]] = []
     if system_prompt:
         messages.append({"role": "system", "content": system_prompt})
+
+    # Inject session + persistent context between system prompt and user prompt
+    # Guard: context_enabled may be MagicMock in test mocks
+    context_enabled = getattr(config, "context_enabled", True)
+    if isinstance(context_enabled, bool) and context_enabled:
+        context_msgs = await build_context_messages(
+            caller_context=caller_context,
+            max_session_messages=getattr(config, "context_max_messages", 5),
+            max_previous_sessions=getattr(config, "context_max_previous_sessions", 3),
+            max_context_tokens=getattr(config, "context_max_tokens", 1500),
+        )
+        messages.extend(context_msgs)
+
     messages.append({"role": "user", "content": prompt})
 
     extra = {}

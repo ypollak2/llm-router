@@ -18,9 +18,13 @@ When a user's task would clearly benefit from an external LLM — research requi
 
 ### When NOT to auto-route
 
-- Tasks you can handle directly (file edits, git operations, shell commands)
 - Questions about this codebase specifically (use Read/Grep instead)
-- When the user explicitly asks YOU to do something, not an external LLM
+- When the user explicitly asks YOU to do something (e.g. "you personally explain this")
+
+> **Token savings are the primary value**: Do NOT skip routing for "simple" tasks like git
+> commits, writing messages, or answering questions. Cheap models (Gemini Flash, GPT-4o-mini)
+> handle the reasoning while Opus stays as orchestrator. When the hook fires a `[ROUTE:]` hint,
+> follow it — the router already decided this task belongs to a cheaper model.
 
 ### Routing Hint
 

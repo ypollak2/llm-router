@@ -53,6 +53,15 @@ logging.basicConfig(level=logging.INFO, format="%(name)s | %(message)s")
 
 mcp = FastMCP("llm-router")
 
+# Auto-update routing rules on startup if a newer version was installed via pip
+try:
+    from llm_router.install_hooks import check_and_update_rules as _update_rules
+    _msg = _update_rules()
+    if _msg:
+        logging.getLogger("llm_router").info(_msg)
+except Exception:
+    pass
+
 
 def _check_tier(feature: str) -> str | None:
     """Gate a feature behind the Pro subscription tier.
@@ -285,6 +294,7 @@ async def llm_route(
     system_prompt: str | None = None,
     temperature: float | None = None,
     max_tokens: int | None = None,
+    context: str | None = None,
 ) -> str:
     """Smart router — classifies task complexity, then routes to the optimal external LLM.
 
@@ -303,6 +313,7 @@ async def llm_route(
         system_prompt: Optional system instructions.
         temperature: Sampling temperature (0.0-2.0).
         max_tokens: Maximum output tokens.
+        context: Optional conversation context to help the model understand the broader task.
     """
     # Step 1: Classify complexity (or use override)
     if complexity_override:
@@ -379,6 +390,7 @@ async def llm_route(
         system_prompt=system_prompt,
         temperature=temperature,
         max_tokens=max_tokens,
+        caller_context=context,
         ctx=ctx,
         classification_data=_classification_data,
     )
@@ -494,6 +506,7 @@ async def llm_query(
     system_prompt: str | None = None,
     temperature: float | None = None,
     max_tokens: int | None = None,
+    context: str | None = None,
 ) -> str:
     """Send a general query to the best available LLM.
 
@@ -505,11 +518,13 @@ async def llm_query(
         system_prompt: Optional system instructions.
         temperature: Sampling temperature (0.0-2.0).
         max_tokens: Maximum output tokens.
+        context: Optional conversation context to help the model understand the broader task.
     """
     resp = await route_and_call(
         TaskType.QUERY, prompt,
         model_override=model, system_prompt=system_prompt,
         temperature=temperature, max_tokens=max_tokens, ctx=ctx,
+        caller_context=context,
     )
     return f"{resp.header()}\n\n{resp.content}"
 
@@ -520,6 +535,7 @@ async def llm_research(
     ctx: Context,
     system_prompt: str | None = None,
     max_tokens: int | None = None,
+    context: str | None = None,
 ) -> str:
     """Search-augmented research query — routes to Perplexity for web-grounded answers.
 
@@ -529,11 +545,12 @@ async def llm_research(
         prompt: The research question.
         system_prompt: Optional system instructions.
         max_tokens: Maximum output tokens.
+        context: Optional conversation context to help the model understand the broader task.
     """
     resp = await route_and_call(
         TaskType.RESEARCH, prompt,
         system_prompt=system_prompt, max_tokens=max_tokens,
-        temperature=0.3, ctx=ctx,
+        temperature=0.3, ctx=ctx, caller_context=context,
     )
     result = resp.header() + "\n\n" + resp.content
     if resp.citations:
@@ -548,6 +565,7 @@ async def llm_generate(
     system_prompt: str | None = None,
     temperature: float | None = None,
     max_tokens: int | None = None,
+    context: str | None = None,
 ) -> str:
     """Generate creative or long-form content — routes to the best generation model.
 
@@ -558,11 +576,12 @@ async def llm_generate(
         system_prompt: Optional system instructions (tone, format, audience).
         temperature: Sampling temperature (higher = more creative).
         max_tokens: Maximum output tokens.
+        context: Optional conversation context to help the model understand the broader task.
     """
     resp = await route_and_call(
         TaskType.GENERATE, prompt,
         system_prompt=system_prompt, temperature=temperature,
-        max_tokens=max_tokens, ctx=ctx,
+        max_tokens=max_tokens, ctx=ctx, caller_context=context,
     )
     return f"{resp.header()}\n\n{resp.content}"
 
@@ -573,6 +592,7 @@ async def llm_analyze(
     ctx: Context,
     system_prompt: str | None = None,
     max_tokens: int | None = None,
+    context: str | None = None,
 ) -> str:
     """Deep analysis task — routes to the strongest reasoning model.
 
@@ -582,11 +602,12 @@ async def llm_analyze(
         prompt: What to analyze.
         system_prompt: Optional system instructions.
         max_tokens: Maximum output tokens.
+        context: Optional conversation context to help the model understand the broader task.
     """
     resp = await route_and_call(
         TaskType.ANALYZE, prompt,
         system_prompt=system_prompt, temperature=0.3,
-        max_tokens=max_tokens, ctx=ctx,
+        max_tokens=max_tokens, ctx=ctx, caller_context=context,
     )
     return f"{resp.header()}\n\n{resp.content}"
 
@@ -597,6 +618,7 @@ async def llm_code(
     ctx: Context,
     system_prompt: str | None = None,
     max_tokens: int | None = None,
+    context: str | None = None,
 ) -> str:
     """Coding task — routes to the best coding model.
 
@@ -606,11 +628,12 @@ async def llm_code(
         prompt: The coding task or question.
         system_prompt: Optional system instructions (language, framework, style).
         max_tokens: Maximum output tokens.
+        context: Optional conversation context to help the model understand the broader task.
     """
     resp = await route_and_call(
         TaskType.CODE, prompt,
         system_prompt=system_prompt, temperature=0.2,
-        max_tokens=max_tokens, ctx=ctx,
+        max_tokens=max_tokens, ctx=ctx, caller_context=context,
     )
     return f"{resp.header()}\n\n{resp.content}"
 
@@ -759,6 +782,31 @@ async def llm_pipeline_templates() -> str:
     lines.append("")
     lines.append('Use: `llm_orchestrate(task="...", template="research_report")`')
     return "\n".join(lines)
+
+
+# ── Session Context ──────────────────────────────────────────────────────────
+
+
+@mcp.tool()
+async def llm_save_session(ctx: Context) -> str:
+    """Summarize and save the current session for cross-session context.
+
+    Uses a cheap model to generate a compact summary of the session's exchanges,
+    then persists it to SQLite. Future routed calls will include this summary
+    as context, giving external models awareness of prior work.
+
+    Call this before ending a session or when switching to a different task.
+    Sessions with fewer than 3 exchanges are skipped.
+    """
+    from llm_router.context import auto_summarize_session
+
+    await ctx.info("Summarizing session...")
+    summary = await auto_summarize_session(min_messages=3)
+
+    if summary is None:
+        return "Session too short (< 3 exchanges) — nothing to save."
+
+    return f"Session saved.\n\n**Summary:** {summary}"
 
 
 # ── Management Tools ─────────────────────────────────────────────────────────

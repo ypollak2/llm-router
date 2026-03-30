@@ -1,5 +1,31 @@
 # Changelog
 
+## v0.5.0 — Session Context Injection & Auto-Update Rules (2026-03-30)
+
+### Added
+
+- **Session context injection** — All text routing tools (`llm_query`, `llm_research`, `llm_generate`, `llm_analyze`, `llm_code`, `llm_route`) now accept an optional `context` parameter. The router automatically prepends recent session messages and cross-session summaries so external models (GPT-4o, Gemini, Perplexity) receive conversation history they would otherwise miss.
+- **Two-layer context system** — Ephemeral in-process ring buffer (last N messages, current session) + persistent SQLite session summaries (previous sessions). Previous sessions appear first, current session at the end.
+- **`llm_save_session` MCP tool** — Summarizes the current session via a cheap model (budget profile) and persists it to SQLite for future context injection. Works as a session boundary marker.
+- **Auto-summarization** — `auto_summarize_session()` routes the buffer through the cheapest available model, falling back to concatenation if LLM is unavailable.
+- **Context compaction** — Injected context runs through the existing structural compaction pipeline to stay within a configurable token budget (default 1500 tokens).
+- **4 new config settings** — `LLM_ROUTER_CONTEXT_ENABLED`, `LLM_ROUTER_CONTEXT_MAX_MESSAGES`, `LLM_ROUTER_CONTEXT_MAX_PREVIOUS_SESSIONS`, `LLM_ROUTER_CONTEXT_MAX_TOKENS`.
+- **Auto-update routing rules** — `check_and_update_rules()` in `install_hooks.py` compares a version header embedded in the bundled rules file against the installed copy. Called automatically at MCP server startup so users get rule updates after `pip upgrade` without re-running `llm-router install`.
+- **Rules versioning** — `<!-- llm-router-rules-version: N -->` header in `llm-router.md`. Increment N to push rule changes to all users silently on next startup.
+
+### Fixed
+
+- **Routing hint override bug** — `CLAUDE.md` previously listed "file edits, git operations, shell commands" as exceptions to routing. Removed: these tasks still consume Opus tokens and benefit most from cheap-model offloading. Token savings are the primary routing value, not just web access.
+- **Global rules enforcement** — Updated `~/.claude/rules/llm-router.md` with an explicit "Why Routing Saves Tokens Even for Simple Tasks" section explaining the token arbitrage model (Opus orchestrates, cheap model reasons).
+
+### Changed
+
+- Tool count increased from 24 to 25 (`llm_save_session` added).
+- `route_and_call()` signature gains `caller_context: str | None = None` parameter.
+- Session buffer and summaries use SHA-256 key hashing consistent with classification cache.
+
+---
+
 ## v0.4.0 — Quality & Global Enforcement (2026-03-29)
 
 ### Added
