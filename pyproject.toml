@@ -44,6 +44,7 @@ Changelog = "https://github.com/ypollak2/llm-router/blob/main/CHANGELOG.md"
 
 [project.scripts]
 llm-router = "llm_router.server:main"
+llm-router-sse = "llm_router.server:main_sse"
 llm-router-onboard = "llm_router.onboard:main"
 llm-router-install-hooks = "llm_router.install_hooks:main"
 

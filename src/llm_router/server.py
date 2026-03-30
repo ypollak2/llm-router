@@ -1914,5 +1914,17 @@ def main():
     mcp.run()
 
 
+def main_sse(port: int | None = None) -> None:
+    """Start the MCP server with SSE transport for remote access (e.g. Claude mobile app).
+
+    Args:
+        port: TCP port to listen on. Defaults to 17891, or reads from argv[1].
+    """
+    import sys
+    if port is None:
+        port = int(sys.argv[1]) if len(sys.argv) > 1 else 17891
+    mcp.run(transport="sse")
+
+
 if __name__ == "__main__":
     main()
