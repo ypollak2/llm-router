@@ -12,6 +12,52 @@ The interactive wizard walks you through each provider. Or manually create a `.e
 
 ---
 
+## Ollama — Local Models (Free, Private)
+
+Run any open-source model locally — no API key, no cost, no data leaving your machine.
+
+### Setup
+
+1. [Download Ollama](https://ollama.com) and install it
+2. Pull the models you want:
+   ```bash
+   ollama pull llama3.2           # fast, good general model (3B/8B)
+   ollama pull qwen2.5-coder:7b   # code-focused
+   ollama pull llama3.3:70b       # powerful but slow (needs 40GB RAM)
+   ```
+3. Add to `.env`:
+   ```
+   OLLAMA_BASE_URL=http://localhost:11434
+
+   # Which models to use at each routing tier (comma-separated, no spaces)
+   OLLAMA_BUDGET_MODELS=llama3.2,qwen2.5-coder:7b
+   OLLAMA_BALANCED_MODELS=llama3.3:70b
+   OLLAMA_PREMIUM_MODELS=
+   ```
+
+### How it works
+
+Ollama models are **prepended** to the routing chain for the matching tier, so they are tried first. If the local model fails or is slow, the router falls back to the next model in the chain (cloud providers).
+
+| Env Var | Tier | Use when |
+|---------|------|----------|
+| `OLLAMA_BUDGET_MODELS` | budget | Simple tasks — fast, small models |
+| `OLLAMA_BALANCED_MODELS` | balanced | Medium tasks — larger models (≥30B) |
+| `OLLAMA_PREMIUM_MODELS` | premium | Complex tasks — largest models (≥70B) |
+
+### Recommended models by use case
+
+| Use case | Model | Pull command |
+|----------|-------|-------------|
+| General chat / quick queries | `llama3.2` | `ollama pull llama3.2` |
+| Code generation | `qwen2.5-coder:7b` | `ollama pull qwen2.5-coder:7b` |
+| Reasoning / analysis | `qwen2.5:32b` | `ollama pull qwen2.5:32b` |
+| Best open-source overall | `llama3.3:70b` | `ollama pull llama3.3:70b` |
+
+> **Tip**: Ollama also powers the auto-route classifier. Even without setting `OLLAMA_BUDGET_MODELS`, Ollama can reduce classification costs by doing local prompt analysis before falling back to a cloud API.
+
+---
+
 ## Text & Code LLMs
 
 ### Google Gemini (Recommended — Free Tier)

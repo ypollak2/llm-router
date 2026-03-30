@@ -52,20 +52,34 @@ You:     "Create a 5-second product demo clip"
 Router:  → Kling 2.0 via fal.ai (best value for short video)
 ```
 
-### Why It Saves 40–70%
+### How It Saves You Real Money
 
-Most AI tasks don't need the most powerful model. The router matches complexity to capability automatically:
+Here's the key insight: **not every task needs the same model**.
+
+When you use Claude Code without a router, every single request — whether it's "what does this function do?" or "redesign this entire architecture" — goes to the same expensive model. That's like hiring a surgeon to change a lightbulb.
+
+LLM Router classifies each task automatically and sends it to the cheapest model that can handle it well:
+
+```
+"What does os.path.join do?"     → Gemini Flash    ($0.000001 — literally free)
+"Refactor the auth module"       → Claude Sonnet   ($0.003)
+"Design the full system arch"    → Claude Opus     ($0.015)
+```
 
 <p align="center">
   <img src="docs/images/savings.svg" alt="Task Distribution" width="400" />
 </p>
 
-| | Without Router | With Router |
-|--|---------------|-------------|
-| Simple tasks (60%) | Opus $$$$ | Haiku $ |
-| Moderate tasks (30%) | Opus $$$$ | Sonnet $$ |
-| Complex tasks (10%) | Opus $$$$ | Opus $$$$ |
-| **Monthly estimate** | **~$50** | **~$15–20** |
+| Task type | Without Router | With Router | Savings |
+|-----------|---------------|-------------|---------|
+| Simple queries (60% of work) | Opus — $0.015 | Haiku/Gemini Flash — $0.0001 | **99%** |
+| Moderate tasks (30% of work) | Opus — $0.015 | Sonnet — $0.003 | **80%** |
+| Complex tasks (10% of work) | Opus — $0.015 | Opus — $0.015 | 0% |
+| **Blended monthly estimate** | **~$50/mo** | **~$8–15/mo** | **70–85%** |
+
+> 💡 **With Ollama**: Route simple tasks to a free local model (`llama3.2`, `qwen2.5-coder`) and the savings become even more dramatic — those 60% of simple tasks cost **$0**.
+
+The router pays for itself in the first hour of use.
 
 ---
 
@@ -224,6 +238,7 @@ Fetched via Playwright from claude.ai's internal JSON API (same data the setting
 
 | Provider | Models | Free Tier | Best For |
 |----------|--------|-----------|----------|
+| **🦙 Ollama** | Any local model | **Yes (free forever)** | Privacy, zero cost, offline use |
 | **Google Gemini** | 2.5 Pro, 2.5 Flash | **Yes** (1M tokens/day) | Generation, long context |
 | **Groq** | Llama 3.3, Mixtral | **Yes** | Ultra-fast inference |
 | **OpenAI** | GPT-4o, GPT-4o-mini, o3 | No | Code, analysis, reasoning |
@@ -234,6 +249,8 @@ Fetched via Playwright from claude.ai's internal JSON API (same data the setting
 | **Together** | Llama 3, CodeLlama | Yes (limited) | Open-source models |
 | **xAI** | Grok 3 | No | Real-time information |
 | **Cohere** | Command R+ | Yes (trial) | RAG, enterprise search |
+
+> 🦙 **Ollama** runs models locally — no API key, no cost, no data sent externally. [Full Ollama setup guide →](docs/PROVIDERS.md#ollama--local-models-free-private)
 
 ### Image Generation
 

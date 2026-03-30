@@ -33,6 +33,7 @@ PROVIDER_ICONS: dict[str, str] = {
     "elevenlabs": "\U0001f3b5",  # musical note
     "runway": "\U0001f3ac",      # clapper board
     "replicate": "\U0001f504",   # counterclockwise arrows
+    "ollama": "\U0001f999",      # llama emoji
 }
 
 

@@ -43,6 +43,16 @@ class RouterConfig(BaseSettings):
     xai_api_key: str = ""
     cohere_api_key: str = ""
 
+    # ── Ollama (local inference — no API key needed) ──
+    # Set ollama_base_url to enable Ollama routing (e.g. http://localhost:11434).
+    # Then list which local models to use per routing tier (comma-separated).
+    # Models are prepended to the tier's chain, so they are tried first.
+    # Example: ollama_budget_models="llama3.2,qwen2.5-coder:7b"
+    ollama_base_url: str = ""               # empty = Ollama disabled
+    ollama_budget_models: str = ""          # e.g. "llama3.2,qwen2.5-coder:7b"
+    ollama_balanced_models: str = ""        # e.g. "llama3.3:70b,qwen2.5-coder:32b"
+    ollama_premium_models: str = ""         # e.g. "llama3.1:405b"
+
     # ── Media providers ──
     fal_key: str = ""               # fal.ai — Flux, video, audio
     stability_api_key: str = ""     # Stability AI — Stable Diffusion
@@ -114,6 +124,9 @@ class RouterConfig(BaseSettings):
         This includes both text and media providers. Used by the router to
         filter the model chain to only models whose provider is available.
 
+        Ollama is treated specially: it has no API key, so it is included
+        whenever ``ollama_base_url`` is set.
+
         Returns:
             Set of provider name strings (e.g. ``{"openai", "anthropic", "fal"}``).
         """
@@ -121,6 +134,8 @@ class RouterConfig(BaseSettings):
         for field_name, (provider_name, _) in self._PROVIDER_MAP.items():
             if getattr(self, field_name, ""):
                 providers.add(provider_name)
+        if self.ollama_base_url:
+            providers.add("ollama")
         return providers
 
     @property
@@ -135,7 +150,7 @@ class RouterConfig(BaseSettings):
         """
         return self.available_providers & {
             "openai", "gemini", "perplexity", "anthropic",
-            "mistral", "deepseek", "groq", "together", "xai", "cohere",
+            "mistral", "deepseek", "groq", "together", "xai", "cohere", "ollama",
         }
 
     @property
@@ -148,6 +163,28 @@ class RouterConfig(BaseSettings):
         return self.available_providers & {
             "openai", "gemini", "fal", "stability", "elevenlabs", "runway", "replicate",
         }
+
+    def ollama_models_for_profile(self, profile: "RoutingProfile") -> list[str]:
+        """Return Ollama model IDs (in ``ollama/model`` format) for a routing profile.
+
+        Parses the comma-separated ``ollama_*_models`` fields and wraps each
+        name in the LiteLLM ``ollama/`` prefix. Returns an empty list when
+        Ollama is not configured or no models are set for that profile.
+
+        Args:
+            profile: The routing profile to look up (BUDGET/BALANCED/PREMIUM).
+
+        Returns:
+            List of LiteLLM model IDs like ``["ollama/llama3.2", "ollama/qwen2.5-coder:7b"]``.
+        """
+        if not self.ollama_base_url:
+            return []
+        raw = {
+            RoutingProfile.BUDGET: self.ollama_budget_models,
+            RoutingProfile.BALANCED: self.ollama_balanced_models,
+            RoutingProfile.PREMIUM: self.ollama_premium_models,
+        }.get(profile, "")
+        return [f"ollama/{m.strip()}" for m in raw.split(",") if m.strip()]
 
     def apply_keys_to_env(self) -> None:
         """Export all configured API keys into ``os.environ``.
@@ -164,6 +201,9 @@ class RouterConfig(BaseSettings):
             value = getattr(self, field_name, "")
             if value:
                 os.environ[env_var] = value
+        # LiteLLM reads Ollama's base URL from OLLAMA_API_BASE
+        if self.ollama_base_url:
+            os.environ.setdefault("OLLAMA_API_BASE", self.ollama_base_url)
 
 
 _config: RouterConfig | None = None
