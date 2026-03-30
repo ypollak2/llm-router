@@ -1,5 +1,17 @@
 # Changelog
 
+## v0.7.1 — Demo Reports & Docs (2026-03-31)
+
+### Added
+
+- **Demo report artifacts** — `demo/demo_report.{md,json}` and `demo/saas_demo_report.{md,json}` committed to repo as reference outputs from live routing sessions (app builder and PulseDB SaaS demos).
+
+### Changed
+
+- README: added `llm_edit` to MCP tools table, moved v0.7 items to Completed section, renamed Next Up to v0.8.
+
+---
+
 ## v0.7.0 — Availability-Aware Routing & llm_edit Tool (2026-03-31)
 
 ### Added

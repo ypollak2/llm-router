@@ -358,6 +358,7 @@ Once installed, Claude Code gets these 25 tools:
 | `llm_generate` | Creative content — writing, summaries, brainstorming |
 | `llm_analyze` | Deep reasoning — analysis, debugging, problem decomposition |
 | `llm_code` | Coding tasks — generation, refactoring, algorithms |
+| `llm_edit` | Route code-edit *reasoning* to a cheap model → returns exact `{file, old_string, new_string}` pairs for Claude to apply |
 | **Media** | |
 | `llm_image` | Image generation — Gemini Imagen, DALL-E, Flux, or SD |
 | `llm_video` | Video generation — Gemini Veo, Runway, Kling, etc. |
@@ -619,7 +620,13 @@ See [ROADMAP.md](ROADMAP.md) for the detailed roadmap with phases and priorities
 - [x] Codex injection fix — no longer injected at position 0 when subscription mode removes Claude from chain (caused 300s timeouts)
 - [x] Codex task filtering — excluded from RESEARCH (no web access) and QUERY (too slow) chains
 
-### Next Up (v0.7 — Evaluation & Learning)
+### Completed (v0.7)
+
+- [x] **Availability-aware routing** — P95 latency from `routing_decisions` table folded into benchmark quality score. Penalty range 0.0–0.50 (<5s=0, <15s=0.03, <60s=0.10, <180s=0.30, ≥180s=0.50). 60s cache prevents repeated DB hits per routing cycle.
+- [x] **Codex cold-start defaults** — `_COLD_START_LATENCY_MS` applies pessimistic 60-90s P95 before any history exists, preventing Codex from being placed first in chains on a fresh install.
+- [x] **`llm_edit` MCP tool** — Routes code-edit reasoning to a cheap CODE model. Reads files locally (32 KB cap), gets `{file, old_string, new_string}` JSON back, returns formatted instructions for Claude to apply mechanically. Keeps Opus out of the "what to change" loop.
+
+### Next Up (v0.8 — Evaluation & Learning)
 
 - [ ] Classification outcome tracking (was the routed model's response good?)
 - [ ] A/B testing framework for routing decisions
