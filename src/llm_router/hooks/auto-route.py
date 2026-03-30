@@ -66,14 +66,15 @@ GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "") or os.environ.get("GOOGLE_
 
 # ── Skip Patterns (truly local operations) ───────────────────────────────────
 
+# Only skip: slash commands, raw shell one-liners, and pure acknowledgement words.
+# Anything that looks like a question or task goes through the classifier so it
+# can be routed to Haiku / Ollama instead of burning top-tier model tokens.
 SKIP_PATTERNS = re.compile(
     r"^/(?:route|help|clear|compact|init|login|doctor|memory|model|cost|config|"
     r"permissions|review|status|mcp|bug|learn|verify|tdd|plan|eval|claw|loop|"
     r"checkpoint|save-session|resume-session|sessions|instinct|skill|usage)\b|"
     r"^\s*(?:git |npm |pip |uv |cargo |make |docker |brew |curl |wget |"
     r"chmod |mkdir |rm |mv |cp |ls |cd |cat |grep |rtk )\b|"
-    r"^\s*(?:commit|push|pull|merge|deploy|rebase|stash|cherry-?pick)\b|"
-    r"^\s*(?:show me the |read |open |list files|find file|find class|find function)\b|"
     r"^\s*(?:yes|no|ok|sure|thanks|thank you|y|n|k|go ahead|do it|looks good|lgtm)\s*$",
     re.IGNORECASE,
 )
@@ -499,11 +500,13 @@ def classify_prompt(text: str) -> dict | None:
             "score": best_score,
         }
 
-    # Layer 5: Truly unclassifiable — route to auto (llm_route decides)
-    if len(stripped) >= 20:
+    # Layer 5: Question / unknown — treat as query so cheap model (Haiku) handles it.
+    # This ensures codebase questions, "why doesn't X work", meta-questions, etc.
+    # are routed instead of silently falling through to the top-tier model.
+    if len(stripped) >= 8:
         return {
-            "task_type": "auto",
-            "complexity": classify_complexity(text, "auto"),
+            "task_type": "query",
+            "complexity": classify_complexity(text, "query"),
             "method": "fallback",
         }
 
