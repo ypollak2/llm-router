@@ -1,9 +1,5 @@
 """Tests for install_hooks version-check logic."""
 
-from pathlib import Path
-
-import pytest
-
 from llm_router.install_hooks import _rules_version, check_and_update_rules
 
 
