@@ -1,0 +1,219 @@
+{
+  "version": 1,
+  "generated_at": "2026-03-30T00:00:00Z",
+  "sources": {
+    "lmsys_fetched_at": null,
+    "aider_fetched_at": null,
+    "huggingface_fetched_at": null,
+    "litellm_fetched_at": null
+  },
+  "raw_scores": {
+    "anthropic/claude-opus-4-6": {
+      "lmsys_elo": 1350,
+      "aider_pass_rate": 0.72,
+      "hf_score": 0.88,
+      "cost_per_1m_input": 15.0,
+      "cost_per_1m_output": 75.0
+    },
+    "openai/o3": {
+      "lmsys_elo": 1380,
+      "aider_pass_rate": 0.79,
+      "hf_score": 0.91,
+      "cost_per_1m_input": 10.0,
+      "cost_per_1m_output": 40.0
+    },
+    "anthropic/claude-sonnet-4-6": {
+      "lmsys_elo": 1290,
+      "aider_pass_rate": 0.64,
+      "hf_score": 0.82,
+      "cost_per_1m_input": 3.0,
+      "cost_per_1m_output": 15.0
+    },
+    "openai/gpt-4o": {
+      "lmsys_elo": 1260,
+      "aider_pass_rate": 0.57,
+      "hf_score": 0.80,
+      "cost_per_1m_input": 2.5,
+      "cost_per_1m_output": 10.0
+    },
+    "gemini/gemini-2.5-pro": {
+      "lmsys_elo": 1300,
+      "aider_pass_rate": 0.61,
+      "hf_score": 0.85,
+      "cost_per_1m_input": 1.25,
+      "cost_per_1m_output": 5.0
+    },
+    "gemini/gemini-2.5-flash": {
+      "lmsys_elo": 1180,
+      "aider_pass_rate": 0.41,
+      "hf_score": 0.72,
+      "cost_per_1m_input": 0.075,
+      "cost_per_1m_output": 0.30
+    },
+    "deepseek/deepseek-chat": {
+      "lmsys_elo": 1220,
+      "aider_pass_rate": 0.49,
+      "hf_score": 0.75,
+      "cost_per_1m_input": 0.14,
+      "cost_per_1m_output": 0.28
+    },
+    "deepseek/deepseek-reasoner": {
+      "lmsys_elo": 1280,
+      "aider_pass_rate": 0.58,
+      "hf_score": 0.83,
+      "cost_per_1m_input": 0.55,
+      "cost_per_1m_output": 2.19
+    },
+    "groq/llama-3.3-70b-versatile": {
+      "lmsys_elo": 1200,
+      "aider_pass_rate": 0.38,
+      "hf_score": 0.71,
+      "cost_per_1m_input": 0.59,
+      "cost_per_1m_output": 0.79
+    },
+    "anthropic/claude-haiku-4-5-20251001": {
+      "lmsys_elo": 1150,
+      "aider_pass_rate": 0.33,
+      "hf_score": 0.65,
+      "cost_per_1m_input": 0.80,
+      "cost_per_1m_output": 4.0
+    },
+    "openai/gpt-4o-mini": {
+      "lmsys_elo": 1160,
+      "aider_pass_rate": 0.30,
+      "hf_score": 0.68,
+      "cost_per_1m_input": 0.15,
+      "cost_per_1m_output": 0.60
+    },
+    "perplexity/sonar-pro": {
+      "lmsys_elo": 1230,
+      "aider_pass_rate": null,
+      "hf_score": null,
+      "cost_per_1m_input": 3.0,
+      "cost_per_1m_output": 15.0
+    },
+    "perplexity/sonar": {
+      "lmsys_elo": 1170,
+      "aider_pass_rate": null,
+      "hf_score": null,
+      "cost_per_1m_input": 1.0,
+      "cost_per_1m_output": 1.0
+    },
+    "mistral/mistral-large-latest": {
+      "lmsys_elo": 1210,
+      "aider_pass_rate": 0.42,
+      "hf_score": 0.74,
+      "cost_per_1m_input": 2.0,
+      "cost_per_1m_output": 6.0
+    },
+    "xai/grok-3": {
+      "lmsys_elo": 1310,
+      "aider_pass_rate": 0.60,
+      "hf_score": 0.84,
+      "cost_per_1m_input": 3.0,
+      "cost_per_1m_output": 15.0
+    },
+    "cohere/command-r-plus": {
+      "lmsys_elo": 1190,
+      "aider_pass_rate": 0.35,
+      "hf_score": 0.70,
+      "cost_per_1m_input": 2.5,
+      "cost_per_1m_output": 10.0
+    }
+  },
+  "task_scores": {
+    "code": {
+      "openai/o3": 0.94,
+      "anthropic/claude-opus-4-6": 0.88,
+      "anthropic/claude-sonnet-4-6": 0.79,
+      "gemini/gemini-2.5-pro": 0.75,
+      "openai/gpt-4o": 0.72,
+      "deepseek/deepseek-reasoner": 0.65,
+      "deepseek/deepseek-chat": 0.55,
+      "gemini/gemini-2.5-flash": 0.48,
+      "groq/llama-3.3-70b-versatile": 0.42,
+      "anthropic/claude-haiku-4-5-20251001": 0.38,
+      "openai/gpt-4o-mini": 0.35
+    },
+    "analyze": {
+      "openai/o3": 0.93,
+      "anthropic/claude-opus-4-6": 0.89,
+      "gemini/gemini-2.5-pro": 0.85,
+      "xai/grok-3": 0.83,
+      "anthropic/claude-sonnet-4-6": 0.81,
+      "openai/gpt-4o": 0.78,
+      "deepseek/deepseek-reasoner": 0.72,
+      "mistral/mistral-large-latest": 0.60,
+      "deepseek/deepseek-chat": 0.58,
+      "gemini/gemini-2.5-flash": 0.50,
+      "groq/llama-3.3-70b-versatile": 0.45,
+      "anthropic/claude-haiku-4-5-20251001": 0.38,
+      "openai/gpt-4o-mini": 0.36
+    },
+    "query": {
+      "openai/o3": 0.90,
+      "gemini/gemini-2.5-pro": 0.87,
+      "xai/grok-3": 0.84,
+      "anthropic/claude-opus-4-6": 0.83,
+      "anthropic/claude-sonnet-4-6": 0.80,
+      "openai/gpt-4o": 0.77,
+      "deepseek/deepseek-reasoner": 0.68,
+      "deepseek/deepseek-chat": 0.60,
+      "gemini/gemini-2.5-flash": 0.55,
+      "groq/llama-3.3-70b-versatile": 0.48,
+      "anthropic/claude-haiku-4-5-20251001": 0.40,
+      "openai/gpt-4o-mini": 0.38
+    },
+    "generate": {
+      "anthropic/claude-opus-4-6": 0.91,
+      "gemini/gemini-2.5-pro": 0.86,
+      "anthropic/claude-sonnet-4-6": 0.83,
+      "openai/o3": 0.80,
+      "openai/gpt-4o": 0.78,
+      "xai/grok-3": 0.75,
+      "cohere/command-r-plus": 0.65,
+      "deepseek/deepseek-chat": 0.58,
+      "gemini/gemini-2.5-flash": 0.52,
+      "mistral/mistral-large-latest": 0.50,
+      "groq/llama-3.3-70b-versatile": 0.44,
+      "anthropic/claude-haiku-4-5-20251001": 0.38,
+      "openai/gpt-4o-mini": 0.36
+    },
+    "research": {
+      "perplexity/sonar-pro": 0.95,
+      "perplexity/sonar": 0.82,
+      "gemini/gemini-2.5-pro": 0.75,
+      "openai/o3": 0.72,
+      "openai/gpt-4o": 0.68,
+      "anthropic/claude-haiku-4-5-20251001": 0.35,
+      "openai/gpt-4o-mini": 0.32
+    }
+  },
+  "tiers": {
+    "code": {
+      "premium": ["openai/o3", "anthropic/claude-opus-4-6"],
+      "balanced": ["anthropic/claude-sonnet-4-6", "openai/gpt-4o", "gemini/gemini-2.5-pro"],
+      "budget": ["gemini/gemini-2.5-flash", "deepseek/deepseek-chat", "anthropic/claude-haiku-4-5-20251001", "groq/llama-3.3-70b-versatile", "openai/gpt-4o-mini"]
+    },
+    "analyze": {
+      "premium": ["openai/o3", "anthropic/claude-opus-4-6", "deepseek/deepseek-reasoner"],
+      "balanced": ["gemini/gemini-2.5-pro", "anthropic/claude-sonnet-4-6", "openai/gpt-4o"],
+      "budget": ["gemini/gemini-2.5-flash", "deepseek/deepseek-chat", "groq/llama-3.3-70b-versatile", "anthropic/claude-haiku-4-5-20251001", "openai/gpt-4o-mini"]
+    },
+    "query": {
+      "premium": ["openai/o3", "anthropic/claude-opus-4-6", "xai/grok-3"],
+      "balanced": ["gemini/gemini-2.5-pro", "openai/gpt-4o", "anthropic/claude-sonnet-4-6"],
+      "budget": ["gemini/gemini-2.5-flash", "deepseek/deepseek-chat", "groq/llama-3.3-70b-versatile", "anthropic/claude-haiku-4-5-20251001", "openai/gpt-4o-mini"]
+    },
+    "generate": {
+      "premium": ["anthropic/claude-opus-4-6", "gemini/gemini-2.5-pro", "openai/o3"],
+      "balanced": ["anthropic/claude-sonnet-4-6", "openai/gpt-4o", "cohere/command-r-plus"],
+      "budget": ["gemini/gemini-2.5-flash", "deepseek/deepseek-chat", "anthropic/claude-haiku-4-5-20251001", "mistral/mistral-small-latest", "openai/gpt-4o-mini"]
+    },
+    "research": {
+      "premium": ["perplexity/sonar-pro", "perplexity/sonar", "openai/o3"],
+      "balanced": ["perplexity/sonar-pro", "perplexity/sonar", "gemini/gemini-2.5-pro", "openai/gpt-4o"],
+      "budget": ["perplexity/sonar", "gemini/gemini-2.5-flash", "anthropic/claude-haiku-4-5-20251001", "openai/gpt-4o-mini"]
+    }
+  }
+}

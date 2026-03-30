@@ -62,6 +62,15 @@ try:
 except Exception:
     pass
 
+# Auto-update benchmark data on startup (same distribution pattern as rules)
+try:
+    from llm_router.benchmarks import check_and_update_benchmarks as _update_benchmarks
+    _bmsg = _update_benchmarks()
+    if _bmsg:
+        logging.getLogger("llm_router").info(_bmsg)
+except Exception:
+    pass
+
 
 def _check_tier(feature: str) -> str | None:
     """Gate a feature behind the Pro subscription tier.

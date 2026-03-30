@@ -1,0 +1,62 @@
+name: Update Benchmarks
+
+on:
+  schedule:
+    - cron: '0 6 * * 1'   # Every Monday 06:00 UTC
+  workflow_dispatch:        # Manual trigger for testing/backfill
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v4
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies (scripts extra)
+        run: uv sync --extra scripts
+
+      - name: Run benchmark fetcher
+        run: uv run python scripts/update_benchmarks.py
+        timeout-minutes: 10
+
+      - name: Check for changes
+        id: diff
+        run: |
+          if git diff --quiet src/llm_router/data/benchmarks.json; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "No changes to benchmarks.json — skipping PR."
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "benchmarks.json updated."
+          fi
+
+      - name: Create PR with updated benchmark data
+        if: steps.diff.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          UPDATE_DATE: ${{ github.run_id }}
+        run: |
+          DATE=$(date +%Y%m%d)
+          BRANCH="benchmarks/auto-update-${DATE}"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git checkout -b "$BRANCH"
+          git add src/llm_router/data/benchmarks.json
+          git commit -m "chore(benchmarks): weekly routing table update $(date +%Y-%m-%d)"
+
+          git push -u origin "$BRANCH"
+
+          gh pr create \
+            --title "chore(benchmarks): weekly routing table update $(date +%Y-%m-%d)" \
+            --body "Automated weekly benchmark refresh from LMSYS, Aider, HuggingFace, LiteLLM pricing. Distributed to all users on next pip upgrade + server restart." \
+            --label "automated" \
+            --base main

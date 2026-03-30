@@ -236,7 +236,18 @@ def get_model_chain(profile: RoutingProfile, task_type: TaskType) -> list[str]:
     Returns:
         Ordered list of model IDs to try, best-fit first.
     """
-    return ROUTING_TABLE.get((profile, task_type), ["openai/gpt-4o"])
+    static_chain = ROUTING_TABLE.get((profile, task_type), ["openai/gpt-4o"])
+
+    # Media tasks: benchmark sources don't cover image/video/audio — use static order.
+    if task_type in {TaskType.IMAGE, TaskType.VIDEO, TaskType.AUDIO}:
+        return static_chain
+
+    try:
+        from llm_router.benchmarks import apply_benchmark_ordering
+        return apply_benchmark_ordering(static_chain, task_type, profile)
+    except Exception:
+        # Any failure (missing file, corrupt JSON, import error) → static chain.
+        return static_chain
 
 
 def provider_from_model(model: str) -> str:

@@ -808,3 +808,47 @@ async def import_savings_log() -> int:
         await db.close()
 
     return imported
+
+
+async def get_model_failure_rates(window_days: int = 30) -> dict[str, float]:
+    """Return the failure rate per model over the given time window.
+
+    Used by ``benchmarks.get_model_failure_penalty()`` to apply a local
+    feedback loop on top of the benchmark scores: models that consistently fail
+    in production get pushed down the chain regardless of their benchmark rank.
+
+    Args:
+        window_days: Number of past days to include (default 30).
+
+    Returns:
+        Dict mapping ``final_model`` -> failure rate (0.0–1.0).
+        Only models with at least 5 routing decisions are included,
+        to avoid penalizing models on insufficient data.
+        Returns an empty dict if the table is empty or on any error.
+    """
+    db = await _get_db()
+    try:
+        cursor = await db.execute(
+            """
+            SELECT final_model,
+                   COUNT(*) AS total,
+                   SUM(CASE WHEN success = 0 THEN 1 ELSE 0 END) AS failures
+            FROM routing_decisions
+            WHERE timestamp >= datetime('now', ?)
+              AND final_model IS NOT NULL
+            GROUP BY final_model
+            HAVING total >= 5
+            """,
+            (f"-{window_days} days",),
+        )
+        rows = await cursor.fetchall()
+        return {
+            row[0]: row[2] / row[1]
+            for row in rows
+            if row[1] > 0
+        }
+    except Exception:
+        return {}
+    finally:
+        await db.close()
+
