@@ -31,6 +31,45 @@ if TYPE_CHECKING:
 
 log = logging.getLogger("llm_router")
 
+# Blended cost per 1K tokens (avg of input + output). Used by the quality-cost
+# sort to prefer cheaper models when two options are within 5% quality of each other.
+# Codex and Ollama are free ($0) — always prefer them over paid when quality allows.
+_MODEL_COST_PER_1K: dict[str, float] = {
+    # Anthropic
+    "anthropic/claude-opus-4-6":           0.045,
+    "anthropic/claude-sonnet-4-6":         0.009,
+    "anthropic/claude-haiku-4-5-20251001": 0.00075,
+    # OpenAI
+    "openai/o3":                           0.025,
+    "openai/gpt-4o":                       0.006,
+    "openai/gpt-4o-mini":                  0.00038,
+    # Google
+    "gemini/gemini-2.5-pro":               0.003,
+    "gemini/gemini-2.5-flash":             0.00019,
+    "gemini/gemini-2.5-flash-lite":        0.000025,
+    # DeepSeek
+    "deepseek/deepseek-reasoner":          0.0014,
+    "deepseek/deepseek-chat":              0.0007,
+    # Groq
+    "groq/llama-3.3-70b-versatile":        0.0007,
+    # Perplexity
+    "perplexity/sonar-pro":                0.010,
+    "perplexity/sonar":                    0.003,
+    # Mistral
+    "mistral/mistral-large-latest":        0.004,
+    "mistral/mistral-small-latest":        0.00020,
+    # xAI / Cohere
+    "xai/grok-3":                          0.009,
+    "cohere/command-r-plus":               0.006,
+    # Free models (Codex = OpenAI subscription, Ollama = local)
+    "codex/gpt-5.4":                       0.0,
+    "codex/o3":                            0.0,
+    "codex/gpt-4o":                        0.0,
+}
+
+# Fallback cost for unknown models — use a mid-range estimate.
+_DEFAULT_COST = 0.005
+
 # Bundled benchmark file shipped inside the wheel.
 _BUNDLED = Path(__file__).parent / "data" / "benchmarks.json"
 
@@ -191,20 +230,70 @@ def apply_benchmark_ordering(
             return chain
 
         # Build two groups:
-        # 1. Models in both the static chain AND the benchmark tier list.
-        # 2. Models in the static chain but NOT covered by benchmarks.
-        covered: list[str] = [m for m in benchmark_tier if m in chain]
-        uncovered: list[str] = [m for m in chain if m not in benchmark_tier]
+        # 1. Models in the chain that have quality scores in task_scores.
+        # 2. Models in the chain with no score data (appended at end unchanged).
+        scored: list[str] = [m for m in chain if m in task_scores]
+        unscored: list[str] = [m for m in chain if m not in task_scores]
 
-        # Apply local failure-rate penalty to covered models, then re-sort.
+        # Apply local failure-rate penalty to scored models.
         def adjusted_score(model: str) -> float:
             base = task_scores.get(model, 0.5)
             penalty = get_model_failure_penalty(model, task_key)
             return base * (1.0 - penalty)
 
-        covered.sort(key=adjusted_score, reverse=True)
+        # Quality-cost sort: quality first, but within any 5% quality tier
+        # sort by cost ascending (cheapest wins when models are near-equal).
+        #
+        # Algorithm:
+        #   1. Sort by quality descending.
+        #   2. Walk the sorted list, opening a new tier whenever the quality
+        #      drop from the TIER LEADER exceeds 5% (relative). This avoids
+        #      non-transitivity that arises from pairwise comparisons.
+        #   3. Within each tier, sort by cost ascending (cheapest first).
+        #
+        # Example (BALANCED/CODE):
+        #   DeepSeek:  quality=0.999 → tier 0 leader
+        #   Haiku:     quality=0.821 → 18% below tier 0 leader → tier 1 leader
+        #   Sonnet:    quality=0.803 → 2.2% below Haiku        → tier 1 (same tier!)
+        #   GPT-4o:    quality=0.774 → 5.7% below Haiku leader → tier 2 leader
+        #
+        #   Tier 0: [DeepSeek] → only one → no cost comparison needed
+        #   Tier 1: [Haiku $0.00075, Sonnet $0.009] → Haiku cheaper → Haiku first
+        #   Tier 2: [GPT-4o, ...] → continues
+        #
+        # Result: DeepSeek → Haiku → Sonnet → GPT-4o → ...
+        scores = {m: adjusted_score(m) for m in scored}
 
-        return covered + uncovered
+        # Step 1: sort by quality descending
+        by_quality = sorted(scored, key=lambda m: scores.get(m, 0.0), reverse=True)
+
+        # Step 2: assign quality tiers (5% drop from tier leader = new tier)
+        tiers: list[list[str]] = []
+        current_tier: list[str] = []
+        tier_leader_q: float | None = None
+
+        for model in by_quality:
+            q = scores.get(model, 0.0)
+            if tier_leader_q is None:
+                current_tier = [model]
+                tier_leader_q = q
+            elif tier_leader_q > 0 and (tier_leader_q - q) / tier_leader_q > 0.05:
+                tiers.append(current_tier)
+                current_tier = [model]
+                tier_leader_q = q
+            else:
+                current_tier.append(model)
+
+        if current_tier:
+            tiers.append(current_tier)
+
+        # Step 3: within each tier, sort by cost ascending (cheapest first)
+        reordered: list[str] = []
+        for tier in tiers:
+            tier.sort(key=lambda m: _MODEL_COST_PER_1K.get(m, _DEFAULT_COST))
+            reordered.extend(tier)
+
+        return reordered + unscored
 
     except Exception as e:
         log.debug("benchmark ordering failed, using static chain: %s", e)

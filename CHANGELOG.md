@@ -1,5 +1,30 @@
 # Changelog
 
+## v0.6.0 — Subscription Mode & Quality-Cost Routing (2026-03-30)
+
+### Added
+
+- **Claude Code subscription mode** (`LLM_ROUTER_CLAUDE_SUBSCRIPTION=true`) — When enabled, `anthropic/*` models are excluded from all routing chains. Claude Code users already have Claude via their subscription; routing back to Anthropic via API would require a separate API key and double-bill. In this mode the router routes every task to non-Claude alternatives (DeepSeek, Gemini, GPT-4o, Perplexity, Codex) to preserve Claude quota.
+- **Quality-cost tier sorting** in `benchmarks.py` — Models are grouped into 5% quality bands relative to the tier leader. Within each band, cheaper models sort first. Example for BALANCED/CODE: `DeepSeek(1.0) → GPT-4o($0.006) → Sonnet($0.009)` — GPT-4o and Sonnet are within 5% quality of each other, so GPT-4o leads because it's cheaper.
+- **Cost pricing table** (`_MODEL_COST_PER_1K`) — blended per-1K-token costs for all 20+ routed models, used by the quality-cost sort.
+- **DeepSeek added to BALANCED and PREMIUM chains** — Previously missing from BALANCED/QUERY, BALANCED/GENERATE, PREMIUM/QUERY, PREMIUM/CODE, PREMIUM/GENERATE. At >85% pressure (subscription mode), DeepSeek Chat/Reasoner now correctly leads these chains instead of GPT-4o or o3.
+- **Demo scripts** — `demo/app_builder_demo.py` (6-task todo app) and `demo/saas_builder_demo.py` (12-task analytics SaaS) exercise all 3 routing tiers, generate a Markdown + JSON report.
+
+### Fixed
+
+- **Codex injection at front (subscription mode)** — When `llm_router_claude_subscription=True` all `anthropic/*` models are filtered, so `last_claude = max(..., default=-1)` resolved to `insert_at=0`, putting Codex first in every BALANCED/PREMIUM chain. This caused 300s timeouts before fallback. Fix: when no Claude is in the chain, Codex is appended at the **end** as a free fallback — quality-ordered models go first.
+- **Codex injected into RESEARCH chains** — Codex has no web access, so injecting it into RESEARCH chains silently replaced Perplexity (when unavailable). Fix: Codex is only injected for `CODE`, `ANALYZE`, and `GENERATE` tasks; never for `RESEARCH` or `QUERY`.
+
+### Changed
+
+- `deepseek/deepseek-reasoner` added to `_CHEAP_MODELS` — at $0.0014/1K it belongs in the cheap tier (priority 1) for pressure reordering, not the paid tier (priority 2). This ensures it leads at >85% pressure instead of being buried behind GPT-4o and o3.
+- `_CHEAP_MODELS` threshold comment updated: "< $0.002/1K tokens" (was "< $0.001/1K").
+- BALANCED/ANALYZE at >85% pressure: `deepseek-reasoner → gpt-4o → gemini-pro` (was `gpt-4o → gemini-pro → deepseek-reasoner`).
+- PREMIUM/CODE at >85% pressure: `deepseek-reasoner → gpt-4o → o3` (was `o3 → gpt-4o`).
+- PREMIUM/ANALYZE at >85% pressure: `deepseek-reasoner → gemini-pro → o3` (was `o3 → deepseek-reasoner → gemini-pro`).
+
+---
+
 ## v0.5.2 — Ollama Local Models & Claude Mobile App Support (2026-03-30)
 
 ### Added

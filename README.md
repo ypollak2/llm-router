@@ -170,12 +170,13 @@ Model chains are ranked using weekly-refreshed data from four authoritative sour
 
 | Task | 🥇 Premium | 🥈 Balanced | 🥉 Budget |
 |------|-----------|------------|----------|
-| 💻 Code | o3, Claude Opus | Sonnet, GPT-4o, Gemini Pro | Flash, DeepSeek, Haiku |
-| 🔍 Analyze | o3, Claude Opus, DeepSeek-R1 | Gemini Pro, Sonnet, GPT-4o | Flash, DeepSeek, Haiku |
-| ❓ Query | o3, Gemini Pro, Grok-3 | Claude Opus, Sonnet, GPT-4o | Flash, DeepSeek, Haiku |
-| ✍️ Generate | Claude Opus, Gemini Pro, o3 | Sonnet, GPT-4o, Command R+ | Flash, DeepSeek, Haiku |
-| 🔎 Research | Perplexity Pro, Perplexity, o3 | Gemini Pro, GPT-4o | Flash, Haiku |
+| 💻 Code | **DeepSeek-R1**, o3, Opus | **DeepSeek Chat**, GPT-4o, Sonnet | Flash, DeepSeek, Haiku |
+| 🔍 Analyze | **DeepSeek-R1**, GPT-4o, Sonnet | **DeepSeek-R1**, GPT-4o, Gemini Pro | Flash, DeepSeek, Haiku |
+| ❓ Query | **DeepSeek Chat**, GPT-4o, Gemini Pro | **DeepSeek Chat**, GPT-4o, Gemini Pro | Flash, DeepSeek, Haiku |
+| ✍️ Generate | **DeepSeek Chat**, GPT-4o, Gemini Pro | **DeepSeek Chat**, GPT-4o, Gemini Pro | Flash, DeepSeek, Haiku |
+| 🔎 Research | Perplexity Pro, Perplexity, GPT-4o | Perplexity Pro, Perplexity, GPT-4o | Perplexity, Flash, Haiku |
 
+> **Bold** = first model tried when Claude quota is high (> 85%) or in subscription mode.
 > **Full benchmark data, scoring weights, raw scores, and sources:** [docs/BENCHMARKS.md](docs/BENCHMARKS.md)
 > 🔄 Updated every Monday via GitHub Actions — distributed to all users on next `pip upgrade`
 
@@ -183,12 +184,12 @@ Model chains are ranked using weekly-refreshed data from four authoritative sour
 
 ```
 Arena Hard win-rate  ──┐
-Aider code pass rate ──┼── weighted by task type ──► composite score ──► tier assignment
-HuggingFace MMLU/MATH──┤                                                 (premium / balanced / budget)
-LiteLLM pricing     ──┘
+Aider code pass rate ──┼── weighted by task type ──► quality score ──► quality-cost tier sort
+HuggingFace MMLU/MATH──┤                                                ↓
+LiteLLM pricing     ──┘                             within 5% quality band → cheapest model first
 ```
 
-Cost is inverted — cheaper models score *higher* on the cost signal — so budget tiers naturally gravitate toward the most efficient options.
+**Quality-cost sorting**: models within 5% quality of each other are grouped into a tier. Within that tier, the cheapest model sorts first. This means GPT-4o ($0.006/1K) leads over Sonnet ($0.009/1K) when their quality difference is under 5%, and DeepSeek Chat ($0.0007/1K) leads over everyone when it's within the top quality band.
 
 ---
 
@@ -397,9 +398,9 @@ dynamically reorders chains based on live Claude subscription usage.
 
 | | Budget (simple) | Balanced (medium) | Premium (complex) |
 |--|--------|----------|---------|
-| **Text** | Ollama → **Haiku** → cheap | **Sonnet** → externals → Haiku | **Opus** → Sonnet → o3 |
+| **Text** | Ollama → **Haiku** → cheap | **Sonnet** → DeepSeek → GPT-4o | **Opus** → Sonnet → o3 |
 | **Research** | Perplexity Sonar | Perplexity Sonar Pro | Perplexity Sonar Pro |
-| **Code** | Ollama → **Haiku** → Deepseek | **Sonnet** → GPT-4o → Gemini | **Opus** → Sonnet → o3 |
+| **Code** | Ollama → **Haiku** → DeepSeek | **Sonnet** → DeepSeek → GPT-4o | **Opus** → Sonnet → DeepSeek-R1 → o3 |
 | **Image** | Flux Dev, Imagen Fast | Flux Pro, Imagen 3, DALL-E 3 | Imagen 3, DALL-E 3 |
 | **Video** | minimax, Veo 2 | Kling, Veo 2, Runway Turbo | Veo 2, Runway Gen-3 |
 | **Audio** | OpenAI TTS | ElevenLabs | ElevenLabs |
@@ -412,9 +413,28 @@ chains automatically reorder to preserve remaining Claude budget:
 | Claude usage | Chain order |
 |---|---|
 | **0–84%** | Claude first (free under subscription) |
-| **85–98%** | Codex → Ollama → cheap externals → Claude last |
-| **≥ 99% (hard cap)** | Codex → Ollama → cheap → paid — **zero Claude** |
+| **85–98%** | DeepSeek/Codex → cheap externals → Claude last |
+| **≥ 99% (hard cap)** | DeepSeek → Codex → cheap → paid — **zero Claude** |
 | **Research (any)** | Perplexity always first (web-grounded) |
+
+### Claude Code subscription mode
+
+If you use Claude Code (Pro/Max), set `LLM_ROUTER_CLAUDE_SUBSCRIPTION=true` in `.env`. The router will **never route to Anthropic via API** — you're already on Claude, so API routing would require a separate key and add duplicate billing. Instead, every task routes to the best non-Claude alternative:
+
+```bash
+# In .env
+LLM_ROUTER_CLAUDE_SUBSCRIPTION=true   # no ANTHROPIC_API_KEY needed
+```
+
+At normal quota (< 85%), chains lead with the highest-quality available model. At high quota (> 85%), DeepSeek takes over — quality 1.0 benchmark score at ~1/8th the cost of GPT-4o:
+
+| | Low quota (< 85%) | High quota (> 85%) |
+|--|---|---|
+| **BUDGET/CODE** | DeepSeek Chat | DeepSeek Chat |
+| **BALANCED/CODE** | DeepSeek Chat | DeepSeek Chat |
+| **BALANCED/ANALYZE** | DeepSeek Reasoner | DeepSeek Reasoner |
+| **PREMIUM/CODE** | o3 | DeepSeek Reasoner |
+| **PREMIUM/ANALYZE** | DeepSeek Reasoner | DeepSeek Reasoner |
 
 Switch profile anytime:
 ```
@@ -499,6 +519,8 @@ ELEVENLABS_API_KEY=...
 # Router config
 LLM_ROUTER_PROFILE=balanced        # budget | balanced | premium
 LLM_ROUTER_MONTHLY_BUDGET=0        # USD, 0 = unlimited
+LLM_ROUTER_CLAUDE_SUBSCRIPTION=false  # true = you're a Claude Code Pro/Max user;
+                                       # anthropic/* excluded, router uses non-Claude models
 
 # Smart routing (Claude Code model selection)
 DAILY_TOKEN_BUDGET=0               # tokens/day, 0 = unlimited
@@ -591,8 +613,13 @@ See [ROADMAP.md](ROADMAP.md) for the detailed roadmap with phases and priorities
 - [x] Cross-session memory (previous session summaries prepended to external LLM calls)
 - [x] Auto-update routing rules (version header + silent update on MCP startup after pip upgrade)
 - [x] Token arbitrage enforcement — routing hint override bug fixed; simple tasks now correctly route to cheap models
+- [x] Claude Code subscription mode (`LLM_ROUTER_CLAUDE_SUBSCRIPTION`) — exclude Anthropic from chains; route to DeepSeek/Gemini/GPT-4o instead
+- [x] Quality-cost tier sorting — within 5% quality band, prefer cheaper model (GPT-4o over Sonnet, DeepSeek over everyone when near-equal quality)
+- [x] DeepSeek Reasoner in cheap tier — $0.0014/1K leads at >85% pressure (was treated as "paid" tier alongside o3 at $0.025)
+- [x] Codex injection fix — no longer injected at position 0 when subscription mode removes Claude from chain (caused 300s timeouts)
+- [x] Codex task filtering — excluded from RESEARCH (no web access) and QUERY (too slow) chains
 
-### Next Up (v0.6 — Evaluation & Learning)
+### Next Up (v0.7 — Evaluation & Learning)
 
 - [ ] Classification outcome tracking (was the routed model's response good?)
 - [ ] A/B testing framework for routing decisions

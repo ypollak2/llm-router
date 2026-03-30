@@ -192,14 +192,24 @@ async def route_and_call(
 
             # ── Codex injection ──────────────────────────────────────────────
             # Codex uses the user's OpenAI subscription (free from Claude quota).
-            # Position depends on pressure:
-            #   < 85%: after all Claude models (Sonnet/Opus first, then Codex)
-            #   ≥ 85%: at the very front (spares Claude entirely)
-            if profile != RoutingProfile.BUDGET and is_codex_available():
+            # Only inject for CODE and ANALYZE — Codex can't browse the web
+            # (no benefit for RESEARCH) and is too slow for quick QUERY responses.
+            # Position depends on pressure and chain composition:
+            #   Claude in chain, pressure < 85%: after all Claude models
+            #   Claude in chain, pressure ≥ 85%: at the very front
+            #   No Claude in chain (subscription mode): at end — let quality-ordered
+            #     models go first; Codex is a free fallback if they all fail
+            _codex_eligible_tasks = {TaskType.CODE, TaskType.ANALYZE, TaskType.GENERATE}
+            if (
+                profile != RoutingProfile.BUDGET
+                and task_type in _codex_eligible_tasks
+                and is_codex_available()
+            ):
                 codex_chain = [f"codex/{m}" for m in CODEX_MODELS[:2]]  # top 2 models
+                has_claude = any(m.startswith("anthropic/") for m in models_to_try)
                 if pressure >= 0.85:
                     models_to_try = codex_chain + models_to_try
-                else:
+                elif has_claude:
                     # Insert after the last Claude model in the chain
                     last_claude = max(
                         (i for i, m in enumerate(models_to_try) if m.startswith("anthropic/")),
@@ -207,6 +217,11 @@ async def route_and_call(
                     )
                     insert_at = last_claude + 1
                     models_to_try = models_to_try[:insert_at] + codex_chain + models_to_try[insert_at:]
+                else:
+                    # No Claude in chain (e.g. subscription mode with no API key) —
+                    # append Codex at end as a free fallback, not a first choice.
+                    # Quality-first models (DeepSeek, Gemini, GPT-4o) go first.
+                    models_to_try = models_to_try + codex_chain
 
     # Filter to providers we have API keys for.
     # Codex and Ollama use local runtimes (no API key) — always pass through.

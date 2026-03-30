@@ -43,6 +43,15 @@ class RouterConfig(BaseSettings):
     xai_api_key: str = ""
     cohere_api_key: str = ""
 
+    # ── Claude Pro/Max subscription ──
+    # Set to True when using llm-router inside Claude Code (Pro/Max subscription).
+    # When enabled, all anthropic/* models are EXCLUDED from routing chains.
+    # Rationale: you are already using Claude Code — routing back to Claude via
+    # the Anthropic API would require a SEPARATE API key AND additional billing.
+    # The router's job in this mode is to route tasks to non-Claude alternatives
+    # (Codex, Ollama, Gemini, GPT-4o, Perplexity, etc.) to save your Claude quota.
+    llm_router_claude_subscription: bool = False
+
     # ── Ollama (local inference — no API key needed) ──
     # Set ollama_base_url to enable Ollama routing (e.g. http://localhost:11434).
     # Ollama models are ONLY used for BUDGET tier (simple tasks) — they are
@@ -134,6 +143,8 @@ class RouterConfig(BaseSettings):
                 providers.add(provider_name)
         if self.ollama_base_url:
             providers.add("ollama")
+        # In Claude subscription mode, anthropic is intentionally excluded:
+        # we never route back to Claude via API when already inside Claude Code.
         return providers
 
     @property

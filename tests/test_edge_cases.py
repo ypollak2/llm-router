@@ -390,3 +390,38 @@ class TestAutoRouteHookEdgeCases:
         """JSON blob in prompt shouldn't break the hook."""
         out = self._run_hook('Analyze this JSON: {"key": "value", "nested": {"deep": true}}')
         assert out is not None
+
+
+class TestClaudeSubscriptionFlag:
+    """Tests for the llm_router_claude_subscription config flag."""
+
+    def test_subscription_flag_excludes_anthropic_from_providers(self, monkeypatch):
+        """When llm_router_claude_subscription=True, anthropic is NOT in providers.
+
+        We never route to Claude via API when already inside Claude Code — that
+        would require a separate API key and add duplicate billing.
+        """
+        import llm_router.config as config_mod
+        config_mod._config = None  # reset singleton
+        monkeypatch.setenv("LLM_ROUTER_CLAUDE_SUBSCRIPTION", "true")
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+        config = config_mod.RouterConfig()
+        assert "anthropic" not in config.available_providers
+
+    def test_no_subscription_flag_requires_api_key(self, monkeypatch):
+        """Without the flag, anthropic requires ANTHROPIC_API_KEY."""
+        import llm_router.config as config_mod
+        config_mod._config = None
+        monkeypatch.delenv("LLM_ROUTER_CLAUDE_SUBSCRIPTION", raising=False)
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+        config = config_mod.RouterConfig()
+        assert "anthropic" not in config.available_providers
+
+    def test_api_key_still_adds_anthropic_without_flag(self, monkeypatch):
+        """Explicit ANTHROPIC_API_KEY still works regardless of the flag."""
+        import llm_router.config as config_mod
+        config_mod._config = None
+        monkeypatch.delenv("LLM_ROUTER_CLAUDE_SUBSCRIPTION", raising=False)
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test-key")
+        config = config_mod.RouterConfig()
+        assert "anthropic" in config.available_providers

@@ -35,12 +35,15 @@ _FREE_EXTERNAL_MODELS: frozenset[str] = frozenset({
     "codex/gpt-4o",
 })
 
-# Cheap-but-not-free models (< $0.001/1K tokens blended).
+# Cheap-but-not-free models (< $0.002/1K tokens blended).
+# deepseek-reasoner is $0.0014 — cheaper than Gemini Pro ($0.003) and outperforms
+# it on every benchmark, so it belongs in the cheap tier for pressure reordering.
 _CHEAP_MODELS: frozenset[str] = frozenset({
     "gemini/gemini-2.5-flash",
     "gemini/gemini-2.5-flash-lite",
     "groq/llama-3.3-70b-versatile",
     "deepseek/deepseek-chat",
+    "deepseek/deepseek-reasoner",
     "openai/gpt-4o-mini",
 })
 
@@ -120,6 +123,7 @@ ROUTING_TABLE: dict[tuple[RoutingProfile, TaskType], list[str]] = {
     # through codex_agent.run_codex(), not LiteLLM.
     (RoutingProfile.BALANCED, TaskType.QUERY): [
         "anthropic/claude-sonnet-4-6",
+        "deepseek/deepseek-chat",       # quality 1.0, $0.0007 — leads when Claude is out
         "openai/gpt-4o",
         "gemini/gemini-2.5-pro",
         "mistral/mistral-large-latest",
@@ -134,6 +138,7 @@ ROUTING_TABLE: dict[tuple[RoutingProfile, TaskType], list[str]] = {
     ],
     (RoutingProfile.BALANCED, TaskType.GENERATE): [
         "anthropic/claude-sonnet-4-6",
+        "deepseek/deepseek-chat",       # quality 1.0 for generation, $0.0007
         "gemini/gemini-2.5-pro",
         "openai/gpt-4o",
         "cohere/command-r-plus",
@@ -177,8 +182,10 @@ ROUTING_TABLE: dict[tuple[RoutingProfile, TaskType], list[str]] = {
     (RoutingProfile.PREMIUM, TaskType.QUERY): [
         "anthropic/claude-opus-4-6",
         "anthropic/claude-sonnet-4-6",
-        "openai/o3",
+        "deepseek/deepseek-chat",       # quality 1.0, $0.0007 — leads at >85% pressure
+        "openai/gpt-4o",
         "gemini/gemini-2.5-pro",
+        "openai/o3",                    # expensive last resort ($0.025)
         "xai/grok-3",
     ],
     (RoutingProfile.PREMIUM, TaskType.RESEARCH): [
@@ -191,7 +198,9 @@ ROUTING_TABLE: dict[tuple[RoutingProfile, TaskType], list[str]] = {
     (RoutingProfile.PREMIUM, TaskType.GENERATE): [
         "anthropic/claude-opus-4-6",
         "anthropic/claude-sonnet-4-6",
+        "deepseek/deepseek-chat",       # quality 1.0 for generation, cheap fallback
         "gemini/gemini-2.5-pro",
+        "openai/gpt-4o",
         "openai/o3",
     ],
     (RoutingProfile.PREMIUM, TaskType.ANALYZE): [
@@ -204,8 +213,9 @@ ROUTING_TABLE: dict[tuple[RoutingProfile, TaskType], list[str]] = {
     (RoutingProfile.PREMIUM, TaskType.CODE): [
         "anthropic/claude-opus-4-6",
         "anthropic/claude-sonnet-4-6",
-        "openai/o3",
+        "deepseek/deepseek-reasoner",   # quality 1.0, $0.0014 — leads at >85% pressure
         "openai/gpt-4o",
+        "openai/o3",
     ],
     (RoutingProfile.PREMIUM, TaskType.IMAGE): [
         "gemini/imagen-3",
