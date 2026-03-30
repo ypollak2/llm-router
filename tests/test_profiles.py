@@ -1,16 +1,21 @@
 """Tests for routing profiles."""
 
+from unittest.mock import patch
+
 from llm_router.profiles import get_model_chain, provider_from_model, ROUTING_TABLE
 from llm_router.types import RoutingProfile, TaskType
 
 
 class TestGetModelChain:
     def test_budget_research_prefers_perplexity(self):
-        chain = get_model_chain(RoutingProfile.BUDGET, TaskType.RESEARCH)
+        # Disable benchmark reordering so we test the static routing table.
+        with patch("llm_router.benchmarks.get_benchmark_data", return_value=None):
+            chain = get_model_chain(RoutingProfile.BUDGET, TaskType.RESEARCH)
         assert chain[0].startswith("perplexity/")
 
     def test_premium_code_prefers_o3(self):
-        chain = get_model_chain(RoutingProfile.PREMIUM, TaskType.CODE)
+        with patch("llm_router.benchmarks.get_benchmark_data", return_value=None):
+            chain = get_model_chain(RoutingProfile.PREMIUM, TaskType.CODE)
         assert "openai/o3" in chain
 
     def test_all_profile_task_combos_exist(self):
