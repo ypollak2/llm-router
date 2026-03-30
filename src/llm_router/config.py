@@ -45,13 +45,11 @@ class RouterConfig(BaseSettings):
 
     # ── Ollama (local inference — no API key needed) ──
     # Set ollama_base_url to enable Ollama routing (e.g. http://localhost:11434).
-    # Then list which local models to use per routing tier (comma-separated).
-    # Models are prepended to the tier's chain, so they are tried first.
+    # Ollama models are ONLY used for BUDGET tier (simple tasks) — they are
+    # prepended to the budget chain so they run first for free before cloud fallback.
     # Example: ollama_budget_models="llama3.2,qwen2.5-coder:7b"
     ollama_base_url: str = ""               # empty = Ollama disabled
     ollama_budget_models: str = ""          # e.g. "llama3.2,qwen2.5-coder:7b"
-    ollama_balanced_models: str = ""        # e.g. "llama3.3:70b,qwen2.5-coder:32b"
-    ollama_premium_models: str = ""         # e.g. "llama3.1:405b"
 
     # ── Media providers ──
     fal_key: str = ""               # fal.ai — Flux, video, audio
@@ -165,26 +163,21 @@ class RouterConfig(BaseSettings):
         }
 
     def ollama_models_for_profile(self, profile: "RoutingProfile") -> list[str]:
-        """Return Ollama model IDs (in ``ollama/model`` format) for a routing profile.
+        """Return Ollama model IDs (in ``ollama/model`` format) for the BUDGET profile.
 
-        Parses the comma-separated ``ollama_*_models`` fields and wraps each
-        name in the LiteLLM ``ollama/`` prefix. Returns an empty list when
-        Ollama is not configured or no models are set for that profile.
+        Ollama is restricted to budget routing — local models handle simple tasks
+        for free, with cloud providers as fallback. Returns an empty list for
+        non-budget profiles or when Ollama is not configured.
 
         Args:
-            profile: The routing profile to look up (BUDGET/BALANCED/PREMIUM).
+            profile: The routing profile. Only BUDGET returns models.
 
         Returns:
             List of LiteLLM model IDs like ``["ollama/llama3.2", "ollama/qwen2.5-coder:7b"]``.
         """
-        if not self.ollama_base_url:
+        if not self.ollama_base_url or profile != RoutingProfile.BUDGET:
             return []
-        raw = {
-            RoutingProfile.BUDGET: self.ollama_budget_models,
-            RoutingProfile.BALANCED: self.ollama_balanced_models,
-            RoutingProfile.PREMIUM: self.ollama_premium_models,
-        }.get(profile, "")
-        return [f"ollama/{m.strip()}" for m in raw.split(",") if m.strip()]
+        return [f"ollama/{m.strip()}" for m in self.ollama_budget_models.split(",") if m.strip()]
 
     def apply_keys_to_env(self) -> None:
         """Export all configured API keys into ``os.environ``.

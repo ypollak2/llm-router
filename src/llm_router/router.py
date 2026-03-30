@@ -178,9 +178,10 @@ async def route_and_call(
         models_to_try = [model_override]
     else:
         models_to_try = get_model_chain(profile, task_type)
-        # Prepend any locally-configured Ollama models for this profile.
-        # Local models are tried first — they're free and have zero latency cost.
-        if task_type not in MEDIA_TASK_TYPES:
+        # Prepend Ollama models only for BUDGET tier (simple tasks).
+        # Local models are great for lightweight work but lack the capability
+        # for complex tasks — restrict to budget profile to avoid quality issues.
+        if task_type not in MEDIA_TASK_TYPES and profile == RoutingProfile.BUDGET:
             ollama_models = config.ollama_models_for_profile(profile)
             if ollama_models:
                 models_to_try = ollama_models + models_to_try

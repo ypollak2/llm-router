@@ -29,21 +29,21 @@ Run any open-source model locally — no API key, no cost, no data leaving your 
    ```
    OLLAMA_BASE_URL=http://localhost:11434
 
-   # Which models to use at each routing tier (comma-separated, no spaces)
+   # Models for simple/budget tasks (comma-separated, no spaces)
    OLLAMA_BUDGET_MODELS=llama3.2,qwen2.5-coder:7b
-   OLLAMA_BALANCED_MODELS=llama3.3:70b
-   OLLAMA_PREMIUM_MODELS=
    ```
 
 ### How it works
 
-Ollama models are **prepended** to the routing chain for the matching tier, so they are tried first. If the local model fails or is slow, the router falls back to the next model in the chain (cloud providers).
+Ollama models are used **only for simple (budget) tasks** — they are prepended to the budget routing chain and tried first. If the local model fails, the router falls back to cloud providers automatically.
 
-| Env Var | Tier | Use when |
-|---------|------|----------|
-| `OLLAMA_BUDGET_MODELS` | budget | Simple tasks — fast, small models |
-| `OLLAMA_BALANCED_MODELS` | balanced | Medium tasks — larger models (≥30B) |
-| `OLLAMA_PREMIUM_MODELS` | premium | Complex tasks — largest models (≥70B) |
+Complex and moderate tasks always go to cloud models — local models don't have the capability for heavy-weight reasoning, architecture decisions, or multi-step analysis.
+
+| Routing tier | Ollama used? | Why |
+|-------------|--------------|-----|
+| budget (simple tasks) | ✅ Yes — tried first | Fast, free, good enough for simple work |
+| balanced (moderate tasks) | ❌ No | Cloud quality needed |
+| premium (complex tasks) | ❌ No | Frontier model required |
 
 ### Recommended models by use case
 
