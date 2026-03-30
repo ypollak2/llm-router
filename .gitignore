@@ -6,3 +6,8 @@ __pycache__/
 dist/
 *.egg-info/
 .venv/
+
+# Private strategy docs — never commit
+MONETIZATION.md
+STRATEGY.md
+PRICING.md
