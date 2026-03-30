@@ -59,7 +59,6 @@ _ALIASES: dict[str, str] = {
     "claude-opus-4-6": "anthropic/claude-opus-4-6",
     "claude-sonnet-4-6": "anthropic/claude-sonnet-4-6",
     "gpt-4o": "openai/gpt-4o",
-    "o3": "openai/o3",
     "gemini-2.5-pro": "gemini/gemini-2.5-pro",
     "gemini-2.5-flash": "gemini/gemini-2.5-flash",
     "deepseek-chat": "deepseek/deepseek-chat",
