@@ -80,6 +80,21 @@ _INSTALLED = Path.home() / ".llm-router" / "benchmarks.json"
 _cache: dict[str, Any] | None = None
 _cache_loaded: bool = False
 
+# Cold-start latency defaults for models that have no routing history yet.
+# Based on empirical observations: Codex CLI requires application launch time
+# before the first call each session, leading to 60-90s P95 latency.
+_COLD_START_LATENCY_MS: dict[str, float] = {
+    "codex/gpt-5.4": 60_000.0,
+    "codex/o3":      90_000.0,
+    "codex/gpt-4o":  60_000.0,
+}
+
+# Latency stats cache: refreshed at most every 60 s to avoid repeated DB hits
+# inside a single routing cycle where many models are evaluated in sequence.
+_latency_cache: dict[str, dict] | None = None
+_latency_cache_ts: float = 0.0
+_LATENCY_CACHE_TTL: float = 60.0
+
 
 def _load_json(path: Path) -> dict[str, Any] | None:
     """Load and parse a JSON file, returning None on any error."""
@@ -187,6 +202,72 @@ def get_model_failure_penalty(model: str, task_type: str) -> float:
     return 0.0
 
 
+def get_model_latency_penalty(model: str, task_type: str) -> float:
+    """Return a 0.0–0.5 penalty for a model based on its observed P95 latency.
+
+    Latency thresholds (P95 ms → penalty):
+      < 5 000 ms  →  0.00  (fast cloud APIs, Gemini Flash)
+      < 15 000 ms →  0.03  (normal cloud APIs, GPT-4o)
+      < 60 000 ms →  0.10  (slower models, first-token latency)
+      < 180 000 ms → 0.30  (Codex typical cold-start)
+      ≥ 180 000 ms → 0.50  (Codex worst-case, effectively last resort)
+
+    For models with no routing history, ``_COLD_START_LATENCY_MS`` provides
+    pessimistic defaults so Codex is not unfairly promoted to first position
+    before any data has been collected.
+
+    Args:
+        model: Model ID in ``provider/model`` format.
+        task_type: Task type string (unused today, reserved for per-task tuning).
+
+    Returns:
+        Penalty coefficient in [0.0, 0.5]. Zero means no penalty.
+    """
+    import time
+
+    global _latency_cache, _latency_cache_ts
+
+    try:
+        # Refresh cache if stale
+        now = time.monotonic()
+        if _latency_cache is None or (now - _latency_cache_ts) > _LATENCY_CACHE_TTL:
+            import asyncio
+            from llm_router.cost import get_model_latency_stats
+
+            async def _fetch() -> dict[str, dict]:
+                return await get_model_latency_stats(window_days=7)
+
+            try:
+                loop = asyncio.get_running_loop()
+                _ = loop  # running loop — skip sync fetch, use cached/default
+            except RuntimeError:
+                # No running loop — safe to call asyncio.run()
+                _latency_cache = asyncio.run(_fetch())
+                _latency_cache_ts = now
+
+        stats = _latency_cache or {}
+        if model in stats:
+            p95_ms = stats[model]["p95"]
+        elif model in _COLD_START_LATENCY_MS:
+            p95_ms = _COLD_START_LATENCY_MS[model]
+        else:
+            return 0.0
+
+        if p95_ms < 5_000:
+            return 0.00
+        elif p95_ms < 15_000:
+            return 0.03
+        elif p95_ms < 60_000:
+            return 0.10
+        elif p95_ms < 180_000:
+            return 0.30
+        else:
+            return 0.50
+
+    except Exception:
+        return 0.0
+
+
 def apply_benchmark_ordering(
     chain: list[str],
     task_type: "TaskType",
@@ -235,11 +316,12 @@ def apply_benchmark_ordering(
         scored: list[str] = [m for m in chain if m in task_scores]
         unscored: list[str] = [m for m in chain if m not in task_scores]
 
-        # Apply local failure-rate penalty to scored models.
+        # Apply local failure-rate and latency penalties to scored models.
         def adjusted_score(model: str) -> float:
             base = task_scores.get(model, 0.5)
-            penalty = get_model_failure_penalty(model, task_key)
-            return base * (1.0 - penalty)
+            failure_pen = get_model_failure_penalty(model, task_key)
+            latency_pen = get_model_latency_penalty(model, task_key)
+            return base * (1.0 - failure_pen) * (1.0 - latency_pen)
 
         # Quality-cost sort: quality first, but within any 5% quality tier
         # sort by cost ascending (cheapest wins when models are near-equal).

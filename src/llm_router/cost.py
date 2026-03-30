@@ -810,6 +810,58 @@ async def import_savings_log() -> int:
     return imported
 
 
+async def get_model_latency_stats(window_days: int = 7) -> dict[str, dict]:
+    """Return P50/P95 latency statistics per model from recent routing decisions.
+
+    Used by ``benchmarks.get_model_latency_penalty()`` to penalise models that
+    are consistently slow in *this* user's environment (e.g. Codex cold-starts).
+
+    Args:
+        window_days: Look-back window in days (default 7).
+
+    Returns:
+        Dict mapping ``final_model`` -> ``{"p50": float, "p95": float, "count": int}``.
+        Only models with at least 5 successful calls are included.
+        Returns an empty dict on any error.
+    """
+    db = await _get_db()
+    try:
+        cursor = await db.execute(
+            """
+            SELECT final_model, latency_ms
+            FROM routing_decisions
+            WHERE timestamp >= datetime('now', ?)
+              AND final_model IS NOT NULL
+              AND success = 1
+              AND latency_ms IS NOT NULL
+            ORDER BY final_model, latency_ms
+            """,
+            (f"-{window_days} days",),
+        )
+        rows = await cursor.fetchall()
+    except Exception:
+        return {}
+    finally:
+        await db.close()
+
+    # Group latency samples by model
+    from collections import defaultdict
+    samples: dict[str, list[float]] = defaultdict(list)
+    for model, latency in rows:
+        samples[model].append(float(latency))
+
+    result: dict[str, dict] = {}
+    for model, latencies in samples.items():
+        if len(latencies) < 5:
+            continue
+        latencies.sort()
+        n = len(latencies)
+        p50 = latencies[int(n * 0.50)]
+        p95 = latencies[min(int(n * 0.95), n - 1)]
+        result[model] = {"p50": p50, "p95": p95, "count": n}
+    return result
+
+
 async def get_model_failure_rates(window_days: int = 30) -> dict[str, float]:
     """Return the failure rate per model over the given time window.
 

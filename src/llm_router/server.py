@@ -650,6 +650,68 @@ async def llm_code(
     return f"{resp.header()}\n\n{resp.content}"
 
 
+@mcp.tool()
+async def llm_edit(
+    task: str,
+    files: list[str],
+    ctx: Context,
+    context: str | None = None,
+) -> str:
+    """Route code-edit reasoning to a cheap model and return exact edit instructions.
+
+    Instead of Opus reasoning about what to change (expensive), a cheap model
+    reads the files, figures out the edits, and returns JSON ``{file, old_string,
+    new_string}`` pairs that Claude can apply mechanically via the Edit tool.
+
+    **How to use the result**: After calling this tool, apply each edit instruction
+    using the Edit tool with the exact old_string → new_string pairs provided.
+
+    Best for: refactoring, bug fixes, adding small features to existing files.
+
+    Args:
+        task: Natural-language description of what to change (e.g.
+            "Add type hints to all public functions in router.py").
+        files: List of file paths to read and include in the prompt.
+            Relative paths are resolved from the current working directory.
+            Files larger than 32 KB are truncated with a note.
+        context: Optional conversation context to help the model understand the task.
+    """
+    from llm_router.edit import (
+        build_edit_prompt, format_edit_result,
+        parse_edit_response, read_file_for_edit,
+    )
+
+    # Read all requested files
+    file_contents: dict[str, str] = {}
+    read_notes: list[str] = []
+    for path in files:
+        content, truncated = read_file_for_edit(path)
+        file_contents[path] = content
+        if truncated:
+            read_notes.append(f"{path}: truncated to 32 KB")
+
+    # Build the prompt and route to cheap code model
+    prompt = build_edit_prompt(task, file_contents)
+    if context:
+        prompt = f"{context}\n\n---\n\n{prompt}"
+
+    resp = await route_and_call(
+        TaskType.CODE, prompt,
+        system_prompt=(
+            "You are a precise code editor. Return ONLY a JSON array of edit "
+            "instructions. No prose, no explanation outside the JSON."
+        ),
+        temperature=0.1,
+        ctx=ctx,
+    )
+
+    instructions, warnings = parse_edit_response(resp.content)
+    if read_notes:
+        warnings = [f"File truncated: {n}" for n in read_notes] + warnings
+
+    return format_edit_result(instructions, warnings, resp.header())
+
+
 # ── Media Tools ──────────────────────────────────────────────────────────────
 
 

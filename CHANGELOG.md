@@ -1,5 +1,23 @@
 # Changelog
 
+## v0.7.0 — Availability-Aware Routing & llm_edit Tool (2026-03-31)
+
+### Added
+
+- **Availability-aware routing** — Latency penalties are now folded into the benchmark-driven quality score. `get_model_latency_stats()` in `cost.py` queries the `routing_decisions` table for P50/P95 latency over a 7-day window. `get_model_latency_penalty()` in `benchmarks.py` maps P95 thresholds to a 0.0–0.50 penalty (<5s=0, <15s=0.03, <60s=0.10, <180s=0.30, ≥180s=0.50). `adjusted_score()` now multiplies failure penalty AND latency penalty into the base quality score.
+- **Cold-start defaults** — `_COLD_START_LATENCY_MS` in `benchmarks.py` provides pessimistic P95 defaults for Codex models before any routing history exists (`codex/gpt-5.4` = 60s → 0.30 penalty, `codex/o3` = 90s → 0.30 penalty). Prevents Codex from being placed first in chains on a fresh install.
+- **Latency cache** — `_latency_cache` is refreshed at most every 60 seconds per process to avoid repeated SQLite hits when many models are evaluated in a single routing cycle.
+- **`llm_edit` MCP tool** — New tool that routes code-edit *reasoning* to a cheap model and returns exact `{file, old_string, new_string}` JSON instructions for Claude to apply mechanically via the Edit tool. Accepts a task description + list of file paths. Files are read locally (capped at 32 KB each), sent to the cheap code model, and parsed into `EditInstruction` dataclasses. Claude's role is execution-only — the expensive reasoning step is offloaded.
+- **`src/llm_router/edit.py`** — New module with `read_file_for_edit()`, `build_edit_prompt()`, `parse_edit_response()`, `format_edit_result()` and `EditInstruction` dataclass (`frozen=True`).
+- **Test coverage** — `tests/test_availability_routing.py` (12 tests covering latency stats, penalty thresholds, cold-start defaults, integration ordering) and `tests/test_edit.py` (12 tests covering file reading, prompt building, response parsing, formatting).
+
+### Changed
+
+- `adjusted_score()` in `apply_benchmark_ordering()` now applies both failure and latency penalties multiplicatively: `base * (1 - failure_pen) * (1 - latency_pen)`.
+- Tool count increased from 25 to 26 (`llm_edit` added).
+
+---
+
 ## v0.6.0 — Subscription Mode & Quality-Cost Routing (2026-03-30)
 
 ### Added
