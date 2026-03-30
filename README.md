@@ -392,18 +392,31 @@ Once installed, Claude Code gets these 25 tools:
   <img src="docs/images/profiles.svg" alt="Routing Profiles" width="700" />
 </p>
 
-Three built-in profiles control the cost/quality tradeoff:
+Three built-in profiles map to task complexity. Model order is pressure-aware — the router
+dynamically reorders chains based on live Claude subscription usage.
 
-| | Budget | Balanced | Premium |
+| | Budget (simple) | Balanced (medium) | Premium (complex) |
 |--|--------|----------|---------|
-| **Text** | Gemini Flash, GPT-4o-mini | GPT-4o, Claude Sonnet | o3, Claude Opus |
-| **Research** | Perplexity Sonar | Sonar Pro | Sonar Pro |
-| **Code** | Deepseek, Gemini Flash | Claude Sonnet, GPT-4o | Claude Opus, o3 |
-| **Image** | Flux Dev, Imagen 3 Fast | Flux Pro, Imagen 3, DALL-E 3 | Imagen 3, DALL-E 3 |
+| **Text** | Ollama → **Haiku** → cheap | **Sonnet** → externals → Haiku | **Opus** → Sonnet → o3 |
+| **Research** | Perplexity Sonar | Perplexity Sonar Pro | Perplexity Sonar Pro |
+| **Code** | Ollama → **Haiku** → Deepseek | **Sonnet** → GPT-4o → Gemini | **Opus** → Sonnet → o3 |
+| **Image** | Flux Dev, Imagen Fast | Flux Pro, Imagen 3, DALL-E 3 | Imagen 3, DALL-E 3 |
 | **Video** | minimax, Veo 2 | Kling, Veo 2, Runway Turbo | Veo 2, Runway Gen-3 |
 | **Audio** | OpenAI TTS | ElevenLabs | ElevenLabs |
 
-Switch anytime:
+### Quota-aware chain reordering
+
+Claude Pro/Max tokens are treated as free — the router uses them first. As quota is consumed,
+chains automatically reorder to preserve remaining Claude budget:
+
+| Claude usage | Chain order |
+|---|---|
+| **0–84%** | Claude first (free under subscription) |
+| **85–98%** | Codex → Ollama → cheap externals → Claude last |
+| **≥ 99% (hard cap)** | Codex → Ollama → cheap → paid — **zero Claude** |
+| **Research (any)** | Perplexity always first (web-grounded) |
+
+Switch profile anytime:
 ```
 llm_set_profile("budget")    # Development, drafts, exploration
 llm_set_profile("balanced")  # Production work, client deliverables

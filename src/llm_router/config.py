@@ -163,19 +163,26 @@ class RouterConfig(BaseSettings):
         }
 
     def ollama_models_for_profile(self, profile: "RoutingProfile") -> list[str]:
-        """Return Ollama model IDs (in ``ollama/model`` format) for the BUDGET profile.
+        """Return Ollama model IDs for the BUDGET profile (legacy behaviour).
 
-        Ollama is restricted to budget routing — local models handle simple tasks
-        for free, with cloud providers as fallback. Returns an empty list for
-        non-budget profiles or when Ollama is not configured.
-
-        Args:
-            profile: The routing profile. Only BUDGET returns models.
-
-        Returns:
-            List of LiteLLM model IDs like ``["ollama/llama3.2", "ollama/qwen2.5-coder:7b"]``.
+        Kept for backward compatibility. Prefer ``all_ollama_models()`` when
+        injecting Ollama under quota pressure regardless of profile.
         """
         if not self.ollama_base_url or profile != RoutingProfile.BUDGET:
+            return []
+        return self.all_ollama_models()
+
+    def all_ollama_models(self) -> list[str]:
+        """Return all configured Ollama model IDs regardless of routing profile.
+
+        Used by the pressure-aware routing layer to inject local/free models
+        when Claude subscription quota is running high (>= 85%).
+
+        Returns:
+            List of LiteLLM model IDs like ``["ollama/llama3.2", "ollama/qwen2.5-coder:7b"]``,
+            or an empty list when Ollama is not configured.
+        """
+        if not self.ollama_base_url:
             return []
         return [f"ollama/{m.strip()}" for m in self.ollama_budget_models.split(",") if m.strip()]
 

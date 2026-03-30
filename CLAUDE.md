@@ -19,7 +19,11 @@ When a user's task would clearly benefit from an external LLM — research requi
 ### When NOT to auto-route
 
 - When the user explicitly asks YOU to do something (e.g. "you personally explain this to me")
-- When actively editing/modifying files in the codebase (file operations, not answers)
+
+**There are no other exceptions.** Codebase work still routes:
+- Planning what to change → `llm_code` or `llm_analyze`
+- Understanding how something works → `llm_query`
+- File edits (Read/Edit/Write) are execution only — route the thinking first
 
 ### CRITICAL: Routing hint = hard constraint, not a suggestion
 

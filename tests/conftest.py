@@ -32,6 +32,12 @@ def mock_env(monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "test-openai-key")
     monkeypatch.setenv("PERPLEXITY_API_KEY", "test-perplexity-key")
     monkeypatch.setenv("LLM_ROUTER_PROFILE", "balanced")
+    # Disable Codex in unit tests — the binary may be installed locally but
+    # Codex CLI requires a trusted git directory and an active session, which
+    # unit tests don't provide. Tests that specifically exercise Codex routing
+    # should patch this themselves.
+    monkeypatch.setattr("llm_router.router.is_codex_available", lambda: False)
+    monkeypatch.setattr("llm_router.profiles.is_codex_available", lambda: False, raising=False)
 
 
 @pytest.fixture

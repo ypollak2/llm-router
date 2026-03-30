@@ -285,6 +285,7 @@ class TestRouterEdgeCases:
             mock_config.return_value.compaction_mode = "off"
             mock_config.return_value.compaction_threshold = 4000
             mock_config.return_value.ollama_models_for_profile.return_value = []
+            mock_config.return_value.all_ollama_models.return_value = []
 
             with patch("llm_router.router.get_model_chain", return_value=["openai/gpt-4o"]):
                 with pytest.raises(ValueError, match="No available models"):
@@ -308,6 +309,7 @@ class TestRouterEdgeCases:
             mock_config.return_value.compaction_mode = "off"
             mock_config.return_value.compaction_threshold = 4000
             mock_config.return_value.ollama_models_for_profile.return_value = []
+            mock_config.return_value.all_ollama_models.return_value = []
 
             with patch("llm_router.router.get_model_chain", return_value=["openai/gpt-4o"]):
                 with pytest.raises(RuntimeError, match="All models failed"):

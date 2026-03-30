@@ -300,6 +300,38 @@ def _time_until(iso_ts: str) -> str:
         return f"(resets: {iso_ts})"
 
 
+# ── In-process pressure cache ────────────────────────────────────────────────
+# Holds the most recent Claude subscription pressure (0.0–1.0).
+# Written by server.py's llm_update_usage whenever fresh data arrives.
+# Read by profiles.py when building the model chain so Claude models are
+# demoted only when the quota is actually tight (>= 85%), not by default.
+_cached_pressure: float = 0.0
+
+
+def get_claude_pressure() -> float:
+    """Return the last-known Claude subscription pressure (0.0–1.0).
+
+    This is ``ClaudeSubscriptionUsage.highest_pressure`` — the raw maximum
+    across session and weekly limits, without time-based discounting. Use this
+    for the 99% hard cap check so the cap holds regardless of imminent resets.
+
+    Returns 0.0 (no pressure = use Claude) until ``set_claude_pressure`` is called.
+    """
+    return _cached_pressure
+
+
+def set_claude_pressure(pressure: float) -> None:
+    """Update the cached pressure from fresh subscription data.
+
+    Args:
+        pressure: ``ClaudeSubscriptionUsage.highest_pressure`` (0.0–1.0).
+            Use the raw max (not effective_pressure) so the 99% hard cap
+            is enforced unconditionally.
+    """
+    global _cached_pressure
+    _cached_pressure = max(0.0, min(1.0, pressure))
+
+
 def parse_api_response(data: dict) -> ClaudeSubscriptionUsage:
     """Parse the JSON response from the claude.ai internal usage API.
 

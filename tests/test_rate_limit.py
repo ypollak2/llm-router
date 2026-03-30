@@ -148,6 +148,7 @@ class TestRouterRateLimitSwitching:
             mock_config.return_value.compaction_mode = "off"
             mock_config.return_value.compaction_threshold = 4000
             mock_config.return_value.ollama_models_for_profile.return_value = []
+            mock_config.return_value.all_ollama_models.return_value = []
 
             tracker = HealthTracker()
             mock_get_tracker.return_value = tracker
@@ -182,6 +183,7 @@ class TestRouterRateLimitSwitching:
             mock_config.return_value.compaction_mode = "off"
             mock_config.return_value.compaction_threshold = 4000
             mock_config.return_value.ollama_models_for_profile.return_value = []
+            mock_config.return_value.all_ollama_models.return_value = []
 
             tracker = HealthTracker()
             mock_get_tracker.return_value = tracker

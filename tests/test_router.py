@@ -75,13 +75,24 @@ async def test_no_providers_configured(monkeypatch):
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     monkeypatch.delenv("PERPLEXITY_API_KEY", raising=False)
     monkeypatch.chdir("/tmp")  # no .env file here
+    monkeypatch.setattr("llm_router.router.is_codex_available", lambda: False)
     with pytest.raises(ValueError, match="No available models"):
         await route_and_call(TaskType.QUERY, "Hello")
 
 
 @pytest.mark.asyncio
-async def test_research_adds_search_params(mock_env, mock_acompletion):
-    await route_and_call(TaskType.RESEARCH, "What happened today?")
+async def test_research_no_search_params_for_non_perplexity(mock_env, mock_acompletion):
+    # Non-Perplexity models explicitly overridden must NOT receive search_recency_filter.
+    await route_and_call(TaskType.RESEARCH, "What happened today?", model_override="openai/gpt-4o")
     call_kwargs = mock_acompletion.call_args.kwargs
-    assert "extra_body" in call_kwargs
-    assert call_kwargs["extra_body"]["search_recency_filter"] == "week"
+    extra_body = call_kwargs.get("extra_body", {})
+    assert "search_recency_filter" not in extra_body
+
+
+@pytest.mark.asyncio
+async def test_research_adds_search_params_for_perplexity(mock_env, mock_acompletion, monkeypatch):
+    # Perplexity sonar models should receive the recency filter.
+    monkeypatch.setenv("LLM_ROUTER_PROFILE", "balanced")
+    await route_and_call(TaskType.RESEARCH, "What happened today?", model_override="perplexity/sonar")
+    call_kwargs = mock_acompletion.call_args.kwargs
+    assert call_kwargs.get("extra_body", {}).get("search_recency_filter") == "week"

@@ -1210,6 +1210,14 @@ async def llm_update_usage(data: dict) -> str:
     global _last_usage
     _last_usage = parse_api_response(data)
 
+    # Propagate pressure into the routing layer so model chains are
+    # reordered immediately (Claude first below 85%, externals first above).
+    from llm_router.claude_usage import set_claude_pressure
+    # Use highest_pressure (raw max of session/weekly), not effective_pressure.
+    # The 99% hard cap must hold unconditionally — even when a session reset
+    # is imminent, we don't want to risk crossing the weekly limit.
+    set_claude_pressure(_last_usage.highest_pressure)
+
     # Write refresh timestamp so the usage-refresh hook knows when data
     # was last fetched and can decide whether to prompt for a re-fetch.
     state_dir = os.path.expanduser("~/.llm-router")

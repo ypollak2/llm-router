@@ -15,6 +15,7 @@ import logging
 from typing import Any
 
 from llm_router import cost, media, providers
+from llm_router.codex_agent import CODEX_MODELS, is_codex_available, run_codex
 from llm_router.compaction import compact_structural
 from llm_router.config import get_config
 from llm_router.context import build_context_messages, get_session_buffer
@@ -178,18 +179,42 @@ async def route_and_call(
         models_to_try = [model_override]
     else:
         models_to_try = get_model_chain(profile, task_type)
-        # Prepend Ollama models only for BUDGET tier (simple tasks).
-        # Local models are great for lightweight work but lack the capability
-        # for complex tasks — restrict to budget profile to avoid quality issues.
-        if task_type not in MEDIA_TASK_TYPES and profile == RoutingProfile.BUDGET:
-            ollama_models = config.ollama_models_for_profile(profile)
-            if ollama_models:
+        if task_type not in MEDIA_TASK_TYPES:
+            from llm_router.claude_usage import get_claude_pressure
+            pressure = get_claude_pressure()
+
+            # ── Ollama injection ─────────────────────────────────────────────
+            # BUDGET always: local/free models fit simple tasks regardless of quota.
+            # BALANCED/PREMIUM at ≥ 85%: inject at front to spare Claude quota.
+            ollama_models = config.all_ollama_models()
+            if ollama_models and (profile == RoutingProfile.BUDGET or pressure >= 0.85):
                 models_to_try = ollama_models + models_to_try
 
-    # Filter to providers we have keys for
+            # ── Codex injection ──────────────────────────────────────────────
+            # Codex uses the user's OpenAI subscription (free from Claude quota).
+            # Position depends on pressure:
+            #   < 85%: after all Claude models (Sonnet/Opus first, then Codex)
+            #   ≥ 85%: at the very front (spares Claude entirely)
+            if profile != RoutingProfile.BUDGET and is_codex_available():
+                codex_chain = [f"codex/{m}" for m in CODEX_MODELS[:2]]  # top 2 models
+                if pressure >= 0.85:
+                    models_to_try = codex_chain + models_to_try
+                else:
+                    # Insert after the last Claude model in the chain
+                    last_claude = max(
+                        (i for i, m in enumerate(models_to_try) if m.startswith("anthropic/")),
+                        default=-1,
+                    )
+                    insert_at = last_claude + 1
+                    models_to_try = models_to_try[:insert_at] + codex_chain + models_to_try[insert_at:]
+
+    # Filter to providers we have API keys for.
+    # Codex and Ollama use local runtimes (no API key) — always pass through.
     available = config.available_providers
     models_to_try = [
-        m for m in models_to_try if provider_from_model(m) in available
+        m for m in models_to_try
+        if provider_from_model(m) in available
+        or provider_from_model(m) in {"codex", "ollama"}
     ]
 
     if not models_to_try:
@@ -217,6 +242,21 @@ async def route_and_call(
         try:
             if task_type in MEDIA_TASK_TYPES:
                 response = await _call_media(task_type, provider, model_name, prompt, media_params)
+            elif provider == "codex":
+                import time as _time
+                _t0 = _time.monotonic()
+                codex_result = await run_codex(prompt, model=model_name)
+                if not codex_result.success:
+                    raise RuntimeError(f"Codex exited {codex_result.exit_code}: {codex_result.content[:200]}")
+                response = LLMResponse(
+                    content=codex_result.content,
+                    model=f"codex/{model_name}",
+                    input_tokens=0,   # CLI doesn't report token counts
+                    output_tokens=0,
+                    cost_usd=0.0,     # free via OpenAI subscription
+                    latency_ms=codex_result.duration_sec * 1000,
+                    provider="codex",
+                )
             else:
                 response = await _call_text(
                     model, prompt, system_prompt, temperature, max_tokens, task_type,
@@ -337,7 +377,8 @@ async def _call_text(
     extra = {}
     # Perplexity's sonar models support a recency filter that limits
     # search results to the last week, keeping research answers current.
-    if task_type == TaskType.RESEARCH:
+    # Only apply to Perplexity models — other providers reject this field.
+    if task_type == TaskType.RESEARCH and "perplexity" in model.lower():
         extra["extra_body"] = {"search_recency_filter": "week"}
 
     return await providers.call_llm(
