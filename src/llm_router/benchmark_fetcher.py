@@ -5,9 +5,9 @@ per-task-type scores, assigns tier lists, and writes an updated
 ``data/benchmarks.json``. Run via ``scripts/update_benchmarks.py``.
 
 Sources:
-  - LMSYS Chatbot Arena (ELO scores — general quality)
-  - Aider Leaderboard (code-specific pass rates)
-  - HuggingFace Open LLM Leaderboard (reasoning, math, knowledge)
+  - Arena Hard Auto (lm-sys/arena-hard-auto CSV — general quality, public)
+  - Aider Edit Leaderboard (YAML from Aider-AI/aider — code-specific pass rates)
+  - HuggingFace Open LLM Leaderboard v2 (datasets-server JSON — reasoning, math)
   - LiteLLM model_cost dict (pricing — already installed as a dependency)
 
 This module requires the ``scripts`` optional dependency group:
@@ -40,7 +40,7 @@ _TASK_WEIGHTS: dict[str, tuple[float, float, float, float]] = {
 # Maps source model names → LiteLLM provider/model IDs.
 # Extend this table when new frontier models are released.
 _ALIASES: dict[str, str] = {
-    # LMSYS names
+    # Arena Hard / display names
     "Claude Opus 4.6": "anthropic/claude-opus-4-6",
     "Claude Sonnet 4.6": "anthropic/claude-sonnet-4-6",
     "Claude Haiku 4.5": "anthropic/claude-haiku-4-5-20251001",
@@ -55,7 +55,24 @@ _ALIASES: dict[str, str] = {
     "Grok-3": "xai/grok-3",
     "Mistral-Large": "mistral/mistral-large-latest",
     "Command R+": "cohere/command-r-plus",
-    # Aider names (may differ slightly)
+    # Arena Hard CSV model names (versioned)
+    "claude-3-5-sonnet-20241022": "anthropic/claude-sonnet-4-6",
+    "claude-3-5-sonnet-20240620": "anthropic/claude-sonnet-4-6",
+    "claude-3-opus-20240229": "anthropic/claude-opus-4-6",
+    "claude-3-haiku-20240307": "anthropic/claude-haiku-4-5-20251001",
+    "gpt-4o-2024-05-13": "openai/gpt-4o",
+    "gpt-4o-2024-08-06": "openai/gpt-4o",
+    "gpt-4o-mini-2024-07-18": "openai/gpt-4o-mini",
+    "o1-preview-2024-09-12": "openai/o3",
+    "gemini-1.5-pro-api-0514": "gemini/gemini-2.5-pro",
+    "gemini-1.5-flash-api-0514": "gemini/gemini-2.5-flash",
+    "gemini-2.0-flash-001": "gemini/gemini-2.5-flash",
+    "deepseek-v3": "deepseek/deepseek-chat",
+    "deepseek-r1": "deepseek/deepseek-reasoner",
+    "llama-3.3-70b-instruct": "groq/llama-3.3-70b-versatile",
+    "grok-3-beta": "xai/grok-3",
+    "mistral-large-2411": "mistral/mistral-large-latest",
+    # Aider YAML model names
     "claude-opus-4-6": "anthropic/claude-opus-4-6",
     "claude-sonnet-4-6": "anthropic/claude-sonnet-4-6",
     "gpt-4o": "openai/gpt-4o",
@@ -63,6 +80,12 @@ _ALIASES: dict[str, str] = {
     "gemini-2.5-flash": "gemini/gemini-2.5-flash",
     "deepseek-chat": "deepseek/deepseek-chat",
     "deepseek-reasoner": "deepseek/deepseek-reasoner",
+    # HuggingFace leaderboard names
+    "claude-3-5-sonnet": "anthropic/claude-sonnet-4-6",
+    "gpt-4o-mini": "openai/gpt-4o-mini",
+    "Meta-Llama-3.3-70B-Instruct": "groq/llama-3.3-70b-versatile",
+    "Llama-3.3-70B-Instruct": "groq/llama-3.3-70b-versatile",
+    "Mistral-Large-Instruct-2411": "mistral/mistral-large-latest",
 }
 
 # Models that are NEVER included in benchmark tiers (local-only, no API benchmarks).
@@ -94,37 +117,47 @@ def _resolve(name: str) -> str | None:
 
 
 def fetch_lmsys() -> dict[str, float]:
-    """Fetch LMSYS Chatbot Arena ELO scores.
+    """Fetch Arena Hard Auto leaderboard win-rate scores (public replacement for gated LMSYS ELO).
+
+    Uses the lm-sys/arena-hard-auto repo CSV which is freely accessible.
+    Scores are win-rates (0–100) treated as relative quality signal.
 
     Returns:
-        Dict mapping provider/model → raw ELO score (un-normalized).
+        Dict mapping provider/model → win-rate score (un-normalized).
         Empty dict on any network or parse failure.
     """
     try:
+        import csv
+        import io
+
         import httpx
+
         resp = httpx.get(
-            "https://huggingface.co/datasets/lmsys/chatbot_arena_leaderboard/resolve/main/elo_results_20240827.json",
+            "https://raw.githubusercontent.com/lm-sys/arena-hard-auto/main/leaderboard/arena_hard_leaderboard_20240731.csv",
             timeout=30,
             follow_redirects=True,
         )
         resp.raise_for_status()
-        data = resp.json()
         scores = {}
-        # The leaderboard JSON has an "elo_rating_final" dict keyed by model name.
-        elo_map = data.get("elo_rating_final", data) if isinstance(data, dict) else {}
-        for name, elo in elo_map.items():
-            resolved = _resolve(name)
-            if resolved and isinstance(elo, (int, float)):
-                scores[resolved] = float(elo)
-        log.info("LMSYS: fetched %d model scores", len(scores))
+        reader = csv.DictReader(io.StringIO(resp.text))
+        for row in reader:
+            name = (row.get("model") or "").strip()
+            raw = row.get("score", "0")
+            resolved = _resolve(name) or _resolve(name.lower())
+            if resolved:
+                try:
+                    scores[resolved] = float(raw)
+                except (TypeError, ValueError):
+                    pass
+        log.info("Arena Hard: fetched %d model scores", len(scores))
         return scores
     except Exception as e:
-        log.warning("LMSYS fetch failed: %s — using empty data", e)
+        log.warning("Arena Hard fetch failed: %s — using empty data", e)
         return {}
 
 
 def fetch_aider() -> dict[str, float]:
-    """Fetch Aider code benchmark pass rates.
+    """Fetch Aider edit leaderboard pass rates from the official YAML source.
 
     Returns:
         Dict mapping provider/model → pass rate (0.0–1.0, already normalized).
@@ -132,17 +165,20 @@ def fetch_aider() -> dict[str, float]:
     """
     try:
         import httpx
+        import yaml  # pyyaml, required in scripts extra
+
         resp = httpx.get(
-            "https://aider.chat/assets/leaderboard.json",
+            "https://raw.githubusercontent.com/Aider-AI/aider/main/aider/website/_data/edit_leaderboard.yml",
             timeout=30,
             follow_redirects=True,
         )
         resp.raise_for_status()
-        rows = resp.json()
+        rows = yaml.safe_load(resp.text) or []
         scores = {}
         for row in rows if isinstance(rows, list) else []:
-            name = row.get("model") or row.get("name", "")
-            rate = row.get("pass_rate_2") or row.get("pass_rate", 0)
+            name = (row.get("model") or row.get("name") or "").strip()
+            # prefer pass_rate_2 (whole-file edit), fall back to pass_rate_1
+            rate = row.get("pass_rate_2") or row.get("pass_rate_1") or row.get("pass_rate") or 0
             resolved = _resolve(name) or _resolve(name.lower())
             if resolved and isinstance(rate, (int, float)):
                 scores[resolved] = float(rate) / 100.0 if float(rate) > 1 else float(rate)
@@ -154,9 +190,9 @@ def fetch_aider() -> dict[str, float]:
 
 
 def fetch_huggingface() -> dict[str, float]:
-    """Fetch HuggingFace Open LLM Leaderboard scores.
+    """Fetch HuggingFace Open LLM Leaderboard v2 scores via datasets-server JSON API.
 
-    Averages IFEval, MMLU-Pro, and MATH Lvl5 columns.
+    Averages IFEval, MMLU-Pro, MATH Lvl 5, and BBH columns where available.
 
     Returns:
         Dict mapping provider/model → averaged score (0.0–1.0).
@@ -164,27 +200,33 @@ def fetch_huggingface() -> dict[str, float]:
     """
     try:
         import httpx
-        # Use the HF Datasets API for the Open LLM Leaderboard v2
-        resp = httpx.get(
-            "https://huggingface.co/datasets/open-llm-leaderboard/contents/resolve/main/contents/results.json",
-            timeout=30,
-            follow_redirects=True,
-        )
-        resp.raise_for_status()
-        rows = resp.json() if isinstance(resp.json(), list) else []
+
         scores: dict[str, list[float]] = {}
-        for row in rows:
-            name = row.get("fullname") or row.get("model", "")
-            resolved = _resolve(name) or _resolve(name.split("/")[-1])
-            if not resolved:
-                continue
-            vals = []
-            for col in ("IFEval", "MMLU-Pro", "MATH Lvl 5", "ifeval", "mmlu_pro"):
-                v = row.get(col)
-                if isinstance(v, (int, float)):
-                    vals.append(float(v) / 100.0 if float(v) > 1.0 else float(v))
-            if vals:
-                scores.setdefault(resolved, []).extend(vals)
+        # Fetch up to 500 rows in batches of 100 — enough to cover our known models.
+        base = (
+            "https://datasets-server.huggingface.co/rows"
+            "?dataset=open-llm-leaderboard%2Fcontents&config=default&split=train"
+        )
+        for offset in range(0, 500, 100):
+            resp = httpx.get(f"{base}&offset={offset}&length=100", timeout=30, follow_redirects=True)
+            resp.raise_for_status()
+            data = resp.json()
+            batch = [r.get("row", r) for r in data.get("rows", [])]
+            if not batch:
+                break
+            for row in batch:
+                name = row.get("fullname") or row.get("Model") or row.get("model", "")
+                resolved = _resolve(name) or _resolve(name.split("/")[-1])
+                if not resolved:
+                    continue
+                vals = []
+                for col in ("IFEval", "MMLU-PRO", "MATH Lvl 5", "BBH", "Average ⬆️"):
+                    v = row.get(col)
+                    if isinstance(v, (int, float)):
+                        vals.append(float(v) / 100.0 if float(v) > 1.0 else float(v))
+                if vals:
+                    scores.setdefault(resolved, []).extend(vals)
+
         result = {m: sum(v) / len(v) for m, v in scores.items() if v}
         log.info("HuggingFace: fetched %d model scores", len(result))
         return result
@@ -342,6 +384,13 @@ def generate_benchmarks_json(output_path: Path = _OUTPUT_PATH) -> None:
             "cost_per_1m_input": inp,
             "cost_per_1m_output": out,
         }
+
+    # Guard: don't overwrite existing data with an empty result.
+    if not raw_scores:
+        log.warning(
+            "All benchmark sources returned empty — keeping existing benchmarks.json unchanged."
+        )
+        return
 
     # Compute scores and tiers.
     task_scores = compute_task_scores(lmsys, aider_raw, hf_raw, pricing)

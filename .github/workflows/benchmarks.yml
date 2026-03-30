@@ -57,6 +57,5 @@ jobs:
 
           gh pr create \
             --title "chore(benchmarks): weekly routing table update $(date +%Y-%m-%d)" \
-            --body "Automated weekly benchmark refresh from LMSYS, Aider, HuggingFace, LiteLLM pricing. Distributed to all users on next pip upgrade + server restart." \
-            --label "automated" \
+            --body "Automated weekly benchmark refresh from Arena Hard, Aider, HuggingFace, LiteLLM pricing. Distributed to all users on next pip upgrade + server restart." \
             --base main
