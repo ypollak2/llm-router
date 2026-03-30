@@ -44,7 +44,7 @@ jobs:
           UPDATE_DATE: ${{ github.run_id }}
         run: |
           DATE=$(date +%Y%m%d)
-          BRANCH="benchmarks/auto-update-${DATE}"
+          BRANCH="benchmarks/auto-update-${DATE}-${GITHUB_RUN_ID}"
 
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
