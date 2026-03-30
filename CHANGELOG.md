@@ -1,5 +1,30 @@
 # Changelog
 
+## v0.5.2 — Ollama Local Models & Claude Mobile App Support (2026-03-30)
+
+### Added
+
+- **Ollama routing** — Local models are now first-class routing targets. Set `OLLAMA_BASE_URL=http://localhost:11434` and `OLLAMA_BUDGET_MODELS=llama3.2,qwen2.5-coder:7b` to route tasks to free local models before falling back to cloud providers. Supports per-tier model lists (`OLLAMA_BUDGET_MODELS`, `OLLAMA_BALANCED_MODELS`, `OLLAMA_PREMIUM_MODELS`).
+- **Claude mobile app access** — `llm-router-sse` CLI entry point starts the MCP server with SSE transport (port 17891) for remote connection from Claude mobile app via cloudflared tunnel.
+- **`SessionStart` hook** — New `mobile-access.sh` hook auto-starts the SSE server + cloudflared tunnel each session and prints the mobile connection URL.
+- **Ollama llama emoji** — 🦙 icon for Ollama provider in CLI and MCP output.
+
+### Changed
+
+- README savings section rewritten with concrete per-task cost examples (factual queries: $0.000001, with Ollama: $0).
+- Ollama added to providers table in README and full setup guide added to `docs/PROVIDERS.md`.
+- `OLLAMA_API_BASE` exported to env automatically when `OLLAMA_BASE_URL` is set.
+
+---
+
+## v0.5.1 — Claude Haiku Budget Routing (2026-03-30)
+
+### Added
+
+- **Claude Haiku in BUDGET tier** — `anthropic/claude-haiku-4-5-20251001` added to all budget-tier text chains. Haiku is now the primary code model in budget routing (best code quality at budget price point) and a fallback in query/research/generate/analyze chains.
+
+---
+
 ## v0.5.0 — Session Context Injection & Auto-Update Rules (2026-03-30)
 
 ### Added
