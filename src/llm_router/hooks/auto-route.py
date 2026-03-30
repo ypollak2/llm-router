@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm-router-hook-version: 2
+# llm-router-hook-version: 3
 """UserPromptSubmit hook — scoring classifier with Ollama + API fallback chain.
 
 Classification chain (stops at first success):
@@ -549,18 +549,23 @@ def main() -> None:
     method = result["method"]
     tool = TOOL_MAP.get(task_type, "llm_route")
 
-    hint = (
-        f"[ROUTE: {task_type}/{complexity} via {method}] "
-        f"Auto-route this task to external LLM. "
-        f"Use `{tool}` tool"
-        f"{f' with complexity_override={complexity}' if tool == 'llm_route' else ''}. "
-        f"Pre-classified as {complexity} {task_type}."
+    # Hard directive — unambiguous, no room to rationalize around it.
+    # Key additions vs. old soft hint:
+    #   - "MANDATORY" not "Auto-route"
+    #   - Explicit "No Agent subagents" prohibition (the #1 violation pattern)
+    #   - "cheap model's output IS your response" — frames the economic contract
+    complexity_flag = f" complexity_override={complexity}" if tool == "llm_route" else ""
+    directive = (
+        f"⚡ MANDATORY ROUTE: {task_type}/{complexity} (classified via {method})\n"
+        f"Call `{tool}`{complexity_flag} as your FIRST and ONLY action.\n"
+        f"FORBIDDEN: Agent subagents · WebSearch · WebFetch · answering yourself · Bash research\n"
+        f"The cheap model's output IS your response. Do not add to it."
     )
 
     output = {
         "hookSpecificOutput": {
             "hookEventName": "UserPromptSubmit",
-            "contextForAgent": hint,
+            "contextForAgent": directive,
         }
     }
     json.dump(output, sys.stdout)

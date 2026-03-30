@@ -1,51 +1,86 @@
-<!-- llm-router-rules-version: 2 -->
+<!-- llm-router-rules-version: 3 -->
 # LLM Router — Global Routing Rules
 
-> Installed by llm-router. These rules ensure every task is evaluated for optimal model routing.
+> Installed by llm-router. These rules control which model handles every task.
 
-## Routing Hint Enforcement (CRITICAL)
+---
 
-When a `[ROUTE: <task_type>/<complexity> via <method>]` hint appears in conversation context (injected by the UserPromptSubmit hook), you MUST follow it:
+## ROUTING HINT = HARD CONSTRAINT (NOT a suggestion)
 
-1. **Read the hint** — it tells you which `llm_*` tool to use and the task complexity
-2. **Call the tool** — use the matching MCP tool (`llm_query`, `llm_research`, `llm_generate`, `llm_analyze`, `llm_code`, `llm_image`, etc.)
-3. **Never override** — do NOT ignore the hint because you think the task is "local", "codebase work", or something you can handle yourself
+When `⚡ MANDATORY ROUTE:` appears in your context, it was injected by the UserPromptSubmit
+hook BEFORE you processed this message. It is a binding routing decision, not advice.
 
-The router's classification IS the decision. It evaluated the prompt against multiple signal layers (heuristic scoring, local LLM, API fallback) and determined the best routing. Trust it.
+**The economic contract**: routing to Haiku/Gemini Flash costs 50–100x less than Opus handling
+the task directly. A "good enough" answer from a cheap model is always preferable to a
+"perfect" answer from you. The whole point is cost reduction, not quality maximisation.
+
+---
+
+## What You MUST Do When a ROUTE Hint Is Present
+
+1. Call the specified MCP tool **as your first and only substantive action**
+2. Return its output to the user
+3. Done
+
+```
+⚡ MANDATORY ROUTE: query/simple → call llm_query
+⚡ MANDATORY ROUTE: research/moderate → call llm_research
+⚡ MANDATORY ROUTE: code/complex → call llm_code
+⚡ MANDATORY ROUTE: analyze/moderate → call llm_analyze
+⚡ MANDATORY ROUTE: generate/simple → call llm_generate
+```
+
+---
+
+## What You MUST NOT Do When a ROUTE Hint Is Present
+
+These actions are **explicitly forbidden** when a routing hint fires:
+
+| Forbidden action | Why it violates routing |
+|-----------------|------------------------|
+| Using the **Agent tool** to spawn subagents | Subagents run on expensive models — defeats cost savings |
+| Using **WebSearch** or **WebFetch** directly | Route hint already decided which model handles research |
+| Using **Read / Grep / Glob** to answer the question yourself | You're doing the work the cheap model should do |
+| Using **Bash** to compute/research the answer | Same — you're the expensive model, stay out of it |
+| Answering from your own knowledge without calling the MCP tool | Direct Opus/Sonnet answer = no routing = full token cost |
+| Deciding the task is "complex enough" to warrant self-handling | The classifier already decided. It was right. |
+| Calling the MCP tool AND ALSO doing the research yourself | Double cost — defeats the purpose entirely |
+
+**The only permitted exception**: if the task requires editing/reading specific files in
+the current codebase (not answering a question — actually modifying code), you may use
+file tools. But questions about the codebase still route: "how does X work?" → `llm_query`.
+
+---
 
 ## Task Type → Tool Mapping
 
-| Route hint | MCP tool | Use case |
+| Route hint | MCP tool | Notes |
 |---|---|---|
-| `research/*` | `llm_research` | Web search, current events, market analysis |
-| `generate/*` | `llm_generate` | Content creation, writing, brainstorming |
-| `analyze/*` | `llm_analyze` | Deep analysis, comparisons, evaluations |
-| `code/*` | `llm_code` | Code generation, refactoring, bug analysis |
-| `query/*` | `llm_query` | Quick factual questions, lookups |
-| `image/*` | `llm_image` | Image generation |
+| `research/*` | `llm_research` | Perplexity / web-grounded models |
+| `generate/*` | `llm_generate` | Gemini Flash / Haiku for writing |
+| `analyze/*` | `llm_analyze` | Sonnet-class for deep analysis |
+| `code/*` | `llm_code` | Haiku / Sonnet for code tasks |
+| `query/*` | `llm_query` | Haiku / Gemini Flash for questions |
+| `image/*` | `llm_image` | Image generation models |
+| `auto/*` | `llm_route` | Full re-classification |
 
-## When No Hint is Present
+---
 
-If no `[ROUTE:]` hint appears (hook not installed or prompt was skipped), use your judgment:
-- Research requiring web access → `llm_research`
-- Content generation → `llm_generate`
-- Deep analysis beyond training data → `llm_analyze`
-- Code generation for external model → `llm_code`
-- Simple factual questions → `llm_query`
+## When No Hint Is Present
 
-## Why Routing Saves Tokens Even for Simple Tasks
+If no `⚡ MANDATORY ROUTE:` appears (hook not installed or prompt was skipped):
+- Research / current events → `llm_research`
+- Writing / content → `llm_generate`
+- Deep analysis → `llm_analyze`
+- Code questions → `llm_code`
+- Simple questions → `llm_query`
 
-The primary value is **token arbitrage**: cheap models (Gemini Flash, GPT-4o-mini, Haiku) cost
-~50-100x less than Opus. When a `[ROUTE: query/simple]` hint fires for a git commit message or
-a one-line answer, calling `llm_query` saves real subscription tokens — Opus only orchestrates,
-the cheap model generates the actual response.
+---
 
-Do NOT treat tasks as "too simple to route" — simple tasks are exactly when routing saves the most.
-
-## What NOT to Do
+## What NOT to Do (Summary)
 
 - Do NOT ignore routing hints — ever
-- Do NOT decide that a task is "too simple" for routing — simple tasks are the best candidates
-- Do NOT skip routing because you're "already working on the codebase"
-- Do NOT re-classify tasks that have already been classified by the hook
-- Do NOT handle a task yourself because it seems "local" — local tasks still consume Opus tokens
+- Do NOT use Agent subagents for routed tasks — this is the #1 violation
+- Do NOT treat "I could do this better myself" as a reason to skip routing
+- Do NOT route AND also do the work yourself — pick one (always pick routing)
+- Do NOT re-classify what the hook already classified

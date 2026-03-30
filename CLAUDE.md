@@ -18,17 +18,24 @@ When a user's task would clearly benefit from an external LLM — research requi
 
 ### When NOT to auto-route
 
-- Questions about this codebase specifically (use Read/Grep instead)
-- When the user explicitly asks YOU to do something (e.g. "you personally explain this")
+- When the user explicitly asks YOU to do something (e.g. "you personally explain this to me")
+- When actively editing/modifying files in the codebase (file operations, not answers)
 
-> **Token savings are the primary value**: Do NOT skip routing for "simple" tasks like git
-> commits, writing messages, or answering questions. Cheap models (Gemini Flash, GPT-4o-mini)
-> handle the reasoning while Opus stays as orchestrator. When the hook fires a `[ROUTE:]` hint,
-> follow it — the router already decided this task belongs to a cheaper model.
+### CRITICAL: Routing hint = hard constraint, not a suggestion
+
+When `⚡ MANDATORY ROUTE:` appears in context, these actions are **forbidden**:
+- Using the **Agent tool** to spawn subagents — this is the #1 violation
+- Using WebSearch / WebFetch to answer the question yourself
+- Answering from your own knowledge without calling the MCP tool
+- Calling the MCP tool AND ALSO doing the research yourself
+
+**One rule**: call the specified tool, return its output, done.
+
+The economic reason: cheap models (Gemini Flash, Haiku) cost 50–100x less than Opus. A "good enough" answer from the cheap model is always correct — that IS the point. Do not optimize for quality over cost when routing is in play.
 
 ### Routing Hint
 
-If a `[ROUTE: <task_type>/<complexity> via <method>]` hint appears in the conversation context, use it to select the right tool and skip re-classification. The hint is injected by the UserPromptSubmit hook's multi-layer classifier:
+If a `⚡ MANDATORY ROUTE:` directive appears in context, use it to select the right tool and skip re-classification. The directive is injected by the UserPromptSubmit hook's multi-layer classifier:
 
 1. `via heuristic` — High-confidence pattern match (instant, free)
 2. `via ollama` — Local LLM classification via qwen3.5 (~1s, free)
