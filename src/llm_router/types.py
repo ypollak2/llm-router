@@ -355,9 +355,15 @@ class LLMResponse:
         """Format a markdown header line for MCP tool responses.
 
         Returns:
-            Markdown blockquote with model, cost, and latency.
+            Markdown blockquote with model, tokens, cost, and latency.
         """
-        return f"> **Routed to {colorize_model(self.model)}** | ${self.cost_usd:.6f} | {self.latency_ms:.0f}ms"
+        tokens = f"{self.input_tokens + self.output_tokens} tokens" if self.input_tokens else ""
+        parts = [f"> 🤖 **{colorize_model(self.model)}**"]
+        if tokens:
+            parts.append(tokens)
+        parts.append(f"${self.cost_usd:.6f}")
+        parts.append(f"{self.latency_ms:.0f}ms")
+        return " · ".join(parts)
 
 
 @dataclass(frozen=True)

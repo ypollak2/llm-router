@@ -192,7 +192,8 @@ async def route_and_call(
             "Run `llm-router-onboard` to configure API keys."
         )
 
-    await _notify(ctx, "info", f"Routing {task_type.value} [{profile.value}] → candidates: {', '.join(models_to_try)}")
+    top_model = models_to_try[0].split("/", 1)[1] if "/" in models_to_try[0] else models_to_try[0]
+    await _notify(ctx, "info", f"🤖 Routing to {top_model} ({task_type.value}/{profile.value})")
 
     last_error: Exception | None = None
     for model in models_to_try:
@@ -200,11 +201,11 @@ async def route_and_call(
         model_name = model.split("/", 1)[1] if "/" in model else model
 
         if not tracker.is_healthy(provider):
-            await _notify(ctx, "warning", f"Skipping {provider} (unhealthy)")
+            await _notify(ctx, "warning", f"⚠️  {provider} unhealthy — trying next")
             log.info("Skipping unhealthy provider: %s", provider)
             continue
 
-        await _notify(ctx, "info", f"Calling {model}...")
+        await _notify(ctx, "info", f"⏳ {model_name} working...")
 
         try:
             if task_type in MEDIA_TASK_TYPES:
@@ -253,7 +254,7 @@ async def route_and_call(
 
             await _notify(
                 ctx, "info",
-                f"Done → {model} | ${response.cost_usd:.6f} | {response.latency_ms:.0f}ms"
+                f"✅ {model_name} — {response.latency_ms:.0f}ms · ${response.cost_usd:.6f}"
             )
             return response
 
