@@ -418,3 +418,210 @@ def generate_benchmarks_json(output_path: Path = _OUTPUT_PATH) -> None:
         len(raw_scores),
         len(task_scores),
     )
+
+    # Also regenerate the human-readable benchmarks doc.
+    md_path = Path(__file__).parent.parent.parent.parent / "docs" / "BENCHMARKS.md"
+    try:
+        generate_benchmarks_md(output, md_path)
+        log.info("BENCHMARKS.md regenerated")
+    except Exception as e:
+        log.warning("BENCHMARKS.md generation failed: %s", e)
+
+
+# ── Human-readable Markdown Generator ───────────────────────────────────────
+
+_TASK_META: dict[str, dict[str, str]] = {
+    "code":     {"icon": "💻", "label": "Code Generation & Refactoring",    "weights": "Aider 50% · Arena Hard 30% · Cost 20%"},
+    "analyze":  {"icon": "🔍", "label": "Analysis & Debugging",              "weights": "Arena Hard 40% · HF Score 40% · Cost 20%"},
+    "query":    {"icon": "❓", "label": "Query & Factual Lookup",             "weights": "Arena Hard 40% · HF Score 40% · Cost 20%"},
+    "generate": {"icon": "✍️",  "label": "Content Generation & Writing",      "weights": "Arena Hard 50% · HF Score 30% · Cost 20%"},
+    "research": {"icon": "🔎", "label": "Research & Web Search",             "weights": "Arena Hard 60% · Cost 40%"},
+}
+
+_TIER_BADGE = {"premium": "🥇", "balanced": "🥈", "budget": "🥉"}
+
+_PROVIDER_SHORT: dict[str, str] = {
+    "anthropic": "Anthropic",
+    "openai": "OpenAI",
+    "gemini": "Google",
+    "deepseek": "DeepSeek",
+    "groq": "Groq",
+    "xai": "xAI",
+    "mistral": "Mistral",
+    "cohere": "Cohere",
+    "perplexity": "Perplexity",
+    "ollama": "Ollama",
+}
+
+
+def _fmt_cost(val: float | None) -> str:
+    if val is None:
+        return "—"
+    return f"${val:.3f}".rstrip("0").rstrip(".")
+
+
+def _fmt_score(val: float | None) -> str:
+    if val is None:
+        return "—"
+    return f"{val:.2f}"
+
+
+def _model_tier(model: str, tiers: dict[str, dict[str, list[str]]]) -> dict[str, str]:
+    """Return {task: tier_name} for a model across all task types."""
+    result: dict[str, str] = {}
+    for task, tier_groups in tiers.items():
+        for tier_name, models in tier_groups.items():
+            if model in models:
+                result[task] = tier_name
+    return result
+
+
+def generate_benchmarks_md(data: dict[str, Any], output_path: Path) -> None:
+    """Render ``data`` (from ``benchmarks.json``) as a stylish Markdown document.
+
+    Args:
+        data: Parsed benchmarks dict (same schema as benchmarks.json).
+        output_path: Where to write the markdown file.
+    """
+    version = data.get("version", "?")
+    generated_at = (data.get("generated_at") or "")[:10]  # date only
+    raw_scores: dict[str, Any] = data.get("raw_scores", {})
+    task_scores: dict[str, dict[str, float]] = data.get("task_scores", {})
+    tiers: dict[str, dict[str, list[str]]] = data.get("tiers", {})
+
+    lines: list[str] = [
+        "<!-- AUTO-GENERATED — do not edit by hand. Updated weekly by GitHub Actions. -->",
+        "<!-- Source: src/llm_router/data/benchmarks.json · Generator: scripts/update_benchmarks.py -->",
+        "",
+        "# Model Benchmarks",
+        "",
+        "> 🔄 **Auto-updated every Monday** by [GitHub Actions](../.github/workflows/benchmarks.yml)  ",
+        f"> 📅 Last updated: **{generated_at}** &nbsp;·&nbsp; Version **{version}**  ",
+        "> 📊 Sources: Arena Hard Auto · Aider Edit Leaderboard · HuggingFace Open LLM v2 · LiteLLM Pricing",
+        "",
+        "The router uses these benchmarks to dynamically reorder model chains so the best-performing",
+        "model for each task type is tried first. Updated data is distributed automatically to all",
+        "users on the next `pip install --upgrade claude-code-llm-router` + server restart.",
+        "",
+        "---",
+        "",
+        "## Tier System",
+        "",
+        "| Tier | Badge | Description | Routing Profile |",
+        "|------|-------|-------------|-----------------|",
+        "| Premium | 🥇 | Top 3 models per task — highest quality, higher cost | `QUALITY_MODE=best` |",
+        "| Balanced | 🥈 | Next 4 models — strong quality/cost ratio | `QUALITY_MODE=balanced` *(default)* |",
+        "| Budget | 🥉 | Remaining models — maximum cost savings | `QUALITY_MODE=conserve` |",
+        "",
+        "---",
+        "",
+        "## Rankings by Task Type",
+    ]
+
+    for task_key, meta in _TASK_META.items():
+        scores = task_scores.get(task_key, {})
+        task_tiers = tiers.get(task_key, {})
+        # Build ordered list: premium first, then balanced, then budget.
+        ranked: list[str] = []
+        for tier in ("premium", "balanced", "budget"):
+            ranked.extend(task_tiers.get(tier, []))
+
+        lines += [
+            "",
+            f"### {meta['icon']} {meta['label']}",
+            "",
+            f"*Weights: {meta['weights']}*",
+            "",
+            "| Rank | Tier | Model | Score | Cost Input/1M |",
+            "|------|------|-------|-------|---------------|",
+        ]
+
+        for i, model in enumerate(ranked, 1):
+            tier_name = next(
+                (t for t, ms in task_tiers.items() if model in ms), "budget"
+            )
+            badge = _TIER_BADGE.get(tier_name, "")
+            score = _fmt_score(scores.get(model))
+            inp, _ = raw_scores.get(model, {}).get("cost_per_1m_input", None), None
+            if isinstance(raw_scores.get(model, {}), dict):
+                inp = raw_scores[model].get("cost_per_1m_input")
+            lines.append(f"| {i} | {badge} | `{model}` | {score} | {_fmt_cost(inp)} |")
+
+        lines.append("")
+        lines.append("---")
+
+    # Raw scores table.
+    lines += [
+        "",
+        "## Raw Scores",
+        "",
+        "Full data behind the composite rankings above.",
+        "",
+        "| Model | Arena Hard Score | Aider Pass Rate | HF Avg | Cost In/1M | Cost Out/1M |",
+        "|-------|-----------------|-----------------|--------|------------|-------------|",
+    ]
+    for model in sorted(raw_scores):
+        rs = raw_scores[model]
+        arena = _fmt_score(rs.get("lmsys_elo"))
+        aider = f"{rs['aider_pass_rate']:.0%}" if isinstance(rs.get("aider_pass_rate"), float) else "—"
+        hf = _fmt_score(rs.get("hf_score"))
+        inp = _fmt_cost(rs.get("cost_per_1m_input"))
+        out = _fmt_cost(rs.get("cost_per_1m_output"))
+        lines.append(f"| `{model}` | {arena} | {aider} | {hf} | {inp} | {out} |")
+
+    lines += [
+        "",
+        "*Arena Hard scores are win-rates (0–100) against GPT-4. HF Avg is mean of IFEval + MMLU-Pro + MATH Lvl 5 + BBH (0–1). Aider pass rate is the whole-file edit benchmark (0–1).*",
+        "",
+        "---",
+        "",
+        "## Scoring Weights",
+        "",
+        "Each task type uses a different weighting formula to compute composite scores:",
+        "",
+        "| Task Type | Arena Hard | Aider | HF Score | Cost (inverted) |",
+        "|-----------|-----------|-------|----------|-----------------|",
+        "| 💻 code | 30% | **50%** | 0% | 20% |",
+        "| 🔍 analyze | 40% | 0% | **40%** | 20% |",
+        "| ❓ query | 40% | 0% | **40%** | 20% |",
+        "| ✍️ generate | **50%** | 0% | 30% | 20% |",
+        "| 🔎 research | **60%** | 0% | 0% | **40%** |",
+        "",
+        "*Cost inverted* means cheaper models score higher on the cost dimension. When sources are missing for a model, weights are redistributed proportionally across available signals.",
+        "",
+        "---",
+        "",
+        "## Data Sources",
+        "",
+        "| Source | URL | What it measures | Update frequency |",
+        "|--------|-----|-----------------|------------------|",
+        "| **Arena Hard Auto** | [lm-sys/arena-hard-auto](https://github.com/lm-sys/arena-hard-auto) | Win-rate vs GPT-4 (general quality) | Irregular |",
+        "| **Aider Edit Leaderboard** | [Aider-AI/aider](https://github.com/Aider-AI/aider/blob/main/aider/website/_data/edit_leaderboard.yml) | Code editing pass rate | Continuous |",
+        "| **HuggingFace Open LLM v2** | [open-llm-leaderboard](https://huggingface.co/datasets/open-llm-leaderboard/contents) | IFEval, MMLU-Pro, MATH, BBH | Irregular |",
+        "| **LiteLLM Pricing** | Bundled in `litellm` package | Input/output cost per 1M tokens | Per `pip upgrade` |",
+        "",
+        "---",
+        "",
+        "## Update Mechanism",
+        "",
+        "```",
+        "Every Monday 06:00 UTC",
+        "    GitHub Actions runs scripts/update_benchmarks.py",
+        "        ├── Fetches Arena Hard CSV",
+        "        ├── Fetches Aider YAML",
+        "        ├── Fetches HuggingFace JSON (5×100 rows)",
+        "        ├── Reads LiteLLM pricing table",
+        "        ├── Computes weighted composite scores per task type",
+        "        ├── Assigns premium / balanced / budget tiers",
+        "        ├── Writes src/llm_router/data/benchmarks.json  ← used by router",
+        "        └── Writes docs/BENCHMARKS.md                   ← this file",
+        "    Opens PR with both files",
+        "    Merged PR → next pip upgrade distributes to all users",
+        "```",
+        "",
+        "On MCP server startup, `check_and_update_benchmarks()` compares the bundled JSON version",
+        "with `~/.llm-router/benchmarks.json` and overwrites if the bundled copy is newer.",
+    ]
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text("\n".join(lines) + "\n", encoding="utf-8")

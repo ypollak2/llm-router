@@ -29,12 +29,12 @@ jobs:
       - name: Check for changes
         id: diff
         run: |
-          if git diff --quiet src/llm_router/data/benchmarks.json; then
+          if git diff --quiet src/llm_router/data/benchmarks.json docs/BENCHMARKS.md; then
             echo "changed=false" >> "$GITHUB_OUTPUT"
-            echo "No changes to benchmarks.json — skipping PR."
+            echo "No changes — skipping PR."
           else
             echo "changed=true" >> "$GITHUB_OUTPUT"
-            echo "benchmarks.json updated."
+            echo "benchmarks.json / BENCHMARKS.md updated."
           fi
 
       - name: Create PR with updated benchmark data
@@ -50,7 +50,7 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
           git checkout -b "$BRANCH"
-          git add src/llm_router/data/benchmarks.json
+          git add src/llm_router/data/benchmarks.json docs/BENCHMARKS.md
           git commit -m "chore(benchmarks): weekly routing table update $(date +%Y-%m-%d)"
 
           git push -u origin "$BRANCH"

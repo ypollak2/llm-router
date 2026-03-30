@@ -162,6 +162,36 @@ This installs hooks + rules to `~/.claude/` so every Claude Code session auto-ro
 
 ---
 
+## Benchmark-Driven Routing
+
+Model chains are ranked using weekly-refreshed data from four authoritative sources, so the router always sends your task to the current best model for that task type.
+
+### Current Top Models by Task
+
+| Task | 🥇 Premium | 🥈 Balanced | 🥉 Budget |
+|------|-----------|------------|----------|
+| 💻 Code | o3, Claude Opus | Sonnet, GPT-4o, Gemini Pro | Flash, DeepSeek, Haiku |
+| 🔍 Analyze | o3, Claude Opus, DeepSeek-R1 | Gemini Pro, Sonnet, GPT-4o | Flash, DeepSeek, Haiku |
+| ❓ Query | o3, Gemini Pro, Grok-3 | Claude Opus, Sonnet, GPT-4o | Flash, DeepSeek, Haiku |
+| ✍️ Generate | Claude Opus, Gemini Pro, o3 | Sonnet, GPT-4o, Command R+ | Flash, DeepSeek, Haiku |
+| 🔎 Research | Perplexity Pro, Perplexity, o3 | Gemini Pro, GPT-4o | Flash, Haiku |
+
+> **Full benchmark data, scoring weights, raw scores, and sources:** [docs/BENCHMARKS.md](docs/BENCHMARKS.md)
+> 🔄 Updated every Monday via GitHub Actions — distributed to all users on next `pip upgrade`
+
+### How rankings are computed
+
+```
+Arena Hard win-rate  ──┐
+Aider code pass rate ──┼── weighted by task type ──► composite score ──► tier assignment
+HuggingFace MMLU/MATH──┤                                                 (premium / balanced / budget)
+LiteLLM pricing     ──┘
+```
+
+Cost is inverted — cheaper models score *higher* on the cost signal — so budget tiers naturally gravitate toward the most efficient options.
+
+---
+
 ## Auto-Route Hook — Every Prompt, Cheaper Model First
 
 The `UserPromptSubmit` hook intercepts **all prompts** — not just explicit routing requests — and classifies them before your top-tier model sees them. Simple tasks go straight to Haiku or a local Ollama model; only genuinely complex work escalates.
