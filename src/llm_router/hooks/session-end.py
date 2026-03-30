@@ -81,7 +81,7 @@ def _read_session_calls() -> dict[str, int]:
                     entry = json.loads(line)
                     ts_str = entry.get("timestamp", "")
                     # Parse ISO timestamp to epoch
-                    from datetime import datetime, timezone
+                    from datetime import datetime
                     ts = datetime.fromisoformat(ts_str.replace("Z", "+00:00")).timestamp()
                     if ts >= session_start:
                         tool = entry.get("tool", "unknown")
