@@ -1411,8 +1411,8 @@ async def llm_refresh_claude_usage() -> str:
     import subprocess
 
     # Step 1: inject async fetch into the Claude tab
-    inject_script = _APPLESCRIPT_INJECT.format(
-        js=_FETCH_USAGE_JS_COMPACT.replace('"', '\\"')
+    inject_script = _APPLESCRIPT_INJECT.replace(
+        "{js}", _FETCH_USAGE_JS_COMPACT.replace('"', '\\"')
     )
     try:
         r = subprocess.run(
