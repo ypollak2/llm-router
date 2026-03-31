@@ -582,14 +582,7 @@ async def llm_research(
         context: Optional conversation context to help the model understand the broader task.
     """
     _cfg = get_config()
-    if not _cfg.perplexity_api_key:
-        return (
-            "⚠️  llm_research requires a Perplexity API key for web-grounded answers.\n\n"
-            "Without it, research tasks would use a non-web-grounded model and silently "
-            "return potentially stale or hallucinated information.\n\n"
-            "**To fix**: set PERPLEXITY_API_KEY in your environment or .env file.\n"
-            "Get a key at https://www.perplexity.ai/settings/api"
-        )
+    no_perplexity = not _cfg.perplexity_api_key
     resp = await route_and_call(
         TaskType.RESEARCH, prompt,
         system_prompt=system_prompt, max_tokens=max_tokens,
@@ -598,6 +591,11 @@ async def llm_research(
     result = resp.header() + "\n\n" + resp.content
     if resp.citations:
         result += "\n\n**Sources:**\n" + "\n".join(f"- {c}" for c in resp.citations)
+    if no_perplexity and "perplexity" not in resp.model.lower():
+        result += (
+            "\n\n---\n⚠️  No PERPLEXITY_API_KEY — used non-web-grounded fallback. "
+            "Results may be stale. Set PERPLEXITY_API_KEY for live web search."
+        )
     return result
 
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm-router-hook-version: 3
+# llm-router-hook-version: 4
 """SessionStart hook — inject routing banner + reset session tracking.
 
 Fires once when a new Claude Code session begins. Three jobs:
@@ -54,6 +54,31 @@ def _reset_session_stats() -> None:
         pass
 
 
+def _check_ollama() -> str:
+    """Return a warning line if Ollama is unreachable or the default model is not installed."""
+    import urllib.request
+    ollama_url = os.environ.get("LLM_ROUTER_OLLAMA_URL", "http://localhost:11434")
+    ollama_model = os.environ.get("LLM_ROUTER_OLLAMA_MODEL", "qwen3.5:latest")
+    try:
+        with urllib.request.urlopen(f"{ollama_url}/api/tags", timeout=1) as r:
+            import json as _json
+            data = _json.loads(r.read())
+        installed = [m.get("name", "") for m in data.get("models", [])]
+        if not any(m == ollama_model or m.startswith(ollama_model.split(":")[0]) for m in installed):
+            return (
+                f"\n⚠️  Ollama running but {ollama_model!r} not installed — "
+                f"classification falls back to Gemini Flash (~$0.0001/call). "
+                f"Run: ollama pull {ollama_model}"
+            )
+        return ""  # model present, all good
+    except Exception:
+        return (
+            f"\n⚠️  Ollama not reachable at {ollama_url} — "
+            f"classification falls back to Gemini Flash (~$0.0001/call). "
+            f"Run: ollama serve"
+        )
+
+
 def _reset_stale_health() -> None:
     """Call llm_update_usage via the MCP server to refresh Claude usage
     and reset stale circuit breakers in the router process.
@@ -84,21 +109,25 @@ def main() -> None:
     _reset_session_stats()
     _reset_stale_health()
 
+    hints = ""
+
+    # Check Ollama availability upfront so user knows if free classification tier is active
+    hints += _check_ollama()
+
     # Check if usage.json is missing or stale — pressure system needs fresh data
     usage_json = os.path.join(STATE_DIR, "usage.json")
-    usage_age_hint = ""
     try:
         age_sec = time.time() - os.path.getmtime(usage_json)
         if age_sec > 3600:  # older than 1 hour
             age_min = int(age_sec / 60)
-            usage_age_hint = f"\n⚠️  Claude usage data is {age_min}m old. Run llm_check_usage to refresh pressure thresholds."
+            hints += f"\n⚠️  Claude usage data is {age_min}m old. Run llm_check_usage to refresh pressure thresholds."
     except OSError:
-        usage_age_hint = "\n⚠️  No Claude usage data yet. Run llm_check_usage for accurate pressure-based routing."
+        hints += "\n⚠️  No Claude usage data yet. Run llm_check_usage for accurate pressure-based routing."
 
     print(json.dumps({
         "hookSpecificOutput": {
             "hookEventName": "SessionStart",
-            "contextForAgent": BANNER + usage_age_hint,
+            "contextForAgent": BANNER + hints,
         }
     }))
 
