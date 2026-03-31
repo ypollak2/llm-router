@@ -41,12 +41,24 @@ Claude quota), making Codex a free-from-Claude fallback.
 
 
 def find_codex_binary() -> str | None:
-    """Search ``CODEX_PATHS`` for an executable Codex CLI binary.
+    """Search for an executable Codex CLI binary.
+
+    Search order:
+      1. ``CODEX_PATH`` env var — user-specified override for custom installs
+      2. ``CODEX_PATHS`` list — known macOS app bundle and standard binary paths
 
     Returns:
         The absolute path to the first matching binary, or ``None`` if
         no executable Codex binary is found at any known location.
     """
+    # Honour explicit override first — covers non-standard install paths,
+    # Linux installs, or symlinks managed by a version manager.
+    env_path = os.environ.get("CODEX_PATH")
+    if env_path:
+        full = os.path.expanduser(env_path)
+        if os.path.isfile(full) and os.access(full, os.X_OK):
+            return full
+
     for path in CODEX_PATHS:
         full = os.path.expanduser(path)
         if os.path.isfile(full) and os.access(full, os.X_OK):

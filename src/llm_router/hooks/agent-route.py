@@ -131,23 +131,44 @@ _TOOL_MAP = {
 # ── Session pressure ─────────────────────────────────────────────────────────
 
 def _get_claude_pressure() -> float:
-    """Read cached Claude pressure from ~/.llm-router/usage.json (written by llm_update_usage).
+    """Read Claude quota pressure from cache file or SQLite DB.
 
-    Returns a fraction 0.0–1.0. Returns 0.0 if the file is missing — meaning
-    routing defaults to treating quota as available (Claude first, full quality).
+    Priority:
+      1. ~/.llm-router/usage.json  — written by llm_update_usage, fastest
+      2. ~/.llm-router/usage.db    — SQLite claude_usage table, authoritative
+      3. Conservative default 0.3  — never assume unlimited quota when blind
+
+    Returns a fraction 0.0–1.0.
     """
+    # Layer 1: fast JSON cache
     usage_path = Path.home() / ".llm-router" / "usage.json"
     try:
         data = json.loads(usage_path.read_text())
-        # highest_pressure: pre-computed max across all buckets (0.0–1.0 fraction)
         if "highest_pressure" in data:
             return float(data["highest_pressure"])
-        # Fallback: derive from percentage fields (written as 0–100)
         session_pct = data.get("session_pct", 0.0) / 100.0
         weekly_pct = data.get("weekly_pct", 0.0) / 100.0
         return max(session_pct, weekly_pct)
     except Exception:
-        return 0.0  # assume low pressure if file missing or unreadable
+        pass
+
+    # Layer 2: SQLite fallback — reads most recent claude_usage row
+    db_path = Path.home() / ".llm-router" / "usage.db"
+    try:
+        import sqlite3
+        conn = sqlite3.connect(str(db_path), timeout=1)
+        row = conn.execute(
+            "SELECT messages_used, messages_limit FROM claude_usage "
+            "ORDER BY timestamp DESC LIMIT 1"
+        ).fetchone()
+        conn.close()
+        if row and row[1] and row[1] > 0:
+            return min(1.0, row[0] / row[1])
+    except Exception:
+        pass
+
+    # Layer 3: conservative default — don't assume full quota when blind
+    return 0.3
 
 
 # ── Classifiers ───────────────────────────────────────────────────────────────

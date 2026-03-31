@@ -185,7 +185,9 @@ async def route_and_call(
             raise BudgetExceededError(
                 f"Monthly budget of ${config.llm_router_monthly_budget:.2f} exceeded "
                 f"(spent: ${monthly_spend:.2f}). "
-                "Increase budget via LLM_ROUTER_MONTHLY_BUDGET or wait until next month."
+                "To continue: run llm_usage() to see the breakdown, or "
+                "llm_set_profile(profile='budget') to switch to cheaper models. "
+                "To raise the limit: set LLM_ROUTER_MONTHLY_BUDGET env var."
             )
 
     # Structural compaction — shrink prompt before sending to external LLMs
@@ -211,6 +213,16 @@ async def route_and_call(
             )
 
     if model_override:
+        # Validate format early — LiteLLM requires "provider/model" and will
+        # produce a cryptic AuthenticationError if the format is wrong.
+        _local_prefixes = {"codex", "ollama"}
+        if "/" not in model_override and model_override not in _local_prefixes:
+            raise ValueError(
+                f"Invalid model_override format: {model_override!r}. "
+                "Use 'provider/model' format (e.g. 'openai/gpt-4o', "
+                "'anthropic/claude-haiku-4-5-20251001', 'gemini/gemini-2.5-flash'). "
+                "Run llm_providers() to see all available models."
+            )
         models_to_try = [model_override]
     else:
         # Pre-fetch penalty data while we're in an async context, so the
@@ -290,7 +302,8 @@ async def route_and_call(
         raise ValueError(
             f"No available models for {task_type.value}/{profile.value}. "
             f"Configured providers: {available or 'none'}. "
-            "Run `llm-router-onboard` to configure API keys."
+            "Run llm_setup(action='test') to check API keys, or "
+            "llm_providers() to see all configured models."
         )
 
     top_model = models_to_try[0].split("/", 1)[1] if "/" in models_to_try[0] else models_to_try[0]
@@ -405,7 +418,8 @@ async def route_and_call(
 
     raise RuntimeError(
         f"All models failed for {task_type.value}/{profile.value}. "
-        f"Last error: {last_error}"
+        f"Last error: {last_error}. "
+        "Run llm_health() to see circuit breaker status and identify failing providers."
     )
 
 
