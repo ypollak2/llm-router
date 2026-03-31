@@ -619,6 +619,9 @@ async def llm_research(
     no_perplexity = not _cfg.perplexity_api_key
     resp = await route_and_call(
         TaskType.RESEARCH, prompt,
+        # Without Perplexity, escalate to PREMIUM so the fallback chain uses
+        # o3 / Gemini 2.5 Pro rather than silently degrading to BALANCED tier.
+        profile=RoutingProfile.PREMIUM if no_perplexity else None,
         system_prompt=system_prompt, max_tokens=max_tokens,
         temperature=0.3, ctx=ctx, caller_context=context,
     )
@@ -627,8 +630,9 @@ async def llm_research(
         result += "\n\n**Sources:**\n" + "\n".join(f"- {c}" for c in resp.citations)
     if no_perplexity and "perplexity" not in resp.model.lower():
         result += (
-            "\n\n---\n⚠️  No PERPLEXITY_API_KEY — used non-web-grounded fallback. "
-            "Results may be stale. Set PERPLEXITY_API_KEY for live web search."
+            "\n\n---\n⚠️  No PERPLEXITY_API_KEY — web search unavailable. "
+            "Escalated to PREMIUM non-web model (results may be stale). "
+            "Set PERPLEXITY_API_KEY for live web search."
         )
     return result
 
