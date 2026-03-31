@@ -1288,6 +1288,18 @@ async def llm_update_usage(data: dict) -> str:
     with open(state_file, "w") as f:
         f.write(str(time.time()))
 
+    # Write usage.json so hook scripts (agent-route.py etc.) can read current
+    # pressure without importing Python packages or hitting the DB.
+    import json as _json
+    usage_json_file = os.path.join(state_dir, "usage.json")
+    with open(usage_json_file, "w") as f:
+        _json.dump({
+            "session_pct": round(_last_usage.session_pct * 100, 1),
+            "weekly_pct": round(_last_usage.weekly_pct * 100, 1),
+            "highest_pressure": round(_last_usage.highest_pressure, 4),
+            "updated_at": time.time(),
+        }, f)
+
     return _last_usage.summary()
 
 

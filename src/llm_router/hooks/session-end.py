@@ -1,50 +1,46 @@
 #!/usr/bin/env python3
-# llm-router-hook-version: 1
-"""Stop hook — session routing distribution summary.
+# llm-router-hook-version: 2
+"""Stop hook — session routing summary with real cost data from SQLite.
 
-Fires when a Claude Code session ends. Reads savings_log.jsonl entries
-since session start and prints a routing distribution summary showing:
+Fires when a Claude Code session ends. Queries the routing_decisions SQLite
+table for calls made since session start and prints:
   - Which tools were called and how many times
-  - How many prompts were answered directly (missed routing)
-  - Estimated cost saved vs all-Opus baseline
+  - Which models actually handled the tasks
+  - Real external cost (from cost_usd column)
+  - Estimated savings vs a Claude Sonnet 4.6 baseline
+
+Baseline: Claude Sonnet 4.6 @ $3/M input + $15/M output tokens.
+Savings = what Sonnet would have cost - what the external model actually cost.
 """
 
 from __future__ import annotations
 
 import json
 import os
+import sqlite3
 import sys
 import time
+from datetime import datetime, timezone
 
 STATE_DIR = os.path.expanduser("~/.llm-router")
 SESSION_START_FILE = os.path.join(STATE_DIR, "session_start.txt")
-SAVINGS_LOG_FILE = os.path.join(STATE_DIR, "savings_log.jsonl")
-CALL_COUNT_FILE = os.path.join(STATE_DIR, "routed_call_count.txt")
+DB_PATH = os.path.join(STATE_DIR, "usage.db")
 
-# Tool display names
-TOOL_LABELS = {
-    "llm_query": ("llm_query   ", "Haiku   "),
-    "llm_code": ("llm_code    ", "Sonnet  "),
+# Sonnet 4.6 pricing (the baseline — what Claude Code itself runs on)
+SONNET_INPUT_PER_M = 3.0    # $3 per million input tokens
+SONNET_OUTPUT_PER_M = 15.0  # $15 per million output tokens
+
+# Tool display config: (display_label, typical_model_short_name)
+TOOL_LABELS: dict[str, tuple[str, str]] = {
+    "llm_query":    ("llm_query   ", "Haiku   "),
+    "llm_code":     ("llm_code    ", "Sonnet  "),
     "llm_generate": ("llm_generate", "Flash   "),
     "llm_research": ("llm_research", "Perplx  "),
-    "llm_analyze": ("llm_analyze ", "Sonnet  "),
-    "llm_image": ("llm_image   ", "Imagen  "),
-    "llm_stream": ("llm_stream  ", "varies  "),
-    "llm_route": ("llm_route   ", "auto    "),
-}
-
-# Estimated cost per routed call saved vs Opus baseline
-# Opus: ~$0.26/call (1500 in + 2000 out tokens @ $15/$75 per M)
-# Haiku: ~$0.003/call, Sonnet: ~$0.033/call, Flash: ~$0.002/call
-SAVINGS_PER_TOOL = {
-    "llm_query": 0.257,
-    "llm_code": 0.227,
-    "llm_generate": 0.258,
-    "llm_research": 0.200,
-    "llm_analyze": 0.227,
-    "llm_image": 0.200,
-    "llm_stream": 0.150,
-    "llm_route": 0.200,
+    "llm_analyze":  ("llm_analyze ", "Sonnet  "),
+    "llm_edit":     ("llm_edit    ", "Haiku   "),
+    "llm_image":    ("llm_image   ", "Imagen  "),
+    "llm_stream":   ("llm_stream  ", "varies  "),
+    "llm_route":    ("llm_route   ", "auto    "),
 }
 
 
@@ -63,58 +59,116 @@ def _read_session_start() -> float:
         return time.time() - 3600  # default: last hour
 
 
-def _read_session_calls() -> dict[str, int]:
-    """Read savings_log.jsonl entries since session start."""
-    session_start = _read_session_start()
-    counts: dict[str, int] = {}
+def _session_start_iso(session_start: float) -> str:
+    return datetime.fromtimestamp(session_start, tz=timezone.utc).isoformat()
 
-    if not os.path.exists(SAVINGS_LOG_FILE):
-        return counts
 
+def _query_session_data(session_start: float) -> list[dict]:
+    """Read routing_decisions rows since session_start from SQLite."""
+    if not os.path.exists(DB_PATH):
+        return []
     try:
-        with open(SAVINGS_LOG_FILE) as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    entry = json.loads(line)
-                    ts_str = entry.get("timestamp", "")
-                    # Parse ISO timestamp to epoch
-                    from datetime import datetime
-                    ts = datetime.fromisoformat(ts_str.replace("Z", "+00:00")).timestamp()
-                    if ts >= session_start:
-                        tool = entry.get("tool", "unknown")
-                        counts[tool] = counts.get(tool, 0) + 1
-                except (json.JSONDecodeError, ValueError, KeyError):
-                    continue
-    except OSError:
-        pass
-
-    return counts
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            """
+            SELECT task_type, final_model, input_tokens, output_tokens,
+                   cost_usd, success
+            FROM routing_decisions
+            WHERE timestamp >= ? AND success = 1
+            ORDER BY rowid
+            """,
+            (_session_start_iso(session_start),),
+        ).fetchall()
+        conn.close()
+        return [dict(r) for r in rows]
+    except Exception:
+        return []
 
 
-def _format_summary(counts: dict[str, int]) -> str:
-    if not counts:
+def _aggregate(rows: list[dict]) -> dict[str, dict]:
+    """Aggregate per-row data into per-tool totals."""
+    tools: dict[str, dict] = {}
+    for r in rows:
+        task = r.get("task_type", "unknown")
+        tool = f"llm_{task}"
+        model = r.get("final_model", "unknown")
+        in_tok = r.get("input_tokens") or 0
+        out_tok = r.get("output_tokens") or 0
+        cost = r.get("cost_usd") or 0.0
+
+        if tool not in tools:
+            tools[tool] = {
+                "count": 0,
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "actual_cost": 0.0,
+                "top_model": {},
+            }
+        tools[tool]["count"] += 1
+        tools[tool]["input_tokens"] += in_tok
+        tools[tool]["output_tokens"] += out_tok
+        tools[tool]["actual_cost"] += cost
+        tools[tool]["top_model"][model] = tools[tool]["top_model"].get(model, 0) + 1
+
+    return tools
+
+
+def _sonnet_baseline(in_tok: int, out_tok: int) -> float:
+    """What these tokens would have cost routed through Claude Sonnet 4.6."""
+    return (in_tok * SONNET_INPUT_PER_M + out_tok * SONNET_OUTPUT_PER_M) / 1_000_000
+
+
+def _format_summary(tools: dict[str, dict]) -> str:
+    if not tools:
         return ""
 
-    total = sum(counts.values())
-    max_count = max(counts.values()) if counts else 1
-    total_saved = sum(SAVINGS_PER_TOOL.get(tool, 0.15) * n for tool, n in counts.items())
+    total_calls = sum(t["count"] for t in tools.values())
+    total_in_tok = sum(t["input_tokens"] for t in tools.values())
+    total_out_tok = sum(t["output_tokens"] for t in tools.values())
+    total_actual = sum(t["actual_cost"] for t in tools.values())
+    total_baseline = _sonnet_baseline(total_in_tok, total_out_tok)
+    total_saved = max(0.0, total_baseline - total_actual)
+
+    max_count = max(t["count"] for t in tools.values())
 
     lines = [
-        "━━ Session Routing Summary ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+        "━━ Session Routing Summary ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
     ]
 
-    for tool, n in sorted(counts.items(), key=lambda x: -x[1]):
-        label, model = TOOL_LABELS.get(tool, (f"{tool:<12}", "?       "))
+    for tool, data in sorted(tools.items(), key=lambda x: -x[1]["count"]):
+        label, default_model = TOOL_LABELS.get(tool, (f"{tool:<12}", "?       "))
+        n = data["count"]
         bar = _bar(n, max_count)
-        saved = SAVINGS_PER_TOOL.get(tool, 0.15) * n
-        lines.append(f"  {label}  {bar}  {n:3}x  {model}  ~${saved:.2f} saved")
 
-    lines.append(f"  {'─' * 58}")
-    lines.append(f"  {total} tasks routed externally  |  ~${total_saved:.2f} saved vs all-Opus")
-    lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+        # Show the most-used model for this tool
+        top_model = max(data["top_model"], key=data["top_model"].get) if data["top_model"] else "?"
+        model_short = top_model.split("/", 1)[-1][:8] if "/" in top_model else top_model[:8]
+
+        # Per-tool savings
+        baseline = _sonnet_baseline(data["input_tokens"], data["output_tokens"])
+        actual = data["actual_cost"]
+        saved = max(0.0, baseline - actual)
+
+        lines.append(
+            f"  {label}  {bar}  {n:3}x  {model_short:<8}  "
+            f"${actual:.4f} actual  ~${saved:.4f} saved"
+        )
+
+    lines.append(f"  {'─' * 65}")
+
+    # Token summary
+    if total_in_tok or total_out_tok:
+        lines.append(
+            f"  Tokens: {total_in_tok:,} in + {total_out_tok:,} out"
+            f"  |  Actual cost: ${total_actual:.4f}"
+            f"  |  Sonnet baseline: ${total_baseline:.4f}"
+        )
+
+    lines.append(
+        f"  {total_calls} tasks routed  |  ~${total_saved:.4f} saved vs Sonnet 4.6"
+    )
+    lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
     return "\n".join(lines)
 
@@ -125,11 +179,14 @@ def main() -> None:
     except (json.JSONDecodeError, EOFError):
         pass
 
-    counts = _read_session_calls()
-    if not counts:
+    session_start = _read_session_start()
+    rows = _query_session_data(session_start)
+
+    if not rows:
         sys.exit(0)
 
-    summary = _format_summary(counts)
+    tools = _aggregate(rows)
+    summary = _format_summary(tools)
     if not summary:
         sys.exit(0)
 

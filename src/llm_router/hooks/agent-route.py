@@ -131,15 +131,23 @@ _TOOL_MAP = {
 # ── Session pressure ─────────────────────────────────────────────────────────
 
 def _get_claude_pressure() -> float:
-    """Read cached Claude session/weekly pressure from ~/.llm-router/usage.json."""
+    """Read cached Claude pressure from ~/.llm-router/usage.json (written by llm_update_usage).
+
+    Returns a fraction 0.0–1.0. Returns 0.0 if the file is missing — meaning
+    routing defaults to treating quota as available (Claude first, full quality).
+    """
     usage_path = Path.home() / ".llm-router" / "usage.json"
     try:
         data = json.loads(usage_path.read_text())
+        # highest_pressure: pre-computed max across all buckets (0.0–1.0 fraction)
+        if "highest_pressure" in data:
+            return float(data["highest_pressure"])
+        # Fallback: derive from percentage fields (written as 0–100)
         session_pct = data.get("session_pct", 0.0) / 100.0
         weekly_pct = data.get("weekly_pct", 0.0) / 100.0
         return max(session_pct, weekly_pct)
     except Exception:
-        return 0.0  # assume low pressure → full model quality available
+        return 0.0  # assume low pressure if file missing or unreadable
 
 
 # ── Classifiers ───────────────────────────────────────────────────────────────
