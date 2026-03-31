@@ -254,7 +254,7 @@ When Claude quota gets tight, external models activate tier by tier. Each thresh
 
 > **Cascade rule**: once a higher tier goes external, all lower tiers go external too. When weekly ≥ 95%, everything routes external — it makes no sense to put simple tasks on external while complex stays on subscription.
 
-Run `llm_check_usage` at session start to populate accurate pressure data.
+Run `llm_check_usage` at session start to populate accurate pressure data. Routing hooks warn when usage data is >30 minutes old (stale quota → routing hints are flagged `⚠️ STALE`).
 
 ---
 
@@ -694,30 +694,6 @@ Key areas where help is needed:
 - Improving routing intelligence
 - Testing across different MCP clients
 - Documentation and examples
-
----
-
-## Claude Code Subscription Mode
-
-When running LLM Router inside Claude Code with a Pro or Max subscription, set:
-
-```bash
-LLM_ROUTER_CLAUDE_SUBSCRIPTION=true
-```
-
-**What this does:**
-- All Claude tiers (Haiku, Sonnet, Opus) are used via your subscription — zero API cost
-- The `anthropic` provider is **excluded from API routing chains**, even if `ANTHROPIC_API_KEY` is set. This prevents accidental double-billing (subscription + API key = two charges for the same Claude)
-- External providers (Gemini, GPT-4o, Perplexity, Ollama) are used for tasks where subscription quota is running low
-
-**Pressure cascade** (subscription quota → external fallback):
-| Quota bucket | Threshold | Effect |
-|---|---|---|
-| `session` | ≥ 85% | Simple tasks → external (Gemini Flash / Groq) |
-| `sonnet` | ≥ 95% | + Moderate tasks → external (GPT-4o / DeepSeek) |
-| `weekly` or `session` | ≥ 95% | All tasks → external (global emergency) |
-
-Keep quota data fresh: run `llm_check_usage` or `/usage-pulse` regularly. Routing hooks warn when data is >30 minutes old.
 
 ---
 
