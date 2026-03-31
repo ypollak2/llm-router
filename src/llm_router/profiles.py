@@ -19,7 +19,11 @@ same convention for media models (though media bypasses LiteLLM).
 
 from __future__ import annotations
 
+import logging
+
 from llm_router.types import Complexity, RoutingProfile, TaskType
+
+log = logging.getLogger("llm_router")
 
 # Models treated as "free" under a Claude Pro subscription — tried first.
 _CLAUDE_MODELS: frozenset[str] = frozenset({
@@ -245,12 +249,17 @@ ROUTING_TABLE: dict[tuple[RoutingProfile, TaskType], list[str]] = {
 # on internal chain-of-thought reasoning, which often causes the actual JSON
 # response to be truncated — triggering the _parse_truncated_json fallback.
 CLASSIFIER_MODELS: list[str] = [
-    "gemini/gemini-2.5-flash-lite",  # non-thinking, fastest, cheapest
+    # Haiku is the preferred classifier — fast, cheap, accurate structured output.
+    # Skipped automatically when no ANTHROPIC_API_KEY is configured (subscription mode).
+    "anthropic/claude-haiku-4-5-20251001",
+    "gemini/gemini-2.5-flash-lite",  # non-thinking, fastest, cheapest external
     "groq/llama-3.3-70b-versatile",
     "openai/gpt-4o-mini",
     "deepseek/deepseek-chat",
     "mistral/mistral-small-latest",
 ]
+# Ollama models (local, free) are prepended by router.py when ollama_base_url
+# is configured, so they are tried before any cloud model.
 
 # ── Complexity -> Profile mapping ─────────────────────────────────────────────
 # Maps classifier output to routing profile. The rationale is straightforward:
@@ -407,8 +416,8 @@ def get_model_chain(
         tail = [m for m in static_chain if "perplexity" not in m]
         try:
             tail = reorder_for_pressure(tail, pressure, profile)
-        except Exception:
-            pass
+        except Exception as _e:
+            log.warning("Pressure reordering failed for RESEARCH tail — using static order: %s", _e)
         return perp + tail
 
     # BUDGET: skip benchmark reordering — static chain already ordered correctly
@@ -423,13 +432,13 @@ def get_model_chain(
                 failure_rates=failure_rates,
                 latency_stats=latency_stats,
             )
-        except Exception:
-            pass
+        except Exception as _e:
+            log.warning("Benchmark ordering failed — using static chain: %s", _e)
 
     try:
         chain = reorder_for_pressure(chain, pressure, profile)
-    except Exception:
-        pass  # pressure reordering is best-effort
+    except Exception as _e:
+        log.warning("Pressure reordering failed — using static chain order: %s", _e)
 
     return chain
 

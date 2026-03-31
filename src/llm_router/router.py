@@ -37,6 +37,10 @@ _COMPLEXITY_TO_PROFILE: dict[Complexity, RoutingProfile] = {
 
 log = logging.getLogger("llm_router")
 
+# Guards the check-then-spend budget sequence so concurrent calls cannot
+# both slip through the limit before either has recorded its spend.
+_budget_lock = asyncio.Lock()
+
 # Task types routed to provider-specific media APIs instead of LiteLLM.
 # LiteLLM only supports text completion; media generation requires direct
 # calls to each provider's SDK (DALL-E, Flux, Runway, ElevenLabs, etc.).
@@ -178,17 +182,26 @@ async def route_and_call(
     else:
         profile = profile or config.llm_router_profile
 
-    # Budget enforcement — block calls if monthly budget is exceeded
+    # Budget enforcement — block calls if monthly budget is exceeded.
+    # Lock prevents two concurrent callers from both reading pre-limit spend
+    # and both proceeding before either has recorded their cost.
     if config.llm_router_monthly_budget > 0:
-        monthly_spend = await cost.get_monthly_spend()
-        if monthly_spend >= config.llm_router_monthly_budget:
-            raise BudgetExceededError(
-                f"Monthly budget of ${config.llm_router_monthly_budget:.2f} exceeded "
-                f"(spent: ${monthly_spend:.2f}). "
-                "To continue: run llm_usage() to see the breakdown, or "
-                "llm_set_profile(profile='budget') to switch to cheaper models. "
-                "To raise the limit: set LLM_ROUTER_MONTHLY_BUDGET env var."
-            )
+        async with _budget_lock:
+            monthly_spend = await cost.get_monthly_spend()
+            budget = config.llm_router_monthly_budget
+            if monthly_spend >= budget:
+                raise BudgetExceededError(
+                    f"Monthly budget of ${budget:.2f} exceeded "
+                    f"(spent: ${monthly_spend:.2f}). "
+                    "To continue: run llm_usage() to see the breakdown, or "
+                    "llm_set_profile(profile='budget') to switch to cheaper models. "
+                    "To raise the limit: set LLM_ROUTER_MONTHLY_BUDGET env var."
+                )
+            if monthly_spend >= budget * 0.9:
+                log.warning(
+                    "Monthly budget at %.0f%% ($%.2f / $%.2f)",
+                    100 * monthly_spend / budget, monthly_spend, budget,
+                )
 
     # Structural compaction — shrink prompt before sending to external LLMs
     # Guard: compaction_mode/threshold may be MagicMock in test mocks
@@ -237,8 +250,11 @@ async def route_and_call(
                     get_model_failure_rates(window_days=30),
                     get_model_latency_stats(window_days=7),
                 )
-            except Exception:
-                pass  # penalties degrade gracefully to 0.0 on failure
+            except Exception as _penalty_err:
+                log.warning(
+                    "Failed to fetch benchmark penalty data — model ordering will use static chain: %s",
+                    _penalty_err,
+                )
 
         models_to_try = get_model_chain(
             profile, task_type,

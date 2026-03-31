@@ -96,6 +96,9 @@ class RouterConfig(BaseSettings):
     default_max_tokens: int = 4096
     default_temperature: float = 0.7
     request_timeout: int = 120
+    # Media generation (especially video) can take several minutes; separate
+    # timeout prevents premature cancellation of long-running generation jobs.
+    media_request_timeout: int = 600
 
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
 

@@ -202,15 +202,21 @@ def _classify_task_type(prompt: str) -> str:
     return best if scores[best] > 0 else "analyze"
 
 
-def _complexity_to_profile(complexity: str, pressure: float) -> str:
-    """Map complexity + pressure to the appropriate routing profile."""
-    if pressure >= 0.99:
-        # Hard cap: route to external cheap models regardless of complexity
+def _complexity_to_profile(complexity: str, session: float, sonnet: float, weekly: float) -> str:
+    """Map complexity + per-bucket pressure to the appropriate routing profile.
+
+    Cascade rule: higher pressure forces ALL lower complexity tiers external too.
+      weekly/session ≥ 95% → everything external (global emergency)
+      sonnet         ≥ 95% → simple + moderate external
+      session        ≥ 85% → simple only external
+    """
+    all_external = weekly >= 0.95 or session >= 0.95
+    if all_external:
+        return "budget" if complexity == "simple" else "balanced"
+    if sonnet >= 0.95:
+        return "budget" if complexity == "simple" else "balanced"
+    if complexity == "simple" and session >= 0.85:
         return "budget"
-    if pressure >= 0.85:
-        # Quota tight: use balanced (external models take over internally)
-        return "balanced"
-    # Normal: match complexity to profile tier
     return {"simple": "budget", "moderate": "balanced", "complex": "premium"}[complexity]
 
 
@@ -244,23 +250,37 @@ def main() -> None:
     # ── Classify reasoning task ──────────────────────────────────────────────
     task_type = _classify_task_type(prompt)
     complexity = _classify_complexity(prompt)
-    pressure = _get_claude_pressure()
-    profile = _complexity_to_profile(complexity, pressure)
+    raw_pressure = _get_claude_pressure()  # legacy single value for display
+
+    # Read per-bucket pressure from usage.json for accurate threshold decisions
+    _p = {"session": raw_pressure, "sonnet": raw_pressure, "weekly": raw_pressure}
+    _usage_path = Path.home() / ".llm-router" / "usage.json"
+    try:
+        _data = json.loads(_usage_path.read_text())
+        def _f(k: str) -> float:
+            v = float(_data.get(k, 0.0))
+            return v / 100.0 if v > 1.0 else v
+        _p = {"session": _f("session_pct"), "sonnet": _f("sonnet_pct"), "weekly": _f("weekly_pct")}
+    except Exception:
+        pass
+
+    profile = _complexity_to_profile(complexity, _p["session"], _p["sonnet"], _p["weekly"])
     tool = _TOOL_MAP.get(task_type, "llm_analyze")
 
-    # Model expectation (for the block message — informational only)
     _model_hint = {
-        "budget": "Haiku (~50x cheaper than Opus)",
-        "balanced": "Sonnet/DeepSeek (~10x cheaper)",
-        "premium": "Opus (full quality — quota available)",
+        "budget": "Gemini Flash / Groq (session pressure — cheap external)",
+        "balanced": "GPT-4o / Gemini Pro (quota pressure — external)",
+        "premium": "Opus via subscription (no API cost — quota available)",
     }
     model_hint = _model_hint.get(profile, profile)
 
     pressure_note = ""
-    if pressure >= 0.99:
-        pressure_note = f"  ⚠️  Quota at {pressure:.0%} — Claude excluded, external models only.\n"
-    elif pressure >= 0.85:
-        pressure_note = f"  ⚠️  Quota at {pressure:.0%} — external cheap models prioritised.\n"
+    if _p["weekly"] >= 0.95:
+        pressure_note = f"  ⚠️  Weekly={_p['weekly']:.0%} — all tiers on external models.\n"
+    elif _p["sonnet"] >= 0.95:
+        pressure_note = f"  ⚠️  Sonnet={_p['sonnet']:.0%} — moderate/complex on external models.\n"
+    elif _p["session"] >= 0.85:
+        pressure_note = f"  ⚠️  Session={_p['session']:.0%} — simple tasks on external models.\n"
 
     # Build the block instruction
     # Use repr() for the prompt so newlines are visible and the instruction is copy-safe
@@ -270,7 +290,7 @@ def main() -> None:
         f"[AGENT-ROUTE] Subagent blocked — routing reasoning to cheap model.\n\n"
         f"  Task:       {task_type}/{complexity}\n"
         f"  Profile:    {profile} → {model_hint}\n"
-        f"  Quota:      {pressure:.0%}\n"
+        f"  Quota:      session={_p['session']:.0%} sonnet={_p['sonnet']:.0%} weekly={_p['weekly']:.0%}\n"
         f"{pressure_note}\n"
         f"ACTION REQUIRED — do this instead of spawning the subagent:\n\n"
         f"  1. If the task needs LOCAL FILE CONTENT:\n"

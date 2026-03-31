@@ -26,16 +26,16 @@ and avoid per-request TLS handshake overhead.
 def _get_client() -> httpx.AsyncClient:
     """Return the shared async HTTP client, creating it on first call.
 
-    The client uses a 120-second timeout because media generation APIs
-    (especially video) can take well over a minute to return even a
-    queue-submission response.
+    Uses ``media_request_timeout`` from config (default 600s) because video
+    generation APIs can take several minutes to respond.
 
     Returns:
         The module-level singleton ``httpx.AsyncClient``.
     """
     global _client
     if _client is None:
-        _client = httpx.AsyncClient(timeout=120.0)
+        timeout = get_config().media_request_timeout
+        _client = httpx.AsyncClient(timeout=float(timeout))
     return _client
 
 

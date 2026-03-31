@@ -65,6 +65,58 @@ CONFIDENCE_THRESHOLD = int(os.environ.get("LLM_ROUTER_CONFIDENCE_THRESHOLD", "4"
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "") or os.environ.get("GOOGLE_API_KEY", "")
 
+# Claude Code subscription mode — Claude models used via subscription, never API.
+# Routing strategy by complexity (no pressure):
+#   simple   → /model claude-haiku-4-5-20251001  (fast, free via subscription)
+#   moderate → passthrough — Sonnet handles directly, no switch needed
+#   complex  → /model claude-opus-4-6            (best quality, free via subscription)
+#
+# When pressure builds, external models take over tier by tier:
+#   session  ≥ 85% → simple   tasks → external (Gemini Flash → Groq → GPT-4o-mini → Ollama)
+#   sonnet   ≥ 95% → moderate tasks → external (GPT-4o → Gemini Pro → DeepSeek → Ollama)
+#   weekly   ≥ 95% → complex  tasks → external (o3 → Gemini Pro → Ollama)
+_CC_MODE = os.environ.get("LLM_ROUTER_CLAUDE_SUBSCRIPTION", "").lower() in ("true", "1", "yes")
+
+
+def _get_pressure() -> dict[str, float]:
+    """Read per-bucket Claude subscription pressure from usage.json or SQLite.
+
+    Returns keys: session (5h window), sonnet (weekly Sonnet), weekly (all models).
+    Falls back to 0.0 per bucket — do NOT use a conservative non-zero default here,
+    because that would cause unnecessary model switching when usage.json simply
+    hasn't been written yet this session (system is healthy).
+    """
+    usage_path = Path.home() / ".llm-router" / "usage.json"
+    try:
+        data = json.loads(usage_path.read_text())
+        def _frac(key: str) -> float:
+            v = float(data.get(key, 0.0))
+            return v / 100.0 if v > 1.0 else v  # normalise if stored as percent
+        return {
+            "session": _frac("session_pct"),
+            "sonnet": _frac("sonnet_pct"),
+            "weekly": _frac("weekly_pct"),
+        }
+    except Exception:
+        pass
+
+    # SQLite fallback — reads most recent claude_usage row
+    db_path = Path.home() / ".llm-router" / "usage.db"
+    try:
+        import sqlite3
+        conn = sqlite3.connect(str(db_path), timeout=1)
+        row = conn.execute(
+            "SELECT messages_used, messages_limit FROM claude_usage ORDER BY timestamp DESC LIMIT 1"
+        ).fetchone()
+        conn.close()
+        if row and row[1] and row[1] > 0:
+            p = min(1.0, row[0] / row[1])
+            return {"session": p, "sonnet": p, "weekly": p}
+    except Exception:
+        pass
+
+    return {"session": 0.0, "sonnet": 0.0, "weekly": 0.0}
+
 # ── Skip Patterns (truly local operations) ───────────────────────────────────
 
 # Only skip: slash commands, raw shell one-liners, and pure acknowledgement words.
@@ -549,7 +601,51 @@ def main() -> None:
     method = result["method"]
     tool = TOOL_MAP.get(task_type, "llm_route")
 
-    # Single-line directive: maximum density, minimum tokens, unmissable.
+    # ── Claude Code subscription mode ─────────────────────────────────────────
+    # Never call Anthropic API. Thresholds decide when subscription → external.
+    if _CC_MODE:
+        pressure = _get_pressure()
+        session_pct = pressure["session"]   # 5h rolling window
+        sonnet_pct  = pressure["sonnet"]    # weekly Sonnet-specific
+        weekly_pct  = pressure["weekly"]    # weekly all-models
+
+        # Pressure tiers cascade — higher pressure forces ALL lower tiers external too.
+        # weekly/session ≥ 95%  → everything external (global emergency)
+        # sonnet          ≥ 95%  → moderate + simple external (Sonnet pool exhausted)
+        # session         ≥ 85%  → simple only external (session filling up)
+        all_external = weekly_pct >= 0.95 or session_pct >= 0.95
+        use_external = {
+            "simple":   all_external or session_pct >= 0.85 or sonnet_pct >= 0.95,
+            "moderate": all_external or sonnet_pct  >= 0.95,
+            "complex":  all_external,
+        }
+
+        if not use_external.get(complexity, False):
+            # Stay on subscription — suggest the right Claude tier
+            _SUBSCRIPTION_MODELS = {
+                "simple":   "claude-haiku-4-5-20251001",
+                "moderate": None,                          # passthrough — no switch
+                "complex":  "claude-opus-4-6",
+            }
+            target = _SUBSCRIPTION_MODELS.get(complexity)
+            if target is None:
+                # moderate + no pressure → Sonnet handles right now, do nothing
+                sys.exit(0)
+            pressure_summary = (
+                f"session={session_pct:.0%} sonnet={sonnet_pct:.0%} weekly={weekly_pct:.0%}"
+            )
+            directive = (
+                f"⚡ CC-MODE ({task_type}/{complexity} via {method} | {pressure_summary}) | "
+                f"Run /model {target} then handle this task directly. "
+                f"Subscription = no API cost. Do NOT call external llm_* tools."
+            )
+            json.dump({"hookSpecificOutput": {"hookEventName": "UserPromptSubmit",
+                                               "contextForAgent": directive}}, sys.stdout)
+            sys.exit(0)
+
+        # Pressure threshold exceeded for this tier → fall through to external routing
+
+    # ── Standard external routing directive ───────────────────────────────────
     # complexity= is passed to every tool so route_and_call can derive the right
     # profile (simple→BUDGET/Haiku, moderate→BALANCED/Sonnet, complex→PREMIUM/Opus).
     # complexity_override= is the separate llm_route parameter name.
