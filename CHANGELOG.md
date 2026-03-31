@@ -1,5 +1,31 @@
 # Changelog
 
+## v0.8.0 — Routing Correctness Fixes (2026-03-31)
+
+### Fixed
+
+- **Async feedback loop (critical)** — `get_model_failure_penalty()` and `get_model_latency_penalty()` always returned `0.0` in async contexts (every real production call), because they detected a running event loop and skipped the DB fetch to avoid deadlock. Fix: `route_and_call()` now pre-fetches `failure_rates` and `latency_stats` in parallel via `asyncio.gather()` before calling `get_model_chain()`, then passes them as optional dict parameters down through `apply_benchmark_ordering()` → penalty functions. The self-learning feedback system now works correctly in production.
+- **BUDGET hard cap never fired** — `reorder_for_pressure()` had an early return for BUDGET profile (`if profile == BUDGET: return chain`), so the ≥ 99% Claude removal logic was never reached for BUDGET routing. Removed the early return — BUDGET chains now correctly strip Claude models at ≥ 99% pressure like BALANCED and PREMIUM.
+- **RESEARCH chains ignored pressure entirely** — All RESEARCH tasks returned the static chain unchanged (skipping both benchmark and pressure reordering), so at 85%+ quota Claude Sonnet remained at position 2 in RESEARCH chains. Fix: RESEARCH chains now apply pressure reordering to the non-Perplexity tail only, keeping Perplexity first (web-grounded) while still demoting Claude and promoting cheap models when quota is tight.
+- **RESEARCH fallback produces no web-grounded answer** — When Perplexity is unavailable, subsequent models (Gemini, Claude) produce plausible but stale answers with no source citations. Added explicit `log.warning()` and MCP notification when a RESEARCH task falls back to a non-web-grounded model.
+
+### Changed
+
+- `get_model_failure_penalty()` gains optional `failure_rates: dict[str, float] | None` parameter. When provided, uses it directly (no DB, no async conflict). Backward-compatible.
+- `get_model_latency_penalty()` gains optional `latency_stats: dict[str, dict] | None` parameter. Same pattern.
+- `apply_benchmark_ordering()` gains `failure_rates` and `latency_stats` optional parameters, passes them into penalty functions.
+- `get_model_chain()` gains `failure_rates` and `latency_stats` optional parameters, passes them into `apply_benchmark_ordering()`. Also now fetches `get_claude_pressure()` internally (was only in router.py previously).
+- `route_and_call()` now `await`s both `get_model_failure_rates()` and `get_model_latency_stats()` in parallel before building the model chain.
+
+### Added
+
+- **6 new tests** in `tests/test_profiles.py`:
+  - `TestResearchPressureTail` — 3 tests verifying Perplexity stays first, Claude is demoted at ≥ 85%, Claude leads at < 85%.
+  - `TestBudgetHardCap` — 1 test verifying BUDGET chains drop Claude at ≥ 99% pressure.
+  - `TestPrefetchedPenalties` — 2 tests verifying `apply_benchmark_ordering()` uses pre-fetched dicts without DB access.
+
+---
+
 ## v0.7.1 — Demo Reports & Docs (2026-03-31)
 
 ### Added

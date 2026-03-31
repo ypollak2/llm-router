@@ -11,6 +11,7 @@ generation APIs directly, because LiteLLM has no media generation support.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any
 
@@ -178,7 +179,26 @@ async def route_and_call(
     if model_override:
         models_to_try = [model_override]
     else:
-        models_to_try = get_model_chain(profile, task_type)
+        # Pre-fetch penalty data while we're in an async context, so the
+        # benchmark ordering can apply failure-rate and latency penalties
+        # without hitting the sync/async deadlock inside penalty functions.
+        _failure_rates: dict[str, float] | None = None
+        _latency_stats: dict[str, dict] | None = None
+        if task_type not in MEDIA_TASK_TYPES:
+            try:
+                from llm_router.cost import get_model_failure_rates, get_model_latency_stats
+                _failure_rates, _latency_stats = await asyncio.gather(
+                    get_model_failure_rates(window_days=30),
+                    get_model_latency_stats(window_days=7),
+                )
+            except Exception:
+                pass  # penalties degrade gracefully to 0.0 on failure
+
+        models_to_try = get_model_chain(
+            profile, task_type,
+            failure_rates=_failure_rates,
+            latency_stats=_latency_stats,
+        )
         if task_type not in MEDIA_TASK_TYPES:
             from llm_router.claude_usage import get_claude_pressure
             pressure = get_claude_pressure()
@@ -241,6 +261,22 @@ async def route_and_call(
 
     top_model = models_to_try[0].split("/", 1)[1] if "/" in models_to_try[0] else models_to_try[0]
     await _notify(ctx, "info", f"🤖 Routing to {top_model} ({task_type.value}/{profile.value})")
+
+    # Warn when a RESEARCH task falls back to a non-web-grounded model.
+    # Perplexity is the only model in the chain with real-time web access.
+    # If it's unavailable (no API key, circuit open), subsequent models will
+    # produce plausible but potentially stale answers with no source citations.
+    if task_type == TaskType.RESEARCH and "perplexity" not in models_to_try[0]:
+        log.warning(
+            "RESEARCH task routed to %s — this model has no web access. "
+            "Add PERPLEXITY_API_KEY for web-grounded research answers.",
+            models_to_try[0],
+        )
+        await _notify(
+            ctx, "warning",
+            "⚠️  No web-grounded model available — answer may not reflect current information. "
+            "Set PERPLEXITY_API_KEY for real-time web access.",
+        )
 
     last_error: Exception | None = None
     for model in models_to_try:

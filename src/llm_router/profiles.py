@@ -297,10 +297,6 @@ def reorder_for_pressure(
     Returns:
         Reordered list, possibly with Claude models removed at ≥ 99%.
     """
-    from llm_router.types import RoutingProfile as _RP
-    if profile == _RP.BUDGET:
-        return chain  # Ollama injection in router.py handles BUDGET ordering
-
     claude_models = [m for m in chain if m in _CLAUDE_MODELS]
     other_models = [m for m in chain if m not in _CLAUDE_MODELS]
 
@@ -357,22 +353,35 @@ def complexity_to_profile(complexity: Complexity) -> RoutingProfile:
     return COMPLEXITY_TO_PROFILE[complexity]
 
 
-def get_model_chain(profile: RoutingProfile, task_type: TaskType) -> list[str]:
+def get_model_chain(
+    profile: RoutingProfile,
+    task_type: TaskType,
+    failure_rates: dict[str, float] | None = None,
+    latency_stats: "dict[str, dict] | None" = None,
+) -> list[str]:
     """Get the ordered model preference chain for a profile + task type.
 
     Falls back to ``["anthropic/claude-sonnet-4-6"]`` if no entry exists.
 
     Applies two dynamic reorderings in sequence:
-    1. Benchmark ordering — surface models with better benchmark scores.
+    1. Benchmark ordering — surface models with better benchmark scores,
+       incorporating failure-rate and latency penalties when pre-fetched dicts
+       are provided (avoids the sync/async conflict in penalty functions).
     2. Pressure reordering — when Claude quota is ≥ 85%, demote Claude
        models and promote free/cheap alternatives (see ``reorder_for_pressure``).
 
-    RESEARCH chains skip pressure reordering because Perplexity must stay
-    first (it's the only web-grounded option).
+    RESEARCH chains apply pressure reordering only to the non-Perplexity tail
+    so Perplexity stays first (the only web-grounded option) while still
+    demoting Claude models when quota is tight.
 
     Args:
         profile: The routing profile (budget/balanced/premium).
         task_type: The task type.
+        failure_rates: Pre-fetched dict of ``{model: failure_rate}`` from
+            ``cost.get_model_failure_rates()``. Passed into benchmark ordering
+            to enable penalty scoring without a sync DB call.
+        latency_stats: Pre-fetched dict of ``{model: {"p50", "p95", "count"}}``
+            from ``cost.get_model_latency_stats()``. Same purpose.
 
     Returns:
         Ordered list of model IDs to try, best-fit first.
@@ -383,10 +392,24 @@ def get_model_chain(profile: RoutingProfile, task_type: TaskType) -> list[str]:
     if task_type in {TaskType.IMAGE, TaskType.VIDEO, TaskType.AUDIO}:
         return static_chain
 
-    # Research: Perplexity must stay first (web-grounded). Skip both benchmark
-    # reordering (benchmarks don't score Perplexity) and pressure reordering.
+    try:
+        from llm_router.claude_usage import get_claude_pressure
+        pressure = get_claude_pressure()
+    except Exception:
+        pressure = 0.0
+
+    # Research: Perplexity must stay first (web-grounded). Skip benchmark
+    # reordering (benchmarks don't score Perplexity), but apply pressure
+    # reordering to the non-Perplexity tail so Claude is demoted when quota
+    # is tight.
     if task_type == TaskType.RESEARCH:
-        return static_chain
+        perp = [m for m in static_chain if "perplexity" in m]
+        tail = [m for m in static_chain if "perplexity" not in m]
+        try:
+            tail = reorder_for_pressure(tail, pressure, profile)
+        except Exception:
+            pass
+        return perp + tail
 
     # BUDGET: skip benchmark reordering — static chain already ordered correctly
     # (Haiku first for CODE, cheap-first for others). Ollama is prepended by the
@@ -395,13 +418,15 @@ def get_model_chain(profile: RoutingProfile, task_type: TaskType) -> list[str]:
     if profile != RoutingProfile.BUDGET:
         try:
             from llm_router.benchmarks import apply_benchmark_ordering
-            chain = apply_benchmark_ordering(chain, task_type, profile)
+            chain = apply_benchmark_ordering(
+                chain, task_type, profile,
+                failure_rates=failure_rates,
+                latency_stats=latency_stats,
+            )
         except Exception:
             pass
 
     try:
-        from llm_router.claude_usage import get_claude_pressure
-        pressure = get_claude_pressure()
         chain = reorder_for_pressure(chain, pressure, profile)
     except Exception:
         pass  # pressure reordering is best-effort

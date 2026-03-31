@@ -164,45 +164,60 @@ def get_benchmark_data() -> dict[str, Any] | None:
     return _cache
 
 
-def get_model_failure_penalty(model: str, task_type: str) -> float:
+def get_model_failure_penalty(
+    model: str,
+    task_type: str,
+    failure_rates: dict[str, float] | None = None,
+) -> float:
     """Return a 0.0–1.0 penalty for a model based on its local failure rate.
 
-    Queries the ``routing_decisions`` SQLite table for recent call outcomes.
+    When ``failure_rates`` is provided (pre-fetched by the async routing layer),
+    uses that dict directly — no DB access, no async/sync conflict.
+    When not provided, falls back to a synchronous DB fetch (works only from
+    non-async contexts; returns 0.0 otherwise to avoid event loop deadlock).
+
     Models with >20% failure rate receive a linear penalty that grows to 1.0
     at 100% failure rate, effectively pushing them to the bottom of the chain.
 
     Args:
         model: Model ID in ``provider/model`` format.
         task_type: Task type string (e.g. ``"code"``).
+        failure_rates: Pre-fetched dict of ``{model: rate}``. Pass this from
+            the async routing path to avoid the sync/async conflict.
 
     Returns:
         Penalty coefficient in [0.0, 1.0]. Zero means no penalty.
     """
     try:
-        import asyncio
-        from llm_router.cost import get_model_failure_rates
+        if failure_rates is not None:
+            rate = failure_rates.get(model, 0.0)
+        else:
+            import asyncio
+            from llm_router.cost import get_model_failure_rates
 
-        async def _fetch() -> float:
-            rates = await get_model_failure_rates(window_days=30)
-            return rates.get(model, 0.0)
+            async def _fetch() -> float:
+                rates = await get_model_failure_rates(window_days=30)
+                return rates.get(model, 0.0)
 
-        try:
-            loop = asyncio.get_running_loop()
-            # Inside an async context — schedule as a task but don't block.
-            # Return 0.0 (no penalty) rather than deadlocking the event loop.
-            _ = loop  # loop exists, we're async — skip the sync fetch
-            return 0.0
-        except RuntimeError:
-            # No running loop — safe to use asyncio.run().
-            failure_rate = asyncio.run(_fetch())
-            if failure_rate > 0.20:
-                return min(1.0, (failure_rate - 0.20) * 2.0)
+            try:
+                asyncio.get_running_loop()
+                # Inside async — skip to avoid deadlock; caller should pass failure_rates
+                return 0.0
+            except RuntimeError:
+                rate = asyncio.run(_fetch())
+
+        if rate > 0.20:
+            return min(1.0, (rate - 0.20) * 2.0)
     except Exception:
         pass
     return 0.0
 
 
-def get_model_latency_penalty(model: str, task_type: str) -> float:
+def get_model_latency_penalty(
+    model: str,
+    task_type: str,
+    latency_stats: dict[str, dict] | None = None,
+) -> float:
     """Return a 0.0–0.5 penalty for a model based on its observed P95 latency.
 
     Latency thresholds (P95 ms → penalty):
@@ -216,9 +231,16 @@ def get_model_latency_penalty(model: str, task_type: str) -> float:
     pessimistic defaults so Codex is not unfairly promoted to first position
     before any data has been collected.
 
+    When ``latency_stats`` is provided (pre-fetched by the async routing layer),
+    uses that dict directly — no DB access, no async/sync conflict.
+    When not provided, falls back to a synchronous DB fetch (works only from
+    non-async contexts; returns 0.0 otherwise to avoid event loop deadlock).
+
     Args:
         model: Model ID in ``provider/model`` format.
         task_type: Task type string (unused today, reserved for per-task tuning).
+        latency_stats: Pre-fetched dict of ``{model: {"p50": ms, "p95": ms, "count": n}}``.
+            Pass this from the async routing path to avoid the sync/async conflict.
 
     Returns:
         Penalty coefficient in [0.0, 0.5]. Zero means no penalty.
@@ -228,24 +250,28 @@ def get_model_latency_penalty(model: str, task_type: str) -> float:
     global _latency_cache, _latency_cache_ts
 
     try:
-        # Refresh cache if stale
-        now = time.monotonic()
-        if _latency_cache is None or (now - _latency_cache_ts) > _LATENCY_CACHE_TTL:
-            import asyncio
-            from llm_router.cost import get_model_latency_stats
+        if latency_stats is not None:
+            stats = latency_stats
+        else:
+            # Refresh cache if stale
+            now = time.monotonic()
+            if _latency_cache is None or (now - _latency_cache_ts) > _LATENCY_CACHE_TTL:
+                import asyncio
+                from llm_router.cost import get_model_latency_stats
 
-            async def _fetch() -> dict[str, dict]:
-                return await get_model_latency_stats(window_days=7)
+                async def _fetch() -> dict[str, dict]:
+                    return await get_model_latency_stats(window_days=7)
 
-            try:
-                loop = asyncio.get_running_loop()
-                _ = loop  # running loop — skip sync fetch, use cached/default
-            except RuntimeError:
-                # No running loop — safe to call asyncio.run()
-                _latency_cache = asyncio.run(_fetch())
-                _latency_cache_ts = now
+                try:
+                    loop = asyncio.get_running_loop()
+                    _ = loop  # running loop — skip sync fetch, use cached/default
+                except RuntimeError:
+                    # No running loop — safe to call asyncio.run()
+                    _latency_cache = asyncio.run(_fetch())
+                    _latency_cache_ts = now
 
-        stats = _latency_cache or {}
+            stats = _latency_cache or {}
+
         if model in stats:
             p95_ms = stats[model]["p95"]
         elif model in _COLD_START_LATENCY_MS:
@@ -272,6 +298,8 @@ def apply_benchmark_ordering(
     chain: list[str],
     task_type: "TaskType",
     profile: "RoutingProfile",
+    failure_rates: dict[str, float] | None = None,
+    latency_stats: dict[str, dict] | None = None,
 ) -> list[str]:
     """Reorder a model chain using benchmark data for the given task/profile.
 
@@ -319,8 +347,8 @@ def apply_benchmark_ordering(
         # Apply local failure-rate and latency penalties to scored models.
         def adjusted_score(model: str) -> float:
             base = task_scores.get(model, 0.5)
-            failure_pen = get_model_failure_penalty(model, task_key)
-            latency_pen = get_model_latency_penalty(model, task_key)
+            failure_pen = get_model_failure_penalty(model, task_key, failure_rates=failure_rates)
+            latency_pen = get_model_latency_penalty(model, task_key, latency_stats=latency_stats)
             return base * (1.0 - failure_pen) * (1.0 - latency_pen)
 
         # Quality-cost sort: quality first, but within any 5% quality tier
