@@ -69,8 +69,13 @@ def _append_savings_log(tool_name: str) -> None:
     _ensure_state_dir()
     # Derive task_type from tool name (e.g. llm_query -> query)
     task_type = tool_name.removeprefix("llm_") if tool_name.startswith("llm_") else tool_name
-    # Session ID: use PID of parent process (Claude Code) for grouping
-    session_id = os.environ.get("CLAUDE_SESSION_ID", f"pid-{os.getppid()}")
+    # Session ID: read UUID written by session-start hook (never reuses PIDs)
+    session_id_file = os.path.join(STATE_DIR, "session_id.txt")
+    try:
+        with open(session_id_file) as _f:
+            session_id = _f.read().strip() or f"pid-{os.getppid()}"
+    except OSError:
+        session_id = os.environ.get("CLAUDE_SESSION_ID", f"pid-{os.getppid()}")
     entry = {
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "task_type": task_type,

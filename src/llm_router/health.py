@@ -197,6 +197,35 @@ class HealthTracker:
         """
         self._get(provider).record_rate_limit()
 
+    def reset_stale(self, max_age_seconds: float = 1800.0) -> list[str]:
+        """Reset circuit breakers for providers whose last failure is older than max_age_seconds.
+
+        Prevents stale failures (e.g. from yesterday's outage) from blocking
+        providers that are healthy again. Called at session start so each new
+        Claude Code session begins with clean provider health state.
+
+        Args:
+            max_age_seconds: Age threshold in seconds (default 30 minutes).
+
+        Returns:
+            List of provider names that were reset.
+        """
+        now = time.monotonic()
+        reset = []
+        for provider, health in self._providers.items():
+            if health.consecutive_failures > 0:
+                age = now - health.last_failure_time
+                if age >= max_age_seconds:
+                    health.consecutive_failures = 0
+                    reset.append(provider)
+            if health.rate_limited:
+                age = now - health.rate_limit_time
+                if age >= max_age_seconds:
+                    health.rate_limited = False
+                    if provider not in reset:
+                        reset.append(provider)
+        return reset
+
     def status_report(self) -> dict[str, str]:
         """Generate a health report for all configured providers.
 

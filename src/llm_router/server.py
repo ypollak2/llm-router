@@ -36,8 +36,8 @@ from llm_router.claude_usage import (
 from llm_router.config import get_config
 from llm_router.cost import (
     get_daily_claude_breakdown, get_daily_claude_tokens,
-    get_lifetime_savings_summary, get_monthly_spend, get_quality_report,
-    get_savings_summary, import_savings_log, log_claude_usage,
+    get_monthly_spend, get_quality_report,
+    get_routing_savings_vs_sonnet, get_savings_summary, log_claude_usage,
 )
 from llm_router.health import get_tracker
 from llm_router.model_selector import select_model
@@ -71,6 +71,23 @@ try:
     _bmsg = _update_benchmarks()
     if _bmsg:
         logging.getLogger("llm_router").info(_bmsg)
+except Exception:
+    pass
+
+# Reset stale circuit breakers on startup (clears failures older than 30 min)
+try:
+    import os as _os
+    from llm_router.health import get_tracker as _get_tracker
+    _reset_file = _os.path.expanduser("~/.llm-router/reset_stale.flag")
+    _reset_tracker = _get_tracker()
+    _reset = _reset_tracker.reset_stale(max_age_seconds=1800.0)
+    if _reset:
+        logging.getLogger("llm_router").info("Reset stale circuit breakers: %s", _reset)
+    # Remove flag if it exists
+    try:
+        _os.unlink(_reset_file)
+    except OSError:
+        pass
 except Exception:
     pass
 
@@ -559,6 +576,15 @@ async def llm_research(
         max_tokens: Maximum output tokens.
         context: Optional conversation context to help the model understand the broader task.
     """
+    _cfg = get_config()
+    if not _cfg.perplexity_api_key:
+        return (
+            "⚠️  llm_research requires a Perplexity API key for web-grounded answers.\n\n"
+            "Without it, research tasks would use a non-web-grounded model and silently "
+            "return potentially stale or hallucinated information.\n\n"
+            "**To fix**: set PERPLEXITY_API_KEY in your environment or .env file.\n"
+            "Get a key at https://www.perplexity.ai/settings/api"
+        )
     resp = await route_and_call(
         TaskType.RESEARCH, prompt,
         system_prompt=system_prompt, max_tokens=max_tokens,
@@ -1013,22 +1039,23 @@ async def llm_usage(period: str = "today") -> str:
             lines.append(row(f"  Opus would cost: ${opus_would_cost:.4f}  ->  Actual: ${actual_cost:.4f}  ({pct_saved:.0f}% saved)"))
         lines.append(HR)
 
-    # ── Section 5: Lifetime Savings (from hook JSONL → SQLite) ──
-    await import_savings_log()  # import any pending JSONL entries
-    lifetime = await get_lifetime_savings_summary(days=0)
-    if lifetime["tasks_routed"] > 0:
-        lines.append(section("LIFETIME SAVINGS"))
-        lines.append(row(f"  Tasks routed:    {lifetime['tasks_routed']}"))
-        lines.append(row(f"  Claude saved:    ${lifetime['total_saved']:.2f}"))
-        lines.append(row(f"  External cost:   ${lifetime['total_external_cost']:.2f}"))
-        lines.append(row(f"  Net savings:     ${lifetime['net_savings']:.2f}"))
-        if lifetime["by_session"]:
+    # ── Section 5: Lifetime Savings (from routing_decisions SQLite table) ──
+    real_lifetime = await get_routing_savings_vs_sonnet(days=0)
+    if real_lifetime["total_calls"] > 0:
+        lt = real_lifetime
+        lines.append(section("LIFETIME SAVINGS (vs Sonnet 4.6 baseline)"))
+        tok_str = f"{lt['input_tokens']:,} in + {lt['output_tokens']:,} out"
+        lines.append(row(f"  Calls:    {lt['total_calls']}    Tokens: {tok_str}"))
+        lines.append(row(f"  Actual:   ${lt['actual_cost']:.4f}    Baseline: ${lt['baseline_cost']:.4f}"))
+        lines.append(row(f"  Saved:    ~${lt['saved']:.4f}"))
+        if lt["by_model"]:
             lines.append(row(""))
-            lines.append(row("  Recent sessions:"))
-            for sess in lifetime["by_session"][:5]:
+            lines.append(row("  Per model:"))
+            for model, md in sorted(lt["by_model"].items(), key=lambda x: -x[1]["calls"])[:6]:
+                short = model.split("/")[-1][:16] if "/" in model else model[:16]
                 lines.append(row(
-                    f"    {sess['session_id'][:16]}..  "
-                    f"{sess['tasks']} tasks  ${sess['saved']:.2f} saved"
+                    f"    {short:<16}  {md['calls']:>4}x  "
+                    f"${md['actual_cost']:.4f} actual  ~${md['saved']:.4f} saved"
                 ))
         lines.append(HR)
 

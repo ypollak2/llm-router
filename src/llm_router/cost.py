@@ -904,3 +904,86 @@ async def get_model_failure_rates(window_days: int = 30) -> dict[str, float]:
     finally:
         await db.close()
 
+
+# Sonnet 4.6 pricing used as baseline for savings calculations
+_SONNET_INPUT_PER_M = 3.0    # $3 per million input tokens
+_SONNET_OUTPUT_PER_M = 15.0  # $15 per million output tokens
+
+
+async def get_routing_savings_vs_sonnet(days: int = 0) -> dict:
+    """Compute savings by comparing actual cost vs Sonnet 4.6 baseline.
+
+    Uses the routing_decisions table (populated by the router on every call).
+    Savings = what Sonnet would have cost − what we actually paid.
+
+    Args:
+        days: Look-back window. 0 = all time.
+
+    Returns:
+        Dict with ``total_calls``, ``actual_cost``, ``baseline_cost``,
+        ``saved``, ``input_tokens``, ``output_tokens``, and ``by_model``.
+    """
+    where = (
+        f"WHERE timestamp >= datetime('now', '-{days} days') AND success = 1"
+        if days > 0
+        else "WHERE success = 1"
+    )
+    empty: dict = {
+        "total_calls": 0,
+        "actual_cost": 0.0,
+        "baseline_cost": 0.0,
+        "saved": 0.0,
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "by_model": {},
+    }
+    db = await _get_db()
+    try:
+        cursor = await db.execute(
+            f"""SELECT COUNT(*),
+                       COALESCE(SUM(cost_usd), 0),
+                       COALESCE(SUM(input_tokens), 0),
+                       COALESCE(SUM(output_tokens), 0)
+                FROM routing_decisions {where}"""
+        )
+        row = await cursor.fetchone()
+        if not row or row[0] == 0:
+            return empty
+
+        total, actual_cost, in_tok, out_tok = row
+        baseline = (in_tok * _SONNET_INPUT_PER_M + out_tok * _SONNET_OUTPUT_PER_M) / 1_000_000
+        saved = max(0.0, baseline - actual_cost)
+
+        cursor = await db.execute(
+            f"""SELECT final_model, COUNT(*),
+                       COALESCE(SUM(cost_usd), 0),
+                       COALESCE(SUM(input_tokens), 0),
+                       COALESCE(SUM(output_tokens), 0)
+                FROM routing_decisions {where}
+                GROUP BY final_model ORDER BY COUNT(*) DESC"""
+        )
+        by_model = {}
+        for m_row in await cursor.fetchall():
+            m, cnt, m_cost, m_in, m_out = m_row
+            m_baseline = (m_in * _SONNET_INPUT_PER_M + m_out * _SONNET_OUTPUT_PER_M) / 1_000_000
+            by_model[m or "unknown"] = {
+                "calls": int(cnt),
+                "actual_cost": float(m_cost),
+                "baseline_cost": float(m_baseline),
+                "saved": max(0.0, m_baseline - float(m_cost)),
+            }
+
+        return {
+            "total_calls": int(total),
+            "actual_cost": float(actual_cost),
+            "baseline_cost": float(baseline),
+            "saved": float(saved),
+            "input_tokens": int(in_tok),
+            "output_tokens": int(out_tok),
+            "by_model": by_model,
+        }
+    except Exception:
+        return empty
+    finally:
+        await db.close()
+

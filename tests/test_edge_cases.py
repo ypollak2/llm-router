@@ -236,10 +236,10 @@ class TestHealthEdgeCases:
         health = ProviderHealth()
         health.record_failure()
         health.record_failure()
-        health.record_success()  # resets consecutive
+        health.record_success()  # resets consecutive to 0
         health.record_failure()
-        health.record_failure()
-        assert health.is_healthy()  # only 2 consecutive
+        # 1 consecutive failure after reset — still below threshold (2)
+        assert health.is_healthy()
 
     def test_rate_limit_followed_by_hard_failure(self):
         """Rate limit then failure — both tracked independently."""

@@ -13,12 +13,11 @@ class TestProviderHealth:
     def test_stays_healthy_below_threshold(self):
         h = ProviderHealth()
         h.record_failure()
-        h.record_failure()
-        assert h.is_healthy()  # threshold is 3
+        assert h.is_healthy()  # 1 failure is below threshold (2)
 
     def test_unhealthy_after_threshold(self):
         h = ProviderHealth()
-        for _ in range(3):
+        for _ in range(2):
             h.record_failure()
         assert not h.is_healthy()
 

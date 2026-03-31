@@ -71,10 +71,10 @@ class RouterConfig(BaseSettings):
     llm_router_profile: RoutingProfile = RoutingProfile.BALANCED
     llm_router_tier: Tier = Tier.FREE
     llm_router_db_path: Path = Path.home() / ".llm-router" / "usage.db"
-    llm_router_monthly_budget: float = 0.0  # 0 = unlimited
+    llm_router_monthly_budget: float = 20.0  # $20/month default cap
 
     # ── Smart routing settings ──
-    daily_token_budget: int = 0             # 0 = unlimited, e.g. 1000000
+    daily_token_budget: int = 500_000       # 500k tokens/day default cap
     quality_mode: QualityMode = QualityMode.BALANCED
     min_model: str = "haiku"                # floor: never route below this
 
@@ -89,8 +89,8 @@ class RouterConfig(BaseSettings):
     compaction_threshold: int = 4000     # token threshold to trigger compaction
 
     # ── Health check settings ──
-    health_failure_threshold: int = 3
-    health_cooldown_seconds: int = 60
+    health_failure_threshold: int = 2
+    health_cooldown_seconds: int = 30
 
     # ── Request defaults ──
     default_max_tokens: int = 4096

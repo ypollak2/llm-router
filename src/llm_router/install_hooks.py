@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import re
 import shutil
+import sys
 from pathlib import Path
 
 
@@ -180,6 +181,22 @@ def install() -> list[str]:
 
     _save_settings(settings)
 
+    # ── Register MCP server globally ─────────────────────────────────────
+    uv_path = shutil.which("uv") or "uv"
+    project_dir = str(_PACKAGE_DIR.parent.parent)  # repo root (two levels up from src/llm_router)
+    mcp_entry = {
+        "command": uv_path,
+        "args": ["run", "--directory", project_dir, "llm-router"],
+    }
+    settings2 = _load_settings()
+    mcp_servers = settings2.setdefault("mcpServers", {})
+    if "llm-router" not in mcp_servers:
+        mcp_servers["llm-router"] = mcp_entry
+        _save_settings(settings2)
+        actions.append("Registered llm-router MCP server globally in ~/.claude/settings.json")
+    else:
+        actions.append("MCP server already registered: llm-router")
+
     # ── Copy routing rules ───────────────────────────────────────────────
     _RULES_DST.mkdir(parents=True, exist_ok=True)
 
@@ -225,6 +242,14 @@ def uninstall() -> list[str]:
 
     _save_settings(settings)
 
+    # Remove MCP server registration
+    settings2 = _load_settings()
+    mcp_servers = settings2.get("mcpServers", {})
+    if "llm-router" in mcp_servers:
+        del mcp_servers["llm-router"]
+        _save_settings(settings2)
+        actions.append("Removed llm-router MCP server from ~/.claude/settings.json")
+
     # Remove rules
     rules_dst = _RULES_DST / "llm-router.md"
     if rules_dst.exists():
@@ -236,7 +261,6 @@ def uninstall() -> list[str]:
 
 def main() -> None:
     """CLI entry point for llm-router-install-hooks."""
-    import sys
 
     if len(sys.argv) > 1 and sys.argv[1] == "uninstall":
         print("\nUninstalling LLM Router hooks...\n")
