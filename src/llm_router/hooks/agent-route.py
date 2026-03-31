@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm-router-hook-version: 1
+# llm-router-hook-version: 2
 """PreToolUse[Agent] hook — intercept subagent spawning, route reasoning to cheap models.
 
 When Claude spawns a subagent (Agent tool), this hook intercepts and decides:

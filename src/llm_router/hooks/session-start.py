@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm-router-hook-version: 2
+# llm-router-hook-version: 3
 """SessionStart hook — inject routing banner + reset session tracking.
 
 Fires once when a new Claude Code session begins. Three jobs:
@@ -24,18 +24,20 @@ SESSION_ID_FILE = os.path.join(STATE_DIR, "session_id.txt")
 
 BANNER = """
 ╔════════════════════════════════════════════════════════════════╗
-║  ⚡ llm-router ACTIVE — mandatory routing in effect           ║
+║  ⚡ llm-router ACTIVE — subscription routing in effect        ║
 ╠════════════════════════════════════════════════════════════════╣
-║  query/*    → llm_query    (Haiku — 50x cheaper than Opus)   ║
-║  code/*     → llm_code     (Sonnet — 10x cheaper)            ║
-║  generate/* → llm_generate (Gemini Flash — 20x cheaper)      ║
-║  research/* → llm_research (Perplexity — web-grounded)       ║
-║  analyze/*  → llm_analyze  (Sonnet — deep analysis)          ║
+║  simple   → /model claude-haiku-4-5-20251001  (subscription) ║
+║  moderate → Sonnet handles directly (passthrough)             ║
+║  complex  → /model claude-opus-4-6            (subscription) ║
+║  research → llm_research  (Perplexity — web-grounded)        ║
 ╠════════════════════════════════════════════════════════════════╣
-║  EVERY prompt gets classified. Call the tool. Don't answer   ║
-║  yourself. FORBIDDEN: Agent subagents · self-answer ·        ║
-║  WebSearch · WebFetch when a ROUTE hint is present.          ║
-║  The cheap model's output IS your response.                  ║
+║  Under pressure, external models activate tier by tier:       ║
+║  session ≥85% → simple external (Gemini Flash / Groq)        ║
+║  sonnet  ≥95% → moderate external (GPT-4o / DeepSeek)        ║
+║  weekly  ≥95% → ALL external (Ollama → cloud fallback)       ║
+╠════════════════════════════════════════════════════════════════╣
+║  FORBIDDEN when ROUTE hint present:                          ║
+║  Agent subagents · self-answer · WebSearch · WebFetch        ║
 ╚════════════════════════════════════════════════════════════════╝
 """.strip()
 
@@ -82,10 +84,21 @@ def main() -> None:
     _reset_session_stats()
     _reset_stale_health()
 
+    # Check if usage.json is missing or stale — pressure system needs fresh data
+    usage_json = os.path.join(STATE_DIR, "usage.json")
+    usage_age_hint = ""
+    try:
+        age_sec = time.time() - os.path.getmtime(usage_json)
+        if age_sec > 3600:  # older than 1 hour
+            age_min = int(age_sec / 60)
+            usage_age_hint = f"\n⚠️  Claude usage data is {age_min}m old. Run llm_check_usage to refresh pressure thresholds."
+    except OSError:
+        usage_age_hint = "\n⚠️  No Claude usage data yet. Run llm_check_usage for accurate pressure-based routing."
+
     print(json.dumps({
         "hookSpecificOutput": {
             "hookEventName": "SessionStart",
-            "contextForAgent": BANNER,
+            "contextForAgent": BANNER + usage_age_hint,
         }
     }))
 

@@ -153,6 +153,7 @@ Making it easy for others to install and use.
 | Plugin marketplace listing | Medium | Done (.claude-plugin/) |
 | Docker image for self-hosted deployment | Low | Planned |
 | REST API mode (non-MCP, for any client) | Low | Planned |
+| **Auto API key discovery** — scan well-known locations on the local machine (`~/.zshrc`, `~/.bashrc`, `~/.zprofile`, `~/.config/`, system keychain) and auto-populate `.env.local`. Opt-in with explicit confirmation before writing any key. | High | Planned |
 
 ---
 
@@ -168,6 +169,22 @@ Smarter model selection based on learned patterns.
 | Cost prediction before execution | Medium | Planned |
 | Automatic profile switching based on time of day / workload | Low | Planned |
 | Multi-tenant support for teams | Low | Planned |
+
+---
+
+## Phase 8: Enterprise & Team Mode
+
+Shared infrastructure, spend controls, and managed secret handling for teams and organisations.
+
+| Feature | Priority | Status |
+|---------|----------|--------|
+| **Secrets manager integrations** — HashiCorp Vault, AWS Secrets Manager, GCP Secret Manager, Azure Key Vault, 1Password CLI. Replaces `.env` files for teams sharing a router config. | High | Planned |
+| `llm-router-server` FastAPI mode — shared routing config + usage DB across a team | High | Planned |
+| Per-user and per-team budget caps with alerts | High | Planned |
+| Migrate SQLite → PostgreSQL for shared persistent backend | Medium | Planned |
+| Simple web dashboard (React, Vercel/Railway) for spend visibility | Medium | Planned |
+| Slack / email spend alerts when team budget exceeds thresholds | Medium | Planned |
+| SSO / OIDC authentication for the web dashboard | Low | Planned |
 
 ---
 

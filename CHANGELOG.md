@@ -1,5 +1,48 @@
 # Changelog
 
+## v0.9.2 — Claude Code Subscription Mode (2026-03-31)
+
+### Added
+
+- **Claude Code subscription mode** (`LLM_ROUTER_CLAUDE_SUBSCRIPTION=true`) — All Claude tiers (Haiku, Sonnet, Opus) are now accessed via the Claude Code subscription at zero API cost. No Anthropic API key required or used.
+- **Tiered pressure cascade** — Three independent quota buckets each control a different complexity tier, cascading downward when pressure rises:
+  - `session ≥ 85%` → simple tasks switch to external (Gemini Flash / Groq)
+  - `sonnet ≥ 95%` → moderate tasks switch to external (GPT-4o / DeepSeek)
+  - `weekly ≥ 95%` OR `session ≥ 95%` → all tiers go external (global emergency)
+- **Per-bucket pressure tracking** — `auto-route.py` and `agent-route.py` now read `{session_pct, sonnet_pct, weekly_pct}` from `usage.json` instead of the single `highest_pressure` field. More granular and accurate fallback decisions.
+- **Haiku for simple tasks** — Simple tasks emit a `/model claude-haiku-4-5-20251001` hint instead of routing to cheap external APIs. Haiku is free via subscription and avoids network latency.
+- **Passthrough for moderate tasks** — Moderate tasks with no pressure are a no-op (Sonnet handles directly). No model switching, no external call.
+- **Opus for complex tasks** — Complex tasks emit a `/model claude-opus-4-6` hint. Best quality, zero API cost while subscription quota is available.
+- **Haiku as preferred complexity classifier** — `CLASSIFIER_MODELS` now lists `anthropic/claude-haiku-4-5-20251001` first. Skipped automatically when no `ANTHROPIC_API_KEY` is set; Gemini Flash / Groq serve as instant fallbacks.
+- **Configurable `media_request_timeout`** — New `LLM_ROUTER_MEDIA_REQUEST_TIMEOUT` env var (default: 600s). Video generation can take several minutes; previously the 120s `request_timeout` caused false failures.
+- **`asyncio.Lock` for budget enforcement** — Budget check in `router.py` is now wrapped in `_budget_lock`. Prevents concurrent requests both passing the monthly budget cap check (race condition when two tasks fire simultaneously near the limit).
+- **90% budget soft-warning** — Logs a `WARNING` at 90% monthly spend, before the hard stop at 100%.
+
+### Changed
+
+- `auto-route.py` → version 5: pressure default changed from `0.3` (conservative) to `0.0` (no pressure assumed when `usage.json` absent). Subscription models are preferred when blind — no unnecessary external routing.
+- `agent-route.py` → version 2: `_complexity_to_profile()` now takes `(complexity, session, sonnet, weekly)` instead of a single pressure float. Block message displays all three pressure values.
+- `session-start.py` → version 3: BANNER updated to reflect subscription-first strategy; adds a `usage.json` freshness check (warns if missing or >1 hour old).
+
+### Fixed
+
+- **Silent exception handlers in `profiles.py`** — Three `except: pass` blocks now log `WARNING` messages instead of swallowing errors silently. Pressure reordering failures are now visible.
+
+---
+
+## v0.9.1 — Robustness & Error Hints (2026-03-31)
+
+### Added
+
+- **Codex path validation** — `llm_codex` now validates `CODEX_PATH` before attempting to run. Returns a clear error with platform-specific instructions (`which codex` / `where codex`) when the binary is missing.
+- **Pressure fallback validation** — `reorder_for_pressure()` now logs a warning when the fallback chain is shorter than expected, so silent routing degradation surfaces in logs.
+
+### Changed
+
+- Version bump to 0.9.1.
+
+---
+
 ## v0.9.0 — Operational Reliability (2026-03-31)
 
 ### Fixed

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm-router-hook-version: 4
+# llm-router-hook-version: 5
 """UserPromptSubmit hook — scoring classifier with Ollama + API fallback chain.
 
 Classification chain (stops at first success):

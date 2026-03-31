@@ -223,6 +223,41 @@ Hook scripts are versioned (`# llm-router-hook-version: N`). On every MCP server
 
 ---
 
+## Claude Code Subscription Mode (Recommended)
+
+If you use Claude Code, you already pay for Haiku, Sonnet, and Opus. Enable subscription mode and the router routes **entirely within your subscription** — zero API calls to Anthropic:
+
+```bash
+# In .env
+LLM_ROUTER_CLAUDE_SUBSCRIPTION=true
+```
+
+### Default Routing Strategy (No Pressure)
+
+| Complexity | Model | Cost |
+|-----------|-------|------|
+| simple | Claude Haiku 4.5 | free (subscription) |
+| moderate | Sonnet (passthrough) | free (you're already using it) |
+| complex | Claude Opus 4.6 | free (subscription) |
+| research | Perplexity Sonar Pro | ~$0.005/query (web-grounded) |
+
+### Pressure-Based External Fallback (Three Independent Buckets)
+
+When Claude quota gets tight, external models activate tier by tier. Each threshold controls its own complexity tier — higher pressure cascades down:
+
+| Condition | simple | moderate | complex |
+|-----------|--------|----------|---------|
+| `session < 85%` | Haiku (sub) | Sonnet (passthrough) | Opus (sub) |
+| `session ≥ 85%` | Gemini Flash / Groq | Sonnet (passthrough) | Opus (sub) |
+| `sonnet ≥ 95%` | Gemini Flash / Groq | GPT-4o / DeepSeek | Opus (sub) |
+| `weekly ≥ 95%` OR `session ≥ 95%` | Gemini Flash / Groq | GPT-4o / DeepSeek | GPT-4o / DeepSeek |
+
+> **Cascade rule**: once a higher tier goes external, all lower tiers go external too. When weekly ≥ 95%, everything routes external — it makes no sense to put simple tasks on external while complex stays on subscription.
+
+Run `llm_check_usage` at session start to populate accurate pressure data.
+
+---
+
 ## Smart Routing (Claude Code Models)
 
 Use Claude Code's own models (Haiku/Sonnet/Opus) **without extra API keys** via the smart classifier:

@@ -47,6 +47,48 @@ If a `⚡ MANDATORY ROUTE:` directive appears in context, use it to select the r
 4. `via heuristic-weak` — Low-confidence pattern match
 5. `via fallback` — No classification; `llm_route` should do full analysis
 
+## Model Routing Strategy (v0.9.2)
+
+Everyone runs in **Claude Code subscription mode** (`LLM_ROUTER_CLAUDE_SUBSCRIPTION=true`).
+Anthropic models are **never** called via API — all Claude tiers are used via subscription.
+
+### No Pressure (default)
+
+| Complexity | Action | Model |
+|---|---|---|
+| `simple` | `/model claude-haiku-4-5-20251001` hint | Haiku (subscription) |
+| `moderate` | Passthrough — no switch | Sonnet (current, subscription) |
+| `complex` | `/model claude-opus-4-6` hint | Opus (subscription) |
+| `research` | `llm_research` | Perplexity (web-grounded) |
+
+### Pressure Cascade (each tier forces all lower tiers external too)
+
+| Condition | simple | moderate | complex |
+|---|---|---|---|
+| session ≥ 85% | EXTERNAL | Sonnet (sub) | Opus (sub) |
+| sonnet ≥ 95% | EXTERNAL | EXTERNAL | Opus (sub) |
+| weekly ≥ 95% **or** session ≥ 95% | EXTERNAL | EXTERNAL | EXTERNAL |
+
+### External Fallback Chains (no Anthropic API, Ollama first when local)
+
+| Tier | Chain |
+|---|---|
+| BUDGET (simple) | Ollama → Gemini Flash → Groq → GPT-4o-mini |
+| BALANCED (moderate) | Ollama → GPT-4o → Gemini Pro → DeepSeek |
+| PREMIUM (complex under pressure) | Ollama → o3 → Gemini Pro |
+
+### Complexity Classifier
+
+| Layer | Tool | Cost |
+|---|---|---|
+| 1. Heuristics | Regex in auto-route hook | Free, instant |
+| 2. Ollama | Local qwen3.5 | Free, ~1-3s |
+| 3. Gemini Flash | API fallback | ~$0.0001 |
+| MCP `llm_classify` | Haiku → Gemini Flash Lite → Groq | Cheapest available |
+
+> **Pressure data**: Run `llm_check_usage` at session start to populate `~/.llm-router/usage.json`.
+> Without it, pressure defaults to 0.0 (subscription models used — correct conservative behavior).
+
 ## Development
 
 ```bash
