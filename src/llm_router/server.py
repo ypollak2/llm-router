@@ -1346,6 +1346,7 @@ async def llm_update_usage(data: dict) -> str:
         _json.dump({
             "session_pct": round(_last_usage.session_pct * 100, 1),
             "weekly_pct": round(_last_usage.weekly_pct * 100, 1),
+            "sonnet_pct": round(_last_usage.sonnet_pct * 100, 1),
             "highest_pressure": round(_last_usage.highest_pressure, 4),
             "updated_at": time.time(),
         }, f)
@@ -1353,112 +1354,83 @@ async def llm_update_usage(data: dict) -> str:
     return _last_usage.summary()
 
 
-# ── Claude Usage — AppleScript Refresh ───────────────────────────────────────
-
-# Compact one-liner JS for AppleScript injection (avoids multiline escaping).
-_FETCH_USAGE_JS_COMPACT = (
-    "window.__llmr=null;"
-    "(async()=>{"
-    "const o=document.cookie.match(/lastActiveOrg=([^;]+)/)?.[1];"
-    "const b='/api/organizations/'+o;"
-    "const[u,s,l,c]=await Promise.all([fetch(b+'/usage'),fetch(b+'/subscription_details'),"
-    "fetch(b+'/overage_spend_limit'),fetch(b+'/prepaid/credits')].map(r=>r.then(j=>j.json())));"
-    "window.__llmr=JSON.stringify({org_id:o,usage:u,subscription:s,overage:l,credits:c});"
-    "})()"
-)
-
-_APPLESCRIPT_INJECT = """\
-tell application "Google Chrome"
-    set _tabs to {}
-    repeat with w in windows
-        repeat with t in tabs of w
-            set end of _tabs to t
-        end repeat
-    end repeat
-    repeat with t in _tabs
-        if URL of t contains "claude.ai" then
-            execute t javascript "{js}"
-            return "ok"
-        end if
-    end repeat
-    return "no_tab"
-end tell"""
-
-_APPLESCRIPT_READ = """\
-tell application "Google Chrome"
-    repeat with w in windows
-        repeat with t in tabs of w
-            if URL of t contains "claude.ai" then
-                return execute t javascript "window.__llmr"
-            end if
-        end repeat
-    end repeat
-    return "null"
-end tell"""
+# ── Claude Usage — OAuth Refresh ─────────────────────────────────────────────
 
 
 @mcp.tool()
 async def llm_refresh_claude_usage() -> str:
-    """Refresh Claude subscription usage — fetches directly from an open claude.ai Chrome tab.
+    """Refresh Claude subscription usage via the OAuth API — no browser required.
 
-    Uses AppleScript to inject a fetch call into the authenticated browser session.
-    No Playwright needed — no browser lock, no ugly JS parameter in the tool call.
+    Reads the Claude Code OAuth token from the macOS Keychain, calls the
+    Anthropic OAuth usage endpoint, and updates the local usage cache.
 
-    Requires: Google Chrome open with a claude.ai tab (any page).
+    Requires: Claude Code installed and authenticated on macOS.
     """
-    import asyncio
     import json as _json
     import subprocess
+    import urllib.request
 
-    # Step 1: inject async fetch into the Claude tab
-    inject_script = _APPLESCRIPT_INJECT.replace(
-        "{js}", _FETCH_USAGE_JS_COMPACT.replace('"', '\\"')
-    )
+    from llm_router.claude_usage import parse_oauth_response
+
+    # ── Step 1: read OAuth token from macOS Keychain ──────────────────────────
     try:
         r = subprocess.run(
-            ["osascript", "-e", inject_script],
+            ["security", "find-generic-password", "-s", "Claude Code-credentials", "-w"],
             capture_output=True, text=True, timeout=8,
         )
-        stdout = r.stdout.strip()
-        if r.returncode != 0 or stdout == "no_tab":
+        if r.returncode != 0 or not r.stdout.strip():
             return (
-                "No claude.ai tab found in Chrome.\n"
-                "Open https://claude.ai in Chrome (any page), then call this tool again."
+                "Could not read Claude Code credentials from Keychain.\n"
+                "Make sure Claude Code is installed and you are signed in."
             )
-    except (subprocess.TimeoutExpired, FileNotFoundError):
-        return "AppleScript unavailable or timed out. Use /usage-pulse for manual Playwright fallback."
+        creds = _json.loads(r.stdout.strip())
+        token = creds.get("claudeAiOauth", {}).get("accessToken", "")
+        if not token:
+            return "OAuth token not found in Keychain credentials. Try signing out and back into Claude Code."
+    except subprocess.TimeoutExpired:
+        return "Keychain read timed out."
+    except _json.JSONDecodeError as e:
+        return f"Could not parse Keychain credentials: {e}"
+    except FileNotFoundError:
+        return "`security` command not available — macOS only."
 
-    # Step 2: wait for the async fetch to resolve (~1-2s)
-    await asyncio.sleep(2)
-
-    # Step 3: read result back from window.__llmr
+    # ── Step 2: call the OAuth usage API ─────────────────────────────────────
+    url = "https://api.anthropic.com/api/oauth/usage"
+    req = urllib.request.Request(url, headers={
+        "Authorization": f"Bearer {token}",
+        "anthropic-beta": "oauth-2025-04-20",
+    })
     try:
-        r2 = subprocess.run(
-            ["osascript", "-e", _APPLESCRIPT_READ],
-            capture_output=True, text=True, timeout=8,
-        )
-        raw = r2.stdout.strip()
-        if not raw or raw in ("null", "missing value"):
-            # Fetch may still be in-flight — one more second
-            await asyncio.sleep(1)
-            r2 = subprocess.run(
-                ["osascript", "-e", _APPLESCRIPT_READ],
-                capture_output=True, text=True, timeout=8,
-            )
-            raw = r2.stdout.strip()
-    except (subprocess.TimeoutExpired, FileNotFoundError):
-        return "Timed out reading result from Chrome."
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            body = resp.read().decode()
+        data = _json.loads(body)
+    except Exception as e:
+        return f"OAuth usage API call failed: {e}"
 
-    if not raw or raw in ("null", "missing value"):
-        return "Fetch not ready. Retry in a moment or check that you're logged into claude.ai."
+    # ── Step 3: parse and cache ───────────────────────────────────────────────
+    global _last_usage
+    _last_usage = parse_oauth_response(data)
 
-    try:
-        data = _json.loads(raw)
-    except _json.JSONDecodeError:
-        return f"Could not parse response from Chrome: {raw[:200]}"
+    from llm_router.claude_usage import set_claude_pressure
+    set_claude_pressure(_last_usage.highest_pressure)
 
-    # Reuse llm_update_usage logic via direct call
-    return await llm_update_usage(data)
+    import os, time
+    state_dir = os.path.expanduser("~/.llm-router")
+    os.makedirs(state_dir, exist_ok=True)
+
+    with open(os.path.join(state_dir, "usage_last_refresh.txt"), "w") as f:
+        f.write(str(time.time()))
+
+    with open(os.path.join(state_dir, "usage.json"), "w") as f:
+        _json.dump({
+            "session_pct": round(_last_usage.session_pct * 100, 1),
+            "weekly_pct": round(_last_usage.weekly_pct * 100, 1),
+            "sonnet_pct": round(_last_usage.sonnet_pct * 100, 1),
+            "highest_pressure": round(_last_usage.highest_pressure, 4),
+            "updated_at": time.time(),
+        }, f)
+
+    return _last_usage.summary()
 
 
 # ── Codex Local Agent ─────────────────────────────────────────────────────────

@@ -405,6 +405,45 @@ def parse_api_response(data: dict) -> ClaudeSubscriptionUsage:
     )
 
 
+def parse_oauth_response(data: dict) -> ClaudeSubscriptionUsage:
+    """Parse the response from the OAuth usage API (api.anthropic.com/api/oauth/usage).
+
+    The OAuth endpoint returns usage windows at the **top level** (no ``"usage"``
+    wrapper), unlike the browser-internal API parsed by ``parse_api_response``:
+
+    .. code-block:: json
+
+        {
+            "five_hour": {"utilization": 21.0, "resets_at": "2024-01-15T12:00:00Z"},
+            "seven_day": {"utilization": 64.0, "resets_at": "..."},
+            "seven_day_sonnet": {"utilization": 74.0, "resets_at": "..."}
+        }
+
+    Normalises the response into the nested structure expected by
+    ``parse_api_response`` so all downstream logic is reused.
+
+    Args:
+        data: Top-level JSON dict from ``GET /api/oauth/usage``.
+
+    Returns:
+        A ``ClaudeSubscriptionUsage`` with session, weekly, and Sonnet limits
+        populated. Extra-usage and prepaid fields default to zero (the OAuth
+        endpoint does not expose them).
+    """
+    wrapped = {
+        "usage": {
+            "five_hour": data.get("five_hour"),
+            "seven_day": data.get("seven_day"),
+            "seven_day_sonnet": data.get("seven_day_sonnet"),
+        },
+        "subscription": {},
+        "overage": {},
+        "credits": {},
+        "org_id": "",
+    }
+    return parse_api_response(wrapped)
+
+
 # ── Legacy DOM parser (kept for backward compat) ─────────────────────────────
 
 def parse_usage_texts(texts: list[str]) -> ClaudeSubscriptionUsage:
