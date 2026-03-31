@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm-router-hook-version: 2
+# llm-router-hook-version: 3
 """Stop hook — session routing summary with real cost data from SQLite.
 
 Fires when a Claude Code session ends. Queries the routing_decisions SQLite
@@ -60,11 +60,11 @@ def _read_session_start() -> float:
 
 
 def _session_start_iso(session_start: float) -> str:
-    return datetime.fromtimestamp(session_start, tz=timezone.utc).isoformat()
+    return datetime.fromtimestamp(session_start, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
 
 def _query_session_data(session_start: float) -> list[dict]:
-    """Read routing_decisions rows since session_start from SQLite."""
+    """Read usage rows since session_start from SQLite."""
     if not os.path.exists(DB_PATH):
         return []
     try:
@@ -72,9 +72,9 @@ def _query_session_data(session_start: float) -> list[dict]:
         conn.row_factory = sqlite3.Row
         rows = conn.execute(
             """
-            SELECT task_type, final_model, input_tokens, output_tokens,
+            SELECT task_type, model, input_tokens, output_tokens,
                    cost_usd, success
-            FROM routing_decisions
+            FROM usage
             WHERE timestamp >= ? AND success = 1
             ORDER BY rowid
             """,
@@ -92,7 +92,7 @@ def _aggregate(rows: list[dict]) -> dict[str, dict]:
     for r in rows:
         task = r.get("task_type", "unknown")
         tool = f"llm_{task}"
-        model = r.get("final_model", "unknown")
+        model = r.get("model", "unknown")
         in_tok = r.get("input_tokens") or 0
         out_tok = r.get("output_tokens") or 0
         cost = r.get("cost_usd") or 0.0
@@ -193,7 +193,7 @@ def main() -> None:
     print(json.dumps({
         "hookSpecificOutput": {
             "hookEventName": "Stop",
-            "contextForAgent": summary,
+            "systemMessage": summary,
         }
     }))
 
