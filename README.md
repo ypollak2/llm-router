@@ -603,85 +603,35 @@ uv run ruff check src/
 
 ## Roadmap
 
-See [ROADMAP.md](ROADMAP.md) for the detailed roadmap with phases and priorities.
+See [ROADMAP.md](ROADMAP.md) for the full roadmap with design notes and competitive context.
 
-### Completed (v0.1–v0.5)
+### Completed (v1.0.0 — 2026-03-31)
 
-- [x] Core text LLM routing (10+ providers)
-- [x] Configurable profiles (budget / balanced / premium)
-- [x] Cost tracking with SQLite
-- [x] Health checks with circuit breaker
-- [x] Image generation (Gemini Imagen 3, DALL-E, Flux, SD)
-- [x] Video generation (Gemini Veo 2, Runway, Kling, minimax)
-- [x] Audio/voice routing (ElevenLabs, OpenAI TTS)
-- [x] Monthly budget enforcement
-- [x] Multi-step orchestration with pipeline templates
-- [x] Claude Code plugin with orchestrator agent and /route skill
-- [x] Freemium tier gating
-- [x] CI with GitHub Actions
-- [x] Smart complexity-first routing (simple->haiku, moderate->sonnet, complex->opus)
-- [x] Live Claude subscription monitoring (session %, weekly %, Sonnet %)
-- [x] Time-aware budget pressure (factors in session reset proximity)
-- [x] External fallback ranking when Claude is tight (Codex, OpenAI, Gemini)
-- [x] Codex desktop integration (local agent, free via OpenAI subscription)
-- [x] Unified usage dashboard (Claude sub + Codex + APIs + savings)
-- [x] `llm_setup` tool for API discovery and secure key management
-- [x] Per-provider budget limits
-- [x] ASCII box-drawing dashboard (terminal-friendly, no Unicode issues)
-- [x] Prompt classification cache (SHA-256 exact-match, in-memory LRU, 1h TTL)
-- [x] `llm_cache_stats` + `llm_cache_clear` MCP tools
-- [x] Auto-route hook (UserPromptSubmit heuristic classifier, zero-latency)
-- [x] Rate limit detection with smart cooldowns (15s rate limit vs 60s hard failure)
-- [x] `llm_setup(action='test')` — API key validation with minimal LLM calls
-- [x] Streaming responses (`llm_stream` tool + `call_llm_stream()` async generator)
-- [x] Usage auto-refresh hook (PostToolUse staleness detection + usage pulse wiring)
-- [x] Published to PyPI as `claude-code-llm-router`
-- [x] Multi-layer auto-classification: scoring heuristic → Ollama local LLM (qwen3.5) → cheap API (Gemini Flash/GPT-4o-mini)
-- [x] Savings awareness (PostToolUse hook tracks routed calls, periodic cost savings reminders)
-- [x] Structural context compaction (5 strategies: whitespace, comments, dedup, truncation, stack traces)
-- [x] Quality logging (`routing_decisions` table + `llm_quality_report` tool)
-- [x] Savings persistence (JSONL + SQLite import, lifetime analytics)
-- [x] Gemini media APIs (Imagen 3 images, Veo 2 video)
-- [x] Global hook installer (`llm_setup(action='install_hooks')` + `llm-router-install-hooks` CLI)
-- [x] Global routing rules (auto-installed to `~/.claude/rules/llm-router.md`)
-- [x] Session context injection (ring buffer + SQLite summaries, injected into all text tools)
-- [x] `llm_save_session` MCP tool (auto-summarize + persist session for future context)
-- [x] Cross-session memory (previous session summaries prepended to external LLM calls)
-- [x] Auto-update routing rules (version header + silent update on MCP startup after pip upgrade)
-- [x] Token arbitrage enforcement — routing hint override bug fixed; simple tasks now correctly route to cheap models
-- [x] Claude Code subscription mode (`LLM_ROUTER_CLAUDE_SUBSCRIPTION`) — exclude Anthropic from chains; route to DeepSeek/Gemini/GPT-4o instead
-- [x] Quality-cost tier sorting — within 5% quality band, prefer cheaper model (GPT-4o over Sonnet, DeepSeek over everyone when near-equal quality)
-- [x] DeepSeek Reasoner in cheap tier — $0.0014/1K leads at >85% pressure (was treated as "paid" tier alongside o3 at $0.025)
-- [x] Codex injection fix — no longer injected at position 0 when subscription mode removes Claude from chain (caused 300s timeouts)
-- [x] Codex task filtering — excluded from RESEARCH (no web access) and QUERY (too slow) chains
+- [x] Everything from v0.1–v0.9 (20+ providers, 24 MCP tools, 6 hooks, complexity routing, pressure cascade, Codex, caching, quality logging)
+- [x] **Subscription flag enforcement** — `available_providers()` actually excludes Anthropic when `LLM_ROUTER_CLAUDE_SUBSCRIPTION=true`
+- [x] **Unified pressure path** — `llm_route` and `llm_classify` both call `select_model()`, eliminating profile divergence under quota pressure
+- [x] **Staleness warnings** — all routing hooks flag `⚠️ STALE` when `usage.json` is >30 minutes old
+- [x] **Research fallback escalation** — no Perplexity key → PREMIUM chain instead of silent BALANCED downgrade
+- [x] **Frozen config fix** — `llm_set_profile` uses module-level `_active_profile` (no more `object.__setattr__()` on frozen Pydantic model)
+- [x] **Health-aware classifier** — classifier chain sorts unhealthy providers to the back
+- [x] **Atomic counter writes** — `usage-refresh.py` uses `os.replace()` to prevent concurrent hook race
 
-### Completed (v0.7)
+### Next (v1.1 — Observability)
 
-- [x] **Availability-aware routing** — P95 latency from `routing_decisions` table folded into benchmark quality score. Penalty range 0.0–0.50 (<5s=0, <15s=0.03, <60s=0.10, <180s=0.30, ≥180s=0.50). 60s cache prevents repeated DB hits per routing cycle.
-- [x] **Codex cold-start defaults** — `_COLD_START_LATENCY_MS` applies pessimistic 60-90s P95 before any history exists, preventing Codex from being placed first in chains on a fresh install.
-- [x] **`llm_edit` MCP tool** — Routes code-edit reasoning to a cheap CODE model. Reads files locally (32 KB cap), gets `{file, old_string, new_string}` JSON back, returns formatted instructions for Claude to apply mechanically. Keeps Opus out of the "what to change" loop.
+- [ ] Auto-refresh stale usage — hook triggers `llm_check_usage` automatically when data >30min
+- [ ] Web dashboard at `localhost:7337` — routing breakdown, cost/day, model distribution, savings chart
+- [ ] OTEL / Prometheus metrics export — counters for routed calls, cost, fallback rate per provider
+- [ ] `llm_rate` feedback tool — per-response thumbs up/down stored in `routing_decisions`
+- [ ] Hard budget alerts — warning + desktop notification when daily spend crosses threshold
 
-### Completed (v0.8)
+### Planned
 
-- [x] **3 routing correctness fixes** — async feedback loop, BUDGET hard cap, RESEARCH pressure tail (see CHANGELOG).
-- [x] **PreToolUse[Agent] hook** — Intercepts subagent spawns; routes reasoning to cheap `llm_*` tools, approves pure retrieval. Biggest cost leak plugged.
-- [x] **Session-end savings dashboard** — Reads real `routing_decisions` data; shows actual cost vs Sonnet 4.6 baseline per tool with ASCII bar charts.
-- [x] **`usage.json` export** — MCP server writes `~/.llm-router/usage.json` so hooks can read quota pressure without importing Python packages.
-
-### Completed (v0.9)
-
-- [x] **Global MCP server registration** — `llm-router-install-hooks` now registers the MCP server globally (`~/.claude/settings.json`) so routing tools work in ALL Claude Code sessions, not just the llm-router project.
-- [x] **Stale circuit breaker reset** — `HealthTracker.reset_stale()` clears failures older than 30 min on startup; yesterday's outage won't block today's routing.
-- [x] **UUID session IDs** — Replaced `os.getppid()` with a UUID written at session start; prevents session data corruption across reboots.
-- [x] **RESEARCH hard-fail** — `llm_research` immediately returns a helpful error when `PERPLEXITY_API_KEY` is not configured instead of silently using a non-web-grounded model.
-- [x] **Sensible config defaults** — Monthly budget cap $20, daily token budget 500k, circuit breaker threshold 2 failures / 30s cooldown.
-- [x] **Lifetime savings from real data** — `llm_usage` now computes savings vs Sonnet 4.6 baseline from `routing_decisions` table (actual token counts + real costs), not legacy estimates.
-
-### Next Up (v1.0 — Evaluation & Learning)
-
-- [ ] Classification outcome tracking (was the routed model's response good?)
-- [ ] A/B testing framework for routing decisions
-- [ ] Adaptive routing based on historical success rates
+| Version | Theme | Headline features |
+|---|---|---|
+| v1.2 | Cost Intelligence | Anthropic prompt caching, semantic dedup cache, hard daily spend cap |
+| v1.3 | Routing Intelligence | Task-aware model preferences, reasoning model tier, learned routing from history |
+| v1.4 | Agentic & Team | Agent-tree budget tracking, multi-user profiles, YAML pipelines |
+| v2.0 | Learning Router | Self-improving classifier trained on your own routing history (local, Ollama) |
 
 ---
 

@@ -1,198 +1,151 @@
 # LLM Router — Roadmap
 
-> Last updated: 2026-03-29
+> Last updated: 2026-03-31
 
 ## Vision
 
-A single MCP server that gives any AI assistant unified access to every LLM provider — automatically picking the right model for each task, managing budgets across subscriptions and APIs, and maximizing quality while minimizing cost.
+A single MCP server that gives Claude Code unified access to every LLM provider — automatically picking the right model for each task, managing budgets across subscriptions and APIs, and maximising quality while minimising cost. The router gets smarter the more you use it: routing history trains a local classifier that learns *your* patterns, not generic heuristics.
 
 ---
 
-## Phase 1: Foundation (v0.1) — COMPLETE
+## What makes this different
 
-Core routing infrastructure, provider integrations, and budget management.
+Most LLM routers (LiteLLM proxy, OpenRouter, Portkey, RouteLLM) are API gateways — they sit between your code and providers. This router is **IDE-native**:
 
-| Feature | Status |
-|---------|--------|
-| Text LLM routing (10 providers via LiteLLM) | Done |
-| Three routing profiles (budget / balanced / premium) | Done |
-| Cost tracking with SQLite | Done |
-| Health checks with circuit breaker pattern | Done |
-| Image generation (DALL-E, Flux, Stable Diffusion) | Done |
-| Video generation (Runway, Kling, minimax) | Done |
-| Audio/voice routing (ElevenLabs, OpenAI TTS) | Done |
-| Monthly budget enforcement with hard limits | Done |
-| Multi-step orchestration with pipeline templates | Done |
-| Claude Code plugin with /route skill | Done |
-| Freemium tier gating (free / pro) | Done |
-| CI with GitHub Actions | Done |
-| Smart complexity classification | Done |
-| Progressive budget-aware model downshifting | Done |
+| Capability | LiteLLM / OpenRouter | Portkey | RouteLLM | **llm-router** |
+|---|---|---|---|---|
+| MCP integration | ✗ | ✗ | ✗ | ✓ |
+| Claude Code hook injection | ✗ | ✗ | ✗ | ✓ |
+| Subscription-quota routing | ✗ | ✗ | ✗ | ✓ |
+| Free local classifier chain | ✗ | ✗ | partial | ✓ |
+| Semantic caching | partial | ✓ | ✗ | planned |
+| Web dashboard | ✓ | ✓ | ✗ | planned |
+| OTEL / Prometheus | ✓ | ✓ | ✗ | planned |
+| Learned routing | ✗ | ✗ | ✓ | planned |
+| Multi-user / team | ✓ | ✓ | ✗ | planned |
 
 ---
 
-## Phase 2: Intelligence Layer (v0.2) — COMPLETE
+## Completed
 
-Smart routing that understands Claude subscription state, integrates local agents, and provides a unified view of all LLM usage.
+### v0.1–v0.9 (Foundation → Global Enforcement)
 
-| Feature | Status |
-|---------|--------|
-| Complexity-first routing (simple->haiku, moderate->sonnet, complex->opus) | Done |
-| Live Claude subscription monitoring via claude.ai JSON API | Done |
-| Time-aware budget pressure (factors in session reset proximity) | Done |
-| External fallback ranking when Claude quota is tight | Done |
-| Codex desktop integration (local agent, free via OpenAI sub) | Done |
-| Unified usage dashboard (Claude + Codex + APIs + savings) | Done |
-| `llm_setup` tool for API discovery and key management | Done |
-| Per-provider budget limits (OPENAI, GEMINI, etc.) | Done |
-| Gemini media routing (Imagen 3 images, Veo 2 video) | Done |
-| ASCII terminal-friendly dashboard (no Unicode rendering issues) | Done |
-| Updated thresholds: 85%/95% safety net instead of 50%/80% | Done |
+- Core text LLM routing (20+ providers via LiteLLM)
+- Budget / balanced / premium profiles with fallback chains
+- Cost tracking with SQLite + lifetime savings analytics
+- Health checks with circuit breaker + stale reset
+- Image / video / audio generation routing
+- Monthly budget enforcement with hard limits
+- Multi-step orchestration with pipeline templates
+- Claude Code plugin: 24 MCP tools + 6 hooks
+- Complexity-first routing (simple→Haiku, moderate→Sonnet, complex→Opus)
+- Live Claude subscription monitoring (session %, weekly %, Sonnet %)
+- Pressure cascade (85%/95%/99% thresholds, tier-by-tier external fallback)
+- Codex desktop integration (local agent, free via OpenAI subscription)
+- Prompt classification cache (SHA-256 exact-match, in-memory LRU, 1h TTL)
+- Auto-route hook (UserPromptSubmit multi-layer classifier: heuristic→Ollama→API)
+- SubagentStart hook (injects routing context into spawned agents)
+- Structural context compaction (5 strategies)
+- Quality logging (`routing_decisions` table + `llm_quality_report` tool)
+- Savings persistence (JSONL + SQLite import, lifetime analytics)
+- Global hook installer + routing rules auto-update
+- UUID session IDs, stale circuit-breaker reset
+- OAuth-based Claude usage refresh (replaces AppleScript)
+- Published to PyPI as `claude-code-llm-router`
 
-### Key Design Decisions (v0.2)
+### v1.0.0 (Routing Integrity — 2026-03-31)
 
-- **Complexity routing IS the savings mechanism** — routing simple tasks to haiku and moderate to sonnet naturally preserves opus quota. Budget downshifting is only a late safety net at 85%+.
-- **Time-aware pressure** — 90% usage with 5 minutes until session reset is very different from 90% with 4 hours left. The router reduces downshift urgency when reset is imminent.
-- **Three independent quota pools** — Claude subscription (session/weekly limits), OpenAI subscription (via Codex, free), and API credits (pay-per-token). The router sees all three.
+Eight correctness fixes making the routing guarantees production-solid:
 
----
-
-## Phase 3: Caching & Automation (v0.3) — COMPLETE
-
-Prompt caching, automatic usage refresh, and smoother UX.
-
-| Feature | Priority | Status |
-|---------|----------|--------|
-| **Prompt cache — exact match** (SHA-256 hash, in-memory LRU, 1h TTL) | High | Done |
-| **`llm_cache_stats` + `llm_cache_clear` MCP tools** — expose hit rate, size, entries | High | Done |
-| **Auto-route hook** — UserPromptSubmit heuristic classifier, zero-latency routing hints | High | Done |
-| Periodic usage pulse (`/usage-pulse` via `/loop`) | High | Done |
-| Auto-refresh Claude usage via PostToolUse hook | High | Done |
-| Streaming responses (`llm_stream` tool + `call_llm_stream`) | Medium | Done |
-| `llm_setup(action='test')` — verify key validity | Medium | Done |
-| Rate limit detection (429/rate_limit, 15s cooldown) | Medium | Done |
-
-### Cache Design (v0.3)
-
-- **Two-tier cache**: Exact match (hash of prompt + quality_mode + min_model) for O(1) lookup, plus semantic similarity (cosine over embeddings, threshold 0.95) when embedding classifier is available (Phase 4).
-- **Caches `ClassificationResult`**, not `RoutingRecommendation` — budget pressure is applied fresh every time, so cached results stay valid even as quota changes.
-- **In-memory LRU**: Max 1,000 entries (~1.5MB with embeddings), 1-hour TTL, `asyncio.Lock` for thread safety. No external dependencies.
-- **Zero overhead for misses**: Hash lookup is O(1). Short prompts that never repeat skip caching entirely.
+1. **Subscription flag enforcement** — `available_providers()` now actually excludes Anthropic when `LLM_ROUTER_CLAUDE_SUBSCRIPTION=true`
+2. **Unified pressure path** — `llm_route` now calls `select_model()` (same as `llm_classify`), eliminating profile divergence under quota pressure
+3. **Staleness warnings** — all 3 routing hooks flag `⚠️ STALE` when `usage.json` is >30 minutes old
+4. **Ollama config clarification** — `OLLAMA_URL` (classifier) vs `OLLAMA_BASE_URL` (answerer) documented
+5. **Frozen config fix** — `llm_set_profile` uses module-level `_active_profile` instead of `object.__setattr__()` on frozen Pydantic model
+6. **Health-aware classifier** — classifier chain sorts unhealthy providers to the back
+7. **Atomic counter writes** — `usage-refresh.py` uses `os.replace()` to prevent concurrent hook race
+8. **Research fallback escalation** — no Perplexity key → PREMIUM chain instead of silent BALANCED downgrade
 
 ---
 
-## Phase 4: Quality & Global Enforcement (v0.4) — COMPLETE
+## v1.1 — Observability (next)
 
-Context compaction, quality analytics, savings persistence, Gemini media, and global hook enforcement.
+**Theme**: You should always know what the router is doing and why.
 
-| Feature | Priority | Status |
-|---------|----------|--------|
-| **Structural context compaction** — 5 strategies: whitespace, comments, dedup, truncation, stack traces | High | Done |
-| **Quality logging** — `routing_decisions` SQLite table (21 columns per decision) | High | Done |
-| **`llm_quality_report` MCP tool** — classifier breakdown, task types, model usage, downshift rate | High | Done |
-| **Savings persistence** — JSONL → SQLite import, lifetime per-session analytics | High | Done |
-| **Gemini Imagen 3** — Direct REST API (predict endpoint, aspect ratio mapping) | High | Done |
-| **Gemini Veo 2** — Long-running prediction with async polling | High | Done |
-| **Global hook installer** — `llm_setup(action='install_hooks')` + `llm-router-install-hooks` CLI | High | Done |
-| **Global routing rules** — `~/.claude/rules/llm-router.md` enforces routing hints | High | Done |
-| **Embedding-based classifier** — `all-MiniLM-L6-v2` + LogisticRegression | Medium | Deferred to v0.5 |
-| **LLM-based context compaction** — summarize via cheap model (opt-in) | Medium | Deferred to v0.5 |
-| **Semantic prompt cache** — cosine similarity over embeddings | Medium | Deferred to v0.5 |
-| **A/B testing** — parallel classifiers, log disagreements | Medium | Deferred to v0.5 |
-
-### Embedding Classifier Design (v0.4)
-
-- **Model**: `all-MiniLM-L6-v2` (22M params, 384-dim vectors, ~80MB). Prefer ONNX runtime (~200MB) over full torch (~2GB) to keep the server lightweight.
-- **Approach**: Encode prompt → LogisticRegression predicts complexity (simple/moderate/complex) and task_type (5 classes) → calibrated confidence via `predict_proba`.
-- **Training**: Bootstrap labeled data from existing LLM classifier on ~500 curated prompts, train sklearn model, store in `~/.llm-router/models/`. Quality framework (below) provides human-corrected labels over time.
-- **Fallback**: If embedding model unavailable or confidence < 0.7, silently fall back to LLM classifier. Zero behavior change for users who don't opt in.
-- **New optional deps**: `onnxruntime`, `scikit-learn` (in `[project.optional-dependencies] ml` group).
-
-### Context Compaction Design (v0.4)
-
-- **When**: Prompt exceeds 4,000 tokens (estimated via `len(text) // 4` or `tiktoken`).
-- **Strategy 1 — Structural** (free, default): Collapse redundant whitespace, strip code comments, deduplicate repeated sections, truncate long code blocks to first/last N lines.
-- **Strategy 2 — LLM summarization** (opt-in `compaction_mode=full`): Send to a cheap classifier model with "summarize preserving all actionable requirements, code refs, and constraints."
-- **Never removes**: Code snippets, error messages, stack traces, file paths, explicit constraints.
-- **Config**: `compaction_mode` = `off` | `structural` | `full`, `compaction_threshold` = 4000 tokens.
-
-### Quality Framework Design (v0.4)
-
-- **Decision logging**: Every classify + route → SQLite row with prompt hash, complexity, classifier type (embedding/llm/cached), recommended model, budget state, outcome (success/retry).
-- **Metrics**: Classification accuracy, cost savings vs opus-baseline, downshift harm rate, classifier agreement rate.
-- **A/B testing**: When both classifiers exist, 10% sample runs both. Secondary is for logging only — primary always routes. Disagreements stored for review.
+| Feature | Priority | Notes |
+|---|---|---|
+| **Auto-refresh stale usage** | High | Hook triggers `llm_check_usage` automatically when data >30min, not just warns |
+| **Web dashboard** | High | `localhost:7337` — routing breakdown, cost/day, model distribution, savings chart |
+| **OTEL / Prometheus export** | Medium | Optional `--metrics-port`; counters for routed calls, cost, fallback rate per provider |
+| **`llm_rate` feedback tool** | Medium | Per-response thumbs up/down stored in `routing_decisions`; feeds classifier confidence |
+| **Hard budget alerts** | Medium | Desktop notification + hook warning when daily spend crosses threshold |
 
 ---
 
-## Phase 5: Media & Multimodal
+## v1.2 — Cost Intelligence
 
-Deep integration with media generation APIs.
+**Theme**: Stop paying for tokens you don't need.
 
-| Feature | Priority | Status |
-|---------|----------|--------|
-| Gemini Imagen 3 API integration | High | Done (v0.4) |
-| Gemini Veo 2 API integration | High | Done (v0.4) |
-| Image editing / inpainting routing | Medium | Planned |
-| Voice cloning workflow (ElevenLabs) | Medium | Planned |
-| Music generation routing (Suno, Udio) | Low | Planned |
-| Real-time video generation (Runway Gen-3 Turbo) | Low | Planned |
-
----
-
-## Phase 6: Distribution & Community
-
-Making it easy for others to install and use.
-
-| Feature | Priority | Status |
-|---------|----------|--------|
-| PyPI package distribution (`pip install claude-code-llm-router`) | High | Done |
-| One-command install script for Claude Code | High | Done (./scripts/install.sh) |
-| Global hook installer (MCP tool + CLI) | High | Done (v0.4) |
-| Web dashboard for usage analytics | Medium | Planned |
-| Weekly quality benchmark updates | Medium | Planned |
-| Plugin marketplace listing | Medium | Done (.claude-plugin/) |
-| Docker image for self-hosted deployment | Low | Planned |
-| REST API mode (non-MCP, for any client) | Low | Planned |
-| **Auto API key discovery** — scan well-known locations on the local machine (`~/.zshrc`, `~/.bashrc`, `~/.zprofile`, `~/.config/`, system keychain) and auto-populate `.env.local`. Opt-in with explicit confirmation before writing any key. | High | Planned |
+| Feature | Priority | Notes |
+|---|---|---|
+| **Anthropic prompt caching** | High | Auto-inject `cache_control` breakpoints on system prompts >2000 tokens (up to 90% savings on repeated context) |
+| **Semantic deduplication cache** | High | Embed-then-nearest-neighbour using local Ollama embeddings; threshold 0.95 cosine similarity |
+| **Hard daily spend cap** | Medium | `DAILY_SPEND_LIMIT_USD` env var; router refuses calls when exceeded, returns clear error |
+| **Cost forecasting** | Medium | Extrapolate hourly burn → "at current rate, weekly quota exhausted in Xh" |
+| **Token budget per task type** | Low | Cap max_tokens per task type in config (prevents runaway research queries) |
 
 ---
 
-## Phase 7: Advanced Routing
+## v1.3 — Routing Intelligence
 
-Smarter model selection based on learned patterns.
+**Theme**: Right model for the right job, not just right cost tier.
 
-| Feature | Priority | Status |
-|---------|----------|--------|
-| Learning from routing outcomes (which model performed best) | High | Planned |
-| Per-user preference profiles | Medium | Planned |
-| A/B testing between providers | Medium | Planned |
-| Cost prediction before execution | Medium | Planned |
-| Automatic profile switching based on time of day / workload | Low | Planned |
-| Multi-tenant support for teams | Low | Planned |
+| Feature | Priority | Notes |
+|---|---|---|
+| **Task-aware model preferences** | High | Code → DeepSeek/Codex first; math → Gemini; writing → Claude/GPT-4o; overrides profile default |
+| **Reasoning model tier** | High | New `deep_reasoning` complexity → routes to o3 / Gemini 2.5 Pro thinking / Claude extended thinking |
+| **Context length routing** | Medium | Long conversations (>8k tokens) routed to models with large context windows; compact before sending to small-context models |
+| **Learned routing** | Medium | Record (prompt_hash, model, was_good) from `llm_rate` → fine-tune local Qwen 0.5B classifier on Ollama after ~500 samples |
+| **Benchmark auto-update** | Low | Weekly cron fetches latest MMLU/HumanEval scores from public leaderboards; updates routing weights |
 
 ---
 
-## Phase 8: Enterprise & Team Mode
+## v1.4 — Agentic & Team Features
 
-Shared infrastructure, spend controls, and managed secret handling for teams and organisations.
+**Theme**: Works as well for 10-agent pipelines as for single prompts.
 
-| Feature | Priority | Status |
-|---------|----------|--------|
-| **Secrets manager integrations** — HashiCorp Vault, AWS Secrets Manager, GCP Secret Manager, Azure Key Vault, 1Password CLI. Replaces `.env` files for teams sharing a router config. | High | Planned |
-| `llm-router-server` FastAPI mode — shared routing config + usage DB across a team | High | Planned |
-| Per-user and per-team budget caps with alerts | High | Planned |
-| Migrate SQLite → PostgreSQL for shared persistent backend | Medium | Planned |
-| Simple web dashboard (React, Vercel/Railway) for spend visibility | Medium | Planned |
-| Slack / email spend alerts when team budget exceeds thresholds | Medium | Planned |
-| SSO / OIDC authentication for the web dashboard | Low | Planned |
+| Feature | Priority | Notes |
+|---|---|---|
+| **Agent-tree budget tracking** | High | Track total token spend across all sub-agents spawned in a session, not just top-level calls |
+| **Tool-use routing** | High | Route tool-heavy prompts to GPT-4o/Sonnet; reasoning-only to Haiku |
+| **User-defined YAML pipelines** | Medium | `~/.llm-router/pipelines/` — custom multi-step workflows without code |
+| **Multi-user profiles** | Medium | Per-user quota pools with shared team budget; `.llm-router/users/` config |
+| **Secrets manager support** | Medium | HashiCorp Vault, AWS Secrets Manager, 1Password CLI as alternatives to `.env` |
+
+---
+
+## v2.0 — Learning Router
+
+**Theme**: The router gets smarter the more you use it.
+
+Every routing decision is already recorded in SQLite. After ~500 calls, there's enough signal to train a tiny local classifier (Qwen 0.5B via Ollama) on *your specific usage patterns* — better than generic heuristics. Unlike RouteLLM (which trains on human preference datasets), this trains on your own history: your prompts, your providers, your quality ratings. Completely local, zero cloud cost, self-improving.
+
+| Feature | Notes |
+|---|---|
+| **Routing history → training data** | Export `routing_decisions` rows with `was_good` labels to JSONL |
+| **Local fine-tune pipeline** | `llm-router-train` CLI: fine-tunes Qwen 0.5B on Ollama, saves to `~/.llm-router/models/` |
+| **Hot-swap classifier** | Server loads custom model on startup; falls back to heuristic chain if unavailable |
+| **Continuous improvement loop** | Every `llm_rate` feedback → queue for next training run |
+| **Model drift detection** | Alert when custom classifier disagrees with heuristic >20% — suggests retraining |
 
 ---
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md). Priority areas for contributions:
+See [CONTRIBUTING.md](CONTRIBUTING.md). Highest-impact areas:
 
-1. **Provider integrations** — especially Gemini media APIs (Imagen 3, Veo 2)
-2. **Streaming support** — LiteLLM supports it, needs MCP plumbing
-3. **Testing** — integration tests for more providers
-4. **Documentation** — usage examples, tutorials, video walkthroughs
+1. **v1.1 dashboard** — React + Vite, reads from `~/.llm-router/` SQLite + JSON
+2. **v1.2 prompt caching** — LiteLLM `cache_control` integration
+3. **v1.3 task-aware preferences** — extend `profiles.py` with task-type model affinity scores
+4. **Provider integrations** — Bedrock, Azure, Vertex AI via LiteLLM
+5. **Testing** — integration tests for provider fallback chains

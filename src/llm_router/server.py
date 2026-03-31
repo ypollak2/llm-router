@@ -1449,7 +1449,8 @@ async def llm_refresh_claude_usage() -> str:
     from llm_router.claude_usage import set_claude_pressure
     set_claude_pressure(_last_usage.highest_pressure)
 
-    import os, time
+    import os
+    import time
     state_dir = os.path.expanduser("~/.llm-router")
     os.makedirs(state_dir, exist_ok=True)
 
