@@ -626,7 +626,23 @@ See [ROADMAP.md](ROADMAP.md) for the detailed roadmap with phases and priorities
 - [x] **Codex cold-start defaults** — `_COLD_START_LATENCY_MS` applies pessimistic 60-90s P95 before any history exists, preventing Codex from being placed first in chains on a fresh install.
 - [x] **`llm_edit` MCP tool** — Routes code-edit reasoning to a cheap CODE model. Reads files locally (32 KB cap), gets `{file, old_string, new_string}` JSON back, returns formatted instructions for Claude to apply mechanically. Keeps Opus out of the "what to change" loop.
 
-### Next Up (v0.8 — Evaluation & Learning)
+### Completed (v0.8)
+
+- [x] **3 routing correctness fixes** — async feedback loop, BUDGET hard cap, RESEARCH pressure tail (see CHANGELOG).
+- [x] **PreToolUse[Agent] hook** — Intercepts subagent spawns; routes reasoning to cheap `llm_*` tools, approves pure retrieval. Biggest cost leak plugged.
+- [x] **Session-end savings dashboard** — Reads real `routing_decisions` data; shows actual cost vs Sonnet 4.6 baseline per tool with ASCII bar charts.
+- [x] **`usage.json` export** — MCP server writes `~/.llm-router/usage.json` so hooks can read quota pressure without importing Python packages.
+
+### Completed (v0.9)
+
+- [x] **Global MCP server registration** — `llm-router-install-hooks` now registers the MCP server globally (`~/.claude/settings.json`) so routing tools work in ALL Claude Code sessions, not just the llm-router project.
+- [x] **Stale circuit breaker reset** — `HealthTracker.reset_stale()` clears failures older than 30 min on startup; yesterday's outage won't block today's routing.
+- [x] **UUID session IDs** — Replaced `os.getppid()` with a UUID written at session start; prevents session data corruption across reboots.
+- [x] **RESEARCH hard-fail** — `llm_research` immediately returns a helpful error when `PERPLEXITY_API_KEY` is not configured instead of silently using a non-web-grounded model.
+- [x] **Sensible config defaults** — Monthly budget cap $20, daily token budget 500k, circuit breaker threshold 2 failures / 30s cooldown.
+- [x] **Lifetime savings from real data** — `llm_usage` now computes savings vs Sonnet 4.6 baseline from `routing_decisions` table (actual token counts + real costs), not legacy estimates.
+
+### Next Up (v1.0 — Evaluation & Learning)
 
 - [ ] Classification outcome tracking (was the routed model's response good?)
 - [ ] A/B testing framework for routing decisions
