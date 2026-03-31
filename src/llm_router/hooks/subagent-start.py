@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import json
 import sys
+import time
 from pathlib import Path
 
 
@@ -52,6 +53,14 @@ def _read_pressure() -> dict[str, float]:
         }
     except Exception:
         return {"session": 0.0, "sonnet": 0.0, "weekly": 0.0}
+
+
+def _is_pressure_stale(max_age_seconds: int = 1800) -> bool:
+    """Return True if usage.json is missing or older than 30 minutes."""
+    usage_path = Path.home() / ".llm-router" / "usage.json"
+    if not usage_path.exists():
+        return True
+    return (time.time() - usage_path.stat().st_mtime) > max_age_seconds
 
 
 def _pressure_status(p: dict[str, float]) -> str:
@@ -99,12 +108,14 @@ def main() -> None:
             "research→llm_research (external)"
         )
 
+    stale_note = "\n⚠️  Usage data >30min old — routing thresholds may be inaccurate. Run llm_check_usage." if _is_pressure_stale() else ""
     context = (
         f"[llm-router] Routing context for this agent:\n"
         f"Pressure: session={p['session']:.0%} sonnet={p['sonnet']:.0%} "
         f"weekly={p['weekly']:.0%} | {status}\n"
         f"Rules: {routing_rules}\n"
         f"Your own Agent tool calls are intercepted by the routing hook — respect routing directives."
+        f"{stale_note}"
     )
 
     json.dump(

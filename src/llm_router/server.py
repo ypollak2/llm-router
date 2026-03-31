@@ -92,6 +92,21 @@ except Exception:
     pass
 
 
+# Active routing profile override — set by llm_set_profile().
+# Using a module-level variable avoids mutating the frozen RouterConfig dataclass
+# via object.__setattr__(), which bypasses Pydantic's immutability guarantees.
+# Router/profile consumers should call get_active_profile() instead of reading
+# config.llm_router_profile directly when they need the current override.
+_active_profile: RoutingProfile | None = None
+
+
+def get_active_profile() -> RoutingProfile:
+    """Return the currently active routing profile (override or config default)."""
+    if _active_profile is not None:
+        return _active_profile
+    return get_config().llm_router_profile
+
+
 def _check_tier(feature: str) -> str | None:
     """Gate a feature behind the Pro subscription tier.
 
@@ -374,17 +389,36 @@ async def llm_route(
                 classifier_latency_ms=0.0,
             )
 
-    # Step 2: Resolve task type and profile
+    # Step 2: Resolve task type and profile — use select_model() so budget pressure
+    # is applied consistently with llm_classify (single decision path, not two).
     resolved_task_type = (
         TaskType(task_type) if task_type
         else classification.inferred_task_type
         or TaskType.QUERY
     )
-    profile = complexity_to_profile(classification.complexity)
+
+    budget_pct = 0.0
+    if _last_usage and _last_usage.session:
+        budget_pct = _last_usage.effective_pressure
+
+    q_mode = get_config().quality_mode
+    floor = get_config().min_model
+    rec = select_model(classification, budget_pct, q_mode, floor)
+
+    # When under budget pressure, respect the downshifted profile from select_model
+    # rather than deriving profile purely from complexity (which ignores pressure).
+    if budget_pct >= 0.85 and rec.was_downshifted:
+        profile = complexity_to_profile(rec.classification.complexity)
+        # Map recommended_model tier back to profile if it's lower
+        _tier_to_profile = {"haiku": RoutingProfile.BUDGET, "sonnet": RoutingProfile.BALANCED, "opus": RoutingProfile.PREMIUM}
+        profile = _tier_to_profile.get(rec.recommended_model, profile)
+    else:
+        profile = complexity_to_profile(classification.complexity)
 
     await ctx.info(
         f"Classified as {classification.complexity.value} "
         f"({classification.confidence:.0%}) → {profile.value} profile"
+        + (f" [downshifted, budget={budget_pct:.0%}]" if rec.was_downshifted else "")
     )
 
     # Step 3: Build classification metadata for quality logging
@@ -405,11 +439,11 @@ async def llm_route(
         "classifier_confidence": classification.confidence,
         "classifier_latency_ms": classification.classifier_latency_ms,
         "complexity": classification.complexity.value,
-        "recommended_model": "",  # external routing has no single recommendation
-        "base_model": "",
-        "was_downshifted": False,
-        "budget_pct_used": 0.0,
-        "quality_mode": "balanced",
+        "recommended_model": rec.recommended_model,
+        "base_model": rec.base_model,
+        "was_downshifted": rec.was_downshifted,
+        "budget_pct_used": budget_pct,
+        "quality_mode": q_mode.value if hasattr(q_mode, "value") else str(q_mode),
     }
 
     # Step 4: Route and call
@@ -940,14 +974,13 @@ async def llm_set_profile(profile: str) -> str:
     Args:
         profile: One of "budget", "balanced", or "premium".
     """
+    global _active_profile
     try:
-        new_profile = RoutingProfile(profile.lower())
+        _active_profile = RoutingProfile(profile.lower())
     except ValueError:
         return f"Invalid profile: {profile}. Choose: budget, balanced, premium."
 
-    config = get_config()
-    object.__setattr__(config, "llm_router_profile", new_profile)
-    return f"Profile switched to: {new_profile.value}"
+    return f"Profile switched to: {_active_profile.value}"
 
 
 @mcp.tool()

@@ -31,6 +31,7 @@ from __future__ import annotations
 import json
 import re
 import sys
+import time
 from pathlib import Path
 
 # ── Retrieval detection (approve subagent) ───────────────────────────────────
@@ -171,6 +172,14 @@ def _get_claude_pressure() -> float:
     return 0.3
 
 
+def _is_pressure_stale(max_age_seconds: int = 1800) -> bool:
+    """Return True if usage.json is missing or older than 30 minutes."""
+    usage_path = Path.home() / ".llm-router" / "usage.json"
+    if not usage_path.exists():
+        return True
+    return (time.time() - usage_path.stat().st_mtime) > max_age_seconds
+
+
 # ── Classifiers ───────────────────────────────────────────────────────────────
 
 def _is_retrieval_only(prompt: str) -> bool:
@@ -286,12 +295,14 @@ def main() -> None:
     # Use repr() for the prompt so newlines are visible and the instruction is copy-safe
     prompt_repr = prompt[:800] + ("..." if len(prompt) > 800 else "")
 
+    stale_note = "\n  ⚠️  Usage data >30min old — quota thresholds may be inaccurate. Run llm_check_usage.\n" if _is_pressure_stale() else ""
     block_reason = (
         f"[AGENT-ROUTE] Subagent blocked — routing reasoning to cheap model.\n\n"
         f"  Task:       {task_type}/{complexity}\n"
         f"  Profile:    {profile} → {model_hint}\n"
         f"  Quota:      session={_p['session']:.0%} sonnet={_p['sonnet']:.0%} weekly={_p['weekly']:.0%}\n"
-        f"{pressure_note}\n"
+        f"{pressure_note}"
+        f"{stale_note}\n"
         f"ACTION REQUIRED — do this instead of spawning the subagent:\n\n"
         f"  1. If the task needs LOCAL FILE CONTENT:\n"
         f"     Use Read / Grep / Glob tools to extract the text.\n"

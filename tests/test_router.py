@@ -70,10 +70,13 @@ async def test_raises_when_all_fail(mock_env):
 
 @pytest.mark.asyncio
 async def test_no_providers_configured(monkeypatch):
-    # Explicitly clear all API keys and prevent .env file loading
-    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
-    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
-    monkeypatch.delenv("PERPLEXITY_API_KEY", raising=False)
+    # Explicitly clear all API keys — use setenv("", "") pattern to also
+    # override values that may be present in the shell environment.
+    for key in ["GEMINI_API_KEY", "OPENAI_API_KEY", "PERPLEXITY_API_KEY",
+                "ANTHROPIC_API_KEY", "DEEPSEEK_API_KEY", "GROQ_API_KEY",
+                "MISTRAL_API_KEY", "TOGETHER_API_KEY", "XAI_API_KEY",
+                "COHERE_API_KEY", "OLLAMA_BASE_URL"]:
+        monkeypatch.setenv(key, "")
     monkeypatch.chdir("/tmp")  # no .env file here
     monkeypatch.setattr("llm_router.router.is_codex_available", lambda: False)
     with pytest.raises(ValueError, match="No available models"):

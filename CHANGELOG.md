@@ -1,5 +1,31 @@
 # Changelog
 
+## v1.0.0 — Production Stable: Bug Fixes & Routing Integrity (2026-03-31)
+
+### Fixed (Critical)
+
+- **Subscription flag now enforced** (`config.py`) — `available_providers()` previously had a comment saying anthropic was excluded in subscription mode, but never applied the filter. Now `providers.discard("anthropic")` is called when `LLM_ROUTER_CLAUDE_SUBSCRIPTION=true`, even if `ANTHROPIC_API_KEY` is set. Prevents accidental double-billing via API when already inside Claude Code.
+- **`llm_route` uses unified pressure-aware profile** (`server.py`) — `llm_route` previously derived its routing profile from complexity alone, while `llm_classify` used `select_model()` (which applies budget pressure). Now both tools share the same decision path: `select_model()` is called in `llm_route` and its downshifted profile is used when pressure ≥ 85%. Eliminates the two-path divergence where the same prompt could route differently depending on which tool was called.
+
+### Fixed (Moderate)
+
+- **Pressure data staleness warnings in 3 hooks** — `auto-route.py`, `subagent-start.py`, and `agent-route.py` now check if `usage.json` is older than 30 minutes. When stale, a visible warning is appended to the routing directive/context. Previously all three hooks made routing decisions on potentially hours-old quota data with no indication to the user.
+- **Ollama comment corrected** (`config.py` lines 55–65) — Updated outdated comment that claimed Ollama is "ONLY used for BUDGET tier". Ollama is also injected at pressure ≥ 85% for any profile. Comment now documents both injection scenarios and the OLLAMA_URL vs OLLAMA_BASE_URL separation.
+- **`llm_set_profile` no longer mutates frozen config** (`server.py`) — Replaced `object.__setattr__(config, ...)` hack (which bypassed Pydantic's immutability) with a module-level `_active_profile` variable. A `get_active_profile()` helper returns the override or config default. Immutability contract is now preserved end-to-end.
+
+### Fixed (Minor)
+
+- **Atomic count write in `usage-refresh.py`** — `_write_count()` now writes to a `.tmp` file then renames atomically via `os.replace()`. Prevents concurrent PostToolUse hooks from corrupting the routed-call counter via interleaved reads/writes.
+- **Health-aware classifier model ordering** (`classifier.py`) — Classifier model candidates are now sorted: healthy providers first, then by static list order. Unhealthy providers (circuit breaker open) are tried last instead of first, reducing classification latency when a provider is down.
+
+### Changed
+
+- `pyproject.toml`: Development status updated from `4 - Beta` to `5 - Production/Stable`.
+- `tests/conftest.py`: `mock_env` fixture now explicitly sets `OLLAMA_BASE_URL=""` to disable Ollama in unit tests (mirrors existing Codex disable pattern). Prevents test failures when `OLLAMA_BASE_URL` is set in project `.env`.
+- `tests/test_router.py`: `test_no_providers_configured` now clears all API keys explicitly (including shell env keys) for deterministic behavior.
+
+---
+
 ## v0.9.2 — Claude Code Subscription Mode (2026-03-31)
 
 ### Added

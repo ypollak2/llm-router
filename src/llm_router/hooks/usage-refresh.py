@@ -17,6 +17,7 @@ import os
 import sys
 import time
 from datetime import datetime, timezone
+from pathlib import Path
 
 STATE_DIR = os.path.expanduser("~/.llm-router")
 STATE_FILE = os.path.join(STATE_DIR, "usage_last_refresh.txt")
@@ -56,12 +57,25 @@ def _read_count() -> int:
 
 
 def _write_count(count: int) -> None:
+    """Write count atomically using a temp file + os.replace() to avoid partial reads.
+
+    A simple open(..., "w") is not atomic: concurrent PostToolUse hooks firing
+    simultaneously can interleave reads and writes, producing an incorrect count.
+    os.replace() is atomic on POSIX (rename syscall), so the target file is
+    always either the old or new value — never a half-written intermediate.
+    """
     _ensure_state_dir()
+    target = Path(CALL_COUNT_FILE)
+    tmp = target.with_suffix(".tmp")
     try:
-        with open(CALL_COUNT_FILE, "w") as f:
-            f.write(str(count))
+        tmp.write_text(str(count))
+        os.replace(tmp, target)
     except OSError:
-        pass
+        # Clean up temp file if replace failed
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 def _append_savings_log(tool_name: str) -> None:

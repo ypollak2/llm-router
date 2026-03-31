@@ -418,10 +418,27 @@ class TestClaudeSubscriptionFlag:
         assert "anthropic" not in config.available_providers
 
     def test_api_key_still_adds_anthropic_without_flag(self, monkeypatch):
-        """Explicit ANTHROPIC_API_KEY still works regardless of the flag."""
+        """Explicit ANTHROPIC_API_KEY still works when subscription flag is off."""
         import llm_router.config as config_mod
         config_mod._config = None
-        monkeypatch.delenv("LLM_ROUTER_CLAUDE_SUBSCRIPTION", raising=False)
+        # Explicitly set to false — delenv alone won't override a value in .env file
+        monkeypatch.setenv("LLM_ROUTER_CLAUDE_SUBSCRIPTION", "false")
         monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test-key")
         config = config_mod.RouterConfig()
         assert "anthropic" in config.available_providers
+
+    def test_subscription_flag_excludes_anthropic_even_with_api_key(self, monkeypatch):
+        """Subscription flag overrides a valid API key — no Claude API routing in CC mode.
+
+        This is the critical bug case: previously the flag was checked but the
+        exclusion was never applied, so a user with both the flag AND an API key
+        set would still have anthropic in their routing chain.
+        """
+        import llm_router.config as config_mod
+        config_mod._config = None
+        monkeypatch.setenv("LLM_ROUTER_CLAUDE_SUBSCRIPTION", "true")
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-real-key-123")
+        config = config_mod.RouterConfig()
+        assert "anthropic" not in config.available_providers, (
+            "subscription flag must exclude anthropic even when API key is set"
+        )

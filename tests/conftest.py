@@ -38,6 +38,10 @@ def mock_env(monkeypatch):
     # should patch this themselves.
     monkeypatch.setattr("llm_router.router.is_codex_available", lambda: False)
     monkeypatch.setattr("llm_router.profiles.is_codex_available", lambda: False, raising=False)
+    # Disable Ollama in unit tests — ollama_base_url may be set in the local .env
+    # but Ollama routing requires a running server. Unit tests that specifically
+    # exercise Ollama injection should set OLLAMA_BASE_URL themselves.
+    monkeypatch.setenv("OLLAMA_BASE_URL", "")
 
 
 @pytest.fixture

@@ -19,6 +19,7 @@ import re
 from llm_router import providers
 from llm_router.cache import get_cache
 from llm_router.config import get_config
+from llm_router.health import get_tracker
 from llm_router.profiles import CLASSIFIER_MODELS, provider_from_model
 from llm_router.types import ClassificationResult, Complexity, TaskType
 
@@ -163,10 +164,21 @@ async def classify_complexity(
 
     config = get_config()
     available = config.available_providers
+    tracker = get_tracker()
 
-    models_to_try = [
-        m for m in CLASSIFIER_MODELS if provider_from_model(m) in available
-    ]
+    # Sort classifier models: healthy providers first, then by static list order.
+    # This avoids repeatedly trying a provider whose circuit breaker is open,
+    # which would waste latency on a call that is guaranteed to fail.
+    def _classifier_sort_key(model: str) -> tuple[int, int]:
+        provider = provider_from_model(model)
+        healthy = 0 if tracker.is_healthy(provider) else 1
+        position = CLASSIFIER_MODELS.index(model) if model in CLASSIFIER_MODELS else 99
+        return (healthy, position)
+
+    models_to_try = sorted(
+        [m for m in CLASSIFIER_MODELS if provider_from_model(m) in available],
+        key=_classifier_sort_key,
+    )
 
     if not models_to_try:
         log.warning("No classifier models available, defaulting to moderate")

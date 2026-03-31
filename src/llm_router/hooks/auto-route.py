@@ -117,6 +117,21 @@ def _get_pressure() -> dict[str, float]:
 
     return {"session": 0.0, "sonnet": 0.0, "weekly": 0.0}
 
+
+def _is_pressure_stale(max_age_seconds: int = 1800) -> bool:
+    """Return True if usage.json is missing or older than max_age_seconds (default 30 min).
+
+    Three hooks read usage.json without checking freshness. Stale data causes
+    routing decisions based on hours-old quota — either over-routing externally
+    (quota refreshed but data says high) or under-routing (quota spiked but data
+    says low). A 30-minute threshold balances accuracy vs. noise.
+    """
+    usage_path = Path.home() / ".llm-router" / "usage.json"
+    if not usage_path.exists():
+        return True
+    return (time.time() - usage_path.stat().st_mtime) > max_age_seconds
+
+
 # ── Skip Patterns (truly local operations) ───────────────────────────────────
 
 # Only skip: slash commands, raw shell one-liners, and pure acknowledgement words.
@@ -668,10 +683,12 @@ def main() -> None:
     else:
         tool_args = ""
     args_str = f"({tool_args})" if tool_args else ""
+    stale_suffix = " [⚠️ STALE USAGE DATA >30min — run llm_check_usage for accurate routing]" if _is_pressure_stale() else ""
     directive = (
         f"⚡ ROUTE→{tool}{args_str} ({task_type}/{complexity} via {method}) | "
         f"FORBIDDEN: self-answer · Agent subagents · WebSearch · WebFetch · Bash research | "
         f"Call the tool NOW as your only action. Cheap model output IS your response."
+        f"{stale_suffix}"
     )
 
     output = {

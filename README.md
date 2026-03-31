@@ -697,6 +697,68 @@ Key areas where help is needed:
 
 ---
 
+## Claude Code Subscription Mode
+
+When running LLM Router inside Claude Code with a Pro or Max subscription, set:
+
+```bash
+LLM_ROUTER_CLAUDE_SUBSCRIPTION=true
+```
+
+**What this does:**
+- All Claude tiers (Haiku, Sonnet, Opus) are used via your subscription — zero API cost
+- The `anthropic` provider is **excluded from API routing chains**, even if `ANTHROPIC_API_KEY` is set. This prevents accidental double-billing (subscription + API key = two charges for the same Claude)
+- External providers (Gemini, GPT-4o, Perplexity, Ollama) are used for tasks where subscription quota is running low
+
+**Pressure cascade** (subscription quota → external fallback):
+| Quota bucket | Threshold | Effect |
+|---|---|---|
+| `session` | ≥ 85% | Simple tasks → external (Gemini Flash / Groq) |
+| `sonnet` | ≥ 95% | + Moderate tasks → external (GPT-4o / DeepSeek) |
+| `weekly` or `session` | ≥ 95% | All tasks → external (global emergency) |
+
+Keep quota data fresh: run `llm_check_usage` or `/usage-pulse` regularly. Routing hooks warn when data is >30 minutes old.
+
+---
+
+## Ollama: Classifier vs Answerer
+
+Ollama plays **two independent roles** in LLM Router. Configuring one does not enable the other.
+
+### Role 1 — Local Classifier (hooks, free)
+Used by `auto-route.py` to classify prompt complexity locally before calling cloud APIs.
+
+```bash
+LLM_ROUTER_OLLAMA_URL=http://localhost:11434   # hook classifier URL
+LLM_ROUTER_OLLAMA_MODEL=qwen3.5:latest         # model used for classification
+```
+
+This runs in the Claude Code hooks pipeline. It classifies whether a prompt is simple/moderate/complex using a local LLM, saving ~$0.0001 per classification vs Gemini Flash.
+
+### Role 2 — Local Task Answerer (router, for actual task responses)
+Used by the MCP router to **answer tasks** with a local model instead of calling cloud providers.
+
+```bash
+OLLAMA_BASE_URL=http://localhost:11434          # router answerer URL
+OLLAMA_BUDGET_MODELS=llama3.2,qwen2.5-coder:7b # comma-separated models
+```
+
+When configured, Ollama models are prepended to the routing chain in two scenarios:
+1. **BUDGET profile** (simple tasks) — always tried first, for free
+2. **Any profile at ≥ 85% Claude quota** — injected to spare subscription tokens
+
+### Full local-first setup (both roles)
+```bash
+LLM_ROUTER_OLLAMA_URL=http://localhost:11434
+LLM_ROUTER_OLLAMA_MODEL=qwen3.5:latest
+OLLAMA_BASE_URL=http://localhost:11434
+OLLAMA_BUDGET_MODELS=qwen3.5:latest,llama3.2
+```
+
+With this configuration, simple tasks never touch the cloud: classification is local, answering is local.
+
+---
+
 ## License
 
 [MIT](LICENSE) — use it however you want.

@@ -53,9 +53,15 @@ class RouterConfig(BaseSettings):
     llm_router_claude_subscription: bool = False
 
     # ── Ollama (local inference — no API key needed) ──
-    # Set ollama_base_url to enable Ollama routing (e.g. http://localhost:11434).
-    # Ollama models are ONLY used for BUDGET tier (simple tasks) — they are
-    # prepended to the budget chain so they run first for free before cloud fallback.
+    # Set ollama_base_url to enable Ollama as a task answerer (e.g. http://localhost:11434).
+    # Ollama models are injected in two scenarios:
+    #   1. BUDGET profile (simple tasks) — always prepended to the budget chain
+    #      so they run first for free before falling back to cloud providers.
+    #   2. ANY profile when Claude quota pressure >= 85% — prepended to spare
+    #      subscription tokens regardless of complexity tier.
+    # Note: OLLAMA_URL (used by hooks) is separate — it controls which model
+    # classifies prompts locally. OLLAMA_BASE_URL here controls which models
+    # ANSWER tasks. Both can be set for full local-first operation.
     # Example: ollama_budget_models="llama3.2,qwen2.5-coder:7b"
     ollama_base_url: str = ""               # empty = Ollama disabled
     ollama_budget_models: str = ""          # e.g. "llama3.2,qwen2.5-coder:7b"
@@ -148,6 +154,10 @@ class RouterConfig(BaseSettings):
             providers.add("ollama")
         # In Claude subscription mode, anthropic is intentionally excluded:
         # we never route back to Claude via API when already inside Claude Code.
+        # Routing to anthropic/* would require a separate API key AND add duplicate
+        # billing on top of the Pro/Max subscription — wrong in every scenario.
+        if self.llm_router_claude_subscription:
+            providers.discard("anthropic")
         return providers
 
     @property
