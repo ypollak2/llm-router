@@ -531,6 +531,7 @@ async def llm_stream(
 async def llm_query(
     prompt: str,
     ctx: Context,
+    complexity: str | None = None,
     model: str | None = None,
     system_prompt: str | None = None,
     temperature: float | None = None,
@@ -539,11 +540,14 @@ async def llm_query(
 ) -> str:
     """Send a general query to the best available LLM.
 
-    Auto-routes based on the active profile. Supports 10+ text LLM providers.
+    Routes by complexity: simple→Haiku/Flash, moderate→Sonnet/GPT-4o, complex→Opus/o3.
 
     Args:
         prompt: The question or prompt to send.
-        model: Optional model override (e.g. "openai/gpt-4o", "gemini/gemini-2.5-flash", "anthropic/claude-sonnet-4-6", "deepseek/deepseek-chat").
+        complexity: Task complexity — "simple", "moderate", or "complex". Drives model
+            selection: simple→cheap (Haiku/Flash), moderate→balanced (Sonnet/GPT-4o),
+            complex→premium (Opus/o3). Auto-detected from prompt length when omitted.
+        model: Explicit model override, bypasses complexity routing entirely.
         system_prompt: Optional system instructions.
         temperature: Sampling temperature (0.0-2.0).
         max_tokens: Maximum output tokens.
@@ -551,6 +555,7 @@ async def llm_query(
     """
     resp = await route_and_call(
         TaskType.QUERY, prompt,
+        complexity_hint=complexity,
         model_override=model, system_prompt=system_prompt,
         temperature=temperature, max_tokens=max_tokens, ctx=ctx,
         caller_context=context,
@@ -600,6 +605,7 @@ async def llm_research(
 async def llm_generate(
     prompt: str,
     ctx: Context,
+    complexity: str | None = None,
     system_prompt: str | None = None,
     temperature: float | None = None,
     max_tokens: int | None = None,
@@ -611,6 +617,9 @@ async def llm_generate(
 
     Args:
         prompt: What to generate.
+        complexity: Task complexity — "simple", "moderate", or "complex". Drives model
+            selection. Simple tasks (short summaries) use cheap models; complex tasks
+            (long-form, nuanced writing) use premium models.
         system_prompt: Optional system instructions (tone, format, audience).
         temperature: Sampling temperature (higher = more creative).
         max_tokens: Maximum output tokens.
@@ -618,6 +627,7 @@ async def llm_generate(
     """
     resp = await route_and_call(
         TaskType.GENERATE, prompt,
+        complexity_hint=complexity,
         system_prompt=system_prompt, temperature=temperature,
         max_tokens=max_tokens, ctx=ctx, caller_context=context,
     )
@@ -628,6 +638,7 @@ async def llm_generate(
 async def llm_analyze(
     prompt: str,
     ctx: Context,
+    complexity: str | None = None,
     system_prompt: str | None = None,
     max_tokens: int | None = None,
     context: str | None = None,
@@ -638,12 +649,19 @@ async def llm_analyze(
 
     Args:
         prompt: What to analyze.
+        complexity: Task complexity — "simple", "moderate", or "complex". Analysis tasks
+            default to at least moderate. Pass "complex" for multi-file reviews or
+            architecture decisions that warrant Opus/o3.
         system_prompt: Optional system instructions.
         max_tokens: Maximum output tokens.
         context: Optional conversation context to help the model understand the broader task.
     """
+    # Analysis is never trivially simple — floor at moderate so Haiku is never
+    # chosen for a task that inherently requires reasoning.
+    effective_complexity = complexity or "moderate"
     resp = await route_and_call(
         TaskType.ANALYZE, prompt,
+        complexity_hint=effective_complexity,
         system_prompt=system_prompt, temperature=0.3,
         max_tokens=max_tokens, ctx=ctx, caller_context=context,
     )
@@ -654,6 +672,7 @@ async def llm_analyze(
 async def llm_code(
     prompt: str,
     ctx: Context,
+    complexity: str | None = None,
     system_prompt: str | None = None,
     max_tokens: int | None = None,
     context: str | None = None,
@@ -664,12 +683,16 @@ async def llm_code(
 
     Args:
         prompt: The coding task or question.
+        complexity: Task complexity — "simple", "moderate", or "complex". Drives model
+            selection: simple questions use Haiku/Flash, actual implementation tasks use
+            Sonnet/GPT-4o, large refactors or architecture work use Opus/o3.
         system_prompt: Optional system instructions (language, framework, style).
         max_tokens: Maximum output tokens.
         context: Optional conversation context to help the model understand the broader task.
     """
     resp = await route_and_call(
         TaskType.CODE, prompt,
+        complexity_hint=complexity,
         system_prompt=system_prompt, temperature=0.2,
         max_tokens=max_tokens, ctx=ctx, caller_context=context,
     )

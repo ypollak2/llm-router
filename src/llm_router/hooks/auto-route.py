@@ -550,10 +550,18 @@ def main() -> None:
     tool = TOOL_MAP.get(task_type, "llm_route")
 
     # Single-line directive: maximum density, minimum tokens, unmissable.
-    # Forbidden list is on the same line — no skimming past it.
-    complexity_flag = f" complexity_override={complexity}" if tool == "llm_route" else ""
+    # complexity= is passed to every tool so route_and_call can derive the right
+    # profile (simple→BUDGET/Haiku, moderate→BALANCED/Sonnet, complex→PREMIUM/Opus).
+    # complexity_override= is the separate llm_route parameter name.
+    if tool == "llm_route":
+        tool_args = f'complexity_override="{complexity}"'
+    elif tool in ("llm_query", "llm_code", "llm_analyze", "llm_generate"):
+        tool_args = f'complexity="{complexity}"'
+    else:
+        tool_args = ""
+    args_str = f"({tool_args})" if tool_args else ""
     directive = (
-        f"⚡ ROUTE→{tool}{complexity_flag} ({task_type}/{complexity} via {method}) | "
+        f"⚡ ROUTE→{tool}{args_str} ({task_type}/{complexity} via {method}) | "
         f"FORBIDDEN: self-answer · Agent subagents · WebSearch · WebFetch · Bash research | "
         f"Call the tool NOW as your only action. Cheap model output IS your response."
     )

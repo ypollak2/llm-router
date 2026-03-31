@@ -22,7 +22,18 @@ from llm_router.config import get_config
 from llm_router.context import build_context_messages, get_session_buffer
 from llm_router.health import get_tracker
 from llm_router.profiles import get_model_chain, provider_from_model
-from llm_router.types import BudgetExceededError, LLMResponse, RoutingProfile, TaskType
+from llm_router.types import BudgetExceededError, Complexity, LLMResponse, RoutingProfile, TaskType
+
+# Foundational routing rule: complexity always determines the profile.
+# This mapping is the single source of truth — every call through route_and_call
+# honours it automatically. simple→BUDGET (Haiku/cheap), moderate→BALANCED
+# (Sonnet/GPT-4o), complex→PREMIUM (Opus/o3). An explicit profile= argument
+# overrides this (escape hatch for power users), but no caller should need to.
+_COMPLEXITY_TO_PROFILE: dict[Complexity, RoutingProfile] = {
+    Complexity.SIMPLE: RoutingProfile.BUDGET,
+    Complexity.MODERATE: RoutingProfile.BALANCED,
+    Complexity.COMPLEX: RoutingProfile.PREMIUM,
+}
 
 log = logging.getLogger("llm_router")
 
@@ -88,6 +99,7 @@ async def route_and_call(
     prompt: str,
     *,
     profile: RoutingProfile | None = None,
+    complexity_hint: Complexity | str | None = None,
     system_prompt: str | None = None,
     model_override: str | None = None,
     temperature: float | None = None,
@@ -116,8 +128,13 @@ async def route_and_call(
     Args:
         task_type: What kind of task this is (query, code, image, etc.).
         prompt: The user's prompt text.
-        profile: Routing profile override (budget/balanced/premium).
-            Defaults to the profile set in config.
+        profile: Explicit routing profile override (budget/balanced/premium).
+            When omitted, profile is derived from complexity_hint. Prefer
+            passing complexity_hint and letting the router pick the profile.
+        complexity_hint: Task complexity — "simple", "moderate", or "complex".
+            Drives profile selection: simple→BUDGET, moderate→BALANCED,
+            complex→PREMIUM. Ignored when profile is explicitly set.
+            When both are None, falls back to a fast prompt-length heuristic.
         system_prompt: Optional system prompt prepended to text LLM calls.
         model_override: Force a specific model, bypassing the routing table.
         temperature: Sampling temperature override for text calls.
@@ -141,8 +158,25 @@ async def route_and_call(
         RuntimeError: All candidate models failed (wraps the last error).
     """
     config = get_config()
-    profile = profile or config.llm_router_profile
     tracker = get_tracker()
+
+    # ── Profile resolution (foundational routing rule) ────────────────────────
+    # Priority: explicit profile > complexity_hint > prompt-length heuristic > config default.
+    # Complexity is the correct signal; prompt length is a cheap fallback when
+    # the caller doesn't know complexity yet (e.g. media tasks, model_override calls).
+    if profile is None and not model_override:
+        c: Complexity | None = None
+        if complexity_hint is not None:
+            c = Complexity(complexity_hint) if isinstance(complexity_hint, str) else complexity_hint
+        elif classification_data and "complexity" in classification_data:
+            c = Complexity(classification_data["complexity"])
+        else:
+            # Fast heuristic — no API call, no latency.
+            n = len(prompt)
+            c = Complexity.SIMPLE if n < 300 else (Complexity.COMPLEX if n > 3000 else Complexity.MODERATE)
+        profile = _COMPLEXITY_TO_PROFILE.get(c, config.llm_router_profile)
+    else:
+        profile = profile or config.llm_router_profile
 
     # Budget enforcement — block calls if monthly budget is exceeded
     if config.llm_router_monthly_budget > 0:
