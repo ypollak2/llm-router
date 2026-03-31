@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm-router-hook-version: 5
+# llm-router-hook-version: 6
 """UserPromptSubmit hook — scoring classifier with Ollama + API fallback chain.
 
 Classification chain (stops at first success):
@@ -629,7 +629,19 @@ def main() -> None:
             }
             target = _SUBSCRIPTION_MODELS.get(complexity)
             if target is None:
-                # moderate + no pressure → Sonnet handles right now, do nothing
+                # moderate + no pressure → still inject routing directive so Claude
+                # calls the MCP tool instead of self-answering (100% routing coverage)
+                pressure_summary = (
+                    f"session={session_pct:.0%} sonnet={sonnet_pct:.0%} weekly={weekly_pct:.0%}"
+                )
+                directive = (
+                    f"⚡ ROUTE→{tool}(complexity=\"moderate\") "
+                    f"({task_type}/moderate via {method} | CC-MODE {pressure_summary}) | "
+                    f"FORBIDDEN: self-answer · Agent subagents · WebSearch · WebFetch · Bash research | "
+                    f"Call the tool NOW as your only action. Cheap model output IS your response."
+                )
+                json.dump({"hookSpecificOutput": {"hookEventName": "UserPromptSubmit",
+                                                   "contextForAgent": directive}}, sys.stdout)
                 sys.exit(0)
             pressure_summary = (
                 f"session={session_pct:.0%} sonnet={sonnet_pct:.0%} weekly={weekly_pct:.0%}"

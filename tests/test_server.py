@@ -16,7 +16,7 @@ def test_all_tools_registered():
         "llm_orchestrate", "llm_pipeline_templates",
         "llm_save_session",
         "llm_set_profile", "llm_usage", "llm_health", "llm_providers",
-        "llm_check_usage", "llm_update_usage", "llm_codex", "llm_setup",
+        "llm_check_usage", "llm_update_usage", "llm_refresh_claude_usage", "llm_codex", "llm_setup",
         "llm_cache_stats", "llm_cache_clear", "llm_quality_report",
         "llm_edit",
     }

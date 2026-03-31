@@ -1353,6 +1353,114 @@ async def llm_update_usage(data: dict) -> str:
     return _last_usage.summary()
 
 
+# ── Claude Usage — AppleScript Refresh ───────────────────────────────────────
+
+# Compact one-liner JS for AppleScript injection (avoids multiline escaping).
+_FETCH_USAGE_JS_COMPACT = (
+    "window.__llmr=null;"
+    "(async()=>{"
+    "const o=document.cookie.match(/lastActiveOrg=([^;]+)/)?.[1];"
+    "const b='/api/organizations/'+o;"
+    "const[u,s,l,c]=await Promise.all([fetch(b+'/usage'),fetch(b+'/subscription_details'),"
+    "fetch(b+'/overage_spend_limit'),fetch(b+'/prepaid/credits')].map(r=>r.then(j=>j.json())));"
+    "window.__llmr=JSON.stringify({org_id:o,usage:u,subscription:s,overage:l,credits:c});"
+    "})()"
+)
+
+_APPLESCRIPT_INJECT = """\
+tell application "Google Chrome"
+    set _tabs to {}
+    repeat with w in windows
+        repeat with t in tabs of w
+            set end of _tabs to t
+        end repeat
+    end repeat
+    repeat with t in _tabs
+        if URL of t contains "claude.ai" then
+            execute t javascript "{js}"
+            return "ok"
+        end if
+    end repeat
+    return "no_tab"
+end tell"""
+
+_APPLESCRIPT_READ = """\
+tell application "Google Chrome"
+    repeat with w in windows
+        repeat with t in tabs of w
+            if URL of t contains "claude.ai" then
+                return execute t javascript "window.__llmr"
+            end if
+        end repeat
+    end repeat
+    return "null"
+end tell"""
+
+
+@mcp.tool()
+async def llm_refresh_claude_usage() -> str:
+    """Refresh Claude subscription usage — fetches directly from an open claude.ai Chrome tab.
+
+    Uses AppleScript to inject a fetch call into the authenticated browser session.
+    No Playwright needed — no browser lock, no ugly JS parameter in the tool call.
+
+    Requires: Google Chrome open with a claude.ai tab (any page).
+    """
+    import asyncio
+    import json as _json
+    import subprocess
+
+    # Step 1: inject async fetch into the Claude tab
+    inject_script = _APPLESCRIPT_INJECT.format(
+        js=_FETCH_USAGE_JS_COMPACT.replace('"', '\\"')
+    )
+    try:
+        r = subprocess.run(
+            ["osascript", "-e", inject_script],
+            capture_output=True, text=True, timeout=8,
+        )
+        stdout = r.stdout.strip()
+        if r.returncode != 0 or stdout == "no_tab":
+            return (
+                "No claude.ai tab found in Chrome.\n"
+                "Open https://claude.ai in Chrome (any page), then call this tool again."
+            )
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return "AppleScript unavailable or timed out. Use /usage-pulse for manual Playwright fallback."
+
+    # Step 2: wait for the async fetch to resolve (~1-2s)
+    await asyncio.sleep(2)
+
+    # Step 3: read result back from window.__llmr
+    try:
+        r2 = subprocess.run(
+            ["osascript", "-e", _APPLESCRIPT_READ],
+            capture_output=True, text=True, timeout=8,
+        )
+        raw = r2.stdout.strip()
+        if not raw or raw in ("null", "missing value"):
+            # Fetch may still be in-flight — one more second
+            await asyncio.sleep(1)
+            r2 = subprocess.run(
+                ["osascript", "-e", _APPLESCRIPT_READ],
+                capture_output=True, text=True, timeout=8,
+            )
+            raw = r2.stdout.strip()
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return "Timed out reading result from Chrome."
+
+    if not raw or raw in ("null", "missing value"):
+        return "Fetch not ready. Retry in a moment or check that you're logged into claude.ai."
+
+    try:
+        data = _json.loads(raw)
+    except _json.JSONDecodeError:
+        return f"Could not parse response from Chrome: {raw[:200]}"
+
+    # Reuse llm_update_usage logic via direct call
+    return await llm_update_usage(data)
+
+
 # ── Codex Local Agent ─────────────────────────────────────────────────────────
 
 
