@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-# llm-router-hook-version: 5
+# llm-router-hook-version: 6
 """SessionStart hook — inject routing banner, start Ollama, refresh Claude usage.
 
 Fires once when a new Claude Code session begins. Four jobs:
-  1. Auto-start Ollama if it is not running (free local routing tier).
+  1. Auto-start Ollama via start-ollama.sh (free local routing tier).
   2. Refresh Claude subscription usage from the OAuth API so pressure-based
      routing has accurate data from the first request of the session.
   3. Inject a compact routing table at position 0 of the context window,
@@ -67,55 +67,30 @@ def _reset_stale_health() -> None:
         pass
 
 
-def _is_ollama_reachable() -> bool:
-    """Return True if Ollama is running and responding."""
-    ollama_url = os.environ.get("LLM_ROUTER_OLLAMA_URL", "http://localhost:11434")
-    try:
-        with urllib.request.urlopen(f"{ollama_url}/api/tags", timeout=2):
-            return True
-    except Exception:
-        return False
-
-
 def _ensure_ollama_running() -> str:
-    """Start Ollama if not running. Returns a status line for the banner."""
-    ollama_url = os.environ.get("LLM_ROUTER_OLLAMA_URL", "http://localhost:11434")
-    ollama_model = os.environ.get("LLM_ROUTER_OLLAMA_MODEL", "qwen3.5:latest")
+    """Start Ollama via start-ollama.sh. Returns a status line for the banner."""
+    script = os.path.join(os.path.dirname(__file__), "start-ollama.sh")
+    if not os.path.exists(script):
+        # Fallback: look next to the installed hook
+        script = os.path.join(os.path.expanduser("~/.claude/hooks"), "start-ollama.sh")
+    if not os.path.exists(script):
+        return "\n⚠️  start-ollama.sh not found — Ollama not managed"
 
-    if _is_ollama_reachable():
-        # Check if the required model is installed
-        try:
-            with urllib.request.urlopen(f"{ollama_url}/api/tags", timeout=2) as r:
-                data = json.loads(r.read())
-            installed = [m.get("name", "") for m in data.get("models", [])]
-            if not any(
-                m == ollama_model or m.startswith(ollama_model.split(":")[0])
-                for m in installed
-            ):
-                return (
-                    f"\n⚠️  Ollama running but {ollama_model!r} not installed — "
-                    f"run: ollama pull {ollama_model}"
-                )
-            return ""  # healthy
-        except Exception:
-            return ""  # reachable, ignore model check error
-
-    # Not running — try to start it
     try:
-        subprocess.Popen(
-            ["ollama", "serve"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            start_new_session=True,  # detach so it survives hook exit
+        result = subprocess.run(
+            ["bash", script],
+            capture_output=True, text=True, timeout=15,
         )
-        # Give it up to 3 seconds to become ready
-        for _ in range(6):
-            time.sleep(0.5)
-            if _is_ollama_reachable():
-                return "\n✅ Ollama started (was offline)"
-        return "\n⚠️  Ollama start attempted — still starting up (first call may be slower)"
-    except FileNotFoundError:
-        return "\n⚠️  Ollama not installed — free local tier unavailable"
+        stdout = result.stdout.strip()
+        if result.returncode != 0:
+            stderr = result.stderr.strip()
+            msg = stderr or stdout or "unknown error"
+            return f"\n⚠️  Ollama: {msg}"
+        return f"\n{stdout}" if stdout else ""
+    except subprocess.TimeoutExpired:
+        return "\n⚠️  Ollama start timed out — first routing call may be slow"
+    except Exception as e:
+        return f"\n⚠️  Ollama start failed: {e}"
 
 
 def _refresh_claude_usage() -> str:
