@@ -74,7 +74,11 @@ Eight correctness fixes making the routing guarantees production-solid:
 
 | Feature | Priority | Notes |
 |---|---|---|
-| **Auto-refresh stale usage** | High | Hook triggers `llm_check_usage` automatically when data >30min, not just warns |
+| **Subscription-aware MCP tools** | High | `llm_query`/`llm_research`/`llm_code` return subscription routing hints (Haiku/Opus) when pressure < threshold instead of making external API calls; external only when subscription is exhausted |
+| **`llm_research` subscription fallback** | High | When Perplexity unavailable + pressure < 85%, route to Opus subscription instead of falling through to gpt-4o |
+| **Ollama health check accuracy** | High | Health endpoint reports "healthy" even when Ollama is unreachable; fix to do a live reachability probe |
+| **Auto-refresh stale usage** | High | ✅ Done (v1.0 hotfix) — session-start hook now refreshes via OAuth API automatically |
+| **Auto-start Ollama at session start** | High | ✅ Done (v1.0 hotfix) — session-start hook calls `start-ollama.sh` to start and pull model |
 | **Web dashboard** | High | `localhost:7337` — routing breakdown, cost/day, model distribution, savings chart |
 | **OTEL / Prometheus export** | Medium | Optional `--metrics-port`; counters for routed calls, cost, fallback rate per provider |
 | **`llm_rate` feedback tool** | Medium | Per-response thumbs up/down stored in `routing_decisions`; feeds classifier confidence |
