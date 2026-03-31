@@ -2,12 +2,13 @@
 # llm-router-hook-version: 3
 """Stop hook — session routing summary with real cost data from SQLite.
 
-Fires when a Claude Code session ends. Queries the routing_decisions SQLite
-table for calls made since session start and prints:
+Fires when a Claude Code session ends. Queries the usage SQLite table for
+calls made since session start and prints:
   - Which tools were called and how many times
   - Which models actually handled the tasks
   - Real external cost (from cost_usd column)
   - Estimated savings vs a Claude Sonnet 4.6 baseline
+  - Claude Code subscription credit usage
 
 Baseline: Claude Sonnet 4.6 @ $3/M input + $15/M output tokens.
 Savings = what Sonnet would have cost - what the external model actually cost.
@@ -25,6 +26,7 @@ from datetime import datetime, timezone
 STATE_DIR = os.path.expanduser("~/.llm-router")
 SESSION_START_FILE = os.path.join(STATE_DIR, "session_start.txt")
 DB_PATH = os.path.join(STATE_DIR, "usage.db")
+USAGE_JSON = os.path.join(STATE_DIR, "usage.json")
 
 # Sonnet 4.6 pricing (the baseline — what Claude Code itself runs on)
 SONNET_INPUT_PER_M = 3.0    # $3 per million input tokens
@@ -114,6 +116,21 @@ def _aggregate(rows: list[dict]) -> dict[str, dict]:
     return tools
 
 
+def _read_claude_credits() -> str:
+    """Return a compact Claude credit string, or empty string if unavailable."""
+    try:
+        with open(USAGE_JSON) as f:
+            data = json.load(f)
+        stale = (time.time() - data.get("updated_at", 0)) > 1800
+        s = data.get("session_pct", 0)
+        w = data.get("weekly_pct", 0)
+        n = data.get("sonnet_pct", 0)
+        stale_mark = " ⚠️ stale" if stale else ""
+        return f"CC {s:.0f}%s · {w:.0f}%w · {n:.0f}%♪{stale_mark}"
+    except Exception:
+        return ""
+
+
 def _sonnet_baseline(in_tok: int, out_tok: int) -> float:
     """What these tokens would have cost routed through Claude Sonnet 4.6."""
     return (in_tok * SONNET_INPUT_PER_M + out_tok * SONNET_OUTPUT_PER_M) / 1_000_000
@@ -165,9 +182,13 @@ def _format_summary(tools: dict[str, dict]) -> str:
             f"  |  Sonnet baseline: ${total_baseline:.4f}"
         )
 
+    savings_pct = round(total_saved / total_baseline * 100) if total_baseline > 0 else 0
     lines.append(
-        f"  {total_calls} tasks routed  |  ~${total_saved:.4f} saved vs Sonnet 4.6"
+        f"  {total_calls} tasks routed  |  ~${total_saved:.4f} saved ({savings_pct}%) vs Sonnet 4.6"
     )
+    credits = _read_claude_credits()
+    if credits:
+        lines.append(f"  {credits}")
     lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
     return "\n".join(lines)
