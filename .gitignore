@@ -11,3 +11,6 @@ dist/
 MONETIZATION.md
 STRATEGY.md
 PRICING.md
+
+# Local AI assistant instructions — machine-specific, never commit
+CLAUDE.md
