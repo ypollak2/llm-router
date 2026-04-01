@@ -139,15 +139,20 @@ def _refresh_claude_usage() -> str:
         highest_pressure = max(session_pct, weekly_pct, sonnet_pct) / 100.0
 
         os.makedirs(STATE_DIR, exist_ok=True)
+        snapshot = {
+            "session_pct": round(session_pct, 1),
+            "weekly_pct": round(weekly_pct, 1),
+            "sonnet_pct": round(sonnet_pct, 1),
+            "highest_pressure": round(highest_pressure, 4),
+            "updated_at": time.time(),
+        }
         usage_path = os.path.join(STATE_DIR, "usage.json")
         with open(usage_path, "w") as f:
-            json.dump({
-                "session_pct": round(session_pct, 1),
-                "weekly_pct": round(weekly_pct, 1),
-                "sonnet_pct": round(sonnet_pct, 1),
-                "highest_pressure": round(highest_pressure, 4),
-                "updated_at": time.time(),
-            }, f)
+            json.dump(snapshot, f)
+        # Snapshot for session-end delta reporting
+        snap_path = os.path.join(STATE_DIR, "session_start_cc_pct.json")
+        with open(snap_path, "w") as f:
+            json.dump(snapshot, f)
 
         # Pressure indicator for the banner
         pressure_str = f"session={session_pct:.0f}% weekly={weekly_pct:.0f}% sonnet={sonnet_pct:.0f}%"

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-# llm-router-hook-version: 6
-"""Stop hook — unified session summary: live CC subscription + external routing costs."""
+# llm-router-hook-version: 7
+"""Stop hook — unified session summary: CC subscription delta + external routing costs."""
 
 from __future__ import annotations
 
@@ -13,23 +13,20 @@ import time
 import urllib.request
 from datetime import datetime, timezone
 
-STATE_DIR           = os.path.expanduser("~/.llm-router")
-SESSION_START_FILE  = os.path.join(STATE_DIR, "session_start.txt")
-DB_PATH             = os.path.join(STATE_DIR, "usage.db")
-USAGE_JSON          = os.path.join(STATE_DIR, "usage.json")
+STATE_DIR            = os.path.expanduser("~/.llm-router")
+SESSION_START_FILE   = os.path.join(STATE_DIR, "session_start.txt")
+SESSION_CC_SNAP_FILE = os.path.join(STATE_DIR, "session_start_cc_pct.json")
+DB_PATH              = os.path.join(STATE_DIR, "usage.db")
+USAGE_JSON           = os.path.join(STATE_DIR, "usage.json")
 
 SONNET_INPUT_PER_M  = 3.0
 SONNET_OUTPUT_PER_M = 15.0
+WIDTH = 64
 
 
-# ── Claude subscription (live refresh) ────────────────────────────────────────
+# ── Claude subscription ────────────────────────────────────────────────────────
 
 def _fetch_live_usage() -> dict | None:
-    """Fetch fresh subscription usage from the OAuth API.
-
-    Returns a dict with session_pct, weekly_pct, sonnet_pct (0-100 floats),
-    or None if the fetch fails (caller falls back to usage.json).
-    """
     try:
         r = subprocess.run(
             ["security", "find-generic-password", "-s", "Claude Code-credentials", "-w"],
@@ -54,12 +51,12 @@ def _fetch_live_usage() -> dict | None:
         return None
 
     try:
-        s = float(data.get("five_hour",        {}).get("utilization", 0.0))
-        w = float(data.get("seven_day",         {}).get("utilization", 0.0))
-        n = float(data.get("seven_day_sonnet",  {}).get("utilization", 0.0))
+        s = float(data.get("five_hour",       {}).get("utilization", 0.0))
+        w = float(data.get("seven_day",        {}).get("utilization", 0.0))
+        n = float(data.get("seven_day_sonnet", {}).get("utilization", 0.0))
         result = {"session_pct": round(s, 1), "weekly_pct": round(w, 1),
                   "sonnet_pct": round(n, 1), "updated_at": time.time()}
-        # Persist so routing pressure is up-to-date for the next session
+        # Persist for routing pressure
         os.makedirs(STATE_DIR, exist_ok=True)
         with open(USAGE_JSON, "w") as f:
             json.dump({**result, "highest_pressure": max(s, w, n) / 100.0}, f)
@@ -68,21 +65,22 @@ def _fetch_live_usage() -> dict | None:
         return None
 
 
-def _read_cached_usage() -> dict | None:
+def _read_json(path: str) -> dict | None:
     try:
-        with open(USAGE_JSON) as f:
+        with open(path) as f:
             return json.load(f)
     except Exception:
         return None
 
 
-def _get_cc_usage() -> tuple[dict | None, bool]:
-    """Return (usage_dict, is_live). Tries live API first, falls back to file."""
-    live = _fetch_live_usage()
+def _get_cc_usage() -> tuple[dict | None, dict | None, bool]:
+    """Return (start_snapshot, current_usage, is_live)."""
+    start  = _read_json(SESSION_CC_SNAP_FILE)
+    live   = _fetch_live_usage()
     if live:
-        return live, True
-    cached = _read_cached_usage()
-    return cached, False
+        return start, live, True
+    cached = _read_json(USAGE_JSON)
+    return start, cached, False
 
 
 # ── External routing (SQLite) ──────────────────────────────────────────────────
@@ -144,28 +142,49 @@ def _sonnet_baseline(in_tok: int, out_tok: int) -> float:
 
 # ── Formatting ─────────────────────────────────────────────────────────────────
 
-def _bar(pct: float, width: int = 20) -> str:
-    filled = round(pct / 100 * width)
-    return "█" * filled + "░" * (width - filled)
+def _bar(pct: float, bar_width: int = 20) -> str:
+    filled = max(0, min(bar_width, round(pct / 100 * bar_width)))
+    return "█" * filled + "░" * (bar_width - filled)
 
 
-def _format_cc_section(usage: dict, is_live: bool, width: int) -> list[str]:
-    s = usage.get("session_pct", 0)
-    w = usage.get("weekly_pct",  0)
-    n = usage.get("sonnet_pct",  0)
-    src = "live" if is_live else "cached ⚠"
+def _cc_row(label: str, start_pct: float | None, end_pct: float) -> str:
+    """Format one CC subscription row.
 
+    start_pct=None means no snapshot available (first session or missing file).
+    """
+    bar = _bar(end_pct)
+    if start_pct is not None:
+        delta = end_pct - start_pct
+        sign  = "+" if delta >= 0 else ""
+        return (
+            f"  {label:<16}  {bar}  "
+            f"{start_pct:>4.1f}% → {end_pct:>4.1f}%  ({sign}{delta:.1f}pp this session)"
+        )
+    return f"  {label:<16}  {bar}  {end_pct:>4.1f}%"
+
+
+def _format_cc_section(start: dict | None, current: dict, is_live: bool) -> list[str]:
+    src   = "live" if is_live else "cached ⚠"
     lines = [f"  Claude Code subscription  ({src})"]
-    lines.append(f"  {'session':<8}  {_bar(s)}  {s:>3.0f}%")
-    lines.append(f"  {'weekly':<8}  {_bar(w)}  {w:>3.0f}%")
-    if n > 0:
-        lines.append(f"  {'sonnet':<8}  {_bar(n)}  {n:>3.0f}%")
+    lines.append("")
+
+    s_end = current.get("session_pct", 0.0)
+    w_end = current.get("weekly_pct",  0.0)
+    n_end = current.get("sonnet_pct",  0.0)
+
+    s_start = start.get("session_pct") if start else None
+    w_start = start.get("weekly_pct")  if start else None
+    n_start = start.get("sonnet_pct")  if start else None
+
+    lines.append(_cc_row("session (5h)",  s_start, s_end))
+    lines.append(_cc_row("weekly (all)",  w_start, w_end))
+    if n_end > 0 or (n_start is not None and n_start > 0):
+        lines.append(_cc_row("weekly sonnet", n_start, n_end))
+
     return lines
 
 
-def _format(tools: dict[str, dict], cc_usage: dict | None, is_live: bool) -> str:
-    WIDTH = 62
-
+def _format_routing_section(tools: dict[str, dict]) -> list[str]:
     total_calls = sum(t["count"] for t in tools.values())
     total_in    = sum(t["in"]    for t in tools.values())
     total_out   = sum(t["out"]   for t in tools.values())
@@ -174,28 +193,33 @@ def _format(tools: dict[str, dict], cc_usage: dict | None, is_live: bool) -> str
     total_saved = max(0.0, total_base - total_cost)
     savings_pct = round(total_saved / total_base * 100) if total_base > 0 else 0
 
+    lines = [
+        f"  External routing  "
+        f"{total_calls} calls  ·  ${total_cost:.4f}  ·  {savings_pct}% saved vs Sonnet",
+        "",
+    ]
+    for tool, d in sorted(tools.items(), key=lambda x: -x[1]["count"]):
+        top_model   = max(d["models"], key=d["models"].get) if d["models"] else "?"
+        model_short = top_model.split("/", 1)[-1] if "/" in top_model else top_model
+        if len(model_short) > 22:
+            model_short = model_short[:20] + "…"
+        lines.append(
+            f"  {tool:<12}  {d['count']:>3}×  {model_short:<24}  ${d['cost']:.4f}"
+        )
+    return lines
+
+
+def _format(tools: dict[str, dict], start: dict | None,
+            current: dict | None, is_live: bool) -> str:
     lines = ["─" * WIDTH]
 
-    # ── CC subscription block (always show if available) ──────────────────────
-    if cc_usage:
-        lines += _format_cc_section(cc_usage, is_live, WIDTH)
-        lines.append("")
+    if current:
+        lines += _format_cc_section(start, current, is_live)
 
-    # ── External routing block ────────────────────────────────────────────────
     if tools:
-        lines.append(
-            f"  External routing  "
-            f"{total_calls} calls  ·  ${total_cost:.4f}  ·  {savings_pct}% saved vs Sonnet"
-        )
-        lines.append("")
-        for tool, d in sorted(tools.items(), key=lambda x: -x[1]["count"]):
-            top_model   = max(d["models"], key=d["models"].get) if d["models"] else "?"
-            model_short = top_model.split("/", 1)[-1] if "/" in top_model else top_model
-            if len(model_short) > 22:
-                model_short = model_short[:20] + "…"
-            lines.append(
-                f"  {tool:<12}  {d['count']:>3}×  {model_short:<24}  ${d['cost']:.4f}"
-            )
+        if current:
+            lines.append("")
+        lines += _format_routing_section(tools)
 
     lines.append("─" * WIDTH)
     return "\n".join(lines)
@@ -209,16 +233,15 @@ def main() -> None:
     except (json.JSONDecodeError, EOFError):
         pass
 
-    session_start = _read_session_start()
-    rows          = _query_session_data(session_start)
-    tools         = _aggregate(rows) if rows else {}
-    cc_usage, is_live = _get_cc_usage()
+    session_start         = _read_session_start()
+    rows                  = _query_session_data(session_start)
+    tools                 = _aggregate(rows) if rows else {}
+    start, current, is_live = _get_cc_usage()
 
-    # Nothing to show
-    if not tools and not cc_usage:
+    if not tools and not current:
         sys.exit(0)
 
-    summary = _format(tools, cc_usage, is_live)
+    summary = _format(tools, start, current, is_live)
     print(json.dumps({"systemMessage": summary}))
 
 

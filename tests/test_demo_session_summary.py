@@ -231,3 +231,49 @@ class TestDemo_SessionSummary:
             assert len(line) <= 120, f"Line too long ({len(line)} chars): {line!r}"
         assert "…" in msg, "Long model name should be truncated with ellipsis"
         print(f"\n[Demo 2d] Long model name truncated:\n{msg}")
+
+    def test_cc_delta_shown_when_snapshot_present(self, tmp_path):
+        """CC subscription shows start->end delta when session_start_cc_pct.json exists."""
+        session_start = time.time() - 300
+
+        llm_dir = tmp_path / ".llm-router"
+        llm_dir.mkdir()
+
+        # Write session-start CC snapshot (simulates what session-start hook saves)
+        start_snap = {"session_pct": 3.0, "weekly_pct": 71.0, "sonnet_pct": 0.0,
+                      "updated_at": session_start}
+        with open(llm_dir / "session_start_cc_pct.json", "w") as f:
+            json.dump(start_snap, f)
+
+        # Write a "current" usage.json (session-end live fetch will fail in test env,
+        # so fall back to this cached file)
+        current = {"session_pct": 30.0, "weekly_pct": 73.0, "sonnet_pct": 3.0,
+                   "highest_pressure": 0.73, "updated_at": time.time()}
+        with open(llm_dir / "usage.json", "w") as f:
+            json.dump(current, f)
+
+        with open(llm_dir / "session_start.txt", "w") as f:
+            f.write(str(session_start))
+
+        # Empty DB (no external routing this session)
+        _build_usage_db(str(llm_dir / "usage.db"), session_start, [])
+
+        result = subprocess.run(
+            [sys.executable, str(HOOK_SCRIPT)],
+            input=json.dumps({}),
+            capture_output=True, text=True,
+            env={**os.environ, "HOME": str(tmp_path)},
+            timeout=10,
+        )
+        assert result.returncode == 0, f"Hook exited non-zero:\n{result.stderr}"
+        assert result.stdout.strip(), "Hook produced no output despite CC data being present"
+
+        msg = json.loads(result.stdout)["systemMessage"]
+
+        # Delta values: session 3→30 (+27), weekly 71→73 (+2), sonnet 0→3 (+3)
+        assert "3.0% → 30.0%" in msg, f"Expected session delta in:\n{msg}"
+        assert "+27.0pp" in msg,      f"Expected +27pp session delta in:\n{msg}"
+        assert "71.0% → 73.0%" in msg, f"Expected weekly delta in:\n{msg}"
+        assert "+2.0pp" in msg,       f"Expected +2pp weekly delta in:\n{msg}"
+
+        print(f"\n[Demo 2e] CC delta display:\n{msg}")
