@@ -35,21 +35,20 @@
 
 ---
 
-## v1.2 — Foundation Hardening 🔄
+## v1.2 — Foundation Hardening ✅
 
-**Branch**: `feature/v1.2-foundation`
+**Branch**: `feature/v1.2-foundation` → merged to main
 **Plan**: [docs/plans/v1.2-plan.md](docs/plans/v1.2-plan.md)
-**Status**: Branch created, implementation pending
-**Theme**: Break the 88KB monolith. Make the codebase extensible and the install frictionless.
+**Status**: All shipped
 
 | Task | Status | Notes |
 |------|--------|-------|
-| Decompose `server.py` into `tools/` modules | ⬜ | routing, text, media, pipeline, admin, subscription, codex, setup |
-| `server.py` becomes thin entrypoint (<150 lines) | ⬜ | Only FastMCP init + module imports |
-| `llm-router install` one-command CLI | ⬜ | Wraps existing `install_hooks.py` logic |
-| MCP registry submission (`mcp-registry.json`) | ⬜ | `registry.modelcontextprotocol.io` gap |
-| All 396 tests still pass after decomposition | ⬜ | Non-negotiable gate |
-| Version bump to 1.2.0 + CHANGELOG entry | ⬜ | |
+| Decompose `server.py` into `tools/` modules | ✅ | routing, text, media, pipeline, admin, subscription, codex, setup |
+| `server.py` becomes thin entrypoint (<150 lines) | ✅ | 110 lines — FastMCP init + register(mcp) calls |
+| `llm-router install` one-command CLI | ✅ | `cli.py` dispatcher — install/--check/--force/uninstall |
+| MCP registry submission (`mcp-registry.json`) | ✅ | `registry.modelcontextprotocol.io` gap filled |
+| All 396 tests still pass after decomposition | ✅ | 396/396 + ruff clean |
+| Version bump to 1.2.0 + CHANGELOG entry | ✅ | |
 
 ---
 
