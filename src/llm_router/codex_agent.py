@@ -13,10 +13,15 @@ import asyncio
 import os
 import time
 from dataclasses import dataclass
+from pathlib import Path
 
 CODEX_PATHS = [
     "/Applications/Codex.app/Contents/Resources/codex",
     os.path.expanduser("~/.local/bin/codex"),
+    # npm global install locations (openai/codex-plugin-cc installs via npm)
+    os.path.expanduser("~/.npm-global/bin/codex"),
+    "/usr/local/bin/codex",
+    "/opt/homebrew/bin/codex",
 ]
 """Ordered list of filesystem paths to search for the Codex CLI binary.
 
@@ -73,6 +78,34 @@ def is_codex_available() -> bool:
         ``True`` if ``find_codex_binary()`` finds an executable binary.
     """
     return find_codex_binary() is not None
+
+
+def is_codex_plugin_available() -> bool:
+    """Check whether the openai/codex-plugin-cc Claude Code plugin is installed.
+
+    The plugin provides slash commands (/codex:review, /codex:rescue, etc.)
+    and background job management on top of the same Codex CLI binary.
+
+    Detection searches known plugin install locations. Returns ``False``
+    safely on any error — plugin presence is informational only; the router
+    degrades gracefully to direct ``codex exec`` when the plugin is absent.
+
+    Returns:
+        ``True`` if the plugin directory is found under the Claude Code
+        global or project-local plugin directories.
+    """
+    # Claude Code installs plugins under ~/.claude/plugins/<name>/
+    candidates = [
+        Path.home() / ".claude" / "plugins" / "codex",
+    ]
+    # Also check project-local plugin path if we're in a project dir
+    cwd_plugin = Path.cwd() / ".claude" / "plugins" / "codex"
+    candidates.append(cwd_plugin)
+
+    try:
+        return any(d.is_dir() for d in candidates)
+    except Exception:
+        return False
 
 
 @dataclass

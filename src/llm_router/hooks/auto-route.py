@@ -628,11 +628,18 @@ def main() -> None:
         # Pressure tiers cascade — higher pressure forces ALL lower tiers external too.
         # weekly/session ≥ 95%  → everything external (global emergency)
         # sonnet          ≥ 95%  → moderate + simple external (Sonnet pool exhausted)
-        # session         ≥ 85%  → simple only external (session filling up)
+        #
+        # NOTE: the old "session ≥ 85% → simple external" rule was removed.
+        # Rationale: at 85% session there is still meaningful Haiku subscription
+        # capacity remaining (15%). Routing simple tasks to paid external models
+        # (Gemini Flash, Groq, GPT-4o-mini) while Haiku subscription is available
+        # violates the "prefer already-paid capacity first" principle. The sonnet
+        # tier threshold (≥ 95%) remains as the correct signal that subscription
+        # models are genuinely exhausted for a given tier.
         all_external = weekly_pct >= 0.95 or session_pct >= 0.95
         use_external = {
-            "simple":   all_external or session_pct >= 0.85 or sonnet_pct >= 0.95,
-            "moderate": all_external or sonnet_pct  >= 0.95,
+            "simple":   all_external or sonnet_pct >= 0.95,
+            "moderate": all_external or sonnet_pct >= 0.95,
             "complex":  all_external,
         }
 
