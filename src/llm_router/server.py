@@ -560,6 +560,78 @@ async def llm_stream(
 
 # ── Text LLM Tools ───────────────────────────────────────────────────────────
 
+# Subscription pressure thresholds — mirror the auto-route hook logic exactly.
+# When below threshold, tools return a subscription hint instead of an API call.
+_SUB_THRESHOLDS = {
+    "simple":   ("session",  0.85),  # session ≥ 85% → external
+    "moderate": ("sonnet",   0.95),  # sonnet  ≥ 95% → external
+    "complex":  ("weekly",   0.95),  # weekly  ≥ 95% (or session ≥ 95%) → external
+}
+_SUB_MODELS = {
+    "simple":   "claude-haiku-4-5-20251001",
+    "moderate": None,                 # passthrough — Sonnet is already active
+    "complex":  "claude-opus-4-6",
+}
+
+
+def _subscription_hint(complexity: str | None, prompt: str) -> str | None:
+    """Return a subscription routing hint if CC-mode is active and below threshold.
+
+    When Claude Code subscription has headroom, routing through external API
+    calls wastes money. This helper returns a ``/model`` directive so Claude
+    Code switches to the right subscription tier instead, or None when the
+    threshold is exceeded and an external call is appropriate.
+
+    Args:
+        complexity: Task complexity — "simple", "moderate", or "complex".
+            Defaults to "moderate" if None.
+        prompt: The original prompt (included in the hint for context).
+
+    Returns:
+        A routing hint string starting with ``⚡ CC-MODE:``, or None.
+    """
+    cfg = get_config()
+    if not cfg.llm_router_claude_subscription:
+        return None
+
+    eff = (complexity or "moderate").lower()
+    if eff not in _SUB_THRESHOLDS:
+        eff = "moderate"
+
+    bucket, threshold = _SUB_THRESHOLDS[eff]
+    target_model = _SUB_MODELS[eff]
+
+    # Read current per-bucket pressure from in-process cache or usage.json
+    if _last_usage:
+        pct = {"session": _last_usage.session_pct,
+               "sonnet":  _last_usage.sonnet_pct,
+               "weekly":  _last_usage.weekly_pct}.get(bucket, 0.0)
+    else:
+        import json, os as _os
+        try:
+            raw = json.loads(open(_os.path.expanduser("~/.llm-router/usage.json")).read())
+            v = float(raw.get(f"{bucket}_pct", 0.0))
+            pct = v / 100.0 if v > 1.0 else v
+        except Exception:
+            pct = 0.0  # conservative: assume no pressure → use subscription
+
+    # Also check session for "complex" (session ≥ 95% triggers full external)
+    if eff == "complex" and _last_usage and _last_usage.session_pct >= 0.95:
+        return None
+
+    if pct >= threshold:
+        return None  # over threshold → fall through to external call
+
+    if target_model is None:
+        return None  # moderate + below threshold → Sonnet passthrough, no hint needed
+
+    return (
+        f"⚡ CC-MODE: {eff}/{bucket}={pct:.0%} < {threshold:.0%} — "
+        f"use subscription model.\n\n"
+        f"/model {target_model}\n\n"
+        f"{prompt}"
+    )
+
 
 @mcp.tool()
 async def llm_query(
@@ -587,6 +659,8 @@ async def llm_query(
         max_tokens: Maximum output tokens.
         context: Optional conversation context to help the model understand the broader task.
     """
+    if hint := _subscription_hint(complexity, prompt):
+        return hint
     resp = await route_and_call(
         TaskType.QUERY, prompt,
         complexity_hint=complexity,
@@ -617,6 +691,20 @@ async def llm_research(
     """
     _cfg = get_config()
     no_perplexity = not _cfg.perplexity_api_key
+
+    # In subscription mode with no Perplexity, prefer Opus subscription over
+    # costly external fallback (o3/gpt-4o) when pressure allows it.
+    if no_perplexity and _cfg.llm_router_claude_subscription:
+        from llm_router.claude_usage import get_claude_pressure
+        pressure = get_claude_pressure()
+        if pressure < 0.85:
+            return (
+                "⚡ CC-MODE: No Perplexity key — routing to Opus subscription (pressure "
+                f"{pressure:.0%} < 85% threshold).\n\n"
+                "/model claude-opus-4-6\n\n"
+                f"{prompt}"
+            )
+
     resp = await route_and_call(
         TaskType.RESEARCH, prompt,
         # Without Perplexity, escalate to PREMIUM so the fallback chain uses
@@ -661,6 +749,8 @@ async def llm_generate(
         max_tokens: Maximum output tokens.
         context: Optional conversation context to help the model understand the broader task.
     """
+    if hint := _subscription_hint(complexity, prompt):
+        return hint
     resp = await route_and_call(
         TaskType.GENERATE, prompt,
         complexity_hint=complexity,
@@ -695,6 +785,8 @@ async def llm_analyze(
     # Analysis is never trivially simple — floor at moderate so Haiku is never
     # chosen for a task that inherently requires reasoning.
     effective_complexity = complexity or "moderate"
+    if hint := _subscription_hint(effective_complexity, prompt):
+        return hint
     resp = await route_and_call(
         TaskType.ANALYZE, prompt,
         complexity_hint=effective_complexity,
@@ -726,6 +818,8 @@ async def llm_code(
         max_tokens: Maximum output tokens.
         context: Optional conversation context to help the model understand the broader task.
     """
+    if hint := _subscription_hint(complexity, prompt):
+        return hint
     resp = await route_and_call(
         TaskType.CODE, prompt,
         complexity_hint=complexity,
@@ -1239,6 +1333,7 @@ async def llm_quality_report(days: int = 7) -> str:
 @mcp.tool()
 async def llm_health() -> str:
     """Check the health status of all configured LLM providers."""
+    from llm_router.config import probe_ollama
     config = get_config()
     tracker = get_tracker()
     report = tracker.status_report()
@@ -1255,6 +1350,12 @@ async def llm_health() -> str:
     else:
         for provider, status in report.items():
             lines.append(f"- **{colorize_provider(provider)}**: {status}")
+
+    # Show Ollama reachability explicitly — it's config-based AND needs a live probe
+    if config.ollama_base_url:
+        reachable = probe_ollama(config.ollama_base_url)
+        ollama_status = "reachable ✅" if reachable else "unreachable ❌ — run: ollama serve"
+        lines.append(f"\n🦙 Ollama ({config.ollama_base_url}): {ollama_status}")
 
     return "\n".join(lines)
 
