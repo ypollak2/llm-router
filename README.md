@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/logo.svg" alt="LLM Router" width="120" />
+  <img src="docs/logo.svg" alt="LLM Router" width="160" />
 </p>
 
 <h1 align="center">LLM Router</h1>

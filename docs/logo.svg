@@ -1,27 +1,79 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 120" width="120" height="120">
-  <defs>
-    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
-      <stop offset="0%" style="stop-color:#6366f1;stop-opacity:1" />
-      <stop offset="100%" style="stop-color:#8b5cf6;stop-opacity:1" />
-    </linearGradient>
-    <linearGradient id="arrow" x1="0%" y1="0%" x2="100%" y2="100%">
-      <stop offset="0%" style="stop-color:#ffffff;stop-opacity:1" />
-      <stop offset="100%" style="stop-color:#e0e7ff;stop-opacity:1" />
-    </linearGradient>
-  </defs>
-  <rect width="120" height="120" rx="24" fill="url(#bg)"/>
-  <!-- Central node -->
-  <circle cx="60" cy="60" r="12" fill="url(#arrow)" opacity="0.95"/>
-  <!-- Top-right branch -->
-  <line x1="68" y1="52" x2="88" y2="32" stroke="white" stroke-width="3" stroke-linecap="round" opacity="0.9"/>
-  <circle cx="90" cy="30" r="7" fill="white" opacity="0.8"/>
-  <!-- Right branch -->
-  <line x1="72" y1="60" x2="92" y2="60" stroke="white" stroke-width="3" stroke-linecap="round" opacity="0.9"/>
-  <circle cx="95" cy="60" r="7" fill="white" opacity="0.7"/>
-  <!-- Bottom-right branch -->
-  <line x1="68" y1="68" x2="88" y2="88" stroke="white" stroke-width="3" stroke-linecap="round" opacity="0.9"/>
-  <circle cx="90" cy="90" r="7" fill="white" opacity="0.6"/>
-  <!-- Left input arrow -->
-  <line x1="18" y1="60" x2="46" y2="60" stroke="white" stroke-width="4" stroke-linecap="round"/>
-  <polygon points="44,54 54,60 44,66" fill="white"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200" width="120" height="120">
+
+  <!-- Background: dark indigo rounded square -->
+  <rect width="200" height="200" rx="36" fill="#1e1b4b"/>
+
+  <!-- Subtle circuit grid lines (background texture) -->
+  <line x1="40" y1="0" x2="40" y2="200" stroke="#2d2a7a" stroke-width="1"/>
+  <line x1="80" y1="0" x2="80" y2="200" stroke="#2d2a7a" stroke-width="1"/>
+  <line x1="120" y1="0" x2="120" y2="200" stroke="#2d2a7a" stroke-width="1"/>
+  <line x1="160" y1="0" x2="160" y2="200" stroke="#2d2a7a" stroke-width="1"/>
+  <line x1="0" y1="40" x2="200" y2="40" stroke="#2d2a7a" stroke-width="1"/>
+  <line x1="0" y1="80" x2="200" y2="80" stroke="#2d2a7a" stroke-width="1"/>
+  <line x1="0" y1="120" x2="200" y2="120" stroke="#2d2a7a" stroke-width="1"/>
+  <line x1="0" y1="160" x2="200" y2="160" stroke="#2d2a7a" stroke-width="1"/>
+
+  <!-- === Central brain / router === -->
+  <!-- Outer glow ring -->
+  <circle cx="100" cy="100" r="42" fill="none" stroke="#4f46e5" stroke-width="3" opacity="0.4"/>
+  <!-- Brain body -->
+  <circle cx="100" cy="100" r="36" fill="#3730a3"/>
+  <!-- Inner highlight -->
+  <circle cx="100" cy="100" r="36" fill="none" stroke="#818cf8" stroke-width="1.5"/>
+
+  <!-- Face: left eye (normal, round) -->
+  <circle cx="88" cy="95" r="5" fill="#e0e7ff"/>
+  <circle cx="89" cy="95" r="2.5" fill="#1e1b4b"/>
+  <circle cx="90" cy="94" r="1" fill="white" opacity="0.6"/>
+
+  <!-- Face: right eye (winking — just a curved line) -->
+  <path d="M 106 92 Q 111 88 116 92" stroke="#e0e7ff" stroke-width="2.5"
+        fill="none" stroke-linecap="round"/>
+
+  <!-- Face: knowing smirk (asymmetric, slightly smug) -->
+  <path d="M 87 108 Q 97 116 113 109" stroke="#e0e7ff" stroke-width="2.5"
+        fill="none" stroke-linecap="round"/>
+
+  <!-- Small $ on forehead (I found you the cheap route) -->
+  <text x="100" y="85" font-size="10" fill="#a5b4fc" text-anchor="middle"
+        font-family="monospace" font-weight="bold">$</text>
+
+  <!-- === Input arrow (left) — one fat expensive prompt coming in === -->
+  <line x1="8" y1="100" x2="56" y2="100" stroke="#818cf8" stroke-width="4"
+        stroke-linecap="round"/>
+  <polygon points="52,93 64,100 52,107" fill="#818cf8"/>
+  <!-- $$$ label on input -->
+  <text x="28" y="92" font-size="9" fill="#818cf8" text-anchor="middle"
+        font-family="monospace">$$$</text>
+
+  <!-- === Output paths (right side) === -->
+
+  <!-- Top path: thin dashed → expensive model (de-emphasized, rejected) -->
+  <line x1="136" y1="88" x2="156" y2="60" stroke="#4338ca" stroke-width="1.5"
+        stroke-dasharray="4,3" stroke-linecap="round"/>
+  <circle cx="166" cy="48" r="11" fill="#1e1b4b" stroke="#4338ca" stroke-width="1.5"/>
+  <text x="166" y="53" font-size="8" fill="#4338ca" text-anchor="middle"
+        font-family="monospace">o3</text>
+
+  <!-- Middle path: medium → balanced model -->
+  <line x1="137" y1="100" x2="158" y2="100" stroke="#6366f1" stroke-width="2"
+        stroke-linecap="round"/>
+  <circle cx="170" cy="100" r="12" fill="#1e1b4b" stroke="#6366f1" stroke-width="2"/>
+  <text x="170" y="105" font-size="7.5" fill="#6366f1" text-anchor="middle"
+        font-family="monospace">4o</text>
+
+  <!-- Bottom path: BOLD GREEN → cheap preferred model (the joke) -->
+  <line x1="136" y1="112" x2="154" y2="142" stroke="#10b981" stroke-width="3.5"
+        stroke-linecap="round"/>
+  <!-- Preferred badge glow -->
+  <circle cx="164" cy="156" r="17" fill="#022c22" stroke="#10b981" stroke-width="2.5"/>
+  <text x="164" y="154" font-size="9" fill="#10b981" text-anchor="middle"
+        font-family="monospace" font-weight="bold">¢</text>
+  <!-- Tiny star/spark on the cheap path = "preferred" -->
+  <text x="164" y="165" font-size="6" fill="#6ee7b7" text-anchor="middle"
+        font-family="sans-serif">FREE</text>
+
+  <!-- Small arrow tip on cheap path -->
+  <polygon points="148,138 158,148 142,148" fill="#10b981"/>
+
 </svg>
