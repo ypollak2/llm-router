@@ -75,7 +75,7 @@ class TestDemo_SubscriptionRouting:
         import llm_router.server as srv
         monkeypatch.setattr(srv, "_last_usage", _make_usage(0.0))
 
-        hint = srv._subscription_hint("simple", "what is 2+2")
+        hint = srv._subscription_hint("query", "simple", "what is 2+2")
 
         assert hint is not None, "Expected CC-mode hint when subscription has headroom"
         assert "CC-MODE" in hint
@@ -91,7 +91,7 @@ class TestDemo_SubscriptionRouting:
         import llm_router.server as srv
         monkeypatch.setattr(srv, "_last_usage", _make_usage(0.0))
 
-        hint = srv._subscription_hint("moderate", "explain this code")
+        hint = srv._subscription_hint("query", "moderate", "explain this code")
 
         assert hint is None, f"Moderate under no pressure should passthrough, got: {hint}"
         print("\n[Demo 1b] Moderate under no pressure -> passthrough (no hint)")
@@ -105,7 +105,7 @@ class TestDemo_SubscriptionRouting:
         import llm_router.server as srv
         monkeypatch.setattr(srv, "_last_usage", _make_usage(0.0))
 
-        hint = srv._subscription_hint("complex", "design a distributed system")
+        hint = srv._subscription_hint("query", "complex", "design a distributed system")
 
         assert hint is not None
         assert "CC-MODE" in hint
@@ -129,7 +129,7 @@ class TestDemo_PressureCascade:
         import llm_router.server as srv
         monkeypatch.setattr(srv, "_last_usage", _make_usage(session_pct=0.90))
 
-        hint = srv._subscription_hint("simple", "what is 2+2")
+        hint = srv._subscription_hint("query", "simple", "what is 2+2")
         assert hint is None, (
             f"Simple at 90% session pressure should go external (no CC hint), got: {hint}"
         )

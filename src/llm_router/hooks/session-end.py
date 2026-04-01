@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm-router-hook-version: 7
+# llm-router-hook-version: 8
 """Stop hook — unified session summary: CC subscription delta + external routing costs."""
 
 from __future__ import annotations
@@ -97,15 +97,16 @@ def _session_start_iso(ts: float) -> str:
     return datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
 
-def _query_session_data(session_start: float) -> list[dict]:
+def _query_session_data(session_start: float) -> tuple[list[dict], list[dict]]:
+    """Return (external_rows, cc_rows) split by provider='subscription'."""
     if not os.path.exists(DB_PATH):
-        return []
+        return [], []
     try:
         conn = sqlite3.connect(DB_PATH)
         conn.row_factory = sqlite3.Row
         rows = conn.execute(
             """
-            SELECT task_type, model, input_tokens, output_tokens, cost_usd
+            SELECT task_type, model, provider, input_tokens, output_tokens, cost_usd
             FROM usage
             WHERE timestamp >= ? AND success = 1
             ORDER BY rowid
@@ -113,9 +114,12 @@ def _query_session_data(session_start: float) -> list[dict]:
             (_session_start_iso(session_start),),
         ).fetchall()
         conn.close()
-        return [dict(r) for r in rows]
+        all_rows = [dict(r) for r in rows]
+        external = [r for r in all_rows if r.get("provider") != "subscription"]
+        cc       = [r for r in all_rows if r.get("provider") == "subscription"]
+        return external, cc
     except Exception:
-        return []
+        return [], []
 
 
 def _aggregate(rows: list[dict]) -> dict[str, dict]:
@@ -184,6 +188,30 @@ def _format_cc_section(start: dict | None, current: dict, is_live: bool) -> list
     return lines
 
 
+def _format_cc_model_section(cc_rows: list[dict]) -> list[str]:
+    """Format per-model CC call counts — same table style as external routing."""
+    models: dict[str, dict] = {}
+    for r in cc_rows:
+        model = r.get("model", "?")
+        task  = r.get("task_type", "?")
+        if model not in models:
+            models[model] = {"count": 0, "tasks": {}}
+        models[model]["count"] += 1
+        models[model]["tasks"][task] = models[model]["tasks"].get(task, 0) + 1
+
+    total = sum(m["count"] for m in models.values())
+    lines = [f"  Claude Code models  {total} calls  (subscription, $0.00)"]
+    lines.append("")
+    for model, d in sorted(models.items(), key=lambda x: -x[1]["count"]):
+        # Short model name: haiku / sonnet / opus
+        short = model.split("/", 1)[-1] if "/" in model else model
+        if len(short) > 30:
+            short = short[:28] + "…"
+        top_task = max(d["tasks"], key=d["tasks"].get) if d["tasks"] else "?"
+        lines.append(f"  {top_task:<12}  {d['count']:>3}×  {short:<32}  (sub)")
+    return lines
+
+
 def _format_routing_section(tools: dict[str, dict]) -> list[str]:
     total_calls = sum(t["count"] for t in tools.values())
     total_in    = sum(t["in"]    for t in tools.values())
@@ -209,16 +237,19 @@ def _format_routing_section(tools: dict[str, dict]) -> list[str]:
     return lines
 
 
-def _format(tools: dict[str, dict], start: dict | None,
-            current: dict | None, is_live: bool) -> str:
+def _format(tools: dict[str, dict], cc_rows: list[dict],
+            start: dict | None, current: dict | None, is_live: bool) -> str:
     lines = ["─" * WIDTH]
 
     if current:
         lines += _format_cc_section(start, current, is_live)
 
+    if cc_rows:
+        lines.append("")
+        lines += _format_cc_model_section(cc_rows)
+
     if tools:
-        if current:
-            lines.append("")
+        lines.append("")
         lines += _format_routing_section(tools)
 
     lines.append("─" * WIDTH)
@@ -233,15 +264,15 @@ def main() -> None:
     except (json.JSONDecodeError, EOFError):
         pass
 
-    session_start         = _read_session_start()
-    rows                  = _query_session_data(session_start)
-    tools                 = _aggregate(rows) if rows else {}
+    session_start           = _read_session_start()
+    ext_rows, cc_rows       = _query_session_data(session_start)
+    tools                   = _aggregate(ext_rows) if ext_rows else {}
     start, current, is_live = _get_cc_usage()
 
-    if not tools and not current:
+    if not tools and not cc_rows and not current:
         sys.exit(0)
 
-    summary = _format(tools, start, current, is_live)
+    summary = _format(tools, cc_rows, start, current, is_live)
     print(json.dumps({"systemMessage": summary}))
 
 

@@ -17,7 +17,6 @@ import os
 import sqlite3
 import subprocess
 import sys
-import tempfile
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -45,19 +44,24 @@ def _build_usage_db(db_path: str, session_start: float, rows: list[dict]) -> Non
             timestamp TEXT NOT NULL,
             task_type TEXT,
             model TEXT,
+            provider TEXT NOT NULL DEFAULT 'external',
             input_tokens INTEGER DEFAULT 0,
             output_tokens INTEGER DEFAULT 0,
             cost_usd REAL DEFAULT 0.0,
+            latency_ms REAL DEFAULT 0.0,
             success INTEGER DEFAULT 1,
             session_id TEXT
         )
     """)
     for r in rows:
-        ts = _iso(session_start + r.get("offset_secs", 60))
+        ts       = _iso(session_start + r.get("offset_secs", 60))
+        provider = r.get("provider", "external")
         conn.execute(
-            "INSERT INTO usage (timestamp, task_type, model, input_tokens, output_tokens, cost_usd, success) "
-            "VALUES (?, ?, ?, ?, ?, ?, 1)",
-            (ts, r["task_type"], r["model"], r["in_tok"], r["out_tok"], r["cost"]),
+            "INSERT INTO usage (timestamp, task_type, model, provider, "
+            "input_tokens, output_tokens, cost_usd, success) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, 1)",
+            (ts, r["task_type"], r["model"], provider,
+             r["in_tok"], r["out_tok"], r["cost"]),
         )
     conn.commit()
     conn.close()
@@ -65,7 +69,6 @@ def _build_usage_db(db_path: str, session_start: float, rows: list[dict]) -> Non
 
 def _run_hook(state_dir: str, session_start: float) -> dict:
     """Run the hook script and return the parsed JSON output."""
-    env = {**os.environ, "HOME": state_dir}
     # The hook reads SESSION_START_FILE and DB_PATH from ~/.llm-router/
     # We point HOME to our tmpdir so it reads our fixtures.
     llm_dir = os.path.join(state_dir, ".llm-router")
@@ -277,3 +280,48 @@ class TestDemo_SessionSummary:
         assert "+2.0pp" in msg,       f"Expected +2pp weekly delta in:\n{msg}"
 
         print(f"\n[Demo 2e] CC delta display:\n{msg}")
+
+    def test_cc_model_calls_shown_like_routing_table(self, tmp_path):
+        """CC subscription calls (provider=subscription) appear as a model table."""
+        session_start = time.time() - 300
+
+        llm_dir = tmp_path / ".llm-router"
+        llm_dir.mkdir()
+
+        _build_usage_db(str(llm_dir / "usage.db"), session_start, [
+            # CC subscription calls (logged by _subscription_hint)
+            {"task_type": "query",  "model": "claude-haiku-4-5-20251001",
+             "provider": "subscription", "in_tok": 0, "out_tok": 0,
+             "cost": 0.0, "offset_secs": 10},
+            {"task_type": "query",  "model": "claude-haiku-4-5-20251001",
+             "provider": "subscription", "in_tok": 0, "out_tok": 0,
+             "cost": 0.0, "offset_secs": 20},
+            {"task_type": "code",   "model": "claude-opus-4-6",
+             "provider": "subscription", "in_tok": 0, "out_tok": 0,
+             "cost": 0.0, "offset_secs": 30},
+            # One external call too
+            {"task_type": "research", "model": "perplexity/sonar",
+             "provider": "perplexity", "in_tok": 500, "out_tok": 200,
+             "cost": 0.003, "offset_secs": 60},
+        ])
+        with open(llm_dir / "session_start.txt", "w") as f:
+            f.write(str(session_start))
+
+        result = subprocess.run(
+            [sys.executable, str(HOOK_SCRIPT)],
+            input=json.dumps({}),
+            capture_output=True, text=True,
+            env={**os.environ, "HOME": str(tmp_path)},
+            timeout=10,
+        )
+        assert result.returncode == 0
+        msg = json.loads(result.stdout)["systemMessage"]
+
+        assert "Claude Code models" in msg,    f"Expected CC model section:\n{msg}"
+        assert "3 calls" in msg,               f"Expected '3 calls' for CC:\n{msg}"
+        assert "haiku" in msg.lower(),          f"Expected haiku model:\n{msg}"
+        assert "opus" in msg.lower(),           f"Expected opus model:\n{msg}"
+        assert "External routing" in msg,       f"Expected external section:\n{msg}"
+        assert "research" in msg,               f"Expected external call:\n{msg}"
+
+        print(f"\n[Demo 2f] CC model call tracking:\n{msg}")

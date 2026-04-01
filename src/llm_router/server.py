@@ -37,7 +37,7 @@ from llm_router.config import get_config
 from llm_router.cost import (
     get_daily_claude_breakdown, get_daily_claude_tokens,
     get_monthly_spend, get_quality_report,
-    get_routing_savings_vs_sonnet, get_savings_summary, log_claude_usage,
+    get_routing_savings_vs_sonnet, get_savings_summary, log_cc_hint, log_claude_usage,
 )
 from llm_router.health import get_tracker
 from llm_router.model_selector import select_model
@@ -574,7 +574,7 @@ _SUB_MODELS = {
 }
 
 
-def _subscription_hint(complexity: str | None, prompt: str) -> str | None:
+def _subscription_hint(task_type_label: str, complexity: str | None, prompt: str) -> str | None:
     """Return a subscription routing hint if CC-mode is active and below threshold.
 
     When Claude Code subscription has headroom, routing through external API
@@ -607,7 +607,8 @@ def _subscription_hint(complexity: str | None, prompt: str) -> str | None:
                "sonnet":  _last_usage.sonnet_pct,
                "weekly":  _last_usage.weekly_pct}.get(bucket, 0.0)
     else:
-        import json, os as _os
+        import json
+        import os as _os
         try:
             raw = json.loads(open(_os.path.expanduser("~/.llm-router/usage.json")).read())
             v = float(raw.get(f"{bucket}_pct", 0.0))
@@ -625,12 +626,21 @@ def _subscription_hint(complexity: str | None, prompt: str) -> str | None:
     if target_model is None:
         return None  # moderate + below threshold → Sonnet passthrough, no hint needed
 
-    return (
+    hint = (
         f"⚡ CC-MODE: {eff}/{bucket}={pct:.0%} < {threshold:.0%} — "
         f"use subscription model.\n\n"
         f"/model {target_model}\n\n"
         f"{prompt}"
     )
+    # Log asynchronously — fire-and-forget, don't block the hint return
+    import asyncio as _asyncio
+    try:
+        loop = _asyncio.get_event_loop()
+        if loop.is_running():
+            loop.create_task(log_cc_hint(task_type_label, target_model))
+    except Exception:
+        pass
+    return hint
 
 
 @mcp.tool()
@@ -659,7 +669,7 @@ async def llm_query(
         max_tokens: Maximum output tokens.
         context: Optional conversation context to help the model understand the broader task.
     """
-    if hint := _subscription_hint(complexity, prompt):
+    if hint := _subscription_hint("query", complexity, prompt):
         return hint
     resp = await route_and_call(
         TaskType.QUERY, prompt,
@@ -749,7 +759,7 @@ async def llm_generate(
         max_tokens: Maximum output tokens.
         context: Optional conversation context to help the model understand the broader task.
     """
-    if hint := _subscription_hint(complexity, prompt):
+    if hint := _subscription_hint("generate", complexity, prompt):
         return hint
     resp = await route_and_call(
         TaskType.GENERATE, prompt,
@@ -785,7 +795,7 @@ async def llm_analyze(
     # Analysis is never trivially simple — floor at moderate so Haiku is never
     # chosen for a task that inherently requires reasoning.
     effective_complexity = complexity or "moderate"
-    if hint := _subscription_hint(effective_complexity, prompt):
+    if hint := _subscription_hint("analyze", effective_complexity, prompt):
         return hint
     resp = await route_and_call(
         TaskType.ANALYZE, prompt,
@@ -818,7 +828,7 @@ async def llm_code(
         max_tokens: Maximum output tokens.
         context: Optional conversation context to help the model understand the broader task.
     """
-    if hint := _subscription_hint(complexity, prompt):
+    if hint := _subscription_hint("code", complexity, prompt):
         return hint
     resp = await route_and_call(
         TaskType.CODE, prompt,
