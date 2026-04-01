@@ -121,7 +121,7 @@ Make the router evaluate **every prompt** across all projects:
 llm_setup(action='install_hooks')
 
 # Or from the CLI:
-llm-router-install-hooks
+llm-router install
 ```
 
 This installs hooks + rules to `~/.claude/` so every Claude Code session auto-routes tasks to the optimal model.
@@ -141,7 +141,7 @@ This installs hooks + rules to `~/.claude/` so every Claude Code session auto-ro
 - **Rate limit detection** — Catches 429/rate_limit errors with smart cooldowns (15s for rate limits vs 60s for hard failures)
 - **Key validation** — `llm_setup(action='test')` validates API keys with minimal LLM calls (~$0.0001 each)
 - **Claude subscription monitoring** — Live session/weekly usage from claude.ai
-- **Codex desktop integration** — Route tasks to local OpenAI Codex (free)
+- **Codex desktop integration** — Route tasks to local OpenAI Codex (free). Injected before paid externals for all eligible task types: CODE, ANALYZE, GENERATE, QUERY.
 - **LLM Orchestrator agent** — Autonomous multi-step task decomposition across models
 
 ---
@@ -219,7 +219,7 @@ The `UserPromptSubmit` hook intercepts **all prompts** — not just explicit rou
 
 ### Self-updating hooks
 
-Hook scripts are versioned (`# llm-router-hook-version: N`). On every MCP server startup, if the bundled version in the installed package is newer than what's in `~/.claude/hooks/`, it's automatically overwritten. **Existing users get classification improvements automatically after `pip install --upgrade claude-code-llm-router`** — no need to re-run `llm-router-install-hooks`.
+Hook scripts are versioned (`# llm-router-hook-version: N`). On every MCP server startup, if the bundled version in the installed package is newer than what's in `~/.claude/hooks/`, it's automatically overwritten. **Existing users get classification improvements automatically after `pip install --upgrade claude-code-llm-router`** — no need to re-run `llm-router install`.
 
 ---
 
@@ -247,8 +247,7 @@ When Claude quota gets tight, external models activate tier by tier. Each thresh
 
 | Condition | simple | moderate | complex |
 |-----------|--------|----------|---------|
-| `session < 85%` | Haiku (sub) | Sonnet (passthrough) | Opus (sub) |
-| `session ≥ 85%` | Gemini Flash / Groq | Sonnet (passthrough) | Opus (sub) |
+| `session < 95%`, `sonnet < 95%` | Haiku (sub) | Sonnet (passthrough) | Opus (sub) |
 | `sonnet ≥ 95%` | Gemini Flash / Groq | GPT-4o / DeepSeek | Opus (sub) |
 | `weekly ≥ 95%` OR `session ≥ 95%` | Gemini Flash / Groq | GPT-4o / DeepSeek | GPT-4o / DeepSeek |
 
@@ -589,15 +588,37 @@ After running `./scripts/install.sh`, your `~/.claude.json` will include:
 # Install with dev dependencies
 uv sync --extra dev
 
-# Run tests
-uv run pytest -v
+# Run tests (skip integration tests)
+uv run pytest tests/ -q --ignore=tests/test_integration.py
 
 # Run integration tests (requires real API keys)
 uv run pytest tests/test_integration.py -v
 
-# Lint
-uv run ruff check src/
+# Lint (includes test files)
+uv run ruff check src/ tests/
+
+# Install global hooks
+llm-router install
 ```
+
+### Architecture (v1.2)
+
+| Module | Responsibility |
+|--------|---------------|
+| `server.py` | Thin MCP entrypoint (~110 lines), calls `register(mcp)` on each module |
+| `state.py` | Shared mutable state (`_active_profile`, `_last_usage`) with getter/setter accessors |
+| `tools/routing.py` | `llm_classify`, `llm_route`, `llm_track_usage`, `llm_stream` |
+| `tools/text.py` | `llm_query`, `llm_research`, `llm_generate`, `llm_analyze`, `llm_code`, `llm_edit` |
+| `tools/media.py` | `llm_image`, `llm_video`, `llm_audio` |
+| `tools/pipeline.py` | `llm_orchestrate`, `llm_pipeline_templates` |
+| `tools/admin.py` | `llm_set_profile`, `llm_usage`, `llm_health`, `llm_providers` |
+| `tools/subscription.py` | `llm_check_usage`, `llm_update_usage`, `llm_refresh_claude_usage` |
+| `tools/codex.py` | `llm_codex` |
+| `tools/setup.py` | `llm_setup`, `llm_quality_report`, `llm_save_session` |
+| `cli.py` | `llm-router install [--check\|--force\|uninstall]` CLI dispatcher |
+| `router.py` | Core routing: fallback chains, Codex injection, pressure-aware ordering |
+| `profiles.py` | Model chains per profile/task type |
+| `codex_agent.py` | Codex binary detection, `is_codex_plugin_available()`, `run_codex()` |
 
 ---
 
@@ -605,32 +626,30 @@ uv run ruff check src/
 
 See [ROADMAP.md](ROADMAP.md) for the full roadmap with design notes and competitive context.
 
-### Completed (v1.0.0 — 2026-03-31)
+### Completed
 
-- [x] Everything from v0.1–v0.9 (20+ providers, 24 MCP tools, 6 hooks, complexity routing, pressure cascade, Codex, caching, quality logging)
-- [x] **Subscription flag enforcement** — `available_providers()` actually excludes Anthropic when `LLM_ROUTER_CLAUDE_SUBSCRIPTION=true`
-- [x] **Unified pressure path** — `llm_route` and `llm_classify` both call `select_model()`, eliminating profile divergence under quota pressure
-- [x] **Staleness warnings** — all routing hooks flag `⚠️ STALE` when `usage.json` is >30 minutes old
-- [x] **Research fallback escalation** — no Perplexity key → PREMIUM chain instead of silent BALANCED downgrade
-- [x] **Frozen config fix** — `llm_set_profile` uses module-level `_active_profile` (no more `object.__setattr__()` on frozen Pydantic model)
-- [x] **Health-aware classifier** — classifier chain sorts unhealthy providers to the back
-- [x] **Atomic counter writes** — `usage-refresh.py` uses `os.replace()` to prevent concurrent hook race
+**v1.0.0 (2026-03-31)** — Foundation: 20+ providers, 24 MCP tools, 6 hooks, complexity routing, pressure cascade, Codex integration, caching, quality logging, subscription enforcement, unified pressure path, staleness warnings, health-aware classifier.
 
-### Next (v1.1 — Observability)
+**v1.1.0 (2026-04-01)** — Subscription-aware routing:
+- [x] **Codex-first routing** — Codex (free via OpenAI sub) injected before paid externals for CODE tasks
+- [x] **Prepaid capacity threshold** — simple tasks no longer go external at 85% session; stays on subscription until Sonnet pool is exhausted (≥ 95%)
+- [x] **`llm_rate` feedback tool** — per-response thumbs up/down stored in `routing_decisions`
+- [x] **Daily spend alerts** — warning when daily spend crosses configurable threshold
+- [x] **Session delta display** — hooks show CC subscription usage delta at session end
 
-- [ ] Auto-refresh stale usage — hook triggers `llm_check_usage` automatically when data >30min
-- [ ] Web dashboard at `localhost:7337` — routing breakdown, cost/day, model distribution, savings chart
-- [ ] OTEL / Prometheus metrics export — counters for routed calls, cost, fallback rate per provider
-- [ ] `llm_rate` feedback tool — per-response thumbs up/down stored in `routing_decisions`
-- [ ] Hard budget alerts — warning + desktop notification when daily spend crosses threshold
+**v1.2.0 (2026-04-01)** — Foundation hardening:
+- [x] **Codex-first for all task types** — ANALYZE, GENERATE, QUERY also prefer free Codex over paid externals
+- [x] **Server decomposition** — 2,300-line `server.py` split into 8 focused modules (`tools/`, `state.py`)
+- [x] **`llm-router install` CLI** — unified `llm-router install [--check] [--force]` replaces `llm-router-install-hooks`
+- [x] **MCP registry manifest** — `mcp-registry.json` for modelcontextprotocol.io submission
 
 ### Planned
 
 | Version | Theme | Headline features |
 |---|---|---|
-| v1.2 | Cost Intelligence | Anthropic prompt caching, semantic dedup cache, hard daily spend cap |
-| v1.3 | Routing Intelligence | Task-aware model preferences, reasoning model tier, learned routing from history |
-| v1.4 | Agentic & Team | Agent-tree budget tracking, multi-user profiles, YAML pipelines |
+| v1.3 | Observability | Web dashboard at `localhost:7337`, OTEL/Prometheus metrics, prompt caching |
+| v1.4 | Routing Intelligence | Task-aware model preferences, reasoning model tier, learned routing from history |
+| v1.5 | Agentic & Team | Agent-tree budget tracking, multi-user profiles, YAML pipelines |
 | v2.0 | Learning Router | Self-improving classifier trained on your own routing history (local, Ollama) |
 
 ---

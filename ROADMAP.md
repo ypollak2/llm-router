@@ -1,6 +1,6 @@
 # LLM Router — Roadmap
 
-> Last updated: 2026-03-31
+> Last updated: 2026-04-01
 
 ## Vision
 
@@ -66,41 +66,38 @@ Eight correctness fixes making the routing guarantees production-solid:
 7. **Atomic counter writes** — `usage-refresh.py` uses `os.replace()` to prevent concurrent hook race
 8. **Research fallback escalation** — no Perplexity key → PREMIUM chain instead of silent BALANCED downgrade
 
+### v1.1.0 (Subscription-Aware Routing — 2026-04-01)
+
+- **Codex-first routing** — Codex injected before paid externals for CODE tasks (free-prepaid-first hierarchy)
+- **Prepaid capacity threshold fix** — simple tasks stay on Haiku subscription until Sonnet exhausted (≥ 95%), not at 85% session
+- **`llm_rate` feedback tool** — per-response thumbs up/down, stored in `routing_decisions`
+- **Daily spend alerts** — warning + desktop notification when daily spend threshold crossed
+- **Session delta display** — CC subscription usage delta shown at session end
+
+### v1.2.0 (Foundation Hardening — 2026-04-01)
+
+- **Codex-first for all task types** — ANALYZE, GENERATE, QUERY also prefer free Codex over paid externals
+- **Server decomposition** — 2,300-line `server.py` split into `state.py` + 8 tools modules (`tools/routing.py`, `tools/text.py`, `tools/media.py`, `tools/pipeline.py`, `tools/admin.py`, `tools/subscription.py`, `tools/codex.py`, `tools/setup.py`)
+- **`llm-router install` CLI** — unified `install / --check / --force / uninstall` replaces `llm-router-install-hooks`
+- **MCP registry manifest** — `mcp-registry.json` for modelcontextprotocol.io submission
+
 ---
 
-## v1.1 — Observability (next)
+## v1.3 — Observability (next)
 
 **Theme**: You should always know what the router is doing and why.
 
 | Feature | Priority | Notes |
 |---|---|---|
-| **Subscription-aware MCP tools** | High | `llm_query`/`llm_research`/`llm_code` return subscription routing hints (Haiku/Opus) when pressure < threshold instead of making external API calls; external only when subscription is exhausted |
-| **`llm_research` subscription fallback** | High | When Perplexity unavailable + pressure < 85%, route to Opus subscription instead of falling through to gpt-4o |
-| **Ollama health check accuracy** | High | Health endpoint reports "healthy" even when Ollama is unreachable; fix to do a live reachability probe |
-| **Auto-refresh stale usage** | High | ✅ Done (v1.0 hotfix) — session-start hook now refreshes via OAuth API automatically |
-| **Auto-start Ollama at session start** | High | ✅ Done (v1.0 hotfix) — session-start hook calls `start-ollama.sh` to start and pull model |
 | **Web dashboard** | High | `localhost:7337` — routing breakdown, cost/day, model distribution, savings chart |
 | **OTEL / Prometheus export** | Medium | Optional `--metrics-port`; counters for routed calls, cost, fallback rate per provider |
-| **`llm_rate` feedback tool** | Medium | Per-response thumbs up/down stored in `routing_decisions`; feeds classifier confidence |
-| **Hard budget alerts** | Medium | Desktop notification + hook warning when daily spend crosses threshold |
-
----
-
-## v1.2 — Cost Intelligence
-
-**Theme**: Stop paying for tokens you don't need.
-
-| Feature | Priority | Notes |
-|---|---|---|
 | **Anthropic prompt caching** | High | Auto-inject `cache_control` breakpoints on system prompts >2000 tokens (up to 90% savings on repeated context) |
-| **Semantic deduplication cache** | High | Embed-then-nearest-neighbour using local Ollama embeddings; threshold 0.95 cosine similarity |
+| **Semantic dedup cache** | High | Embed-then-nearest-neighbour using local Ollama embeddings; threshold 0.95 cosine similarity |
 | **Hard daily spend cap** | Medium | `DAILY_SPEND_LIMIT_USD` env var; router refuses calls when exceeded, returns clear error |
-| **Cost forecasting** | Medium | Extrapolate hourly burn → "at current rate, weekly quota exhausted in Xh" |
-| **Token budget per task type** | Low | Cap max_tokens per task type in config (prevents runaway research queries) |
 
 ---
 
-## v1.3 — Routing Intelligence
+## v1.4 — Routing Intelligence
 
 **Theme**: Right model for the right job, not just right cost tier.
 
@@ -114,7 +111,7 @@ Eight correctness fixes making the routing guarantees production-solid:
 
 ---
 
-## v1.4 — Agentic & Team Features
+## v1.5 — Agentic & Team Features
 
 **Theme**: Works as well for 10-agent pipelines as for single prompts.
 
@@ -148,8 +145,8 @@ Every routing decision is already recorded in SQLite. After ~500 calls, there's 
 
 See [CONTRIBUTING.md](CONTRIBUTING.md). Highest-impact areas:
 
-1. **v1.1 dashboard** — React + Vite, reads from `~/.llm-router/` SQLite + JSON
-2. **v1.2 prompt caching** — LiteLLM `cache_control` integration
-3. **v1.3 task-aware preferences** — extend `profiles.py` with task-type model affinity scores
+1. **v1.3 dashboard** — React + Vite, reads from `~/.llm-router/` SQLite + JSON
+2. **v1.3 prompt caching** — LiteLLM `cache_control` integration
+3. **v1.4 task-aware preferences** — extend `profiles.py` with task-type model affinity scores
 4. **Provider integrations** — Bedrock, Azure, Vertex AI via LiteLLM
 5. **Testing** — integration tests for provider fallback chains

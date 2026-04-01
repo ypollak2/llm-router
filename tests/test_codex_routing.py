@@ -16,7 +16,7 @@ from unittest.mock import patch
 import pytest
 
 from llm_router.router import route_and_call
-from llm_router.types import LLMResponse, RoutingProfile, TaskType
+from llm_router.types import RoutingProfile, TaskType
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -300,8 +300,6 @@ class TestCodexPluginDetection:
 
     def test_plugin_available_when_dir_exists(self, tmp_path):
         """is_codex_plugin_available returns True when plugin directory exists."""
-        from llm_router.codex_agent import is_codex_plugin_available
-
         plugin_dir = tmp_path / ".claude" / "plugins" / "codex"
         plugin_dir.mkdir(parents=True)
 
