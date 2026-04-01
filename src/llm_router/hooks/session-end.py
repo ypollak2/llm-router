@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm-router-hook-version: 4
+# llm-router-hook-version: 5
 """Stop hook — session routing summary with real cost data from SQLite."""
 
 from __future__ import annotations
@@ -142,12 +142,7 @@ def main() -> None:
     if not summary:
         sys.exit(0)
 
-    print(json.dumps({
-        "hookSpecificOutput": {
-            "hookEventName": "Stop",
-            "systemMessage": summary,
-        }
-    }))
+    print(json.dumps({"systemMessage": summary}))
 
 
 if __name__ == "__main__":

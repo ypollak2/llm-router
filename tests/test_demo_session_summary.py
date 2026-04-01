@@ -132,7 +132,7 @@ class TestDemo_SessionSummary:
         assert result.stdout.strip(), "Hook produced no output for a non-empty session"
 
         out = json.loads(result.stdout.strip())
-        msg = out["hookSpecificOutput"]["systemMessage"]
+        msg = out["systemMessage"]
 
         assert "3 calls" in msg, f"Expected '3 calls' in summary:\n{msg}"
         assert "llm_query" in msg
@@ -168,7 +168,7 @@ class TestDemo_SessionSummary:
             timeout=10,
         )
         assert result.returncode == 0
-        msg = json.loads(result.stdout)["hookSpecificOutput"]["systemMessage"]
+        msg = json.loads(result.stdout)["systemMessage"]
 
         assert f"{expected_pct}%" in msg, (
             f"Expected {expected_pct}% savings in:\n{msg}"
@@ -224,7 +224,7 @@ class TestDemo_SessionSummary:
             timeout=10,
         )
         assert result.returncode == 0
-        msg = json.loads(result.stdout)["hookSpecificOutput"]["systemMessage"]
+        msg = json.loads(result.stdout)["systemMessage"]
 
         # Verify truncation happened — no line exceeds reasonable terminal width
         for line in msg.splitlines():
