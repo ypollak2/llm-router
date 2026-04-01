@@ -1,5 +1,19 @@
 # Changelog
 
+## v1.1.0 — Subscription-Aware Routing + Observability (2026-04-01)
+
+### Added
+
+- **Subscription-aware MCP tools** (`server.py`) — `llm_query`, `llm_code`, `llm_research`, and `llm_analyze` now return a `⚡ CC-MODE:` hint when Claude Code subscription has headroom, directing Claude to switch model tier (`/model haiku` / `/model opus`) instead of making an external API call. External calls are only made when the relevant pressure threshold is exceeded (session ≥ 85% for simple, sonnet ≥ 95% for moderate, weekly ≥ 95% for complex).
+- **Ollama live reachability probe** (`config.py`) — `ollama_reachable()` does a TCP socket check before marking Ollama available. Previously the health endpoint reported "healthy" even when the Ollama server was unreachable. The probe result is cached for 30 seconds to avoid per-call overhead.
+- **E2E demo test suite** (`tests/test_demo_routing.py`, `tests/test_demo_session_summary.py`) — Two demo files doubling as executable documentation: 7 tests covering the full routing pipeline (CC hints, pressure cascade, Ollama health probe) and 4 tests covering the session-end hook (subprocess output, savings math, empty session, model name truncation).
+
+### Fixed
+
+- **Session-end hook Stop schema** (`hooks/session-end.py` v5) — Hook was wrapping output in `hookSpecificOutput` which is invalid for Stop events. Output is now `{"systemMessage": "..."}` at the top level, matching the Stop hook schema. Previously caused "JSON validation failed" errors at session end.
+- **"improve ... performance" misrouted as query** (`hooks/auto-route.py`) — The code heuristic only matched `optimize` but not `improve`, causing "improve the database query performance" to fall through to Ollama and get classified as `query/simple`. Now matches both.
+- **Session-end hook simplification** (`hooks/session-end.py` v4→v5) — Removed per-tool bar chart and verbose labels (60 lines). Summary is now a compact table: calls × model × cost, with total savings % vs Sonnet baseline.
+
 ## v1.0.0 — Production Stable: Bug Fixes & Routing Integrity (2026-03-31)
 
 ### Fixed (Critical)

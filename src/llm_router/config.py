@@ -16,11 +16,47 @@ Configuration is organized into five sections:
 
 from __future__ import annotations
 
+import time
+import urllib.request
 from pathlib import Path
 
 from pydantic_settings import BaseSettings
 
 from llm_router.types import QualityMode, RoutingProfile, Tier
+
+# ── Ollama reachability cache ─────────────────────────────────────────────────
+# Checked at most once per TTL to avoid a network call on every routing
+# decision. Starts as None so the first call always does a live probe.
+_ollama_reachable_cache: bool | None = None
+_ollama_cache_time: float = 0.0
+_OLLAMA_PROBE_TTL = 60.0  # seconds
+
+
+def probe_ollama(base_url: str) -> bool:
+    """Return True if Ollama is reachable, with a 60-second result cache.
+
+    The result is cached to avoid a network probe on every call to
+    ``available_providers``, which is invoked per routing request.
+    Cache is invalidated after ``_OLLAMA_PROBE_TTL`` seconds so that a
+    freshly-started Ollama process is detected within one minute.
+
+    Args:
+        base_url: Ollama base URL, e.g. ``"http://localhost:11434"``.
+
+    Returns:
+        True if Ollama responds to ``GET /api/tags`` within 1 second.
+    """
+    global _ollama_reachable_cache, _ollama_cache_time
+    now = time.monotonic()
+    if _ollama_reachable_cache is not None and (now - _ollama_cache_time) < _OLLAMA_PROBE_TTL:
+        return _ollama_reachable_cache
+    try:
+        with urllib.request.urlopen(f"{base_url}/api/tags", timeout=1):
+            _ollama_reachable_cache = True
+    except Exception:
+        _ollama_reachable_cache = False
+    _ollama_cache_time = now
+    return _ollama_reachable_cache
 
 
 class RouterConfig(BaseSettings):
@@ -150,7 +186,7 @@ class RouterConfig(BaseSettings):
         for field_name, (provider_name, _) in self._PROVIDER_MAP.items():
             if getattr(self, field_name, ""):
                 providers.add(provider_name)
-        if self.ollama_base_url:
+        if self.ollama_base_url and probe_ollama(self.ollama_base_url):
             providers.add("ollama")
         # In Claude subscription mode, anthropic is intentionally excluded:
         # we never route back to Claude via API when already inside Claude Code.

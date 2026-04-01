@@ -158,7 +158,7 @@ SIGNALS: dict[str, dict[str, re.Pattern]] = {
             r"add (?:a |the )?(?:\w+ )*(?:feature|method|test|endpoint|route|handler|middleware)|"
             r"update (?:the |this )?(?:\w+ )*(?:code|logic|function|implementation)|"
             r"modify (?:the |this )|extend (?:the |this )|"
-            r"optimize (?:the |this )?(?:code|query|performance|function)|"
+            r"(?:optimize|improve) (?:the |this )?(?:code|query|performance|function)|"
             r"set up|configure|install|bootstrap|initialize|"
             r"create (?:(?:a |the )?\w+ )*(?:function|class|module|component|hook|test|script|program|service|tool))\b",
             re.IGNORECASE,
