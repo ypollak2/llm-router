@@ -38,6 +38,7 @@ from llm_router.cost import (
     get_daily_claude_breakdown, get_daily_claude_tokens,
     get_monthly_spend, get_quality_report,
     get_routing_savings_vs_sonnet, get_savings_summary, log_cc_hint, log_claude_usage,
+    rate_routing_decision,
 )
 from llm_router.health import get_tracker
 from llm_router.model_selector import select_model
@@ -2247,6 +2248,32 @@ def _setup_uninstall_hooks() -> str:
         "To reinstall: `llm_setup(action='install_hooks')`",
     ])
     return "\n".join(lines)
+
+
+# ── Feedback ─────────────────────────────────────────────────────────────────
+
+
+@mcp.tool()
+async def llm_rate(good: bool, decision_id: int | None = None) -> str:
+    """Rate the last (or a specific) routing decision as good or bad.
+
+    Stores thumbs-up / thumbs-down feedback in the ``routing_decisions`` table.
+    Over time this signal can be used to retrain the local classifier so routing
+    choices improve based on your preferences.
+
+    Args:
+        good: True = routing was a good choice; False = bad choice.
+        decision_id: Row ID to rate. Omit (or pass None) to rate the most recent
+            routing decision.
+
+    Returns:
+        Confirmation string with the rated decision ID, or an error message.
+    """
+    rated_id = await rate_routing_decision(decision_id, good)
+    if rated_id is None:
+        return "No routing decision found to rate. Make a routed call first."
+    label = "👍 Good" if good else "👎 Bad"
+    return f"{label} — feedback recorded for routing decision #{rated_id}."
 
 
 # ── Resources ────────────────────────────────────────────────────────────────

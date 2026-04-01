@@ -114,6 +114,7 @@ class RouterConfig(BaseSettings):
     llm_router_tier: Tier = Tier.FREE
     llm_router_db_path: Path = Path.home() / ".llm-router" / "usage.db"
     llm_router_monthly_budget: float = 20.0  # $20/month default cap
+    llm_router_daily_spend_limit: float = 0.0  # 0 = disabled; >0 fires alert when crossed
 
     # ── Smart routing settings ──
     daily_token_budget: int = 500_000       # 500k tokens/day default cap

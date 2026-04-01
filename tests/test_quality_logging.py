@@ -129,3 +129,51 @@ async def test_quality_report_aggregates(temp_db):
     assert report["total_tokens"] == 450  # 100+50+200+100
     assert report["avg_confidence"] == pytest.approx(0.9)
     assert report["avg_latency_ms"] == pytest.approx(300.0)
+
+
+@pytest.mark.asyncio
+async def test_rate_routing_decision_latest(temp_db):
+    """rate_routing_decision(None) rates the most recent decision."""
+    await _log_decision()
+    rated_id = await cost.rate_routing_decision(None, good=True)
+    assert rated_id is not None
+    assert rated_id > 0
+
+
+@pytest.mark.asyncio
+async def test_rate_routing_decision_specific(temp_db):
+    """rate_routing_decision(id) rates a specific decision."""
+    await _log_decision(prompt="first")
+    await _log_decision(prompt="second")
+    # Rate the first (id=1)
+    rated_id = await cost.rate_routing_decision(1, good=False)
+    assert rated_id == 1
+
+
+@pytest.mark.asyncio
+async def test_rate_routing_decision_missing(temp_db):
+    """Returns None when there are no decisions to rate."""
+    result = await cost.rate_routing_decision(None, good=True)
+    assert result is None
+
+
+@pytest.mark.asyncio
+async def test_get_daily_spend_empty(temp_db):
+    """Returns 0.0 when no usage data exists for today."""
+    spend = await cost.get_daily_spend()
+    assert spend == 0.0
+
+
+@pytest.mark.asyncio
+async def test_get_daily_spend_with_usage(temp_db):
+    """Returns sum of today's external usage costs."""
+    from llm_router.types import LLMResponse, RoutingProfile, TaskType
+    for _ in range(3):
+        resp = LLMResponse(
+            content="x", model="openai/gpt-4o-mini",
+            input_tokens=10, output_tokens=5,
+            cost_usd=0.002, latency_ms=100.0, provider="openai",
+        )
+        await cost.log_usage(resp, TaskType.QUERY, RoutingProfile.BUDGET)
+    spend = await cost.get_daily_spend()
+    assert spend == pytest.approx(0.006)

@@ -417,6 +417,30 @@ async def route_and_call(
                 ctx, "info",
                 f"✅ {model_name} — {response.latency_ms:.0f}ms · ${response.cost_usd:.6f}"
             )
+
+            # Daily spend alert — fire async so it never blocks the response
+            # Guard: llm_router_daily_spend_limit may be MagicMock in tests
+            _raw_limit = getattr(config, "llm_router_daily_spend_limit", 0.0)
+            daily_limit = float(_raw_limit) if isinstance(_raw_limit, (int, float)) else 0.0
+            if daily_limit > 0:
+                try:
+                    daily_spend = await cost.get_daily_spend()
+                    if daily_spend >= daily_limit:
+                        cost.fire_budget_alert(
+                            "LLM Router — Daily Limit Reached",
+                            f"Daily spend ${daily_spend:.3f} has crossed the "
+                            f"${daily_limit:.2f} limit.",
+                        )
+                    elif daily_spend >= daily_limit * 0.9:
+                        cost.fire_budget_alert(
+                            "LLM Router — Daily Spend Warning",
+                            f"Daily spend ${daily_spend:.3f} is at "
+                            f"{100 * daily_spend / daily_limit:.0f}% of the "
+                            f"${daily_limit:.2f} limit.",
+                        )
+                except Exception as e:
+                    log.debug("Daily budget alert check failed: %s", e)
+
             return response
 
         except Exception as e:

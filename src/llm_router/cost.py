@@ -115,6 +115,11 @@ MIGRATE_CLAUDE_USAGE_ADD_SAVINGS = [
 Each statement is wrapped in a try/except so it silently succeeds if the column
 already exists. This avoids needing a formal migration framework."""
 
+MIGRATE_ROUTING_DECISIONS_ADD_FEEDBACK = [
+    "ALTER TABLE routing_decisions ADD COLUMN was_good INTEGER",
+]
+"""Idempotent migration to add user feedback column to routing_decisions."""
+
 
 async def _get_db() -> aiosqlite.Connection:
     """Open (or create) the SQLite database and apply all migrations.
@@ -137,6 +142,12 @@ async def _get_db() -> aiosqlite.Connection:
     await db.execute(CREATE_SAVINGS_STATS_TABLE)
     # Migrate: add savings columns if missing
     for stmt in MIGRATE_CLAUDE_USAGE_ADD_SAVINGS:
+        try:
+            await db.execute(stmt)
+        except Exception:
+            pass  # column already exists
+    # Migrate: add feedback column if missing
+    for stmt in MIGRATE_ROUTING_DECISIONS_ADD_FEEDBACK:
         try:
             await db.execute(stmt)
         except Exception:
@@ -225,6 +236,84 @@ async def get_monthly_spend() -> float:
         )
         row = await cursor.fetchone()
         return float(row[0]) if row else 0.0
+    finally:
+        await db.close()
+
+
+async def get_daily_spend() -> float:
+    """Get total USD spent on external LLMs today (UTC calendar day).
+
+    Returns:
+        Total spend as a float. Returns 0.0 if no usage data exists.
+    """
+    db = await _get_db()
+    try:
+        cursor = await db.execute(
+            "SELECT COALESCE(SUM(cost_usd), 0) FROM usage "
+            "WHERE timestamp >= datetime('now', 'start of day')"
+        )
+        row = await cursor.fetchone()
+        return float(row[0]) if row else 0.0
+    finally:
+        await db.close()
+
+
+def fire_budget_alert(title: str, message: str) -> None:
+    """Send a macOS notification for budget threshold events.
+
+    Uses ``osascript`` (no extra dependencies). Silently swallowed on
+    non-macOS platforms or when ``osascript`` is unavailable.
+
+    Args:
+        title: Notification title shown in bold.
+        message: Notification body text.
+    """
+    import subprocess
+    script = (
+        f'display notification "{message}" '
+        f'with title "{title}" '
+        f'sound name "Glass"'
+    )
+    try:
+        subprocess.run(["osascript", "-e", script], timeout=3, capture_output=True)
+    except Exception:
+        pass  # non-macOS or osascript unavailable
+
+
+async def rate_routing_decision(decision_id: int | None, good: bool) -> int | None:
+    """Record user feedback (thumbs up/down) on a routing decision.
+
+    Updates the ``was_good`` column on the specified row. If ``decision_id``
+    is None, rates the most recent routing decision.
+
+    Args:
+        decision_id: Row ID in ``routing_decisions``, or None for the latest.
+        good: True = good routing choice; False = bad routing choice.
+
+    Returns:
+        The row ID that was updated, or None if no matching row was found.
+    """
+    db = await _get_db()
+    try:
+        if decision_id is None:
+            cursor = await db.execute(
+                "SELECT id FROM routing_decisions ORDER BY id DESC LIMIT 1"
+            )
+            row = await cursor.fetchone()
+            if not row:
+                return None
+            decision_id = row[0]
+
+        await db.execute(
+            "UPDATE routing_decisions SET was_good = ? WHERE id = ?",
+            (1 if good else 0, decision_id),
+        )
+        await db.commit()
+        # Confirm the row existed
+        cursor = await db.execute(
+            "SELECT id FROM routing_decisions WHERE id = ?", (decision_id,)
+        )
+        return decision_id if await cursor.fetchone() else None
     finally:
         await db.close()
 
