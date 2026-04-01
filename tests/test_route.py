@@ -52,8 +52,8 @@ async def test_route_simple_goes_to_budget(mock_env, mock_ctx):
     classification = _make_classification("simple", "query")
     response = _make_response("gemini/gemini-2.5-flash")
 
-    with patch("llm_router.server.classify_complexity", new_callable=AsyncMock, return_value=classification), \
-         patch("llm_router.server.route_and_call", new_callable=AsyncMock, return_value=response) as mock_route:
+    with patch("llm_router.tools.routing.classify_complexity", new_callable=AsyncMock, return_value=classification), \
+         patch("llm_router.tools.routing.route_and_call", new_callable=AsyncMock, return_value=response) as mock_route:
 
         from llm_router.server import llm_route
         result = await llm_route("What is 2+2?", mock_ctx)
@@ -70,8 +70,8 @@ async def test_route_complex_goes_to_premium(mock_env, mock_ctx):
     classification = _make_classification("complex", "code")
     response = _make_response("openai/o3")
 
-    with patch("llm_router.server.classify_complexity", new_callable=AsyncMock, return_value=classification), \
-         patch("llm_router.server.route_and_call", new_callable=AsyncMock, return_value=response) as mock_route:
+    with patch("llm_router.tools.routing.classify_complexity", new_callable=AsyncMock, return_value=classification), \
+         patch("llm_router.tools.routing.route_and_call", new_callable=AsyncMock, return_value=response) as mock_route:
 
         from llm_router.server import llm_route
         result = await llm_route("Design a distributed CQRS architecture", mock_ctx)
@@ -85,8 +85,8 @@ async def test_route_complex_goes_to_premium(mock_env, mock_ctx):
 async def test_route_with_complexity_override(mock_env, mock_ctx):
     response = _make_response("gemini/gemini-2.5-flash")
 
-    with patch("llm_router.server.classify_complexity") as mock_classify, \
-         patch("llm_router.server.route_and_call", new_callable=AsyncMock, return_value=response) as mock_route:
+    with patch("llm_router.tools.routing.classify_complexity") as mock_classify, \
+         patch("llm_router.tools.routing.route_and_call", new_callable=AsyncMock, return_value=response) as mock_route:
 
         from llm_router.server import llm_route
         await llm_route("Some prompt", mock_ctx, complexity_override="simple")
@@ -109,8 +109,8 @@ async def test_route_uses_inferred_task_type(mock_env, mock_ctx):
     classification = _make_classification("moderate", "code")
     response = _make_response("openai/gpt-4o")
 
-    with patch("llm_router.server.classify_complexity", new_callable=AsyncMock, return_value=classification), \
-         patch("llm_router.server.route_and_call", new_callable=AsyncMock, return_value=response) as mock_route:
+    with patch("llm_router.tools.routing.classify_complexity", new_callable=AsyncMock, return_value=classification), \
+         patch("llm_router.tools.routing.route_and_call", new_callable=AsyncMock, return_value=response) as mock_route:
 
         from llm_router.server import llm_route
         await llm_route("Write a Python function to sort a list", mock_ctx)
@@ -125,8 +125,8 @@ async def test_route_explicit_task_type_overrides_inferred(mock_env, mock_ctx):
     classification = _make_classification("moderate", "code")
     response = _make_response("openai/gpt-4o")
 
-    with patch("llm_router.server.classify_complexity", new_callable=AsyncMock, return_value=classification), \
-         patch("llm_router.server.route_and_call", new_callable=AsyncMock, return_value=response) as mock_route:
+    with patch("llm_router.tools.routing.classify_complexity", new_callable=AsyncMock, return_value=classification), \
+         patch("llm_router.tools.routing.route_and_call", new_callable=AsyncMock, return_value=response) as mock_route:
 
         from llm_router.server import llm_route
         await llm_route("Write a poem about code", mock_ctx, task_type="generate")
@@ -140,8 +140,8 @@ async def test_route_shows_total_cost(mock_env, mock_ctx):
     classification = _make_classification("moderate", "query")
     response = _make_response("openai/gpt-4o")
 
-    with patch("llm_router.server.classify_complexity", new_callable=AsyncMock, return_value=classification), \
-         patch("llm_router.server.route_and_call", new_callable=AsyncMock, return_value=response):
+    with patch("llm_router.tools.routing.classify_complexity", new_callable=AsyncMock, return_value=classification), \
+         patch("llm_router.tools.routing.route_and_call", new_callable=AsyncMock, return_value=response):
 
         from llm_router.server import llm_route
         result = await llm_route("Explain quantum computing", mock_ctx)
@@ -155,8 +155,8 @@ async def test_route_shows_total_cost(mock_env, mock_ctx):
 async def test_route_classifier_failure_falls_back(mock_env, mock_ctx):
     response = _make_response("openai/gpt-4o")
 
-    with patch("llm_router.server.classify_complexity", new_callable=AsyncMock, side_effect=RuntimeError("boom")), \
-         patch("llm_router.server.route_and_call", new_callable=AsyncMock, return_value=response) as mock_route:
+    with patch("llm_router.tools.routing.classify_complexity", new_callable=AsyncMock, side_effect=RuntimeError("boom")), \
+         patch("llm_router.tools.routing.route_and_call", new_callable=AsyncMock, return_value=response) as mock_route:
 
         from llm_router.server import llm_route
         result = await llm_route("test prompt", mock_ctx)
