@@ -265,22 +265,46 @@ async def route_and_call(
             from llm_router.claude_usage import get_claude_pressure
             pressure = get_claude_pressure()
 
+            # ── Provider filter (must run before injection) ──────────────────
+            # Filter here so that Codex/Ollama injection decisions (has_claude,
+            # has_no_claude) reflect what's actually callable.  In subscription
+            # mode, anthropic/* is stripped here; checking has_claude on the
+            # unfiltered chain would wrongly place Codex after removed Claude
+            # slots, causing it to appear first once those slots are gone.
+            # Codex and Ollama use local runtimes — no API key needed.
+            available = config.available_providers
+            models_to_try = [
+                m for m in models_to_try
+                if provider_from_model(m) in available
+                or provider_from_model(m) in {"codex", "ollama"}
+            ]
+
             # ── Ollama injection ─────────────────────────────────────────────
             # BUDGET always: local/free models fit simple tasks regardless of quota.
             # BALANCED/PREMIUM at ≥ 85%: inject at front to spare Claude quota.
+            # Ollama stays at 0.85 (not 0.95) because it's truly free and local —
+            # even light quota stress is enough reason to prefer it.
             ollama_models = config.all_ollama_models()
             if ollama_models and (profile == RoutingProfile.BUDGET or pressure >= 0.85):
                 models_to_try = ollama_models + models_to_try
 
             # ── Codex injection ──────────────────────────────────────────────
             # Codex uses the user's OpenAI subscription (free from Claude quota).
-            # Only inject for CODE and ANALYZE — Codex can't browse the web
+            # Only inject for CODE, ANALYZE, GENERATE — Codex can't browse the web
             # (no benefit for RESEARCH) and is too slow for quick QUERY responses.
-            # Position depends on pressure and chain composition:
-            #   Claude in chain, pressure < 85%: after all Claude models
-            #   Claude in chain, pressure ≥ 85%: at the very front
-            #   No Claude in chain (subscription mode): at end — let quality-ordered
-            #     models go first; Codex is a free fallback if they all fail
+            #
+            # Priority principle: prefer already-paid capacity before paid external APIs.
+            # Codex (OpenAI subscription) is free — it must come before GPT-4o, Gemini
+            # Pro, and other paid external models whenever possible.
+            #
+            # Injection position:
+            #   pressure ≥ 0.95               : Codex at front (before Claude)
+            #   Claude in chain, CODE task     : Codex after FIRST Claude
+            #                                    (beats paid externals as first fallback)
+            #   Claude in chain, other tasks   : Codex after LAST Claude (quality-first)
+            #   No Claude (subscription mode), CODE : Codex at FRONT
+            #                                    (already-paid beats all paid externals)
+            #   No Claude, other tasks         : Codex at end (quality-ordered externals first)
             _codex_eligible_tasks = {TaskType.CODE, TaskType.ANALYZE, TaskType.GENERATE}
             if (
                 profile != RoutingProfile.BUDGET
@@ -289,30 +313,37 @@ async def route_and_call(
             ):
                 codex_chain = [f"codex/{m}" for m in CODEX_MODELS[:2]]  # top 2 models
                 has_claude = any(m.startswith("anthropic/") for m in models_to_try)
-                if pressure >= 0.85:
+                if pressure >= 0.95:
+                    # Near-exhaustion: Codex before everything including remaining Claude
+                    log.debug("Codex injected at front (pressure=%.0f%%)", pressure * 100)
                     models_to_try = codex_chain + models_to_try
+                elif has_claude and task_type == TaskType.CODE:
+                    # CODE task: Codex right after the FIRST Claude model so it beats
+                    # paid external APIs (GPT-4o, Gemini Pro) as first non-Claude fallback.
+                    first_claude = next(
+                        i for i, m in enumerate(models_to_try) if m.startswith("anthropic/")
+                    )
+                    insert_at = first_claude + 1
+                    log.debug("Codex injected after first Claude at index %d (CODE task)", insert_at)
+                    models_to_try = models_to_try[:insert_at] + codex_chain + models_to_try[insert_at:]
                 elif has_claude:
-                    # Insert after the last Claude model in the chain
+                    # ANALYZE/GENERATE with Claude: quality-first, Codex after last Claude
                     last_claude = max(
                         (i for i, m in enumerate(models_to_try) if m.startswith("anthropic/")),
                         default=-1,
                     )
                     insert_at = last_claude + 1
+                    log.debug("Codex injected after last Claude at index %d (%s task)", insert_at, task_type.value)
                     models_to_try = models_to_try[:insert_at] + codex_chain + models_to_try[insert_at:]
+                elif task_type == TaskType.CODE:
+                    # Subscription mode (no Claude in chain): CODE task — Codex at FRONT.
+                    # Already-paid OpenAI capacity must come before paid external APIs.
+                    log.debug("Codex injected at front (subscription mode, CODE task — beats paid externals)")
+                    models_to_try = codex_chain + models_to_try
                 else:
-                    # No Claude in chain (e.g. subscription mode with no API key) —
-                    # append Codex at end as a free fallback, not a first choice.
-                    # Quality-first models (DeepSeek, Gemini, GPT-4o) go first.
+                    # Subscription mode, non-CODE task: quality-ordered externals go first.
+                    log.debug("Codex appended at end (%s task, subscription mode)", task_type.value)
                     models_to_try = models_to_try + codex_chain
-
-    # Filter to providers we have API keys for.
-    # Codex and Ollama use local runtimes (no API key) — always pass through.
-    available = config.available_providers
-    models_to_try = [
-        m for m in models_to_try
-        if provider_from_model(m) in available
-        or provider_from_model(m) in {"codex", "ollama"}
-    ]
 
     if not models_to_try:
         raise ValueError(
