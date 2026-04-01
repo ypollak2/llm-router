@@ -113,36 +113,66 @@ async def test_code_task_codex_after_first_claude_not_last(
 
 
 @pytest.mark.asyncio
-async def test_analyze_task_codex_after_paid_externals_subscription_mode(
+async def test_analyze_task_codex_before_paid_externals_subscription_mode(
     mock_env, mock_acompletion, monkeypatch
 ):
-    """In subscription mode, ANALYZE task uses quality-first ordering:
-    paid externals (GPT-4o, Gemini Pro) go before Codex, not after.
+    """In subscription mode, ANALYZE task tries Codex BEFORE paid externals.
 
-    We route CODE tasks differently (Codex first) because code quality from
-    Codex/gpt-5.4 is exceptional. For ANALYZE, broad-knowledge models like
-    GPT-4o run first; Codex is a free fallback if all paid externals fail.
+    Codex uses the OpenAI subscription (free) — it must come before paid API
+    calls (GPT-4o, Gemini Pro) regardless of task type. The hierarchy is:
+      free-local (Ollama) → free-prepaid (Codex) → paid-per-call
 
-    Chain: [GPT-4o, Gemini Pro, DeepSeek, ..., Codex/gpt-5.4, Codex/o3]
+    Chain: [Codex/gpt-5.4, Codex/o3, GPT-4o, Gemini Pro, DeepSeek, ...]
     """
     monkeypatch.setenv("ANTHROPIC_API_KEY", "")
     monkeypatch.setenv("LLM_ROUTER_CLAUDE_SUBSCRIPTION", "true")
     monkeypatch.setattr("llm_router.router.is_codex_available", lambda: True)
     monkeypatch.setattr("llm_router.claude_usage.get_claude_pressure", lambda: 0.2)
 
-    await route_and_call(
-        TaskType.ANALYZE, "analyze the tradeoffs",
-        profile=RoutingProfile.BALANCED,
-    )
+    codex_result = _mock_codex_result("Codex analyze output")
 
-    # First model called should NOT be Codex (quality-ordered externals go first)
-    # The conftest mock_acompletion captures all litellm.acompletion calls.
-    call_sequence = _captured_chain(mock_acompletion)
-    assert call_sequence, "Should have tried at least one model"
-    assert not call_sequence[0].startswith("codex/"), (
-        f"For ANALYZE tasks, Codex should not be the first choice. "
-        f"Got: {call_sequence[0]}"
+    with patch("llm_router.router.run_codex", return_value=codex_result) as mock_codex:
+        resp = await route_and_call(
+            TaskType.ANALYZE, "analyze the tradeoffs",
+            profile=RoutingProfile.BALANCED,
+        )
+
+    # Codex should be tried first — before any paid external API (acompletion never called)
+    assert mock_codex.called, "Codex should be tried before paid externals for ANALYZE"
+    assert mock_acompletion.call_count == 0, (
+        f"No paid API calls should be made when Codex succeeds first. "
+        f"Got acompletion calls: {_captured_chain(mock_acompletion)}"
     )
+    assert resp.provider == "codex"
+
+
+@pytest.mark.asyncio
+async def test_query_task_codex_before_paid_externals_subscription_mode(
+    mock_env, mock_acompletion, monkeypatch
+):
+    """QUERY tasks now use the same prepaid-first ordering as CODE/ANALYZE.
+
+    Codex (free via OpenAI subscription) must come before paid externals
+    for QUERY tasks in subscription mode — not just for CODE tasks.
+    """
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "")
+    monkeypatch.setenv("LLM_ROUTER_CLAUDE_SUBSCRIPTION", "true")
+    monkeypatch.setattr("llm_router.router.is_codex_available", lambda: True)
+    monkeypatch.setattr("llm_router.claude_usage.get_claude_pressure", lambda: 0.2)
+
+    codex_result = _mock_codex_result("Codex query output")
+
+    with patch("llm_router.router.run_codex", return_value=codex_result) as mock_codex:
+        resp = await route_and_call(
+            TaskType.QUERY, "what is the capital of France?",
+            profile=RoutingProfile.BALANCED,
+        )
+
+    assert mock_codex.called, "Codex should be tried before paid externals for QUERY"
+    assert mock_acompletion.call_count == 0, (
+        "No paid API calls when Codex succeeds first"
+    )
+    assert resp.provider == "codex"
 
 
 @pytest.mark.asyncio
