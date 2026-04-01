@@ -290,22 +290,20 @@ async def route_and_call(
 
             # ── Codex injection ──────────────────────────────────────────────
             # Codex uses the user's OpenAI subscription (free from Claude quota).
-            # Only inject for CODE, ANALYZE, GENERATE — Codex can't browse the web
-            # (no benefit for RESEARCH) and is too slow for quick QUERY responses.
+            # Excluded: RESEARCH (no web browsing), BUDGET profile (Codex is balanced-tier).
             #
             # Priority principle: prefer already-paid capacity before paid external APIs.
-            # Codex (OpenAI subscription) is free — it must come before GPT-4o, Gemini
-            # Pro, and other paid external models whenever possible.
+            # Hierarchy: free-local (Ollama) → free-prepaid (Codex) → paid-per-call.
+            # This applies to ALL eligible task types, not just CODE.
             #
             # Injection position:
             #   pressure ≥ 0.95               : Codex at front (before Claude)
             #   Claude in chain, CODE task     : Codex after FIRST Claude
             #                                    (beats paid externals as first fallback)
             #   Claude in chain, other tasks   : Codex after LAST Claude (quality-first)
-            #   No Claude (subscription mode), CODE : Codex at FRONT
-            #                                    (already-paid beats all paid externals)
-            #   No Claude, other tasks         : Codex at end (quality-ordered externals first)
-            _codex_eligible_tasks = {TaskType.CODE, TaskType.ANALYZE, TaskType.GENERATE}
+            #   No Claude (subscription mode)  : Codex after Ollama, before paid externals
+            #                                    (already-paid beats paid API for all tasks)
+            _codex_eligible_tasks = {TaskType.CODE, TaskType.ANALYZE, TaskType.GENERATE, TaskType.QUERY}
             if (
                 profile != RoutingProfile.BUDGET
                 and task_type in _codex_eligible_tasks
@@ -327,7 +325,7 @@ async def route_and_call(
                     log.debug("Codex injected after first Claude at index %d (CODE task)", insert_at)
                     models_to_try = models_to_try[:insert_at] + codex_chain + models_to_try[insert_at:]
                 elif has_claude:
-                    # ANALYZE/GENERATE with Claude: quality-first, Codex after last Claude
+                    # ANALYZE/GENERATE/QUERY with Claude: quality-first, Codex after last Claude
                     last_claude = max(
                         (i for i, m in enumerate(models_to_try) if m.startswith("anthropic/")),
                         default=-1,
@@ -335,15 +333,20 @@ async def route_and_call(
                     insert_at = last_claude + 1
                     log.debug("Codex injected after last Claude at index %d (%s task)", insert_at, task_type.value)
                     models_to_try = models_to_try[:insert_at] + codex_chain + models_to_try[insert_at:]
-                elif task_type == TaskType.CODE:
-                    # Subscription mode (no Claude in chain): CODE task — Codex at FRONT.
-                    # Already-paid OpenAI capacity must come before paid external APIs.
-                    log.debug("Codex injected at front (subscription mode, CODE task — beats paid externals)")
-                    models_to_try = codex_chain + models_to_try
                 else:
-                    # Subscription mode, non-CODE task: quality-ordered externals go first.
-                    log.debug("Codex appended at end (%s task, subscription mode)", task_type.value)
-                    models_to_try = models_to_try + codex_chain
+                    # Subscription mode (no Claude in chain): inject Codex after any Ollama
+                    # models but before all paid external APIs — free beats paid for every
+                    # eligible task type (CODE, ANALYZE, GENERATE, QUERY).
+                    first_paid = next(
+                        (i for i, m in enumerate(models_to_try)
+                         if provider_from_model(m) not in {"ollama", "codex"}),
+                        len(models_to_try),
+                    )
+                    log.debug(
+                        "Codex injected before paid externals at index %d (%s task, subscription mode)",
+                        first_paid, task_type.value,
+                    )
+                    models_to_try = models_to_try[:first_paid] + codex_chain + models_to_try[first_paid:]
 
     if not models_to_try:
         raise ValueError(
