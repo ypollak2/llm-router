@@ -16,8 +16,8 @@
   <a href="#quick-start">Quick Start</a> &bull;
   <a href="#how-it-works">How It Works</a> &bull;
   <a href="#providers">Providers</a> &bull;
-  <a href="#routing-profiles">Profiles</a> &bull;
-  <a href="#budget-control">Budget Control</a> &bull;
+  <a href="#mcp-tools">Tools</a> &bull;
+  <a href="#configuration">Configuration</a> &bull;
   <a href="docs/PROVIDERS.md">Provider Setup</a>
 </p>
 
@@ -34,9 +34,9 @@
 
 ## The Problem
 
-You use Claude Code (or any MCP client). You also have access to GPT-4o, Gemini, Perplexity, DALL-E, Runway, ElevenLabs — but switching between them is manual, slow, and expensive.
+You use Claude Code. You also have GPT-4o, Gemini, Perplexity, DALL-E, Runway, ElevenLabs — but switching between them is manual, slow, and expensive.
 
-**LLM Router** gives your AI assistant one unified interface to all of them — and it automatically picks the right one based on what you're doing and what you can afford.
+**LLM Router** gives your AI assistant one unified interface to all of them — and automatically picks the right one based on what you're doing and what you can afford.
 
 ```
 You:     "Research the latest AI funding rounds"
@@ -52,23 +52,15 @@ You:     "Create a 5-second product demo clip"
 Router:  → Kling 2.0 via fal.ai (best value for short video)
 ```
 
-### How It Saves You Real Money
+### How It Saves You Money
 
-Here's the key insight: **not every task needs the same model**.
-
-When you use Claude Code without a router, every single request — whether it's "what does this function do?" or "redesign this entire architecture" — goes to the same expensive model. That's like hiring a surgeon to change a lightbulb.
-
-LLM Router classifies each task automatically and sends it to the cheapest model that can handle it well:
+Not every task needs the same model. Without a router, everything goes to the same expensive model — like hiring a surgeon to change a lightbulb.
 
 ```
 "What does os.path.join do?"     → Gemini Flash    ($0.000001 — literally free)
 "Refactor the auth module"       → Claude Sonnet   ($0.003)
 "Design the full system arch"    → Claude Opus     ($0.015)
 ```
-
-<p align="center">
-  <img src="docs/images/savings.svg" alt="Task Distribution" width="400" />
-</p>
 
 | Task type | Without Router | With Router | Savings |
 |-----------|---------------|-------------|---------|
@@ -77,9 +69,7 @@ LLM Router classifies each task automatically and sends it to the cheapest model
 | Complex tasks (10% of work) | Opus — $0.015 | Opus — $0.015 | 0% |
 | **Blended monthly estimate** | **~$50/mo** | **~$8–15/mo** | **70–85%** |
 
-> 💡 **With Ollama**: Route simple tasks to a free local model (`llama3.2`, `qwen2.5-coder`) and the savings become even more dramatic — those 60% of simple tasks cost **$0**.
-
-The router pays for itself in the first hour of use.
+> 💡 **With Ollama**: simple tasks route to a free local model — those 60% of queries cost **$0**.
 
 ---
 
@@ -103,14 +93,7 @@ claude plugin add ypollak2/llm-router
 git clone https://github.com/ypollak2/llm-router.git
 cd llm-router
 uv sync
-./scripts/install.sh    # registers as MCP server in Claude Code
 ```
-
-### Get Running in 3 Steps
-
-<p align="center">
-  <img src="docs/images/quickstart.svg" alt="Quick Start" width="700" />
-</p>
 
 ### Enable Global Auto-Routing
 
@@ -126,78 +109,24 @@ llm-router install
 
 This installs hooks + rules to `~/.claude/` so every Claude Code session auto-routes tasks to the optimal model.
 
-> **Start for free**: Google's Gemini API has a [free tier](https://aistudio.google.com/apikey) with 1M tokens/day — no credit card needed. [Groq](https://console.groq.com/keys) also offers a generous free tier with ultra-fast inference.
+> **Start for free**: Google's Gemini API has a [free tier](https://aistudio.google.com/apikey) with 1M tokens/day. [Groq](https://console.groq.com/keys) also offers a generous free tier with ultra-fast inference.
 
 ### What You Get
 
-- **24 MCP tools** — Smart routing, text, image, video, audio, streaming, setup, quality analytics, usage monitoring, cache management
-- **`/route` skill** — Smart task classification and routing in one command
-- **Smart classifier** — Auto-picks Claude Haiku/Sonnet/Opus based on complexity
-- **Prompt classification cache** — SHA-256 exact-match LRU cache (1000 entries, 1h TTL) for instant repeat classifications
-- **Auto-route hook** — Multi-layer `UserPromptSubmit` classifier: routes **every prompt** (including codebase questions) through Haiku/Ollama first; heuristic scoring (instant) → Ollama local LLM (free, ~1s) → cheap API (Gemini Flash/GPT-4o-mini, ~$0.0001) → auto fallback. Hooks self-update after `pip upgrade` — no reinstall needed.
-- **Streaming responses** — `llm_stream` tool for long-running tasks, shows output as it arrives
-- **Usage auto-refresh** — `PostToolUse` hook detects stale Claude subscription data (>15 min) and nudges for refresh
-- **Savings awareness** — Every 5th routed task, shows estimated Claude API costs and rate limit capacity saved
-- **Rate limit detection** — Catches 429/rate_limit errors with smart cooldowns (15s for rate limits vs 60s for hard failures)
-- **Key validation** — `llm_setup(action='test')` validates API keys with minimal LLM calls (~$0.0001 each)
-- **Claude subscription monitoring** — Live session/weekly usage from claude.ai
-- **Codex desktop integration** — Route tasks to local OpenAI Codex (free). Injected before paid externals for all eligible task types: CODE, ANALYZE, GENERATE, QUERY.
-- **LLM Orchestrator agent** — Autonomous multi-step task decomposition across models
+- **29 MCP tools** — smart routing, text/code, image/video/audio, streaming, orchestration, usage monitoring
+- **Auto-route hook** — intercepts every prompt before your top-tier model sees it; heuristic → Ollama → cheap API classifier chain, hooks self-update on `pip upgrade`
+- **Claude subscription mode** — routes entirely within your CC subscription; Codex (free) before paid externals; external only when quota exhausted
+- **Prompt classification cache** — SHA-256 LRU cache for instant repeat classifications
+- **Circuit breaker + health** — catches 429s, marks unhealthy providers, auto-recovers
+- **Quality logging** — records every routing decision; `llm_quality_report` shows accuracy, savings, downshift rate
 
 ---
 
 ## How It Works
 
-### Architecture
+### Auto-Route Hook — Every Prompt, Cheaper Model First
 
-<p align="center">
-  <img src="docs/images/architecture.svg" alt="Architecture" width="700" />
-</p>
-
-### Routing Decision Flow
-
-<p align="center">
-  <img src="docs/images/routing-flow.svg" alt="Routing Flow" width="600" />
-</p>
-
----
-
-## Benchmark-Driven Routing
-
-Model chains are ranked using weekly-refreshed data from four authoritative sources, so the router always sends your task to the current best model for that task type.
-
-### Current Top Models by Task
-
-| Task | 🥇 Premium | 🥈 Balanced | 🥉 Budget |
-|------|-----------|------------|----------|
-| 💻 Code | **DeepSeek-R1**, o3, Opus | **DeepSeek Chat**, GPT-4o, Sonnet | Flash, DeepSeek, Haiku |
-| 🔍 Analyze | **DeepSeek-R1**, GPT-4o, Sonnet | **DeepSeek-R1**, GPT-4o, Gemini Pro | Flash, DeepSeek, Haiku |
-| ❓ Query | **DeepSeek Chat**, GPT-4o, Gemini Pro | **DeepSeek Chat**, GPT-4o, Gemini Pro | Flash, DeepSeek, Haiku |
-| ✍️ Generate | **DeepSeek Chat**, GPT-4o, Gemini Pro | **DeepSeek Chat**, GPT-4o, Gemini Pro | Flash, DeepSeek, Haiku |
-| 🔎 Research | Perplexity Pro, Perplexity, GPT-4o | Perplexity Pro, Perplexity, GPT-4o | Perplexity, Flash, Haiku |
-
-> **Bold** = first model tried when Claude quota is high (> 85%) or in subscription mode.
-> **Full benchmark data, scoring weights, raw scores, and sources:** [docs/BENCHMARKS.md](docs/BENCHMARKS.md)
-> 🔄 Updated every Monday via GitHub Actions — distributed to all users on next `pip upgrade`
-
-### How rankings are computed
-
-```
-Arena Hard win-rate  ──┐
-Aider code pass rate ──┼── weighted by task type ──► quality score ──► quality-cost tier sort
-HuggingFace MMLU/MATH──┤                                                ↓
-LiteLLM pricing     ──┘                             within 5% quality band → cheapest model first
-```
-
-**Quality-cost sorting**: models within 5% quality of each other are grouped into a tier. Within that tier, the cheapest model sorts first. This means GPT-4o ($0.006/1K) leads over Sonnet ($0.009/1K) when their quality difference is under 5%, and DeepSeek Chat ($0.0007/1K) leads over everyone when it's within the top quality band.
-
----
-
-## Auto-Route Hook — Every Prompt, Cheaper Model First
-
-The `UserPromptSubmit` hook intercepts **all prompts** — not just explicit routing requests — and classifies them before your top-tier model sees them. Simple tasks go straight to Haiku or a local Ollama model; only genuinely complex work escalates.
-
-### What gets routed
+The `UserPromptSubmit` hook intercepts **all prompts** before your top-tier model sees them.
 
 | Prompt | Classified as | Model used |
 |--------|---------------|------------|
@@ -208,7 +137,7 @@ The `UserPromptSubmit` hook intercepts **all prompts** — not just explicit rou
 | `write a blog post about LLMs` | `generate/moderate` | Haiku / Gemini Flash |
 | `git status` (raw shell command) | *(skipped — terminal op)* | — |
 
-### Classification chain (stops at first success)
+Classification chain (stops at first success):
 
 ```
 1. Heuristic scoring    instant, free   → high-confidence patterns route immediately
@@ -217,99 +146,45 @@ The `UserPromptSubmit` hook intercepts **all prompts** — not just explicit rou
 4. Query catch-all      instant, free   → any remaining question → Haiku
 ```
 
-### Self-updating hooks
+Hook scripts are versioned and self-update — existing users get improvements automatically after `pip install --upgrade`.
 
-Hook scripts are versioned (`# llm-router-hook-version: N`). On every MCP server startup, if the bundled version in the installed package is newer than what's in `~/.claude/hooks/`, it's automatically overwritten. **Existing users get classification improvements automatically after `pip install --upgrade claude-code-llm-router`** — no need to re-run `llm-router install`.
+### Claude Code Subscription Mode
 
----
-
-## Claude Code Subscription Mode (Recommended)
-
-If you use Claude Code, you already pay for Haiku, Sonnet, and Opus. Enable subscription mode and the router routes **entirely within your subscription** — zero API calls to Anthropic:
+If you use Claude Code Pro/Max, you already pay for Haiku, Sonnet, and Opus. Enable subscription mode and the router routes **within your subscription first** — Codex (free via OpenAI subscription) before any paid API call, external only when quota is exhausted.
 
 ```bash
 # In .env
 LLM_ROUTER_CLAUDE_SUBSCRIPTION=true
 ```
 
-### Default Routing Strategy (No Pressure)
+#### Default Routing (No Pressure)
 
 | Complexity | Model | Cost |
 |-----------|-------|------|
 | simple | Claude Haiku 4.5 | free (subscription) |
 | moderate | Sonnet (passthrough) | free (you're already using it) |
 | complex | Claude Opus 4.6 | free (subscription) |
-| research | Perplexity Sonar Pro | ~$0.005/query (web-grounded) |
+| research | Perplexity Sonar Pro | ~$0.005/query |
 
-### Pressure-Based External Fallback (Three Independent Buckets)
-
-When Claude quota gets tight, external models activate tier by tier. Each threshold controls its own complexity tier — higher pressure cascades down:
+#### Pressure Cascade
 
 | Condition | simple | moderate | complex |
 |-----------|--------|----------|---------|
-| `session < 95%`, `sonnet < 95%` | Haiku (sub) | Sonnet (passthrough) | Opus (sub) |
-| `sonnet ≥ 95%` | Gemini Flash / Groq | GPT-4o / DeepSeek | Opus (sub) |
-| `weekly ≥ 95%` OR `session ≥ 95%` | Gemini Flash / Groq | GPT-4o / DeepSeek | GPT-4o / DeepSeek |
+| session < 95%, sonnet < 95% | Haiku (sub) | Sonnet (sub) | Opus (sub) |
+| sonnet ≥ 95% | Codex → external | Codex → external | Opus (sub) |
+| weekly ≥ 95% or session ≥ 95% | Codex → external | Codex → external | Codex → external |
 
-> **Cascade rule**: once a higher tier goes external, all lower tiers go external too. When weekly ≥ 95%, everything routes external — it makes no sense to put simple tasks on external while complex stays on subscription.
+Run `llm_check_usage` at session start to populate accurate pressure data. Hooks flag `⚠️ STALE` when usage data is >30 minutes old.
 
-Run `llm_check_usage` at session start to populate accurate pressure data. Routing hooks warn when usage data is >30 minutes old (stale quota → routing hints are flagged `⚠️ STALE`).
+#### External Fallback Chains (free-first)
 
----
+| Tier | Chain |
+|---|---|
+| BUDGET (simple) | Ollama → Codex/gpt-5.4 → Codex/o3 → Gemini Flash → Groq → GPT-4o-mini |
+| BALANCED (moderate) | Ollama → Codex/gpt-5.4 → Codex/o3 → GPT-4o → Gemini Pro → DeepSeek |
+| PREMIUM (complex) | Ollama → Codex/gpt-5.4 → Codex/o3 → o3 → Gemini Pro |
 
-## Smart Routing (Claude Code Models)
-
-Use Claude Code's own models (Haiku/Sonnet/Opus) **without extra API keys** via the smart classifier:
-
-```
-llm_classify("What is the capital of France?")
-→ [S] simple (99%) → haiku
-
-llm_classify("Write a REST API with auth and pagination")
-→ [M] moderate (98%) → sonnet
-
-llm_classify("Design a distributed CQRS architecture")
-→ [C] complex (85%) → opus
-```
-
-### Complexity-First Routing
-
-Complexity drives model selection — this is the real savings mechanism. You don't need opus for "what time is it?" and you don't want haiku for architecture design. Budget pressure is a late safety net, not the primary router.
-
-```bash
-# In .env
-QUALITY_MODE=balanced        # best | balanced | conserve
-MIN_MODEL=haiku              # floor: never route below this
-```
-
-| Claude Usage | Effect |
-|-------------|--------|
-| 0-85% | No downshift — complexity routing handles efficiency |
-| 85-95% | Downshift by 1 tier + suggest external fallback |
-| 95%+ | Downshift by 2 tiers + recommend external (Codex, OpenAI, Gemini) |
-
-Budget pressure comes from **real Claude subscription data** (session %, weekly %) fetched live from claude.ai. The router also factors in **time until session reset** — if you're at 90% but the session resets in 5 minutes, no downshift needed.
-
-### External Fallback
-
-When Claude quota is tight (85%+), the router ranks available external models:
-
-```
-llm_classify("Design auth architecture")
-# -> complex -> sonnet (downshifted from opus)
-#    pressure: [========..] 90%
-#    >> fallback: codex/gpt-5.4 (free, preserves Claude quota)
-```
-
-- **Codex (local)**: Free — uses your OpenAI desktop subscription
-- **OpenAI API**: GPT-4o, o3 (ranked by quality, filtered by budget)
-- **Gemini API**: gemini-2.5-pro, gemini-2.5-flash
-
-Per-provider budgets via `LLM_ROUTER_BUDGET_OPENAI=10.00`, `LLM_ROUTER_BUDGET_GEMINI=5.00`.
-
-### Claude Subscription Monitoring
-
-Live usage data from your claude.ai account — no guessing:
+Live subscription status:
 
 ```
 +----------------------------------------------------------+
@@ -323,17 +198,13 @@ Live usage data from your claude.ai account — no guessing:
 +----------------------------------------------------------+
 ```
 
-Fetched via Playwright from claude.ai's internal JSON API (same data the settings page uses). One `browser_evaluate` call, cached in memory for routing decisions.
-
 ---
 
 ## Providers
 
-### Text & Code LLMs
-
 | Provider | Models | Free Tier | Best For |
 |----------|--------|-----------|----------|
-| **🦙 Ollama** | Any local model | **Yes (free forever)** | Privacy, zero cost, offline use |
+| **🦙 Ollama** | Any local model | **Yes (free forever)** | Privacy, zero cost, offline |
 | **Google Gemini** | 2.5 Pro, 2.5 Flash | **Yes** (1M tokens/day) | Generation, long context |
 | **Groq** | Llama 3.3, Mixtral | **Yes** | Ultra-fast inference |
 | **OpenAI** | GPT-4o, GPT-4o-mini, o3 | No | Code, analysis, reasoning |
@@ -345,40 +216,15 @@ Fetched via Playwright from claude.ai's internal JSON API (same data the setting
 | **xAI** | Grok 3 | No | Real-time information |
 | **Cohere** | Command R+ | Yes (trial) | RAG, enterprise search |
 
-> 🦙 **Ollama** runs models locally — no API key, no cost, no data sent externally. [Full Ollama setup guide →](docs/PROVIDERS.md#ollama--local-models-free-private)
+Image, video, and audio providers (fal.ai, Runway, Stability AI, ElevenLabs, etc.) — see [docs/PROVIDERS.md](docs/PROVIDERS.md) for full setup guides.
 
-### Image Generation
-
-| Provider | Models | Best For |
-|----------|--------|----------|
-| **Google Gemini** | Imagen 3 | High quality, integrated with text models |
-| **fal.ai** | Flux Pro, Flux Dev | Quality/cost ratio, fast generation |
-| **OpenAI** | DALL-E 3, DALL-E 2 | Prompt adherence, text in images |
-| **Stability AI** | Stable Diffusion 3 | Fine control, open weights |
-
-### Video Generation
-
-| Provider | Models | Best For |
-|----------|--------|----------|
-| **Google Gemini** | Veo 2 | Integrated with Gemini ecosystem |
-| **Runway** | Gen-3 Alpha | Professional quality, motion control |
-| **fal.ai** | Kling, minimax | Value, fast generation |
-| **Replicate** | Various | Open-source video models |
-
-### Audio & Voice
-
-| Provider | Models | Best For |
-|----------|--------|----------|
-| **ElevenLabs** | Multilingual v2 | Voice cloning, highest quality |
-| **OpenAI** | TTS-1, TTS-1-HD | Cost-effective text-to-speech |
-
-> **20+ providers and growing.** See [docs/PROVIDERS.md](docs/PROVIDERS.md) for full setup guides with API key links.
+> 🦙 **Ollama** runs models locally — no API key, no cost, no data sent externally. [Setup guide →](docs/PROVIDERS.md#ollama--local-models-free-private)
 
 ---
 
 ## MCP Tools
 
-Once installed, Claude Code gets these 25 tools:
+Once installed, Claude Code gets these 29 tools:
 
 | Tool | What It Does |
 |------|-------------|
@@ -386,13 +232,14 @@ Once installed, Claude Code gets these 25 tools:
 | `llm_classify` | Classify complexity + recommend model with time-aware budget pressure |
 | `llm_route` | Auto-classify, then route to the best external LLM |
 | `llm_track_usage` | Report Claude Code token usage for budget tracking |
+| `llm_stream` | Stream LLM responses for long-running tasks |
 | **Text & Code** | |
 | `llm_query` | General questions — auto-routed to the best text LLM |
 | `llm_research` | Search-augmented answers via Perplexity |
 | `llm_generate` | Creative content — writing, summaries, brainstorming |
 | `llm_analyze` | Deep reasoning — analysis, debugging, problem decomposition |
 | `llm_code` | Coding tasks — generation, refactoring, algorithms |
-| `llm_edit` | Route code-edit *reasoning* to a cheap model → returns exact `{file, old_string, new_string}` pairs for Claude to apply |
+| `llm_edit` | Route code-edit reasoning to a cheap model → returns exact `{file, old_string, new_string}` pairs |
 | **Media** | |
 | `llm_image` | Image generation — Gemini Imagen, DALL-E, Flux, or SD |
 | `llm_video` | Video generation — Gemini Veo, Runway, Kling, etc. |
@@ -400,143 +247,86 @@ Once installed, Claude Code gets these 25 tools:
 | **Orchestration** | |
 | `llm_orchestrate` | Multi-step pipelines across multiple models |
 | `llm_pipeline_templates` | List available orchestration templates |
-| **Cache** | |
-| `llm_cache_stats` | View cache hit rate, entries, memory estimate, evictions |
-| `llm_cache_clear` | Clear the classification cache |
-| **Streaming** | |
-| `llm_stream` | Stream LLM responses for long-running tasks — output as it arrives |
 | **Monitoring & Setup** | |
 | `llm_check_usage` | Check live Claude subscription usage (session %, weekly %) |
 | `llm_update_usage` | Feed live usage data from claude.ai into the router |
+| `llm_refresh_claude_usage` | Force-refresh Claude subscription data via OAuth |
 | `llm_codex` | Route tasks to local Codex desktop agent (free, uses OpenAI sub) |
-| `llm_setup` | Discover API keys, add providers, get setup guides, validate keys, install global hooks |
+| `llm_setup` | Discover API keys, add providers, validate keys, install global hooks |
+| `llm_rate` | Rate last response (👍/👎) — stored in `routing_decisions` for quality tracking |
 | `llm_quality_report` | Routing accuracy, classifier stats, savings metrics, downshift rate |
 | `llm_set_profile` | Switch routing profile (budget / balanced / premium) |
 | `llm_usage` | Unified dashboard — Claude sub, Codex, APIs, savings in one view |
 | `llm_health` | Check provider availability and circuit breaker status |
 | `llm_providers` | List all supported and configured providers |
+| `llm_cache_stats` | View cache hit rate, entries, memory estimate, evictions |
+| `llm_cache_clear` | Clear the classification cache |
 | **Session Memory** | |
 | `llm_save_session` | Summarize + persist current session for cross-session context injection |
 
-> **Context injection**: text tools (`llm_query`, `llm_research`, `llm_generate`, `llm_analyze`, `llm_code`) automatically prepend recent conversation history and previous session summaries to every external LLM call — so GPT-4o, Gemini, and Perplexity receive the same context you have. Pass `context="..."` to add caller-supplied context on top. Controlled by `LLM_ROUTER_CONTEXT_ENABLED` (default: on).
+> **Context injection**: text tools (`llm_query`, `llm_research`, `llm_generate`, `llm_analyze`, `llm_code`) automatically prepend recent conversation history to every external call — GPT-4o, Gemini, and Perplexity receive the same context you have. Controlled by `LLM_ROUTER_CONTEXT_ENABLED` (default: on).
 
 ---
 
 ## Routing Profiles
 
-<p align="center">
-  <img src="docs/images/profiles.svg" alt="Routing Profiles" width="700" />
-</p>
+Three built-in profiles map to task complexity. Switch anytime:
 
-Three built-in profiles map to task complexity. Model order is pressure-aware — the router
-dynamically reorders chains based on live Claude subscription usage.
-
-| | Budget (simple) | Balanced (medium) | Premium (complex) |
-|--|--------|----------|---------|
-| **Text** | Ollama → **Haiku** → cheap | **Sonnet** → DeepSeek → GPT-4o | **Opus** → Sonnet → o3 |
-| **Research** | Perplexity Sonar | Perplexity Sonar Pro | Perplexity Sonar Pro |
-| **Code** | Ollama → **Haiku** → DeepSeek | **Sonnet** → DeepSeek → GPT-4o | **Opus** → Sonnet → DeepSeek-R1 → o3 |
-| **Image** | Flux Dev, Imagen Fast | Flux Pro, Imagen 3, DALL-E 3 | Imagen 3, DALL-E 3 |
-| **Video** | minimax, Veo 2 | Kling, Veo 2, Runway Turbo | Veo 2, Runway Gen-3 |
-| **Audio** | OpenAI TTS | ElevenLabs | ElevenLabs |
-
-### Quota-aware chain reordering
-
-Claude Pro/Max tokens are treated as free — the router uses them first. As quota is consumed,
-chains automatically reorder to preserve remaining Claude budget:
-
-| Claude usage | Chain order |
-|---|---|
-| **0–84%** | Claude first (free under subscription) |
-| **85–98%** | DeepSeek/Codex → cheap externals → Claude last |
-| **≥ 99% (hard cap)** | DeepSeek → Codex → cheap → paid — **zero Claude** |
-| **Research (any)** | Perplexity always first (web-grounded) |
-
-### Claude Code subscription mode
-
-If you use Claude Code (Pro/Max), set `LLM_ROUTER_CLAUDE_SUBSCRIPTION=true` in `.env`. The router will **never route to Anthropic via API** — you're already on Claude, so API routing would require a separate key and add duplicate billing. Instead, every task routes to the best non-Claude alternative:
-
-```bash
-# In .env
-LLM_ROUTER_CLAUDE_SUBSCRIPTION=true   # no ANTHROPIC_API_KEY needed
-```
-
-At normal quota (< 85%), chains lead with the highest-quality available model. At high quota (> 85%), DeepSeek takes over — quality 1.0 benchmark score at ~1/8th the cost of GPT-4o:
-
-| | Low quota (< 85%) | High quota (> 85%) |
-|--|---|---|
-| **BUDGET/CODE** | DeepSeek Chat | DeepSeek Chat |
-| **BALANCED/CODE** | DeepSeek Chat | DeepSeek Chat |
-| **BALANCED/ANALYZE** | DeepSeek Reasoner | DeepSeek Reasoner |
-| **PREMIUM/CODE** | o3 | DeepSeek Reasoner |
-| **PREMIUM/ANALYZE** | DeepSeek Reasoner | DeepSeek Reasoner |
-
-Switch profile anytime:
 ```
 llm_set_profile("budget")    # Development, drafts, exploration
 llm_set_profile("balanced")  # Production work, client deliverables
 llm_set_profile("premium")   # Critical tasks, maximum quality
 ```
 
+| | Budget (simple) | Balanced (moderate) | Premium (complex) |
+|--|--------|----------|---------|
+| **Text** | Ollama → Haiku → Gemini Flash | Sonnet → GPT-4o → DeepSeek | Opus → Sonnet → o3 |
+| **Code** | Ollama → Codex → DeepSeek → Haiku | Codex → Sonnet → GPT-4o | Codex → Opus → o3 |
+| **Research** | Perplexity Sonar | Perplexity Sonar Pro | Perplexity Sonar Pro |
+| **Image** | Flux Dev, Imagen Fast | Flux Pro, Imagen 3, DALL-E 3 | Imagen 3, DALL-E 3 |
+| **Video** | minimax, Veo 2 | Kling, Veo 2, Runway Turbo | Veo 2, Runway Gen-3 |
+| **Audio** | OpenAI TTS | ElevenLabs | ElevenLabs |
+
+Model order is pressure-aware — as Claude quota is consumed, chains reorder to preserve remaining budget. See [BENCHMARKS.md](docs/BENCHMARKS.md) for how model quality scores drive rankings.
+
 ---
 
 ## Budget Control
-
-Set a monthly budget to prevent overspending:
 
 ```bash
 # In .env
 LLM_ROUTER_MONTHLY_BUDGET=50   # USD, 0 = unlimited
 ```
 
-The router:
-- **Tracks real-time spend** across all providers in SQLite
-- **Blocks requests** when the monthly budget is reached
-- **Shows budget status** in `llm_usage`
+The router tracks real-time spend across all providers in SQLite and blocks requests when the monthly budget is reached.
 
 ```
 llm_usage("month")
-
-## Usage Summary (month)
-Calls: 142
-Tokens: 240,000 in + 80,000 out = 320,000 total
-Cost: $3.4200
-Avg latency: 1200ms
-
-### Budget Status
-Monthly budget: $50.00
-Spent this month: $3.4200 (6.8%)
-Remaining: $46.5800
+→ Calls: 142 | Tokens: 320,000 | Cost: $3.42 | Budget: 6.8% of $50
 ```
+
+Per-provider budgets: `LLM_ROUTER_BUDGET_OPENAI=10.00`, `LLM_ROUTER_BUDGET_GEMINI=5.00`.
 
 ---
 
 ## Multi-Step Orchestration
 
-Chain tasks across different models in a pipeline:
-
-<p align="center">
-  <img src="docs/images/orchestration.svg" alt="Orchestration Pipeline" width="600" />
-</p>
+Chain tasks across models in a pipeline:
 
 ```
 llm_orchestrate("Research AI trends and write a report", template="research_report")
 ```
 
-Built-in templates:
-
-| Template | Steps | Pipeline |
-|----------|-------|----------|
-| `research_report` | 3 | Research → Analyze → Write |
-| `competitive_analysis` | 4 | Multi-source research → SWOT → Report |
-| `content_pipeline` | 4 | Research → Draft → Review → Polish |
-| `code_review_fix` | 3 | Review → Fix → Test |
+| Template | Pipeline |
+|----------|----------|
+| `research_report` | Research → Analyze → Write |
+| `competitive_analysis` | Multi-source research → SWOT → Report |
+| `content_pipeline` | Research → Draft → Review → Polish |
+| `code_review_fix` | Review → Fix → Test |
 
 ---
 
 ## Configuration
-
-### Environment Variables
 
 ```bash
 # Required: at least one provider
@@ -544,7 +334,7 @@ GEMINI_API_KEY=AIza...         # Free tier! https://aistudio.google.com/apikey
 OPENAI_API_KEY=sk-proj-...
 PERPLEXITY_API_KEY=pplx-...
 
-# Optional: more providers (add as many as you want)
+# Optional: more providers
 ANTHROPIC_API_KEY=sk-ant-...
 DEEPSEEK_API_KEY=...
 GROQ_API_KEY=gsk_...
@@ -552,155 +342,58 @@ FAL_KEY=...
 ELEVENLABS_API_KEY=...
 
 # Router config
-LLM_ROUTER_PROFILE=balanced        # budget | balanced | premium
-LLM_ROUTER_MONTHLY_BUDGET=0        # USD, 0 = unlimited
-LLM_ROUTER_CLAUDE_SUBSCRIPTION=false  # true = you're a Claude Code Pro/Max user;
-                                       # anthropic/* excluded, router uses non-Claude models
+LLM_ROUTER_PROFILE=balanced               # budget | balanced | premium
+LLM_ROUTER_MONTHLY_BUDGET=0              # USD, 0 = unlimited
+LLM_ROUTER_CLAUDE_SUBSCRIPTION=false     # true = Claude Code Pro/Max user
+
+# Ollama (two independent roles — classifier and task answerer)
+LLM_ROUTER_OLLAMA_URL=http://localhost:11434    # hook classifier
+LLM_ROUTER_OLLAMA_MODEL=qwen3.5:latest
+OLLAMA_BASE_URL=http://localhost:11434          # router answerer
+OLLAMA_BUDGET_MODELS=llama3.2,qwen2.5-coder:7b
 
 # Smart routing (Claude Code model selection)
-DAILY_TOKEN_BUDGET=0               # tokens/day, 0 = unlimited
-QUALITY_MODE=balanced              # best | balanced | conserve
-MIN_MODEL=haiku                    # floor: haiku | sonnet | opus
+QUALITY_MODE=balanced          # best | balanced | conserve
+MIN_MODEL=haiku                # floor: haiku | sonnet | opus
 ```
 
-See [.env.example](.env.example) for the full list of supported providers.
+See [.env.example](.env.example) for the full list.
 
-### Claude Code Integration
-
-After running `./scripts/install.sh`, your `~/.claude.json` will include:
-
-```json
-{
-  "mcpServers": {
-    "llm-router": {
-      "command": "uv",
-      "args": ["run", "--directory", "/path/to/llm-router", "llm-router"]
-    }
-  }
-}
-```
+> **Ollama note**: `LLM_ROUTER_OLLAMA_URL` is for the hook classifier (classifying complexity); `OLLAMA_BASE_URL` is for the router answerer (actually answering tasks). Configuring one does not enable the other. See [docs/PROVIDERS.md](docs/PROVIDERS.md) for the full local-first setup.
 
 ---
 
 ## Development
 
 ```bash
-# Install with dev dependencies
 uv sync --extra dev
-
-# Run tests (skip integration tests)
 uv run pytest tests/ -q --ignore=tests/test_integration.py
-
-# Run integration tests (requires real API keys)
-uv run pytest tests/test_integration.py -v
-
-# Lint (includes test files)
 uv run ruff check src/ tests/
-
-# Install global hooks
-llm-router install
+llm-router install   # deploy hooks to ~/.claude/
 ```
 
-### Architecture (v1.2)
-
-| Module | Responsibility |
-|--------|---------------|
-| `server.py` | Thin MCP entrypoint (~110 lines), calls `register(mcp)` on each module |
-| `state.py` | Shared mutable state (`_active_profile`, `_last_usage`) with getter/setter accessors |
-| `tools/routing.py` | `llm_classify`, `llm_route`, `llm_track_usage`, `llm_stream` |
-| `tools/text.py` | `llm_query`, `llm_research`, `llm_generate`, `llm_analyze`, `llm_code`, `llm_edit` |
-| `tools/media.py` | `llm_image`, `llm_video`, `llm_audio` |
-| `tools/pipeline.py` | `llm_orchestrate`, `llm_pipeline_templates` |
-| `tools/admin.py` | `llm_set_profile`, `llm_usage`, `llm_health`, `llm_providers` |
-| `tools/subscription.py` | `llm_check_usage`, `llm_update_usage`, `llm_refresh_claude_usage` |
-| `tools/codex.py` | `llm_codex` |
-| `tools/setup.py` | `llm_setup`, `llm_quality_report`, `llm_save_session` |
-| `cli.py` | `llm-router install [--check\|--force\|uninstall]` CLI dispatcher |
-| `router.py` | Core routing: fallback chains, Codex injection, pressure-aware ordering |
-| `profiles.py` | Model chains per profile/task type |
-| `codex_agent.py` | Codex binary detection, `is_codex_plugin_available()`, `run_codex()` |
+See [CLAUDE.md](CLAUDE.md) for architecture, module layout, and contribution guidelines.
 
 ---
 
 ## Roadmap
 
-See [ROADMAP.md](ROADMAP.md) for the full roadmap with design notes and competitive context.
-
-### Completed
-
-**v1.0.0 (2026-03-31)** — Foundation: 20+ providers, 24 MCP tools, 6 hooks, complexity routing, pressure cascade, Codex integration, caching, quality logging, subscription enforcement, unified pressure path, staleness warnings, health-aware classifier.
-
-**v1.1.0 (2026-04-01)** — Subscription-aware routing:
-- [x] **Codex-first routing** — Codex (free via OpenAI sub) injected before paid externals for CODE tasks
-- [x] **Prepaid capacity threshold** — simple tasks no longer go external at 85% session; stays on subscription until Sonnet pool is exhausted (≥ 95%)
-- [x] **`llm_rate` feedback tool** — per-response thumbs up/down stored in `routing_decisions`
-- [x] **Daily spend alerts** — warning when daily spend crosses configurable threshold
-- [x] **Session delta display** — hooks show CC subscription usage delta at session end
-
-**v1.2.0 (2026-04-01)** — Foundation hardening:
-- [x] **Codex-first for all task types** — ANALYZE, GENERATE, QUERY also prefer free Codex over paid externals
-- [x] **Server decomposition** — 2,300-line `server.py` split into 8 focused modules (`tools/`, `state.py`)
-- [x] **`llm-router install` CLI** — unified `llm-router install [--check] [--force]` replaces `llm-router-install-hooks`
-- [x] **MCP registry manifest** — `mcp-registry.json` for modelcontextprotocol.io submission
-
-### Planned
+See [CHANGELOG.md](CHANGELOG.md) for what's been shipped. Coming next:
 
 | Version | Theme | Headline features |
 |---|---|---|
 | v1.3 | Observability | Web dashboard at `localhost:7337`, OTEL/Prometheus metrics, prompt caching |
-| v1.4 | Routing Intelligence | Task-aware model preferences, reasoning model tier, learned routing from history |
+| v1.4 | Routing Intelligence | Task-aware model preferences, reasoning model tier, learned routing |
 | v1.5 | Agentic & Team | Agent-tree budget tracking, multi-user profiles, YAML pipelines |
-| v2.0 | Learning Router | Self-improving classifier trained on your own routing history (local, Ollama) |
+| v2.0 | Learning Router | Self-improving classifier trained on your own routing history |
+
+See [ROADMAP.md](ROADMAP.md) for design notes and competitive context.
 
 ---
 
 ## Contributing
 
-We welcome contributions! See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
-
-Key areas where help is needed:
-- Adding new provider integrations
-- Improving routing intelligence
-- Testing across different MCP clients
-- Documentation and examples
-
----
-
-## Ollama: Classifier vs Answerer
-
-Ollama plays **two independent roles** in LLM Router. Configuring one does not enable the other.
-
-### Role 1 — Local Classifier (hooks, free)
-Used by `auto-route.py` to classify prompt complexity locally before calling cloud APIs.
-
-```bash
-LLM_ROUTER_OLLAMA_URL=http://localhost:11434   # hook classifier URL
-LLM_ROUTER_OLLAMA_MODEL=qwen3.5:latest         # model used for classification
-```
-
-This runs in the Claude Code hooks pipeline. It classifies whether a prompt is simple/moderate/complex using a local LLM, saving ~$0.0001 per classification vs Gemini Flash.
-
-### Role 2 — Local Task Answerer (router, for actual task responses)
-Used by the MCP router to **answer tasks** with a local model instead of calling cloud providers.
-
-```bash
-OLLAMA_BASE_URL=http://localhost:11434          # router answerer URL
-OLLAMA_BUDGET_MODELS=llama3.2,qwen2.5-coder:7b # comma-separated models
-```
-
-When configured, Ollama models are prepended to the routing chain in two scenarios:
-1. **BUDGET profile** (simple tasks) — always tried first, for free
-2. **Any profile at ≥ 85% Claude quota** — injected to spare subscription tokens
-
-### Full local-first setup (both roles)
-```bash
-LLM_ROUTER_OLLAMA_URL=http://localhost:11434
-LLM_ROUTER_OLLAMA_MODEL=qwen3.5:latest
-OLLAMA_BASE_URL=http://localhost:11434
-OLLAMA_BUDGET_MODELS=qwen3.5:latest,llama3.2
-```
-
-With this configuration, simple tasks never touch the cloud: classification is local, answering is local.
+See [CONTRIBUTING.md](CONTRIBUTING.md). Key areas: new provider integrations, routing intelligence, MCP client testing, documentation.
 
 ---
 
