@@ -72,10 +72,11 @@ class TestDemo_SubscriptionRouting:
         monkeypatch.setenv("GEMINI_API_KEY", "test-key")
         monkeypatch.setenv("OPENAI_API_KEY", "test-key")
 
-        import llm_router.server as srv
-        monkeypatch.setattr(srv, "_last_usage", _make_usage(0.0))
+        import llm_router.state as _state
+        from llm_router.tools.text import _subscription_hint
+        monkeypatch.setattr(_state, "_last_usage", _make_usage(0.0))
 
-        hint = srv._subscription_hint("query", "simple", "what is 2+2")
+        hint = _subscription_hint("query", "simple", "what is 2+2")
 
         assert hint is not None, "Expected CC-mode hint when subscription has headroom"
         assert "CC-MODE" in hint
@@ -88,10 +89,11 @@ class TestDemo_SubscriptionRouting:
         monkeypatch.setenv("GEMINI_API_KEY", "test-key")
         monkeypatch.setenv("OPENAI_API_KEY", "test-key")
 
-        import llm_router.server as srv
-        monkeypatch.setattr(srv, "_last_usage", _make_usage(0.0))
+        import llm_router.state as _state
+        from llm_router.tools.text import _subscription_hint
+        monkeypatch.setattr(_state, "_last_usage", _make_usage(0.0))
 
-        hint = srv._subscription_hint("query", "moderate", "explain this code")
+        hint = _subscription_hint("query", "moderate", "explain this code")
 
         assert hint is None, f"Moderate under no pressure should passthrough, got: {hint}"
         print("\n[Demo 1b] Moderate under no pressure -> passthrough (no hint)")
@@ -102,10 +104,11 @@ class TestDemo_SubscriptionRouting:
         monkeypatch.setenv("GEMINI_API_KEY", "test-key")
         monkeypatch.setenv("OPENAI_API_KEY", "test-key")
 
-        import llm_router.server as srv
-        monkeypatch.setattr(srv, "_last_usage", _make_usage(0.0))
+        import llm_router.state as _state
+        from llm_router.tools.text import _subscription_hint
+        monkeypatch.setattr(_state, "_last_usage", _make_usage(0.0))
 
-        hint = srv._subscription_hint("query", "complex", "design a distributed system")
+        hint = _subscription_hint("query", "complex", "design a distributed system")
 
         assert hint is not None
         assert "CC-MODE" in hint
@@ -126,10 +129,11 @@ class TestDemo_PressureCascade:
         monkeypatch.setenv("GEMINI_API_KEY", "test-key")
         monkeypatch.setenv("OPENAI_API_KEY", "test-key")
 
-        import llm_router.server as srv
-        monkeypatch.setattr(srv, "_last_usage", _make_usage(session_pct=0.90))
+        import llm_router.state as _state
+        from llm_router.tools.text import _subscription_hint
+        monkeypatch.setattr(_state, "_last_usage", _make_usage(session_pct=0.90))
 
-        hint = srv._subscription_hint("query", "simple", "what is 2+2")
+        hint = _subscription_hint("query", "simple", "what is 2+2")
         assert hint is None, (
             f"Simple at 90% session pressure should go external (no CC hint), got: {hint}"
         )
@@ -141,8 +145,8 @@ class TestDemo_PressureCascade:
         monkeypatch.setenv("LLM_ROUTER_CLAUDE_SUBSCRIPTION", "true")
         monkeypatch.setenv("OLLAMA_BASE_URL", "")
 
-        import llm_router.server as srv
-        monkeypatch.setattr(srv, "_last_usage", _make_usage(
+        import llm_router.state as _state
+        monkeypatch.setattr(_state, "_last_usage", _make_usage(
             session_pct=0.97, weekly_pct=0.97, sonnet_pct=0.97
         ))
 

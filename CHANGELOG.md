@@ -1,5 +1,17 @@
 # Changelog
 
+## v1.2.0 — Foundation Hardening (2026-04-02)
+
+### Changed
+
+- **`server.py` decomposed into `tools/` modules** — the 2,328-line monolith is now a 110-line thin entrypoint. All 24 MCP tools live in 8 focused modules: `routing.py`, `text.py`, `media.py`, `pipeline.py`, `admin.py`, `subscription.py`, `codex.py`, `setup.py`. Each module exports `register(mcp)`. Backward-compatible: all imports from `llm_router.server` still work.
+- **`state.py` module** — shared mutable state (`_last_usage`, `_active_profile`) extracted from `server.py` into a dedicated module with `get_*`/`set_*` accessors, eliminating circular import risk across tool modules.
+
+### Added
+
+- **`llm-router install` subcommand** — the main `llm-router` CLI now accepts `install`, `install --check`, `install --force`, and `uninstall` subcommands. Running `llm-router` without arguments still starts the MCP server (unchanged behavior). The `--check` flag previews what would be installed; `--force` updates paths even if already registered.
+- **`mcp-registry.json`** — registry manifest at repo root for `registry.modelcontextprotocol.io` submission, listing all 18 primary tools, 1 resource, and 2 hooks with descriptions.
+
 ## v1.1.0 — Subscription-Aware Routing + Observability (2026-04-01)
 
 ### Added
