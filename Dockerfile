@@ -2,12 +2,9 @@ FROM python:3.12-slim
 
 WORKDIR /app
 
-RUN pip install --no-cache-dir claude-code-llm-router
+# Install uv for fast package management (uvx pattern)
+RUN pip install --no-cache-dir uv
 
-# Bind to all interfaces so Glama / Docker can reach the SSE endpoint
-ENV FASTMCP_HOST=0.0.0.0
-ENV FASTMCP_PORT=8000
-
-EXPOSE 8000
-
-CMD ["llm-router-sse"]
+# uvx installs claude-code-llm-router into an isolated venv and runs it.
+# stdio transport is used for MCP proxy inspection (Glama, Claude Code, etc.)
+CMD ["uvx", "claude-code-llm-router"]
