@@ -96,7 +96,7 @@ async def _get_stats() -> dict:
             c = await db.execute(
                 "SELECT timestamp, task_type, complexity, final_model, "
                 "cost_usd, latency_ms, success "
-                "FROM routing_decisions ORDER BY timestamp DESC LIMIT 10"
+                "FROM routing_decisions ORDER BY timestamp DESC LIMIT 20"
             )
             stats["recent"] = [
                 {
@@ -146,1248 +146,853 @@ async def _get_stats() -> dict:
 
 
 def _html() -> str:
-    """Return the self-contained dashboard HTML.
+    """Return the Stitch-designed dashboard HTML.
 
-    All database values are passed as JSON and rendered via textContent /
-    Chart.js data arrays — never injected via innerHTML — so there is no
-    XSS surface even if the SQLite database is tampered with.
+    Uses Tailwind CDN with the exact Stitch color token system (Liquid Glass).
+    DB values rendered via esc() before being placed into table row markup —
+    all string values are HTML-escaped before insertion, so there is no XSS
+    surface even if the SQLite database is tampered with.
 
-    Design: "Liquid Glass" dark theme inspired by Google Stitch designs.
-    Primary: #8B5CF6 (purple), Secondary: #22D3EE (cyan), BG: #0F172A.
-    Fonts: Inter (body), Space Grotesk (labels) — loaded from Google Fonts CDN.
+    Design: "The Ethereal Engine" Liquid Glass theme from Google Stitch.
+    Primary: #d0bcff (violet), Secondary: #5de6ff (cyan), BG: #0b1326.
+    Fonts: Inter (body/headlines), Space Grotesk (labels), JetBrains Mono (code).
+    Icons: Material Symbols Outlined.
     """
     return r"""<!DOCTYPE html>
-<html lang="en">
+<html class="dark" lang="en">
 <head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta charset="utf-8"/>
+<meta content="width=device-width, initial-scale=1.0" name="viewport"/>
 <title>LLM Router</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Space+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&family=Space+Grotesk:wght@300;500;700&family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&display=swap" rel="stylesheet"/>
+<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
+<script id="tailwind-config">
+tailwind.config = {
+  darkMode: "class",
+  theme: {
+    extend: {
+      colors: {
+        "on-surface": "#dae2fd",
+        "primary": "#d0bcff",
+        "primary-container": "#a078ff",
+        "secondary": "#5de6ff",
+        "tertiary": "#ffb869",
+        "error": "#ffb4ab",
+        "outline": "#958ea0",
+        "outline-variant": "#494454",
+        "surface": "#0b1326",
+        "surface-dim": "#0b1326",
+        "surface-container-lowest": "#060e20",
+        "surface-container-low": "#131b2e",
+        "surface-container": "#171f33",
+        "surface-container-high": "#222a3d",
+        "surface-container-highest": "#2d3449",
+        "surface-variant": "#2d3449",
+        "on-surface-variant": "#cbc3d7",
+        "on-primary": "#3c0091",
+        "on-secondary": "#00363e",
+        "on-error": "#690005",
+        "inverse-surface": "#dae2fd",
+        "background": "#0b1326",
+        "on-background": "#dae2fd",
+        "tertiary-container": "#ca801e",
+        "error-container": "#93000a",
+      },
+      borderRadius: {
+        "DEFAULT": "0.125rem", "lg": "0.25rem", "xl": "0.5rem", "full": "0.75rem",
+      },
+      fontFamily: {
+        "headline": ["Inter"], "body": ["Inter"],
+        "label": ["Space Grotesk"], "mono": ["JetBrains Mono"],
+      },
+    },
+  },
+}
+</script>
 <style>
-:root {
-  --bg:        #0F172A;
-  --surface:   #1E293B;
-  --surface2:  #162032;
-  --border:    rgba(139,92,246,0.18);
-  --border2:   rgba(255,255,255,0.06);
-  --purple:    #8B5CF6;
-  --purple-lo: rgba(139,92,246,0.12);
-  --purple-md: rgba(139,92,246,0.25);
-  --cyan:      #22D3EE;
-  --cyan-lo:   rgba(34,211,238,0.10);
-  --amber:     #F59E0B;
-  --green:     #10B981;
-  --red:       #EF4444;
-  --text:      #E2E8F0;
-  --text-muted:#94A3B8;
-  --text-dim:  #475569;
-  --sidebar-w: 220px;
-  --radius:    14px;
-  --radius-sm: 8px;
-}
-*,*::before,*::after { box-sizing: border-box; margin: 0; padding: 0; }
-
-body {
-  font-family: 'Inter', system-ui, sans-serif;
-  background: var(--bg);
-  color: var(--text);
-  min-height: 100vh;
-  display: flex;
-  overflow-x: hidden;
-}
-
-/* ── Sidebar ────────────────────────────────── */
-.sidebar {
-  width: var(--sidebar-w);
-  min-height: 100vh;
-  background: linear-gradient(180deg, #131f35 0%, #0d1625 100%);
-  border-right: 1px solid var(--border2);
-  display: flex;
-  flex-direction: column;
-  padding: 1.5rem 0;
-  position: fixed;
-  top: 0; left: 0; bottom: 0;
-  z-index: 100;
-  transform: translateX(0);
-  transition: transform 0.3s cubic-bezier(0.4,0,0.2,1);
-}
-.sidebar-logo {
-  display: flex; align-items: center; gap: 0.6rem;
-  padding: 0 1.25rem 1.75rem;
-  border-bottom: 1px solid var(--border2);
-  margin-bottom: 1rem;
-}
-.sidebar-logo .logo-icon {
-  width: 34px; height: 34px;
-  background: linear-gradient(135deg, var(--purple) 0%, #6D28D9 100%);
-  border-radius: 9px;
-  display: flex; align-items: center; justify-content: center;
-  font-size: 1.1rem;
-  box-shadow: 0 0 16px rgba(139,92,246,0.4);
-  animation: logoGlow 3s ease-in-out infinite;
-}
-@keyframes logoGlow {
-  0%,100% { box-shadow: 0 0 16px rgba(139,92,246,0.4); }
-  50%      { box-shadow: 0 0 28px rgba(139,92,246,0.7); }
-}
-.sidebar-logo .logo-text {
-  font-family: 'Space Grotesk', sans-serif;
-  font-weight: 700; font-size: 1rem;
-  background: linear-gradient(90deg, var(--text) 0%, var(--purple) 100%);
-  -webkit-background-clip: text; -webkit-text-fill-color: transparent;
-}
-.sidebar-logo .logo-ver {
-  font-size: 0.6rem; color: var(--text-dim);
-  font-family: 'Space Grotesk', sans-serif;
-  margin-top: 1px;
-}
-
-.nav-section-label {
-  font-family: 'Space Grotesk', sans-serif;
-  font-size: 0.65rem; font-weight: 600;
-  letter-spacing: 0.1em;
-  color: var(--text-dim);
-  text-transform: uppercase;
-  padding: 0.6rem 1.25rem 0.3rem;
-}
-
-.nav-item {
-  display: flex; align-items: center; gap: 0.65rem;
-  padding: 0.6rem 1.25rem;
-  font-size: 0.85rem; font-weight: 500;
-  color: var(--text-muted);
-  cursor: pointer;
-  border-radius: 0;
-  border-left: 2px solid transparent;
-  transition: all 0.2s ease;
-  user-select: none;
-  position: relative;
-  overflow: hidden;
-}
-.nav-item::before {
-  content: '';
-  position: absolute; inset: 0;
-  background: var(--purple-lo);
-  transform: translateX(-100%);
-  transition: transform 0.25s ease;
-}
-.nav-item:hover::before { transform: translateX(0); }
-.nav-item:hover { color: var(--text); border-left-color: var(--purple); }
-.nav-item.active {
-  color: var(--purple);
-  border-left-color: var(--purple);
-  background: var(--purple-lo);
-}
-.nav-item .nav-icon { font-size: 0.9rem; width: 18px; text-align: center; flex-shrink: 0; }
-
-.sidebar-footer {
-  margin-top: auto;
-  padding: 1rem 1.25rem 0;
-  border-top: 1px solid var(--border2);
-}
-.status-dot {
-  display: inline-block; width: 7px; height: 7px;
-  border-radius: 50%; background: var(--green);
-  box-shadow: 0 0 8px var(--green);
-  animation: pulse-dot 2s ease-in-out infinite;
-  margin-right: 0.4rem;
-}
-@keyframes pulse-dot {
-  0%,100% { opacity: 1; transform: scale(1); }
-  50%      { opacity: 0.6; transform: scale(0.85); }
-}
-.sidebar-status { font-size: 0.72rem; color: var(--text-muted); }
-
-/* ── Main area ──────────────────────────────── */
-.main {
-  margin-left: var(--sidebar-w);
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  min-height: 100vh;
-}
-
-/* ── Top bar ────────────────────────────────── */
-.topbar {
-  display: flex; align-items: center; gap: 1rem;
-  padding: 1rem 2rem;
-  background: rgba(30,41,59,0.6);
-  backdrop-filter: blur(12px);
-  border-bottom: 1px solid var(--border2);
-  position: sticky; top: 0; z-index: 50;
-}
-.topbar-title {
-  font-family: 'Space Grotesk', sans-serif;
-  font-size: 1rem; font-weight: 600;
-  color: var(--text);
-}
-.topbar-badge {
-  font-family: 'Space Grotesk', sans-serif;
-  font-size: 0.65rem; font-weight: 600;
-  letter-spacing: 0.06em;
-  padding: 2px 10px;
-  border-radius: 999px;
-  background: var(--purple-md);
-  color: var(--purple);
-  border: 1px solid var(--border);
-  animation: badgeFade 0.5s ease;
-}
-@keyframes badgeFade { from { opacity: 0; transform: scale(0.85); } to { opacity: 1; transform: scale(1); } }
-.topbar-right { margin-left: auto; display: flex; align-items: center; gap: 0.75rem; }
-.topbar-time { font-size: 0.72rem; color: var(--text-dim); }
-.refresh-btn {
-  background: var(--purple-lo);
-  border: 1px solid var(--border);
-  color: var(--purple);
-  font-size: 0.75rem; font-weight: 500;
-  padding: 4px 12px; border-radius: 6px;
-  cursor: pointer;
-  transition: all 0.2s;
-}
-.refresh-btn:hover { background: var(--purple-md); }
-.refresh-btn.spinning .btn-icon { display: inline-block; animation: spin 0.6s linear infinite; }
-@keyframes spin { to { transform: rotate(360deg); } }
-
-/* ── Panels ─────────────────────────────────── */
-.panel { display: none; animation: panelIn 0.35s cubic-bezier(0.4,0,0.2,1); }
-.panel.active { display: block; }
-@keyframes panelIn {
-  from { opacity: 0; transform: translateY(10px); }
-  to   { opacity: 1; transform: translateY(0); }
-}
-
-/* ── Stat cards ─────────────────────────────── */
-.stat-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-  gap: 1rem;
-  padding: 1.5rem 2rem 0;
-}
-.stat-card {
-  background: linear-gradient(135deg, var(--surface) 0%, var(--surface2) 100%);
-  border: 1px solid var(--border2);
-  border-radius: var(--radius);
-  padding: 1.25rem 1.5rem;
-  position: relative;
-  overflow: hidden;
-  transition: transform 0.25s ease, box-shadow 0.25s ease, border-color 0.25s ease;
-  animation: cardIn 0.4s cubic-bezier(0.4,0,0.2,1) both;
-}
-.stat-card:nth-child(1) { animation-delay: 0.05s; }
-.stat-card:nth-child(2) { animation-delay: 0.10s; }
-.stat-card:nth-child(3) { animation-delay: 0.15s; }
-.stat-card:nth-child(4) { animation-delay: 0.20s; }
-.stat-card:nth-child(5) { animation-delay: 0.25s; }
-.stat-card:nth-child(6) { animation-delay: 0.30s; }
-@keyframes cardIn {
-  from { opacity: 0; transform: translateY(16px); }
-  to   { opacity: 1; transform: translateY(0); }
-}
-.stat-card::before {
-  content: '';
-  position: absolute; top: -1px; left: 0; right: 0; height: 2px;
-  background: linear-gradient(90deg, transparent, var(--purple), transparent);
-  opacity: 0;
-  transition: opacity 0.3s;
-}
-.stat-card:hover {
-  transform: translateY(-2px);
-  box-shadow: 0 8px 30px rgba(0,0,0,0.3), 0 0 0 1px var(--border);
-  border-color: var(--border);
-}
-.stat-card:hover::before { opacity: 1; }
-.stat-card .card-label {
-  font-family: 'Space Grotesk', sans-serif;
-  font-size: 0.65rem; font-weight: 600;
-  color: var(--text-dim);
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
-  margin-bottom: 0.6rem;
-}
-.stat-card .card-value {
-  font-family: 'Space Grotesk', sans-serif;
-  font-size: 1.85rem; font-weight: 700;
-  color: var(--text);
-  line-height: 1;
-  transition: color 0.3s;
-}
-.stat-card .card-sub {
-  font-size: 0.72rem; color: var(--text-dim);
-  margin-top: 0.35rem;
-}
-.stat-card .card-icon {
-  position: absolute; top: 1.1rem; right: 1.25rem;
-  font-size: 1.4rem; opacity: 0.25;
-  transition: opacity 0.3s, transform 0.3s;
-}
-.stat-card:hover .card-icon { opacity: 0.45; transform: scale(1.1); }
-
-/* Color accents */
-.accent-purple .card-value { color: var(--purple); }
-.accent-cyan   .card-value { color: var(--cyan); }
-.accent-amber  .card-value { color: var(--amber); }
-.accent-green  .card-value { color: var(--green); }
-
-/* ── Charts grid ────────────────────────────── */
-.charts-grid {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 1rem;
-  padding: 1.25rem 2rem 2rem;
-}
-.chart-card {
-  background: linear-gradient(135deg, var(--surface) 0%, var(--surface2) 100%);
-  border: 1px solid var(--border2);
-  border-radius: var(--radius);
-  padding: 1.4rem;
-  transition: border-color 0.25s;
-  animation: cardIn 0.45s cubic-bezier(0.4,0,0.2,1) both;
-}
-.chart-card:nth-child(1) { animation-delay: 0.15s; }
-.chart-card:nth-child(2) { animation-delay: 0.20s; }
-.chart-card:nth-child(3) { animation-delay: 0.25s; }
-.chart-card:nth-child(4) { animation-delay: 0.30s; }
-.chart-card:hover { border-color: var(--border); }
-.chart-card-header {
-  display: flex; align-items: center; justify-content: space-between;
-  margin-bottom: 1.1rem;
-}
-.chart-card-title {
-  font-family: 'Space Grotesk', sans-serif;
-  font-size: 0.78rem; font-weight: 600;
-  color: var(--text-muted);
-  letter-spacing: 0.03em;
-}
-.chart-card-badge {
-  font-size: 0.6rem; font-weight: 600;
-  padding: 1px 7px; border-radius: 999px;
-  background: var(--cyan-lo); color: var(--cyan);
-  border: 1px solid rgba(34,211,238,0.25);
-  font-family: 'Space Grotesk', sans-serif;
-}
-
-/* ── Traffic table ──────────────────────────── */
-.traffic-table { width: 100%; border-collapse: collapse; font-size: 0.78rem; }
-.traffic-table th {
-  font-family: 'Space Grotesk', sans-serif;
-  font-size: 0.63rem; font-weight: 600;
-  color: var(--text-dim);
-  text-transform: uppercase; letter-spacing: 0.07em;
-  padding: 0.4rem 0.6rem;
-  border-bottom: 1px solid var(--border2);
-  text-align: left;
-}
-.traffic-table td {
-  padding: 0.55rem 0.6rem;
-  border-bottom: 1px solid rgba(255,255,255,0.04);
-  color: var(--text-muted);
-  transition: background 0.15s;
-}
-.traffic-table tr:last-child td { border-bottom: none; }
-.traffic-table tbody tr {
-  transition: background 0.18s, transform 0.18s;
-}
-.traffic-table tbody tr:hover {
-  background: var(--purple-lo);
-}
-.traffic-table tbody tr.row-new {
-  animation: rowSlide 0.4s ease both;
-}
-@keyframes rowSlide {
-  from { opacity: 0; transform: translateX(-8px); }
-  to   { opacity: 1; transform: translateX(0); }
-}
-.traffic-table .model-cell {
-  font-family: 'Space Grotesk', sans-serif;
-  font-size: 0.72rem; font-weight: 500;
-  color: var(--cyan);
-}
-.pill {
-  display: inline-flex; align-items: center; gap: 3px;
-  padding: 1px 8px; border-radius: 999px;
-  font-family: 'Space Grotesk', sans-serif;
-  font-size: 0.65rem; font-weight: 600;
-}
-.pill-ok   { background: rgba(16,185,129,0.12); color: #34D399; border: 1px solid rgba(16,185,129,0.25); }
-.pill-fail { background: rgba(239,68,68,0.12);  color: #FC8181; border: 1px solid rgba(239,68,68,0.25); }
-
-/* ── Savings velocity gauge ─────────────────── */
-.gauge-card {
-  grid-column: span 2;
-  background: linear-gradient(135deg, rgba(139,92,246,0.08) 0%, var(--surface2) 100%);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  padding: 1.5rem 2rem;
-  display: flex; align-items: center; gap: 2rem;
-  animation: cardIn 0.5s cubic-bezier(0.4,0,0.2,1) 0.1s both;
-}
-.gauge-arc-wrap {
-  position: relative; width: 120px; height: 70px; flex-shrink: 0;
-}
-.gauge-arc-wrap svg { overflow: visible; }
-.gauge-needle {
-  transform-origin: 60px 60px;
-  transition: transform 1.2s cubic-bezier(0.34,1.56,0.64,1);
-}
-.gauge-label {
-  position: absolute; bottom: -4px; left: 0; right: 0;
-  text-align: center;
-  font-family: 'Space Grotesk', sans-serif;
-  font-size: 0.6rem; color: var(--text-dim); letter-spacing: 0.05em;
-}
-.gauge-stats { flex: 1; min-width: 0; }
-.gauge-main-val {
-  font-family: 'Space Grotesk', sans-serif;
-  font-size: 2.4rem; font-weight: 700;
-  background: linear-gradient(90deg, var(--purple) 0%, var(--cyan) 100%);
-  -webkit-background-clip: text; -webkit-text-fill-color: transparent;
-  line-height: 1;
-}
-.gauge-main-label {
-  font-size: 0.72rem; color: var(--text-muted); margin-top: 0.25rem;
-}
-.gauge-eff {
-  display: inline-block;
-  margin-top: 0.5rem;
-  font-family: 'Space Grotesk', sans-serif;
-  font-size: 0.8rem; font-weight: 600;
-  padding: 2px 12px; border-radius: 999px;
-  background: var(--purple-md); color: var(--purple);
-  border: 1px solid var(--border);
-}
-
-/* ── Routing flow chart ─────────────────────── */
-.flow-wrap {
-  display: flex; flex-direction: column; gap: 0.5rem;
-  padding-top: 0.25rem;
-}
-.flow-row {
-  display: flex; align-items: center; gap: 0.6rem;
-  animation: rowSlide 0.3s ease both;
-}
-.flow-row:nth-child(1) { animation-delay: 0.05s; }
-.flow-row:nth-child(2) { animation-delay: 0.10s; }
-.flow-row:nth-child(3) { animation-delay: 0.15s; }
-.flow-label {
-  font-family: 'Space Grotesk', sans-serif;
-  font-size: 0.68rem; font-weight: 500;
-  color: var(--text-muted); width: 52px; flex-shrink: 0;
-}
-.flow-bar-wrap {
-  flex: 1; height: 16px;
-  background: var(--surface2);
-  border-radius: 99px; overflow: hidden;
-  position: relative;
-}
-.flow-bar {
-  height: 100%; border-radius: 99px;
-  transition: width 1.1s cubic-bezier(0.34,1.2,0.64,1);
-  position: relative;
-}
-.flow-bar::after {
-  content: '';
-  position: absolute; inset: 0;
-  background: linear-gradient(90deg, transparent 60%, rgba(255,255,255,0.15) 100%);
-}
-.flow-bar-0 { background: linear-gradient(90deg, var(--purple), #A78BFA); }
-.flow-bar-1 { background: linear-gradient(90deg, var(--cyan),   #67E8F9); }
-.flow-bar-2 { background: linear-gradient(90deg, var(--amber),  #FCD34D); }
-.flow-bar-3 { background: linear-gradient(90deg, var(--green),  #6EE7B7); }
-.flow-bar-4 { background: linear-gradient(90deg, #F472B6,       #FDA4AF); }
-.flow-pct {
-  font-family: 'Space Grotesk', sans-serif;
-  font-size: 0.65rem; font-weight: 600;
-  color: var(--text-dim); width: 32px; text-align: right; flex-shrink: 0;
-}
-
-/* ── Quota arc ──────────────────────────────── */
-.quota-ring { position: relative; width: 80px; height: 80px; }
-.quota-ring svg { transform: rotate(-90deg); }
-.quota-ring-text {
-  position: absolute; inset: 0;
-  display: flex; flex-direction: column;
-  align-items: center; justify-content: center;
-}
-.quota-ring-text .ring-val {
-  font-family: 'Space Grotesk', sans-serif;
-  font-size: 1rem; font-weight: 700;
-  color: var(--text);
-}
-.quota-ring-text .ring-label {
-  font-size: 0.5rem; color: var(--text-dim);
-  font-family: 'Space Grotesk', sans-serif;
-}
-.quota-ring-track { stroke: var(--border2); fill: none; stroke-width: 7; }
-.quota-ring-fill  { fill: none; stroke-width: 7; stroke-linecap: round;
-                    stroke: var(--purple);
-                    transition: stroke-dashoffset 1.4s cubic-bezier(0.34,1.56,0.64,1),
-                                stroke 0.5s; }
-
-/* ── Loading skeleton ───────────────────────── */
-.skeleton {
-  background: linear-gradient(90deg, var(--surface2) 25%, var(--surface) 50%, var(--surface2) 75%);
-  background-size: 200% 100%;
-  animation: shimmer 1.5s infinite;
-  border-radius: 4px;
-}
-@keyframes shimmer {
-  0%   { background-position: 200% 0; }
-  100% { background-position: -200% 0; }
-}
-
-/* ── Animated counter ───────────────────────── */
-.count-anim { transition: opacity 0.3s; }
-
-/* ── Live feed indicator ────────────────────── */
-.live-indicator {
-  display: inline-flex; align-items: center; gap: 4px;
-  font-size: 0.6rem; color: var(--green);
-  font-family: 'Space Grotesk', sans-serif; font-weight: 600;
-}
-.live-dot {
-  width: 5px; height: 5px; border-radius: 50%; background: var(--green);
-  animation: pulse-dot 1.5s ease-in-out infinite;
-}
-
-/* ── Logs panel ─────────────────────────────── */
-.logs-list { display: flex; flex-direction: column; gap: 0.4rem; }
-.log-row {
-  display: flex; align-items: center; gap: 0.75rem;
-  padding: 0.65rem 0.9rem;
-  background: var(--surface2);
-  border: 1px solid var(--border2);
-  border-radius: var(--radius-sm);
-  font-size: 0.78rem;
-  transition: background 0.2s, border-color 0.2s;
-  animation: rowSlide 0.35s ease both;
-}
-.log-row:hover { background: var(--purple-lo); border-color: var(--border); }
-.log-time { font-family: 'Space Grotesk', sans-serif; font-size: 0.65rem; color: var(--text-dim); flex-shrink: 0; width: 42px; }
-.log-type { font-family: 'Space Grotesk', sans-serif; font-size: 0.65rem; font-weight: 600;
-            padding: 1px 6px; border-radius: 4px; flex-shrink: 0; }
-.log-type-code     { background: rgba(139,92,246,0.15); color: var(--purple); }
-.log-type-query    { background: rgba(34,211,238,0.12); color: var(--cyan); }
-.log-type-analyze  { background: rgba(245,158,11,0.12); color: var(--amber); }
-.log-type-generate { background: rgba(16,185,129,0.12); color: var(--green); }
-.log-type-research { background: rgba(244,114,182,0.12); color: #F472B6; }
-.log-model { font-family: 'Space Grotesk', sans-serif; font-size: 0.68rem; color: var(--cyan); }
-.log-latency { margin-left: auto; font-size: 0.68rem; color: var(--text-dim); flex-shrink: 0; }
-.log-cost    { font-size: 0.65rem; color: var(--text-dim); flex-shrink: 0; }
-
-/* ── Config panel ───────────────────────────── */
-.config-grid {
-  display: grid; grid-template-columns: 1fr 1fr; gap: 1rem;
-  padding: 1.25rem 2rem 2rem;
-}
-.config-card {
-  background: var(--surface); border: 1px solid var(--border2);
-  border-radius: var(--radius); padding: 1.25rem;
-  animation: cardIn 0.4s cubic-bezier(0.4,0,0.2,1) both;
-}
-.config-card-title {
-  font-family: 'Space Grotesk', sans-serif;
-  font-size: 0.75rem; font-weight: 600;
-  color: var(--text-muted); margin-bottom: 1rem;
-  text-transform: uppercase; letter-spacing: 0.07em;
-}
-.config-row {
-  display: flex; align-items: center; justify-content: space-between;
-  padding: 0.5rem 0;
-  border-bottom: 1px solid var(--border2);
-  font-size: 0.78rem;
-}
-.config-row:last-child { border-bottom: none; }
-.config-key { color: var(--text-muted); }
-.config-val { font-family: 'Space Grotesk', sans-serif; font-weight: 500; color: var(--text); }
-.config-val.on  { color: var(--green); }
-.config-val.off { color: var(--text-dim); }
-
-/* ── Footer ─────────────────────────────────── */
-.footer {
-  margin-top: auto;
-  padding: 0.9rem 2rem;
-  border-top: 1px solid var(--border2);
-  display: flex; align-items: center; justify-content: space-between;
-  font-size: 0.68rem; color: var(--text-dim);
-}
-
-/* ── Scrollbar ──────────────────────────────── */
-::-webkit-scrollbar { width: 5px; }
-::-webkit-scrollbar-track { background: transparent; }
-::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 999px; }
-
-/* ── Responsive ─────────────────────────────── */
-@media (max-width: 900px) {
-  .sidebar { transform: translateX(-100%); }
-  .sidebar.open { transform: translateX(0); }
-  .main { margin-left: 0; }
-  .charts-grid, .config-grid { grid-template-columns: 1fr; }
-  .gauge-card { grid-column: span 1; }
-  .stat-grid { grid-template-columns: repeat(2, 1fr); }
-}
+.material-symbols-outlined { font-variation-settings:'FILL' 0,'wght' 400,'GRAD' 0,'opsz' 24; vertical-align:middle; }
+.glass-panel { background:rgba(45,52,73,0.4); backdrop-filter:blur(20px); -webkit-backdrop-filter:blur(20px); border:1px solid rgba(149,142,160,0.15); }
+.nav-active  { color:#5de6ff!important; font-weight:700; background:rgba(30,40,64,0.4); }
+.nav-inactive { color:#494454; }
+.nav-inactive:hover { background:rgba(30,40,64,0.3); color:#cbc3d7; }
+.spinning { animation:spin 0.8s linear infinite; display:inline-block; }
+@keyframes spin { to { transform:rotate(360deg); } }
+.hidden { display:none; }
 </style>
 </head>
-<body>
+<body class="bg-surface font-body text-on-surface">
 
-<!-- ── Sidebar ───────────────────────────── -->
-<nav class="sidebar" id="sidebar">
-  <div class="sidebar-logo">
-    <div class="logo-icon">&#129504;</div>
-    <div>
-      <div class="logo-text">LLM Router</div>
-      <div class="logo-ver">v1.3.0</div>
+<!-- Top header -->
+<header class="flex justify-between items-center px-6 h-16 w-full fixed z-50 bg-slate-950/40 backdrop-blur-xl shadow-[0_0_32px_rgba(208,188,255,0.06)]">
+  <div class="flex items-center gap-6">
+    <span class="text-xl font-bold bg-clip-text text-transparent bg-gradient-to-br from-violet-300 to-violet-600 font-headline tracking-tight">LLM Router</span>
+    <span id="mode-badge" class="text-[10px] font-mono bg-primary/10 text-primary border border-primary/20 px-3 py-1 rounded-full uppercase tracking-wider">CC Subscription</span>
+  </div>
+  <div class="flex items-center gap-4">
+    <span id="refresh-ts" class="text-xs font-mono text-outline">—</span>
+    <button onclick="doRefresh()" id="refresh-btn" class="material-symbols-outlined text-outline hover:text-primary transition-colors cursor-pointer select-none">refresh</button>
+  </div>
+</header>
+
+<!-- Sidebar -->
+<aside class="h-screen w-64 fixed left-0 top-0 pt-20 flex flex-col px-4 bg-slate-900/60 backdrop-blur-lg z-40 border-r border-outline-variant/5">
+  <div class="px-4 mb-6">
+    <div class="flex items-center gap-2 mb-1">
+      <div class="w-2 h-2 rounded-full bg-secondary" style="animation:pulse 2s ease-in-out infinite;box-shadow:0 0 6px #5de6ff;"></div>
+      <span class="font-mono text-[10px] uppercase tracking-widest text-secondary">Router Node</span>
     </div>
+    <p id="sb-profile" class="text-[10px] text-outline font-mono">Active | v1.3</p>
   </div>
-
-  <span class="nav-section-label">Dashboards</span>
-  <div class="nav-item active" data-panel="overview" onclick="switchPanel(this)">
-    <span class="nav-icon">&#128202;</span> Overview
+  <nav class="space-y-1 flex-1">
+    <button onclick="showTab('overview')" data-tab="overview" class="nav-active flex items-center gap-3 w-full px-4 py-2.5 rounded-r-full transition-all text-left">
+      <span class="material-symbols-outlined text-xl">dashboard</span>
+      <span class="font-mono text-sm uppercase tracking-widest">Overview</span>
+    </button>
+    <button onclick="showTab('performance')" data-tab="performance" class="nav-inactive flex items-center gap-3 w-full px-4 py-2.5 rounded-r-full transition-all text-left">
+      <span class="material-symbols-outlined text-xl">monitoring</span>
+      <span class="font-mono text-sm uppercase tracking-widest">Performance</span>
+    </button>
+    <button onclick="showTab('config')" data-tab="config" class="nav-inactive flex items-center gap-3 w-full px-4 py-2.5 rounded-r-full transition-all text-left">
+      <span class="material-symbols-outlined text-xl">tune</span>
+      <span class="font-mono text-sm uppercase tracking-widest">Configuration</span>
+    </button>
+    <button onclick="showTab('logs')" data-tab="logs" class="nav-inactive flex items-center gap-3 w-full px-4 py-2.5 rounded-r-full transition-all text-left">
+      <span class="material-symbols-outlined text-xl">terminal</span>
+      <span class="font-mono text-sm uppercase tracking-widest">Logs</span>
+    </button>
+  </nav>
+  <div class="pb-8 px-4">
+    <div id="sb-status" class="text-[10px] font-mono text-outline">Connecting...</div>
+    <a href="/api/stats" target="_blank" class="text-[10px] font-mono text-outline/50 hover:text-primary transition-colors mt-1 block">raw JSON ↗</a>
   </div>
-  <div class="nav-item" data-panel="performance" onclick="switchPanel(this)">
-    <span class="nav-icon">&#9889;</span> Performance
-  </div>
-  <div class="nav-item" data-panel="logs" onclick="switchPanel(this)">
-    <span class="nav-icon">&#128203;</span> Logs &amp; Analysis
-  </div>
+</aside>
 
-  <span class="nav-section-label" style="margin-top:.75rem">System</span>
-  <div class="nav-item" data-panel="config" onclick="switchPanel(this)">
-    <span class="nav-icon">&#9881;</span> Configuration
-  </div>
+<!-- Main content -->
+<main class="pl-64 pt-16 min-h-screen">
 
-  <div class="sidebar-footer">
-    <div class="sidebar-status">
-      <span class="status-dot"></span>
-      <span id="sb-status">Connected</span>
-    </div>
-  </div>
-</nav>
+<!-- TAB: Overview -->
+<div id="tab-overview" class="p-8 max-w-[1600px] mx-auto space-y-8">
+  <div class="grid grid-cols-1 lg:grid-cols-12 gap-8">
 
-<!-- ── Main ──────────────────────────────── -->
-<div class="main">
-
-  <!-- Top bar -->
-  <div class="topbar">
-    <div class="topbar-title" id="panel-title">Overview</div>
-    <span class="topbar-badge" id="mode-badge">loading&#8230;</span>
-    <div class="topbar-right">
-      <span class="topbar-time" id="refresh-ts"></span>
-      <button class="refresh-btn" onclick="doRefresh()" id="refresh-btn">
-        <span class="btn-icon">&#8635;</span> Refresh
-      </button>
-    </div>
-  </div>
-
-  <!-- ── OVERVIEW panel ─────────────────── -->
-  <div class="panel active" id="panel-overview">
-
-    <!-- Savings velocity gauge -->
-    <div style="padding: 1.25rem 2rem 0;">
-      <div class="gauge-card">
-        <div class="gauge-arc-wrap">
-          <svg viewBox="0 0 120 70" width="120" height="70">
-            <path d="M10,60 A50,50 0 0,1 110,60" fill="none" stroke="rgba(255,255,255,0.06)" stroke-width="8" stroke-linecap="round"/>
-            <path d="M10,60 A50,50 0 0,1 110,60" fill="none" stroke="url(#gaugeGrad)" stroke-width="8"
-                  stroke-linecap="round" id="gauge-arc"
-                  stroke-dasharray="157" stroke-dashoffset="157"
-                  style="transition: stroke-dashoffset 1.5s cubic-bezier(0.34,1.2,0.64,1)"/>
-            <defs>
-              <linearGradient id="gaugeGrad" x1="0" y1="0" x2="1" y2="0">
-                <stop offset="0%"   stop-color="#8B5CF6"/>
-                <stop offset="100%" stop-color="#22D3EE"/>
-              </linearGradient>
-            </defs>
-          </svg>
-          <div class="gauge-label">Efficiency</div>
-        </div>
-        <div class="gauge-stats">
-          <div class="gauge-main-val" id="g-saved">$0.00</div>
-          <div class="gauge-main-label">Total saved vs Opus baseline</div>
-          <div class="gauge-eff" id="g-eff">0% efficiency</div>
-        </div>
-        <div style="display:flex;flex-direction:column;gap:0.5rem;margin-left:auto;">
-          <div style="text-align:right">
-            <div style="font-family:'Space Grotesk',sans-serif;font-size:.65rem;color:var(--text-dim);text-transform:uppercase;letter-spacing:.07em">Today</div>
-            <div style="font-family:'Space Grotesk',sans-serif;font-size:1.1rem;font-weight:700;color:var(--text)" id="g-today-cost">$0.0000</div>
+    <!-- Savings gauge -->
+    <div class="lg:col-span-4 glass-panel rounded-3xl p-8 relative overflow-hidden">
+      <div class="relative z-10">
+        <div class="flex justify-between items-start mb-6">
+          <div>
+            <h2 class="text-xs font-label uppercase tracking-widest text-outline">Efficiency Gauge</h2>
+            <p class="text-2xl font-bold text-white">Savings Velocity</p>
           </div>
-          <div style="text-align:right">
-            <div style="font-family:'Space Grotesk',sans-serif;font-size:.65rem;color:var(--text-dim);text-transform:uppercase;letter-spacing:.07em">Month</div>
-            <div style="font-family:'Space Grotesk',sans-serif;font-size:1.1rem;font-weight:700;color:var(--text)" id="g-month-cost">$0.0000</div>
-          </div>
+          <span id="eff-pct" class="text-secondary font-mono text-xl font-bold">0%</span>
         </div>
-      </div>
-    </div>
-
-    <!-- Stat cards -->
-    <div class="stat-grid">
-      <div class="stat-card accent-cyan">
-        <div class="card-label">Today&#39;s Calls</div>
-        <div class="card-value count-anim" id="s-calls">&#8212;</div>
-        <div class="card-sub">API + subscription</div>
-        <div class="card-icon">&#128222;</div>
-      </div>
-      <div class="stat-card accent-purple">
-        <div class="card-label">Tokens (today)</div>
-        <div class="card-value count-anim" id="s-tokens">&#8212;</div>
-        <div class="card-sub">input + output</div>
-        <div class="card-icon">&#128171;</div>
-      </div>
-      <div class="stat-card accent-green">
-        <div class="card-label">Session Quota</div>
-        <div class="card-value" id="s-session-wrap" style="display:flex;align-items:center;gap:.75rem">
-          <div class="quota-ring" id="quota-ring-wrap">
-            <svg viewBox="0 0 80 80" width="80" height="80">
-              <circle cx="40" cy="40" r="31" class="quota-ring-track"/>
-              <circle cx="40" cy="40" r="31" class="quota-ring-fill" id="quota-circle"
-                      stroke-dasharray="195" stroke-dashoffset="195"/>
+        <div class="flex justify-center py-4">
+          <div class="w-52 h-52 relative flex items-center justify-center">
+            <svg class="absolute inset-0 w-full h-full" viewBox="0 0 208 208">
+              <circle cx="104" cy="104" r="86" fill="none" stroke="rgba(45,52,73,0.6)" stroke-width="14"/>
+              <circle id="gauge-arc" cx="104" cy="104" r="86" fill="none"
+                      stroke="url(#gaugeGrad)" stroke-width="14" stroke-linecap="round"
+                      stroke-dasharray="540" stroke-dashoffset="540"
+                      transform="rotate(-90 104 104)" style="transition:stroke-dashoffset 1s ease;"/>
+              <defs>
+                <linearGradient id="gaugeGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+                  <stop offset="0%" style="stop-color:#5de6ff;"/>
+                  <stop offset="100%" style="stop-color:#d0bcff;"/>
+                </linearGradient>
+              </defs>
             </svg>
-            <div class="quota-ring-text">
-              <span class="ring-val" id="s-session">0%</span>
-              <span class="ring-label">session</span>
+            <div class="z-10 text-center">
+              <span id="g-saved" class="text-4xl font-extrabold text-white">$0</span>
+              <p class="text-[10px] font-mono text-outline uppercase mt-1">Lifetime Savings</p>
             </div>
           </div>
         </div>
-        <div class="card-icon">&#9711;</div>
+        <div class="mt-6 space-y-3">
+          <div class="flex justify-between text-xs">
+            <span class="text-outline">External API Spend</span>
+            <span id="g-ext-cost" class="font-mono text-error">$0.00</span>
+          </div>
+          <div class="w-full h-1 bg-surface-container-highest rounded-full overflow-hidden">
+            <div id="g-ext-bar" class="h-full bg-error transition-all duration-700" style="width:0%"></div>
+          </div>
+          <div class="flex justify-between text-xs">
+            <span class="text-outline">Today's Cost</span>
+            <span id="g-today-cost" class="font-mono text-secondary">$0.00</span>
+          </div>
+          <div class="w-full h-1 bg-surface-container-highest rounded-full overflow-hidden">
+            <div id="g-today-bar" class="h-full bg-secondary transition-all duration-700" style="width:0%;box-shadow:0 0 8px #5de6ff;"></div>
+          </div>
+        </div>
       </div>
-      <div class="stat-card accent-amber">
-        <div class="card-label">Cache Hits (7d)</div>
-        <div class="card-value count-anim" id="s-semhits">&#8212;</div>
-        <div class="card-sub">semantic dedup</div>
-        <div class="card-icon">&#9889;</div>
-      </div>
+      <div class="absolute -top-20 -right-20 w-48 h-48 bg-primary/10 rounded-full blur-3xl pointer-events-none"></div>
     </div>
 
-    <!-- Charts -->
-    <div class="charts-grid">
-      <!-- Cost chart -->
-      <div class="chart-card">
-        <div class="chart-card-header">
-          <span class="chart-card-title">Daily Cost — 14 days</span>
-          <span class="chart-card-badge">USD</span>
+    <!-- 3 stat cards + routing flow -->
+    <div class="lg:col-span-8 grid grid-cols-1 md:grid-cols-3 gap-6">
+      <div class="bg-surface-container-high rounded-3xl p-6 border border-outline-variant/10 flex flex-col justify-between">
+        <div class="flex justify-between items-start">
+          <div class="bg-primary/10 p-2 rounded-xl"><span class="material-symbols-outlined text-primary">route</span></div>
+          <span class="text-[10px] font-mono text-primary">today</span>
         </div>
-        <canvas id="costChart" height="155"></canvas>
-      </div>
-
-      <!-- Model distribution -->
-      <div class="chart-card">
-        <div class="chart-card-header">
-          <span class="chart-card-title">Model Distribution — 7 days</span>
-          <span class="chart-card-badge">calls</span>
-        </div>
-        <canvas id="modelChart" height="155"></canvas>
-      </div>
-
-      <!-- Routing flow (task types as horizontal bars) -->
-      <div class="chart-card">
-        <div class="chart-card-header">
-          <span class="chart-card-title">Prompt Intent Routing</span>
-          <span class="chart-card-badge">7 days</span>
-        </div>
-        <div class="flow-wrap" id="flow-wrap">
-          <div style="color:var(--text-dim);font-size:.75rem">Loading&#8230;</div>
+        <div class="mt-8">
+          <p class="text-xs font-label text-outline uppercase tracking-wider">Calls Today</p>
+          <h3 id="s-calls" class="text-4xl font-extrabold text-white mt-1">0</h3>
         </div>
       </div>
-
-      <!-- Recent traffic -->
-      <div class="chart-card">
-        <div class="chart-card-header">
-          <span class="chart-card-title">Recent Routed Traffic</span>
-          <span class="live-indicator"><span class="live-dot"></span>LIVE</span>
+      <div class="bg-surface-container-high rounded-3xl p-6 border border-outline-variant/10 flex flex-col justify-between">
+        <div class="flex justify-between items-start">
+          <div class="bg-secondary/10 p-2 rounded-xl"><span class="material-symbols-outlined text-secondary">data_usage</span></div>
+          <span class="text-[10px] font-mono text-secondary">today</span>
         </div>
-        <div id="recent-table-wrap"></div>
-      </div>
-    </div>
-  </div>
-
-  <!-- ── PERFORMANCE panel ───────────────── -->
-  <div class="panel" id="panel-performance">
-    <div class="stat-grid" style="padding-top:1.5rem;">
-      <div class="stat-card accent-cyan">
-        <div class="card-label">Total Calls (month)</div>
-        <div class="card-value count-anim" id="p-month-calls">&#8212;</div>
-        <div class="card-icon">&#128201;</div>
-      </div>
-      <div class="stat-card accent-purple">
-        <div class="card-label">Month Cost</div>
-        <div class="card-value count-anim" id="p-month-cost">&#8212;</div>
-        <div class="card-icon">&#128181;</div>
-      </div>
-      <div class="stat-card accent-green">
-        <div class="card-label">Top Model</div>
-        <div class="card-value" id="p-top-model" style="font-size:1rem">&#8212;</div>
-        <div class="card-icon">&#127942;</div>
-      </div>
-      <div class="stat-card accent-amber">
-        <div class="card-label">Weekly Quota</div>
-        <div class="card-value" id="p-weekly">&#8212;</div>
-        <div class="card-icon">&#128197;</div>
-      </div>
-    </div>
-    <div class="charts-grid">
-      <div class="chart-card" style="grid-column:span 2">
-        <div class="chart-card-header">
-          <span class="chart-card-title">Cost per Model — 7 days</span>
-          <span class="chart-card-badge">USD</span>
+        <div class="mt-8">
+          <p class="text-xs font-label text-outline uppercase tracking-wider">Tokens</p>
+          <h3 id="s-tokens" class="text-4xl font-extrabold text-white mt-1">0</h3>
         </div>
-        <canvas id="modelCostChart" height="120"></canvas>
       </div>
-      <div class="chart-card">
-        <div class="chart-card-header">
-          <span class="chart-card-title">Profile Distribution</span>
-          <span class="chart-card-badge">7 days</span>
+      <div class="bg-surface-container-high rounded-3xl p-6 border border-outline-variant/10 flex flex-col justify-between">
+        <div class="flex justify-between items-start">
+          <div class="bg-tertiary/10 p-2 rounded-xl"><span class="material-symbols-outlined text-tertiary">bolt</span></div>
+          <span class="flex items-center gap-1">
+            <span class="w-1.5 h-1.5 rounded-full bg-secondary" style="animation:pulse 2s ease-in-out infinite;"></span>
+            <span class="text-[10px] font-mono text-outline">7d</span>
+          </span>
         </div>
-        <canvas id="profileChart" height="155"></canvas>
+        <div class="mt-8">
+          <p class="text-xs font-label text-outline uppercase tracking-wider">Cache Hits</p>
+          <h3 id="s-semhits" class="text-4xl font-extrabold text-white mt-1">0</h3>
+        </div>
       </div>
-      <div class="chart-card">
-        <div class="chart-card-header">
-          <span class="chart-card-title">Task Type Breakdown</span>
-          <span class="chart-card-badge">7 days</span>
+      <!-- Routing flow spans 3 cols -->
+      <div class="md:col-span-3 glass-panel rounded-3xl p-8 relative overflow-hidden">
+        <div class="flex justify-between items-center mb-4">
+          <div>
+            <h3 class="text-base font-bold text-white">Task → Model Routing</h3>
+            <p class="text-xs text-outline font-label">Live routing decisions by task type (7 days)</p>
+          </div>
+          <span class="px-3 py-1 bg-primary/10 rounded-lg text-[10px] font-mono text-primary uppercase border border-primary/20">Real-time</span>
         </div>
-        <canvas id="taskChart" height="155"></canvas>
+        <div id="routing-flow" class="h-44 w-full relative"></div>
       </div>
     </div>
   </div>
 
-  <!-- ── LOGS panel ──────────────────────── -->
-  <div class="panel" id="panel-logs">
-    <div style="padding:1.5rem 2rem 2rem">
-      <div class="chart-card">
-        <div class="chart-card-header">
-          <span class="chart-card-title">Recent Routing Decisions</span>
-          <span class="live-indicator"><span class="live-dot"></span>LIVE</span>
+  <!-- Recent traffic -->
+  <section class="space-y-4">
+    <div class="flex items-center justify-between">
+      <h3 class="text-xl font-bold text-white flex items-center gap-3">
+        <span class="material-symbols-outlined text-primary">history</span>
+        Recent Routed Traffic
+      </h3>
+      <button onclick="showTab('logs')" class="text-sm font-label text-primary hover:underline transition-all">View full stream →</button>
+    </div>
+    <div class="bg-surface-container-low rounded-3xl border border-outline-variant/10 overflow-hidden">
+      <table class="w-full border-collapse">
+        <thead class="bg-surface-container-highest/50">
+          <tr>
+            <th class="text-left px-6 py-4 text-[10px] font-mono text-outline uppercase tracking-wider">Timestamp</th>
+            <th class="text-left px-6 py-4 text-[10px] font-mono text-outline uppercase tracking-wider">Task / Complexity</th>
+            <th class="text-left px-6 py-4 text-[10px] font-mono text-outline uppercase tracking-wider">Model</th>
+            <th class="text-left px-6 py-4 text-[10px] font-mono text-outline uppercase tracking-wider">Status</th>
+            <th class="text-right px-6 py-4 text-[10px] font-mono text-outline uppercase tracking-wider">Cost / Latency</th>
+          </tr>
+        </thead>
+        <tbody id="recent-tbody">
+          <tr><td colspan="5" class="px-6 py-10 text-center text-outline font-mono text-xs">Loading...</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+</div>
+
+<!-- TAB: Performance -->
+<div id="tab-performance" class="p-8 max-w-[1600px] mx-auto space-y-8 hidden">
+  <div>
+    <h1 class="text-3xl font-extrabold font-headline text-white">Performance Intelligence</h1>
+    <p class="text-sm text-outline font-label mt-1">Routing efficiency, model distribution, and cost trends</p>
+  </div>
+  <div class="grid grid-cols-1 lg:grid-cols-12 gap-8">
+    <div class="lg:col-span-8 glass-panel rounded-3xl p-8">
+      <div class="flex justify-between items-center mb-6">
+        <div>
+          <h3 class="text-lg font-bold text-white">Daily Cost Trend</h3>
+          <p class="text-xs text-outline font-label">External API spend — trailing 14 days</p>
         </div>
-        <div class="logs-list" id="logs-list">
-          <div style="color:var(--text-dim);font-size:.8rem">Loading&#8230;</div>
+        <span class="px-3 py-1 bg-secondary/10 text-secondary text-[10px] font-mono rounded-lg border border-secondary/20 uppercase">14 days</span>
+      </div>
+      <div class="h-64"><canvas id="costChart"></canvas></div>
+    </div>
+    <div class="lg:col-span-4 glass-panel rounded-3xl p-8 flex flex-col items-center justify-center gap-6">
+      <h3 class="text-xs font-label text-outline uppercase tracking-wider self-start">Efficiency Score</h3>
+      <div class="relative w-40 h-40 flex items-center justify-center">
+        <svg class="absolute inset-0 w-full h-full" viewBox="0 0 160 160">
+          <circle cx="80" cy="80" r="64" fill="none" stroke="rgba(45,52,73,0.6)" stroke-width="10"/>
+          <circle id="eff-arc" cx="80" cy="80" r="64" fill="none"
+                  stroke="#5de6ff" stroke-width="10" stroke-linecap="round"
+                  stroke-dasharray="402" stroke-dashoffset="402"
+                  transform="rotate(-90 80 80)"
+                  style="transition:stroke-dashoffset 1s ease;filter:drop-shadow(0 0 6px #5de6ff);"/>
+        </svg>
+        <div class="z-10 text-center">
+          <span id="eff-score" class="text-4xl font-extrabold text-white">0%</span>
+          <p class="text-[10px] font-mono text-outline uppercase">optimum</p>
+        </div>
+      </div>
+      <div class="w-full space-y-2 text-xs">
+        <div class="flex justify-between"><span class="text-outline">Lifetime Saved</span><span id="p-saved" class="font-mono text-secondary">$0.00</span></div>
+        <div class="w-full h-0.5 bg-surface-container-highest rounded-full">
+          <div id="p-saved-bar" class="h-full bg-secondary rounded-full transition-all duration-700" style="width:0%"></div>
+        </div>
+        <div class="flex justify-between mt-2"><span class="text-outline">Month Cost</span><span id="p-month-cost" class="font-mono text-primary">$0.00</span></div>
+        <div class="flex justify-between"><span class="text-outline">Month Calls</span><span id="p-month-calls" class="font-mono text-on-surface">0</span></div>
+      </div>
+    </div>
+  </div>
+  <div class="grid grid-cols-1 lg:grid-cols-12 gap-8">
+    <div class="lg:col-span-4 glass-panel rounded-3xl p-8">
+      <h3 class="text-lg font-bold text-white mb-6">Model Distribution <span class="text-xs text-outline font-label font-normal ml-1">7 days</span></h3>
+      <div class="h-52 flex items-center justify-center"><canvas id="modelChart"></canvas></div>
+      <div id="model-legend" class="mt-4 space-y-1.5"></div>
+    </div>
+    <div class="lg:col-span-8 glass-panel rounded-3xl p-8">
+      <h3 class="text-lg font-bold text-white mb-6">Model Benchmark</h3>
+      <table class="w-full">
+        <thead>
+          <tr>
+            <th class="text-left pb-4 text-[10px] font-mono text-outline uppercase tracking-wider">Backend Name</th>
+            <th class="text-right pb-4 text-[10px] font-mono text-outline uppercase tracking-wider">Calls</th>
+            <th class="text-right pb-4 text-[10px] font-mono text-outline uppercase tracking-wider">Cost / 1K tok</th>
+            <th class="text-right pb-4 text-[10px] font-mono text-outline uppercase tracking-wider">Health</th>
+          </tr>
+        </thead>
+        <tbody id="model-tbody">
+          <tr><td colspan="4" class="py-10 text-center text-outline font-mono text-xs">Loading...</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<!-- TAB: Configuration -->
+<div id="tab-config" class="p-8 max-w-[1600px] mx-auto space-y-8 hidden">
+  <div>
+    <h1 class="text-3xl font-extrabold font-headline text-white">Configuration &amp; Status</h1>
+    <p class="text-sm text-outline font-label mt-1">Active routing profile and Claude subscription health</p>
+  </div>
+  <div class="grid grid-cols-1 lg:grid-cols-2 gap-8">
+    <div class="glass-panel rounded-3xl p-8">
+      <h3 class="text-lg font-bold text-white mb-6">Router Settings</h3>
+      <div class="space-y-1">
+        <div class="flex justify-between items-center py-3 border-b border-outline-variant/10">
+          <span class="text-sm text-outline font-label">Active Profile</span>
+          <span id="cfg-profile" class="font-mono text-sm text-primary bg-primary/10 px-3 py-1 rounded-lg">—</span>
+        </div>
+        <div class="flex justify-between items-center py-3 border-b border-outline-variant/10">
+          <span class="text-sm text-outline font-label">CC Subscription Mode</span>
+          <span id="cfg-sub" class="font-mono text-sm px-3 py-1 rounded-lg">—</span>
+        </div>
+        <div class="flex justify-between items-center py-3 border-b border-outline-variant/10">
+          <span class="text-sm text-outline font-label">Monthly Budget</span>
+          <span id="cfg-budget" class="font-mono text-sm text-on-surface">—</span>
+        </div>
+        <div class="flex justify-between items-center py-3">
+          <span class="text-sm text-outline font-label">Daily Spend Limit</span>
+          <span id="cfg-daily" class="font-mono text-sm text-on-surface">—</span>
+        </div>
+      </div>
+    </div>
+    <div class="glass-panel rounded-3xl p-8 space-y-6">
+      <div class="flex justify-between items-start">
+        <h3 class="text-lg font-bold text-white">Claude Subscription</h3>
+        <span id="cfg-refresh-time" class="text-[10px] font-mono text-outline">—</span>
+      </div>
+      <div class="space-y-5">
+        <div>
+          <div class="flex justify-between text-xs mb-2">
+            <span class="text-outline font-label">Session</span>
+            <span id="cfg-session-pct" class="font-mono text-on-surface">0%</span>
+          </div>
+          <div class="w-full h-2 bg-surface-container-highest rounded-full overflow-hidden">
+            <div id="cfg-session-bar" class="h-full bg-gradient-to-r from-secondary to-primary rounded-full transition-all duration-700" style="width:0%"></div>
+          </div>
+        </div>
+        <div>
+          <div class="flex justify-between text-xs mb-2">
+            <span class="text-outline font-label">Weekly (all)</span>
+            <span id="cfg-weekly-pct" class="font-mono text-on-surface">0%</span>
+          </div>
+          <div class="w-full h-2 bg-surface-container-highest rounded-full overflow-hidden">
+            <div id="cfg-weekly-bar" class="h-full bg-gradient-to-r from-secondary to-primary rounded-full transition-all duration-700" style="width:0%"></div>
+          </div>
+        </div>
+        <div>
+          <div class="flex justify-between text-xs mb-2">
+            <span class="text-outline font-label">Sonnet Only</span>
+            <span id="cfg-sonnet-pct" class="font-mono text-on-surface">0%</span>
+          </div>
+          <div class="w-full h-2 bg-surface-container-highest rounded-full overflow-hidden">
+            <div id="cfg-sonnet-bar" class="h-full bg-gradient-to-r from-secondary to-primary rounded-full transition-all duration-700" style="width:0%"></div>
+          </div>
         </div>
       </div>
     </div>
   </div>
-
-  <!-- ── CONFIG panel ────────────────────── -->
-  <div class="panel" id="panel-config">
-    <div class="config-grid">
-      <div class="config-card">
-        <div class="config-card-title">Routing Settings</div>
-        <div class="config-row">
-          <span class="config-key">Profile</span>
-          <span class="config-val" id="cfg-profile">&#8212;</span>
-        </div>
-        <div class="config-row">
-          <span class="config-key">Subscription Mode</span>
-          <span class="config-val" id="cfg-sub">&#8212;</span>
-        </div>
-        <div class="config-row">
-          <span class="config-key">Monthly Budget</span>
-          <span class="config-val" id="cfg-budget">&#8212;</span>
-        </div>
-        <div class="config-row">
-          <span class="config-key">Daily Spend Limit</span>
-          <span class="config-val" id="cfg-daily">&#8212;</span>
-        </div>
-      </div>
-      <div class="config-card">
-        <div class="config-card-title">Claude Subscription</div>
-        <div class="config-row">
-          <span class="config-key">Session %</span>
-          <span class="config-val" id="cfg-session-pct">&#8212;</span>
-        </div>
-        <div class="config-row">
-          <span class="config-key">Weekly %</span>
-          <span class="config-val" id="cfg-weekly-pct">&#8212;</span>
-        </div>
-        <div class="config-row">
-          <span class="config-key">Sonnet %</span>
-          <span class="config-val" id="cfg-sonnet-pct">&#8212;</span>
-        </div>
-        <div class="config-row">
-          <span class="config-key">Last Refresh</span>
-          <span class="config-val" id="cfg-refresh-time" style="font-size:.7rem">&#8212;</span>
-        </div>
-      </div>
+  <div class="glass-panel rounded-3xl p-8">
+    <h3 class="text-lg font-bold text-white mb-6">Task Type Distribution <span class="text-xs text-outline font-label font-normal ml-1">7 days</span></h3>
+    <div id="task-breakdown" class="grid grid-cols-2 md:grid-cols-5 gap-4">
+      <div class="col-span-5 text-center text-outline font-mono text-xs py-4">Loading...</div>
     </div>
   </div>
+</div>
 
-  <!-- Footer -->
-  <div class="footer">
-    <span>LLM Router Dashboard &#183; Auto-refreshes every 30s</span>
-    <a href="/api/stats" style="color:var(--text-dim)">raw JSON</a>
+<!-- TAB: Logs -->
+<div id="tab-logs" class="p-8 max-w-[1600px] mx-auto space-y-8 hidden">
+  <div>
+    <h1 class="text-3xl font-extrabold font-headline text-white">Routing Logs</h1>
+    <p class="text-sm text-outline font-label mt-1">Recent routing decisions — last 20 entries</p>
   </div>
+  <div class="bg-surface-container-low rounded-3xl border border-outline-variant/10 overflow-hidden">
+    <table class="w-full border-collapse">
+      <thead class="bg-surface-container-highest/50">
+        <tr>
+          <th class="text-left px-6 py-4 text-[10px] font-mono text-outline uppercase tracking-wider">Timestamp</th>
+          <th class="text-left px-6 py-4 text-[10px] font-mono text-outline uppercase tracking-wider">Task</th>
+          <th class="text-left px-6 py-4 text-[10px] font-mono text-outline uppercase tracking-wider">Complexity</th>
+          <th class="text-left px-6 py-4 text-[10px] font-mono text-outline uppercase tracking-wider">Model</th>
+          <th class="text-right px-6 py-4 text-[10px] font-mono text-outline uppercase tracking-wider">Cost</th>
+          <th class="text-right px-6 py-4 text-[10px] font-mono text-outline uppercase tracking-wider">Latency</th>
+          <th class="text-center px-6 py-4 text-[10px] font-mono text-outline uppercase tracking-wider">Status</th>
+        </tr>
+      </thead>
+      <tbody id="logs-tbody">
+        <tr><td colspan="7" class="px-6 py-10 text-center text-outline font-mono text-xs">Loading...</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
 
-</div><!-- /main -->
+</main>
 
 <script>
-"use strict";
+// ── HTML escaping — all DB values go through esc() before any DOM insertion ──
+function esc(s) {
+  const d = document.createElement('div');
+  d.textContent = String(s == null ? '' : s);
+  return d.innerHTML;
+}
 
-/* ── Palette ───────────────────────────────── */
-const C = {
-  purple: "#8B5CF6", cyan: "#22D3EE", amber: "#F59E0B",
-  green: "#10B981",  pink: "#F472B6", red: "#EF4444",
-  grid: "rgba(255,255,255,0.05)",
-  tick: "#475569",
-};
-const PALETTE = [C.purple,C.cyan,C.amber,C.green,C.pink,"#A78BFA","#67E8F9","#FCD34D"];
+// ── Tab navigation ────────────────────────────────────────────────────────
+const TABS = ['overview', 'performance', 'config', 'logs'];
+function showTab(name) {
+  TABS.forEach(t => {
+    const panel = document.getElementById('tab-' + t);
+    const btn   = document.querySelector('[data-tab="' + t + '"]');
+    if (panel) panel.classList.toggle('hidden', t !== name);
+    if (btn) {
+      btn.className = btn.className
+        .replace(/\bnav-active\b|\bnav-inactive\b/g, '').trim() + ' ' +
+        (t === name ? 'nav-active' : 'nav-inactive') +
+        ' flex items-center gap-3 w-full px-4 py-2.5 rounded-r-full transition-all text-left';
+    }
+  });
+}
 
-/* ── Chart defaults ────────────────────────── */
-Chart.defaults.color = C.tick;
-Chart.defaults.font.family = "Inter, system-ui, sans-serif";
-
-/* ── Safe text helper ──────────────────────── */
+// ── Helpers ───────────────────────────────────────────────────────────────
 function setText(id, val) {
   const el = document.getElementById(id);
   if (el) el.textContent = val;
 }
-
-/* ── Panel switching ───────────────────────── */
-const PANEL_TITLES = {
-  overview: "Overview", performance: "Model Performance",
-  logs: "Logs & Analysis", config: "Configuration",
-};
-let activePanel = "overview";
-
-function switchPanel(navEl) {
-  const id = navEl.dataset.panel;
-  if (id === activePanel) return;
-  activePanel = id;
-
-  document.querySelectorAll(".nav-item").forEach(n => n.classList.remove("active"));
-  navEl.classList.add("active");
-
-  document.querySelectorAll(".panel").forEach(p => p.classList.remove("active"));
-  const panel = document.getElementById("panel-" + id);
-  if (panel) panel.classList.add("active");
-
-  setText("panel-title", PANEL_TITLES[id] || id);
+function setBar(id, pct) {
+  const el = document.getElementById(id);
+  if (el) el.style.width = Math.min(100, Math.max(0, Math.round(pct * 100))) + '%';
 }
-
-/* ── Animated counter ──────────────────────── */
-function animateCount(el, target, prefix, suffix, decimals) {
-  if (!el) return;
-  const start = 0, duration = 800;
-  const startTime = performance.now();
-  function step(now) {
-    const pct = Math.min((now - startTime) / duration, 1);
-    const ease = 1 - Math.pow(1 - pct, 3);
-    const val = start + (target - start) * ease;
-    el.textContent = prefix + val.toFixed(decimals) + suffix;
-    if (pct < 1) requestAnimationFrame(step);
-  }
-  requestAnimationFrame(step);
+function fmtNum(n) {
+  if (n >= 1e6) return (n / 1e6).toFixed(1) + 'M';
+  if (n >= 1e3) return (n / 1e3).toFixed(1) + 'K';
+  return String(Math.round(n));
 }
-
-/* ── Gauge arc ─────────────────────────────── */
-function setGaugeArc(pct) {
-  const arc = document.getElementById("gauge-arc");
-  if (!arc) return;
-  const len = 157;
-  arc.style.strokeDashoffset = (len - len * Math.min(pct, 1)).toFixed(1);
+function normPct(v) { return typeof v === 'number' ? (v <= 1 ? v : v / 100) : 0; }
+function shortModel(m) { return String(m || '—').split('/').pop(); }
+function shortTs(ts) {
+  const s = String(ts || '');
+  return s.includes('T') ? s.split('T')[1].split('.')[0] : s.slice(-8) || '—';
 }
+function fullTs(ts) { return String(ts || '').replace('T', ' ').split('.')[0] || '—'; }
 
-/* ── Quota ring ────────────────────────────── */
-function setQuotaRing(pct) {
-  const circ = document.getElementById("quota-circle");
-  if (!circ) return;
-  const r = 31, circumference = 2 * Math.PI * r;
-  circ.style.strokeDasharray  = circumference;
-  circ.style.strokeDashoffset = (circumference * (1 - Math.min(pct, 1))).toFixed(2);
-  circ.style.stroke = pct >= 0.95 ? C.red : pct >= 0.85 ? C.amber : C.purple;
-}
-
-/* ── Routing flow bars ─────────────────────── */
-function buildFlowBars(taskTypes) {
-  const wrap = document.getElementById("flow-wrap");
-  if (!wrap) return;
-  if (!taskTypes || taskTypes.length === 0) {
-    wrap.textContent = "No data yet.";
-    return;
-  }
-  const total = taskTypes.reduce((s, t) => s + t.calls, 0) || 1;
-  wrap.replaceChildren();
-  taskTypes.slice(0, 6).forEach((t, i) => {
-    const pct = t.calls / total;
-    const row = document.createElement("div");
-    row.className = "flow-row";
-    const lbl = document.createElement("div");
-    lbl.className = "flow-label";
-    lbl.textContent = (t.task_type || "?").toLowerCase();
-    const barWrap = document.createElement("div");
-    barWrap.className = "flow-bar-wrap";
-    const bar = document.createElement("div");
-    bar.className = "flow-bar flow-bar-" + (i % 5);
-    bar.style.width = "0%";
-    barWrap.appendChild(bar);
-    const pctLbl = document.createElement("div");
-    pctLbl.className = "flow-pct";
-    pctLbl.textContent = Math.round(pct * 100) + "%";
-    row.appendChild(lbl); row.appendChild(barWrap); row.appendChild(pctLbl);
-    wrap.appendChild(row);
-    // animate in
-    requestAnimationFrame(() => {
-      setTimeout(() => { bar.style.width = (pct * 100).toFixed(1) + "%"; }, 80 + i * 40);
-    });
-  });
-}
-
-/* ── Recent traffic table ──────────────────── */
-function buildRecentTable(rows) {
-  const wrap = document.getElementById("recent-table-wrap");
-  if (!wrap) return;
-  if (!rows || rows.length === 0) {
-    wrap.textContent = "No recent decisions yet.";
-    return;
-  }
-  const tbl  = document.createElement("table");
-  tbl.className = "traffic-table";
-  const head = tbl.createTHead();
-  const hr   = head.insertRow();
-  ["Time","Type","Model","Latency",""].forEach(h => {
-    const th = document.createElement("th");
-    th.textContent = h;
-    hr.appendChild(th);
-  });
-  const body = tbl.createTBody();
-  rows.forEach((r, idx) => {
-    const tr = body.insertRow();
-    tr.className = "row-new";
-    tr.style.animationDelay = (idx * 0.04) + "s";
-    const time = r.timestamp ? r.timestamp.slice(11, 16) : "";
-    [time, r.task_type || "?"].forEach(val => {
-      const td = tr.insertCell();
-      td.textContent = val;
-    });
-    const modelTd = tr.insertCell();
-    modelTd.className = "model-cell";
-    modelTd.textContent = (r.model || "?").split("/").pop();
-    const latTd = tr.insertCell();
-    latTd.textContent = r.latency_ms ? Math.round(r.latency_ms) + "ms" : "—";
-    const statusTd = tr.insertCell();
-    const pill = document.createElement("span");
-    pill.className = "pill " + (r.success ? "pill-ok" : "pill-fail");
-    pill.textContent = r.success ? "ok" : "fail";
-    statusTd.appendChild(pill);
-  });
-  wrap.replaceChildren(tbl);
-}
-
-/* ── Logs list ──────────────────────────────── */
-function buildLogs(rows) {
-  const list = document.getElementById("logs-list");
-  if (!list) return;
-  if (!rows || rows.length === 0) { list.textContent = "No log entries yet."; return; }
-  list.replaceChildren();
-  rows.forEach((r, idx) => {
-    const row = document.createElement("div");
-    row.className = "log-row";
-    row.style.animationDelay = (idx * 0.04) + "s";
-    const time = document.createElement("span");
-    time.className = "log-time";
-    time.textContent = r.timestamp ? r.timestamp.slice(11, 16) : "";
-    const type = document.createElement("span");
-    type.className = "log-type log-type-" + (r.task_type || "query").toLowerCase();
-    type.textContent = (r.task_type || "?").toLowerCase();
-    const model = document.createElement("span");
-    model.className = "log-model";
-    model.textContent = (r.model || "?").split("/").pop();
-    const lat = document.createElement("span");
-    lat.className = "log-latency";
-    lat.textContent = r.latency_ms ? Math.round(r.latency_ms) + "ms" : "—";
-    const cost = document.createElement("span");
-    cost.className = "log-cost";
-    cost.textContent = r.cost_usd ? "$" + Number(r.cost_usd).toFixed(5) : "";
-    row.appendChild(time); row.appendChild(type); row.appendChild(model);
-    row.appendChild(lat); row.appendChild(cost);
-    list.appendChild(row);
-  });
-}
-
-/* ── Chart instances ───────────────────────── */
-let costChart, modelChart, modelCostChart, profileChart, taskChart;
-const CHART_OPTS_SHARED = {
-  plugins: { legend: { display: false } },
+// ── Charts ────────────────────────────────────────────────────────────────
+let costChart = null, modelChart = null;
+const PALETTE = ['#d0bcff','#5de6ff','#ffb869','#a078ff','#2fd9f4','#ca801e','#958ea0'];
+const CHART_SHARED = {
+  responsive: true, maintainAspectRatio: false,
+  plugins: {
+    legend: { display: false },
+    tooltip: {
+      backgroundColor: 'rgba(6,14,32,0.95)', borderColor: 'rgba(208,188,255,0.2)', borderWidth: 1,
+      titleColor: '#d0bcff', bodyColor: '#cbc3d7', padding: 12, cornerRadius: 8,
+    },
+  },
   scales: {
-    x: { ticks: { color: C.tick, font: { size: 10 } }, grid: { color: C.grid } },
-    y: { ticks: { color: C.tick, font: { size: 10 } }, grid: { color: C.grid }, beginAtZero: true },
+    x: { grid: { color: 'rgba(73,68,84,0.15)' }, ticks: { color: '#958ea0', font: { family: 'JetBrains Mono', size: 10 } } },
+    y: { grid: { color: 'rgba(73,68,84,0.15)' }, ticks: { color: '#958ea0', font: { family: 'JetBrains Mono', size: 10 } } },
   },
 };
-
-function initOrUpdateChart(ref, id, cfg) {
-  if (!ref) {
-    return new Chart(document.getElementById(id), cfg);
-  }
-  ref.data = cfg.data;
-  ref.update("active");
-  return ref;
+function initOrUpdateChart(chart, id, config) {
+  const canvas = document.getElementById(id);
+  if (!canvas) return chart;
+  if (chart) { chart.data = config.data; chart.update(); return chart; }
+  return new Chart(canvas.getContext('2d'), config);
 }
 
-/* ── Main refresh ──────────────────────────── */
-async function refresh() {
-  const btn = document.getElementById("refresh-btn");
-  if (btn) btn.classList.add("spinning");
-  try {
-    const res = await fetch("/api/stats");
-    const d   = await res.json();
-    applyData(d);
-  } catch(e) {
-    setText("sb-status", "Error");
-  } finally {
-    if (btn) btn.classList.remove("spinning");
+// ── Routing flow (SVG) ────────────────────────────────────────────────────
+const TASK_COLORS = {
+  code:'#d0bcff', research:'#5de6ff', generate:'#ffb869',
+  analyze:'#a078ff', query:'#2fd9f4', image:'#ca801e', audio:'#ffb4ab',
+};
+const MODEL_COLORS = ['#d0bcff','#5de6ff','#ffb869','#a078ff'];
+
+function buildRoutingFlow(taskTypes, models) {
+  const el = document.getElementById('routing-flow');
+  if (!el) return;
+  const tasks = (taskTypes || []).slice(0, 5);
+  const mdls  = (models    || []).slice(0, 4);
+  if (!tasks.length) {
+    // Safe: only static text, no user data
+    el.textContent = 'No routing data yet — make a few calls first';
+    el.className += ' flex items-center justify-center text-outline font-mono text-xs';
+    return;
   }
+  const H = 176, ls = H / (tasks.length + 1), rs = H / (mdls.length + 1);
+  const maxCalls = Math.max(...tasks.map(t => t.calls), 1);
+
+  // Build SVG paths (only numeric and color values — no user strings in SVG)
+  let paths = '';
+  tasks.forEach((t, li) => {
+    const ly = (ls * (li + 1)) / H * 100;
+    const color = TASK_COLORS[t.task_type] || '#958ea0';
+    const sw = (1.5 + (t.calls / maxCalls) * 6).toFixed(1);
+    mdls.forEach((m, ri) => {
+      const ry = (rs * (ri + 1)) / H * 100;
+      const op = li === ri ? 0.35 : 0.12;
+      paths += `<path d="M 140 ${ly} C 220 ${ly}, 220 ${ry}, 300 ${ry}" fill="transparent" stroke="${color}" stroke-width="${sw}" stroke-opacity="${op}"/>`;
+    });
+  });
+
+  const svgEl = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  svgEl.setAttribute('class', 'absolute inset-0 w-full h-full pointer-events-none');
+  svgEl.setAttribute('viewBox', '0 0 440 100');
+  svgEl.setAttribute('preserveAspectRatio', 'none');
+  svgEl.innerHTML = paths; // paths contain only numeric coords & hex colors — safe
+
+  const wrapper = document.createElement('div');
+  wrapper.className = 'relative w-full h-full';
+  wrapper.appendChild(svgEl);
+
+  // Left labels (task types) — built with DOM, esc() for text
+  tasks.forEach((t, i) => {
+    const y = ls * (i + 1);
+    const color = TASK_COLORS[t.task_type] || '#958ea0';
+    const row = document.createElement('div');
+    row.className = 'absolute left-0 flex items-center gap-2';
+    row.style.top = (y - 14) + 'px';
+    const badge = document.createElement('div');
+    badge.className = 'px-3 py-1 rounded font-mono text-xs text-on-surface bg-surface-container-lowest';
+    badge.style.border = `1px solid ${color}44`;
+    badge.textContent = t.task_type || '?'; // textContent — XSS-safe
+    const cnt = document.createElement('span');
+    cnt.className = 'text-[9px] font-mono';
+    cnt.style.color = color;
+    cnt.textContent = t.calls;
+    row.appendChild(badge); row.appendChild(cnt);
+    wrapper.appendChild(row);
+  });
+
+  // Right labels (models) — built with DOM, esc() via textContent
+  mdls.forEach((m, i) => {
+    const y = rs * (i + 1);
+    const color = MODEL_COLORS[i % MODEL_COLORS.length];
+    const label = shortModel(m.model).split('-').slice(0, 3).join('-');
+    const row = document.createElement('div');
+    row.className = 'absolute right-0 text-right';
+    row.style.top = (y - 14) + 'px';
+    const badge = document.createElement('div');
+    badge.className = 'px-3 py-1 rounded font-mono text-xs inline-block';
+    badge.style.border = `1px solid ${color}55`;
+    badge.style.color = color;
+    badge.style.background = color + '10';
+    badge.textContent = label; // textContent — XSS-safe
+    row.appendChild(badge);
+    wrapper.appendChild(row);
+  });
+
+  el.innerHTML = '';
+  el.appendChild(wrapper);
 }
 
+// ── Table renderers (all user strings go through esc()) ───────────────────
+function statusBadge(ok) {
+  // No user data here — only static strings
+  return ok
+    ? '<span class="text-[10px] px-2 py-0.5 rounded font-mono border bg-secondary/10 text-secondary border-secondary/20">200 OK</span>'
+    : '<span class="text-[10px] px-2 py-0.5 rounded font-mono border bg-error/10 text-error border-error/20">FAILED</span>';
+}
+
+function buildRecentTraffic(rows) {
+  const tbody = document.getElementById('recent-tbody');
+  if (!tbody) return;
+  tbody.replaceChildren();
+  if (!rows?.length) {
+    const tr = document.createElement('tr');
+    const td = document.createElement('td');
+    td.colSpan = 5; td.className = 'px-6 py-10 text-center text-outline font-mono text-xs';
+    td.textContent = 'No routing decisions yet';
+    tr.appendChild(td); tbody.appendChild(tr); return;
+  }
+  rows.slice(0, 8).forEach(r => {
+    const ok   = r.success !== 0;
+    const cost = r.cost_usd ? '$' + Number(r.cost_usd).toFixed(4) : '$0.00';
+    const lat  = r.latency_ms ? Math.round(r.latency_ms) + 'ms' : '—';
+    const dotColor = ok ? '#5de6ff' : '#ffb4ab';
+    const tr = document.createElement('tr');
+    tr.className = 'hover:bg-surface-container-high/50 transition-colors';
+    tr.innerHTML =
+      `<td class="px-6 py-4 text-xs font-mono text-on-surface-variant">${esc(shortTs(r.timestamp))}</td>` +
+      `<td class="px-6 py-4 font-mono text-xs text-white">${esc(r.task_type || '—')} <span class="text-[10px] text-outline ml-1">${esc(r.complexity || '')}</span></td>` +
+      `<td class="px-6 py-4"><div class="flex items-center gap-2"><div class="w-1.5 h-1.5 rounded-full flex-shrink-0" style="background:${dotColor}"></div><span class="font-mono text-xs text-on-surface">${esc(shortModel(r.model))}</span></div></td>` +
+      `<td class="px-6 py-4">${statusBadge(ok)}</td>` +
+      `<td class="px-6 py-4 text-right font-mono text-xs text-on-surface-variant">${esc(cost)} / ${esc(lat)}</td>`;
+    tbody.appendChild(tr);
+  });
+}
+
+function buildLogs(rows) {
+  const tbody = document.getElementById('logs-tbody');
+  if (!tbody) return;
+  tbody.replaceChildren();
+  if (!rows?.length) {
+    const tr = document.createElement('tr');
+    const td = document.createElement('td');
+    td.colSpan = 7; td.className = 'px-6 py-10 text-center text-outline font-mono text-xs';
+    td.textContent = 'No routing decisions yet';
+    tr.appendChild(td); tbody.appendChild(tr); return;
+  }
+  const cxColor = { simple: 'text-secondary', moderate: 'text-tertiary', complex: 'text-primary' };
+  rows.forEach(r => {
+    const ok   = r.success !== 0;
+    const cost = r.cost_usd ? '$' + Number(r.cost_usd).toFixed(4) : '$0.00';
+    const lat  = r.latency_ms ? Math.round(r.latency_ms) + 'ms' : '—';
+    const cx   = cxColor[r.complexity] || 'text-outline';
+    const tr = document.createElement('tr');
+    tr.className = 'hover:bg-surface-container-high/50 transition-colors';
+    tr.innerHTML =
+      `<td class="px-6 py-4 text-xs font-mono text-on-surface-variant">${esc(fullTs(r.timestamp))}</td>` +
+      `<td class="px-6 py-4 font-mono text-xs text-white">${esc(r.task_type || '—')}</td>` +
+      `<td class="px-6 py-4 font-mono text-xs ${cx}">${esc(r.complexity || '—')}</td>` +
+      `<td class="px-6 py-4 font-mono text-xs text-on-surface">${esc(shortModel(r.model))}</td>` +
+      `<td class="px-6 py-4 text-right font-mono text-xs text-on-surface-variant">${esc(cost)}</td>` +
+      `<td class="px-6 py-4 text-right font-mono text-xs text-on-surface-variant">${esc(lat)}</td>` +
+      `<td class="px-6 py-4 text-center">${statusBadge(ok)}</td>`;
+    tbody.appendChild(tr);
+  });
+}
+
+function buildModelTable(models) {
+  const tbody = document.getElementById('model-tbody');
+  if (!tbody) return;
+  tbody.replaceChildren();
+  if (!models?.length) {
+    const tr = document.createElement('tr');
+    const td = document.createElement('td');
+    td.colSpan = 4; td.className = 'py-10 text-center text-outline font-mono text-xs';
+    td.textContent = 'No model data yet';
+    tr.appendChild(td); tbody.appendChild(tr); return;
+  }
+  models.forEach(m => {
+    const label = shortModel(m.model);
+    const c1k   = m.calls > 0 ? '$' + (m.cost_usd / m.calls * 1000).toFixed(4) : '$0.00';
+    const tr = document.createElement('tr');
+    tr.className = 'hover:bg-surface-container-high/50 transition-colors';
+    tr.innerHTML =
+      `<td class="py-3.5 font-mono text-sm text-on-surface">${esc(label)}</td>` +
+      `<td class="py-3.5 text-right font-mono text-sm text-on-surface-variant">${esc(m.calls)}</td>` +
+      `<td class="py-3.5 text-right font-mono text-sm text-on-surface-variant">${esc(c1k)}</td>` +
+      `<td class="py-3.5 text-right"><span class="text-[10px] font-mono text-secondary bg-secondary/10 px-2 py-0.5 rounded border border-secondary/20">OPERATIONAL</span></td>`;
+    tbody.appendChild(tr);
+  });
+}
+
+function buildTaskBreakdown(taskTypes) {
+  const el = document.getElementById('task-breakdown');
+  if (!el) return;
+  el.replaceChildren();
+  if (!taskTypes?.length) {
+    const div = document.createElement('div');
+    div.className = 'col-span-5 text-center text-outline font-mono text-xs py-4';
+    div.textContent = 'No data yet';
+    el.appendChild(div); return;
+  }
+  const total = taskTypes.reduce((s, t) => s + t.calls, 0);
+  taskTypes.forEach(t => {
+    const pct   = total > 0 ? Math.round(t.calls / total * 100) : 0;
+    const color = TASK_COLORS[t.task_type] || '#958ea0';
+    const card  = document.createElement('div');
+    card.className = 'bg-surface-container-high rounded-2xl p-4 border border-outline-variant/10 text-center';
+    const pctEl = document.createElement('div');
+    pctEl.className = 'text-2xl font-extrabold font-mono mb-1';
+    pctEl.style.color = color;
+    pctEl.textContent = pct + '%';
+    const nameEl = document.createElement('div');
+    nameEl.className = 'text-[10px] font-mono text-outline uppercase tracking-wider';
+    nameEl.textContent = t.task_type || '?';
+    const cntEl = document.createElement('div');
+    cntEl.className = 'text-xs font-mono text-on-surface-variant mt-1';
+    cntEl.textContent = t.calls + ' calls';
+    card.appendChild(pctEl); card.appendChild(nameEl); card.appendChild(cntEl);
+    el.appendChild(card);
+  });
+}
+
+function buildModelLegend(models) {
+  const el = document.getElementById('model-legend');
+  if (!el || !models?.length) return;
+  el.replaceChildren();
+  models.slice(0, 6).forEach((m, i) => {
+    const label = shortModel(m.model);
+    const row   = document.createElement('div');
+    row.className = 'flex items-center justify-between text-xs py-1';
+    const left  = document.createElement('div');
+    left.className = 'flex items-center gap-2';
+    const dot   = document.createElement('div');
+    dot.className = 'w-2 h-2 rounded-full flex-shrink-0';
+    dot.style.background = PALETTE[i % PALETTE.length];
+    const name  = document.createElement('span');
+    name.className = 'font-mono text-on-surface-variant';
+    name.textContent = label;
+    const cnt   = document.createElement('span');
+    cnt.className = 'font-mono text-outline';
+    cnt.textContent = m.calls;
+    left.appendChild(dot); left.appendChild(name);
+    row.appendChild(left); row.appendChild(cnt);
+    el.appendChild(row);
+  });
+}
+
+// ── Main data application ─────────────────────────────────────────────────
 function applyData(d) {
-  /* ── top bar ── */
-  setText("mode-badge", d.config?.subscription_mode ? "CC Subscription" : "API Mode");
-  setText("refresh-ts", "Updated " + new Date().toLocaleTimeString());
-  setText("sb-status", "Connected");
+  setText('mode-badge', d.config?.subscription_mode ? 'CC Subscription' : 'API Mode');
+  setText('refresh-ts', 'Updated ' + new Date().toLocaleTimeString());
+  setText('sb-status', '● Connected');
+  setText('sb-profile', (d.config?.profile || '?') + ' | v1.3');
 
-  /* ── savings gauge ── */
   const saved = d.savings?.total_saved_usd ?? 0;
   const ext   = d.savings?.total_external_usd ?? 0;
   const eff   = (saved + ext) > 0 ? saved / (saved + ext) : 0;
-  setText("g-saved", "$" + saved.toFixed(2));
-  setText("g-eff",   Math.round(eff * 100) + "% efficiency");
-  setText("g-today-cost", "$" + (d.today.cost_usd || 0).toFixed(4));
-  setText("g-month-cost", "$" + (d.month.cost_usd || 0).toFixed(4));
-  setGaugeArc(eff);
 
-  /* ── stat cards ── */
-  animateCount(document.getElementById("s-calls"),   d.today.calls || 0,  "", "", 0);
-  animateCount(document.getElementById("s-tokens"),  d.today.tokens || 0, "", "", 0);
-  animateCount(document.getElementById("s-semhits"), d.semantic_cache?.hits ?? 0, "", "", 0);
+  setText('g-saved', '$' + saved.toFixed(2));
+  setText('eff-pct', Math.round(eff * 100) + '%');
+  setText('g-ext-cost', '$' + ext.toFixed(2));
+  setText('g-today-cost', '$' + (d.today?.cost_usd || 0).toFixed(4));
 
-  /* session quota ring */
-  const rawSession = (d.usage || {}).session_pct ?? 0;
-  const sp = typeof rawSession === "number" && rawSession <= 1 ? rawSession : rawSession / 100;
-  setText("s-session", Math.round(sp * 100) + "%");
-  setQuotaRing(sp);
+  const gaugeArc = document.getElementById('gauge-arc');
+  if (gaugeArc) gaugeArc.style.strokeDashoffset = 540 * (1 - eff);
+  const effArc = document.getElementById('eff-arc');
+  if (effArc) effArc.style.strokeDashoffset = 402 * (1 - eff);
+  setText('eff-score', Math.round(eff * 100) + '%');
 
-  /* ── performance panel ── */
-  animateCount(document.getElementById("p-month-calls"), d.month.calls || 0, "", "", 0);
-  animateCount(document.getElementById("p-month-cost"),  d.month.cost_usd || 0, "$", "", 4);
-  const topModel = (d.models ?? [])[0]?.model ?? "—";
-  setText("p-top-model", topModel.split("/").pop());
-  const rawWeekly = (d.usage || {}).weekly_pct ?? 0;
-  const wp = typeof rawWeekly === "number" && rawWeekly <= 1 ? rawWeekly : rawWeekly / 100;
-  setText("p-weekly", Math.round(wp * 100) + "%");
+  setBar('g-ext-bar', (saved + ext) > 0 ? ext / (saved + ext) : 0);
+  const bgt = d.config?.monthly_budget || 0;
+  setBar('g-today-bar', bgt > 0 ? (d.today?.cost_usd || 0) / bgt : Math.min(1, d.today?.cost_usd || 0));
 
-  /* ── config panel ── */
+  setText('s-calls',   fmtNum(d.today?.calls  || 0));
+  setText('s-tokens',  fmtNum(d.today?.tokens || 0));
+  setText('s-semhits', fmtNum(d.semantic_cache?.hits ?? 0));
+
+  setText('p-saved',       '$' + saved.toFixed(2));
+  setText('p-month-cost',  '$' + (d.month?.cost_usd || 0).toFixed(4));
+  setText('p-month-calls', String(d.month?.calls || 0));
+  setBar('p-saved-bar', eff);
+
   const cfg = d.config || {};
-  setText("cfg-profile", cfg.profile || "—");
-  const subEl = document.getElementById("cfg-sub");
+  setText('cfg-profile', cfg.profile || '—');
+  const subEl = document.getElementById('cfg-sub');
   if (subEl) {
-    subEl.textContent = cfg.subscription_mode ? "Enabled" : "Disabled";
-    subEl.className = "config-val " + (cfg.subscription_mode ? "on" : "off");
+    subEl.textContent = cfg.subscription_mode ? 'Enabled' : 'Disabled';
+    subEl.className = cfg.subscription_mode
+      ? 'font-mono text-sm text-secondary bg-secondary/10 px-3 py-1 rounded-lg'
+      : 'font-mono text-sm text-outline bg-surface-container-high px-3 py-1 rounded-lg';
   }
-  setText("cfg-budget", cfg.monthly_budget > 0 ? "$" + cfg.monthly_budget.toFixed(2) : "Unlimited");
-  setText("cfg-daily",  cfg.daily_limit   > 0 ? "$" + cfg.daily_limit.toFixed(2)   : "Unlimited");
-  const u = d.usage || {};
-  setText("cfg-session-pct", Math.round(sp * 100) + "%");
-  setText("cfg-weekly-pct",  Math.round(wp * 100) + "%");
-  const sonnetRaw = u.sonnet_pct ?? 0;
-  const sonnetPct = typeof sonnetRaw === "number" && sonnetRaw <= 1 ? sonnetRaw : sonnetRaw / 100;
-  setText("cfg-sonnet-pct", Math.round(sonnetPct * 100) + "%");
-  setText("cfg-refresh-time", u.last_updated || "—");
+  setText('cfg-budget', cfg.monthly_budget > 0 ? '$' + cfg.monthly_budget.toFixed(2) : 'Unlimited');
+  setText('cfg-daily',  cfg.daily_limit   > 0 ? '$' + cfg.daily_limit.toFixed(2)   : 'Unlimited');
 
-  /* ── Cost bar chart ── */
+  const u   = d.usage || {};
+  const sp  = normPct(u.session_pct);
+  const wp  = normPct(u.weekly_pct);
+  const snp = normPct(u.sonnet_pct);
+  setText('cfg-session-pct', Math.round(sp  * 100) + '%');
+  setText('cfg-weekly-pct',  Math.round(wp  * 100) + '%');
+  setText('cfg-sonnet-pct',  Math.round(snp * 100) + '%');
+  setText('cfg-refresh-time', u.last_updated || '—');
+  setBar('cfg-session-bar', sp);
+  setBar('cfg-weekly-bar',  wp);
+  setBar('cfg-sonnet-bar',  snp);
+
+  buildTaskBreakdown(d.task_types);
+  buildRoutingFlow(d.task_types, d.models);
+  buildRecentTraffic(d.recent);
+  buildLogs(d.recent);
+  buildModelTable(d.models);
+  buildModelLegend(d.models);
+
   const dc = d.daily_cost ?? [];
-  costChart = initOrUpdateChart(costChart, "costChart", {
-    type: "bar",
+  costChart = initOrUpdateChart(costChart, 'costChart', {
+    type: 'bar',
     data: {
-      labels: dc.map(r => r.day.slice(5)),
+      labels: dc.map(r => r.day?.slice(5) || ''),
       datasets: [{
-        label: "USD", data: dc.map(r => r.cost_usd),
-        backgroundColor: "rgba(139,92,246,0.35)",
-        borderColor: C.purple, borderWidth: 1,
-        borderRadius: 5, borderSkipped: false,
-      }]
+        label: 'USD', data: dc.map(r => r.cost_usd),
+        backgroundColor: 'rgba(208,188,255,0.2)',
+        borderColor: '#d0bcff', borderWidth: 1,
+        borderRadius: 6, borderSkipped: false,
+      }],
     },
-    options: {
-      ...CHART_OPTS_SHARED,
-      animation: { duration: 800 },
-    }
+    options: { ...CHART_SHARED, animation: { duration: 800 } },
   });
 
-  /* ── Model doughnut ── */
   const models = d.models ?? [];
-  modelChart = initOrUpdateChart(modelChart, "modelChart", {
-    type: "doughnut",
+  modelChart = initOrUpdateChart(modelChart, 'modelChart', {
+    type: 'doughnut',
     data: {
-      labels: models.map(m => m.model.split("/").pop()),
-      datasets: [{ data: models.map(m => m.calls), backgroundColor: PALETTE,
-                   borderWidth: 0, hoverOffset: 6 }]
+      labels: models.map(m => shortModel(m.model)),
+      datasets: [{ data: models.map(m => m.calls), backgroundColor: PALETTE, borderWidth: 0, hoverOffset: 6 }],
     },
     options: {
-      plugins: { legend: { position: "right",
-        labels: { color: C.tick, font: { size: 10 }, boxWidth: 10, padding: 8 }
-      }},
-      animation: { animateRotate: true, duration: 900 },
-      cutout: "68%",
-    }
-  });
-
-  /* ── Model cost bar ── */
-  modelCostChart = initOrUpdateChart(modelCostChart, "modelCostChart", {
-    type: "bar",
-    data: {
-      labels: models.map(m => m.model.split("/").pop()),
-      datasets: [{
-        label: "Cost USD", data: models.map(m => m.cost_usd),
-        backgroundColor: PALETTE.map(c => c + "55"),
-        borderColor: PALETTE, borderWidth: 1.5, borderRadius: 4,
-      }]
+      responsive: true, maintainAspectRatio: false, cutout: '70%',
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          backgroundColor: 'rgba(6,14,32,0.95)', borderColor: 'rgba(208,188,255,0.2)', borderWidth: 1,
+          titleColor: '#d0bcff', bodyColor: '#cbc3d7', padding: 12, cornerRadius: 8,
+        },
+      },
     },
-    options: { ...CHART_OPTS_SHARED, animation: { duration: 700 } },
   });
-
-  /* ── Profile doughnut ── */
-  const profiles = d.profiles ?? [];
-  profileChart = initOrUpdateChart(profileChart, "profileChart", {
-    type: "doughnut",
-    data: {
-      labels: profiles.map(p => p.profile),
-      datasets: [{ data: profiles.map(p => p.calls), backgroundColor: PALETTE.slice(3),
-                   borderWidth: 0, hoverOffset: 6 }]
-    },
-    options: {
-      plugins: { legend: { position: "right",
-        labels: { color: C.tick, font: { size: 10 }, boxWidth: 10, padding: 8 }
-      }},
-      animation: { animateRotate: true, duration: 900 },
-      cutout: "60%",
-    }
-  });
-
-  /* ── Task type pie ── */
-  const tasks = d.task_types ?? [];
-  taskChart = initOrUpdateChart(taskChart, "taskChart", {
-    type: "pie",
-    data: {
-      labels: tasks.map(t => t.task_type),
-      datasets: [{ data: tasks.map(t => t.calls), backgroundColor: PALETTE.slice(1),
-                   borderWidth: 0, hoverOffset: 6 }]
-    },
-    options: {
-      plugins: { legend: { position: "right",
-        labels: { color: C.tick, font: { size: 10 }, boxWidth: 10, padding: 8 }
-      }},
-      animation: { animateRotate: true, duration: 900 },
-    }
-  });
-
-  /* ── Routing flow bars ── */
-  buildFlowBars(tasks);
-
-  /* ── Tables & logs ── */
-  buildRecentTable(d.recent ?? []);
-  buildLogs(d.recent ?? []);
 }
 
-function doRefresh() { refresh(); }
+// ── Refresh loop ──────────────────────────────────────────────────────────
+async function doRefresh() {
+  const btn = document.getElementById('refresh-btn');
+  if (btn) btn.classList.add('spinning');
+  try {
+    const res = await fetch('/api/stats');
+    const d   = await res.json();
+    applyData(d);
+  } catch (e) {
+    setText('sb-status', '○ Error — retrying in 30s');
+  } finally {
+    if (btn) btn.classList.remove('spinning');
+  }
+}
 
-refresh();
-setInterval(refresh, 30_000);
+doRefresh();
+setInterval(doRefresh, 30000);
 </script>
 </body>
 </html>"""
