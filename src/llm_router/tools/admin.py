@@ -195,6 +195,8 @@ async def llm_usage(period: str = "today") -> str:
         lines.append(row(f"  ${monthly_spend:.2f} / ${budget:.2f}  {bar}  ${remaining:.2f} left"))
         lines.append(HR)
 
+    lines.append(row("  Tip: use llm_dashboard to open the visual web dashboard"))
+    lines.append(HR)
     return "\n".join(lines)
 
 
@@ -325,6 +327,7 @@ async def llm_health() -> str:
         ollama_status = "reachable ✅" if reachable else "unreachable ❌ — run: ollama serve"
         lines.append(f"\n🦙 Ollama ({config.ollama_base_url}): {ollama_status}")
 
+    lines.append("\nTip: use llm_dashboard to open the visual web dashboard at localhost:7337")
     return "\n".join(lines)
 
 
