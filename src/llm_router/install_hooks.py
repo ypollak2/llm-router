@@ -114,6 +114,7 @@ _HOOK_DEFS = [
     ("agent-route.py", "llm-router-agent-route.py", "PreToolUse", "Agent"),
     ("subagent-start.py", "llm-router-subagent-start.py", "SubagentStart", ""),
     ("usage-refresh.py", "llm-router-usage-refresh.py", "PostToolUse", "llm_"),
+    ("cc-usage-track.py", "llm-router-cc-usage-track.py", "PostToolUse", "Agent"),
     ("session-end.py", "llm-router-session-end.py", "Stop", ""),
 ]
 
