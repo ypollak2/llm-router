@@ -1,0 +1,177 @@
+{
+  "$schema": "https://glama.ai/mcp/schemas/glama-json-schema.json",
+  "name": "llm-router",
+  "description": "Subscription-aware LLM routing for Claude Code — routes tasks to 20+ providers with complexity classification, pressure-based fallback chains, Codex integration, and cost tracking.",
+  "version": "1.3.0",
+  "license": "MIT",
+  "tools": [
+    {
+      "name": "llm_classify",
+      "description": "Classify a prompt's complexity and recommend which Claude model to use"
+    },
+    {
+      "name": "llm_route",
+      "description": "Smart router — classifies task complexity, then routes to the optimal external LLM"
+    },
+    {
+      "name": "llm_query",
+      "description": "Send a general query to the best available LLM, subscription-aware"
+    },
+    {
+      "name": "llm_code",
+      "description": "Coding task — routes to the best coding model (Haiku, Codex, DeepSeek)"
+    },
+    {
+      "name": "llm_analyze",
+      "description": "Deep analysis — routes to the strongest reasoning model"
+    },
+    {
+      "name": "llm_research",
+      "description": "Search-augmented research — routes to Perplexity for web-grounded answers"
+    },
+    {
+      "name": "llm_generate",
+      "description": "Generate creative or long-form content — routes to the best generation model"
+    },
+    {
+      "name": "llm_edit",
+      "description": "Route code-edit reasoning to a cheap model and return exact edit instructions"
+    },
+    {
+      "name": "llm_codex",
+      "description": "Route a task to the local Codex desktop agent (uses OpenAI subscription, not Claude quota)"
+    },
+    {
+      "name": "llm_image",
+      "description": "Generate images via DALL-E, Stable Diffusion, or Flux"
+    },
+    {
+      "name": "llm_video",
+      "description": "Generate short video clips via Sora or RunwayML"
+    },
+    {
+      "name": "llm_audio",
+      "description": "Text-to-speech or speech-to-text via ElevenLabs or Whisper"
+    },
+    {
+      "name": "llm_orchestrate",
+      "description": "Multi-step pipeline orchestration — break complex tasks across multiple model calls"
+    },
+    {
+      "name": "llm_stream",
+      "description": "Stream an LLM response for long-running tasks"
+    },
+    {
+      "name": "llm_check_usage",
+      "description": "Check current Claude subscription usage (session, weekly, Sonnet limits)"
+    },
+    {
+      "name": "llm_update_usage",
+      "description": "Manually update Claude subscription usage data"
+    },
+    {
+      "name": "llm_refresh_claude_usage",
+      "description": "Refresh Claude usage data from the live subscription API"
+    },
+    {
+      "name": "llm_usage",
+      "description": "Show cost and savings summary for the current session"
+    },
+    {
+      "name": "llm_health",
+      "description": "Show provider health status and circuit breaker states"
+    },
+    {
+      "name": "llm_providers",
+      "description": "List all configured providers and their API key status"
+    },
+    {
+      "name": "llm_set_profile",
+      "description": "Switch the active routing profile (budget, balanced, quality, speed)"
+    },
+    {
+      "name": "llm_setup",
+      "description": "Interactive setup wizard — configure API keys, test providers, view routing status"
+    },
+    {
+      "name": "llm_quality_report",
+      "description": "Generate a routing quality report with model performance analytics"
+    },
+    {
+      "name": "llm_save_session",
+      "description": "Save the current session context for future reference"
+    },
+    {
+      "name": "llm_pipeline_templates",
+      "description": "List available multi-step pipeline templates"
+    },
+    {
+      "name": "llm_track_usage",
+      "description": "Track external LLM usage and cost for a completed call"
+    },
+    {
+      "name": "llm_rate",
+      "description": "Rate the quality of a routing decision to improve future routing"
+    },
+    {
+      "name": "llm_cache_stats",
+      "description": "Show prompt classification cache hit rate and savings"
+    },
+    {
+      "name": "llm_cache_clear",
+      "description": "Clear the prompt classification cache"
+    },
+    {
+      "name": "llm_dashboard",
+      "description": "Launch the web dashboard for live cost and routing analytics"
+    }
+  ],
+  "resources": [
+    {
+      "uri": "llm-router://status",
+      "description": "Live snapshot of router state: profile, tier, providers, health"
+    }
+  ],
+  "environments": [
+    {
+      "name": "OPENAI_API_KEY",
+      "description": "OpenAI API key for GPT-4o and o3 access",
+      "required": false
+    },
+    {
+      "name": "GEMINI_API_KEY",
+      "description": "Google Gemini API key for Gemini Flash and Pro access",
+      "required": false
+    },
+    {
+      "name": "ANTHROPIC_API_KEY",
+      "description": "Anthropic API key (overrides Claude subscription mode)",
+      "required": false
+    },
+    {
+      "name": "PERPLEXITY_API_KEY",
+      "description": "Perplexity API key for web-grounded research routing",
+      "required": false
+    },
+    {
+      "name": "LLM_ROUTER_CLAUDE_SUBSCRIPTION",
+      "description": "Set 'true' to use Claude Code subscription instead of Anthropic API (recommended)",
+      "required": false
+    },
+    {
+      "name": "OLLAMA_BASE_URL",
+      "description": "Ollama endpoint for local model routing (e.g. http://localhost:11434)",
+      "required": false
+    },
+    {
+      "name": "LLM_ROUTER_DAILY_SPEND_LIMIT",
+      "description": "Hard daily spend cap in USD (e.g. 1.00). Set 0 to disable.",
+      "required": false
+    },
+    {
+      "name": "LLM_ROUTER_MONTHLY_BUDGET",
+      "description": "Soft monthly budget in USD. Router switches to cheaper models when approaching limit.",
+      "required": false
+    }
+  ]
+}

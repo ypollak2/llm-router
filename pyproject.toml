@@ -63,6 +63,11 @@ packages = ["src/llm_router"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+filterwarnings = [
+    # aiosqlite's worker thread may call call_soon_threadsafe after the event
+    # loop closes — benign teardown race in pytest-asyncio function-scoped loops.
+    "ignore:.*call_soon_threadsafe:pytest.PytestUnhandledThreadExceptionWarning",
+]
 
 [tool.ruff]
 line-length = 100
