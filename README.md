@@ -127,6 +127,22 @@ This installs hooks + rules to `~/.claude/` so every Claude Code session auto-ro
 
 ---
 
+## Dashboard
+
+The built-in web dashboard (`llm_dashboard` or `llm-router dashboard`) gives you a live view of routing decisions, cost trends, and subscription pressure.
+
+| Overview | Performance |
+|---|---|
+| ![Overview](docs/images/dashboard-overview.png) | ![Performance](docs/images/dashboard-performance.png) |
+
+| Logs & Analysis |
+|---|
+| ![Logs](docs/images/dashboard-logs.png) |
+
+> **Design:** Liquid Glass dark theme — Inter + JetBrains Mono, Material Symbols, Tailwind CSS. Auto-refreshes every 30 s.
+
+---
+
 ## How It Works
 
 ### Auto-Route Hook — Every Prompt, Cheaper Model First
