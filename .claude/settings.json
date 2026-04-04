@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 .claude/hooks/auto-route.py"
+            "command": "python3 /Users/yali.pollak/Projects/llm-router/.claude/hooks/auto-route.py"
           }
         ]
       }
@@ -17,7 +17,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 .claude/hooks/usage-refresh.py"
+            "command": "python3 /Users/yali.pollak/Projects/llm-router/.claude/hooks/usage-refresh.py"
           }
         ]
       }
