@@ -1,5 +1,23 @@
 # Changelog
 
+## v1.3.0 — Observability (2026-04-04)
+
+### Added
+
+- **Anthropic prompt caching** (`prompt_cache.py`) — auto-injects `cache_control: {"type": "ephemeral"}` breakpoints on long stable context before every Anthropic model call, saving up to 90% on cached token reads. Two breakpoints are placed at the most cache-effective positions: the system message (if ≥1024 tokens) and the last context message before the current user turn. Non-Anthropic models pass through unchanged. Activated by default; controlled by `LLM_ROUTER_PROMPT_CACHE_ENABLED` (bool) and `LLM_ROUTER_PROMPT_CACHE_MIN_TOKENS` (int, default 1024).
+
+- **Hard daily spend cap** (`router.py`) — `LLM_ROUTER_DAILY_SPEND_LIMIT` (float, default 0 = disabled) now raises `BudgetExceededError` before any LLM call when daily spend ≥ limit. Checked inside the existing `_budget_lock` alongside the monthly cap so concurrent callers can't both slip past. Error message includes the reset time (midnight UTC) and the env var to raise the limit.
+
+- **Semantic dedup cache** (`semantic_cache.py`) — embeds prompts via Ollama's `nomic-embed-text` model and skips the LLM call entirely when a recent response (within 24h, same task type) has cosine similarity ≥ 0.95. Returns a zero-cost `LLMResponse` with `provider="cache"`. New `semantic_cache` table added to the usage SQLite DB via `CREATE TABLE IF NOT EXISTS` (existing DBs unaffected). Only active when `OLLAMA_BASE_URL` is set; silently no-op otherwise.
+
+- **Web dashboard** (`dashboard/`) — `llm-router dashboard [--port N]` starts a local `aiohttp` HTTP server at `localhost:7337`. Also accessible via the `llm_dashboard` MCP tool. Shows: today's calls/cost/tokens, monthly spend, lifetime savings vs Opus baseline, model and task-type distribution (7 days), daily cost trend (14 days), recent routing decisions table, and session quota. Auto-refreshes every 30 seconds. Self-contained single-file HTML — no build step. All DB values rendered via `textContent`/Chart.js arrays (no `innerHTML` XSS surface).
+
+### Fixed
+
+- **Cross-platform desktop notifications** (`cost.py`) — `fire_budget_alert` now dispatches to `osascript` (macOS), `notify-send` (Linux), or `win10toast` (Windows, optional). Previously macOS-only; alerts were silently dropped on Linux and Windows.
+
+- **Dashboard background process** (`tools/admin.py`) — `llm_dashboard` uses `start_new_session=True` on macOS/Linux and `DETACHED_PROCESS` on Windows, ensuring the dashboard survives terminal close on all platforms.
+
 ## v1.2.0 — Foundation Hardening (2026-04-02)
 
 ### Changed

@@ -6,6 +6,8 @@ Usage:
     llm-router install --check  — show what would be installed without doing it
     llm-router install --force  — reinstall even if already present
     llm-router uninstall        — remove hooks and MCP registration
+    llm-router dashboard        — start the web dashboard at localhost:7337
+    llm-router dashboard --port 7338  — use a custom port
 """
 
 from __future__ import annotations
@@ -14,13 +16,15 @@ import sys
 
 
 def main() -> None:
-    """Unified CLI: dispatches to MCP server or install subcommands."""
+    """Unified CLI: dispatches to MCP server or subcommands."""
     args = sys.argv[1:]
 
     if args and args[0] == "install":
         _run_install(flags=args[1:])
     elif args and args[0] == "uninstall":
         _run_uninstall()
+    elif args and args[0] == "dashboard":
+        _run_dashboard(flags=args[1:])
     else:
         # Default: start the MCP server (original behavior)
         from llm_router.server import main as _mcp_main
@@ -84,6 +88,22 @@ def _run_uninstall() -> None:
     for a in actions:
         print(f"  {a}")
     print("\nDone. Restart Claude Code to apply changes.\n")
+
+
+def _run_dashboard(flags: list[str]) -> None:
+    import asyncio
+
+    port = 7337
+    for i, flag in enumerate(flags):
+        if flag == "--port" and i + 1 < len(flags):
+            try:
+                port = int(flags[i + 1])
+            except ValueError:
+                print(f"Invalid port: {flags[i + 1]}")
+                sys.exit(1)
+
+    from llm_router.dashboard.server import run
+    asyncio.run(run(port=port))
 
 
 if __name__ == "__main__":

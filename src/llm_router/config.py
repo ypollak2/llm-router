@@ -131,6 +131,13 @@ class RouterConfig(BaseSettings):
     compaction_mode: str = "structural"  # off | structural | full
     compaction_threshold: int = 4000     # token threshold to trigger compaction
 
+    # ── Prompt caching (Anthropic only) ──
+    # Auto-injects cache_control breakpoints on long stable context (system prompts,
+    # conversation history) to save up to 90% on repeated Anthropic API calls.
+    # min_tokens: Anthropic requires ≥1024 for Sonnet/Opus, ≥2048 for Haiku.
+    prompt_cache_enabled: bool = True
+    prompt_cache_min_tokens: int = 1024
+
     # ── Health check settings ──
     health_failure_threshold: int = 2
     health_cooldown_seconds: int = 30

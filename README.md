@@ -113,12 +113,17 @@ This installs hooks + rules to `~/.claude/` so every Claude Code session auto-ro
 
 ### What You Get
 
-- **29 MCP tools** — smart routing, text/code, image/video/audio, streaming, orchestration, usage monitoring
+- **30 MCP tools** — smart routing, text/code, image/video/audio, streaming, orchestration, usage monitoring, web dashboard
 - **Auto-route hook** — intercepts every prompt before your top-tier model sees it; heuristic → Ollama → cheap API classifier chain, hooks self-update on `pip upgrade`
 - **Claude subscription mode** — routes entirely within your CC subscription; Codex (free) before paid externals; external only when quota exhausted
+- **Anthropic prompt caching** — auto-injects `cache_control` breakpoints on long system prompts; up to 90% savings on repeated context
+- **Semantic dedup cache** — Ollama embeddings + cosine similarity skip identical-intent calls at zero cost
+- **Web dashboard** — `llm-router dashboard` → `localhost:7337`; cost trends, model distribution, recent decisions
+- **Hard spend caps** — `LLM_ROUTER_DAILY_SPEND_LIMIT` and `LLM_ROUTER_MONTHLY_BUDGET` raise before any call
 - **Prompt classification cache** — SHA-256 LRU cache for instant repeat classifications
 - **Circuit breaker + health** — catches 429s, marks unhealthy providers, auto-recovers
 - **Quality logging** — records every routing decision; `llm_quality_report` shows accuracy, savings, downshift rate
+- **Cross-platform** — macOS, Linux, Windows (desktop notifications, background processes, path handling)
 
 ---
 
@@ -382,7 +387,7 @@ See [CHANGELOG.md](CHANGELOG.md) for what's been shipped. Coming next:
 
 | Version | Theme | Headline features |
 |---|---|---|
-| v1.3 | Observability | Web dashboard at `localhost:7337`, OTEL/Prometheus metrics, prompt caching |
+| ~~v1.3~~ | ~~Observability~~ | ✅ Web dashboard, prompt caching, semantic dedup cache, hard daily cap, cross-platform notifications |
 | v1.4 | Routing Intelligence | Task-aware model preferences, reasoning model tier, learned routing |
 | v1.5 | Agentic & Team | Agent-tree budget tracking, multi-user profiles, YAML pipelines |
 | v2.0 | Learning Router | Self-improving classifier trained on your own routing history |

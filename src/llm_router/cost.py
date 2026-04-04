@@ -107,6 +107,25 @@ SAVINGS_LOG_PATH = Path.home() / ".llm-router" / "savings_log.jsonl"
 """Path to the JSONL file written by the PostToolUse hook for async import."""
 
 
+CREATE_SEMANTIC_CACHE_TABLE = """
+CREATE TABLE IF NOT EXISTS semantic_cache (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_type TEXT NOT NULL,
+    embedding TEXT NOT NULL,
+    response_content TEXT NOT NULL,
+    response_model TEXT NOT NULL,
+    response_cost_usd REAL NOT NULL DEFAULT 0,
+    created_at TEXT DEFAULT (datetime('now'))
+)
+"""
+"""Schema for the ``semantic_cache`` table. Each row stores a prompt embedding
+alongside the cached response, enabling cosine-similarity dedup lookups."""
+
+CREATE_SEMANTIC_CACHE_INDEX = """
+CREATE INDEX IF NOT EXISTS idx_semantic_cache_type_time
+ON semantic_cache(task_type, created_at DESC)
+"""
+
 MIGRATE_CLAUDE_USAGE_ADD_SAVINGS = [
     "ALTER TABLE claude_usage ADD COLUMN cost_saved_usd REAL NOT NULL DEFAULT 0",
     "ALTER TABLE claude_usage ADD COLUMN time_saved_sec REAL NOT NULL DEFAULT 0",
@@ -140,6 +159,8 @@ async def _get_db() -> aiosqlite.Connection:
     await db.execute(CREATE_CLAUDE_USAGE_TABLE)
     await db.execute(CREATE_ROUTING_DECISIONS_TABLE)
     await db.execute(CREATE_SAVINGS_STATS_TABLE)
+    await db.execute(CREATE_SEMANTIC_CACHE_TABLE)
+    await db.execute(CREATE_SEMANTIC_CACHE_INDEX)
     # Migrate: add savings columns if missing
     for stmt in MIGRATE_CLAUDE_USAGE_ADD_SAVINGS:
         try:
@@ -259,25 +280,47 @@ async def get_daily_spend() -> float:
 
 
 def fire_budget_alert(title: str, message: str) -> None:
-    """Send a macOS notification for budget threshold events.
+    """Send a desktop notification for budget threshold events.
 
-    Uses ``osascript`` (no extra dependencies). Silently swallowed on
-    non-macOS platforms or when ``osascript`` is unavailable.
+    Platform support:
+    - **macOS**: ``osascript`` (built-in, no extra deps).
+    - **Linux**: ``notify-send`` (libnotify, typically pre-installed on GNOME/KDE).
+    - **Windows**: ``win10toast`` if installed, falls back to a log warning.
+
+    Silently swallowed when no notification mechanism is available.
 
     Args:
         title: Notification title shown in bold.
         message: Notification body text.
     """
     import subprocess
-    script = (
-        f'display notification "{message}" '
-        f'with title "{title}" '
-        f'sound name "Glass"'
-    )
+    import sys
+
     try:
-        subprocess.run(["osascript", "-e", script], timeout=3, capture_output=True)
+        if sys.platform == "darwin":
+            script = (
+                f'display notification "{message}" '
+                f'with title "{title}" '
+                f'sound name "Glass"'
+            )
+            subprocess.run(["osascript", "-e", script], timeout=3, capture_output=True)
+        elif sys.platform.startswith("linux"):
+            subprocess.run(
+                ["notify-send", "--urgency=normal", title, message],
+                timeout=3, capture_output=True,
+            )
+        elif sys.platform == "win32":
+            try:
+                from win10toast import ToastNotifier  # type: ignore[import]
+                ToastNotifier().show_toast(title, message, duration=5, threaded=True)
+            except ImportError:
+                import logging
+                logging.getLogger("llm_router").warning(
+                    "Budget alert: %s — %s (install win10toast for desktop notifications)",
+                    title, message,
+                )
     except Exception:
-        pass  # non-macOS or osascript unavailable
+        pass  # notification is best-effort — never block routing
 
 
 async def rate_routing_decision(decision_id: int | None, good: bool) -> int | None:

@@ -83,17 +83,17 @@ Eight correctness fixes making the routing guarantees production-solid:
 
 ---
 
-## v1.3 — Observability (next)
+## v1.3 — Observability ✅ Complete
 
 **Theme**: You should always know what the router is doing and why.
 
 | Feature | Priority | Notes |
 |---|---|---|
-| **Web dashboard** | High | `localhost:7337` — routing breakdown, cost/day, model distribution, savings chart |
+| ~~**Web dashboard**~~ | ✅ v1.3.0 | `localhost:7337` — routing breakdown, cost/day, model distribution, savings chart |
 | **OTEL / Prometheus export** | Medium | Optional `--metrics-port`; counters for routed calls, cost, fallback rate per provider |
-| **Anthropic prompt caching** | High | Auto-inject `cache_control` breakpoints on system prompts >2000 tokens (up to 90% savings on repeated context) |
-| **Semantic dedup cache** | High | Embed-then-nearest-neighbour using local Ollama embeddings; threshold 0.95 cosine similarity |
-| **Hard daily spend cap** | Medium | `DAILY_SPEND_LIMIT_USD` env var; router refuses calls when exceeded, returns clear error |
+| ~~**Anthropic prompt caching**~~ | ✅ v1.3.0 | Auto-inject `cache_control` breakpoints on system prompts ≥1024 tokens (up to 90% savings on repeated context) |
+| ~~**Semantic dedup cache**~~ | ✅ v1.3.0 | Embed-then-nearest-neighbour using Ollama embeddings; 0.95 cosine similarity, 24h TTL |
+| ~~**Hard daily spend cap**~~ | ✅ v1.3.0 | `LLM_ROUTER_DAILY_SPEND_LIMIT` env var; router raises `BudgetExceededError` when exceeded |
 
 ---
 

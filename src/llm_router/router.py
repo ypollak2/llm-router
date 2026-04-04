@@ -182,11 +182,24 @@ async def route_and_call(
     else:
         profile = profile or config.llm_router_profile
 
-    # Budget enforcement — block calls if monthly budget is exceeded.
-    # Lock prevents two concurrent callers from both reading pre-limit spend
-    # and both proceeding before either has recorded their cost.
-    if config.llm_router_monthly_budget > 0:
-        async with _budget_lock:
+    # Budget enforcement — block calls if daily or monthly budget is exceeded.
+    # Both checks share one lock to prevent two concurrent callers from both
+    # passing the limit check before either has recorded their cost.
+    async with _budget_lock:
+        # Guard: llm_router_daily_spend_limit may be MagicMock in tests
+        _raw_daily = getattr(config, "llm_router_daily_spend_limit", 0.0)
+        _daily_limit = float(_raw_daily) if isinstance(_raw_daily, (int, float)) else 0.0
+        if _daily_limit > 0:
+            daily_spend = await cost.get_daily_spend()
+            if daily_spend >= _daily_limit:
+                raise BudgetExceededError(
+                    f"Daily spend limit of ${_daily_limit:.2f} exceeded "
+                    f"(spent: ${daily_spend:.4f} today UTC). "
+                    "Resets at midnight UTC. "
+                    "To raise the limit: set LLM_ROUTER_DAILY_SPEND_LIMIT env var."
+                )
+
+        if config.llm_router_monthly_budget > 0:
             monthly_spend = await cost.get_monthly_spend()
             budget = config.llm_router_monthly_budget
             if monthly_spend >= budget:
@@ -356,6 +369,19 @@ async def route_and_call(
             "llm_providers() to see all configured models."
         )
 
+    # Semantic dedup cache — skip the LLM call entirely when an equivalent
+    # prompt was answered recently (cosine similarity ≥ 0.95 within 24 hours).
+    # Only active when Ollama is configured; silently skipped otherwise.
+    if task_type not in MEDIA_TASK_TYPES and not model_override:
+        try:
+            from llm_router import semantic_cache
+            cached = await semantic_cache.check(prompt, task_type)
+            if cached is not None:
+                await _notify(ctx, "info", "⚡ Semantic cache hit — skipping LLM call")
+                return cached
+        except Exception as _sc_err:
+            log.debug("Semantic cache check failed (continuing): %s", _sc_err)
+
     top_model = models_to_try[0].split("/", 1)[1] if "/" in models_to_try[0] else models_to_try[0]
     await _notify(ctx, "info", f"🤖 Routing to {top_model} ({task_type.value}/{profile.value})")
 
@@ -475,6 +501,14 @@ async def route_and_call(
                 except Exception as e:
                     log.debug("Daily budget alert check failed: %s", e)
 
+            # Store in semantic cache for future dedup (fire-and-forget)
+            if task_type not in MEDIA_TASK_TYPES and not model_override:
+                try:
+                    from llm_router import semantic_cache
+                    await semantic_cache.store(prompt, task_type, response)
+                except Exception as _sc_err:
+                    log.debug("Semantic cache store failed (non-fatal): %s", _sc_err)
+
             return response
 
         except Exception as e:
@@ -553,6 +587,10 @@ async def _call_text(
     # Only apply to Perplexity models — other providers reject this field.
     if task_type == TaskType.RESEARCH and "perplexity" in model.lower():
         extra["extra_body"] = {"search_recency_filter": "week"}
+
+    if config.prompt_cache_enabled:
+        from llm_router.prompt_cache import inject_cache_control
+        messages = inject_cache_control(messages, model, min_tokens=config.prompt_cache_min_tokens)
 
     return await providers.call_llm(
         model=model,

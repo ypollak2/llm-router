@@ -371,6 +371,64 @@ async def llm_providers() -> str:
     return "\n".join(lines)
 
 
+async def llm_dashboard(port: int = 7337) -> str:
+    """Open the LLM Router web dashboard in the background.
+
+    Starts a local HTTP server at localhost:<port> showing routing stats,
+    cost trends, model distribution, and recent decisions. Refreshes every 30s.
+
+    The dashboard reads from the same SQLite DB the router writes — no extra
+    configuration needed.
+
+    Args:
+        port: TCP port for the dashboard server (default 7337).
+
+    Returns:
+        URL and instructions for opening the dashboard.
+    """
+    import asyncio
+    import subprocess
+    import sys
+
+    # Start as a detached background process so the MCP server stays responsive.
+    # Using sys.executable guarantees the same venv Python is used.
+    # start_new_session=True works on macOS and Linux; on Windows the process
+    # still starts but is not fully detached (acceptable — Windows users can
+    # close the terminal window to stop it).
+    kwargs: dict = {"stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
+    if sys.platform != "win32":
+        kwargs["start_new_session"] = True
+    else:
+        kwargs["creationflags"] = subprocess.DETACHED_PROCESS  # type: ignore[attr-defined]
+
+    subprocess.Popen(
+        [sys.executable, "-m", "llm_router.dashboard.__main__", "--port", str(port)],
+        **kwargs,
+    )
+
+    # Give it a moment to bind the port
+    await asyncio.sleep(1)
+
+    stop_cmd = (
+        "pkill -f 'llm_router.dashboard'"
+        if sys.platform != "win32"
+        else "taskkill /F /FI \"WINDOWTITLE eq llm_router.dashboard\""
+    )
+
+    return (
+        f"✅ Dashboard started at http://localhost:{port}\n\n"
+        "Open that URL in your browser. It shows:\n"
+        "- Today's calls, cost, and tokens\n"
+        "- Monthly spend vs budget\n"
+        "- Lifetime savings vs Opus baseline\n"
+        "- Model & task-type distribution (7 days)\n"
+        "- Daily cost trend (14 days)\n"
+        "- Recent routing decisions\n\n"
+        f"The dashboard auto-refreshes every 30 seconds.\n"
+        f"Stop it with: {stop_cmd}"
+    )
+
+
 def register(mcp) -> None:
     """Register management tools with the FastMCP instance."""
     mcp.tool()(llm_save_session)
@@ -381,3 +439,4 @@ def register(mcp) -> None:
     mcp.tool()(llm_quality_report)
     mcp.tool()(llm_health)
     mcp.tool()(llm_providers)
+    mcp.tool()(llm_dashboard)
