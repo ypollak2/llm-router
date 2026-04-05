@@ -1,5 +1,18 @@
 # Changelog
 
+## v1.3.4 — Trendiness & Usability (2026-04-05)
+
+### Added
+
+- **`llm-router doctor`** — comprehensive health check command: verifies hooks, routing rules, Claude Code MCP registration, Claude Desktop registration, Ollama reachability (with model list), usage data freshness, API keys, and installed version. Prints colored ✓/✗/⚠ results with copy-paste fix commands.
+- **Cursor / Windsurf / Zed install snippets** in README — the router works in any MCP-compatible IDE; Quick Start now includes ready-to-paste config blocks for Cursor (`~/.cursor/mcp.json`), Windsurf (`~/.codeium/windsurf/mcp_config.json`), and Zed (`settings.json`).
+- **Colored `install --check` output** — `✓`/`✗`/`⚠` symbols with ANSI colors (respects `NO_COLOR` and non-tty); broken items show a `→ fix command` hint inline.
+- **Better first-run install message** — after `llm-router install`, shows a "Try it" prompt to test routing immediately and lists all subcommands including the new `doctor`.
+
+### Changed
+
+- `llm-router status` subcommand list now includes `llm-router doctor`.
+
 ## v1.3.3 — Visibility & Usability (2026-04-05)
 
 ### Added

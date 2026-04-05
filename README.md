@@ -105,6 +105,50 @@ cd llm-router
 uv sync
 ```
 
+### Works with Cursor, Windsurf, and Zed
+
+LLM Router is an MCP server — it works in any IDE that supports the Model Context Protocol.
+
+**Cursor** — add to `~/.cursor/mcp.json`:
+```json
+{
+  "mcpServers": {
+    "llm-router": {
+      "command": "llm-router",
+      "args": []
+    }
+  }
+}
+```
+
+**Windsurf** — add to `~/.codeium/windsurf/mcp_config.json`:
+```json
+{
+  "mcpServers": {
+    "llm-router": {
+      "command": "llm-router",
+      "args": []
+    }
+  }
+}
+```
+
+**Zed** — add to Zed's `settings.json`:
+```json
+{
+  "context_servers": {
+    "llm-router": {
+      "command": {
+        "path": "llm-router",
+        "args": []
+      }
+    }
+  }
+}
+```
+
+> The MCP tools (`llm_query`, `llm_code`, `llm_research`, etc.) work identically in all IDEs. The auto-route hook is Claude Code-specific; other IDEs call the tools directly.
+
 ### Enable Global Auto-Routing
 
 Make the router evaluate **every prompt** across all projects:
