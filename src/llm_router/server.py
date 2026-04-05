@@ -121,15 +121,31 @@ def main():
 
 
 def main_sse(port: int | None = None) -> None:
-    """Start the MCP server with SSE transport for remote access (e.g. Claude mobile app).
+    """Start the MCP server with SSE transport for remote/hosted access.
+
+    Reads PORT and HOST from environment so it works on Railway, Render,
+    Fly.io and other PaaS platforms that inject these at runtime.
 
     Args:
-        port: TCP port to listen on. Defaults to 17891, or reads from argv[1].
+        port: TCP port to listen on. Falls back to $PORT env var, then
+              argv[1], then 17891.
     """
+    import os
     import sys
+    import anyio
+    import uvicorn
+
     if port is None:
-        port = int(sys.argv[1]) if len(sys.argv) > 1 else 17891
-    mcp.run(transport="sse")
+        env_port = os.environ.get("PORT")
+        port = int(env_port) if env_port else (
+            int(sys.argv[1]) if len(sys.argv) > 1 else 17891
+        )
+    host = os.environ.get("HOST", "0.0.0.0")
+
+    starlette_app = mcp.sse_app()
+    config = uvicorn.Config(starlette_app, host=host, port=port, log_level="info")
+    server = uvicorn.Server(config)
+    anyio.run(server.serve)
 
 
 if __name__ == "__main__":
