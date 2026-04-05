@@ -1,5 +1,16 @@
 # Changelog
 
+## v1.4.1 — Smarter demo, real routing history, uninstall --purge (2026-04-05)
+
+### Added
+
+- **`llm-router demo` — real routing history**: when `~/.llm-router/usage.db` has external routing calls, `demo` now shows your actual last 8 routing decisions (prompt snippet, task type, complexity, model, cost) instead of static examples. Falls back to examples with "(no routing history yet — showing examples)" when DB is empty.
+- **`llm-router uninstall --purge`**: removes hooks and MCP registration (existing behaviour), then optionally deletes `~/.llm-router/` (usage DB, `.env`, logs). Prompts for confirmation before deleting; cancels if user types anything other than `yes`.
+
+### Fixed
+
+- Removed unused `import sqlite3` in `_run_demo()` (ruff F401).
+
 ## v1.4.0 — Real savings dashboard, update command, Linux/Windows compat (2026-04-05)
 
 ### Added
