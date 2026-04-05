@@ -33,7 +33,7 @@
 </p>
 
 <p align="center">
-  <img src="docs/images/demo.png" alt="LLM Router demo" width="860" />
+  <img src="docs/images/demo.svg" alt="LLM Router demo — animated terminal" width="860" />
 </p>
 
 ---
