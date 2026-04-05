@@ -1,5 +1,25 @@
 # Changelog
 
+## v1.3.2 — Distribution & Install (2026-04-05)
+
+### Added
+
+- **Claude Desktop auto-install** (`install_hooks.py`) — `llm-router install` now writes the MCP server entry to `claude_desktop_config.json` on macOS, Windows, and Linux. Safe merge — never overwrites unrelated entries. `uninstall` removes it cleanly.
+- **API key validation on install** — `llm-router install --check` and post-install output now show which provider API keys are set and warn when no external providers are configured.
+- **Automated PyPI publish CI** (`.github/workflows/publish.yml`) — pushes to `v*` tags trigger: test suite → version verification → `uv build` → PyPI publish. Blocks bad releases by running tests first.
+- **PyPI discoverability keywords** — added `llm-router`, `claude-desktop`, `cost-optimization`, `model-routing`, `mcp-server` to package metadata.
+- **Glama MCP registry listing** (`glama.json`) — full tool/environment/resource metadata for Glama and compatible registries.
+
+### Fixed
+
+- **sdist bloat** — excluded `.claude/`, `.serena/`, `.playwright-mcp/`, screenshots, and dev files from the source distribution (331 KB vs 28 MB previously).
+- **aiosqlite teardown warning** — added targeted `filterwarnings` for the benign `call_soon_threadsafe` race in pytest-asyncio function-scoped loops.
+- **Hook absolute paths** — `.claude/settings.json` project hooks now use absolute paths, preventing `ENOENT` failures when Claude is opened from a different directory.
+
+### Changed
+
+- `mcp-registry.json` version bumped to `1.3.2`.
+
 ## v1.3.0 — Observability (2026-04-04)
 
 ### Added
