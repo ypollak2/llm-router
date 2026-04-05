@@ -1,5 +1,12 @@
 # Changelog
 
+## v1.3.9 — High-quality demo screenshot (2026-04-05)
+
+### Changed
+
+- Replaced vhs GIF (unreadable font) with a Chrome-rendered PNG (`docs/images/demo.png`) — crisp SF Mono, Dracula theme, 2× resolution, no username in paths.
+- README now shows the PNG demo image; PyPI page updated accordingly.
+
 ## v1.3.8 — Improved demo GIF and table layout (2026-04-05)
 
 ### Changed
