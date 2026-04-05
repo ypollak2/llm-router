@@ -94,9 +94,9 @@ async def _get_stats() -> dict:
             ]
 
             c = await db.execute(
-                "SELECT timestamp, task_type, complexity, final_model, "
+                "SELECT timestamp, task_type, NULL as complexity, model, "
                 "cost_usd, latency_ms, success "
-                "FROM routing_decisions ORDER BY timestamp DESC LIMIT 20"
+                "FROM usage ORDER BY timestamp DESC LIMIT 20"
             )
             stats["recent"] = [
                 {
@@ -106,15 +106,20 @@ async def _get_stats() -> dict:
                 for r in await c.fetchall()
             ]
 
+            # Savings = baseline Sonnet cost minus actual external spend
+            SONNET_IN, SONNET_OUT = 3.0, 15.0  # $/M tokens
             c = await db.execute(
-                "SELECT COALESCE(SUM(estimated_claude_cost_saved),0), "
-                "COALESCE(SUM(external_cost),0) FROM savings_stats"
+                "SELECT COALESCE(SUM(input_tokens),0), COALESCE(SUM(output_tokens),0), "
+                "COALESCE(SUM(cost_usd),0) FROM usage "
+                "WHERE success=1 AND provider!='subscription'"
             )
             row = await c.fetchone()
             if row:
+                baseline = (row[0] * SONNET_IN + row[1] * SONNET_OUT) / 1_000_000
+                external = row[2]
                 stats["savings"] = {
-                    "total_saved_usd": round(row[0], 4),
-                    "total_external_usd": round(row[1], 4),
+                    "total_saved_usd": round(max(0.0, baseline - external), 4),
+                    "total_external_usd": round(external, 4),
                 }
 
             c = await db.execute(
@@ -135,11 +140,17 @@ async def _get_stats() -> dict:
     except Exception:
         pass
 
+    try:
+        from importlib.metadata import version as _pkg_version
+        _pkg_ver = _pkg_version("claude-code-llm-router")
+    except Exception:
+        _pkg_ver = "?"
     stats["config"] = {
         "profile": config.llm_router_profile.value,
         "monthly_budget": config.llm_router_monthly_budget,
         "daily_limit": config.llm_router_daily_spend_limit,
         "subscription_mode": config.llm_router_claude_subscription,
+        "version": _pkg_ver,
     }
 
     return stats
@@ -243,7 +254,7 @@ tailwind.config = {
       <div class="w-2 h-2 rounded-full bg-secondary" style="animation:pulse 2s ease-in-out infinite;box-shadow:0 0 6px #5de6ff;"></div>
       <span class="font-mono text-[10px] uppercase tracking-widest text-secondary">Router Node</span>
     </div>
-    <p id="sb-profile" class="text-[10px] text-outline font-mono">Active | v1.3</p>
+    <p id="sb-profile" class="text-[10px] text-outline font-mono">balanced | v1.4.1</p>
   </div>
   <nav class="space-y-1 flex-1">
     <button onclick="showTab('overview')" data-tab="overview" class="nav-active flex items-center gap-3 w-full px-4 py-2.5 rounded-r-full transition-all text-left">
@@ -880,7 +891,7 @@ function applyData(d) {
   setText('mode-badge', d.config?.subscription_mode ? 'CC Subscription' : 'API Mode');
   setText('refresh-ts', 'Updated ' + new Date().toLocaleTimeString());
   setText('sb-status', '● Connected');
-  setText('sb-profile', (d.config?.profile || '?') + ' | v1.3');
+  setText('sb-profile', (d.config?.profile || '?') + ' | v' + (d.config?.version || '?'));
 
   const saved = d.savings?.total_saved_usd ?? 0;
   const ext   = d.savings?.total_external_usd ?? 0;
