@@ -32,6 +32,10 @@
   <a href="https://smithery.ai/server/llm-router"><img src="https://smithery.ai/badge/llm-router" alt="Smithery"></a>
 </p>
 
+<p align="center">
+  <img src="docs/images/demo.gif" alt="LLM Router demo" width="800" />
+</p>
+
 ---
 
 ## The Problem

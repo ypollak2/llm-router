@@ -102,8 +102,7 @@ def _run_install(flags: list[str]) -> None:
 
     from llm_router.install_hooks import (
         _HOOKS_DST, _HOOKS_SRC, _HOOK_DEFS,
-        _RULES_DST, _RULES_SRC,
-        check_api_keys, claude_desktop_config_path,
+        _RULES_DST, check_api_keys, claude_desktop_config_path,
         install,
     )
 
@@ -127,7 +126,6 @@ def _run_install(flags: list[str]) -> None:
                 ))
                 all_ok = False
 
-        rules_src = _RULES_SRC / "llm-router.md"
         rules_dst = _RULES_DST / "llm-router.md"
         if rules_dst.exists():
             print(_ok("llm-router.md  (routing rules)"))
@@ -229,8 +227,8 @@ def _run_doctor() -> None:
     from pathlib import Path
 
     from llm_router.install_hooks import (
-        _CLAUDE_DIR, _HOOKS_DST, _HOOKS_SRC, _HOOK_DEFS,
-        _RULES_DST, _RULES_SRC, _SETTINGS_PATH,
+        _HOOKS_DST, _HOOKS_SRC, _HOOK_DEFS,
+        _RULES_DST, _SETTINGS_PATH,
         check_api_keys, claude_desktop_config_path,
     )
 
@@ -260,7 +258,6 @@ def _run_doctor() -> None:
     # ── 2. Routing rules ──────────────────────────────────────────────────────
     print(f"\n{_bold('  Routing rules')}")
     rules_dst = _RULES_DST / "llm-router.md"
-    rules_src = _RULES_SRC / "llm-router.md"
     if rules_dst.exists():
         print(_ok("llm-router.md"))
     else:

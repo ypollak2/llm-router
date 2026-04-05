@@ -1,5 +1,15 @@
 # Changelog
 
+## v1.3.6 — Demo GIF, Ruff fixes (2026-04-05)
+
+### Added
+
+- **Demo GIF** (`docs/images/demo.gif`) — generated via VHS; embedded at top of README showing `demo`, `doctor`, and `status` commands in action.
+
+### Fixed
+
+- Removed three unused imports/variables in `cli.py` (`_CLAUDE_DIR`, two `rules_src` assignments) that caused ruff F401/F841 CI failures.
+
 ## v1.3.5 — Setup Wizard, Demo, Deep Reasoning (2026-04-05)
 
 ### Added
