@@ -1,5 +1,17 @@
 # Changelog
 
+## v1.4.0 — Real savings dashboard, update command, Linux/Windows compat (2026-04-05)
+
+### Added
+
+- **`llm-router status` — real cumulative savings**: now shows today / 7-day / 30-day / all-time savings with ASCII bar charts (green = saved, yellow = spent), top models used, and colored subscription pressure bars.
+- **`llm-router update`**: re-installs hooks and routing rules to the latest bundled version, then checks PyPI for a newer package version with upgrade hint.
+- **Linux/Windows compatibility**: `dst.chmod(0o755)` is now skipped on Windows; hook `command` now uses `sys.executable` (the running Python interpreter) instead of the hardcoded `python3`, ensuring hooks work in pipx/venv/pyenv setups on all platforms.
+
+### Fixed
+
+- **CI no longer hangs**: added `timeout-minutes: 10` to CI job and `--timeout=30` per-test via `pytest-timeout`; added `timeout = 30` to `pyproject.toml` pytest config as local default.
+
 ## v1.3.9 — High-quality demo screenshot (2026-04-05)
 
 ### Changed

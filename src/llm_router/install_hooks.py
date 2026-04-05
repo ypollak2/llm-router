@@ -20,6 +20,23 @@ import sys
 from pathlib import Path
 
 
+def _python_exe() -> str:
+    """Return the best Python interpreter path for use in hook command strings.
+
+    Preference order:
+    1. The interpreter currently running this code (most reliable — same venv/pipx env).
+    2. ``python3`` on PATH (Linux/macOS standard).
+    3. ``python`` on PATH (Windows fallback).
+    """
+    import shutil as _shutil
+    current = sys.executable
+    if current and Path(current).exists():
+        return current
+    if _shutil.which("python3"):
+        return "python3"
+    return "python"
+
+
 # Where bundled hook scripts and rules live inside the package
 _PACKAGE_DIR = Path(__file__).resolve().parent
 _HOOKS_SRC = _PACKAGE_DIR / "hooks"
@@ -283,10 +300,11 @@ def install() -> list[str]:
             continue
 
         shutil.copy2(src, dst)
-        dst.chmod(0o755)
+        if sys.platform != "win32":
+            dst.chmod(0o755)
         actions.append(f"Copied {src_name} → {dst}")
 
-        command = f"python3 {dst}"
+        command = f"{_python_exe()} {dst}"
         if _register_hook(settings, event, matcher, command):
             actions.append(f"Registered {event} hook: {dst_name}")
         else:
