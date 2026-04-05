@@ -8,7 +8,7 @@ requires-python = ">=3.10,<3.14"
 authors = [
     { name = "ypollak2", email = "ypollak2@users.noreply.github.com" },
 ]
-keywords = ["llm", "mcp", "claude", "router", "ai", "openai", "gemini", "litellm", "claude-code"]
+keywords = ["llm-router", "llm", "mcp", "claude", "router", "ai", "openai", "gemini", "litellm", "claude-code", "claude-desktop", "cost-optimization", "model-routing", "mcp-server"]
 classifiers = [
     "Development Status :: 5 - Production/Stable",
     "Intended Audience :: Developers",
