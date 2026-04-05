@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm-router-hook-version: 6
+# llm-router-hook-version: 7
 """UserPromptSubmit hook — scoring classifier with Ollama + API fallback chain.
 
 Classification chain (stops at first success):
@@ -699,11 +699,13 @@ def main() -> None:
         f"{stale_suffix}"
     )
 
+    indicator = f"⚡ llm-router → {tool}  [{task_type}/{complexity} · {method}]"
     output = {
         "hookSpecificOutput": {
             "hookEventName": "UserPromptSubmit",
             "contextForAgent": directive,
-        }
+        },
+        "systemMessage": indicator,
     }
     json.dump(output, sys.stdout)
 

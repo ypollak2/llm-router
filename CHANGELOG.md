@@ -1,5 +1,21 @@
 # Changelog
 
+## v1.3.3 — Visibility & Usability (2026-04-05)
+
+### Added
+
+- **Visible routing indicator** (`auto-route.py`) — terminal now shows `⚡ llm-router → {tool} [{task_type}/{complexity} · {method}]` each time the hook fires. Users can see routing happen in real time instead of it being silent.
+- **Shareable savings line** (`session-end.py`) — session summary now prints `💡 Saved ~$X.XX with llm-router · github.com/ypollak2/llm-router` when external savings exceed $0.001.
+- **`llm-router status` command** — new CLI subcommand showing Claude subscription pressure, today's external routing calls/cost/savings, and top models used, all from local state files (no network calls).
+- **Smithery listing** (`smithery.yaml`) — one-click install via Smithery MCP marketplace with full `configSchema` and `commandFunction`.
+- **PyPI download badge + Smithery badge** in README.
+- **Zero-config pitch** in README Quick Start — prominently explains the router works with just a Claude Code subscription, no API keys required.
+- **`pipx` one-line install** in README — `pipx install claude-code-llm-router && llm-router install`.
+
+### Changed
+
+- `auto-route.py` hook version bumped to 7; `session-end.py` to 9.
+
 ## v1.3.2 — Distribution & Install (2026-04-05)
 
 ### Added

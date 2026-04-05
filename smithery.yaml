@@ -1,0 +1,35 @@
+startCommand:
+  type: stdio
+  configSchema:
+    type: object
+    properties:
+      OPENAI_API_KEY:
+        type: string
+        description: "OpenAI API key — GPT-4o, o3 (optional)"
+      GEMINI_API_KEY:
+        type: string
+        description: "Google Gemini API key — Gemini Pro, Flash (optional)"
+      ANTHROPIC_API_KEY:
+        type: string
+        description: "Anthropic API key — overrides subscription mode (optional)"
+      PERPLEXITY_API_KEY:
+        type: string
+        description: "Perplexity API key — web-grounded research (optional)"
+      GROQ_API_KEY:
+        type: string
+        description: "Groq API key — ultra-fast Llama inference (optional)"
+      LLM_ROUTER_CLAUDE_SUBSCRIPTION:
+        type: string
+        description: "Set 'true' to route within your Claude Code subscription (no API keys needed)"
+        default: "true"
+      OLLAMA_BASE_URL:
+        type: string
+        description: "Ollama endpoint for free local model routing"
+        default: "http://localhost:11434"
+    required: []
+  commandFunction: |-
+    (config) => ({
+      command: "uvx",
+      args: ["claude-code-llm-router"],
+      env: config,
+    })

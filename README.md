@@ -28,6 +28,8 @@
   <img src="https://img.shields.io/badge/MCP-1.0+-purple?style=flat-square" alt="MCP">
   <img src="https://img.shields.io/badge/providers-20+-orange?style=flat-square" alt="Providers">
   <a href="https://pypi.org/project/claude-code-llm-router/"><img src="https://img.shields.io/pypi/v/claude-code-llm-router?style=flat-square&label=PyPI" alt="PyPI"></a>
+  <a href="https://pypi.org/project/claude-code-llm-router/"><img src="https://img.shields.io/pypi/dm/claude-code-llm-router?style=flat-square&label=downloads" alt="PyPI Downloads"></a>
+  <a href="https://smithery.ai/server/llm-router"><img src="https://smithery.ai/badge/llm-router" alt="Smithery"></a>
 </p>
 
 ---
@@ -75,10 +77,18 @@ Not every task needs the same model. Without a router, everything goes to the sa
 
 ## Quick Start
 
-### Option A: PyPI (Recommended)
+> **Zero API keys required** — if you have a Claude Code subscription, the router works out of the box. Simple tasks route to Claude Haiku (included), complex ones escalate to Sonnet/Opus. External providers (GPT-4o, Gemini, Perplexity) are optional add-ons.
+
+### One-line install
 
 ```bash
-pip install claude-code-llm-router
+pipx install claude-code-llm-router && llm-router install
+```
+
+Or with pip:
+
+```bash
+pip install claude-code-llm-router && llm-router install
 ```
 
 ### Option B: Claude Code Plugin

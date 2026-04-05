@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm-router-hook-version: 8
+# llm-router-hook-version: 9
 """Stop hook — unified session summary: CC subscription delta + external routing costs."""
 
 from __future__ import annotations
@@ -237,6 +237,14 @@ def _format_routing_section(tools: dict[str, dict]) -> list[str]:
     return lines
 
 
+def _total_saved(tools: dict[str, dict]) -> float:
+    total_in   = sum(t["in"]   for t in tools.values())
+    total_out  = sum(t["out"]  for t in tools.values())
+    total_cost = sum(t["cost"] for t in tools.values())
+    baseline   = _sonnet_baseline(total_in, total_out)
+    return max(0.0, baseline - total_cost)
+
+
 def _format(tools: dict[str, dict], cc_rows: list[dict],
             start: dict | None, current: dict | None, is_live: bool) -> str:
     lines = ["─" * WIDTH]
@@ -251,6 +259,13 @@ def _format(tools: dict[str, dict], cc_rows: list[dict],
     if tools:
         lines.append("")
         lines += _format_routing_section(tools)
+        saved = _total_saved(tools)
+        if saved >= 0.001:
+            lines.append("")
+            lines.append(
+                f'  💡 Saved ~${saved:.2f} with llm-router · '
+                f'github.com/ypollak2/llm-router'
+            )
 
     lines.append("─" * WIDTH)
     return "\n".join(lines)
