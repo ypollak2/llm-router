@@ -38,21 +38,46 @@ def _run_install(flags: list[str]) -> None:
     from llm_router.install_hooks import (
         _HOOKS_DST, _HOOKS_SRC, _HOOK_DEFS,
         _RULES_DST, _RULES_SRC,
+        check_api_keys, claude_desktop_config_path,
         install,
     )
 
     if check_only:
         print("\n[llm-router] Install preview (--check, no changes made)\n")
+
+        print("  Hooks & rules:")
         for src_name, dst_name, event, _ in _HOOK_DEFS:
             src = _HOOKS_SRC / src_name
             dst = _HOOKS_DST / dst_name
             exists = "✓ exists" if dst.exists() else "⬜ missing"
             src_ok = "✓" if src.exists() else "✗ SOURCE MISSING"
-            print(f"  {src_ok}  {src_name} → {dst}  [{exists}]")
+            print(f"    {src_ok}  {src_name} → {dst}  [{exists}]")
         rules_src = _RULES_SRC / "llm-router.md"
         rules_dst = _RULES_DST / "llm-router.md"
         r_exists = "✓ exists" if rules_dst.exists() else "⬜ missing"
-        print(f"  {'✓' if rules_src.exists() else '✗'}  llm-router.md → {rules_dst}  [{r_exists}]")
+        print(f"    {'✓' if rules_src.exists() else '✗'}  llm-router.md → {rules_dst}  [{r_exists}]")
+
+        print("\n  Claude Desktop:")
+        desktop_path = claude_desktop_config_path()
+        if desktop_path is None:
+            print("    ⬜  unsupported platform")
+        else:
+            import json
+            desktop_exists = "✓ exists" if desktop_path.exists() else "⬜ not found"
+            registered = False
+            if desktop_path.exists():
+                try:
+                    cfg = json.loads(desktop_path.read_text())
+                    registered = "llm-router" in cfg.get("mcpServers", {})
+                except Exception:
+                    pass
+            status = "✓ registered" if registered else "⬜ not registered"
+            print(f"    {status}  {desktop_path}  [{desktop_exists}]")
+
+        print("\n  Provider keys:")
+        for line in check_api_keys():
+            print(f"  {line}")
+
         print("\nRun `llm-router install` to apply.\n")
         return
 
@@ -73,8 +98,13 @@ def _run_install(flags: list[str]) -> None:
 
     print("\n✓ LLM Router installed globally.")
     print("  Every Claude Code session will now auto-route tasks.")
-    print("  Restart Claude Code to activate.\n")
-    print("  Subcommands:")
+    print("  Restart Claude Code (and Claude Desktop if installed) to activate.\n")
+
+    print("  Provider keys:")
+    for line in check_api_keys():
+        print(f" {line}")
+
+    print("\n  Subcommands:")
     print("    llm-router install --check   — preview only")
     print("    llm-router install --force   — reinstall / update paths")
     print("    llm-router uninstall         — remove\n")

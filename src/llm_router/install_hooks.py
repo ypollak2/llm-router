@@ -13,6 +13,7 @@ Can be run as:
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import sys
@@ -29,6 +30,18 @@ _CLAUDE_DIR = Path.home() / ".claude"
 _HOOKS_DST = _CLAUDE_DIR / "hooks"
 _RULES_DST = _CLAUDE_DIR / "rules"
 _SETTINGS_PATH = _CLAUDE_DIR / "settings.json"
+
+# Provider API keys — used for post-install validation
+_PROVIDER_KEYS: dict[str, str] = {
+    "OPENAI_API_KEY": "OpenAI",
+    "GEMINI_API_KEY": "Gemini",
+    "ANTHROPIC_API_KEY": "Anthropic",
+    "PERPLEXITY_API_KEY": "Perplexity",
+    "GROQ_API_KEY": "Groq",
+    "DEEPSEEK_API_KEY": "DeepSeek",
+    "MISTRAL_API_KEY": "Mistral",
+}
+_SUBSCRIPTION_VAR = "LLM_ROUTER_CLAUDE_SUBSCRIPTION"
 
 _RULES_VERSION_RE = re.compile(r"<!--\s*llm-router-rules-version:\s*(\d+)\s*-->")
 _HOOK_VERSION_RE = re.compile(r"#\s*llm-router-hook-version:\s*(\d+)")
@@ -155,6 +168,104 @@ def _register_hook(settings: dict, event: str, matcher: str, command: str) -> bo
     return True
 
 
+def claude_desktop_config_path() -> Path | None:
+    """Return the Claude Desktop config path for the current OS, or None."""
+    if sys.platform == "darwin":
+        return Path.home() / "Library" / "Application Support" / "Claude" / "claude_desktop_config.json"
+    if sys.platform == "win32":
+        appdata = os.environ.get("APPDATA", "")
+        return Path(appdata) / "Claude" / "claude_desktop_config.json" if appdata else None
+    # Linux / other
+    xdg = os.environ.get("XDG_CONFIG_HOME", "")
+    base = Path(xdg) if xdg else Path.home() / ".config"
+    return base / "Claude" / "claude_desktop_config.json"
+
+
+def _load_desktop_config(path: Path) -> dict:
+    if path.exists():
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            pass
+    return {}
+
+
+def _install_claude_desktop() -> list[str]:
+    """Add llm-router to Claude Desktop's claude_desktop_config.json.
+
+    Safe merge — never overwrites unrelated entries. Returns actions taken.
+    """
+    config_path = claude_desktop_config_path()
+    if config_path is None:
+        return ["SKIP Claude Desktop: unsupported platform"]
+
+    llm_router_bin = shutil.which("llm-router") or "llm-router"
+    entry = {"command": llm_router_bin, "args": []}
+
+    config = _load_desktop_config(config_path)
+    servers = config.setdefault("mcpServers", {})
+
+    if "llm-router" in servers:
+        return ["Claude Desktop: llm-router already registered"]
+
+    servers["llm-router"] = entry
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
+    return [f"Registered llm-router in Claude Desktop → {config_path}"]
+
+
+def _uninstall_claude_desktop() -> list[str]:
+    """Remove llm-router from Claude Desktop config. Returns actions taken."""
+    config_path = claude_desktop_config_path()
+    if config_path is None or not config_path.exists():
+        return []
+
+    config = _load_desktop_config(config_path)
+    if "llm-router" not in config.get("mcpServers", {}):
+        return []
+
+    del config["mcpServers"]["llm-router"]
+    config_path.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
+    return [f"Removed llm-router from Claude Desktop → {config_path}"]
+
+
+def check_api_keys() -> list[str]:
+    """Return human-readable lines describing which provider keys are set.
+
+    Used by --check and post-install output to warn when no external providers
+    are configured (router will still work via Claude subscription, but users
+    should know the fallback chain will be limited).
+    """
+    lines: list[str] = []
+    subscription_on = os.environ.get(_SUBSCRIPTION_VAR, "").lower() in ("1", "true", "yes")
+
+    found: list[str] = []
+    missing: list[str] = []
+    for var, label in _PROVIDER_KEYS.items():
+        if os.environ.get(var):
+            found.append(label)
+        else:
+            missing.append(label)
+
+    if subscription_on:
+        lines.append(f"  ✓  Claude subscription mode active ({_SUBSCRIPTION_VAR}=true)")
+    else:
+        lines.append(f"  ⬜  Claude subscription mode off (set {_SUBSCRIPTION_VAR}=true to enable)")
+
+    if found:
+        lines.append(f"  ✓  API keys set: {', '.join(found)}")
+    else:
+        lines.append("  ⬜  No external provider API keys found in environment")
+
+    if not subscription_on and not found:
+        lines.append(
+            "  ⚠️   No providers configured — set at least one API key or"
+            f" {_SUBSCRIPTION_VAR}=true"
+        )
+
+    return lines
+
+
 def install() -> list[str]:
     """Install hooks and rules globally. Returns list of actions taken."""
     actions: list[str] = []
@@ -211,6 +322,9 @@ def install() -> list[str]:
     else:
         actions.append(f"SKIP rules: source not found at {rules_src}")
 
+    # ── Register in Claude Desktop ────────────────────────────────────────
+    actions.extend(_install_claude_desktop())
+
     return actions
 
 
@@ -257,6 +371,9 @@ def uninstall() -> list[str]:
     if rules_dst.exists():
         rules_dst.unlink()
         actions.append(f"Removed {rules_dst}")
+
+    # Remove from Claude Desktop
+    actions.extend(_uninstall_claude_desktop())
 
     return actions
 
