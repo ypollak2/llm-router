@@ -1,5 +1,19 @@
 # Changelog
 
+## v1.3.5 — Setup Wizard, Demo, Deep Reasoning (2026-04-05)
+
+### Added
+
+- **`llm-router setup`** — interactive wizard: walks through Claude subscription mode + optional provider API keys (Gemini, Perplexity, OpenAI, Groq, DeepSeek, Mistral, Anthropic), writes to `~/.llm-router/.env`, offers to run `llm-router install` at the end.
+- **`llm-router demo`** — shows a table of routing decisions for 7 sample prompts against your active config (subscription mode, which providers are set), with savings estimate vs always-Opus. Color-coded by complexity, ANSI-aware column alignment.
+- **`deep_reasoning` complexity tier** — new complexity value above `complex`: triggers extended thinking on Claude models (`thinking={"type": "enabled", "budget_tokens": 16000}` via LiteLLM `extra_params`). Routes to PREMIUM chain. Classifier system prompt updated to recognize it. Auto-route hook heuristics detect formal proofs, first-principles derivation, theorem proving, and philosophical analysis.
+
+### Changed
+
+- `auto-route.py` hook bumped to v8 (deep_reasoning heuristics).
+- `ClassificationResult.header()` and `RoutingRecommendation.header()` show `[D]` tag for deep_reasoning.
+- `COMPLEXITY_BASE_MODEL` and `COMPLEXITY_ICONS` include `deep_reasoning` entry.
+
 ## v1.3.4 — Trendiness & Usability (2026-04-05)
 
 ### Added

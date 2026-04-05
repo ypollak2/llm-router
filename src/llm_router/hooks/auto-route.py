@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm-router-hook-version: 7
+# llm-router-hook-version: 8
 """UserPromptSubmit hook — scoring classifier with Ollama + API fallback chain.
 
 Classification chain (stops at first success):
@@ -330,6 +330,21 @@ SIGNALS: dict[str, dict[str, re.Pattern]] = {
 
 # ── Complexity Patterns ──────────────────────────────────────────────────────
 
+COMPLEXITY_DEEP_REASONING = re.compile(
+    r"\b(?:prove (?:that|mathematically|formally)|"
+    r"mathematical(?:ly)? (?:prove|derive|show)|"
+    r"formal proof|theorem|lemma|axiom|corollary|"
+    r"derive from first principles?|first[- ]principles? (?:derivation|analysis|explanation)|"
+    r"from (?:the )?fundamentals?|foundational(?:ly)?|"
+    r"philosophical(?:ly)? (?:analyze|examine|argue|discuss)|"
+    r"what does it mean (?:fundamentally|philosophically|at its core)|"
+    r"synthesize (?:the )?research|comprehensive literature review|"
+    r"rigorous(?:ly)? (?:analyze|prove|derive|examine)|"
+    r"formal(?:ly)? (?:specify|verify|prove)|"
+    r"induction|deduction|proof by contradiction|reductio ad absurdum)\b",
+    re.IGNORECASE,
+)
+
 COMPLEXITY_COMPLEX = re.compile(
     r"\b(?:architect|design system|from scratch|end-to-end|comprehensive|"
     r"novel approach|research paper|synthesis|multi-step|workflow|pipeline|"
@@ -504,6 +519,8 @@ def classify_with_gemini(text: str) -> str | None:
 
 def classify_complexity(text: str, task_type: str) -> str:
     """Determine task complexity from text signals."""
+    if COMPLEXITY_DEEP_REASONING.search(text):
+        return "deep_reasoning"
     if COMPLEXITY_COMPLEX.search(text):
         return "complex"
     if COMPLEXITY_SIMPLE.search(text):

@@ -123,18 +123,22 @@ class Complexity(str, Enum):
     """Prompt complexity level as determined by the classifier.
 
     Maps directly to routing profiles via ``COMPLEXITY_TO_PROFILE`` in
-    ``profiles.py``: simple->budget, moderate->balanced, complex->premium.
+    ``profiles.py``: simple->budget, moderate->balanced, complex->premium,
+    deep_reasoning->premium with extended thinking enabled.
     """
 
-    SIMPLE = "simple"       # Facts, math, lookups — fast/cheap models suffice
-    MODERATE = "moderate"   # Multi-step reasoning, code gen, writing
-    COMPLEX = "complex"     # Architecture, research synthesis, novel algorithms
+    SIMPLE = "simple"               # Facts, math, lookups — fast/cheap models suffice
+    MODERATE = "moderate"           # Multi-step reasoning, code gen, writing
+    COMPLEX = "complex"             # Architecture, research synthesis, novel algorithms
+    DEEP_REASONING = "deep_reasoning"  # Formal proofs, philosophical analysis, first-principles
+                                        # derivation — routes to PREMIUM with extended thinking
 
 
 COMPLEXITY_ICONS: dict[str, str] = {
-    "simple": "\U0001f7e1",    # yellow circle
-    "moderate": "\U0001f535",  # blue circle
-    "complex": "\U0001f7e3",   # purple circle
+    "simple": "\U0001f7e1",           # yellow circle
+    "moderate": "\U0001f535",         # blue circle
+    "complex": "\U0001f7e3",          # purple circle
+    "deep_reasoning": "\U0001f9e0",   # brain (extended thinking)
 }
 
 
@@ -168,7 +172,7 @@ class ClassificationResult:
         Returns:
             Human-readable string like ``"[S] simple (95%) | task: query | via gemini/... ($0.000001, 42ms)"``.
         """
-        tag = {"simple": "[S]", "moderate": "[M]", "complex": "[C]"}.get(self.complexity.value, "[?]")
+        tag = {"simple": "[S]", "moderate": "[M]", "complex": "[C]", "deep_reasoning": "[D]"}.get(self.complexity.value, "[?]")
         task = self.inferred_task_type.value if self.inferred_task_type else "auto"
         return (
             f"{tag} {self.complexity.value} ({self.confidence:.0%}) "
@@ -229,6 +233,7 @@ COMPLEXITY_BASE_MODEL: dict[str, str] = {
     "simple": "haiku",
     "moderate": "sonnet",
     "complex": "opus",
+    "deep_reasoning": "opus",  # Extended thinking uses Opus or Sonnet 3.7+ with thinking budget
 }
 
 
@@ -268,7 +273,7 @@ class RoutingRecommendation:
             Human-readable string showing complexity, model choice, budget
             pressure bar, and any downshift/fallback indicators.
         """
-        tag = {"simple": "[S]", "moderate": "[M]", "complex": "[C]"}.get(
+        tag = {"simple": "[S]", "moderate": "[M]", "complex": "[C]", "deep_reasoning": "[D]"}.get(
             self.classification.complexity.value, "[?]",
         )
         model_tag = {"haiku": "H", "sonnet": "S", "opus": "O"}.get(self.recommended_model, "?")

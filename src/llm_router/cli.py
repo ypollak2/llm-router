@@ -6,8 +6,10 @@ Usage:
     llm-router install --check  — show what would be installed without doing it
     llm-router install --force  — reinstall even if already present
     llm-router uninstall        — remove hooks and MCP registration
+    llm-router setup            — interactive wizard: configure providers and API keys
     llm-router status           — show routing status, today's savings, subscription pressure
     llm-router doctor           — check that everything is wired up correctly
+    llm-router demo             — show routing decisions for sample prompts
     llm-router dashboard        — start the web dashboard at localhost:7337
     llm-router dashboard --port 7338  — use a custom port
 """
@@ -40,6 +42,17 @@ def _bold(s: str) -> str:
     return f"\033[1m{s}\033[0m" if _color_enabled() else s
 
 
+def _visual_len(s: str) -> int:
+    """Return visible character count, stripping ANSI escape codes."""
+    import re
+    return len(re.sub(r'\033\[[0-9;]*m', '', s))
+
+
+def _pad(s: str, width: int) -> str:
+    """Left-justify s to visual width (handles ANSI-colored strings correctly)."""
+    return s + " " * max(0, width - _visual_len(s))
+
+
 def _ok(label: str) -> str:
     return f"  {_green('✓')}  {label}"
 
@@ -65,10 +78,14 @@ def main() -> None:
         _run_install(flags=args[1:])
     elif args and args[0] == "uninstall":
         _run_uninstall()
+    elif args and args[0] == "setup":
+        _run_setup()
     elif args and args[0] == "status":
         _run_status()
     elif args and args[0] == "doctor":
         _run_doctor()
+    elif args and args[0] == "demo":
+        _run_demo()
     elif args and args[0] == "dashboard":
         _run_dashboard(flags=args[1:])
     else:
@@ -360,6 +377,198 @@ def _hook_version_num(path) -> int:
     except OSError:
         pass
     return 0
+
+
+# ── setup ──────────────────────────────────────────────────────────────────────
+
+_PROVIDERS_WIZARD = [
+    ("GEMINI_API_KEY",       "Google Gemini",  "Gemini 2.5 Pro/Flash + Imagen — 1M tokens/day FREE tier",   "aistudio.google.com/apikey"),
+    ("PERPLEXITY_API_KEY",   "Perplexity",     "Web-grounded research (live search results)",               "perplexity.ai/settings/api"),
+    ("OPENAI_API_KEY",       "OpenAI",         "GPT-4o, o3, DALL-E, Whisper",                              "platform.openai.com/api-keys"),
+    ("GROQ_API_KEY",         "Groq",           "Ultra-fast inference — generous FREE tier",                 "console.groq.com/keys"),
+    ("DEEPSEEK_API_KEY",     "DeepSeek",       "High-quality coding at 10x lower cost than GPT-4o",        "platform.deepseek.com/api-keys"),
+    ("MISTRAL_API_KEY",      "Mistral",        "EU-hosted, GDPR-friendly, strong European models",         "console.mistral.ai/api-keys"),
+    ("ANTHROPIC_API_KEY",    "Anthropic API",  "Direct API access (distinct from CC subscription)",        "console.anthropic.com/settings/keys"),
+]
+
+
+def _run_setup() -> None:
+    """Interactive wizard: configure providers and write API keys to ~/.llm-router/.env."""
+    from pathlib import Path
+
+    env_path = Path.home() / ".llm-router" / ".env"
+    env_path.parent.mkdir(parents=True, exist_ok=True)
+
+    print(f"\n{_bold('LLM Router — Setup Wizard')}\n")
+    print("This wizard configures your provider API keys.")
+    print("Keys are saved to ~/.llm-router/.env and loaded automatically by the router.\n")
+
+    # ── Step 1: Claude Code subscription ──────────────────────────────────────
+    print(_bold("Step 1: Claude Code subscription"))
+    cc_mode = os.getenv("LLM_ROUTER_CLAUDE_SUBSCRIPTION", "")
+    if cc_mode.lower() in ("true", "1", "yes"):
+        print(_ok("LLM_ROUTER_CLAUDE_SUBSCRIPTION is already set — Claude models routed via subscription."))
+        enable_cc = True
+    else:
+        ans = input("  Do you have a Claude Code subscription (Pro/Max)? [Y/n]: ").strip().lower()
+        enable_cc = ans in ("", "y", "yes")
+        if enable_cc:
+            print(_green("  ✓ Claude subscription mode enabled — Claude models used for free via subscription."))
+        else:
+            print("  Skipping — Claude models will be used via API (requires ANTHROPIC_API_KEY).")
+
+    # ── Step 2: External providers ─────────────────────────────────────────────
+    print(f"\n{_bold('Step 2: External providers')}  (all optional — skip with Enter)\n")
+
+    new_keys: dict[str, str] = {}
+    if enable_cc:
+        new_keys["LLM_ROUTER_CLAUDE_SUBSCRIPTION"] = "true"
+
+    for env_var, name, description, url in _PROVIDERS_WIZARD:
+        existing = os.getenv(env_var, "")
+        if existing:
+            print(_ok(f"{name} — already configured"))
+            continue
+        print(f"  {_bold(name)}")
+        print(f"  {description}")
+        print(f"  Get key: {url}")
+        key = input(f"  {env_var}: ").strip()
+        if key:
+            new_keys[env_var] = key
+            print(_green(f"  ✓ {env_var} saved"))
+        else:
+            print(f"  {_yellow('→')} skipped")
+        print()
+
+    # ── Write .env ──────────────────────────────────────────────────────────────
+    if new_keys:
+        # Load existing .env keys to merge
+        existing_env: dict[str, str] = {}
+        if env_path.exists():
+            for line in env_path.read_text().splitlines():
+                line = line.strip()
+                if line and not line.startswith("#") and "=" in line:
+                    k, _, v = line.partition("=")
+                    existing_env[k.strip()] = v.strip().strip("\"'")
+        merged = {**existing_env, **new_keys}
+
+        lines = ["# LLM Router provider keys — auto-generated by `llm-router setup`", ""]
+        for k, v in merged.items():
+            lines.append(f"{k}={v}")
+        env_path.write_text("\n".join(lines) + "\n")
+
+        print(_green(_bold(f"\n  ✓ Saved {len(new_keys)} key(s) to {env_path}")))
+        print(f"\n  {_bold('To load in current shell:')}")
+        print(f"    source {env_path}")
+        print(f"\n  {_bold('To load automatically (add to ~/.zshrc or ~/.bashrc):')}")
+        print(f"    [ -f {env_path} ] && source {env_path}")
+    else:
+        print(_yellow("  No new keys entered."))
+
+    # ── Step 3: Install hooks ──────────────────────────────────────────────────
+    print()
+    ans = input("Run `llm-router install` now? [Y/n]: ").strip().lower()
+    if ans in ("", "y", "yes"):
+        _run_install(flags=[])
+    else:
+        print(f"\n  Run {_bold('llm-router install')} when ready to activate routing.\n")
+
+
+# ── demo ───────────────────────────────────────────────────────────────────────
+
+def _run_demo() -> None:
+    """Show routing decisions for a set of sample prompts."""
+
+    # Detect active config
+    cc_mode = os.getenv("LLM_ROUTER_CLAUDE_SUBSCRIPTION", "").lower() in ("true", "1", "yes")
+    has_perplexity = bool(os.getenv("PERPLEXITY_API_KEY"))
+    has_openai = bool(os.getenv("OPENAI_API_KEY"))
+    has_gemini = bool(os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY"))
+
+    # (prompt, task_type, complexity, model_if_cc, model_if_api, cost_estimate)
+    DEMO_CASES = [
+        ('"what does os.path.join do?"',        "query",    "simple",        "Haiku (sub)",   "Gemini Flash",  "$0.00001"),
+        ('"why is my async code slow?"',         "analyze",  "moderate",      "Sonnet (sub)",  "GPT-4o",        "$0.003"),
+        ('"implement a Redis-backed rate limiter"',"code",   "complex",       "Opus (sub)",    "o3",            "$0.015"),
+        ('"prove the halting problem is undecidable"',"analyze","deep_reason", "Opus+🧠thinking","o3",          "$0.03"),
+        ('"research latest Gemini 2.5 benchmarks"',"research","moderate",    "Perplexity" if has_perplexity else "Sonnet","Perplexity","$0.002"),
+        ('"write a hero section for a SaaS landing"',"generate","moderate",  "Sonnet (sub)",  "Claude Haiku",  "$0.001"),
+        ('"generate a dashboard screenshot mockup"',"image",  "—",            "Flux Pro",      "Flux Pro",      "$0.04"),
+    ]
+
+    col_w = [48, 10, 14, 22, 10]
+    sep = "─" * (sum(col_w) + len(col_w) * 3 + 1)
+
+    print(f"\n{_bold('llm-router demo')}  — how smart routing handles your prompts\n")
+
+    config_parts = []
+    if cc_mode:
+        config_parts.append("Claude Code subscription")
+    if has_perplexity:
+        config_parts.append("Perplexity")
+    if has_openai:
+        config_parts.append("OpenAI")
+    if has_gemini:
+        config_parts.append("Gemini")
+    if not config_parts:
+        config_parts.append("no external APIs — subscription mode assumed")
+    print(f"  Active config: {', '.join(config_parts)}\n")
+
+    # Header
+    h_prompt = "Prompt"
+    h_task   = "Task"
+    h_compl  = "Complexity"
+    h_model  = "Model (your config)"
+    h_cost   = "~Cost"
+    print(f"  {h_prompt:<{col_w[0]}}  {h_task:<{col_w[1]}}  {h_compl:<{col_w[2]}}  {h_model:<{col_w[3]}}  {h_cost}")
+    print("  " + sep)
+
+    total_routed = 0.0
+    total_opus   = 0.0
+    for prompt, task, complexity, model_cc, model_api, cost_str in DEMO_CASES:
+        model = model_cc if cc_mode else model_api
+
+        # Colorize complexity
+        if complexity == "simple":
+            compl_label = _green(complexity)
+        elif complexity == "moderate":
+            compl_label = _yellow(complexity)
+        elif complexity in ("complex", "deep_reason"):
+            compl_label = _red(complexity)
+        else:
+            compl_label = complexity
+
+        # Colorize cost
+        try:
+            cost_val = float(cost_str.lstrip("$"))
+            cost_label = _green(cost_str) if cost_val < 0.002 else (_yellow(cost_str) if cost_val < 0.01 else _red(cost_str))
+        except ValueError:
+            cost_label = cost_str
+
+        prompt_disp = prompt if len(prompt) <= col_w[0] else prompt[:col_w[0] - 1] + "…"
+        row = (
+            f"  {_pad(prompt_disp, col_w[0])}"
+            f"  {_pad(task, col_w[1])}"
+            f"  {_pad(compl_label, col_w[2])}"
+            f"  {_pad(model, col_w[3])}"
+            f"  {cost_label}"
+        )
+        print(row)
+
+        # Track savings estimate (vs always-Opus at $0.015)
+        try:
+            total_routed += float(cost_str.lstrip("$"))
+            total_opus   += 0.015
+        except ValueError:
+            pass
+
+    print("  " + sep)
+
+    savings_pct = 100 * (1 - total_routed / total_opus) if total_opus > 0 else 0
+    savings_str = f"${total_opus:.3f} → ${total_routed:.3f}  ({savings_pct:.0f}% cheaper)"
+    print(f"\n  {_bold('Savings vs always-Opus:')}  {_green(savings_str)}")
+    print(f"\n  {_yellow('→')} Run {_bold('llm-router setup')} to configure API keys for more providers.")
+    print(f"  {_yellow('→')} Run {_bold('llm-router dashboard')} to see live routing decisions.\n")
 
 
 # ── status ─────────────────────────────────────────────────────────────────────

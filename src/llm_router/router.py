@@ -33,6 +33,7 @@ _COMPLEXITY_TO_PROFILE: dict[Complexity, RoutingProfile] = {
     Complexity.SIMPLE: RoutingProfile.BUDGET,
     Complexity.MODERATE: RoutingProfile.BALANCED,
     Complexity.COMPLEX: RoutingProfile.PREMIUM,
+    Complexity.DEEP_REASONING: RoutingProfile.PREMIUM,  # Extended thinking — same chain as PREMIUM
 }
 
 log = logging.getLogger("llm_router")
@@ -168,16 +169,23 @@ async def route_and_call(
     # Priority: explicit profile > complexity_hint > prompt-length heuristic > config default.
     # Complexity is the correct signal; prompt length is a cheap fallback when
     # the caller doesn't know complexity yet (e.g. media tasks, model_override calls).
+    use_thinking = False  # Extended thinking flag — set for deep_reasoning complexity
     if profile is None and not model_override:
         c: Complexity | None = None
         if complexity_hint is not None:
             c = Complexity(complexity_hint) if isinstance(complexity_hint, str) else complexity_hint
         elif classification_data and "complexity" in classification_data:
-            c = Complexity(classification_data["complexity"])
+            try:
+                c = Complexity(classification_data["complexity"])
+            except ValueError:
+                c = Complexity.MODERATE
         else:
             # Fast heuristic — no API call, no latency.
             n = len(prompt)
             c = Complexity.SIMPLE if n < 300 else (Complexity.COMPLEX if n > 3000 else Complexity.MODERATE)
+        # deep_reasoning routes to PREMIUM with extended thinking enabled
+        if c == Complexity.DEEP_REASONING:
+            use_thinking = True
         profile = _COMPLEXITY_TO_PROFILE.get(c, config.llm_router_profile)
     else:
         profile = profile or config.llm_router_profile
@@ -435,6 +443,7 @@ async def route_and_call(
                 response = await _call_text(
                     model, prompt, system_prompt, temperature, max_tokens, task_type,
                     caller_context=caller_context,
+                    use_thinking=use_thinking,
                 )
 
             tracker.record_success(provider)
@@ -540,6 +549,7 @@ async def _call_text(
     task_type: TaskType,
     *,
     caller_context: str | None = None,
+    use_thinking: bool = False,
 ) -> LLMResponse:
     """Dispatch a text completion call through LiteLLM's unified API.
 
@@ -587,6 +597,15 @@ async def _call_text(
     # Only apply to Perplexity models — other providers reject this field.
     if task_type == TaskType.RESEARCH and "perplexity" in model.lower():
         extra["extra_body"] = {"search_recency_filter": "week"}
+
+    # Extended thinking — enabled for deep_reasoning complexity on Claude models.
+    # Anthropic's extended thinking lets the model reason for longer before
+    # responding, improving accuracy on proofs, derivations, and complex analysis.
+    # Only supported on claude-sonnet-4+ and claude-opus-4+; other providers ignore it.
+    if use_thinking and model.startswith("anthropic/"):
+        extra["thinking"] = {"type": "enabled", "budget_tokens": 16000}
+        # Extended thinking requires temperature=1 (Anthropic API constraint)
+        temperature = 1
 
     if config.prompt_cache_enabled:
         from llm_router.prompt_cache import inject_cache_control

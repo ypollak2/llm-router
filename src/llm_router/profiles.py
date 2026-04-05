@@ -271,6 +271,7 @@ COMPLEXITY_TO_PROFILE: dict[Complexity, RoutingProfile] = {
     Complexity.SIMPLE: RoutingProfile.BUDGET,
     Complexity.MODERATE: RoutingProfile.BALANCED,
     Complexity.COMPLEX: RoutingProfile.PREMIUM,
+    Complexity.DEEP_REASONING: RoutingProfile.PREMIUM,  # Extended thinking — same chain as PREMIUM
 }
 
 

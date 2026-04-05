@@ -32,7 +32,7 @@ log = logging.getLogger("llm_router.classifier")
 CLASSIFIER_SYSTEM_PROMPT = """\
 Classify task complexity and type. Respond with ONLY a single-line JSON object. No markdown, no explanation.
 
-Complexity: "simple" (facts, math, lookups), "moderate" (multi-step, code gen, writing), "complex" (architecture, research synthesis, novel algorithms)
+Complexity: "simple" (facts, math, lookups), "moderate" (multi-step, code gen, writing), "complex" (architecture, research synthesis, novel algorithms), "deep_reasoning" (formal proofs, first-principles derivation, philosophical analysis, theorem proving, research synthesis requiring extended chain-of-thought)
 Task type: "query", "research", "generate", "analyze", "code"
 
 Example: {"complexity":"simple","task_type":"query","confidence":0.95,"reasoning":"factual lookup"}"""
@@ -204,7 +204,11 @@ async def classify_complexity(
             try:
                 complexity = Complexity(complexity_val)
             except ValueError:
-                complexity = Complexity.MODERATE
+                # Map legacy "complex" responses that might say "deep" to DEEP_REASONING
+                if "deep" in str(complexity_val).lower():
+                    complexity = Complexity.DEEP_REASONING
+                else:
+                    complexity = Complexity.MODERATE
 
             task_type_val = parsed.get("task_type", "query")
             inferred_task = TaskType(task_type_val) if task_type_val in VALID_TASK_TYPES else None
