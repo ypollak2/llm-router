@@ -52,6 +52,54 @@ MEDIA_TASK_TYPES = {TaskType.IMAGE, TaskType.VIDEO, TaskType.AUDIO}
 # (OpenAI says "Rate limit", Anthropic uses "rate_limit", etc.), so we
 # check multiple markers to catch them all reliably.
 _RATE_LIMIT_MARKERS = ("rate limit", "rate_limit", "429", "too many requests", "quota exceeded")
+_AUTH_MARKERS = ("authentication", "401", "not logged in", "invalid api key", "incorrect api key",
+                 "no auth", "unauthorized", "api key")
+
+# Provider → env var name, so auth errors name exactly what to set.
+_PROVIDER_KEY_ENV: dict[str, str] = {
+    "openai": "OPENAI_API_KEY",
+    "anthropic": "ANTHROPIC_API_KEY",
+    "gemini": "GEMINI_API_KEY",
+    "google": "GEMINI_API_KEY",
+    "perplexity": "PERPLEXITY_API_KEY",
+    "groq": "GROQ_API_KEY",
+    "mistral": "MISTRAL_API_KEY",
+    "deepseek": "DEEPSEEK_API_KEY",
+    "fal": "FAL_KEY",
+    "replicate": "REPLICATE_API_TOKEN",
+    "elevenlabs": "ELEVENLABS_API_KEY",
+    "runway": "RUNWAYML_API_SECRET",
+}
+
+
+def _is_auth_error(exc: Exception) -> bool:
+    """Detect if an exception is an authentication (HTTP 401/403) error."""
+    exc_str = str(exc).lower()
+    exc_type = type(exc).__name__.lower()
+    return (
+        any(m in exc_str for m in _AUTH_MARKERS)
+        or "authentication" in exc_type
+        or "unauthorized" in exc_type
+    )
+
+
+def _auth_error_hint(provider: str) -> str:
+    """Return a human-readable fix hint for an auth error from *provider*."""
+    env_var = _PROVIDER_KEY_ENV.get(provider.lower())
+    if env_var:
+        return (
+            f"❌  {provider} authentication failed — {env_var} is missing or invalid.\n"
+            f"    Fix: run `llm-router setup` to configure it, or set {env_var} in "
+            f"~/.llm-router/.env\n"
+            f"    Note: Claude Code subscription covers Haiku/Sonnet/Opus — no API key needed "
+            f"for those. External providers like {provider} require their own key."
+        )
+    return (
+        f"❌  {provider} authentication failed — API key missing or invalid.\n"
+        f"    Fix: run `llm-router setup` to configure your providers.\n"
+        f"    Note: Claude Code subscription covers Haiku/Sonnet/Opus — no API key needed "
+        f"for those. External providers require their own key."
+    )
 
 
 def _is_rate_limit_error(exc: Exception) -> bool:
@@ -522,10 +570,16 @@ async def route_and_call(
 
         except Exception as e:
             is_rate_limit = _is_rate_limit_error(e)
+            is_auth = not is_rate_limit and _is_auth_error(e)
             if is_rate_limit:
                 await _notify(ctx, "warning", f"{model} rate-limited — switching provider...")
                 log.warning("Rate limit on %s, switching to next", model)
                 tracker.record_rate_limit(provider)
+            elif is_auth:
+                hint = _auth_error_hint(provider)
+                await _notify(ctx, "warning", hint)
+                log.warning("Auth error on %s: %s", model, e)
+                tracker.record_failure(provider)
             else:
                 await _notify(ctx, "warning", f"{model} failed: {e} — trying next...")
                 log.warning("Model %s failed: %s", model, e)
@@ -533,10 +587,17 @@ async def route_and_call(
             last_error = e
             continue
 
+    last_is_auth = last_error is not None and _is_auth_error(last_error)
+    setup_hint = (
+        " Run `llm-router setup` to configure provider API keys, or "
+        "`llm-router doctor` to diagnose all issues."
+        if last_is_auth else
+        " Run `llm_health()` to see circuit breaker status, or "
+        "`llm-router doctor` to diagnose all issues."
+    )
     raise RuntimeError(
         f"All models failed for {task_type.value}/{profile.value}. "
-        f"Last error: {last_error}. "
-        "Run llm_health() to see circuit breaker status and identify failing providers."
+        f"Last error: {last_error}.{setup_hint}"
     )
 
 

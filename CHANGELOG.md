@@ -1,5 +1,12 @@
 # Changelog
 
+## v1.3.7 — Friendly auth error messages (2026-04-05)
+
+### Fixed
+
+- **Authentication errors now show actionable hints** — when a provider returns a 401 (missing/invalid API key), the router emits a clear message naming the exact env var to set (`GEMINI_API_KEY`, `OPENAI_API_KEY`, etc.) and explains that Claude Code subscription covers Haiku/Sonnet/Opus without an API key. Previously these surfaced as raw LiteLLM exception text.
+- "All models failed" terminal error now suggests `llm-router setup` when the root cause was auth, vs. `llm_health()` for other failures.
+
 ## v1.3.6 — Demo GIF, Ruff fixes (2026-04-05)
 
 ### Added
