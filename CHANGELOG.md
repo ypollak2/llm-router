@@ -1,5 +1,13 @@
 # Changelog
 
+## v1.3.8 — Improved demo GIF and table layout (2026-04-05)
+
+### Changed
+
+- Demo tape now uses plain `llm-router` (no hardcoded user path); terminal widened to 1100px so output never wraps.
+- `llm-router demo` table: slimmer column widths (prompt 44, task 8, complexity 12, model 18, cost 9), cleaner model names (`Claude Haiku` / `Claude Sonnet` / `Claude Opus` instead of `Haiku (sub)` etc.).
+- Regenerated `docs/images/demo.gif`.
+
 ## v1.3.7 — Friendly auth error messages (2026-04-05)
 
 ### Fixed

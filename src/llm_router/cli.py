@@ -484,17 +484,17 @@ def _run_demo() -> None:
 
     # (prompt, task_type, complexity, model_if_cc, model_if_api, cost_estimate)
     DEMO_CASES = [
-        ('"what does os.path.join do?"',        "query",    "simple",        "Haiku (sub)",   "Gemini Flash",  "$0.00001"),
-        ('"why is my async code slow?"',         "analyze",  "moderate",      "Sonnet (sub)",  "GPT-4o",        "$0.003"),
-        ('"implement a Redis-backed rate limiter"',"code",   "complex",       "Opus (sub)",    "o3",            "$0.015"),
-        ('"prove the halting problem is undecidable"',"analyze","deep_reason", "Opus+🧠thinking","o3",          "$0.03"),
-        ('"research latest Gemini 2.5 benchmarks"',"research","moderate",    "Perplexity" if has_perplexity else "Sonnet","Perplexity","$0.002"),
-        ('"write a hero section for a SaaS landing"',"generate","moderate",  "Sonnet (sub)",  "Claude Haiku",  "$0.001"),
-        ('"generate a dashboard screenshot mockup"',"image",  "—",            "Flux Pro",      "Flux Pro",      "$0.04"),
+        ('"what does os.path.join do?"',         "query",    "simple",     "Claude Haiku",    "Gemini Flash",  "$0.00001"),
+        ('"why is my async code slow?"',          "analyze",  "moderate",   "Claude Sonnet",   "GPT-4o",        "$0.003"),
+        ('"implement a Redis-backed rate limiter"',"code",    "complex",    "Claude Opus",     "o3",            "$0.015"),
+        ('"prove the halting problem is undecidable"',"analyze","deep_reason","Opus + thinking","o3",           "$0.03"),
+        ('"research latest Gemini 2.5 benchmarks"',"research","moderate",   "Perplexity" if has_perplexity else "Claude Sonnet","Perplexity","$0.002"),
+        ('"write a hero section for a SaaS landing"',"generate","moderate", "Claude Sonnet",   "Claude Haiku",  "$0.001"),
+        ('"generate a dashboard screenshot mockup"',"image",  "—",          "Flux Pro",        "Flux Pro",      "$0.04"),
     ]
 
-    col_w = [48, 10, 14, 22, 10]
-    sep = "─" * (sum(col_w) + len(col_w) * 3 + 1)
+    col_w = [44, 8, 12, 18, 9]
+    sep = "─" * (sum(col_w) + len(col_w) * 2 + 2)
 
     print(f"\n{_bold('llm-router demo')}  — how smart routing handles your prompts\n")
 
@@ -512,12 +512,7 @@ def _run_demo() -> None:
     print(f"  Active config: {', '.join(config_parts)}\n")
 
     # Header
-    h_prompt = "Prompt"
-    h_task   = "Task"
-    h_compl  = "Complexity"
-    h_model  = "Model (your config)"
-    h_cost   = "~Cost"
-    print(f"  {h_prompt:<{col_w[0]}}  {h_task:<{col_w[1]}}  {h_compl:<{col_w[2]}}  {h_model:<{col_w[3]}}  {h_cost}")
+    print(f"  {'Prompt':<{col_w[0]}}  {'Task':<{col_w[1]}}  {'Complexity':<{col_w[2]}}  {'Model':<{col_w[3]}}  {'~Cost'}")
     print("  " + sep)
 
     total_routed = 0.0
