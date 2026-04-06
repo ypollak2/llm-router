@@ -19,96 +19,99 @@
 
 ## v1.1 — Codex-First Routing + Prepaid Capacity ✅
 
-**Branch**: `feature/codex-plugin-cc-integration` → merged to main
-**Plan**: N/A (implemented directly)
-**Status**: All shipped
-
 | Task | Status |
 |------|--------|
 | Raise simple-task threshold 85% → 95% in auto-route.py | ✅ |
-| Codex injection priority rewrite (CODE: after first Claude; subscription: at front) | ✅ |
-| Provider filter moved before Codex/Ollama injection (subscription mode bug) | ✅ |
+| Codex injection priority rewrite | ✅ |
+| Provider filter moved before Codex/Ollama injection | ✅ |
 | `is_codex_plugin_available()` detection function | ✅ |
 | Expanded `CODEX_PATHS` with npm + Homebrew locations | ✅ |
-| 14-test suite for Codex routing (14/14 passing) | ✅ |
+| 14-test suite for Codex routing | ✅ |
 | Sync `marketplace.json` version to 1.1.0 | ✅ |
 
 ---
 
 ## v1.2 — Foundation Hardening ✅
 
-**Branch**: `feature/v1.2-foundation` → merged to main
-**Plan**: [docs/plans/v1.2-plan.md](docs/plans/v1.2-plan.md)
-**Status**: All shipped
-
 | Task | Status | Notes |
 |------|--------|-------|
 | Decompose `server.py` into `tools/` modules | ✅ | routing, text, media, pipeline, admin, subscription, codex, setup |
-| `server.py` becomes thin entrypoint (<150 lines) | ✅ | 110 lines — FastMCP init + register(mcp) calls |
-| `llm-router install` one-command CLI | ✅ | `cli.py` dispatcher — install/--check/--force/uninstall |
-| MCP registry submission (`mcp-registry.json`) | ✅ | `registry.modelcontextprotocol.io` gap filled |
-| All 396 tests still pass after decomposition | ✅ | 396/396 + ruff clean |
-| Version bump to 1.2.0 + CHANGELOG entry | ✅ | |
+| `server.py` becomes thin entrypoint (<150 lines) | ✅ | 110 lines |
+| `llm-router install` one-command CLI | ✅ | install/--check/--force/uninstall |
+| MCP registry submission (`mcp-registry.json`) | ✅ | |
+| All tests pass after decomposition | ✅ | |
 
 ---
 
-## v1.3 — Developer Experience ⬜
-
-**Branch**: `feature/v1.3-devex` (not yet created)
-**Plan**: [docs/plans/v1.3-plan.md](docs/plans/v1.3-plan.md) (not yet written)
-**Theme**: Make spending visible. Make routing configurable without code changes.
+## v1.3 — Observability ✅
 
 | Task | Status | Notes |
 |------|--------|-------|
-| Web dashboard `localhost:7337` | ⬜ | Routing breakdown, cost/day, savings chart, model distribution |
-| Anthropic prompt caching (`cache_control` breakpoints) | ⬜ | Up to 90% savings on repeated system prompts >2000 tokens |
-| Semantic deduplication cache (Ollama embeddings, cosine 0.95) | ⬜ | Avoid re-running near-identical prompts |
-| Config-as-code routing rules (`~/.llm-router/routing.yaml`) | ⬜ | Runtime override of static `profiles.py` table |
-| Hard daily spend cap (`DAILY_SPEND_LIMIT_USD`) | ⬜ | Router refuses calls + returns clear error when exceeded |
-| Cost forecasting ("weekly quota exhausted in Xh") | ⬜ | Based on hourly burn rate |
-| Version bump to 1.3.0 + CHANGELOG entry | ⬜ | |
+| Web dashboard `localhost:7337` | ✅ | Routing breakdown, cost/day, savings chart, model distribution |
+| Anthropic prompt caching (`cache_control` breakpoints) | ✅ | Up to 90% savings on repeated system prompts |
+| Semantic deduplication cache (Ollama embeddings, cosine 0.95) | ✅ | |
+| Hard daily spend cap (`DAILY_SPEND_LIMIT_USD`) | ✅ | |
+| `llm-router doctor` health check command | ✅ | |
+| `llm-router setup` interactive wizard | ✅ | |
+| `llm-router demo` command | ✅ | |
+| `deep_reasoning` complexity tier | ✅ | Routes to extended thinking |
+| Visible routing indicator in hook output | ✅ | |
+| Shareable savings line in session-end | ✅ | |
+| Smithery marketplace listing (`smithery.yaml`) | ✅ | |
+| Cross-IDE docs (Cursor, Windsurf, Zed) | ✅ | |
+| Friendly auth error messages | ✅ | |
 
 ---
 
-## v1.4 — Routing Intelligence ⬜
-
-**Branch**: `feature/v1.4-routing-intelligence` (not yet created)
-**Plan**: [docs/plans/v1.4-plan.md](docs/plans/v1.4-plan.md) (not yet written)
-**Theme**: Right model for the right job, not just cheapest available tier.
+## v1.4 — Developer Ergonomics ✅
 
 | Task | Status | Notes |
 |------|--------|-------|
-| Task-aware model preferences (CODE→DeepSeek/Codex; math→Gemini; writing→Claude) | ⬜ | Extends `profiles.py` with task-type affinity |
-| `deep_reasoning` complexity tier (→ o3 / Gemini 2.5 Pro thinking) | ⬜ | New complexity value in classifier |
-| Context length routing (long convos → large-context models) | ⬜ | Compact before sending to small-context models |
-| Codex MCP documentation + Codex marketplace submission | ⬜ | `docs/codex-mcp-setup.md` + `.claude-plugin/` polish |
-| Claude Code marketplace submission | ⬜ | Submit to official registry |
-| Learned routing (Qwen 0.5B fine-tune after 500+ samples) | ⬜ | Uses `llm_rate` feedback + `routing_decisions` |
-| Version bump to 1.4.0 + CHANGELOG entry | ⬜ | |
+| `llm-router status` real cumulative savings | ✅ | Today/7d/30d/all-time with bar charts |
+| `llm-router update` command | ✅ | Re-installs hooks, checks PyPI version |
+| Linux/Windows compatibility (`sys.executable`, chmod skip) | ✅ | |
+| CI hang fix (`pytest-timeout`, `timeout-minutes: 10`) | ✅ | |
+| `llm-router demo` real routing history from DB | ✅ | Falls back to examples when DB empty |
+| `llm-router uninstall --purge` | ✅ | Deletes `~/.llm-router/` after confirmation |
+| Animated SVG demo in README | ✅ | `docs/images/demo.svg` via svg-term |
+| Dashboard savings gauge — real data from `usage` table | ✅ | Was reading empty `savings_stats` table |
+| Dashboard recent traffic — real data from `usage` table | ✅ | Was reading empty `routing_decisions` table |
+| Dashboard version — dynamic from `importlib.metadata` | ✅ | Was hardcoded `v1.3` |
+| Railway SSE deployment support | ✅ | Reads `$PORT`/`$HOST` from env |
 
 ---
 
-## v1.5 — Agentic & Observability ⬜
+## v1.5 — Configuration & Transparency ⬜
 
-**Branch**: `feature/v1.5-agentic` (not yet created)
-**Plan**: [docs/plans/v1.5-plan.md](docs/plans/v1.5-plan.md) (not yet written)
-**Theme**: Works as well for 10-agent pipelines as for single prompts.
+**Theme**: Power users should be able to customize and understand routing without touching source code.
 
 | Task | Status | Notes |
 |------|--------|-------|
-| Agent-tree budget tracking (total spend across sub-agents) | ⬜ | |
-| Tool-use routing (tool-heavy → GPT-4o/Sonnet; reasoning-only → Haiku) | ⬜ | |
-| OTEL / Prometheus export (`--metrics-port`) | ⬜ | Counters: routed calls, cost, fallback rate per provider |
-| Multi-user profiles (per-user quota pools, shared team budget) | ⬜ | |
-| User-defined YAML pipelines (`~/.llm-router/pipelines/`) | ⬜ | |
+| `~/.llm-router/routing.yaml` custom overrides | ⬜ | Pin tasks to models, block providers, per-type daily caps |
+| `llm-router test <prompt>` dry-run classifier | ⬜ | Show routing decision without making an API call |
+| Routing explain mode (`LLM_ROUTER_EXPLAIN=1`) | ⬜ | Prepend `[→ haiku, reason: simple, 92%]` to responses |
+| Provider latency tracking (`response_ms` in usage.db) | ⬜ | P50/P95 per model in `llm-router status` |
+| Dashboard savings breakdown panel | ⬜ | Token volume + actual vs Sonnet/Opus baseline |
 | Version bump to 1.5.0 + CHANGELOG entry | ⬜ | |
+
+---
+
+## v1.6 — Growth & Ecosystem ⬜
+
+**Theme**: Make savings visible, shareable, and spread the tool virally.
+
+| Task | Status | Notes |
+|------|--------|-------|
+| `llm-router share` shareable savings card | ⬜ | Markdown/ASCII card, copy-to-clipboard |
+| Webhook support — daily summary to Slack/Discord | ⬜ | POST digest to any webhook URL |
+| `llm-router leaderboard` personal model rankings | ⬜ | Quality × cost × latency from real data |
+| VS Code / Cursor status bar extension | ⬜ | Quick profile toggle in IDE status bar |
+| Version bump to 1.6.0 + CHANGELOG entry | ⬜ | |
 
 ---
 
 ## v2.0 — Learning Router ⬜
 
-**Branch**: `feature/v2.0-learning-router` (not yet created)
-**Plan**: [docs/plans/v2.0-plan.md](docs/plans/v2.0-plan.md) (not yet written)
 **Theme**: The router gets smarter the more you use it.
 
 | Task | Status | Notes |

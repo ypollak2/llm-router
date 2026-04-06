@@ -53,6 +53,34 @@ Most LLM routers (LiteLLM proxy, OpenRouter, Portkey, RouteLLM) are API gateways
 - OAuth-based Claude usage refresh (replaces AppleScript)
 - Published to PyPI as `claude-code-llm-router`
 
+### v1.3 — Observability (2026-04-04 → 2026-04-05)
+
+- **Web dashboard** `localhost:7337` — routing breakdown, cost/day, model distribution, savings chart, animated Liquid Glass redesign
+- **Anthropic prompt caching** — auto `cache_control` breakpoints on system prompts ≥1024 tokens (up to 90% savings on repeated context)
+- **Semantic dedup cache** — Ollama embeddings + 0.95 cosine similarity; skips LLM call for near-duplicate prompts
+- **Hard daily spend cap** — `LLM_ROUTER_DAILY_SPEND_LIMIT` env var; raises `BudgetExceededError` when exceeded
+- **`llm-router doctor`** — comprehensive ANSI-colored health check command
+- **`llm-router setup`** — interactive provider wizard
+- **`llm-router demo`** — routing table with color-coded complexity, ANSI-aware layout
+- **`deep_reasoning` complexity tier** — extended thinking via Claude models; new classifier heuristics
+- **Visible routing indicator** — `⚡ llm-router →` shown in terminal on every hook fire
+- **Shareable savings line** in session-end summary
+- **Smithery marketplace** — `smithery.yaml` for one-click install
+- **Cross-IDE docs** — Cursor, Windsurf, Zed install snippets in README
+- **Friendly auth error messages** — names exact env var to set, explains subscription vs API key
+
+### v1.4 — Developer Ergonomics (2026-04-05 → 2026-04-06)
+
+- **`llm-router status` real savings** — today/7d/30d/all-time with ASCII bar charts and subscription pressure
+- **`llm-router update`** — re-installs hooks + rules, checks PyPI for newer version
+- **`llm-router demo` real routing history** — shows last 8 actual decisions from usage.db
+- **`llm-router uninstall --purge`** — deletes `~/.llm-router/` after confirmation
+- **Linux/Windows compat** — `sys.executable` in hooks, chmod skip on Windows
+- **CI hang fix** — `pytest-timeout` + `timeout-minutes: 10`
+- **Animated SVG demo** in README via svg-term + asciinema cast
+- **Dashboard fixes** — savings gauge + recent traffic read from `usage` table; version from metadata
+- **Railway SSE deployment** — reads `$PORT`/`$HOST` for PaaS hosting
+
 ### v1.0.0 (Routing Integrity — 2026-03-31)
 
 Eight correctness fixes making the routing guarantees production-solid:
@@ -97,31 +125,30 @@ Eight correctness fixes making the routing guarantees production-solid:
 
 ---
 
-## v1.4 — Routing Intelligence
+## v1.5 — Configuration & Transparency
 
-**Theme**: Right model for the right job, not just right cost tier.
+**Theme**: Power users should be able to customize and understand routing without touching source code.
 
 | Feature | Priority | Notes |
 |---|---|---|
-| **Task-aware model preferences** | High | Code → DeepSeek/Codex first; math → Gemini; writing → Claude/GPT-4o; overrides profile default |
-| **Reasoning model tier** | High | New `deep_reasoning` complexity → routes to o3 / Gemini 2.5 Pro thinking / Claude extended thinking |
-| **Context length routing** | Medium | Long conversations (>8k tokens) routed to models with large context windows; compact before sending to small-context models |
-| **Learned routing** | Medium | Record (prompt_hash, model, was_good) from `llm_rate` → fine-tune local Qwen 0.5B classifier on Ollama after ~500 samples |
-| **Benchmark auto-update** | Low | Weekly cron fetches latest MMLU/HumanEval scores from public leaderboards; updates routing weights |
+| **`~/.llm-router/routing.yaml` custom overrides** | High | Pin tasks to models, block providers, per-type daily caps (`image: $2.00`) |
+| **`llm-router test <prompt>` dry-run** | High | Show routing decision without making an API call; helps tune and debug |
+| **Routing explain mode** (`LLM_ROUTER_EXPLAIN=1`) | Medium | Prepend `[→ haiku, reason: simple query, 92% confidence]` to every routed response |
+| **Provider latency tracking** | Medium | Store `response_ms` in usage.db; `llm-router status` shows P50/P95 per model |
+| **Dashboard savings breakdown panel** | Medium | Token volume + actual spend vs Sonnet/Opus baseline side-by-side |
 
 ---
 
-## v1.5 — Agentic & Team Features
+## v1.6 — Growth & Ecosystem
 
-**Theme**: Works as well for 10-agent pipelines as for single prompts.
+**Theme**: Make savings visible, shareable, and spread the tool virally.
 
 | Feature | Priority | Notes |
 |---|---|---|
-| **Agent-tree budget tracking** | High | Track total token spend across all sub-agents spawned in a session, not just top-level calls |
-| **Tool-use routing** | High | Route tool-heavy prompts to GPT-4o/Sonnet; reasoning-only to Haiku |
-| **User-defined YAML pipelines** | Medium | `~/.llm-router/pipelines/` — custom multi-step workflows without code |
-| **Multi-user profiles** | Medium | Per-user quota pools with shared team budget; `.llm-router/users/` config |
-| **Secrets manager support** | Medium | HashiCorp Vault, AWS Secrets Manager, 1Password CLI as alternatives to `.env` |
+| **`llm-router share`** | High | Shareable markdown/ASCII savings card — "Saved $12.40 this month (35% cheaper)" |
+| **Webhook support** | Medium | Daily routing summary to Slack/Discord/generic URL |
+| **`llm-router leaderboard`** | Medium | Personal model rankings: quality rating × cost × latency from real usage |
+| **VS Code / Cursor status bar** | Low | Quick profile toggle (`no_pressure ↔ balanced ↔ high_pressure`) in IDE status bar |
 
 ---
 
