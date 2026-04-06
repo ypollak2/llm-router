@@ -1,0 +1,33 @@
+- generic [active] [ref=e1]:
+  - banner [ref=e2]:
+    - generic [ref=e3]: 🧠
+    - heading "LLM Router" [level=1] [ref=e4]
+    - generic [ref=e5]: loading…
+  - generic [ref=e6]:
+    - generic [ref=e7]:
+      - heading "Today's calls" [level=3] [ref=e8]
+      - generic [ref=e9]: —
+    - generic [ref=e10]:
+      - heading "Today's cost" [level=3] [ref=e11]
+      - generic [ref=e12]: —
+    - generic [ref=e13]:
+      - heading "Month cost" [level=3] [ref=e14]
+      - generic [ref=e15]: —
+    - generic [ref=e16]:
+      - heading "Total saved" [level=3] [ref=e17]
+      - generic [ref=e18]: —
+    - generic [ref=e19]:
+      - heading "Session quota" [level=3] [ref=e20]
+      - generic [ref=e21]: —
+    - generic [ref=e22]:
+      - heading "Cache hits (7d)" [level=3] [ref=e23]
+      - generic [ref=e24]: —
+  - generic [ref=e25]:
+    - heading "Daily cost (14 days)" [level=3] [ref=e27]
+    - heading "Model distribution (7 days)" [level=3] [ref=e30]
+    - heading "Task types (7 days)" [level=3] [ref=e33]
+    - heading "Recent routing decisions" [level=3] [ref=e36]
+  - contentinfo [ref=e37]:
+    - text: Auto-refreshes every 30 s ·
+    - link "raw JSON" [ref=e38] [cursor=pointer]:
+      - /url: /api/stats

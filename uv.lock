@@ -322,7 +322,7 @@ wheels = [
 
 [[package]]
 name = "claude-code-llm-router"
-version = "1.8.2"
+version = "1.9.0"
 source = { editable = "." }
 dependencies = [
     { name = "aiohttp" },

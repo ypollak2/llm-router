@@ -165,6 +165,7 @@ def check_and_update_rules() -> str | None:
 _HOOK_DEFS = [
     ("session-start.py", "llm-router-session-start.py", "SessionStart", ""),
     ("auto-route.py", "llm-router-auto-route.py", "UserPromptSubmit", ""),
+    ("enforce-route.py", "llm-router-enforce-route.py", "PreToolUse", ""),
     ("agent-route.py", "llm-router-agent-route.py", "PreToolUse", "Agent"),
     ("subagent-start.py", "llm-router-subagent-start.py", "SubagentStart", ""),
     ("usage-refresh.py", "llm-router-usage-refresh.py", "PostToolUse", "llm_"),
@@ -179,6 +180,7 @@ _CLAW_CODE_HOOK_DEFS = [
     ("session-start.py",            "llm-router-session-start.py",  "SessionStart",     ""),
     ("auto-route.py",               "llm-router-auto-route.py",     "UserPromptSubmit", ""),
     ("status-bar-clawcode.py",      "llm-router-status-bar.py",     "UserPromptSubmit", ""),
+    ("enforce-route.py",            "llm-router-enforce-route.py",  "PreToolUse",       ""),
     ("agent-route.py",              "llm-router-agent-route.py",    "PreToolUse",       "Agent"),
     ("subagent-start.py",           "llm-router-subagent-start.py", "SubagentStart",    ""),
     ("usage-refresh.py",            "llm-router-usage-refresh.py",  "PostToolUse",      "llm_"),

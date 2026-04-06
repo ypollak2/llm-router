@@ -10,7 +10,7 @@ def test_all_tools_registered():
     tools = mcp._tool_manager.list_tools()
     names = {t.name for t in tools}
     expected = {
-        "llm_classify", "llm_track_usage", "llm_route", "llm_stream",
+        "llm_classify", "llm_track_usage", "llm_route", "llm_stream", "llm_select_agent",
         "llm_query", "llm_research", "llm_generate",
         "llm_analyze", "llm_code", "llm_image", "llm_video", "llm_audio",
         "llm_orchestrate", "llm_pipeline_templates",

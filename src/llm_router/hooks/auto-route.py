@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm-router-hook-version: 11
+# llm-router-hook-version: 12
 """UserPromptSubmit hook — scoring classifier with Ollama + API fallback chain.
 
 Classification chain (stops at first success):
@@ -809,6 +809,23 @@ def main() -> None:
         f" | FORBIDDEN: self-answer · Agent subagents · WebSearch · WebFetch"
         f" | Call the tool NOW as your ONLY action. Cheap model output IS your response."
     )
+
+    # ── Write enforcement state for enforce-route.py (PreToolUse hook) ──────────
+    session_id = hook_input.get("session_id", "")
+    if session_id:
+        _router_dir = Path.home() / ".llm-router"
+        _router_dir.mkdir(parents=True, exist_ok=True)
+        _state_path = _router_dir / f"pending_route_{session_id}.json"
+        try:
+            _state_path.write_text(json.dumps({
+                "expected_tool": tool,
+                "task_type": task_type,
+                "complexity": complexity,
+                "issued_at": time.time(),
+                "session_id": session_id,
+            }))
+        except OSError:
+            pass
 
     indicator = f"⚡ llm-router → {tool}  [{task_type}/{complexity} · {method}]"
     output = {

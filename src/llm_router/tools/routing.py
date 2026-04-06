@@ -424,9 +424,135 @@ async def llm_stream(
     return f"{header}\n\n{content}"
 
 
+async def llm_select_agent(
+    prompt: str,
+    profile: str = "balanced",
+) -> str:
+    """Classify a task prompt and return the recommended agent CLI + model for session-level routing.
+
+    Use this BEFORE starting a Claude Code / Codex / Gemini CLI session to pick the right
+    agent runtime for the task. This is session-level routing — it selects which agent to
+    invoke, not which model to call mid-session.
+
+    Decision tree (profile × complexity):
+      budget  + simple/moderate  → codex  + gpt-4o-mini
+      budget  + complex          → codex  + gpt-4o (Codex handles most coding; escalate if needed)
+      balanced + simple          → codex  + gpt-4o-mini
+      balanced + moderate        → claude_code + sonnet
+      balanced + complex         → claude_code + opus
+      premium + any              → claude_code + opus
+
+    Returns JSON with:
+      primary          — agent binary name: "claude_code" | "codex" | "gemini_cli"
+      primary_model    — model flag value (pass via -m or --model)
+      fallback         — fallback agent if primary unavailable
+      fallback_model   — model for fallback
+      task_type        — classified task type (code / analyze / generate / research / query)
+      complexity       — simple | moderate | complex
+      confidence       — classifier confidence 0–1
+      reason           — one-line classification rationale
+      env_check        — dict of required env vars and whether they're set
+
+    Args:
+        prompt: The task description to classify (same text you'd pass to the agent).
+        profile: Routing profile — "budget", "balanced", or "premium" (default: "balanced").
+    """
+    import json as _json
+    import shutil as _shutil
+    import os as _os
+
+    from llm_router.codex_agent import is_codex_plugin_available
+
+    valid_profiles = {"budget", "balanced", "premium"}
+    if profile not in valid_profiles:
+        profile = "balanced"
+
+    try:
+        classification = await classify_complexity(prompt)
+        task_type_val = classification.inferred_task_type or TaskType.CODE
+        complexity_val = classification.complexity
+        confidence = classification.confidence
+        reason = classification.reasoning or "heuristic"
+    except Exception:
+        task_type_val = TaskType.CODE
+        complexity_val = Complexity.MODERATE
+        confidence = 0.0
+        reason = "classification failed — defaulted to moderate code task"
+
+    task_type_str = task_type_val.value if hasattr(task_type_val, "value") else str(task_type_val)
+    complexity_str = complexity_val.value if hasattr(complexity_val, "value") else str(complexity_val)
+
+    # Decision tree: profile × complexity → (agent, model)
+    _AGENT_MAP = {
+        ("budget",   "simple"):   ("codex",       "gpt-4o-mini",            "claude_code", "claude-sonnet-4-6"),
+        ("budget",   "moderate"): ("codex",       "gpt-4o-mini",            "claude_code", "claude-sonnet-4-6"),
+        ("budget",   "complex"):  ("codex",       "gpt-4o",                 "claude_code", "claude-sonnet-4-6"),
+        ("balanced", "simple"):   ("codex",       "gpt-4o-mini",            "claude_code", "claude-sonnet-4-6"),
+        ("balanced", "moderate"): ("claude_code", "claude-sonnet-4-6",      "codex",       "gpt-4o"),
+        ("balanced", "complex"):  ("claude_code", "claude-opus-4-6",        "codex",       "gpt-4o"),
+        ("premium",  "simple"):   ("claude_code", "claude-sonnet-4-6",      "codex",       "gpt-4o-mini"),
+        ("premium",  "moderate"): ("claude_code", "claude-opus-4-6",        "codex",       "gpt-4o"),
+        ("premium",  "complex"):  ("claude_code", "claude-opus-4-6",        "codex",       "gpt-4o"),
+    }
+
+    key = (profile, complexity_str)
+    primary, primary_model, fallback, fallback_model = _AGENT_MAP.get(
+        key, ("claude_code", "claude-sonnet-4-6", "codex", "gpt-4o")
+    )
+
+    # Override: research tasks → always claude_code (needs web access via Perplexity)
+    if task_type_str == "research":
+        primary, primary_model = "claude_code", "claude-sonnet-4-6"
+        fallback, fallback_model = "codex", "gpt-4o"
+
+    # Environment check
+    codex_ok = is_codex_plugin_available()
+    claude_ok = bool(_shutil.which("claude"))
+    openai_key = bool(_os.environ.get("OPENAI_API_KEY"))
+    gemini_key = bool(_os.environ.get("GEMINI_API_KEY"))
+
+    env_check = {
+        "claude_code_binary": claude_ok,
+        "codex_binary": codex_ok,
+        "OPENAI_API_KEY": openai_key,
+        "GEMINI_API_KEY": gemini_key,
+    }
+
+    # Fallback if primary unavailable
+    primary_available = (primary == "claude_code" and claude_ok) or (primary == "codex" and codex_ok)
+    if not primary_available and primary != fallback:
+        primary, primary_model, fallback, fallback_model = fallback, fallback_model, primary, primary_model
+
+    result = {
+        "primary": primary,
+        "primary_model": primary_model,
+        "fallback": fallback,
+        "fallback_model": fallback_model,
+        "task_type": task_type_str,
+        "complexity": complexity_str,
+        "confidence": round(confidence, 2),
+        "reason": reason,
+        "env_check": env_check,
+    }
+
+    # CLI usage hint
+    if primary == "claude_code":
+        invocation = f'claude --model {primary_model} -p "{prompt[:60]}..."'
+    else:
+        invocation = f'codex exec --model {primary_model} "{prompt[:60]}..."'
+
+    return (
+        f"**Session-level routing recommendation** (profile={profile})\n\n"
+        f"```json\n{_json.dumps(result, indent=2)}\n```\n\n"
+        f"**Suggested invocation:**\n```bash\n{invocation}\n```\n\n"
+        f"*Classification: {task_type_str}/{complexity_str} · confidence={confidence:.0%} · {reason}*"
+    )
+
+
 def register(mcp) -> None:
     """Register smart router tools with the FastMCP instance."""
     mcp.tool()(llm_classify)
     mcp.tool()(llm_track_usage)
     mcp.tool()(llm_route)
     mcp.tool()(llm_stream)
+    mcp.tool()(llm_select_agent)

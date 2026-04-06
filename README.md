@@ -236,8 +236,9 @@ RUN pip install claude-code-llm-router && llm-router install --headless
 
 ### What You Get
 
-- **33 MCP tools** — smart routing, text/code/filesystem, image/video/audio, streaming, orchestration, usage monitoring, web dashboard
+- **34 MCP tools** — smart routing, text/code/filesystem, image/video/audio, streaming, orchestration, usage monitoring, web dashboard
 - **Auto-route hook** — intercepts every prompt before your top-tier model sees it; heuristic → Ollama → cheap API classifier chain, hooks self-update on `pip upgrade`; works in interactive, `claude -p`, and Docker/agent mode
+- **Routing enforcement** — `enforce-route.py` PreToolUse hook blocks Write/Edit/Bash before `llm_*` is called; set `LLM_ROUTER_ENFORCE=hard` to hard-block violations; defaults to `soft` (logs only)
 - **Live status bar + persistent statusline** — `📊 CC 13%s · 24%w │ sub:0 · free:15 · paid:27 │ $0.52 saved (35%)` fires before every prompt and stays visible in the bottom status bar throughout the session
 - **Claude subscription mode** — routes entirely within your CC subscription; Codex (free) before paid externals; external only when quota exhausted
 - **Anthropic prompt caching** — auto-injects `cache_control` breakpoints on long system prompts; up to 90% savings on repeated context
@@ -441,6 +442,7 @@ Once installed, Claude Code gets these 33 tools:
 | **Smart Routing** | |
 | `llm_classify` | Classify complexity + recommend model with time-aware budget pressure |
 | `llm_route` | Auto-classify, then route to the best external LLM |
+| `llm_select_agent` | Session-level routing — pick which agent CLI (claude_code / codex) + model to invoke for an entire session |
 | `llm_track_usage` | Report Claude Code token usage for budget tracking |
 | `llm_stream` | Stream LLM responses for long-running tasks |
 | **Text & Code** | |
@@ -602,8 +604,8 @@ See [CHANGELOG.md](CHANGELOG.md) for what's been shipped. Coming next:
 | ~~v1.6~~ | ~~Growth & Sharing~~ | ✅ `llm-router share` savings card + tweet, one-time star CTA in session summary |
 | ~~v1.7~~ | ~~Ecosystem~~ | ✅ Multi-harness docs (claw-code, OpenClaw, Agno, Cursor, Windsurf, Zed) |
 | ~~v1.8~~ | ~~Reliability~~ | ✅ Inline OAuth refresh (prevents session exhaustion), claw-code hooks, Docker/headless install, fix routing format drift + MCP CLI registration |
-| v1.9 | Skills + OpenClaw | OpenClaw Skill Package (`llm-router install --openclaw`), routing dry-run (`llm-router test <prompt>`) |
-| v2.0 | Learning Router | Self-improving classifier trained on your own routing history; Agno `RouteredModel` + `RouteredTeam` |
+| ~~v1.9~~ | ~~Enforcement + Agent Selection~~ | ✅ `enforce-route.py` hook (`LLM_ROUTER_ENFORCE=hard` to block violations), `llm_select_agent` session-level routing for agent orchestrators |
+| v2.0 | Learning Router | Self-improving classifier trained on your own routing history; routing dry-run (`llm-router test <prompt>`); Agno `RouteredModel` + `RouteredTeam` |
 
 See [ROADMAP.md](ROADMAP.md) for design notes and competitive context.
 

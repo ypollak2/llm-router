@@ -1,5 +1,43 @@
 # Changelog
 
+## v1.9.0 — Routing enforcement + session-level agent selection (2026-04-06)
+
+### Added
+
+- **`enforce-route.py` hook (PreToolUse, all tools)** — hard-enforces routing compliance. When `auto-route.py` issues a `⚡ MANDATORY ROUTE` directive, it writes a session-scoped pending state file (`~/.llm-router/pending_route_{session_id}.json`). The new `enforce-route.py` hook fires before every tool call:
+  - If Claude calls an `llm_*` tool → routing honored, state cleared, allow.
+  - If the tool is context-gathering (Read, Glob, Grep, LS, NotebookRead) → always allow.
+  - If a work tool (Write, Edit, MultiEdit, Bash) fires before routing → enforce per `LLM_ROUTER_ENFORCE`:
+    - `soft` (default) — log violation to `~/.llm-router/enforcement.log`, allow the call.
+    - `hard` — block the call with a remediation message telling Claude to call the routing tool.
+    - `off` — disable enforcement entirely.
+  - State expires after 5 minutes to avoid stale blocks.
+
+- **`llm_select_agent` MCP tool** — session-level agent routing for orchestrators like claw-biz. Given a task prompt and profile, returns which agent CLI (claude_code / codex) + model to invoke for the whole session — before starting, not mid-session. Decision tree:
+  ```
+  budget   + simple/moderate → codex     + gpt-4o-mini
+  budget   + complex         → codex     + gpt-4o
+  balanced + simple          → codex     + gpt-4o-mini
+  balanced + moderate        → claude_code + sonnet
+  balanced + complex         → claude_code + opus
+  premium  + any             → claude_code + opus
+  research (any profile)     → claude_code + sonnet (needs web access)
+  ```
+  Returns JSON with primary agent, model, fallback, env_check, and a ready-to-run CLI invocation hint.
+
+### Addresses GitHub Issues
+
+- [Issue #1](https://github.com/ypollak2/llm-router/issues/1) — CC-MODE `/model` slash commands silently ignored: **fixed in v1.8.4**, upgrade resolves it (`pip install --upgrade claude-code-llm-router`).
+- [Issue #2](https://github.com/ypollak2/llm-router/issues/2) — Hard-enforce routing directives: implemented via `enforce-route.py` + `LLM_ROUTER_ENFORCE`.
+- [Issue #3](https://github.com/ypollak2/llm-router/issues/3) — `llm_select_agent` session-level routing classifier: implemented as new MCP tool.
+
+### Hook versions
+
+- `auto-route.py`: v11 → v12 (writes pending state for enforcement)
+- `enforce-route.py`: v1 (new)
+
+---
+
 ## v1.8.5 — Persistent statusline stats bar (2026-04-06)
 
 ### Changed
