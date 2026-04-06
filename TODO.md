@@ -81,18 +81,20 @@
 
 ---
 
-## v1.5 — Configuration & Transparency ⬜
+## v1.5 — Configuration & Transparency 🔄
 
 **Theme**: Power users should be able to customize and understand routing without touching source code.
 
 | Task | Status | Notes |
 |------|--------|-------|
+| `llm_fs_find` / `llm_fs_rename` / `llm_fs_edit_many` MCP tools | ✅ | Routes filesystem reasoning to Haiku/Ollama |
+| Free-model savings in `llm-router status` | ✅ | Ollama/Codex savings vs Sonnet baseline |
 | `~/.llm-router/routing.yaml` custom overrides | ⬜ | Pin tasks to models, block providers, per-type daily caps |
 | `llm-router test <prompt>` dry-run classifier | ⬜ | Show routing decision without making an API call |
 | Routing explain mode (`LLM_ROUTER_EXPLAIN=1`) | ⬜ | Prepend `[→ haiku, reason: simple, 92%]` to responses |
 | Provider latency tracking (`response_ms` in usage.db) | ⬜ | P50/P95 per model in `llm-router status` |
 | Dashboard savings breakdown panel | ⬜ | Token volume + actual vs Sonnet/Opus baseline |
-| Version bump to 1.5.0 + CHANGELOG entry | ⬜ | |
+| Version bump to 1.5.0 + CHANGELOG entry | ✅ | |
 
 ---
 

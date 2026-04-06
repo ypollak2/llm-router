@@ -673,6 +673,71 @@ def _query_routing_period(db_path: str, since_iso: str) -> tuple[int, float, flo
         return 0, 0.0, 0.0
 
 
+def _query_free_model_savings(db_path: str) -> list[dict]:
+    """Return per-provider savings rows for zero-cost providers (Ollama, Codex).
+
+    Each row: {provider, calls, in_tok, out_tok, cost_usd, baseline_usd, saved_usd}
+    ``baseline_usd`` is what those tokens would cost at Sonnet-3.5 API rates.
+    Codex tokens are not tracked (always 0); its baseline is estimated from the
+    average tokens/call across all tracked providers.
+    """
+    import sqlite3
+    SONNET_IN, SONNET_OUT = 3.0, 15.0
+    FREE_PROVIDERS = ("ollama", "codex")
+    try:
+        conn = sqlite3.connect(db_path)
+        conn.row_factory = sqlite3.Row
+
+        # Average tokens per call across paid providers (used to estimate Codex)
+        avg_row = conn.execute(
+            "SELECT AVG(input_tokens), AVG(output_tokens) FROM usage "
+            "WHERE success=1 AND provider NOT IN ('subscription','ollama','codex') "
+            "AND input_tokens > 0"
+        ).fetchone()
+        avg_in  = float(avg_row[0] or 0)
+        avg_out = float(avg_row[1] or 0)
+
+        rows = conn.execute(
+            "SELECT provider, COUNT(*) as calls, "
+            "COALESCE(SUM(input_tokens),0) as in_tok, "
+            "COALESCE(SUM(output_tokens),0) as out_tok, "
+            "COALESCE(SUM(cost_usd),0) as cost_usd "
+            "FROM usage WHERE success=1 AND provider IN ('ollama','codex') "
+            "GROUP BY provider ORDER BY calls DESC"
+        ).fetchall()
+        conn.close()
+
+        result = []
+        for r in rows:
+            in_t = r["in_tok"] or 0
+            out_t = r["out_tok"] or 0
+            calls = r["calls"]
+
+            # If tokens not tracked (Codex), estimate from avg paid-provider tokens
+            if in_t == 0 and out_t == 0:
+                in_t  = int(avg_in  * calls)
+                out_t = int(avg_out * calls)
+                estimated = True
+            else:
+                estimated = False
+
+            baseline = (in_t * SONNET_IN + out_t * SONNET_OUT) / 1_000_000
+            saved    = max(0.0, baseline - (r["cost_usd"] or 0.0))
+            result.append({
+                "provider":  r["provider"],
+                "calls":     calls,
+                "in_tok":    in_t,
+                "out_tok":   out_t,
+                "cost_usd":  r["cost_usd"] or 0.0,
+                "baseline":  baseline,
+                "saved":     saved,
+                "estimated": estimated,
+            })
+        return result
+    except Exception:
+        return []
+
+
 def _run_status() -> None:
     import json
     import os
@@ -766,6 +831,25 @@ def _run_status() -> None:
                     print(f"    {short:<32}  {r['n']:>4}×  ${r['c']:.4f}")
         except Exception:
             pass
+
+        # Free model savings (Ollama + Codex)
+        free_rows = _query_free_model_savings(db_path)
+        if free_rows:
+            total_free_saved = sum(r["saved"] for r in free_rows)
+            total_free_calls = sum(r["calls"] for r in free_rows)
+            print(f"\n  {_bold('Free-model savings')}  "
+                  f"{_dim('(Ollama / Codex — $0 API cost)')}")
+            for r in free_rows:
+                est_tag = _dim(" ~est") if r["estimated"] else ""
+                in_k  = f"{r['in_tok'] // 1000}k"  if r["in_tok"]  >= 1000 else str(r["in_tok"])
+                out_k = f"{r['out_tok'] // 1000}k" if r["out_tok"] >= 1000 else str(r["out_tok"])
+                tok_str = f"{in_k}↑ {out_k}↓{est_tag}"
+                saved_str = f"${r['saved']:.4f}"
+                print(f"    {r['provider']:<10}  {r['calls']:>4} calls  "
+                      f"{tok_str:<14}  {_green(saved_str)} saved")
+            bar = _savings_bar(total_free_saved, 0.0)
+            print(f"  {bar}  {total_free_calls} free calls  "
+                  f"{_green(f'${total_free_saved:.4f}')} total saved vs Sonnet")
 
     print(f"\n  {_bold('Subcommands')}")
     print(f"    {_bold('llm-router update')}     — update hooks to latest version")

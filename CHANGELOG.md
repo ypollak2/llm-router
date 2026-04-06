@@ -1,5 +1,14 @@
 # Changelog
 
+## v1.5.0 — Filesystem tools + free-model savings (2026-04-06)
+
+### Added
+
+- **`llm_fs_find` MCP tool** — describe files to find in natural language; cheap model (Haiku/Ollama) generates glob patterns and grep commands. Use with Claude's Glob/Grep tools for zero-Opus file discovery.
+- **`llm_fs_rename` MCP tool** — describe a rename/reorganise operation; cheap model returns `mv`/`git mv` commands. `dry_run=True` (default) prefixes with `echo` for safe review before execution.
+- **`llm_fs_edit_many` MCP tool** — bulk edit across multiple files. Accepts a file list or glob pattern; reads all files locally (free), sends to moderate-tier model, returns `{file, old_string, new_string}` JSON for mechanical application.
+- **Free-model savings in `llm-router status`** — new "Free-model savings" section shows Ollama and Codex calls separately: call count, token volume, and estimated savings vs Sonnet-3.5 API rates. Codex token savings are estimated from average paid-provider tokens/call when exact counts aren't available.
+
 ## v1.4.2 — Dashboard data fixes, animated SVG demo (2026-04-06)
 
 ### Fixed

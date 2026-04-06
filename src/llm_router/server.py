@@ -1,6 +1,6 @@
 """FastMCP server — MCP entry point for llm-router.
 
-All 24 tools are registered by modules in llm_router/tools/:
+All 33 tools are registered by modules in llm_router/tools/:
 - routing.py  — llm_classify, llm_track_usage, llm_route, llm_stream
 - text.py     — llm_query, llm_research, llm_generate, llm_analyze, llm_code, llm_edit
 - media.py    — llm_image, llm_video, llm_audio
@@ -10,6 +10,7 @@ All 24 tools are registered by modules in llm_router/tools/:
 - subscription.py — llm_check_usage, llm_update_usage, llm_refresh_claude_usage
 - codex.py    — llm_codex
 - setup.py    — llm_setup, llm_rate
+- fs.py       — llm_fs_find, llm_fs_rename, llm_fs_edit_many
 
 All tools return formatted strings (not structured data) because MCP tool
 responses are displayed directly to the user in the Claude Code UI.
@@ -24,7 +25,7 @@ from mcp.server.fastmcp import FastMCP
 from llm_router.config import get_config
 from llm_router.health import get_tracker
 from llm_router.state import _check_tier, get_active_profile  # noqa: F401  (backward compat)
-from llm_router.tools import admin, codex, media, pipeline, routing, setup, subscription, text
+from llm_router.tools import admin, codex, fs, media, pipeline, routing, setup, subscription, text
 from llm_router.tools.admin import llm_health, llm_set_profile, llm_usage  # noqa: F401
 from llm_router.tools.pipeline import llm_orchestrate  # noqa: F401
 from llm_router.tools.routing import llm_route  # noqa: F401
@@ -80,6 +81,7 @@ admin.register(mcp)
 subscription.register(mcp)
 codex.register(mcp)
 setup.register(mcp)
+fs.register(mcp)
 
 # ── Resources ────────────────────────────────────────────────────────────────
 
