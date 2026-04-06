@@ -1,5 +1,11 @@
 # Changelog
 
+## v1.5.1 — Free-model savings in session-end summary (2026-04-06)
+
+### Added
+
+- **Session-end summary shows free-model savings** — Ollama and Codex calls are now separated from paid external calls in the stop hook output. A new "Free models" section shows per-provider call counts, token volumes, and savings vs Sonnet baseline. Codex savings estimated from avg tokens/call when token counts aren't tracked. The combined savings tip (`💡 Saved ~$X.XX`) now includes both paid routing savings and free-model savings.
+
 ## v1.5.0 — Filesystem tools + free-model savings (2026-04-06)
 
 ### Added
