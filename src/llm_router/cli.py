@@ -2,9 +2,10 @@
 
 Usage:
     llm-router                  — start the MCP server (stdio transport)
-    llm-router install          — install hooks, rules, and MCP server config globally
-    llm-router install --check  — show what would be installed without doing it
-    llm-router install --force  — reinstall even if already present
+    llm-router install              — install hooks, rules, and MCP server config globally
+    llm-router install --check      — show what would be installed without doing it
+    llm-router install --force      — reinstall even if already present
+    llm-router install --claw-code  — also install into claw-code (auto-detects ~/.claw-code/)
     llm-router uninstall        — remove hooks and MCP registration
     llm-router uninstall --purge — also delete ~/.llm-router/ (usage DB, .env, logs)
     llm-router setup            — interactive wizard: configure providers and API keys
@@ -179,6 +180,8 @@ def _run_install(flags: list[str]) -> None:
         print()
         return
 
+    claw_code = "--claw-code" in flags
+
     if force:
         from llm_router.install_hooks import _load_settings, _save_settings
         settings = _load_settings()
@@ -193,6 +196,18 @@ def _run_install(flags: list[str]) -> None:
     for a in actions:
         print(f"  {_green('✓')}  {a}")
 
+    # ── claw-code (explicit flag or auto-detect) ──────────────────────────
+    from llm_router.install_hooks import install_claw_code, claw_code_settings_path
+    cc_detected = claw_code_settings_path() is not None
+    if claw_code or cc_detected:
+        if cc_detected and not claw_code:
+            print(f"\n{_bold('  claw-code detected — installing hooks...')}")
+        cc_actions = install_claw_code()
+        for a in cc_actions:
+            ok = not a.startswith("SKIP")
+            marker = _green('✓') if ok else _yellow('⚠')
+            print(f"  {marker}  {a}")
+
     print(f"\n{_green('✓')} {_bold('LLM Router installed globally.')}")
     print("  Every Claude Code session will now auto-route tasks.")
     print("  Restart Claude Code (and Claude Desktop if installed) to activate.\n")
@@ -206,12 +221,13 @@ def _run_install(flags: list[str]) -> None:
     print("    You'll see: ⚡ ROUTE → Haiku (simple query)\n")
 
     print(_bold("  Subcommands:"))
-    print("    llm-router doctor          — verify everything is wired up")
-    print("    llm-router status          — today's cost & savings")
-    print("    llm-router dashboard       — web dashboard (localhost:7337)")
-    print("    llm-router install --check — preview install state")
-    print("    llm-router install --force — reinstall / update paths")
-    print("    llm-router uninstall       — remove\n")
+    print("    llm-router doctor               — verify everything is wired up")
+    print("    llm-router status               — today's cost & savings")
+    print("    llm-router dashboard            — web dashboard (localhost:7337)")
+    print("    llm-router install --check      — preview install state")
+    print("    llm-router install --force      — reinstall / update paths")
+    print("    llm-router install --claw-code  — also install into claw-code")
+    print("    llm-router uninstall            — remove\n")
 
 
 # ── uninstall ──────────────────────────────────────────────────────────────────
@@ -377,7 +393,40 @@ def _run_doctor() -> None:
     for line in check_api_keys():
         print(f"  {line}")
 
-    # ── 8. Version ────────────────────────────────────────────────────────────
+    # ── 8. claw-code ─────────────────────────────────────────────────────────
+    print(f"\n{_bold('  claw-code (optional — open-source Claude Code alternative)')}")
+    from llm_router.install_hooks import (
+        _CLAW_CODE_HOOK_DEFS, _claw_code_dir,
+    )
+    cc_dir = _claw_code_dir()
+    if cc_dir is None:
+        print(_dim("  not detected (install at github.com/claw-code/claw-code)"))
+    else:
+        cc_hooks_dst = cc_dir / "hooks"
+        cc_settings = {}
+        cc_settings_path = cc_dir / "settings.json"
+        if cc_settings_path.exists():
+            try:
+                cc_settings = json.loads(cc_settings_path.read_text())
+            except Exception:
+                pass
+        for _, dst_name, event, _ in _CLAW_CODE_HOOK_DEFS:
+            dst = cc_hooks_dst / dst_name
+            if dst.exists():
+                print(_ok(f"{dst_name}  ({event})"))
+            else:
+                print(_fail(f"{dst_name}  — not installed",
+                            fix="llm-router install --claw-code"))
+                issues.append(f"claw-code hook {dst_name} not installed")
+                pass
+        if "llm-router" in cc_settings.get("mcpServers", {}):
+            print(_ok("MCP server registered in claw-code settings.json"))
+        else:
+            print(_fail("MCP server not registered in claw-code",
+                        fix="llm-router install --claw-code"))
+            issues.append("MCP server not registered in claw-code")
+
+    # ── 9. Version ────────────────────────────────────────────────────────────
     print(f"\n{_bold('  Version')}")
     try:
         from importlib.metadata import version
@@ -685,7 +734,6 @@ def _query_free_model_savings(db_path: str) -> list[dict]:
     """
     import sqlite3
     SONNET_IN, SONNET_OUT = 3.0, 15.0
-    FREE_PROVIDERS = ("ollama", "codex")
     try:
         conn = sqlite3.connect(db_path)
         conn.row_factory = sqlite3.Row
@@ -915,7 +963,6 @@ def _run_share() -> None:
     import os
     import sqlite3
     import urllib.parse
-    from datetime import datetime, timezone, timedelta
 
     state_dir = os.path.expanduser("~/.llm-router")
     db_path   = os.path.join(state_dir, "usage.db")
@@ -927,7 +974,6 @@ def _run_share() -> None:
     total_calls = paid_calls = free_calls = 0
     total_saved = 0.0
     top_model   = "—"
-    since_iso   = (datetime.now(timezone.utc) - timedelta(days=30)).strftime("%Y-%m-%d %H:%M:%S")
 
     if os.path.exists(db_path):
         try:

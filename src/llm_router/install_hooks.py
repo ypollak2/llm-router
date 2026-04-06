@@ -48,6 +48,30 @@ _HOOKS_DST = _CLAUDE_DIR / "hooks"
 _RULES_DST = _CLAUDE_DIR / "rules"
 _SETTINGS_PATH = _CLAUDE_DIR / "settings.json"
 
+
+def _claw_code_dir() -> Path | None:
+    """Return the claw-code config directory, or None if not detected.
+
+    Detection order:
+    1. ``~/.claw-code/`` (primary — same as Claude Code uses ``~/.claude/``)
+    2. ``$XDG_CONFIG_HOME/claw-code/`` (Linux XDG fallback)
+    """
+    primary = Path.home() / ".claw-code"
+    if primary.exists():
+        return primary
+    xdg = os.environ.get("XDG_CONFIG_HOME", "")
+    if xdg:
+        xdg_path = Path(xdg) / "claw-code"
+        if xdg_path.exists():
+            return xdg_path
+    return None
+
+
+def claw_code_settings_path() -> Path | None:
+    """Return the claw-code settings.json path if claw-code is installed."""
+    d = _claw_code_dir()
+    return d / "settings.json" if d is not None else None
+
 # Provider API keys — used for post-install validation
 _PROVIDER_KEYS: dict[str, str] = {
     "OPENAI_API_KEY": "OpenAI",
@@ -146,6 +170,19 @@ _HOOK_DEFS = [
     ("usage-refresh.py", "llm-router-usage-refresh.py", "PostToolUse", "llm_"),
     ("cc-usage-track.py", "llm-router-cc-usage-track.py", "PostToolUse", "Agent"),
     ("session-end.py", "llm-router-session-end.py", "Stop", ""),
+]
+
+# claw-code hook definitions: same as above except:
+#   - cc-usage-track.py omitted (no Anthropic OAuth subscription in claw-code)
+#   - session-end and status-bar use claw-code variants (no CC pressure sections)
+_CLAW_CODE_HOOK_DEFS = [
+    ("session-start.py",            "llm-router-session-start.py",  "SessionStart",     ""),
+    ("auto-route.py",               "llm-router-auto-route.py",     "UserPromptSubmit", ""),
+    ("status-bar-clawcode.py",      "llm-router-status-bar.py",     "UserPromptSubmit", ""),
+    ("agent-route.py",              "llm-router-agent-route.py",    "PreToolUse",       "Agent"),
+    ("subagent-start.py",           "llm-router-subagent-start.py", "SubagentStart",    ""),
+    ("usage-refresh.py",            "llm-router-usage-refresh.py",  "PostToolUse",      "llm_"),
+    ("session-end-clawcode.py",     "llm-router-session-end.py",    "Stop",             ""),
 ]
 
 
@@ -392,6 +429,118 @@ def uninstall() -> list[str]:
 
     # Remove from Claude Desktop
     actions.extend(_uninstall_claude_desktop())
+
+    return actions
+
+
+def install_claw_code() -> list[str]:
+    """Install hooks and MCP server into claw-code's settings.json.
+
+    Detects ``~/.claw-code/settings.json`` (or XDG fallback).  Uses
+    claw-code-adapted hooks that omit the Claude Code subscription sections.
+    Returns a list of human-readable actions taken.
+    """
+    actions: list[str] = []
+
+    cc_dir = _claw_code_dir()
+    if cc_dir is None:
+        return ["SKIP claw-code: ~/.claw-code/ not found (claw-code may not be installed)"]
+
+    hooks_dst = cc_dir / "hooks"
+    settings_path = cc_dir / "settings.json"
+
+    # ── Copy hook scripts ────────────────────────────────────────────────
+    hooks_dst.mkdir(parents=True, exist_ok=True)
+
+    settings: dict = {}
+    if settings_path.exists():
+        try:
+            settings = json.loads(settings_path.read_text())
+        except (json.JSONDecodeError, OSError):
+            pass
+
+    for src_name, dst_name, event, matcher in _CLAW_CODE_HOOK_DEFS:
+        src = _HOOKS_SRC / src_name
+        dst = hooks_dst / dst_name
+
+        if not src.exists():
+            actions.append(f"SKIP {src_name}: source not found at {src}")
+            continue
+
+        shutil.copy2(src, dst)
+        if sys.platform != "win32":
+            dst.chmod(0o755)
+        actions.append(f"Copied {src_name} → {dst}")
+
+        command = f"{_python_exe()} {dst}"
+        if _register_hook(settings, event, matcher, command):
+            actions.append(f"Registered {event} hook: {dst_name}")
+        else:
+            actions.append(f"Hook already registered: {dst_name}")
+
+    settings_path.parent.mkdir(parents=True, exist_ok=True)
+    settings_path.write_text(json.dumps(settings, indent=2) + "\n")
+
+    # ── Register MCP server in claw-code settings ────────────────────────
+    llm_router_bin = shutil.which("llm-router") or "llm-router"
+    mcp_entry = {"command": llm_router_bin, "args": []}
+    mcp_servers = settings.setdefault("mcpServers", {})
+    if "llm-router" not in mcp_servers:
+        mcp_servers["llm-router"] = mcp_entry
+        settings_path.write_text(json.dumps(settings, indent=2) + "\n")
+        actions.append(f"Registered llm-router MCP server in {settings_path}")
+    else:
+        actions.append("MCP server already registered in claw-code")
+
+    return actions
+
+
+def uninstall_claw_code() -> list[str]:
+    """Remove llm-router hooks and MCP registration from claw-code. Returns actions taken."""
+    actions: list[str] = []
+
+    cc_dir = _claw_code_dir()
+    if cc_dir is None:
+        return []
+
+    hooks_dst = cc_dir / "hooks"
+    settings_path = cc_dir / "settings.json"
+
+    settings: dict = {}
+    if settings_path.exists():
+        try:
+            settings = json.loads(settings_path.read_text())
+        except (json.JSONDecodeError, OSError):
+            pass
+
+    for _, dst_name, event, _ in _CLAW_CODE_HOOK_DEFS:
+        dst = hooks_dst / dst_name
+        if dst.exists():
+            dst.unlink()
+            actions.append(f"Removed {dst}")
+
+        hooks = settings.get("hooks", {})
+        event_hooks = hooks.get(event, [])
+        command = f"python3 {dst}"
+        filtered = [
+            entry for entry in event_hooks
+            if not any(
+                h.get("command", "") == command
+                for h in entry.get("hooks", [])
+            )
+        ]
+        if len(filtered) < len(event_hooks):
+            hooks[event] = filtered
+            actions.append(f"Unregistered {event} hook: {dst_name}")
+
+    # Remove MCP server
+    mcp_servers = settings.get("mcpServers", {})
+    if "llm-router" in mcp_servers:
+        del mcp_servers["llm-router"]
+        actions.append("Removed llm-router MCP server from claw-code")
+
+    if settings_path.exists():
+        settings_path.write_text(json.dumps(settings, indent=2) + "\n")
 
     return actions
 

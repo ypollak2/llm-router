@@ -1,90 +1,30 @@
 #!/usr/bin/env python3
-# llm-router-hook-version: 11
-"""Stop hook — unified session summary: CC subscription delta + external routing costs."""
+# llm-router-hook-version: 1
+"""Stop hook (claw-code variant) — session summary: external routing costs + free-model savings.
+
+Identical to session-end.py but omits Claude Code subscription pressure sections
+(claw-code has no Anthropic OAuth — every call is a paid API call).
+"""
 
 from __future__ import annotations
 
 import json
 import os
 import sqlite3
-import subprocess
 import sys
 import time
-import urllib.request
 from datetime import datetime, timezone
 
 STATE_DIR            = os.path.expanduser("~/.llm-router")
 SESSION_START_FILE   = os.path.join(STATE_DIR, "session_start.txt")
-SESSION_CC_SNAP_FILE = os.path.join(STATE_DIR, "session_start_cc_pct.json")
 DB_PATH              = os.path.join(STATE_DIR, "usage.db")
-USAGE_JSON           = os.path.join(STATE_DIR, "usage.json")
 STAR_CTA_FILE        = os.path.join(STATE_DIR, "star_cta_shown.txt")
 
-# Show star CTA once the user has saved at least this much (lifetime)
 STAR_CTA_THRESHOLD_USD = 0.50
 
 SONNET_INPUT_PER_M  = 3.0
 SONNET_OUTPUT_PER_M = 15.0
 WIDTH = 64
-
-
-# ── Claude subscription ────────────────────────────────────────────────────────
-
-def _fetch_live_usage() -> dict | None:
-    try:
-        r = subprocess.run(
-            ["security", "find-generic-password", "-s", "Claude Code-credentials", "-w"],
-            capture_output=True, text=True, timeout=6,
-        )
-        if r.returncode != 0 or not r.stdout.strip():
-            return None
-        token = json.loads(r.stdout.strip()).get("claudeAiOauth", {}).get("accessToken", "")
-        if not token:
-            return None
-    except Exception:
-        return None
-
-    try:
-        req = urllib.request.Request(
-            "https://api.anthropic.com/api/oauth/usage",
-            headers={"Authorization": f"Bearer {token}", "anthropic-beta": "oauth-2025-04-20"},
-        )
-        with urllib.request.urlopen(req, timeout=8) as resp:
-            data = json.loads(resp.read().decode())
-    except Exception:
-        return None
-
-    try:
-        s = float(data.get("five_hour",       {}).get("utilization", 0.0))
-        w = float(data.get("seven_day",        {}).get("utilization", 0.0))
-        n = float(data.get("seven_day_sonnet", {}).get("utilization", 0.0))
-        result = {"session_pct": round(s, 1), "weekly_pct": round(w, 1),
-                  "sonnet_pct": round(n, 1), "updated_at": time.time()}
-        # Persist for routing pressure
-        os.makedirs(STATE_DIR, exist_ok=True)
-        with open(USAGE_JSON, "w") as f:
-            json.dump({**result, "highest_pressure": max(s, w, n) / 100.0}, f)
-        return result
-    except Exception:
-        return None
-
-
-def _read_json(path: str) -> dict | None:
-    try:
-        with open(path) as f:
-            return json.load(f)
-    except Exception:
-        return None
-
-
-def _get_cc_usage() -> tuple[dict | None, dict | None, bool]:
-    """Return (start_snapshot, current_usage, is_live)."""
-    start  = _read_json(SESSION_CC_SNAP_FILE)
-    live   = _fetch_live_usage()
-    if live:
-        return start, live, True
-    cached = _read_json(USAGE_JSON)
-    return start, cached, False
 
 
 # ── External routing (SQLite) ──────────────────────────────────────────────────
@@ -104,10 +44,10 @@ def _session_start_iso(ts: float) -> str:
 _FREE_PROVIDERS = {"ollama", "codex"}
 
 
-def _query_session_data(session_start: float) -> tuple[list[dict], list[dict], list[dict]]:
-    """Return (paid_rows, cc_rows, free_rows) split by provider type."""
+def _query_session_data(session_start: float) -> tuple[list[dict], list[dict]]:
+    """Return (paid_rows, free_rows) split by provider type."""
     if not os.path.exists(DB_PATH):
-        return [], [], []
+        return [], []
     try:
         conn = sqlite3.connect(DB_PATH)
         conn.row_factory = sqlite3.Row
@@ -122,13 +62,12 @@ def _query_session_data(session_start: float) -> tuple[list[dict], list[dict], l
         ).fetchall()
         conn.close()
         all_rows = [dict(r) for r in rows]
-        paid  = [r for r in all_rows
-                 if r.get("provider") not in _FREE_PROVIDERS | {"subscription"}]
-        cc    = [r for r in all_rows if r.get("provider") == "subscription"]
-        free  = [r for r in all_rows if r.get("provider") in _FREE_PROVIDERS]
-        return paid, cc, free
+        paid = [r for r in all_rows
+                if r.get("provider") not in _FREE_PROVIDERS | {"subscription"}]
+        free = [r for r in all_rows if r.get("provider") in _FREE_PROVIDERS]
+        return paid, free
     except Exception:
-        return [], [], []
+        return [], []
 
 
 def _aggregate(rows: list[dict]) -> dict[str, dict]:
@@ -158,67 +97,6 @@ def _sonnet_baseline(in_tok: int, out_tok: int) -> float:
 def _bar(pct: float, bar_width: int = 20) -> str:
     filled = max(0, min(bar_width, round(pct / 100 * bar_width)))
     return "█" * filled + "░" * (bar_width - filled)
-
-
-def _cc_row(label: str, start_pct: float | None, end_pct: float) -> str:
-    """Format one CC subscription row.
-
-    start_pct=None means no snapshot available (first session or missing file).
-    """
-    bar = _bar(end_pct)
-    if start_pct is not None:
-        delta = end_pct - start_pct
-        sign  = "+" if delta >= 0 else ""
-        return (
-            f"  {label:<16}  {bar}  "
-            f"{start_pct:>4.1f}% → {end_pct:>4.1f}%  ({sign}{delta:.1f}pp this session)"
-        )
-    return f"  {label:<16}  {bar}  {end_pct:>4.1f}%"
-
-
-def _format_cc_section(start: dict | None, current: dict, is_live: bool) -> list[str]:
-    src   = "live" if is_live else "cached ⚠"
-    lines = [f"  Claude Code subscription  ({src})"]
-    lines.append("")
-
-    s_end = current.get("session_pct", 0.0)
-    w_end = current.get("weekly_pct",  0.0)
-    n_end = current.get("sonnet_pct",  0.0)
-
-    s_start = start.get("session_pct") if start else None
-    w_start = start.get("weekly_pct")  if start else None
-    n_start = start.get("sonnet_pct")  if start else None
-
-    lines.append(_cc_row("session (5h)",  s_start, s_end))
-    lines.append(_cc_row("weekly (all)",  w_start, w_end))
-    if n_end > 0 or (n_start is not None and n_start > 0):
-        lines.append(_cc_row("weekly sonnet", n_start, n_end))
-
-    return lines
-
-
-def _format_cc_model_section(cc_rows: list[dict]) -> list[str]:
-    """Format per-model CC call counts — same table style as external routing."""
-    models: dict[str, dict] = {}
-    for r in cc_rows:
-        model = r.get("model", "?")
-        task  = r.get("task_type", "?")
-        if model not in models:
-            models[model] = {"count": 0, "tasks": {}}
-        models[model]["count"] += 1
-        models[model]["tasks"][task] = models[model]["tasks"].get(task, 0) + 1
-
-    total = sum(m["count"] for m in models.values())
-    lines = [f"  Claude Code models  {total} calls  (subscription, $0.00)"]
-    lines.append("")
-    for model, d in sorted(models.items(), key=lambda x: -x[1]["count"]):
-        # Short model name: haiku / sonnet / opus
-        short = model.split("/", 1)[-1] if "/" in model else model
-        if len(short) > 30:
-            short = short[:28] + "…"
-        top_task = max(d["tasks"], key=d["tasks"].get) if d["tasks"] else "?"
-        lines.append(f"  {top_task:<12}  {d['count']:>3}×  {short:<32}  (sub)")
-    return lines
 
 
 def _format_routing_section(tools: dict[str, dict]) -> list[str]:
@@ -255,27 +133,21 @@ def _total_saved(tools: dict[str, dict]) -> float:
 
 
 def _format_free_section(free_rows: list[dict], paid_rows: list[dict]) -> list[str]:
-    """Format free-model (Ollama / Codex) session savings.
-
-    Codex doesn't track tokens; we estimate from the avg tokens/call across paid rows.
-    """
     if not free_rows:
         return []
 
-    # Compute avg tokens/call from paid rows (for Codex estimation)
     paid_with_tokens = [r for r in paid_rows if (r.get("input_tokens") or 0) > 0]
     if paid_with_tokens:
         avg_in  = sum(r.get("input_tokens",  0) for r in paid_with_tokens) / len(paid_with_tokens)
         avg_out = sum(r.get("output_tokens", 0) for r in paid_with_tokens) / len(paid_with_tokens)
     else:
-        avg_in, avg_out = 500.0, 300.0  # conservative fallback
+        avg_in, avg_out = 500.0, 300.0
 
-    # Aggregate by provider
     by_provider: dict[str, dict] = {}
     for r in free_rows:
         p = r.get("provider", "?")
         if p not in by_provider:
-            by_provider[p] = {"calls": 0, "in": 0, "out": 0, "estimated": False}
+            by_provider[p] = {"calls": 0, "in": 0, "out": 0}
         by_provider[p]["calls"] += 1
         by_provider[p]["in"]    += r.get("input_tokens",  0) or 0
         by_provider[p]["out"]   += r.get("output_tokens", 0) or 0
@@ -307,20 +179,10 @@ def _format_free_section(free_rows: list[dict], paid_rows: list[dict]) -> list[s
     return lines
 
 
-def _format(tools: dict[str, dict], cc_rows: list[dict], free_rows: list[dict],
-            paid_rows: list[dict],
-            start: dict | None, current: dict | None, is_live: bool) -> str:
+def _format(tools: dict[str, dict], free_rows: list[dict], paid_rows: list[dict]) -> str:
     lines = ["─" * WIDTH]
 
-    if current:
-        lines += _format_cc_section(start, current, is_live)
-
-    if cc_rows:
-        lines.append("")
-        lines += _format_cc_model_section(cc_rows)
-
     if free_rows:
-        lines.append("")
         lines += _format_free_section(free_rows, paid_rows)
 
     if tools:
@@ -340,19 +202,11 @@ def _format(tools: dict[str, dict], cc_rows: list[dict], free_rows: list[dict],
     if total_saved >= 0.001:
         lines.append("")
         if _should_show_star_cta(total_saved):
-            lines.append(
-                f'  💡 Saved ~${total_saved:.2f} this session with llm-router'
-            )
+            lines.append(f'  💡 Saved ~${total_saved:.2f} this session with llm-router')
             lines.append("")
-            lines.append(
-                '  ⭐  Enjoying the savings? A star on GitHub helps others find it:'
-            )
-            lines.append(
-                '      github.com/ypollak2/llm-router'
-            )
-            lines.append(
-                '      (run `llm-router share` to post your savings)'
-            )
+            lines.append('  ⭐  Enjoying the savings? A star on GitHub helps others find it:')
+            lines.append('      github.com/ypollak2/llm-router')
+            lines.append('      (run `llm-router share` to post your savings)')
         else:
             lines.append(
                 f'  💡 Saved ~${total_saved:.2f} this session · '
@@ -366,7 +220,6 @@ def _format(tools: dict[str, dict], cc_rows: list[dict], free_rows: list[dict],
 # ── Star CTA ───────────────────────────────────────────────────────────────────
 
 def _lifetime_saved() -> float:
-    """Return total lifetime savings (USD) across all providers."""
     if not os.path.exists(DB_PATH):
         return 0.0
     try:
@@ -390,14 +243,12 @@ def _lifetime_saved() -> float:
 
 
 def _should_show_star_cta(session_saved: float) -> bool:
-    """Return True the first time lifetime savings crosses STAR_CTA_THRESHOLD_USD."""
     if session_saved <= 0.0:
         return False
     if os.path.exists(STAR_CTA_FILE):
         return False
     lifetime = _lifetime_saved()
     if lifetime >= STAR_CTA_THRESHOLD_USD:
-        # Mark as shown so it only fires once
         try:
             with open(STAR_CTA_FILE, "w") as f:
                 f.write(f"{lifetime:.4f}")
@@ -415,15 +266,14 @@ def main() -> None:
     except (json.JSONDecodeError, EOFError):
         pass
 
-    session_start               = _read_session_start()
-    paid_rows, cc_rows, free_rows = _query_session_data(session_start)
-    tools                       = _aggregate(paid_rows) if paid_rows else {}
-    start, current, is_live     = _get_cc_usage()
+    session_start     = _read_session_start()
+    paid_rows, free_rows = _query_session_data(session_start)
+    tools             = _aggregate(paid_rows) if paid_rows else {}
 
-    if not tools and not cc_rows and not current and not free_rows:
+    if not tools and not free_rows:
         sys.exit(0)
 
-    summary = _format(tools, cc_rows, free_rows, paid_rows, start, current, is_live)
+    summary = _format(tools, free_rows, paid_rows)
     print(json.dumps({"systemMessage": summary}))
 
 

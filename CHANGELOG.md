@@ -1,5 +1,18 @@
 # Changelog
 
+## v1.8.0 — claw-code hook install (2026-04-06)
+
+### Added
+
+- **`llm-router install --claw-code`** — installs hooks and MCP server into `~/.claw-code/settings.json`; auto-detects claw-code if present during regular `llm-router install`
+- **claw-code-adapted hooks** — `session-end-clawcode.py` and `status-bar-clawcode.py` omit the Claude Code subscription pressure sections (claw-code has no Anthropic OAuth; every call is a paid API call)
+- **`llm-router doctor`** — new section checks claw-code hook status and MCP registration when `~/.claw-code/` is detected
+- **`install_claw_code()` / `uninstall_claw_code()`** in `install_hooks.py` — programmatic API for claw-code integration; detects `~/.claw-code/` with XDG fallback
+
+### Fixed
+
+- **CI lint failures** — removed unused `FREE_PROVIDERS` and `since_iso` variables in `cli.py`; fixed f-strings without placeholders in `session-end.py`
+
 ## v1.7.0 — Multi-harness docs: claw-code, OpenClaw, Agno (2026-04-06)
 
 ### Added
