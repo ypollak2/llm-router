@@ -1,5 +1,11 @@
 # Changelog
 
+## v1.5.2 — Call breakdown in status bar (2026-04-06)
+
+### Changed
+
+- **Status bar now shows call breakdown** — the `UserPromptSubmit` status bar now displays `sub:N · free:N · paid:N` (Claude subscription / Ollama+Codex / paid API) alongside the savings figure. Example: `📊  CC 33%s · 25%w · 45%♪   │   sub:0 · free:15 · paid:27   │   $0.008 saved (29%)`
+
 ## v1.5.1 — Free-model savings in session-end summary (2026-04-06)
 
 ### Added

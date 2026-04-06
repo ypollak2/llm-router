@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm-router-hook-version: 1
+# llm-router-hook-version: 2
 """UserPromptSubmit hook — compact credit + savings status bar.
 
 Fires before every prompt. Displays a single visible line showing:
@@ -50,35 +50,53 @@ def _read_claude_credits() -> tuple[float | None, float | None, float | None, bo
         return None, None, None, True
 
 
-def _read_session_savings() -> tuple[int, float, int]:
-    """Return (call_count, dollars_saved, savings_pct) for the current session."""
+_FREE_PROVIDERS = {"ollama", "codex"}
+
+
+def _read_session_stats() -> tuple[int, int, int, float, int]:
+    """Return (sub_calls, free_calls, paid_calls, dollars_saved, savings_pct).
+
+    One SQLite pass: categorise each row as sub / free / paid, compute savings
+    only for paid+free rows (subscription rows have no token data).
+    """
     try:
         start = float(open(SESSION_START_FILE).read().strip())
         start_str = datetime.fromtimestamp(start, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
         conn = sqlite3.connect(USAGE_DB)
         rows = conn.execute(
-            "SELECT input_tokens, output_tokens, cost_usd FROM usage "
+            "SELECT provider, input_tokens, output_tokens, cost_usd FROM usage "
             "WHERE timestamp >= ? AND success = 1",
             (start_str,),
         ).fetchall()
         conn.close()
-        if not rows:
-            return 0, 0.0, 0
-        actual = sum(r[2] or 0.0 for r in rows)
-        baseline = sum(
-            ((r[0] or 0) * SONNET_INPUT_PER_M + (r[1] or 0) * SONNET_OUTPUT_PER_M) / 1_000_000
-            for r in rows
-        )
+
+        sub_calls = free_calls = paid_calls = 0
+        actual = baseline = 0.0
+        for provider, in_tok, out_tok, cost in rows:
+            in_tok = in_tok or 0
+            out_tok = out_tok or 0
+            cost = cost or 0.0
+            if provider == "subscription":
+                sub_calls += 1
+            elif provider in _FREE_PROVIDERS:
+                free_calls += 1
+                # Estimate baseline (free model avoided Sonnet cost)
+                baseline += (in_tok * SONNET_INPUT_PER_M + out_tok * SONNET_OUTPUT_PER_M) / 1_000_000
+            else:
+                paid_calls += 1
+                actual += cost
+                baseline += (in_tok * SONNET_INPUT_PER_M + out_tok * SONNET_OUTPUT_PER_M) / 1_000_000
+
         saved = max(0.0, baseline - actual)
         pct = round(saved / baseline * 100) if baseline > 0 else 0
-        return len(rows), saved, pct
+        return sub_calls, free_calls, paid_calls, saved, pct
     except Exception:
-        return 0, 0.0, 0
+        return 0, 0, 0, 0.0, 0
 
 
 def _format_status() -> str:
     session_pct, weekly_pct, sonnet_pct, stale = _read_claude_credits()
-    calls, saved, pct = _read_session_savings()
+    sub_calls, free_calls, paid_calls, saved, pct = _read_session_stats()
 
     if session_pct is not None:
         stale_mark = " ⚠️" if stale else ""
@@ -86,10 +104,13 @@ def _format_status() -> str:
     else:
         credit = "CC — run llm_check_usage"
 
-    if calls > 0:
-        router = f"Router ${saved:.3f} saved · {calls} calls · {pct}% cheaper"
+    total_calls = sub_calls + free_calls + paid_calls
+    if total_calls > 0:
+        calls_part = f"sub:{sub_calls} · free:{free_calls} · paid:{paid_calls}"
+        savings_part = f"${saved:.3f} saved ({pct}%)" if saved >= 0.001 else "no savings yet"
+        router = f"{calls_part}   │   {savings_part}"
     else:
-        router = "Router — no calls yet"
+        router = "no calls yet"
 
     return f"📊  {credit}   │   {router}"
 
