@@ -1,5 +1,15 @@
 # Changelog
 
+## v1.7.0 — Multi-harness docs: claw-code, OpenClaw, Agno (2026-04-06)
+
+### Added
+
+- **claw-code MCP snippet** in README — open-source Rust Claude Code alternative; same hook/MCP protocol, no subscription (API-only users save even more)
+- **OpenClaw MCP snippet** in README — `openclaw mcp add llm-router` one-liner for the Skills marketplace
+- **Agno MCP example** in README — `MCPTools(command="llm-router")` pattern; teaser for v2.0 `RouteredModel` drop-in
+- **v1.7–v2.1 roadmap sections** — documented multi-platform integration strategy (claw-code hooks, OpenClaw skill, Agno adapter, Learning Router)
+- **`docs/plans/v2.0-ecosystem-integrations.md`** — full integration architecture doc with 4-layer model, per-system breakdowns, `RouteredModel`/`RouteredTeam` sketches, and phase plan
+
 ## v1.6.0 — `llm-router share` + star CTA (2026-04-06)
 
 ### Added
