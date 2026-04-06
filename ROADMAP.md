@@ -139,32 +139,104 @@ Eight correctness fixes making the routing guarantees production-solid:
 
 ---
 
-## v1.6 — Growth & Ecosystem
+## v1.6 — Growth & Sharing ✅ Complete
 
-**Theme**: Make savings visible, shareable, and spread the tool virally.
-
-| Feature | Priority | Notes |
+| Feature | Status | Notes |
 |---|---|---|
-| **`llm-router share`** | High | Shareable markdown/ASCII savings card — "Saved $12.40 this month (35% cheaper)" |
-| **Webhook support** | Medium | Daily routing summary to Slack/Discord/generic URL |
-| **`llm-router leaderboard`** | Medium | Personal model rankings: quality rating × cost × latency from real usage |
-| **VS Code / Cursor status bar** | Low | Quick profile toggle (`no_pressure ↔ balanced ↔ high_pressure`) in IDE status bar |
+| ~~`llm-router share`~~ | ✅ v1.6.0 | ASCII savings card + clipboard + pre-filled tweet |
+| ~~One-time star CTA in session summary~~ | ✅ v1.6.0 | Fires once when lifetime savings > $0.50 |
+| **Webhook support** | ⬜ | Daily routing summary to Slack/Discord/generic URL |
+| **`llm-router leaderboard`** | ⬜ | Personal model rankings: quality × cost × latency |
+| **VS Code / Cursor status bar** | ⬜ | Quick profile toggle in IDE status bar |
 
 ---
 
-## v2.0 — Learning Router
+## v1.7 — Multi-Harness Docs + claw-code Layer 1
+
+**Theme**: llm-router works everywhere the Claude Code architecture runs.
+
+| Feature | Priority | Notes |
+|---|---|---|
+| **README: claw-code MCP snippet** | ✅ v1.7.0 | Config snippet + savings context (no subscription = even more valuable) |
+| **README: OpenClaw MCP snippet** | ✅ v1.7.0 | `openclaw mcp add llm-router` one-liner |
+| **README: Agno MCP example** | ✅ v1.7.0 | `MCPTools(command="llm-router")` pattern |
+| **ROADMAP: v1.8–v2.0 ecosystem phases** | ✅ v1.7.0 | Documented below |
+| **Smithery `smithery.yaml`: add claw-code/OpenClaw compatibility** | High | Signals to marketplace that it works beyond Claude Code |
+| **`llm-router install --claw-code`** | High | Detect `~/.claw-code/settings.json`, write hooks |
+
+---
+
+## v1.8 — claw-code Hook Install
+
+**Theme**: First-class hook integration for claw-code users.
+
+| Feature | Priority | Notes |
+|---|---|---|
+| **`install_hooks.py`: claw-code path detection** | High | `~/.claw-code/settings.json` + XDG fallback |
+| **Adapted `session-end` hook (no-subscription mode)** | High | Drop CC pressure section; keep free/paid/savings |
+| **Adapted `status-bar` hook (no-subscription mode)** | High | Drop `CC N%s` prefix; show only routing stats |
+| **`llm-router doctor` detects claw-code** | Medium | Reports hook status for claw-code installs |
+| **`llm-router install` auto-detects claw-code** | Medium | Offers to install in claw-code when detected |
+
+---
+
+## v1.9 — OpenClaw Skill Package
+
+**Theme**: Passive distribution via the OpenClaw Skills marketplace.
+
+| Feature | Priority | Notes |
+|---|---|---|
+| **`src/llm_router/skills/openclaw/` package** | High | `skill.json` + `before-prompt.py` + `session-end.py` + `mcp.json` |
+| **`llm-router install --openclaw`** | High | Packages and registers the skill in one command |
+| **Publish to OpenClaw skill registry** | High | Passive discovery from the marketplace |
+| **OpenClaw-specific hook adaptations** | Medium | Respect OpenClaw's `BeforeToolCall` hook format |
+
+---
+
+## v2.0 — Agno Adapter
+
+**Theme**: llm-router becomes the smart model layer inside multi-agent Python workflows.
+
+Every Agno agent takes a `model=` parameter. `RouteredModel` makes llm-router a transparent drop-in — routing each prompt to the cheapest capable model without changing any agent logic.
+
+| Feature | Notes |
+|---|---|
+| **`src/llm_router/adapters/agno.py`** | `RouteredModel` — drop-in Agno `Model` subclass that classifies + routes each prompt |
+| **`RouteredTeam`** | Budget-aware team wrapper; `monthly_budget_usd` enforced across all agents |
+| **`pip install claude-code-llm-router[agno]`** | Optional extra dep group; agno not required for core package |
+| **Example: `docs/examples/agno_team_routing.py`** | 3-agent team (researcher + analyst + writer) with per-role routing |
+| **Integration tests with Agno test harness** | Confirm `RouteredModel` satisfies Agno's `Model` ABC |
+
+### Why this matters
+
+In a 3-agent Agno Team without routing, all agents pay Sonnet rates. With `RouteredTeam`:
+
+```python
+# Before: 3 × Sonnet = 3× cost
+team = Team(agents=[researcher, analyst, writer])
+
+# After: writer → Haiku (90% cheaper), researcher → Perplexity, analyst → Sonnet
+team = RouteredTeam(
+    agents=[researcher, analyst, writer],
+    monthly_budget_usd=20.0,
+)
+```
+
+---
+
+## v2.1 — Learning Router
 
 **Theme**: The router gets smarter the more you use it.
 
-Every routing decision is already recorded in SQLite. After ~500 calls, there's enough signal to train a tiny local classifier (Qwen 0.5B via Ollama) on *your specific usage patterns* — better than generic heuristics. Unlike RouteLLM (which trains on human preference datasets), this trains on your own history: your prompts, your providers, your quality ratings. Completely local, zero cloud cost, self-improving.
+Every routing decision is already recorded in SQLite. After ~500 calls, there's enough signal to train a tiny local classifier (Qwen 0.5B via Ollama) on *your specific usage patterns*.
 
 | Feature | Notes |
 |---|---|
 | **Routing history → training data** | Export `routing_decisions` rows with `was_good` labels to JSONL |
-| **Local fine-tune pipeline** | `llm-router-train` CLI: fine-tunes Qwen 0.5B on Ollama, saves to `~/.llm-router/models/` |
-| **Hot-swap classifier** | Server loads custom model on startup; falls back to heuristic chain if unavailable |
+| **Local fine-tune pipeline** | `llm-router-train` CLI: fine-tunes Qwen 0.5B on Ollama |
+| **Hot-swap classifier** | Server loads custom model on startup; falls back to heuristic chain |
 | **Continuous improvement loop** | Every `llm_rate` feedback → queue for next training run |
-| **Model drift detection** | Alert when custom classifier disagrees with heuristic >20% — suggests retraining |
+| **Model drift detection** | Alert when custom classifier disagrees with heuristic >20% |
 
 ---
 
@@ -172,8 +244,8 @@ Every routing decision is already recorded in SQLite. After ~500 calls, there's 
 
 See [CONTRIBUTING.md](CONTRIBUTING.md). Highest-impact areas:
 
-1. **v1.3 dashboard** — React + Vite, reads from `~/.llm-router/` SQLite + JSON
-2. **v1.3 prompt caching** — LiteLLM `cache_control` integration
-3. **v1.4 task-aware preferences** — extend `profiles.py` with task-type model affinity scores
+1. **v1.8 claw-code hooks** — adapt session-end and status-bar for no-subscription mode
+2. **v1.9 OpenClaw skill** — `skill.json` format + hook compatibility with OpenClaw's pipeline
+3. **v2.0 Agno adapter** — `RouteredModel` implementing Agno's `Model` ABC
 4. **Provider integrations** — Bedrock, Azure, Vertex AI via LiteLLM
 5. **Testing** — integration tests for provider fallback chains

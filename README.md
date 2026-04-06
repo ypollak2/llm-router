@@ -114,9 +114,37 @@ cd llm-router
 uv sync
 ```
 
-### Works with Cursor, Windsurf, and Zed
+### Works with Claude Code, claw-code, OpenClaw, Cursor, Windsurf, Zed, and Agno
 
-LLM Router is an MCP server — it works in any IDE that supports the Model Context Protocol.
+LLM Router is an MCP server — it works in any harness or framework that supports the Model Context Protocol.
+
+#### Agent harnesses
+
+**Claude Code** — auto-installed by `llm-router install`. Hooks intercept every prompt.
+
+**claw-code** (open-source Rust rewrite of Claude Code) — add to `~/.claw-code/mcp.json`:
+```json
+{
+  "mcpServers": {
+    "llm-router": {
+      "command": "llm-router",
+      "args": []
+    }
+  }
+}
+```
+> No subscription pressure in claw-code — every call is a paid API call, so the free-first chain (Ollama → Codex → Gemini Flash) saves even more here than in Claude Code.
+
+**OpenClaw** (multi-provider Claude Code alternative) — add to OpenClaw's MCP config or install as a Skill:
+```bash
+# Via MCP config (immediate)
+openclaw mcp add llm-router
+
+# Via Skills (coming in v1.9)
+openclaw skill add llm-router
+```
+
+#### IDEs
 
 **Cursor** — add to `~/.cursor/mcp.json`:
 ```json
@@ -156,7 +184,25 @@ LLM Router is an MCP server — it works in any IDE that supports the Model Cont
 }
 ```
 
-> The MCP tools (`llm_query`, `llm_code`, `llm_research`, etc.) work identically in all IDEs. The auto-route hook is Claude Code-specific; other IDEs call the tools directly.
+#### Agno (multi-agent framework)
+
+[Agno](https://github.com/agno-agi/agno) agents can consume llm-router's 33 tools as an MCP tool provider — no extra setup beyond the standard MCP config:
+
+```python
+from agno.agent import Agent
+from agno.models.anthropic import Claude
+from agno.tools.mcp import MCPTools
+
+agent = Agent(
+    model=Claude(id="claude-sonnet-4-6"),
+    tools=[MCPTools(command="llm-router")],
+    instructions="Use llm_research for web searches, llm_code for coding tasks.",
+)
+```
+
+> **v2.0 roadmap**: `RouteredModel` — a drop-in Agno model that routes each prompt to the cheapest capable model automatically, and `RouteredTeam` with a `monthly_budget_usd` cap enforced across all agents in the team.
+
+> The MCP tools (`llm_query`, `llm_code`, `llm_research`, etc.) work identically across all harnesses and IDEs. The auto-route hook is Claude Code / claw-code specific; other environments call the tools directly.
 
 ### Enable Global Auto-Routing
 
