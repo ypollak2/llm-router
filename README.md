@@ -216,14 +216,28 @@ llm_setup(action='install_hooks')
 llm-router install
 ```
 
-This installs hooks + rules to `~/.claude/` so every Claude Code session auto-routes tasks to the optimal model.
+This installs hooks + rules to `~/.claude/` and registers the MCP server in both `~/.claude/settings.json` (interactive) and `~/.claude.json` (CLI / `claude -p`), so routing works in every mode — interactive, non-interactive, and agent.
+
+#### Docker / CI / Agent mode
+
+```bash
+# In your Dockerfile or CI setup:
+RUN pip install claude-code-llm-router && llm-router install --headless
+```
+
+`--headless` skips interactive prompts, prints a ready-to-merge `settings.json` snippet, and works without the `claude` CLI present. Pass API keys at runtime:
+
+```bash
+# docker run -e GEMINI_API_KEY=... -e OPENAI_API_KEY=... your-image
+# No LLM_ROUTER_CLAUDE_SUBSCRIPTION needed — API-key mode routes free-first automatically
+```
 
 > **Start for free**: Google's Gemini API has a [free tier](https://aistudio.google.com/apikey) with 1M tokens/day. [Groq](https://console.groq.com/keys) also offers a generous free tier with ultra-fast inference.
 
 ### What You Get
 
 - **33 MCP tools** — smart routing, text/code/filesystem, image/video/audio, streaming, orchestration, usage monitoring, web dashboard
-- **Auto-route hook** — intercepts every prompt before your top-tier model sees it; heuristic → Ollama → cheap API classifier chain, hooks self-update on `pip upgrade`
+- **Auto-route hook** — intercepts every prompt before your top-tier model sees it; heuristic → Ollama → cheap API classifier chain, hooks self-update on `pip upgrade`; works in interactive, `claude -p`, and Docker/agent mode
 - **Live status bar** — fires before every prompt: `📊 CC 13%s · 24%w │ sub:0 · free:15 · paid:27 │ $0.52 saved (35%)`
 - **Claude subscription mode** — routes entirely within your CC subscription; Codex (free) before paid externals; external only when quota exhausted
 - **Anthropic prompt caching** — auto-injects `cache_control` breakpoints on long system prompts; up to 90% savings on repeated context
@@ -586,8 +600,10 @@ See [CHANGELOG.md](CHANGELOG.md) for what's been shipped. Coming next:
 | ~~v1.4~~ | ~~Developer Ergonomics~~ | ✅ Real savings in `status`, `update` command, `uninstall --purge`, animated SVG demo |
 | ~~v1.5~~ | ~~Filesystem + Transparency~~ | ✅ `llm_fs_*` tools, free-model savings in status + session summary, sub/free/paid call counts in status bar |
 | ~~v1.6~~ | ~~Growth & Sharing~~ | ✅ `llm-router share` savings card + tweet, one-time star CTA in session summary |
-| v1.7 | Ecosystem | Webhook daily digest, `llm-router leaderboard`, VS Code status bar |
-| v2.0 | Learning Router | Self-improving classifier trained on your own routing history |
+| ~~v1.7~~ | ~~Ecosystem~~ | ✅ Multi-harness docs (claw-code, OpenClaw, Agno, Cursor, Windsurf, Zed) |
+| ~~v1.8~~ | ~~Reliability~~ | ✅ Inline OAuth refresh (prevents session exhaustion), claw-code hooks, Docker/headless install, fix routing format drift + MCP CLI registration |
+| v1.9 | Skills + OpenClaw | OpenClaw Skill Package (`llm-router install --openclaw`), routing dry-run (`llm-router test <prompt>`) |
+| v2.0 | Learning Router | Self-improving classifier trained on your own routing history; Agno `RouteredModel` + `RouteredTeam` |
 
 See [ROADMAP.md](ROADMAP.md) for design notes and competitive context.
 

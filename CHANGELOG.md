@@ -23,9 +23,8 @@
 ### How to use in Docker/K8s agents
 
 ```dockerfile
-RUN pip install claude-code-llm-router && llm-router install
-ENV LLM_ROUTER_CLAUDE_SUBSCRIPTION=false
-# Pass at runtime via K8s secret:
+RUN pip install claude-code-llm-router && llm-router install --headless
+# Pass API keys at runtime via K8s secret (do NOT set LLM_ROUTER_CLAUDE_SUBSCRIPTION):
 # GEMINI_API_KEY, OPENAI_API_KEY, GROQ_API_KEY, DEEPSEEK_API_KEY
 ```
 
