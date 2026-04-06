@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm-router-hook-version: 7
+# llm-router-hook-version: 8
 """SessionStart hook — inject routing banner, start Ollama, refresh Claude usage.
 
 Fires once when a new Claude Code session begins. Four jobs:
@@ -32,16 +32,16 @@ _CC_MODE = os.environ.get("LLM_ROUTER_CLAUDE_SUBSCRIPTION", "").lower() in ("tru
 
 BANNER_SUBSCRIPTION = """
 ╔════════════════════════════════════════════════════════════════╗
-║  ⚡ llm-router ACTIVE — subscription routing in effect        ║
+║  ⚡ llm-router ACTIVE — subscription mode (MCP-tool routing)  ║
 ╠════════════════════════════════════════════════════════════════╣
-║  simple   → /model claude-haiku-4-5-20251001  (subscription) ║
-║  moderate → Sonnet handles directly (passthrough)             ║
-║  complex  → /model claude-opus-4-6            (subscription) ║
-║  research → llm_research  (Perplexity — web-grounded)        ║
+║  Every task routes to the cheapest capable model via MCP:    ║
+║  simple   → llm_query   (Ollama → Codex → Gemini Flash)      ║
+║  moderate → llm_analyze (Ollama → Codex → GPT-4o)            ║
+║  complex  → llm_code    (Ollama → Codex → o3)                ║
+║  research → llm_research (Perplexity — web-grounded)         ║
 ╠════════════════════════════════════════════════════════════════╣
-║  Under pressure, external models activate tier by tier:       ║
-║  sonnet  ≥95% → moderate external (Ollama → GPT-4o)          ║
-║  weekly  ≥95% → ALL external (Ollama → cloud fallback)       ║
+║  Subscription usage tracked for session-end delta reporting  ║
+║  Inline OAuth refresh keeps pressure data fresh              ║
 ╠════════════════════════════════════════════════════════════════╣
 ║  FORBIDDEN when ROUTE hint present:                          ║
 ║  Agent subagents · self-answer · WebSearch · WebFetch        ║

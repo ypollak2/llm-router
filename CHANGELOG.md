@@ -1,5 +1,19 @@
 # Changelog
 
+## v1.8.4 — Fix: remove broken /model directives, always route via MCP tools (2026-04-06)
+
+### Fixed
+
+- **CC-MODE `/model` directives never worked** — the hook was emitting `⚡ MANDATORY ROUTE: query/simple → /model claude-haiku-4-5-20251001 (subscription)` but Claude Code's model cannot execute slash commands from hook context (neither interactive nor `claude -p` mode). Every CC-MODE simple/complex routing directive was silently ignored. Removed the entire `/model` directive path.
+- **All routing now goes via MCP tools** — `simple` → `llm_query`, `moderate` → `llm_analyze`/`llm_generate`/`llm_code`, `complex` → `llm_code`/`llm_analyze`. The free-first chain (Ollama → Codex → cheap API) keeps costs low in both subscription and API-key modes.
+- **`LLM_ROUTER_CLAUDE_SUBSCRIPTION=true`** now only enables inline OAuth refresh and session-end delta reporting — it no longer changes routing behaviour (routing was broken anyway).
+- **Session-start banner updated** to describe actual MCP-tool routing instead of the broken `/model` model-switch table.
+
+### Hook versions
+
+- `auto-route.py`: v10 → v11
+- `session-start.py`: v7 → v8
+
 ## v1.8.3 — Critical: fix routing format drift + MCP CLI registration (2026-04-06)
 
 ### Fixed

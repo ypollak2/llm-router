@@ -367,24 +367,18 @@ If you use Claude Code Pro/Max, you already pay for Haiku, Sonnet, and Opus. Ena
 LLM_ROUTER_CLAUDE_SUBSCRIPTION=true
 ```
 
-#### Default Routing (No Pressure)
+#### Routing
 
-| Complexity | Model | Cost |
-|-----------|-------|------|
-| simple | Claude Haiku 4.5 | free (subscription) |
-| moderate | Sonnet (passthrough) | free (you're already using it) |
-| complex | Claude Opus 4.6 | free (subscription) |
-| research | Perplexity Sonar Pro | ~$0.005/query |
+All tasks route via MCP tools regardless of subscription mode. The free-first chain keeps costs low:
 
-#### Pressure Cascade
+| Complexity | MCP tool | Chain |
+|-----------|----------|-------|
+| simple | `llm_query` | Ollama → Codex → Gemini Flash → Groq |
+| moderate | `llm_analyze` / `llm_code` / `llm_generate` | Ollama → Codex → GPT-4o → Gemini Pro |
+| complex | `llm_code` / `llm_analyze` | Ollama → Codex → o3 → Gemini Pro |
+| research | `llm_research` | Perplexity (web-grounded) |
 
-| Condition | simple | moderate | complex |
-|-----------|--------|----------|---------|
-| session < 95%, sonnet < 95% | Haiku (sub) | Sonnet (sub) | Opus (sub) |
-| sonnet ≥ 95% | Codex → external | Codex → external | Opus (sub) |
-| weekly ≥ 95% or session ≥ 95% | Codex → external | Codex → external | Codex → external |
-
-Run `llm_check_usage` at session start to populate accurate pressure data. Hooks flag `⚠️ STALE` when usage data is >30 minutes old.
+Setting `LLM_ROUTER_CLAUDE_SUBSCRIPTION=true` enables inline OAuth refresh to keep subscription usage data fresh for accurate session-end reporting — it does not change routing behaviour. Run `llm_check_usage` at session start or rely on auto-refresh (triggers when data is >30 min stale).
 
 #### External Fallback Chains (free-first)
 

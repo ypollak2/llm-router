@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm-router-hook-version: 10
+# llm-router-hook-version: 11
 """UserPromptSubmit hook — scoring classifier with Ollama + API fallback chain.
 
 Classification chain (stops at first success):
@@ -740,67 +740,57 @@ def main() -> None:
     tool = TOOL_MAP.get(task_type, "llm_route")
 
     # ── Claude Code subscription mode ─────────────────────────────────────────
-    # Never call Anthropic API. Thresholds decide when subscription → external.
+    # Trigger inline OAuth refresh if usage data is stale (side-effect of _get_pressure).
+    #
+    # NOTE: /model slash commands cannot be executed by the model from hook context
+    # (neither interactive nor -p mode), so subscription tier routing via /model is
+    # disabled. All tasks route through MCP tools (free-first chain).
+    #
+    # Set LLM_ROUTER_MODEL_SWITCH=true to re-enable /model directives once Claude Code
+    # gains the ability to execute slash commands from hook context.
+    _MODEL_SWITCH = os.environ.get("LLM_ROUTER_MODEL_SWITCH", "").lower() in ("1", "true", "yes")
+
     if _CC_MODE:
         pressure = _get_pressure()
-        session_pct = pressure["session"]   # 5h rolling window
-        sonnet_pct  = pressure["sonnet"]    # weekly Sonnet-specific
-        weekly_pct  = pressure["weekly"]    # weekly all-models
-
-        # Pressure tiers cascade — higher pressure forces ALL lower tiers external too.
-        # weekly/session ≥ 95%  → everything external (global emergency)
-        # sonnet          ≥ 95%  → moderate + simple external (Sonnet pool exhausted)
-        #
-        # NOTE: the old "session ≥ 85% → simple external" rule was removed.
-        # Rationale: at 85% session there is still meaningful Haiku subscription
-        # capacity remaining (15%). Routing simple tasks to paid external models
-        # (Gemini Flash, Groq, GPT-4o-mini) while Haiku subscription is available
-        # violates the "prefer already-paid capacity first" principle. The sonnet
-        # tier threshold (≥ 95%) remains as the correct signal that subscription
-        # models are genuinely exhausted for a given tier.
-        all_external = weekly_pct >= 0.95 or session_pct >= 0.95
-        use_external = {
-            "simple":   all_external or sonnet_pct >= 0.95,
-            "moderate": all_external or sonnet_pct >= 0.95,
-            "complex":  all_external,
-        }
-
-        if not use_external.get(complexity, False):
-            # Stay on subscription — suggest the right Claude tier
-            _SUBSCRIPTION_MODELS = {
-                "simple":   "claude-haiku-4-5-20251001",
-                "moderate": None,                          # passthrough — no switch
-                "complex":  "claude-opus-4-6",
+        if _MODEL_SWITCH:
+            session_pct = pressure["session"]
+            sonnet_pct  = pressure["sonnet"]
+            weekly_pct  = pressure["weekly"]
+            all_external = weekly_pct >= 0.95 or session_pct >= 0.95
+            use_external = {
+                "simple":   all_external or sonnet_pct >= 0.95,
+                "moderate": all_external or sonnet_pct >= 0.95,
+                "complex":  all_external,
             }
-            target = _SUBSCRIPTION_MODELS.get(complexity)
-            if target is None:
-                # moderate + no pressure → still inject routing directive so Claude
-                # calls the MCP tool instead of self-answering (100% routing coverage)
+            if not use_external.get(complexity, False):
+                _SUBSCRIPTION_MODELS = {
+                    "simple":   "claude-haiku-4-5-20251001",
+                    "moderate": None,
+                    "complex":  "claude-opus-4-6",
+                }
+                target = _SUBSCRIPTION_MODELS.get(complexity)
                 pressure_summary = (
                     f"session={session_pct:.0%} sonnet={sonnet_pct:.0%} weekly={weekly_pct:.0%}"
                 )
-                directive = (
-                    f"⚡ MANDATORY ROUTE: {task_type}/moderate → call {tool}(complexity=\"moderate\")"
-                    f" [CC-MODE {pressure_summary} via {method}]"
-                    f" | FORBIDDEN: self-answer · Agent subagents · WebSearch · WebFetch"
-                    f" | Call the tool NOW as your ONLY action."
-                )
+                if target is None:
+                    # moderate + no pressure → route via MCP tool
+                    directive = (
+                        f"⚡ MANDATORY ROUTE: {task_type}/moderate → call {tool}(complexity=\"moderate\")"
+                        f" [CC-MODE {pressure_summary} via {method}]"
+                        f" | FORBIDDEN: self-answer · Agent subagents · WebSearch · WebFetch"
+                        f" | Call the tool NOW as your ONLY action."
+                    )
+                else:
+                    directive = (
+                        f"⚡ MANDATORY ROUTE: {task_type}/{complexity} → /model {target} (subscription)"
+                        f" [CC-MODE {pressure_summary} via {method}]"
+                        f" | Handle directly. Subscription = no API cost."
+                        f" Do NOT call external llm_* tools."
+                    )
                 json.dump({"hookSpecificOutput": {"hookEventName": "UserPromptSubmit",
                                                    "contextForAgent": directive}}, sys.stdout)
                 sys.exit(0)
-            pressure_summary = (
-                f"session={session_pct:.0%} sonnet={sonnet_pct:.0%} weekly={weekly_pct:.0%}"
-            )
-            directive = (
-                f"⚡ MANDATORY ROUTE: {task_type}/{complexity} → /model {target} (subscription)"
-                f" [CC-MODE {pressure_summary} via {method}]"
-                f" | Handle directly. Subscription = no API cost. Do NOT call external llm_* tools."
-            )
-            json.dump({"hookSpecificOutput": {"hookEventName": "UserPromptSubmit",
-                                               "contextForAgent": directive}}, sys.stdout)
-            sys.exit(0)
-
-        # Pressure threshold exceeded for this tier → fall through to external routing
+            # Pressure exceeded → fall through to external routing
 
     # ── Standard external routing directive ───────────────────────────────────
     # complexity= is passed to every tool so route_and_call can derive the right

@@ -47,29 +47,25 @@ If a `⚡ MANDATORY ROUTE:` directive appears in context, use it to select the r
 4. `via heuristic-weak` — Low-confidence pattern match
 5. `via fallback` — No classification; `llm_route` should do full analysis
 
-## Model Routing Strategy (v1.2.0)
+## Model Routing Strategy (v1.8.4)
 
-Everyone runs in **Claude Code subscription mode** (`LLM_ROUTER_CLAUDE_SUBSCRIPTION=true`).
-Anthropic models are **never** called via API — all Claude tiers are used via subscription.
+All routing goes through MCP tools — the hook never emits `/model` directives
+because Claude Code's model cannot execute slash commands from context. The
+free-first MCP chain keeps costs low in both subscription and API-key modes.
 
-### No Pressure (default)
+### All Complexity Levels → MCP Tools (free-first chain)
 
-| Complexity | Action | Model |
+| Complexity | MCP tool | Chain |
 |---|---|---|
-| `simple` | `/model claude-haiku-4-5-20251001` hint | Haiku (subscription) |
-| `moderate` | Passthrough — no switch | Sonnet (current, subscription) |
-| `complex` | `/model claude-opus-4-6` hint | Opus (subscription) |
+| `simple` | `llm_query` | Ollama → Codex → Gemini Flash → Groq |
+| `moderate` | `llm_analyze` / `llm_generate` / `llm_code` | Ollama → Codex → GPT-4o → Gemini Pro |
+| `complex` | `llm_code` / `llm_analyze` | Ollama → Codex → o3 → Gemini Pro |
 | `research` | `llm_research` | Perplexity (web-grounded) |
 
-### Pressure Cascade (each tier forces all lower tiers external too)
+`LLM_ROUTER_CLAUDE_SUBSCRIPTION=true` enables inline OAuth refresh (keeps subscription
+usage data fresh for session-end delta reporting) but does not change routing behaviour.
 
-| Condition | simple | moderate | complex |
-|---|---|---|---|
-| session < 95%, sonnet < 95% | Haiku (sub) | Sonnet (sub) | Opus (sub) |
-| sonnet ≥ 95% | EXTERNAL | EXTERNAL | Opus (sub) |
-| weekly ≥ 95% **or** session ≥ 95% | EXTERNAL | EXTERNAL | EXTERNAL |
-
-### External Fallback Chains (no Anthropic API, free-first ordering)
+### External Fallback Chains (free-first ordering)
 
 Hierarchy: **free-local (Ollama) → free-prepaid (Codex) → paid-per-call**
 
