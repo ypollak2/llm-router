@@ -1,5 +1,13 @@
 # Changelog
 
+## v1.9.1 — Fix: llm_select_agent codex detection (2026-04-06)
+
+### Fixed
+
+- **`llm_select_agent` reported `codex_binary: false` when the Codex CLI was installed** — the tool called `is_codex_plugin_available()` (which checks for the openai/codex-plugin-cc Claude Code plugin directory) instead of `is_codex_available()` (which checks for the actual `codex` binary at known paths and `$CODEX_PATH`). Users with Codex at `/usr/local/bin/codex` got `claude_code` as primary instead of `codex` even on budget profile.
+
+---
+
 ## v1.9.0 — Routing enforcement + session-level agent selection (2026-04-06)
 
 ### Added

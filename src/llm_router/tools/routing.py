@@ -461,7 +461,7 @@ async def llm_select_agent(
     import shutil as _shutil
     import os as _os
 
-    from llm_router.codex_agent import is_codex_plugin_available
+    from llm_router.codex_agent import is_codex_available
 
     valid_profiles = {"budget", "balanced", "premium"}
     if profile not in valid_profiles:
@@ -506,7 +506,7 @@ async def llm_select_agent(
         fallback, fallback_model = "codex", "gpt-4o"
 
     # Environment check
-    codex_ok = is_codex_plugin_available()
+    codex_ok = is_codex_available()
     claude_ok = bool(_shutil.which("claude"))
     openai_key = bool(_os.environ.get("OPENAI_API_KEY"))
     gemini_key = bool(_os.environ.get("GEMINI_API_KEY"))
