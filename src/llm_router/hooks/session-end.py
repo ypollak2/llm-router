@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm-router-hook-version: 10
+# llm-router-hook-version: 11
 """Stop hook — unified session summary: CC subscription delta + external routing costs."""
 
 from __future__ import annotations
@@ -18,6 +18,10 @@ SESSION_START_FILE   = os.path.join(STATE_DIR, "session_start.txt")
 SESSION_CC_SNAP_FILE = os.path.join(STATE_DIR, "session_start_cc_pct.json")
 DB_PATH              = os.path.join(STATE_DIR, "usage.db")
 USAGE_JSON           = os.path.join(STATE_DIR, "usage.json")
+STAR_CTA_FILE        = os.path.join(STATE_DIR, "star_cta_shown.txt")
+
+# Show star CTA once the user has saved at least this much (lifetime)
+STAR_CTA_THRESHOLD_USD = 0.50
 
 SONNET_INPUT_PER_M  = 3.0
 SONNET_OUTPUT_PER_M = 15.0
@@ -335,13 +339,72 @@ def _format(tools: dict[str, dict], cc_rows: list[dict], free_rows: list[dict],
     total_saved = paid_saved + free_saved
     if total_saved >= 0.001:
         lines.append("")
-        lines.append(
-            f'  💡 Saved ~${total_saved:.2f} with llm-router · '
-            f'github.com/ypollak2/llm-router'
-        )
+        if _should_show_star_cta(total_saved):
+            lines.append(
+                f'  💡 Saved ~${total_saved:.2f} this session with llm-router'
+            )
+            lines.append("")
+            lines.append(
+                f'  ⭐  Enjoying the savings? A star on GitHub helps others find it:'
+            )
+            lines.append(
+                f'      github.com/ypollak2/llm-router'
+            )
+            lines.append(
+                f'      (run `llm-router share` to post your savings)'
+            )
+        else:
+            lines.append(
+                f'  💡 Saved ~${total_saved:.2f} this session · '
+                f'run `llm-router share` to post it'
+            )
 
     lines.append("─" * WIDTH)
     return "\n".join(lines)
+
+
+# ── Star CTA ───────────────────────────────────────────────────────────────────
+
+def _lifetime_saved() -> float:
+    """Return total lifetime savings (USD) across all providers."""
+    if not os.path.exists(DB_PATH):
+        return 0.0
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        rows = conn.execute(
+            "SELECT provider, input_tokens, output_tokens, cost_usd "
+            "FROM usage WHERE success=1"
+        ).fetchall()
+        conn.close()
+        saved = 0.0
+        for provider, in_tok, out_tok, cost in rows:
+            base = ((in_tok or 0) * SONNET_INPUT_PER_M
+                    + (out_tok or 0) * SONNET_OUTPUT_PER_M) / 1_000_000
+            if provider in _FREE_PROVIDERS:
+                saved += base
+            elif provider != "subscription":
+                saved += max(0.0, base - (cost or 0.0))
+        return saved
+    except Exception:
+        return 0.0
+
+
+def _should_show_star_cta(session_saved: float) -> bool:
+    """Return True the first time lifetime savings crosses STAR_CTA_THRESHOLD_USD."""
+    if session_saved <= 0.0:
+        return False
+    if os.path.exists(STAR_CTA_FILE):
+        return False
+    lifetime = _lifetime_saved()
+    if lifetime >= STAR_CTA_THRESHOLD_USD:
+        # Mark as shown so it only fires once
+        try:
+            with open(STAR_CTA_FILE, "w") as f:
+                f.write(f"{lifetime:.4f}")
+        except OSError:
+            pass
+        return True
+    return False
 
 
 # ── Entry point ────────────────────────────────────────────────────────────────

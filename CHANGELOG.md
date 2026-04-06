@@ -1,5 +1,12 @@
 # Changelog
 
+## v1.6.0 — `llm-router share` + star CTA (2026-04-06)
+
+### Added
+
+- **`llm-router share`** — generates a savings card (box-drawn ASCII), copies it to the clipboard, and opens a pre-filled Twitter/X tweet with your real savings numbers. Works on macOS (`pbcopy`), Linux (`xclip`/`xsel`), and Windows (`clip`).
+- **Star CTA in session-end hook** — the first time your lifetime savings crosses $0.50, the Stop hook shows a one-time prompt: `⭐ Enjoying the savings? A star on GitHub helps others find it`. Never shown again after that session. Regular sessions show `run llm-router share to post it` instead.
+
 ## v1.5.2 — Call breakdown in status bar (2026-04-06)
 
 ### Changed

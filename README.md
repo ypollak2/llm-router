@@ -185,6 +185,7 @@ This installs hooks + rules to `~/.claude/` so every Claude Code session auto-ro
 - **Web dashboard** — `llm-router dashboard` → `localhost:7337`; cost trends, model distribution, recent decisions
 - **Hard spend caps** — `LLM_ROUTER_DAILY_SPEND_LIMIT` and `LLM_ROUTER_MONTHLY_BUDGET` raise before any call
 - **Filesystem tools** — `llm_fs_find`, `llm_fs_rename`, `llm_fs_edit_many` route file-operation reasoning to cheap models so Opus never burns tokens on grep patterns
+- **`llm-router share`** — one command generates a shareable savings card, copies it to clipboard, and opens a pre-filled tweet with your real numbers
 - **Prompt classification cache** — SHA-256 LRU cache for instant repeat classifications
 - **Circuit breaker + health** — catches 429s, marks unhealthy providers, auto-recovers
 - **Quality logging** — records every routing decision; `llm_quality_report` shows accuracy, savings, downshift rate
@@ -205,6 +206,32 @@ The built-in web dashboard (`llm_dashboard` or `llm-router dashboard`) gives you
 | ![Logs](docs/images/dashboard-logs.png) |
 
 > **Design:** Liquid Glass dark theme — Inter + JetBrains Mono, Material Symbols, Tailwind CSS. Auto-refreshes every 30 s.
+
+### Share Your Savings
+
+```bash
+llm-router share
+```
+
+Generates a savings card, copies it to clipboard, and opens a one-click tweet:
+
+```
+  ┌──────────────────────────────────────────────────────┐
+  │                                                      │
+  │   🤖 llm-router saved me $18.40 (lifetime)           │
+  │      35% cheaper than always-Sonnet                  │
+  │                                                      │
+  │   2,110 total calls tracked                          │
+  │   320 free  (Ollama / Codex)  ·  1,790 paid API      │
+  │   Top model: gemini-2.5-flash                        │
+  │                                                      │
+  │   ⭐ github.com/ypollak2/llm-router                   │
+  │                                                      │
+  └──────────────────────────────────────────────────────┘
+
+  ✓  Card copied to clipboard
+  →  Tweet it: https://twitter.com/intent/tweet?text=...
+```
 
 ### Status Bar
 
@@ -512,7 +539,8 @@ See [CHANGELOG.md](CHANGELOG.md) for what's been shipped. Coming next:
 | ~~v1.3~~ | ~~Observability~~ | ✅ Web dashboard, prompt caching, semantic dedup cache, hard daily cap |
 | ~~v1.4~~ | ~~Developer Ergonomics~~ | ✅ Real savings in `status`, `update` command, `uninstall --purge`, animated SVG demo |
 | ~~v1.5~~ | ~~Filesystem + Transparency~~ | ✅ `llm_fs_*` tools, free-model savings in status + session summary, sub/free/paid call counts in status bar |
-| v1.6 | Growth & Sharing | `llm-router share` savings card, webhook digests, leaderboard, VS Code status bar |
+| ~~v1.6~~ | ~~Growth & Sharing~~ | ✅ `llm-router share` savings card + tweet, one-time star CTA in session summary |
+| v1.7 | Ecosystem | Webhook daily digest, `llm-router leaderboard`, VS Code status bar |
 | v2.0 | Learning Router | Self-improving classifier trained on your own routing history |
 
 See [ROADMAP.md](ROADMAP.md) for design notes and competitive context.
