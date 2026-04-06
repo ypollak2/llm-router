@@ -6,6 +6,7 @@ Usage:
     llm-router install --check      — show what would be installed without doing it
     llm-router install --force      — reinstall even if already present
     llm-router install --claw-code  — also install into claw-code (auto-detects ~/.claw-code/)
+    llm-router install --headless   — install for Docker/agent/CI environments (API-key mode, no OAuth)
     llm-router uninstall        — remove hooks and MCP registration
     llm-router uninstall --purge — also delete ~/.llm-router/ (usage DB, .env, logs)
     llm-router setup            — interactive wizard: configure providers and API keys
@@ -181,6 +182,11 @@ def _run_install(flags: list[str]) -> None:
         return
 
     claw_code = "--claw-code" in flags
+    headless  = "--headless"  in flags
+
+    if headless:
+        _run_install_headless()
+        return
 
     if force:
         from llm_router.install_hooks import _load_settings, _save_settings
@@ -228,6 +234,66 @@ def _run_install(flags: list[str]) -> None:
     print("    llm-router install --force      — reinstall / update paths")
     print("    llm-router install --claw-code  — also install into claw-code")
     print("    llm-router uninstall            — remove\n")
+
+
+# ── install --headless ─────────────────────────────────────────────────────────
+
+def _run_install_headless() -> None:
+    """Install for Docker / CI / agent environments (API-key mode, no OAuth).
+
+    Runs the standard hook + MCP install, then prints a Dockerfile snippet showing
+    the complete wiring needed for a Claude Code agent container.
+    """
+    from llm_router.install_hooks import install
+
+    print(f"\n{_bold('╔══════════════════════════════════════════════╗')}")
+    print(f"{_bold('║   LLM Router — Headless / Agent Install       ║')}")
+    print(f"{_bold('╚══════════════════════════════════════════════╝')}\n")
+    print(_dim("  API-key mode — no subscription, no OAuth, routes directly to external providers.\n"))
+
+    actions = install()
+    for a in actions:
+        print(f"  {_green('✓')}  {a}")
+
+    print(f"\n{_green('✓')} {_bold('Hooks and MCP server installed.')}\n")
+
+    print(_bold("  Dockerfile snippet (bake hooks into agent image):"))
+    print(_dim("  ─────────────────────────────────────────────────────────────"))
+    snippet = """\
+  FROM python:3.12-slim
+
+  # Install llm-router and wire in hooks
+  RUN pip install claude-code-llm-router && llm-router install
+
+  # Route to API providers — no Anthropic subscription in CI
+  ENV LLM_ROUTER_CLAUDE_SUBSCRIPTION=false
+
+  # At least one provider key required for the fallback chain
+  # (pass at runtime via --env or K8s secret)
+  ENV GEMINI_API_KEY=""
+  ENV OPENAI_API_KEY=""
+  ENV GROQ_API_KEY=""
+  ENV DEEPSEEK_API_KEY=""
+"""
+    print(snippet)
+
+    print(_bold("  .claude/settings.json — MCP + hooks merge example:"))
+    print(_dim("  (llm-router install does this automatically; shown for reference)"))
+    import json as _json
+    example = {
+        "mcpServers": {"llm-router": {"command": "llm-router", "args": []}},
+        "hooks": {
+            "UserPromptSubmit": [{"matcher": "", "hooks": [{"type": "command", "command": "python3 ~/.claude/hooks/llm-router-auto-route.py"}]}],
+            "Stop":             [{"matcher": "", "hooks": [{"type": "command", "command": "python3 ~/.claude/hooks/llm-router-session-end.py"}]}],
+        }
+    }
+    print("  " + _dim(_json.dumps(example, indent=2).replace("\n", "\n  ")))
+
+    print(f"\n{_bold('  Verification (run inside the container after a job):')}")
+    print("    grep ROUTE /proc/1/fd/1            # look for routing log lines")
+    print("    cat ~/.llm-router/usage.json        # routing stats")
+    print("    sqlite3 ~/.llm-router/usage.db \\")
+    print('      "SELECT model, COUNT(*) FROM usage GROUP BY model"\n')
 
 
 # ── uninstall ──────────────────────────────────────────────────────────────────

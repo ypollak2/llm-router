@@ -1,5 +1,22 @@
 # Changelog
 
+## v1.8.2 — Docker/agent headless mode (2026-04-06)
+
+### Added
+
+- **`llm-router install --headless`** — installs for Docker/CI/agent environments (API-key mode). Prints a complete Dockerfile snippet + settings.json merge example for wiring llm-router into a Claude Code agent container.
+- **Dynamic session-start banner** — `session-start.py` now auto-detects the routing mode from `LLM_ROUTER_CLAUDE_SUBSCRIPTION`. When not set (API-key / Docker mode), shows "API-key routing in effect" banner with free-first chain instead of "subscription routing" + wrong pressure cascade info.
+- **Skip OAuth on Linux/Docker** — `session-start.py` skips the `_refresh_claude_usage()` OAuth call when `LLM_ROUTER_CLAUDE_SUBSCRIPTION` is not set, eliminating noisy "Keychain not found" warnings in agent containers.
+
+### How to use in Docker/K8s agents
+
+```dockerfile
+RUN pip install claude-code-llm-router && llm-router install
+ENV LLM_ROUTER_CLAUDE_SUBSCRIPTION=false
+# Pass at runtime via K8s secret:
+# GEMINI_API_KEY, OPENAI_API_KEY, GROQ_API_KEY, DEEPSEEK_API_KEY
+```
+
 ## v1.8.1 — Fix: inline OAuth refresh prevents session exhaustion (2026-04-06)
 
 ### Fixed

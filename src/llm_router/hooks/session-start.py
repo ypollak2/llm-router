@@ -1,14 +1,17 @@
 #!/usr/bin/env python3
-# llm-router-hook-version: 6
+# llm-router-hook-version: 7
 """SessionStart hook — inject routing banner, start Ollama, refresh Claude usage.
 
 Fires once when a new Claude Code session begins. Four jobs:
   1. Auto-start Ollama via start-ollama.sh (free local routing tier).
-  2. Refresh Claude subscription usage from the OAuth API so pressure-based
-     routing has accurate data from the first request of the session.
+  2. Refresh Claude subscription usage from the OAuth API (subscription mode only).
   3. Inject a compact routing table at position 0 of the context window,
      so routing rules are always salient regardless of session length.
   4. Reset the session stats tracker so session-end summary is accurate.
+
+Mode detection (auto):
+  LLM_ROUTER_CLAUDE_SUBSCRIPTION=true → subscription mode (OAuth pressure cascade)
+  otherwise                           → API-key mode (always routes to external providers)
 """
 
 from __future__ import annotations
@@ -25,7 +28,9 @@ STATE_DIR = os.path.expanduser("~/.llm-router")
 SESSION_START_FILE = os.path.join(STATE_DIR, "session_start.txt")
 SESSION_ID_FILE = os.path.join(STATE_DIR, "session_id.txt")
 
-BANNER = """
+_CC_MODE = os.environ.get("LLM_ROUTER_CLAUDE_SUBSCRIPTION", "").lower() in ("true", "1", "yes")
+
+BANNER_SUBSCRIPTION = """
 ╔════════════════════════════════════════════════════════════════╗
 ║  ⚡ llm-router ACTIVE — subscription routing in effect        ║
 ╠════════════════════════════════════════════════════════════════╣
@@ -35,7 +40,6 @@ BANNER = """
 ║  research → llm_research  (Perplexity — web-grounded)        ║
 ╠════════════════════════════════════════════════════════════════╣
 ║  Under pressure, external models activate tier by tier:       ║
-║  session ≥85% → simple external (Ollama → Gemini Flash)      ║
 ║  sonnet  ≥95% → moderate external (Ollama → GPT-4o)          ║
 ║  weekly  ≥95% → ALL external (Ollama → cloud fallback)       ║
 ╠════════════════════════════════════════════════════════════════╣
@@ -43,6 +47,26 @@ BANNER = """
 ║  Agent subagents · self-answer · WebSearch · WebFetch        ║
 ╚════════════════════════════════════════════════════════════════╝
 """.strip()
+
+BANNER_API_KEYS = """
+╔════════════════════════════════════════════════════════════════╗
+║  ⚡ llm-router ACTIVE — API-key routing in effect             ║
+╠════════════════════════════════════════════════════════════════╣
+║  Every task is routed to the cheapest capable external model: ║
+║  simple   → llm_query   (Gemini Flash / Groq / GPT-4o-mini)  ║
+║  moderate → llm_analyze (GPT-4o / Gemini Pro)                ║
+║  complex  → llm_code    (o3 / Gemini Pro)                    ║
+║  research → llm_research (Perplexity — web-grounded)         ║
+╠════════════════════════════════════════════════════════════════╣
+║  Free-first chain: Ollama → Codex → paid API providers        ║
+║  Set GEMINI_API_KEY, OPENAI_API_KEY, GROQ_API_KEY, etc.      ║
+╠════════════════════════════════════════════════════════════════╣
+║  FORBIDDEN when ROUTE hint present:                          ║
+║  Agent subagents · self-answer · WebSearch · WebFetch        ║
+╚════════════════════════════════════════════════════════════════╝
+""".strip()
+
+BANNER = BANNER_SUBSCRIPTION if _CC_MODE else BANNER_API_KEYS
 
 
 def _reset_session_stats() -> None:
@@ -179,8 +203,11 @@ def main() -> None:
     # 1. Ensure Ollama is running (start it if needed)
     hints += _ensure_ollama_running()
 
-    # 2. Refresh Claude usage from OAuth API (accurate pressure from session start)
-    hints += _refresh_claude_usage()
+    # 2. Refresh Claude usage from OAuth API — subscription mode only.
+    # In API-key mode (no subscription) skip this: there is no quota to track,
+    # and the Keychain lookup would fail noisily on Linux / Docker agents.
+    if _CC_MODE:
+        hints += _refresh_claude_usage()
 
     print(json.dumps({
         "hookSpecificOutput": {
