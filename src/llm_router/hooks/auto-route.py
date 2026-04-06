@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm-router-hook-version: 8
+# llm-router-hook-version: 9
 """UserPromptSubmit hook — scoring classifier with Ollama + API fallback chain.
 
 Classification chain (stops at first success):
@@ -21,6 +21,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import subprocess
 import sys
 import time
 import urllib.request
@@ -82,21 +83,58 @@ _CC_MODE = os.environ.get("LLM_ROUTER_CLAUDE_SUBSCRIPTION", "").lower() in ("tru
 def _get_pressure() -> dict[str, float]:
     """Read per-bucket Claude subscription pressure from usage.json or SQLite.
 
-    Returns keys: session (5h window), sonnet (weekly Sonnet), weekly (all models).
-    Falls back to 0.0 per bucket — do NOT use a conservative non-zero default here,
-    because that would cause unnecessary model switching when usage.json simply
-    hasn't been written yet this session (system is healthy).
+    Returns keys: session (5h window), sonnet (weekly Sonnet), weekly (all models)
+    as fractions 0.0–1.0.
+
+    Staleness handling:
+    - If usage.json is fresh (≤30 min): use it directly.
+    - If usage.json is stale AND last known session ≥ 70%: attempt an inline OAuth
+      refresh before routing. Subscription usage only goes up in a session window,
+      so stale data underestimates pressure. At high pressure (≥70%), this
+      underestimate can cause catastrophic under-routing and session exhaustion.
+    - If usage.json does not exist (new session): fall back to 0.0 — this is safe
+      because there genuinely is no pressure to speak of.
     """
     usage_path = Path.home() / ".llm-router" / "usage.json"
+
+    def _frac(d: dict, key: str) -> float:
+        v = float(d.get(key, 0.0))
+        return v / 100.0 if v > 1.0 else v  # normalise: percent→fraction
+
     try:
-        data = json.loads(usage_path.read_text())
-        def _frac(key: str) -> float:
-            v = float(data.get(key, 0.0))
-            return v / 100.0 if v > 1.0 else v  # normalise if stored as percent
+        raw = json.loads(usage_path.read_text())
+        age_s = time.time() - float(raw.get("updated_at", 0))
+        stale = age_s > 1800  # 30 minutes
+
+        if stale:
+            last_session = _frac(raw, "session_pct")
+            # Only pay the ~300ms OAuth round-trip when we're actually at risk.
+            if last_session >= _INLINE_REFRESH_PRESSURE_FLOOR:
+                # Rate-limit the refresh to avoid hammering the API every prompt.
+                last_inline_file = str(Path.home() / ".llm-router" / "last_inline_refresh.txt")
+                last_inline = 0.0
+                try:
+                    last_inline = float(open(last_inline_file).read().strip())
+                except Exception:
+                    pass
+                if (time.time() - last_inline) >= _INLINE_REFRESH_MIN_INTERVAL_SEC:
+                    fresh = _fetch_usage_inline()
+                    if fresh:
+                        try:
+                            with open(last_inline_file, "w") as _f:
+                                _f.write(str(time.time()))
+                        except Exception:
+                            pass
+                        return {
+                            "session": _frac(fresh, "session_pct"),
+                            "sonnet":  _frac(fresh, "sonnet_pct"),
+                            "weekly":  _frac(fresh, "weekly_pct"),
+                        }
+
         return {
-            "session": _frac("session_pct"),
-            "sonnet": _frac("sonnet_pct"),
-            "weekly": _frac("weekly_pct"),
+            "session": _frac(raw, "session_pct"),
+            "sonnet":  _frac(raw, "sonnet_pct"),
+            "weekly":  _frac(raw, "weekly_pct"),
         }
     except Exception:
         pass
@@ -117,6 +155,73 @@ def _get_pressure() -> dict[str, float]:
         pass
 
     return {"session": 0.0, "sonnet": 0.0, "weekly": 0.0}
+
+
+_USAGE_JSON = str(Path.home() / ".llm-router" / "usage.json")
+# Inline refresh fires when data is stale AND last known session ≥ this threshold.
+# Below this threshold, stale data is safe to use (pressure is low, risk of hitting
+# limits is small). At 70%+ the window is closing fast enough to justify the ~300ms
+# OAuth round-trip to get fresh data before every routing decision.
+_INLINE_REFRESH_PRESSURE_FLOOR = 0.70
+# Minimum interval between inline refreshes (avoid hammering the API on every prompt).
+_INLINE_REFRESH_MIN_INTERVAL_SEC = 120  # 2 minutes
+
+
+def _fetch_usage_inline() -> dict | None:
+    """Live OAuth refresh of Claude subscription data — called when usage.json is stale.
+
+    Uses the macOS Keychain (security command) to get the OAuth access token,
+    then calls the Anthropic usage API. Writes fresh data to usage.json atomically.
+    Returns the parsed data dict, or None on any failure (network, no token, etc.).
+    """
+    if sys.platform != "darwin":
+        return None  # Keychain only available on macOS
+    try:
+        r = subprocess.run(
+            ["security", "find-generic-password", "-s", "Claude Code-credentials", "-w"],
+            capture_output=True, text=True, timeout=4,
+        )
+        if r.returncode != 0 or not r.stdout.strip():
+            return None
+        token = json.loads(r.stdout.strip()).get("claudeAiOauth", {}).get("accessToken", "")
+        if not token:
+            return None
+    except Exception:
+        return None
+
+    try:
+        req = urllib.request.Request(
+            "https://api.anthropic.com/api/oauth/usage",
+            headers={
+                "Authorization": f"Bearer {token}",
+                "anthropic-beta": "oauth-2025-04-20",
+            },
+        )
+        with urllib.request.urlopen(req, timeout=4) as resp:
+            data = json.loads(resp.read().decode())
+    except Exception:
+        return None
+
+    try:
+        s = float(data.get("five_hour",       {}).get("utilization", 0.0))
+        w = float(data.get("seven_day",        {}).get("utilization", 0.0))
+        n = float(data.get("seven_day_sonnet", {}).get("utilization", 0.0))
+        result = {
+            "session_pct": round(s, 1),
+            "weekly_pct":  round(w, 1),
+            "sonnet_pct":  round(n, 1),
+            "updated_at":  time.time(),
+            "highest_pressure": max(s, w, n),
+        }
+        state_dir = str(Path.home() / ".llm-router")
+        os.makedirs(state_dir, exist_ok=True)
+        tmp = _USAGE_JSON + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(result, f)
+        os.replace(tmp, _USAGE_JSON)
+        return result
+    except Exception:
+        return None
 
 
 def _is_pressure_stale(max_age_seconds: int = 1800) -> bool:

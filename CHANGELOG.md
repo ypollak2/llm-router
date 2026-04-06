@@ -1,5 +1,15 @@
 # Changelog
 
+## v1.8.1 — Fix: inline OAuth refresh prevents session exhaustion (2026-04-06)
+
+### Fixed
+
+- **Critical routing bug: session hitting 100%** — `auto-route.py` was reading stale `usage.json` and making routing decisions based on hours-old pressure data. When `usage.json` was >30 min old AND last known session pressure was ≥70%, the hook never triggered the pressure cascade to external providers, letting the Claude subscription session exhaust to 100%.
+
+  **Root cause**: Subscription usage is monotonically increasing within a 5h window. Stale data always underestimates pressure. At 70%+ pressure, this underestimate caused catastrophic under-routing.
+
+  **Fix**: `auto-route.py` now attempts an **inline OAuth refresh** (macOS Keychain + Anthropic API) when `usage.json` is stale AND last known session ≥ 70%. Refresh is rate-limited to once per 2 minutes to avoid API hammering. After the refresh, routing decisions use fresh pressure data — ensuring the cascade to external providers fires at the correct 95% threshold.
+
 ## v1.8.0 — claw-code hook install (2026-04-06)
 
 ### Added
