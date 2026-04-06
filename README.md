@@ -30,6 +30,11 @@
   <a href="https://pypi.org/project/claude-code-llm-router/"><img src="https://img.shields.io/pypi/v/claude-code-llm-router?style=flat-square&label=PyPI" alt="PyPI"></a>
   <a href="https://pypi.org/project/claude-code-llm-router/"><img src="https://img.shields.io/pypi/dm/claude-code-llm-router?style=flat-square&label=downloads" alt="PyPI Downloads"></a>
   <a href="https://smithery.ai/server/llm-router"><img src="https://smithery.ai/badge/llm-router" alt="Smithery"></a>
+  <a href="https://github.com/ypollak2/llm-router/stargazers"><img src="https://img.shields.io/github/stars/ypollak2/llm-router?style=flat-square&label=stars&color=yellow" alt="GitHub Stars"></a>
+</p>
+
+<p align="center">
+  <b>If llm-router saves you money, please <a href="https://github.com/ypollak2/llm-router">⭐ star the repo</a> — it helps others find it.</b>
 </p>
 
 <p align="center">
@@ -171,13 +176,15 @@ This installs hooks + rules to `~/.claude/` so every Claude Code session auto-ro
 
 ### What You Get
 
-- **30 MCP tools** — smart routing, text/code, image/video/audio, streaming, orchestration, usage monitoring, web dashboard
+- **33 MCP tools** — smart routing, text/code/filesystem, image/video/audio, streaming, orchestration, usage monitoring, web dashboard
 - **Auto-route hook** — intercepts every prompt before your top-tier model sees it; heuristic → Ollama → cheap API classifier chain, hooks self-update on `pip upgrade`
+- **Live status bar** — fires before every prompt: `📊 CC 13%s · 24%w │ sub:0 · free:15 · paid:27 │ $0.52 saved (35%)`
 - **Claude subscription mode** — routes entirely within your CC subscription; Codex (free) before paid externals; external only when quota exhausted
 - **Anthropic prompt caching** — auto-injects `cache_control` breakpoints on long system prompts; up to 90% savings on repeated context
 - **Semantic dedup cache** — Ollama embeddings + cosine similarity skip identical-intent calls at zero cost
 - **Web dashboard** — `llm-router dashboard` → `localhost:7337`; cost trends, model distribution, recent decisions
 - **Hard spend caps** — `LLM_ROUTER_DAILY_SPEND_LIMIT` and `LLM_ROUTER_MONTHLY_BUDGET` raise before any call
+- **Filesystem tools** — `llm_fs_find`, `llm_fs_rename`, `llm_fs_edit_many` route file-operation reasoning to cheap models so Opus never burns tokens on grep patterns
 - **Prompt classification cache** — SHA-256 LRU cache for instant repeat classifications
 - **Circuit breaker + health** — catches 429s, marks unhealthy providers, auto-recovers
 - **Quality logging** — records every routing decision; `llm_quality_report` shows accuracy, savings, downshift rate
@@ -198,6 +205,43 @@ The built-in web dashboard (`llm_dashboard` or `llm-router dashboard`) gives you
 | ![Logs](docs/images/dashboard-logs.png) |
 
 > **Design:** Liquid Glass dark theme — Inter + JetBrains Mono, Material Symbols, Tailwind CSS. Auto-refreshes every 30 s.
+
+### Status Bar
+
+Fires before every prompt — one line showing subscription pressure, call breakdown, and savings:
+
+```
+📊  CC 13%s · 24%w · 43%♪   │   sub:0 · free:305 · paid:1813   │   $1.59 saved (35%)
+```
+
+`sub` = Claude subscription calls · `free` = Ollama/Codex ($0) · `paid` = external API calls
+
+### Session Summary
+
+At session end the Stop hook prints a full breakdown:
+
+```
+────────────────────────────────────────────────────────────────
+  Claude Code subscription  (live)
+
+  session (5h)     ████░░░░░░░░░░░░░░░░  13.0% → 21.0%  (+8.0pp)
+  weekly (all)     █████░░░░░░░░░░░░░░░  24.0% → 24.0%  (+0.0pp)
+  weekly sonnet    █████████░░░░░░░░░░░  43.0% → 44.0%  (+1.0pp)
+
+  Free models  305 calls  ·  $0.52 saved vs Sonnet  (Ollama/Codex)
+
+  codex        298×  29k↑ 28k↓ ~est   $0.51 saved
+  ollama         7×  360↑ 719↓        $0.01 saved
+
+  External routing  14 calls  ·  $0.006  ·  29% saved vs Sonnet
+
+  query           7×  gemini-2.5-flash   $0.004
+  code            3×  gpt-5.4            $0.000
+  research        2×  gpt-4o             $0.002
+
+  💡 Saved ~$0.53 with llm-router · github.com/ypollak2/llm-router
+────────────────────────────────────────────────────────────────
+```
 
 ---
 
@@ -303,7 +347,7 @@ Image, video, and audio providers (fal.ai, Runway, Stability AI, ElevenLabs, etc
 
 ## MCP Tools
 
-Once installed, Claude Code gets these 29 tools:
+Once installed, Claude Code gets these 33 tools:
 
 | Tool | What It Does |
 |------|-------------|
@@ -319,6 +363,10 @@ Once installed, Claude Code gets these 29 tools:
 | `llm_analyze` | Deep reasoning — analysis, debugging, problem decomposition |
 | `llm_code` | Coding tasks — generation, refactoring, algorithms |
 | `llm_edit` | Route code-edit reasoning to a cheap model → returns exact `{file, old_string, new_string}` pairs |
+| **Filesystem** | |
+| `llm_fs_find` | Describe files to find; cheap model generates glob patterns and grep commands |
+| `llm_fs_rename` | Describe a rename/reorganise; cheap model returns `mv`/`git mv` commands (`dry_run=True` by default) |
+| `llm_fs_edit_many` | Bulk edit across multiple files via glob pattern — cheap model returns all `{file, old, new}` pairs |
 | **Media** | |
 | `llm_image` | Image generation — Gemini Imagen, DALL-E, Flux, or SD |
 | `llm_video` | Video generation — Gemini Veo, Runway, Kling, etc. |
@@ -461,9 +509,10 @@ See [CHANGELOG.md](CHANGELOG.md) for what's been shipped. Coming next:
 
 | Version | Theme | Headline features |
 |---|---|---|
-| ~~v1.3~~ | ~~Observability~~ | ✅ Web dashboard, prompt caching, semantic dedup cache, hard daily cap, cross-platform notifications |
-| v1.4 | Routing Intelligence | Task-aware model preferences, reasoning model tier, learned routing |
-| v1.5 | Agentic & Team | Agent-tree budget tracking, multi-user profiles, YAML pipelines |
+| ~~v1.3~~ | ~~Observability~~ | ✅ Web dashboard, prompt caching, semantic dedup cache, hard daily cap |
+| ~~v1.4~~ | ~~Developer Ergonomics~~ | ✅ Real savings in `status`, `update` command, `uninstall --purge`, animated SVG demo |
+| ~~v1.5~~ | ~~Filesystem + Transparency~~ | ✅ `llm_fs_*` tools, free-model savings in status + session summary, sub/free/paid call counts in status bar |
+| v1.6 | Growth & Sharing | `llm-router share` savings card, webhook digests, leaderboard, VS Code status bar |
 | v2.0 | Learning Router | Self-improving classifier trained on your own routing history |
 
 See [ROADMAP.md](ROADMAP.md) for design notes and competitive context.
