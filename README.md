@@ -238,7 +238,7 @@ RUN pip install claude-code-llm-router && llm-router install --headless
 
 - **33 MCP tools** — smart routing, text/code/filesystem, image/video/audio, streaming, orchestration, usage monitoring, web dashboard
 - **Auto-route hook** — intercepts every prompt before your top-tier model sees it; heuristic → Ollama → cheap API classifier chain, hooks self-update on `pip upgrade`; works in interactive, `claude -p`, and Docker/agent mode
-- **Live status bar** — fires before every prompt: `📊 CC 13%s · 24%w │ sub:0 · free:15 · paid:27 │ $0.52 saved (35%)`
+- **Live status bar + persistent statusline** — `📊 CC 13%s · 24%w │ sub:0 · free:15 · paid:27 │ $0.52 saved (35%)` fires before every prompt and stays visible in the bottom status bar throughout the session
 - **Claude subscription mode** — routes entirely within your CC subscription; Codex (free) before paid externals; external only when quota exhausted
 - **Anthropic prompt caching** — auto-injects `cache_control` breakpoints on long system prompts; up to 90% savings on repeated context
 - **Semantic dedup cache** — Ollama embeddings + cosine similarity skip identical-intent calls at zero cost
@@ -295,13 +295,19 @@ Generates a savings card, copies it to clipboard, and opens a one-click tweet:
 
 ### Status Bar
 
-Fires before every prompt — one line showing subscription pressure, call breakdown, and savings:
+Two places show the same stats — before every prompt, and in the persistent bottom statusline:
 
+**Before every prompt** (UserPromptSubmit hook):
 ```
 📊  CC 13%s · 24%w · 43%♪   │   sub:0 · free:305 · paid:1813   │   $1.59 saved (35%)
 ```
 
-`sub` = Claude subscription calls · `free` = Ollama/Codex ($0) · `paid` = external API calls
+**Persistent statusline** (Claude Code bottom bar, always visible):
+```
+…/Projects/my-app  main | claude-sonnet-4-6 | 📊  CC 13%s · 24%w · 43%♪   │   sub:0 · free:305 · paid:1813   │   $1.59 saved (35%)
+```
+
+`%s` = session usage · `%w` = weekly usage · `%♪` = Sonnet monthly · `sub` = CC subscription calls · `free` = Ollama/Codex ($0) · `paid` = external API calls
 
 ### Session Summary
 

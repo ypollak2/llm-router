@@ -1,5 +1,27 @@
 # Changelog
 
+## v1.8.5 — Persistent statusline stats bar (2026-04-06)
+
+### Changed
+
+- **Statusline: persistent `📊` stats bar** — the Claude Code bottom status bar now shows the llm-router savings stats continuously instead of the old `🔀 last-model · HH:MM · Ntok` last-call indicator. The new display persists across the whole session:
+  ```
+  …/Projects/my-app  main | claude-sonnet-4-6 | 📊  CC 13%s · 24%w · 43%♪   │   sub:0 · free:15 · paid:27   │   $0.008 saved (29%)
+  ```
+  `%s` = session · `%w` = weekly · `%♪` = Sonnet monthly · `sub/free/paid` = call counts
+
+- The statusline now calls `llm-router-status-bar.py` directly (the same hook that fires before every prompt) so the data is always fresh.
+
+### How to apply
+
+If you installed llm-router before this release, re-run the statusline installer or update `~/.claude/statusline-command.sh` to call the status-bar hook:
+
+```bash
+llm-router install          # re-installs all hooks and updates statusline
+```
+
+---
+
 ## v1.8.4 — Fix: remove broken /model directives, always route via MCP tools (2026-04-06)
 
 ### Fixed
