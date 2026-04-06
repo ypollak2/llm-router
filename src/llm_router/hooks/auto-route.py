@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm-router-hook-version: 9
+# llm-router-hook-version: 10
 """UserPromptSubmit hook — scoring classifier with Ollama + API fallback chain.
 
 Classification chain (stops at first success):
@@ -780,10 +780,10 @@ def main() -> None:
                     f"session={session_pct:.0%} sonnet={sonnet_pct:.0%} weekly={weekly_pct:.0%}"
                 )
                 directive = (
-                    f"⚡ ROUTE→{tool}(complexity=\"moderate\") "
-                    f"({task_type}/moderate via {method} | CC-MODE {pressure_summary}) | "
-                    f"FORBIDDEN: self-answer · Agent subagents · WebSearch · WebFetch · Bash research | "
-                    f"Call the tool NOW as your only action. Cheap model output IS your response."
+                    f"⚡ MANDATORY ROUTE: {task_type}/moderate → call {tool}(complexity=\"moderate\")"
+                    f" [CC-MODE {pressure_summary} via {method}]"
+                    f" | FORBIDDEN: self-answer · Agent subagents · WebSearch · WebFetch"
+                    f" | Call the tool NOW as your ONLY action."
                 )
                 json.dump({"hookSpecificOutput": {"hookEventName": "UserPromptSubmit",
                                                    "contextForAgent": directive}}, sys.stdout)
@@ -792,9 +792,9 @@ def main() -> None:
                 f"session={session_pct:.0%} sonnet={sonnet_pct:.0%} weekly={weekly_pct:.0%}"
             )
             directive = (
-                f"⚡ CC-MODE ({task_type}/{complexity} via {method} | {pressure_summary}) | "
-                f"Run /model {target} then handle this task directly. "
-                f"Subscription = no API cost. Do NOT call external llm_* tools."
+                f"⚡ MANDATORY ROUTE: {task_type}/{complexity} → /model {target} (subscription)"
+                f" [CC-MODE {pressure_summary} via {method}]"
+                f" | Handle directly. Subscription = no API cost. Do NOT call external llm_* tools."
             )
             json.dump({"hookSpecificOutput": {"hookEventName": "UserPromptSubmit",
                                                "contextForAgent": directive}}, sys.stdout)
@@ -813,12 +813,11 @@ def main() -> None:
     else:
         tool_args = ""
     args_str = f"({tool_args})" if tool_args else ""
-    stale_suffix = " [⚠️ STALE USAGE DATA >30min — run llm_check_usage for accurate routing]" if _is_pressure_stale() else ""
+    stale_suffix = " [⚠️ STALE USAGE DATA >30min — run llm_check_usage]" if _is_pressure_stale() else ""
     directive = (
-        f"⚡ ROUTE→{tool}{args_str} ({task_type}/{complexity} via {method}) | "
-        f"FORBIDDEN: self-answer · Agent subagents · WebSearch · WebFetch · Bash research | "
-        f"Call the tool NOW as your only action. Cheap model output IS your response."
-        f"{stale_suffix}"
+        f"⚡ MANDATORY ROUTE: {task_type}/{complexity} → call {tool}{args_str} [via {method}{stale_suffix}]"
+        f" | FORBIDDEN: self-answer · Agent subagents · WebSearch · WebFetch"
+        f" | Call the tool NOW as your ONLY action. Cheap model output IS your response."
     )
 
     indicator = f"⚡ llm-router → {tool}  [{task_type}/{complexity} · {method}]"

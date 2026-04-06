@@ -244,6 +244,82 @@ def _load_desktop_config(path: Path) -> dict:
     return {}
 
 
+# Path that `claude mcp add --scope user` writes to (Claude Code CLI global config)
+_CLAUDE_JSON_PATH = Path.home() / ".claude.json"
+
+
+def _install_claude_code_cli(mcp_entry: dict) -> list[str]:
+    """Register llm-router in ~/.claude.json so `claude -p` (non-interactive) picks it up.
+
+    Claude Code CLI reads mcpServers from ~/.claude.json (user scope), while
+    ~/.claude/settings.json is used by Claude Desktop. We try two approaches:
+    1. Shell out to `claude mcp add --scope user` — canonical, handles edge cases.
+    2. Direct JSON merge into ~/.claude.json as fallback (no claude CLI required).
+    """
+    import subprocess as _sp
+
+    # Try `claude mcp add --scope user` first
+    claude_bin = shutil.which("claude")
+    if claude_bin:
+        cmd_str = mcp_entry["command"]
+        args = mcp_entry.get("args", [])
+        try:
+            result = _sp.run(
+                [claude_bin, "mcp", "add", "--scope", "user", "llm-router", cmd_str] + args,
+                capture_output=True, text=True, timeout=15,
+            )
+            if result.returncode == 0:
+                return ["Registered llm-router MCP server in ~/.claude.json (via claude mcp add)"]
+        except Exception:
+            pass  # fall through to direct JSON approach
+
+    # Direct JSON merge fallback (works without the claude CLI — Docker/CI/headless)
+    try:
+        data: dict = {}
+        if _CLAUDE_JSON_PATH.exists():
+            try:
+                data = json.loads(_CLAUDE_JSON_PATH.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError):
+                pass
+        servers = data.setdefault("mcpServers", {})
+        if "llm-router" in servers:
+            return ["MCP server already in ~/.claude.json: llm-router"]
+        servers["llm-router"] = mcp_entry
+        _CLAUDE_JSON_PATH.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+        return ["Registered llm-router MCP server in ~/.claude.json (direct merge)"]
+    except OSError as e:
+        return [f"WARNING: could not register MCP in ~/.claude.json: {e}"]
+
+
+def _uninstall_claude_code_cli() -> list[str]:
+    """Remove llm-router from ~/.claude.json."""
+    import subprocess as _sp
+
+    claude_bin = shutil.which("claude")
+    if claude_bin:
+        try:
+            result = _sp.run(
+                [claude_bin, "mcp", "remove", "--scope", "user", "llm-router"],
+                capture_output=True, text=True, timeout=10,
+            )
+            if result.returncode == 0:
+                return ["Removed llm-router from ~/.claude.json (via claude mcp remove)"]
+        except Exception:
+            pass
+
+    try:
+        if not _CLAUDE_JSON_PATH.exists():
+            return []
+        data = json.loads(_CLAUDE_JSON_PATH.read_text(encoding="utf-8"))
+        if "llm-router" not in data.get("mcpServers", {}):
+            return []
+        del data["mcpServers"]["llm-router"]
+        _CLAUDE_JSON_PATH.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+        return ["Removed llm-router from ~/.claude.json"]
+    except OSError:
+        return []
+
+
 def _install_claude_desktop() -> list[str]:
     """Add llm-router to Claude Desktop's claude_desktop_config.json.
 
@@ -350,20 +426,28 @@ def install() -> list[str]:
     _save_settings(settings)
 
     # ── Register MCP server globally ─────────────────────────────────────
-    uv_path = shutil.which("uv") or "uv"
-    project_dir = str(_PACKAGE_DIR.parent.parent)  # repo root (two levels up from src/llm_router)
-    mcp_entry = {
-        "command": uv_path,
-        "args": ["run", "--directory", project_dir, "llm-router"],
-    }
+    # Build the entry using the installed llm-router binary when available
+    # (pip install), falling back to uv run for development installs.
+    llm_router_bin = shutil.which("llm-router")
+    if llm_router_bin:
+        mcp_entry: dict = {"command": llm_router_bin, "args": []}
+    else:
+        uv_path = shutil.which("uv") or "uv"
+        project_dir = str(_PACKAGE_DIR.parent.parent)
+        mcp_entry = {"command": uv_path, "args": ["run", "--directory", project_dir, "llm-router"]}
+
+    # ~/.claude/settings.json — Claude Desktop / interactive Claude Code
     settings2 = _load_settings()
     mcp_servers = settings2.setdefault("mcpServers", {})
     if "llm-router" not in mcp_servers:
         mcp_servers["llm-router"] = mcp_entry
         _save_settings(settings2)
-        actions.append("Registered llm-router MCP server globally in ~/.claude/settings.json")
+        actions.append("Registered llm-router MCP server in ~/.claude/settings.json")
     else:
-        actions.append("MCP server already registered: llm-router")
+        actions.append("MCP server already in ~/.claude/settings.json: llm-router")
+
+    # ~/.claude.json — Claude Code CLI (`claude -p`, non-interactive, agent mode)
+    actions.extend(_install_claude_code_cli(mcp_entry))
 
     # ── Copy routing rules ───────────────────────────────────────────────
     _RULES_DST.mkdir(parents=True, exist_ok=True)
@@ -413,13 +497,14 @@ def uninstall() -> list[str]:
 
     _save_settings(settings)
 
-    # Remove MCP server registration
+    # Remove MCP server registration (settings.json + .claude.json)
     settings2 = _load_settings()
     mcp_servers = settings2.get("mcpServers", {})
     if "llm-router" in mcp_servers:
         del mcp_servers["llm-router"]
         _save_settings(settings2)
         actions.append("Removed llm-router MCP server from ~/.claude/settings.json")
+    actions.extend(_uninstall_claude_code_cli())
 
     # Remove rules
     rules_dst = _RULES_DST / "llm-router.md"

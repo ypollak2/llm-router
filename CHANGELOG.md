@@ -1,5 +1,17 @@
 # Changelog
 
+## v1.8.3 — Critical: fix routing format drift + MCP CLI registration (2026-04-06)
+
+### Fixed
+
+- **Hook format drift (routing silently ignored)** — `auto-route.py` was emitting `⚡ ROUTE→tool(...)` but the bundled rules file told Claude to look for `⚡ MANDATORY ROUTE:`. The mismatch caused Claude to treat every routing directive as informational text and ignore it, defaulting to Opus for all tasks. All tokens, zero routing. Fixed: hook now emits the canonical `⚡ MANDATORY ROUTE: {task_type}/{complexity} → call {tool}({args})` format.
+- **MCP server not visible to `claude -p`** — `llm-router install` was writing `mcpServers` to `~/.claude/settings.json` (Claude Desktop location) but not to `~/.claude.json` (Claude Code CLI location). After a fresh install, running `claude mcp list` showed no llm-router entry, and `claude -p` couldn't call any `llm_*` tools. Fixed: `install()` now also registers in `~/.claude.json` via `claude mcp add --scope user` (with a direct JSON merge fallback for headless/Docker environments without the `claude` CLI).
+- **Rules file updated** — `llm-router.md` bumped to version 4 with accurate format examples showing the `(complexity="...")` argument syntax.
+
+### Hook version
+
+- `auto-route.py`: v9 → v10 (format fix)
+
 ## v1.8.2 — Docker/agent headless mode (2026-04-06)
 
 ### Added

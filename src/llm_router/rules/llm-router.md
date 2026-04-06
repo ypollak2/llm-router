@@ -1,4 +1,4 @@
-<!-- llm-router-rules-version: 3 -->
+<!-- llm-router-rules-version: 4 -->
 # LLM Router — Global Routing Rules
 
 > Installed by llm-router. These rules control which model handles every task.
@@ -23,12 +23,15 @@ the task directly. A "good enough" answer from a cheap model is always preferabl
 3. Done
 
 ```
-⚡ MANDATORY ROUTE: query/simple → call llm_query
-⚡ MANDATORY ROUTE: research/moderate → call llm_research
-⚡ MANDATORY ROUTE: code/complex → call llm_code
-⚡ MANDATORY ROUTE: analyze/moderate → call llm_analyze
-⚡ MANDATORY ROUTE: generate/simple → call llm_generate
+⚡ MANDATORY ROUTE: query/simple → call llm_query(complexity="simple") [via heuristic]
+⚡ MANDATORY ROUTE: research/moderate → call llm_research [via ollama]
+⚡ MANDATORY ROUTE: code/complex → call llm_code(complexity="complex") [via api]
+⚡ MANDATORY ROUTE: analyze/moderate → call llm_analyze(complexity="moderate") [via heuristic]
+⚡ MANDATORY ROUTE: generate/simple → call llm_generate(complexity="simple") [via ollama]
 ```
+
+The format is: `⚡ MANDATORY ROUTE: {task_type}/{complexity} → call {tool}({args}) [via {method}]`
+Extract the tool name and call it with the shown arguments.
 
 ---
 
@@ -68,7 +71,7 @@ file tools. But questions about the codebase still route: "how does X work?" →
 
 ## When No Hint Is Present
 
-If no `⚡ MANDATORY ROUTE:` appears (hook not installed or prompt was skipped):
+If no `⚡ MANDATORY ROUTE:` line appears (hook not installed or prompt was skipped):
 - Research / current events → `llm_research`
 - Writing / content → `llm_generate`
 - Deep analysis → `llm_analyze`
