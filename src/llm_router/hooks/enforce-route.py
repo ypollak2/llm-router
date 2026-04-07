@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm-router-hook-version: 1
+# llm-router-hook-version: 2
 """PreToolUse[*] hook — enforce routing compliance.
 
 When auto-route.py issues a ⚡ MANDATORY ROUTE directive, it writes a
@@ -10,15 +10,15 @@ This hook fires before every tool call and:
   2. If the tool is an llm_* MCP tool → routing honored, clear state, allow.
   3. If the tool is context-gathering (Read, Glob, Grep, LS) → allow.
   4. Otherwise → enforce based on LLM_ROUTER_ENFORCE:
-       soft  (default) — log the violation, allow the call.
-       hard             — block the call with a remediation message.
+       hard (default)   — block the call with a remediation message.
+       soft             — log the violation, allow the call.
        off              — allow all calls regardless.
 
 Compliance log: ~/.llm-router/enforcement.log
 Pending state:  ~/.llm-router/pending_route_{session_id}.json
 
 Environment variables:
-  LLM_ROUTER_ENFORCE  soft | hard | off   (default: soft)
+  LLM_ROUTER_ENFORCE  hard | soft | off   (default: hard)
 """
 
 from __future__ import annotations
@@ -87,7 +87,7 @@ def main() -> None:
     except (json.JSONDecodeError, EOFError):
         sys.exit(0)
 
-    enforce = os.environ.get("LLM_ROUTER_ENFORCE", "soft").lower()
+    enforce = os.environ.get("LLM_ROUTER_ENFORCE", "hard").lower()
     if enforce == "off":
         sys.exit(0)
 

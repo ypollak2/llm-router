@@ -49,6 +49,10 @@ PERPLEXITY_API_KEY=pplx-...
 LLM_ROUTER_CLAUDE_SUBSCRIPTION=true
 ```
 
+Hook enforcement is now **hard by default** for routed prompts that try to jump
+straight to `Bash`/`Edit`/`Write` without an `llm_*` call first. Set
+`LLM_ROUTER_ENFORCE=soft` or `off` if you need to relax that behavior.
+
 ---
 
 ## How It Works
