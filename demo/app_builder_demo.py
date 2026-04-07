@@ -490,8 +490,8 @@ def main() -> None:
         help="Simulated Claude subscription pressure (0.0–1.0). Try 0.90 to see high-pressure routing."
     )
     parser.add_argument(
-        "--report", type=str, default="demo/demo_report.md",
-        help="Path to write the markdown report (default: demo/demo_report.md)"
+        "--report", type=str, default="demo/output/app_builder_report.md",
+        help="Path to write the markdown report (default: demo/output/app_builder_report.md)"
     )
     args = parser.parse_args()
 

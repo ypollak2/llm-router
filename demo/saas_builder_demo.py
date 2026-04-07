@@ -506,7 +506,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="LLM Router SaaS builder demo")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--pressure", type=float, default=0.0)
-    parser.add_argument("--report", type=str, default="demo/saas_demo_report.md")
+    parser.add_argument("--report", type=str, default="demo/output/saas_builder_report.md")
     args = parser.parse_args()
 
     results = asyncio.run(run_demo(dry_run=args.dry_run, pressure=args.pressure))

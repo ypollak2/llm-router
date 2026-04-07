@@ -4,6 +4,10 @@
 
 ### Changed
 
+- **Release metadata now matches the shipped hook changes** (`pyproject.toml`, `uv.lock`)
+
+  The package version is now `2.0.1`, so the existing tag-based publish workflow can cut a real release for the Claude Code enforcement changes already merged on `main`.
+
 - **Routing enforcement now defaults to `hard` in Claude Code hooks** (`src/llm_router/hooks/enforce-route.py`)
 
   `LLM_ROUTER_ENFORCE` now defaults to `hard` instead of `soft`. When `auto-route.py` issues a `⚡ MANDATORY ROUTE` directive and Claude tries to jump straight to `Bash`, `Write`, `Edit`, or `MultiEdit`, the `PreToolUse` hook blocks that work by default instead of merely logging it.
@@ -15,6 +19,10 @@
 - **Installer and README now document hard-by-default behavior** (`src/llm_router/tools/setup.py`, `README.md`)
 
   Post-install messaging now tells users that routed work is blocked by default unless they explicitly set `LLM_ROUTER_ENFORCE=soft` or `off`.
+
+- **Demo outputs now default to an ignored folder and repo noise was removed** (`demo/app_builder_demo.py`, `demo/saas_builder_demo.py`, `.gitignore`)
+
+  The demo scripts now write reports to `demo/output/` by default, and the repo no longer tracks generated demo reports, Finder metadata, or stray root-level screenshots.
 
 ### Added
 

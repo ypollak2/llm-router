@@ -1,4 +1,5 @@
 .env
+.DS_Store
 __pycache__/
 *.pyc
 .ruff_cache/
@@ -6,6 +7,11 @@ __pycache__/
 dist/
 *.egg-info/
 .venv/
+/dashboard.png
+/stitch*.png
+/demo/output/
+/demo/*_demo_report.md
+/demo/*_demo_report.json
 
 # Private strategy docs — never commit
 MONETIZATION.md
