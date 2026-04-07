@@ -212,7 +212,35 @@ Add to your IDE's MCP config:
 
 ### Agno (multi-agent)
 
-Use llm-router's 34 tools as an MCP tool provider in any Agno agent:
+Two integration modes:
+
+**Option 1 — RouteredModel** (v2.0+): use llm-router as a first-class Agno model. Every agent call is automatically routed to the cheapest capable provider.
+
+```bash
+pip install "claude-code-llm-router[agno]"
+```
+
+```python
+from agno.agent import Agent
+from llm_router.integrations.agno import RouteredModel, RouteredTeam
+
+# Single agent — routes each call intelligently
+coder = Agent(
+    model=RouteredModel(task_type="code", profile="balanced"),
+    instructions="You are a coding assistant.",
+)
+coder.print_response("Write a Python quicksort.")
+
+# Multi-agent team with shared $20/month budget cap
+# Automatically downshifts to 'budget' profile at 80% spend
+team = RouteredTeam(
+    members=[coder, researcher],
+    monthly_budget_usd=20.0,
+    downshift_at=0.80,
+)
+```
+
+**Option 2 — MCP tools**: use llm-router's 34 tools in any Agno agent:
 
 ```python
 from agno.agent import Agent
@@ -311,7 +339,8 @@ llm-router share   # copies savings card to clipboard + opens tweet
 | Version | Theme | Status |
 |---------|-------|--------|
 | v1.3–v1.9 | Dashboard, filesystem tools, enforcement, agent selection | ✅ Done |
-| **v2.0** | **Agno `RouteredModel` + `RouteredTeam`; routing dry-run** | 🔜 Next |
+| **v2.0** | **Agno `RouteredModel` + `RouteredTeam` with shared budget enforcement** | ✅ Done |
+| **v2.1** | **Routing dry-run mode; streaming support in RouteredModel** | 🔜 Next |
 
 ---
 

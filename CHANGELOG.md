@@ -1,5 +1,48 @@
 # Changelog
 
+## v2.0.0 — Agno integration: RouteredModel + RouteredTeam (2026-04-07)
+
+### Added
+
+- **`RouteredModel` — drop-in Agno model with smart routing** (`src/llm_router/integrations/agno.py`)
+
+  Use llm-router as a first-class Agno model. Every agent call is classified by complexity and routed to the cheapest capable provider (Ollama → Codex → paid APIs).
+
+  ```python
+  from llm_router.integrations.agno import RouteredModel
+  from agno.agent import Agent
+
+  agent = Agent(
+      model=RouteredModel(task_type="code", profile="balanced"),
+      instructions="You are a coding assistant.",
+  )
+  agent.print_response("Write a Python quicksort.")
+  ```
+
+  Parameters: `task_type` (query/research/generate/analyze/code/image/video/audio), `profile` (budget/balanced/premium), `model_override` (pin a specific model). Accepts both string values and enum instances.
+
+- **`RouteredTeam` — multi-agent team with shared budget enforcement** (`src/llm_router/integrations/agno.py`)
+
+  Agno `Team` subclass that automatically downshifts all `RouteredModel` members to the `budget` routing profile when monthly spend reaches a configurable threshold.
+
+  ```python
+  from llm_router.integrations.agno import RouteredModel, RouteredTeam
+
+  team = RouteredTeam(
+      members=[coder_agent, researcher_agent],
+      monthly_budget_usd=20.0,
+      downshift_at=0.80,  # downshift when 80% of budget spent
+  )
+  ```
+
+  Budget check runs before each `run()` / `arun()` call. Non-fatal: if the cost database is unavailable, the team continues without downshifting.
+
+- **`agno` optional dependency group** — install with `pip install "claude-code-llm-router[agno]"`.
+
+- **19 new tests** (`tests/test_agno_integration.py`) covering model construction, invoke/ainvoke/stream, multi-turn message handling, token metadata, budget pressure downshifting, and team integration.
+
+---
+
 ## v1.9.4 — Fix: content filter silent fallback + model_override subscription bypass (2026-04-07)
 
 ### Fixed
