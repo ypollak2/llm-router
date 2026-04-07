@@ -1,5 +1,17 @@
 # Changelog
 
+## v1.9.2 — Fix: block ANTHROPIC_API_KEY export in subscription mode (2026-04-07)
+
+### Fixed
+
+- **Anthropic API still called in subscription mode** — `apply_keys_to_env()` was unconditionally exporting `ANTHROPIC_API_KEY` into `os.environ` at MCP server startup, even when `LLM_ROUTER_CLAUDE_SUBSCRIPTION=true`. LiteLLM reads keys directly from the environment at call time, so any code path (routing chain, classifier, tool fallback) that encountered an `anthropic/*` model would successfully make a direct API call — billing separately from the Claude Code subscription.
+
+  The `available_providers` filter (which correctly excludes `anthropic` in subscription mode) guarded the main routing chains, but was insufficient as a sole defense because LiteLLM's environment-level key meant the call could still succeed if a model slipped through any bypass.
+
+  **Fix**: `apply_keys_to_env()` now skips exporting `ANTHROPIC_API_KEY` when `llm_router_claude_subscription=True`. This is a hard guarantee: LiteLLM cannot call Anthropic at all in subscription mode, regardless of which model is requested.
+
+---
+
 ## v1.9.1 — Fix: llm_select_agent codex detection (2026-04-06)
 
 ### Fixed

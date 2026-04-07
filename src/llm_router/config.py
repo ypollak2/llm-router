@@ -262,13 +262,25 @@ class RouterConfig(BaseSettings):
         gap by copying keys from our Pydantic config into the environment
         using the LiteLLM-expected variable names (from ``_PROVIDER_MAP``).
 
+        In subscription mode (``llm_router_claude_subscription=True``),
+        ``ANTHROPIC_API_KEY`` is intentionally NOT exported. This ensures
+        LiteLLM cannot make Anthropic API calls even if an ``anthropic/*``
+        model slips through any code path — a hard guarantee on top of the
+        ``available_providers`` filter.
+
         Called automatically by ``get_config()`` on first load.
         """
         import os
-        for field_name, (_, env_var) in self._PROVIDER_MAP.items():
+        for field_name, (provider_name, env_var) in self._PROVIDER_MAP.items():
             value = getattr(self, field_name, "")
-            if value:
-                os.environ[env_var] = value
+            if not value:
+                continue
+            # Never export the Anthropic key in subscription mode — prevents
+            # LiteLLM from making direct Anthropic API calls that would incur
+            # separate billing on top of the Claude Code subscription.
+            if self.llm_router_claude_subscription and provider_name == "anthropic":
+                continue
+            os.environ[env_var] = value
         # LiteLLM reads Ollama's base URL from OLLAMA_API_BASE
         if self.ollama_base_url:
             os.environ.setdefault("OLLAMA_API_BASE", self.ollama_base_url)
