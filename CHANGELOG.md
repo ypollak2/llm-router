@@ -1,5 +1,13 @@
 # Changelog
 
+## v2.0.2 — Fix release CI for Agno tests (2026-04-07)
+
+### Fixed
+
+- **Release and CI test jobs now install the `agno` extra** (`.github/workflows/ci.yml`, `.github/workflows/publish.yml`)
+
+  The workflows were running the full test suite, including `tests/test_agno_integration.py`, but only installing `--extra dev`. That made both CI and tag-based publish fail before release because `agno` was missing. Both workflows now install `uv sync --extra dev --extra agno` before running tests.
+
 ## v2.0.1 — Harder Claude Code routing enforcement (2026-04-07)
 
 ### Changed
