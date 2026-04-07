@@ -1,5 +1,30 @@
 # Changelog
 
+## v2.0.1 — Harder Claude Code routing enforcement (2026-04-07)
+
+### Changed
+
+- **Routing enforcement now defaults to `hard` in Claude Code hooks** (`src/llm_router/hooks/enforce-route.py`)
+
+  `LLM_ROUTER_ENFORCE` now defaults to `hard` instead of `soft`. When `auto-route.py` issues a `⚡ MANDATORY ROUTE` directive and Claude tries to jump straight to `Bash`, `Write`, `Edit`, or `MultiEdit`, the `PreToolUse` hook blocks that work by default instead of merely logging it.
+
+- **Missed routed turns are now surfaced on the next prompt** (`src/llm_router/hooks/auto-route.py`)
+
+  Claude Code still has no hook that fires immediately before a plain text response, so same-turn self-answering cannot be blocked directly. To make those misses visible, `auto-route.py` now detects a leftover `pending_route_{session_id}.json` from the prior turn, logs it as `NO_ROUTE` in `~/.llm-router/enforcement.log`, clears the stale state, and injects a warning into the next `⚡ MANDATORY ROUTE` context.
+
+- **Installer and README now document hard-by-default behavior** (`src/llm_router/tools/setup.py`, `README.md`)
+
+  Post-install messaging now tells users that routed work is blocked by default unless they explicitly set `LLM_ROUTER_ENFORCE=soft` or `off`.
+
+### Added
+
+- **Hook regression tests for enforcement behavior** (`tests/test_route_enforcement_hooks.py`)
+
+  Covers:
+  - hard-default blocking of work tools
+  - soft-mode override still logging violations
+  - carry-over logging for unrouted previous turns
+
 ## v2.0.0 — Agno integration: RouteredModel + RouteredTeam (2026-04-07)
 
 ### Added

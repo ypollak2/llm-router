@@ -567,8 +567,10 @@ def _setup_install_hooks() -> str:
         "**Restart Claude Code to activate.**",
         "",
         "Every prompt will now be evaluated by the auto-router.",
-        "The router classifies tasks and injects `[ROUTE:]` hints that",
+        "Work that skips a required route is blocked by default (`LLM_ROUTER_ENFORCE=hard`).",
+        "The router classifies tasks and injects `⚡ MANDATORY ROUTE` directives that",
         "direct Claude to use the optimal `llm_*` tool.",
+        "Set `LLM_ROUTER_ENFORCE=soft` or `off` to relax enforcement.",
         "",
         "To remove: `llm_setup(action='uninstall_hooks')`",
     ])

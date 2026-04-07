@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm-router-hook-version: 12
+# llm-router-hook-version: 13
 """UserPromptSubmit hook — scoring classifier with Ollama + API fallback chain.
 
 Classification chain (stops at first success):
@@ -716,6 +716,68 @@ TOOL_MAP = {
     "auto": "llm_route",
 }
 
+_ROUTER_DIR = Path.home() / ".llm-router"
+_ENFORCEMENT_LOG_PATH = _ROUTER_DIR / "enforcement.log"
+_PENDING_ROUTE_TTL_SEC = 300
+
+
+def _pending_state_path(session_id: str) -> Path:
+    return _ROUTER_DIR / f"pending_route_{session_id}.json"
+
+
+def _read_pending_state(session_id: str) -> dict | None:
+    path = _pending_state_path(session_id)
+    try:
+        data = json.loads(path.read_text())
+        if time.time() - float(data.get("issued_at", 0)) > _PENDING_ROUTE_TTL_SEC:
+            path.unlink(missing_ok=True)
+            return None
+        return data
+    except (OSError, json.JSONDecodeError, TypeError, ValueError):
+        return None
+
+
+def _clear_pending_state(session_id: str) -> None:
+    _pending_state_path(session_id).unlink(missing_ok=True)
+
+
+def _log_unrouted_turn(session_id: str, pending: dict) -> None:
+    expected_tool = pending.get("expected_tool", "llm_route")
+    task_type = pending.get("task_type", "?")
+    complexity = pending.get("complexity", "?")
+    try:
+        _ROUTER_DIR.mkdir(parents=True, exist_ok=True)
+        ts = time.strftime("%Y-%m-%d %H:%M:%S")
+        with _ENFORCEMENT_LOG_PATH.open("a", encoding="utf-8") as f:
+            f.write(
+                f"[{ts}] NO_ROUTE session={session_id[:12]} "
+                f"expected={expected_tool} task={task_type}/{complexity}\n"
+            )
+    except OSError:
+        pass
+
+
+def _consume_unresolved_pending(session_id: str) -> dict | None:
+    pending = _read_pending_state(session_id)
+    if pending is None:
+        return None
+    _log_unrouted_turn(session_id, pending)
+    _clear_pending_state(session_id)
+    return pending
+
+
+def _prior_violation_notice(pending: dict | None) -> str:
+    if pending is None:
+        return ""
+    expected_tool = pending.get("expected_tool", "llm_route")
+    task_type = pending.get("task_type", "?")
+    complexity = pending.get("complexity", "?")
+    return (
+        "⚠ PREVIOUS TURN VIOLATED ROUTING: "
+        f"expected {expected_tool} for {task_type}/{complexity}, but no llm_* tool was called. "
+        "This was logged.\n"
+    )
+
 
 # ── Entry Point ──────────────────────────────────────────────────────────────
 
@@ -729,6 +791,9 @@ def main() -> None:
     prompt = hook_input.get("prompt", "")
     if not prompt:
         sys.exit(0)
+
+    session_id = hook_input.get("session_id", "")
+    previous_unrouted = _consume_unresolved_pending(session_id) if session_id else None
 
     result = classify_prompt(prompt)
     if result is None:
@@ -788,7 +853,7 @@ def main() -> None:
                         f" Do NOT call external llm_* tools."
                     )
                 json.dump({"hookSpecificOutput": {"hookEventName": "UserPromptSubmit",
-                                                   "contextForAgent": directive}}, sys.stdout)
+                                                   "contextForAgent": _prior_violation_notice(previous_unrouted) + directive}}, sys.stdout)
                 sys.exit(0)
             # Pressure exceeded → fall through to external routing
 
@@ -809,13 +874,12 @@ def main() -> None:
         f" | FORBIDDEN: self-answer · Agent subagents · WebSearch · WebFetch"
         f" | Call the tool NOW as your ONLY action. Cheap model output IS your response."
     )
+    directive = _prior_violation_notice(previous_unrouted) + directive
 
     # ── Write enforcement state for enforce-route.py (PreToolUse hook) ──────────
-    session_id = hook_input.get("session_id", "")
     if session_id:
-        _router_dir = Path.home() / ".llm-router"
-        _router_dir.mkdir(parents=True, exist_ok=True)
-        _state_path = _router_dir / f"pending_route_{session_id}.json"
+        _ROUTER_DIR.mkdir(parents=True, exist_ok=True)
+        _state_path = _pending_state_path(session_id)
         try:
             _state_path.write_text(json.dumps({
                 "expected_tool": tool,
@@ -828,6 +892,11 @@ def main() -> None:
             pass
 
     indicator = f"⚡ llm-router → {tool}  [{task_type}/{complexity} · {method}]"
+    if previous_unrouted is not None:
+        indicator = (
+            f"⚠ prior unrouted turn ({previous_unrouted.get('expected_tool', 'llm_route')}) | "
+            f"{indicator}"
+        )
     output = {
         "hookSpecificOutput": {
             "hookEventName": "UserPromptSubmit",
