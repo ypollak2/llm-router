@@ -296,11 +296,22 @@ def get_config() -> RouterConfig:
     and exports API keys into ``os.environ`` for LiteLLM. Subsequent calls
     return the cached instance.
 
+    In subscription mode the Anthropic key is actively removed from
+    ``os.environ`` on every call — not just skipped during init — so that
+    a pre-existing ``ANTHROPIC_API_KEY`` (e.g. set before the server started)
+    cannot slip through to LiteLLM.
+
     Returns:
         The global ``RouterConfig`` singleton.
     """
+    import os as _os
     global _config
     if _config is None:
         _config = RouterConfig()
         _config.apply_keys_to_env()
+    # Active purge: remove ANTHROPIC_API_KEY from the live environment every
+    # time get_config() is called in subscription mode. This handles the case
+    # where the key was already present before the server started.
+    if _config.llm_router_claude_subscription:
+        _os.environ.pop("ANTHROPIC_API_KEY", None)
     return _config

@@ -1,5 +1,15 @@
 # Changelog
 
+## v1.9.3 — Fix: actively purge ANTHROPIC_API_KEY from live env in subscription mode (2026-04-07)
+
+### Fixed
+
+- **v1.9.2 fix was incomplete for already-running servers** — `apply_keys_to_env()` now skips exporting `ANTHROPIC_API_KEY` in subscription mode, but the currently running MCP server had already exported it at startup. Since the MCP server is a long-lived process, any `ANTHROPIC_API_KEY` already in `os.environ` before my fix persisted and LiteLLM continued using it.
+
+  **Fix**: `get_config()` now actively calls `os.environ.pop("ANTHROPIC_API_KEY", None)` on every invocation when `llm_router_claude_subscription=True`. This purges the key from the live environment regardless of how or when it got there — covering pre-existing keys, keys injected by the shell, and keys exported before the server started.
+
+---
+
 ## v1.9.2 — Fix: block ANTHROPIC_API_KEY export in subscription mode (2026-04-07)
 
 ### Fixed
