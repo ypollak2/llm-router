@@ -58,7 +58,7 @@ _load_dotenv()
 
 # ── Config ───────────────────────────────────────────────────────────────────
 
-OLLAMA_MODEL = os.environ.get("LLM_ROUTER_OLLAMA_MODEL", "qwen3.5:latest")
+OLLAMA_MODEL = os.environ.get("LLM_ROUTER_OLLAMA_MODEL", "gemma4:12b")
 OLLAMA_URL = os.environ.get("LLM_ROUTER_OLLAMA_URL", "http://localhost:11434")
 OLLAMA_TIMEOUT = int(os.environ.get("LLM_ROUTER_OLLAMA_TIMEOUT", "5"))
 CONFIDENCE_THRESHOLD = int(os.environ.get("LLM_ROUTER_CONFIDENCE_THRESHOLD", "4"))
@@ -522,8 +522,9 @@ def _extract_category(raw: str) -> str | None:
 
 
 OLLAMA_MODELS = [
-    OLLAMA_MODEL,       # Primary: qwen3.5 (or env override)
-    "qwen2.5:1.5b",    # Fallback: smaller, no thinking mode
+    OLLAMA_MODEL,       # Primary: gemma4:12b (or env override via LLM_ROUTER_OLLAMA_MODEL)
+    "qwen3.5:latest",  # Fallback: reasoning-tuned, thinking mode
+    "qwen2.5:1.5b",    # Fallback: lightweight, no thinking mode
 ]
 
 

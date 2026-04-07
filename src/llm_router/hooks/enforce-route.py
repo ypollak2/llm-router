@@ -105,8 +105,11 @@ def main() -> None:
     task_type = pending.get("task_type", "?")
     complexity = pending.get("complexity", "?")
 
-    # Routing honored — LLM called an llm_* tool
-    if tool_name.startswith("llm_"):
+    # Routing honored — LLM called an llm_* tool.
+    # Tool names may be short ("llm_query") or fully-qualified MCP names
+    # ("mcp__llm-router__llm_query") — accept both forms.
+    bare_name = tool_name.split("__")[-1] if "__" in tool_name else tool_name
+    if bare_name.startswith("llm_"):
         _clear_pending(session_id)
         sys.exit(0)
 

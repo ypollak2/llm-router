@@ -157,7 +157,7 @@ Push to `main` after every logical change that passes tests. Rules:
 1. **Always run tests before pushing** — `uv run pytest tests/ -q --ignore=tests/test_integration.py`
 2. **Deploy hooks after any hook change** — `install -m 755 src/llm_router/hooks/<hook>.py ~/.claude/hooks/<hook>.py`
 3. **Bump server tool count in test_server.py** when adding new MCP tools
-4. **Version bump in pyproject.toml** for user-facing changes (new tools, routing strategy changes)
+4. **Version bump in BOTH pyproject.toml AND .claude-plugin/plugin.json** — these must always match. Claude Code reads `plugin.json` for the displayed version; `pyproject.toml` drives PyPI. A mismatch causes Claude Code to show a stale version forever.
 5. **Update CHANGELOG.md** for any version bump
 6. **Push immediately after commit** — never let local main diverge from remote
 7. **One concern per commit** — routing changes, tool additions, and hook fixes each get their own commit

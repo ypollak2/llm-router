@@ -11,7 +11,7 @@
 #   1 — Ollama failed to start or model unavailable
 
 OLLAMA_URL="${LLM_ROUTER_OLLAMA_URL:-http://localhost:11434}"
-OLLAMA_MODEL="${LLM_ROUTER_OLLAMA_MODEL:-qwen3.5:latest}"
+OLLAMA_MODEL="${LLM_ROUTER_OLLAMA_MODEL:-gemma4:12b}"
 MAX_WAIT=10  # seconds to wait for Ollama to become ready after starting
 
 # ── Helpers ──────────────────────────────────────────────────────────────────

@@ -16,6 +16,20 @@
 
   Post-install messaging now tells users that routed work is blocked by default unless they explicitly set `LLM_ROUTER_ENFORCE=soft` or `off`.
 
+### Fixed
+
+- **Enforcement hook deadlock with MCP fully-qualified tool names** (`src/llm_router/hooks/enforce-route.py`)
+
+  The `startswith("llm_")` guard failed to recognise fully-qualified MCP tool names like `mcp__llm-router__llm_generate`, causing the hook to block the very tool it demanded Claude call. The check now strips the `mcp__<server>__` prefix before matching, accepting both short and namespaced forms.
+
+- **`plugin.json` version in sync with `pyproject.toml`** (`.claude-plugin/plugin.json`)
+
+  Claude Code reads `plugin.json` for the displayed version. The file was stuck at `0.2.0` while `pyproject.toml` had moved to `2.0.0`. Both files are now kept in sync on every release.
+
+- **Default Ollama classifier model updated to `gemma4:12b`** (`src/llm_router/hooks/auto-route.py`, `src/llm_router/hooks/start-ollama.sh`)
+
+  `qwen3.5:latest` is now the first fallback; `qwen2.5:1.5b` remains as the lightweight last-resort.
+
 ### Added
 
 - **Hook regression tests for enforcement behavior** (`tests/test_route_enforcement_hooks.py`)

@@ -1,6 +1,6 @@
 # LLM Router Demo Report
 
-**Date**: 2026-03-31 00:18  |  **Mode**: LIVE  |  **Pressure**: 0% (default)
+**Date**: 2026-04-07 10:14  |  **Mode**: DRY RUN  |  **Pressure**: 0% (default)
 
 ## Summary
 
@@ -8,10 +8,10 @@
 |--------|-------|
 | Tasks run | 6 |
 | Succeeded | 6/6 |
-| Routing correct | 4/6 |
-| Total cost | $0.034414 |
-| Total tokens | 5,060 |
-| Avg latency | 58568ms |
+| Routing correct | 6/6 |
+| Total cost | $0.001200 |
+| Total tokens | 1,200 |
+| Avg latency | 500ms |
 
 ## Task Results
 
@@ -20,112 +20,84 @@
 - **Tier**: BUDGET  |  **Type**: query  |  **Profile**: budget
 - **Expected model**: haiku / gemini-flash
 - **Status**: ✅ Succeeded
-- **Model used**: `gemini/gemini-2.5-flash`
-- **Tokens**: 31 in / 864 out
-- **Cost**: $0.002169  |  **Latency**: 5189ms
-- **Routing**: ✅ ✅ Cheap model used for BUDGET tier (gemini/gemini-2.5-flash)
-
-<details><summary>Response preview</summary>
-
-> **Difference:** REST APIs fetch predefined resources from multiple URLs, whereas GraphQL APIs let the client precisely specify and retrieve only the d...
-
-</details>
+- **Model used**: `anthropic/claude-haiku-4-5-20251001`
+- **Tokens**: 120 in / 80 out
+- **Cost**: $0.000200  |  **Latency**: 500ms
+- **Routing**: ✅ ✅ Cheap model used for BUDGET tier (anthropic/claude-haiku-4-5-20251001)
 
 ### T2: Simple README draft
 
 - **Tier**: BUDGET  |  **Type**: generate  |  **Profile**: budget
 - **Expected model**: haiku / gemini-flash
 - **Status**: ✅ Succeeded
-- **Model used**: `gemini/gemini-2.5-flash`
-- **Tokens**: 152 in / 375 out
-- **Cost**: $0.000983  |  **Latency**: 2126ms
-- **Routing**: ✅ ✅ Cheap model used for BUDGET tier (gemini/gemini-2.5-flash)
-
-<details><summary>Response preview</summary>
-
-> Hey there! Welcome to this little todo app built with the awesome **FastAPI** framework, all powered by **Python**. It's designed to be super straight...
-
-</details>
+- **Model used**: `anthropic/claude-haiku-4-5-20251001`
+- **Tokens**: 120 in / 80 out
+- **Cost**: $0.000200  |  **Latency**: 500ms
+- **Routing**: ✅ ✅ Cheap model used for BUDGET tier (anthropic/claude-haiku-4-5-20251001)
 
 ### T3: CRUD API implementation
 
 - **Tier**: BALANCED  |  **Type**: code  |  **Profile**: balanced
 - **Expected model**: claude-sonnet / gpt-4o
 - **Status**: ✅ Succeeded
-- **Model used**: `codex/gpt-5.4`
-- **Tokens**: 0 in / 0 out
-- **Cost**: $0.000000  |  **Latency**: 78432ms
-- **Routing**: ✅ ✅ Mid-tier model for BALANCED (codex/gpt-5.4)
-
-<details><summary>Response preview</summary>
-
-> from collections.abc import AsyncIterator from contextlib import asynccontextmanager from typing import Annotated import os  import aiosqlite from fas...
-
-</details>
+- **Model used**: `anthropic/claude-sonnet-4-6`
+- **Tokens**: 120 in / 80 out
+- **Cost**: $0.000200  |  **Latency**: 500ms
+- **Routing**: ✅ ✅ Mid-tier model for BALANCED (anthropic/claude-sonnet-4-6)
 
 ### T4: Code review of the implementation
 
 - **Tier**: BALANCED  |  **Type**: analyze  |  **Profile**: balanced
 - **Expected model**: claude-sonnet / gpt-4o
 - **Status**: ✅ Succeeded
-- **Model used**: `codex/gpt-5.4`
-- **Tokens**: 0 in / 0 out
-- **Cost**: $0.000000  |  **Latency**: 53069ms
-- **Routing**: ✅ ✅ Mid-tier model for BALANCED (codex/gpt-5.4)
-
-<details><summary>Response preview</summary>
-
-> Findings for `delete_todo`, ordered by severity:  - High: No authentication/authorization. Any caller who can hit this route can delete a todo. - High...
-
-</details>
+- **Model used**: `anthropic/claude-sonnet-4-6`
+- **Tokens**: 120 in / 80 out
+- **Cost**: $0.000200  |  **Latency**: 500ms
+- **Routing**: ✅ ✅ Mid-tier model for BALANCED (anthropic/claude-sonnet-4-6)
 
 ### T5: Research: latest FastAPI best practices
 
 - **Tier**: BALANCED  |  **Type**: research  |  **Profile**: balanced
 - **Expected model**: perplexity/sonar (web-grounded, always first for RESEARCH)
 - **Status**: ✅ Succeeded
-- **Model used**: `gemini/gemini-2.5-pro`
-- **Tokens**: 585 in / 3053 out
-- **Cost**: $0.031261  |  **Latency**: 35378ms
-- **Routing**: ⚠️ ⚠️  Expected Perplexity for RESEARCH, got gemini/gemini-2.5-pro
-
-<details><summary>Response preview</summary>
-
-> Excellent question. Here are 3 specific, forward-looking best practices for building robust FastAPI applications in 2025.  ### 1. Database: Use Postgr...
-
-</details>
+- **Model used**: `perplexity/sonar-pro`
+- **Tokens**: 120 in / 80 out
+- **Cost**: $0.000200  |  **Latency**: 500ms
+- **Routing**: ✅ ✅ Perplexity used for RESEARCH (correct)
 
 ### T6: Architecture decision: SQLite vs PostgreSQL
 
 - **Tier**: PREMIUM  |  **Type**: analyze  |  **Profile**: premium
 - **Expected model**: claude-opus / claude-sonnet (premium analysis)
 - **Status**: ✅ Succeeded
-- **Model used**: `codex/gpt-5.4`
-- **Tokens**: 0 in / 0 out
-- **Cost**: $0.000000  |  **Latency**: 177212ms
-- **Routing**: ⚠️ ⚠️  Expected premium model, got codex/gpt-5.4
-
-<details><summary>Response preview</summary>
-
-> Assumption, and clearly an inference: a 10k-user todo app usually has a small dataset and modest write volume. For this kind of product, the deciding ...
-
-</details>
+- **Model used**: `anthropic/claude-sonnet-4-6`
+- **Tokens**: 120 in / 80 out
+- **Cost**: $0.000200  |  **Latency**: 500ms
+- **Routing**: ✅ ✅ Premium model for PREMIUM tier (anthropic/claude-sonnet-4-6)
 
 ## What Went Right
 
-- **T1 (BUDGET)**: ✅ Cheap model used for BUDGET tier (gemini/gemini-2.5-flash)
-- **T2 (BUDGET)**: ✅ Cheap model used for BUDGET tier (gemini/gemini-2.5-flash)
-- **T3 (BALANCED)**: ✅ Mid-tier model for BALANCED (codex/gpt-5.4)
-- **T4 (BALANCED)**: ✅ Mid-tier model for BALANCED (codex/gpt-5.4)
+- **T1 (BUDGET)**: ✅ Cheap model used for BUDGET tier (anthropic/claude-haiku-4-5-20251001)
+- **T2 (BUDGET)**: ✅ Cheap model used for BUDGET tier (anthropic/claude-haiku-4-5-20251001)
+- **T3 (BALANCED)**: ✅ Mid-tier model for BALANCED (anthropic/claude-sonnet-4-6)
+- **T4 (BALANCED)**: ✅ Mid-tier model for BALANCED (anthropic/claude-sonnet-4-6)
+- **T5 (BALANCED)**: ✅ Perplexity used for RESEARCH (correct)
+- **T6 (PREMIUM)**: ✅ Premium model for PREMIUM tier (anthropic/claude-sonnet-4-6)
 
 ## What Went Wrong / Needs Fixing
 
-- **T5 (BALANCED)**: ⚠️  Expected Perplexity for RESEARCH, got gemini/gemini-2.5-pro
-- **T6 (PREMIUM)**: ⚠️  Expected premium model, got codex/gpt-5.4
+- All tasks routed correctly! 🎉
 
 ## Routing Chain Inspection (dry-run only)
 
 Chains shown are what the router *would* use at current pressure:
+
+- **T1 (BUDGET/query)**: `anthropic/claude-haiku-4-5-20251001 → gemini/gemini-2.5-flash → groq/llama-3.3-70b-versatile → deepseek/deepseek-chat → openai/gpt-4o-mini`
+- **T2 (BUDGET/generate)**: `anthropic/claude-haiku-4-5-20251001 → gemini/gemini-2.5-flash → deepseek/deepseek-chat → mistral/mistral-small-latest → openai/gpt-4o-mini`
+- **T3 (BALANCED/code)**: `anthropic/claude-sonnet-4-6 → anthropic/claude-haiku-4-5-20251001 → deepseek/deepseek-chat → openai/gpt-4o → gemini/gemini-2.5-pro`
+- **T4 (BALANCED/analyze)**: `anthropic/claude-sonnet-4-6 → anthropic/claude-haiku-4-5-20251001 → deepseek/deepseek-reasoner → openai/gpt-4o → gemini/gemini-2.5-pro`
+- **T5 (BALANCED/research)**: `perplexity/sonar-pro → perplexity/sonar → anthropic/claude-sonnet-4-6 → gemini/gemini-2.5-pro → openai/gpt-4o`
+- **T6 (PREMIUM/analyze)**: `anthropic/claude-sonnet-4-6 → anthropic/claude-opus-4-6 → deepseek/deepseek-reasoner → gemini/gemini-2.5-pro → openai/o3`
 
 ## Next Steps
 
