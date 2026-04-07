@@ -88,13 +88,22 @@ class RouterConfig(BaseSettings):
     # (Codex, Ollama, Gemini, GPT-4o, Perplexity, etc.) to save your Claude quota.
     llm_router_claude_subscription: bool = False
 
+    # ── claw-code mode ──
+    # Set to True when running inside claw-code (open-source Claude alternative).
+    # In claw-code every API call is paid — there is no subscription quota.
+    # Effect: Ollama is injected at the front of ALL routing chains (not just
+    # BUDGET or when Claude quota is high) so free local inference is always
+    # tried first before spending money on cloud APIs.
+    # Set automatically by `llm-router install` when ~/.claw-code/ is detected.
+    llm_router_claw_code: bool = False
+
     # ── Ollama (local inference — no API key needed) ──
     # Set ollama_base_url to enable Ollama as a task answerer (e.g. http://localhost:11434).
-    # Ollama models are injected in two scenarios:
-    #   1. BUDGET profile (simple tasks) — always prepended to the budget chain
-    #      so they run first for free before falling back to cloud providers.
-    #   2. ANY profile when Claude quota pressure >= 85% — prepended to spare
-    #      subscription tokens regardless of complexity tier.
+    # Ollama models are injected in three scenarios:
+    #   1. BUDGET profile (simple tasks) — always prepended to the budget chain.
+    #   2. ANY profile when Claude quota pressure >= 85% — spares subscription tokens.
+    #   3. claw-code mode (llm_router_claw_code=true) — always prepended to every
+    #      chain regardless of profile, because every non-local call costs money.
     # Note: OLLAMA_URL (used by hooks) is separate — it controls which model
     # classifies prompts locally. OLLAMA_BASE_URL here controls which models
     # ANSWER tasks. Both can be set for full local-first operation.

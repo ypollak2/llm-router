@@ -568,6 +568,24 @@ def install_claw_code() -> list[str]:
     settings_path.parent.mkdir(parents=True, exist_ok=True)
     settings_path.write_text(json.dumps(settings, indent=2) + "\n")
 
+    # ── Set LLM_ROUTER_CLAW_CODE=true in ~/.claw-code/.env ───────────────
+    # Ensures Ollama is always tried first for every chain (not just BUDGET),
+    # because in claw-code every cloud API call costs money.
+    env_path = cc_dir / ".env"
+    claw_flag = "LLM_ROUTER_CLAW_CODE=true"
+    try:
+        existing = env_path.read_text(encoding="utf-8") if env_path.exists() else ""
+        if "LLM_ROUTER_CLAW_CODE" not in existing:
+            with env_path.open("a", encoding="utf-8") as f:
+                if existing and not existing.endswith("\n"):
+                    f.write("\n")
+                f.write(f"{claw_flag}\n")
+            actions.append(f"Set {claw_flag} in {env_path}")
+        else:
+            actions.append(f"LLM_ROUTER_CLAW_CODE already set in {env_path}")
+    except OSError as e:
+        actions.append(f"WARN could not write {env_path}: {e}")
+
     # ── Register MCP server in claw-code settings ────────────────────────
     llm_router_bin = shutil.which("llm-router") or "llm-router"
     mcp_entry = {"command": llm_router_bin, "args": []}

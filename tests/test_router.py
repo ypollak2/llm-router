@@ -138,3 +138,65 @@ async def test_subscription_mode_blocks_anthropic_override(mock_env, mock_acompl
     # Should have used a non-Anthropic model
     assert not resp.model.startswith("anthropic/")
     _config._config = None  # reset for other tests
+
+
+@pytest.mark.asyncio
+async def test_claw_code_mode_injects_ollama_for_balanced_profile(
+    mock_env, mock_acompletion, monkeypatch
+):
+    """In claw-code mode, Ollama should be injected for BALANCED profile (not just BUDGET)."""
+    monkeypatch.setenv("LLM_ROUTER_CLAW_CODE", "true")
+    monkeypatch.setenv("OLLAMA_BASE_URL", "http://localhost:11434")
+    monkeypatch.setenv("OLLAMA_BUDGET_MODELS", "llama3.2")
+    import llm_router.config as _config
+    _config._config = None
+
+    await route_and_call(TaskType.QUERY, "Hello", profile=RoutingProfile.BALANCED)
+
+    call_kwargs = mock_acompletion.call_args.kwargs
+    assert "ollama" in call_kwargs["model"], (
+        f"Expected Ollama to be first in BALANCED chain in claw-code mode, got {call_kwargs['model']}"
+    )
+    _config._config = None
+
+
+@pytest.mark.asyncio
+async def test_claw_code_mode_injects_ollama_for_premium_profile(
+    mock_env, mock_acompletion, monkeypatch
+):
+    """In claw-code mode, Ollama should also be injected for PREMIUM profile."""
+    monkeypatch.setenv("LLM_ROUTER_CLAW_CODE", "true")
+    monkeypatch.setenv("OLLAMA_BASE_URL", "http://localhost:11434")
+    monkeypatch.setenv("OLLAMA_BUDGET_MODELS", "llama3.2")
+    import llm_router.config as _config
+    _config._config = None
+
+    await route_and_call(TaskType.QUERY, "Hello", profile=RoutingProfile.PREMIUM)
+
+    call_kwargs = mock_acompletion.call_args.kwargs
+    assert "ollama" in call_kwargs["model"], (
+        f"Expected Ollama to be first in PREMIUM chain in claw-code mode, got {call_kwargs['model']}"
+    )
+    _config._config = None
+
+
+@pytest.mark.asyncio
+async def test_no_claw_code_mode_ollama_skipped_for_balanced(
+    mock_env, mock_acompletion, monkeypatch
+):
+    """Without claw-code mode, Ollama should NOT inject for BALANCED profile at zero pressure."""
+    monkeypatch.setenv("LLM_ROUTER_CLAW_CODE", "false")
+    monkeypatch.setenv("OLLAMA_BASE_URL", "http://localhost:11434")
+    monkeypatch.setenv("OLLAMA_BUDGET_MODELS", "llama3.2")
+    import llm_router.config as _config
+    import llm_router.claude_usage as _usage
+    _config._config = None
+    _usage.set_claude_pressure(0.0)  # no subscription pressure
+
+    await route_and_call(TaskType.QUERY, "Hello", profile=RoutingProfile.BALANCED)
+
+    call_kwargs = mock_acompletion.call_args.kwargs
+    assert "ollama" not in call_kwargs["model"], (
+        f"Ollama should not inject for BALANCED without claw-code or pressure, got {call_kwargs['model']}"
+    )
+    _config._config = None
