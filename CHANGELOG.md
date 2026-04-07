@@ -1,5 +1,19 @@
 # Changelog
 
+## v1.9.4 — Fix: content filter silent fallback + model_override subscription bypass (2026-04-07)
+
+### Fixed
+
+- **Content filter errors surfaced to user as scary warnings** — When Anthropic (or any provider) returned a `400 "Output blocked by content filtering policy"` error, the router was treating it as a generic failure: showing a warning notification to the user AND tripping the circuit breaker, penalising the provider for what is a content policy decision, not an infrastructure failure. Users saw the raw API error even though the router was successfully falling back to the next model.
+
+  **Fix**: Added `_is_content_filter_error()` detection for content filtering markers. These errors are now **silently skipped** — no user-visible warning, no circuit breaker trip — so the router tries the next model transparently.
+
+- **`model_override` bypassed subscription mode filter** — When a caller (tool or hook) passed an explicit `model="anthropic/claude-haiku-4-5-20251001"` override, the `available_providers` filter was never applied. In subscription mode this meant an Anthropic API call was attempted despite `LLM_ROUTER_CLAUDE_SUBSCRIPTION=true`.
+
+  **Fix**: When `model_override` starts with `anthropic/` and subscription mode is active, the override is silently replaced with the balanced chain (Anthropic models excluded), logged at WARNING level.
+
+---
+
 ## v1.9.3 — Fix: actively purge ANTHROPIC_API_KEY from live env in subscription mode (2026-04-07)
 
 ### Fixed

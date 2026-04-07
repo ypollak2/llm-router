@@ -99,3 +99,42 @@ async def test_research_adds_search_params_for_perplexity(mock_env, mock_acomple
     await route_and_call(TaskType.RESEARCH, "What happened today?", model_override="perplexity/sonar")
     call_kwargs = mock_acompletion.call_args.kwargs
     assert call_kwargs.get("extra_body", {}).get("search_recency_filter") == "week"
+
+
+@pytest.mark.asyncio
+async def test_content_filter_error_is_silent_fallback(mock_env, mock_litellm_response):
+    """Content filter errors should silently skip to next model without warning."""
+    call_count = 0
+
+    async def side_effect(**kwargs):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            raise Exception("litellm.BadRequestError: Output blocked by content filtering policy")
+        return mock_litellm_response()
+
+    with patch("litellm.acompletion", side_effect=side_effect):
+        with patch("litellm.completion_cost", return_value=0.001):
+            resp = await route_and_call(
+                TaskType.QUERY, "Hello",
+                profile=RoutingProfile.BUDGET,
+            )
+    assert resp.content == "Mock response"
+    assert call_count == 2  # first content-filtered, second succeeded
+
+
+@pytest.mark.asyncio
+async def test_subscription_mode_blocks_anthropic_override(mock_env, mock_acompletion, monkeypatch):
+    """In subscription mode, explicit anthropic/ model_override should be redirected."""
+    monkeypatch.setenv("LLM_ROUTER_CLAUDE_SUBSCRIPTION", "true")
+    import llm_router.router as _router
+    import llm_router.config as _config
+    _config._config = None  # force config reload
+    _router._config = None if hasattr(_router, "_config") else None
+    resp = await route_and_call(
+        TaskType.QUERY, "Hello",
+        model_override="anthropic/claude-haiku-4-5-20251001",
+    )
+    # Should have used a non-Anthropic model
+    assert not resp.model.startswith("anthropic/")
+    _config._config = None  # reset for other tests

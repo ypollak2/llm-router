@@ -54,6 +54,17 @@ MEDIA_TASK_TYPES = {TaskType.IMAGE, TaskType.VIDEO, TaskType.AUDIO}
 _RATE_LIMIT_MARKERS = ("rate limit", "rate_limit", "429", "too many requests", "quota exceeded")
 _AUTH_MARKERS = ("authentication", "401", "not logged in", "invalid api key", "incorrect api key",
                  "no auth", "unauthorized", "api key")
+# Content filtering errors are provider-side policy blocks, not infrastructure failures.
+# They should be silently skipped (no warning to user, no circuit-breaker trip) so the
+# router tries the next model without alarming the user with a policy error message.
+_CONTENT_FILTER_MARKERS = (
+    "output blocked by content filtering",
+    "content filtering policy",
+    "content_policy_violation",
+    "content filter",
+    "violates our usage policy",
+    "safety system",
+)
 
 # Provider → env var name, so auth errors name exactly what to set.
 _PROVIDER_KEY_ENV: dict[str, str] = {
@@ -100,6 +111,18 @@ def _auth_error_hint(provider: str) -> str:
         f"    Note: Claude Code subscription covers Haiku/Sonnet/Opus — no API key needed "
         f"for those. External providers require their own key."
     )
+
+
+def _is_content_filter_error(exc: Exception) -> bool:
+    """Detect if an exception is a provider-side content filter block (HTTP 400).
+
+    Content filter errors are not infrastructure failures — they are policy
+    decisions by the provider. We skip silently rather than tripping the
+    circuit breaker, so temporary false-positives don't degrade the provider's
+    health score for legitimate future calls.
+    """
+    exc_str = str(exc).lower()
+    return any(m in exc_str for m in _CONTENT_FILTER_MARKERS)
 
 
 def _is_rate_limit_error(exc: Exception) -> bool:
@@ -305,7 +328,26 @@ async def route_and_call(
                 "'anthropic/claude-haiku-4-5-20251001', 'gemini/gemini-2.5-flash'). "
                 "Run llm_providers() to see all available models."
             )
-        models_to_try = [model_override]
+        # Subscription mode hard block — even explicit overrides must not route
+        # to Anthropic when Claude subscription mode is active. The API key is
+        # intentionally absent; routing back would fail with auth errors and waste
+        # time. Swap to the first non-Anthropic model in the balanced chain instead.
+        if (
+            config.llm_router_claude_subscription
+            and model_override.startswith("anthropic/")
+        ):
+            log.warning(
+                "model_override %r blocked in subscription mode — "
+                "routing to balanced chain instead",
+                model_override,
+            )
+            fallback_chain = [
+                m for m in get_model_chain(RoutingProfile.BALANCED, task_type)
+                if not m.startswith("anthropic/")
+            ]
+            models_to_try = fallback_chain or get_model_chain(RoutingProfile.BALANCED, task_type)
+        else:
+            models_to_try = [model_override]
     else:
         # Pre-fetch penalty data while we're in an async context, so the
         # benchmark ordering can apply failure-rate and latency penalties
@@ -570,11 +612,16 @@ async def route_and_call(
 
         except Exception as e:
             is_rate_limit = _is_rate_limit_error(e)
-            is_auth = not is_rate_limit and _is_auth_error(e)
+            is_content_filter = not is_rate_limit and _is_content_filter_error(e)
+            is_auth = not is_rate_limit and not is_content_filter and _is_auth_error(e)
             if is_rate_limit:
                 await _notify(ctx, "warning", f"{model} rate-limited — switching provider...")
                 log.warning("Rate limit on %s, switching to next", model)
                 tracker.record_rate_limit(provider)
+            elif is_content_filter:
+                # Silent skip — content filter is a provider policy decision, not a
+                # reliability failure. Don't show a warning or trip the circuit breaker.
+                log.info("Content filter on %s, trying next model silently", model)
             elif is_auth:
                 hint = _auth_error_hint(provider)
                 await _notify(ctx, "warning", hint)
