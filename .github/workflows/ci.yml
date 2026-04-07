@@ -9,8 +9,9 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 20
     strategy:
+      fail-fast: false
       matrix:
         python-version: ["3.11", "3.12", "3.13"]
 
@@ -30,7 +31,7 @@ jobs:
         run: uv run ruff check src/
 
       - name: Run tests
-        run: uv run pytest tests/ -v --ignore=tests/test_integration.py --timeout=30
+        run: uv run pytest tests/ -q --ignore=tests/test_integration.py --timeout=30
 
   lint:
     runs-on: ubuntu-latest
