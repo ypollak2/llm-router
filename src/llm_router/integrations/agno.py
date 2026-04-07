@@ -26,28 +26,27 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict, Iterator, List, Optional, Type, Union
+
+from llm_router.router import route_and_call
+from llm_router.types import LLMResponse, RoutingProfile, TaskType
 
 log = logging.getLogger(__name__)
 
 try:
+    from agno.agent import Agent
     from agno.models.base import Model
     from agno.models.message import Message
     from agno.models.response import ModelResponse
     from agno.run.agent import RunOutput
     from agno.run.team import TeamRunOutput
     from agno.team.team import Team
-    from agno.agent import Agent
 except ImportError as e:
     raise ImportError(
         "agno is required for RouteredModel. "
         "Install it with: pip install 'claude-code-llm-router[agno]'"
     ) from e
-
-from llm_router.types import LLMResponse, RoutingProfile, TaskType
-from llm_router.router import route_and_call
 
 
 # ---------------------------------------------------------------------------
