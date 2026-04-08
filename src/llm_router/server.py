@@ -1,12 +1,13 @@
 """FastMCP server — MCP entry point for llm-router.
 
-All 33 tools are registered by modules in llm_router/tools/:
+All 37 tools are registered by modules in llm_router/tools/:
 - routing.py  — llm_classify, llm_track_usage, llm_route, llm_stream
 - text.py     — llm_query, llm_research, llm_generate, llm_analyze, llm_code, llm_edit
 - media.py    — llm_image, llm_video, llm_audio
 - pipeline.py — llm_orchestrate, llm_pipeline_templates
 - admin.py    — llm_save_session, llm_set_profile, llm_usage, llm_cache_stats,
-                llm_cache_clear, llm_quality_report, llm_health, llm_providers
+                llm_cache_clear, llm_quality_report, llm_health, llm_providers,
+                llm_team_report, llm_team_push
 - subscription.py — llm_check_usage, llm_update_usage, llm_refresh_claude_usage
 - codex.py    — llm_codex
 - setup.py    — llm_setup, llm_rate

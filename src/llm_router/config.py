@@ -129,6 +129,14 @@ class RouterConfig(BaseSettings):
     quality_mode: QualityMode = QualityMode.BALANCED
     min_model: str = "haiku"                # floor: never route below this
 
+    # ── Team Dashboard settings (v3.0) ──
+    # llm_router_team_endpoint: webhook URL for push notifications.
+    # Channel auto-detected: hooks.slack.com → Slack, discord.com → Discord,
+    # api.telegram.org/bot* → Telegram, anything else → generic JSON POST.
+    llm_router_team_endpoint: str = ""   # e.g. https://hooks.slack.com/...
+    llm_router_user_id: str = ""         # override auto-detected git email
+    llm_router_team_chat_id: str = ""    # Telegram chat_id (only for Telegram)
+
     # ── Context injection settings ──
     context_enabled: bool = True          # inject session/history context into routed calls
     context_max_messages: int = 5         # max recent session messages to include

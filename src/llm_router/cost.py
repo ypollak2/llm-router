@@ -150,6 +150,12 @@ MIGRATE_USAGE_ADD_SAVINGS = [
     "ALTER TABLE usage ADD COLUMN saved_usd REAL DEFAULT 0.0",
     "ALTER TABLE usage ADD COLUMN is_simulated INTEGER DEFAULT 0",
 ]
+
+MIGRATE_USAGE_ADD_TEAM = [
+    "ALTER TABLE usage ADD COLUMN user_id TEXT",
+    "ALTER TABLE usage ADD COLUMN project_id TEXT",
+]
+"""Idempotent migration to add team identity columns (v3.0)."""
 """Idempotent migration to add per-call savings columns to usage table.
 
 baseline_model:     Model that would have been used without routing (e.g. claude-sonnet)
@@ -204,8 +210,31 @@ async def _get_db() -> aiosqlite.Connection:
             await db.execute(stmt)
         except Exception:
             pass  # column already exists
+    # Migrate: add team identity columns if missing (v3.0)
+    for stmt in MIGRATE_USAGE_ADD_TEAM:
+        try:
+            await db.execute(stmt)
+        except Exception:
+            pass  # column already exists
     await db.commit()
     return db
+
+
+def _get_team_identity() -> tuple[str, str]:
+    """Return (user_id, project_id) for the current process context.
+
+    Cached per-process to avoid repeated git subprocess calls.
+    Returns ("", "") when team identity is not configured.
+    """
+    try:
+        from llm_router.team import get_project_id, get_user_id
+        from llm_router.config import get_config
+        cfg = get_config()
+        uid = get_user_id(override=cfg.llm_router_user_id)
+        pid = get_project_id()
+        return uid, pid
+    except Exception:
+        return "", ""
 
 
 async def log_usage(
@@ -227,12 +256,14 @@ async def log_usage(
         success: Whether the call completed successfully. Failed calls are
             still logged for observability but flagged with success=0.
     """
+    user_id, project_id = _get_team_identity()
     db = await _get_db()
     try:
         await db.execute(
             """INSERT INTO usage (model, provider, task_type, profile,
-               input_tokens, output_tokens, cost_usd, latency_ms, success)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               input_tokens, output_tokens, cost_usd, latency_ms, success,
+               user_id, project_id)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 response.model,
                 response.provider,
@@ -243,6 +274,8 @@ async def log_usage(
                 response.cost_usd,
                 response.latency_ms,
                 1 if success else 0,
+                user_id or None,
+                project_id or None,
             ),
         )
         await db.commit()
@@ -1198,6 +1231,89 @@ async def get_model_acceptance_scores(window_days: int = 30) -> dict[str, float]
         return {}
     finally:
         await db.close()
+
+
+async def get_team_savings(
+    user_id: str = "",
+    project_id: str = "",
+    period: str = "week",
+) -> dict:
+    """Return aggregated savings for the team dashboard.
+
+    Queries the ``usage`` table filtered by optional user/project and period.
+    Free providers (ollama, codex, subscription) are counted toward free_pct.
+
+    Args:
+        user_id: Filter to a specific user. Empty = all users.
+        project_id: Filter to a specific project. Empty = all projects.
+        period: ``"today"``, ``"week"``, ``"month"``, or ``"all"``.
+
+    Returns:
+        Dict with total_calls, saved_usd, actual_usd, free_pct, top_models.
+    """
+    period_map = {
+        "today": "date('now')",
+        "week": "date('now', 'weekday 0', '-6 days')",
+        "month": "date('now', 'start of month')",
+        "all": "'1970-01-01'",
+    }
+    since = period_map.get(period, period_map["week"])
+
+    where_parts = [f"timestamp >= {since}"]
+    params: list = []
+    if user_id:
+        where_parts.append("user_id = ?")
+        params.append(user_id)
+    if project_id:
+        where_parts.append("project_id = ?")
+        params.append(project_id)
+    where = " AND ".join(where_parts)
+
+    _free = {"ollama", "codex", "subscription"}
+
+    db = await _get_db()
+    try:
+        cursor = await db.execute(
+            f"""
+            SELECT model, provider,
+                   COUNT(*) as calls,
+                   COALESCE(SUM(cost_usd), 0) as actual_cost,
+                   COALESCE(SUM(input_tokens + output_tokens), 0) as tokens
+            FROM usage
+            WHERE {where}
+            GROUP BY model, provider
+            ORDER BY calls DESC
+            """,
+            params,
+        )
+        rows = await cursor.fetchall()
+    except Exception:
+        return {"total_calls": 0, "saved_usd": 0.0, "actual_usd": 0.0, "free_pct": 0.0, "top_models": []}
+    finally:
+        await db.close()
+
+    total_calls = sum(r[2] for r in rows)
+    actual_usd = sum(r[3] for r in rows)
+    free_calls = sum(r[2] for r in rows if r[1] in _free)
+    free_pct = free_calls / total_calls if total_calls else 0.0
+
+    # Estimate savings vs Sonnet baseline using token counts
+    total_tokens = sum(r[4] for r in rows)
+    sonnet_baseline = total_tokens / 1000 * ((_SONNET_INPUT_PER_M + _SONNET_OUTPUT_PER_M) / 2 / 1000)
+    saved_usd = max(0.0, sonnet_baseline - actual_usd)
+
+    top_models = [
+        {"model": r[0], "provider": r[1], "calls": r[2], "cost": r[3]}
+        for r in rows[:10]
+    ]
+
+    return {
+        "total_calls": total_calls,
+        "saved_usd": saved_usd,
+        "actual_usd": actual_usd,
+        "free_pct": free_pct,
+        "top_models": top_models,
+    }
 
 
 # Sonnet 4.6 pricing used as baseline for savings calculations

@@ -524,6 +524,124 @@ async def llm_savings() -> str:
     return "\n".join(lines)
 
 
+async def llm_team_report(period: str = "week") -> str:
+    """Show a team savings report for the current user and project.
+
+    Displays call counts, cost savings, free-tier usage, and top models,
+    broken down for the auto-detected user (git email) and project (git remote).
+
+    Args:
+        period: ``"today"``, ``"week"``, ``"month"``, or ``"all"``.
+    """
+    from llm_router.team import build_team_report, get_project_id, get_user_id, detect_channel
+
+    config = get_config()
+    user_id = get_user_id(override=config.llm_router_user_id)
+    project_id = get_project_id()
+
+    report = await build_team_report(user_id=user_id, project_id=project_id, period=period)
+
+    W = 58
+    HR = "+" + "-" * W + "+"
+
+    def row(text: str) -> str:
+        return f"| {text:<{W-1}}|"
+
+    def section(title: str) -> str:
+        return "|" + f" {title} ".center(W, "-") + "|"
+
+    def bar(pct: float, width: int = 10) -> str:
+        filled = round(pct * width)
+        return "█" * filled + "░" * (width - filled)
+
+    lines = [HR, "|" + " Team Savings Report ".center(W) + "|", HR]
+    lines.append(row(f"  User:    {user_id}"))
+    lines.append(row(f"  Project: {project_id}"))
+    lines.append(row(f"  Period:  {period}"))
+    lines.append(HR)
+
+    calls = report["total_calls"]
+    saved = report["saved_usd"]
+    actual = report["actual_usd"]
+    free_pct = report["free_pct"]
+
+    if calls == 0:
+        lines.append(row("  No routing data for this period."))
+    else:
+        lines.append(row(f"  Calls:     {calls:,}"))
+        lines.append(row(f"  Saved:     ~${saved:.4f}  (paid ${actual:.4f})"))
+        lines.append(row(f"  Free tier: {free_pct:.0%}  {bar(free_pct)}"))
+
+        top = report.get("top_models", [])
+        if top:
+            lines.append(row(""))
+            lines.append(row("  Top models:"))
+            for m in top[:6]:
+                short = m["model"].split("/")[-1][:20] if "/" in m["model"] else m["model"][:20]
+                lines.append(row(f"    {short:<20}  {m['calls']:>4}x  ${m['cost']:.4f}"))
+
+    lines.append(HR)
+
+    endpoint = config.llm_router_team_endpoint
+    if endpoint:
+        channel = detect_channel(endpoint)
+        lines.append(row(f"  Push endpoint: {channel} ({endpoint[:40]}...)"))
+        lines.append(row("  Run llm_team_push to send this report."))
+    else:
+        lines.append(row("  Set LLM_ROUTER_TEAM_ENDPOINT to push to Slack/Discord/Telegram."))
+    lines.append(HR)
+    return "\n".join(lines)
+
+
+async def llm_team_push(period: str = "week") -> str:
+    """Push the team savings report to the configured notification channel.
+
+    Sends a formatted message to the endpoint set by ``LLM_ROUTER_TEAM_ENDPOINT``.
+    Channel is auto-detected from the URL:
+      - hooks.slack.com        → Slack Block Kit message
+      - discord.com/api/webhooks → Discord Embed
+      - api.telegram.org/bot*  → Telegram MarkdownV2 message
+      - anything else          → Generic JSON POST
+
+    Args:
+        period: ``"today"``, ``"week"``, ``"month"``, or ``"all"``.
+    """
+    from llm_router.team import build_team_report, detect_channel, get_project_id, get_user_id, push_report
+
+    config = get_config()
+    endpoint = config.llm_router_team_endpoint
+    if not endpoint:
+        return (
+            "No team endpoint configured.\n"
+            "Set LLM_ROUTER_TEAM_ENDPOINT in your .env or routing.yaml:\n\n"
+            "  LLM_ROUTER_TEAM_ENDPOINT=https://hooks.slack.com/...    # Slack\n"
+            "  LLM_ROUTER_TEAM_ENDPOINT=https://discord.com/api/webhooks/...  # Discord\n"
+            "  LLM_ROUTER_TEAM_ENDPOINT=https://api.telegram.org/bot{token}/  # Telegram\n"
+            "  LLM_ROUTER_TEAM_ENDPOINT=https://your-server.com/webhook  # Generic\n"
+        )
+
+    user_id = get_user_id(override=config.llm_router_user_id)
+    project_id = get_project_id()
+    chat_id = config.llm_router_team_chat_id
+
+    report = await build_team_report(user_id=user_id, project_id=project_id, period=period)
+    channel = detect_channel(endpoint)
+
+    success, message = await push_report(report, endpoint, telegram_chat_id=chat_id)
+
+    if success:
+        return (
+            f"✓ Report pushed to {channel}\n\n"
+            f"  User:    {user_id}\n"
+            f"  Project: {project_id}\n"
+            f"  Period:  {period}\n"
+            f"  Calls:   {report['total_calls']:,}\n"
+            f"  Saved:   ~${report['saved_usd']:.4f}\n"
+            f"  Free:    {report['free_pct']:.0%}\n"
+        )
+    return f"✗ Push failed: {message}"
+
+
 def register(mcp) -> None:
     """Register management tools with the FastMCP instance."""
     mcp.tool()(llm_save_session)
@@ -536,3 +654,5 @@ def register(mcp) -> None:
     mcp.tool()(llm_health)
     mcp.tool()(llm_providers)
     mcp.tool()(llm_dashboard)
+    mcp.tool()(llm_team_report)
+    mcp.tool()(llm_team_push)

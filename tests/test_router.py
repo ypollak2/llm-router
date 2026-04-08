@@ -181,10 +181,10 @@ async def test_claw_code_mode_injects_ollama_for_premium_profile(
 
 
 @pytest.mark.asyncio
-async def test_no_claw_code_mode_ollama_skipped_for_balanced(
+async def test_ollama_always_injected_for_balanced(
     mock_env, mock_acompletion, monkeypatch
 ):
-    """Without claw-code mode, Ollama should NOT inject for BALANCED profile at zero pressure."""
+    """Ollama should always inject when configured, regardless of profile or pressure."""
     monkeypatch.setenv("LLM_ROUTER_CLAW_CODE", "false")
     monkeypatch.setenv("OLLAMA_BASE_URL", "http://localhost:11434")
     monkeypatch.setenv("OLLAMA_BUDGET_MODELS", "llama3.2")
@@ -196,7 +196,7 @@ async def test_no_claw_code_mode_ollama_skipped_for_balanced(
     await route_and_call(TaskType.QUERY, "Hello", profile=RoutingProfile.BALANCED)
 
     call_kwargs = mock_acompletion.call_args.kwargs
-    assert "ollama" not in call_kwargs["model"], (
-        f"Ollama should not inject for BALANCED without claw-code or pressure, got {call_kwargs['model']}"
+    assert "ollama" in call_kwargs["model"], (
+        f"Ollama should always inject when configured (free-first), got {call_kwargs['model']}"
     )
     _config._config = None

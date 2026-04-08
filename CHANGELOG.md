@@ -1,5 +1,58 @@
 # Changelog
 
+## v3.0.0 — Team Dashboard + Multi-Channel Push (2026-04-08)
+
+### Added
+
+- **Team Dashboard** (`src/llm_router/team.py`)
+
+  New module for team identity, savings aggregation, and multi-channel push notifications:
+  - `get_user_id()` — resolves to git email, falls back to `username@hostname`
+  - `get_project_id()` — resolves to git remote origin basename, falls back to cwd name
+  - `detect_channel(url)` — auto-detects Slack / Discord / Telegram / generic from URL pattern
+  - `push_report(report, url, telegram_chat_id)` — async HTTP POST with channel-native format
+
+- **Multi-channel push formats**
+
+  Each channel receives a native format:
+  - **Slack**: Block Kit with header, fields, model list, and footer link
+  - **Discord**: Embed with color, fields, and footer
+  - **Telegram**: MarkdownV2 with proper escaping for special characters
+  - **Generic**: Raw JSON POST for custom webhooks
+
+- **`llm_team_report` + `llm_team_push` MCP tools** (`src/llm_router/tools/admin.py`)
+
+  Two new tools (total 37 tools now) for team savings visibility:
+  - `llm_team_report(period)` — box-drawing ASCII table of calls/savings/free-tier/top models
+  - `llm_team_push(period)` — push report to configured channel; channel auto-detected from URL
+
+- **Team settings in config** (`src/llm_router/config.py`)
+
+  Three new environment variables:
+  - `LLM_ROUTER_TEAM_ENDPOINT` — webhook URL (Slack / Discord / Telegram / generic)
+  - `LLM_ROUTER_USER_ID` — override auto-detected git email
+  - `LLM_ROUTER_TEAM_CHAT_ID` — Telegram chat_id (only needed for Telegram)
+
+- **`llm-router team` CLI subcommand** (`src/llm_router/cli.py`)
+
+  New `team` subcommand with three actions:
+  - `llm-router team report [--period week|month|all]` — print savings dashboard to stdout
+  - `llm-router team push [--period week|month|all]` — push to configured webhook
+  - `llm-router team setup` — interactive wizard to configure endpoint and verify connection
+
+- **Team identity columns in usage DB** (`src/llm_router/cost.py`)
+
+  Idempotent migration adds `user_id` and `project_id` columns to the `usage` table.
+  New `get_team_savings(user_id, project_id, period)` aggregation query for dashboard data.
+
+### Changed
+
+- **Ollama always injected when configured** (`src/llm_router/router.py`)
+
+  Removed the gate that restricted Ollama injection to `BUDGET` profile or pressure ≥ 85%.
+  Ollama is now always prepended to the routing chain when `OLLAMA_BASE_URL` is set —
+  it is free and local, so there is no reason to ever skip it.
+
 ## v2.6.0 — Latency-Aware + Personalized Routing (2026-04-08)
 
 ### Added

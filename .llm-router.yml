@@ -1,0 +1,25 @@
+# .llm-router.yml — repo-level routing config
+# Docs: https://github.com/ypollak2/llm-router
+version: 1
+
+# Routing profile: budget | balanced | premium
+profile: budget
+
+# Enforcement mode: shadow (observe) | suggest (hints) | enforce (block violations)
+enforce: enforce
+
+# Block specific providers (comment out to allow all)
+# block_providers:
+#   - openai
+
+# Pin specific task types to a model or provider
+# routing:
+#   code:
+#     provider: ollama        # prefer local for code tasks
+#   research:
+#     provider: perplexity   # always use web-grounded search
+
+# Per-task daily spend caps (USD)
+# daily_caps:
+#   image: 2.00
+#   _total: 5.00
