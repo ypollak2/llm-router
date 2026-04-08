@@ -2,13 +2,64 @@
 
 from __future__ import annotations
 
+import os
+
 from mcp.server.fastmcp import Context
 
 from llm_router.config import get_config
 from llm_router.cost import log_cc_hint
 from llm_router.router import route_and_call
-from llm_router.types import RoutingProfile, TaskType
+from llm_router.types import LLMResponse, RoutingProfile, TaskType
 from llm_router import state as _state
+
+
+# ---------------------------------------------------------------------------
+# Explainability helper — injected into every routed response when
+# LLM_ROUTER_EXPLAIN=1 is set in the environment.
+# ---------------------------------------------------------------------------
+
+#: Approximate cost-per-1k-output-tokens for the Sonnet baseline used in
+#: "why not Opus/Sonnet?" comparisons shown in explain mode.
+_COST_PER_1K = {
+    "claude-opus-4-6":            0.075,
+    "claude-sonnet-4-6":          0.015,
+    "claude-haiku-4-5-20251001":  0.00125,
+    "gemini/gemini-2.5-flash":    0.00035,
+    "openai/gpt-4o":              0.010,
+    "openai/gpt-4o-mini":         0.0006,
+    "groq/llama-3.3-70b-versatile": 0.00059,
+}
+_SONNET_BASELINE = "claude-sonnet-4-6"
+_SONNET_COST     = _COST_PER_1K[_SONNET_BASELINE]
+
+
+def _explain_prefix(resp: LLMResponse, task: str, confidence: float = 0.0) -> str:
+    """Return a routing explanation prefix when LLM_ROUTER_EXPLAIN=1.
+
+    Format: ``[→ model-name · task · confidence% · $cost · Nx cheaper]``
+
+    The prefix is prepended to every routed response so the user can see at a
+    glance which model handled the request and why it was cheaper than Sonnet.
+    Returns an empty string when the env var is not set.
+    """
+    if os.getenv("LLM_ROUTER_EXPLAIN") != "1":
+        return ""
+
+    model_short = resp.model.split("/")[-1] if resp.model else "unknown"
+    conf_str = f" · {confidence:.0%}" if confidence > 0 else ""
+
+    # Cost comparison vs Sonnet baseline (per-call savings)
+    actual_cost = _COST_PER_1K.get(resp.model, _SONNET_COST)
+    if actual_cost < _SONNET_COST and actual_cost > 0:
+        ratio = _SONNET_COST / actual_cost
+        savings_str = f" · {ratio:.1f}x cheaper than Sonnet"
+    elif resp.model == _SONNET_BASELINE:
+        savings_str = " · baseline"
+    else:
+        savings_str = ""
+
+    cost_str = f" · ${resp.cost_usd:.5f}" if resp.cost_usd else ""
+    return f"[→ {model_short} · {task}{conf_str}{cost_str}{savings_str}]\n\n"
 
 # Subscription pressure thresholds — mirror the auto-route hook logic exactly.
 # When below threshold, tools return a subscription hint instead of an API call.
@@ -129,7 +180,7 @@ async def llm_query(
         temperature=temperature, max_tokens=max_tokens, ctx=ctx,
         caller_context=context,
     )
-    return f"{resp.header()}\n\n{resp.content}"
+    return f"{_explain_prefix(resp, 'query')}{resp.header()}\n\n{resp.content}"
 
 
 async def llm_research(
@@ -173,7 +224,7 @@ async def llm_research(
         system_prompt=system_prompt, max_tokens=max_tokens,
         temperature=0.3, ctx=ctx, caller_context=context,
     )
-    result = resp.header() + "\n\n" + resp.content
+    result = _explain_prefix(resp, "research") + resp.header() + "\n\n" + resp.content
     if resp.citations:
         result += "\n\n**Sources:**\n" + "\n".join(f"- {c}" for c in resp.citations)
     if no_perplexity and "perplexity" not in resp.model.lower():
@@ -216,7 +267,7 @@ async def llm_generate(
         system_prompt=system_prompt, temperature=temperature,
         max_tokens=max_tokens, ctx=ctx, caller_context=context,
     )
-    return f"{resp.header()}\n\n{resp.content}"
+    return f"{_explain_prefix(resp, 'generate')}{resp.header()}\n\n{resp.content}"
 
 
 async def llm_analyze(
@@ -251,7 +302,7 @@ async def llm_analyze(
         system_prompt=system_prompt, temperature=0.3,
         max_tokens=max_tokens, ctx=ctx, caller_context=context,
     )
-    return f"{resp.header()}\n\n{resp.content}"
+    return f"{_explain_prefix(resp, 'analyze')}{resp.header()}\n\n{resp.content}"
 
 
 async def llm_code(
@@ -283,7 +334,7 @@ async def llm_code(
         system_prompt=system_prompt, temperature=0.2,
         max_tokens=max_tokens, ctx=ctx, caller_context=context,
     )
-    return f"{resp.header()}\n\n{resp.content}"
+    return f"{_explain_prefix(resp, 'code')}{resp.header()}\n\n{resp.content}"
 
 
 async def llm_edit(

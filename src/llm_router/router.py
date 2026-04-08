@@ -574,6 +574,7 @@ async def route_and_call(
                         output_tokens=response.output_tokens,
                         cost_usd=response.cost_usd,
                         latency_ms=response.latency_ms,
+                        reason_code=classification_data.get("reason_code"),
                     )
                 except Exception as e:
                     log.warning("Failed to log routing decision: %s", e)

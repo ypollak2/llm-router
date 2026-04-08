@@ -229,17 +229,17 @@ The biggest adoption blocker is not routing quality — it is trust. One visible
 
 ---
 
-### v2.2 — Explainable Routing (mid May 2026)
+### v2.2 — Explainable Routing ✅ Done (2026-04-08)
 
 **Headline**: *"Every route has a why."*
 
-| Feature | Notes |
-|---|---|
-| **Per-decision explanation block** | Classifier emits `reason`, `confidence`, `alternatives_considered` |
-| **`LLM_ROUTER_EXPLAIN=1` mode** | Prepends `[→ haiku · simple query · 92%]` to every routed response |
-| **"Why not Sonnet/Opus?" comparison** | Shows cost delta between chosen model and next tier up |
-| **Missed-savings labelling** | Marks non-interceptable turns (plain-text responses) as `[unroutable]` with explanation |
-| **Confidence score in quality log** | `routing_decisions` table gains `confidence` and `reason_code` columns |
+| Feature | Status | Notes |
+|---|---|---|
+| **`LLM_ROUTER_EXPLAIN=1` mode** | ✅ | Prepends `[→ model · task · $cost · Nx cheaper]` to every routed response |
+| **"Why not Sonnet/Opus?" comparison** | ✅ | `llm_classify` shows cost multiplier for each skipped tier |
+| **`reason_code` in quality log** | ✅ | `routing_decisions` table gains `reason_code` column |
+| **Per-decision explanation** | ✅ | `router.py` propagates classification reason to DB |
+| **Missed-savings labelling** | 📅 v2.3 | `[unroutable]` markers for non-interceptable turns |
 
 ---
 

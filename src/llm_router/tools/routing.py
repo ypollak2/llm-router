@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+
 from mcp.server.fastmcp import Context
 
 from llm_router.classifier import classify_complexity
@@ -131,6 +133,31 @@ async def llm_classify(
     elif budget_pct >= 0.85:
         lines.append(HR)
         lines.append(row(f"  ~~ Budget low ({budget_pct:.0%}) -- downshifted {rec.base_model} -> {rec.recommended_model}"))
+
+    # Explainable routing: "why not Opus/Sonnet?" cost comparison
+    # Always shown — this is the core of v2.2 explainability.
+    _COST_PER_1K_OUT = {
+        "opus":   0.075,
+        "sonnet": 0.015,
+        "haiku":  0.00125,
+    }
+    chosen_tier = rec.recommended_model  # "haiku" | "sonnet" | "opus"
+    chosen_cost = _COST_PER_1K_OUT.get(chosen_tier, 0.015)
+    lines.append(HR)
+    lines.append(row("  Why not a more expensive model?"))
+    for tier, cost in [("opus", 0.075), ("sonnet", 0.015), ("haiku", 0.00125)]:
+        if tier == chosen_tier:
+            marker = "✓ chosen"
+        elif cost > chosen_cost:
+            ratio = cost / chosen_cost
+            marker = f"↑ {ratio:.0f}x more expensive — unnecessary for {classification.complexity.value} task"
+        else:
+            marker = "↓ cheaper option exists"
+        lines.append(row(f"    {tier:<8} ${cost:.5f}/1k  {marker}"))
+
+    # Extra tip when LLM_ROUTER_EXPLAIN=1 is not set
+    if os.getenv("LLM_ROUTER_EXPLAIN") != "1":
+        lines.append(row("  Tip: set LLM_ROUTER_EXPLAIN=1 to see [→ model · task] on every response"))
 
     lines.append(HR)
     return "\n".join(lines)

@@ -1,5 +1,37 @@
 # Changelog
 
+## v2.2.0 — Explainable Routing (2026-04-08)
+
+### Added
+
+- **`LLM_ROUTER_EXPLAIN=1` response prefix** (`src/llm_router/tools/text.py`)
+
+  When set, every routed response (`llm_query`, `llm_research`, `llm_generate`, `llm_analyze`, `llm_code`) is prefixed with a compact routing summary:
+
+  ```
+  [→ gemini-2.5-flash · query · $0.00003 · 42.9x cheaper than Sonnet]
+  ```
+
+  Shows: model used, task type, per-call cost, and cost ratio vs Sonnet baseline — the "why this model?" answer right in the response stream.
+
+- **`llm_classify` cost comparison table** (`src/llm_router/tools/routing.py`)
+
+  The classification output now includes a "Why not a more expensive model?" breakdown showing Opus/Sonnet/Haiku costs side-by-side with the chosen tier, including a multiplier for each skipped tier (e.g. "↑ 60x more expensive — unnecessary for simple task"). Always shown; no env var required.
+
+- **`reason_code` DB column** (`src/llm_router/cost.py`)
+
+  New column in `routing_decisions` table for storing classification reasoning codes (idempotent migration). `log_routing_decision()` updated with `reason_code: str | None = None` parameter.
+
+- **`router.py` reason_code propagation** — passes `reason_code` from classification metadata to `log_routing_decision()`.
+
+### Technical
+
+- `_explain_prefix()` helper: pure function, zero overhead when env var not set.
+- Cost table uses per-1k-output-token pricing — representative of real-world savings signal.
+- Routing tip injected into `llm_classify` output when `LLM_ROUTER_EXPLAIN` is not set.
+
+---
+
 ## v2.1.0 — Route Simulator + Savings Dashboard (2026-04-08)
 
 ### Added

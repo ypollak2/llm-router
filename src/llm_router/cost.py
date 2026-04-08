@@ -139,6 +139,11 @@ MIGRATE_ROUTING_DECISIONS_ADD_FEEDBACK = [
 ]
 """Idempotent migration to add user feedback column to routing_decisions."""
 
+MIGRATE_ROUTING_DECISIONS_ADD_REASON = [
+    "ALTER TABLE routing_decisions ADD COLUMN reason_code TEXT",
+]
+"""Idempotent migration to add classifier reasoning text to routing_decisions (v2.2)."""
+
 MIGRATE_USAGE_ADD_SAVINGS = [
     "ALTER TABLE usage ADD COLUMN baseline_model TEXT",
     "ALTER TABLE usage ADD COLUMN potential_cost_usd REAL DEFAULT 0.0",
@@ -183,6 +188,12 @@ async def _get_db() -> aiosqlite.Connection:
             pass  # column already exists
     # Migrate: add feedback column if missing
     for stmt in MIGRATE_ROUTING_DECISIONS_ADD_FEEDBACK:
+        try:
+            await db.execute(stmt)
+        except Exception:
+            pass  # column already exists
+    # Migrate: add classifier reasoning to routing_decisions (v2.2)
+    for stmt in MIGRATE_ROUTING_DECISIONS_ADD_REASON:
         try:
             await db.execute(stmt)
         except Exception:
@@ -489,6 +500,7 @@ async def log_routing_decision(
     output_tokens: int,
     cost_usd: float,
     latency_ms: float,
+    reason_code: str | None = None,
 ) -> None:
     """Persist a complete routing decision to the routing_decisions table.
 
@@ -526,8 +538,8 @@ async def log_routing_decision(
                 classifier_confidence, classifier_latency_ms, complexity,
                 recommended_model, base_model, was_downshifted, budget_pct_used,
                 quality_mode, final_model, final_provider, success,
-                input_tokens, output_tokens, cost_usd, latency_ms)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                input_tokens, output_tokens, cost_usd, latency_ms, reason_code)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 _prompt_hash(prompt),
                 task_type,
@@ -549,6 +561,7 @@ async def log_routing_decision(
                 output_tokens,
                 cost_usd,
                 latency_ms,
+                reason_code,
             ),
         )
         await db.commit()

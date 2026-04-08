@@ -340,11 +340,42 @@ llm-router share   # copies savings card to clipboard + opens tweet
 
 ## Roadmap
 
-| Version | Theme | Status |
-|---------|-------|--------|
-| v1.3–v1.9 | Dashboard, filesystem tools, enforcement, agent selection | ✅ Done |
-| **v2.0** | **Agno `RouteredModel` + `RouteredTeam` with shared budget enforcement** | ✅ Done |
-| **v2.1** | **Routing dry-run mode; streaming support in RouteredModel** | 🔜 Next |
+**Positioning**: *Claude Code's cost autopilot. Stop paying Opus prices for Haiku work.*
+
+### Phase 1 — Trust & Proof (Apr–Jun 2026)
+
+| Version | Headline | Status |
+|---------|----------|--------|
+| v1.3–v2.0 | Foundation, dashboard, enforcement, Agno adapter | ✅ Done |
+| **v2.1** | **Route Simulator** — `llm-router test "<prompt>"` dry-run + `llm_savings` dashboard | ✅ Done |
+| **v2.2** | **Explainable Routing** — `LLM_ROUTER_EXPLAIN=1`, "why not Opus?", per-decision reasoning | ✅ Done |
+| **v2.3** | **Zero-Friction Activation** — onboarding wizard, shadow/suggest/enforce modes, savings card | 📅 Jun 2026 |
+
+### Phase 2 — Smarter Routing (Jun–Aug 2026)
+
+| Version | Headline | Status |
+|---------|----------|--------|
+| **v2.4** | **Repo-Aware YAML Config** — `.llm-router.yml` committed with the codebase | 📅 Jun 2026 |
+| **v2.5** | **Context-Aware Routing** — "yes/continue/proceed" resolved from conversation context | 📅 Jul 2026 |
+| **v2.6** | **Latency + Personalized Routing** — p95 latency scoring, per-user acceptance signals | 📅 Aug 2026 |
+
+### Phase 3 — Team Infrastructure (Sep–Nov 2026)
+
+| Version | Headline | Status |
+|---------|----------|--------|
+| **v3.0** | **Team Dashboard** — shared savings across the whole team | 📅 Sep 2026 |
+| **v3.1** | **Policy Engine** — org/project/user routing policy, spend caps, audit log | 📅 Oct 2026 |
+| **v3.2** | **Slack Digests** — weekly savings summary, spend-spike alerts | 📅 Nov 2026 |
+
+### Phase 4 — Category Leadership (Jan–Apr 2027)
+
+| Version | Headline | Status |
+|---------|----------|--------|
+| **v3.3** | **Community Benchmarks** — opt-in anonymous routing quality leaderboard | 📅 Jan 2027 |
+| **v3.5** | **Claude Desktop + Co-Work** — tool-based delegation, per-user savings attribution | 📅 Mar 2027 |
+| **v4.0** | **VS Code + Cursor GA** — cross-editor routing, shared config and analytics | 📅 Apr 2027 |
+
+> Full details: [ROADMAP.md](ROADMAP.md)
 
 ---
 
