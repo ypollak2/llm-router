@@ -379,7 +379,8 @@ def _format_cumulative_section(periods: list[tuple[str, int, int, int, float]]) 
     # Yearly projection — prefer weekly rate (7-day avg × 365), fall back to today × 365
     weekly_data  = period_map.get("this week", (0, 0, 0, 0.0))
     today_data   = period_map.get("today",     (0, 0, 0, 0.0))
-    weekly_saved = weekly_data[3];  today_saved = today_data[3]
+    weekly_saved = weekly_data[3]
+    today_saved  = today_data[3]
     weekly_tok   = weekly_data[1] + weekly_data[2]
     today_tok    = today_data[1]  + today_data[2]
     if weekly_saved > 0:
