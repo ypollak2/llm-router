@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm-router-hook-version: 11
+# llm-router-hook-version: 12
 """Stop hook — unified session summary: CC subscription delta + external routing costs."""
 
 from __future__ import annotations
@@ -64,6 +64,11 @@ def _fetch_live_usage() -> dict | None:
         os.makedirs(STATE_DIR, exist_ok=True)
         with open(USAGE_JSON, "w") as f:
             json.dump({**result, "highest_pressure": max(s, w, n) / 100.0}, f)
+        # Update the session-start snapshot with current live values so the
+        # NEXT session's delta is computed against today's end-of-session baseline,
+        # not a stale snapshot. This is the fallback if session-start fails to refresh.
+        with open(SESSION_CC_SNAP_FILE, "w") as f:
+            json.dump(result, f)
         return result
     except Exception:
         return None

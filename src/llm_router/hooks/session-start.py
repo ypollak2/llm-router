@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm-router-hook-version: 8
+# llm-router-hook-version: 9
 """SessionStart hook — inject routing banner, start Ollama, refresh Claude usage.
 
 Fires once when a new Claude Code session begins. Four jobs:
@@ -27,6 +27,37 @@ import uuid
 STATE_DIR = os.path.expanduser("~/.llm-router")
 SESSION_START_FILE = os.path.join(STATE_DIR, "session_start.txt")
 SESSION_ID_FILE = os.path.join(STATE_DIR, "session_id.txt")
+
+# ── .env loader ───────────────────────────────────────────────────────────────
+# Hooks run outside the MCP server process and don't inherit its env.
+# Load .env so LLM_ROUTER_CLAUDE_SUBSCRIPTION and other settings are available.
+_ENV_PATHS = [
+    os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__)))), ".env"),
+    os.path.expanduser("~/.env"),
+    os.path.join(STATE_DIR, ".env"),
+]
+
+
+def _load_dotenv() -> None:
+    for env_path in _ENV_PATHS:
+        if not os.path.exists(env_path):
+            continue
+        try:
+            with open(env_path) as f:
+                for line in f:
+                    line = line.strip()
+                    if not line or line.startswith("#") or "=" not in line:
+                        continue
+                    key, _, value = line.partition("=")
+                    key = key.strip()
+                    value = value.strip().strip("\"'")
+                    if key and key not in os.environ:
+                        os.environ[key] = value
+        except OSError:
+            pass
+
+
+_load_dotenv()
 
 _CC_MODE = os.environ.get("LLM_ROUTER_CLAUDE_SUBSCRIPTION", "").lower() in ("true", "1", "yes")
 
@@ -203,16 +234,26 @@ def main() -> None:
     # 1. Ensure Ollama is running (start it if needed)
     hints += _ensure_ollama_running()
 
-    # 2. Refresh Claude usage from OAuth API — subscription mode only.
-    # In API-key mode (no subscription) skip this: there is no quota to track,
-    # and the Keychain lookup would fail noisily on Linux / Docker agents.
-    if _CC_MODE:
-        hints += _refresh_claude_usage()
+    # 2. Refresh Claude usage from OAuth API.
+    # Always attempt the refresh — if the OAuth token is present, we're in
+    # subscription mode regardless of LLM_ROUTER_CLAUDE_SUBSCRIPTION env var.
+    # This makes CC mode detection implicit (token present = CC mode) rather
+    # than requiring a .env file that hooks may not have access to.
+    usage_hint = _refresh_claude_usage()
+    is_subscription = not usage_hint.startswith("\n⚠️")
+
+    # Pick the right banner based on detected mode
+    if is_subscription or _CC_MODE:
+        banner = BANNER_SUBSCRIPTION
+    else:
+        banner = BANNER_API_KEYS
+
+    hints += usage_hint
 
     print(json.dumps({
         "hookSpecificOutput": {
             "hookEventName": "SessionStart",
-            "contextForAgent": BANNER + hints,
+            "contextForAgent": banner + hints,
         }
     }))
 
