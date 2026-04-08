@@ -19,6 +19,7 @@ from llm_router import cost, media, providers
 from llm_router.codex_agent import CODEX_MODELS, is_codex_available, run_codex
 from llm_router.compaction import compact_structural
 from llm_router.config import get_config
+from llm_router.repo_config import effective_config as get_repo_config
 from llm_router.context import build_context_messages, get_session_buffer
 from llm_router.health import get_tracker
 from llm_router.profiles import get_model_chain, provider_from_model
@@ -389,6 +390,25 @@ async def route_and_call(
                 if provider_from_model(m) in available
                 or provider_from_model(m) in {"codex", "ollama"}
             ]
+
+            # ── Repo config: block_providers + model/provider pin ────────────
+            repo_cfg = get_repo_config()
+            if repo_cfg.block_providers:
+                blocked = set(repo_cfg.block_providers)
+                models_to_try = [
+                    m for m in models_to_try
+                    if provider_from_model(m) not in blocked
+                ]
+            # Model pin: prepend pinned model so it's tried first
+            pinned_model = repo_cfg.model_override(task_type.value)
+            pinned_provider = repo_cfg.provider_override(task_type.value)
+            if pinned_model and pinned_model not in models_to_try:
+                models_to_try = [pinned_model] + models_to_try
+            elif pinned_provider and not pinned_model:
+                # Provider pin: move models from that provider to the front
+                pinned = [m for m in models_to_try if provider_from_model(m) == pinned_provider]
+                rest   = [m for m in models_to_try if provider_from_model(m) != pinned_provider]
+                models_to_try = pinned + rest
 
             # ── Ollama injection ─────────────────────────────────────────────
             # BUDGET always: local/free models fit simple tasks regardless of quota.

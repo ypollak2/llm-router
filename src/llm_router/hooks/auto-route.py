@@ -1000,10 +1000,29 @@ def main() -> None:
             # Pressure exceeded → fall through to external routing
 
     # ── Activation mode (shadow / suggest / enforce) ──────────────────────────
+    # Priority: env var > .llm-router.yml repo config > ~/.llm-router/.env > "hard"
     # shadow  — observe only; emit passive hint, write NO pending state
     # suggest — show soft hint; write pending state (enforce-route treats it as soft/logged-only)
     # enforce / hard (default) — block Claude if routing is violated
-    _enforce_mode = os.environ.get("LLM_ROUTER_ENFORCE", "hard").lower()
+    _enforce_mode = os.environ.get("LLM_ROUTER_ENFORCE", "").lower()
+    if not _enforce_mode:
+        # Try reading from .llm-router.yml in cwd or ancestor
+        try:
+            import yaml as _yaml
+            _repo_yml = Path.cwd() / ".llm-router.yml"
+            if not _repo_yml.exists():
+                for _p in Path.cwd().parents:
+                    _c = _p / ".llm-router.yml"
+                    if _c.exists():
+                        _repo_yml = _c
+                        break
+            if _repo_yml.exists():
+                _repo_data = _yaml.safe_load(_repo_yml.read_text()) or {}
+                _enforce_mode = str(_repo_data.get("enforce", "")).lower()
+        except Exception:
+            pass
+    if not _enforce_mode:
+        _enforce_mode = "hard"
 
     # ── Standard external routing directive ───────────────────────────────────
     if tool == "llm_route":

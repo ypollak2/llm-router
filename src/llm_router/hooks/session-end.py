@@ -376,14 +376,25 @@ def _format_cumulative_section(periods: list[tuple[str, int, int, int, float]]) 
         lines.append(
             f"  {label:<12}  {calls:>5} calls  {tok_str:>7} tok  ${saved:.4f} saved"
         )
-    # Yearly projection — prefer weekly rate (7-day average × 365), fall back to today × 365
-    weekly_saved = period_map.get("this week", (0, 0, 0, 0.0))[3]
-    today_saved  = period_map.get("today",     (0, 0, 0, 0.0))[3]
-    rate = weekly_saved / 7 if weekly_saved > 0 else today_saved
-    if rate > 0:
-        yearly = rate * 365
+    # Yearly projection — prefer weekly rate (7-day avg × 365), fall back to today × 365
+    weekly_data  = period_map.get("this week", (0, 0, 0, 0.0))
+    today_data   = period_map.get("today",     (0, 0, 0, 0.0))
+    weekly_saved = weekly_data[3];  today_saved = today_data[3]
+    weekly_tok   = weekly_data[1] + weekly_data[2]
+    today_tok    = today_data[1]  + today_data[2]
+    if weekly_saved > 0:
+        rate_usd, rate_tok, basis = weekly_saved / 7, weekly_tok / 7, "7-day avg"
+    elif today_saved > 0:
+        rate_usd, rate_tok, basis = today_saved, today_tok, "today"
+    else:
+        rate_usd = 0.0
+    if rate_usd > 0:
         lines.append("")
-        lines.append(f"  📈 Projection: ~${yearly:.0f}/year  (based on {('7-day' if weekly_saved > 0 else 'today')} avg)")
+        lines.append(
+            f"  📈 Projection: ~${rate_usd * 365:.0f}/year"
+            f" · ~{_fmt_tok(int(rate_tok * 365))} tok/year"
+            f"  (based on {basis})"
+        )
     return lines
 
 
