@@ -193,7 +193,7 @@ Eight correctness fixes making the routing guarantees production-solid:
 
 ---
 
-## v2.0 — Agno Adapter
+## v2.0 — Agno Adapter ✅ Complete
 
 **Theme**: llm-router becomes the smart model layer inside multi-agent Python workflows.
 
@@ -207,36 +207,204 @@ Every Agno agent takes a `model=` parameter. `RouteredModel` makes llm-router a 
 | **Example: `docs/examples/agno_team_routing.py`** | 3-agent team (researcher + analyst + writer) with per-role routing |
 | **Integration tests with Agno test harness** | Confirm `RouteredModel` satisfies Agno's `Model` ABC |
 
-### Why this matters
-
-In a 3-agent Agno Team without routing, all agents pay Sonnet rates. With `RouteredTeam`:
-
-```python
-# Before: 3 × Sonnet = 3× cost
-team = Team(agents=[researcher, analyst, writer])
-
-# After: writer → Haiku (90% cheaper), researcher → Perplexity, analyst → Sonnet
-team = RouteredTeam(
-    agents=[researcher, analyst, writer],
-    monthly_budget_usd=20.0,
-)
-```
-
 ---
 
-## v2.1 — Learning Router
+## Phase 1 — Trust & Proof (Apr–Jun 2026)
 
-**Theme**: The router gets smarter the more you use it.
+**Marketing positioning**: *"Claude Code's cost autopilot. Stop paying Opus prices for Haiku work."*
 
-Every routing decision is already recorded in SQLite. After ~500 calls, there's enough signal to train a tiny local classifier (Qwen 0.5B via Ollama) on *your specific usage patterns*.
+The biggest adoption blocker is not routing quality — it is trust. One visible misroute outweighs dozens of invisible cheap wins. Phase 1 builds the trust infrastructure before optimising the routing engine.
+
+### v2.1 — Route Simulator (late Apr 2026)
+
+**Headline**: *"See where your prompts would go before you trust the autopilot."*
 
 | Feature | Notes |
 |---|---|
-| **Routing history → training data** | Export `routing_decisions` rows with `was_good` labels to JSONL |
-| **Local fine-tune pipeline** | `llm-router-train` CLI: fine-tunes Qwen 0.5B on Ollama |
-| **Hot-swap classifier** | Server loads custom model on startup; falls back to heuristic chain |
-| **Continuous improvement loop** | Every `llm_rate` feedback → queue for next training run |
-| **Model drift detection** | Alert when custom classifier disagrees with heuristic >20% |
+| **`llm-router test "<prompt>"` dry-run** | Show routing decision + cost estimate without making any API call |
+| **Savings DB schema expansion** | Add `baseline_model`, `potential_cost_usd`, `saved_usd`, `is_simulated` columns to `usage` table |
+| **Simulator populates DB with `is_simulated=True`** | Lets users see projected savings before enabling enforce mode |
+| **`llm_dashboard` MCP tool** | Returns formatted savings table: today / week / month / all-time with efficiency multiplier |
+| **Enhanced status bar** | Time-bucketed savings (D/W/M), provider health icons, enforcement mode badge, Nx efficiency score |
+
+---
+
+### v2.2 — Explainable Routing (mid May 2026)
+
+**Headline**: *"Every route has a why."*
+
+| Feature | Notes |
+|---|---|
+| **Per-decision explanation block** | Classifier emits `reason`, `confidence`, `alternatives_considered` |
+| **`LLM_ROUTER_EXPLAIN=1` mode** | Prepends `[→ haiku · simple query · 92%]` to every routed response |
+| **"Why not Sonnet/Opus?" comparison** | Shows cost delta between chosen model and next tier up |
+| **Missed-savings labelling** | Marks non-interceptable turns (plain-text responses) as `[unroutable]` with explanation |
+| **Confidence score in quality log** | `routing_decisions` table gains `confidence` and `reason_code` columns |
+
+---
+
+### v2.3 — Zero-Friction Activation + Savings Analytics (early Jun 2026)
+
+**Headline**: *"Go from install to first savings in under 2 minutes. Then watch the number grow."*
+
+| Feature | Notes |
+|---|---|
+| **Guided onboarding wizard** | Auto-detects Codex/Ollama, recommends profile, fails with precise remediation steps |
+| **`shadow` / `suggest` / `enforce` activation modes** | `shadow` = observe only; `suggest` = hint in output; `enforce` = block + route |
+| **Shareable savings card** | `llm-router share` generates ASCII card: savings D/W/M/YTD + efficiency multiplier |
+| **Weekly digest hook** | Monday notification: "You saved $8.91 last week — your AI is 17x more efficient" |
+| **Yearly projection** | Session summary shows: "At this rate you'll save $180/year" |
+
+---
+
+## Phase 2 — Smarter Routing (Jun–Aug 2026)
+
+Once users trust the router and can inspect its decisions, Phase 2 makes routing genuinely smarter. These features have no value without the trust infrastructure from Phase 1.
+
+### v2.4 — Repo-Aware YAML Config (late Jun 2026)
+
+**Headline**: *"One repo, one routing policy — committed to git."*
+
+| Feature | Notes |
+|---|---|
+| **`.llm-router.yml` repo config** | Pin tasks to models, block providers, per-path rules |
+| **`~/.llm-router/routing.yaml` user overrides** | Per-type daily caps, preferred providers |
+| **Repo fingerprinting** | Detects language/framework/size and suggests an appropriate profile |
+| **`llm-router config lint`** | Validates config and previews effective routing table |
+| **Config precedence**: org → user → repo → prompt | Consistent override hierarchy |
+
+---
+
+### v2.5 — Context-Aware Routing (late Jul 2026)
+
+**Headline**: *"'Yes', 'continue', 'do it' — the router understands what you actually meant."*
+
+Short continuation prompts are currently classified on their 3 words alone, losing the task context. This version fixes that with a synthetic prompt pre-processor.
+
+| Feature | Notes |
+|---|---|
+| **Continuation prompt detector** | Regex: `^(yes\|no\|ok\|continue\|proceed\|go ahead\|do it\|y\|n)\.?$` + <5 word check |
+| **Synthetic prompt injection** | Prepends last assistant message: `"User confirmed to proceed with: {context}"` |
+| **Negative continuation handling** | "no" / "skip" → cheap model, correct task type from context |
+| **Statement vs question detection** | Assistant statements → treat "ok" as acknowledgement (low complexity), not command |
+| **Configurable via `.llm-router.yml`** | `context_aware_routing: true/false` |
+
+---
+
+### v2.6 — Latency-Aware + Personalized Routing (early Aug 2026)
+
+**Headline**: *"The router learns what you actually accept — and keeps it fast."*
+
+| Feature | Notes |
+|---|---|
+| **p95 latency in model scoring** | Latency as tiebreaker between equally cheap models |
+| **Cold-start penalties for local models** | Ollama first-request penalty accounted for in selection |
+| **Per-user acceptance signals** | Local tracking of `llm_rate` thumbs / re-prompts as routing feedback |
+| **Score blending** | Per-user weights blend with global benchmarks; reset/opt-out controls |
+| **Latency dashboard** | `llm-router status` shows P50/P95 per provider |
+
+---
+
+## Phase 3 — Team Infrastructure (Sep–Nov 2026)
+
+### v3.0 — Team Dashboard (Sep 2026)
+
+**Headline**: *"See savings across the whole team, not just your laptop."*
+
+| Feature | Notes |
+|---|---|
+| **Shared telemetry collector** | Optional self-hosted endpoint; `usage.db` rows replicated with `user_id` |
+| **Org / project / user dashboard views** | Savings by user, route mix, expensive-call leakage |
+| **Team onboarding bootstrap** | Invite token flow; shared profile defaults |
+| **`show_savings_report` MCP tool** | Conversational: `for me today` / `for this session` / `for everyone this month` |
+
+---
+
+### v3.1 — Policy Engine (Oct 2026)
+
+**Headline**: *"Set routing policy once — enforce it everywhere."*
+
+| Feature | Notes |
+|---|---|
+| **Org / project / user policy precedence** | Consistent override hierarchy across installs |
+| **Model + provider allow/deny rules** | "never use GPT-4o", "only local models for this repo" |
+| **Spend caps + fallback rules** | Per-task-type daily caps; hard stops with graceful degradation |
+| **Audit log** | Policy hits, overrides, enforcement decisions logged to `routing_decisions` |
+
+---
+
+### v3.2 — Slack + Webhook Digests (Nov 2026)
+
+**Headline**: *"Bring token savings into the team's Slack — where decisions actually get made."*
+
+| Feature | Notes |
+|---|---|
+| **Weekly savings digest to Slack/Discord/webhook** | `LLM_ROUTER_WEBHOOK_URL`; Markdown-formatted summary |
+| **Spend-spike alerts** | Alert when daily spend exceeds threshold unexpectedly |
+| **Policy exception summaries** | Weekly log of override events and who triggered them |
+| **"What if router was off?" simulation** | Show team lead: "Without routing, last week would have cost $XXX more" |
+
+---
+
+## Phase 4 — Category Leadership (Jan–Apr 2027)
+
+### v3.3 — Community Benchmarks (Jan 2027)
+
+**Headline**: *"Routing quality backed by real developer workloads — not synthetic benchmarks."*
+
+| Feature | Notes |
+|---|---|
+| **Opt-in anonymous outcome sharing** | `LLM_ROUTER_COMMUNITY=true`; strips PII, shares task type + quality signal |
+| **Public benchmark leaderboard** | Routing accuracy by task type, updated weekly |
+| **Benchmark confidence metadata** | In-product: "This route is 94% accurate based on 10k similar tasks" |
+
+---
+
+### v3.4 — Enterprise Pilot (Feb 2027, private beta)
+
+| Feature | Notes |
+|---|---|
+| **Self-hosted deployment pack** | Docker Compose; isolated telemetry; no external calls |
+| **SSO / RBAC admin layer** | Per-team policy admin, audit export |
+| **Bedrock / Azure OpenAI / Vertex AI** | Via LiteLLM; enterprise provider support |
+| **Procurement + security review docs** | SOC 2 readiness guide, data flow diagrams |
+
+---
+
+### v3.5 — Claude Desktop + Co-Work (Mar 2027)
+
+**Headline**: *"Claude Desktop's cost autopilot — now with shared savings for whole teams."*
+
+No hooks in Claude Desktop means a fundamentally different model: **tool-based delegation** instead of silent interception.
+
+| Feature | Notes |
+|---|---|
+| **Task-specific MCP tools** | `generate_code`, `refactor_code`, `summarize_text`, `draft_email` — Claude delegates to these |
+| **Free-first chain inside each tool** | Ollama → Codex → paid API, invisible to user |
+| **Co-Work savings attribution** | `user_id` + `session_id` in DB; per-user analytics in shared sessions |
+| **`show_savings_report` conversational tool** | `@show_savings_report for me today` / `for everyone this month` |
+| **GUI settings panel** | No YAML editing; graphical provider config + activation mode toggle |
+
+---
+
+### v4.0 — VS Code + Cursor GA (Apr 2027)
+
+**Headline**: *"Claude Code's cost autopilot becomes the routing standard across every editor."*
+
+| Feature | Notes |
+|---|---|
+| **Stable VS Code extension** | Status bar integration, quick profile toggle, savings display |
+| **Stable Cursor integration** | Same feature set via Cursor's extension API |
+| **Cross-editor shared config** | One `.llm-router.yml` governs all editors + Claude Code |
+| **Cross-editor analytics** | Team dashboard aggregates savings across Claude Code + VS Code + Cursor |
+
+---
+
+## Architectural notes
+
+**Routing coverage ceiling (~70–80%):** The hook system can only intercept `UserPromptSubmit` turns. Plain-text responses (Claude answering directly without a tool call) and post-tool-result reasoning are architecturally unintercept-able. Marketing should say "routes all routable requests", not "routes everything".
+
+**Patch release policy:** `.x` patches are for hook regressions, provider API drift, classifier bugs, and packaging fixes only. No new headline features in patch releases.
 
 ---
 
@@ -244,8 +412,9 @@ Every routing decision is already recorded in SQLite. After ~500 calls, there's 
 
 See [CONTRIBUTING.md](CONTRIBUTING.md). Highest-impact areas:
 
-1. **v1.8 claw-code hooks** — adapt session-end and status-bar for no-subscription mode
-2. **v1.9 OpenClaw skill** — `skill.json` format + hook compatibility with OpenClaw's pipeline
-3. **v2.0 Agno adapter** — `RouteredModel` implementing Agno's `Model` ABC
-4. **Provider integrations** — Bedrock, Azure, Vertex AI via LiteLLM
-5. **Testing** — integration tests for provider fallback chains
+1. **v2.1 Route Simulator** — dry-run routing + savings DB schema expansion
+2. **v2.3 Activation modes** — `shadow` / `suggest` / `enforce` transition logic
+3. **v2.5 Context-aware routing** — synthetic prompt pre-processor in `auto-route.py`
+4. **v3.0 Team Dashboard** — shared telemetry + `show_savings_report` tool
+5. **Provider integrations** — Bedrock, Azure, Vertex AI via LiteLLM
+6. **Testing** — integration tests for provider fallback chains
