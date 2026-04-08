@@ -99,17 +99,16 @@ class RouterConfig(BaseSettings):
 
     # ── Ollama (local inference — no API key needed) ──
     # Set ollama_base_url to enable Ollama as a task answerer (e.g. http://localhost:11434).
-    # Ollama models are injected in three scenarios:
-    #   1. BUDGET profile (simple tasks) — always prepended to the budget chain.
-    #   2. ANY profile when Claude quota pressure >= 85% — spares subscription tokens.
-    #   3. claw-code mode (llm_router_claw_code=true) — always prepended to every
-    #      chain regardless of profile, because every non-local call costs money.
+    # When configured, Ollama models are ALWAYS prepended to the routing chain
+    # regardless of profile or quota pressure — they are free and local, so there
+    # is no reason to skip them. If a model can't answer the task it fails fast
+    # and the chain falls through to paid APIs.
     # Note: OLLAMA_URL (used by hooks) is separate — it controls which model
     # classifies prompts locally. OLLAMA_BASE_URL here controls which models
-    # ANSWER tasks. Both can be set for full local-first operation.
-    # Example: ollama_budget_models="llama3.2,qwen2.5-coder:7b"
+    # ANSWER tasks. Both should be set for full local-first operation.
+    # Example: ollama_budget_models="gemma4:latest,qwen3.5:latest"
     ollama_base_url: str = ""               # empty = Ollama disabled
-    ollama_budget_models: str = ""          # e.g. "llama3.2,qwen2.5-coder:7b"
+    ollama_budget_models: str = ""          # comma-separated model names
 
     # ── Media providers ──
     fal_key: str = ""               # fal.ai — Flux, video, audio

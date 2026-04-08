@@ -418,18 +418,12 @@ async def route_and_call(
                 models_to_try = pinned + rest
 
             # ── Ollama injection ─────────────────────────────────────────────
-            # BUDGET always: local/free models fit simple tasks regardless of quota.
-            # BALANCED/PREMIUM at ≥ 85%: inject at front to spare Claude quota.
-            # claw-code mode: always inject — every cloud call is paid, so free
-            #   local inference should always be tried first regardless of profile.
-            # Ollama stays at 0.85 (not 0.95) because it's truly free and local —
-            # even light quota stress is enough reason to prefer it.
+            # Always inject when configured — Ollama is free and local, so there
+            # is never a reason to skip it. If the model can't answer (quality
+            # mismatch or timeout) it fails fast and the fallback chain continues.
+            # This ensures >80% of routable tasks hit a free model first.
             ollama_models = config.all_ollama_models()
-            if ollama_models and (
-                profile == RoutingProfile.BUDGET
-                or pressure >= 0.85
-                or config.llm_router_claw_code
-            ):
+            if ollama_models:
                 models_to_try = ollama_models + models_to_try
 
             # ── Codex injection ──────────────────────────────────────────────
