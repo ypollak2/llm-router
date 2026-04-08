@@ -1,8 +1,6 @@
 # LLM Router
 
-**One MCP server. Every AI model. Smart routing.**
-
-Route text, code, image, video, and audio tasks to 20+ providers — automatically picking the right model based on task complexity and your budget. Works in Claude Code, Cursor, Windsurf, Zed, claw-code, and Agno.
+**Route cheap work away from premium models.**
 
 [![Tests](https://img.shields.io/github/actions/workflow/status/ypollak2/llm-router/ci.yml?style=flat-square&label=tests)](https://github.com/ypollak2/llm-router/actions)
 [![PyPI](https://img.shields.io/pypi/v/claude-code-llm-router?style=flat-square)](https://pypi.org/project/claude-code-llm-router/)
@@ -12,20 +10,25 @@ Route text, code, image, video, and audio tasks to 20+ providers — automatical
 [![License](https://img.shields.io/badge/license-MIT-green?style=flat-square)](LICENSE)
 [![Stars](https://img.shields.io/github/stars/ypollak2/llm-router?style=flat-square&color=yellow)](https://github.com/ypollak2/llm-router/stargazers)
 
+LLM Router is an MCP server and hook set that intercepts prompts and routes them to the cheapest model that can handle the task.
+
+It is built for a common failure mode in AI coding tools: using your best model for everything. In Claude Code, that burns quota on simple explanations, file lookups, small edits, and repetitive prompts. In other MCP clients, it means paying premium-model prices for work that never needed them.
+
+The goal is simple: keep cheap work on cheap or free models, keep hard work on Claude or other premium models, and remove the need to micromanage model selection. Works in Claude Code, Cursor, Windsurf, Zed, claw-code, and Agno.
+
 ---
 
 ## Why
 
-Not every task needs the same model. Without a router, everything goes to the same expensive frontier model — like hiring a surgeon to change a lightbulb.
+Most sessions contain a lot of low-value turns: quick questions, repo lookups, boilerplate edits, and small follow-ups. Those are exactly the prompts that quietly burn through premium models.
 
-| Task | Without router | With router | Savings |
-|------|---------------|-------------|---------|
-| Simple queries (60% of work) | Opus — $0.015 | Haiku / Gemini Flash — $0.0001 | **99%** |
-| Moderate tasks (30% of work) | Opus — $0.015 | Sonnet — $0.003 | **80%** |
-| Complex tasks (10% of work) | Opus — $0.015 | Opus — $0.015 | 0% |
-| **Blended monthly** | **~$50/mo** | **~$8–15/mo** | **70–85%** |
+LLM Router offloads that work first, then escalates when the task actually needs more capability.
 
-With Ollama: simple tasks route to a free local model — those 60% of queries cost **$0**.
+- Cheap work stays cheap.
+- Hard work still gets the best model.
+- Your workflow stays the same.
+
+It does not try to replace Claude or force weak models onto hard tasks. It removes the waste around them.
 
 ---
 
@@ -35,48 +38,25 @@ With Ollama: simple tasks route to a free local model — those 60% of queries c
 pipx install claude-code-llm-router && llm-router install
 ```
 
-That's it. The installer registers the MCP server and installs hooks into `~/.claude/` so every prompt is evaluated automatically.
+`llm-router install` registers the MCP server and installs hooks so prompt routing starts automatically.
 
-**Zero API keys required** if you have a Claude Code Pro/Max subscription. Add `GEMINI_API_KEY` for a free external fallback (1M tokens/day free tier).
+If you use Claude Code Pro/Max, you can start with zero API keys. Otherwise add `GEMINI_API_KEY` for a cheap free-tier fallback.
 
 ```bash
-# Optional: add providers in .env
-GEMINI_API_KEY=AIza...      # free tier
-OPENAI_API_KEY=sk-proj-...
-PERPLEXITY_API_KEY=pplx-...
-
-# If you use Claude Code subscription
+GEMINI_API_KEY=AIza...              # optional free-tier fallback
 LLM_ROUTER_CLAUDE_SUBSCRIPTION=true
-```
-
-**Enforcement modes** — control how strictly routing is applied:
-
-| Mode | Behaviour | Set via |
-|------|-----------|---------|
-| `smart` *(default)* | Hard block for Q&A tasks (query/research/generate/analyze), soft for code tasks | `LLM_ROUTER_ENFORCE=smart` |
-| `soft` | Route hints in context, never blocks — lowest friction | `LLM_ROUTER_ENFORCE=soft` |
-| `hard` | Blocks all Bash/Edit/Write until `llm_*` tool called — maximum savings | `LLM_ROUTER_ENFORCE=hard` |
-| `off` | Enforcement disabled entirely | `LLM_ROUTER_ENFORCE=off` |
-
-Switch mode instantly with the CLI:
-
-```bash
-llm-router set-enforce smart   # (default) smart balance
-llm-router set-enforce hard    # maximum cost savings
-llm-router set-enforce soft    # no blocking
-```
-
-Set permanently in your `.env` or `~/.llm-router/routing.yaml`:
-```yaml
-# ~/.llm-router/routing.yaml
-enforce: smart   # smart | soft | hard | off
 ```
 
 ---
 
 ## How It Works
 
-Every prompt is intercepted by a `UserPromptSubmit` hook before your top-tier model sees it:
+1. Intercept the prompt before your default premium model sees it.
+2. Classify the task and its complexity.
+3. Try the cheapest capable route first.
+4. Escalate or fall back when the task needs more capability.
+
+Under the hood, every prompt goes through a `UserPromptSubmit` hook before your top-tier model sees it:
 
 ```
 0. Context inherit      instant, free    "yes/ok/go ahead" reuse prior turn's route
@@ -313,6 +293,18 @@ OLLAMA_BUDGET_MODELS=gemma4:latest,qwen3.5:latest
 # Spend limits
 LLM_ROUTER_DAILY_SPEND_LIMIT=5.00   # USD, 0 = disabled
 ```
+
+### Enforcement Modes
+
+Choose how strict routing should be. The easiest way is `llm-router onboard`, which lets you pick a mode interactively.
+
+| Mode | Behaviour | Best for |
+|------|-----------|----------|
+| `shadow` | Observe routing decisions, never blocks | Safest first install |
+| `suggest` | Show route hints, allow direct answers | Low-friction adoption |
+| `enforce` | Block routed violations until the route is followed | Maximum savings |
+
+`LLM_ROUTER_ENFORCE=hard` is the strict compatibility alias for `enforce`. Legacy `soft` and `off` values are still supported for direct CLI or env-based control.
 
 ### Repo-level config (`.llm-router.yml`)
 
