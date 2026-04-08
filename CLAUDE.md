@@ -219,7 +219,15 @@ NOTES
 )"
 ```
 
-### Step 9 — Plugin reinstall (every version bump)
+### Step 9 — Bump marketplace.json (REQUIRED — controls plugin install version)
+```bash
+# .claude-plugin/marketplace.json "version" is what `claude plugin install llm-router`
+# uses to determine which git tag to clone. Without this, other machines stay on old versions.
+# Update the version field to match pyproject.toml:
+# "version": "X.Y.Z"
+```
+
+### Step 10 — Plugin reinstall (every version bump)
 ```bash
 # Reinstall the CC plugin from the updated repo so the installed version matches
 claude plugin reinstall llm-router
