@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm-router-hook-version: 13
+# llm-router-hook-version: 14
 """UserPromptSubmit hook — scoring classifier with Ollama + API fallback chain.
 
 Classification chain (stops at first success):
@@ -704,6 +704,123 @@ def classify_prompt(text: str) -> dict | None:
     return None
 
 
+# ── MCP Capability Map ───────────────────────────────────────────────────────
+#
+# Known non-llm-router MCP servers and the intent patterns that match them.
+# When the user's prompt matches one of these patterns AND that server's tools
+# are available in the current session, we skip issuing an llm_* routing
+# directive — Claude should use that MCP server's tools directly.
+#
+# Pattern order matters: more specific servers are checked first.
+_MCP_INTENT_PATTERNS: list[tuple[re.Pattern, list[str]]] = [
+    # Obsidian / note-taking
+    (re.compile(
+        r"\b(?:obsidian|vault|note(?:s)?|zettelkasten|journal entry|"
+        r"create (?:a )?note|add (?:a )?note|write (?:a )?note|"
+        r"open (?:a )?note|find (?:a )?note|search (?:my )?notes|"
+        r"daily note|weekly note|meeting note)\b",
+        re.IGNORECASE,
+    ), ["obsidian", "mcp-obsidian", "obsidian-mcp"]),
+
+    # GitHub / git hosting
+    (re.compile(
+        r"\b(?:github|gitlab|gitea|"
+        r"open (?:an? )?(?:issue|pr|pull request)|"
+        r"create (?:an? )?(?:issue|pr|pull request|gist)|"
+        r"list (?:issues|prs|pull requests)|"
+        r"search (?:issues|repos|repositories)|"
+        r"merge (?:pr|pull request)|close (?:issue|pr))\b",
+        re.IGNORECASE,
+    ), ["github", "gitlab"]),
+
+    # Google Calendar / scheduling
+    (re.compile(
+        r"\b(?:calendar|gcal|google calendar|"
+        r"(?:schedule|create|add|book) (?:a )?(?:meeting|event|appointment)|"
+        r"(?:my )?(?:meetings?|events?) (?:today|tomorrow|this week)|"
+        r"free (?:time|slot)|available (?:time|slot)|"
+        r"invite .+ to|block (?:time|calendar))\b",
+        re.IGNORECASE,
+    ), ["google-calendar", "gcal", "calendar"]),
+
+    # Gmail / email
+    (re.compile(
+        r"\b(?:gmail|"
+        r"(?:send|compose|draft|write|reply to) (?:an? )?(?:email|message)|"
+        r"(?:check|read|open) (?:my )?(?:email|inbox|messages)|"
+        r"email .+ about|forward (?:this|the) email)\b",
+        re.IGNORECASE,
+    ), ["gmail", "google-mail"]),
+
+    # Slack
+    (re.compile(
+        r"\b(?:slack|"
+        r"(?:send|post|message) (?:in|to|on) (?:#\w+|\w+ channel)|"
+        r"(?:check|read) (?:slack|#\w+|the channel)|"
+        r"dm .+|direct message .+)\b",
+        re.IGNORECASE,
+    ), ["slack"]),
+
+    # Linear / Jira / project management
+    (re.compile(
+        r"\b(?:linear|jira|"
+        r"(?:create|open|close|update) (?:a )?(?:ticket|issue|task|story|epic)|"
+        r"(?:assign|move) (?:ticket|issue|task)|"
+        r"sprint backlog|project board)\b",
+        re.IGNORECASE,
+    ), ["linear", "jira", "atlassian"]),
+
+    # Notion
+    (re.compile(
+        r"\b(?:notion|"
+        r"(?:create|add|update) (?:a )?(?:notion )?(?:page|database|block)|"
+        r"(?:search|find) (?:in )?notion)\b",
+        re.IGNORECASE,
+    ), ["notion"]),
+]
+
+
+def _build_mcp_capability_map(tools: list[dict]) -> dict[str, list[str]]:
+    """Parse available tools into a server → [tool_names] map.
+
+    Only non-llm-router MCP servers are included — llm_* tools are handled
+    by the standard routing path. Returns empty dict if no external MCP servers.
+    """
+    servers: dict[str, list[str]] = {}
+    for tool in tools:
+        name = tool.get("name", "") if isinstance(tool, dict) else str(tool)
+        if not name.startswith("mcp__"):
+            continue
+        parts = name.split("__", 2)  # ["mcp", "server-name", "tool-name"]
+        if len(parts) != 3:
+            continue
+        server = parts[1]
+        if server in ("llm-router", "llm_router"):
+            continue  # skip our own tools
+        servers.setdefault(server, []).append(parts[2])
+    return servers
+
+
+def _match_mcp_server(prompt: str, capability_map: dict[str, list[str]]) -> str | None:
+    """Return the MCP server name if the prompt clearly targets an available server.
+
+    Checks intent patterns in order. Returns the first matching server that is
+    actually available in capability_map, or None if no match.
+    """
+    if not capability_map:
+        return None
+    available = set(capability_map.keys())
+    for pattern, server_hints in _MCP_INTENT_PATTERNS:
+        if not pattern.search(prompt):
+            continue
+        for hint in server_hints:
+            # Accept partial matches: "obsidian" matches "mcp-obsidian", etc.
+            for server in available:
+                if hint in server or server in hint:
+                    return server
+    return None
+
+
 # ── Tool Mapping ─────────────────────────────────────────────────────────────
 
 TOOL_MAP = {
@@ -795,6 +912,31 @@ def main() -> None:
     session_id = hook_input.get("session_id", "")
     previous_unrouted = _consume_unresolved_pending(session_id) if session_id else None
 
+    # ── MCP capability check — runs before LLM classification ────────────────
+    # If the prompt clearly targets an available non-llm-router MCP server
+    # (Obsidian, GitHub, Calendar, etc.), skip the routing directive entirely.
+    # Claude should use that server's tools directly — no cheap-LLM routing needed.
+    raw_tools = hook_input.get("tools", [])
+    capability_map = _build_mcp_capability_map(raw_tools)
+    matched_server = _match_mcp_server(prompt, capability_map)
+    if matched_server:
+        # Emit an informational hint (not mandatory) so Claude knows why no directive
+        server_tools = capability_map.get(matched_server, [])
+        tool_hint = f"mcp__{matched_server}__{server_tools[0]}" if server_tools else f"mcp__{matched_server}__*"
+        hint = (
+            f"💡 MCP ROUTE: {matched_server} — use {tool_hint} tools for this task. "
+            f"No llm_* routing needed — {matched_server} handles it directly."
+        )
+        output = {
+            "hookSpecificOutput": {
+                "hookEventName": "UserPromptSubmit",
+                "contextForAgent": hint,
+            },
+            "systemMessage": f"💡 llm-router → {matched_server} MCP  [direct route]",
+        }
+        json.dump(output, sys.stdout)
+        sys.exit(0)
+
     result = classify_prompt(prompt)
     if result is None:
         sys.exit(0)
@@ -883,6 +1025,7 @@ def main() -> None:
         try:
             _state_path.write_text(json.dumps({
                 "expected_tool": tool,
+                "expected_server": "",  # empty for llm_* routes; set for MCP server routes
                 "task_type": task_type,
                 "complexity": complexity,
                 "issued_at": time.time(),
