@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm-router-hook-version: 4
+# llm-router-hook-version: 6
 """PreToolUse[*] hook — enforce routing compliance.
 
 When auto-route.py issues a ⚡ MANDATORY ROUTE directive, it writes a
@@ -13,19 +13,30 @@ This hook fires before every tool call and:
   4. If the tool is NOT in _BLOCK_TOOLS → allow unconditionally.
      This covers: ToolSearch, Read, Glob, all mcp__* tools, Agent (schema load), etc.
   5. If the tool IS in _BLOCK_TOOLS → enforce based on LLM_ROUTER_ENFORCE:
-       hard (default)   — block the call with a remediation message.
+       smart (default)  — hard for Q&A tasks (query/research/generate/analyze),
+                          soft for code tasks (file editing allowed).
        soft             — log the violation, allow the call.
+       hard             — block the call with a remediation message.
        off              — allow all calls regardless.
 
-Blocklist approach (not allowlist): only tools where Claude is doing the work
-itself (Bash, Edit, Write) need to be blocked. Everything else — including other
-MCP plugins — is already routing away from Claude and should pass through freely.
+Enforcement modes:
+  smart (default) — Balances cost savings with developer productivity:
+                    • query / research / generate / analyze tasks → hard block
+                      (Claude cannot answer directly — routes to cheap models)
+                    • code tasks → soft (file tools are needed for actual editing)
+                    Target: >80% of question-answering goes through router.
+  soft            — Route hints appear in context; Claude can follow voluntarily.
+                    Bash/Edit/Write are never blocked. Lowest friction.
+  hard            — Bash/Edit/Write are blocked for ALL task types until an
+                    llm_* tool is called. Maximum cost enforcement.
+                    Set: export LLM_ROUTER_ENFORCE=hard
+  off             — Enforcement completely disabled. No pending state is checked.
 
 Compliance log: ~/.llm-router/enforcement.log
 Pending state:  ~/.llm-router/pending_route_{session_id}.json
 
 Environment variables:
-  LLM_ROUTER_ENFORCE  hard | soft | off   (default: hard)
+  LLM_ROUTER_ENFORCE  smart | soft | hard | off   (default: smart)
 """
 
 from __future__ import annotations
@@ -88,9 +99,8 @@ def main() -> None:
     except (json.JSONDecodeError, EOFError):
         sys.exit(0)
 
-    enforce = os.environ.get("LLM_ROUTER_ENFORCE", "hard").lower()
-    # shadow = pure observation (auto-route writes no pending state in shadow mode, so
-    # this hook rarely fires, but treat it as off just in case)
+    enforce = os.environ.get("LLM_ROUTER_ENFORCE", "smart").lower()
+    # shadow / off = pure observation (treat as off)
     if enforce in ("off", "shadow"):
         sys.exit(0)
     # suggest = soft (log violation but never block)
@@ -143,8 +153,18 @@ def main() -> None:
     # ── Work tool used before routing ─────────────────────────────────────────
     _log_violation(session_id, tool_name, expected_tool)
 
-    if enforce != "hard":
+    if enforce == "soft":
         sys.exit(0)  # soft mode: logged, allowed
+
+    if enforce == "smart":
+        # Hard enforcement for pure Q&A tasks (question answering, research,
+        # content generation, analysis). These tasks have NO reason to use
+        # Bash/Edit/Write — the answer should come from the cheap model.
+        # Soft enforcement for code tasks — file tools are needed for editing.
+        _HARD_TASK_TYPES = frozenset({"query", "research", "generate", "analyze"})
+        if task_type not in _HARD_TASK_TYPES:
+            sys.exit(0)  # code task in smart mode — allow file tools
+        # Fall through to hard block for Q&A tasks
 
     # Hard mode: block with clear remediation instructions
     block_reason = (
@@ -155,7 +175,7 @@ def main() -> None:
         f"  1. Call {expected_tool}(prompt=\"...\") with the user's request as the prompt.\n"
         f"  2. Return its output as your response.\n"
         f"  3. Do NOT use {tool_name} directly to answer — the cheap model does the work.\n\n"
-        f"To allow this call without routing, set LLM_ROUTER_ENFORCE=soft or off.\n"
+        f"To allow this call without routing, set LLM_ROUTER_ENFORCE=soft.\n"
         f"Compliance log: {_LOG_PATH}"
     )
 

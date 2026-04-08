@@ -368,6 +368,7 @@ def get_model_chain(
     task_type: TaskType,
     failure_rates: dict[str, float] | None = None,
     latency_stats: "dict[str, dict] | None" = None,
+    acceptance_scores: "dict[str, float] | None" = None,
 ) -> list[str]:
     """Get the ordered model preference chain for a profile + task type.
 
@@ -392,6 +393,9 @@ def get_model_chain(
             to enable penalty scoring without a sync DB call.
         latency_stats: Pre-fetched dict of ``{model: {"p50", "p95", "count"}}``
             from ``cost.get_model_latency_stats()``. Same purpose.
+        acceptance_scores: Pre-fetched dict of ``{model: acceptance_rate}``
+            from ``cost.get_model_acceptance_scores()``. Models with low user
+            acceptance are penalised in benchmark ordering.
 
     Returns:
         Ordered list of model IDs to try, best-fit first.
@@ -432,6 +436,7 @@ def get_model_chain(
                 chain, task_type, profile,
                 failure_rates=failure_rates,
                 latency_stats=latency_stats,
+                acceptance_scores=acceptance_scores,
             )
         except Exception as _e:
             log.warning("Benchmark ordering failed — using static chain: %s", _e)

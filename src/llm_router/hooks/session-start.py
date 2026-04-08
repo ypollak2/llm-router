@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm-router-hook-version: 10
+# llm-router-hook-version: 11
 """SessionStart hook — inject routing banner, start Ollama, refresh Claude usage.
 
 Fires once when a new Claude Code session begins. Four jobs:
@@ -309,6 +309,14 @@ def main() -> None:
 
     _reset_session_stats()
     _reset_stale_health()
+    # Clear any orphaned pending-route state files from crashed/killed sessions.
+    # Without this, stale files would block Bash/Edit in the new session.
+    import glob as _glob
+    for _stale in _glob.glob(os.path.join(STATE_DIR, "pending_route_*.json")):
+        try:
+            os.unlink(_stale)
+        except OSError:
+            pass
 
     hints = ""
 

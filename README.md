@@ -53,11 +53,24 @@ LLM_ROUTER_CLAUDE_SUBSCRIPTION=true
 
 | Mode | Behaviour | Set via |
 |------|-----------|---------|
-| `shadow` | Observes and logs, never blocks | `LLM_ROUTER_ENFORCE=shadow` |
-| `suggest` | Shows a soft hint, logs violations | `LLM_ROUTER_ENFORCE=suggest` |
-| `enforce` | Blocks non-routed tool calls *(default)* | `LLM_ROUTER_ENFORCE=enforce` |
+| `smart` *(default)* | Hard block for Q&A tasks (query/research/generate/analyze), soft for code tasks | `LLM_ROUTER_ENFORCE=smart` |
+| `soft` | Route hints in context, never blocks — lowest friction | `LLM_ROUTER_ENFORCE=soft` |
+| `hard` | Blocks all Bash/Edit/Write until `llm_*` tool called — maximum savings | `LLM_ROUTER_ENFORCE=hard` |
+| `off` | Enforcement disabled entirely | `LLM_ROUTER_ENFORCE=off` |
 
-Set in env var, `.llm-router.yml`, or `~/.llm-router/routing.yaml`.
+Switch mode instantly with the CLI:
+
+```bash
+llm-router set-enforce smart   # (default) smart balance
+llm-router set-enforce hard    # maximum cost savings
+llm-router set-enforce soft    # no blocking
+```
+
+Set permanently in your `.env` or `~/.llm-router/routing.yaml`:
+```yaml
+# ~/.llm-router/routing.yaml
+enforce: smart   # smart | soft | hard | off
+```
 
 ---
 

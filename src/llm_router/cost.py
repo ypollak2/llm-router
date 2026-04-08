@@ -1162,6 +1162,44 @@ async def get_model_failure_rates(window_days: int = 30) -> dict[str, float]:
         await db.close()
 
 
+async def get_model_acceptance_scores(window_days: int = 30) -> dict[str, float]:
+    """Return the user-acceptance rate per model based on ``llm_rate`` feedback.
+
+    Acceptance rate = (was_good=1 count) / (total rated count). Only models
+    with at least 3 explicitly rated calls are included to avoid penalising
+    models on insufficient data.
+
+    Args:
+        window_days: Look-back window in days (default 30).
+
+    Returns:
+        Dict mapping ``final_model`` -> acceptance rate (0.0–1.0).
+        Returns an empty dict if no feedback exists or on any error.
+    """
+    db = await _get_db()
+    try:
+        cursor = await db.execute(
+            """
+            SELECT final_model,
+                   COUNT(*) AS rated,
+                   SUM(CASE WHEN was_good = 1 THEN 1 ELSE 0 END) AS good
+            FROM routing_decisions
+            WHERE timestamp >= datetime('now', ?)
+              AND final_model IS NOT NULL
+              AND was_good IS NOT NULL
+            GROUP BY final_model
+            HAVING rated >= 3
+            """,
+            (f"-{window_days} days",),
+        )
+        rows = await cursor.fetchall()
+        return {row[0]: row[2] / row[1] for row in rows if row[1] > 0}
+    except Exception:
+        return {}
+    finally:
+        await db.close()
+
+
 # Sonnet 4.6 pricing used as baseline for savings calculations
 _SONNET_INPUT_PER_M = 3.0    # $3 per million input tokens
 _SONNET_OUTPUT_PER_M = 15.0  # $15 per million output tokens

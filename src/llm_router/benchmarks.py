@@ -294,12 +294,46 @@ def get_model_latency_penalty(
         return 0.0
 
 
+def get_model_acceptance_penalty(
+    model: str,
+    acceptance_scores: dict[str, float] | None = None,
+) -> float:
+    """Return a 0.0–0.4 penalty for models with below-average user acceptance.
+
+    Models with no feedback data (None) receive no penalty — unknown is neutral.
+    Acceptance thresholds:
+      ≥ 70%  →  0.00  (good track record)
+      ≥ 50%  →  0.20  (mixed quality — push down moderately)
+      < 50%  →  0.40  (poor quality — push to back of chain)
+
+    Args:
+        model: Model ID in ``provider/model`` format.
+        acceptance_scores: Pre-fetched dict of ``{model: rate}`` from
+            ``cost.get_model_acceptance_scores()``.
+
+    Returns:
+        Penalty coefficient in [0.0, 0.4]. Zero means no penalty.
+    """
+    if not acceptance_scores:
+        return 0.0
+    rate = acceptance_scores.get(model)
+    if rate is None:
+        return 0.0  # no feedback yet — neutral
+    if rate >= 0.70:
+        return 0.00
+    elif rate >= 0.50:
+        return 0.20
+    else:
+        return 0.40
+
+
 def apply_benchmark_ordering(
     chain: list[str],
     task_type: "TaskType",
     profile: "RoutingProfile",
     failure_rates: dict[str, float] | None = None,
     latency_stats: dict[str, dict] | None = None,
+    acceptance_scores: dict[str, float] | None = None,
 ) -> list[str]:
     """Reorder a model chain using benchmark data for the given task/profile.
 
@@ -308,13 +342,20 @@ def apply_benchmark_ordering(
     first, while preserving all models (no removals). Models not covered by
     benchmark data are appended at the end in their original relative order.
 
-    The reordering also incorporates a local failure-rate penalty: a model with
-    a high local failure rate is pushed down even if its benchmark score is good.
+    The reordering incorporates three local feedback penalties:
+    - **Failure-rate penalty**: models that frequently fail are pushed down.
+    - **Latency penalty**: models with high P95 latency are pushed down.
+    - **Acceptance penalty**: models rated poorly via ``llm_rate`` are pushed down.
 
     Args:
         chain: Ordered list of model IDs from the static routing table.
         task_type: The task type being routed.
         profile: The routing profile (BUDGET / BALANCED / PREMIUM).
+        failure_rates: Pre-fetched dict of ``{model: rate}`` from cost module.
+        latency_stats: Pre-fetched dict of ``{model: {"p50", "p95", "count"}}``.
+        acceptance_scores: Pre-fetched dict of ``{model: acceptance_rate}``
+            from ``cost.get_model_acceptance_scores()``. Models with a rate
+            below 70% receive a penalty reducing their adjusted score.
 
     Returns:
         Reordered chain. Falls back to the input ``chain`` on any failure.
@@ -344,12 +385,13 @@ def apply_benchmark_ordering(
         scored: list[str] = [m for m in chain if m in task_scores]
         unscored: list[str] = [m for m in chain if m not in task_scores]
 
-        # Apply local failure-rate and latency penalties to scored models.
+        # Apply local failure-rate, latency, and acceptance penalties to scored models.
         def adjusted_score(model: str) -> float:
             base = task_scores.get(model, 0.5)
             failure_pen = get_model_failure_penalty(model, task_key, failure_rates=failure_rates)
             latency_pen = get_model_latency_penalty(model, task_key, latency_stats=latency_stats)
-            return base * (1.0 - failure_pen) * (1.0 - latency_pen)
+            accept_pen = get_model_acceptance_penalty(model, acceptance_scores=acceptance_scores)
+            return base * (1.0 - failure_pen) * (1.0 - latency_pen) * (1.0 - accept_pen)
 
         # Quality-cost sort: quality first, but within any 5% quality tier
         # sort by cost ascending (cheapest wins when models are near-equal).

@@ -1,5 +1,47 @@
 # Changelog
 
+## v2.6.0 — Latency-Aware + Personalized Routing (2026-04-08)
+
+### Added
+
+- **User-acceptance feedback loop** (`src/llm_router/cost.py`)
+
+  New `get_model_acceptance_scores(window_days=30)` function queries the `was_good` column from `routing_decisions` table to compute per-model acceptance rates. Models with < 50% acceptance receive up to a 40% score penalty in benchmark ordering — pushing poorly-rated models down the routing chain automatically.
+
+- **Acceptance penalty in benchmark ordering** (`src/llm_router/benchmarks.py`)
+
+  New `get_model_acceptance_penalty(model, acceptance_scores)` function with three tiers:
+  - ≥ 70% acceptance → no penalty
+  - ≥ 50% acceptance → 20% penalty
+  - < 50% acceptance → 40% penalty
+
+  Wired into `apply_benchmark_ordering()` via the new `acceptance_scores` parameter, threaded through `get_model_chain()` in `profiles.py` and the `route_and_call()` async gather in `router.py`.
+
+- **Model Performance section in `llm_usage`** (`src/llm_router/tools/admin.py`)
+
+  New section in the usage dashboard showing per-model P50/P95 latency (7-day window) and user acceptance rate (30-day window). Lists top 8 models by call count.
+
+- **`smart` enforcement mode** (`src/llm_router/hooks/enforce-route.py` v6)
+
+  New default enforcement mode that achieves >80% routing compliance without blocking developer workflow:
+  - **query / research / generate / analyze** tasks → hard block (Bash/Edit/Write blocked until `llm_*` called — the answer must come from the cheap model)
+  - **code** tasks → soft (file tools are needed for actual editing, not blocked)
+
+  Previous default `hard` → new default `smart`. Users can override with `LLM_ROUTER_ENFORCE=hard|soft|off`.
+
+- **Stale pending state cleanup on session start** (`src/llm_router/hooks/session-start.py` v11)
+
+  Session start now clears any orphaned `pending_route_*.json` files from crashed or killed sessions. Previously, a hard-killed Claude session left stale state files that would block Bash/Edit in the next session.
+
+### Changed
+
+- `LLM_ROUTER_ENFORCE` default changed from `hard` → `smart`
+- `apply_benchmark_ordering()` signature extended with `acceptance_scores: dict[str, float] | None = None`
+- `get_model_chain()` signature extended with `acceptance_scores: dict[str, float] | None = None`
+- `route_and_call()` now fetches acceptance scores in parallel with failure_rates and latency_stats
+
+---
+
 ## v2.5.0 — Context-Aware Routing (2026-04-08)
 
 ### Added

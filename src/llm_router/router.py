@@ -355,12 +355,18 @@ async def route_and_call(
         # without hitting the sync/async deadlock inside penalty functions.
         _failure_rates: dict[str, float] | None = None
         _latency_stats: dict[str, dict] | None = None
+        _acceptance_scores: dict[str, float] | None = None
         if task_type not in MEDIA_TASK_TYPES:
             try:
-                from llm_router.cost import get_model_failure_rates, get_model_latency_stats
-                _failure_rates, _latency_stats = await asyncio.gather(
+                from llm_router.cost import (
+                    get_model_acceptance_scores,
+                    get_model_failure_rates,
+                    get_model_latency_stats,
+                )
+                _failure_rates, _latency_stats, _acceptance_scores = await asyncio.gather(
                     get_model_failure_rates(window_days=30),
                     get_model_latency_stats(window_days=7),
+                    get_model_acceptance_scores(window_days=30),
                 )
             except Exception as _penalty_err:
                 log.warning(
@@ -372,6 +378,7 @@ async def route_and_call(
             profile, task_type,
             failure_rates=_failure_rates,
             latency_stats=_latency_stats,
+            acceptance_scores=_acceptance_scores,
         )
         if task_type not in MEDIA_TASK_TYPES:
             from llm_router.claude_usage import get_claude_pressure

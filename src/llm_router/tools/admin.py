@@ -3,12 +3,15 @@ llm_cache_clear, llm_quality_report, llm_health, llm_providers."""
 
 from __future__ import annotations
 
+import asyncio
+
 from mcp.server.fastmcp import Context
 
 from llm_router.cache import get_cache
 from llm_router.codex_agent import is_codex_available
 from llm_router.config import get_config
 from llm_router.cost import (
+    get_model_acceptance_scores, get_model_latency_stats,
     get_monthly_spend, get_quality_report,
     get_routing_savings_vs_sonnet, get_savings_summary,
 )
@@ -183,7 +186,32 @@ async def llm_usage(period: str = "today") -> str:
                 ))
         lines.append(HR)
 
-    # ── Section 6: Monthly Budget ──
+    # ── Section 6: Model Performance (latency + acceptance) ──
+    latency_stats, acceptance_scores = await asyncio.gather(
+        get_model_latency_stats(window_days=7),
+        get_model_acceptance_scores(window_days=30),
+    )
+    # Only show models that have latency OR acceptance data
+    perf_models = sorted(
+        set(latency_stats.keys()) | set(acceptance_scores.keys()),
+        key=lambda m: -(latency_stats.get(m, {}).get("count", 0)),
+    )
+    if perf_models:
+        lines.append(section("MODEL PERFORMANCE (7d latency / 30d acceptance)"))
+        header = f"  {'Model':<24} {'P50':>6} {'P95':>6}  {'Accept':>7}  {'Calls':>5}"
+        lines.append(row(header))
+        for m in perf_models[:8]:  # cap at 8 rows to keep the box compact
+            short = m.split("/")[-1][:22] if "/" in m else m[:22]
+            ls = latency_stats.get(m)
+            p50_s = f"{ls['p50']/1000:.1f}s" if ls else "  n/a "
+            p95_s = f"{ls['p95']/1000:.1f}s" if ls else "  n/a "
+            cnt_s = f"{ls['count']}" if ls else "  -  "
+            rate = acceptance_scores.get(m)
+            acc_s = f"{rate:.0%}" if rate is not None else "  n/a "
+            lines.append(row(f"  {short:<24} {p50_s:>6} {p95_s:>6}  {acc_s:>7}  {cnt_s:>5}"))
+        lines.append(HR)
+
+    # ── Section 7: Monthly Budget ──
     config = get_config()
     if config.llm_router_monthly_budget > 0:
         monthly_spend = await get_monthly_spend()
