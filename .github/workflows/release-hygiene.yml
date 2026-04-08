@@ -1,0 +1,45 @@
+name: Release Hygiene
+
+on:
+  push:
+    branches:
+      - "**"
+    tags-ignore:
+      - "v*"
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  release-hygiene:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Verify release metadata stays in sync
+        run: python3 scripts/release_guard.py sync
+
+      - name: Fetch base ref for pull request
+        if: github.event_name == 'pull_request'
+        run: git fetch origin "${{ github.base_ref }}" --depth=1
+
+      - name: Check release-impacting diffs updated the checklist
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_REF: ${{ github.base_ref }}
+          BEFORE_SHA: ${{ github.event.before }}
+          HEAD_SHA: ${{ github.sha }}
+        run: |
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            python3 scripts/release_guard.py changes --base "origin/$BASE_REF" --head HEAD
+          elif [ "$BEFORE_SHA" != "0000000000000000000000000000000000000000" ]; then
+            python3 scripts/release_guard.py changes --base "$BEFORE_SHA" --head "$HEAD_SHA"
+          else
+            echo "No previous commit to diff against; skipping changed-file release hygiene check."
+          fi

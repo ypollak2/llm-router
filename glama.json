@@ -2,7 +2,7 @@
   "$schema": "https://glama.ai/mcp/schemas/glama-json-schema.json",
   "name": "llm-router",
   "description": "Subscription-aware LLM routing for Claude Code — routes tasks to 20+ providers with complexity classification, pressure-based fallback chains, Codex integration, and cost tracking.",
-  "version": "1.3.0",
+  "version": "2.2.0",
   "license": "MIT",
   "tools": [
     {

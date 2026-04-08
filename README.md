@@ -342,6 +342,9 @@ llm-router share   # copies savings card to clipboard + opens tweet
 
 **Positioning**: *Claude Code's cost autopilot. Stop paying Opus prices for Haiku work.*
 
+> Release discipline: merged-but-unreleased work lives in [`CHANGELOG.md`](CHANGELOG.md)
+> under `Unreleased` until it is tagged and published. See [docs/RELEASING.md](docs/RELEASING.md).
+
 ### Phase 1 — Trust & Proof (Apr–Jun 2026)
 
 | Version | Headline | Status |
@@ -349,13 +352,13 @@ llm-router share   # copies savings card to clipboard + opens tweet
 | v1.3–v2.0 | Foundation, dashboard, enforcement, Agno adapter | ✅ Done |
 | **v2.1** | **Route Simulator** — `llm-router test "<prompt>"` dry-run + `llm_savings` dashboard | ✅ Done |
 | **v2.2** | **Explainable Routing** — `LLM_ROUTER_EXPLAIN=1`, "why not Opus?", per-decision reasoning | ✅ Done |
-| **v2.3** | **Zero-Friction Activation** — onboarding wizard, shadow/suggest/enforce modes, savings card | 📅 Jun 2026 |
+| **v2.3** | **Zero-Friction Activation** — onboarding wizard, shadow/suggest/enforce modes, savings card | 🚧 Unreleased on main |
 
 ### Phase 2 — Smarter Routing (Jun–Aug 2026)
 
 | Version | Headline | Status |
 |---------|----------|--------|
-| **v2.4** | **Repo-Aware YAML Config** — `.llm-router.yml` committed with the codebase | 📅 Jun 2026 |
+| **v2.4** | **Repo-Aware YAML Config** — `.llm-router.yml` committed with the codebase | 🚧 Unreleased on main |
 | **v2.5** | **Context-Aware Routing** — "yes/continue/proceed" resolved from conversation context | 📅 Jul 2026 |
 | **v2.6** | **Latency + Personalized Routing** — p95 latency scoring, per-user acceptance signals | 📅 Aug 2026 |
 
@@ -388,6 +391,8 @@ uv run ruff check src/ tests/
 ```
 
 See [CLAUDE.md](CLAUDE.md) for architecture and module layout.
+
+Release process: [docs/RELEASING.md](docs/RELEASING.md)
 
 ---
 
