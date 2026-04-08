@@ -87,6 +87,42 @@ def test_enforce_route_soft_mode_still_logs_but_allows(tmp_path):
     assert "expected=llm_query" in log_text
 
 
+def test_enforce_route_blocks_file_tools_for_qa_tasks(tmp_path):
+    """Glob/Read/Grep/LS are blocked for Q&A tasks — reading files is equivalent to self-answering."""
+    for tool_name in ("Read", "Glob", "Grep", "LS"):
+        session_id = f"sess-qa-{tool_name.lower()}"
+        _write_pending(tmp_path, session_id, task_type="query")
+
+        result = _run_hook(
+            ENFORCE_ROUTE_HOOK,
+            {"session_id": session_id, "tool_name": tool_name},
+            home=tmp_path,
+            extra_env={"LLM_ROUTER_ENFORCE": "hard"},
+        )
+
+        assert result.returncode == 0, f"{tool_name} should be blocked for query tasks"
+        out = json.loads(result.stdout)
+        assert out["decision"] == "block"
+        assert tool_name in out["reason"]
+
+
+def test_enforce_route_allows_file_tools_for_code_tasks(tmp_path):
+    """Glob/Read/Grep/LS are allowed for code tasks — needed to find files before editing."""
+    session_id = "sess-code-read-allowed"
+    _write_pending(tmp_path, session_id, task_type="code", expected_tool="llm_code")
+
+    for tool_name in ("Read", "Glob", "Grep", "LS"):
+        result = _run_hook(
+            ENFORCE_ROUTE_HOOK,
+            {"session_id": session_id, "tool_name": tool_name},
+            home=tmp_path,
+            extra_env={"LLM_ROUTER_ENFORCE": "hard"},
+        )
+
+        assert result.returncode == 0
+        assert result.stdout.strip() == "", f"{tool_name} should be allowed for code tasks"
+
+
 def test_auto_route_logs_unrouted_previous_turn_on_next_prompt(tmp_path):
     """A pending route that survives to the next prompt is recorded as NO_ROUTE."""
     session_id = "sess-unrouted-prior-turn"

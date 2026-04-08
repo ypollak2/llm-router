@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm-router-hook-version: 6
+# llm-router-hook-version: 7
 """PreToolUse[*] hook — enforce routing compliance.
 
 When auto-route.py issues a ⚡ MANDATORY ROUTE directive, it writes a
@@ -10,9 +10,11 @@ This hook fires before every tool call and:
   2. If the tool is an llm_* MCP tool → routing honored, clear state, allow.
   3. If the tool exactly matches the expected_tool in pending state → allow + clear.
      (Supports MCP server routing, e.g. mcp__obsidian__create_note)
-  4. If the tool is NOT in _BLOCK_TOOLS → allow unconditionally.
-     This covers: ToolSearch, Read, Glob, all mcp__* tools, Agent (schema load), etc.
-  5. If the tool IS in _BLOCK_TOOLS → enforce based on LLM_ROUTER_ENFORCE:
+  4. If the tool is NOT in the task-specific blocklist → allow unconditionally.
+     This covers: ToolSearch, all mcp__* tools, Agent (schema load), etc.
+     For code tasks: Read/Glob/Grep/LS are also allowed (needed for editing).
+     For Q&A tasks: Read/Glob/Grep/LS are blocked (Claude shouldn't self-answer).
+  5. If the tool IS in the task-specific blocklist → enforce based on LLM_ROUTER_ENFORCE:
        smart (default)  — hard for Q&A tasks (query/research/generate/analyze),
                           soft for code tasks (file editing allowed).
        soft             — log the violation, allow the call.
@@ -50,13 +52,23 @@ from pathlib import Path
 _ROUTER_DIR = Path.home() / ".llm-router"
 _LOG_PATH = _ROUTER_DIR / "enforcement.log"
 
-# Blocklist: ONLY these tools are blocked before routing is satisfied.
-# Everything else — ToolSearch, Read, Glob, all mcp__* tools from any plugin —
-# passes through freely. This prevents deadlocks with schema discovery and
-# ensures other MCP plugins (Obsidian, GitHub, etc.) are never blocked.
-_BLOCK_TOOLS = frozenset({
+# Base blocklist: always blocked before routing is satisfied (all task types).
+_BASE_BLOCK_TOOLS = frozenset({
     "Bash", "Edit", "MultiEdit", "Write", "NotebookEdit",
 })
+
+# Q&A task types: Claude answering by reading local files is the same as
+# Claude answering directly — both bypass the cheap model. Block file-reading
+# tools so the content must be passed to llm_analyze/llm_query instead.
+_QA_TASK_TYPES = frozenset({"query", "research", "generate", "analyze"})
+_QA_ONLY_BLOCK_TOOLS = frozenset({"Glob", "Read", "Grep", "LS"})
+
+
+def _block_tools_for(task_type: str) -> frozenset:
+    """Return the appropriate blocklist for the given task type."""
+    if task_type in _QA_TASK_TYPES:
+        return _BASE_BLOCK_TOOLS | _QA_ONLY_BLOCK_TOOLS
+    return _BASE_BLOCK_TOOLS
 
 
 def _pending_path(session_id: str) -> Path:
@@ -144,10 +156,12 @@ def main() -> None:
         _clear_pending(session_id)
         sys.exit(0)
 
-    # ── Blocklist check — only block "Claude doing the work itself" tools ─────
-    # Everything NOT in _BLOCK_TOOLS passes through unconditionally:
-    # ToolSearch, Read, Glob, Grep, LS, all mcp__* tools, TodoWrite, etc.
-    if tool_name not in _BLOCK_TOOLS:
+    # ── Blocklist check ───────────────────────────────────────────────────────
+    # For code tasks: only Bash/Edit/Write are blocked (file reads are needed).
+    # For Q&A tasks: also block Read/Glob/Grep/LS — Claude reading files and
+    # reasoning about them is equivalent to answering directly; the file
+    # contents should be passed to llm_analyze/llm_query instead.
+    if tool_name not in _block_tools_for(task_type):
         sys.exit(0)
 
     # ── Work tool used before routing ─────────────────────────────────────────
@@ -157,24 +171,32 @@ def main() -> None:
         sys.exit(0)  # soft mode: logged, allowed
 
     if enforce == "smart":
-        # Hard enforcement for pure Q&A tasks (question answering, research,
-        # content generation, analysis). These tasks have NO reason to use
-        # Bash/Edit/Write — the answer should come from the cheap model.
+        # Hard enforcement for Q&A tasks — answer must come from cheap model.
         # Soft enforcement for code tasks — file tools are needed for editing.
-        _HARD_TASK_TYPES = frozenset({"query", "research", "generate", "analyze"})
-        if task_type not in _HARD_TASK_TYPES:
+        if task_type not in _QA_TASK_TYPES:
             sys.exit(0)  # code task in smart mode — allow file tools
         # Fall through to hard block for Q&A tasks
 
     # Hard mode: block with clear remediation instructions
+    is_file_reader = tool_name in _QA_ONLY_BLOCK_TOOLS
+    if is_file_reader:
+        action = (
+            f"  1. Call {expected_tool}(prompt=\"...\", context=\"<paste file contents here>\").\n"
+            f"  2. Do NOT use {tool_name} to read files and reason about them yourself —\n"
+            f"     that is equivalent to answering directly. Pass the content to the cheap model."
+        )
+    else:
+        action = (
+            f"  1. Call {expected_tool}(prompt=\"...\") with the user's request as the prompt.\n"
+            f"  2. Return its output as your response.\n"
+            f"  3. Do NOT use {tool_name} directly to answer — the cheap model does the work."
+        )
     block_reason = (
         f"[llm-router] Routing directive violated.\n\n"
         f"  Directive:     ⚡ MANDATORY ROUTE: {task_type}/{complexity} → call {expected_tool}\n"
         f"  Tool blocked:  {tool_name}\n\n"
         f"REQUIRED ACTION:\n"
-        f"  1. Call {expected_tool}(prompt=\"...\") with the user's request as the prompt.\n"
-        f"  2. Return its output as your response.\n"
-        f"  3. Do NOT use {tool_name} directly to answer — the cheap model does the work.\n\n"
+        f"{action}\n\n"
         f"To allow this call without routing, set LLM_ROUTER_ENFORCE=soft.\n"
         f"Compliance log: {_LOG_PATH}"
     )
