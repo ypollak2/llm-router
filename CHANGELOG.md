@@ -1,5 +1,87 @@
 # Changelog
 
+## v2.5.0 — Context-Aware Routing (2026-04-08)
+
+### Added
+
+- **Continuation prompt state inheritance** (`src/llm_router/hooks/auto-route.py` v16)
+
+  Short follow-up prompts (`yes`, `ok`, `go ahead`, `do it`, `sounds good`, etc.) now instantly reuse the prior turn's `task_type/complexity/tool` instead of re-running the full Ollama/API classifier chain (~1–3s saved per continuation turn).
+
+  - `_is_continuation()` — detects affirmatives, negatives, and ≤5-word zero-signal prompts
+  - `_save_last_route()` / `_load_last_route()` — session-scoped state at `~/.llm-router/last_route_{session_id}.json` with 30-minute TTL
+  - Negative continuations (`no`, `stop`, `skip`, `cancel`) downgrade to `query/simple → llm_query`
+  - Routing directive shows `[via context-inherit]` method tag
+  - Session states are keyed by `session_id` so parallel Claude sessions never interfere
+
+---
+
+## v2.4.0 — Repo-Aware YAML Config (2026-04-08)
+
+### Added
+
+- **`src/llm_router/repo_config.py`** — Two-layer YAML configuration system
+
+  Loads and merges two optional config files with clear precedence:
+  ```
+  env vars > .llm-router.yml (repo) > ~/.llm-router/routing.yaml (user) > defaults
+  ```
+
+  - `RepoConfig` dataclass: `profile`, `enforce`, `block_providers`, `routing` (per-task model/provider pins), `daily_caps`
+  - `load_user_config()` — reads `~/.llm-router/routing.yaml`
+  - `load_repo_config()` — searches cwd and ancestors for `.llm-router.yml`
+  - `effective_config()` — merges both (repo wins over user config)
+  - `fingerprint_repo()` — auto-detects Python/Node/Go/Rust/Java/Swift/Ruby/PHP from indicator files, suggests appropriate profile
+
+- **`llm-router config` sub-commands** (`src/llm_router/cli.py`)
+
+  - `llm-router config show` — displays effective settings with per-field source annotation
+  - `llm-router config lint` — validates YAML files, surfaces unknown keys and invalid values
+  - `llm-router config init` — creates starter `.llm-router.yml` with repo-fingerprinted profile suggestion
+
+- **`llm-router onboard` wizard** (`src/llm_router/cli.py`)
+
+  Interactive first-run setup: detects available providers (Ollama, Codex, API keys), recommends a profile, lets you pick enforcement mode (shadow/suggest/enforce), writes `~/.llm-router/.env`, and runs `llm-router install`.
+
+- **Block providers + model/provider pins** (`src/llm_router/router.py`)
+
+  Repo config `block_providers` list is applied before routing — blocked providers are removed from the fallback chain. Per-task `routing.{task_type}.model` / `.provider` pins prepend or reorder the chain accordingly.
+
+### Technical
+
+- `TaskRouteOverride` dataclass: `model`, `provider` fields (both optional)
+- `VALID_TASK_TYPES`, `VALID_PROFILES`, `VALID_ENFORCE` schema constants for strict YAML validation
+- `_merge()` combines two configs — override wins for scalars, lists are unioned
+
+---
+
+## v2.3.0 — Zero-Friction Activation (2026-04-08)
+
+### Added
+
+- **Yearly savings projection** (`src/llm_router/hooks/session-end.py` v14)
+
+  Session-end summary now shows a `📈 Projection: ~$X/year · ~Xk tok/year (based on 7-day avg)` line alongside daily/weekly/monthly cumulative savings, giving a concrete annual ROI signal.
+
+  - `_fmt_tok()` helper: human-readable token counts (e.g. `42k`, `1.3M`)
+  - Projection extrapolates from 7-day average when available, falls back to today's rate
+
+- **Monday weekly digest** (`src/llm_router/hooks/session-start.py` v10)
+
+  Fires once per week (on Mondays or after 6-day gap), shows last 7 days: calls, tokens, USD saved, and yearly projection. Writes `~/.llm-router/last_weekly_digest.txt` to prevent repeat firing within the same week.
+
+- **Shadow / suggest / enforce activation modes** (`src/llm_router/hooks/auto-route.py` v15, `enforce-route.py` v4)
+
+  Control routing enforcement level via `LLM_ROUTER_ENFORCE` env var or `.llm-router.yml`:
+
+  | Mode | Behaviour |
+  |---|---|
+  | `shadow` | Passive `👁 ROUTING OBSERVATION` — no pending state, no blocking |
+  | `suggest` | Soft `💡 SUGGESTED ROUTE` hint — pending state written, enforce-route only logs |
+  | `enforce` / `hard` | `⚡ MANDATORY ROUTE` — blocks non-routed tool calls (default) |
+
+---
+
 ## v2.2.0 — Explainable Routing (2026-04-08)
 
 ### Added

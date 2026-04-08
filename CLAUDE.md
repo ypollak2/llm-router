@@ -150,21 +150,78 @@ uv run llm-router
 - Classification results ARE cached (complexity doesn't change with budget)
 - MCP tools return formatted strings, not structured data
 
-## Push to Production Rules
+## MANDATORY Release Checklist
 
-Push to `main` after every logical change that passes tests. Rules:
+**Every user-facing change MUST complete ALL steps before moving to the next feature.**
+This checklist is not optional. Missing any step means the release is incomplete.
 
-1. **Always run tests before pushing** — `uv run pytest tests/ -q --ignore=tests/test_integration.py`
-2. **Deploy hooks after any hook change** — `install -m 755 src/llm_router/hooks/<hook>.py ~/.claude/hooks/<hook>.py`
-3. **Bump server tool count in test_server.py** when adding new MCP tools
-4. **Version bump in pyproject.toml** for user-facing changes (new tools, routing strategy changes)
-5. **Update CHANGELOG.md** for any version bump
-6. **Push immediately after commit** — never let local main diverge from remote
-7. **One concern per commit** — routing changes, tool additions, and hook fixes each get their own commit
-8. **Publish to PyPI after every version bump** — run these three commands in order:
-   ```bash
-   rm -rf dist/ && uv build
-   PYPI_TOKEN=$(python3 -c "import configparser; c=configparser.ConfigParser(); c.read('/Users/yali.pollak/.pypirc'); print(c['pypi']['password'])")
-   uv publish --token "$PYPI_TOKEN"
-   git tag v$(python3 -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])") && git push origin --tags
-   ```
+### Step 1 — Tests (always)
+```bash
+uv run pytest tests/ -q --ignore=tests/test_integration.py
+uv run ruff check src/ tests/
+```
+
+### Step 2 — Hook deploy (after any hook change)
+```bash
+install -m 755 src/llm_router/hooks/auto-route.py ~/.claude/hooks/llm-router-auto-route.py
+install -m 755 src/llm_router/hooks/session-end.py ~/.claude/hooks/llm-router-session-end.py
+install -m 755 src/llm_router/hooks/session-start.py ~/.claude/hooks/llm-router-session-start.py
+install -m 755 src/llm_router/hooks/enforce-route.py ~/.claude/hooks/llm-router-enforce-route.py
+```
+
+### Step 3 — Version bump (every user-facing change)
+Bump `pyproject.toml` AND `.claude-plugin/plugin.json` to the same version:
+```bash
+# Edit both files, then verify:
+python3 -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])"
+python3 -c "import json; print(json.load(open('.claude-plugin/plugin.json'))['version'])"
+```
+
+### Step 4 — CHANGELOG.md (every version bump)
+Add entry at the top with: version, date, feature summary, technical notes.
+
+### Step 5 — README.md (when new features/commands are added)
+Update the feature list, command reference, and any version badges.
+
+### Step 6 — Commit + push
+```bash
+git add -p   # stage deliberately, never `git add .`
+git commit -m "feat(vX.Y.Z): ..."
+git push
+```
+
+### Step 7 — PyPI publish (every version bump)
+```bash
+rm -rf dist/ && uv build
+PYPI_TOKEN=$(python3 -c "import configparser; c=configparser.ConfigParser(); c.read('/Users/yali.pollak/.pypirc'); print(c['pypi']['password'])")
+uv publish --token "$PYPI_TOKEN"
+```
+
+### Step 8 — Git tag (every version bump)
+```bash
+git tag v$(python3 -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")
+git push origin --tags
+```
+
+### Step 9 — Plugin reinstall (every version bump)
+```bash
+# Reinstall the CC plugin from the updated repo so the installed version matches
+claude plugin reinstall llm-router
+# Verify installed version matches pyproject.toml
+claude plugin list | grep llm-router
+```
+
+---
+
+**Why this matters**: skipping CHANGELOG/version/PyPI/plugin leaves users on stale builds,
+breaks `pip install --upgrade`, and creates drift between installed plugin and live code.
+
+---
+
+## Push to Production Rules (legacy — superseded by checklist above)
+
+Additional rules that apply on every push:
+
+1. **Bump server tool count in test_server.py** when adding new MCP tools
+2. **Push immediately after commit** — never let local main diverge from remote
+3. **One concern per commit** — routing changes, tool additions, and hook fixes each get their own commit

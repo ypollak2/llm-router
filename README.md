@@ -49,9 +49,15 @@ PERPLEXITY_API_KEY=pplx-...
 LLM_ROUTER_CLAUDE_SUBSCRIPTION=true
 ```
 
-Hook enforcement is now **hard by default** for routed prompts that try to jump
-straight to `Bash`/`Edit`/`Write` without an `llm_*` call first. Set
-`LLM_ROUTER_ENFORCE=soft` or `off` if you need to relax that behavior.
+**Enforcement modes** — control how strictly routing is applied:
+
+| Mode | Behaviour | Set via |
+|------|-----------|---------|
+| `shadow` | Observes and logs, never blocks | `LLM_ROUTER_ENFORCE=shadow` |
+| `suggest` | Shows a soft hint, logs violations | `LLM_ROUTER_ENFORCE=suggest` |
+| `enforce` | Blocks non-routed tool calls *(default)* | `LLM_ROUTER_ENFORCE=enforce` |
+
+Set in env var, `.llm-router.yml`, or `~/.llm-router/routing.yaml`.
 
 ---
 
@@ -60,6 +66,7 @@ straight to `Bash`/`Edit`/`Write` without an `llm_*` call first. Set
 Every prompt is intercepted by a `UserPromptSubmit` hook before your top-tier model sees it:
 
 ```
+0. Context inherit      instant, free    "yes/ok/go ahead" reuse prior turn's route
 1. Heuristic scoring    instant, free    high-confidence patterns route immediately
 2. Ollama local LLM     free, ~1s        catches what heuristics miss
 3. Cheap API            ~$0.0001         Gemini Flash / GPT-4o-mini fallback
@@ -284,14 +291,38 @@ ELEVENLABS_API_KEY=...
 LLM_ROUTER_PROFILE=balanced         # budget | balanced | premium
 LLM_ROUTER_MONTHLY_BUDGET=0         # USD, 0 = unlimited
 LLM_ROUTER_CLAUDE_SUBSCRIPTION=false  # true = Claude Code Pro/Max
+LLM_ROUTER_ENFORCE=enforce          # shadow | suggest | enforce (default: enforce)
 
 # Ollama (local models)
 OLLAMA_BASE_URL=http://localhost:11434
-OLLAMA_BUDGET_MODELS=llama3.2,qwen2.5-coder:7b
+OLLAMA_BUDGET_MODELS=gemma4:latest,qwen3.5:latest
 
 # Spend limits
 LLM_ROUTER_DAILY_SPEND_LIMIT=5.00   # USD, 0 = disabled
 ```
+
+### Repo-level config (`.llm-router.yml`)
+
+Commit a routing policy alongside your code — no env vars required:
+
+```yaml
+profile: balanced
+enforce: suggest          # shadow | suggest | enforce
+block_providers:
+  - openai                # never use OpenAI in this repo
+
+routing:
+  code:
+    model: ollama/qwen3.5:latest   # always use local model for code tasks
+  research:
+    provider: perplexity           # always use Perplexity for research
+
+daily_caps:
+  _total: 2.00            # global $2/day cap
+  code: 0.50              # code tasks capped at $0.50/day
+```
+
+User-level overrides live in `~/.llm-router/routing.yaml` (same schema). Repo config wins.
 
 Full reference: [.env.example](.env.example)
 
@@ -349,14 +380,14 @@ llm-router share   # copies savings card to clipboard + opens tweet
 | v1.3–v2.0 | Foundation, dashboard, enforcement, Agno adapter | ✅ Done |
 | **v2.1** | **Route Simulator** — `llm-router test "<prompt>"` dry-run + `llm_savings` dashboard | ✅ Done |
 | **v2.2** | **Explainable Routing** — `LLM_ROUTER_EXPLAIN=1`, "why not Opus?", per-decision reasoning | ✅ Done |
-| **v2.3** | **Zero-Friction Activation** — onboarding wizard, shadow/suggest/enforce modes, savings card | 📅 Jun 2026 |
+| **v2.3** | **Zero-Friction Activation** — onboarding wizard, shadow/suggest/enforce modes, yearly savings projection | ✅ Done |
 
 ### Phase 2 — Smarter Routing (Jun–Aug 2026)
 
 | Version | Headline | Status |
 |---------|----------|--------|
-| **v2.4** | **Repo-Aware YAML Config** — `.llm-router.yml` committed with the codebase | 📅 Jun 2026 |
-| **v2.5** | **Context-Aware Routing** — "yes/continue/proceed" resolved from conversation context | 📅 Jul 2026 |
+| **v2.4** | **Repo-Aware YAML Config** — `.llm-router.yml` committed with the codebase, block_providers, model pins | ✅ Done |
+| **v2.5** | **Context-Aware Routing** — "yes/ok/go ahead" inherits prior turn's route, zero classifier latency | ✅ Done |
 | **v2.6** | **Latency + Personalized Routing** — p95 latency scoring, per-user acceptance signals | 📅 Aug 2026 |
 
 ### Phase 3 — Team Infrastructure (Sep–Nov 2026)
