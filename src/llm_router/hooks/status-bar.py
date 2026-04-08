@@ -71,25 +71,25 @@ def _read_claude_credits() -> tuple[float | None, float | None, float | None, bo
 
 # ── Provider health ────────────────────────────────────────────────────────
 
-def _read_provider_health() -> dict[str, str]:
-    """Return {ollama: ok|warn|down, codex: ok|warn|down, apis: ok|warn|down}.
+def _read_provider_health() -> dict[str, str] | None:
+    """Return {ollama, codex, apis} status, or None if health tracking not active.
 
-    Reads from ~/.llm-router/health.json written by background health checks.
-    Falls back to 'unknown' if the file is missing or stale (>5 min).
+    Returns None when health.json is missing or stale (>5 min) — callers
+    suppress the health segment entirely in that case. The segment becomes
+    visible automatically once the background health checker writes this file.
     """
     try:
         with open(HEALTH_JSON) as f:
             data = json.load(f)
-        age = time.time() - data.get("updated_at", 0)
-        if age > 300:  # 5 min stale
-            return {"ollama": "unknown", "codex": "unknown", "apis": "unknown"}
+        if time.time() - data.get("updated_at", 0) > 300:
+            return None  # stale — checker may have stopped
         return {
             "ollama": data.get("ollama", "unknown"),
             "codex": data.get("codex", "unknown"),
             "apis": data.get("apis", "unknown"),
         }
     except (FileNotFoundError, json.JSONDecodeError, OSError):
-        return {"ollama": "unknown", "codex": "unknown", "apis": "unknown"}
+        return None  # not yet active
 
 
 def _health_icon(status: str, label: str = "", compact: bool = True) -> str:
@@ -297,8 +297,10 @@ def _format_status() -> str:
     else:
         cc = f"{DIM}CC — run llm_check_usage{RST}"
 
-    # ── Provider health segment ──
-    health_seg = _provider_health_compact(health) if compact else _provider_health_full(health)
+    # ── Provider health segment (only when health.json is active and fresh) ──
+    health_seg = None
+    if health is not None:
+        health_seg = _provider_health_compact(health) if compact else _provider_health_full(health)
 
     # ── Savings segment ──
     savings_seg = (
@@ -321,13 +323,19 @@ def _format_status() -> str:
 
     # ── Assemble ──
     if compact:
-        # 📊 CC 45%s·28%w │ 🦙✔ ⚙️✔ ☁️✔ │ 💰 D:$1.42 W:$9.88 │ 🛡️ │ 14.2x
-        parts = ["📊 ", cc, SEP, health_seg, SEP, savings_seg, SEP, enforce_seg]
+        # 📊 CC 45%s·28%w │ [🦙✔ ⚙️✔ ☁️✔ │] 💰 D:$1.42 W:$9.88 │ 🛡️ │ 14.2x
+        parts = ["📊 ", cc]
+        if health_seg:
+            parts += [SEP, health_seg]
+        parts += [SEP, savings_seg, SEP, enforce_seg]
         if eff:
             parts += [SEP, eff]
     else:
-        # 📊 CC 45%s·28%w·61%♪ │ Ollama✔ Codex✔ APIs✔ │ 💰 D:$1.42 W:$9.88 M:$41.15 (vs Sonnet:$58) │ enforce🛡️ │ eff 14.2x │ sub:3 free:12 paid:2
-        parts = ["📊 ", cc, SEP, health_seg, SEP, savings_seg, SEP, enforce_seg]
+        # 📊 CC 45%s·28%w·61%♪ │ [Ollama✔ Codex✔ APIs✔ │] 💰 D:$1.42 W:$9.88 M:$41.15 │ enforce🛡️ │ eff 14.2x
+        parts = ["📊 ", cc]
+        if health_seg:
+            parts += [SEP, health_seg]
+        parts += [SEP, savings_seg, SEP, enforce_seg]
         if eff:
             parts += [SEP, f"{DIM}eff {RST}{eff}"]
         if calls_seg:
