@@ -1272,7 +1272,7 @@ def _run_test(prompt: str) -> None:
         if saved > 0:
             print(row(f"  Saved:       {_green(f'${saved:.5f}  ({savings_pct}% cheaper)')}"))
         else:
-            print(row(f"  Saved:       —"))
+            print(row("  Saved:       —"))
         print(HR)
         print()
 

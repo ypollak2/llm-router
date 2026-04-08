@@ -1,5 +1,38 @@
 # Changelog
 
+## v2.1.0 — Route Simulator + Savings Dashboard (2026-04-08)
+
+### Added
+
+- **`llm-router test "<prompt>"` dry-run CLI** (`src/llm_router/cli.py`)
+
+  Simulates a routing decision for any prompt without making an API call. Uses the existing 5-layer classifier to determine task type, complexity, and confidence, then maps to the cheapest appropriate model and shows an estimated cost vs Sonnet baseline.
+
+  ```
+  llm-router test "refactor the auth module to use JWT"
+  → Task: analyze / moderate / 85% confidence (via gemini-flash-lite)
+  → Chosen: claude-sonnet-4-6  Baseline: claude-sonnet-4-5
+  → Saved: $0.00465 (100% cheaper)
+  ```
+
+- **`llm_savings` MCP tool** (`src/llm_router/tools/admin.py`)
+
+  Text-based savings dashboard with time-bucketed aggregates: today / this week / this month / all-time. Shows actual spend, Sonnet baseline, savings, and the efficiency multiplier (Nx) — the "wow" metric that makes routing value tangible.
+
+- **DB schema migration v2.1** (`src/llm_router/cost.py`)
+
+  Four new columns added to `usage` table via idempotent `ALTER TABLE` (safe for existing DBs): `baseline_model`, `potential_cost_usd`, `saved_usd`, `is_simulated`.
+
+- **`get_savings_by_period()`** (`src/llm_router/cost.py`) — async savings query used by status bar and `llm_savings`. Falls back to Sonnet estimation for pre-v2.1 rows.
+
+- **Enhanced status bar v3** (`src/llm_router/hooks/status-bar.py`) — D/W savings, provider health icons (auto-hidden until `health.json` active), enforcement mode badge, Nx efficiency multiplier. Full mode via `LLM_ROUTER_STATUS_MODE=full`.
+
+### Fixed
+
+- **Ruff F541** (`src/llm_router/cli.py:1275`) — spurious `f` prefix on string with no placeholders; broke CI lint on both Python 3.11 and 3.12.
+
+---
+
 ## v2.0.2 — Fix release CI for Agno tests (2026-04-07)
 
 ### Fixed

@@ -215,7 +215,7 @@ Every Agno agent takes a `model=` parameter. `RouteredModel` makes llm-router a 
 
 The biggest adoption blocker is not routing quality — it is trust. One visible misroute outweighs dozens of invisible cheap wins. Phase 1 builds the trust infrastructure before optimising the routing engine.
 
-### v2.1 — Route Simulator (late Apr 2026)
+### v2.1 — Route Simulator ✅ Complete (2026-04-08)
 
 **Headline**: *"See where your prompts would go before you trust the autopilot."*
 
