@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm-router-hook-version: 3
+# llm-router-hook-version: 4
 """PreToolUse[*] hook — enforce routing compliance.
 
 When auto-route.py issues a ⚡ MANDATORY ROUTE directive, it writes a
@@ -89,8 +89,13 @@ def main() -> None:
         sys.exit(0)
 
     enforce = os.environ.get("LLM_ROUTER_ENFORCE", "hard").lower()
-    if enforce == "off":
+    # shadow = pure observation (auto-route writes no pending state in shadow mode, so
+    # this hook rarely fires, but treat it as off just in case)
+    if enforce in ("off", "shadow"):
         sys.exit(0)
+    # suggest = soft (log violation but never block)
+    if enforce == "suggest":
+        enforce = "soft"
 
     session_id = hook_input.get("session_id", "")
     tool_name = hook_input.get("tool_name", "")

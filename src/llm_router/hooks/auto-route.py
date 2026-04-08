@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm-router-hook-version: 14
+# llm-router-hook-version: 15
 """UserPromptSubmit hook — scoring classifier with Ollama + API fallback chain.
 
 Classification chain (stops at first success):
@@ -999,10 +999,13 @@ def main() -> None:
                 sys.exit(0)
             # Pressure exceeded → fall through to external routing
 
+    # ── Activation mode (shadow / suggest / enforce) ──────────────────────────
+    # shadow  — observe only; emit passive hint, write NO pending state
+    # suggest — show soft hint; write pending state (enforce-route treats it as soft/logged-only)
+    # enforce / hard (default) — block Claude if routing is violated
+    _enforce_mode = os.environ.get("LLM_ROUTER_ENFORCE", "hard").lower()
+
     # ── Standard external routing directive ───────────────────────────────────
-    # complexity= is passed to every tool so route_and_call can derive the right
-    # profile (simple→BUDGET/Haiku, moderate→BALANCED/Sonnet, complex→PREMIUM/Opus).
-    # complexity_override= is the separate llm_route parameter name.
     if tool == "llm_route":
         tool_args = f'complexity_override="{complexity}"'
     elif tool in ("llm_query", "llm_code", "llm_analyze", "llm_generate"):
@@ -1011,21 +1014,44 @@ def main() -> None:
         tool_args = ""
     args_str = f"({tool_args})" if tool_args else ""
     stale_suffix = " [⚠️ STALE USAGE DATA >30min — run llm_check_usage]" if _is_pressure_stale() else ""
-    directive = (
-        f"⚡ MANDATORY ROUTE: {task_type}/{complexity} → call {tool}{args_str} [via {method}{stale_suffix}]"
-        f" | FORBIDDEN: self-answer · Agent subagents · WebSearch · WebFetch"
-        f" | Call the tool NOW as your ONLY action. Cheap model output IS your response."
-    )
+
+    if _enforce_mode == "shadow":
+        # Passive observation — no pending state, no blocking
+        directive = (
+            f"👁 ROUTING OBSERVATION [{_enforce_mode}]: {task_type}/{complexity} "
+            f"would route to {tool}{args_str} [via {method}{stale_suffix}] "
+            f"(shadow mode — no enforcement)"
+        )
+        indicator = f"👁 shadow → {tool}  [{task_type}/{complexity} · {method}]"
+        write_pending = False
+    elif _enforce_mode == "suggest":
+        # Soft hint — pending state written but enforce-route only logs, never blocks
+        directive = (
+            f"💡 SUGGESTED ROUTE: {task_type}/{complexity} → consider calling {tool}{args_str} "
+            f"[via {method}{stale_suffix}] | suggest mode: you may answer directly if needed"
+        )
+        indicator = f"💡 suggest → {tool}  [{task_type}/{complexity} · {method}]"
+        write_pending = True
+    else:
+        # enforce / hard (default)
+        directive = (
+            f"⚡ MANDATORY ROUTE: {task_type}/{complexity} → call {tool}{args_str} [via {method}{stale_suffix}]"
+            f" | FORBIDDEN: self-answer · Agent subagents · WebSearch · WebFetch"
+            f" | Call the tool NOW as your ONLY action. Cheap model output IS your response."
+        )
+        indicator = f"⚡ llm-router → {tool}  [{task_type}/{complexity} · {method}]"
+        write_pending = True
+
     directive = _prior_violation_notice(previous_unrouted) + directive
 
     # ── Write enforcement state for enforce-route.py (PreToolUse hook) ──────────
-    if session_id:
+    if write_pending and session_id:
         _ROUTER_DIR.mkdir(parents=True, exist_ok=True)
         _state_path = _pending_state_path(session_id)
         try:
             _state_path.write_text(json.dumps({
                 "expected_tool": tool,
-                "expected_server": "",  # empty for llm_* routes; set for MCP server routes
+                "expected_server": "",
                 "task_type": task_type,
                 "complexity": complexity,
                 "issued_at": time.time(),
@@ -1034,7 +1060,6 @@ def main() -> None:
         except OSError:
             pass
 
-    indicator = f"⚡ llm-router → {tool}  [{task_type}/{complexity} · {method}]"
     if previous_unrouted is not None:
         indicator = (
             f"⚠ prior unrouted turn ({previous_unrouted.get('expected_tool', 'llm_route')}) | "

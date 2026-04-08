@@ -365,16 +365,25 @@ def _fmt_tok(n: int) -> str:
 
 
 def _format_cumulative_section(periods: list[tuple[str, int, int, int, float]]) -> list[str]:
-    """Format daily/weekly/monthly/all-time cumulative savings table."""
+    """Format daily/weekly/monthly/all-time cumulative savings table + yearly projection."""
     if not periods or all(p[1] == 0 for p in periods):
         return []
     lines = ["  Cumulative savings (vs Sonnet baseline)", ""]
+    period_map = {label: (calls, ti, to, saved) for label, calls, ti, to, saved in periods}
     for label, calls, total_in, total_out, saved in periods:
         total_tok = total_in + total_out
         tok_str   = _fmt_tok(total_tok)
         lines.append(
             f"  {label:<12}  {calls:>5} calls  {tok_str:>7} tok  ${saved:.4f} saved"
         )
+    # Yearly projection — prefer weekly rate (7-day average × 365), fall back to today × 365
+    weekly_saved = period_map.get("this week", (0, 0, 0, 0.0))[3]
+    today_saved  = period_map.get("today",     (0, 0, 0, 0.0))[3]
+    rate = weekly_saved / 7 if weekly_saved > 0 else today_saved
+    if rate > 0:
+        yearly = rate * 365
+        lines.append("")
+        lines.append(f"  📈 Projection: ~${yearly:.0f}/year  (based on {('7-day' if weekly_saved > 0 else 'today')} avg)")
     return lines
 
 

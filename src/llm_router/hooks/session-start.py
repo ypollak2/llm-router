@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm-router-hook-version: 9
+# llm-router-hook-version: 10
 """SessionStart hook — inject routing banner, start Ollama, refresh Claude usage.
 
 Fires once when a new Claude Code session begins. Four jobs:
@@ -18,15 +18,23 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 import subprocess
 import sys
 import time
 import urllib.request
 import uuid
+from datetime import datetime
 
-STATE_DIR = os.path.expanduser("~/.llm-router")
-SESSION_START_FILE = os.path.join(STATE_DIR, "session_start.txt")
-SESSION_ID_FILE = os.path.join(STATE_DIR, "session_id.txt")
+STATE_DIR              = os.path.expanduser("~/.llm-router")
+SESSION_START_FILE     = os.path.join(STATE_DIR, "session_start.txt")
+SESSION_ID_FILE        = os.path.join(STATE_DIR, "session_id.txt")
+DB_PATH                = os.path.join(STATE_DIR, "usage.db")
+WEEKLY_DIGEST_FILE     = os.path.join(STATE_DIR, "last_weekly_digest.txt")
+
+_SONNET_IN_PER_M  = 3.0
+_SONNET_OUT_PER_M = 15.0
+_FREE_PROVIDERS   = {"ollama", "codex"}
 
 # ── .env loader ───────────────────────────────────────────────────────────────
 # Hooks run outside the MCP server process and don't inherit its env.
@@ -220,6 +228,79 @@ def _refresh_claude_usage() -> str:
         return f"\n⚠️  Usage parse failed: {e}"
 
 
+def _weekly_digest() -> str:
+    """Return a one-line weekly savings summary shown on Mondays (or after 6+ day gap).
+
+    Queries usage.db directly — no import from the package needed.
+    Writes a timestamp file so it fires at most once per week.
+    """
+    today = datetime.now()
+    is_monday = today.weekday() == 0
+
+    # Check last-shown timestamp
+    try:
+        with open(WEEKLY_DIGEST_FILE) as f:
+            last_ts = float(f.read().strip())
+        since_last = time.time() - last_ts
+        if since_last < 6 * 86400:     # shown within the last 6 days — skip
+            return ""
+    except (OSError, ValueError):
+        if not is_monday:
+            return ""   # First run — only show on Mondays
+
+    if not os.path.exists(DB_PATH):
+        return ""
+
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        rows = conn.execute(
+            """
+            SELECT provider,
+                   COUNT(*),
+                   COALESCE(SUM(input_tokens),  0),
+                   COALESCE(SUM(output_tokens), 0),
+                   COALESCE(SUM(cost_usd),      0)
+            FROM usage
+            WHERE success=1
+              AND timestamp >= datetime('now', '-7 days')
+            GROUP BY provider
+            """
+        ).fetchall()
+        conn.close()
+
+        calls = total_in = total_out = 0
+        saved = 0.0
+        for provider, cnt, in_tok, out_tok, cost in rows:
+            calls     += cnt
+            total_in  += in_tok
+            total_out += out_tok
+            baseline   = (in_tok * _SONNET_IN_PER_M + out_tok * _SONNET_OUT_PER_M) / 1_000_000
+            if provider in _FREE_PROVIDERS:
+                saved += baseline
+            elif provider != "subscription":
+                saved += max(0.0, baseline - cost)
+
+        if calls == 0:
+            return ""
+
+        # Record shown
+        try:
+            with open(WEEKLY_DIGEST_FILE, "w") as f:
+                f.write(str(time.time()))
+        except OSError:
+            pass
+
+        total_tok = total_in + total_out
+        tok_str = f"{total_tok / 1000:.1f}k" if total_tok >= 1000 else str(total_tok)
+        yearly = saved / 7 * 365
+        return (
+            f"\n📊 Weekly digest: {calls} calls · {tok_str} tok · ${saved:.2f} saved last 7 days"
+            f"  (≈${yearly:.0f}/yr at this rate)"
+        )
+    except Exception:
+        return ""
+
+
 def main() -> None:
     try:
         json.load(sys.stdin)  # consume input (may be empty)
@@ -249,6 +330,7 @@ def main() -> None:
         banner = BANNER_API_KEYS
 
     hints += usage_hint
+    hints += _weekly_digest()
 
     print(json.dumps({
         "hookSpecificOutput": {
