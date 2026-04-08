@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm-router-hook-version: 15
+# llm-router-hook-version: 16
 """UserPromptSubmit hook — scoring classifier with Ollama + API fallback chain.
 
 Classification chain (stops at first success):
@@ -838,6 +838,24 @@ _ROUTER_DIR = Path.home() / ".llm-router"
 _ENFORCEMENT_LOG_PATH = _ROUTER_DIR / "enforcement.log"
 _PENDING_ROUTE_TTL_SEC = 300
 
+# ── Context-Aware Routing (v2.5) ─────────────────────────────────────────────
+# Short continuation prompts inherit the prior turn's classification so the
+# full Ollama/API classifier chain isn't re-invoked for "ok do it" / "yes" etc.
+_LAST_ROUTE_TTL = 1800  # 30 minutes — reuse context within same working session
+
+_CONTINUATION_RE = re.compile(
+    r"^(?:yes|no|ok|okay|sure|yep|nope|y|n|"
+    r"continue|proceed|go ahead|do it|do that|"
+    r"sounds good|great|perfect|agreed|correct|right|"
+    r"wait|hmm|actually|and|also|but|"
+    r"stop|skip|cancel)\s*[!?.]*$",
+    re.IGNORECASE,
+)
+_NEGATIVE_RE = re.compile(
+    r"^(?:no|nope|n|stop|skip|cancel|wait|nevermind|never mind)\s*[!?.]*$",
+    re.IGNORECASE,
+)
+
 
 def _pending_state_path(session_id: str) -> Path:
     return _ROUTER_DIR / f"pending_route_{session_id}.json"
@@ -882,6 +900,58 @@ def _consume_unresolved_pending(session_id: str) -> dict | None:
     _log_unrouted_turn(session_id, pending)
     _clear_pending_state(session_id)
     return pending
+
+
+def _last_route_path(session_id: str) -> Path:
+    return _ROUTER_DIR / f"last_route_{session_id}.json"
+
+
+def _save_last_route(session_id: str, task_type: str, complexity: str, tool: str) -> None:
+    if not session_id:
+        return
+    _ROUTER_DIR.mkdir(parents=True, exist_ok=True)
+    try:
+        _last_route_path(session_id).write_text(json.dumps({
+            "task_type": task_type,
+            "complexity": complexity,
+            "tool": tool,
+            "saved_at": time.time(),
+        }))
+    except OSError:
+        pass
+
+
+def _load_last_route(session_id: str) -> dict | None:
+    if not session_id:
+        return None
+    path = _last_route_path(session_id)
+    try:
+        data = json.loads(path.read_text())
+        if time.time() - float(data.get("saved_at", 0)) > _LAST_ROUTE_TTL:
+            path.unlink(missing_ok=True)
+            return None
+        return data
+    except (OSError, json.JSONDecodeError, TypeError, ValueError):
+        return None
+
+
+def _is_continuation(prompt: str) -> bool:
+    """Return True if the prompt looks like a continuation of the prior task.
+
+    Matches short affirmatives/negatives (yes/ok/go ahead/stop/…) that carry no
+    new task signal of their own — these should inherit the prior route rather
+    than re-triggering the full classifier chain.
+    """
+    stripped = prompt.strip()
+    if _CONTINUATION_RE.match(stripped):
+        return True
+    # Also treat very short prompts (≤5 words) with zero heuristic signal as continuations
+    words = stripped.split()
+    if 1 <= len(words) <= 5:
+        scores = score_categories(stripped)
+        if max(scores.values(), default=0) == 0:
+            return True
+    return False
 
 
 def _prior_violation_notice(pending: dict | None) -> str:
@@ -938,14 +1008,29 @@ def main() -> None:
         json.dump(output, sys.stdout)
         sys.exit(0)
 
-    result = classify_prompt(prompt)
-    if result is None:
-        sys.exit(0)
-
-    task_type = result["task_type"]
-    complexity = result["complexity"]
-    method = result["method"]
-    tool = TOOL_MAP.get(task_type, "llm_route")
+    # ── Context-Aware Routing (v2.5) ─────────────────────────────────────────
+    # Short continuation prompts inherit the prior turn's route — instant, free.
+    last_route = _load_last_route(session_id) if session_id else None
+    if last_route and _is_continuation(prompt):
+        task_type  = last_route["task_type"]
+        complexity = last_route["complexity"]
+        tool       = last_route["tool"]
+        # Negative continuations (no/stop/skip) → downgrade to cheap query
+        if _NEGATIVE_RE.match(prompt.strip()):
+            task_type  = "query"
+            complexity = "simple"
+            tool       = "llm_query"
+        method = "context-inherit"
+    else:
+        result = classify_prompt(prompt)
+        if result is None:
+            sys.exit(0)
+        task_type  = result["task_type"]
+        complexity = result["complexity"]
+        method     = result["method"]
+        tool       = TOOL_MAP.get(task_type, "llm_route")
+        # Save classification so the next turn can inherit if it's a continuation
+        _save_last_route(session_id, task_type, complexity, tool)
 
     # ── Claude Code subscription mode ─────────────────────────────────────────
     # Trigger inline OAuth refresh if usage data is stale (side-effect of _get_pressure).
