@@ -432,11 +432,76 @@ async def llm_dashboard(port: int = 7337) -> str:
     )
 
 
+async def llm_savings() -> str:
+    """Show time-bucketed savings dashboard: today / this week / this month / all-time.
+
+    Displays actual spend vs Sonnet baseline and the efficiency multiplier (Nx)
+    for each period. Use this to understand the real dollar value routing provides.
+
+    Returns:
+        Formatted savings table with efficiency multiplier.
+    """
+    from llm_router.cost import get_savings_by_period
+
+    data = await get_savings_by_period()
+
+    W = 58
+    HR = "+" + "-" * W + "+"
+
+    def row(text: str) -> str:
+        return f"| {text:<{W - 1}}|"
+
+    def section(title: str) -> str:
+        return "|" + f" {title} ".center(W, "-") + "|"
+
+    lines = [HR, "|" + " 💰 Savings Dashboard ".center(W) + "|", HR]
+
+    period_labels = [
+        ("today",    "Today"),
+        ("week",     "This week"),
+        ("month",    "This month"),
+        ("all_time", "All time"),
+    ]
+
+    lines.append(section("SAVINGS vs SONNET BASELINE"))
+    lines.append(row(f"  {'Period':<12}  {'Saved':>8}  {'Actual':>8}  {'Baseline':>9}  {'Eff':>5}"))
+    lines.append(row("  " + "-" * 52))
+
+    best_efficiency = 0.0
+    for key, label in period_labels:
+        d = data.get(key, {})
+        saved = d.get("saved_usd", 0.0)
+        actual = d.get("actual_usd", 0.0)
+        baseline = d.get("baseline_usd", 0.0)
+        eff = d.get("efficiency", 0.0)
+        best_efficiency = max(best_efficiency, eff)
+        eff_str = f"{eff:.1f}x" if eff >= 1.0 else "—"
+        lines.append(row(
+            f"  {label:<12}  ${saved:>7.2f}  ${actual:>7.4f}  ${baseline:>8.2f}  {eff_str:>5}"
+        ))
+
+    lines.append(HR)
+
+    # Highlight the "wow" metric
+    if best_efficiency >= 2.0:
+        lines.append(section(f"YOUR AI IS {best_efficiency:.1f}x MORE COST-EFFICIENT"))
+        lines.append(row("  than using Sonnet for every request."))
+    elif data.get("all_time", {}).get("calls", 0) == 0:
+        lines.append(row("  No routed calls yet. Run a few prompts to see savings."))
+
+    lines.append(HR)
+    lines.append(row("  Tip: run `llm-router test \"<prompt>\"` to simulate routing"))
+    lines.append(HR)
+
+    return "\n".join(lines)
+
+
 def register(mcp) -> None:
     """Register management tools with the FastMCP instance."""
     mcp.tool()(llm_save_session)
     mcp.tool()(llm_set_profile)
     mcp.tool()(llm_usage)
+    mcp.tool()(llm_savings)
     mcp.tool()(llm_cache_stats)
     mcp.tool()(llm_cache_clear)
     mcp.tool()(llm_quality_report)

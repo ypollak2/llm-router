@@ -139,6 +139,20 @@ MIGRATE_ROUTING_DECISIONS_ADD_FEEDBACK = [
 ]
 """Idempotent migration to add user feedback column to routing_decisions."""
 
+MIGRATE_USAGE_ADD_SAVINGS = [
+    "ALTER TABLE usage ADD COLUMN baseline_model TEXT",
+    "ALTER TABLE usage ADD COLUMN potential_cost_usd REAL DEFAULT 0.0",
+    "ALTER TABLE usage ADD COLUMN saved_usd REAL DEFAULT 0.0",
+    "ALTER TABLE usage ADD COLUMN is_simulated INTEGER DEFAULT 0",
+]
+"""Idempotent migration to add per-call savings columns to usage table.
+
+baseline_model:     Model that would have been used without routing (e.g. claude-sonnet)
+potential_cost_usd: Estimated cost if baseline_model had handled the call
+saved_usd:          potential_cost_usd - actual cost_usd (negative = routing cost money)
+is_simulated:       1 for dry-run test calls (llm-router test), 0 for real calls
+"""
+
 
 async def _get_db() -> aiosqlite.Connection:
     """Open (or create) the SQLite database and apply all migrations.
@@ -169,6 +183,12 @@ async def _get_db() -> aiosqlite.Connection:
             pass  # column already exists
     # Migrate: add feedback column if missing
     for stmt in MIGRATE_ROUTING_DECISIONS_ADD_FEEDBACK:
+        try:
+            await db.execute(stmt)
+        except Exception:
+            pass  # column already exists
+    # Migrate: add per-call savings columns if missing (v2.1)
+    for stmt in MIGRATE_USAGE_ADD_SAVINGS:
         try:
             await db.execute(stmt)
         except Exception:
@@ -1016,6 +1036,74 @@ async def get_model_latency_stats(window_days: int = 7) -> dict[str, dict]:
         p95 = latencies[min(int(n * 0.95), n - 1)]
         result[model] = {"p50": p50, "p95": p95, "count": n}
     return result
+
+
+# Sonnet baseline costs used when per-call saved_usd is not populated (pre-v2.1 rows)
+_SONNET_INPUT_PER_M = 3.0
+_SONNET_OUTPUT_PER_M = 15.0
+_FREE_PROVIDERS = {"ollama", "codex"}
+
+
+async def get_savings_by_period() -> dict[str, dict]:
+    """Return time-bucketed savings aggregates for the savings dashboard.
+
+    Queries the usage table for four periods: today, this week (Mon–Sun),
+    this calendar month, and all-time. For each period returns:
+        saved_usd:    total dollars saved vs Sonnet baseline
+        actual_usd:   total dollars actually spent on paid API calls
+        baseline_usd: what Sonnet would have cost for the same tokens
+        calls:        total routed calls in the period
+        efficiency:   baseline_usd / actual_usd multiplier (0 if no paid calls)
+
+    Rows with saved_usd populated (v2.1+) use that directly. Pre-v2.1 rows
+    fall back to estimating the Sonnet baseline from token counts.
+    """
+    db = await _get_db()
+    try:
+        # Build period boundaries as SQLite datetime expressions
+        periods = {
+            "today": "date('now')",
+            "week": "date('now', 'weekday 0', '-6 days')",
+            "month": "date('now', 'start of month')",
+            "all_time": "'1970-01-01'",
+        }
+        result: dict[str, dict] = {}
+        for name, since_expr in periods.items():
+            rows = await db.execute_fetchall(
+                f"""SELECT provider, input_tokens, output_tokens, cost_usd, saved_usd
+                    FROM usage
+                    WHERE date(timestamp) >= {since_expr}
+                      AND success = 1
+                      AND is_simulated IS NOT 1""",
+            )
+            actual = baseline = saved_total = 0.0
+            calls = 0
+            for provider, in_tok, out_tok, cost, saved_col in rows:
+                in_tok = in_tok or 0
+                out_tok = out_tok or 0
+                cost = cost or 0.0
+                calls += 1
+                if provider == "subscription":
+                    continue  # CC subscription rows have no token cost data
+                sonnet_est = (in_tok * _SONNET_INPUT_PER_M + out_tok * _SONNET_OUTPUT_PER_M) / 1_000_000
+                baseline += sonnet_est
+                if provider in _FREE_PROVIDERS:
+                    saved_total += saved_col if saved_col else sonnet_est
+                else:
+                    actual += cost
+                    saved_total += saved_col if saved_col else max(0.0, sonnet_est - cost)
+
+            efficiency = baseline / actual if actual > 0.001 else 0.0
+            result[name] = {
+                "saved_usd": round(saved_total, 4),
+                "actual_usd": round(actual, 4),
+                "baseline_usd": round(baseline, 4),
+                "calls": calls,
+                "efficiency": round(efficiency, 1),
+            }
+        return result
+    finally:
+        await db.close()
 
 
 async def get_model_failure_rates(window_days: int = 30) -> dict[str, float]:
