@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm-router-hook-version: 12
+# llm-router-hook-version: 13
 """Stop hook — unified session summary: CC subscription delta + external routing costs."""
 
 from __future__ import annotations
@@ -134,6 +134,49 @@ def _query_session_data(session_start: float) -> tuple[list[dict], list[dict], l
         return paid, cc, free
     except Exception:
         return [], [], []
+
+
+_PERIODS = [
+    ("today",     "date(timestamp) = date('now')"),
+    ("this week", "timestamp >= datetime('now', '-7 days')"),
+    ("this month","timestamp >= datetime('now', 'start of month')"),
+    ("all time",  "1=1"),
+]
+
+
+def _query_cumulative_savings() -> list[tuple[str, int, int, int, float]]:
+    """Return list of (label, calls, total_in_tokens, total_out_tokens, saved_usd) per period."""
+    if not os.path.exists(DB_PATH):
+        return []
+    results = []
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        for label, where in _PERIODS:
+            rows = conn.execute(
+                f"""
+                SELECT provider, COUNT(*), COALESCE(SUM(input_tokens),0),
+                       COALESCE(SUM(output_tokens),0), COALESCE(SUM(cost_usd),0)
+                FROM usage
+                WHERE success=1 AND {where}
+                GROUP BY provider
+                """
+            ).fetchall()
+            calls = total_in = total_out = 0
+            saved = 0.0
+            for provider, cnt, in_tok, out_tok, cost in rows:
+                calls   += cnt
+                total_in  += in_tok
+                total_out += out_tok
+                baseline = _sonnet_baseline(in_tok, out_tok)
+                if provider in _FREE_PROVIDERS:
+                    saved += baseline          # free = full Sonnet cost avoided
+                elif provider != "subscription":
+                    saved += max(0.0, baseline - cost)
+            results.append((label, calls, total_in, total_out, saved))
+        conn.close()
+    except Exception:
+        pass
+    return results
 
 
 def _aggregate(rows: list[dict]) -> dict[str, dict]:
@@ -312,9 +355,33 @@ def _format_free_section(free_rows: list[dict], paid_rows: list[dict]) -> list[s
     return lines
 
 
+def _fmt_tok(n: int) -> str:
+    """Human-readable token count: 1234 → 1.2k, 1234567 → 1.2M."""
+    if n >= 1_000_000:
+        return f"{n / 1_000_000:.1f}M"
+    if n >= 1_000:
+        return f"{n / 1_000:.1f}k"
+    return str(n)
+
+
+def _format_cumulative_section(periods: list[tuple[str, int, int, int, float]]) -> list[str]:
+    """Format daily/weekly/monthly/all-time cumulative savings table."""
+    if not periods or all(p[1] == 0 for p in periods):
+        return []
+    lines = ["  Cumulative savings (vs Sonnet baseline)", ""]
+    for label, calls, total_in, total_out, saved in periods:
+        total_tok = total_in + total_out
+        tok_str   = _fmt_tok(total_tok)
+        lines.append(
+            f"  {label:<12}  {calls:>5} calls  {tok_str:>7} tok  ${saved:.4f} saved"
+        )
+    return lines
+
+
 def _format(tools: dict[str, dict], cc_rows: list[dict], free_rows: list[dict],
             paid_rows: list[dict],
-            start: dict | None, current: dict | None, is_live: bool) -> str:
+            start: dict | None, current: dict | None, is_live: bool,
+            cumulative: list[tuple[str, int, int, int, float]] | None = None) -> str:
     lines = ["─" * WIDTH]
 
     if current:
@@ -331,6 +398,12 @@ def _format(tools: dict[str, dict], cc_rows: list[dict], free_rows: list[dict],
     if tools:
         lines.append("")
         lines += _format_routing_section(tools)
+
+    if cumulative:
+        cum_lines = _format_cumulative_section(cumulative)
+        if cum_lines:
+            lines.append("")
+            lines += cum_lines
 
     # Combined savings tip
     paid_saved = _total_saved(tools) if tools else 0.0
@@ -424,11 +497,12 @@ def main() -> None:
     paid_rows, cc_rows, free_rows = _query_session_data(session_start)
     tools                       = _aggregate(paid_rows) if paid_rows else {}
     start, current, is_live     = _get_cc_usage()
+    cumulative                  = _query_cumulative_savings()
 
-    if not tools and not cc_rows and not current and not free_rows:
+    if not tools and not cc_rows and not current and not free_rows and not cumulative:
         sys.exit(0)
 
-    summary = _format(tools, cc_rows, free_rows, paid_rows, start, current, is_live)
+    summary = _format(tools, cc_rows, free_rows, paid_rows, start, current, is_live, cumulative)
     print(json.dumps({"systemMessage": summary}))
 
 
