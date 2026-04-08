@@ -1,5 +1,33 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **Zero-friction activation is merged on `main` but not released yet** (`src/llm_router/cli.py`, `src/llm_router/hooks/session-start.py`)
+
+  Includes the onboard wizard, weekly digest, yearly projection, and shadow / suggest / enforce routing modes introduced after `v2.2.0`.
+
+- **Repo-aware YAML config is merged on `main` but not released yet** (`src/llm_router/repo_config.py`, `src/llm_router/cli.py`)
+
+  Adds committed `.llm-router.yml` support plus config linting for repo-scoped routing defaults.
+
+### Changed
+
+- **Session hooks now keep fresher cost and usage context** (`src/llm_router/hooks/session-end.py`, `src/llm_router/hooks/auto-route.py`)
+
+  Session summaries now include cumulative savings with token counts, and OAuth usage snapshots are refreshed more aggressively before routing decisions.
+
+- **Ollama defaults now prefer Gemma 4 where available** (`src/llm_router/cli.py`)
+
+  The local-first model ordering on `main` now prefers Gemma 4 over the older default.
+
+### Fixed
+
+- **Routing enforcement and auto-route blocklists tightened on `main`** (`src/llm_router/hooks/enforce-route.py`, `src/llm_router/hooks/auto-route.py`)
+
+  The post-`v2.2.0` hook work improves MCP-aware routing and closes several enforcement escape hatches.
+
 ## v2.2.0 — Explainable Routing (2026-04-08)
 
 ### Added

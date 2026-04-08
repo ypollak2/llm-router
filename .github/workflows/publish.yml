@@ -65,4 +65,34 @@ jobs:
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           password: ${{ secrets.PYPI_TOKEN }}
-          skip_existing: true
+          skip-existing: true
+
+  github_release:
+    name: Sync GitHub Release
+    needs: publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Extract release notes from CHANGELOG
+        env:
+          TAG_REF: ${{ github.ref_name }}
+        run: |
+          TAG="${TAG_REF#v}"
+          python3 scripts/release_guard.py title --version "$TAG" > "$RUNNER_TEMP/release-title.txt"
+          python3 scripts/release_guard.py notes --version "$TAG" --output "$RUNNER_TEMP/release-notes.md"
+
+      - name: Create or update GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG_REF: ${{ github.ref_name }}
+        run: |
+          TITLE="$(cat "$RUNNER_TEMP/release-title.txt")"
+          if gh release view "$TAG_REF" >/dev/null 2>&1; then
+            gh release edit "$TAG_REF" --title "$TITLE" --notes-file "$RUNNER_TEMP/release-notes.md"
+          else
+            gh release create "$TAG_REF" --title "$TITLE" --notes-file "$RUNNER_TEMP/release-notes.md"
+          fi
