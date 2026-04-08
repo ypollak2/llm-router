@@ -197,10 +197,26 @@ PYPI_TOKEN=$(python3 -c "import configparser; c=configparser.ConfigParser(); c.r
 uv publish --token "$PYPI_TOKEN"
 ```
 
-### Step 8 — Git tag (every version bump)
+### Step 8 — Git tag + GitHub Release (every version bump)
 ```bash
+# Tag
 git tag v$(python3 -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")
 git push origin --tags
+
+# GitHub Release (use --latest for the newest version)
+gh release create vX.Y.Z \
+  --title "vX.Y.Z — <headline>" \
+  --latest \
+  --notes "$(cat <<'NOTES'
+## What's new
+- bullet points from CHANGELOG
+
+## Upgrade
+\`\`\`bash
+pip install --upgrade claude-code-llm-router && llm-router install
+\`\`\`
+NOTES
+)"
 ```
 
 ### Step 9 — Plugin reinstall (every version bump)
