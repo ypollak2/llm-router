@@ -96,7 +96,8 @@ CREATE TABLE IF NOT EXISTS savings_stats (
     task_type TEXT NOT NULL,
     estimated_claude_cost_saved REAL NOT NULL,
     external_cost REAL NOT NULL,
-    model_used TEXT NOT NULL
+    model_used TEXT NOT NULL,
+    host TEXT NOT NULL DEFAULT 'claude_code'
 )
 """
 """Schema for the ``savings_stats`` table tracking per-call routing savings.
@@ -156,6 +157,11 @@ MIGRATE_USAGE_ADD_TEAM = [
     "ALTER TABLE usage ADD COLUMN project_id TEXT",
 ]
 """Idempotent migration to add team identity columns (v3.0)."""
+
+MIGRATE_SAVINGS_STATS_ADD_HOST = [
+    "ALTER TABLE savings_stats ADD COLUMN host TEXT NOT NULL DEFAULT 'claude_code'",
+]
+"""Idempotent migration to add host attribution column to savings_stats (v3.1)."""
 """Idempotent migration to add per-call savings columns to usage table.
 
 baseline_model:     Model that would have been used without routing (e.g. claude-sonnet)
@@ -212,6 +218,12 @@ async def _get_db() -> aiosqlite.Connection:
             pass  # column already exists
     # Migrate: add team identity columns if missing (v3.0)
     for stmt in MIGRATE_USAGE_ADD_TEAM:
+        try:
+            await db.execute(stmt)
+        except Exception:
+            pass  # column already exists
+    # Migrate: add host column to savings_stats (v3.1)
+    for stmt in MIGRATE_SAVINGS_STATS_ADD_HOST:
         try:
             await db.execute(stmt)
         except Exception:
@@ -1009,7 +1021,7 @@ async def import_savings_log() -> int:
             await db.execute(
                 "INSERT INTO savings_stats "
                 "(timestamp, session_id, task_type, estimated_claude_cost_saved, "
-                "external_cost, model_used) VALUES (?, ?, ?, ?, ?, ?)",
+                "external_cost, model_used, host) VALUES (?, ?, ?, ?, ?, ?, ?)",
                 (
                     entry.get("timestamp", datetime.now(timezone.utc).isoformat()),
                     entry.get("session_id", "unknown"),
@@ -1017,6 +1029,7 @@ async def import_savings_log() -> int:
                     float(entry.get("estimated_saved", 0.0)),
                     float(entry.get("external_cost", 0.0)),
                     entry.get("model", "unknown"),
+                    entry.get("host", "claude_code"),
                 ),
             )
             imported += 1

@@ -98,6 +98,7 @@ def _append_savings_log(tool_name: str) -> None:
         "external_cost": 0.0,  # actual cost unknown at hook time
         "model": "unknown",
         "session_id": session_id,
+        "host": "claude_code",
     }
     try:
         with open(SAVINGS_LOG_FILE, "a") as f:
