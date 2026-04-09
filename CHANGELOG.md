@@ -1,5 +1,63 @@
 # Changelog
 
+## v3.1.0 — Multi-Host Support + Cross-Session Savings (2026-04-09)
+
+### Added
+
+- **`llm_auto` MCP tool** (`src/llm_router/tools/routing.py`)
+
+  New sibling to `llm_route` designed for hosts without a UserPromptSubmit hook
+  (Codex CLI, Claude Desktop, GitHub Copilot). Identical routing logic, plus:
+  - Flushes pending JSONL savings records into SQLite before routing, so
+    cross-session savings are accurate even when called from hook-less hosts.
+  - Appends a compact savings envelope every 5 calls so savings are visible
+    without running `llm_savings` explicitly.
+
+- **Cross-session savings wiring** (`src/llm_router/tools/admin.py`)
+
+  `llm_savings()` and `llm_usage()` now call `import_savings_log()` before
+  querying, so hook-written JSONL records are always flushed into SQLite first.
+  Previously `import_savings_log()` was defined but never triggered — savings
+  from the PostToolUse hook were written to JSONL but never persisted to SQLite.
+
+- **`host` column in `savings_stats`** (`src/llm_router/cost.py`)
+
+  New `host TEXT NOT NULL DEFAULT 'claude_code'` column tracks which client
+  originated each routed call. The PostToolUse hook writes `"host": "claude_code"`;
+  future host adapters will write `"codex"`, `"desktop"`, or `"copilot"`.
+  Idempotent migration applied on DB open (existing rows default to `claude_code`).
+
+- **Host config snippets** (`llm-router install --host <name>`)
+
+  New CLI subcommand prints copy-paste config for non-Claude Code hosts.
+  No files are modified — snippets only.
+  - `--host codex` — `~/.codex/config.yaml` + routing rules
+  - `--host desktop` — `claude_desktop_config.json` snippet
+  - `--host copilot` — `.vscode/mcp.json` + `copilot-instructions.md` template
+  - `--host all` — all three
+
+- **Host routing rules** (`src/llm_router/rules/`)
+
+  Three new rules files for non-Claude Code hosts:
+  - `codex-rules.md` — how to use `llm_auto` in Codex CLI
+  - `desktop-rules.md` — capability extension framing for Desktop
+  - `copilot-rules.md` — capability extension framing for Copilot
+
+- **Phase 0 research doc** (`docs/multi-host-research.md`)
+
+  Documents architecture findings, revised plan scope, and host compatibility
+  matrix for future reference.
+
+### Technical notes
+
+- Total MCP tools: 38 (was 37 — added `llm_auto`)
+- `llm_route` remains unchanged for backwards compatibility; `llm_auto` is additive
+- `savings_stats` now has a `host` column; existing rows migrate to `'claude_code'`
+- Codex CLI confirmed to have no hook API — falls back to capability-extension tier
+- Claude Desktop and Copilot are capability-extension tier only (no cost-routing)
+
+---
+
 ## v3.0.0 — Team Dashboard + Multi-Channel Push (2026-04-08)
 
 ### Added
