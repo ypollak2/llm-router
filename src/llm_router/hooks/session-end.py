@@ -527,7 +527,8 @@ def main() -> None:
     start, current, is_live     = _get_cc_usage()
     cumulative                  = _query_cumulative_savings()
 
-    if not tools and not cc_rows and not current and not free_rows and not cumulative:
+    has_cumulative = any(calls > 0 for _, calls, *_ in cumulative)
+    if not tools and not cc_rows and not current and not free_rows and not has_cumulative:
         sys.exit(0)
 
     summary = _format(tools, cc_rows, free_rows, paid_rows, start, current, is_live, cumulative)
