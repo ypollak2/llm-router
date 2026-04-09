@@ -1,5 +1,24 @@
 # Changelog
 
+## v3.2.1 — Session-End Cumulative Accuracy Fix (2026-04-09)
+
+### Fixed
+
+- **Session-end hook: JSONL records now flushed before cumulative query** (`src/llm_router/hooks/session-end.py`)
+
+  Codex and Ollama calls that bypass the MCP server write savings records to
+  `~/.llm-router/savings_log.jsonl` via the PostToolUse hook. The session-end hook
+  was querying cumulative totals directly from SQLite without first importing those
+  records, causing a one-session lag for free-provider savings.
+
+  Fix: `_sync_import_savings_log()` is now called in `main()` before
+  `_query_cumulative_savings()`. It flushes any pending JSONL lines into the
+  `savings_stats` table synchronously (stdlib-only, no venv dependency).
+  The cumulative query now also unions `savings_stats` alongside `usage`, so
+  pre-computed savings from JSONL imports are included in every period total.
+
+---
+
 ## v3.2.0 — Policy Engine + Slack Digests + Community Benchmarks (2026-04-09)
 
 ### Added

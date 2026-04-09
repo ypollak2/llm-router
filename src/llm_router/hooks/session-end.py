@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm-router-hook-version: 13
+# llm-router-hook-version: 14
 """Stop hook — unified session summary: CC subscription delta + external routing costs."""
 
 from __future__ import annotations
@@ -19,6 +19,7 @@ SESSION_CC_SNAP_FILE = os.path.join(STATE_DIR, "session_start_cc_pct.json")
 DB_PATH              = os.path.join(STATE_DIR, "usage.db")
 USAGE_JSON           = os.path.join(STATE_DIR, "usage.json")
 STAR_CTA_FILE        = os.path.join(STATE_DIR, "star_cta_shown.txt")
+SAVINGS_LOG_PATH     = os.path.join(STATE_DIR, "savings_log.jsonl")
 
 # Show star CTA once the user has saved at least this much (lifetime)
 STAR_CTA_THRESHOLD_USD = 0.50
@@ -144,6 +145,76 @@ _PERIODS = [
 ]
 
 
+def _sync_import_savings_log() -> None:
+    """Flush JSONL savings records into savings_stats before querying cumulative data.
+
+    The PostToolUse hook appends one JSON line per routed Codex/Ollama call to
+    ``savings_log.jsonl``.  These records bypass the MCP server so they are never
+    written to the ``usage`` table.  Without this flush, the cumulative totals in
+    the session summary are one-session behind for free-provider calls.
+
+    This is a synchronous, stdlib-only version of ``cost.import_savings_log()``.
+    """
+    if not os.path.exists(SAVINGS_LOG_PATH) or not os.path.exists(DB_PATH):
+        return
+    try:
+        with open(SAVINGS_LOG_PATH) as f:
+            raw = f.read().strip()
+    except OSError:
+        return
+    if not raw:
+        return
+
+    records = []
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            r = json.loads(line)
+            records.append((
+                r.get("timestamp", ""),
+                r.get("session_id", ""),
+                r.get("task_type", "unknown"),
+                float(r.get("estimated_claude_cost_saved", 0.0)),
+                float(r.get("external_cost", 0.0)),
+                r.get("model_used", ""),
+                r.get("host", "claude_code"),
+            ))
+        except (json.JSONDecodeError, KeyError, ValueError):
+            continue
+
+    if not records:
+        return
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS savings_stats (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                task_type TEXT NOT NULL,
+                estimated_claude_cost_saved REAL NOT NULL,
+                external_cost REAL NOT NULL,
+                model_used TEXT NOT NULL,
+                host TEXT NOT NULL DEFAULT 'claude_code'
+            )
+        """)
+        conn.executemany(
+            "INSERT INTO savings_stats "
+            "(timestamp, session_id, task_type, estimated_claude_cost_saved, external_cost, model_used, host) "
+            "VALUES (?,?,?,?,?,?,?)",
+            records,
+        )
+        conn.commit()
+        conn.close()
+        # Truncate only after successful commit
+        with open(SAVINGS_LOG_PATH, "w") as f:
+            f.write("")
+    except Exception:
+        pass
+
+
 def _query_cumulative_savings() -> list[tuple[str, int, int, int, float]]:
     """Return list of (label, calls, total_in_tokens, total_out_tokens, saved_usd) per period."""
     if not os.path.exists(DB_PATH):
@@ -151,6 +222,11 @@ def _query_cumulative_savings() -> list[tuple[str, int, int, int, float]]:
     results = []
     try:
         conn = sqlite3.connect(DB_PATH)
+        # Check if savings_stats table exists (created on first JSONL import)
+        has_savings_stats = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='savings_stats'"
+        ).fetchone() is not None
+
         for label, where in _PERIODS:
             rows = conn.execute(
                 f"""
@@ -172,6 +248,18 @@ def _query_cumulative_savings() -> list[tuple[str, int, int, int, float]]:
                     saved += baseline          # free = full Sonnet cost avoided
                 elif provider != "subscription":
                     saved += max(0.0, baseline - cost)
+
+            # Also include pre-computed savings from savings_stats (Codex/Ollama JSONL records
+            # that bypass the MCP server and are never in the usage table)
+            if has_savings_stats:
+                ss_rows = conn.execute(
+                    f"SELECT COUNT(*), COALESCE(SUM(estimated_claude_cost_saved),0) "
+                    f"FROM savings_stats WHERE {where}"
+                ).fetchone()
+                if ss_rows:
+                    calls += ss_rows[0]
+                    saved += ss_rows[1]
+
             results.append((label, calls, total_in, total_out, saved))
         conn.close()
     except Exception:
@@ -525,6 +613,7 @@ def main() -> None:
     paid_rows, cc_rows, free_rows = _query_session_data(session_start)
     tools                       = _aggregate(paid_rows) if paid_rows else {}
     start, current, is_live     = _get_cc_usage()
+    _sync_import_savings_log()          # flush JSONL before cumulative query
     cumulative                  = _query_cumulative_savings()
 
     has_cumulative = any(calls > 0 for _, calls, *_ in cumulative)

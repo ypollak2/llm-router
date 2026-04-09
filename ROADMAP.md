@@ -291,17 +291,17 @@ Short continuation prompts are currently classified on their 3 words alone, losi
 
 ---
 
-### v2.6 — Latency-Aware + Personalized Routing (early Aug 2026)
+### v2.6 — Latency-Aware + Personalized Routing ✅ Complete (2026-04-09)
 
 **Headline**: *"The router learns what you actually accept — and keeps it fast."*
 
 | Feature | Notes |
 |---|---|
-| **p95 latency in model scoring** | Latency as tiebreaker between equally cheap models |
-| **Cold-start penalties for local models** | Ollama first-request penalty accounted for in selection |
-| **Per-user acceptance signals** | Local tracking of `llm_rate` thumbs / re-prompts as routing feedback |
-| **Score blending** | Per-user weights blend with global benchmarks; reset/opt-out controls |
-| **Latency dashboard** | `llm-router status` shows P50/P95 per provider |
+| ~~**p95 latency in model scoring**~~ | ✅ Latency as tiebreaker between equally cheap models |
+| ~~**Cold-start penalties for local models**~~ | ✅ Ollama first-request penalty accounted for in selection |
+| ~~**Per-user acceptance signals**~~ | ✅ Local tracking of `llm_rate` thumbs / re-prompts as routing feedback |
+| ~~**Score blending**~~ | ✅ Per-user weights blend with global benchmarks; reset/opt-out controls |
+| ~~**Latency dashboard**~~ | ✅ `llm-router status` shows P50/P95 per provider |
 
 ---
 
@@ -335,43 +335,43 @@ Short continuation prompts are currently classified on their 3 words alone, losi
 
 ---
 
-### v3.2 — Policy Engine (Oct 2026)
+### v3.2 — Policy Engine ✅ Complete (2026-04-09)
 
 **Headline**: *"Set routing policy once — enforce it everywhere."*
 
 | Feature | Notes |
 |---|---|
-| **Org / project / user policy precedence** | Consistent override hierarchy across installs |
-| **Model + provider allow/deny rules** | "never use GPT-4o", "only local models for this repo" |
-| **Spend caps + fallback rules** | Per-task-type daily caps; hard stops with graceful degradation |
-| **Audit log** | Policy hits, overrides, enforcement decisions logged to `routing_decisions` |
+| ~~**Org / project / user policy precedence**~~ | ✅ `~/.llm-router/org-policy.yaml` + `.llm-router.yaml` merge with glob allow/deny |
+| ~~**Model + provider allow/deny rules**~~ | ✅ `block_models`/`allow_models` with fnmatch glob patterns; allow overrides block |
+| ~~**Spend caps + fallback rules**~~ | ✅ Per-task-type daily caps in org policy |
+| ~~**Audit log**~~ | ✅ `routing_decisions.policy_applied` column; `llm_policy` tool shows last 10 decisions |
 
 ---
 
-### v3.3 — Slack + Webhook Digests (Nov 2026)
+### v3.3 — Slack + Webhook Digests ✅ Complete (2026-04-09)
 
 **Headline**: *"Bring token savings into the team's Slack — where decisions actually get made."*
 
 | Feature | Notes |
 |---|---|
-| **Weekly savings digest to Slack/Discord/webhook** | `LLM_ROUTER_WEBHOOK_URL`; Markdown-formatted summary |
-| **Spend-spike alerts** | Alert when daily spend exceeds threshold unexpectedly |
-| **Policy exception summaries** | Weekly log of override events and who triggered them |
-| **"What if router was off?" simulation** | Show team lead: "Without routing, last week would have cost $XXX more" |
+| ~~**Weekly savings digest to Slack/Discord/webhook**~~ | ✅ `LLM_ROUTER_WEBHOOK_URL`; auto-detects Slack/Discord/generic from URL |
+| ~~**Spend-spike alerts**~~ | ✅ Fires when today > 2× 7-day average |
+| ~~**"What if router was off?" simulation**~~ | ✅ `simulate_without_routing()` — full cost without routing |
+| **Policy exception summaries** | ⬜ Weekly log of override events (deferred to v3.5) |
 
 ---
 
 ## Phase 4 — Category Leadership (Jan–Apr 2027)
 
-### v3.4 — Community Benchmarks (Jan 2027)
+### v3.4 — Community Benchmarks ✅ Complete (2026-04-09)
 
 **Headline**: *"Routing quality backed by real developer workloads — not synthetic benchmarks."*
 
 | Feature | Notes |
 |---|---|
-| **Opt-in anonymous outcome sharing** | `LLM_ROUTER_COMMUNITY=true`; strips PII, shares task type + quality signal |
-| **Public benchmark leaderboard** | Routing accuracy by task type, updated weekly |
-| **Benchmark confidence metadata** | In-product: "This route is 94% accurate based on 10k similar tasks" |
+| ~~**Opt-in anonymous outcome sharing**~~ | ✅ `LLM_ROUTER_COMMUNITY=true`; local export to `~/.llm-router/community_export.jsonl` |
+| ~~**Benchmark confidence metadata**~~ | ✅ `★★★ High / ★★☆ Medium / ★☆☆ Low`; `llm_benchmark` tool shows per-task accuracy |
+| **Public benchmark leaderboard** | ⬜ Upload endpoint not yet live; local export only |
 
 ---
 
@@ -427,8 +427,8 @@ No hooks in Claude Desktop means a fundamentally different model: **tool-based d
 
 See [CONTRIBUTING.md](CONTRIBUTING.md). Highest-impact areas:
 
-1. **v3.2 Policy Engine** — org/project/user policy precedence + audit log
-2. **v3.3 Slack Digests** — weekly savings digest + spend-spike alerts
-3. **v2.6 Latency-aware routing** — p95 latency scoring + per-user acceptance signals
+1. **v3.5 Enterprise Pilot** — self-hosted Docker Compose, SSO/RBAC, Bedrock/Azure/Vertex AI
+2. **v2.3 Zero-Friction Activation** — `shadow`/`suggest`/`enforce` modes + guided onboarding wizard
+3. **v3.5 Claude Desktop Co-Work** — task-specific MCP tools, per-user savings attribution
 4. **Provider integrations** — Bedrock, Azure, Vertex AI via LiteLLM
 5. **Testing** — integration tests for provider fallback chains
