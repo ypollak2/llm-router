@@ -43,6 +43,8 @@ class RepoConfig:
     profile: str | None = None                            # budget | balanced | premium
     enforce: str | None = None                            # shadow | suggest | enforce
     block_providers: list[str] = field(default_factory=list)
+    block_models: list[str] = field(default_factory=list)   # model-level deny (v3.2)
+    allow_models: list[str] = field(default_factory=list)   # model-level allow-list (v3.2)
     routing: dict[str, TaskRouteOverride] = field(default_factory=dict)
     daily_caps: dict[str, float] = field(default_factory=dict)  # task_type → USD; "_total" key for global
     # Source info (not a user field — set by loader)
@@ -106,6 +108,12 @@ def _dict_to_config(data: dict[str, Any], source: str) -> RepoConfig:
     if isinstance(data.get("block_providers"), list):
         cfg.block_providers = [str(p).lower() for p in data["block_providers"]]
 
+    if isinstance(data.get("block_models"), list):
+        cfg.block_models = [str(m) for m in data["block_models"]]
+
+    if isinstance(data.get("allow_models"), list):
+        cfg.allow_models = [str(m) for m in data["allow_models"]]
+
     if isinstance(data.get("routing"), dict):
         for task, opts in data["routing"].items():
             if task not in VALID_TASK_TYPES:
@@ -132,6 +140,8 @@ def _merge(base: RepoConfig, override: RepoConfig) -> RepoConfig:
         profile        = override.profile        or base.profile,
         enforce        = override.enforce        or base.enforce,
         block_providers= list({*base.block_providers, *override.block_providers}),
+        block_models   = list({*base.block_models,    *override.block_models}),
+        allow_models   = list({*base.allow_models,    *override.allow_models}),
         routing        = {**base.routing, **override.routing},
         daily_caps     = {**base.daily_caps, **override.daily_caps},
         _sources       = base._sources + override._sources,

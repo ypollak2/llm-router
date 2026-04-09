@@ -162,6 +162,15 @@ MIGRATE_SAVINGS_STATS_ADD_HOST = [
     "ALTER TABLE savings_stats ADD COLUMN host TEXT NOT NULL DEFAULT 'claude_code'",
 ]
 """Idempotent migration to add host attribution column to savings_stats (v3.1)."""
+
+MIGRATE_ROUTING_DECISIONS_ADD_POLICY = [
+    "ALTER TABLE routing_decisions ADD COLUMN policy_applied TEXT",
+]
+"""Idempotent migration to add policy audit column to routing_decisions (v3.2).
+
+policy_applied: JSON string of policy actions, e.g.
+  '{"blocked": ["openai/gpt-4o"], "source": "org-policy.yaml"}'
+"""
 """Idempotent migration to add per-call savings columns to usage table.
 
 baseline_model:     Model that would have been used without routing (e.g. claude-sonnet)
@@ -224,6 +233,12 @@ async def _get_db() -> aiosqlite.Connection:
             pass  # column already exists
     # Migrate: add host column to savings_stats (v3.1)
     for stmt in MIGRATE_SAVINGS_STATS_ADD_HOST:
+        try:
+            await db.execute(stmt)
+        except Exception:
+            pass  # column already exists
+    # Migrate: add policy audit column to routing_decisions (v3.2)
+    for stmt in MIGRATE_ROUTING_DECISIONS_ADD_POLICY:
         try:
             await db.execute(stmt)
         except Exception:

@@ -406,6 +406,27 @@ async def route_and_call(
                     m for m in models_to_try
                     if provider_from_model(m) not in blocked
                 ]
+
+            # ── Policy engine: org-level + repo-level model allow/deny ───────
+            from llm_router.policy import OrgPolicy, apply_policy, load_org_policy
+            _org = load_org_policy()
+            # Merge repo-level block_models/allow_models into a unified policy
+            _merged_block = list({*_org.block_models, *repo_cfg.block_models})
+            _merged_allow = list({*_org.allow_models, *repo_cfg.allow_models})
+            _merged_block_prov = list({*_org.block_providers})  # already applied above
+            _policy = OrgPolicy(
+                block_providers=_merged_block_prov,
+                block_models=_merged_block,
+                allow_models=_merged_allow,
+                task_caps=_org.task_caps,
+                source=_org.source,
+            )
+            if _merged_block or _merged_allow:
+                models_to_try, _policy_blocked = apply_policy(
+                    models_to_try, task_type.value, _policy,
+                )
+            else:
+                _policy_blocked = []
             # Model pin: prepend pinned model so it's tried first
             pinned_model = repo_cfg.model_override(task_type.value)
             pinned_provider = repo_cfg.provider_override(task_type.value)

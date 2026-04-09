@@ -79,7 +79,7 @@ Under the hood, every prompt goes through a `UserPromptSubmit` hook before your 
 
 ## MCP Tools
 
-38 tools across 6 categories:
+41 tools across 6 categories:
 
 ### Smart Routing
 | Tool | What it does |
@@ -142,6 +142,9 @@ Under the hood, every prompt goes through a `UserPromptSubmit` hook before your 
 | `llm_dashboard` | Open web dashboard at localhost:7337 |
 | `llm_team_report` | Team-wide routing savings report |
 | `llm_team_push` | Push local savings data to shared team store |
+| `llm_policy` | Show active org/repo routing policy + last 10 policy decisions |
+| `llm_digest` | Savings digest with spend-spike detection; push to Slack/Discord webhook |
+| `llm_benchmark` | Per-task-type routing accuracy from `llm_rate` feedback |
 
 ---
 
@@ -248,7 +251,7 @@ team = RouteredTeam(
 )
 ```
 
-**Option 2 — MCP tools**: use llm-router's 38 tools in any Agno agent:
+**Option 2 — MCP tools**: use llm-router's 41 tools in any Agno agent:
 
 ```python
 from agno.agent import Agent

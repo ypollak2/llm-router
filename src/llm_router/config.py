@@ -137,6 +137,17 @@ class RouterConfig(BaseSettings):
     llm_router_user_id: str = ""         # override auto-detected git email
     llm_router_team_chat_id: str = ""    # Telegram chat_id (only for Telegram)
 
+    # ── Digest settings (v3.3) ──
+    # Separate from team_endpoint — digest goes to a different channel/webhook.
+    # Falls back to llm_router_team_endpoint if not set.
+    llm_router_webhook_url: str = ""     # LLM_ROUTER_WEBHOOK_URL
+
+    # ── Community Benchmarks settings (v3.4) ──
+    # Set to true to opt in to anonymous routing quality sharing (future upload).
+    # In v3.4 this only prepares a local export file; upload requires a future
+    # server endpoint to be ready.
+    llm_router_community: bool = False   # LLM_ROUTER_COMMUNITY
+
     # ── Context injection settings ──
     context_enabled: bool = True          # inject session/history context into routed calls
     context_max_messages: int = 5         # max recent session messages to include

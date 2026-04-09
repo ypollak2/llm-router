@@ -647,6 +647,131 @@ async def llm_team_push(period: str = "week") -> str:
     return f"✗ Push failed: {message}"
 
 
+async def llm_policy() -> str:
+    """Show the active routing policy and recent policy audit events.
+
+    Displays the merged policy from all three layers:
+      - Org policy   (~/.llm-router/org-policy.yaml)
+      - User policy  (~/.llm-router/routing.yaml)
+      - Repo policy  (.llm-router.yml)
+
+    Also shows the last 10 policy enforcement events from the audit log.
+    """
+    from llm_router.policy import load_org_policy, policy_summary
+    from llm_router.repo_config import effective_config as get_repo_config
+    from llm_router.cost import _get_db
+
+    org = load_org_policy()
+    repo = get_repo_config()
+
+    W = 64
+    lines = [
+        "─" * W,
+        "  Routing Policy (org → user → repo)",
+        "",
+        "  Org layer:",
+    ]
+    lines.append(policy_summary(org))
+
+    lines += ["", "  Repo/user layer:"]
+    if repo.block_providers:
+        lines.append(f"    block_providers: {', '.join(repo.block_providers)}")
+    if repo.block_models:
+        lines.append(f"    block_models:    {', '.join(repo.block_models)}")
+    if repo.allow_models:
+        lines.append(f"    allow_models:    {', '.join(repo.allow_models)}")
+    if repo.daily_caps:
+        lines.append(f"    daily_caps:      {repo.daily_caps}")
+    if repo._sources:
+        lines.append(f"    sources:         {', '.join(repo._sources)}")
+    if not (repo.block_providers or repo.block_models or repo.allow_models or repo.daily_caps):
+        lines.append("    No restrictions configured.")
+
+    # Recent policy audit events
+    try:
+        db = await _get_db()
+        rows = await (await db.execute(
+            """
+            SELECT timestamp, task_type, final_model, policy_applied
+            FROM routing_decisions
+            WHERE policy_applied IS NOT NULL
+            ORDER BY id DESC LIMIT 10
+            """
+        )).fetchall()
+        await db.close()
+        if rows:
+            lines += ["", "  Recent policy events (last 10):"]
+            for ts, task, model, pol in rows:
+                lines.append(f"    {ts[:16]}  {task:<10}  {model or '?':<25}  {pol}")
+        else:
+            lines += ["", "  No policy enforcement events recorded yet."]
+    except Exception:
+        pass
+
+    lines.append("─" * W)
+    return "\n".join(lines)
+
+
+async def llm_digest(period: str = "week", send: bool = False) -> str:
+    """Generate a savings digest and optionally send it to a webhook.
+
+    Formats a savings summary for the given period. Also detects spend spikes
+    and shows a "what if router was off?" simulation.
+
+    Args:
+        period: ``"today"``, ``"week"``, ``"month"``, or ``"all time"``.
+        send:   If True, POST the digest to LLM_ROUTER_WEBHOOK_URL.
+    """
+    from llm_router.digest import format_digest, send_to_webhook
+
+    digest = await format_digest(period)
+
+    if not send:
+        return digest
+
+    config = get_config()
+    url = config.llm_router_webhook_url or config.llm_router_team_endpoint
+    if not url:
+        return (
+            digest + "\n\n"
+            "  ℹ️  To send this digest automatically, set:\n"
+            "  LLM_ROUTER_WEBHOOK_URL=https://hooks.slack.com/...\n"
+        )
+
+    ok, msg = await send_to_webhook(url, digest)
+    return digest + f"\n\n  {'✓' if ok else '✗'}  {msg}"
+
+
+async def llm_benchmark() -> str:
+    """Show routing accuracy benchmarks by task type.
+
+    Accuracy is computed from llm_rate feedback (thumbs up/down).
+    The more you rate responses with llm_rate, the more accurate this becomes.
+
+    Also shows an optional community export status if LLM_ROUTER_COMMUNITY=true.
+    """
+    from llm_router.community import (
+        format_benchmark_report,
+        get_benchmark_stats,
+        prepare_community_export,
+    )
+
+    stats = await get_benchmark_stats()
+    report = format_benchmark_report(stats)
+
+    config = get_config()
+    if config.llm_router_community:
+        export_msg = await prepare_community_export()
+        report += f"\n\n  📤 Community export: {export_msg}"
+    else:
+        report += (
+            "\n\n  ℹ️  Set LLM_ROUTER_COMMUNITY=true to prepare an anonymous "
+            "export of your routing outcomes for community benchmarking."
+        )
+
+    return report
+
+
 def register(mcp) -> None:
     """Register management tools with the FastMCP instance."""
     mcp.tool()(llm_save_session)
@@ -661,3 +786,6 @@ def register(mcp) -> None:
     mcp.tool()(llm_dashboard)
     mcp.tool()(llm_team_report)
     mcp.tool()(llm_team_push)
+    mcp.tool()(llm_policy)
+    mcp.tool()(llm_digest)
+    mcp.tool()(llm_benchmark)

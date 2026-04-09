@@ -21,6 +21,7 @@ def test_all_tools_registered():
         "llm_edit", "llm_rate", "llm_dashboard",
         "llm_fs_find", "llm_fs_rename", "llm_fs_edit_many",
         "llm_team_report", "llm_team_push",
+        "llm_policy", "llm_digest", "llm_benchmark",
     }
     assert expected == names
 

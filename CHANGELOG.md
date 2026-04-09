@@ -1,5 +1,42 @@
 # Changelog
 
+## v3.2.0 — Policy Engine + Slack Digests + Community Benchmarks (2026-04-09)
+
+### Added
+
+- **Policy Engine (`llm_policy` MCP tool, `src/llm_router/policy.py`)** — v3.2
+
+  Org/user/repo precedence hierarchy for model-level routing policy. Supports
+  glob-based allow/deny lists (e.g. `block_models: ["gpt-4o", "o3*"]`), per-task
+  cost caps, and a `~/.llm-router/org-policy.yaml` file for shared org-wide rules.
+  - `RepoConfig` extended with `block_models` and `allow_models` fields
+  - Policy audit trail written to `routing_decisions.policy_applied` column
+  - `llm_policy` tool shows active org + repo policy and last 10 policy decisions
+
+- **Savings Digest (`llm_digest` MCP tool, `src/llm_router/digest.py`)** — v3.3
+
+  Period-based savings summaries with Slack/Discord/webhook push support.
+  - Spend spike detection: alerts when today's spend > 2× 7-day average
+  - "What if router was off?" simulation shows cost without routing
+  - Auto-detects webhook channel from URL: `hooks.slack.com` → Slack,
+    `discord.com` → Discord, anything else → generic JSON POST
+  - `LLM_ROUTER_WEBHOOK_URL` env var for separate digest channel
+  - `llm_digest(period="week", send=True)` pushes to webhook
+
+- **Community Benchmarks (`llm_benchmark` MCP tool, `src/llm_router/community.py`)** — v3.4
+
+  Per-task-type routing accuracy derived from `llm_rate` feedback data.
+  - Shows accuracy %, total rated calls, and top-performing model per task type
+  - Confidence strings: `★★★ High`, `★★☆ Medium`, `★☆☆ Low`, `☆☆☆ No data`
+  - `LLM_ROUTER_COMMUNITY=true` enables anonymous local export to
+    `~/.llm-router/community_export.jsonl` (upload endpoint deferred)
+
+### Changed
+
+- `llm_policy`, `llm_digest`, `llm_benchmark` registered as MCP tools (total: 41)
+
+---
+
 ## v3.1.0 — Multi-Host Support + Cross-Session Savings (2026-04-09)
 
 ### Added
