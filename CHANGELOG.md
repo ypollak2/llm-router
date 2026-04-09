@@ -48,6 +48,16 @@
   Documents architecture findings, revised plan scope, and host compatibility
   matrix for future reference.
 
+### Fixed
+
+- **Yearly savings projection now uses 30-day average** (`src/llm_router/hooks/session-end.py`)
+
+  The session-end summary previously projected yearly savings from a 7-day rolling
+  average, making early-session estimates unreliable. It now uses month-to-date data
+  (actual days elapsed as divisor) with a fallback chain: month → week → today.
+  The basis label in the output reflects the window used (`30-day avg`, `7-day avg`,
+  or `today`).
+
 ### Technical notes
 
 - Total MCP tools: 38 (was 37 — added `llm_auto`)

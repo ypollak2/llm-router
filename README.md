@@ -79,12 +79,13 @@ Under the hood, every prompt goes through a `UserPromptSubmit` hook before your 
 
 ## MCP Tools
 
-34 tools across 6 categories:
+38 tools across 6 categories:
 
 ### Smart Routing
 | Tool | What it does |
 |------|-------------|
 | `llm_route` | Auto-classify prompt → route to best model |
+| `llm_auto` | Route + server-side savings tracking — designed for hook-less hosts (Codex CLI, Claude Desktop, Copilot) |
 | `llm_classify` | Classify complexity + recommend model |
 | `llm_select_agent` | Pick agent CLI (claude_code / codex) + model for a session |
 | `llm_stream` | Stream LLM response for long-running tasks |
@@ -123,6 +124,7 @@ Under the hood, every prompt goes through a `UserPromptSubmit` hook before your 
 | Tool | What it does |
 |------|-------------|
 | `llm_usage` | Unified dashboard — Claude sub, Codex, APIs, savings |
+| `llm_savings` | Cross-session savings breakdown by period, host, and task type |
 | `llm_check_usage` | Live Claude subscription usage (session %, weekly %) |
 | `llm_health` | Provider availability + circuit breaker status |
 | `llm_providers` | List all configured providers and models |
@@ -138,6 +140,8 @@ Under the hood, every prompt goes through a `UserPromptSubmit` hook before your 
 | `llm_update_usage` | Feed usage data from claude.ai into the router |
 | `llm_track_usage` | Report Claude Code token usage for budget tracking |
 | `llm_dashboard` | Open web dashboard at localhost:7337 |
+| `llm_team_report` | Team-wide routing savings report |
+| `llm_team_push` | Push local savings data to shared team store |
 
 ---
 
@@ -244,7 +248,7 @@ team = RouteredTeam(
 )
 ```
 
-**Option 2 — MCP tools**: use llm-router's 34 tools in any Agno agent:
+**Option 2 — MCP tools**: use llm-router's 38 tools in any Agno agent:
 
 ```python
 from agno.agent import Agent
@@ -256,6 +260,36 @@ agent = Agent(
     tools=[MCPTools(command="llm-router")],
     instructions="Use llm_research for web searches, llm_code for coding tasks.",
 )
+```
+
+### Codex CLI
+
+```bash
+llm-router install --host codex
+```
+
+Prints the snippet to add to `~/.codex/config.yaml`. Use `llm_auto` instead of `llm_route` — it does server-side savings tracking so your savings history accumulates even without the hook system.
+
+### Claude Desktop
+
+```bash
+llm-router install --host desktop
+```
+
+Prints the snippet for `claude_desktop_config.json`. No hooks available in Claude Desktop, so all saving tracking goes through `llm_auto`.
+
+### GitHub Copilot (VS Code)
+
+```bash
+llm-router install --host copilot
+```
+
+Prints the snippet for `.vscode/mcp.json` and a `copilot-instructions.md` template for routing rules.
+
+### All at once
+
+```bash
+llm-router install --host all   # prints snippets for all three
 ```
 
 ### Docker / CI
@@ -399,16 +433,16 @@ llm-router share   # copies savings card to clipboard + opens tweet
 
 | Version | Headline | Status |
 |---------|----------|--------|
-| **v3.0** | **Team Dashboard** — shared savings across the whole team | 📅 Sep 2026 |
-| **v3.1** | **Policy Engine** — org/project/user routing policy, spend caps, audit log | 📅 Oct 2026 |
-| **v3.2** | **Slack Digests** — weekly savings summary, spend-spike alerts | 📅 Nov 2026 |
+| **v3.0** | **Team Dashboard** — shared savings across the whole team | ✅ Done |
+| **v3.1** | **Multi-Host + Cross-Session Savings** — `llm_auto`, Codex/Desktop/Copilot adapters, persistent savings across sessions, 30-day projection | ✅ Done |
+| **v3.2** | **Policy Engine** — org/project/user routing policy, spend caps, audit log | 📅 Oct 2026 |
+| **v3.3** | **Slack Digests** — weekly savings summary, spend-spike alerts | 📅 Nov 2026 |
 
 ### Phase 4 — Category Leadership (Jan–Apr 2027)
 
 | Version | Headline | Status |
 |---------|----------|--------|
-| **v3.3** | **Community Benchmarks** — opt-in anonymous routing quality leaderboard | 📅 Jan 2027 |
-| **v3.5** | **Claude Desktop + Co-Work** — tool-based delegation, per-user savings attribution | 📅 Mar 2027 |
+| **v3.4** | **Community Benchmarks** — opt-in anonymous routing quality leaderboard | 📅 Jan 2027 |
 | **v4.0** | **VS Code + Cursor GA** — cross-editor routing, shared config and analytics | 📅 Apr 2027 |
 
 > Full details: [ROADMAP.md](ROADMAP.md)
