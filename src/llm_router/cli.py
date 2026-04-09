@@ -7,6 +7,10 @@ Usage:
     llm-router install --force      — reinstall even if already present
     llm-router install --claw-code  — also install into claw-code (auto-detects ~/.claw-code/)
     llm-router install --headless   — install for Docker/agent/CI environments (API-key mode, no OAuth)
+    llm-router install --host codex    — print Codex CLI config snippet (no file changes)
+    llm-router install --host desktop  — print Claude Desktop config snippet (no file changes)
+    llm-router install --host copilot  — print VS Code / Copilot config snippet (no file changes)
+    llm-router install --host all      — print all host snippets
     llm-router uninstall        — remove hooks and MCP registration
     llm-router uninstall --purge — also delete ~/.llm-router/ (usage DB, .env, logs)
     llm-router setup            — interactive wizard: configure providers and API keys
@@ -122,6 +126,14 @@ def main() -> None:
 # ── install ────────────────────────────────────────────────────────────────────
 
 def _run_install(flags: list[str]) -> None:
+    # --host <name> is handled before the regular install path — it prints
+    # config snippets only (no file modifications to external tools).
+    if "--host" in flags:
+        idx = flags.index("--host")
+        host = flags[idx + 1] if idx + 1 < len(flags) else "all"
+        _install_host(host)
+        return
+
     check_only = "--check" in flags
     force = "--force" in flags
 
@@ -308,6 +320,108 @@ def _run_install_headless() -> None:
     print("    cat ~/.llm-router/usage.json        # routing stats")
     print("    sqlite3 ~/.llm-router/usage.db \\")
     print('      "SELECT model, COUNT(*) FROM usage GROUP BY model"\n')
+
+
+# ── install --host (print config snippets for non-Claude Code hosts) ──────────
+
+_HOST_SNIPPETS: dict[str, str] = {
+    "codex": """\
+{bold}Codex CLI{reset}  (capability extension — no cost-routing)
+──────────────────────────────────────────────────────────────────
+1. Add to ~/.codex/config.yaml:
+
+   mcp:
+     servers:
+       llm-router:
+         command: uvx
+         args: [claude-code-llm-router]
+
+2. Copy routing rules so Codex knows when to call llm_auto:
+
+   cp "$(python3 -c "import llm_router; import pathlib; print(pathlib.Path(llm_router.__file__).parent / 'rules' / 'codex-rules.md')")" \\
+      ~/.codex/instructions.md
+
+3. Restart Codex — run llm_savings to verify the DB is shared.
+""",
+
+    "desktop": """\
+{bold}Claude Desktop{reset}  (capability extension — no cost-routing)
+──────────────────────────────────────────────────────────────────
+Edit ~/Library/Application Support/Claude/claude_desktop_config.json
+(Linux: ~/.config/Claude/claude_desktop_config.json)
+(Windows: %APPDATA%\\Claude\\claude_desktop_config.json)
+
+Add inside the top-level object:
+
+  "mcpServers": {{
+    "llm-router": {{
+      "command": "uvx",
+      "args": ["claude-code-llm-router"],
+      "env": {{
+        "LLM_ROUTER_PROFILE": "balanced"
+      }}
+    }}
+  }}
+
+Restart Claude Desktop. Run llm_savings to confirm DB is shared.
+Note: cost-routing is not available in Desktop (no hook system).
+""",
+
+    "copilot": """\
+{bold}GitHub Copilot (VS Code){reset}  (capability extension — no cost-routing)
+──────────────────────────────────────────────────────────────────
+1. Create or edit .vscode/mcp.json in your workspace:
+
+   {{
+     "servers": {{
+       "llm-router": {{
+         "command": "uvx",
+         "args": ["claude-code-llm-router"]
+       }}
+     }}
+   }}
+
+2. Optionally add routing guidance to .github/copilot-instructions.md:
+
+   When a task requires live web search, call the llm_research MCP tool.
+   When a task requires image generation, call the llm_image MCP tool.
+   For auto-routing with savings tracking, call llm_auto.
+
+3. Enable MCP in VS Code settings (Copilot > MCP: Enable).
+   Restart VS Code. Run @llm-router llm_savings to verify.
+Note: cost-routing is not available in Copilot (no hook system).
+""",
+}
+
+
+def _install_host(host: str) -> None:
+    """Print config snippets for non-Claude Code hosts (no file modifications)."""
+    import shutil
+
+    bold = "\033[1m" if _color_enabled() else ""
+    reset = "\033[0m" if _color_enabled() else ""
+
+    hosts_to_show = list(_HOST_SNIPPETS.keys()) if host == "all" else [host]
+    unknown = [h for h in hosts_to_show if h not in _HOST_SNIPPETS]
+    if unknown:
+        print(f"Unknown host(s): {', '.join(unknown)}")
+        print(f"Valid options: {', '.join(_HOST_SNIPPETS)} or 'all'")
+        return
+
+    w = shutil.get_terminal_size((80, 24)).columns
+    print(f"\n{bold}llm-router install --host {host}{reset}\n")
+    print("Snippets below are COPY-PASTE ONLY — no files are modified.\n")
+    print("─" * min(w, 70))
+
+    for h in hosts_to_show:
+        snippet = _HOST_SNIPPETS[h].format(bold=bold, reset=reset)
+        print(snippet)
+        print("─" * min(w, 70))
+
+    print(
+        f"\nFor Claude Code (hooks + full cost-routing): {bold}llm-router install{reset}\n"
+        f"See docs/hosts/ for setup guides and trade-off explanations.\n"
+    )
 
 
 # ── uninstall ──────────────────────────────────────────────────────────────────
