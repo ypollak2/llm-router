@@ -1,6 +1,6 @@
 # LLM Router — Roadmap
 
-> Last updated: 2026-04-01
+> Last updated: 2026-04-09
 
 ## Vision
 
@@ -19,10 +19,10 @@ Most LLM routers (LiteLLM proxy, OpenRouter, Portkey, RouteLLM) are API gateways
 | Subscription-quota routing | ✗ | ✗ | ✗ | ✓ |
 | Free local classifier chain | ✗ | ✗ | partial | ✓ |
 | Semantic caching | partial | ✓ | ✗ | planned |
-| Web dashboard | ✓ | ✓ | ✗ | planned |
+| Web dashboard | ✓ | ✓ | ✗ | ✓ |
 | OTEL / Prometheus | ✓ | ✓ | ✗ | planned |
 | Learned routing | ✗ | ✗ | ✓ | planned |
-| Multi-user / team | ✓ | ✓ | ✗ | planned |
+| Multi-user / team | ✓ | ✓ | ✗ | ✓ |
 
 ---
 
@@ -307,7 +307,7 @@ Short continuation prompts are currently classified on their 3 words alone, losi
 
 ## Phase 3 — Team Infrastructure (Sep–Nov 2026)
 
-### v3.0 — Team Dashboard (Sep 2026)
+### v3.0 — Team Dashboard ✅ Complete (2026-04-08)
 
 **Headline**: *"See savings across the whole team, not just your laptop."*
 
@@ -316,11 +316,26 @@ Short continuation prompts are currently classified on their 3 words alone, losi
 | **Shared telemetry collector** | Optional self-hosted endpoint; `usage.db` rows replicated with `user_id` |
 | **Org / project / user dashboard views** | Savings by user, route mix, expensive-call leakage |
 | **Team onboarding bootstrap** | Invite token flow; shared profile defaults |
-| **`show_savings_report` MCP tool** | Conversational: `for me today` / `for this session` / `for everyone this month` |
+| **`llm_team_report` / `llm_team_push` MCP tools** | Push local savings to shared webhook; team-wide report |
 
 ---
 
-### v3.1 — Policy Engine (Oct 2026)
+### v3.1 — Multi-Host + Cross-Session Savings ✅ Complete (2026-04-09)
+
+**Headline**: *"Savings persist across sessions. llm-router works in Codex, Desktop, and Copilot too."*
+
+| Feature | Notes |
+|---|---|
+| **`llm_auto` MCP tool** | Sibling to `llm_route` for hook-less hosts; server-side JSONL flush + savings envelope |
+| **Cross-session savings wiring** | `import_savings_log()` called on every `llm_savings`/`llm_usage` — root bug fixed |
+| **`host` column in `savings_stats`** | Tracks origin of each routed call; idempotent migration |
+| **`llm-router install --host codex\|desktop\|copilot\|all`** | Prints copy-paste config snippets for each host |
+| **Per-host routing rules** | `codex-rules.md`, `desktop-rules.md`, `copilot-rules.md` |
+| **Yearly projection accuracy** | 30-day month-based average; fallback chain: month → week → today |
+
+---
+
+### v3.2 — Policy Engine (Oct 2026)
 
 **Headline**: *"Set routing policy once — enforce it everywhere."*
 
@@ -333,7 +348,7 @@ Short continuation prompts are currently classified on their 3 words alone, losi
 
 ---
 
-### v3.2 — Slack + Webhook Digests (Nov 2026)
+### v3.3 — Slack + Webhook Digests (Nov 2026)
 
 **Headline**: *"Bring token savings into the team's Slack — where decisions actually get made."*
 
@@ -348,7 +363,7 @@ Short continuation prompts are currently classified on their 3 words alone, losi
 
 ## Phase 4 — Category Leadership (Jan–Apr 2027)
 
-### v3.3 — Community Benchmarks (Jan 2027)
+### v3.4 — Community Benchmarks (Jan 2027)
 
 **Headline**: *"Routing quality backed by real developer workloads — not synthetic benchmarks."*
 
@@ -412,9 +427,8 @@ No hooks in Claude Desktop means a fundamentally different model: **tool-based d
 
 See [CONTRIBUTING.md](CONTRIBUTING.md). Highest-impact areas:
 
-1. **v2.1 Route Simulator** — dry-run routing + savings DB schema expansion
-2. **v2.3 Activation modes** — `shadow` / `suggest` / `enforce` transition logic
-3. **v2.5 Context-aware routing** — synthetic prompt pre-processor in `auto-route.py`
-4. **v3.0 Team Dashboard** — shared telemetry + `show_savings_report` tool
-5. **Provider integrations** — Bedrock, Azure, Vertex AI via LiteLLM
-6. **Testing** — integration tests for provider fallback chains
+1. **v3.2 Policy Engine** — org/project/user policy precedence + audit log
+2. **v3.3 Slack Digests** — weekly savings digest + spend-spike alerts
+3. **v2.6 Latency-aware routing** — p95 latency scoring + per-user acceptance signals
+4. **Provider integrations** — Bedrock, Azure, Vertex AI via LiteLLM
+5. **Testing** — integration tests for provider fallback chains
