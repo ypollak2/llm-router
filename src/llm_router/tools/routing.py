@@ -369,6 +369,144 @@ async def llm_route(
     return "\n".join(lines)
 
 
+async def llm_auto(
+    prompt: str,
+    ctx: Context,
+    task_type: str | None = None,
+    profile_override: str | None = None,
+    system_prompt: str | None = None,
+    context: str | None = None,
+) -> str:
+    """Auto-routing wrapper with persistent savings tracking — works from any host.
+
+    Equivalent to llm_route but additionally:
+    - Flushes pending hook-written savings records into SQLite before routing.
+    - Appends a compact savings envelope every 5 calls so you can see the
+      cumulative value across all sessions and hosts without running llm_savings.
+
+    Use llm_auto instead of llm_route when you are in a host that lacks a
+    UserPromptSubmit hook (Codex CLI, Claude Desktop, GitHub Copilot) — the
+    savings are tracked server-side, so they accumulate correctly regardless of
+    which client triggered the call.
+
+    Args:
+        prompt: The task or question to route.
+        task_type: Optional hint — "query", "research", "generate", "analyze", "code".
+        profile_override: Force a routing profile — "budget", "balanced", or "premium".
+        system_prompt: Optional system instructions.
+        context: Optional conversation context.
+    """
+    from llm_router.cost import import_savings_log, get_lifetime_savings_summary
+
+    # Flush any hook-written JSONL records into SQLite before we query or route
+    await import_savings_log()
+
+    # Classify complexity (or skip if profile_override forces a specific profile)
+    try:
+        classification = await classify_complexity(prompt)
+    except Exception as e:
+        await ctx.warning(f"Classification failed: {e} — defaulting to moderate")
+        classification = ClassificationResult(
+            complexity=Complexity.MODERATE,
+            confidence=0.0,
+            reasoning=f"error fallback: {e}",
+            inferred_task_type=None,
+            classifier_model="none",
+            classifier_cost_usd=0.0,
+            classifier_latency_ms=0.0,
+        )
+
+    resolved_task_type = (
+        TaskType(task_type) if task_type
+        else classification.inferred_task_type
+        or TaskType.QUERY
+    )
+
+    budget_pct = 0.0
+    _last_usage = _state.get_last_usage()
+    if _last_usage and _last_usage.session:
+        budget_pct = _last_usage.effective_pressure
+
+    q_mode = get_config().quality_mode
+    floor = get_config().min_model
+
+    # Allow profile_override to bypass the classifier-driven profile
+    if profile_override:
+        try:
+            profile = RoutingProfile(profile_override.lower())
+        except ValueError:
+            return f"Invalid profile_override: {profile_override}. Choose: budget, balanced, premium."
+    else:
+        from llm_router.profiles import complexity_to_profile
+        rec = select_model(classification, budget_pct, q_mode, floor)
+        if budget_pct >= 0.85 and rec.was_downshifted:
+            _tier_to_profile = {
+                "haiku": RoutingProfile.BUDGET,
+                "sonnet": RoutingProfile.BALANCED,
+                "opus": RoutingProfile.PREMIUM,
+            }
+            profile = _tier_to_profile.get(rec.recommended_model, complexity_to_profile(classification.complexity))
+        else:
+            profile = complexity_to_profile(classification.complexity)
+
+    await ctx.info(
+        f"[llm_auto] {classification.complexity.value} ({classification.confidence:.0%}) "
+        f"→ {profile.value}"
+        + (f" [budget={budget_pct:.0%}]" if budget_pct >= 0.85 else "")
+    )
+
+    _clf_type = (
+        "cached" if classification.classifier_latency_ms == 0.0 and classification.confidence > 0
+        else "fallback" if classification.classifier_model == "none"
+        else "llm"
+    )
+    _classification_data = {
+        "task_type": resolved_task_type.value,
+        "profile": profile.value,
+        "classifier_type": _clf_type,
+        "classifier_model": classification.classifier_model,
+        "classifier_confidence": classification.confidence,
+        "classifier_latency_ms": classification.classifier_latency_ms,
+        "complexity": classification.complexity.value,
+        "recommended_model": getattr(select_model(classification, budget_pct, q_mode, floor), "recommended_model", "sonnet"),
+        "base_model": getattr(select_model(classification, budget_pct, q_mode, floor), "base_model", "sonnet"),
+        "was_downshifted": False,
+        "budget_pct_used": budget_pct,
+        "quality_mode": q_mode.value if hasattr(q_mode, "value") else str(q_mode),
+    }
+
+    resp = await route_and_call(
+        resolved_task_type, prompt,
+        profile=profile,
+        system_prompt=system_prompt,
+        caller_context=context,
+        ctx=ctx,
+        classification_data=_classification_data,
+    )
+
+    total_cost = classification.classifier_cost_usd + resp.cost_usd
+    lines = [
+        classification.header(),
+        resp.header(),
+        f"> **Total cost: ${total_cost:.6f}** | routed via llm_auto",
+        "",
+        resp.content,
+    ]
+
+    # Periodic savings envelope — show every 5 calls so value is visible without
+    # needing to call llm_savings explicitly (especially useful for hook-less hosts)
+    lifetime = await get_lifetime_savings_summary(days=0)
+    tasks_routed = lifetime["tasks_routed"]
+    if tasks_routed > 0 and tasks_routed % 5 == 0:
+        net = lifetime["net_savings"]
+        lines.append(
+            f"\n---\n📊 **{tasks_routed} tasks routed** — ~${net:.2f} net saved lifetime. "
+            "Run `llm_savings` for the full breakdown."
+        )
+
+    return "\n".join(lines)
+
+
 async def llm_stream(
     prompt: str,
     ctx: Context,
@@ -581,5 +719,6 @@ def register(mcp) -> None:
     mcp.tool()(llm_classify)
     mcp.tool()(llm_track_usage)
     mcp.tool()(llm_route)
+    mcp.tool()(llm_auto)
     mcp.tool()(llm_stream)
     mcp.tool()(llm_select_agent)

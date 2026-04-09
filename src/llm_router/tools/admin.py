@@ -14,6 +14,7 @@ from llm_router.cost import (
     get_model_acceptance_scores, get_model_latency_stats,
     get_monthly_spend, get_quality_report,
     get_routing_savings_vs_sonnet, get_savings_summary,
+    import_savings_log,
 )
 from llm_router.health import get_tracker
 from llm_router.provider_budget import get_provider_budgets
@@ -135,6 +136,8 @@ async def llm_usage(period: str = "today") -> str:
     lines.append(HR)
 
     # ── Section 4: Routing Savings ──
+    # Flush any pending hook JSONL records into SQLite before querying
+    await import_savings_log()
     savings = await get_savings_summary(period)
     if savings["total_calls"] > 0:
         s = savings
@@ -471,6 +474,8 @@ async def llm_savings() -> str:
     """
     from llm_router.cost import get_savings_by_period
 
+    # Flush any hook-written JSONL records into SQLite before querying
+    await import_savings_log()
     data = await get_savings_by_period()
 
     W = 58
