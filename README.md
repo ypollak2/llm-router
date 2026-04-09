@@ -430,7 +430,7 @@ llm-router share   # copies savings card to clipboard + opens tweet
 |---------|----------|--------|
 | **v2.4** | **Repo-Aware YAML Config** — `.llm-router.yml` committed with the codebase, block_providers, model pins | ✅ Done |
 | **v2.5** | **Context-Aware Routing** — "yes/ok/go ahead" inherits prior turn's route, zero classifier latency | ✅ Done |
-| **v2.6** | **Latency + Personalized Routing** — p95 latency scoring, per-user acceptance signals | 📅 Aug 2026 |
+| **v2.6** | **Latency + Personalized Routing** — p95 latency scoring, per-user acceptance signals | ✅ Done |
 
 ### Phase 3 — Team Infrastructure (Sep–Nov 2026)
 
@@ -438,14 +438,14 @@ llm-router share   # copies savings card to clipboard + opens tweet
 |---------|----------|--------|
 | **v3.0** | **Team Dashboard** — shared savings across the whole team | ✅ Done |
 | **v3.1** | **Multi-Host + Cross-Session Savings** — `llm_auto`, Codex/Desktop/Copilot adapters, persistent savings across sessions, 30-day projection | ✅ Done |
-| **v3.2** | **Policy Engine** — org/project/user routing policy, spend caps, audit log | 📅 Oct 2026 |
-| **v3.3** | **Slack Digests** — weekly savings summary, spend-spike alerts | 📅 Nov 2026 |
+| **v3.2** | **Policy Engine** — org/project/user routing policy, spend caps, audit log | ✅ Done |
+| **v3.3** | **Slack Digests** — weekly savings summary, spend-spike alerts | ✅ Done |
 
 ### Phase 4 — Category Leadership (Jan–Apr 2027)
 
 | Version | Headline | Status |
 |---------|----------|--------|
-| **v3.4** | **Community Benchmarks** — opt-in anonymous routing quality leaderboard | 📅 Jan 2027 |
+| **v3.4** | **Community Benchmarks** — opt-in anonymous routing quality leaderboard | ✅ Done |
 | **v4.0** | **VS Code + Cursor GA** — cross-editor routing, shared config and analytics | 📅 Apr 2027 |
 
 > Full details: [ROADMAP.md](ROADMAP.md)
