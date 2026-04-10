@@ -6,7 +6,7 @@
   "plugins": [
     {
       "name": "llm-router",
-      "description": "Route text, image, video, and audio tasks to 20+ AI providers with smart routing, budget control, and multi-step orchestration",
+      "description": "Route every Codex task to the cheapest capable model across 20+ AI providers. Tracks cross-session savings, enforces routing policy, and sends weekly Slack digests.",
       "version": "3.3.0",
       "source": {
         "source": "github",

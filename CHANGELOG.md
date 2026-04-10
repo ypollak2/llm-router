@@ -1,5 +1,39 @@
 # Changelog
 
+## v3.3.0 — Codex Plugin (2026-04-10)
+
+### Added
+
+- **Codex CLI plugin package** (`.codex-plugin/`)
+
+  llm-router is now a first-class Codex plugin, installable from the Codex marketplace.
+  - `.codex-plugin/plugin.json` — full plugin manifest with marketplace metadata
+  - `.codex-plugin/marketplace.json` — Codex marketplace entry (mirrors `.claude-plugin/`)
+  - `.codex-plugin/.mcp.json` — MCP server declaration (`uvx claude-code-llm-router`)
+
+- **`llm-router install --host codex` now writes files** (`src/llm_router/cli.py`)
+
+  Previously printed copy-paste snippets only. Now actually writes:
+  - `~/.codex/config.yaml` — appends `llm-router` MCP server block
+  - `~/.codex/hooks.json` — adds PostToolUse hook entry (creates file if absent)
+  - `~/.codex/instructions.md` — appends routing rules (creates if absent)
+  - `~/.llm-router/hooks/codex-post-tool.py` — installs the hook script
+
+- **Codex PostToolUse hook** (`src/llm_router/hooks/codex-post-tool.py`)
+
+  Fires after every Bash tool call in Codex. Reads pending savings records from
+  `~/.llm-router/codex_session.json` (written by `llm_auto` / `llm_track_usage`)
+  and flushes them to `savings_log.jsonl` with `"host": "codex"` tag.
+  Rate-limited to once per 30 seconds to avoid log churn.
+
+- **Codex Skills** (`skills/routing/SKILL.md`, `skills/savings/SKILL.md`)
+
+  Markdown skill files bundled into the plugin. Teach the Codex agent:
+  - `routing/SKILL.md` — when to call `llm_query`, `llm_code`, `llm_auto`, etc. and why
+  - `savings/SKILL.md` — how to use `llm_savings`, `llm_digest`, `llm_policy`, `llm_benchmark`
+
+---
+
 ## v3.2.1 — Session-End Cumulative Accuracy Fix (2026-04-09)
 
 ### Fixed

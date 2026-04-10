@@ -394,8 +394,102 @@ Note: cost-routing is not available in Copilot (no hook system).
 }
 
 
+def _install_codex_files() -> list[str]:
+    """Write Codex-specific config files and return a list of actions taken."""
+    import pathlib
+    import shutil as _shutil
+
+    actions: list[str] = []
+    home = pathlib.Path.home()
+
+    # 1. MCP server entry in ~/.codex/config.yaml
+    codex_dir = home / ".codex"
+    codex_dir.mkdir(parents=True, exist_ok=True)
+    config_yaml = codex_dir / "config.yaml"
+
+    mcp_block = (
+        "\nmcp:\n"
+        "  servers:\n"
+        "    llm-router:\n"
+        "      command: uvx\n"
+        "      args: [claude-code-llm-router]\n"
+    )
+    existing = config_yaml.read_text() if config_yaml.exists() else ""
+    if "llm-router" not in existing:
+        with config_yaml.open("a") as f:
+            f.write(mcp_block)
+        actions.append(f"✓ Added llm-router MCP server to {config_yaml}")
+    else:
+        actions.append(f"  llm-router already in {config_yaml} (skipped)")
+
+    # 2. PostToolUse hook in ~/.codex/hooks.json
+    hooks_json = codex_dir / "hooks.json"
+    hook_script = home / ".llm-router" / "hooks" / "codex-post-tool.py"
+
+    # Copy the hook script to ~/.llm-router/hooks/
+    hook_script.parent.mkdir(parents=True, exist_ok=True)
+    src_hook = pathlib.Path(__file__).parent / "hooks" / "codex-post-tool.py"
+    if src_hook.exists():
+        _shutil.copy2(src_hook, hook_script)
+        hook_script.chmod(0o755)
+        actions.append(f"✓ Installed hook script to {hook_script}")
+
+    hook_entry = {
+        "hooks": {
+            "PostToolUse": [
+                {
+                    "matcher": "Bash",
+                    "hooks": [{"type": "command", "command": str(hook_script)}],
+                }
+            ]
+        }
+    }
+    if hooks_json.exists():
+        try:
+            import json as _json
+            current = _json.loads(hooks_json.read_text())
+            existing_hooks = current.get("hooks", {}).get("PostToolUse", [])
+            already = any(
+                str(hook_script) in str(h)
+                for entry in existing_hooks
+                for h in entry.get("hooks", [])
+            )
+            if not already:
+                existing_hooks.append(hook_entry["hooks"]["PostToolUse"][0])
+                current.setdefault("hooks", {})["PostToolUse"] = existing_hooks
+                hooks_json.write_text(_json.dumps(current, indent=2))
+                actions.append(f"✓ Added PostToolUse hook to {hooks_json}")
+            else:
+                actions.append(f"  Hook already in {hooks_json} (skipped)")
+        except Exception as e:
+            actions.append(f"  Could not update {hooks_json}: {e}")
+    else:
+        import json as _json
+        hooks_json.write_text(_json.dumps(hook_entry, indent=2))
+        actions.append(f"✓ Created {hooks_json} with PostToolUse hook")
+
+    # 3. Copy routing rules to ~/.codex/instructions.md (append if exists)
+    instructions = codex_dir / "instructions.md"
+    rules_src = pathlib.Path(__file__).parent / "rules" / "codex-rules.md"
+    if rules_src.exists():
+        rules_text = rules_src.read_text()
+        if instructions.exists():
+            existing_inst = instructions.read_text()
+            if "llm-router" not in existing_inst:
+                with instructions.open("a") as f:
+                    f.write(f"\n\n{rules_text}")
+                actions.append(f"✓ Appended routing rules to {instructions}")
+            else:
+                actions.append(f"  Routing rules already in {instructions} (skipped)")
+        else:
+            instructions.write_text(rules_text)
+            actions.append(f"✓ Created {instructions} with routing rules")
+
+    return actions
+
+
 def _install_host(host: str) -> None:
-    """Print config snippets for non-Claude Code hosts (no file modifications)."""
+    """Install config for non-Claude Code hosts (writes files for Codex; prints snippets for others)."""
     import shutil
 
     bold = "\033[1m" if _color_enabled() else ""
@@ -410,12 +504,20 @@ def _install_host(host: str) -> None:
 
     w = shutil.get_terminal_size((80, 24)).columns
     print(f"\n{bold}llm-router install --host {host}{reset}\n")
-    print("Snippets below are COPY-PASTE ONLY — no files are modified.\n")
     print("─" * min(w, 70))
 
     for h in hosts_to_show:
-        snippet = _HOST_SNIPPETS[h].format(bold=bold, reset=reset)
-        print(snippet)
+        if h == "codex":
+            # Codex: actually write the files
+            print(f"{bold}Codex CLI{reset}  — writing config files…\n")
+            actions = _install_codex_files()
+            for action in actions:
+                print(f"  {action}")
+            print()
+            print("  Restart Codex and run llm_savings to verify the DB is shared.")
+        else:
+            snippet = _HOST_SNIPPETS[h].format(bold=bold, reset=reset)
+            print(snippet)
         print("─" * min(w, 70))
 
     print(

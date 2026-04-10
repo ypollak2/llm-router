@@ -361,6 +361,20 @@ Short continuation prompts are currently classified on their 3 words alone, losi
 
 ---
 
+### v3.3 — Codex Plugin ✅ Complete (2026-04-10)
+
+**Headline**: *"llm-router is now a first-class Codex plugin — one command to install."*
+
+| Feature | Notes |
+|---|---|
+| ~~**`.codex-plugin/` manifest + marketplace**~~ | ✅ `plugin.json` with full marketplace metadata, `marketplace.json` for discovery |
+| ~~**`.codex-plugin/.mcp.json`**~~ | ✅ MCP server declaration for automatic Codex registration |
+| ~~**`llm-router install --host codex` writes files**~~ | ✅ Writes `~/.codex/config.yaml`, `hooks.json`, `instructions.md` — no more copy-paste |
+| ~~**Codex PostToolUse hook**~~ | ✅ `codex-post-tool.py` flushes pending savings to `savings_log.jsonl` with `host=codex` |
+| ~~**Codex Skills**~~ | ✅ `skills/routing/SKILL.md` + `skills/savings/SKILL.md` teach routing and savings commands |
+
+---
+
 ## Phase 4 — Category Leadership (Jan–Apr 2027)
 
 ### v3.4 — Community Benchmarks ✅ Complete (2026-04-09)

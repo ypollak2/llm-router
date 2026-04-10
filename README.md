@@ -267,11 +267,23 @@ agent = Agent(
 
 ### Codex CLI
 
+One command installs everything — MCP server, PostToolUse hook, and routing rules:
+
 ```bash
 llm-router install --host codex
 ```
 
-Prints the snippet to add to `~/.codex/config.yaml`. Use `llm_auto` instead of `llm_route` — it does server-side savings tracking so your savings history accumulates even without the hook system.
+This writes:
+- `~/.codex/config.yaml` — registers `llm-router` as an MCP server
+- `~/.codex/hooks.json` — adds a PostToolUse hook for savings tracking
+- `~/.codex/instructions.md` — injects routing rules so Codex knows when to call `llm_auto`
+
+Or install directly from the Codex plugin marketplace (coming soon):
+```bash
+codex plugin install llm-router
+```
+
+Use `llm_auto` instead of `llm_route` — it does server-side savings tracking so your history accumulates across sessions even without the Claude Code hook system.
 
 ### Claude Desktop
 
@@ -439,7 +451,7 @@ llm-router share   # copies savings card to clipboard + opens tweet
 | **v3.0** | **Team Dashboard** — shared savings across the whole team | ✅ Done |
 | **v3.1** | **Multi-Host + Cross-Session Savings** — `llm_auto`, Codex/Desktop/Copilot adapters, persistent savings across sessions, 30-day projection | ✅ Done |
 | **v3.2** | **Policy Engine** — org/project/user routing policy, spend caps, audit log | ✅ Done |
-| **v3.3** | **Slack Digests** — weekly savings summary, spend-spike alerts | ✅ Done |
+| **v3.3** | **Slack Digests + Codex Plugin** — weekly savings digest, spend-spike alerts, Codex marketplace plugin | ✅ Done |
 
 ### Phase 4 — Category Leadership (Jan–Apr 2027)
 
