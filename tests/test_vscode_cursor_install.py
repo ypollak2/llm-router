@@ -35,7 +35,7 @@ class TestInstallVsCodeFiles:
     def test_creates_mcp_json_with_servers_key(self, fake_home):
         from llm_router.cli import _install_vscode_files
 
-        actions = _install_vscode_files()
+        _install_vscode_files()  # noqa: F841
 
         # Find the mcp.json that was written
         if sys.platform == "darwin":

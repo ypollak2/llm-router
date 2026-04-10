@@ -590,6 +590,38 @@ async def route_and_call(
             "Set PERPLEXITY_API_KEY for real-time web access.",
         )
 
+    # Cost-threshold escalation check (v4.0): block expensive calls before they happen.
+    # Uses the same config reference already resolved above (respects mocks in tests).
+    config_for_escalation = config
+    _escalate_above = getattr(config_for_escalation, "llm_router_escalate_above", 0.0)
+    if isinstance(_escalate_above, (int, float)) and _escalate_above > 0 and task_type not in MEDIA_TASK_TYPES:
+        try:
+            from llm_router.session_spend import get_session_spend, _estimate_cost
+            _top_model = models_to_try[0] if models_to_try else ""
+            _estimated = _estimate_cost(_top_model, len(prompt) // 4, 500)
+            _session_total = get_session_spend().total_usd
+            if _estimated > config_for_escalation.llm_router_escalate_above:
+                from llm_router.tools.admin import _set_pending_approval
+                _set_pending_approval({"model": _top_model, "estimated_cost": _estimated})
+                raise BudgetExceededError(
+                    f"Call to {_top_model} (estimated ${_estimated:.4f}) exceeds "
+                    f"LLM_ROUTER_ESCALATE_ABOVE=${config_for_escalation.llm_router_escalate_above:.2f}. "
+                    f"Run llm_approve_route(approve=True) to proceed or "
+                    f"llm_approve_route(downgrade_to='gemini/gemini-2.5-flash') to use a cheaper model."
+                )
+            if (config_for_escalation.llm_router_hard_stop_above > 0
+                    and _session_total >= config_for_escalation.llm_router_hard_stop_above):
+                raise BudgetExceededError(
+                    f"Session spend ${_session_total:.4f} has reached the hard stop limit "
+                    f"(LLM_ROUTER_HARD_STOP_ABOVE=${config_for_escalation.llm_router_hard_stop_above:.2f}). "
+                    f"No further calls will be made this session. "
+                    f"Unset LLM_ROUTER_HARD_STOP_ABOVE to continue."
+                )
+        except BudgetExceededError:
+            raise
+        except Exception:
+            pass  # Never block routing due to escalation check errors
+
     last_error: Exception | None = None
     for model in models_to_try:
         provider = provider_from_model(model)
@@ -629,6 +661,19 @@ async def route_and_call(
 
             tracker.record_success(provider)
             await cost.log_usage(response, task_type, profile)
+
+            # Record spend for real-time session spend meter (v4.0)
+            try:
+                from llm_router.session_spend import get_session_spend
+                get_session_spend().record(
+                    model=model,
+                    tool=task_type.value,
+                    input_tokens=response.input_tokens,
+                    output_tokens=response.output_tokens,
+                    cost_usd=response.cost_usd,
+                )
+            except Exception:
+                pass  # Never block routing due to spend tracking errors
 
             # Record exchange in session buffer for future context injection
             buf = get_session_buffer()

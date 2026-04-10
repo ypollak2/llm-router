@@ -164,8 +164,120 @@ async def llm_fs_edit_many(
     return format_edit_result(instructions, warnings, resp.header())
 
 
-def register(mcp) -> None:
+async def llm_fs_analyze_context(
+    path: str = ".",
+    max_files: int = 20,
+    ctx: Context = None,
+) -> str:
+    """Analyze workspace files to build a routing context summary.
+
+    Scans key files (package.json, pyproject.toml, go.mod, Cargo.toml, README,
+    open TODOs) and produces a compact semantic summary stored in
+    ~/.llm-router/context_summary.json. Subsequent routing decisions inject
+    this summary into the system prompt so cheap models have workspace context.
+
+    Call this once at the start of a project session or after major refactors.
+    The summary is automatically used by llm_route and llm_auto — no further
+    action required.
+
+    Args:
+        path: Workspace root to analyze (default: current directory).
+        max_files: Maximum files to read (default: 20).
+    """
+    import json as _json
+    import time as _time
+    from pathlib import Path as _Path
+
+    workspace = _Path(path).resolve()
+
+    # Key files to read for project understanding
+    KEY_FILES = [
+        "pyproject.toml", "setup.py", "requirements.txt",
+        "package.json", "tsconfig.json",
+        "go.mod", "Cargo.toml",
+        "README.md", "README.rst",
+        "CLAUDE.md", ".llm-router.yml",
+        "src/main.py", "src/index.ts", "main.go",
+    ]
+
+    collected: list[str] = []
+    found_files: list[str] = []
+
+    for key_file in KEY_FILES:
+        candidate = workspace / key_file
+        if candidate.exists() and len(found_files) < max_files:
+            try:
+                content = candidate.read_text(encoding="utf-8", errors="ignore")
+                # Cap each file at 2KB to keep the summary compact
+                if len(content) > 2048:
+                    content = content[:2048] + "\n[... truncated ...]"
+                collected.append(f"=== {key_file} ===\n{content}")
+                found_files.append(key_file)
+            except OSError:
+                pass
+
+    if not collected:
+        return (
+            f"No key project files found in {workspace}. "
+            "Try running from the project root directory."
+        )
+
+    # Route to a cheap model for summarization
+    files_text = "\n\n".join(collected)
+    prompt = f"""Analyze these project files and produce a compact routing context summary.
+
+{files_text}
+
+Return a JSON object with:
+- "language": primary programming language (e.g. "Python", "TypeScript", "Go")
+- "framework": primary framework if any (e.g. "FastAPI", "React", "gin")
+- "project_type": brief type (e.g. "MCP server", "web app", "CLI tool", "library")
+- "summary": one sentence describing what this project does
+- "routing_hint": one sentence about what kind of tasks are most common in this codebase
+
+Return ONLY the JSON object."""
+
+    resp = await route_and_call(
+        TaskType.QUERY, prompt,
+        complexity_hint="simple",
+        ctx=ctx,
+    )
+
+    # Parse and persist the context summary
+    summary_path = _Path.home() / ".llm-router" / "context_summary.json"
+    try:
+        raw = resp.content.strip()
+        # Strip markdown code fences if present
+        if raw.startswith("```"):
+            raw = raw.split("\n", 1)[1].rsplit("```", 1)[0]
+        data = _json.loads(raw)
+        data["workspace"] = str(workspace)
+        data["files_analyzed"] = found_files
+        data["updated_at"] = _time.time()
+        summary_path.parent.mkdir(parents=True, exist_ok=True)
+        summary_path.write_text(_json.dumps(data, indent=2))
+        return (
+            f"Context summary saved to {summary_path}\n\n"
+            f"**Project:** {data.get('project_type', 'unknown')} "
+            f"({data.get('language', '?')}/{data.get('framework', 'none')})\n"
+            f"**Summary:** {data.get('summary', '?')}\n"
+            f"**Routing hint:** {data.get('routing_hint', '?')}\n\n"
+            f"Files analyzed: {', '.join(found_files)}\n\n"
+            f"This context will be injected into routing decisions automatically."
+        )
+    except (_json.JSONDecodeError, KeyError, OSError):
+        # Even if parsing fails, return the raw summary — still useful
+        return f"{resp.header()}\n\n{resp.content}"
+
+
+def register(mcp, should_register=None) -> None:
     """Register filesystem tools with the FastMCP instance."""
-    mcp.tool()(llm_fs_find)
-    mcp.tool()(llm_fs_rename)
-    mcp.tool()(llm_fs_edit_many)
+    gate = should_register or (lambda _: True)
+    if gate("llm_fs_find"):
+        mcp.tool()(llm_fs_find)
+    if gate("llm_fs_rename"):
+        mcp.tool()(llm_fs_rename)
+    if gate("llm_fs_edit_many"):
+        mcp.tool()(llm_fs_edit_many)
+    if gate("llm_fs_analyze_context"):
+        mcp.tool()(llm_fs_analyze_context)

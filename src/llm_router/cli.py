@@ -106,7 +106,14 @@ def main() -> None:
     elif args and args[0] == "status":
         _run_status()
     elif args and args[0] == "doctor":
-        _run_doctor()
+        host_flag = None
+        if "--host" in args:
+            idx = args.index("--host")
+            host_flag = args[idx + 1] if idx + 1 < len(args) else None
+        _run_doctor(host=host_flag)
+    elif args and args[0] == "quickstart":
+        from llm_router.quickstart import main as _qs_main
+        _qs_main()
     elif args and args[0] == "demo":
         _run_demo()
     elif args and args[0] == "dashboard":
@@ -899,8 +906,113 @@ def _run_uninstall(flags: list[str] | None = None) -> None:
 
 # ── doctor ─────────────────────────────────────────────────────────────────────
 
-def _run_doctor() -> None:
-    """Comprehensive health check — verify every component is wired up."""
+
+def _run_doctor_host(host: str) -> None:
+    """Run host-specific installation checks for vscode, cursor, or claude."""
+    import json
+    import shutil
+    from pathlib import Path
+
+    valid_hosts = {"claude", "vscode", "cursor", "all"}
+    if host not in valid_hosts:
+        print(f"  Unknown host: {host}. Valid options: {', '.join(sorted(valid_hosts))}")
+        return
+
+    hosts_to_check = list({"claude", "vscode", "cursor"}) if host == "all" else [host]
+
+    for h in hosts_to_check:
+        print(f"\n{_bold(f'  Host: {h}')}")
+        issues: list[str] = []
+
+        if h == "claude":
+            # Check hooks
+            from llm_router.install_hooks import _HOOKS_DST, _HOOK_DEFS
+            for _, dst_name, event, _ in _HOOK_DEFS:
+                dst = _HOOKS_DST / dst_name
+                if dst.exists():
+                    print(_ok(f"{dst_name}  ({event})"))
+                else:
+                    print(_fail(f"{dst_name}  — not installed", fix="llm-router install"))
+                    issues.append(f"Hook {dst_name} missing")
+
+            # Check uvx
+            if shutil.which("uvx"):
+                print(_ok("uvx found in PATH"))
+            else:
+                print(_warn("uvx not in PATH — install via: pip install uv"))
+
+        elif h == "vscode":
+            if sys.platform == "darwin":
+                mcp_json = Path.home() / "Library" / "Application Support" / "Code" / "User" / "mcp.json"
+            elif sys.platform == "win32":
+                mcp_json = Path(os.getenv("APPDATA", "")) / "Code" / "User" / "mcp.json"
+            else:
+                mcp_json = Path.home() / ".config" / "Code" / "User" / "mcp.json"
+
+            if mcp_json.exists():
+                try:
+                    data = json.loads(mcp_json.read_text())
+                    if "llm-router" in data.get("servers", {}):
+                        print(_ok(f"llm-router registered in {mcp_json}"))
+                    else:
+                        print(_fail(f"llm-router not in servers ({mcp_json})",
+                                    fix="llm-router install --host vscode"))
+                        issues.append("llm-router not registered in VS Code mcp.json")
+                except Exception as e:
+                    print(_fail(f"could not parse {mcp_json}: {e}"))
+            else:
+                print(_fail(f"mcp.json not found at {mcp_json}",
+                            fix="llm-router install --host vscode"))
+                issues.append("VS Code mcp.json missing")
+
+            if shutil.which("uvx"):
+                print(_ok("uvx found in PATH"))
+            else:
+                print(_warn("uvx not in PATH — required for VS Code MCP server"))
+
+        elif h == "cursor":
+            mcp_json = Path.home() / ".cursor" / "mcp.json"
+            cursor_rules = Path.home() / ".cursor" / "rules" / "llm-router.md"
+
+            if mcp_json.exists():
+                try:
+                    data = json.loads(mcp_json.read_text())
+                    if "llm-router" in data.get("mcpServers", {}):
+                        print(_ok(f"llm-router registered in {mcp_json}"))
+                    else:
+                        print(_fail(f"llm-router not in mcpServers ({mcp_json})",
+                                    fix="llm-router install --host cursor"))
+                        issues.append("llm-router not registered in Cursor mcp.json")
+                except Exception as e:
+                    print(_fail(f"could not parse {mcp_json}: {e}"))
+            else:
+                print(_fail(f"mcp.json not found at {mcp_json}",
+                            fix="llm-router install --host cursor"))
+                issues.append("Cursor mcp.json missing")
+
+            if cursor_rules.exists():
+                print(_ok(f"routing rules installed ({cursor_rules})"))
+            else:
+                print(_warn(f"routing rules not found at {cursor_rules}"))
+
+        if not issues:
+            print(_green(f"  ✓ {h} is correctly configured"))
+        else:
+            print(_red(f"  {len(issues)} issue(s) found for {h}"))
+
+
+def _run_doctor(host: str | None = None) -> None:
+    """Comprehensive health check — verify every component is wired up.
+
+    When host is specified, also checks host-specific configuration
+    (e.g. mcp.json for vscode/cursor, hooks for claude).
+    """
+    if host:
+        _run_doctor_host(host)
+        # Fall through to also run the full general checks
+        print()
+
+    """Comprehensive general health check — verify every component is wired up."""
     import json
     import time
     import urllib.request

@@ -1,6 +1,6 @@
 [project]
 name = "claude-code-llm-router"
-version = "3.6.0"
+version = "4.0.0"
 description = "Multi-LLM router MCP server for Claude Code — smart complexity routing, Claude subscription monitoring, Codex integration, 20+ providers"
 readme = "README.md"
 license = "MIT"
@@ -56,6 +56,7 @@ llm-router = "llm_router.cli:main"
 llm-router-sse = "llm_router.server:main_sse"
 llm-router-onboard = "llm_router.onboard:main"
 llm-router-install-hooks = "llm_router.install_hooks:main"
+llm-router-quickstart = "llm_router.quickstart:main"
 
 [build-system]
 requires = ["hatchling"]

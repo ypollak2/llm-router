@@ -171,6 +171,26 @@ MIGRATE_ROUTING_DECISIONS_ADD_POLICY = [
 policy_applied: JSON string of policy actions, e.g.
   '{"blocked": ["openai/gpt-4o"], "source": "org-policy.yaml"}'
 """
+
+CREATE_CORRECTIONS_TABLE = """
+CREATE TABLE IF NOT EXISTS corrections (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp TEXT DEFAULT (datetime('now')),
+    original_tool TEXT NOT NULL,
+    original_model TEXT NOT NULL,
+    corrected_tool TEXT NOT NULL,
+    corrected_model TEXT,
+    reason TEXT,
+    session_id TEXT
+)
+"""
+"""Schema for the ``corrections`` table storing user-initiated reroute decisions.
+
+Each row is written by ``llm_reroute``. The classifier reads this table to
+lower confidence scores for repeatedly corrected tools, providing a basic
+feedback loop between user corrections and routing quality.
+"""
+
 """Idempotent migration to add per-call savings columns to usage table.
 
 baseline_model:     Model that would have been used without routing (e.g. claude-sonnet)
@@ -201,6 +221,7 @@ async def _get_db() -> aiosqlite.Connection:
     await db.execute(CREATE_SAVINGS_STATS_TABLE)
     await db.execute(CREATE_SEMANTIC_CACHE_TABLE)
     await db.execute(CREATE_SEMANTIC_CACHE_INDEX)
+    await db.execute(CREATE_CORRECTIONS_TABLE)
     # Migrate: add savings columns if missing
     for stmt in MIGRATE_CLAUDE_USAGE_ADD_SAVINGS:
         try:
@@ -330,6 +351,67 @@ async def log_cc_hint(task_type: str, model: str) -> None:
         await db.commit()
     except Exception:
         pass
+    finally:
+        await db.close()
+
+
+async def log_correction(
+    original_tool: str,
+    original_model: str,
+    corrected_tool: str,
+    corrected_model: str = "",
+    reason: str = "",
+    session_id: str = "",
+) -> None:
+    """Record a user-initiated reroute correction for feedback-loop learning.
+
+    Called by ``llm_reroute`` whenever the user overrides a routing decision.
+    The ``get_correction_count`` function reads these records to lower routing
+    confidence for repeatedly corrected tools.
+
+    Args:
+        original_tool: The tool the router chose (e.g. "llm_query").
+        original_model: The model selected for that tool.
+        corrected_tool: The tool the user wants to use instead.
+        corrected_model: Optional override model for the corrected tool.
+        reason: Optional user-provided explanation.
+        session_id: Session identifier for grouping corrections.
+    """
+    db = await _get_db()
+    try:
+        await db.execute(
+            """
+            INSERT INTO corrections
+                (original_tool, original_model, corrected_tool, corrected_model, reason, session_id)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (original_tool, original_model, corrected_tool, corrected_model, reason, session_id),
+        )
+        await db.commit()
+    finally:
+        await db.close()
+
+
+async def get_correction_count(tool: str) -> int:
+    """Return how many times the given tool has been overridden by the user.
+
+    Used by ``llm_route`` explain mode to compute routing confidence:
+    each correction lowers confidence by 15 percentage points.
+
+    Args:
+        tool: MCP tool name (e.g. "llm_query", "llm_code").
+
+    Returns:
+        Number of user corrections targeting this tool as the original.
+    """
+    db = await _get_db()
+    try:
+        cursor = await db.execute(
+            "SELECT COUNT(*) FROM corrections WHERE original_tool = ?",
+            (tool,),
+        )
+        row = await cursor.fetchone()
+        return int(row[0]) if row else 0
     finally:
         await db.close()
 

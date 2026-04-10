@@ -142,6 +142,20 @@ class RouterConfig(BaseSettings):
     # Falls back to llm_router_team_endpoint if not set.
     llm_router_webhook_url: str = ""     # LLM_ROUTER_WEBHOOK_URL
 
+    # ── Tool slim mode (v4.0) ──
+    # Reduce the number of registered MCP tools to save context tokens.
+    # Values: "off" (all 41 tools), "routing" (12 tools), "core" (4 tools).
+    # Set LLM_ROUTER_SLIM=routing in the MCP server env to activate.
+    llm_router_slim: str = "off"         # LLM_ROUTER_SLIM
+
+    # ── Cost-threshold escalation (v4.0) ──
+    # Block any single call estimated above this cost until approved via
+    # llm_approve_route. 0.0 = disabled (default). Example: 0.10 = $0.10/call cap.
+    llm_router_escalate_above: float = 0.0   # LLM_ROUTER_ESCALATE_ABOVE (per-call USD)
+    # Hard stop: cancel all calls once session spend exceeds this total.
+    # 0.0 = disabled. Example: 1.0 = $1.00/session hard stop.
+    llm_router_hard_stop_above: float = 0.0  # LLM_ROUTER_HARD_STOP_ABOVE (session USD)
+
     # ── Community Benchmarks settings (v3.4) ──
     # Set to true to opt in to anonymous routing quality sharing (future upload).
     # In v3.4 this only prepares a local export file; upload requires a future

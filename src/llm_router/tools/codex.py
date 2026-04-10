@@ -62,6 +62,8 @@ async def llm_codex(
     return "\n".join(lines)
 
 
-def register(mcp) -> None:
+def register(mcp, should_register=None) -> None:
     """Register Codex tool with the FastMCP instance."""
-    mcp.tool()(llm_codex)
+    gate = should_register or (lambda _: True)
+    if gate("llm_codex"):
+        mcp.tool()(llm_codex)

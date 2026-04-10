@@ -772,20 +772,161 @@ async def llm_benchmark() -> str:
     return report
 
 
-def register(mcp) -> None:
-    """Register management tools with the FastMCP instance."""
-    mcp.tool()(llm_save_session)
-    mcp.tool()(llm_set_profile)
-    mcp.tool()(llm_usage)
-    mcp.tool()(llm_savings)
-    mcp.tool()(llm_cache_stats)
-    mcp.tool()(llm_cache_clear)
-    mcp.tool()(llm_quality_report)
-    mcp.tool()(llm_health)
-    mcp.tool()(llm_providers)
-    mcp.tool()(llm_dashboard)
-    mcp.tool()(llm_team_report)
-    mcp.tool()(llm_team_push)
-    mcp.tool()(llm_policy)
-    mcp.tool()(llm_digest)
-    mcp.tool()(llm_benchmark)
+async def llm_session_spend() -> str:
+    """Show real-time session cost breakdown.
+
+    Reports spend accumulated since this session started, broken down by model
+    and tool. Fires an anomaly warning if spend exceeds the configured threshold
+    (default $0.50) in under 10 minutes.
+
+    Returns a formatted summary with per-model costs and anomaly status.
+    """
+    from llm_router.session_spend import get_session_spend
+    import time as _time
+
+    spend = get_session_spend()
+    summary = spend.get_summary()
+
+    elapsed = _time.time() - summary.get("session_start", _time.time())
+    elapsed_min = int(elapsed / 60)
+
+    lines = [
+        f"**Session spend** ({elapsed_min}m elapsed)",
+        "",
+        f"Total: **${summary['total_usd']:.4f}** across {summary['call_count']} calls",
+    ]
+
+    if summary.get("anomaly_flag"):
+        lines.insert(0, "⚠️  ANOMALY: Spend threshold exceeded in < 10 minutes!")
+        lines.insert(1, "")
+
+    if summary.get("per_model"):
+        lines.append("")
+        lines.append("Per model:")
+        for model, stats in sorted(
+            summary["per_model"].items(),
+            key=lambda x: -x[1]["cost_usd"],
+        ):
+            short = model.split("/", 1)[-1] if "/" in model else model
+            lines.append(
+                f"  {short:<28} {stats['calls']:>3}× calls  "
+                f"${stats['cost_usd']:.4f}  "
+                f"{stats['tokens']:,} tokens"
+            )
+
+    if summary.get("per_tool"):
+        lines.append("")
+        lines.append("Per tool:")
+        for tool, count in sorted(summary["per_tool"].items(), key=lambda x: -x[1]):
+            lines.append(f"  {tool:<24} {count:>3}× calls")
+
+    config = get_config()
+    if config.llm_router_escalate_above > 0:
+        lines.append("")
+        lines.append(
+            f"Per-call cap: ${config.llm_router_escalate_above:.2f} "
+            f"(LLM_ROUTER_ESCALATE_ABOVE)"
+        )
+    if config.llm_router_hard_stop_above > 0:
+        lines.append(
+            f"Session hard stop: ${config.llm_router_hard_stop_above:.2f} "
+            f"(LLM_ROUTER_HARD_STOP_ABOVE)"
+        )
+
+    return "\n".join(lines)
+
+
+# ── Pending approval state for cost-threshold escalation ─────────────────────
+
+_pending_approval: dict | None = None
+
+
+def _set_pending_approval(data: dict | None) -> None:
+    global _pending_approval
+    _pending_approval = data
+
+
+def _get_pending_approval() -> dict | None:
+    return _pending_approval
+
+
+async def llm_approve_route(
+    approve: bool = True,
+    downgrade_to: str = "",
+) -> str:
+    """Approve or reject a pending high-cost routing decision.
+
+    Use this when llm_route (or any routing tool) blocked a call because the
+    estimated cost exceeded LLM_ROUTER_ESCALATE_ABOVE. The pending call is
+    stored server-side until you approve or cancel it.
+
+    Args:
+        approve: True to proceed with the call, False to cancel it.
+        downgrade_to: Optional cheaper model to use instead of the blocked one
+                      (e.g. "gemini/gemini-2.5-flash" instead of "openai/o3").
+    """
+    pending = _get_pending_approval()
+
+    if pending is None:
+        return "No pending routing approval. All calls are proceeding normally."
+
+    if not approve:
+        _set_pending_approval(None)
+        return (
+            f"Routing cancelled.\n\n"
+            f"Blocked call was: {pending.get('model', 'unknown')} "
+            f"(estimated ${pending.get('estimated_cost', 0):.4f})\n"
+            f"Use a cheaper tool like `llm_query` for simple tasks."
+        )
+
+    model = downgrade_to or pending.get("model", "")
+    _set_pending_approval(None)
+
+    return (
+        f"Approved. Proceeding with: **{model}**\n\n"
+        f"Estimated cost: ${pending.get('estimated_cost', 0):.4f}\n\n"
+        f"Re-run your original prompt now — routing will proceed without interruption."
+    )
+
+
+def register(mcp, should_register=None) -> None:
+    """Register management tools with the FastMCP instance.
+
+    Args:
+        should_register: Optional callable(tool_name) -> bool for slim mode filtering.
+    """
+    gate = should_register or (lambda _: True)
+    if gate("llm_save_session"):
+        mcp.tool()(llm_save_session)
+    if gate("llm_set_profile"):
+        mcp.tool()(llm_set_profile)
+    if gate("llm_usage"):
+        mcp.tool()(llm_usage)
+    if gate("llm_savings"):
+        mcp.tool()(llm_savings)
+    if gate("llm_cache_stats"):
+        mcp.tool()(llm_cache_stats)
+    if gate("llm_cache_clear"):
+        mcp.tool()(llm_cache_clear)
+    if gate("llm_quality_report"):
+        mcp.tool()(llm_quality_report)
+    if gate("llm_health"):
+        mcp.tool()(llm_health)
+    if gate("llm_providers"):
+        mcp.tool()(llm_providers)
+    if gate("llm_dashboard"):
+        mcp.tool()(llm_dashboard)
+    if gate("llm_team_report"):
+        mcp.tool()(llm_team_report)
+    if gate("llm_team_push"):
+        mcp.tool()(llm_team_push)
+    if gate("llm_policy"):
+        mcp.tool()(llm_policy)
+    if gate("llm_digest"):
+        mcp.tool()(llm_digest)
+    if gate("llm_benchmark"):
+        mcp.tool()(llm_benchmark)
+    if gate("llm_session_spend"):
+        mcp.tool()(llm_session_spend)
+    if gate("llm_approve_route"):
+        mcp.tool()(llm_approve_route)

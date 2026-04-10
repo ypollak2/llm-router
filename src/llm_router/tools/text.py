@@ -398,11 +398,18 @@ async def llm_edit(
     return format_edit_result(instructions, warnings, resp.header())
 
 
-def register(mcp) -> None:
+def register(mcp, should_register=None) -> None:
     """Register text LLM tools with the FastMCP instance."""
-    mcp.tool()(llm_query)
-    mcp.tool()(llm_research)
-    mcp.tool()(llm_generate)
-    mcp.tool()(llm_analyze)
-    mcp.tool()(llm_code)
-    mcp.tool()(llm_edit)
+    gate = should_register or (lambda _: True)
+    if gate("llm_query"):
+        mcp.tool()(llm_query)
+    if gate("llm_research"):
+        mcp.tool()(llm_research)
+    if gate("llm_generate"):
+        mcp.tool()(llm_generate)
+    if gate("llm_analyze"):
+        mcp.tool()(llm_analyze)
+    if gate("llm_code"):
+        mcp.tool()(llm_code)
+    if gate("llm_edit"):
+        mcp.tool()(llm_edit)

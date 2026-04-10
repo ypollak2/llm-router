@@ -1,17 +1,21 @@
 """FastMCP server — MCP entry point for llm-router.
 
-All 37 tools are registered by modules in llm_router/tools/:
-- routing.py  — llm_classify, llm_track_usage, llm_route, llm_stream
+All 43 tools are registered by modules in llm_router/tools/:
+- routing.py  — llm_classify, llm_track_usage, llm_route, llm_auto, llm_stream,
+                llm_select_agent, llm_reroute
 - text.py     — llm_query, llm_research, llm_generate, llm_analyze, llm_code, llm_edit
 - media.py    — llm_image, llm_video, llm_audio
 - pipeline.py — llm_orchestrate, llm_pipeline_templates
 - admin.py    — llm_save_session, llm_set_profile, llm_usage, llm_cache_stats,
                 llm_cache_clear, llm_quality_report, llm_health, llm_providers,
-                llm_team_report, llm_team_push
+                llm_team_report, llm_team_push, llm_session_spend, llm_approve_route
 - subscription.py — llm_check_usage, llm_update_usage, llm_refresh_claude_usage
 - codex.py    — llm_codex
 - setup.py    — llm_setup, llm_rate
-- fs.py       — llm_fs_find, llm_fs_rename, llm_fs_edit_many
+- fs.py       — llm_fs_find, llm_fs_rename, llm_fs_edit_many, llm_fs_analyze_context
+
+Tool slim mode (LLM_ROUTER_SLIM=routing|core) reduces registered tools to save
+context tokens — see llm_router/tool_tiers.py for tier definitions.
 
 All tools return formatted strings (not structured data) because MCP tool
 responses are displayed directly to the user in the Claude Code UI.
@@ -72,17 +76,28 @@ try:
 except Exception:
     pass
 
+# ── Tool slim mode (v4.0) ─────────────────────────────────────────────────────
+# Gating happens at registration time so unused tools never appear in Claude's
+# tool list at all — saving tokens before any request is made.
+
+from llm_router.tool_tiers import make_should_register, tier_summary as _tier_summary  # noqa: E402
+
+_slim = get_config().llm_router_slim
+_gate = make_should_register(_slim)
+if _slim != "off":
+    logging.getLogger("llm_router").info("Slim mode: %s", _tier_summary(_slim))
+
 # ── Register all tool groups ──────────────────────────────────────────────────
 
-routing.register(mcp)
-text.register(mcp)
-media.register(mcp)
-pipeline.register(mcp)
-admin.register(mcp)
-subscription.register(mcp)
-codex.register(mcp)
-setup.register(mcp)
-fs.register(mcp)
+routing.register(mcp, _gate)
+text.register(mcp, _gate)
+media.register(mcp, _gate)
+pipeline.register(mcp, _gate)
+admin.register(mcp, _gate)
+subscription.register(mcp, _gate)
+codex.register(mcp, _gate)
+setup.register(mcp, _gate)
+fs.register(mcp, _gate)
 
 # ── Resources ────────────────────────────────────────────────────────────────
 

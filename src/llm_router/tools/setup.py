@@ -596,7 +596,10 @@ def _setup_uninstall_hooks() -> str:
     return "\n".join(lines)
 
 
-def register(mcp) -> None:
+def register(mcp, should_register=None) -> None:
     """Register setup and feedback tools with the FastMCP instance."""
-    mcp.tool()(llm_setup)
-    mcp.tool()(llm_rate)
+    gate = should_register or (lambda _: True)
+    if gate("llm_setup"):
+        mcp.tool()(llm_setup)
+    if gate("llm_rate"):
+        mcp.tool()(llm_rate)

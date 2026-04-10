@@ -82,8 +82,12 @@ async def llm_audio(
     return result
 
 
-def register(mcp) -> None:
+def register(mcp, should_register=None) -> None:
     """Register media tools with the FastMCP instance."""
-    mcp.tool()(llm_image)
-    mcp.tool()(llm_video)
-    mcp.tool()(llm_audio)
+    gate = should_register or (lambda _: True)
+    if gate("llm_image"):
+        mcp.tool()(llm_image)
+    if gate("llm_video"):
+        mcp.tool()(llm_video)
+    if gate("llm_audio"):
+        mcp.tool()(llm_audio)

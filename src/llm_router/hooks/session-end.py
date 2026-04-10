@@ -20,6 +20,7 @@ DB_PATH              = os.path.join(STATE_DIR, "usage.db")
 USAGE_JSON           = os.path.join(STATE_DIR, "usage.json")
 STAR_CTA_FILE        = os.path.join(STATE_DIR, "star_cta_shown.txt")
 SAVINGS_LOG_PATH     = os.path.join(STATE_DIR, "savings_log.jsonl")
+SESSION_SPEND_FILE   = os.path.join(STATE_DIR, "session_spend.json")
 
 # Show star CTA once the user has saved at least this much (lifetime)
 STAR_CTA_THRESHOLD_USD = 0.50
@@ -603,6 +604,15 @@ def _should_show_star_cta(session_saved: float) -> bool:
 
 # ── Entry point ────────────────────────────────────────────────────────────────
 
+def _read_session_spend() -> dict | None:
+    """Read the real-time session spend file if it exists."""
+    try:
+        with open(SESSION_SPEND_FILE) as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return None
+
+
 def main() -> None:
     try:
         json.load(sys.stdin)
@@ -621,6 +631,21 @@ def main() -> None:
         sys.exit(0)
 
     summary = _format(tools, cc_rows, free_rows, paid_rows, start, current, is_live, cumulative)
+
+    # Append session spend one-liner if available (v4.0)
+    spend = _read_session_spend()
+    if spend and spend.get("call_count", 0) > 0:
+        total = spend.get("total_usd", 0.0)
+        calls = spend.get("call_count", 0)
+        top   = spend.get("top_model", "")
+        top_short = top.split("/", 1)[-1] if top and "/" in top else top
+        spend_line = f"  💰 Session API spend: ${total:.4f} across {calls} call(s)"
+        if top_short:
+            spend_line += f" · top model: {top_short}"
+        if spend.get("anomaly_flag"):
+            spend_line = "  ⚠️  ANOMALY DETECTED: " + spend_line.lstrip()
+        summary = summary.rstrip("─" * WIDTH) + "\n" + spend_line + "\n" + "─" * WIDTH
+
     print(json.dumps({"systemMessage": summary}))
 
 

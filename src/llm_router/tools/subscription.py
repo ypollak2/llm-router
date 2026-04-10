@@ -156,8 +156,12 @@ async def llm_refresh_claude_usage() -> str:
     return _last_usage.summary()
 
 
-def register(mcp) -> None:
+def register(mcp, should_register=None) -> None:
     """Register subscription tools with the FastMCP instance."""
-    mcp.tool()(llm_check_usage)
-    mcp.tool()(llm_update_usage)
-    mcp.tool()(llm_refresh_claude_usage)
+    gate = should_register or (lambda _: True)
+    if gate("llm_check_usage"):
+        mcp.tool()(llm_check_usage)
+    if gate("llm_update_usage"):
+        mcp.tool()(llm_update_usage)
+    if gate("llm_refresh_claude_usage"):
+        mcp.tool()(llm_refresh_claude_usage)

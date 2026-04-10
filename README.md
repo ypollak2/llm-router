@@ -1,20 +1,40 @@
-# LLM Router
+# llm-router
 
-**Route cheap work away from premium models.**
+> Route every AI call to the cheapest model that can handle it.
+> 43 tools · 20+ providers · Claude Code, VS Code, Cursor, Codex, and more.
 
-[![Tests](https://img.shields.io/github/actions/workflow/status/ypollak2/llm-router/ci.yml?style=flat-square&label=tests)](https://github.com/ypollak2/llm-router/actions)
 [![PyPI](https://img.shields.io/pypi/v/claude-code-llm-router?style=flat-square)](https://pypi.org/project/claude-code-llm-router/)
+[![Tests](https://img.shields.io/github/actions/workflow/status/ypollak2/llm-router/ci.yml?style=flat-square&label=tests)](https://github.com/ypollak2/llm-router/actions)
 [![Downloads](https://img.shields.io/pypi/dm/claude-code-llm-router?style=flat-square)](https://pypi.org/project/claude-code-llm-router/)
 [![Python](https://img.shields.io/badge/python-3.10–3.13-blue?style=flat-square)](https://pypi.org/project/claude-code-llm-router/)
 [![MCP](https://img.shields.io/badge/MCP-1.0+-purple?style=flat-square)](https://modelcontextprotocol.io)
 [![License](https://img.shields.io/badge/license-MIT-green?style=flat-square)](LICENSE)
 [![Stars](https://img.shields.io/github/stars/ypollak2/llm-router?style=flat-square&color=yellow)](https://github.com/ypollak2/llm-router/stargazers)
 
+**Average savings: 60–80% vs running everything on Claude Opus.**
+
+```bash
+# One command to start saving
+uvx claude-code-llm-router install
+
+# Or: guided 5-minute setup
+uvx claude-code-llm-router quickstart
+```
+
+| Host | One-line install |
+|------|-----------------|
+| <img src="https://img.shields.io/badge/-Claude_Code-191919?logo=anthropic&logoColor=white" height="16"/> Claude Code | `llm-router install` |
+| <img src="https://img.shields.io/badge/-VS_Code-0078d4?logo=visual-studio-code&logoColor=white" height="16"/> VS Code | `llm-router install --host vscode` |
+| <img src="https://img.shields.io/badge/-Cursor-000000?logoColor=white" height="16"/> Cursor | `llm-router install --host cursor` |
+| <img src="https://img.shields.io/badge/-Codex_CLI-412991?logo=openai&logoColor=white" height="16"/> Codex CLI | `llm-router install --host codex` |
+
+---
+
 LLM Router is an MCP server and hook set that intercepts prompts and routes them to the cheapest model that can handle the task.
 
 It is built for a common failure mode in AI coding tools: using your best model for everything. In Claude Code, that burns quota on simple explanations, file lookups, small edits, and repetitive prompts. In other MCP clients, it means paying premium-model prices for work that never needed them.
 
-The goal is simple: keep cheap work on cheap or free models, keep hard work on Claude or other premium models, and remove the need to micromanage model selection. Works in Claude Code, Cursor, Windsurf, Zed, claw-code, and Agno.
+The goal is simple: keep cheap work on cheap or free models, keep hard work on Claude or other premium models, and remove the need to micromanage model selection. Works in Claude Code, Cursor, VS Code, Codex, Windsurf, Zed, claw-code, and Agno.
 
 ---
 
@@ -269,16 +289,16 @@ agent = Agent(
 
 | Host | Install command | Writes files | Hook support |
 |------|----------------|:------------:|:------------:|
-| **Claude Code** | `llm-router install` | ✅ | ✅ Full auto-route |
-| **Codex CLI** | `llm-router install --host codex` | ✅ | ✅ PostToolUse |
-| **OpenCode** | `llm-router install --host opencode` | ✅ | ✅ PostToolUse |
-| **Gemini CLI** | `llm-router install --host gemini-cli` | ✅ | ✅ Extension hook |
-| **GitHub Copilot CLI** | `llm-router install --host copilot-cli` | ✅ | — |
-| **OpenClaw** | `llm-router install --host openclaw` | ✅ | — |
-| **Trae IDE** | `llm-router install --host trae` | ✅ | — |
-| **Factory Droid** | `llm-router install --host factory` | ✅ manifest | — (Claude Code compat) |
-| **VS Code (MCP native)** | `llm-router install --host vscode` | ✅ | — |
-| **Cursor IDE** | `llm-router install --host cursor` | ✅ | — |
+| <img src="https://img.shields.io/badge/-Claude_Code-191919?logo=anthropic&logoColor=white" height="18"/> **Claude Code** | `llm-router install` | ✅ | ✅ Full auto-route |
+| <img src="https://img.shields.io/badge/-Codex_CLI-412991?logo=openai&logoColor=white" height="18"/> **Codex CLI** | `llm-router install --host codex` | ✅ | ✅ PostToolUse |
+| <img src="https://img.shields.io/badge/-OpenCode-0080FF?logo=codesandbox&logoColor=white" height="18"/> **OpenCode** | `llm-router install --host opencode` | ✅ | ✅ PostToolUse |
+| <img src="https://img.shields.io/badge/-Gemini_CLI-4285F4?logo=google&logoColor=white" height="18"/> **Gemini CLI** | `llm-router install --host gemini-cli` | ✅ | ✅ Extension hook |
+| <img src="https://img.shields.io/badge/-GitHub_Copilot-24292e?logo=github&logoColor=white" height="18"/> **GitHub Copilot CLI** | `llm-router install --host copilot-cli` | ✅ | — |
+| <img src="https://img.shields.io/badge/-OpenClaw-6B38CC?logo=claw&logoColor=white" height="18"/> **OpenClaw** | `llm-router install --host openclaw` | ✅ | — |
+| <img src="https://img.shields.io/badge/-Trae_IDE-FF6B35?logo=jetbrains&logoColor=white" height="18"/> **Trae IDE** | `llm-router install --host trae` | ✅ | — |
+| <img src="https://img.shields.io/badge/-Factory_Droid-1A1A2E?logo=robot&logoColor=white" height="18"/> **Factory Droid** | `llm-router install --host factory` | ✅ manifest | — (Claude Code compat) |
+| <img src="https://img.shields.io/badge/-VS_Code-0078d4?logo=visual-studio-code&logoColor=white" height="18"/> **VS Code (MCP native)** | `llm-router install --host vscode` | ✅ | — |
+| <img src="https://img.shields.io/badge/-Cursor-000000?logo=cursor&logoColor=white" height="18"/> **Cursor IDE** | `llm-router install --host cursor` | ✅ | — |
 | **Claude Desktop** | `llm-router install --host desktop` | snippet | — |
 | **GitHub Copilot (VS Code)** | `llm-router install --host copilot` | snippet | — |
 

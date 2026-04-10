@@ -9,8 +9,8 @@ from mcp.server.fastmcp import Context
 from llm_router.classifier import classify_complexity
 from llm_router.config import get_config
 from llm_router.cost import (
-    get_daily_claude_breakdown, get_daily_claude_tokens,
-    get_savings_summary, log_claude_usage,
+    get_correction_count, get_daily_claude_breakdown, get_daily_claude_tokens,
+    get_savings_summary, log_claude_usage, log_correction,
 )
 from llm_router.model_selector import select_model
 from llm_router.profiles import complexity_to_profile
@@ -719,11 +719,81 @@ async def llm_select_agent(
     )
 
 
-def register(mcp) -> None:
-    """Register smart router tools with the FastMCP instance."""
-    mcp.tool()(llm_classify)
-    mcp.tool()(llm_track_usage)
-    mcp.tool()(llm_route)
-    mcp.tool()(llm_auto)
-    mcp.tool()(llm_stream)
-    mcp.tool()(llm_select_agent)
+async def llm_reroute(
+    to_tool: str,
+    reason: str = "",
+    original_tool: str = "",
+    original_model: str = "",
+) -> str:
+    """Override the last routing decision and record it for feedback learning.
+
+    Logs the correction to the database so future routing decisions for this
+    task type have lowered confidence. Use this when llm_route, llm_query,
+    llm_code, or any other tool chose the wrong model for your task.
+
+    Args:
+        to_tool: Which tool to use instead (e.g. "llm_analyze", "llm_code").
+        reason: Optional explanation — stored for routing quality improvement.
+        original_tool: The tool that made the wrong decision (auto-detected if omitted).
+        original_model: The model that was selected (for logging purposes).
+    """
+    valid_tools = {
+        "llm_query", "llm_code", "llm_analyze", "llm_research",
+        "llm_generate", "llm_route", "llm_auto", "llm_classify",
+        "llm_stream", "llm_edit",
+    }
+    if to_tool not in valid_tools:
+        return (
+            f"Unknown tool: {to_tool}. "
+            f"Valid tools: {', '.join(sorted(valid_tools))}"
+        )
+
+    await log_correction(
+        original_tool=original_tool or "unknown",
+        original_model=original_model or "unknown",
+        corrected_tool=to_tool,
+        reason=reason,
+    )
+
+    correction_count = await get_correction_count(original_tool or "unknown")
+    confidence_impact = min(0.85, correction_count * 0.15)
+
+    lines = [
+        f"Correction recorded — future routing for this task type will favour `{to_tool}`.",
+        "",
+        f"Route to: **{to_tool}**",
+    ]
+    if reason:
+        lines.append(f"Reason: {reason}")
+    if original_tool:
+        lines.append(
+            f"Original: {original_tool} → now has {correction_count} correction(s), "
+            f"confidence reduced by {confidence_impact:.0%}"
+        )
+    lines.append("")
+    lines.append(f"Call `{to_tool}` now with your original prompt to proceed.")
+    return "\n".join(lines)
+
+
+def register(mcp, should_register=None) -> None:
+    """Register smart router tools with the FastMCP instance.
+
+    Args:
+        should_register: Optional callable(tool_name) -> bool for slim mode filtering.
+                         Defaults to registering all tools.
+    """
+    gate = should_register or (lambda _: True)
+    if gate("llm_classify"):
+        mcp.tool()(llm_classify)
+    if gate("llm_track_usage"):
+        mcp.tool()(llm_track_usage)
+    if gate("llm_route"):
+        mcp.tool()(llm_route)
+    if gate("llm_auto"):
+        mcp.tool()(llm_auto)
+    if gate("llm_stream"):
+        mcp.tool()(llm_stream)
+    if gate("llm_select_agent"):
+        mcp.tool()(llm_select_agent)
+    if gate("llm_reroute"):
+        mcp.tool()(llm_reroute)

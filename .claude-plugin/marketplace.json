@@ -13,5 +13,6 @@
         "repo": "ypollak2/llm-router"
       }
     }
-  ]
+  ],
+  "version": "4.0.0"
 }

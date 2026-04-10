@@ -69,7 +69,10 @@ async def llm_pipeline_templates() -> str:
     return "\n".join(lines)
 
 
-def register(mcp) -> None:
+def register(mcp, should_register=None) -> None:
     """Register orchestration tools with the FastMCP instance."""
-    mcp.tool()(llm_orchestrate)
-    mcp.tool()(llm_pipeline_templates)
+    gate = should_register or (lambda _: True)
+    if gate("llm_orchestrate"):
+        mcp.tool()(llm_orchestrate)
+    if gate("llm_pipeline_templates"):
+        mcp.tool()(llm_pipeline_templates)

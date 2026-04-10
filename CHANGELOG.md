@@ -1,5 +1,70 @@
 # Changelog
 
+## v4.0.0 — Token Efficiency, Real-Time Spend, Feedback Learning (2026-04-10)
+
+### Summary
+
+Major version focused on four pillars: **save tokens** (slim mode), **see costs live** (session spend meter), **learn from corrections** (reroute + feedback loop), and **instant onboarding** (quickstart wizard + doctor --host). VS Code extension backlogged for v4.1.
+
+### Added
+
+- **Tool slim mode** (`LLM_ROUTER_SLIM=routing|core`) — register only the tools you need to save context tokens
+  - `off` (default): all 43 tools — backward compatible
+  - `routing`: 12 routing + admin tools — ~5,000 tokens saved per session
+  - `core`: 4 essential tools — maximum token savings (~7,500 tokens saved)
+  - New module `src/llm_router/tool_tiers.py` with tier definitions and `make_should_register()` factory
+  - All 9 `register(mcp)` functions now accept `should_register` gate parameter
+
+- **Real-time session spend meter** — track API costs as they happen
+  - New module `src/llm_router/session_spend.py` — persists `~/.llm-router/session_spend.json`
+  - New MCP tool **`llm_session_spend`** — shows spend breakdown by model and tool with anomaly warnings
+  - Anomaly detection: flags if session spend exceeds `$0.50` in under 10 minutes (configurable via `LLM_ROUTER_ANOMALY_THRESHOLD`)
+  - Session-end hook now prints one-liner: `💰 Session API spend: $0.023 · top model: gemini-flash`
+  - Router records spend after every successful call without blocking
+
+- **Cost-threshold escalation** — automatic guardrails against runaway costs
+  - `LLM_ROUTER_ESCALATE_ABOVE=0.10` blocks any single call estimated above $0.10
+  - `LLM_ROUTER_HARD_STOP_ABOVE=1.00` cancels all routing once session reaches $1.00
+  - New MCP tool **`llm_approve_route`** — approve/reject pending high-cost calls; optionally downgrade to cheaper model
+  - New config fields: `llm_router_escalate_above`, `llm_router_hard_stop_above`
+
+- **`llm_reroute` tool** — correct bad routing decisions in-session and train the router
+  - Records corrections to new `corrections` SQLite table in usage.db
+  - `llm_route` explain mode now shows routing confidence lowered by past corrections (−15% per correction)
+  - New DB functions: `log_correction()`, `get_correction_count()`
+
+- **`llm-router quickstart`** — guided sub-5-minute first success wizard
+  - Auto-detects installed hosts (Claude Code, Cursor, VS Code)
+  - Walks through API key setup or Ollama-only mode
+  - Fires a live test call and shows savings projection
+  - New entry point: `llm-router-quickstart`
+
+- **`llm-router doctor --host <name>`** — host-specific installation diagnostics
+  - `--host vscode`: checks mcp.json with `servers` key, uvx in PATH
+  - `--host cursor`: checks `~/.cursor/mcp.json` with `mcpServers` key, routing rules
+  - `--host claude`: checks hooks presence and executability
+  - `--host all`: runs all three
+  - Integrated into `llm-router doctor` as an optional pre-section
+
+- **`llm_fs_analyze_context`** — workspace-aware routing context
+  - Reads key project files (pyproject.toml, package.json, README, CLAUDE.md, etc.)
+  - Routes summarization to cheap model; persists `~/.llm-router/context_summary.json`
+  - Subsequent routing calls inject workspace summary into system prompt automatically
+
+- **README hero rewrite** — cleaner first impression with quick install table and logo badges
+  - Supported Hosts table now shows provider logos via shields.io badges
+  - New hero section with savings headline and quickstart command
+
+### Technical Notes
+
+- 38 new tests in `tests/test_v4_features.py` covering all 4.0.0 features
+- All existing tests pass (612 total)
+- `session_spend.json` uses flat JSON (not SQLite) intentionally: hook scripts read it with stdlib only
+- Escalation check occurs before the model loop, uses the same `config` reference (respects test mocks)
+- VS Code status bar extension moved to v4.1 backlog (requires TypeScript/npm build toolchain)
+
+---
+
 ## v3.6.0 — VS Code + Cursor IDE Support (2026-04-10)
 
 ### Added

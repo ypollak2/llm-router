@@ -19,9 +19,10 @@ def test_all_tools_registered():
         "llm_check_usage", "llm_update_usage", "llm_refresh_claude_usage", "llm_codex", "llm_setup",
         "llm_cache_stats", "llm_cache_clear", "llm_quality_report",
         "llm_edit", "llm_rate", "llm_dashboard",
-        "llm_fs_find", "llm_fs_rename", "llm_fs_edit_many",
+        "llm_fs_find", "llm_fs_rename", "llm_fs_edit_many", "llm_fs_analyze_context",
         "llm_team_report", "llm_team_push",
         "llm_policy", "llm_digest", "llm_benchmark",
+        "llm_reroute", "llm_session_spend", "llm_approve_route",
     }
     assert expected == names
 
