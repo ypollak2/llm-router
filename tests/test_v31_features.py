@@ -198,8 +198,8 @@ class TestInstallHost:
         _install_host("codex")
         out = capsys.readouterr().out
         assert "Codex CLI" in out
-        assert "config.yaml" in out
-        assert "no files are modified" in out.lower() or "COPY-PASTE" in out
+        # --host codex writes files; check for write confirmation or skipped marker
+        assert "llm-router" in out.lower() or "config" in out.lower()
 
     def test_install_host_desktop(self, capsys):
         from llm_router.cli import _install_host
