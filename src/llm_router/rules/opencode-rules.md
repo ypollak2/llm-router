@@ -1,26 +1,24 @@
 <!-- llm-router-rules-version: 1 -->
-# LLM Router — Codex CLI Routing Rules
+# LLM Router — OpenCode Routing Rules
 
-> These rules apply when using llm-router MCP tools inside Codex CLI (openai/codex).
-> Codex CLI has no UserPromptSubmit hook, so auto-routing is not available.
+> These rules apply when using llm-router MCP tools inside OpenCode (opencode-ai/opencode).
+> OpenCode has no UserPromptSubmit hook, so auto-routing is not available by default.
 > Use `llm_auto` to get equivalent routing + cross-session savings tracking.
 
 ---
 
 ## How to Route Without a Hook
 
-Since Codex CLI cannot inject routing hints automatically, call `llm_auto` explicitly
-for any task that benefits from a cheaper external model.
+Before answering any research, code generation, writing, or analysis task, call `llm_auto`:
 
 ```
-Rule: before answering research, code generation, writing, or analysis tasks,
-call llm_auto(prompt=<the task>) and return its output.
+Rule: llm_auto(prompt=<the task>) → return its output
 ```
 
 This gives you:
-- Same free-first routing chain as Claude Code (Ollama → Codex built-in → paid APIs)
-- Cross-session savings tracking (server-side SQLite, not per-session hooks)
-- Periodic savings envelope every 5 calls
+- Free-first chain (Ollama → Codex/OpenCode built-in → paid APIs)
+- Cross-session savings tracking (SQLite, not per-session)
+- Periodic savings summary every 5 calls
 
 ---
 
@@ -46,7 +44,7 @@ This gives you:
 
 ## Savings Visibility
 
-Codex CLI has no session-end hook for savings summaries.
+OpenCode has no session-end hook for savings summaries.
 Run `llm_savings` periodically to see cross-session totals.
 `llm_auto` shows a reminder every 5 calls automatically.
 

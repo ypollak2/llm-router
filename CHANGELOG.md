@@ -1,5 +1,44 @@
 # Changelog
 
+## v3.5.0 — Multi-Agent CLI Compatibility (2026-04-10)
+
+### Added
+
+- **Factory Droid plugin** (`.factory-plugin/`)
+
+  llm-router is now a first-class Factory Droid plugin. Factory Droid explicitly
+  supports `.claude-plugin/` format — the existing manifest works automatically.
+  Added dedicated `.factory-plugin/plugin.json` and `marketplace.json` for the
+  Factory marketplace. Install via: `factory plugin install ypollak2/llm-router`
+
+- **`llm-router install --host opencode`** — writes `~/.config/opencode/config.json` MCP block, PostToolUse hook, routing rules
+- **`llm-router install --host gemini-cli`** — writes `~/.gemini/settings.json`, Gemini CLI extension manifest + hooks, routing rules
+- **`llm-router install --host copilot-cli`** — writes `~/.config/gh/copilot/mcp.json`, routing rules
+- **`llm-router install --host openclaw`** — writes `~/.openclaw/mcp.json`, routing rules
+- **`llm-router install --host trae`** — writes platform-appropriate Trae config + `.rules` file
+- **`llm-router install --host factory`** — confirms `.factory-plugin/` is present, prints install command
+
+- **3 new helper functions** in `cli.py` (`_merge_json_mcp_block`, `_append_routing_rules`, `_copy_hook_script`)
+
+  All install functions share these to keep the implementation DRY and consistent.
+  Each function is idempotent — safe to run multiple times.
+
+- **5 new rules files** (`src/llm_router/rules/`)
+
+  `opencode-rules.md`, `gemini-cli-rules.md`, `copilot-cli-rules.md`,
+  `openclaw-rules.md`, `trae-rules.md` — each with routing guidance and
+  the token-efficient response principles from the caveman skill.
+
+- **2 new PostToolUse hook scripts** (`src/llm_router/hooks/`)
+
+  `opencode-post-tool.py`, `gemini-cli-post-tool.py` — flush pending savings
+  records to `savings_log.jsonl` with `host=opencode` / `host=gemini_cli` tags.
+
+- **45 new tests** (`tests/test_multi_host_install.py`)
+
+  Full coverage of all install functions, helper utilities, idempotency,
+  Factory Droid manifest schema, and rules file content.
+
 ## v3.4.0 — Agent-Context Chain Reordering (2026-04-10)
 
 ### Added

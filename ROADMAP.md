@@ -398,6 +398,23 @@ Short continuation prompts are currently classified on their 3 words alone, losi
 
 ---
 
+### v3.5 — Multi-Agent CLI Compatibility ✅ Complete (2026-04-10)
+
+**Headline**: *"One tool, every terminal agent — OpenCode, Gemini CLI, Copilot CLI, OpenClaw, Factory Droid, Trae."*
+
+| Feature | Notes |
+|---|---|
+| ~~**Factory Droid plugin**~~ | ✅ `.factory-plugin/plugin.json` + marketplace.json; Claude Code-compatible natively |
+| ~~**`install --host opencode`**~~ | ✅ Writes config.json MCP block + PostToolUse hook + routing rules |
+| ~~**`install --host gemini-cli`**~~ | ✅ Writes settings.json + gemini-extension.json + hooks.json + routing rules |
+| ~~**`install --host copilot-cli`**~~ | ✅ Writes `~/.config/gh/copilot/mcp.json` + routing rules |
+| ~~**`install --host openclaw`**~~ | ✅ Writes `~/.openclaw/mcp.json` + routing rules |
+| ~~**`install --host trae`**~~ | ✅ Writes platform-appropriate Trae config + `.rules` file |
+| ~~**5 new rules files**~~ | ✅ Token-efficient routing rules for each new host |
+| ~~**45 new tests**~~ | ✅ Full idempotency coverage in `tests/test_multi_host_install.py` |
+
+---
+
 ### v3.4 — Enterprise Pilot (Feb 2027, private beta)
 
 | Feature | Notes |

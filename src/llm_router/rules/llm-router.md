@@ -1,4 +1,4 @@
-<!-- llm-router-rules-version: 4 -->
+<!-- llm-router-rules-version: 5 -->
 # LLM Router — Global Routing Rules
 
 > Installed by llm-router. These rules control which model handles every task.
@@ -87,3 +87,27 @@ If no `⚡ MANDATORY ROUTE:` line appears (hook not installed or prompt was skip
 - Do NOT treat "I could do this better myself" as a reason to skip routing
 - Do NOT route AND also do the work yourself — pick one (always pick routing)
 - Do NOT re-classify what the hook already classified
+
+---
+
+## Token-Efficient Responses
+
+Routing already saves 50–100x on model cost. Apply these rules to also save output tokens:
+
+**Skip all preamble.** Never open with "I'll help", "Let me", "Great question", "Certainly", "Sure".
+
+**Lead with the result.** Answer first, reasoning only if asked or non-obvious.
+
+**Fragments are fine** when meaning is clear:
+- ✗ "I am routing this to Haiku. This saved you $0.012."
+- ✓ "Routed → Haiku. Saved $0.012."
+
+**Drop unnecessary articles** (a/an/the) when omitting them doesn't change meaning.
+
+**No trailing summaries.** User can read the output — don't restate it.
+
+**≥3 items → table or bullets**, not prose.
+
+**Never restate the user's request** before answering it.
+
+These rules stack with routing: cheaper model + fewer tokens = maximum cost reduction.

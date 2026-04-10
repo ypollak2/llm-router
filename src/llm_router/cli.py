@@ -7,10 +7,16 @@ Usage:
     llm-router install --force      — reinstall even if already present
     llm-router install --claw-code  — also install into claw-code (auto-detects ~/.claw-code/)
     llm-router install --headless   — install for Docker/agent/CI environments (API-key mode, no OAuth)
-    llm-router install --host codex    — print Codex CLI config snippet (no file changes)
-    llm-router install --host desktop  — print Claude Desktop config snippet (no file changes)
-    llm-router install --host copilot  — print VS Code / Copilot config snippet (no file changes)
-    llm-router install --host all      — print all host snippets
+    llm-router install --host codex       — write Codex CLI config files
+    llm-router install --host opencode    — write OpenCode config files
+    llm-router install --host gemini-cli  — write Gemini CLI config files
+    llm-router install --host copilot-cli — write GitHub Copilot CLI config files
+    llm-router install --host openclaw    — write OpenClaw config files
+    llm-router install --host trae        — write Trae IDE config files
+    llm-router install --host factory     — confirm Factory Droid plugin manifest
+    llm-router install --host desktop     — print Claude Desktop config snippet
+    llm-router install --host copilot     — print VS Code / Copilot config snippet
+    llm-router install --host all         — install / print all host configs
     llm-router uninstall        — remove hooks and MCP registration
     llm-router uninstall --purge — also delete ~/.llm-router/ (usage DB, .env, logs)
     llm-router setup            — interactive wizard: configure providers and API keys
@@ -391,6 +397,30 @@ Note: cost-routing is not available in Desktop (no hook system).
    Restart VS Code. Run @llm-router llm_savings to verify.
 Note: cost-routing is not available in Copilot (no hook system).
 """,
+
+    "opencode": """\
+{bold}OpenCode{reset}  — writing config files…
+""",
+
+    "gemini-cli": """\
+{bold}Gemini CLI{reset}  — writing config files…
+""",
+
+    "copilot-cli": """\
+{bold}GitHub Copilot CLI{reset}  — writing config files…
+""",
+
+    "openclaw": """\
+{bold}OpenClaw{reset}  — writing config files…
+""",
+
+    "trae": """\
+{bold}Trae IDE{reset}  — writing config files…
+""",
+
+    "factory": """\
+{bold}Factory Droid{reset}  — writing config files…
+""",
 }
 
 
@@ -488,6 +518,240 @@ def _install_codex_files() -> list[str]:
     return actions
 
 
+def _merge_json_mcp_block(config_path, server_name: str, server_entry: dict) -> list[str]:
+    """Merge an MCP server entry into a JSON config file. Returns list of action strings."""
+    import json as _json
+    import pathlib
+
+    actions: list[str] = []
+    config_path = pathlib.Path(config_path)
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+
+    existing = {}
+    if config_path.exists():
+        try:
+            existing = _json.loads(config_path.read_text())
+        except Exception:
+            existing = {}
+
+    mcp_key = "mcpServers"
+    servers = existing.setdefault(mcp_key, {})
+    if server_name not in servers:
+        servers[server_name] = server_entry
+        config_path.write_text(_json.dumps(existing, indent=2))
+        actions.append(f"✓ Added llm-router MCP server to {config_path}")
+    else:
+        actions.append(f"  llm-router already in {config_path} (skipped)")
+    return actions
+
+
+def _append_routing_rules(dest_path, rules_filename: str) -> list[str]:
+    """Append routing rules from src/rules/ to dest_path. Returns list of action strings."""
+    import pathlib
+
+    actions: list[str] = []
+    dest_path = pathlib.Path(dest_path)
+    rules_src = pathlib.Path(__file__).parent / "rules" / rules_filename
+    if not rules_src.exists():
+        return actions
+    rules_text = rules_src.read_text()
+    if dest_path.exists():
+        existing = dest_path.read_text()
+        if "llm-router" not in existing:
+            with dest_path.open("a") as f:
+                f.write(f"\n\n{rules_text}")
+            actions.append(f"✓ Appended routing rules to {dest_path}")
+        else:
+            actions.append(f"  Routing rules already in {dest_path} (skipped)")
+    else:
+        dest_path.parent.mkdir(parents=True, exist_ok=True)
+        dest_path.write_text(rules_text)
+        actions.append(f"✓ Created {dest_path} with routing rules")
+    return actions
+
+
+def _copy_hook_script(hook_filename: str, dest_dir) -> tuple[str, list[str]]:
+    """Copy a hook script from src/hooks/ to dest_dir. Returns (dest_path_str, actions)."""
+    import pathlib
+    import shutil as _shutil
+
+    actions: list[str] = []
+    dest_dir = pathlib.Path(dest_dir)
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    src = pathlib.Path(__file__).parent / "hooks" / hook_filename
+    dest = dest_dir / hook_filename
+    if src.exists():
+        _shutil.copy2(src, dest)
+        dest.chmod(0o755)
+        actions.append(f"✓ Installed hook script to {dest}")
+    return str(dest), actions
+
+
+def _install_opencode_files() -> list[str]:
+    """Write OpenCode-specific config files and return a list of actions taken."""
+    import pathlib
+
+    actions: list[str] = []
+    home = pathlib.Path.home()
+    opencode_dir = home / ".config" / "opencode"
+    opencode_dir.mkdir(parents=True, exist_ok=True)
+
+    # 1. MCP server entry
+    server_entry = {"command": "uvx", "args": ["claude-code-llm-router"]}
+    actions += _merge_json_mcp_block(opencode_dir / "config.json", "llm-router", server_entry)
+
+    # 2. Hook script
+    hook_dest, hook_actions = _copy_hook_script(
+        "opencode-post-tool.py", home / ".llm-router" / "hooks"
+    )
+    actions += hook_actions
+
+    # 3. Routing rules
+    actions += _append_routing_rules(opencode_dir / "instructions.md", "opencode-rules.md")
+
+    return actions
+
+
+def _install_gemini_cli_files() -> list[str]:
+    """Write Gemini CLI-specific config files and return a list of actions taken."""
+    import json as _json
+    import pathlib
+
+    actions: list[str] = []
+    home = pathlib.Path.home()
+    gemini_dir = home / ".gemini"
+    gemini_dir.mkdir(parents=True, exist_ok=True)
+
+    # 1. MCP server entry in ~/.gemini/settings.json
+    server_entry = {"command": "uvx", "args": ["claude-code-llm-router"]}
+    actions += _merge_json_mcp_block(gemini_dir / "settings.json", "llm-router", server_entry)
+
+    # 2. Extension manifest + hooks directory
+    ext_dir = gemini_dir / "extensions" / "llm-router"
+    ext_dir.mkdir(parents=True, exist_ok=True)
+
+    ext_manifest = ext_dir / "gemini-extension.json"
+    if not ext_manifest.exists():
+        manifest = {
+            "name": "llm-router",
+            "version": "3.5.0",
+            "description": "Route tasks to cheapest capable model — 20+ providers",
+            "mcpServers": {"llm-router": server_entry},
+        }
+        ext_manifest.write_text(_json.dumps(manifest, indent=2))
+        actions.append(f"✓ Created Gemini CLI extension manifest at {ext_manifest}")
+    else:
+        actions.append(f"  Extension manifest already exists at {ext_manifest} (skipped)")
+
+    # 3. Hook script
+    hook_dest, hook_actions = _copy_hook_script(
+        "gemini-cli-post-tool.py", home / ".llm-router" / "hooks"
+    )
+    actions += hook_actions
+
+    # 4. Extension hooks.json
+    hooks_dir = ext_dir / "hooks"
+    hooks_dir.mkdir(parents=True, exist_ok=True)
+    hooks_json = hooks_dir / "hooks.json"
+    hook_entry = {
+        "hooks": {
+            "PostToolUse": [
+                {"matcher": "*", "command": hook_dest}
+            ]
+        }
+    }
+    if not hooks_json.exists():
+        hooks_json.write_text(_json.dumps(hook_entry, indent=2))
+        actions.append(f"✓ Created Gemini CLI hooks.json at {hooks_json}")
+    else:
+        actions.append(f"  hooks.json already exists at {hooks_json} (skipped)")
+
+    # 5. Routing rules
+    actions += _append_routing_rules(ext_dir / "INSTRUCTIONS.md", "gemini-cli-rules.md")
+
+    return actions
+
+
+def _install_copilot_cli_files() -> list[str]:
+    """Write GitHub Copilot CLI config files and return a list of actions taken."""
+    import pathlib
+
+    actions: list[str] = []
+    home = pathlib.Path.home()
+
+    # Copilot CLI MCP config — ~/.config/gh/copilot/mcp.json
+    copilot_dir = home / ".config" / "gh" / "copilot"
+    copilot_dir.mkdir(parents=True, exist_ok=True)
+
+    server_entry = {"command": "uvx", "args": ["claude-code-llm-router"]}
+    actions += _merge_json_mcp_block(copilot_dir / "mcp.json", "llm-router", server_entry)
+
+    # Routing rules → ~/.config/gh/copilot/instructions.md
+    actions += _append_routing_rules(
+        copilot_dir / "instructions.md", "copilot-cli-rules.md"
+    )
+
+    return actions
+
+
+def _install_openclaw_files() -> list[str]:
+    """Write OpenClaw config files and return a list of actions taken."""
+    import pathlib
+
+    actions: list[str] = []
+    home = pathlib.Path.home()
+    openclaw_dir = home / ".openclaw"
+    openclaw_dir.mkdir(parents=True, exist_ok=True)
+
+    server_entry = {"command": "uvx", "args": ["claude-code-llm-router"]}
+    actions += _merge_json_mcp_block(openclaw_dir / "mcp.json", "llm-router", server_entry)
+    actions += _append_routing_rules(openclaw_dir / "instructions.md", "openclaw-rules.md")
+
+    return actions
+
+
+def _install_trae_files() -> list[str]:
+    """Write Trae IDE config files and return a list of actions taken."""
+    import pathlib
+    import sys
+
+    actions: list[str] = []
+    home = pathlib.Path.home()
+
+    # Trae config location differs by platform
+    if sys.platform == "darwin":
+        trae_dir = home / "Library" / "Application Support" / "Trae"
+    elif sys.platform == "win32":
+        trae_dir = pathlib.Path(home / "AppData" / "Roaming" / "Trae")
+    else:
+        trae_dir = home / ".config" / "Trae"
+    trae_dir.mkdir(parents=True, exist_ok=True)
+
+    server_entry = {"command": "uvx", "args": ["claude-code-llm-router"]}
+    actions += _merge_json_mcp_block(trae_dir / "mcp.json", "llm-router", server_entry)
+
+    # .rules file in current project directory (Trae-specific pattern)
+    rules_dest = pathlib.Path(".rules")
+    actions += _append_routing_rules(rules_dest, "trae-rules.md")
+
+    return actions
+
+
+def _install_factory_files() -> list[str]:
+    """Factory Droid uses .claude-plugin/ format natively — just confirm it's present."""
+    import pathlib
+
+    actions: list[str] = []
+    plugin_dir = pathlib.Path(__file__).parent.parent.parent.parent / ".factory-plugin"
+    if plugin_dir.exists():
+        actions.append("✓ .factory-plugin/ manifest present — Factory Droid will auto-load it")
+        actions.append("  Install via: factory plugin install ypollak2/llm-router")
+    else:
+        actions.append("  .factory-plugin/ not found in repo root — run from the llm-router repo dir")
+    actions.append("  Or install .claude-plugin/ directly: factory plugin install ypollak2/llm-router")
+    return actions
+
+
 def _install_host(host: str) -> None:
     """Install config for non-Claude Code hosts (writes files for Codex; prints snippets for others)."""
     import shutil
@@ -506,15 +770,27 @@ def _install_host(host: str) -> None:
     print(f"\n{bold}llm-router install --host {host}{reset}\n")
     print("─" * min(w, 70))
 
+    # Hosts that write files; all others print snippets
+    _FILE_WRITERS = {
+        "codex":      (_install_codex_files,       "Restart Codex and run llm_savings to verify."),
+        "opencode":   (_install_opencode_files,     "Restart OpenCode and run llm_savings to verify."),
+        "gemini-cli": (_install_gemini_cli_files,   "Restart Gemini CLI and run llm_savings to verify."),
+        "copilot-cli":(_install_copilot_cli_files,  "Restart Copilot CLI and run llm_savings to verify."),
+        "openclaw":   (_install_openclaw_files,     "Restart OpenClaw and run llm_savings to verify."),
+        "trae":       (_install_trae_files,         "Restart Trae IDE and run llm_savings to verify."),
+        "factory":    (_install_factory_files,      "Run: factory plugin install ypollak2/llm-router"),
+    }
+
     for h in hosts_to_show:
-        if h == "codex":
-            # Codex: actually write the files
-            print(f"{bold}Codex CLI{reset}  — writing config files…\n")
-            actions = _install_codex_files()
+        if h in _FILE_WRITERS:
+            install_fn, verify_hint = _FILE_WRITERS[h]
+            label = _HOST_SNIPPETS[h].format(bold=bold, reset=reset).strip()
+            print(f"{label}\n")
+            actions = install_fn()
             for action in actions:
                 print(f"  {action}")
             print()
-            print("  Restart Codex and run llm_savings to verify the DB is shared.")
+            print(f"  {verify_hint}")
         else:
             snippet = _HOST_SNIPPETS[h].format(bold=bold, reset=reset)
             print(snippet)

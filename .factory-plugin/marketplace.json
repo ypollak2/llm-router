@@ -6,7 +6,7 @@
   "plugins": [
     {
       "name": "llm-router",
-      "description": "Route every Codex task to the cheapest capable model across 20+ AI providers. Tracks cross-session savings, enforces routing policy, and sends weekly Slack digests.",
+      "description": "Route every Droid task to the cheapest capable model across 20+ AI providers. Tracks cross-session savings, enforces routing policy, and sends weekly Slack digests.",
       "version": "3.5.0",
       "source": {
         "source": "github",

@@ -265,25 +265,85 @@ agent = Agent(
 )
 ```
 
-### Codex CLI
+### Supported Hosts
 
-One command installs everything — MCP server, PostToolUse hook, and routing rules:
+| Host | Install command | Writes files | Hook support |
+|------|----------------|:------------:|:------------:|
+| **Claude Code** | `llm-router install` | ✅ | ✅ Full auto-route |
+| **Codex CLI** | `llm-router install --host codex` | ✅ | ✅ PostToolUse |
+| **OpenCode** | `llm-router install --host opencode` | ✅ | ✅ PostToolUse |
+| **Gemini CLI** | `llm-router install --host gemini-cli` | ✅ | ✅ Extension hook |
+| **GitHub Copilot CLI** | `llm-router install --host copilot-cli` | ✅ | — |
+| **OpenClaw** | `llm-router install --host openclaw` | ✅ | — |
+| **Trae IDE** | `llm-router install --host trae` | ✅ | — |
+| **Factory Droid** | `llm-router install --host factory` | ✅ manifest | — (Claude Code compat) |
+| **Claude Desktop** | `llm-router install --host desktop` | snippet | — |
+| **GitHub Copilot (VS Code)** | `llm-router install --host copilot` | snippet | — |
+
+All hosts except Claude Desktop/VS Code write files directly. Run any command twice — it's idempotent.
+
+### Codex CLI
 
 ```bash
 llm-router install --host codex
 ```
 
-This writes:
-- `~/.codex/config.yaml` — registers `llm-router` as an MCP server
-- `~/.codex/hooks.json` — adds a PostToolUse hook for savings tracking
-- `~/.codex/instructions.md` — injects routing rules so Codex knows when to call `llm_auto`
+Writes `~/.codex/config.yaml`, `~/.codex/hooks.json` (PostToolUse), and `~/.codex/instructions.md`.
 
-Or install directly from the Codex plugin marketplace (coming soon):
 ```bash
-codex plugin install llm-router
+codex plugin install llm-router   # or via Codex marketplace
 ```
 
-Use `llm_auto` instead of `llm_route` — it does server-side savings tracking so your history accumulates across sessions even without the Claude Code hook system.
+### OpenCode
+
+```bash
+llm-router install --host opencode
+```
+
+Writes `~/.config/opencode/config.json` (MCP block), PostToolUse hook, and routing rules.
+
+### Gemini CLI
+
+```bash
+llm-router install --host gemini-cli
+```
+
+Writes `~/.gemini/settings.json`, creates the `llm-router` extension with `gemini-extension.json` + `hooks.json`, and appends routing rules.
+
+### GitHub Copilot CLI
+
+```bash
+llm-router install --host copilot-cli
+```
+
+Writes `~/.config/gh/copilot/mcp.json` and routing rules.
+
+### OpenClaw
+
+```bash
+llm-router install --host openclaw
+```
+
+Writes `~/.openclaw/mcp.json` and routing rules.
+
+### Trae IDE
+
+```bash
+llm-router install --host trae
+```
+
+Writes the platform-appropriate Trae config (`~/Library/Application Support/Trae/mcp.json` on macOS) and a `.rules` file in the current directory.
+
+### Factory Droid
+
+Factory Droid natively supports Claude Code plugin format (`.claude-plugin/`) — no extra setup needed:
+
+```bash
+factory plugin install ypollak2/llm-router
+# or via Factory marketplace search: llm-router
+```
+
+The dedicated `.factory-plugin/` manifest is included for Factory marketplace discovery.
 
 ### Claude Desktop
 
@@ -291,7 +351,7 @@ Use `llm_auto` instead of `llm_route` — it does server-side savings tracking s
 llm-router install --host desktop
 ```
 
-Prints the snippet for `claude_desktop_config.json`. No hooks available in Claude Desktop, so all saving tracking goes through `llm_auto`.
+Prints the snippet for `claude_desktop_config.json`. No hooks in Desktop — use `llm_auto` for savings tracking.
 
 ### GitHub Copilot (VS Code)
 
@@ -299,12 +359,12 @@ Prints the snippet for `claude_desktop_config.json`. No hooks available in Claud
 llm-router install --host copilot
 ```
 
-Prints the snippet for `.vscode/mcp.json` and a `copilot-instructions.md` template for routing rules.
+Prints the snippet for `.vscode/mcp.json` and a `copilot-instructions.md` template.
 
 ### All at once
 
 ```bash
-llm-router install --host all   # prints snippets for all three
+llm-router install --host all   # installs/prints all hosts
 ```
 
 ### Docker / CI
@@ -458,6 +518,7 @@ llm-router share   # copies savings card to clipboard + opens tweet
 | Version | Headline | Status |
 |---------|----------|--------|
 | **v3.4** | **Agent-Context Routing** — subscription-first chain reordering when Codex or Claude Code is active | ✅ Done |
+| **v3.5** | **Multi-Agent CLI Compatibility** — OpenCode, Gemini CLI, Copilot CLI, OpenClaw, Factory Droid, Trae | ✅ Done |
 | **v4.0** | **VS Code + Cursor GA** — cross-editor routing, shared config and analytics | 📅 Apr 2027 |
 
 > Full details: [ROADMAP.md](ROADMAP.md)
