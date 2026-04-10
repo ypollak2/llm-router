@@ -1,5 +1,25 @@
 # Changelog
 
+## v3.6.0 — VS Code + Cursor IDE Support (2026-04-10)
+
+### Added
+
+- **`llm-router install --host vscode`** — writes user-level `mcp.json` with `"servers"` root key (VS Code MCP spec); appends routing guidance to `.github/copilot-instructions.md`
+  - macOS: `~/Library/Application Support/Code/User/mcp.json`
+  - Linux: `~/.config/Code/User/mcp.json`
+  - Windows: `%APPDATA%/Code/User/mcp.json`
+- **`llm-router install --host cursor`** — writes `~/.cursor/mcp.json` with `"mcpServers"` root key; installs routing rules to `~/.cursor/rules/llm-router.md`
+- **`vscode-rules.md`** + **`cursor-rules.md`** bundled in package — task routing tables, token-efficient response rules, MCP setup guidance
+- **`_merge_json_mcp_block` `root_key` parameter** — cleanly supports both `"servers"` (VS Code) and `"mcpServers"` (Cursor/Desktop/Codex) without duplication
+
+### Technical Notes
+
+- All installs are idempotent — re-running skips already-configured entries
+- VS Code uses `"servers"` (MCP spec standard); Cursor uses `"mcpServers"` (Claude Desktop compat)
+- 22 new tests in `tests/test_vscode_cursor_install.py` covering file writes, key format, idempotency, merge, and rules content
+
+---
+
 ## v3.5.0 — Multi-Agent CLI Compatibility (2026-04-10)
 
 ### Added

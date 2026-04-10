@@ -421,6 +421,14 @@ Note: cost-routing is not available in Copilot (no hook system).
     "factory": """\
 {bold}Factory Droid{reset}  — writing config files…
 """,
+
+    "vscode": """\
+{bold}VS Code (MCP native){reset}  — writing config files…
+""",
+
+    "cursor": """\
+{bold}Cursor IDE{reset}  — writing config files…
+""",
 }
 
 
@@ -518,7 +526,9 @@ def _install_codex_files() -> list[str]:
     return actions
 
 
-def _merge_json_mcp_block(config_path, server_name: str, server_entry: dict) -> list[str]:
+def _merge_json_mcp_block(
+    config_path, server_name: str, server_entry: dict, root_key: str = "mcpServers"
+) -> list[str]:
     """Merge an MCP server entry into a JSON config file. Returns list of action strings."""
     import json as _json
     import pathlib
@@ -534,8 +544,7 @@ def _merge_json_mcp_block(config_path, server_name: str, server_entry: dict) -> 
         except Exception:
             existing = {}
 
-    mcp_key = "mcpServers"
-    servers = existing.setdefault(mcp_key, {})
+    servers = existing.setdefault(root_key, {})
     if server_name not in servers:
         servers[server_name] = server_entry
         config_path.write_text(_json.dumps(existing, indent=2))
@@ -752,6 +761,52 @@ def _install_factory_files() -> list[str]:
     return actions
 
 
+def _install_vscode_files() -> list[str]:
+    """Write VS Code MCP config and routing rules. Returns list of actions taken."""
+    import pathlib
+    import sys
+
+    actions: list[str] = []
+    home = pathlib.Path.home()
+
+    # Platform-specific user mcp.json location
+    if sys.platform == "darwin":
+        mcp_json = home / "Library" / "Application Support" / "Code" / "User" / "mcp.json"
+    elif sys.platform == "win32":
+        appdata = pathlib.Path(pathlib.os.environ.get("APPDATA", home / "AppData" / "Roaming"))
+        mcp_json = appdata / "Code" / "User" / "mcp.json"
+    else:
+        mcp_json = home / ".config" / "Code" / "User" / "mcp.json"
+
+    server_entry = {"command": "uvx", "args": ["claude-code-llm-router"]}
+    actions += _merge_json_mcp_block(mcp_json, "llm-router", server_entry, root_key="servers")
+
+    # Append routing guidance to .github/copilot-instructions.md in cwd (if it exists)
+    copilot_instructions = pathlib.Path.cwd() / ".github" / "copilot-instructions.md"
+    actions += _append_routing_rules(copilot_instructions, "vscode-rules.md")
+
+    return actions
+
+
+def _install_cursor_files() -> list[str]:
+    """Write Cursor IDE MCP config and routing rules. Returns list of actions taken."""
+    import pathlib
+
+    actions: list[str] = []
+    home = pathlib.Path.home()
+
+    # Global Cursor MCP config (applies across all projects)
+    mcp_json = home / ".cursor" / "mcp.json"
+    server_entry = {"command": "uvx", "args": ["claude-code-llm-router"]}
+    actions += _merge_json_mcp_block(mcp_json, "llm-router", server_entry, root_key="mcpServers")
+
+    # Append routing rules to ~/.cursor/rules/llm-router.md
+    cursor_rules = home / ".cursor" / "rules" / "llm-router.md"
+    actions += _append_routing_rules(cursor_rules, "cursor-rules.md")
+
+    return actions
+
+
 def _install_host(host: str) -> None:
     """Install config for non-Claude Code hosts (writes files for Codex; prints snippets for others)."""
     import shutil
@@ -779,6 +834,8 @@ def _install_host(host: str) -> None:
         "openclaw":   (_install_openclaw_files,     "Restart OpenClaw and run llm_savings to verify."),
         "trae":       (_install_trae_files,         "Restart Trae IDE and run llm_savings to verify."),
         "factory":    (_install_factory_files,      "Run: factory plugin install ypollak2/llm-router"),
+        "vscode":     (_install_vscode_files,       "Restart VS Code and enable MCP in Copilot settings."),
+        "cursor":     (_install_cursor_files,       "Restart Cursor and run llm_savings to verify."),
     }
 
     for h in hosts_to_show:

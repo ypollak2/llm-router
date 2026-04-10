@@ -277,10 +277,12 @@ agent = Agent(
 | **OpenClaw** | `llm-router install --host openclaw` | ✅ | — |
 | **Trae IDE** | `llm-router install --host trae` | ✅ | — |
 | **Factory Droid** | `llm-router install --host factory` | ✅ manifest | — (Claude Code compat) |
+| **VS Code (MCP native)** | `llm-router install --host vscode` | ✅ | — |
+| **Cursor IDE** | `llm-router install --host cursor` | ✅ | — |
 | **Claude Desktop** | `llm-router install --host desktop` | snippet | — |
 | **GitHub Copilot (VS Code)** | `llm-router install --host copilot` | snippet | — |
 
-All hosts except Claude Desktop/VS Code write files directly. Run any command twice — it's idempotent.
+All installs are idempotent — run any command twice safely.
 
 ### Codex CLI
 

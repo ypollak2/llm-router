@@ -7,7 +7,7 @@
     {
       "name": "llm-router",
       "description": "Route every Droid task to the cheapest capable model across 20+ AI providers. Tracks cross-session savings, enforces routing policy, and sends weekly Slack digests.",
-      "version": "3.5.0",
+      "version": "3.6.0",
       "source": {
         "source": "github",
         "repo": "ypollak2/llm-router"
