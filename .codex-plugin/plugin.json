@@ -1,7 +1,7 @@
 {
   "name": "llm-router",
-  "version": "3.3.0",
-  "description": "Route every Codex task to the cheapest capable model — Gemini Flash, Haiku, Ollama, Perplexity, and 20+ providers. Tracks cross-session savings.",
+  "version": "3.4.0",
+  "description": "Route every Codex task to the cheapest capable model \u2014 Gemini Flash, Haiku, Ollama, Perplexity, and 20+ providers. Tracks cross-session savings.",
   "author": {
     "name": "ypollak2",
     "url": "https://github.com/ypollak2"
@@ -13,7 +13,7 @@
   "mcpServers": ".mcp.json",
   "interface": {
     "displayName": "LLM Router",
-    "shortDescription": "Smart LLM routing — cheapest capable model, every task",
+    "shortDescription": "Smart LLM routing \u2014 cheapest capable model, every task",
     "longDescription": "llm-router is an MCP server that automatically routes prompts to the best-fit model from 20+ providers. Simple questions go to Gemini Flash or Haiku ($0.001); complex reasoning goes to o3 or GPT-4o only when needed. Tracks savings across sessions. Works with Codex CLI, Claude Code, Claude Desktop, and GitHub Copilot.",
     "developerName": "ypollak2",
     "category": "Developer Tools",

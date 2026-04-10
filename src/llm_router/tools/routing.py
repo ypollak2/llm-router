@@ -627,6 +627,7 @@ async def llm_select_agent(
     import os as _os
 
     from llm_router.codex_agent import is_codex_available
+    from llm_router.state import set_active_agent
 
     valid_profiles = {"budget", "balanced", "premium"}
     if profile not in valid_profiles:
@@ -687,6 +688,10 @@ async def llm_select_agent(
     primary_available = (primary == "claude_code" and claude_ok) or (primary == "codex" and codex_ok)
     if not primary_available and primary != fallback:
         primary, primary_model, fallback, fallback_model = fallback, fallback_model, primary, primary_model
+
+    # Persist agent choice so subsequent routing calls can reorder chains for
+    # subscription-first ordering (see _reorder_for_agent_context in router.py).
+    set_active_agent(primary)
 
     result = {
         "primary": primary,

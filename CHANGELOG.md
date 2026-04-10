@@ -1,5 +1,44 @@
 # Changelog
 
+## v3.4.0 — Agent-Context Chain Reordering (2026-04-10)
+
+### Added
+
+- **Agent-context aware model chain reordering** (`src/llm_router/router.py`)
+
+  When `llm_select_agent` has determined the active agent (Claude Code or Codex),
+  subsequent routing calls now reorder the model chain to put that agent's subscription-
+  covered models first — maximising already-paid capacity before paid-per-call APIs.
+
+  Priority matrix:
+
+  | Session | Complexity | Chain order |
+  |---------|-----------|-------------|
+  | Codex | simple / moderate | Ollama → Codex → rest → Claude |
+  | Codex | complex | Codex → Claude → rest → Ollama |
+  | Claude Code | simple / moderate | Ollama → Claude → rest → Codex |
+  | Claude Code | complex | Claude → rest → Codex → Ollama |
+
+  Ollama stays first for simple/moderate tasks (free + local), falls to last for
+  complex tasks (quality matters more than cost at high complexity).
+
+- **`get_active_agent()` / `set_active_agent()`** (`src/llm_router/state.py`)
+
+  New shared state accessors for the active agent context. `llm_select_agent` now
+  calls `set_active_agent(primary)` after resolving its decision tree so all routing
+  calls in the same session inherit the subscription context.
+
+- **`_reorder_for_agent_context(models, agent, complexity)`** (`src/llm_router/router.py`)
+
+  Pure function that reorders a model list into groups `[ollama, codex, rest, claude]`
+  and returns them in the priority order for the given agent/complexity combination.
+  Called automatically after all Codex/Ollama injection, before any model is tried.
+
+- **34 new tests** (`tests/test_agent_context_routing.py`)
+
+  Full coverage of state helpers, both agent types, all complexity levels, and edge
+  cases (chains missing Ollama, Claude, or Codex models).
+
 ## v3.3.0 — Codex Plugin (2026-04-10)
 
 ### Added

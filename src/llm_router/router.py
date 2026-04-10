@@ -16,6 +16,7 @@ import logging
 from typing import Any
 
 from llm_router import cost, media, providers
+from llm_router.state import get_active_agent
 from llm_router.codex_agent import CODEX_MODELS, is_codex_available, run_codex
 from llm_router.compaction import compact_structural
 from llm_router.config import get_config
@@ -38,6 +39,40 @@ _COMPLEXITY_TO_PROFILE: dict[Complexity, RoutingProfile] = {
 }
 
 log = logging.getLogger("llm_router")
+
+
+def _reorder_for_agent_context(
+    models: list[str],
+    agent: str | None,
+    complexity: Complexity,
+) -> list[str]:
+    """Reorder model chain to prefer subscription-covered models for the active agent.
+
+    Priority matrix (subscription-first ordering):
+      Codex session + simple/moderate  : Ollama → Codex → rest (GPT-4o etc.) → Claude
+      Codex session + complex          : Codex → Claude → rest → Ollama
+      Claude Code session + simple/moderate : Ollama → Claude → rest → Codex
+      Claude Code session + complex    : Claude → rest → Codex → Ollama
+
+    Does not filter any models — every model stays in the chain, just reordered
+    so the cheapest/already-paid tier is attempted first.
+    """
+    if agent is None:
+        return models
+    ollama = [m for m in models if provider_from_model(m) == "ollama"]
+    codex  = [m for m in models if provider_from_model(m) == "codex"]
+    claude = [m for m in models if provider_from_model(m) == "anthropic"]
+    rest   = [m for m in models if m not in set(ollama + codex + claude)]
+    if complexity in (Complexity.SIMPLE, Complexity.MODERATE):
+        if agent == "codex":
+            return ollama + codex + rest + claude
+        else:  # claude_code
+            return ollama + claude + rest + codex
+    else:  # COMPLEX / DEEP_REASONING
+        if agent == "codex":
+            return codex + claude + rest + ollama
+        else:  # claude_code
+            return claude + rest + codex + ollama
 
 # Guards the check-then-spend budget sequence so concurrent calls cannot
 # both slip through the limit before either has recorded its spend.
@@ -241,9 +276,9 @@ async def route_and_call(
     # Priority: explicit profile > complexity_hint > prompt-length heuristic > config default.
     # Complexity is the correct signal; prompt length is a cheap fallback when
     # the caller doesn't know complexity yet (e.g. media tasks, model_override calls).
+    c: Complexity = Complexity.MODERATE  # effective complexity; used later for agent-context reorder
     use_thinking = False  # Extended thinking flag — set for deep_reasoning complexity
     if profile is None and not model_override:
-        c: Complexity | None = None
         if complexity_hint is not None:
             c = Complexity(complexity_hint) if isinstance(complexity_hint, str) else complexity_hint
         elif classification_data and "complexity" in classification_data:
@@ -506,6 +541,14 @@ async def route_and_call(
                         first_paid, task_type.value,
                     )
                     models_to_try = models_to_try[:first_paid] + codex_chain + models_to_try[first_paid:]
+
+            # ── Agent-context chain reordering ───────────────────────────────
+            # When llm_select_agent has tagged the active tool (claude_code or
+            # codex), reorder the chain so that tool's subscription-covered
+            # models are attempted first — maximising already-paid capacity.
+            models_to_try = _reorder_for_agent_context(
+                models_to_try, get_active_agent(), c,
+            )
 
     if not models_to_try:
         raise ValueError(

@@ -7,7 +7,7 @@
     {
       "name": "llm-router",
       "description": "Route every Codex task to the cheapest capable model across 20+ AI providers. Tracks cross-session savings, enforces routing policy, and sends weekly Slack digests.",
-      "version": "3.3.0",
+      "version": "3.4.0",
       "source": {
         "source": "github",
         "repo": "ypollak2/llm-router"

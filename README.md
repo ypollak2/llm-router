@@ -457,7 +457,7 @@ llm-router share   # copies savings card to clipboard + opens tweet
 
 | Version | Headline | Status |
 |---------|----------|--------|
-| **v3.4** | **Community Benchmarks** — opt-in anonymous routing quality leaderboard | ✅ Done |
+| **v3.4** | **Agent-Context Routing** — subscription-first chain reordering when Codex or Claude Code is active | ✅ Done |
 | **v4.0** | **VS Code + Cursor GA** — cross-editor routing, shared config and analytics | 📅 Apr 2027 |
 
 > Full details: [ROADMAP.md](ROADMAP.md)

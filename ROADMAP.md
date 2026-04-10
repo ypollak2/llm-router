@@ -377,9 +377,18 @@ Short continuation prompts are currently classified on their 3 words alone, losi
 
 ## Phase 4 — Category Leadership (Jan–Apr 2027)
 
-### v3.4 — Community Benchmarks ✅ Complete (2026-04-09)
+### v3.4 — Agent-Context Routing ✅ Complete (2026-04-10)
 
-**Headline**: *"Routing quality backed by real developer workloads — not synthetic benchmarks."*
+**Headline**: *"When you use Codex, route to Codex models first. When you use Claude Code, route to Claude models first."*
+
+| Feature | Notes |
+|---|---|
+| ~~**`_reorder_for_agent_context()`**~~ | ✅ Pure reorder function in `router.py`; reshuffles chain by `(agent, complexity)` |
+| ~~**`get/set_active_agent()`**~~ | ✅ Shared state in `state.py`; `llm_select_agent` tags the session |
+| ~~**Priority matrix**~~ | ✅ Codex+simple→Ollama→Codex→rest→Claude; Claude+complex→Claude→rest→Codex→Ollama |
+| ~~**34 new tests**~~ | ✅ Full coverage in `tests/test_agent_context_routing.py` |
+
+**Community Benchmarks** (previously v3.4):
 
 | Feature | Notes |
 |---|---|

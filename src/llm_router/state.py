@@ -22,6 +22,7 @@ from llm_router.types import PRO_FEATURES, Tier
 
 _active_profile = None          # RoutingProfile | None
 _last_usage = None              # ClaudeSubscriptionUsage | None
+_active_agent = None            # str | None — "claude_code" or "codex"
 
 
 def get_active_profile():
@@ -46,6 +47,17 @@ def set_last_usage(usage) -> None:
     """Update the cached ClaudeSubscriptionUsage object."""
     global _last_usage
     _last_usage = usage
+
+
+def get_active_agent() -> str | None:
+    """Return the currently active agent context ('claude_code' or 'codex'), or None."""
+    return _active_agent
+
+
+def set_active_agent(agent: str | None) -> None:
+    """Set the active agent context (pass None to clear)."""
+    global _active_agent
+    _active_agent = agent
 
 
 def _check_tier(feature: str) -> str | None:
