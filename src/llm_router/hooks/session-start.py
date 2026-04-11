@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm-router-hook-version: 11
+# llm-router-hook-version: 12
 """SessionStart hook — inject routing banner, start Ollama, refresh Claude usage.
 
 Fires once when a new Claude Code session begins. Four jobs:
@@ -29,6 +29,7 @@ from datetime import datetime
 STATE_DIR              = os.path.expanduser("~/.llm-router")
 SESSION_START_FILE     = os.path.join(STATE_DIR, "session_start.txt")
 SESSION_ID_FILE        = os.path.join(STATE_DIR, "session_id.txt")
+SESSION_SPEND_FILE     = os.path.join(STATE_DIR, "session_spend.json")
 DB_PATH                = os.path.join(STATE_DIR, "usage.db")
 WEEKLY_DIGEST_FILE     = os.path.join(STATE_DIR, "last_weekly_digest.txt")
 
@@ -109,13 +110,31 @@ BANNER = BANNER_SUBSCRIPTION if _CC_MODE else BANNER_API_KEYS
 
 
 def _reset_session_stats() -> None:
-    """Write current timestamp and a fresh UUID as session identifiers."""
+    """Write current timestamp and a fresh UUID as session identifiers.
+    Also resets session_spend.json so per-session cost tracking starts clean."""
     os.makedirs(STATE_DIR, exist_ok=True)
     try:
         with open(SESSION_START_FILE, "w") as f:
             f.write(str(time.time()))
         with open(SESSION_ID_FILE, "w") as f:
             f.write(str(uuid.uuid4()))
+    except OSError:
+        pass
+    # Reset real-time spend tracker so session-end shows this session only
+    try:
+        fresh = {
+            "total_usd": 0.0,
+            "call_count": 0,
+            "anomaly_flag": False,
+            "session_start": time.time(),
+            "top_model": None,
+            "per_model": {},
+            "per_tool": {},
+        }
+        tmp = SESSION_SPEND_FILE + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(fresh, f)
+        os.replace(tmp, SESSION_SPEND_FILE)
     except OSError:
         pass
 
