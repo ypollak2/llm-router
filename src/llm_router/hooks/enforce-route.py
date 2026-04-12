@@ -171,11 +171,17 @@ def main() -> None:
         sys.exit(0)  # soft mode: logged, allowed
 
     if enforce == "smart":
-        # Hard enforcement for Q&A tasks — answer must come from cheap model.
-        # Soft enforcement for code tasks — file tools are needed for editing.
+        # In smart mode, NEVER block Read/Glob/Grep/LS.
+        # Blocking file-read tools caused irrecoverable deadlocks where Claude
+        # couldn't read the hook source to fix it. The cost saving from blocking
+        # reads is low; the deadlock risk is too high.
+        # Only Bash/Edit/Write are blocked in smart mode (prevents direct answers
+        # and code execution, but keeps investigation tools available).
+        if tool_name not in _BASE_BLOCK_TOOLS:
+            sys.exit(0)
         if task_type not in _QA_TASK_TYPES:
             sys.exit(0)  # code task in smart mode — allow file tools
-        # Fall through to hard block for Q&A tasks
+        # Fall through to hard block for Q&A tasks (Bash/Edit/Write only)
 
     # Hard mode: block with clear remediation instructions
     is_file_reader = tool_name in _QA_ONLY_BLOCK_TOOLS

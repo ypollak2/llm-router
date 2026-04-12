@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm-router-hook-version: 14
+# llm-router-hook-version: 15
 """SessionStart hook — inject routing banner, start Ollama, refresh Claude usage.
 
 Fires once when a new Claude Code session begins. Four jobs:
@@ -363,6 +363,58 @@ def _latency_hint() -> str:
         return ""
 
 
+def _preflight_check() -> str:
+    """Check API keys, Ollama, and enforce-route mode. Returns a compact status line.
+
+    Runs silently (never raises) so it cannot block session start.
+    Only emits output when something needs attention.
+    """
+    issues = []
+    ok = []
+
+    # API keys
+    for key, label in [
+        ("OPENAI_API_KEY", "OpenAI"),
+        ("GEMINI_API_KEY", "Gemini"),
+        ("ANTHROPIC_API_KEY", "Anthropic"),
+    ]:
+        if os.environ.get(key, "").strip():
+            ok.append(label)
+        else:
+            issues.append(f"{key} missing")
+
+    # Ollama
+    try:
+        import subprocess
+        result = subprocess.run(
+            ["ollama", "list"], capture_output=True, timeout=3
+        )
+        if result.returncode == 0:
+            ok.append("Ollama")
+        else:
+            issues.append("Ollama not running")
+    except Exception:
+        issues.append("Ollama not found")
+
+    # Enforce-route mode
+    enforce = os.environ.get("LLM_ROUTER_ENFORCE", "smart")
+    if enforce == "hard":
+        issues.append("LLM_ROUTER_ENFORCE=hard (may block tools — use smart or off to debug)")
+    elif enforce == "off":
+        ok.append("enforce=off")
+    else:
+        ok.append(f"enforce={enforce}")
+
+    if not issues:
+        return ""  # All good — stay silent
+
+    lines = ["\n⚠️  Pre-flight issues:"]
+    for issue in issues:
+        lines.append(f"  ✗ {issue}")
+    lines.append("  Fix before starting implementation.")
+    return "\n".join(lines)
+
+
 def main() -> None:
     try:
         json.load(sys.stdin)  # consume input (may be empty)
@@ -402,6 +454,7 @@ def main() -> None:
     hints += usage_hint
     hints += _weekly_digest()
     hints += _latency_hint()
+    hints += _preflight_check()
 
     print(json.dumps({
         "hookSpecificOutput": {

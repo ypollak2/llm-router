@@ -20,6 +20,26 @@
             "command": "python3 /Users/yali.pollak/Projects/llm-router/.claude/hooks/usage-refresh.py"
           }
         ]
+      },
+      {
+        "matcher": "Edit|Write|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 /Users/yali.pollak/projects/llm-router/.claude/hooks/version-guard.py"
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "chronicle inject --format=markdown 2>/dev/null || true"
+          }
+        ]
       }
     ]
   }

@@ -1,5 +1,74 @@
 # LLM Router — Project Instructions
 
+## ⚠️ CRITICAL: Hook Deadlock Prevention
+
+**NEVER configure enforce-route or any hook to block Claude's core tools.**
+The following tools must ALWAYS be allowed, unconditionally:
+`Read, Edit, MultiEdit, Write, Bash, Grep, Glob, LS, ToolSearch, Agent`
+
+Blocking these creates an unresolvable deadlock — Claude cannot fix the hook
+because the hook blocks the tools needed to fix it. This killed 6+ sessions.
+
+- Use a **blocklist** approach: block specific routing violations only
+- Never use an **allowlist** that omits core Claude tools
+- If you suspect a deadlock: `export LLM_ROUTER_ENFORCE=off` then fix the hook
+
+## Project Overview
+
+This project is **Python**. All new code must be Python unless explicitly asked otherwise.
+Use type hints on all public functions, Pydantic for external data, `@dataclass` for domain objects.
+
+## Environment Setup
+
+Before any implementation session, verify:
+```bash
+echo $OPENAI_API_KEY      # must be set and valid
+echo $GEMINI_API_KEY      # must be set and valid
+echo $ANTHROPIC_API_KEY   # must be set and valid
+ollama list               # Ollama must be running
+echo $LLM_ROUTER_ENFORCE  # check enforcement mode (off/soft/smart/hard)
+```
+If any key is missing or invalid, fix it before writing code.
+
+## Testing
+
+Always run tests with:
+```bash
+uv run pytest tests/ -q --ignore=tests/test_integration.py
+```
+Never use bare `pytest` — it will fail without the venv context `uv run` provides.
+For a single test file: `uv run pytest tests/test_classifier.py -x -q`
+
+## Version Management
+
+Every user-facing change requires ALL of these files to stay in sync:
+- `pyproject.toml` → `project.version`
+- `.claude-plugin/plugin.json` → `version`
+- `.claude-plugin/marketplace.json` → `version`
+
+Verify sync before any commit:
+```bash
+python3 -c "
+import tomllib, json
+v1 = tomllib.load(open('pyproject.toml','rb'))['project']['version']
+v2 = json.load(open('.claude-plugin/plugin.json'))['version']
+v3 = json.load(open('.claude-plugin/marketplace.json'))['version']
+assert v1==v2==v3, f'VERSION MISMATCH: pyproject={v1} plugin={v2} marketplace={v3}'
+print(f'✅ All versions in sync: {v1}')
+"
+```
+
+## Decision Logging
+
+After completing any significant feature or architectural decision, append to `docs/decisions.md`:
+```
+## YYYY-MM-DD — <feature name>
+**Decision**: what was decided
+**Alternatives considered**: what else was evaluated
+**Outcome**: result, any caveats
+```
+This replaces the need for separate observer/memory agent sessions.
+
 ## Auto-Routing Rule
 
 When a user's task would clearly benefit from an external LLM — research requiring web access, content generation, deep analysis beyond your training data, or code generation that could leverage a specialized model — **automatically use the appropriate `llm_*` MCP tool** without the user needing to type `/route`.
