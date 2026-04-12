@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm-router-hook-version: 12
+# llm-router-hook-version: 14
 """SessionStart hook — inject routing banner, start Ollama, refresh Claude usage.
 
 Fires once when a new Claude Code session begins. Four jobs:
@@ -320,6 +320,49 @@ def _weekly_digest() -> str:
         return ""
 
 
+def _latency_hint() -> str:
+    """Return a one-liner showing p50 latency for the top models seen in the last 7 days.
+
+    Only shown when there is enough data (≥3 models with ≥2 calls each).
+    Silent on any error so it never breaks the session start.
+    """
+    if not os.path.exists(DB_PATH):
+        return ""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        rows = conn.execute(
+            """
+            SELECT model, AVG(latency_ms) as p50, COUNT(*) as n
+            FROM usage
+            WHERE success=1
+              AND latency_ms > 100
+              AND timestamp >= datetime('now', '-7 days')
+            GROUP BY model
+            HAVING n >= 2
+            ORDER BY p50 ASC
+            LIMIT 5
+            """
+        ).fetchall()
+        conn.close()
+
+        if len(rows) < 2:
+            return ""
+
+        parts = []
+        for model, p50_ms, _ in rows:
+            short = model.split("/")[-1] if "/" in model else model
+            # Abbreviate common suffixes to keep it compact
+            short = short.replace("-preview", "").replace("-latest", "")
+            if len(short) > 16:
+                short = short[:14] + "…"
+            secs = p50_ms / 1000
+            parts.append(f"{short} {secs:.1f}s")
+
+        return "\n⚡ p50: " + " · ".join(parts)
+    except Exception:
+        return ""
+
+
 def main() -> None:
     try:
         json.load(sys.stdin)  # consume input (may be empty)
@@ -358,6 +401,7 @@ def main() -> None:
 
     hints += usage_hint
     hints += _weekly_digest()
+    hints += _latency_hint()
 
     print(json.dumps({
         "hookSpecificOutput": {
