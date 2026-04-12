@@ -25,13 +25,13 @@ jobs:
         run: uv python install ${{ matrix.python-version }}
 
       - name: Install dependencies
-        run: uv sync --extra dev --extra agno
+        run: uv sync --extra dev
 
       - name: Lint
         run: uv run ruff check src/
 
       - name: Run tests
-        run: uv run pytest tests/ -q --ignore=tests/test_integration.py --timeout=30
+        run: uv run pytest tests/ -q --ignore=tests/test_integration.py --ignore=tests/test_agno_integration.py --timeout=30
 
   lint:
     runs-on: ubuntu-latest

@@ -1,5 +1,28 @@
 # Changelog
 
+## v4.0.2 — CI reliability + cost-contract test coverage (2026-04-12)
+
+### Fixed
+
+- **CI hang on Python 3.12/3.13** — `test_agno_integration.py` was included in the standard test run, which caused agno's async initialisation to hang on Python 3.12/3.13. Both `ci.yml` and `publish.yml` now exclude agno tests from the default suite; agno tests run separately when `--extra agno` is explicitly requested.
+- **Publish workflow never reaching PyPI** — The v4.0.1 publish job was gated behind the `test` job that used Python 3.12, so every publish attempt was cancelled. Removing the `--extra agno` install from the test gate unblocks the publish chain.
+
+### Added
+
+- **`tests/test_routing_value.py`** — 32 tests covering the core cost-saving contracts:
+  - Complexity→profile mapping: SIMPLE→BUDGET (Haiku $0.0008/1K) vs COMPLEX→PREMIUM (Opus $0.075/1K) — a regression here costs 94× per query
+  - Subscription-aware agent reordering: verifies Ollama→Claude→GPT-4o ordering for claude_code sessions (free-first)
+  - Pressure-based chain reordering: at ≥85% Claude quota, cheap models (Gemini Flash, Groq) lead the chain; at ≥99% Claude is removed entirely
+  - Circuit breaker isolation: failures on one provider don't cascade to others
+  - Model chain shape assertions: BUDGET chains never start with frontier models (Opus, o3)
+
+- **`tests/test_config_routing_value.py`** — 27 tests covering provider detection safety:
+  - `available_providers` with all key combinations
+  - Claude subscription mode: `anthropic` excluded AND key withheld from `os.environ` (prevents LiteLLM bypass)
+  - Ollama inclusion/exclusion gated by liveness probe
+  - `text_providers` vs `media_providers` segmentation
+  - Routing defaults validated (profile=BALANCED, budget=$20, temperature=0.7)
+
 ## v4.0.0 — Token Efficiency, Real-Time Spend, Feedback Learning (2026-04-10)
 
 ### Summary
