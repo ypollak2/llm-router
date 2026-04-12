@@ -62,15 +62,13 @@ def _fetch_live_usage() -> dict | None:
         n = float(data.get("seven_day_sonnet", {}).get("utilization", 0.0))
         result = {"session_pct": round(s, 1), "weekly_pct": round(w, 1),
                   "sonnet_pct": round(n, 1), "updated_at": time.time()}
-        # Persist for routing pressure
+        # Persist for routing pressure only — do NOT write SESSION_CC_SNAP_FILE here.
+        # Writing the snapshot from _fetch_live_usage() causes mid-session usage-refresh
+        # calls to clobber the session-start baseline, making start == end (delta = 0).
+        # SESSION_CC_SNAP_FILE is updated only once: in main(), after the delta is computed.
         os.makedirs(STATE_DIR, exist_ok=True)
         with open(USAGE_JSON, "w") as f:
             json.dump({**result, "highest_pressure": max(s, w, n) / 100.0}, f)
-        # Update the session-start snapshot with current live values so the
-        # NEXT session's delta is computed against today's end-of-session baseline,
-        # not a stale snapshot. This is the fallback if session-start fails to refresh.
-        with open(SESSION_CC_SNAP_FILE, "w") as f:
-            json.dump(result, f)
         return result
     except Exception:
         return None
@@ -647,6 +645,15 @@ def main() -> None:
         summary = summary.rstrip("─" * WIDTH) + "\n" + spend_line + "\n" + "─" * WIDTH
 
     print(json.dumps({"systemMessage": summary}))
+
+    # Update the session-start snapshot AFTER the delta has been reported,
+    # so the NEXT session starts from today's end-of-session baseline.
+    if current and is_live:
+        try:
+            with open(SESSION_CC_SNAP_FILE, "w") as f:
+                json.dump(current, f)
+        except OSError:
+            pass
 
 
 if __name__ == "__main__":
