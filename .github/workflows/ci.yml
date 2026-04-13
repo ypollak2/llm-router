@@ -19,7 +19,7 @@ jobs:
 
   test:
     runs-on: ubuntu-latest
-    timeout-minutes: 8
+    timeout-minutes: 10
     strategy:
       fail-fast: false
       matrix:
@@ -40,21 +40,43 @@ jobs:
         run: uv sync --extra dev
 
       - name: Run tests
+        shell: bash
         run: |
-          output=$(timeout 90 uv run pytest tests/ -q \
+          # Run pytest in the background so we can detect the aiosqlite thread hang.
+          # pytest writes junit xml before the hang; we read that to determine pass/fail.
+          uv run pytest tests/ -q \
             --ignore=tests/test_integration.py \
             --ignore=tests/test_agno_integration.py \
-            --timeout=30 2>&1)
-          code=$?
-          echo "$output"
-          # exit 124 = timeout (aiosqlite non-daemon thread hangs pytest on exit).
-          # Tests already printed "passed/failed" before the hang — use that as truth.
-          if [ $code -eq 124 ]; then
-            if echo "$output" | grep -qE "[0-9]+ passed" && ! echo "$output" | grep -qE "failed|error"; then
-              echo "Note: pytest hung on exit (aiosqlite thread), all tests passed."
-              exit 0
+            --timeout=30 \
+            --junit-xml=/tmp/pytest-results.xml &
+          PYTEST_PID=$!
+
+          # Wait up to 150s for pytest to exit normally.
+          for i in $(seq 1 150); do
+            if ! kill -0 $PYTEST_PID 2>/dev/null; then
+              wait $PYTEST_PID
+              exit $?
             fi
-            echo "Timed out with test failures."
-            exit 1
-          fi
-          exit $code
+            sleep 1
+          done
+
+          # Still running after 150s — pytest is hanging on exit (aiosqlite thread).
+          # Read the junit xml written before the hang to determine true pass/fail.
+          echo "pytest is hanging on exit — reading junit results..."
+          python3 - <<'PY'
+          import sys, xml.etree.ElementTree as ET
+          try:
+              root = ET.parse("/tmp/pytest-results.xml").getroot()
+              suite = root if root.tag == "testsuite" else root.find("testsuite")
+              failures = int(suite.get("failures", 0))
+              errors   = int(suite.get("errors",   0))
+              tests    = int(suite.get("tests",     0))
+              print(f"junit: {tests} tests, {failures} failures, {errors} errors")
+              sys.exit(1 if (failures or errors) else 0)
+          except Exception as e:
+              print(f"Could not read junit xml: {e}")
+              sys.exit(1)
+          PY
+          result=$?
+          kill $PYTEST_PID 2>/dev/null || true
+          exit $result

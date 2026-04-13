@@ -1,5 +1,15 @@
 # Changelog
 
+## v4.0.5 — Robust pytest hang detection via JUnit XML (2026-04-13)
+
+### Fixed
+
+- **CI test step now reliable against pytest hang** — uses background process + JUnit XML approach:
+  pytest runs in background (`&`); waiter loop polls for exit up to 150s; if still alive after 150s (aiosqlite thread hang), reads `--junit-xml` written before the hang to determine true pass/fail. Exits 0 only if `failures=0` and `errors=0` in the XML.
+- **Increased job timeout to 10 min** — gives room for cached install (~60s) + tests (~30s) + 150s hang window.
+
+---
+
 ## v4.0.4 — Fix pytest hang on CI exit (2026-04-13)
 
 ### Fixed
