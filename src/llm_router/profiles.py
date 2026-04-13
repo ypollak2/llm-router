@@ -132,6 +132,7 @@ ROUTING_TABLE: dict[tuple[RoutingProfile, TaskType], list[str]] = {
         "gemini/gemini-2.5-pro",
         "mistral/mistral-large-latest",
         "anthropic/claude-haiku-4-5-20251001",
+        "ollama/qwen3.5:32b",           # free local; auto-promoted to first in CC mode
     ],
     (RoutingProfile.BALANCED, TaskType.RESEARCH): [
         "perplexity/sonar-pro",       # web-grounded, Claude can't search
@@ -147,6 +148,7 @@ ROUTING_TABLE: dict[tuple[RoutingProfile, TaskType], list[str]] = {
         "openai/gpt-4o",
         "cohere/command-r-plus",
         "anthropic/claude-haiku-4-5-20251001",
+        "ollama/qwen3.5:32b",           # free local; auto-promoted to first in CC mode
     ],
     (RoutingProfile.BALANCED, TaskType.ANALYZE): [
         "anthropic/claude-sonnet-4-6",
@@ -154,6 +156,7 @@ ROUTING_TABLE: dict[tuple[RoutingProfile, TaskType], list[str]] = {
         "gemini/gemini-2.5-pro",
         "deepseek/deepseek-reasoner",
         "anthropic/claude-haiku-4-5-20251001",
+        "ollama/qwen3.5:32b",           # free local; auto-promoted to first in CC mode
     ],
     (RoutingProfile.BALANCED, TaskType.CODE): [
         "anthropic/claude-sonnet-4-6",
@@ -161,6 +164,7 @@ ROUTING_TABLE: dict[tuple[RoutingProfile, TaskType], list[str]] = {
         "gemini/gemini-2.5-pro",
         "deepseek/deepseek-chat",
         "anthropic/claude-haiku-4-5-20251001",
+        "ollama/qwen3.5:32b",           # free local; auto-promoted to first in CC mode
     ],
     (RoutingProfile.BALANCED, TaskType.IMAGE): [
         "fal/flux-pro",
