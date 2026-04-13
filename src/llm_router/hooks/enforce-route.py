@@ -111,7 +111,22 @@ def main() -> None:
     except (json.JSONDecodeError, EOFError):
         sys.exit(0)
 
-    enforce = os.environ.get("LLM_ROUTER_ENFORCE", "smart").lower()
+    enforce = os.environ.get("LLM_ROUTER_ENFORCE", "").lower()
+    if not enforce:
+        # Fall back to ~/.llm-router/routing.yaml so users who set
+        # `enforce: hard` there get the expected behaviour without
+        # needing a separate env-var export.
+        try:
+            _yaml = _ROUTER_DIR / "routing.yaml"
+            if _yaml.exists():
+                for _line in _yaml.read_text().splitlines():
+                    if _line.strip().startswith("enforce:"):
+                        enforce = _line.split(":", 1)[1].strip().lower()
+                        break
+        except Exception:
+            pass
+    if not enforce:
+        enforce = "smart"
     # shadow / off = pure observation (treat as off)
     if enforce in ("off", "shadow"):
         sys.exit(0)

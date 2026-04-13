@@ -1,5 +1,21 @@
 # Changelog
 
+## v4.1.0 — Playwright DOM compression + routing.yaml enforcement fix (2026-04-13)
+
+### Added
+
+- **`playwright-compress.py` PostToolUse hook** — fires after every `browser_snapshot` call; compresses the DOM via a cheap LLM (Ollama → Gemini Flash → rule-based fallback) and injects a compact summary (`REFS / STATE / ERRORS`) as `contextForAgent`. Eliminates the depth-escalation pattern (`depth:3→6→8`) and retry storms that cause 60-80% of token waste in Playwright sessions.
+- **Free-first compression chain** — Ollama (local, free) → Gemini Flash (cheap, requires `GEMINI_API_KEY`) → regex rule-based extraction (always works, instant). Consistent with llm-router's existing routing philosophy.
+- **Opt-out env var** — `LLM_ROUTER_PLAYWRIGHT_COMPRESS=off` disables the hook without uninstalling it.
+- Hook registered for both Claude Code (`_HOOK_DEFS`) and claw-code (`_CLAW_CODE_HOOK_DEFS`).
+
+### Fixed
+
+- **`enforce:` in `routing.yaml` was silently ignored** — `enforce-route.py` previously read `LLM_ROUTER_ENFORCE` with a hard-coded default of `"smart"`, so users who set `enforce: hard` in `~/.llm-router/routing.yaml` saw no effect. The hook now reads `routing.yaml` as a fallback when the env var is absent; priority is: `LLM_ROUTER_ENFORCE` env var → `routing.yaml` → built-in default (`smart`). Fix applied to both the installed hook and the distributed source.
+- **8 new tests** in `test_route_enforcement_hooks.py` covering: hard/soft/off/shadow from yaml, env var priority over yaml, smart fallback when neither source is present, whitespace-tolerant parsing, and yaml without an `enforce:` line.
+
+---
+
 ## v4.0.5 — Robust pytest hang detection via JUnit XML (2026-04-13)
 
 ### Fixed
