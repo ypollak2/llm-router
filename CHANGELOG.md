@@ -1,5 +1,14 @@
 # Changelog
 
+## v4.1.1 — Fix PostToolUse matcher for MCP tool names (2026-04-13)
+
+### Fixed
+
+- **PostToolUse `usage-refresh` hook never fired for MCP tool calls** — the hook matcher was `"llm_"` but Claude Code passes the full MCP tool name `mcp__llm-router__llm_*` to PostToolUse hooks. The hook never triggered, so the dashboard showed no savings from routed calls. Matcher updated to `"llm_|mcp__llm-router__llm"` in both `_HOOK_DEFS` and `_CLAW_CODE_HOOK_DEFS`.
+- **Default enforcement changed from `hard` to `smart`** — `hard` mode blocked `Read`/`Grep`/`Glob` for Q&A tasks, causing deadlocks where Claude couldn't read files to answer questions without first calling an `llm_*` tool. `smart` mode allows file reads for all task types; only `Bash`/`Edit`/`Write` are blocked for Q&A tasks.
+
+---
+
 ## v4.1.0 — Playwright DOM compression + routing.yaml enforcement fix (2026-04-13)
 
 ### Added
