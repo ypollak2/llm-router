@@ -547,13 +547,14 @@ llm-router share   # copies savings card to clipboard + opens tweet
 | **v3.5** | **Multi-Agent CLI Compatibility** — OpenCode, Gemini CLI, Copilot CLI, OpenClaw, Factory Droid, Trae |
 | **v3.6** | **VS Code + Cursor IDE Support** — native MCP config, routing rules, idempotent install |
 | **v4.0** | **Token Efficiency + Real-Time Spend** — tool slim mode, session spend meter, reroute learning, quickstart wizard |
+| **v4.1** | **Playwright DOM Compression + Enforcement Fixes** — DOM compression hook, PostToolUse MCP matcher fix, smart enforcement default |
+| **v4.2** | **Quota-Aware Routing + Context-Aware Classification** — Ollama-first CC-mode for simple tasks, qwen3.5:32b in BALANCED chains, short code follow-up context inheritance |
 
 ### What's Next
 
 | Version | Headline | Status |
 |---------|----------|--------|
-| **v4.1** | **VS Code Status Bar** — live routing stats and profile toggle in the IDE status bar | 📅 Planned |
-| **v4.2** | **OTEL / Prometheus Export** — metrics endpoint for routing decisions, cost, and fallback rates | 📅 Planned |
+| **v4.3** | **OTEL / Prometheus Export** — metrics endpoint for routing decisions, cost, and fallback rates | 📅 Planned |
 | **v5.0** | **Learned Routing** — self-training classifier from `llm_rate` feedback; personal routing patterns | 📅 Planned |
 
 ---

@@ -1,5 +1,56 @@
 # Changelog
 
+## v4.2.0 — Quota-Aware Routing + Context-Aware Classification (2026-04-13)
+
+### Added
+
+- **qwen3.5:32b in BALANCED chains for moderate complexity** (`src/llm_router/profiles.py`)
+
+  qwen3.5:32b added to all BALANCED text chains (QUERY, GENERATE, ANALYZE, CODE) as the
+  last entry. In CC-mode, `_reorder_for_agent_context` auto-promotes Ollama models to
+  first position for simple/moderate tasks, so qwen3.5:32b is tried before Sonnet when
+  running locally — saving subscription quota for complex work. RESEARCH, IMAGE, VIDEO,
+  and AUDIO chains excluded (web access / media not applicable).
+
+- **Short code follow-up context inheritance** (`.claude/hooks/auto-route.py` v17)
+
+  Short prompts (≤15 words) after a code task were being misclassified as `generate/query`
+  by the fallback classifier, causing enforcement deadlocks when users followed a code session
+  with brief follow-ups like "explain why X doesn't work" or "go ahead and do the change".
+
+  - `_is_short_code_followup()` — detects ≤15-word prompts when the previous `last_route`
+    was a code task (checks `~/.llm-router/last_route_{session_id}.json`)
+  - New routing branch between `_is_continuation` and the full classifier — inherits
+    `task_type/complexity/tool` from `last_route` without resaving (preserves code context)
+  - Routing directive shows `[via code-context-inherit]` method tag
+
+### Changed
+
+- **CC-mode simple tasks now route via Ollama-first MCP chain** (`.claude/hooks/auto-route.py` v18)
+
+  Previously, CC-mode routed simple tasks to `/model claude-haiku-4-5-20251001`, consuming
+  subscription quota for every trivial question. Simple tasks now route through
+  `llm_*(complexity="simple")` (Ollama → Haiku fallback), preserving session quota for
+  moderate/complex work. Haiku remains the fallback inside the MCP tool when Ollama is
+  unavailable.
+
+  Updated CC-mode routing table (low pressure):
+
+  | Complexity | Route | Model chain |
+  |---|---|---|
+  | simple | `llm_*(complexity="simple")` | Ollama → Haiku fallback |
+  | moderate | `llm_*(complexity="moderate")` | Sonnet passthrough |
+  | complex | `/model claude-opus-4-6` | Opus via subscription |
+
+### Fixed
+
+- **Test assertions updated for current `[ROUTE→` directive format** (`tests/test_auto_route_hook.py`)
+
+  Hook output format changed from `⚡ MANDATORY ROUTE:` to `⚡ ROUTE→tool(args)` in v4.0.x.
+  Test assertions were still matching the old format — updated throughout.
+
+---
+
 ## v4.1.1 — Fix PostToolUse matcher for MCP tool names (2026-04-13)
 
 ### Fixed
