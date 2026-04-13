@@ -13,7 +13,6 @@ from __future__ import annotations
 import time
 from unittest.mock import patch
 
-import pytest
 
 from llm_router.health import ProviderHealth, HealthTracker, RATE_LIMIT_COOLDOWN_SECONDS
 from llm_router.profiles import (

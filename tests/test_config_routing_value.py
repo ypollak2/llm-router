@@ -10,7 +10,6 @@ from __future__ import annotations
 import os
 from unittest.mock import patch
 
-import pytest
 
 from llm_router.config import RouterConfig
 from llm_router.types import RoutingProfile
