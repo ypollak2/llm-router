@@ -511,43 +511,50 @@ llm-router share   # copies savings card to clipboard + opens tweet
 
 ## Roadmap
 
-**Positioning**: *Claude Code's cost autopilot. Stop paying Opus prices for Haiku work.*
+**Positioning**: *Route every AI coding task to the cheapest capable model. Works across Claude Code, Cursor, VS Code, Codex, Gemini CLI, and more.*
 
-### Phase 1 — Trust & Proof (Apr–Jun 2026)
+### Phase 1 — Foundation ✅ Complete
+
+| Version | Headline |
+|---------|----------|
+| v1.3–v2.0 | Foundation, dashboard, enforcement, Agno adapter |
+| **v2.1** | **Route Simulator** — `llm-router test "<prompt>"` dry-run + `llm_savings` dashboard |
+| **v2.2** | **Explainable Routing** — `LLM_ROUTER_EXPLAIN=1`, "why not Opus?", per-decision reasoning |
+| **v2.3** | **Zero-Friction Activation** — onboarding wizard, shadow/suggest/enforce modes, yearly savings projection |
+
+### Phase 2 — Smarter Routing ✅ Complete
+
+| Version | Headline |
+|---------|----------|
+| **v2.4** | **Repo-Aware YAML Config** — `.llm-router.yml` committed with the codebase, block_providers, model pins |
+| **v2.5** | **Context-Aware Routing** — "yes/ok/go ahead" inherits prior turn's route, zero classifier latency |
+| **v2.6** | **Latency + Personalized Routing** — p95 latency scoring, per-user acceptance signals |
+
+### Phase 3 — Team Infrastructure ✅ Complete
+
+| Version | Headline |
+|---------|----------|
+| **v3.0** | **Team Dashboard** — shared savings across the whole team |
+| **v3.1** | **Multi-Host + Cross-Session Savings** — `llm_auto`, Codex/Desktop/Copilot adapters, persistent savings across sessions |
+| **v3.2** | **Policy Engine** — org/project/user routing policy, spend caps, audit log |
+| **v3.3** | **Slack Digests + Codex Plugin** — weekly savings digest, spend-spike alerts, Codex marketplace plugin |
+
+### Phase 4 — Multi-Host Expansion ✅ Complete
+
+| Version | Headline |
+|---------|----------|
+| **v3.4** | **Agent-Context Routing** — subscription-first chain reordering when Codex or Claude Code is active |
+| **v3.5** | **Multi-Agent CLI Compatibility** — OpenCode, Gemini CLI, Copilot CLI, OpenClaw, Factory Droid, Trae |
+| **v3.6** | **VS Code + Cursor IDE Support** — native MCP config, routing rules, idempotent install |
+| **v4.0** | **Token Efficiency + Real-Time Spend** — tool slim mode, session spend meter, reroute learning, quickstart wizard |
+
+### What's Next
 
 | Version | Headline | Status |
 |---------|----------|--------|
-| v1.3–v2.0 | Foundation, dashboard, enforcement, Agno adapter | ✅ Done |
-| **v2.1** | **Route Simulator** — `llm-router test "<prompt>"` dry-run + `llm_savings` dashboard | ✅ Done |
-| **v2.2** | **Explainable Routing** — `LLM_ROUTER_EXPLAIN=1`, "why not Opus?", per-decision reasoning | ✅ Done |
-| **v2.3** | **Zero-Friction Activation** — onboarding wizard, shadow/suggest/enforce modes, yearly savings projection | ✅ Done |
-
-### Phase 2 — Smarter Routing (Jun–Aug 2026)
-
-| Version | Headline | Status |
-|---------|----------|--------|
-| **v2.4** | **Repo-Aware YAML Config** — `.llm-router.yml` committed with the codebase, block_providers, model pins | ✅ Done |
-| **v2.5** | **Context-Aware Routing** — "yes/ok/go ahead" inherits prior turn's route, zero classifier latency | ✅ Done |
-| **v2.6** | **Latency + Personalized Routing** — p95 latency scoring, per-user acceptance signals | ✅ Done |
-
-### Phase 3 — Team Infrastructure (Sep–Nov 2026)
-
-| Version | Headline | Status |
-|---------|----------|--------|
-| **v3.0** | **Team Dashboard** — shared savings across the whole team | ✅ Done |
-| **v3.1** | **Multi-Host + Cross-Session Savings** — `llm_auto`, Codex/Desktop/Copilot adapters, persistent savings across sessions, 30-day projection | ✅ Done |
-| **v3.2** | **Policy Engine** — org/project/user routing policy, spend caps, audit log | ✅ Done |
-| **v3.3** | **Slack Digests + Codex Plugin** — weekly savings digest, spend-spike alerts, Codex marketplace plugin | ✅ Done |
-
-### Phase 4 — Category Leadership (Jan–Apr 2027)
-
-| Version | Headline | Status |
-|---------|----------|--------|
-| **v3.4** | **Agent-Context Routing** — subscription-first chain reordering when Codex or Claude Code is active | ✅ Done |
-| **v3.5** | **Multi-Agent CLI Compatibility** — OpenCode, Gemini CLI, Copilot CLI, OpenClaw, Factory Droid, Trae | ✅ Done |
-| **v4.0** | **Token Efficiency + Real-Time Spend** — tool slim mode, session spend meter, reroute learning, quickstart wizard | ✅ Done |
-
-> Full details: [ROADMAP.md](ROADMAP.md)
+| **v4.1** | **VS Code Status Bar** — live routing stats and profile toggle in the IDE status bar | 📅 Planned |
+| **v4.2** | **OTEL / Prometheus Export** — metrics endpoint for routing decisions, cost, and fallback rates | 📅 Planned |
+| **v5.0** | **Learned Routing** — self-training classifier from `llm_rate` feedback; personal routing patterns | 📅 Planned |
 
 ---
 
