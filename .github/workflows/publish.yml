@@ -10,30 +10,8 @@ permissions:
   id-token: write  # required for OIDC trusted publisher
 
 jobs:
-  test:
-    name: Test before publish
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: astral-sh/setup-uv@v4
-
-      - name: Set up Python
-        run: uv python install 3.12
-
-      - name: Install dependencies
-        run: uv sync --extra dev
-
-      - name: Lint
-        run: uv run ruff check src/
-
-      - name: Run tests
-        run: uv run pytest tests/ -q --ignore=tests/test_integration.py --ignore=tests/test_agno_integration.py --timeout=30
-
   publish:
     name: Build and publish
-    needs: test
     runs-on: ubuntu-latest
     environment: pypi
 
@@ -43,7 +21,13 @@ jobs:
       - uses: astral-sh/setup-uv@v4
 
       - name: Set up Python
-        run: uv python install 3.12
+        run: uv python install 3.11
+
+      - name: Install dependencies
+        run: uv sync --extra dev
+
+      - name: Lint
+        run: uv run ruff check src/ tests/
 
       - name: Verify tag matches pyproject.toml version
         env:

@@ -1,7 +1,7 @@
 # llm-router
 
 > Route every AI call to the cheapest model that can handle it.
-> 43 tools · 20+ providers · Claude Code, VS Code, Cursor, Codex, and more.
+> 45 tools · 20+ providers · Claude Code, VS Code, Cursor, Codex, and more.
 
 [![PyPI](https://img.shields.io/pypi/v/claude-code-llm-router?style=flat-square)](https://pypi.org/project/claude-code-llm-router/)
 [![Tests](https://img.shields.io/github/actions/workflow/status/ypollak2/llm-router/ci.yml?style=flat-square&label=tests)](https://github.com/ypollak2/llm-router/actions)
@@ -99,7 +99,7 @@ Under the hood, every prompt goes through a `UserPromptSubmit` hook before your 
 
 ## MCP Tools
 
-41 tools across 6 categories:
+45 tools across 6 categories:
 
 ### Smart Routing
 | Tool | What it does |
@@ -109,6 +109,7 @@ Under the hood, every prompt goes through a `UserPromptSubmit` hook before your 
 | `llm_classify` | Classify complexity + recommend model |
 | `llm_select_agent` | Pick agent CLI (claude_code / codex) + model for a session |
 | `llm_stream` | Stream LLM response for long-running tasks |
+| `llm_reroute` | Correct a bad routing decision in-session and train the router |
 
 ### Text & Code
 | Tool | What it does |
@@ -126,6 +127,7 @@ Under the hood, every prompt goes through a `UserPromptSubmit` hook before your 
 | `llm_fs_find` | Describe files to find → cheap model returns glob/grep commands |
 | `llm_fs_rename` | Describe a rename → returns `mv`/`git mv` commands (dry_run by default) |
 | `llm_fs_edit_many` | Bulk edits across files → returns all patch pairs |
+| `llm_fs_analyze_context` | Summarise workspace context for smarter routing |
 
 ### Media
 | Tool | What it does |
@@ -165,6 +167,8 @@ Under the hood, every prompt goes through a `UserPromptSubmit` hook before your 
 | `llm_policy` | Show active org/repo routing policy + last 10 policy decisions |
 | `llm_digest` | Savings digest with spend-spike detection; push to Slack/Discord webhook |
 | `llm_benchmark` | Per-task-type routing accuracy from `llm_rate` feedback |
+| `llm_session_spend` | Real-time API spend breakdown for the current session |
+| `llm_approve_route` | Approve or reject a pending high-cost routing call |
 
 ---
 
@@ -271,7 +275,7 @@ team = RouteredTeam(
 )
 ```
 
-**Option 2 — MCP tools**: use llm-router's 41 tools in any Agno agent:
+**Option 2 — MCP tools**: use llm-router's 45 tools in any Agno agent:
 
 ```python
 from agno.agent import Agent
@@ -541,7 +545,7 @@ llm-router share   # copies savings card to clipboard + opens tweet
 |---------|----------|--------|
 | **v3.4** | **Agent-Context Routing** — subscription-first chain reordering when Codex or Claude Code is active | ✅ Done |
 | **v3.5** | **Multi-Agent CLI Compatibility** — OpenCode, Gemini CLI, Copilot CLI, OpenClaw, Factory Droid, Trae | ✅ Done |
-| **v4.0** | **VS Code + Cursor GA** — cross-editor routing, shared config and analytics | 📅 Apr 2027 |
+| **v4.0** | **Token Efficiency + Real-Time Spend** — tool slim mode, session spend meter, reroute learning, quickstart wizard | ✅ Done |
 
 > Full details: [ROADMAP.md](ROADMAP.md)
 
