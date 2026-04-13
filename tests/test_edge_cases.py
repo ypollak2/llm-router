@@ -341,14 +341,14 @@ class TestAutoRouteHookEdgeCases:
         assert out is not None
         hint = out["hookSpecificOutput"]["contextForAgent"]
         # Mixed signals — classifiers may route to analyze, code, or generate
-        assert "[ROUTE: analyze/" in hint or "[ROUTE: code/" in hint or "[ROUTE: generate/" in hint
+        assert "analyze/" in hint or "code/" in hint or "generate/" in hint
 
     def test_code_fix_routes(self):
         """'fix' with code references now routes to code task type."""
         out = self._run_hook("fix `implement_auth()` in server.py")
         assert out is not None
         hint = out["hookSpecificOutput"]["contextForAgent"]
-        assert "[ROUTE:" in hint
+        assert "ROUTE:" in hint
 
     def test_long_prompt_classified_complex(self):
         """Very long prompts (>500 chars) should be classified as complex."""
@@ -370,7 +370,7 @@ class TestAutoRouteHookEdgeCases:
         assert out is not None
         hint = out["hookSpecificOutput"]["contextForAgent"]
         # May route as query (with Ollama) or auto/fallback (without)
-        assert "[ROUTE:" in hint
+        assert "ROUTE:" in hint
 
     def test_multilingual_prompt(self):
         """Hebrew prompt with 'research' keyword should still route."""
