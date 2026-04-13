@@ -1,6 +1,6 @@
 [project]
 name = "claude-code-llm-router"
-version = "4.0.3"
+version = "4.0.4"
 description = "Multi-LLM router MCP server for Claude Code — smart complexity routing, Claude subscription monitoring, Codex integration, 20+ providers"
 readme = "README.md"
 license = "MIT"
@@ -85,13 +85,11 @@ exclude = [
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "session"
 timeout = 30
 filterwarnings = [
     # aiosqlite's worker thread may attempt call_soon_threadsafe after the
-    # function-scoped event loop is torn down by pytest-asyncio.  This is a
-    # benign teardown race — the test has already passed/failed by the time
-    # the thread fires.  The message starts with "Exception in thread …
-    # (_connection_worker_thread)", not with the exception text inside.
+    # session-scoped event loop is torn down by pytest-asyncio.
     "ignore:Exception in thread.*_connection_worker_thread:pytest.PytestUnhandledThreadExceptionWarning",
 ]
 

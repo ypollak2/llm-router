@@ -1,5 +1,16 @@
 # Changelog
 
+## v4.0.4 — Fix pytest hang on CI exit (2026-04-13)
+
+### Fixed
+
+- **pytest hangs after passing** — aiosqlite's `_connection_worker_thread` is a non-daemon thread; Python waits for it indefinitely after tests complete. Fixed with two layers:
+  1. `asyncio_default_fixture_loop_scope = "session"` in `pyproject.toml` — reuses one event loop across the session, reducing thread churn
+  2. CI wraps pytest in `timeout 90`; exit code 124 (timeout) is treated as success if all tests passed (output contains `N passed` with no `failed`/`error`)
+- **Job timeout-minutes reduced to 8** — was 20, now safe with caching enabled
+
+---
+
 ## v4.0.3 — CI cache + test isolation fix (2026-04-13)
 
 ### Fixed
