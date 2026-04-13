@@ -22,7 +22,10 @@ def _run_hook(
     home: Path,
     extra_env: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
-    env = {**os.environ, "HOME": str(home)}
+    # Strip shell-level enforcement overrides so tests are deterministic.
+    # The hook defaults to "smart"; tests that need a specific mode pass extra_env.
+    env = {k: v for k, v in os.environ.items() if k != "LLM_ROUTER_ENFORCE"}
+    env["HOME"] = str(home)
     if extra_env:
         env.update(extra_env)
     return subprocess.run(

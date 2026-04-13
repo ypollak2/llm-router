@@ -1,5 +1,20 @@
 # Changelog
 
+## v4.0.3 — CI cache + test isolation fix (2026-04-13)
+
+### Fixed
+
+- **Test env isolation** — `_run_hook` in `test_route_enforcement_hooks.py` now strips `LLM_ROUTER_ENFORCE` from the inherited shell env before running hook subprocess. Tests were non-deterministic when the developer had `LLM_ROUTER_ENFORCE=soft` set locally, causing `test_enforce_route_blocks_work_tools_by_default` to fail.
+
+### Changed
+
+- **CI caching** — `astral-sh/setup-uv@v4` now runs with `enable-cache: true` in both `ci.yml` and `publish.yml`. Subsequent runs skip re-downloading packages; install step drops from ~18 min to ~30s.
+- **Lint via `uvx`** — both workflows now run `uvx ruff check` instead of installing the full dev venv first. Lint job completes in ~10s regardless of dep install time.
+- **CI matrix** — trimmed from 3.11/3.12/3.13 to 3.11/3.13 (min + max). 3.12 adds no coverage not caught by the endpoints.
+- **Publish workflow simplified** — removed redundant `test` gate job; lint + version check + build is the only gate before PyPI publish.
+
+---
+
 ## v4.0.2 — CI reliability + cost-contract test coverage (2026-04-12)
 
 ### Fixed
