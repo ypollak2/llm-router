@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm-router-hook-version: 17
+# llm-router-hook-version: 18
 """UserPromptSubmit hook — scoring classifier with Ollama + API fallback chain.
 
 Classification chain (stops at first success):
@@ -1079,8 +1079,13 @@ def main() -> None:
                 "complex":  all_external,
             }
             if not use_external.get(complexity, False):
+                # simple → None: route via llm_* MCP tool (Ollama-first chain) to preserve
+                #   subscription quota. Ollama handles simple tasks for free; Haiku is the
+                #   fallback inside the MCP tool if Ollama is unavailable.
+                # moderate → None: passthrough — Sonnet handles directly, no model switch.
+                # complex → Opus: genuinely needs top-tier reasoning.
                 _SUBSCRIPTION_MODELS = {
-                    "simple":   "claude-haiku-4-5-20251001",
+                    "simple":   None,
                     "moderate": None,
                     "complex":  "claude-opus-4-6",
                 }
@@ -1089,9 +1094,9 @@ def main() -> None:
                     f"session={session_pct:.0%} sonnet={sonnet_pct:.0%} weekly={weekly_pct:.0%}"
                 )
                 if target is None:
-                    # moderate + no pressure → route via MCP tool
+                    # simple/moderate + no pressure → route via MCP tool (Ollama-first)
                     directive = (
-                        f"⚡ MANDATORY ROUTE: {task_type}/moderate → call {tool}(complexity=\"moderate\")"
+                        f"⚡ MANDATORY ROUTE: {task_type}/{complexity} → call {tool}(complexity=\"{complexity}\")"
                         f" [CC-MODE {pressure_summary} via {method}]"
                         f" | FORBIDDEN: self-answer · Agent subagents · WebSearch · WebFetch"
                         f" | Call the tool NOW as your ONLY action."
