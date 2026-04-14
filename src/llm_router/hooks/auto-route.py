@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm-router-hook-version: 17
+# llm-router-hook-version: 19
 """UserPromptSubmit hook — scoring classifier with Ollama + API fallback chain.
 
 Classification chain (stops at first success):
@@ -1016,6 +1016,22 @@ def _is_continuation(prompt: str) -> bool:
     return False
 
 
+def _is_short_code_followup(prompt: str, last_route: dict | None) -> bool:
+    """Return True if prompt is a short follow-up after a code task.
+
+    Short prompts (≤15 words) after a code classification inherit the code
+    context rather than being re-classified as generate/query via the fallback.
+    Example: "explain why the dashboard doesn't update" (7 words) after editing
+    code would otherwise score 0 on heuristics and fall through to query/generate.
+    """
+    if last_route is None:
+        return False
+    if last_route.get("task_type") != "code":
+        return False
+    words = prompt.strip().split()
+    return 1 <= len(words) <= 15
+
+
 def _prior_violation_notice(pending: dict | None) -> str:
     if pending is None:
         return ""
@@ -1083,6 +1099,13 @@ def main() -> None:
             complexity = "simple"
             tool       = "llm_query"
         method = "context-inherit"
+    elif last_route and _is_short_code_followup(prompt, last_route):
+        # Short follow-ups after code tasks inherit code classification.
+        # Don't save — preserve original code context for subsequent turns.
+        task_type  = last_route["task_type"]
+        complexity = last_route["complexity"]
+        tool       = last_route["tool"]
+        method     = "code-context-inherit"
     else:
         result = classify_prompt(prompt)
         if result is None:
@@ -1119,7 +1142,12 @@ def main() -> None:
             }
             if not use_external.get(complexity, False):
                 _SUBSCRIPTION_MODELS = {
-                    "simple":   "claude-haiku-4-5-20251001",
+                    # simple → None: route via llm_* MCP tool (Ollama-first chain) to preserve
+                    #   subscription quota. Ollama handles simple tasks for free; Haiku is the
+                    #   fallback inside the MCP tool if Ollama is unavailable.
+                    # moderate → None: passthrough — Sonnet handles directly, no model switch.
+                    # complex → Opus: genuinely needs top-tier reasoning.
+                    "simple":   None,
                     "moderate": None,
                     "complex":  "claude-opus-4-6",
                 }
@@ -1128,9 +1156,9 @@ def main() -> None:
                     f"session={session_pct:.0%} sonnet={sonnet_pct:.0%} weekly={weekly_pct:.0%}"
                 )
                 if target is None:
-                    # moderate + no pressure → route via MCP tool
+                    # simple/moderate + no pressure → route via MCP tool (Ollama-first)
                     directive = (
-                        f"⚡ MANDATORY ROUTE: {task_type}/moderate → call {tool}(complexity=\"moderate\")"
+                        f"⚡ MANDATORY ROUTE: {task_type}/{complexity} → call {tool}(complexity=\"{complexity}\")"
                         f" [CC-MODE {pressure_summary} via {method}]"
                         f" | FORBIDDEN: self-answer · Agent subagents · WebSearch · WebFetch"
                         f" | Call the tool NOW as your ONLY action."
