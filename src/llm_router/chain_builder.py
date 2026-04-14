@@ -114,11 +114,11 @@ async def _build_dynamic_chain(
 
     # 2. Filter to models that support this task type.
     task_caps = [
-        cap for cap in capabilities
+        cap for cap in capabilities.values()
         if not cap.task_types or task_type in cap.task_types
     ]
     if not task_caps:
-        task_caps = capabilities  # all models as fallback
+        task_caps = list(capabilities.values())  # all models as fallback
 
     # 3. Score all eligible models in parallel.
     scored: list[ScoredModel] = await score_all_models(
