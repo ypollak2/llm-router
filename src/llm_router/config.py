@@ -156,6 +156,35 @@ class RouterConfig(BaseSettings):
     # 0.0 = disabled. Example: 1.0 = $1.00/session hard stop.
     llm_router_hard_stop_above: float = 0.0  # LLM_ROUTER_HARD_STOP_ABOVE (session USD)
 
+    # ── HuggingFace Inference API ──
+    # Used by the discovery layer to access free-tier hosted models.
+    # Accepts HF_TOKEN or HUGGINGFACE_API_KEY from environment.
+    huggingface_api_key: str = ""   # HF_TOKEN / HUGGINGFACE_API_KEY
+
+    # ── Adaptive Universal Router settings (v5.0) ──
+    # Feature flag: False = v4.x static routing (default, no breaking change).
+    # Set LLM_ROUTER_DYNAMIC=true to enable dynamic chain building.
+    llm_router_dynamic: bool = False         # LLM_ROUTER_DYNAMIC
+
+    # Discovery cache TTL in seconds. After this window, available models are
+    # re-scanned (Ollama list, HF API check, env var re-read). Default: 30 min.
+    llm_router_discovery_ttl: int = 1800     # LLM_ROUTER_DISCOVERY_TTL
+
+    # Benchmark data refresh interval in days. After this many days the cached
+    # leaderboard scores are re-fetched in the background. Default: 7 days.
+    llm_router_benchmark_ttl_days: int = 7   # LLM_ROUTER_BENCHMARK_TTL_DAYS
+
+    # Per-provider monthly budget caps (USD). 0.0 = no cap (unlimited).
+    # When a provider's tracked spend reaches its cap, budget_availability
+    # drops to 0.0 and it sinks to the bottom of all routing chains automatically.
+    llm_router_budget_openai: float = 0.0       # LLM_ROUTER_BUDGET_OPENAI
+    llm_router_budget_gemini: float = 0.0       # LLM_ROUTER_BUDGET_GEMINI
+    llm_router_budget_groq: float = 0.0         # LLM_ROUTER_BUDGET_GROQ
+    llm_router_budget_deepseek: float = 0.0     # LLM_ROUTER_BUDGET_DEEPSEEK
+    llm_router_budget_together: float = 0.0     # LLM_ROUTER_BUDGET_TOGETHER
+    llm_router_budget_perplexity: float = 0.0   # LLM_ROUTER_BUDGET_PERPLEXITY
+    llm_router_budget_mistral: float = 0.0      # LLM_ROUTER_BUDGET_MISTRAL
+
     # ── Community Benchmarks settings (v3.4) ──
     # Set to true to opt in to anonymous routing quality sharing (future upload).
     # In v3.4 this only prepares a local export file; upload requires a future
@@ -216,6 +245,7 @@ class RouterConfig(BaseSettings):
         "elevenlabs_api_key": ("elevenlabs", "ELEVENLABS_API_KEY"),
         "runway_api_key": ("runway", "RUNWAY_API_KEY"),
         "replicate_api_token": ("replicate", "REPLICATE_API_TOKEN"),
+        "huggingface_api_key": ("huggingface", "HF_TOKEN"),
     }
 
     @property
@@ -258,6 +288,7 @@ class RouterConfig(BaseSettings):
         return self.available_providers & {
             "openai", "gemini", "perplexity", "anthropic",
             "mistral", "deepseek", "groq", "together", "xai", "cohere", "ollama",
+            "huggingface",
         }
 
     @property

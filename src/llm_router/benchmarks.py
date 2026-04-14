@@ -23,6 +23,7 @@ from __future__ import annotations
 import json
 import logging
 import shutil
+import threading
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -325,6 +326,211 @@ def get_model_acceptance_penalty(
         return 0.20
     else:
         return 0.40
+
+
+# ── Local Model Quality Registry ─────────────────────────────────────────────
+# Static quality estimates for local model families that never appear on CI
+# benchmarks (ollama/*, lm_studio/*, vllm/*). Keyed by benchmark_alias defined
+# in discover.py's _OLLAMA_MODEL_REGISTRY.
+#
+# Scores are conservative estimates calibrated from community reports and
+# Aider/EvalPlus leaderboards for quantized local variants. Local models are
+# penalised ~15–25% vs the cloud models they are based on (quantization loss).
+#
+# Format: {benchmark_alias: {task_type: quality_score [0.0–1.0]}}
+_LOCAL_QUALITY_SCORES: dict[str, dict[str, float]] = {
+    "qwen3-coder":    {"code": 0.76, "analyze": 0.72, "query": 0.65, "generate": 0.62, "research": 0.55},
+    "qwen3":          {"code": 0.70, "analyze": 0.68, "query": 0.66, "generate": 0.64, "research": 0.52},
+    "qwen2.5-coder":  {"code": 0.72, "analyze": 0.68, "query": 0.60, "generate": 0.58, "research": 0.48},
+    "qwen2.5":        {"code": 0.65, "analyze": 0.64, "query": 0.62, "generate": 0.60, "research": 0.50},
+    "codestral":      {"code": 0.73, "analyze": 0.65, "query": 0.55, "generate": 0.58, "research": 0.45},
+    "deepseek-coder": {"code": 0.74, "analyze": 0.68, "query": 0.58, "generate": 0.56, "research": 0.46},
+    "deepseek-v3":    {"code": 0.70, "analyze": 0.70, "query": 0.67, "generate": 0.65, "research": 0.54},
+    "llama-3":        {"code": 0.62, "analyze": 0.63, "query": 0.64, "generate": 0.62, "research": 0.52},
+    "llama":          {"code": 0.55, "analyze": 0.57, "query": 0.58, "generate": 0.56, "research": 0.46},
+    "gemma":          {"code": 0.60, "analyze": 0.63, "query": 0.62, "generate": 0.59, "research": 0.48},
+    "mistral":        {"code": 0.60, "analyze": 0.60, "query": 0.59, "generate": 0.60, "research": 0.50},
+    "phi-4":          {"code": 0.62, "analyze": 0.61, "query": 0.60, "generate": 0.59, "research": 0.48},
+    "phi":            {"code": 0.50, "analyze": 0.50, "query": 0.50, "generate": 0.50, "research": 0.40},
+    "granite":        {"code": 0.65, "analyze": 0.62, "query": 0.58, "generate": 0.55, "research": 0.45},
+    "command-r":      {"code": 0.55, "analyze": 0.60, "query": 0.62, "generate": 0.65, "research": 0.58},
+}
+
+# Default score for models not in any registry.
+_DEFAULT_QUALITY = 0.50
+
+# Background refresh state: only one refresh runs at a time.
+_refresh_lock = threading.Lock()
+_refresh_in_progress = False
+
+
+def _resolve_local_alias(model_id: str) -> str | None:
+    """Resolve a local model ID to a benchmark alias for quality lookup.
+
+    Strips the provider prefix (``ollama/``, ``lm_studio/``) and matches the
+    model name against the alias table used in ``discover.py``.  This allows
+    ``ollama/qwen3:32b`` to resolve to the ``qwen3`` alias and look up quality
+    scores from ``_LOCAL_QUALITY_SCORES``.
+
+    Args:
+        model_id: Full model ID, e.g. ``"ollama/qwen3:32b"``.
+
+    Returns:
+        Alias string (e.g. ``"qwen3"``) or ``None`` if not matched.
+    """
+    _LOCAL_PREFIXES = ("ollama/", "lm_studio/", "vllm/", "llamacpp/")
+    base = model_id
+    for prefix in _LOCAL_PREFIXES:
+        if model_id.startswith(prefix):
+            base = model_id[len(prefix):]
+            break
+    else:
+        return None  # not a local model
+
+    # Strip :<tag> suffix (e.g. "qwen3:32b" → "qwen3")
+    name_lower = base.split(":")[0].lower()
+
+    # Import the registry lazily to avoid circular imports at module load.
+    # Ordered longest-prefix-first so "qwen3-coder" matches before "qwen3".
+    _ALIAS_PREFIXES: list[tuple[str, str]] = [
+        ("qwen3-coder",    "qwen3-coder"),
+        ("qwen3",          "qwen3"),
+        ("qwen2.5-coder",  "qwen2.5-coder"),
+        ("qwen2.5",        "qwen2.5"),
+        ("codestral",      "codestral"),
+        ("deepseek-coder", "deepseek-coder"),
+        ("deepseek",       "deepseek-v3"),
+        ("llama3",         "llama-3"),
+        ("llama",          "llama"),
+        ("gemma4",         "gemma"),
+        ("gemma",          "gemma"),
+        ("mistral",        "mistral"),
+        ("phi4",           "phi-4"),
+        ("phi",            "phi"),
+        ("granite",        "granite"),
+        ("command",        "command-r"),
+    ]
+    for prefix, alias in _ALIAS_PREFIXES:
+        if name_lower.startswith(prefix):
+            return alias
+    return None
+
+
+def get_quality_score(model_id: str, task_type: str) -> float:
+    """Return the quality score [0.0–1.0] for *model_id* on *task_type*.
+
+    Lookup order:
+      1. **Benchmark data** (``~/.llm-router/benchmarks.json``) — API models
+         that appear on Arena Hard / Aider / HuggingFace leaderboards.
+      2. **Local alias registry** (``_LOCAL_QUALITY_SCORES``) — Ollama / local
+         models resolved via ``_resolve_local_alias()``.
+      3. **Default** — 0.5 (neutral; model is treated as average quality).
+
+    All failures return 0.5 silently (same offline-safe contract as the rest
+    of this module).
+
+    Args:
+        model_id: Full model ID, e.g. ``"ollama/qwen3:32b"`` or
+            ``"openai/gpt-4o"``.
+        task_type: Task type string (``"code"``, ``"analyze"``, ``"query"``,
+            ``"generate"``, ``"research"``).
+
+    Returns:
+        Quality score in [0.0, 1.0]. Higher is better.
+    """
+    try:
+        # 1. Try benchmark data (API models)
+        data = get_benchmark_data()
+        if data:
+            task_scores: dict[str, float] = data.get("task_scores", {}).get(task_type, {})
+            if model_id in task_scores:
+                return float(task_scores[model_id])
+
+        # 2. Try local alias registry (Ollama / local providers)
+        alias = _resolve_local_alias(model_id)
+        if alias and alias in _LOCAL_QUALITY_SCORES:
+            return float(_LOCAL_QUALITY_SCORES[alias].get(task_type, _DEFAULT_QUALITY))
+
+    except Exception:
+        pass
+
+    return _DEFAULT_QUALITY
+
+
+def maybe_refresh_benchmarks_background(ttl_days: int = 7) -> bool:
+    """Trigger a background benchmark refresh if the local file is stale.
+
+    Checks whether ``~/.llm-router/benchmarks.json`` was last fetched more
+    than *ttl_days* days ago.  If stale (or missing), launches a background
+    thread that re-fetches all sources and writes a new file.
+
+    Designed to be called once per session start (cheap — just a file-mtime
+    check plus a thread spawn).  The refresh itself is best-effort: any failure
+    is logged at DEBUG level and silently ignored so routing is never blocked.
+
+    Args:
+        ttl_days: Days before the benchmark file is considered stale.
+            Reads ``llm_router_benchmark_ttl_days`` from config when available.
+
+    Returns:
+        ``True`` if a background refresh was started, ``False`` otherwise.
+    """
+    global _refresh_in_progress
+
+    try:
+        from llm_router.config import get_config
+        ttl_days = get_config().llm_router_benchmark_ttl_days
+    except Exception:
+        pass
+
+    # Already refreshing in this process — skip.
+    if _refresh_in_progress:
+        return False
+
+    # Check staleness.
+    stale = True
+    if _INSTALLED.exists():
+        try:
+            data = _load_json(_INSTALLED)
+            generated_at_str = (data or {}).get("generated_at", "")
+            if generated_at_str:
+                from datetime import datetime, timezone
+                generated_at = datetime.fromisoformat(generated_at_str)
+                if generated_at.tzinfo is None:
+                    generated_at = generated_at.replace(tzinfo=timezone.utc)
+                age_days = (datetime.now(timezone.utc) - generated_at).days
+                stale = age_days >= ttl_days
+        except Exception:
+            stale = True  # parse failed → refresh
+
+    if not stale:
+        return False
+
+    # Acquire lock and launch refresh thread.
+    if not _refresh_lock.acquire(blocking=False):
+        return False  # another thread just started
+
+    _refresh_in_progress = True
+
+    def _refresh_worker() -> None:
+        global _refresh_in_progress, _cache, _cache_loaded
+        try:
+            from llm_router.benchmark_fetcher import generate_benchmarks_json
+            generate_benchmarks_json(output_path=_INSTALLED)
+            # Invalidate cache so next get_benchmark_data() picks up the new file.
+            _cache = None
+            _cache_loaded = False
+            log.info("Background benchmark refresh completed → %s", _INSTALLED)
+        except Exception as e:
+            log.debug("Background benchmark refresh failed: %s", e)
+        finally:
+            _refresh_in_progress = False
+            _refresh_lock.release()
+
+    thread = threading.Thread(target=_refresh_worker, name="benchmark-refresh", daemon=True)
+    thread.start()
+    log.debug("Background benchmark refresh started (benchmarks stale by ≥%d days)", ttl_days)
+    return True
 
 
 def apply_benchmark_ordering(

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm-router-hook-version: 7
+# llm-router-hook-version: 8
 """PreToolUse[*] hook — enforce routing compliance.
 
 When auto-route.py issues a ⚡ MANDATORY ROUTE directive, it writes a
@@ -51,6 +51,7 @@ from pathlib import Path
 
 _ROUTER_DIR = Path.home() / ".llm-router"
 _LOG_PATH = _ROUTER_DIR / "enforcement.log"
+_PENDING_TTL = 60  # seconds — matches auto-route.py _PENDING_ROUTE_TTL_SEC
 
 # Base blocklist: always blocked before routing is satisfied (all task types).
 _BASE_BLOCK_TOOLS = frozenset({
@@ -71,6 +72,34 @@ def _block_tools_for(task_type: str) -> frozenset:
     return _BASE_BLOCK_TOOLS
 
 
+# ── Session-Type Tracking ─────────────────────────────────────────────────────
+# Written to ~/.llm-router/session_{id}.json when Claude's first file edit in
+# a session is detected. Once marked "coding", enforcement downgrades to soft.
+
+def _session_type_path(session_id: str) -> Path:
+    return _ROUTER_DIR / f"session_{session_id}.json"
+
+
+def _is_coding_session(session_id: str) -> bool:
+    """Return True if this session has already been identified as coding work."""
+    try:
+        data = json.loads(_session_type_path(session_id).read_text())
+        return data.get("session_type") == "coding"
+    except (OSError, json.JSONDecodeError):
+        return False
+
+
+def _mark_session_coding(session_id: str) -> None:
+    """Mark session as coding — future directives won't block file-edit tools."""
+    try:
+        _ROUTER_DIR.mkdir(parents=True, exist_ok=True)
+        _session_type_path(session_id).write_text(
+            json.dumps({"session_type": "coding", "marked_at": time.time()})
+        )
+    except OSError:
+        pass
+
+
 def _pending_path(session_id: str) -> Path:
     return _ROUTER_DIR / f"pending_route_{session_id}.json"
 
@@ -79,8 +108,9 @@ def _read_pending(session_id: str) -> dict | None:
     p = _pending_path(session_id)
     try:
         data = json.loads(p.read_text())
-        # Expire state after 5 minutes (stale if Claude skipped routing)
-        if time.time() - data.get("issued_at", 0) > 300:
+        # Use expires_at if present (new format), else fall back to issued_at + TTL
+        expires = data.get("expires_at") or (data.get("issued_at", 0) + _PENDING_TTL)
+        if time.time() > expires:
             p.unlink(missing_ok=True)
             return None
         return data
@@ -144,6 +174,11 @@ def main() -> None:
     if pending is None:
         sys.exit(0)  # No routing directive was issued
 
+    # Session-type check: if Claude has called Edit/Write in this session already,
+    # it's confirmed coding work — downgrade enforcement to soft for the whole session.
+    if _is_coding_session(session_id) and enforce in ("smart", "hard"):
+        enforce = "soft"
+
     expected_tool = pending.get("expected_tool", "llm_route")
     expected_server = pending.get("expected_server", "")  # for MCP server routing
     task_type = pending.get("task_type", "?")
@@ -184,6 +219,14 @@ def main() -> None:
 
     if enforce == "soft":
         sys.exit(0)  # soft mode: logged, allowed
+
+    # Smart/hard: first Edit/Write in a session proves it's coding work.
+    # Soft-fail: log, mark session as coding, clear pending state, allow the edit.
+    # All subsequent tool calls in this session will bypass enforcement.
+    if tool_name in {"Edit", "Write", "MultiEdit"}:
+        _mark_session_coding(session_id)
+        _clear_pending(session_id)
+        sys.exit(0)
 
     if enforce == "smart":
         # In smart mode, NEVER block Read/Glob/Grep/LS.

@@ -889,6 +889,38 @@ async def llm_approve_route(
     )
 
 
+async def llm_budget() -> str:
+    """Show real-time budget pressure for all configured providers (v5.0).
+
+    Reads live budget state from the Budget Oracle, which normalises provider
+    quota into a single pressure value (0.0 = fully available, 1.0 = exhausted).
+
+    Pressure sources by provider type:
+      Local (Ollama, vLLM)  — always 0.0 (free, no quota)
+      Claude subscription   — max(session_pct, weekly_pct, sonnet_pct) / 100
+      API-key providers     — monthly spend / configured cap (0.0 if no cap)
+
+    Returns:
+        A formatted budget summary with pressure bars per provider, plus the
+        current dynamic routing status (enabled/disabled).
+    """
+    try:
+        from llm_router.budget import get_all_budget_states, format_budget_summary
+        from llm_router.chain_builder import is_dynamic_routing_enabled
+
+        states = await get_all_budget_states()
+        summary = format_budget_summary(states)
+
+        dynamic_status = (
+            "✅ Active (LLM_ROUTER_DYNAMIC=true)"
+            if is_dynamic_routing_enabled()
+            else "⏸ Inactive (set LLM_ROUTER_DYNAMIC=true to enable)"
+        )
+        return f"{summary}\n\n**Adaptive Router v5.0**: {dynamic_status}"
+    except Exception as e:
+        return f"Budget Oracle error: {e}"
+
+
 def register(mcp, should_register=None) -> None:
     """Register management tools with the FastMCP instance.
 
@@ -930,3 +962,5 @@ def register(mcp, should_register=None) -> None:
         mcp.tool()(llm_session_spend)
     if gate("llm_approve_route"):
         mcp.tool()(llm_approve_route)
+    if gate("llm_budget"):
+        mcp.tool()(llm_budget)

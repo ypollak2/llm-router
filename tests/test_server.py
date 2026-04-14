@@ -23,6 +23,7 @@ def test_all_tools_registered():
         "llm_team_report", "llm_team_push",
         "llm_policy", "llm_digest", "llm_benchmark",
         "llm_reroute", "llm_session_spend", "llm_approve_route",
+        "llm_budget",
     }
     assert expected == names
 

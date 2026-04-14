@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm-router-hook-version: 15
+# llm-router-hook-version: 16
 """SessionStart hook — inject routing banner, start Ollama, refresh Claude usage.
 
 Fires once when a new Claude Code session begins. Four jobs:
@@ -415,6 +415,58 @@ def _preflight_check() -> str:
     return "\n".join(lines)
 
 
+def _maybe_refresh_benchmarks_bg() -> None:
+    """Trigger a background benchmark refresh if the local file is stale.
+
+    Detaches a subprocess immediately so the session-start hook returns in < 1ms.
+    Only fires when ``~/.llm-router/benchmarks.json`` is missing or older than
+    ``LLM_ROUTER_BENCHMARK_TTL_DAYS`` (default 7 days).
+    """
+    benchmarks_path = os.path.join(STATE_DIR, "benchmarks.json")
+    ttl_days = int(os.environ.get("LLM_ROUTER_BENCHMARK_TTL_DAYS", "7"))
+
+    # Check staleness — if file exists, compare generated_at timestamp.
+    stale = True
+    if os.path.exists(benchmarks_path):
+        try:
+            import json as _json
+            from datetime import datetime, timezone
+            data = _json.loads(open(benchmarks_path).read())
+            generated_at_str = data.get("generated_at", "")
+            if generated_at_str:
+                generated_at = datetime.fromisoformat(generated_at_str)
+                if generated_at.tzinfo is None:
+                    generated_at = generated_at.replace(tzinfo=timezone.utc)
+                age_days = (datetime.now(timezone.utc) - generated_at).days
+                stale = age_days >= ttl_days
+        except Exception:
+            stale = True
+
+    if not stale:
+        return
+
+    # Find the project directory (to run with uv).
+    project_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
+    uv_path = subprocess.run(["which", "uv"], capture_output=True, text=True).stdout.strip()
+    if not uv_path:
+        return
+
+    script = (
+        "from llm_router.benchmark_fetcher import generate_benchmarks_json; "
+        f"from pathlib import Path; "
+        f"generate_benchmarks_json(output_path=Path('{benchmarks_path}'))"
+    )
+    try:
+        subprocess.Popen(
+            [uv_path, "run", "--directory", project_dir, "python", "-c", script],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,  # detach from parent session
+        )
+    except Exception:
+        pass  # never block session start
+
+
 def main() -> None:
     try:
         json.load(sys.stdin)  # consume input (may be empty)
@@ -455,6 +507,10 @@ def main() -> None:
     hints += _weekly_digest()
     hints += _latency_hint()
     hints += _preflight_check()
+
+    # 5. Trigger benchmark refresh in background if stale (v5.0 adaptive router).
+    # Runs as a detached subprocess so the session start is never blocked.
+    _maybe_refresh_benchmarks_bg()
 
     print(json.dumps({
         "hookSpecificOutput": {

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm-router-hook-version: 18
+# llm-router-hook-version: 17
 """UserPromptSubmit hook — scoring classifier with Ollama + API fallback chain.
 
 Classification chain (stops at first success):
@@ -252,6 +252,63 @@ SKIP_PATTERNS = re.compile(
     r"^\s*(?:yes|no|ok|sure|thanks|thank you|y|n|k|go ahead|do it|looks good|lgtm)\s*$",
     re.IGNORECASE,
 )
+
+# ── Build Task Patterns (skip routing — Claude IS the coding model) ──────────
+#
+# When a prompt clearly asks Claude to write/edit/fix/implement code, routing it
+# to a cheap model is counterproductive — Claude Code IS the right model for that.
+# These patterns fire before any LLM classification and skip pending state entirely.
+#
+# Criteria: must have BOTH a build verb AND a build object to avoid false positives.
+# "implement" alone might be "how do I implement X?" → still route to query.
+# "implement the budget oracle in budget.py" → clearly a coding task → don't route.
+
+_BUILD_VERBS = re.compile(
+    r"\b(implement|build|write|create|add|fix|refactor|update|modify|edit|scaffold|"
+    r"migrate|port|integrate|wire|connect|code|develop|finish|complete|continue "
+    r"implement|phase \d|start phase|begin phase)\b",
+    re.IGNORECASE,
+)
+_BUILD_OBJECTS = re.compile(
+    r"\b(function|class|module|file|test|hook|endpoint|migration|script|"
+    r"the code|\.py\b|\.ts\b|\.go\b|budget\.py|discover\.py|scorer\.py|"
+    r"chain_builder\.py|router\.py|types\.py|config\.py|phase \d|"
+    r"todo list|task list|checklist)\b|"
+    r"\b(in (?:src|tests|hooks|the)[\s/])",
+    re.IGNORECASE,
+)
+
+
+def _is_build_task(prompt: str) -> bool:
+    """Return True when the prompt clearly asks Claude to write or edit code.
+
+    Requires both a build verb AND a build object — prevents false positives
+    like "how do I implement X?" which still routes to llm_query.
+    """
+    return bool(_BUILD_VERBS.search(prompt)) and bool(_BUILD_OBJECTS.search(prompt))
+
+
+# ── Session Type Tracking ─────────────────────────────────────────────────────
+# Written to ~/.llm-router/session_{id}.json when Claude's first tool call in
+# a session is a file edit (Edit/Write/MultiEdit). Once a session is marked
+# "coding", enforce-route.py skips all enforcement for the rest of the session.
+
+def _session_type_path(session_id: str) -> "Path":
+    return _ROUTER_DIR / f"session_{session_id}.json"
+
+
+def mark_session_coding(session_id: str) -> None:
+    """Mark this session as a coding session to disable enforcement."""
+    if not session_id:
+        return
+    _ROUTER_DIR.mkdir(parents=True, exist_ok=True)
+    try:
+        _session_type_path(session_id).write_text(
+            json.dumps({"session_type": "coding", "marked_at": time.time()})
+        )
+    except OSError:
+        pass
+
 
 # ── Signal Patterns ──────────────────────────────────────────────────────────
 
@@ -650,6 +707,11 @@ def classify_prompt(text: str) -> dict | None:
     if SKIP_PATTERNS.search(stripped):
         return None
 
+    # Build task fast-path: Claude is the right model for coding work.
+    # Skip routing entirely — no pending state, no enforcement.
+    if _is_build_task(stripped):
+        return None
+
     # Layer 1: Heuristic scoring (instant, free)
     scores = score_categories(text)
     best_category = max(scores, key=scores.get)
@@ -836,7 +898,7 @@ TOOL_MAP = {
 
 _ROUTER_DIR = Path.home() / ".llm-router"
 _ENFORCEMENT_LOG_PATH = _ROUTER_DIR / "enforcement.log"
-_PENDING_ROUTE_TTL_SEC = 300
+_PENDING_ROUTE_TTL_SEC = 60  # 60s per-turn TTL — old directives don't poison new turns
 
 # ── Context-Aware Routing (v2.5) ─────────────────────────────────────────────
 # Short continuation prompts inherit the prior turn's classification so the
@@ -954,22 +1016,6 @@ def _is_continuation(prompt: str) -> bool:
     return False
 
 
-def _is_short_code_followup(prompt: str, last_route: dict | None) -> bool:
-    """Return True if prompt is a short follow-up after a code task.
-
-    Short prompts (≤15 words) after a code classification inherit the code
-    context rather than being re-classified as generate/query via the fallback.
-    Example: "explain why the dashboard doesn't update" (7 words) after editing
-    code would otherwise score 0 on heuristics and fall through to query/generate.
-    """
-    if last_route is None:
-        return False
-    if last_route.get("task_type") != "code":
-        return False
-    words = prompt.strip().split()
-    return 1 <= len(words) <= 15
-
-
 def _prior_violation_notice(pending: dict | None) -> str:
     if pending is None:
         return ""
@@ -1037,13 +1083,6 @@ def main() -> None:
             complexity = "simple"
             tool       = "llm_query"
         method = "context-inherit"
-    elif last_route and _is_short_code_followup(prompt, last_route):
-        # Short follow-ups after code tasks inherit code classification.
-        # Don't save — preserve original code context for subsequent turns.
-        task_type  = last_route["task_type"]
-        complexity = last_route["complexity"]
-        tool       = last_route["tool"]
-        method     = "code-context-inherit"
     else:
         result = classify_prompt(prompt)
         if result is None:
@@ -1079,13 +1118,8 @@ def main() -> None:
                 "complex":  all_external,
             }
             if not use_external.get(complexity, False):
-                # simple → None: route via llm_* MCP tool (Ollama-first chain) to preserve
-                #   subscription quota. Ollama handles simple tasks for free; Haiku is the
-                #   fallback inside the MCP tool if Ollama is unavailable.
-                # moderate → None: passthrough — Sonnet handles directly, no model switch.
-                # complex → Opus: genuinely needs top-tier reasoning.
                 _SUBSCRIPTION_MODELS = {
-                    "simple":   None,
+                    "simple":   "claude-haiku-4-5-20251001",
                     "moderate": None,
                     "complex":  "claude-opus-4-6",
                 }
@@ -1094,9 +1128,9 @@ def main() -> None:
                     f"session={session_pct:.0%} sonnet={sonnet_pct:.0%} weekly={weekly_pct:.0%}"
                 )
                 if target is None:
-                    # simple/moderate + no pressure → route via MCP tool (Ollama-first)
+                    # moderate + no pressure → route via MCP tool
                     directive = (
-                        f"⚡ MANDATORY ROUTE: {task_type}/{complexity} → call {tool}(complexity=\"{complexity}\")"
+                        f"⚡ MANDATORY ROUTE: {task_type}/moderate → call {tool}(complexity=\"moderate\")"
                         f" [CC-MODE {pressure_summary} via {method}]"
                         f" | FORBIDDEN: self-answer · Agent subagents · WebSearch · WebFetch"
                         f" | Call the tool NOW as your ONLY action."
@@ -1182,12 +1216,15 @@ def main() -> None:
         _ROUTER_DIR.mkdir(parents=True, exist_ok=True)
         _state_path = _pending_state_path(session_id)
         try:
+            _now = time.time()
             _state_path.write_text(json.dumps({
                 "expected_tool": tool,
                 "expected_server": "",
                 "task_type": task_type,
                 "complexity": complexity,
-                "issued_at": time.time(),
+                "issued_at": _now,
+                "expires_at": _now + _PENDING_ROUTE_TTL_SEC,
+                "turn_id": int(_now),  # proxy for turn — clears when next prompt arrives
                 "session_id": session_id,
             }))
         except OSError:

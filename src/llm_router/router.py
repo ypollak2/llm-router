@@ -409,12 +409,25 @@ async def route_and_call(
                     _penalty_err,
                 )
 
-        models_to_try = get_model_chain(
-            profile, task_type,
-            failure_rates=_failure_rates,
-            latency_stats=_latency_stats,
-            acceptance_scores=_acceptance_scores,
-        )
+        # ── Dynamic chain (v5.0) or static chain (v4.x) ─────────────────────
+        # When LLM_ROUTER_DYNAMIC=true, use the Adaptive Universal Router to
+        # build a scored, budget-aware chain from discovered models.
+        # Falls back to the static profiles table on any error.
+        from llm_router.chain_builder import is_dynamic_routing_enabled, build_chain
+        if is_dynamic_routing_enabled() and task_type not in MEDIA_TASK_TYPES:
+            complexity_key = (
+                complexity_hint.value
+                if hasattr(complexity_hint, "value")
+                else str(complexity_hint or "moderate")
+            )
+            models_to_try = await build_chain(task_type, complexity_key, profile)
+        else:
+            models_to_try = get_model_chain(
+                profile, task_type,
+                failure_rates=_failure_rates,
+                latency_stats=_latency_stats,
+                acceptance_scores=_acceptance_scores,
+            )
         if task_type not in MEDIA_TASK_TYPES:
             from llm_router.claude_usage import get_claude_pressure
             pressure = get_claude_pressure()

@@ -34,6 +34,9 @@ PROVIDER_ICONS: dict[str, str] = {
     "runway": "\U0001f3ac",      # clapper board
     "replicate": "\U0001f504",   # counterclockwise arrows
     "ollama": "\U0001f999",      # llama emoji
+    "huggingface": "\U0001f917", # hugging face emoji
+    "lm_studio": "\U0001f4bb",   # laptop (local server)
+    "vllm": "\u26a1",            # lightning bolt (fast local)
 }
 
 
@@ -389,6 +392,127 @@ class PipelineStep:
     prompt_template: str
     system_prompt: str | None = None
     model_override: str | None = None
+
+
+# ── Adaptive Universal Router types (v5.0) ────────────────────────────────────
+
+
+class ProviderTier(str, Enum):
+    """Cost tier for a provider, used to enforce free-first ordering in chains.
+
+    Ordered ascending by cost: LOCAL is always preferred, EXPENSIVE is last resort.
+    Models within 5% quality score are ranked by tier (lower = preferred).
+    """
+
+    LOCAL = "local"              # Ollama, LM Studio, vLLM — zero monetary cost
+    FREE_CLOUD = "free_cloud"    # HF Inference free tier, Groq free, Codex quota
+    CHEAP_PAID = "cheap_paid"    # DeepSeek, Gemini Flash, GPT-4o-mini
+    SUBSCRIPTION = "subscription"  # Claude Pro/Max, paid Codex tier
+    EXPENSIVE = "expensive"      # o3, Claude Opus API, GPT-4o full
+
+
+# Providers that are always locally hosted with zero monetary cost.
+# These always receive budget_availability = 1.0 regardless of any quota state.
+LOCAL_PROVIDERS: frozenset[str] = frozenset({"ollama", "lm_studio", "vllm", "llamacpp"})
+
+
+@dataclass(frozen=True)
+class ModelCapability:
+    """Discovered capability record for a single model.
+
+    Produced by the discovery layer (discover.py) and cached to
+    ``~/.llm-router/discovery.json``.
+
+    Attributes:
+        model_id: Full model identifier (e.g. ``"ollama/qwen3:32b"``).
+        provider: Provider name (e.g. ``"ollama"``, ``"openai"``).
+        provider_tier: Cost tier for free-first chain ordering.
+        task_types: Task types this model can serve.
+        cost_per_1k: Blended cost per 1K tokens (0.0 for local/free models).
+        latency_p50_ms: Measured P50 latency in ms (0.0 if not yet measured).
+        context_window: Max context window in tokens.
+        available: Whether this model is currently reachable.
+    """
+
+    model_id: str
+    provider: str
+    provider_tier: ProviderTier
+    task_types: frozenset[TaskType]
+    cost_per_1k: float = 0.0
+    latency_p50_ms: float = 0.0
+    context_window: int = 8192
+    available: bool = True
+
+
+@dataclass(frozen=True)
+class BudgetState:
+    """Real-time budget state for a single provider.
+
+    Produced by the Budget Oracle (budget.py) and used by the scorer to
+    compute ``budget_availability`` for each model in the chain.
+
+    Attributes:
+        provider: Provider name.
+        pressure: Normalized 0.0 (fully available) to 1.0 (exhausted).
+        spend_usd: Amount spent this billing period in USD.
+        cap_usd: User-configured monthly cap in USD (0.0 = no cap).
+        quota_pct: Quota consumption 0.0-1.0 for subscription providers.
+        reset_at: ISO timestamp when quota/rate-limit resets (None if unknown).
+    """
+
+    provider: str
+    pressure: float
+    spend_usd: float = 0.0
+    cap_usd: float = 0.0
+    quota_pct: float = 0.0
+    reset_at: str | None = None
+
+    @property
+    def availability(self) -> float:
+        """Inverse of pressure — 1.0 = fully available, 0.0 = exhausted."""
+        return max(0.0, 1.0 - self.pressure)
+
+
+@dataclass(frozen=True)
+class ComplexityWeights:
+    """Scoring formula weights for a given complexity tier.
+
+    All four weights must sum to 1.0. Used by scorer.py to compute
+    the final model score from quality, latency, budget, and acceptance signals.
+    """
+
+    quality: float      # Benchmark score for this task type
+    latency: float      # Speed: normalized inverse of measured P50 latency
+    budget: float       # Budget availability: 1.0 = free/available, 0.0 = exhausted
+    acceptance: float   # User acceptance rate from llm_rate feedback
+
+
+# Scoring weight profiles per complexity tier.
+# Simple tasks weight budget heavily — cheap models are preferred and quota is preserved.
+# Complex tasks weight quality heavily — spend budget only when the task demands it.
+COMPLEXITY_WEIGHTS: dict[str, ComplexityWeights] = {
+    "simple": ComplexityWeights(quality=0.20, latency=0.25, budget=0.45, acceptance=0.10),
+    "moderate": ComplexityWeights(quality=0.35, latency=0.20, budget=0.35, acceptance=0.10),
+    "complex": ComplexityWeights(quality=0.55, latency=0.10, budget=0.20, acceptance=0.15),
+    "deep_reasoning": ComplexityWeights(quality=0.60, latency=0.05, budget=0.20, acceptance=0.15),
+}
+
+
+@dataclass(frozen=True)
+class ScoredModel:
+    """A model with its computed composite score for a (task, complexity) pair.
+
+    Produced by scorer.py and consumed by chain_builder.py to sort models
+    into the optimal fallback chain.
+    """
+
+    model_id: str
+    capability: ModelCapability
+    score: float            # Final composite score (0.0–1.0)
+    quality_score: float    # Benchmark score component
+    budget_score: float     # Budget availability component
+    latency_score: float    # Latency component
+    acceptance_score: float  # User feedback component
 
 
 @dataclass

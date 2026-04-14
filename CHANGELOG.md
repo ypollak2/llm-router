@@ -1,5 +1,29 @@
 # Changelog
 
+## v5.0.0 — Adaptive Universal Router (2026-04-14)
+
+### Added
+
+- **Budget Oracle** (`budget.py`) — normalises budget pressure [0.0–1.0] across all provider types: local (always 0.0), Claude subscription (max of session/weekly/sonnet quota dimensions via `highest_pressure`), daily-rate providers (Groq), monthly-request providers (HuggingFace), monthly-spend providers (OpenAI, Gemini, DeepSeek, etc.). Results cached 60s.
+- **Universal Model Discovery** (`discover.py`) — scans Ollama (`/api/tags`), HuggingFace free-tier, configured API-key providers, and Codex CLI. Encodes quota type, provider tier, task types, and latency estimate per model. Results cached 30 min to `~/.llm-router/discovery.json`. Includes `_OLLAMA_MODEL_REGISTRY` mapping 16 local model families to benchmark aliases.
+- **Live Benchmark Registry** (Phase 4 additions to `benchmarks.py`) — `get_quality_score(model_id, task_type)` exposes quality scores for both API models (via benchmark data) and local Ollama models (via `_LOCAL_QUALITY_SCORES` keyed by benchmark alias). Background refresh: `maybe_refresh_benchmarks_background()` checks staleness and spawns a thread if benchmarks are older than `LLM_ROUTER_BENCHMARK_TTL_DAYS` (default 7). Session-start hook triggers the background refresh automatically.
+- **Unified Scorer** (`scorer.py`) — `score_model()` computes a composite score using `COMPLEXITY_WEIGHTS` from `types.py` (simple: 45% budget, 20% quality; complex: 55% quality, 20% budget). `score_all_models()` fetches all supporting data in parallel and returns models sorted best-first. Pure-compute inner loop — no I/O in the hot path.
+- **Dynamic Chain Builder** (`chain_builder.py`) — `build_chain()` assembles a ranked model chain from discovered models using scorer output. Preserves free-first ordering (LOCAL tier before paid APIs). Score floor 0.30, min chain length 2, max 8. Falls back to static `profiles.py` chain on any error or when `LLM_ROUTER_DYNAMIC=false` (default).
+- **`llm_budget` MCP tool** — shows real-time Budget Oracle pressure bars for all providers plus adaptive router status. Call `llm_budget` to see which providers are near exhaustion.
+- **New types** in `types.py`: `ProviderTier`, `ModelCapability`, `BudgetState`, `ComplexityWeights`, `ScoredModel`, `COMPLEXITY_WEIGHTS`, `LOCAL_PROVIDERS`.
+- **New config fields**: `llm_router_dynamic`, `llm_router_discovery_ttl`, `llm_router_benchmark_ttl_days`, `llm_router_budget_{openai,gemini,groq,deepseek,together,perplexity,mistral}`.
+- **Session-type tracking** in `enforce-route.py` — once Claude calls `Edit`/`Write` in a session, it's marked as a coding session and enforcement downgrades to soft for the remainder. Prevents deadlocks on mixed query+coding sessions.
+- **`_is_build_task()` fast-path** in `auto-route.py` — detects coding prompts via regex (build verb + build object) before the classifier runs, skipping routing for implementation work.
+
+### Changed
+
+- Pending route TTL reduced from 300s → 60s to prevent stale directives poisoning new turns.
+- Router (`router.py`) routes through `build_chain()` when `LLM_ROUTER_DYNAMIC=true`, with full static fallback.
+- Session-start hook (v16) triggers background benchmark refresh if `~/.llm-router/benchmarks.json` is stale.
+
+### Feature flag
+
+`LLM_ROUTER_DYNAMIC=true` activates the Adaptive Universal Router. Default is `false` — all v4.x behaviour is preserved.
 ## v4.2.0 — Quota-Aware Routing + Context-Aware Classification (2026-04-13)
 
 ### Added
