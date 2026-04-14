@@ -31,15 +31,15 @@ def test_bump_versions_and_verify(tmp_path):
     module = _load_release_script()
     project = tmp_path
     (project / "src" / "llm_router").mkdir(parents=True)
-    (project / ".Codex-plugin").mkdir()
+    (project / ".codex-plugin").mkdir()
 
     (project / "pyproject.toml").write_text('[project]\nversion = "1.0.0"\n', encoding="utf-8")
     (project / "src" / "llm_router" / "__init__.py").write_text('__version__ = "1.0.0"\n', encoding="utf-8")
-    (project / ".Codex-plugin" / "plugin.json").write_text(
+    (project / ".codex-plugin" / "plugin.json").write_text(
         json.dumps({"name": "llm-router", "version": "1.0.0"}),
         encoding="utf-8",
     )
-    (project / ".Codex-plugin" / "marketplace.json").write_text(
+    (project / ".codex-plugin" / "marketplace.json").write_text(
         json.dumps({"plugins": [{"name": "llm-router", "version": "1.0.0"}]}),
         encoding="utf-8",
     )

@@ -63,6 +63,11 @@ OLLAMA_MODEL = os.environ.get("LLM_ROUTER_OLLAMA_MODEL", "gemma4:latest")
 OLLAMA_URL = os.environ.get("LLM_ROUTER_OLLAMA_URL", "http://localhost:11434")
 OLLAMA_TIMEOUT = int(os.environ.get("LLM_ROUTER_OLLAMA_TIMEOUT", "5"))
 CONFIDENCE_THRESHOLD = int(os.environ.get("LLM_ROUTER_CONFIDENCE_THRESHOLD", "4"))
+DISABLE_LLM_CLASSIFIERS = os.environ.get("LLM_ROUTER_DISABLE_LLM_CLASSIFIERS", "").lower() in (
+    "1",
+    "true",
+    "yes",
+)
 
 # API keys for cheap fallback (read from env or .env files)
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
@@ -336,7 +341,8 @@ def mark_session_coding(session_id: str) -> None:
 SIGNALS: dict[str, dict[str, re.Pattern]] = {
     "image": {
         "intent": re.compile(
-            r"\b(?:generate (?:an? )?(?:image|picture|photo|illustration|graphic)|"
+            r"\b(?:generate (?:an? )?(?:image|picture|photo|illustration|graphic|logo|"
+            r"icon|banner|thumbnail|avatar|mockup|diagram)|"
             r"create (?:an? )?(?:image|picture|illustration|logo|"
             r"icon|graphic|banner|thumbnail|avatar|mockup|diagram)|"
             r"draw (?:a |an |the |me )?|design (?:a |an )?(?:visual|poster|flyer|card|cover)|"
@@ -346,7 +352,7 @@ SIGNALS: dict[str, dict[str, re.Pattern]] = {
         ),
         "topic": re.compile(
             r"\b(?:artwork|portrait|landscape|scenery|sunset|sunrise|mountain|ocean|forest|city|"
-            r"pixel art|wallpaper|infographic|"
+            r"pixel art|wallpaper|infographic|logo|mockup|brand(?:ing)?|"
             r"meme|sticker|sprite|texture|concept art|"
             r"photorealistic|cartoon|anime|watercolor|oil painting|abstract|"
             r"dall-?e|midjourney|stable diffusion|flux)\b",
@@ -355,6 +361,22 @@ SIGNALS: dict[str, dict[str, re.Pattern]] = {
         "format": re.compile(
             r"\b(?:in the style of|aesthetic|color palette|aspect ratio|"
             r"resolution|4k|hd|minimalist|flat design|artistic)\b",
+            re.IGNORECASE,
+        ),
+    },
+    "query": {
+        "intent": re.compile(
+            r"\b(?:what does|what(?:'s| is)|how does|explain (?:what|how)|"
+            r"define|definition of|describe (?:what|how)|summarize how)\b",
+            re.IGNORECASE,
+        ),
+        "topic": re.compile(
+            r"\b(?:rest api|api|foreign key|database index(?:es)?|index(?:es)?|sql|"
+            r"os\.path\.join|json|yaml|regex|http|oauth|jwt)\b",
+            re.IGNORECASE,
+        ),
+        "format": re.compile(
+            r"\b(?:quick|simple|brief|short|definition|overview|eli5)\b|\?$",
             re.IGNORECASE,
         ),
     },
@@ -408,8 +430,10 @@ SIGNALS: dict[str, dict[str, re.Pattern]] = {
             r"build (?:a |the )?(?:app|service|tool|cli|library|package|component|feature)|"
             r"scaffold|boilerplate|port .+ to|migrate|"
             r"fix (?:the |this |a )?(?:\w+ )*(?:bug|error|issue|crash|failing test|exception)|"
-            r"add (?:a |the )?(?:\w+ )*(?:feature|method|test|endpoint|route|handler|middleware)|"
-            r"update (?:the |this )?(?:\w+ )*(?:code|logic|function|implementation)|"
+            r"add (?:a |the )?(?:\w+ )*(?:feature|method|test|endpoint|route|handler|"
+            r"middleware|support|integration|login)|"
+            r"update (?:the |this )?(?:\w+ )*(?:code|logic|function|implementation|client|"
+            r"api client|service|handler|middleware|endpoint)|"
             r"modify (?:the |this )|extend (?:the |this )|"
             r"(?:optimize|improve) (?:the |this )?(?:code|query|performance|function)|"
             r"set up|configure|install|bootstrap|initialize|"
@@ -419,12 +443,12 @@ SIGNALS: dict[str, dict[str, re.Pattern]] = {
         "topic": re.compile(
             r"\b(?:function|class|method|constructor|interface|enum|struct|"
             r"module|package|library|dependency|"
-            r"endpoint|route|handler|middleware|controller|resolver|"
+            r"endpoint|route|handler|middleware|controller|resolver|client|api client|"
             r"database|schema|migration|orm|"
             r"test|spec|coverage|assertion|mock|fixture|"
             r"algorithm|data structure|linked list|hash map|binary tree|"
-            r"authentication|authorization|jwt|oauth|"
-            r"cache|queue|worker|cron|webhook|"
+            r"authentication|authorization|jwt|oauth|login|dashboard|"
+            r"cache|queue|worker|cron|webhook|retry|rate limit|429|response(?:s)?|"
             r"dockerfile|ci/cd|pipeline|github actions|"
             r"linter|formatter|type checker|compiler|bundler)\b",
             re.IGNORECASE,
@@ -442,7 +466,7 @@ SIGNALS: dict[str, dict[str, re.Pattern]] = {
             r"\b(?:analyze|evaluate|assess|review (?:the |this |my )|"
             r"critique|debug|diagnose|"
             r"explain why|root cause|investigate|audit|"
-            r"compare (?:and contrast |.+ (?:to|with|vs|versus) )|"
+            r"compare (?:and contrast |.+ (?:to|with|vs|versus) |.+ and .+)|"
             r"pros and cons|trade-?offs?|advantages|disadvantages|"
             r"deep dive|what do you think|what(?:'s| is) (?:your |the )?(?:opinion|take|assessment)|"
             r"help me understand|break down|walk me through|"
@@ -461,7 +485,8 @@ SIGNALS: dict[str, dict[str, re.Pattern]] = {
             r"trade-?off|decision|choice|option|alternative|"
             r"root cause|failure|incident|outage|regression|"
             r"error|exception|stack trace|traceback|crash|panic|segfault|"
-            r"metric|kpi|benchmark|baseline|target|"
+            r"metric|kpi|benchmark|baseline|target|queue|stream(?:s)?|broker|"
+            r"replication|logical replication|cdc|background jobs|"
             r"code review|pull request|diff|changeset)\b",
             re.IGNORECASE,
         ),
@@ -476,7 +501,9 @@ SIGNALS: dict[str, dict[str, re.Pattern]] = {
     "generate": {
         "intent": re.compile(
             r"\b(?:write (?:(?:me |us )?(?:a |an |the )?)?(?:blog|article|email|letter|story|poem|"
-            r"tweet|post|description|pitch|proposal|speech|script|outline|"
+            r"tweet|post|description|pitch|proposal|speech|script|outline|copy|"
+            r"hero section|faq(?: answers)?|headline|messaging|onboarding copy|"
+            r"welcome modal copy|landing page copy|website copy|"
             r"summary|bio|resume|cover letter|announcement|press release|"
             r"newsletter|report|whitepaper|message|response|reply|comment|"
             r"review|testimonial|caption|title|headline|tagline|slogan|"
@@ -487,12 +514,16 @@ SIGNALS: dict[str, dict[str, re.Pattern]] = {
             r"edit (?:the |this )?(?:text|copy|content|writing)|"
             r"make (?:it |this )?(?:sound|more|less )|"
             r"summarize (?:this|the|a )|"
-            r"create (?:a |an )?(?:list|outline|plan|agenda|schedule))\b",
+            r"create (?:a |an )?(?:list|outline|plan|agenda|schedule|copy|"
+            r"hero section|faq(?: answers)?|headline|messaging|welcome modal copy|"
+            r"landing page copy|website copy))\b",
             re.IGNORECASE,
         ),
         "topic": re.compile(
             r"\b(?:blog post|article|essay|email|newsletter|"
-            r"marketing copy|ad copy|social media|content strategy|"
+            r"marketing copy|ad copy|social media|content strategy|hero section|"
+            r"welcome modal|onboarding copy|landing page|website copy|faq answers?|"
+            r"pricing page|launch email|"
             r"creative writing|fiction|non-fiction|narrative|"
             r"documentation|readme|changelog|release notes|"
             r"presentation|slide deck|pitch deck|"
@@ -750,7 +781,7 @@ def classify_prompt(text: str) -> dict | None:
         }
 
     # Layer 2: Ollama local LLM (free, 1-3s)
-    if len(stripped) >= 10:
+    if not DISABLE_LLM_CLASSIFIERS and len(stripped) >= 10:
         ollama_result = classify_with_ollama(text)
         if ollama_result:
             return {
@@ -760,7 +791,7 @@ def classify_prompt(text: str) -> dict | None:
             }
 
     # Layer 3: Cheap API model (Gemini Flash first — free tier, then GPT-4o-mini)
-    if len(stripped) >= 10:
+    if not DISABLE_LLM_CLASSIFIERS and len(stripped) >= 10:
         api_result = classify_with_gemini(text) or classify_with_openai(text)
         if api_result:
             return {

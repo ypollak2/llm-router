@@ -1,8 +1,10 @@
 """Tests for the auto-route UserPromptSubmit hook."""
 
 import json
+import os
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -12,18 +14,31 @@ ROOT = Path(__file__).resolve().parents[1]
 HOOK_PATH = ROOT / "src" / "llm_router" / "hooks" / "auto-route.py"
 
 
-def run_hook(prompt: str, session_id: str | None = None) -> dict | None:
+def _hook_env(home_dir: Path) -> dict[str, str]:
+    env = os.environ.copy()
+    env["HOME"] = str(home_dir)
+    env["LLM_ROUTER_DISABLE_LLM_CLASSIFIERS"] = "1"
+    env["OPENAI_API_KEY"] = ""
+    env["GEMINI_API_KEY"] = ""
+    env["GOOGLE_API_KEY"] = ""
+    return env
+
+
+def run_hook(prompt: str, session_id: str | None = None, home_dir: Path | None = None) -> dict | None:
     """Run the hook script with a prompt and return parsed output."""
-    payload = json.dumps({"prompt": prompt, "session_id": session_id or ""})
-    result = subprocess.run(
-        [sys.executable, str(HOOK_PATH)],
-        input=payload,
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode != 0 or not result.stdout.strip():
-        return None
-    return json.loads(result.stdout)
+    with tempfile.TemporaryDirectory(prefix="llm-router-hook-test-") as tmp_home:
+        effective_home = home_dir or Path(tmp_home)
+        payload = json.dumps({"prompt": prompt, "session_id": session_id or ""})
+        result = subprocess.run(
+            [sys.executable, str(HOOK_PATH)],
+            input=payload,
+            capture_output=True,
+            text=True,
+            env=_hook_env(effective_home),
+        )
+        if result.returncode != 0 or not result.stdout.strip():
+            return None
+        return json.loads(result.stdout)
 
 
 def run_hook_with_last_route(
@@ -33,20 +48,22 @@ def run_hook_with_last_route(
     last_tool: str = "llm_code",
 ) -> dict | None:
     """Run the hook with a pre-seeded last_route file to test context inheritance."""
-    session_id = f"test-session-{int(time.time() * 1000)}"
-    router_dir = Path.home() / ".llm-router"
-    router_dir.mkdir(parents=True, exist_ok=True)
-    last_route_path = router_dir / f"last_route_{session_id}.json"
-    try:
-        last_route_path.write_text(json.dumps({
-            "task_type": last_task_type,
-            "complexity": last_complexity,
-            "tool": last_tool,
-            "saved_at": time.time(),
-        }))
-        return run_hook(prompt, session_id=session_id)
-    finally:
-        last_route_path.unlink(missing_ok=True)
+    with tempfile.TemporaryDirectory(prefix="llm-router-hook-test-") as tmp_home:
+        home_dir = Path(tmp_home)
+        session_id = f"test-session-{int(time.time() * 1000)}"
+        router_dir = home_dir / ".llm-router"
+        router_dir.mkdir(parents=True, exist_ok=True)
+        last_route_path = router_dir / f"last_route_{session_id}.json"
+        try:
+            last_route_path.write_text(json.dumps({
+                "task_type": last_task_type,
+                "complexity": last_complexity,
+                "tool": last_tool,
+                "saved_at": time.time(),
+            }))
+            return run_hook(prompt, session_id=session_id, home_dir=home_dir)
+        finally:
+            last_route_path.unlink(missing_ok=True)
 
 
 def _extract_hint(output: dict) -> str:
@@ -299,20 +316,22 @@ class TestShortCodeFollowup:
 
     def test_stale_last_route_not_inherited(self):
         """Expired last_route (>30 min) is not used for context inheritance."""
-        session_id = f"test-stale-{int(time.time() * 1000)}"
-        router_dir = Path.home() / ".llm-router"
-        router_dir.mkdir(parents=True, exist_ok=True)
-        last_route_path = router_dir / f"last_route_{session_id}.json"
-        try:
-            last_route_path.write_text(json.dumps({
-                "task_type": "code",
-                "complexity": "moderate",
-                "tool": "llm_code",
-                "saved_at": time.time() - 3700,  # >30 min ago
-            }))
-            out = run_hook("do the change", session_id=session_id)
-            if out is not None:
-                hint = _extract_hint(out)
-                assert "code-context-inherit" not in hint
-        finally:
-            last_route_path.unlink(missing_ok=True)
+        with tempfile.TemporaryDirectory(prefix="llm-router-hook-test-") as tmp_home:
+            home_dir = Path(tmp_home)
+            session_id = f"test-stale-{int(time.time() * 1000)}"
+            router_dir = home_dir / ".llm-router"
+            router_dir.mkdir(parents=True, exist_ok=True)
+            last_route_path = router_dir / f"last_route_{session_id}.json"
+            try:
+                last_route_path.write_text(json.dumps({
+                    "task_type": "code",
+                    "complexity": "moderate",
+                    "tool": "llm_code",
+                    "saved_at": time.time() - 3700,  # >30 min ago
+                }))
+                out = run_hook("do the change", session_id=session_id, home_dir=home_dir)
+                if out is not None:
+                    hint = _extract_hint(out)
+                    assert "code-context-inherit" not in hint
+            finally:
+                last_route_path.unlink(missing_ok=True)
