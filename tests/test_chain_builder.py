@@ -199,3 +199,178 @@ class TestBuildDynamicChain:
             result = await _build_dynamic_chain(TaskType.CODE, "simple", RoutingProfile.BUDGET)
 
         assert isinstance(result, list)
+
+
+# ── Cache corruption regression (discover.py) ─────────────────────────────────
+
+class TestDiscoverCacheCorruption:
+    """Regression tests for corrupted discovery.json not crashing the router."""
+
+    def test_unknown_provider_tier_returns_none(self, tmp_path):
+        """ValueError from ProviderTier(unknown_value) must be caught, not propagate."""
+        import json
+        import time
+        from llm_router.discover import _load_cache
+
+        cache_file = tmp_path / "discovery.json"
+        cache_file.write_text(json.dumps({
+            "cached_at": time.time(),
+            "models": {
+                "ollama/qwen3:32b": {
+                    "model_id": "ollama/qwen3:32b",
+                    "provider": "ollama",
+                    "provider_tier": "future_tier_unknown",  # invalid enum value
+                    "task_types": ["code"],
+                    "cost_per_1k": 0.0,
+                    "latency_p50_ms": 400.0,
+                    "context_window": 128000,
+                    "available": True,
+                }
+            },
+        }))
+
+        with patch("llm_router.discover._DISCOVERY_CACHE", cache_file):
+            result = _load_cache(ttl=3600)
+
+        assert result is None, "corrupted cache should return None, not raise ValueError"
+
+    def test_missing_required_field_returns_none(self, tmp_path):
+        """KeyError from missing model_id must be caught, not propagate."""
+        import json
+        import time
+        from llm_router.discover import _load_cache
+
+        cache_file = tmp_path / "discovery.json"
+        cache_file.write_text(json.dumps({
+            "cached_at": time.time(),
+            "models": {
+                "ollama/qwen3:32b": {
+                    # model_id intentionally omitted
+                    "provider": "ollama",
+                    "provider_tier": "local",
+                    "task_types": ["code"],
+                }
+            },
+        }))
+
+        with patch("llm_router.discover._DISCOVERY_CACHE", cache_file):
+            result = _load_cache(ttl=3600)
+
+        assert result is None
+
+    def test_unknown_task_type_returns_none(self, tmp_path):
+        """ValueError from TaskType(unknown_value) must be caught."""
+        import json
+        import time
+        from llm_router.discover import _load_cache
+
+        cache_file = tmp_path / "discovery.json"
+        cache_file.write_text(json.dumps({
+            "cached_at": time.time(),
+            "models": {
+                "ollama/qwen3:32b": {
+                    "model_id": "ollama/qwen3:32b",
+                    "provider": "ollama",
+                    "provider_tier": "local",
+                    "task_types": ["future_task_not_in_enum"],  # invalid TaskType
+                    "cost_per_1k": 0.0,
+                    "latency_p50_ms": 400.0,
+                    "context_window": 128000,
+                    "available": True,
+                }
+            },
+        }))
+
+        with patch("llm_router.discover._DISCOVERY_CACHE", cache_file):
+            result = _load_cache(ttl=3600)
+
+        assert result is None
+
+    def test_valid_cache_loads_correctly(self, tmp_path):
+        """Sanity check: a well-formed cache should load without errors."""
+        import json
+        import time
+        from llm_router.discover import _load_cache
+
+        cache_file = tmp_path / "discovery.json"
+        cache_file.write_text(json.dumps({
+            "cached_at": time.time(),
+            "models": {
+                "ollama/qwen3:32b": {
+                    "model_id": "ollama/qwen3:32b",
+                    "provider": "ollama",
+                    "provider_tier": "local",
+                    "task_types": ["code", "query"],
+                    "cost_per_1k": 0.0,
+                    "latency_p50_ms": 400.0,
+                    "context_window": 128000,
+                    "available": True,
+                }
+            },
+        }))
+
+        with patch("llm_router.discover._DISCOVERY_CACHE", cache_file):
+            result = _load_cache(ttl=3600)
+
+        assert result is not None
+        assert "ollama/qwen3:32b" in result
+
+
+# ── End-to-end: dynamic routing through build_chain ───────────────────────────
+
+class TestEndToEndDynamicRouting:
+    """Verify the full dynamic routing path: build_chain → discover → score → chain."""
+
+    @pytest.mark.asyncio
+    async def test_dynamic_enabled_uses_scored_chain(self):
+        """When LLM_ROUTER_DYNAMIC=true, build_chain returns scored model IDs."""
+        from llm_router.chain_builder import build_chain
+        from llm_router.types import ScoredModel
+
+        fake_scored = [
+            ScoredModel(
+                model_id="ollama/qwen3:32b",
+                score=0.88,
+                quality_score=0.70,
+                budget_score=1.0,
+                latency_score=0.80,
+                acceptance_score=1.0,
+                capability=_FAKE_CAPS["ollama/qwen3:32b"],
+            ),
+            ScoredModel(
+                model_id="openai/gpt-4o",
+                score=0.75,
+                quality_score=0.90,
+                budget_score=0.50,
+                latency_score=0.80,
+                acceptance_score=1.0,
+                capability=_FAKE_CAPS["openai/gpt-4o"],
+            ),
+        ]
+
+        with (
+            patch("llm_router.chain_builder.is_dynamic_routing_enabled", return_value=True),
+            patch("llm_router.discover.discover_available_models",
+                  new_callable=AsyncMock, return_value=_FAKE_CAPS),
+            patch("llm_router.scorer.score_all_models",
+                  new_callable=AsyncMock, return_value=fake_scored),
+        ):
+            result = await build_chain(TaskType.CODE, "moderate", RoutingProfile.BALANCED)
+
+        assert "ollama/qwen3:32b" in result
+        assert result[0] == "ollama/qwen3:32b", "local model must lead chain"
+
+    @pytest.mark.asyncio
+    async def test_dynamic_chain_never_empty(self):
+        """Even with zero discovered models, build_chain returns a non-empty static fallback."""
+        from llm_router.chain_builder import build_chain
+
+        with (
+            patch("llm_router.chain_builder.is_dynamic_routing_enabled", return_value=True),
+            patch("llm_router.discover.discover_available_models",
+                  new_callable=AsyncMock, return_value={}),
+        ):
+            result = await build_chain(TaskType.CODE, "simple", RoutingProfile.BUDGET)
+
+        assert isinstance(result, list)
+        assert len(result) > 0, "static fallback must always return models"

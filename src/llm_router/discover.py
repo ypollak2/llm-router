@@ -189,7 +189,7 @@ def _load_cache(ttl: float) -> dict[str, ModelCapability] | None:
             mid: _cap_from_dict(cap_dict)
             for mid, cap_dict in data.get("models", {}).items()
         }
-    except (OSError, json.JSONDecodeError, KeyError):
+    except (OSError, json.JSONDecodeError, KeyError, ValueError):
         return None
 
 
