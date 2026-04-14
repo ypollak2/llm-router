@@ -185,6 +185,11 @@ class RouterConfig(BaseSettings):
     llm_router_budget_perplexity: float = 0.0   # LLM_ROUTER_BUDGET_PERPLEXITY
     llm_router_budget_mistral: float = 0.0      # LLM_ROUTER_BUDGET_MISTRAL
 
+    # ── Enterprise integrations (v5.1) ──
+    helicone_api_key: str = ""              # HELICONE_API_KEY
+    llm_router_helicone_pull: bool = False  # LLM_ROUTER_HELICONE_PULL — pull spend from Helicone API
+    llm_router_litellm_budget_db: str = ""  # LLM_ROUTER_LITELLM_BUDGET_DB — path to LiteLLM proxy DB
+
     # ── Community Benchmarks settings (v3.4) ──
     # Set to true to opt in to anonymous routing quality sharing (future upload).
     # In v3.4 this only prepares a local export file; upload requires a future

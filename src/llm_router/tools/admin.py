@@ -916,7 +916,21 @@ async def llm_budget() -> str:
             if is_dynamic_routing_enabled()
             else "⏸ Inactive (set LLM_ROUTER_DYNAMIC=true to enable)"
         )
-        return f"{summary}\n\n**Adaptive Router v5.0**: {dynamic_status}"
+
+        from llm_router.types import LOCAL_PROVIDERS
+        uncapped = [
+            p for p, s in states.items()
+            if p not in LOCAL_PROVIDERS and s.cap_usd <= 0
+        ]
+        nudge = ""
+        if uncapped:
+            providers_str = ", ".join(sorted(uncapped))
+            nudge = (
+                f"\n\n💡 **No cap set for**: {providers_str}\n"
+                f"   Run `llm-router budget set <provider> <amount>` to protect against runaway costs."
+            )
+
+        return f"{summary}{nudge}\n\n**Adaptive Router v5.0**: {dynamic_status}"
     except Exception as e:
         return f"Budget Oracle error: {e}"
 

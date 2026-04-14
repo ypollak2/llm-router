@@ -7,12 +7,12 @@
     {
       "name": "llm-router",
       "description": "Route text, image, video, and audio tasks to 20+ AI providers with smart routing, budget control, and multi-step orchestration",
-      "version": "3.6.0",
+      "version": "5.1.0",
       "source": {
         "source": "github",
         "repo": "ypollak2/llm-router"
       }
     }
   ],
-  "version": "5.0.0"
+  "version": "5.1.0"
 }

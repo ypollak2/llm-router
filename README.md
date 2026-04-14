@@ -1,7 +1,7 @@
 # llm-router
 
 > Route every AI call to the cheapest model that can handle it.
-> 45 tools · 20+ providers · Claude Code, VS Code, Cursor, Codex, and more.
+> 46 tools · 20+ providers · Claude Code, VS Code, Cursor, Codex, and more.
 
 [![PyPI](https://img.shields.io/pypi/v/claude-code-llm-router?style=flat-square)](https://pypi.org/project/claude-code-llm-router/)
 [![Tests](https://img.shields.io/github/actions/workflow/status/ypollak2/llm-router/ci.yml?style=flat-square&label=tests)](https://github.com/ypollak2/llm-router/actions)
@@ -99,7 +99,7 @@ Under the hood, every prompt goes through a `UserPromptSubmit` hook before your 
 
 ## MCP Tools
 
-45 tools across 6 categories:
+46 tools across 6 categories:
 
 ### Smart Routing
 | Tool | What it does |
@@ -169,6 +169,7 @@ Under the hood, every prompt goes through a `UserPromptSubmit` hook before your 
 | `llm_benchmark` | Per-task-type routing accuracy from `llm_rate` feedback |
 | `llm_session_spend` | Real-time API spend breakdown for the current session |
 | `llm_approve_route` | Approve or reject a pending high-cost routing call |
+| `llm_budget` | Budget Oracle — real-time spend vs. cap per provider with pressure bars |
 
 ---
 
@@ -427,6 +428,18 @@ OLLAMA_BUDGET_MODELS=gemma4:latest,qwen3.5:latest
 
 # Spend limits
 LLM_ROUTER_DAILY_SPEND_LIMIT=5.00   # USD, 0 = disabled
+
+# Per-provider monthly budget caps (overridden by llm-router budget set)
+LLM_ROUTER_BUDGET_OPENAI=20.0
+LLM_ROUTER_BUDGET_GEMINI=5.0
+LLM_ROUTER_BUDGET_GROQ=3.0
+LLM_ROUTER_BUDGET_DEEPSEEK=3.0
+
+# Enterprise integrations
+HELICONE_API_KEY=sk-helicone-...         # enables Helicone routing properties
+LLM_ROUTER_HELICONE_PULL=false           # pull spend from Helicone API
+LLM_ROUTER_LITELLM_BUDGET_DB=/path/to/litellm.db  # LiteLLM Proxy DB
+LLM_ROUTER_LITELLM_USER=my-team          # optional LiteLLM user/team filter
 ```
 
 ### Enforcement Modes
@@ -470,8 +483,30 @@ Full reference: [.env.example](.env.example)
 
 ## Budget Control
 
+### Per-Provider Caps (CLI)
+
+Set monthly spend caps per provider — persisted to `~/.llm-router/budgets.json`:
+
 ```bash
-LLM_ROUTER_MONTHLY_BUDGET=50   # raises BudgetExceededError when exceeded
+llm-router budget list                  # show all providers with cap, spend, pressure
+llm-router budget set openai 20         # $20/month cap for OpenAI
+llm-router budget set gemini 5          # $5/month cap for Gemini
+llm-router budget remove openai         # remove cap (reverts to env-var or unlimited)
+```
+
+Caps set via CLI take priority over `LLM_ROUTER_BUDGET_*` env vars. The router automatically routes away from providers approaching their caps.
+
+### Via Env Vars
+
+```bash
+LLM_ROUTER_BUDGET_OPENAI=20.0          # $20/month cap for OpenAI
+LLM_ROUTER_BUDGET_GEMINI=5.0           # $5/month cap for Gemini
+LLM_ROUTER_BUDGET_GROQ=3.0
+LLM_ROUTER_BUDGET_DEEPSEEK=3.0
+LLM_ROUTER_BUDGET_TOGETHER=5.0
+LLM_ROUTER_BUDGET_PERPLEXITY=10.0
+LLM_ROUTER_BUDGET_MISTRAL=5.0
+LLM_ROUTER_MONTHLY_BUDGET=50           # global cap across all providers
 ```
 
 ```
@@ -479,7 +514,7 @@ llm_usage("month")
 → Calls: 142 | Tokens: 320k | Cost: $3.42 | Budget: 6.8% of $50
 ```
 
-The router tracks spend in SQLite across all providers and blocks calls when the monthly cap is reached.
+The router tracks spend in SQLite across all providers and routes away from providers approaching their monthly caps.
 
 ---
 
@@ -490,6 +525,63 @@ llm-router dashboard   # opens localhost:7337
 ```
 
 Live view of routing decisions, cost trends, model distribution, and subscription pressure. Auto-refreshes every 30s.
+
+Tabs: **Overview** · **Performance** · **Config** · **Logs** · **💰 Budget**
+
+The Budget tab shows per-provider spend vs. cap with editable cap inputs — changes are persisted to `~/.llm-router/budgets.json` and take effect immediately.
+
+### Prometheus metrics
+
+```
+GET http://localhost:7337/metrics
+```
+
+Exposes standard text exposition format, no extra dependencies:
+
+```
+# HELP llm_router_spend_usd Monthly spend per provider in USD
+llm_router_spend_usd{provider="openai"} 3.42
+llm_router_budget_pressure{provider="openai"} 0.17
+llm_router_budget_cap_usd{provider="openai"} 20.0
+llm_router_savings_usd_total 12.87
+```
+
+---
+
+## Enterprise Integrations
+
+### Helicone
+
+Add observability headers to every routed call and optionally pull spend data back from the Helicone API:
+
+```bash
+HELICONE_API_KEY=sk-helicone-...      # enables routing properties in every call
+LLM_ROUTER_HELICONE_PULL=true         # pull spend per provider from Helicone API
+```
+
+When `LLM_ROUTER_HELICONE_PULL=true`, Helicone spend is merged with local SQLite spend and LiteLLM spend — budget pressure uses the **maximum** across all sources.
+
+Headers injected on every call:
+```
+Helicone-Auth: Bearer sk-helicone-...
+Helicone-Property-Router-Task-Type: code
+Helicone-Property-Router-Model: openai/gpt-4o
+Helicone-Property-Router-Complexity: moderate
+Helicone-Property-Router-Profile: balanced
+```
+
+### LiteLLM BudgetManager
+
+Teams running a LiteLLM Proxy with budget management can point llm-router at the proxy's SQLite DB:
+
+```bash
+LLM_ROUTER_LITELLM_BUDGET_DB=/path/to/litellm.db
+LLM_ROUTER_LITELLM_USER=my-team        # optional — filter by user/team key
+```
+
+The router reads `spend_logs` aggregated by provider (e.g. `openai/gpt-4o` → `openai`) and incorporates LiteLLM spend into pressure calculations. This ensures routing pressure reflects traffic flowing through both direct llm-router calls and the LiteLLM proxy simultaneously.
+
+Budget cap lookup from `budget_limits` table (LiteLLM Proxy ≥ 1.30) is also supported.
 
 ---
 

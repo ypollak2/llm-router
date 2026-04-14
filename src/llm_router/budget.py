@@ -147,11 +147,42 @@ def _claude_subscription_state() -> BudgetState:
 
 
 async def _api_provider_state(provider: str) -> BudgetState:
-    """Compute pressure from monthly spend vs. per-provider cap."""
+    """Compute pressure from monthly spend vs. per-provider cap.
+
+    Spend is the maximum of:
+      1. Local SQLite usage DB (always tracked)
+      2. Helicone pull (when LLM_ROUTER_HELICONE_PULL=true)
+      3. LiteLLM Proxy DB (when LLM_ROUTER_LITELLM_BUDGET_DB is set)
+
+    Using the maximum ensures pressure is never under-reported when traffic
+    flows through multiple tracking systems.
+    """
     cfg = get_config()
     cap = _get_cap(provider, cfg)
 
-    spend = await _get_provider_monthly_spend(provider)
+    # Gather spend from all configured sources concurrently
+    spend_sources = [_get_provider_monthly_spend(provider)]
+
+    try:
+        from llm_router.integrations.helicone import get_helicone_spend
+        spend_sources.append(_extract_provider(get_helicone_spend(), provider))
+    except Exception:
+        pass
+
+    try:
+        from llm_router.integrations.litellm_budget import (
+            get_litellm_spend, is_litellm_budget_enabled,
+        )
+        if is_litellm_budget_enabled():
+            spend_sources.append(_extract_provider(get_litellm_spend(provider), provider))
+    except Exception:
+        pass
+
+    results = await asyncio.gather(*spend_sources, return_exceptions=True)
+    spend = max(
+        (float(r) if isinstance(r, (int, float)) else 0.0)
+        for r in results
+    )
 
     if cap <= 0.0:
         # No cap configured — provider is available, track spend only.
@@ -166,11 +197,26 @@ async def _api_provider_state(provider: str) -> BudgetState:
     )
 
 
+async def _extract_provider(coro, provider: str) -> float:
+    """Await a coroutine returning dict[str, float] and extract *provider*'s value."""
+    try:
+        result = await coro
+        return float(result.get(provider, 0.0))
+    except Exception:
+        return 0.0
+
+
 def _get_cap(provider: str, cfg) -> float:
     """Return the configured monthly budget cap for *provider* in USD.
 
+    Priority: budget_store (set via CLI/dashboard) > env-var config fields.
     Returns 0.0 when no cap is set (unlimited).
     """
+    from llm_router.budget_store import get_cap as _store_cap
+    stored = _store_cap(provider)
+    if stored > 0.0:
+        return stored
+
     cap_map = {
         "openai": cfg.llm_router_budget_openai,
         "gemini": cfg.llm_router_budget_gemini,

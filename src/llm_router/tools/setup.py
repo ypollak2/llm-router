@@ -467,10 +467,22 @@ def _setup_add(provider: str, api_key: str) -> str:
     _cfg._config = None  # Force reload on next get_config()
 
     masked = _mask_key(api_key)
+
+    # Suggest setting a budget cap if none is already configured for this provider
+    from llm_router.budget_store import get_cap as _get_stored_cap
+    budget_nudge = ""
+    if _get_stored_cap(provider) <= 0:
+        budget_nudge = (
+            f"\n\n💰 **Set a monthly budget cap** to protect against runaway costs:\n"
+            f"   `llm-router budget set {provider} 20`\n"
+            f"   (or any amount — the router will route away from this provider as you approach the cap)"
+        )
+
     return (
         f"Added **{reg['name']}** (`{masked}`) to `{env_path}`\n\n"
         f"Run `llm_health()` to verify the key works."
         f"{gitignore_warning}"
+        f"{budget_nudge}"
     )
 
 

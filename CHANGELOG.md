@@ -1,5 +1,44 @@
 # Changelog
 
+## v5.1.0 — Budget Management UX + Enterprise Integrations (2026-04-14)
+
+### Added
+
+- **Persistent budget cap storage** (`budget_store.py`) — `~/.llm-router/budgets.json` stores per-provider monthly spend caps with atomic writes (`tmp → os.replace`). Caps set via CLI or dashboard persist across sessions and take priority over env-var config.
+- **`llm-router budget` CLI subcommand** — three commands for interactive budget management:
+  - `llm-router budget list` — colored table of all providers with cap, spend, pressure bar, and remaining budget
+  - `llm-router budget set <provider> <amount>` — set a monthly cap (e.g. `llm-router budget set openai 20`)
+  - `llm-router budget remove <provider>` — remove a cap (reverts to env-var or unlimited)
+- **Dashboard Budget tab** — new "💰 Budget" tab in the web dashboard with:
+  - Summary cards (total configured cap, current total spend, highest pressure provider)
+  - Per-provider cards showing spend vs. cap, pressure bar, and an editable cap input with live Save
+  - `GET /api/budget` — JSON endpoint returning all provider budget states
+  - `POST /api/budget/set` — accepts `{"provider": "openai", "cap": 20.0}`, writes to budget_store and invalidates cache
+- **Prometheus metrics endpoint** (`GET /metrics`) — text exposition format, no extra dependencies:
+  - `llm_router_spend_usd{provider}` — current monthly spend per provider
+  - `llm_router_budget_pressure{provider}` — budget pressure 0.0–1.0
+  - `llm_router_budget_cap_usd{provider}` — configured monthly cap
+  - `llm_router_savings_usd_total` — cumulative savings vs. Claude Opus baseline
+- **Budget nudge on first-time setup** (`tools/setup.py`) — after successfully adding an API key, the setup flow shows a one-line prompt to set a monthly cap: `llm-router budget set <provider> 20`
+- **Uncapped-provider nudge in `llm_budget`** (`tools/admin.py`) — when providers have no cap configured, the budget dashboard appends a `💡 No cap set for:` hint listing them
+- **Helicone integration** (`integrations/helicone.py`):
+  - `get_helicone_headers()` — returns extra HTTP headers including `Helicone-Auth` and routing properties (`Helicone-Property-Router-Task-Type`, `-Model`, `-Complexity`, `-Profile`)
+  - `get_helicone_spend()` — async; queries Helicone's cost aggregation API when `LLM_ROUTER_HELICONE_PULL=true`; results merged into budget pressure alongside local SQLite spend
+  - `is_helicone_enabled()` — checks for `HELICONE_API_KEY`
+- **LiteLLM BudgetManager integration** (`integrations/litellm_budget.py`):
+  - `get_litellm_spend()` — async; reads `spend_logs` table from a LiteLLM Proxy SQLite DB; aggregates monthly spend per provider (e.g. `openai/gpt-4o` → `openai`)
+  - `get_litellm_budget_cap()` — reads `budget_limits` table for per-user/team caps (LiteLLM Proxy ≥ 1.30)
+  - `is_litellm_budget_enabled()` — checks `LLM_ROUTER_LITELLM_BUDGET_DB` env var and file existence
+- **Multi-source spend aggregation** in `_api_provider_state()` (`budget.py`) — spend is now the **maximum** of three concurrent sources (local SQLite DB, Helicone pull, LiteLLM DB). Using the maximum ensures pressure is never under-reported when traffic flows through multiple tracking systems.
+- **New config fields** in `config.py`:
+  - `HELICONE_API_KEY` — Helicone authentication key
+  - `LLM_ROUTER_HELICONE_PULL` — enable spend pull from Helicone API (default: `false`)
+  - `LLM_ROUTER_LITELLM_BUDGET_DB` — path to LiteLLM Proxy SQLite database
+  - `LLM_ROUTER_LITELLM_USER` — optional user/team key filter for LiteLLM queries
+- **35 new tests** across `test_budget_store.py` (18) and `test_integrations.py` (17) covering CRUD ops, atomic writes, env-var priority, Helicone header generation, spend pull parsing, and LiteLLM SQLite queries.
+
+---
+
 ## v5.0.0 — Adaptive Universal Router (2026-04-14)
 
 ### Added

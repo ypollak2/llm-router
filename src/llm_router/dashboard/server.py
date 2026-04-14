@@ -273,6 +273,10 @@ tailwind.config = {
       <span class="material-symbols-outlined text-xl">terminal</span>
       <span class="font-mono text-sm uppercase tracking-widest">Logs</span>
     </button>
+    <button onclick="showTab('budget')" data-tab="budget" class="nav-inactive flex items-center gap-3 w-full px-4 py-2.5 rounded-r-full transition-all text-left">
+      <span class="material-symbols-outlined text-xl">account_balance_wallet</span>
+      <span class="font-mono text-sm uppercase tracking-widest">Budget</span>
+    </button>
   </nav>
   <div class="pb-8 px-4">
     <div id="sb-status" class="text-[10px] font-mono text-outline">Connecting...</div>
@@ -555,6 +559,30 @@ tailwind.config = {
   </div>
 </div>
 
+<!-- TAB: Budget -->
+<div id="tab-budget" class="p-8 max-w-[1600px] mx-auto space-y-8 hidden">
+  <div>
+    <h1 class="text-3xl font-extrabold font-headline text-white">Budget Caps</h1>
+    <p class="text-sm text-outline font-label mt-1">Set monthly spend limits per provider — the router avoids providers as they approach their cap</p>
+  </div>
+  <div id="budget-summary" class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-2">
+    <div class="bg-surface-container-low rounded-2xl border border-outline-variant/10 p-5">
+      <p class="text-xs text-outline uppercase tracking-widest font-label mb-1">Total Monthly Spend</p>
+      <p class="text-2xl font-bold text-on-surface" id="budget-total-spend">—</p>
+    </div>
+    <div class="bg-surface-container-low rounded-2xl border border-outline-variant/10 p-5">
+      <p class="text-xs text-outline uppercase tracking-widest font-label mb-1">Total Budget Cap</p>
+      <p class="text-2xl font-bold text-on-surface" id="budget-total-cap">—</p>
+    </div>
+    <div class="bg-surface-container-low rounded-2xl border border-outline-variant/10 p-5">
+      <p class="text-xs text-outline uppercase tracking-widest font-label mb-1">Overall Pressure</p>
+      <p class="text-2xl font-bold text-on-surface" id="budget-overall-pct">—</p>
+    </div>
+  </div>
+  <div id="budget-providers" class="space-y-3"></div>
+  <p class="text-xs text-outline mt-2">Caps are saved to <code class="font-mono">~/.llm-router/budgets.json</code> and take effect immediately on the next routing call.</p>
+</div>
+
 <!-- TAB: Logs -->
 <div id="tab-logs" class="p-8 max-w-[1600px] mx-auto space-y-8 hidden">
   <div>
@@ -592,7 +620,7 @@ function esc(s) {
 }
 
 // ── Tab navigation ────────────────────────────────────────────────────────
-const TABS = ['overview', 'performance', 'config', 'logs'];
+const TABS = ['overview', 'performance', 'config', 'logs', 'budget'];
 function showTab(name) {
   TABS.forEach(t => {
     const panel = document.getElementById('tab-' + t);
@@ -605,6 +633,81 @@ function showTab(name) {
         ' flex items-center gap-3 w-full px-4 py-2.5 rounded-r-full transition-all text-left';
     }
   });
+}
+
+// ── Budget tab ────────────────────────────────────────────────────────────
+async function loadBudget() {
+  let data;
+  try {
+    const r = await fetch('/api/budget');
+    data = await r.json();
+  } catch(e) { return; }
+
+  const providers = data.providers || [];
+  const LOCAL = new Set(['ollama','vllm','llamacpp','lm_studio']);
+
+  const paid = providers.filter(p => !LOCAL.has(p.provider));
+  const totalSpend = paid.reduce((s, p) => s + (p.spend_usd || 0), 0);
+  const totalCap   = paid.reduce((s, p) => s + (p.cap_usd  || 0), 0);
+  const overallPct = totalCap > 0 ? Math.round(totalSpend / totalCap * 100) : 0;
+
+  setText('budget-total-spend', '$' + totalSpend.toFixed(2));
+  setText('budget-total-cap', totalCap > 0 ? '$' + totalCap.toFixed(2) : 'No cap');
+  setText('budget-overall-pct', totalCap > 0 ? overallPct + '%' : '—');
+
+  const container = document.getElementById('budget-providers');
+  if (!container) return;
+  container.innerHTML = providers.map(p => {
+    const isLocal = LOCAL.has(p.provider);
+    const pct = Math.round((p.pressure || 0) * 100);
+    const barW = Math.min(100, pct);
+    const barColor = pct >= 80 ? 'bg-error' : pct >= 50 ? 'bg-tertiary' : 'bg-primary';
+    const capVal = p.cap_usd > 0 ? p.cap_usd.toFixed(2) : '';
+    return `
+    <div class="bg-surface-container-low rounded-2xl border border-outline-variant/10 p-5">
+      <div class="flex items-center justify-between mb-3">
+        <div>
+          <span class="font-bold text-on-surface text-base">${esc(p.provider)}</span>
+          ${isLocal ? '<span class="ml-2 text-xs text-primary bg-primary/10 px-2 py-0.5 rounded-full">local · free</span>' : ''}
+        </div>
+        <span class="text-sm text-outline">${isLocal ? 'free' : '$' + (p.spend_usd||0).toFixed(4) + ' spent'}</span>
+      </div>
+      <div class="w-full bg-surface-container rounded-full h-2 mb-3">
+        <div class="${barColor} h-2 rounded-full transition-all" style="width:${barW}%"></div>
+      </div>
+      ${isLocal ? '' : `
+      <div class="flex items-center gap-2 mt-2">
+        <label class="text-xs text-outline">Monthly cap $</label>
+        <input id="cap-input-${esc(p.provider)}" type="number" min="0" step="1"
+          value="${esc(capVal)}" placeholder="no cap"
+          class="w-24 bg-surface-container border border-outline-variant/30 rounded-lg px-2 py-1 text-sm text-on-surface focus:outline-none focus:ring-1 focus:ring-primary" />
+        <button onclick="saveBudgetCap('${esc(p.provider)}')"
+          class="px-3 py-1 text-xs font-mono bg-primary/10 hover:bg-primary/20 text-primary rounded-lg transition-all">
+          Save
+        </button>
+        <span id="cap-status-${esc(p.provider)}" class="text-xs text-outline"></span>
+      </div>`}
+    </div>`;
+  }).join('');
+}
+
+async function saveBudgetCap(provider) {
+  const input = document.getElementById('cap-input-' + provider);
+  const status = document.getElementById('cap-status-' + provider);
+  if (!input || !status) return;
+  const val = parseFloat(input.value);
+  if (isNaN(val) || val < 0) { status.textContent = '✗ invalid'; return; }
+  status.textContent = 'Saving…';
+  try {
+    const r = await fetch('/api/budget/set', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({provider, cap: val})
+    });
+    const d = await r.json();
+    status.textContent = d.ok ? '✓ saved' : ('✗ ' + (d.error || 'error'));
+    if (d.ok) setTimeout(() => loadBudget(), 500);
+  } catch(e) { status.textContent = '✗ network error'; }
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────
@@ -1004,6 +1107,9 @@ async function doRefresh() {
 
 doRefresh();
 setInterval(doRefresh, 30000);
+
+// Load budget tab on first visit
+document.querySelector('[data-tab="budget"]').addEventListener('click', () => loadBudget());
 </script>
 </body>
 </html>"""
@@ -1035,9 +1141,95 @@ async def run(port: int = DEFAULT_PORT) -> None:
             content_type="application/json",
         )
 
+    async def handle_budget_get(request: "web.Request") -> "web.Response":
+        from llm_router.budget import get_all_budget_states
+        from llm_router.budget_store import list_caps
+        states = await get_all_budget_states()
+        providers = [
+            {
+                "provider": p,
+                "pressure": round(s.pressure, 4),
+                "spend_usd": round(s.spend_usd, 4),
+                "cap_usd": round(s.cap_usd, 2),
+            }
+            for p, s in sorted(states.items())
+        ]
+        return web.Response(
+            text=json.dumps({"providers": providers, "caps": list_caps()}),
+            content_type="application/json",
+        )
+
+    async def handle_budget_set(request: "web.Request") -> "web.Response":
+        try:
+            body = await request.json()
+            provider = str(body["provider"]).strip().lower()
+            cap = float(body["cap"])
+        except Exception as e:
+            return web.Response(
+                text=json.dumps({"ok": False, "error": str(e)}),
+                content_type="application/json", status=400,
+            )
+        from llm_router.budget_store import set_cap, remove_cap
+        from llm_router.budget import invalidate_cache
+        if cap <= 0:
+            remove_cap(provider)
+        else:
+            set_cap(provider, cap)
+        invalidate_cache(provider)
+        return web.Response(
+            text=json.dumps({"ok": True, "provider": provider, "cap": cap}),
+            content_type="application/json",
+        )
+
+    async def handle_metrics(request: "web.Request") -> "web.Response":
+        from llm_router.budget import get_all_budget_states
+        from llm_router.cost import get_savings_by_period
+        states = await get_all_budget_states()
+        try:
+            savings = await get_savings_by_period()
+            total_saved = savings.get("all_time", {}).get("saved_usd", 0.0)
+            total_external = savings.get("all_time", {}).get("external_usd", 0.0)
+        except Exception:
+            total_saved = total_external = 0.0
+
+        lines = [
+            "# HELP llm_router_spend_usd Monthly spend per provider",
+            "# TYPE llm_router_spend_usd gauge",
+        ]
+        for p, s in sorted(states.items()):
+            lines.append(f'llm_router_spend_usd{{provider="{p}"}} {s.spend_usd:.4f}')
+
+        lines += [
+            "# HELP llm_router_budget_pressure Budget pressure per provider (0=free 1=exhausted)",
+            "# TYPE llm_router_budget_pressure gauge",
+        ]
+        for p, s in sorted(states.items()):
+            lines.append(f'llm_router_budget_pressure{{provider="{p}"}} {s.pressure:.4f}')
+
+        lines += [
+            "# HELP llm_router_cap_usd Configured monthly cap per provider (0=unlimited)",
+            "# TYPE llm_router_cap_usd gauge",
+        ]
+        for p, s in sorted(states.items()):
+            lines.append(f'llm_router_cap_usd{{provider="{p}"}} {s.cap_usd:.2f}')
+
+        lines += [
+            "# HELP llm_router_savings_usd_total Lifetime savings vs Sonnet baseline",
+            "# TYPE llm_router_savings_usd_total counter",
+            f"llm_router_savings_usd_total {total_saved:.4f}",
+            "# HELP llm_router_external_usd_total Lifetime external API spend",
+            "# TYPE llm_router_external_usd_total counter",
+            f"llm_router_external_usd_total {total_external:.4f}",
+            "",
+        ]
+        return web.Response(text="\n".join(lines), content_type="text/plain")
+
     app = web.Application()
     app.router.add_get("/", handle_index)
     app.router.add_get("/api/stats", handle_stats)
+    app.router.add_get("/api/budget", handle_budget_get)
+    app.router.add_post("/api/budget/set", handle_budget_set)
+    app.router.add_get("/metrics", handle_metrics)
 
     runner = web.AppRunner(app)
     await runner.setup()
