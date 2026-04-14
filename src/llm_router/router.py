@@ -12,18 +12,21 @@ generation APIs directly, because LiteLLM has no media generation support.
 from __future__ import annotations
 
 import asyncio
-import logging
 from typing import Any
+from uuid import uuid4
 
 from llm_router import cost, media, providers
+from llm_router.budget import get_budget_state
 from llm_router.state import get_active_agent
 from llm_router.codex_agent import CODEX_MODELS, is_codex_available, run_codex
+from llm_router.logging import configure_logging, get_logger
 from llm_router.compaction import compact_structural
 from llm_router.config import get_config
 from llm_router.repo_config import effective_config as get_repo_config
 from llm_router.context import build_context_messages, get_session_buffer
 from llm_router.health import get_tracker
 from llm_router.profiles import get_model_chain, provider_from_model
+from llm_router.tracing import set_span_attributes, traced_span
 from llm_router.types import BudgetExceededError, Complexity, LLMResponse, RoutingProfile, TaskType
 
 # Foundational routing rule: complexity always determines the profile.
@@ -38,7 +41,7 @@ _COMPLEXITY_TO_PROFILE: dict[Complexity, RoutingProfile] = {
     Complexity.DEEP_REASONING: RoutingProfile.PREMIUM,  # Extended thinking — same chain as PREMIUM
 }
 
-log = logging.getLogger("llm_router")
+log = get_logger("llm_router.router")
 
 
 def _reorder_for_agent_context(
@@ -82,6 +85,23 @@ _budget_lock = asyncio.Lock()
 # LiteLLM only supports text completion; media generation requires direct
 # calls to each provider's SDK (DALL-E, Flux, Runway, ElevenLabs, etc.).
 MEDIA_TASK_TYPES = {TaskType.IMAGE, TaskType.VIDEO, TaskType.AUDIO}
+
+# Allowed keys per media task type.  Caller-supplied media_params are filtered
+# through this whitelist before being spread into the generator functions, so
+# an MCP caller cannot inject unexpected kwargs into provider SDKs.
+_ALLOWED_MEDIA_PARAMS: dict[TaskType, frozenset[str]] = {
+    TaskType.IMAGE: frozenset({"size", "quality", "style", "n", "response_format"}),
+    TaskType.VIDEO: frozenset({"duration", "resolution", "fps", "aspect_ratio"}),
+    TaskType.AUDIO: frozenset({"voice", "speed", "format", "sample_rate"}),
+}
+
+
+def _filter_media_params(task_type: TaskType, params: dict | None) -> dict:
+    """Return media_params filtered to the allowed keys for *task_type*."""
+    if not params:
+        return {}
+    allowed = _ALLOWED_MEDIA_PARAMS.get(task_type, frozenset())
+    return {k: v for k, v in params.items() if k in allowed}
 
 # Substrings checked against exception messages and type names to detect
 # rate-limit (HTTP 429) errors. Each provider SDK formats these differently
@@ -269,8 +289,10 @@ async def route_and_call(
         ValueError: No models available for the given task/profile combo.
         RuntimeError: All candidate models failed (wraps the last error).
     """
+    configure_logging()
     config = get_config()
     tracker = get_tracker()
+    correlation_id = uuid4().hex[:8]
 
     # ── Profile resolution (foundational routing rule) ────────────────────────
     # Priority: explicit profile > complexity_hint > prompt-length heuristic > config default.
@@ -296,506 +318,650 @@ async def route_and_call(
         profile = _COMPLEXITY_TO_PROFILE.get(c, config.llm_router_profile)
     else:
         profile = profile or config.llm_router_profile
-
-    # Budget enforcement — block calls if daily or monthly budget is exceeded.
-    # Both checks share one lock to prevent two concurrent callers from both
-    # passing the limit check before either has recorded their cost.
-    async with _budget_lock:
-        # Guard: llm_router_daily_spend_limit may be MagicMock in tests
-        _raw_daily = getattr(config, "llm_router_daily_spend_limit", 0.0)
-        _daily_limit = float(_raw_daily) if isinstance(_raw_daily, (int, float)) else 0.0
-        if _daily_limit > 0:
-            daily_spend = await cost.get_daily_spend()
-            if daily_spend >= _daily_limit:
-                raise BudgetExceededError(
-                    f"Daily spend limit of ${_daily_limit:.2f} exceeded "
-                    f"(spent: ${daily_spend:.4f} today UTC). "
-                    "Resets at midnight UTC. "
-                    "To raise the limit: set LLM_ROUTER_DAILY_SPEND_LIMIT env var."
-                )
-
-        if config.llm_router_monthly_budget > 0:
-            monthly_spend = await cost.get_monthly_spend()
-            budget = config.llm_router_monthly_budget
-            if monthly_spend >= budget:
-                raise BudgetExceededError(
-                    f"Monthly budget of ${budget:.2f} exceeded "
-                    f"(spent: ${monthly_spend:.2f}). "
-                    "To continue: run llm_usage() to see the breakdown, or "
-                    "llm_set_profile(profile='budget') to switch to cheaper models. "
-                    "To raise the limit: set LLM_ROUTER_MONTHLY_BUDGET env var."
-                )
-            if monthly_spend >= budget * 0.9:
-                log.warning(
-                    "Monthly budget at %.0f%% ($%.2f / $%.2f)",
-                    100 * monthly_spend / budget, monthly_spend, budget,
-                )
-
-    # Structural compaction — shrink prompt before sending to external LLMs
-    # Guard: compaction_mode/threshold may be MagicMock in test mocks
-    compaction_mode = getattr(config, "compaction_mode", "structural")
-    compaction_threshold = getattr(config, "compaction_threshold", 4000)
-    if (
-        isinstance(compaction_mode, str)
-        and compaction_mode != "off"
-        and isinstance(compaction_threshold, int)
-        and task_type not in MEDIA_TASK_TYPES
-    ):
-        prompt, compaction_result = await compact_structural(
-            prompt, compaction_threshold,
+    effective_complexity = (
+        c.value if hasattr(c, "value") else str(complexity_hint or "moderate")
+    )
+    available = config.available_providers
+    with traced_span(
+        "route_and_call",
+        tracer_name="llm_router.router",
+        correlation_id=correlation_id,
+        task_type=task_type,
+        complexity=effective_complexity,
+        profile=profile,
+        model_override=model_override,
+        prompt_chars=len(prompt),
+    ) as route_span:
+        route_log = log.bind(
+            correlation_id=correlation_id,
+            task_type=task_type.value,
+            profile=profile.value,
+            complexity=effective_complexity,
         )
-        if compaction_result.tokens_saved_estimate > 0:
-            log.info(
-                "Compacted prompt: %d→%d chars (~%d tokens saved) [%s]",
-                compaction_result.original_length,
-                compaction_result.compacted_length,
-                compaction_result.tokens_saved_estimate,
-                ", ".join(compaction_result.strategies_applied),
-            )
 
-    if model_override:
-        # Validate format early — LiteLLM requires "provider/model" and will
-        # produce a cryptic AuthenticationError if the format is wrong.
-        _local_prefixes = {"codex", "ollama"}
-        if "/" not in model_override and model_override not in _local_prefixes:
-            raise ValueError(
-                f"Invalid model_override format: {model_override!r}. "
-                "Use 'provider/model' format (e.g. 'openai/gpt-4o', "
-                "'anthropic/claude-haiku-4-5-20251001', 'gemini/gemini-2.5-flash'). "
-                "Run llm_providers() to see all available models."
-            )
-        # Subscription mode hard block — even explicit overrides must not route
-        # to Anthropic when Claude subscription mode is active. The API key is
-        # intentionally absent; routing back would fail with auth errors and waste
-        # time. Swap to the first non-Anthropic model in the balanced chain instead.
+        # Budget enforcement — block calls if daily or monthly budget is exceeded.
+        # Both checks share one lock to prevent two concurrent callers from both
+        # passing the limit check before either has recorded their cost.
+        async with _budget_lock:
+            # Guard: llm_router_daily_spend_limit may be MagicMock in tests
+            _raw_daily = getattr(config, "llm_router_daily_spend_limit", 0.0)
+            _daily_limit = float(_raw_daily) if isinstance(_raw_daily, (int, float)) else 0.0
+            if _daily_limit > 0:
+                daily_spend = await cost.get_daily_spend()
+                if daily_spend >= _daily_limit:
+                    raise BudgetExceededError(
+                        f"Daily spend limit of ${_daily_limit:.2f} exceeded "
+                        f"(spent: ${daily_spend:.4f} today UTC). "
+                        "Resets at midnight UTC. "
+                        "To raise the limit: set LLM_ROUTER_DAILY_SPEND_LIMIT env var."
+                    )
+
+            if config.llm_router_monthly_budget > 0:
+                monthly_spend = await cost.get_monthly_spend()
+                budget = config.llm_router_monthly_budget
+                if monthly_spend >= budget:
+                    raise BudgetExceededError(
+                        f"Monthly budget of ${budget:.2f} exceeded "
+                        f"(spent: ${monthly_spend:.2f}). "
+                        "To continue: run llm_usage() to see the breakdown, or "
+                        "llm_set_profile(profile='budget') to switch to cheaper models. "
+                        "To raise the limit: set LLM_ROUTER_MONTHLY_BUDGET env var."
+                    )
+                if monthly_spend >= budget * 0.9:
+                    log.warning(
+                        "Monthly budget at %.0f%% ($%.2f / $%.2f)",
+                        100 * monthly_spend / budget, monthly_spend, budget,
+                    )
+                    set_span_attributes(route_span, monthly_budget_pressure=monthly_spend / budget)
+
+        # Structural compaction — shrink prompt before sending to external LLMs
+        # Guard: compaction_mode/threshold may be MagicMock in test mocks
+        compaction_mode = getattr(config, "compaction_mode", "structural")
+        compaction_threshold = getattr(config, "compaction_threshold", 4000)
         if (
-            config.llm_router_claude_subscription
-            and model_override.startswith("anthropic/")
+            isinstance(compaction_mode, str)
+            and compaction_mode != "off"
+            and isinstance(compaction_threshold, int)
+            and task_type not in MEDIA_TASK_TYPES
         ):
-            log.warning(
-                "model_override %r blocked in subscription mode — "
-                "routing to balanced chain instead",
-                model_override,
+            prompt, compaction_result = await compact_structural(
+                prompt, compaction_threshold,
             )
-            fallback_chain = [
-                m for m in get_model_chain(RoutingProfile.BALANCED, task_type)
-                if not m.startswith("anthropic/")
-            ]
-            models_to_try = fallback_chain or get_model_chain(RoutingProfile.BALANCED, task_type)
-        else:
-            models_to_try = [model_override]
-    else:
-        # Pre-fetch penalty data while we're in an async context, so the
-        # benchmark ordering can apply failure-rate and latency penalties
-        # without hitting the sync/async deadlock inside penalty functions.
-        _failure_rates: dict[str, float] | None = None
-        _latency_stats: dict[str, dict] | None = None
-        _acceptance_scores: dict[str, float] | None = None
-        if task_type not in MEDIA_TASK_TYPES:
-            try:
-                from llm_router.cost import (
-                    get_model_acceptance_scores,
-                    get_model_failure_rates,
-                    get_model_latency_stats,
+            if compaction_result.tokens_saved_estimate > 0:
+                log.info(
+                    "Compacted prompt: %d→%d chars (~%d tokens saved) [%s]",
+                    compaction_result.original_length,
+                    compaction_result.compacted_length,
+                    compaction_result.tokens_saved_estimate,
+                    ", ".join(compaction_result.strategies_applied),
                 )
-                _failure_rates, _latency_stats, _acceptance_scores = await asyncio.gather(
-                    get_model_failure_rates(window_days=30),
-                    get_model_latency_stats(window_days=7),
-                    get_model_acceptance_scores(window_days=30),
+                set_span_attributes(
+                    route_span,
+                    compacted=True,
+                    compacted_chars=compaction_result.compacted_length,
+                    tokens_saved_estimate=compaction_result.tokens_saved_estimate,
                 )
-            except Exception as _penalty_err:
+
+        if model_override:
+            # Validate format early — LiteLLM requires "provider/model" and will
+            # produce a cryptic AuthenticationError if the format is wrong.
+            _local_prefixes = {"codex", "ollama"}
+            if "/" not in model_override and model_override not in _local_prefixes:
+                raise ValueError(
+                    f"Invalid model_override format: {model_override!r}. "
+                    "Use 'provider/model' format (e.g. 'openai/gpt-4o', "
+                    "'anthropic/claude-haiku-4-5-20251001', 'gemini/gemini-2.5-flash'). "
+                    "Run llm_providers() to see all available models."
+                )
+            # Subscription mode hard block — even explicit overrides must not route
+            # to Anthropic when Claude subscription mode is active. The API key is
+            # intentionally absent; routing back would fail with auth errors and waste
+            # time. Swap to the first non-Anthropic model in the balanced chain instead.
+            if (
+                config.llm_router_claude_subscription
+                and model_override.startswith("anthropic/")
+            ):
                 log.warning(
-                    "Failed to fetch benchmark penalty data — model ordering will use static chain: %s",
-                    _penalty_err,
+                    "model_override %r blocked in subscription mode — "
+                    "routing to balanced chain instead",
+                    model_override,
                 )
-
-        # ── Dynamic chain (v5.0) or static chain (v4.x) ─────────────────────
-        # When LLM_ROUTER_DYNAMIC=true, use the Adaptive Universal Router to
-        # build a scored, budget-aware chain from discovered models.
-        # Falls back to the static profiles table on any error.
-        from llm_router.chain_builder import is_dynamic_routing_enabled, build_chain
-        if is_dynamic_routing_enabled() and task_type not in MEDIA_TASK_TYPES:
-            complexity_key = (
-                complexity_hint.value
-                if hasattr(complexity_hint, "value")
-                else str(complexity_hint or "moderate")
-            )
-            models_to_try = await build_chain(task_type, complexity_key, profile)
+                fallback_chain = [
+                    m for m in get_model_chain(RoutingProfile.BALANCED, task_type)
+                    if not m.startswith("anthropic/")
+                ]
+                models_to_try = fallback_chain or get_model_chain(RoutingProfile.BALANCED, task_type)
+            else:
+                models_to_try = [model_override]
         else:
-            models_to_try = get_model_chain(
-                profile, task_type,
-                failure_rates=_failure_rates,
-                latency_stats=_latency_stats,
-                acceptance_scores=_acceptance_scores,
-            )
-        if task_type not in MEDIA_TASK_TYPES:
-            from llm_router.claude_usage import get_claude_pressure
-            pressure = get_claude_pressure()
+            # Pre-fetch penalty data while we're in an async context, so the
+            # benchmark ordering can apply failure-rate and latency penalties
+            # without hitting the sync/async deadlock inside penalty functions.
+            _failure_rates: dict[str, float] | None = None
+            _latency_stats: dict[str, dict] | None = None
+            _acceptance_scores: dict[str, float] | None = None
+            if task_type not in MEDIA_TASK_TYPES:
+                try:
+                    from llm_router.cost import (
+                        get_model_acceptance_scores,
+                        get_model_failure_rates,
+                        get_model_latency_stats,
+                    )
+                    _failure_rates, _latency_stats, _acceptance_scores = await asyncio.gather(
+                        get_model_failure_rates(window_days=30),
+                        get_model_latency_stats(window_days=7),
+                        get_model_acceptance_scores(window_days=30),
+                    )
+                except Exception as _penalty_err:
+                    log.warning(
+                        "Failed to fetch benchmark penalty data — model ordering will use static chain: %s",
+                        _penalty_err,
+                    )
 
-            # ── Provider filter (must run before injection) ──────────────────
-            # Filter here so that Codex/Ollama injection decisions (has_claude,
-            # has_no_claude) reflect what's actually callable.  In subscription
-            # mode, anthropic/* is stripped here; checking has_claude on the
-            # unfiltered chain would wrongly place Codex after removed Claude
-            # slots, causing it to appear first once those slots are gone.
-            # Codex and Ollama use local runtimes — no API key needed.
-            available = config.available_providers
-            models_to_try = [
-                m for m in models_to_try
-                if provider_from_model(m) in available
-                or provider_from_model(m) in {"codex", "ollama"}
-            ]
+            # ── Dynamic chain (v5.0) or static chain (v4.x) ─────────────────────
+            # When LLM_ROUTER_DYNAMIC=true, use the Adaptive Universal Router to
+            # build a scored, budget-aware chain from discovered models.
+            # Falls back to the static profiles table on any error.
+            from llm_router.chain_builder import is_dynamic_routing_enabled, build_chain
+            if is_dynamic_routing_enabled() and task_type not in MEDIA_TASK_TYPES:
+                complexity_key = (
+                    complexity_hint.value
+                    if hasattr(complexity_hint, "value")
+                    else str(complexity_hint or "moderate")
+                )
+                models_to_try = await build_chain(task_type, complexity_key, profile)
+            else:
+                models_to_try = get_model_chain(
+                    profile, task_type,
+                    failure_rates=_failure_rates,
+                    latency_stats=_latency_stats,
+                    acceptance_scores=_acceptance_scores,
+                )
+            if task_type not in MEDIA_TASK_TYPES:
+                from llm_router.claude_usage import get_claude_pressure
+                pressure = get_claude_pressure()
 
-            # ── Repo config: block_providers + model/provider pin ────────────
-            repo_cfg = get_repo_config()
-            if repo_cfg.block_providers:
-                blocked = set(repo_cfg.block_providers)
+                # ── Provider filter (must run before injection) ──────────────────
+                # Filter here so that Codex/Ollama injection decisions (has_claude,
+                # has_no_claude) reflect what's actually callable.  In subscription
+                # mode, anthropic/* is stripped here; checking has_claude on the
+                # unfiltered chain would wrongly place Codex after removed Claude
+                # slots, causing it to appear first once those slots are gone.
+                # Codex and Ollama use local runtimes — no API key needed.
+                available = config.available_providers
                 models_to_try = [
                     m for m in models_to_try
-                    if provider_from_model(m) not in blocked
+                    if provider_from_model(m) in available
+                    or provider_from_model(m) in {"codex", "ollama"}
                 ]
 
-            # ── Policy engine: org-level + repo-level model allow/deny ───────
-            from llm_router.policy import OrgPolicy, apply_policy, load_org_policy
-            _org = load_org_policy()
-            # Merge repo-level block_models/allow_models into a unified policy
-            _merged_block = list({*_org.block_models, *repo_cfg.block_models})
-            _merged_allow = list({*_org.allow_models, *repo_cfg.allow_models})
-            _merged_block_prov = list({*_org.block_providers})  # already applied above
-            _policy = OrgPolicy(
-                block_providers=_merged_block_prov,
-                block_models=_merged_block,
-                allow_models=_merged_allow,
-                task_caps=_org.task_caps,
-                source=_org.source,
-            )
-            if _merged_block or _merged_allow:
-                models_to_try, _policy_blocked = apply_policy(
-                    models_to_try, task_type.value, _policy,
+                # ── Repo config: block_providers + model/provider pin ────────────
+                repo_cfg = get_repo_config()
+                if repo_cfg.block_providers:
+                    blocked = set(repo_cfg.block_providers)
+                    models_to_try = [
+                        m for m in models_to_try
+                        if provider_from_model(m) not in blocked
+                    ]
+
+                # ── Policy engine: org-level + repo-level model allow/deny ───────
+                from llm_router.policy import OrgPolicy, apply_policy, load_org_policy
+                _org = load_org_policy()
+                # Merge repo-level block_models/allow_models into a unified policy
+                _merged_block = list({*_org.block_models, *repo_cfg.block_models})
+                _merged_allow = list({*_org.allow_models, *repo_cfg.allow_models})
+                _merged_block_prov = list({*_org.block_providers})  # already applied above
+                _policy = OrgPolicy(
+                    block_providers=_merged_block_prov,
+                    block_models=_merged_block,
+                    allow_models=_merged_allow,
+                    task_caps=_org.task_caps,
+                    source=_org.source,
                 )
-            else:
-                _policy_blocked = []
-            # Model pin: prepend pinned model so it's tried first
-            pinned_model = repo_cfg.model_override(task_type.value)
-            pinned_provider = repo_cfg.provider_override(task_type.value)
-            if pinned_model and pinned_model not in models_to_try:
-                models_to_try = [pinned_model] + models_to_try
-            elif pinned_provider and not pinned_model:
-                # Provider pin: move models from that provider to the front
-                pinned = [m for m in models_to_try if provider_from_model(m) == pinned_provider]
-                rest   = [m for m in models_to_try if provider_from_model(m) != pinned_provider]
-                models_to_try = pinned + rest
-
-            # ── Ollama injection ─────────────────────────────────────────────
-            # Always inject when configured — Ollama is free and local, so there
-            # is never a reason to skip it. If the model can't answer (quality
-            # mismatch or timeout) it fails fast and the fallback chain continues.
-            # This ensures >80% of routable tasks hit a free model first.
-            ollama_models = config.all_ollama_models()
-            if ollama_models:
-                models_to_try = ollama_models + models_to_try
-
-            # ── Codex injection ──────────────────────────────────────────────
-            # Codex uses the user's OpenAI subscription (free from Claude quota).
-            # Excluded: RESEARCH (no web browsing), BUDGET profile (Codex is balanced-tier).
-            #
-            # Priority principle: prefer already-paid capacity before paid external APIs.
-            # Hierarchy: free-local (Ollama) → free-prepaid (Codex) → paid-per-call.
-            # This applies to ALL eligible task types, not just CODE.
-            #
-            # Injection position:
-            #   pressure ≥ 0.95               : Codex at front (before Claude)
-            #   Claude in chain, CODE task     : Codex after FIRST Claude
-            #                                    (beats paid externals as first fallback)
-            #   Claude in chain, other tasks   : Codex after LAST Claude (quality-first)
-            #   No Claude (subscription mode)  : Codex after Ollama, before paid externals
-            #                                    (already-paid beats paid API for all tasks)
-            _codex_eligible_tasks = {TaskType.CODE, TaskType.ANALYZE, TaskType.GENERATE, TaskType.QUERY}
-            if (
-                profile != RoutingProfile.BUDGET
-                and task_type in _codex_eligible_tasks
-                and is_codex_available()
-            ):
-                codex_chain = [f"codex/{m}" for m in CODEX_MODELS[:2]]  # top 2 models
-                has_claude = any(m.startswith("anthropic/") for m in models_to_try)
-                if pressure >= 0.95:
-                    # Near-exhaustion: Codex before everything including remaining Claude
-                    log.debug("Codex injected at front (pressure=%.0f%%)", pressure * 100)
-                    models_to_try = codex_chain + models_to_try
-                elif has_claude and task_type == TaskType.CODE:
-                    # CODE task: Codex right after the FIRST Claude model so it beats
-                    # paid external APIs (GPT-4o, Gemini Pro) as first non-Claude fallback.
-                    first_claude = next(
-                        i for i, m in enumerate(models_to_try) if m.startswith("anthropic/")
+                if _merged_block or _merged_allow:
+                    models_to_try, _policy_blocked = apply_policy(
+                        models_to_try, task_type.value, _policy,
                     )
-                    insert_at = first_claude + 1
-                    log.debug("Codex injected after first Claude at index %d (CODE task)", insert_at)
-                    models_to_try = models_to_try[:insert_at] + codex_chain + models_to_try[insert_at:]
-                elif has_claude:
-                    # ANALYZE/GENERATE/QUERY with Claude: quality-first, Codex after last Claude
-                    last_claude = max(
-                        (i for i, m in enumerate(models_to_try) if m.startswith("anthropic/")),
-                        default=-1,
-                    )
-                    insert_at = last_claude + 1
-                    log.debug("Codex injected after last Claude at index %d (%s task)", insert_at, task_type.value)
-                    models_to_try = models_to_try[:insert_at] + codex_chain + models_to_try[insert_at:]
                 else:
-                    # Subscription mode (no Claude in chain): inject Codex after any Ollama
-                    # models but before all paid external APIs — free beats paid for every
-                    # eligible task type (CODE, ANALYZE, GENERATE, QUERY).
-                    first_paid = next(
-                        (i for i, m in enumerate(models_to_try)
-                         if provider_from_model(m) not in {"ollama", "codex"}),
-                        len(models_to_try),
-                    )
-                    log.debug(
-                        "Codex injected before paid externals at index %d (%s task, subscription mode)",
-                        first_paid, task_type.value,
-                    )
-                    models_to_try = models_to_try[:first_paid] + codex_chain + models_to_try[first_paid:]
+                    _policy_blocked = []
+                # Model pin: prepend pinned model so it's tried first
+                pinned_model = repo_cfg.model_override(task_type.value)
+                pinned_provider = repo_cfg.provider_override(task_type.value)
+                if pinned_model and pinned_model not in models_to_try:
+                    models_to_try = [pinned_model] + models_to_try
+                elif pinned_provider and not pinned_model:
+                    # Provider pin: move models from that provider to the front
+                    pinned = [m for m in models_to_try if provider_from_model(m) == pinned_provider]
+                    rest   = [m for m in models_to_try if provider_from_model(m) != pinned_provider]
+                    models_to_try = pinned + rest
 
-            # ── Agent-context chain reordering ───────────────────────────────
-            # When llm_select_agent has tagged the active tool (claude_code or
-            # codex), reorder the chain so that tool's subscription-covered
-            # models are attempted first — maximising already-paid capacity.
-            models_to_try = _reorder_for_agent_context(
-                models_to_try, get_active_agent(), c,
+                # ── Ollama injection ─────────────────────────────────────────────
+                # Always inject when configured — Ollama is free and local, so there
+                # is never a reason to skip it. If the model can't answer (quality
+                # mismatch or timeout) it fails fast and the fallback chain continues.
+                # This ensures >80% of routable tasks hit a free model first.
+                ollama_models = config.all_ollama_models()
+                if ollama_models:
+                    models_to_try = ollama_models + models_to_try
+
+                # ── Codex injection ──────────────────────────────────────────────
+                # Codex uses the user's OpenAI subscription (free from Claude quota).
+                # Excluded: RESEARCH (no web browsing), BUDGET profile (Codex is balanced-tier).
+                #
+                # Priority principle: prefer already-paid capacity before paid external APIs.
+                # Hierarchy: free-local (Ollama) → free-prepaid (Codex) → paid-per-call.
+                # This applies to ALL eligible task types, not just CODE.
+                #
+                # Injection position:
+                #   pressure ≥ 0.95               : Codex at front (before Claude)
+                #   Claude in chain, CODE task     : Codex after FIRST Claude
+                #                                    (beats paid externals as first fallback)
+                #   Claude in chain, other tasks   : Codex after LAST Claude (quality-first)
+                #   No Claude (subscription mode)  : Codex after Ollama, before paid externals
+                #                                    (already-paid beats paid API for all tasks)
+                _codex_eligible_tasks = {TaskType.CODE, TaskType.ANALYZE, TaskType.GENERATE, TaskType.QUERY}
+                if (
+                    profile != RoutingProfile.BUDGET
+                    and task_type in _codex_eligible_tasks
+                    and is_codex_available()
+                ):
+                    codex_chain = [f"codex/{m}" for m in CODEX_MODELS[:2]]  # top 2 models
+                    has_claude = any(m.startswith("anthropic/") for m in models_to_try)
+                    if pressure >= 0.95:
+                        # Near-exhaustion: Codex before everything including remaining Claude
+                        log.debug("Codex injected at front (pressure=%.0f%%)", pressure * 100)
+                        models_to_try = codex_chain + models_to_try
+                    elif has_claude and task_type == TaskType.CODE:
+                        # CODE task: Codex right after the FIRST Claude model so it beats
+                        # paid external APIs (GPT-4o, Gemini Pro) as first non-Claude fallback.
+                        first_claude = next(
+                            i for i, m in enumerate(models_to_try) if m.startswith("anthropic/")
+                        )
+                        insert_at = first_claude + 1
+                        log.debug("Codex injected after first Claude at index %d (CODE task)", insert_at)
+                        models_to_try = models_to_try[:insert_at] + codex_chain + models_to_try[insert_at:]
+                    elif has_claude:
+                        # ANALYZE/GENERATE/QUERY with Claude: quality-first, Codex after last Claude
+                        last_claude = max(
+                            (i for i, m in enumerate(models_to_try) if m.startswith("anthropic/")),
+                            default=-1,
+                        )
+                        insert_at = last_claude + 1
+                        log.debug("Codex injected after last Claude at index %d (%s task)", insert_at, task_type.value)
+                        models_to_try = models_to_try[:insert_at] + codex_chain + models_to_try[insert_at:]
+                    else:
+                        # Subscription mode (no Claude in chain): inject Codex after any Ollama
+                        # models but before all paid external APIs — free beats paid for every
+                        # eligible task type (CODE, ANALYZE, GENERATE, QUERY).
+                        first_paid = next(
+                            (i for i, m in enumerate(models_to_try)
+                             if provider_from_model(m) not in {"ollama", "codex"}),
+                            len(models_to_try),
+                        )
+                        log.debug(
+                            "Codex injected before paid externals at index %d (%s task, subscription mode)",
+                            first_paid, task_type.value,
+                        )
+                        models_to_try = models_to_try[:first_paid] + codex_chain + models_to_try[first_paid:]
+
+                # ── Agent-context chain reordering ───────────────────────────────
+                # When llm_select_agent has tagged the active tool (claude_code or
+                # codex), reorder the chain so that tool's subscription-covered
+                # models are attempted first — maximising already-paid capacity.
+                models_to_try = _reorder_for_agent_context(
+                    models_to_try, get_active_agent(), c,
+                )
+
+        if not models_to_try:
+            set_span_attributes(
+                route_span,
+                available_providers=sorted(available),
+                candidate_count=0,
+            )
+            raise ValueError(
+                f"No available models for {task_type.value}/{profile.value}. "
+                f"Configured providers: {available or 'none'}. "
+                "Run llm_setup(action='test') to check API keys, or "
+                "llm_providers() to see all configured models."
             )
 
-    if not models_to_try:
-        raise ValueError(
-            f"No available models for {task_type.value}/{profile.value}. "
-            f"Configured providers: {available or 'none'}. "
-            "Run llm_setup(action='test') to check API keys, or "
-            "llm_providers() to see all configured models."
-        )
-
-    # Semantic dedup cache — skip the LLM call entirely when an equivalent
-    # prompt was answered recently (cosine similarity ≥ 0.95 within 24 hours).
-    # Only active when Ollama is configured; silently skipped otherwise.
-    if task_type not in MEDIA_TASK_TYPES and not model_override:
-        try:
-            from llm_router import semantic_cache
-            cached = await semantic_cache.check(prompt, task_type)
-            if cached is not None:
-                await _notify(ctx, "info", "⚡ Semantic cache hit — skipping LLM call")
-                return cached
-        except Exception as _sc_err:
-            log.debug("Semantic cache check failed (continuing): %s", _sc_err)
-
-    top_model = models_to_try[0].split("/", 1)[1] if "/" in models_to_try[0] else models_to_try[0]
-    await _notify(ctx, "info", f"🤖 Routing to {top_model} ({task_type.value}/{profile.value})")
-
-    # Warn when a RESEARCH task falls back to a non-web-grounded model.
-    # Perplexity is the only model in the chain with real-time web access.
-    # If it's unavailable (no API key, circuit open), subsequent models will
-    # produce plausible but potentially stale answers with no source citations.
-    if task_type == TaskType.RESEARCH and "perplexity" not in models_to_try[0]:
-        log.warning(
-            "RESEARCH task routed to %s — this model has no web access. "
-            "Add PERPLEXITY_API_KEY for web-grounded research answers.",
-            models_to_try[0],
-        )
-        await _notify(
-            ctx, "warning",
-            "⚠️  No web-grounded model available — answer may not reflect current information. "
-            "Set PERPLEXITY_API_KEY for real-time web access.",
-        )
-
-    # Cost-threshold escalation check (v4.0): block expensive calls before they happen.
-    # Uses the same config reference already resolved above (respects mocks in tests).
-    config_for_escalation = config
-    _escalate_above = getattr(config_for_escalation, "llm_router_escalate_above", 0.0)
-    if isinstance(_escalate_above, (int, float)) and _escalate_above > 0 and task_type not in MEDIA_TASK_TYPES:
-        try:
-            from llm_router.session_spend import get_session_spend, _estimate_cost
-            _top_model = models_to_try[0] if models_to_try else ""
-            _estimated = _estimate_cost(_top_model, len(prompt) // 4, 500)
-            _session_total = get_session_spend().total_usd
-            if _estimated > config_for_escalation.llm_router_escalate_above:
-                from llm_router.tools.admin import _set_pending_approval
-                _set_pending_approval({"model": _top_model, "estimated_cost": _estimated})
-                raise BudgetExceededError(
-                    f"Call to {_top_model} (estimated ${_estimated:.4f}) exceeds "
-                    f"LLM_ROUTER_ESCALATE_ABOVE=${config_for_escalation.llm_router_escalate_above:.2f}. "
-                    f"Run llm_approve_route(approve=True) to proceed or "
-                    f"llm_approve_route(downgrade_to='gemini/gemini-2.5-flash') to use a cheaper model."
-                )
-            if (config_for_escalation.llm_router_hard_stop_above > 0
-                    and _session_total >= config_for_escalation.llm_router_hard_stop_above):
-                raise BudgetExceededError(
-                    f"Session spend ${_session_total:.4f} has reached the hard stop limit "
-                    f"(LLM_ROUTER_HARD_STOP_ABOVE=${config_for_escalation.llm_router_hard_stop_above:.2f}). "
-                    f"No further calls will be made this session. "
-                    f"Unset LLM_ROUTER_HARD_STOP_ABOVE to continue."
-                )
-        except BudgetExceededError:
-            raise
-        except Exception:
-            pass  # Never block routing due to escalation check errors
-
-    last_error: Exception | None = None
-    for model in models_to_try:
-        provider = provider_from_model(model)
-        model_name = model.split("/", 1)[1] if "/" in model else model
-
-        if not tracker.is_healthy(provider):
-            await _notify(ctx, "warning", f"⚠️  {provider} unhealthy — trying next")
-            log.info("Skipping unhealthy provider: %s", provider)
-            continue
-
-        await _notify(ctx, "info", f"⏳ {model_name} working...")
-
-        try:
-            if task_type in MEDIA_TASK_TYPES:
-                response = await _call_media(task_type, provider, model_name, prompt, media_params)
-            elif provider == "codex":
-                import time as _time
-                _t0 = _time.monotonic()
-                codex_result = await run_codex(prompt, model=model_name)
-                if not codex_result.success:
-                    raise RuntimeError(f"Codex exited {codex_result.exit_code}: {codex_result.content[:200]}")
-                response = LLMResponse(
-                    content=codex_result.content,
-                    model=f"codex/{model_name}",
-                    input_tokens=0,   # CLI doesn't report token counts
-                    output_tokens=0,
-                    cost_usd=0.0,     # free via OpenAI subscription
-                    latency_ms=codex_result.duration_sec * 1000,
-                    provider="codex",
-                )
-            else:
-                response = await _call_text(
-                    model, prompt, system_prompt, temperature, max_tokens, task_type,
-                    caller_context=caller_context,
-                    use_thinking=use_thinking,
-                )
-
-            tracker.record_success(provider)
-            await cost.log_usage(response, task_type, profile)
-
-            # Record spend for real-time session spend meter (v4.0)
+        # Semantic dedup cache — skip the LLM call entirely when an equivalent
+        # prompt was answered recently (cosine similarity ≥ 0.95 within 24 hours).
+        # Only active when Ollama is configured; silently skipped otherwise.
+        if task_type not in MEDIA_TASK_TYPES and not model_override:
             try:
-                from llm_router.session_spend import get_session_spend
-                get_session_spend().record(
-                    model=model,
-                    tool=task_type.value,
-                    input_tokens=response.input_tokens,
-                    output_tokens=response.output_tokens,
-                    cost_usd=response.cost_usd,
-                )
+                from llm_router import semantic_cache
+                cached = await semantic_cache.check(prompt, task_type)
+                if cached is not None:
+                    await _notify(ctx, "info", "⚡ Semantic cache hit — skipping LLM call")
+                    set_span_attributes(
+                        route_span,
+                        semantic_cache_hit=True,
+                        final_model=cached.model,
+                        final_provider=cached.provider,
+                        cost_usd=cached.cost_usd,
+                        latency_ms=cached.latency_ms,
+                    )
+                    return cached
+            except Exception as _sc_err:
+                log.debug("Semantic cache check failed (continuing): %s", _sc_err)
+
+        set_span_attributes(
+            route_span,
+            semantic_cache_hit=False,
+            candidate_count=len(models_to_try),
+            top_model=models_to_try[0],
+        )
+        top_model = models_to_try[0].split("/", 1)[1] if "/" in models_to_try[0] else models_to_try[0]
+        route_log.info(
+            "route_start",
+            correlation_id=correlation_id,
+            task_type=task_type.value,
+            complexity=effective_complexity,
+            profile=profile.value,
+            top_model=models_to_try[0],
+            candidate_count=len(models_to_try),
+        )
+        await _notify(ctx, "info", f"🤖 Routing to {top_model} ({task_type.value}/{profile.value})")
+
+        # Warn when a RESEARCH task falls back to a non-web-grounded model.
+        # Perplexity is the only model in the chain with real-time web access.
+        # If it's unavailable (no API key, circuit open), subsequent models will
+        # produce plausible but potentially stale answers with no source citations.
+        if task_type == TaskType.RESEARCH and "perplexity" not in models_to_try[0]:
+            log.warning(
+                "RESEARCH task routed to %s — this model has no web access. "
+                "Add PERPLEXITY_API_KEY for web-grounded research answers.",
+                models_to_try[0],
+            )
+            await _notify(
+                ctx, "warning",
+                "⚠️  No web-grounded model available — answer may not reflect current information. "
+                "Set PERPLEXITY_API_KEY for real-time web access.",
+            )
+
+        # Cost-threshold escalation check (v4.0): block expensive calls before they happen.
+        # Uses the same config reference already resolved above (respects mocks in tests).
+        config_for_escalation = config
+        _escalate_above = getattr(config_for_escalation, "llm_router_escalate_above", 0.0)
+        if isinstance(_escalate_above, (int, float)) and _escalate_above > 0 and task_type not in MEDIA_TASK_TYPES:
+            try:
+                from llm_router.session_spend import get_session_spend, _estimate_cost
+                _top_model = models_to_try[0] if models_to_try else ""
+                _estimated = _estimate_cost(_top_model, len(prompt) // 4, 500)
+                _session_total = get_session_spend().total_usd
+                if _estimated > config_for_escalation.llm_router_escalate_above:
+                    from llm_router.tools.admin import _set_pending_approval
+                    _set_pending_approval({"model": _top_model, "estimated_cost": _estimated})
+                    raise BudgetExceededError(
+                        f"Call to {_top_model} (estimated ${_estimated:.4f}) exceeds "
+                        f"LLM_ROUTER_ESCALATE_ABOVE=${config_for_escalation.llm_router_escalate_above:.2f}. "
+                        f"Run llm_approve_route(approve=True) to proceed or "
+                        f"llm_approve_route(downgrade_to='gemini/gemini-2.5-flash') to use a cheaper model."
+                    )
+                if (config_for_escalation.llm_router_hard_stop_above > 0
+                        and _session_total >= config_for_escalation.llm_router_hard_stop_above):
+                    raise BudgetExceededError(
+                        f"Session spend ${_session_total:.4f} has reached the hard stop limit "
+                        f"(LLM_ROUTER_HARD_STOP_ABOVE=${config_for_escalation.llm_router_hard_stop_above:.2f}). "
+                        f"No further calls will be made this session. "
+                        f"Unset LLM_ROUTER_HARD_STOP_ABOVE to continue."
+                    )
+            except BudgetExceededError:
+                raise
             except Exception:
-                pass  # Never block routing due to spend tracking errors
+                pass  # Never block routing due to escalation check errors
 
-            # Record exchange in session buffer for future context injection
-            buf = get_session_buffer()
-            buf.record("user", prompt, task_type=task_type.value)
-            buf.record("assistant", response.content, task_type=task_type.value)
+        last_error: Exception | None = None
+        for attempt, model in enumerate(models_to_try, start=1):
+            provider = provider_from_model(model)
+            model_name = model.split("/", 1)[1] if "/" in model else model
 
-            # Log routing decision for quality analytics
-            if classification_data:
+            if not tracker.is_healthy(provider):
+                await _notify(ctx, "warning", f"⚠️  {provider} unhealthy — trying next")
+                log.info("Skipping unhealthy provider: %s", provider)
+                route_log.warning(
+                    "provider_unhealthy_skip",
+                    correlation_id=correlation_id,
+                    provider=provider,
+                    model=model,
+                )
+                continue
+
+            # Refresh provider budget state for each attempt so long fallback walks
+            # do not keep routing to providers that exhausted their budget mid-chain.
+            budget_state = await get_budget_state(provider)
+            if budget_state.pressure >= 0.8:
+                route_log.warning(
+                    "provider_budget_pressure_high",
+                    correlation_id=correlation_id,
+                    provider=provider,
+                    model=model,
+                    pressure=budget_state.pressure,
+                )
+            if budget_state.pressure >= 1.0:
+                await _notify(ctx, "warning", f"⚠️  {provider} budget exhausted — trying next")
+                log.info("Skipping budget-exhausted provider: %s", provider)
+                last_error = BudgetExceededError(f"{provider} budget exhausted")
+                continue
+
+            await _notify(ctx, "info", f"⏳ {model_name} working...")
+
+            try:
+                with traced_span(
+                    "provider_call",
+                    tracer_name="llm_router.router",
+                    correlation_id=correlation_id,
+                    attempt=attempt,
+                    model=model,
+                    provider=provider,
+                    task_type=task_type,
+                ) as provider_span:
+                    if task_type in MEDIA_TASK_TYPES:
+                        response = await _call_media(task_type, provider, model_name, prompt,
+                                                     _filter_media_params(task_type, media_params),
+                                                     correlation_id=correlation_id)
+                    elif provider == "codex":
+                        codex_result = await run_codex(prompt, model=model_name)
+                        if not codex_result.success:
+                            raise RuntimeError(f"Codex exited {codex_result.exit_code}: {codex_result.content[:200]}")
+                        response = LLMResponse(
+                            content=codex_result.content,
+                            model=f"codex/{model_name}",
+                            input_tokens=0,   # CLI doesn't report token counts
+                            output_tokens=0,
+                            cost_usd=0.0,     # free via OpenAI subscription
+                            latency_ms=codex_result.duration_sec * 1000,
+                            provider="codex",
+                        )
+                    else:
+                        response = await _call_text(
+                            model, prompt, system_prompt, temperature, max_tokens, task_type,
+                            caller_context=caller_context,
+                            use_thinking=use_thinking,
+                            correlation_id=correlation_id,
+                        )
+
+                    set_span_attributes(
+                        provider_span,
+                        response_model=response.model,
+                        response_provider=response.provider,
+                        cost_usd=response.cost_usd,
+                        latency_ms=response.latency_ms,
+                    )
+
+                tracker.record_success(provider)
+                await cost.log_usage(response, task_type, profile)
+
+                # Record spend for real-time session spend meter (v4.0)
                 try:
-                    await cost.log_routing_decision(
-                        prompt=prompt,
-                        task_type=classification_data.get("task_type", task_type.value),
-                        profile=classification_data.get("profile", profile.value),
-                        classifier_type=classification_data.get("classifier_type", "unknown"),
-                        classifier_model=classification_data.get("classifier_model"),
-                        classifier_confidence=classification_data.get("classifier_confidence", 0.0),
-                        classifier_latency_ms=classification_data.get("classifier_latency_ms", 0.0),
-                        complexity=classification_data.get("complexity", "moderate"),
-                        recommended_model=classification_data.get("recommended_model", model),
-                        base_model=classification_data.get("base_model", model),
-                        was_downshifted=classification_data.get("was_downshifted", False),
-                        budget_pct_used=classification_data.get("budget_pct_used", 0.0),
-                        quality_mode=classification_data.get("quality_mode", "balanced"),
-                        final_model=response.model,
-                        final_provider=response.provider,
-                        success=True,
+                    from llm_router.session_spend import get_session_spend
+                    get_session_spend().record(
+                        model=model,
+                        tool=task_type.value,
                         input_tokens=response.input_tokens,
                         output_tokens=response.output_tokens,
                         cost_usd=response.cost_usd,
-                        latency_ms=response.latency_ms,
-                        reason_code=classification_data.get("reason_code"),
                     )
-                except Exception as e:
-                    log.warning("Failed to log routing decision: %s", e)
+                except Exception:
+                    pass  # Never block routing due to spend tracking errors
 
-            await _notify(
-                ctx, "info",
-                f"✅ {model_name} — {response.latency_ms:.0f}ms · ${response.cost_usd:.6f}"
-            )
+                # Record exchange in session buffer for future context injection
+                buf = get_session_buffer()
+                buf.record("user", prompt, task_type=task_type.value)
+                buf.record("assistant", response.content, task_type=task_type.value)
 
-            # Daily spend alert — fire async so it never blocks the response
-            # Guard: llm_router_daily_spend_limit may be MagicMock in tests
-            _raw_limit = getattr(config, "llm_router_daily_spend_limit", 0.0)
-            daily_limit = float(_raw_limit) if isinstance(_raw_limit, (int, float)) else 0.0
-            if daily_limit > 0:
-                try:
-                    daily_spend = await cost.get_daily_spend()
-                    if daily_spend >= daily_limit:
-                        cost.fire_budget_alert(
-                            "LLM Router — Daily Limit Reached",
-                            f"Daily spend ${daily_spend:.3f} has crossed the "
-                            f"${daily_limit:.2f} limit.",
+                # Log routing decision for quality analytics
+                if classification_data:
+                    try:
+                        await cost.log_routing_decision(
+                            prompt=prompt,
+                            task_type=classification_data.get("task_type", task_type.value),
+                            profile=classification_data.get("profile", profile.value),
+                            classifier_type=classification_data.get("classifier_type", "unknown"),
+                            classifier_model=classification_data.get("classifier_model"),
+                            classifier_confidence=classification_data.get("classifier_confidence", 0.0),
+                            classifier_latency_ms=classification_data.get("classifier_latency_ms", 0.0),
+                            complexity=classification_data.get("complexity", "moderate"),
+                            recommended_model=classification_data.get("recommended_model", model),
+                            base_model=classification_data.get("base_model", model),
+                            was_downshifted=classification_data.get("was_downshifted", False),
+                            budget_pct_used=classification_data.get("budget_pct_used", 0.0),
+                            quality_mode=classification_data.get("quality_mode", "balanced"),
+                            final_model=response.model,
+                            final_provider=response.provider,
+                            success=True,
+                            input_tokens=response.input_tokens,
+                            output_tokens=response.output_tokens,
+                            cost_usd=response.cost_usd,
+                            latency_ms=response.latency_ms,
+                            reason_code=classification_data.get("reason_code"),
                         )
-                    elif daily_spend >= daily_limit * 0.9:
-                        cost.fire_budget_alert(
-                            "LLM Router — Daily Spend Warning",
-                            f"Daily spend ${daily_spend:.3f} is at "
-                            f"{100 * daily_spend / daily_limit:.0f}% of the "
-                            f"${daily_limit:.2f} limit.",
-                        )
-                except Exception as e:
-                    log.debug("Daily budget alert check failed: %s", e)
+                    except Exception as e:
+                        log.warning("Failed to log routing decision: %s", e)
 
-            # Store in semantic cache for future dedup (fire-and-forget)
-            if task_type not in MEDIA_TASK_TYPES and not model_override:
-                try:
-                    from llm_router import semantic_cache
-                    await semantic_cache.store(prompt, task_type, response)
-                except Exception as _sc_err:
-                    log.debug("Semantic cache store failed (non-fatal): %s", _sc_err)
+                await _notify(
+                    ctx, "info",
+                    f"✅ {model_name} — {response.latency_ms:.0f}ms · ${response.cost_usd:.6f}"
+                )
+                route_log.info(
+                    "routing_decision",
+                    correlation_id=correlation_id,
+                    task_type=task_type.value,
+                    complexity=effective_complexity,
+                    profile=profile.value,
+                    model=response.model,
+                    provider=response.provider,
+                    cost_usd=response.cost_usd,
+                    latency_ms=response.latency_ms,
+                )
+                set_span_attributes(
+                    route_span,
+                    final_model=response.model,
+                    final_provider=response.provider,
+                    cost_usd=response.cost_usd,
+                    latency_ms=response.latency_ms,
+                    attempts=attempt,
+                )
 
-            return response
+                # Daily spend alert — fire async so it never blocks the response
+                # Guard: llm_router_daily_spend_limit may be MagicMock in tests
+                _raw_limit = getattr(config, "llm_router_daily_spend_limit", 0.0)
+                daily_limit = float(_raw_limit) if isinstance(_raw_limit, (int, float)) else 0.0
+                if daily_limit > 0:
+                    try:
+                        daily_spend = await cost.get_daily_spend()
+                        if daily_spend >= daily_limit:
+                            cost.fire_budget_alert(
+                                "LLM Router — Daily Limit Reached",
+                                f"Daily spend ${daily_spend:.3f} has crossed the "
+                                f"${daily_limit:.2f} limit.",
+                            )
+                        elif daily_spend >= daily_limit * 0.9:
+                            cost.fire_budget_alert(
+                                "LLM Router — Daily Spend Warning",
+                                f"Daily spend ${daily_spend:.3f} is at "
+                                f"{100 * daily_spend / daily_limit:.0f}% of the "
+                                f"${daily_limit:.2f} limit.",
+                            )
+                    except Exception as e:
+                        log.debug("Daily budget alert check failed: %s", e)
 
-        except Exception as e:
-            is_rate_limit = _is_rate_limit_error(e)
-            is_content_filter = not is_rate_limit and _is_content_filter_error(e)
-            is_auth = not is_rate_limit and not is_content_filter and _is_auth_error(e)
-            if is_rate_limit:
-                await _notify(ctx, "warning", f"{model} rate-limited — switching provider...")
-                log.warning("Rate limit on %s, switching to next", model)
-                tracker.record_rate_limit(provider)
-            elif is_content_filter:
-                # Silent skip — content filter is a provider policy decision, not a
-                # reliability failure. Don't show a warning or trip the circuit breaker.
-                log.info("Content filter on %s, trying next model silently", model)
-            elif is_auth:
-                hint = _auth_error_hint(provider)
-                await _notify(ctx, "warning", hint)
-                log.warning("Auth error on %s: %s", model, e)
-                tracker.record_failure(provider)
-            else:
-                await _notify(ctx, "warning", f"{model} failed: {e} — trying next...")
-                log.warning("Model %s failed: %s", model, e)
-                tracker.record_failure(provider)
-            last_error = e
-            continue
+                # Store in semantic cache for future dedup (fire-and-forget)
+                if task_type not in MEDIA_TASK_TYPES and not model_override:
+                    try:
+                        from llm_router import semantic_cache
+                        await semantic_cache.store(prompt, task_type, response)
+                    except Exception as _sc_err:
+                        log.debug("Semantic cache store failed (non-fatal): %s", _sc_err)
 
-    last_is_auth = last_error is not None and _is_auth_error(last_error)
-    setup_hint = (
-        " Run `llm-router setup` to configure provider API keys, or "
-        "`llm-router doctor` to diagnose all issues."
-        if last_is_auth else
-        " Run `llm_health()` to see circuit breaker status, or "
-        "`llm-router doctor` to diagnose all issues."
-    )
-    raise RuntimeError(
-        f"All models failed for {task_type.value}/{profile.value}. "
-        f"Last error: {last_error}.{setup_hint}"
-    )
+                return response
+
+            except Exception as e:
+                is_rate_limit = _is_rate_limit_error(e)
+                is_content_filter = not is_rate_limit and _is_content_filter_error(e)
+                is_auth = not is_rate_limit and not is_content_filter and _is_auth_error(e)
+                if is_rate_limit:
+                    await _notify(ctx, "warning", f"{model} rate-limited — switching provider...")
+                    log.warning("Rate limit on %s, switching to next", model)
+                    route_log.warning(
+                        "routing_fallback",
+                        correlation_id=correlation_id,
+                        model=model,
+                        provider=provider,
+                        error_type=type(e).__name__,
+                        fallback_reason="rate_limit",
+                    )
+                    tracker.record_rate_limit(provider)
+                elif is_content_filter:
+                    # Silent skip — content filter is a provider policy decision, not a
+                    # reliability failure. Don't show a warning or trip the circuit breaker.
+                    log.info("Content filter on %s, trying next model silently", model)
+                elif is_auth:
+                    hint = _auth_error_hint(provider)
+                    await _notify(ctx, "warning", hint)
+                    log.warning("Auth error on %s: %s", model, e)
+                    route_log.warning(
+                        "routing_fallback",
+                        correlation_id=correlation_id,
+                        model=model,
+                        provider=provider,
+                        error_type=type(e).__name__,
+                        fallback_reason="auth_error",
+                    )
+                    tracker.record_failure(provider)
+                else:
+                    await _notify(ctx, "warning", f"{model} failed: {e} — trying next...")
+                    log.warning("Model %s failed: %s", model, e)
+                    route_log.warning(
+                        "routing_fallback",
+                        correlation_id=correlation_id,
+                        model=model,
+                        provider=provider,
+                        error_type=type(e).__name__,
+                        fallback_reason="provider_error",
+                    )
+                    tracker.record_failure(provider)
+                last_error = e
+                continue
+
+        last_is_auth = last_error is not None and _is_auth_error(last_error)
+        setup_hint = (
+            " Run `llm-router setup` to configure provider API keys, or "
+            "`llm-router doctor` to diagnose all issues."
+            if last_is_auth else
+            " Run `llm_health()` to see circuit breaker status, or "
+            "`llm-router doctor` to diagnose all issues."
+        )
+        set_span_attributes(
+            route_span,
+            attempts=len(models_to_try),
+            last_error_type=type(last_error).__name__ if last_error else None,
+        )
+        raise RuntimeError(
+            f"All models failed for {task_type.value}/{profile.value}. "
+            f"Last error: {last_error}.{setup_hint}"
+        )
 
 
 async def _call_text(
@@ -808,6 +974,7 @@ async def _call_text(
     *,
     caller_context: str | None = None,
     use_thinking: bool = False,
+    correlation_id: str | None = None,
 ) -> LLMResponse:
     """Dispatch a text completion call through LiteLLM's unified API.
 
@@ -884,6 +1051,7 @@ async def _call_media(
     model_name: str,
     prompt: str,
     params: dict | None,
+    correlation_id: str | None = None,
 ) -> LLMResponse:
     """Dispatch a media generation call to the appropriate provider SDK.
 

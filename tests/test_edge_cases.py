@@ -326,9 +326,11 @@ class TestAutoRouteHookEdgeCases:
         import json
         import subprocess
         import sys
+        from pathlib import Path
         payload = json.dumps({"prompt": prompt})
+        hook_path = Path(__file__).resolve().parents[1] / "src" / "llm_router" / "hooks" / "auto-route.py"
         result = subprocess.run(
-            [sys.executable, ".claude/hooks/auto-route.py"],
+            [sys.executable, str(hook_path)],
             input=payload, capture_output=True, text=True,
         )
         if result.returncode != 0 or not result.stdout.strip():

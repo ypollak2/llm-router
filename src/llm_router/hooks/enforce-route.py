@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm-router-hook-version: 8
+# llm-router-hook-version: 9
 """PreToolUse[*] hook — enforce routing compliance.
 
 When auto-route.py issues a ⚡ MANDATORY ROUTE directive, it writes a
@@ -46,6 +46,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -83,18 +84,40 @@ def _session_type_path(session_id: str) -> Path:
 def _is_coding_session(session_id: str) -> bool:
     """Return True if this session has already been identified as coding work."""
     try:
-        data = json.loads(_session_type_path(session_id).read_text())
+        data = _read_json_retry(_session_type_path(session_id))
+        if data is None:
+            return False
         return data.get("session_type") == "coding"
-    except (OSError, json.JSONDecodeError):
+    except OSError:
         return False
+
+
+def _write_json_atomic(path: Path, data: dict) -> None:
+    """Write JSON to *path* via a same-directory temp file + atomic rename."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_path = tempfile.mkstemp(
+        dir=str(path.parent),
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(data, handle)
+        os.replace(tmp_path, path)
+    except Exception:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
 
 
 def _mark_session_coding(session_id: str) -> None:
     """Mark session as coding — future directives won't block file-edit tools."""
     try:
-        _ROUTER_DIR.mkdir(parents=True, exist_ok=True)
-        _session_type_path(session_id).write_text(
-            json.dumps({"session_type": "coding", "marked_at": time.time()})
+        _write_json_atomic(
+            _session_type_path(session_id),
+            {"session_type": "coding", "marked_at": time.time()},
         )
     except OSError:
         pass
@@ -104,17 +127,35 @@ def _pending_path(session_id: str) -> Path:
     return _ROUTER_DIR / f"pending_route_{session_id}.json"
 
 
+def _read_json_retry(path: Path, retries: int = 3, retry_delay_sec: float = 0.01) -> dict | None:
+    """Read JSON from *path*, retrying transient decode failures from concurrent writes."""
+    for attempt in range(retries):
+        try:
+            return json.loads(path.read_text())
+        except FileNotFoundError:
+            return None
+        except json.JSONDecodeError:
+            if attempt == retries - 1:
+                return None
+            time.sleep(retry_delay_sec)
+        except OSError:
+            return None
+    return None
+
+
 def _read_pending(session_id: str) -> dict | None:
     p = _pending_path(session_id)
     try:
-        data = json.loads(p.read_text())
+        data = _read_json_retry(p)
+        if data is None:
+            return None
         # Use expires_at if present (new format), else fall back to issued_at + TTL
         expires = data.get("expires_at") or (data.get("issued_at", 0) + _PENDING_TTL)
         if time.time() > expires:
             p.unlink(missing_ok=True)
             return None
         return data
-    except (OSError, json.JSONDecodeError, KeyError):
+    except (OSError, KeyError):
         return None
 
 

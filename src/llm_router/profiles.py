@@ -19,11 +19,10 @@ same convention for media models (though media bypasses LiteLLM).
 
 from __future__ import annotations
 
-import logging
-
+from llm_router.logging import get_logger
 from llm_router.types import Complexity, RoutingProfile, TaskType
 
-log = logging.getLogger("llm_router")
+log = get_logger("llm_router.profiles")
 
 # Models treated as "free" under a Claude Pro subscription — tried first.
 _CLAUDE_MODELS: frozenset[str] = frozenset({

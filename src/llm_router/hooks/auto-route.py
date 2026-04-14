@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm-router-hook-version: 19
+# llm-router-hook-version: 21
 """UserPromptSubmit hook — scoring classifier with Ollama + API fallback chain.
 
 Classification chain (stops at first success):
@@ -23,6 +23,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.request
 from pathlib import Path
@@ -253,11 +254,11 @@ SKIP_PATTERNS = re.compile(
     re.IGNORECASE,
 )
 
-# ── Build Task Patterns (skip routing — Claude IS the coding model) ──────────
+# ── Build Task Patterns (code fast-path) ─────────────────────────────────────
 #
-# When a prompt clearly asks Claude to write/edit/fix/implement code, routing it
-# to a cheap model is counterproductive — Claude Code IS the right model for that.
-# These patterns fire before any LLM classification and skip pending state entirely.
+# When a prompt clearly asks for write/edit/fix/implement work, we can skip the
+# slower classifier layers and route straight to llm_code. This keeps auto-route
+# aligned with the repo rule that coding work still routes through llm_* tools.
 #
 # Criteria: must have BOTH a build verb AND a build object to avoid false positives.
 # "implement" alone might be "how do I implement X?" → still route to query.
@@ -280,7 +281,7 @@ _BUILD_OBJECTS = re.compile(
 
 
 def _is_build_task(prompt: str) -> bool:
-    """Return True when the prompt clearly asks Claude to write or edit code.
+    """Return True when the prompt clearly asks for code implementation work.
 
     Requires both a build verb AND a build object — prevents false positives
     like "how do I implement X?" which still routes to llm_query.
@@ -297,14 +298,34 @@ def _session_type_path(session_id: str) -> "Path":
     return _ROUTER_DIR / f"session_{session_id}.json"
 
 
+def _write_json_atomic(path: Path, data: dict) -> None:
+    """Write JSON to *path* via a same-directory temp file + atomic rename."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_path = tempfile.mkstemp(
+        dir=str(path.parent),
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(data, handle)
+        os.replace(tmp_path, path)
+    except Exception:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
+
+
 def mark_session_coding(session_id: str) -> None:
     """Mark this session as a coding session to disable enforcement."""
     if not session_id:
         return
-    _ROUTER_DIR.mkdir(parents=True, exist_ok=True)
     try:
-        _session_type_path(session_id).write_text(
-            json.dumps({"session_type": "coding", "marked_at": time.time()})
+        _write_json_atomic(
+            _session_type_path(session_id),
+            {"session_type": "coding", "marked_at": time.time()},
         )
     except OSError:
         pass
@@ -707,10 +728,13 @@ def classify_prompt(text: str) -> dict | None:
     if SKIP_PATTERNS.search(stripped):
         return None
 
-    # Build task fast-path: Claude is the right model for coding work.
-    # Skip routing entirely — no pending state, no enforcement.
+    # Build task fast-path: deterministic llm_code routing for obvious coding work.
     if _is_build_task(stripped):
-        return None
+        return {
+            "task_type": "code",
+            "complexity": classify_complexity(text, "code"),
+            "method": "build-fast-path",
+        }
 
     # Layer 1: Heuristic scoring (instant, free)
     scores = score_categories(text)
@@ -971,14 +995,16 @@ def _last_route_path(session_id: str) -> Path:
 def _save_last_route(session_id: str, task_type: str, complexity: str, tool: str) -> None:
     if not session_id:
         return
-    _ROUTER_DIR.mkdir(parents=True, exist_ok=True)
     try:
-        _last_route_path(session_id).write_text(json.dumps({
-            "task_type": task_type,
-            "complexity": complexity,
-            "tool": tool,
-            "saved_at": time.time(),
-        }))
+        _write_json_atomic(
+            _last_route_path(session_id),
+            {
+                "task_type": task_type,
+                "complexity": complexity,
+                "tool": tool,
+                "saved_at": time.time(),
+            },
+        )
     except OSError:
         pass
 
@@ -1241,20 +1267,22 @@ def main() -> None:
 
     # ── Write enforcement state for enforce-route.py (PreToolUse hook) ──────────
     if write_pending and session_id:
-        _ROUTER_DIR.mkdir(parents=True, exist_ok=True)
         _state_path = _pending_state_path(session_id)
         try:
             _now = time.time()
-            _state_path.write_text(json.dumps({
-                "expected_tool": tool,
-                "expected_server": "",
-                "task_type": task_type,
-                "complexity": complexity,
-                "issued_at": _now,
-                "expires_at": _now + _PENDING_ROUTE_TTL_SEC,
-                "turn_id": int(_now),  # proxy for turn — clears when next prompt arrives
-                "session_id": session_id,
-            }))
+            _write_json_atomic(
+                _state_path,
+                {
+                    "expected_tool": tool,
+                    "expected_server": "",
+                    "task_type": task_type,
+                    "complexity": complexity,
+                    "issued_at": _now,
+                    "expires_at": _now + _PENDING_ROUTE_TTL_SEC,
+                    "turn_id": int(_now),  # proxy for turn — clears when next prompt arrives
+                    "session_id": session_id,
+                },
+            )
         except OSError:
             pass
 

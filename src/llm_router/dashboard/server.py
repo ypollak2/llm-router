@@ -16,12 +16,27 @@ Start via CLI:
 from __future__ import annotations
 
 import json
-import logging
+import os
+import secrets
 from pathlib import Path
 
-log = logging.getLogger("llm_router.dashboard")
+from llm_router.logging import configure_logging, get_logger
+
+log = get_logger("llm_router.dashboard")
 
 DEFAULT_PORT = 7337
+_TOKEN_FILE = Path.home() / ".llm-router" / "dashboard.token"
+
+
+def _get_or_create_token() -> str:
+    """Return the persistent dashboard auth token, creating it on first call."""
+    _TOKEN_FILE.parent.mkdir(parents=True, exist_ok=True)
+    if _TOKEN_FILE.exists():
+        return _TOKEN_FILE.read_text().strip()
+    token = secrets.token_urlsafe(32)
+    _TOKEN_FILE.write_text(token)
+    os.chmod(_TOKEN_FILE, 0o600)
+    return token
 
 
 async def _get_stats() -> dict:
@@ -156,8 +171,8 @@ async def _get_stats() -> dict:
     return stats
 
 
-def _html() -> str:
-    """Return the Stitch-designed dashboard HTML.
+def _html(token: str = "") -> str:
+    """Return the Stitch-designed dashboard HTML with the auth token injected.
 
     Uses Tailwind CDN with the exact Stitch color token system (Liquid Glass).
     DB values rendered via esc() before being placed into table row markup —
@@ -169,7 +184,7 @@ def _html() -> str:
     Fonts: Inter (body/headlines), Space Grotesk (labels), JetBrains Mono (code).
     Icons: Material Symbols Outlined.
     """
-    return r"""<!DOCTYPE html>
+    html = r"""<!DOCTYPE html>
 <html class="dark" lang="en">
 <head>
 <meta charset="utf-8"/>
@@ -639,7 +654,7 @@ function showTab(name) {
 async function loadBudget() {
   let data;
   try {
-    const r = await fetch('/api/budget');
+    const r = await fetch('/api/budget', {headers: {'X-Dashboard-Token': window.DASHBOARD_TOKEN}});
     data = await r.json();
   } catch(e) { return; }
 
@@ -701,7 +716,7 @@ async function saveBudgetCap(provider) {
   try {
     const r = await fetch('/api/budget/set', {
       method: 'POST',
-      headers: {'Content-Type': 'application/json'},
+      headers: {'Content-Type': 'application/json', 'X-Dashboard-Token': window.DASHBOARD_TOKEN},
       body: JSON.stringify({provider, cap: val})
     });
     const d = await r.json();
@@ -1095,7 +1110,7 @@ async function doRefresh() {
   const btn = document.getElementById('refresh-btn');
   if (btn) btn.classList.add('spinning');
   try {
-    const res = await fetch('/api/stats');
+    const res = await fetch('/api/stats', {headers: {'X-Dashboard-Token': window.DASHBOARD_TOKEN}});
     const d   = await res.json();
     applyData(d);
   } catch (e) {
@@ -1113,6 +1128,12 @@ document.querySelector('[data-tab="budget"]').addEventListener('click', () => lo
 </script>
 </body>
 </html>"""
+    # Inject the dashboard auth token as a JS global so all fetch() calls can use it
+    return html.replace(
+        "<script>\n// ── HTML escaping",
+        f"<script>\nwindow.DASHBOARD_TOKEN = {json.dumps(token)};\n// ── HTML escaping",
+        1,
+    )
 
 
 async def run(port: int = DEFAULT_PORT) -> None:
@@ -1121,18 +1142,30 @@ async def run(port: int = DEFAULT_PORT) -> None:
     Args:
         port: TCP port to listen on (default 7337).
     """
+    configure_logging()
     try:
         from aiohttp import web
     except ImportError:
-        print(
-            "aiohttp is required for the dashboard.\n"
-            "Install it: pip install aiohttp\n"
-            "Or: uv add aiohttp"
+        log.error(
+            "dashboard_missing_dependency",
+            dependency="aiohttp",
+            install_hint="pip install aiohttp or uv add aiohttp",
         )
         return
 
+    token = _get_or_create_token()
+
+    @web.middleware
+    async def auth_middleware(request: "web.Request", handler) -> "web.Response":
+        if request.path == "/":
+            return await handler(request)
+        provided = request.headers.get("X-Dashboard-Token") or request.rel_url.query.get("token")
+        if provided != token:
+            raise web.HTTPUnauthorized(text="Unauthorized")
+        return await handler(request)
+
     async def handle_index(request: "web.Request") -> "web.Response":
-        return web.Response(text=_html(), content_type="text/html")
+        return web.Response(text=_html(token), content_type="text/html")
 
     async def handle_stats(request: "web.Request") -> "web.Response":
         stats = await _get_stats()
@@ -1224,7 +1257,7 @@ async def run(port: int = DEFAULT_PORT) -> None:
         ]
         return web.Response(text="\n".join(lines), content_type="text/plain")
 
-    app = web.Application()
+    app = web.Application(middlewares=[auth_middleware])
     app.router.add_get("/", handle_index)
     app.router.add_get("/api/stats", handle_stats)
     app.router.add_get("/api/budget", handle_budget_get)
@@ -1236,8 +1269,14 @@ async def run(port: int = DEFAULT_PORT) -> None:
     site = web.TCPSite(runner, "localhost", port)
     await site.start()
 
-    print(f"\n✓ LLM Router Dashboard running at http://localhost:{port}\n")
-    print("  Press Ctrl+C to stop.\n")
+    dashboard_url = f"http://localhost:{port}/?token={token}"
+    log.info(
+        "dashboard_started",
+        port=port,
+        token=token,
+        url=dashboard_url,
+    )
+    log.info("dashboard_ready", stop_hint="Press Ctrl+C to stop")
 
     try:
         import asyncio

@@ -1,7 +1,7 @@
 # llm-router
 
-> Route every AI call to the cheapest model that can handle it.
-> 46 tools · 20+ providers · Claude Code, VS Code, Cursor, Codex, and more.
+> Route every AI call to the cheapest model that can do the job well.
+> 46 tools · 20+ providers · budget caps, dashboards, traces, and one-command installs.
 
 [![PyPI](https://img.shields.io/pypi/v/claude-code-llm-router?style=flat-square)](https://pypi.org/project/claude-code-llm-router/)
 [![Tests](https://img.shields.io/github/actions/workflow/status/ypollak2/llm-router/ci.yml?style=flat-square&label=tests)](https://github.com/ypollak2/llm-router/actions)
@@ -69,6 +69,16 @@ LLM_ROUTER_CLAUDE_SUBSCRIPTION=true
 
 ---
 
+## New in v5.2.0
+
+- **Safer routing under pressure**: providers refresh budget pressure per attempt, fallback chains deduplicate cleanly, and hook IPC writes are atomic.
+- **Production-grade observability**: the hot path now emits structured logs and optional OpenTelemetry spans for classify → score → build chain → provider call.
+- **Classifier quality you can measure**: the classifier prompt is versioned in-repo and ships with a 100-example eval harness.
+- **Release flow you can repeat**: `scripts/release.py` synchronizes versions, verifies metadata, builds artifacts, and drives the publish/tag workflow from one command.
+- **CI is stricter again**: the integration suite is back in CI, with mocked coverage for end-to-end routing behavior.
+
+---
+
 ## How It Works
 
 1. Intercept the prompt before your default premium model sees it.
@@ -94,6 +104,13 @@ Under the hood, every prompt goes through a `UserPromptSubmit` hook before your 
 | "Generate a hero image" | image | Flux Pro via fal.ai |
 
 **Free-first chain** (subscription mode): Ollama → Codex (free via OpenAI sub) → paid API
+
+### Why teams keep it on
+
+- It cuts premium-model waste without forcing people to think about models on every turn.
+- It keeps a real paper trail: routing decisions, spend, budget pressure, and quality signals all stay visible.
+- It degrades gracefully: stale hooks, unhealthy providers, exhausted budgets, and partial integrations fall through to safe defaults instead of deadlocking a session.
+- It scales from solo use to team rollout with the same primitives: budgets, policies, dashboards, digests, and host-specific installs.
 
 ---
 
@@ -440,6 +457,7 @@ HELICONE_API_KEY=sk-helicone-...         # enables Helicone routing properties
 LLM_ROUTER_HELICONE_PULL=false           # pull spend from Helicone API
 LLM_ROUTER_LITELLM_BUDGET_DB=/path/to/litellm.db  # LiteLLM Proxy DB
 LLM_ROUTER_LITELLM_USER=my-team          # optional LiteLLM user/team filter
+LLM_ROUTER_SPEND_AGGREGATION=max         # max | sum when sources are independent
 ```
 
 ### Enforcement Modes
@@ -528,7 +546,9 @@ Live view of routing decisions, cost trends, model distribution, and subscriptio
 
 Tabs: **Overview** · **Performance** · **Config** · **Logs** · **💰 Budget**
 
-The Budget tab shows per-provider spend vs. cap with editable cap inputs — changes are persisted to `~/.llm-router/budgets.json` and take effect immediately.
+The dashboard now starts with a tokenized local URL and protects API calls with that token, so local metrics stay private by default.
+
+The Budget tab shows per-provider spend vs. cap with editable cap inputs. Changes are persisted to `~/.llm-router/budgets.json` and take effect immediately.
 
 ### Prometheus metrics
 
@@ -545,6 +565,24 @@ llm_router_budget_pressure{provider="openai"} 0.17
 llm_router_budget_cap_usd{provider="openai"} 20.0
 llm_router_savings_usd_total 12.87
 ```
+
+### OpenTelemetry tracing
+
+Install the optional tracing extra when you want route-level spans in Tempo, Jaeger, Honeycomb, or any OTLP-compatible backend:
+
+```bash
+pip install "claude-code-llm-router[tracing]"
+OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317
+OTEL_SERVICE_NAME=llm-router
+```
+
+Spans cover the routing hot path:
+
+- `classify_complexity`
+- `score_all_models`
+- `build_chain`
+- `route_and_call`
+- `provider_call`
 
 ---
 
@@ -582,6 +620,14 @@ LLM_ROUTER_LITELLM_USER=my-team        # optional — filter by user/team key
 The router reads `spend_logs` aggregated by provider (e.g. `openai/gpt-4o` → `openai`) and incorporates LiteLLM spend into pressure calculations. This ensures routing pressure reflects traffic flowing through both direct llm-router calls and the LiteLLM proxy simultaneously.
 
 Budget cap lookup from `budget_limits` table (LiteLLM Proxy ≥ 1.30) is also supported.
+
+If Helicone and LiteLLM are tracking genuinely separate traffic streams, set:
+
+```bash
+LLM_ROUTER_SPEND_AGGREGATION=sum
+```
+
+The default `max` mode is safer when multiple systems may be observing the same requests.
 
 ---
 
@@ -642,12 +688,20 @@ llm-router share   # copies savings card to clipboard + opens tweet
 | **v4.1** | **Playwright DOM Compression + Enforcement Fixes** — DOM compression hook, PostToolUse MCP matcher fix, smart enforcement default |
 | **v4.2** | **Quota-Aware Routing + Context-Aware Classification** — Ollama-first CC-mode for simple tasks, qwen3.5:32b in BALANCED chains, short code follow-up context inheritance |
 
+### Phase 5 — Reliability + Observability ✅ Complete
+
+| Version | Headline |
+|---------|----------|
+| **v5.0** | **Adaptive Universal Router** — budget oracle, model discovery, live benchmarks, scorer, dynamic chain builder |
+| **v5.1** | **Budget Management UX + Enterprise Integrations** — persistent caps, dashboard budget tab, Prometheus metrics, Helicone + LiteLLM spend |
+| **v5.2** | **Audit Remediation Release** — atomic hooks, stricter CI, structlog, OpenTelemetry spans, classifier evals, release automation |
+
 ### What's Next
 
 | Version | Headline | Status |
 |---------|----------|--------|
-| **v4.3** | **OTEL / Prometheus Export** — metrics endpoint for routing decisions, cost, and fallback rates | 📅 Planned |
-| **v5.0** | **Learned Routing** — self-training classifier from `llm_rate` feedback; personal routing patterns | 📅 Planned |
+| **v5.3** | **Learned Routing** — self-training classifier from `llm_rate` feedback, prompt-set benchmarks, personal routing patterns | 📅 Planned |
+| **v5.4** | **Team Controls** — policy approvals, richer dashboard analytics, provider-level SLO alerts | 📅 Planned |
 
 ---
 
@@ -655,8 +709,10 @@ llm-router share   # copies savings card to clipboard + opens tweet
 
 ```bash
 uv sync --extra dev
-uv run pytest tests/ -q --ignore=tests/test_integration.py
+uv run pytest tests/ -q --ignore=tests/test_agno_integration.py
 uv run ruff check src/ tests/
+uv run python scripts/eval_classifier.py --limit 20
+uv run python scripts/release.py 5.2.0 --dry-run
 ```
 
 See [CLAUDE.md](CLAUDE.md) for architecture and module layout.

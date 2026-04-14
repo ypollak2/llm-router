@@ -104,7 +104,7 @@ async def get_helicone_spend(days: int = 30) -> dict[str, float]:
     api_key = os.environ.get("HELICONE_API_KEY", "")
     if not api_key:
         return {}
-    if not os.environ.get(_PULL_ENABLED_ENV, "").lower() in ("1", "true", "yes"):
+    if os.environ.get(_PULL_ENABLED_ENV, "").lower() not in ("1", "true", "yes"):
         return {}
 
     try:

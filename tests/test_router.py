@@ -1,11 +1,11 @@
 """Tests for core routing logic."""
 
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 from llm_router.router import route_and_call
-from llm_router.types import LLMResponse, RoutingProfile, TaskType
+from llm_router.types import BudgetState, LLMResponse, RoutingProfile, TaskType
 
 
 @pytest.mark.asyncio
@@ -16,6 +16,34 @@ async def test_routes_to_first_available_model(mock_env, mock_acompletion):
     # Should have called acompletion with the first model in budget/query chain
     call_kwargs = mock_acompletion.call_args
     assert "gemini/gemini-2.5-flash" in call_kwargs.kwargs["model"]
+
+
+@pytest.mark.asyncio
+async def test_logs_structured_routing_decision(mock_env, mock_acompletion):
+    route_log = MagicMock()
+    fake_uuid = MagicMock(hex="deadbeefcafebabe")
+
+    with patch("llm_router.router.log") as mock_log:
+        with patch("llm_router.router.configure_logging"):
+            with patch("llm_router.router.uuid4", return_value=fake_uuid):
+                mock_log.bind.return_value = route_log
+                resp = await route_and_call(
+                    TaskType.QUERY,
+                    "Hello",
+                    complexity_hint="simple",
+                )
+
+    decision_calls = [
+        call for call in route_log.info.call_args_list
+        if call.args and call.args[0] == "routing_decision"
+    ]
+    assert decision_calls
+    decision = decision_calls[-1]
+    assert decision.kwargs["correlation_id"] == "deadbeef"
+    assert decision.kwargs["task_type"] == "query"
+    assert decision.kwargs["complexity"] == "simple"
+    assert decision.kwargs["model"] == resp.model
+    assert decision.kwargs["cost_usd"] == resp.cost_usd
 
 
 @pytest.mark.asyncio
@@ -124,6 +152,46 @@ async def test_content_filter_error_is_silent_fallback(mock_env, mock_litellm_re
 
 
 @pytest.mark.asyncio
+async def test_skips_model_when_budget_exhausts_mid_chain(mock_env, mock_litellm_response):
+    chain = [
+        "openai/gpt-4o",
+        "gemini/gemini-2.5-flash",
+        "perplexity/sonar",
+    ]
+    called_models: list[str] = []
+    budget_checks: list[str] = []
+
+    async def completion_side_effect(**kwargs):
+        called_models.append(kwargs["model"])
+        if kwargs["model"] == chain[0]:
+            raise Exception("Provider down")
+        return mock_litellm_response()
+
+    async def budget_side_effect(provider: str):
+        budget_checks.append(provider)
+        pressure = {
+            "openai": 0.0,
+            "gemini": 1.0,
+            "perplexity": 0.0,
+        }[provider]
+        return BudgetState(provider=provider, pressure=pressure)
+
+    with patch("litellm.acompletion", side_effect=completion_side_effect):
+        with patch("litellm.completion_cost", return_value=0.001):
+            with patch("llm_router.router.get_model_chain", return_value=chain):
+                with patch("llm_router.chain_builder.is_dynamic_routing_enabled", return_value=False):
+                    with patch("llm_router.router.get_budget_state", side_effect=budget_side_effect):
+                        resp = await route_and_call(
+                            TaskType.QUERY, "Hello",
+                            profile=RoutingProfile.BALANCED,
+                        )
+
+    assert resp.model == chain[2]
+    assert called_models == [chain[0], chain[2]]
+    assert budget_checks == ["openai", "gemini", "perplexity"]
+
+
+@pytest.mark.asyncio
 async def test_subscription_mode_blocks_anthropic_override(mock_env, mock_acompletion, monkeypatch):
     """In subscription mode, explicit anthropic/ model_override should be redirected."""
     monkeypatch.setenv("LLM_ROUTER_CLAUDE_SUBSCRIPTION", "true")
@@ -200,3 +268,68 @@ async def test_ollama_always_injected_for_balanced(
         f"Ollama should always inject when configured (free-first), got {call_kwargs['model']}"
     )
     _config._config = None
+
+
+# ── Security: extra_params / media_params whitelists ─────────────────────────
+
+class TestExtraParamsWhitelist:
+    def test_allowed_keys_present(self):
+        """Whitelisted keys must be in the allowlist."""
+        from llm_router.providers import _ALLOWED_EXTRA_PARAMS
+        safe_keys = {"temperature", "top_p", "seed", "stop", "extra_body", "thinking"}
+        assert safe_keys.issubset(_ALLOWED_EXTRA_PARAMS)
+
+    def test_dangerous_keys_blocked(self):
+        """api_key, base_url, api_base must NOT be in the allowlist."""
+        from llm_router.providers import _ALLOWED_EXTRA_PARAMS
+        blocked = {"api_key", "base_url", "api_base", "headers", "custom_llm_provider"}
+        assert blocked.isdisjoint(_ALLOWED_EXTRA_PARAMS), (
+            f"Dangerous key(s) found in allowlist: {blocked & _ALLOWED_EXTRA_PARAMS}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_injection_keys_stripped_before_litellm(self, mock_litellm_response):
+        """api_key injected via extra_params must never reach litellm.acompletion."""
+        from unittest.mock import patch
+        captured: dict = {}
+
+        async def capturing_completion(**kwargs):
+            captured.update(kwargs)
+            return mock_litellm_response()
+
+        with patch("litellm.acompletion", side_effect=capturing_completion):
+            with patch("litellm.completion_cost", return_value=0.0):
+                from llm_router import providers
+                await providers.call_llm(
+                    "openai/gpt-4o",
+                    [{"role": "user", "content": "hi"}],
+                    extra_params={"api_key": "evil-key", "temperature": 0.5},
+                )
+
+        assert "api_key" not in captured, "api_key must be stripped from LiteLLM kwargs"
+        assert captured.get("temperature") == 0.5, "safe key must be preserved"
+
+
+class TestMediaParamsWhitelist:
+    def test_image_strips_unknown_keys(self):
+        from llm_router.router import _filter_media_params
+        from llm_router.types import TaskType
+        result = _filter_media_params(
+            TaskType.IMAGE,
+            {"size": "1024x1024", "api_key": "evil", "base_url": "http://evil.com"},
+        )
+        assert "size" in result
+        assert "api_key" not in result
+        assert "base_url" not in result
+
+    def test_video_strips_unknown_keys(self):
+        from llm_router.router import _filter_media_params
+        from llm_router.types import TaskType
+        result = _filter_media_params(TaskType.VIDEO, {"duration": 5, "inject": "bad"})
+        assert result == {"duration": 5}
+
+    def test_empty_params_returns_empty(self):
+        from llm_router.router import _filter_media_params
+        from llm_router.types import TaskType
+        assert _filter_media_params(TaskType.IMAGE, None) == {}
+        assert _filter_media_params(TaskType.AUDIO, {}) == {}

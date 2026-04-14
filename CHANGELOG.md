@@ -1,5 +1,33 @@
 # Changelog
 
+## v5.2.0 — Audit Remediation, Observability, and Release Automation (2026-04-14)
+
+### Added
+
+- **Structured routing observability** — the hot path now emits `structlog` events plus optional OpenTelemetry spans for `classify_complexity`, `score_all_models`, `build_chain`, `route_and_call`, and individual `provider_call` attempts.
+- **Versioned classifier prompt assets** — the classifier system prompt now lives in `src/llm_router/prompts/classifier_v1.txt`, making prompt revisions visible in diffs and release history.
+- **Classifier eval harness** (`scripts/eval_classifier.py`) — ships with a 100-example golden set so prompt or model-chain changes can be measured instead of guessed.
+- **Automated release workflow** (`scripts/release.py`) — synchronizes package/plugin versions, verifies changelog metadata, builds artifacts, and drives the commit/push/publish/tag flow from one command.
+
+### Changed
+
+- **Routing fallbacks now refresh live provider pressure per attempt** — long fallback walks stop as soon as a provider exhausts its budget, instead of using stale pressure from the start of the chain.
+- **Hook IPC is now atomic and retry-friendly** — route/session files are written with atomic replace semantics, readers retry transient partial JSON, and obvious implementation prompts fast-path straight to `llm_code`.
+- **Integration coverage is back in CI** — `tests/test_integration.py` now uses mocked end-to-end coverage that is safe for CI and included in the default pipeline again.
+- **Spend aggregation is configurable** — multi-source spend can now be combined with either `max` (default, overlap-safe) or `sum` (`LLM_ROUTER_SPEND_AGGREGATION=sum`) for independent traffic channels.
+- **README and release docs are aligned with the current product** — the docs now describe the tracing stack, classifier eval flow, dashboard token auth, and release automation.
+
+### Fixed
+
+- **Dynamic + static fallback chains no longer waste slots on duplicates** — repeated model IDs are removed while preserving the intended order.
+- **Background benchmark refresh lock ownership** (`benchmarks.py`) — the worker now releases the specific lock instance it acquired, preventing the `release unlocked lock` warning seen in concurrent test/hot-reload scenarios.
+- **Hook regression blind spots** — a larger golden prompt matrix and source-hook-based tests now cover the real shipped hook path instead of stale copies.
+
+### Technical Notes
+
+- Full verification baseline for this release is `uv run pytest tests/ -q --ignore=tests/test_agno_integration.py` and `uv run ruff check src/ tests/`.
+- This release continues the audit-remediation track and bundles the reliability, observability, and release-discipline tasks targeted for `v5.2.0`.
+
 ## v5.1.0 — Budget Management UX + Enterprise Integrations (2026-04-14)
 
 ### Added

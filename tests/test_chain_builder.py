@@ -87,7 +87,7 @@ class TestBuildDynamicChain:
         cap.task_types raises AttributeError: 'str' has no attribute 'task_types'.
         """
         from llm_router.chain_builder import _build_dynamic_chain
-        from llm_router.types import BudgetState, ScoredModel
+        from llm_router.types import ScoredModel
 
         fake_scored = [
             ScoredModel(
@@ -199,6 +199,49 @@ class TestBuildDynamicChain:
             result = await _build_dynamic_chain(TaskType.CODE, "simple", RoutingProfile.BUDGET)
 
         assert isinstance(result, list)
+
+    @pytest.mark.asyncio
+    async def test_deduplicates_dynamic_and_static_models(self):
+        """Merged chains should keep first occurrence only, preserving order."""
+        from llm_router.chain_builder import _build_dynamic_chain
+        from llm_router.types import ScoredModel
+
+        fake_scored = [
+            ScoredModel(
+                model_id="ollama/qwen3:32b",
+                score=0.90,
+                quality_score=0.80,
+                budget_score=1.0,
+                latency_score=0.80,
+                acceptance_score=1.0,
+                capability=_FAKE_CAPS["ollama/qwen3:32b"],
+            ),
+            ScoredModel(
+                model_id="openai/gpt-4o",
+                score=0.85,
+                quality_score=0.90,
+                budget_score=0.70,
+                latency_score=0.80,
+                acceptance_score=1.0,
+                capability=_FAKE_CAPS["openai/gpt-4o"],
+            ),
+        ]
+
+        with (
+            patch("llm_router.discover.discover_available_models",
+                  new_callable=AsyncMock, return_value=_FAKE_CAPS),
+            patch("llm_router.scorer.score_all_models",
+                  new_callable=AsyncMock, return_value=fake_scored),
+            patch("llm_router.chain_builder._static_chain",
+                  return_value=["ollama/qwen3:32b", "openai/gpt-4o", "gemini/gemini-2.5-flash"]),
+        ):
+            result = await _build_dynamic_chain(TaskType.CODE, "simple", RoutingProfile.BUDGET)
+
+        assert result == [
+            "ollama/qwen3:32b",
+            "openai/gpt-4o",
+            "gemini/gemini-2.5-flash",
+        ]
 
 
 # ── Cache corruption regression (discover.py) ─────────────────────────────────

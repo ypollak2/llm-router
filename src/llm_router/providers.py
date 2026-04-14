@@ -24,6 +24,28 @@ from llm_router.types import LLMResponse
 # that clutters MCP server logs. Suppressing it keeps logs focused on routing.
 litellm.suppress_debug_info = True
 
+# Keys allowed in extra_params passed to LiteLLM.  Any key outside this set
+# could redirect the call (api_key, base_url, api_base), leak credentials, or
+# override provider selection.  New legitimate keys should be added here.
+_ALLOWED_EXTRA_PARAMS: frozenset[str] = frozenset({
+    "temperature",
+    "max_tokens",
+    "top_p",
+    "top_k",
+    "stop",
+    "seed",
+    "presence_penalty",
+    "frequency_penalty",
+    "logit_bias",
+    "n",
+    "stream",
+    "logprobs",
+    "top_logprobs",
+    # Provider-specific safe pass-through keys
+    "extra_body",   # used for Perplexity search_recency_filter
+    "thinking",     # used for Anthropic extended thinking
+})
+
 
 async def call_llm(
     model: str,
@@ -84,7 +106,8 @@ async def call_llm(
         "timeout": config.request_timeout,
     }
     if extra_params:
-        kwargs.update(extra_params)
+        safe = {k: v for k, v in extra_params.items() if k in _ALLOWED_EXTRA_PARAMS}
+        kwargs.update(safe)
 
     response = await litellm.acompletion(**kwargs)
     elapsed_ms = (time.monotonic() - start) * 1000
@@ -167,7 +190,8 @@ async def call_llm_stream(
         "stream": True,
     }
     if extra_params:
-        kwargs.update(extra_params)
+        safe = {k: v for k, v in extra_params.items() if k in _ALLOWED_EXTRA_PARAMS}
+        kwargs.update(safe)
 
     response = await litellm.acompletion(**kwargs)
 

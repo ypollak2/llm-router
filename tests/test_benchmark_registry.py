@@ -199,6 +199,40 @@ class TestMaybeRefreshBenchmarks:
         # Should attempt to start (file is missing = stale)
         assert isinstance(result, bool)
 
+    def test_worker_releases_original_lock_when_global_lock_changes(self, tmp_path):
+        """Worker should release the lock it acquired, not whatever is later in the global."""
+        import llm_router.benchmarks as bm
+
+        benchmarks_file = tmp_path / "benchmarks.json"
+        from datetime import datetime, timezone, timedelta
+
+        old_data = {"generated_at": (datetime.now(timezone.utc) - timedelta(days=10)).isoformat(), "version": 1}
+        benchmarks_file.write_text(json.dumps(old_data))
+
+        original_lock = threading.Lock()
+
+        class ImmediateThread:
+            def __init__(self, target, name=None, daemon=None):
+                self._target = target
+
+            def start(self):
+                self._target()
+
+        def swap_global_lock(output_path):
+            bm._refresh_lock = threading.Lock()
+
+        with (
+            patch("llm_router.benchmarks._INSTALLED", benchmarks_file),
+            patch("llm_router.benchmarks._refresh_in_progress", False),
+            patch("llm_router.benchmarks._refresh_lock", original_lock),
+            patch("llm_router.benchmark_fetcher.generate_benchmarks_json", side_effect=swap_global_lock),
+            patch("llm_router.benchmarks.threading.Thread", ImmediateThread),
+        ):
+            result = maybe_refresh_benchmarks_background(ttl_days=7)
+
+        assert result is True
+        assert not original_lock.locked()
+
 
 # ── Local quality scores registry sanity checks ───────────────────────────────
 

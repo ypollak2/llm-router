@@ -2417,7 +2417,7 @@ def _run_budget(subcmd: str, flags: list[str]) -> None:
     remove <provider>          — clear the cap for a provider
     """
     import asyncio
-    from llm_router.budget_store import get_caps, list_caps, remove_cap, set_cap
+    from llm_router.budget_store import list_caps, remove_cap, set_cap
     from llm_router.budget import get_all_budget_states, invalidate_cache
     from llm_router.types import LOCAL_PROVIDERS
 
@@ -2494,7 +2494,7 @@ def _run_budget(subcmd: str, flags: list[str]) -> None:
     stored = caps
     if stored:
         print()
-        print(_dim(f"  Caps stored in ~/.llm-router/budgets.json"))
+        print(_dim("  Caps stored in ~/.llm-router/budgets.json"))
     print()
 
 

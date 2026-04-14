@@ -45,7 +45,6 @@ jobs:
           # Run pytest in the background so we can detect the aiosqlite thread hang.
           # pytest writes junit xml before the hang; we read that to determine pass/fail.
           uv run pytest tests/ -q \
-            --ignore=tests/test_integration.py \
             --ignore=tests/test_agno_integration.py \
             --timeout=30 \
             --junit-xml=/tmp/pytest-results.xml &

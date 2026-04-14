@@ -7,4 +7,4 @@ health tracking, and multi-step orchestration pipelines.
 See README.md for full documentation.
 """
 
-__version__ = "0.9.1"
+__version__ = "5.2.0"

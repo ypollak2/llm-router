@@ -28,15 +28,16 @@ is_dynamic_routing_enabled()
 
 from __future__ import annotations
 
-import logging
 from typing import TYPE_CHECKING
 
+from llm_router.logging import get_logger
+from llm_router.tracing import set_span_attributes, traced_span
 from llm_router.types import LOCAL_PROVIDERS, ScoredModel, TaskType
 
 if TYPE_CHECKING:
     from llm_router.types import RoutingProfile
 
-log = logging.getLogger("llm_router.chain_builder")
+log = get_logger("llm_router.chain_builder")
 
 # Score below which a model is excluded from the dynamic chain (unless we need
 # it to meet minimum length).
@@ -88,14 +89,35 @@ async def build_chain(
     Returns:
         Ordered list of model IDs, best first.  Never empty (falls back to static).
     """
-    if not is_dynamic_routing_enabled():
-        return _static_chain(task_type, profile)
+    with traced_span(
+        "build_chain",
+        tracer_name="llm_router.chain_builder",
+        task_type=task_type,
+        complexity=complexity,
+        profile=profile,
+    ) as span:
+        dynamic_enabled = is_dynamic_routing_enabled()
+        set_span_attributes(span, dynamic_enabled=dynamic_enabled)
 
-    try:
-        return await _build_dynamic_chain(task_type, complexity, profile)
-    except Exception as e:
-        log.debug("dynamic chain builder failed, using static: %s", e)
-        return _static_chain(task_type, profile)
+        if not dynamic_enabled:
+            chain = _static_chain(task_type, profile)
+            set_span_attributes(span, chain_length=len(chain), top_model=chain[0] if chain else None)
+            return chain
+
+        try:
+            chain = await _build_dynamic_chain(task_type, complexity, profile)
+            set_span_attributes(span, chain_length=len(chain), top_model=chain[0] if chain else None)
+            return chain
+        except Exception as e:
+            log.debug("dynamic chain builder failed, using static: %s", e)
+            chain = _static_chain(task_type, profile)
+            set_span_attributes(
+                span,
+                fallback_reason="dynamic_chain_builder_failed",
+                chain_length=len(chain),
+                top_model=chain[0] if chain else None,
+            )
+            return chain
 
 
 async def _build_dynamic_chain(
@@ -144,18 +166,20 @@ async def _build_dynamic_chain(
         needed = _MIN_CHAIN_LENGTH - len(above_floor)
         merged = above_floor + below[:needed]
 
-    # 7. Apply max chain length.
-    chain = [s.model_id for s in merged[:_MAX_CHAIN_LENGTH]]
+    # 7. Merge scored results with the static fallback tail, then deduplicate
+    # while preserving order so repeated models never waste chain slots.
+    merged_chain = [s.model_id for s in merged] + _static_chain(task_type, profile)
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for model_id in merged_chain:
+        if model_id in seen:
+            continue
+        seen.add(model_id)
+        deduped.append(model_id)
+        if len(deduped) >= _MAX_CHAIN_LENGTH:
+            break
 
-    # 8. Always append static fallback tail for providers not discovered locally.
-    static = _static_chain(task_type, profile)
-    for model in static:
-        if model not in chain:
-            chain.append(model)
-            if len(chain) >= _MAX_CHAIN_LENGTH:
-                break
-
-    return chain if chain else _static_chain(task_type, profile)
+    return deduped if deduped else _static_chain(task_type, profile)
 
 
 def _static_chain(task_type: "TaskType", profile: "RoutingProfile") -> list[str]:

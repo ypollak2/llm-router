@@ -58,3 +58,29 @@ async def test_multiple_entries(temp_db):
     summary = await cost.get_usage_summary("all")
     assert "3" in summary  # 3 calls
     assert "gemini" in summary
+
+
+@pytest.mark.asyncio
+async def test_migration_idempotent(temp_db):
+    """Running _get_db() twice on the same DB must not raise OperationalError."""
+    import llm_router.config as _cfg
+    _cfg._config = None  # force reload with temp_db env vars
+    # First open — creates schema + runs migrations
+    db1 = await cost._get_db()
+    await db1.close()
+    # Second open — migrations must skip already-existing columns without error
+    db2 = await cost._get_db()
+    await db2.close()
+    _cfg._config = None
+
+
+@pytest.mark.asyncio
+async def test_column_exists_helper(temp_db):
+    """_column_exists returns True for existing columns, False for missing ones."""
+    import llm_router.config as _cfg
+    _cfg._config = None
+    db = await cost._get_db()
+    assert await cost._column_exists(db, "usage", "cost_usd") is True
+    assert await cost._column_exists(db, "usage", "nonexistent_col_xyz") is False
+    await db.close()
+    _cfg._config = None

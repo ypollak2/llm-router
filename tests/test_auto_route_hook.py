@@ -6,14 +6,17 @@ import sys
 import time
 from pathlib import Path
 
-HOOK_PATH = ".claude/hooks/auto-route.py"
+import pytest
+
+ROOT = Path(__file__).resolve().parents[1]
+HOOK_PATH = ROOT / "src" / "llm_router" / "hooks" / "auto-route.py"
 
 
 def run_hook(prompt: str, session_id: str | None = None) -> dict | None:
     """Run the hook script with a prompt and return parsed output."""
     payload = json.dumps({"prompt": prompt, "session_id": session_id or ""})
     result = subprocess.run(
-        [sys.executable, HOOK_PATH],
+        [sys.executable, str(HOOK_PATH)],
         input=payload,
         capture_output=True,
         text=True,
@@ -48,6 +51,56 @@ def run_hook_with_last_route(
 
 def _extract_hint(output: dict) -> str:
     return output["hookSpecificOutput"]["contextForAgent"]
+
+
+GOLDEN_ROUTE_CASES = [
+    ("What does os.path.join do?", "query", "simple", "llm_query"),
+    ("What is the quick definition of REST API?", "query", "simple", "llm_query"),
+    ("Explain what a foreign key is in SQL.", "query", "simple", "llm_query"),
+    ("Summarize how database indexes work", "query", "simple", "llm_query"),
+    ("Write a hero section for our site", "generate", "moderate", "llm_generate"),
+    ("Draft a launch email for our new pricing page", "generate", "moderate", "llm_generate"),
+    ("Brainstorm three taglines for a coffee delivery app", "generate", "moderate", "llm_generate"),
+    ("Create onboarding copy for the welcome modal", "generate", "moderate", "llm_generate"),
+    ("Draft FAQ answers for our pricing page", "generate", "moderate", "llm_generate"),
+    ("Analyze the pros and cons of microservices vs monolith", "analyze", "moderate", "llm_analyze"),
+    ("Compare Redis Streams and RabbitMQ for background jobs", "analyze", "moderate", "llm_analyze"),
+    ("Evaluate whether feature flags fit this rollout plan", "analyze", "moderate", "llm_analyze"),
+    ("Compare Postgres logical replication and CDC tools", "analyze", "moderate", "llm_analyze"),
+    ("Research latest AI funding rounds", "research", "moderate", "llm_research"),
+    ("Research the latest SOC 2 automation vendors", "research", "moderate", "llm_research"),
+    ("Find the latest OpenAI pricing changes", "research", "moderate", "llm_research"),
+    ("Research today's changes in EU AI regulation", "research", "moderate", "llm_research"),
+    ("Refactor the caching middleware to support TTLs", "code", "moderate", "llm_code"),
+    ("Add OAuth login support to the dashboard", "code", "moderate", "llm_code"),
+    ("Refactor the billing service into smaller modules", "code", "moderate", "llm_code"),
+    ("Update the API client to retry on 429 responses", "code", "moderate", "llm_code"),
+    (
+        "Architect a distributed task queue with retries and dead letter handling",
+        "code",
+        "complex",
+        "llm_code",
+    ),
+    ("Generate an image of a futuristic city at night", "image", "moderate", "llm_image"),
+    ("Generate a logo mockup for a travel startup", "image", "moderate", "llm_image"),
+]
+
+
+@pytest.mark.parametrize(
+    "prompt,expected_task,expected_complexity,expected_tool",
+    GOLDEN_ROUTE_CASES,
+)
+def test_golden_prompt_routing_matrix(
+    prompt: str,
+    expected_task: str,
+    expected_complexity: str,
+    expected_tool: str,
+):
+    out = run_hook(prompt)
+    assert out is not None
+    hint = _extract_hint(out)
+    assert f"MANDATORY ROUTE: {expected_task}/{expected_complexity}" in hint
+    assert expected_tool in hint
 
 
 class TestAutoRouteClassification:

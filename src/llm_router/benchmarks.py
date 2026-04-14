@@ -506,8 +506,11 @@ def maybe_refresh_benchmarks_background(ttl_days: int = 7) -> bool:
     if not stale:
         return False
 
-    # Acquire lock and launch refresh thread.
-    if not _refresh_lock.acquire(blocking=False):
+    # Acquire lock and launch refresh thread. Capture the exact lock instance
+    # we acquired so tests or hot reloads swapping the module global can't
+    # cause the worker to release a different, unlocked lock later on.
+    refresh_lock = _refresh_lock
+    if not refresh_lock.acquire(blocking=False):
         return False  # another thread just started
 
     _refresh_in_progress = True
@@ -525,7 +528,8 @@ def maybe_refresh_benchmarks_background(ttl_days: int = 7) -> bool:
             log.debug("Background benchmark refresh failed: %s", e)
         finally:
             _refresh_in_progress = False
-            _refresh_lock.release()
+            if refresh_lock.locked():
+                refresh_lock.release()
 
     thread = threading.Thread(target=_refresh_worker, name="benchmark-refresh", daemon=True)
     thread.start()

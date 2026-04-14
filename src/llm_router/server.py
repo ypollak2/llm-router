@@ -1,6 +1,6 @@
 """FastMCP server — MCP entry point for llm-router.
 
-All 43 tools are registered by modules in llm_router/tools/:
+All 46 tools are registered by modules in llm_router/tools/:
 - routing.py  — llm_classify, llm_track_usage, llm_route, llm_auto, llm_stream,
                 llm_select_agent, llm_reroute
 - text.py     — llm_query, llm_research, llm_generate, llm_analyze, llm_code, llm_edit
@@ -23,12 +23,11 @@ responses are displayed directly to the user in the Claude Code UI.
 
 from __future__ import annotations
 
-import logging
-
 from mcp.server.fastmcp import FastMCP
 
 from llm_router.config import get_config
 from llm_router.health import get_tracker
+from llm_router.logging import configure_logging, get_logger
 from llm_router.state import _check_tier, get_active_profile  # noqa: F401  (backward compat)
 from llm_router.tools import admin, codex, fs, media, pipeline, routing, setup, subscription, text
 from llm_router.tools.admin import llm_health, llm_set_profile, llm_usage  # noqa: F401
@@ -36,7 +35,8 @@ from llm_router.tools.pipeline import llm_orchestrate  # noqa: F401
 from llm_router.tools.routing import llm_route  # noqa: F401
 from llm_router.tools.setup import _mask_key, llm_setup  # noqa: F401
 
-logging.basicConfig(level=logging.INFO, format="%(name)s | %(message)s")
+configure_logging()
+log = get_logger("llm_router.server")
 
 mcp = FastMCP("llm-router")
 
@@ -46,9 +46,9 @@ try:
     from llm_router.install_hooks import check_and_update_rules as _update_rules
     _msg = _update_rules()
     if _msg:
-        logging.getLogger("llm_router").info(_msg)
+        log.info("routing_rules_updated", update_message=_msg)
     for _hmsg in _update_hooks():
-        logging.getLogger("llm_router").info(_hmsg)
+        log.info("hook_updated", update_message=_hmsg)
 except Exception:
     pass
 
@@ -57,7 +57,7 @@ try:
     from llm_router.benchmarks import check_and_update_benchmarks as _update_benchmarks
     _bmsg = _update_benchmarks()
     if _bmsg:
-        logging.getLogger("llm_router").info(_bmsg)
+        log.info("benchmarks_updated", update_message=_bmsg)
 except Exception:
     pass
 
@@ -68,7 +68,7 @@ try:
     _reset_tracker = _get_tracker()
     _reset = _reset_tracker.reset_stale(max_age_seconds=1800.0)
     if _reset:
-        logging.getLogger("llm_router").info("Reset stale circuit breakers: %s", _reset)
+        log.info("circuit_breakers_reset", reset_count=_reset)
     try:
         _os.unlink(_os.path.expanduser("~/.llm-router/reset_stale.flag"))
     except OSError:
@@ -85,7 +85,7 @@ from llm_router.tool_tiers import make_should_register, tier_summary as _tier_su
 _slim = get_config().llm_router_slim
 _gate = make_should_register(_slim)
 if _slim != "off":
-    logging.getLogger("llm_router").info("Slim mode: %s", _tier_summary(_slim))
+    log.info("tool_slim_mode", slim_mode=_slim, summary=_tier_summary(_slim))
 
 # ── Register all tool groups ──────────────────────────────────────────────────
 

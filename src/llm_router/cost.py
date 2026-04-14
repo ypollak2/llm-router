@@ -200,6 +200,36 @@ is_simulated:       1 for dry-run test calls (llm-router test), 0 for real calls
 """
 
 
+async def _column_exists(db: aiosqlite.Connection, table: str, column: str) -> bool:
+    """Return True if *column* exists in *table* (uses SQLite PRAGMA, no exceptions)."""
+    cursor = await db.execute(
+        f"SELECT name FROM pragma_table_info('{table}') WHERE name = ?", (column,)
+    )
+    return await cursor.fetchone() is not None
+
+
+async def _safe_migrate(db: aiosqlite.Connection, stmt: str) -> None:
+    """Run an ALTER TABLE statement only if the target column does not yet exist.
+
+    Parses the column name from the statement so the check is explicit rather
+    than relying on SQLite raising OperationalError for duplicate columns.
+    Falls back to try/except for any statement that doesn't match the expected
+    'ALTER TABLE <t> ADD COLUMN <col>' form.
+    """
+    import re
+    m = re.match(
+        r"ALTER\s+TABLE\s+(\w+)\s+ADD\s+COLUMN\s+(\w+)", stmt, re.IGNORECASE
+    )
+    if m:
+        table, column = m.group(1), m.group(2)
+        if await _column_exists(db, table, column):
+            return  # already migrated — skip
+    try:
+        await db.execute(stmt)
+    except Exception:
+        pass  # last-resort fallback for non-standard ALTER forms
+
+
 async def _get_db() -> aiosqlite.Connection:
     """Open (or create) the SQLite database and apply all migrations.
 
@@ -222,48 +252,19 @@ async def _get_db() -> aiosqlite.Connection:
     await db.execute(CREATE_SEMANTIC_CACHE_TABLE)
     await db.execute(CREATE_SEMANTIC_CACHE_INDEX)
     await db.execute(CREATE_CORRECTIONS_TABLE)
-    # Migrate: add savings columns if missing
-    for stmt in MIGRATE_CLAUDE_USAGE_ADD_SAVINGS:
-        try:
-            await db.execute(stmt)
-        except Exception:
-            pass  # column already exists
-    # Migrate: add feedback column if missing
-    for stmt in MIGRATE_ROUTING_DECISIONS_ADD_FEEDBACK:
-        try:
-            await db.execute(stmt)
-        except Exception:
-            pass  # column already exists
-    # Migrate: add classifier reasoning to routing_decisions (v2.2)
-    for stmt in MIGRATE_ROUTING_DECISIONS_ADD_REASON:
-        try:
-            await db.execute(stmt)
-        except Exception:
-            pass  # column already exists
-    # Migrate: add per-call savings columns if missing (v2.1)
-    for stmt in MIGRATE_USAGE_ADD_SAVINGS:
-        try:
-            await db.execute(stmt)
-        except Exception:
-            pass  # column already exists
-    # Migrate: add team identity columns if missing (v3.0)
-    for stmt in MIGRATE_USAGE_ADD_TEAM:
-        try:
-            await db.execute(stmt)
-        except Exception:
-            pass  # column already exists
-    # Migrate: add host column to savings_stats (v3.1)
-    for stmt in MIGRATE_SAVINGS_STATS_ADD_HOST:
-        try:
-            await db.execute(stmt)
-        except Exception:
-            pass  # column already exists
-    # Migrate: add policy audit column to routing_decisions (v3.2)
-    for stmt in MIGRATE_ROUTING_DECISIONS_ADD_POLICY:
-        try:
-            await db.execute(stmt)
-        except Exception:
-            pass  # column already exists
+    # Run all migrations idempotently — _safe_migrate checks column existence
+    # before executing, so re-running on an existing DB is always safe.
+    all_migrations = (
+        MIGRATE_CLAUDE_USAGE_ADD_SAVINGS
+        + MIGRATE_ROUTING_DECISIONS_ADD_FEEDBACK
+        + MIGRATE_ROUTING_DECISIONS_ADD_REASON
+        + MIGRATE_USAGE_ADD_SAVINGS
+        + MIGRATE_USAGE_ADD_TEAM
+        + MIGRATE_SAVINGS_STATS_ADD_HOST
+        + MIGRATE_ROUTING_DECISIONS_ADD_POLICY
+    )
+    for stmt in all_migrations:
+        await _safe_migrate(db, stmt)
     await db.commit()
     return db
 

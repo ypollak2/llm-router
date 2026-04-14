@@ -149,13 +149,15 @@ def _claude_subscription_state() -> BudgetState:
 async def _api_provider_state(provider: str) -> BudgetState:
     """Compute pressure from monthly spend vs. per-provider cap.
 
-    Spend is the maximum of:
+    Spend sources:
       1. Local SQLite usage DB (always tracked)
       2. Helicone pull (when LLM_ROUTER_HELICONE_PULL=true)
       3. LiteLLM Proxy DB (when LLM_ROUTER_LITELLM_BUDGET_DB is set)
 
-    Using the maximum ensures pressure is never under-reported when traffic
-    flows through multiple tracking systems.
+    Aggregation strategy is controlled by ``llm_router_spend_aggregation``:
+      - ``"max"`` (default): conservative dedup when multiple trackers likely
+        observe the same traffic.
+      - ``"sum"``: additive when trackers represent independent traffic channels.
     """
     cfg = get_config()
     cap = _get_cap(provider, cfg)
@@ -179,10 +181,14 @@ async def _api_provider_state(provider: str) -> BudgetState:
         pass
 
     results = await asyncio.gather(*spend_sources, return_exceptions=True)
-    spend = max(
-        (float(r) if isinstance(r, (int, float)) else 0.0)
+    spend_values = [
+        float(r) if isinstance(r, (int, float)) else 0.0
         for r in results
-    )
+    ]
+    if cfg.llm_router_spend_aggregation == "sum":
+        spend = sum(spend_values)
+    else:
+        spend = max(spend_values, default=0.0)
 
     if cap <= 0.0:
         # No cap configured — provider is available, track spend only.

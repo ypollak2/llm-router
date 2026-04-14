@@ -14,6 +14,9 @@ added in one place.
 
 from __future__ import annotations
 
+import copy
+import threading
+
 from llm_router.config import get_config
 from llm_router.types import PRO_FEATURES, Tier
 
@@ -23,6 +26,12 @@ from llm_router.types import PRO_FEATURES, Tier
 _active_profile = None          # RoutingProfile | None
 _last_usage = None              # ClaudeSubscriptionUsage | None
 _active_agent = None            # str | None — "claude_code" or "codex"
+
+# Guards all module-level state mutations.  The MCP server runs on asyncio
+# (single-threaded), so concurrent coroutines cannot race at the Python level,
+# but the server may delegate work to a ThreadPoolExecutor.  A threading.Lock
+# covers both cases without requiring callers to become async.
+_state_lock = threading.Lock()
 
 
 def get_active_profile():
@@ -35,29 +44,37 @@ def get_active_profile():
 def set_active_profile(profile) -> None:
     """Set the active routing profile override (pass None to clear)."""
     global _active_profile
-    _active_profile = profile
+    with _state_lock:
+        _active_profile = profile
 
 
 def get_last_usage():
-    """Return the cached ClaudeSubscriptionUsage object, or None."""
-    return _last_usage
+    """Return a copy of the cached ClaudeSubscriptionUsage object, or None.
+
+    Returns a shallow copy so callers cannot mutate shared state.
+    """
+    with _state_lock:
+        return copy.copy(_last_usage) if _last_usage is not None else None
 
 
 def set_last_usage(usage) -> None:
     """Update the cached ClaudeSubscriptionUsage object."""
     global _last_usage
-    _last_usage = usage
+    with _state_lock:
+        _last_usage = usage
 
 
 def get_active_agent() -> str | None:
     """Return the currently active agent context ('claude_code' or 'codex'), or None."""
-    return _active_agent
+    with _state_lock:
+        return _active_agent
 
 
 def set_active_agent(agent: str | None) -> None:
     """Set the active agent context (pass None to clear)."""
     global _active_agent
-    _active_agent = agent
+    with _state_lock:
+        _active_agent = agent
 
 
 def _check_tier(feature: str) -> str | None:

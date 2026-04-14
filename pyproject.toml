@@ -1,6 +1,6 @@
 [project]
 name = "claude-code-llm-router"
-version = "5.1.0"
+version = "5.2.0"
 description = "Multi-LLM router MCP server for Claude Code — smart complexity routing, Claude subscription monitoring, Codex integration, 20+ providers"
 readme = "README.md"
 license = "MIT"
@@ -28,6 +28,7 @@ dependencies = [
     "pydantic-settings>=2.0",
     "aiosqlite>=0.20.0",
     "aiohttp>=3.9.0",
+    "structlog>=24.4.0",
 ]
 
 [project.optional-dependencies]
@@ -43,6 +44,10 @@ scripts = [
 ]
 agno = [
     "agno>=2.5.14",
+]
+tracing = [
+    "opentelemetry-sdk>=1.20",
+    "opentelemetry-exporter-otlp-proto-grpc>=1.20",
 ]
 
 [project.urls]

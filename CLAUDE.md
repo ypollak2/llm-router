@@ -34,7 +34,7 @@ If any key is missing or invalid, fix it before writing code.
 
 Always run tests with:
 ```bash
-uv run pytest tests/ -q --ignore=tests/test_integration.py
+uv run pytest tests/ -q --ignore=tests/test_agno_integration.py
 ```
 Never use bare `pytest` — it will fail without the venv context `uv run` provides.
 For a single test file: `uv run pytest tests/test_classifier.py -x -q`
@@ -226,7 +226,7 @@ This checklist is not optional. Missing any step means the release is incomplete
 
 ### Step 1 — Tests (always)
 ```bash
-uv run pytest tests/ -q --ignore=tests/test_integration.py
+uv run pytest tests/ -q --ignore=tests/test_agno_integration.py
 uv run ruff check src/ tests/
 ```
 

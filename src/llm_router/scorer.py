@@ -24,7 +24,6 @@ score_all_models(models, task_type, complexity)
 from __future__ import annotations
 
 import asyncio
-import logging
 from typing import Sequence
 
 from llm_router.benchmarks import (
@@ -34,13 +33,15 @@ from llm_router.benchmarks import (
     get_model_acceptance_penalty,
 )
 from llm_router.budget import get_model_pressure
+from llm_router.logging import get_logger
+from llm_router.tracing import set_span_attributes, traced_span
 from llm_router.types import (
     COMPLEXITY_WEIGHTS,
     ModelCapability,
     ScoredModel,
 )
 
-log = logging.getLogger("llm_router.scorer")
+log = get_logger("llm_router.scorer")
 
 # ── Score component bounds ────────────────────────────────────────────────────
 # quality_score  → from get_quality_score()       0.0–1.0 (higher = better)
@@ -180,68 +181,85 @@ async def score_all_models(
         List of :class:`~llm_router.types.ScoredModel` sorted by score
         descending (best first).  Never raises; returns empty list on error.
     """
-    if not models:
-        return []
+    with traced_span(
+        "score_all_models",
+        tracer_name="llm_router.scorer",
+        task_type=task_type,
+        complexity=complexity,
+        input_models=len(models),
+    ) as span:
+        if not models:
+            set_span_attributes(span, scored_models=0)
+            return []
 
-    # Normalise to (model_id, capability | None) pairs.
-    pairs: list[tuple[str, ModelCapability | None]] = []
-    for m in models:
-        if isinstance(m, str):
-            pairs.append((m, None))
-        else:
-            pairs.append((m.model_id, m))
+        # Normalise to (model_id, capability | None) pairs.
+        pairs: list[tuple[str, ModelCapability | None]] = []
+        for m in models:
+            if isinstance(m, str):
+                pairs.append((m, None))
+            else:
+                pairs.append((m.model_id, m))
 
-    model_ids = [p[0] for p in pairs]
+        model_ids = [p[0] for p in pairs]
+        set_span_attributes(span, candidate_models=model_ids)
 
-    try:
-        # Fetch all supporting data concurrently.
-        from llm_router.cost import (
-            get_model_failure_rates,
-            get_model_latency_stats,
-            get_model_acceptance_scores,
-        )
+        try:
+            # Fetch all supporting data concurrently.
+            from llm_router.cost import (
+                get_model_failure_rates,
+                get_model_latency_stats,
+                get_model_acceptance_scores,
+            )
 
-        failure_rates, latency_stats, acceptance_scores, pressures = await asyncio.gather(
-            get_model_failure_rates(window_days=30),
-            get_model_latency_stats(window_days=7),
-            get_model_acceptance_scores(),
-            _fetch_pressures(model_ids),
-            return_exceptions=True,
-        )
+            failure_rates, latency_stats, acceptance_scores, pressures = await asyncio.gather(
+                get_model_failure_rates(window_days=30),
+                get_model_latency_stats(window_days=7),
+                get_model_acceptance_scores(),
+                _fetch_pressures(model_ids),
+                return_exceptions=True,
+            )
 
-        # Degrade gracefully if any fetch fails.
-        if isinstance(failure_rates, Exception):
-            failure_rates = {}
-        if isinstance(latency_stats, Exception):
-            latency_stats = {}
-        if isinstance(acceptance_scores, Exception):
-            acceptance_scores = {}
-        if isinstance(pressures, Exception):
+            # Degrade gracefully if any fetch fails.
+            if isinstance(failure_rates, Exception):
+                failure_rates = {}
+            if isinstance(latency_stats, Exception):
+                latency_stats = {}
+            if isinstance(acceptance_scores, Exception):
+                acceptance_scores = {}
+            if isinstance(pressures, Exception):
+                pressures = {m: 0.0 for m in model_ids}
+
+        except Exception:
+            failure_rates = latency_stats = acceptance_scores = {}
             pressures = {m: 0.0 for m in model_ids}
 
-    except Exception:
-        failure_rates = latency_stats = acceptance_scores = {}
-        pressures = {m: 0.0 for m in model_ids}
+        # Score each model (pure compute, no I/O).
+        scored: list[ScoredModel] = []
+        for model_id, cap in pairs:
+            try:
+                sm = score_model(
+                    model_id,
+                    task_type,
+                    complexity,
+                    pressure=pressures.get(model_id, 0.0),
+                    failure_rates=failure_rates,
+                    latency_stats=latency_stats,
+                    acceptance_scores=acceptance_scores,
+                    capability=cap,
+                )
+                scored.append(sm)
+            except Exception as e:
+                log.debug("score_model failed for %s: %s", model_id, e)
 
-    # Score each model (pure compute, no I/O).
-    scored: list[ScoredModel] = []
-    for model_id, cap in pairs:
-        try:
-            sm = score_model(
-                model_id,
-                task_type,
-                complexity,
-                pressure=pressures.get(model_id, 0.0),
-                failure_rates=failure_rates,
-                latency_stats=latency_stats,
-                acceptance_scores=acceptance_scores,
-                capability=cap,
-            )
-            scored.append(sm)
-        except Exception as e:
-            log.debug("score_model failed for %s: %s", model_id, e)
-
-    return sorted(scored, key=lambda s: s.score, reverse=True)
+        ranked = sorted(scored, key=lambda s: s.score, reverse=True)
+        top = ranked[0] if ranked else None
+        set_span_attributes(
+            span,
+            scored_models=len(ranked),
+            top_model=top.model_id if top else None,
+            top_score=top.score if top else None,
+        )
+        return ranked
 
 
 async def _fetch_pressures(model_ids: list[str]) -> dict[str, float]:

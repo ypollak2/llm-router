@@ -19,6 +19,7 @@ from __future__ import annotations
 import time
 import urllib.request
 from pathlib import Path
+from typing import Literal
 
 from pydantic_settings import BaseSettings
 
@@ -189,6 +190,10 @@ class RouterConfig(BaseSettings):
     helicone_api_key: str = ""              # HELICONE_API_KEY
     llm_router_helicone_pull: bool = False  # LLM_ROUTER_HELICONE_PULL — pull spend from Helicone API
     llm_router_litellm_budget_db: str = ""  # LLM_ROUTER_LITELLM_BUDGET_DB — path to LiteLLM proxy DB
+    # How to combine spend seen across multiple tracking systems:
+    # "max" assumes sources overlap and keeps the highest single observed total.
+    # "sum" treats sources as independent traffic channels and adds them together.
+    llm_router_spend_aggregation: Literal["max", "sum"] = "max"
 
     # ── Community Benchmarks settings (v3.4) ──
     # Set to true to opt in to anonymous routing quality sharing (future upload).
