@@ -115,32 +115,24 @@ async def _build_and_filter_chain(
                 _penalty_err,
             )
 
-    # ── Dynamic (v5.0+) chain selection — always-on ──────────────────────────
-    # Try dynamic chain first; fall back to static profiles.py on any error
-    # or when discovery cache hasn't populated yet. (Feature flag removed in v5.0.)
-    models_to_try: list[str] = []
-    if task_type not in MEDIA_TASK_TYPES:
-        try:
-            from llm_router.chain_builder import build_chain
-            complexity_key = (
-                complexity_hint.value
-                if hasattr(complexity_hint, "value")
-                else str(complexity_hint or "moderate")
-            )
-            models_to_try = await build_chain(task_type, complexity_key, profile)
-        except Exception as _dynamic_err:
-            log.debug(
-                "Dynamic chain builder failed, using static profiles: %s",
-                _dynamic_err,
-            )
+    # ── Dynamic chain selection (v5.0) with availability filtering ─────────────
+    # Get static chain from profiles.py, then filter by discovered availability.
+    # This ensures chains always reflect the actual configured providers.
+    models_to_try = get_model_chain(
+        profile, task_type,
+        failure_rates=_failure_rates,
+        latency_stats=_latency_stats,
+        acceptance_scores=_acceptance_scores,
+    )
     
-    # Fallback: use static profiles if dynamic failed or returned empty
-    if not models_to_try:
-        models_to_try = get_model_chain(
-            profile, task_type,
-            failure_rates=_failure_rates,
-            latency_stats=_latency_stats,
-            acceptance_scores=_acceptance_scores,
+    # Discover available providers and filter chain
+    try:
+        from llm_router.discover import discover_and_build_chain
+        models_to_try = await discover_and_build_chain(models_to_try)
+    except Exception as _discover_err:
+        log.debug(
+            "Discovery filtering failed, using static chain: %s",
+            _discover_err,
         )
 
     if task_type not in MEDIA_TASK_TYPES:

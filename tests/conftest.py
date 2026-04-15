@@ -28,10 +28,12 @@ def _reset_singletons():
 @pytest.fixture
 def mock_env(monkeypatch):
     """Set up test environment variables."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-anthropic-key")
     monkeypatch.setenv("GEMINI_API_KEY", "test-gemini-key")
     monkeypatch.setenv("OPENAI_API_KEY", "test-openai-key")
     monkeypatch.setenv("PERPLEXITY_API_KEY", "test-perplexity-key")
     monkeypatch.setenv("LLM_ROUTER_PROFILE", "balanced")
+    monkeypatch.setenv("LLM_ROUTER_CLAUDE_SUBSCRIPTION", "false")
     # Disable Codex in unit tests — the binary may be installed locally but
     # Codex CLI requires a trusted git directory and an active session, which
     # unit tests don't provide. Tests that specifically exercise Codex routing

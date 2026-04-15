@@ -1,660 +1,203 @@
-"""Universal Model Discovery — scan all available models for this user.
+"""Dynamic LLM discovery — scan available models at routing time.
 
-Discovers what LLM models are reachable from this machine and encodes their
-capability, cost tier, and quota *type* into :class:`~llm_router.types.ModelCapability`
-records.  Results are cached to ``~/.llm-router/discovery.json`` with a
-configurable TTL (default 30 minutes).
+Discovers which LLM providers are actually available by:
+  1. Checking if Ollama is running (local models)
+  2. Checking if API keys are configured (cloud providers)
+  3. Filtering model chains based on discovered availability
 
-## Quota types (why they matter for routing)
-
-Different providers impose limits in fundamentally different ways:
-
-  ``"none"``            Local models — no monetary cost, no quota, always available.
-  ``"session_window"``  Claude Pro 5h-session + weekly limits — pressure resets
-                        every 5 hours (session) and every Monday (weekly). Use
-                        the Budget Oracle for real-time state.
-  ``"daily_rate"``      Groq free tier — tokens/min and tokens/day rate limits.
-                        Pressure is transient; resets at midnight UTC and after
-                        every per-minute window. Can go from 100% → 0% in minutes.
-  ``"monthly_requests"``HuggingFace Inference API free tier — request quota resets
-                        on the 1st of each month.
-  ``"monthly_spend"``   API-key providers (OpenAI, Gemini, DeepSeek …) — dollar
-                        spend tracked against an optional user-configured cap.
-                        Resets at the provider's billing cycle start.
-
-## Discovery sources
-
-  1. Ollama     — ``GET /api/tags``; maps to LOCAL / free
-  2. HuggingFace— ``HF_TOKEN`` env var; marks free-tier hosted models available
-  3. API keys   — env var presence; marks paid providers configured
-  4. Codex CLI  — ``codex --version`` binary check; marks Codex quota available
-  5. Claude sub — ``usage.json`` snapshot; marks subscription active
-
-## Model-to-benchmark alias registry
-
-Local model names (``qwen3:32b``, ``gemma4:latest``) don't appear on leaderboards.
-The alias registry maps model family + parameter count → canonical benchmark name
-so the scorer can look up quality scores for local models.
+Discovery happens at routing time (per-request) so chains always reflect
+the current state of configured keys and running services.
 """
 
 from __future__ import annotations
 
 import asyncio
-import json
-import time
-import urllib.request
-from pathlib import Path
+from functools import lru_cache
 
 from llm_router.config import get_config
-from llm_router.types import ModelCapability, ProviderTier, TaskType, LOCAL_PROVIDERS
+from llm_router.logging import get_logger
+from llm_router.profiles import provider_from_model
 
-# ── Paths ─────────────────────────────────────────────────────────────────────
-_ROUTER_DIR = Path.home() / ".llm-router"
-_DISCOVERY_CACHE = _ROUTER_DIR / "discovery.json"
-_USAGE_JSON = _ROUTER_DIR / "usage.json"
+log = get_logger("llm_router.discover")
 
-# ── Known-model registry ──────────────────────────────────────────────────────
-# Maps Ollama model name patterns → (task_types, benchmark_alias).
-# task_types: which task types this model is well-suited for.
-# benchmark_alias: canonical name to look up in the benchmark registry.
-_OLLAMA_MODEL_REGISTRY: list[tuple[str, frozenset[TaskType], str]] = [
-    # (name_prefix_lower, task_types, benchmark_alias)
-    ("qwen3-coder",   frozenset({TaskType.CODE, TaskType.ANALYZE}),         "qwen3-coder"),
-    ("qwen3",         frozenset({TaskType.CODE, TaskType.ANALYZE,
-                                  TaskType.QUERY, TaskType.GENERATE}),       "qwen3"),
-    ("qwen2.5-coder", frozenset({TaskType.CODE, TaskType.ANALYZE}),          "qwen2.5-coder"),
-    ("qwen2.5",       frozenset({TaskType.CODE, TaskType.QUERY,
-                                  TaskType.GENERATE, TaskType.ANALYZE}),     "qwen2.5"),
-    ("codestral",     frozenset({TaskType.CODE, TaskType.ANALYZE}),          "codestral"),
-    ("deepseek-coder",frozenset({TaskType.CODE, TaskType.ANALYZE}),          "deepseek-coder"),
-    ("deepseek",      frozenset({TaskType.CODE, TaskType.QUERY,
-                                  TaskType.ANALYZE, TaskType.GENERATE}),     "deepseek-v3"),
-    ("llama3",        frozenset({TaskType.QUERY, TaskType.GENERATE,
-                                  TaskType.ANALYZE, TaskType.CODE}),         "llama-3"),
-    ("llama",         frozenset({TaskType.QUERY, TaskType.GENERATE,
-                                  TaskType.ANALYZE}),                        "llama"),
-    ("gemma4",        frozenset({TaskType.QUERY, TaskType.GENERATE,
-                                  TaskType.ANALYZE, TaskType.CODE}),         "gemma"),
-    ("gemma",         frozenset({TaskType.QUERY, TaskType.GENERATE}),        "gemma"),
-    ("mistral",       frozenset({TaskType.QUERY, TaskType.GENERATE,
-                                  TaskType.CODE, TaskType.ANALYZE}),         "mistral"),
-    ("phi4",          frozenset({TaskType.QUERY, TaskType.GENERATE,
-                                  TaskType.CODE}),                           "phi-4"),
-    ("phi",           frozenset({TaskType.QUERY, TaskType.GENERATE}),        "phi"),
-    ("granite",       frozenset({TaskType.CODE, TaskType.ANALYZE}),          "granite"),
-    ("command",       frozenset({TaskType.QUERY, TaskType.GENERATE,
-                                  TaskType.ANALYZE}),                        "command-r"),
-]
-
-# Heuristic: parameter count → rough latency estimate (ms P50) on typical hardware.
-_PARAM_LATENCY_MS: list[tuple[float, float]] = [
-    (1.0,  80.0),   # ≤1B  → ~80ms
-    (3.0,  200.0),  # ≤3B  → ~200ms
-    (8.0,  400.0),  # ≤8B  → ~400ms
-    (14.0, 700.0),  # ≤14B → ~700ms
-    (32.0, 1400.0), # ≤32B → ~1.4s
-    (70.0, 3000.0), # ≤70B → ~3s
-    (float("inf"), 8000.0),  # >70B → ~8s
-]
-
-# HuggingFace free-tier models available via Inference API (curated subset).
-# Full list changes frequently; this covers the most stable free-tier models.
-_HF_FREE_MODELS: list[tuple[str, frozenset[TaskType], str]] = [
-    ("HuggingFaceH4/zephyr-7b-beta",
-     frozenset({TaskType.QUERY, TaskType.GENERATE}), "zephyr-7b"),
-    ("mistralai/Mistral-7B-Instruct-v0.2",
-     frozenset({TaskType.QUERY, TaskType.GENERATE, TaskType.CODE}), "mistral-7b"),
-    ("meta-llama/Meta-Llama-3-8B-Instruct",
-     frozenset({TaskType.QUERY, TaskType.GENERATE, TaskType.CODE}), "llama-3-8b"),
-    ("google/gemma-2-2b-it",
-     frozenset({TaskType.QUERY, TaskType.GENERATE}), "gemma-2-2b"),
-    ("Qwen/Qwen2.5-7B-Instruct",
-     frozenset({TaskType.QUERY, TaskType.GENERATE, TaskType.CODE}), "qwen2.5-7b"),
-    ("codellama/CodeLlama-34b-Instruct-hf",
-     frozenset({TaskType.CODE, TaskType.ANALYZE}), "codellama-34b"),
-]
-
-# ── Public API ────────────────────────────────────────────────────────────────
+# Cache for Ollama reachability (5 second TTL per config probe)
+_ollama_cache: dict[str, tuple[bool, float]] = {}
+_OLLAMA_CACHE_TTL = 5.0
 
 
-async def discover_available_models(force: bool = False) -> dict[str, ModelCapability]:
-    """Discover all models available to this user and return a capability map.
-
-    Results are cached to ``~/.llm-router/discovery.json``.  Set ``force=True``
-    to bypass the cache and re-scan everything.
-
-    Args:
-        force: Ignore cached results and re-run all scanners.
-
+def is_ollama_available() -> bool:
+    """Check if Ollama is configured and reachable.
+    
     Returns:
-        Dict mapping model_id → :class:`~llm_router.types.ModelCapability`.
+        True if OLLAMA_BASE_URL is set and Ollama responds to /api/tags
     """
-    cfg = get_config()
-    ttl = cfg.llm_router_discovery_ttl
-
-    # Cache hit
-    if not force:
-        cached = _load_cache(ttl)
-        if cached is not None:
-            return cached
-
-    # Parallel scan — all sources run concurrently (v5.0: added _scan_openai, _scan_gemini)
-    results = await asyncio.gather(
-        _scan_ollama(cfg),
-        _scan_huggingface(cfg),
-        _scan_openai(),          # NEW: live OpenAI API enumeration
-        _scan_gemini(),          # NEW: live Gemini API enumeration
-        _scan_api_key_providers(cfg),
-        _scan_codex(),
-        return_exceptions=True,
-    )
-
-    models: dict[str, ModelCapability] = {}
-    for batch in results:
-        if isinstance(batch, Exception):
-            continue  # scanner failure is silent — skip that source
-        for cap in batch:
-            models[cap.model_id] = cap
-
-    _save_cache(models)
-    return models
-
-
-def get_local_model_ids() -> list[str]:
-    """Return model IDs from the cache that belong to local providers.
-
-    Used by the chain builder to inject local models first without waiting
-    for a full async discovery cycle.
-
-    Returns:
-        List of model_ids for all LOCAL_PROVIDERS, or empty list if no cache.
-    """
-    cached = _load_cache(ttl=float("inf"))  # any age is fine for this helper
-    if cached is None:
-        return []
-    return [
-        mid for mid, cap in cached.items()
-        if cap.provider in LOCAL_PROVIDERS and cap.available
-    ]
-
-
-def get_cached_ollama_models() -> list[str]:
-    """Return Ollama model IDs from the discovery cache.
-
-    Reads ``discovery.json`` and extracts only the Ollama models (prefix ``ollama/``).
-    Used by config.all_ollama_models() to inject live-discovered models instead of
-    reading the static OLLAMA_BUDGET_MODELS env var.
-
-    Returns:
-        List of Ollama model IDs like ``["ollama/qwen3.5:latest", "ollama/llama3.2"]``,
-        or empty list if cache is missing/expired.
-    """
-    cached = _load_cache(ttl=float("inf"))  # any age is fine for this helper
-    if cached is None:
-        return []
-    return [
-        mid for mid, cap in cached.items()
-        if cap.provider == "ollama" and cap.available
-    ]
-
-
-# ── Cache helpers ─────────────────────────────────────────────────────────────
-
-
-def _load_cache(ttl: float) -> dict[str, ModelCapability] | None:
-    """Load discovery cache from disk.  Returns None if missing or stale."""
+    import time
+    
+    config = get_config()
+    if not config.ollama_base_url:
+        return False
+    
+    now = time.monotonic()
+    
+    # Check cache
+    if config.ollama_base_url in _ollama_cache:
+        cached_result, cached_time = _ollama_cache[config.ollama_base_url]
+        if (now - cached_time) < _OLLAMA_CACHE_TTL:
+            return cached_result
+    
+    # Probe Ollama
     try:
-        data = json.loads(_DISCOVERY_CACHE.read_text())
-        if time.time() - data.get("cached_at", 0) > ttl:
-            return None
-        return {
-            mid: _cap_from_dict(cap_dict)
-            for mid, cap_dict in data.get("models", {}).items()
-        }
-    except (OSError, json.JSONDecodeError, KeyError, ValueError):
-        return None
-
-
-def _save_cache(models: dict[str, ModelCapability]) -> None:
-    """Persist discovery results to disk."""
-    try:
-        _ROUTER_DIR.mkdir(parents=True, exist_ok=True)
-        payload = {
-            "cached_at": time.time(),
-            "models": {mid: _cap_to_dict(cap) for mid, cap in models.items()},
-        }
-        _DISCOVERY_CACHE.write_text(json.dumps(payload, indent=2))
-    except OSError:
-        pass
-
-
-def _cap_to_dict(cap: ModelCapability) -> dict:
-    return {
-        "model_id": cap.model_id,
-        "provider": cap.provider,
-        "provider_tier": cap.provider_tier.value,
-        "task_types": [t.value for t in cap.task_types],
-        "cost_per_1k": cap.cost_per_1k,
-        "latency_p50_ms": cap.latency_p50_ms,
-        "context_window": cap.context_window,
-        "available": cap.available,
-    }
-
-
-def _cap_from_dict(d: dict) -> ModelCapability:
-    return ModelCapability(
-        model_id=d["model_id"],
-        provider=d["provider"],
-        provider_tier=ProviderTier(d["provider_tier"]),
-        task_types=frozenset(TaskType(t) for t in d["task_types"]),
-        cost_per_1k=d.get("cost_per_1k", 0.0),
-        latency_p50_ms=d.get("latency_p50_ms", 0.0),
-        context_window=d.get("context_window", 8192),
-        available=d.get("available", True),
-    )
-
-
-# ── Scanners ──────────────────────────────────────────────────────────────────
-
-
-async def _scan_ollama(cfg) -> list[ModelCapability]:
-    """Scan Ollama for locally available models."""
-    if not cfg.ollama_base_url:
-        return []
-    try:
-        url = f"{cfg.ollama_base_url.rstrip('/')}/api/tags"
-        with urllib.request.urlopen(url, timeout=2) as resp:
-            data = json.loads(resp.read())
+        import urllib.request
+        with urllib.request.urlopen(
+            f"{config.ollama_base_url}/api/tags",
+            timeout=1
+        ):
+            result = True
     except Exception:
-        return []
-
-    models = []
-    for entry in data.get("models", []):
-        name: str = entry.get("name", "")
-        if not name:
-            continue
-        details = entry.get("details", {})
-        param_size_str: str = details.get("parameter_size", "")
-        task_types, alias = _classify_ollama_model(name)
-        latency = _estimate_latency(param_size_str)
-        ctx = _estimate_context(details)
-
-        models.append(ModelCapability(
-            model_id=f"ollama/{name}",
-            provider="ollama",
-            provider_tier=ProviderTier.LOCAL,
-            task_types=task_types,
-            cost_per_1k=0.0,
-            latency_p50_ms=latency,
-            context_window=ctx,
-            available=True,
-        ))
-    return models
-
-
-async def _scan_huggingface(cfg) -> list[ModelCapability]:
-    """Mark HuggingFace free-tier models as available when HF_TOKEN is set."""
-    if not cfg.huggingface_api_key:
-        return []
-    # We trust the static list — verifying each model via HTTP would be slow
-    # and the free-tier list changes rarely.
-    return [
-        ModelCapability(
-            model_id=f"huggingface/{model_id}",
-            provider="huggingface",
-            provider_tier=ProviderTier.FREE_CLOUD,
-            task_types=task_types,
-            cost_per_1k=0.0,       # free tier (rate-limited, not dollar-billed)
-            latency_p50_ms=2000.0, # HF Inference API typically ~2s cold, ~500ms warm
-            context_window=8192,
-            available=True,
-        )
-        for model_id, task_types, _ in _HF_FREE_MODELS
-    ]
-
-
-async def _scan_api_key_providers(cfg) -> list[ModelCapability]:
-    """Create capability records for all configured API-key providers.
-
-    Uses a curated list of the best model per provider × task type.
-    These are the models the existing profiles.py chains use, so they
-    are guaranteed to be wired up in LiteLLM.
-
-    Note (v5.0): OpenAI and Gemini are now enumerated live by _scan_openai()
-    and _scan_gemini(). This function handles static-only providers and
-    Anthropic (which has no public /models endpoint).
-    """
-    # (provider, model_suffix, task_types, tier, cost_per_1k, latency_ms, ctx)
-    _PROVIDER_MODELS: list[tuple] = [
-        # Groq (free-tier rate limited — quota_type: daily_rate)
-        ("groq",   "groq/llama-3.3-70b-versatile",
-         frozenset({TaskType.QUERY, TaskType.GENERATE, TaskType.CODE, TaskType.ANALYZE}),
-         ProviderTier.FREE_CLOUD,  0.0,     400,  128_000),
-        ("groq",   "groq/qwen-qwq-32b",
-         frozenset({TaskType.CODE, TaskType.ANALYZE}),
-         ProviderTier.FREE_CLOUD,  0.0,     800,  128_000),
-        # DeepSeek
-        ("deepseek", "deepseek/deepseek-chat",
-         frozenset({TaskType.CODE, TaskType.ANALYZE, TaskType.GENERATE}),
-         ProviderTier.CHEAP_PAID,  0.00028, 1000, 64_000),
-        ("deepseek", "deepseek/deepseek-reasoner",
-         frozenset({TaskType.CODE, TaskType.ANALYZE}),
-         ProviderTier.CHEAP_PAID,  0.00055, 4000, 64_000),
-        # Perplexity (research only)
-        ("perplexity", "perplexity/sonar-pro",
-         frozenset({TaskType.RESEARCH}),
-         ProviderTier.CHEAP_PAID,  0.003,   1500, 200_000),
-        # Mistral
-        ("mistral", "mistral/mistral-large-latest",
-         frozenset({TaskType.CODE, TaskType.ANALYZE, TaskType.GENERATE}),
-         ProviderTier.CHEAP_PAID,  0.002,   900,  128_000),
-        # Together
-        ("together", "together_ai/meta-llama/Llama-3.3-70B-Instruct-Turbo",
-         frozenset({TaskType.QUERY, TaskType.GENERATE, TaskType.CODE}),
-         ProviderTier.CHEAP_PAID,  0.00088, 600,  128_000),
-        # Cohere
-        ("cohere", "cohere/command-r-plus",
-         frozenset({TaskType.QUERY, TaskType.GENERATE, TaskType.ANALYZE}),
-         ProviderTier.CHEAP_PAID,  0.0025,  1000, 128_000),
-    ]
-
-    available = cfg.available_providers
-    result = []
-
-    # Add static provider models (non-enumerable providers)
-    for provider, model_suffix, task_types, tier, cost, latency, ctx in _PROVIDER_MODELS:
-        if provider not in available:
-            continue
-        # Use model_suffix as the full model_id when it already contains a prefix,
-        # otherwise build "provider/model_suffix".
-        model_id = model_suffix if "/" in model_suffix else f"{provider}/{model_suffix}"
-        result.append(ModelCapability(
-            model_id=model_id,
-            provider=provider,
-            provider_tier=tier,
-            task_types=task_types,
-            cost_per_1k=cost,
-            latency_p50_ms=float(latency),
-            context_window=ctx,
-            available=True,
-        ))
-
-    # Add Anthropic models (no public /models endpoint, so static list)
-    if "anthropic" in available:
-        for model_id, task_types, tier, cost, latency, ctx in _ANTHROPIC_MODELS:
-            result.append(ModelCapability(
-                model_id=model_id,
-                provider="anthropic",
-                provider_tier=tier,
-                task_types=task_types,
-                cost_per_1k=cost,
-                latency_p50_ms=float(latency),
-                context_window=ctx,
-                available=True,
-            ))
-
+        result = False
+    
+    _ollama_cache[config.ollama_base_url] = (result, now)
     return result
 
 
-async def _scan_codex() -> list[ModelCapability]:
-    """Check if Codex CLI is available and add its models."""
-    try:
-        from llm_router.codex_agent import is_codex_plugin_available
-        if not is_codex_plugin_available():
-            return []
-    except Exception:
-        return []
-
-    # Codex CLI routes to OpenAI API under the hood (gpt-5.4 / o3)
-    # but uses the user's Codex prepaid quota — treated as FREE_CLOUD tier.
-    _CODEX_MODELS = [
-        ("codex/gpt-5.4",  frozenset({TaskType.CODE, TaskType.ANALYZE, TaskType.QUERY}), 600),
-        ("codex/o3",       frozenset({TaskType.CODE, TaskType.ANALYZE}),                 4000),
-    ]
-    return [
-        ModelCapability(
-            model_id=mid,
-            provider="codex",
-            provider_tier=ProviderTier.FREE_CLOUD,
-            task_types=task_types,
-            cost_per_1k=0.0,  # prepaid quota, not per-call billed
-            latency_p50_ms=float(lat),
-            context_window=200_000,
-            available=True,
-        )
-        for mid, task_types, lat in _CODEX_MODELS
-    ]
-
-
-# ── Curated static model lists for providers without enumeration APIs ──────────
-
-# Anthropic has no public /models endpoint — using curated list of latest models.
-_ANTHROPIC_ALL_TASKS = frozenset({
-    TaskType.CODE, TaskType.ANALYZE, TaskType.GENERATE, TaskType.QUERY
-})
-_ANTHROPIC_BASIC_TASKS = frozenset({TaskType.QUERY, TaskType.GENERATE, TaskType.CODE})
-
-_ANTHROPIC_MODELS = [
-    ("anthropic/claude-opus-4-6", _ANTHROPIC_ALL_TASKS,
-     ProviderTier.SUBSCRIPTION, 0.003, 2000, 200_000),
-    ("anthropic/claude-sonnet-4-6", _ANTHROPIC_ALL_TASKS,
-     ProviderTier.EXPENSIVE, 0.0005, 1500, 200_000),
-    ("anthropic/claude-haiku-4-5-20251001", _ANTHROPIC_BASIC_TASKS,
-     ProviderTier.CHEAP_PAID, 0.00008, 800, 200_000),
-]
-
-
-async def _scan_openai() -> list[ModelCapability]:
-    """Scan OpenAI API for available models.
-
-    Calls GET https://api.openai.com/v1/models with the configured API key.
-    Filters to models containing 'gpt', 'o1', 'o3', 'text-' or 'embedding-'.
-    Falls back gracefully if API key missing or request fails.
-
+def get_available_providers() -> set[str]:
+    """Get set of providers that are actually available.
+    
+    Checks:
+      - API keys configured in environment
+      - Ollama running and reachable
+      - Codex CLI installed (caller's responsibility to check)
+    
     Returns:
-        List of ModelCapability records for available OpenAI models, or [] on error.
+        Set of provider names like {"openai", "gemini", "ollama"}
     """
-    cfg = get_config()
-    if not cfg.openai_api_key:
-        return []
-
-    try:
-        # Query OpenAI models endpoint with timeout
-        url = "https://api.openai.com/v1/models"
-        req = urllib.request.Request(
-            url,
-            headers={"Authorization": f"Bearer {cfg.openai_api_key}"}
-        )
-        with urllib.request.urlopen(req, timeout=5) as resp:
-            data = json.loads(resp.read())
-    except Exception:
-        # Silent failure — will use static fallback list
-        return []
-
-    models = []
-    for entry in data.get("models", []):
-        model_id: str = entry.get("id", "")
-        if not model_id or model_id.startswith("babbage"):  # skip old models
-            continue
-
-        # Only include chat/completion models
-        if not any(x in model_id for x in ["gpt", "o1", "o3", "text-", "embedding-"]):
-            continue
-
-        # Classify task types based on model name
-        if "o3" in model_id or "o1" in model_id:
-            task_types = frozenset({TaskType.CODE, TaskType.ANALYZE})
-        elif "gpt-4" in model_id:
-            task_types = frozenset({TaskType.CODE, TaskType.ANALYZE, TaskType.GENERATE})
-        else:
-            task_types = frozenset({TaskType.QUERY, TaskType.GENERATE, TaskType.CODE})
-
-        # Determine tier and cost heuristically
-        if "o3" in model_id:
-            tier = ProviderTier.EXPENSIVE
-            cost = 0.004
-            latency = 3000.0
-        elif "o1" in model_id:
-            tier = ProviderTier.EXPENSIVE
-            cost = 0.015
-            latency = 5000.0
-        elif "gpt-4o" in model_id and "mini" not in model_id:
-            tier = ProviderTier.EXPENSIVE
-            cost = 0.005
-            latency = 1200.0
-        else:
-            tier = ProviderTier.CHEAP_PAID
-            cost = 0.00015
-            latency = 800.0
-
-        models.append(ModelCapability(
-            model_id=f"openai/{model_id}",
-            provider="openai",
-            provider_tier=tier,
-            task_types=task_types,
-            cost_per_1k=cost,
-            latency_p50_ms=latency,
-            context_window=128_000,
-            available=True,
-        ))
-
-    return models
+    config = get_config()
+    providers = set()
+    
+    # Check configured API keys
+    if config.openai_api_key:
+        providers.add("openai")
+    if config.gemini_api_key:
+        providers.add("gemini")
+    if config.perplexity_api_key:
+        providers.add("perplexity")
+    if config.anthropic_api_key and not config.llm_router_claude_subscription:
+        # In subscription mode, Claude is intentionally excluded
+        providers.add("anthropic")
+    if config.mistral_api_key:
+        providers.add("mistral")
+    if config.deepseek_api_key:
+        providers.add("deepseek")
+    if config.groq_api_key:
+        providers.add("groq")
+    if config.together_api_key:
+        providers.add("together")
+    if config.xai_api_key:
+        providers.add("xai")
+    if config.cohere_api_key:
+        providers.add("cohere")
+    
+    # Check Ollama
+    if is_ollama_available():
+        providers.add("ollama")
+    
+    return providers
 
 
-async def _scan_gemini() -> list[ModelCapability]:
-    """Scan Google Gemini API for available models.
-
-    Calls GET https://generativelanguage.googleapis.com/v1beta/models
-    with the configured API key. Filters to models supporting generateContent.
-    Falls back gracefully if API key missing or request fails.
-
+def filter_chain_by_availability(
+    chain: list[str],
+    available_providers: set[str] | None = None,
+) -> list[str]:
+    """Filter a model chain to only include available providers.
+    
+    Removes models whose provider is not in the available set.
+    Preserves order so highest-priority models stay first.
+    
+    Args:
+        chain: Ordered list of model IDs (e.g. ["anthropic/claude-haiku", "gemini/gemini-2.5-flash"])
+        available_providers: Set of available provider names. If None, discovers automatically.
+    
     Returns:
-        List of ModelCapability records for available Gemini models, or [] on error.
+        Filtered chain with only models from available providers.
     """
-    cfg = get_config()
-    if not cfg.gemini_api_key:
-        return []
-
-    try:
-        # Query Gemini models endpoint with timeout
-        url = f"https://generativelanguage.googleapis.com/v1beta/models?key={cfg.gemini_api_key}"
-        with urllib.request.urlopen(url, timeout=5) as resp:
-            data = json.loads(resp.read())
-    except Exception:
-        # Silent failure — will use static fallback list
-        return []
-
-    models = []
-    for entry in data.get("models", []):
-        model_id: str = entry.get("name", "")
-        if not model_id or "gemini" not in model_id.lower():
-            continue
-
-        # Extract just the model name (models/xyz -> xyz)
-        if "/" in model_id:
-            model_id = model_id.split("/")[-1]
-
-        # Only include models that support generateContent
-        supported_methods = entry.get("supportedGenerationMethods", [])
-        if "generateContent" not in supported_methods:
-            continue
-
-        # Classify task types based on model name
-        all_tasks = frozenset({
-            TaskType.CODE, TaskType.ANALYZE, TaskType.GENERATE, TaskType.QUERY
-        })
-        pro_tasks = frozenset({TaskType.CODE, TaskType.ANALYZE, TaskType.GENERATE})
-
-        if "pro" in model_id.lower():
-            task_types = pro_tasks
-            tier = ProviderTier.EXPENSIVE
-            cost = 0.00125
-            latency = 2000.0
-        else:
-            task_types = all_tasks
-            tier = ProviderTier.CHEAP_PAID
-            cost = 0.000075
-            latency = 600.0
-
-        models.append(ModelCapability(
-            model_id=f"gemini/{model_id}",
-            provider="gemini",
-            provider_tier=tier,
-            task_types=task_types,
-            cost_per_1k=cost,
-            latency_p50_ms=latency,
-            context_window=1_000_000,
-            available=True,
-        ))
-
-    return models
+    if available_providers is None:
+        available_providers = get_available_providers()
+    
+    # Always allow local providers (codex, ollama) even if they need special handling
+    available_providers = available_providers | {"codex", "ollama"}
+    
+    filtered = [
+        m for m in chain
+        if provider_from_model(m) in available_providers
+    ]
+    
+    return filtered
 
 
-# ── Model classification helpers ──────────────────────────────────────────────
-
-
-def _classify_ollama_model(name: str) -> tuple[frozenset[TaskType], str]:
-    """Map an Ollama model name to task types and benchmark alias."""
-    name_lower = name.lower().split(":")[0]  # strip tag (e.g. ":latest")
-    for prefix, task_types, alias in _OLLAMA_MODEL_REGISTRY:
-        if name_lower.startswith(prefix):
-            return task_types, alias
-    # Unknown model — assume general purpose
-    return frozenset({TaskType.QUERY, TaskType.GENERATE, TaskType.CODE}), name_lower
-
-
-def _estimate_latency(param_size_str: str) -> float:
-    """Estimate P50 latency from parameter size string (e.g. ``"32B"``)."""
-    try:
-        # Strip non-numeric suffix (B, M, K) and convert
-        s = param_size_str.upper().rstrip("B").rstrip("M").rstrip("K")
-        params_b = float(s)
-        if "M" in param_size_str.upper():
-            params_b /= 1000.0
-    except (ValueError, AttributeError):
-        return 1500.0  # unknown — assume mid-range
-
-    for threshold, latency in _PARAM_LATENCY_MS:
-        if params_b <= threshold:
-            return latency
-    return 8000.0
-
-
-def _estimate_context(details: dict) -> int:
-    """Estimate context window from Ollama model details."""
-    # Ollama doesn't expose context window in /api/tags; use family heuristics.
-    family = (details.get("family") or "").lower()
-    families = [f.lower() for f in (details.get("families") or [])]
-    all_families = {family} | set(families)
-
-    if any(f in all_families for f in ("qwen3", "qwen2.5", "llama3")):
-        return 128_000
-    if any(f in all_families for f in ("gemma4", "gemma")):
-        return 128_000
-    if "mistral" in all_families:
-        return 32_000
-    return 8_192
-
-
-# ── Convenience: quota type description ──────────────────────────────────────
-
-
-def quota_type_for(cap: ModelCapability) -> str:
-    """Return a human-readable quota type string for *cap*.
-
-    Used in dashboard output to explain why a model's availability changes.
-
-    Returns one of: ``"none"``, ``"session_window"``, ``"daily_rate"``,
-    ``"monthly_requests"``, ``"monthly_spend"``.
+async def discover_and_build_chain(
+    static_chain: list[str],
+) -> list[str]:
+    """Discover available providers and build dynamic chain.
+    
+    This is the main entry point for dynamic chain building. It:
+      1. Discovers what's actually available (Ollama, API keys, etc)
+      2. Filters the static chain to only available providers
+      3. Returns the dynamically filtered chain
+    
+    The static chain from profiles.py is treated as the preference order,
+    and dynamic discovery simply removes unavailable options while preserving
+    the preference order.
+    
+    Args:
+        static_chain: The base chain from profiles.py for this profile/task
+    
+    Returns:
+        Filtered chain with only available providers
     """
-    if cap.provider in LOCAL_PROVIDERS:
-        return "none"
-    if cap.provider == "anthropic":
-        return "session_window"  # 5h session + weekly
-    if cap.provider == "groq":
-        return "daily_rate"       # tokens/day + requests/min
-    if cap.provider == "huggingface":
-        return "monthly_requests"  # HF free tier
-    if cap.provider == "codex":
-        return "monthly_spend"     # Codex prepaid quota
-    return "monthly_spend"         # generic API key provider
+    try:
+        available = await asyncio.to_thread(get_available_providers)
+    except Exception as e:
+        log.warning("Discovery failed, using static chain: %s", e)
+        return static_chain
+    
+    filtered = filter_chain_by_availability(static_chain, available)
+    
+    if not filtered and static_chain:
+        log.warning(
+            "All models filtered out by availability — no providers configured. "
+            "Static chain: %s | Available: %s",
+            static_chain, available
+        )
+        return static_chain
+    
+    return filtered
+
+
+@lru_cache(maxsize=1)
+def get_cached_ollama_models() -> list[str]:
+    """Get cached list of Ollama models (populated by discovery).
+    
+    Returns:
+        List of ollama/model-name strings, or empty if Ollama not available
+    """
+    if not is_ollama_available():
+        return []
+    
+    config = get_config()
+    if not config.ollama_base_url:
+        return []
+    
+    try:
+        import urllib.request
+        import json
+        
+        with urllib.request.urlopen(
+            f"{config.ollama_base_url}/api/tags",
+            timeout=2
+        ) as response:
+            data = json.loads(response.read().decode())
+            models = data.get("models", [])
+            return [f"ollama/{m.get('name', '')}" for m in models if m.get('name')]
+    except Exception as e:
+        log.debug("Failed to list Ollama models: %s", e)
+        return []
