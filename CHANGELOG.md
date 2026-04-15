@@ -1,5 +1,23 @@
 # Changelog
 
+## v5.5.1 — Documentation & Linting Updates (2026-04-15)
+
+### Fixed
+
+- **Unused imports cleanup** — Removed unused imports from `cli_init_memory.py`, `discover.py`, and `dynamic_routing.py` to pass linting checks.
+- **Import organization** — Reorganized module-level imports in `discover.py` to follow PEP 8 conventions (imports at top of file).
+
+### Documentation
+
+- **README.md updates** — Added comprehensive v5.5.0 feature documentation including security-friendly configuration setup, auto-discovery workflow, and Claude Code memory integration.
+
+### Technical Notes
+
+- Patch release focused on code quality and documentation
+- All 940+ tests passing
+- No breaking changes
+- Ready for production
+
 ## v5.5.0 — Security-Friendly Configuration + Auto-Discovery Memory System (2026-04-15)
 
 ### Added
