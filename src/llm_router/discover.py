@@ -252,14 +252,21 @@ async def discover_and_build_chain(
     return filtered
 
 
-def _load_cache() -> dict | None:
+def _load_cache(ttl: int = 3600) -> dict | None:
     """Load discovery cache from disk if it exists and is recent.
     
+    Validates that cached data is well-formed (all required fields present, enum values valid).
+    Returns None if cache is missing, expired, or corrupted.
+    
+    Args:
+        ttl: Time-to-live in seconds (default: 3600 = 1 hour)
+    
     Returns:
-        Dict with cached models or None if cache doesn't exist/expired.
+        Dict with cached models or None if cache doesn't exist/expired/corrupted.
     """
     import json
     import time
+    from llm_router.types import ModelCapability, ProviderTier, TaskType
     
     if not os.path.exists(_DISCOVERY_CACHE):
         return None
@@ -268,11 +275,33 @@ def _load_cache() -> dict | None:
         with open(_DISCOVERY_CACHE) as f:
             data = json.load(f)
         
-        # Cache expires after 1 hour
-        if time.time() - data.get("cached_at", 0) > 3600:
+        # Check if cache has expired
+        if time.time() - data.get("cached_at", 0) > ttl:
             return None
         
-        return data.get("models", {})
+        models = data.get("models", {})
+        
+        # Validate cache by trying to parse each model into ModelCapability
+        # This ensures the cache has valid enum values and required fields
+        for model_id, model_data in models.items():
+            try:
+                # Validate required fields
+                if "model_id" not in model_data or "provider" not in model_data or "provider_tier" not in model_data:
+                    log.debug("Cache entry missing required field: %s", model_id)
+                    return None
+                
+                # Validate enum values by trying to construct them
+                ProviderTier(model_data["provider_tier"])  # raises ValueError if invalid
+                
+                # Validate task_types if present
+                if "task_types" in model_data:
+                    for tt in model_data["task_types"]:
+                        TaskType(tt)  # raises ValueError if invalid
+            except (ValueError, KeyError) as e:
+                log.debug("Cache validation failed for %s: %s", model_id, e)
+                return None
+        
+        return models
     except Exception as e:
         log.debug("Failed to load discovery cache: %s", e)
         return None

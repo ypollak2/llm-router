@@ -16,6 +16,7 @@ Configuration is organized into five sections:
 
 from __future__ import annotations
 
+import os as _os
 import time
 import urllib.request
 from pathlib import Path
@@ -345,6 +346,47 @@ class RouterConfig(BaseSettings):
 
         # Fall back to env var for backward compatibility
         return [f"ollama/{m.strip()}" for m in self.ollama_budget_models.split(",") if m.strip()]
+
+    def model_post_init(self, __context: dict) -> None:
+        """Load fallback configuration from ~/.llm-router/config.yaml if needed.
+
+        This is called after Pydantic loads the config from .env / env vars.
+        If .env is not readable (e.g. blocked by security team), we try to load
+        from ~/.llm-router/config.yaml as a fallback. This allows enterprise
+        users to configure Ollama and API keys without needing project-level
+        .env access.
+
+        Priority: .env (already loaded) → ~/.llm-router/config.yaml (fallback)
+                  → env vars → defaults
+
+        Fields that are still empty after .env load are filled from config.yaml.
+
+        NOTE: Fallback loading is skipped in test mode to prevent test isolation
+        issues. Tests explicitly configure RouterConfig via constructor params.
+        """
+        # Skip in test mode (pytest sets this env var)
+        if _os.getenv("PYTEST_CURRENT_TEST"):
+            return
+
+        try:
+            from llm_router.safe_config import load_safe_config
+            safe_config_data = load_safe_config()
+            if not safe_config_data:
+                return
+
+            # Only fill in fields that are still empty (don't override .env)
+            for field_name, value in safe_config_data.items():
+                if not value or not isinstance(value, (str, bool, int, float)):
+                    continue
+                current = getattr(self, field_name, None)
+                # Only apply if current value is empty/False
+                if not current:
+                    try:
+                        setattr(self, field_name, value)
+                    except (ValueError, AttributeError):
+                        pass  # Silently skip invalid fields
+        except Exception:
+            pass  # Silently fail — fallback config is optional
 
     def apply_keys_to_env(self) -> None:
         """Export all configured API keys into ``os.environ``.

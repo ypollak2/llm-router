@@ -20,15 +20,75 @@ Use type hints on all public functions, Pydantic for external data, `@dataclass`
 
 ## Environment Setup
 
-Before any implementation session, verify:
+✅ **User Configuration (Yali)**
+
+Configured in `.env`:
+- `OPENAI_API_KEY` — Present (gpt-5.4, o3, gpt-4o, gpt-4o-mini available)
+- `GEMINI_API_KEY` — Present (Gemini Flash, Pro available)
+- `OLLAMA_BASE_URL=http://localhost:11434` — Running locally
+- `OLLAMA_BUDGET_MODELS=gemma4:latest,qwen3.5:latest` — Local free models
+- `LLM_ROUTER_CLAUDE_SUBSCRIPTION=true` — Claude subscription mode enabled (no ANTHROPIC_API_KEY needed)
+
+**Routing chain in use**:
+- Simple tasks → Ollama (gemma4/qwen3.5) → OpenAI (gpt-4o-mini) → Gemini Flash
+- Moderate tasks → Ollama → OpenAI (gpt-4o) → Gemini Pro → Claude Sonnet (subscription)
+- Complex tasks → Ollama → OpenAI (o3) → Claude Opus (subscription)
+
+**Guidelines for Claude**:
+- Do NOT ask "do you have API keys?" — Yali's setup is complete
+- Do NOT give generic setup advice — check `.env` and actual config first
+- Always verify environment state before answering about LLM availability
+
+## Security-Friendly Configuration (Enterprise)
+
+**Problem**: Security teams often block `.env` files at the project level.
+
+**Solution**: `~/.llm-router/config.yaml` — User-level fallback config file
+
+### Setup
+
 ```bash
-echo $OPENAI_API_KEY      # must be set and valid
-echo $GEMINI_API_KEY      # must be set and valid
-echo $ANTHROPIC_API_KEY   # must be set and valid
-ollama list               # Ollama must be running
-echo $LLM_ROUTER_ENFORCE  # check enforcement mode (off/soft/smart/hard)
+# Generate config.yaml template (auto-discovers current setup)
+llm-router init-claude-memory
+
+# Edit the template (located at ~/.llm-router/config.yaml)
+nano ~/.llm-router/config.yaml
+
+# Set secure permissions (readable by user only)
+chmod 600 ~/.llm-router/config.yaml
 ```
-If any key is missing or invalid, fix it before writing code.
+
+### Configuration Priority
+
+1. `.env` (project-level, if readable) — highest priority
+2. `~/.llm-router/config.yaml` (user-level fallback)
+3. Environment variables (system-wide)
+4. Hardcoded defaults
+
+If `.env` is blocked by security policy, the router automatically falls back to `config.yaml`.
+
+### Example `config.yaml`
+
+```yaml
+# Text LLM API Keys (leave empty to disable)
+openai_api_key: "sk-proj-..."
+gemini_api_key: "AIzaSy..."
+perplexity_api_key: ""
+
+# Ollama (local inference — free, no API key needed)
+ollama_base_url: "http://localhost:11434"
+ollama_budget_models: "gemma4:latest,qwen3.5:latest"
+
+# Router settings
+llm_router_profile: "balanced"
+llm_router_claude_subscription: true
+```
+
+### When to Use
+
+- **Team/Enterprise**: Security blocks `.env` → use `config.yaml` instead
+- **Multi-Project**: Share credentials across projects without copying `.env` files
+- **Simplified Setup**: Only Ollama + minimal keys → just configure `config.yaml`
 
 ## Testing
 

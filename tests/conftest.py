@@ -28,6 +28,8 @@ def _reset_singletons():
 @pytest.fixture
 def mock_env(monkeypatch):
     """Set up test environment variables."""
+    from llm_router.types import BudgetState
+    
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test-anthropic-key")
     monkeypatch.setenv("GEMINI_API_KEY", "test-gemini-key")
     monkeypatch.setenv("OPENAI_API_KEY", "test-openai-key")
@@ -44,6 +46,12 @@ def mock_env(monkeypatch):
     # but Ollama routing requires a running server. Unit tests that specifically
     # exercise Ollama injection should set OLLAMA_BASE_URL themselves.
     monkeypatch.setenv("OLLAMA_BASE_URL", "")
+    # Mock budget pressure to 0.0 for all providers so tests aren't affected by
+    # real system budget state. Tests that specifically want to test budget
+    # pressure behavior should patch this themselves.
+    async def mock_get_budget_state(provider: str) -> BudgetState:
+        return BudgetState(provider=provider, pressure=0.0)
+    monkeypatch.setattr("llm_router.router.get_budget_state", mock_get_budget_state)
 
 
 @pytest.fixture

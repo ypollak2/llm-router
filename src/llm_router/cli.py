@@ -108,6 +108,9 @@ def main() -> None:
         _run_setup()
     elif args and args[0] == "status":
         _run_status()
+    elif args and args[0] == "init-claude-memory":
+        from llm_router.cli_init_memory import run_init_claude_memory
+        run_init_claude_memory()
     elif args and args[0] == "doctor":
         host_flag = None
         if "--host" in args:
