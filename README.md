@@ -69,6 +69,14 @@ LLM_ROUTER_CLAUDE_SUBSCRIPTION=true
 
 ---
 
+## New in v5.5.0
+
+- **Security-Friendly YAML Configuration**: Enterprises with .env restrictions can now store API keys in `~/.llm-router/config.yaml` (permissions: 600). Priority order: .env (project) → config.yaml (user home) → env vars → defaults. Run `llm-router init-claude-memory` to auto-discover and generate the template.
+- **Auto-Discovery Initialization**: New `llm-router init-claude-memory` command auto-detects which API keys and local models are configured, generates `~/.llm-router/config.yaml`, and persists setup to Claude Code memory (`~/.claude/projects/*/memory/`) so future sessions don't repeat environment discovery.
+- **Claude Code Memory Integration**: Persistent storage of environment configuration prevents repetitive "what API keys do you have?" questions across sessions. Memory survives session restarts and context compaction.
+
+---
+
 ## New in v5.3.0
 
 - **Sidecar routing service**: llm-router now runs as independent FastAPI service (localhost:7337) for classification, eliminating blocking and enabling zero-deadlock operation with Serena, Obsidian, and all other MCP servers.
