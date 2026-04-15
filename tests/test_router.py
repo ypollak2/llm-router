@@ -151,7 +151,11 @@ async def test_content_filter_error_is_silent_fallback(mock_env, mock_litellm_re
 
 
 @pytest.mark.asyncio
-async def test_skips_model_when_budget_exhausts_mid_chain(mock_env, mock_litellm_response):
+async def test_skips_model_when_budget_exhausts_mid_chain(mock_env, mock_litellm_response, monkeypatch):
+    # Enable Ollama for this test so it gets injected in the chain
+    monkeypatch.setenv("OLLAMA_BASE_URL", "http://localhost:11434")
+    monkeypatch.setenv("OLLAMA_BUDGET_MODELS", "llama3.2,qwen2.5-coder:7b")
+    
     chain = [
         "openai/gpt-4o",
         "gemini/gemini-2.5-flash",
@@ -180,10 +184,11 @@ async def test_skips_model_when_budget_exhausts_mid_chain(mock_env, mock_litellm
         with patch("litellm.completion_cost", return_value=0.001):
             with patch("llm_router.router.get_model_chain", return_value=chain):
                 with patch("llm_router.router.get_budget_state", side_effect=budget_side_effect):
-                    resp = await route_and_call(
-                        TaskType.QUERY, "Hello",
-                        profile=RoutingProfile.BALANCED,
-                    )
+                    with patch("llm_router.chain_builder.build_chain", return_value=[]):
+                        resp = await route_and_call(
+                            TaskType.QUERY, "Hello",
+                            profile=RoutingProfile.BALANCED,
+                        )
 
     # Ollama is injected first (free-first), and succeeds with 0.0 pressure
     assert resp.model.startswith("ollama/")
