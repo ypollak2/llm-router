@@ -15,27 +15,36 @@ def _reset_singletons():
     import llm_router.config as config_mod
     import llm_router.context as context_mod
     import llm_router.health as health_mod
+    import llm_router.discover as discover_mod
 
     config_mod._config = None
     health_mod._tracker = None
     context_mod._session_buffer = None
+    discover_mod._discovery_cache = None
     yield
     config_mod._config = None
     health_mod._tracker = None
     context_mod._session_buffer = None
+    discover_mod._discovery_cache = None
 
 
 @pytest.fixture
 def mock_env(monkeypatch):
     """Set up test environment variables."""
     from llm_router.types import BudgetState
-    
+
+    # Set all provider API keys to enable routing
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test-anthropic-key")
     monkeypatch.setenv("GEMINI_API_KEY", "test-gemini-key")
     monkeypatch.setenv("OPENAI_API_KEY", "test-openai-key")
     monkeypatch.setenv("PERPLEXITY_API_KEY", "test-perplexity-key")
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "test-deepseek-key")
+    monkeypatch.setenv("GROQ_API_KEY", "test-groq-key")
+    monkeypatch.setenv("MISTRAL_API_KEY", "test-mistral-key")
     monkeypatch.setenv("LLM_ROUTER_PROFILE", "balanced")
-    monkeypatch.setenv("LLM_ROUTER_CLAUDE_SUBSCRIPTION", "false")
+    # Pydantic requires boolean env vars to be "0", "false", "False", "FALSE", "no" for False
+    # Setting to "0" ensures it's parsed as False, not truthy like the string "false"
+    monkeypatch.setenv("LLM_ROUTER_CLAUDE_SUBSCRIPTION", "0")
     # Disable Codex in unit tests — the binary may be installed locally but
     # Codex CLI requires a trusted git directory and an active session, which
     # unit tests don't provide. Tests that specifically exercise Codex routing
