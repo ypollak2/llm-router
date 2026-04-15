@@ -332,20 +332,21 @@ class TestAlwaysOnDynamic:
         assert not hasattr(chain_builder, "is_dynamic_routing_enabled"), \
             "is_dynamic_routing_enabled() must be removed — dynamic routing is always on"
 
-    def test_router_calls_build_chain_not_just_static(self):
-        """Verify that router code calls build_chain for dynamic routing."""
-        # This test checks that _build_and_filter_chain calls build_chain
-        # The actual complex signature is tested elsewhere; here we just verify
-        # that the dynamic routing path is taken by checking the code
+    def test_router_calls_dynamic_routing_tables(self):
+        """Verify that router uses dynamic routing tables from session startup."""
+        # v5.4.1+: Router uses pre-built dynamic routing tables instead of per-request
+        # discovery. Dynamic tables are built once at session start via
+        # initialize_dynamic_routing() in server.py startup sequence.
         from llm_router import router
         import inspect
 
         source = inspect.getsource(router._build_and_filter_chain)
-        # Should call build_chain for dynamic routing
-        assert "build_chain" in source
-        # Should have try/except fallback
-        assert "await build_chain" in source
+        # Should look up dynamic routing tables first
+        assert "get_dynamic_model_chain" in source
+        # Should fall back to static chain if dynamic tables unavailable
         assert "get_model_chain" in source
+        # Should have try/except for graceful fallback
+        assert "except" in source
 
 
 # ── Phase 4: Sidecar /score Endpoint ──────────────────────────────────────────

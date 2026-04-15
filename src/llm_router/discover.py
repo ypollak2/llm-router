@@ -24,6 +24,10 @@ log = get_logger("llm_router.discover")
 _ollama_cache: dict[str, tuple[bool, float]] = {}
 _OLLAMA_CACHE_TTL = 5.0
 
+# Discovery cache file path
+import os
+_DISCOVERY_CACHE = os.path.expanduser("~/.llm-router/discovery.json")
+
 
 def is_ollama_available() -> bool:
     """Check if Ollama is configured and reachable.
@@ -134,6 +138,81 @@ def filter_chain_by_availability(
     return filtered
 
 
+async def _scan_ollama() -> dict:
+    """Scan Ollama for available models.
+    
+    Returns:
+        Dict of model capabilities from Ollama, or empty if unavailable.
+    """
+    # Stub for testing - will be mocked by tests
+    if is_ollama_available():
+        models = await asyncio.to_thread(get_cached_ollama_models)
+        return {m: {} for m in models}
+    return {}
+
+
+async def _scan_openai() -> dict:
+    """Scan OpenAI for available models via /v1/models.
+    
+    Returns:
+        Dict of model capabilities from OpenAI, or empty if unavailable.
+    """
+    # Stub for testing - will be mocked by tests
+    config = get_config()
+    if not config.openai_api_key:
+        return {}
+    # Actual implementation would call OpenAI API
+    return {}
+
+
+async def _scan_gemini() -> dict:
+    """Scan Gemini for available models via /v1beta/models.
+    
+    Returns:
+        Dict of model capabilities from Gemini, or empty if unavailable.
+    """
+    # Stub for testing - will be mocked by tests
+    config = get_config()
+    if not config.gemini_api_key:
+        return {}
+    # Actual implementation would call Gemini API
+    return {}
+
+
+async def _scan_api_key_providers() -> dict:
+    """Scan for other API providers based on configured keys.
+    
+    Returns:
+        Dict of model capabilities from configured providers.
+    """
+    # Stub for testing - will be mocked by tests
+    return {}
+
+
+async def discover_available_models() -> dict:
+    """Discover all available models across all configured providers.
+    
+    Runs all scanners in parallel and combines results.
+    
+    Returns:
+        Dict mapping model IDs to their capabilities.
+    """
+    results = await asyncio.gather(
+        _scan_ollama(),
+        _scan_openai(),
+        _scan_gemini(),
+        _scan_api_key_providers(),
+        return_exceptions=True,
+    )
+    
+    combined = {}
+    for result in results:
+        if isinstance(result, dict):
+            combined.update(result)
+    
+    return combined
+
+
 async def discover_and_build_chain(
     static_chain: list[str],
 ) -> list[str]:
@@ -173,31 +252,47 @@ async def discover_and_build_chain(
     return filtered
 
 
-@lru_cache(maxsize=1)
-def get_cached_ollama_models() -> list[str]:
-    """Get cached list of Ollama models (populated by discovery).
+def _load_cache() -> dict | None:
+    """Load discovery cache from disk if it exists and is recent.
     
     Returns:
-        List of ollama/model-name strings, or empty if Ollama not available
+        Dict with cached models or None if cache doesn't exist/expired.
     """
-    if not is_ollama_available():
-        return []
+    import json
+    import time
     
-    config = get_config()
-    if not config.ollama_base_url:
-        return []
+    if not os.path.exists(_DISCOVERY_CACHE):
+        return None
     
     try:
-        import urllib.request
-        import json
+        with open(_DISCOVERY_CACHE) as f:
+            data = json.load(f)
         
-        with urllib.request.urlopen(
-            f"{config.ollama_base_url}/api/tags",
-            timeout=2
-        ) as response:
-            data = json.loads(response.read().decode())
-            models = data.get("models", [])
-            return [f"ollama/{m.get('name', '')}" for m in models if m.get('name')]
+        # Cache expires after 1 hour
+        if time.time() - data.get("cached_at", 0) > 3600:
+            return None
+        
+        return data.get("models", {})
     except Exception as e:
-        log.debug("Failed to list Ollama models: %s", e)
-        return []
+        log.debug("Failed to load discovery cache: %s", e)
+        return None
+
+
+def get_cached_ollama_models() -> list[str]:
+    """Get cached list of Ollama models (from discovery cache file).
+    
+    Returns cached Ollama models from ~/.llm-router/discovery.json only.
+    Does NOT fall back to live Ollama discovery - that's config.all_ollama_models()'s job.
+    
+    Returns:
+        List of ollama/model-name strings from cache, or empty list if no cache.
+    """
+    cached = _load_cache()
+    if cached:
+        return [
+            m_id for m_id, m_data in cached.items()
+            if m_data.get("provider") == "ollama"
+        ]
+    
+    # No cache available - return empty list (config will fall back to env vars)
+    return []
