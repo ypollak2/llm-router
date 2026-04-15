@@ -69,13 +69,17 @@ LLM_ROUTER_CLAUDE_SUBSCRIPTION=true
 
 ---
 
-## New in v5.2.0
+## New in v5.3.0
 
-- **Safer routing under pressure**: providers refresh budget pressure per attempt, fallback chains deduplicate cleanly, and hook IPC writes are atomic.
-- **Production-grade observability**: the hot path now emits structured logs and optional OpenTelemetry spans for classify → score → build chain → provider call.
-- **Classifier quality you can measure**: the classifier prompt is versioned in-repo and ships with a 100-example eval harness.
-- **Release flow you can repeat**: `scripts/release.py` synchronizes versions, verifies metadata, builds artifacts, and drives the publish/tag workflow from one command.
-- **CI is stricter again**: the integration suite is back in CI, with mocked coverage for end-to-end routing behavior.
+- **Sidecar routing service**: llm-router now runs as independent FastAPI service (localhost:7337) for classification, eliminating blocking and enabling zero-deadlock operation with Serena, Obsidian, and all other MCP servers.
+- **Context-aware routing**: high-confidence matches only (heuristic patterns) emit routing directives; medium/low confidence prompts allowed unconditionally. Infrastructure tools automatically skipped.
+- **Observation-only enforcement**: enforce-route hook changed to logging-only mode (never blocks), preventing deadlocks and ensuring Serena/MCP tools always work.
+- **TOCTOU budget enforcement**: concurrent routing calls reserve budget atomically before dispatch, preventing multiple calls from slipping under daily/monthly limits. Fixed via `_pending_spend` global with `_budget_lock` protection.
+- **Emergency fallback chain**: when the primary profile exhausts all capable models, automatically escalate to BUDGET chain to prevent complete routing failure.
+- **Dashboard authentication**: token-based auth middleware for the optional dashboard UI, with secure token generation and storage.
+- **Correlation ID tracking**: every routing call gets a unique 8-char ID for distributed tracing; logged in both usage and routing_decisions tables.
+- **Async/event-loop safety**: eliminated synchronous filesystem I/O blocking the event loop in budget checks and Claude subscription state reads via `asyncio.to_thread()`.
+- **Route refactoring**: extracted `_dispatch_model_loop()` to reduce `route_and_call()` from 960 to 527 lines; added helper functions `_resolve_profile()` and `_build_and_filter_chain()`.
 
 ---
 

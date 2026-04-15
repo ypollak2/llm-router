@@ -12,6 +12,10 @@
 
 ### Added
 
+- **Sidecar routing service** — New FastAPI service (`src/llm_router/service.py`) running on localhost:7337 with heuristic classification. Hook connects via non-blocking HTTP client (`hook_client.py`) with 0.5s timeout. Graceful degradation: if service unavailable, all tools allowed unconditionally. Eliminates previous hook hangs by moving classification off the hot path.
+- **Context-aware routing** — Service detects infrastructure operations (`mcp__plugin_*`, system tools like Bash/Read/Edit) and skips routing for them. Prevents Serena, Obsidian, and other MCP servers from being blocked or rerouted.
+- **Observation-only enforcement hook** — `enforce-route.py` changed from blocking to logging-only mode. All tools allowed; violations are recorded to SQLite for analytics but never block execution. Breaks deadlock loops.
+- **Service lifecycle management** — `service_manager.py` handles process lifecycle: starts on session-start with health checks (max 5s), stops on session-end with graceful shutdown (SIGTERM→SIGKILL). PID persisted in `~/.llm-router/service.pid`.
 - **Correlation ID tracking** — `route_and_call()` generates a `uuid4().hex[:8]` correlation ID per call, stored in both `usage` and `routing_decisions` SQLite tables (`correlation_id TEXT` column added via idempotent migration). Enables log↔DB joins for debugging.
 - **DB indices for query performance** — four new `CREATE INDEX IF NOT EXISTS` statements on `usage(provider, timestamp)`, `usage(model, timestamp)`, `routing_decisions(timestamp)`, and `routing_decisions(final_model)`.
 - **Session spend reset documentation** — `session_spend.py` now documents the known limitation that `_pending_spend` resets on MCP server restart, with the recommended workaround (`LLM_ROUTER_MONTHLY_BUDGET`).

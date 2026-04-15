@@ -184,6 +184,7 @@ async def llm_fs_analyze_context(
         path: Workspace root to analyze (default: current directory).
         max_files: Maximum files to read (default: 20).
     """
+    import asyncio
     import json as _json
     import time as _time
     from pathlib import Path as _Path
