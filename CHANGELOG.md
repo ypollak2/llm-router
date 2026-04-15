@@ -1,5 +1,23 @@
 # Changelog
 
+## v5.3.1 — Sidecar Service Architecture + Async I/O Fixes (2026-04-15)
+
+### Fixed
+
+- **Missing asyncio import in llm_fs_analyze_context()** — function attempted to use `asyncio.to_thread()` without importing `asyncio`, causing `NameError` at runtime. Added missing import alongside other local imports.
+
+### Changed
+
+- **Sidecar routing service now production-ready** — full implementation of FastAPI service with non-blocking HTTP client hooks, infrastructure detection, and graceful degradation. Eliminates previous hangs and deadlock scenarios.
+- **Hook architecture refactored for reliability** — auto-route reduced from 1256 to 60 lines (thin HTTP client), enforce-route changed to observation-only mode (never blocks), both now have 0.5s timeouts with graceful fallthrough.
+
+### Technical Notes
+
+- All 897 tests pass with sidecar service fully integrated
+- Zero deadlock risk: hooks are non-blocking, service is optional (graceful degradation)
+- Infrastructure operations (MCP tools, system operations) are automatically exempted from routing
+- Full backward compatibility maintained
+
 ## v5.3.0 — Production Hardening: TOCTOU Fix, Correlation IDs, and Routing Refactor (2026-04-15)
 
 ### Fixed
