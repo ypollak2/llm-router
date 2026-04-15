@@ -359,15 +359,19 @@ async def _setup_discover() -> str:
             found.append((provider, f"env: ${env_var}", masked))
 
     # 2. Check common .env file locations (read-only, no writes)
+    import asyncio
+
     env_paths = [
         Path.home() / ".env",
         Path.cwd() / ".env",
         Path.home() / ".config" / "llm-router" / ".env",
     ]
     for env_path in env_paths:
-        if env_path.exists():
+        # Offload synchronous Path.exists() to thread pool to avoid blocking event loop
+        exists = await asyncio.to_thread(env_path.exists)
+        if exists:
             try:
-                content = env_path.read_text()
+                content = await asyncio.to_thread(env_path.read_text)
                 for provider, reg in _PROVIDER_REGISTRY.items():
                     env_var = reg["env_var"]
                     for line in content.splitlines():

@@ -1,0 +1,132 @@
+- generic [ref=e3]:
+  - link "Skip to main content" [ref=e4] [cursor=pointer]:
+    - /url: "#main-content"
+  - banner [ref=e5]:
+    - generic [ref=e6]:
+      - generic [ref=e7]:
+        - img "Anaplan logo" [ref=e8]
+        - generic [ref=e9]:
+          - heading "Anaplan ML Framework" [level=1] [ref=e10]
+          - paragraph [ref=e11]: Intelligent Pipeline Orchestration
+      - navigation "Main navigation" [ref=e12]:
+        - link "Pipelines" [ref=e13] [cursor=pointer]:
+          - /url: /
+        - link "⬡ Architect" [ref=e14] [cursor=pointer]:
+          - /url: /architect
+        - link "Data" [ref=e15] [cursor=pointer]:
+          - /url: /data
+        - link "Agent" [ref=e16] [cursor=pointer]:
+          - /url: /conversations
+        - link "Governance" [ref=e17] [cursor=pointer]:
+          - /url: /governance
+        - link "Anaplan" [ref=e18] [cursor=pointer]:
+          - /url: /anaplan
+        - link "Schedules" [ref=e19] [cursor=pointer]:
+          - /url: /schedules
+        - link "Admin" [ref=e20] [cursor=pointer]:
+          - /url: /admin
+      - navigation "Header actions" [ref=e21]:
+        - button "Switch to dark mode" [ref=e22] [cursor=pointer]:
+          - img [ref=e23]
+        - status "Demo mode active" [ref=e25]: Demo Mode
+  - main [ref=e27]:
+    - application "ML Analysis Dashboard" [ref=e28]:
+      - generic [ref=e29]:
+        - region "Analysis input" [ref=e30]:
+          - generic [ref=e31]:
+            - heading "What do you want to analyze?" [level=2] [ref=e32]
+            - paragraph [ref=e33]: Describe your analysis goal in plain English
+          - form "ML analysis request" [ref=e35]:
+            - generic [ref=e36]:
+              - group "Quick start" [ref=e37]:
+                - generic [ref=e38]: Quick start
+                - list "Demo scenarios" [ref=e39]:
+                  - 'listitem "Run Customer Churn Prevention: Identify at-risk accounts with churn drivers and recommended actions" [ref=e40] [cursor=pointer]':
+                    - generic [ref=e41]:
+                      - generic [ref=e42]: Classify
+                      - generic [ref=e43]:
+                        - generic [ref=e44]: Customer Churn Prevention
+                        - generic [ref=e45]: Sarah, Customer Success Manager
+                  - 'listitem "Run Financial Anomaly Investigation: Detect budget anomalies with sub-account localization and driver analysis" [ref=e46] [cursor=pointer]':
+                    - generic [ref=e47]:
+                      - generic [ref=e48]: Anomaly
+                      - generic [ref=e49]:
+                        - generic [ref=e50]: Financial Anomaly Investigation
+                        - generic [ref=e51]: David, Finance Analyst
+                  - 'listitem "Run Account Segmentation for Quota Planning: Group accounts by behavioral similarity and score each segment''s potential" [ref=e52] [cursor=pointer]':
+                    - generic [ref=e53]:
+                      - generic [ref=e54]: Cluster
+                      - generic [ref=e55]:
+                        - generic [ref=e56]: Account Segmentation for Quota Planning
+                        - generic [ref=e57]: Alex, Sales Operations
+                  - 'listitem "Run CRM Account Quota Planning: Cluster CRM accounts by performance metrics and score revenue potential for quota allocation" [ref=e58] [cursor=pointer]':
+                    - generic [ref=e59]:
+                      - generic [ref=e60]: Cluster
+                      - generic [ref=e61]:
+                        - generic [ref=e62]: CRM Account Quota Planning
+                        - generic [ref=e63]: Rachel, Revenue Operations
+                  - 'listitem "Run Auto Parts Budget Variance Investigation: Find budget anomalies in manufacturing cost centers with driver analysis across product lines" [ref=e64] [cursor=pointer]':
+                    - generic [ref=e65]:
+                      - generic [ref=e66]: Anomaly
+                      - generic [ref=e67]:
+                        - generic [ref=e68]: Auto Parts Budget Variance Investigation
+                        - generic [ref=e69]: Mike, FP&A Manager
+                  - 'listitem "Run Support Feedback NLP Analysis: Run business NLP for ticket sentiment, topics, and actionable keyphrase trends" [ref=e70] [cursor=pointer]':
+                    - generic [ref=e71]:
+                      - generic [ref=e72]: NLP
+                      - generic [ref=e73]:
+                        - generic [ref=e74]: Support Feedback NLP Analysis
+                        - generic [ref=e75]: Leah, Support Operations Lead
+                  - 'listitem "Run Semantic Layer Harmonization: Map fields to canonical terms and surface unresolved semantic entities" [ref=e76] [cursor=pointer]':
+                    - generic [ref=e77]:
+                      - generic [ref=e78]: Semantic
+                      - generic [ref=e79]:
+                        - generic [ref=e80]: Semantic Layer Harmonization
+                        - generic [ref=e81]: Noah, Analytics Engineering
+                  - 'listitem "Run Demand Forecasting Outlook: 90-day multi-product demand forecast with daily granularity and backtest diagnostics" [ref=e82] [cursor=pointer]':
+                    - generic [ref=e83]:
+                      - generic [ref=e84]: Forecast
+                      - generic [ref=e85]:
+                        - generic [ref=e86]: Demand Forecasting Outlook
+                        - generic [ref=e87]: Emma, FP&A Analyst
+                  - 'listitem "Run Resource Allocation Optimization: Compute constraint-aware allocations and highlight top objective contributors" [ref=e88] [cursor=pointer]':
+                    - generic [ref=e89]:
+                      - generic [ref=e90]: Optimize
+                      - generic [ref=e91]:
+                        - generic [ref=e92]: Resource Allocation Optimization
+                        - generic [ref=e93]: Daniel, Operations Strategy
+                  - 'listitem "Run Integrated Business Intelligence Pipeline: Multi-step pipeline: segmentation → churn scoring → revenue forecast → budget optimization (4 algorithm families)" [ref=e94] [cursor=pointer]':
+                    - generic [ref=e95]:
+                      - generic [ref=e96]: Cluster
+                      - generic [ref=e97]:
+                        - generic [ref=e98]: Integrated Business Intelligence Pipeline
+                        - generic [ref=e99]: Natalie, Chief Strategy Officer
+              - generic [ref=e102]: or type your own
+              - button "Attach CSV data (optional)" [ref=e105] [cursor=pointer]:
+                - img [ref=e106]
+                - text: Attach CSV data (optional)
+              - textbox "Describe your analysis goal in plain English" [ref=e109]:
+                - /placeholder: e.g., "Show me accounts at risk of churning..."
+            - generic [ref=e110]:
+              - button "Submit analysis request" [disabled] [ref=e111]:
+                - img [ref=e112]
+                - text: Analyze with AI
+              - paragraph [ref=e114]: ⌘+Enter to submit
+        - region "Workflow pipeline visualization" [ref=e115]:
+          - generic [ref=e117]:
+            - img [ref=e118]
+            - paragraph [ref=e120]: Pipeline DAG will appear here
+            - paragraph [ref=e121]: Submit a request to see the workflow
+        - complementary "Analysis results" [ref=e122]:
+          - generic [ref=e124]:
+            - img [ref=e125]
+            - paragraph [ref=e127]: Results & insights will appear here
+            - paragraph [ref=e128]: After pipeline completion
+      - region "Live execution logs" [ref=e129]:
+        - button "Collapse live logs (0 entries)" [expanded] [ref=e130] [cursor=pointer]:
+          - generic [ref=e131]:
+            - status "Connected to log stream" [ref=e132]
+            - generic [ref=e133]: Live Logs
+          - img [ref=e135]
+        - log [ref=e137]:
+          - paragraph [ref=e138]: Awaiting input. Submit an analysis to get started.

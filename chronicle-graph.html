@@ -1,0 +1,233 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Chronicle Graph — llm-router</title>
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0 }
+  body { font: 14px/1.5 -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+         background: #0d1117; color: #c9d1d9; height: 100vh; display: flex; flex-direction: column }
+  header { padding: 14px 24px; border-bottom: 1px solid #30363d; display: flex; align-items: center; gap: 16px; flex-shrink: 0 }
+  header h1 { font-size: 16px; color: #e6edf3 }
+  header .stats { font-size: 12px; color: #8b949e; margin-left: auto; display: flex; gap: 16px }
+  header .stat span { color: #e6edf3; font-weight: 600 }
+  .tabs { display: flex; gap: 0; border-bottom: 1px solid #30363d; flex-shrink: 0; padding: 0 24px }
+  .tab { padding: 10px 16px; font-size: 13px; cursor: pointer; border: none; background: none;
+          color: #8b949e; border-bottom: 2px solid transparent; transition: color .15s }
+  .tab:hover { color: #c9d1d9 }
+  .tab.active { color: #58a6ff; border-bottom-color: #58a6ff }
+  .panel { display: none; flex: 1; overflow: hidden }
+  .panel.active { display: flex; flex-direction: column }
+  #topology-panel { position: relative }
+  #graph-svg { width: 100%; height: 100%; cursor: grab }
+  #graph-svg:active { cursor: grabbing }
+  .node circle { stroke-width: 1.5; transition: r .2s }
+  .node text { pointer-events: none; font-size: 11px; fill: #e6edf3; text-shadow: 0 1px 3px #0d1117 }
+  .link { stroke: #30363d; stroke-opacity: .8 }
+  .tooltip { position: absolute; background: #161b22; border: 1px solid #30363d; border-radius: 6px;
+              padding: 10px 14px; font-size: 12px; pointer-events: none; max-width: 280px;
+              line-height: 1.6; display: none; z-index: 10 }
+  .tooltip strong { color: #e6edf3; display: block; margin-bottom: 4px }
+  .tooltip .risk-high { color: #f85149 } .tooltip .risk-medium { color: #d29922 }
+  .tooltip .risk-low { color: #3fb950 } .tooltip .risk-none { color: #8b949e }
+  .legend { position: absolute; bottom: 16px; left: 16px; background: #161b22; border: 1px solid #30363d;
+             border-radius: 6px; padding: 10px 14px; font-size: 12px }
+  .legend-title { color: #8b949e; margin-bottom: 6px; font-size: 11px; text-transform: uppercase; letter-spacing: .06em }
+  .legend-item { display: flex; align-items: center; gap: 8px; margin-bottom: 4px }
+  .legend-dot { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0 }
+  #hotspots-panel { overflow-y: auto; padding: 24px }
+  .hotspots-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; max-width: 1100px }
+  .card { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 16px }
+  .card h3 { font-size: 13px; color: #8b949e; text-transform: uppercase; letter-spacing: .06em; margin-bottom: 12px }
+  .hs-row { display: flex; align-items: center; gap: 10px; padding: 6px 0; border-bottom: 1px solid #21262d }
+  .hs-row:last-child { border-bottom: none }
+  .hs-name { flex: 1; font-size: 13px; color: #c9d1d9; font-family: monospace }
+  .hs-bar-wrap { width: 100px; background: #21262d; border-radius: 3px; height: 6px; overflow: hidden }
+  .hs-bar { height: 6px; border-radius: 3px; transition: width .4s }
+  .hs-count { font-size: 12px; color: #8b949e; min-width: 24px; text-align: right }
+  .risk-badge { font-size: 11px; padding: 1px 7px; border-radius: 10px; font-weight: 600 }
+  .risk-high-bg { background: #2d1215; color: #f85149 } .risk-medium-bg { background: #2d2407; color: #d29922 }
+  .risk-low-bg  { background: #122117; color: #3fb950 } .risk-none-bg  { background: #21262d; color: #8b949e }
+</style>
+</head>
+<body>
+<header>
+  <h1>◆ Chronicle — llm-router</h1>
+  <div class="stats">
+    <div class="stat"><span id="s-mods">0</span> modules</div>
+    <div class="stat"><span id="s-dec">0</span> decisions</div>
+    <div class="stat"><span id="s-rej">0</span> rejections</div>
+    <div class="stat" style="color:#8b949e;font-size:11px">generated <span id="s-gen"></span></div>
+  </div>
+</header>
+<div class="tabs">
+  <button class="tab active" onclick="showTab('topology')">Topology</button>
+  <button class="tab" onclick="showTab('hotspots')">Hotspots</button>
+</div>
+<div id="topology-panel" class="panel active">
+  <svg id="graph-svg"></svg>
+  <div class="tooltip" id="tooltip"></div>
+  <div class="legend">
+    <div class="legend-title">Max Risk</div>
+    <div class="legend-item"><div class="legend-dot" style="background:#f85149"></div> High</div>
+    <div class="legend-item"><div class="legend-dot" style="background:#d29922"></div> Medium</div>
+    <div class="legend-item"><div class="legend-dot" style="background:#3fb950"></div> Low</div>
+    <div class="legend-item"><div class="legend-dot" style="background:#8b949e"></div> None</div>
+    <div style="margin-top:8px;color:#8b949e;font-size:11px">Node size = decision count</div>
+  </div>
+</div>
+<div id="hotspots-panel" class="panel">
+  <div class="hotspots-grid" id="hotspots-content"></div>
+</div>
+
+<script>
+const DATA = {"nodes":[{"id":"src/llm_router/hooks/","decisions":4,"rejections":0,"maxRisk":"medium","titles":["Ensure JSONL savings are flushed before cumulative","Block Glob/Read/Grep/LS for Q&A tasks in hard enfo","Context-aware routing for short continuation promp","Add cumulative savings section to session-end hook"]},{"id":"src/llm_router/","decisions":2,"rejections":0,"maxRisk":"medium","titles":["Always inject Ollama models when configured","Always inject Ollama into routing chain when confi"]},{"id":"src/","decisions":1,"rejections":0,"maxRisk":"medium","titles":["Always inject Ollama models when configured"]}],"links":[{"source":"src/llm_router/","target":"src/","weight":1,"titles":["Always inject Ollama models when configured"]}],"generated":"2026-04-10T16:23:58.435Z","stats":{"decisions":6,"rejections":0,"modules":3}};
+const RISK_COLOR = { high:'#f85149', medium:'#d29922', low:'#3fb950', none:'#8b949e' };
+
+// ── Header stats ───────────────────────────────────────────────────────────────
+document.getElementById('s-mods').textContent = DATA.stats.modules;
+document.getElementById('s-dec').textContent  = DATA.stats.decisions;
+document.getElementById('s-rej').textContent  = DATA.stats.rejections;
+document.getElementById('s-gen').textContent  = DATA.generated.slice(0,10);
+
+// ── Tab switching ──────────────────────────────────────────────────────────────
+function showTab(name) {
+  document.querySelectorAll('.tab').forEach((t,i) => t.classList.toggle('active', ['topology','hotspots'][i] === name));
+  document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+  document.getElementById(name + '-panel').classList.add('active');
+  if (name === 'topology') requestAnimationFrame(drawGraph);
+  if (name === 'hotspots') drawHotspots();
+}
+
+// ── D3 Force Graph ─────────────────────────────────────────────────────────────
+let graphDrawn = false;
+function drawGraph() {
+  if (graphDrawn) return;
+  graphDrawn = true;
+
+  const svg = d3.select('#graph-svg');
+  const { width, height } = svg.node().getBoundingClientRect();
+
+  const nodes = DATA.nodes.map(d => ({...d}));
+  const links = DATA.links.map(d => ({...d}));
+
+  const maxDec = d3.max(nodes, d => d.decisions) || 1;
+  const rScale = d3.scaleSqrt().domain([0, maxDec]).range([8, 36]);
+  const lScale = d3.scaleLinear().domain([1, d3.max(links, d => d.weight) || 1]).range([1, 6]);
+
+  const sim = d3.forceSimulation(nodes)
+    .force('link', d3.forceLink(links).id(d => d.id).distance(d => 120 + (36 - rScale(d.source.decisions || 0))))
+    .force('charge', d3.forceManyBody().strength(-300))
+    .force('center', d3.forceCenter(width / 2, height / 2))
+    .force('collision', d3.forceCollide().radius(d => rScale(d.decisions) + 12));
+
+  const g = svg.append('g');
+
+  // Zoom
+  svg.call(d3.zoom().scaleExtent([0.2, 4]).on('zoom', e => g.attr('transform', e.transform)));
+
+  const link = g.append('g').selectAll('line').data(links).join('line')
+    .attr('class', 'link')
+    .attr('stroke-width', d => lScale(d.weight));
+
+  const tooltip = document.getElementById('tooltip');
+
+  const node = g.append('g').selectAll('g').data(nodes).join('g')
+    .attr('class', 'node')
+    .call(d3.drag()
+      .on('start', (e, d) => { if (!e.active) sim.alphaTarget(0.3).restart(); d.fx = d.x; d.fy = d.y; })
+      .on('drag',  (e, d) => { d.fx = e.x; d.fy = e.y; })
+      .on('end',   (e, d) => { if (!e.active) sim.alphaTarget(0); d.fx = null; d.fy = null; }))
+    .on('mouseover', (e, d) => {
+      const linked = new Set(links.filter(l => l.source.id === d.id || l.target.id === d.id)
+        .flatMap(l => [l.source.id, l.target.id]));
+      node.selectAll('circle').attr('opacity', n => linked.has(n.id) ? 1 : 0.25);
+      link.attr('opacity', l => l.source.id === d.id || l.target.id === d.id ? 1 : 0.1);
+      const dec = d.titles.slice(0,5).map(t => '<li style="color:#c9d1d9">'+t+'</li>').join('');
+      const more = d.titles.length > 5 ? '<li style="color:#8b949e">+ ' + (d.titles.length-5) + ' more…</li>' : '';
+      tooltip.innerHTML =
+        '<strong>' + d.id + '</strong>' +
+        '<div>Decisions: <b>' + d.decisions + '</b> &nbsp; Rejections: <b>' + d.rejections + '</b></div>' +
+        '<div>Risk: <span class="risk-' + d.maxRisk + '">' + d.maxRisk + '</span></div>' +
+        (dec ? '<ul style="margin-top:6px;padding-left:14px;font-size:11px">' + dec + more + '</ul>' : '');
+      tooltip.style.display = 'block';
+      tooltip.style.left = (e.pageX + 14) + 'px';
+      tooltip.style.top  = (e.pageY - 10) + 'px';
+    })
+    .on('mousemove', e => {
+      tooltip.style.left = (e.pageX + 14) + 'px';
+      tooltip.style.top  = (e.pageY - 10) + 'px';
+    })
+    .on('mouseout', () => {
+      node.selectAll('circle').attr('opacity', 1);
+      link.attr('opacity', 1);
+      tooltip.style.display = 'none';
+    });
+
+  node.append('circle')
+    .attr('r', d => rScale(d.decisions))
+    .attr('fill', d => RISK_COLOR[d.maxRisk] + '33')
+    .attr('stroke', d => RISK_COLOR[d.maxRisk]);
+
+  node.append('text')
+    .attr('dy', d => rScale(d.decisions) + 13)
+    .attr('text-anchor', 'middle')
+    .text(d => d.id.replace(//$/, ''));
+
+  sim.on('tick', () => {
+    link
+      .attr('x1', d => d.source.x).attr('y1', d => d.source.y)
+      .attr('x2', d => d.target.x).attr('y2', d => d.target.y);
+    node.attr('transform', d => 'translate(' + d.x + ',' + d.y + ')');
+  });
+}
+
+// ── Hotspots ───────────────────────────────────────────────────────────────────
+function drawHotspots() {
+  const el = document.getElementById('hotspots-content');
+  if (el.children.length) return;
+
+  const nodes = [...DATA.nodes];
+  const maxDec = Math.max(1, ...nodes.map(n => n.decisions));
+  const maxRej = Math.max(1, ...nodes.map(n => n.rejections));
+
+  const byDec = [...nodes].sort((a,b) => b.decisions - a.decisions).slice(0,10);
+  const byRej = [...nodes].filter(n => n.rejections > 0).sort((a,b) => b.rejections - a.rejections).slice(0,10);
+  const byRisk = [...nodes].filter(n => n.maxRisk !== 'none')
+    .sort((a,b) => ({high:3,medium:2,low:1,none:0}[b.maxRisk] - {high:3,medium:2,low:1,none:0}[a.maxRisk])).slice(0,10);
+  const mostLinked = [...nodes].map(n => ({
+    ...n,
+    links: DATA.links.filter(l => l.source === n.id || l.target === n.id).length
+  })).sort((a,b) => b.links - a.links).slice(0,10);
+
+  function card(title, rows, barValue, barMax, extra) {
+    return '<div class="card"><h3>' + title + '</h3>' +
+      rows.map(r =>
+        '<div class="hs-row">' +
+        '<span class="hs-name">' + r.id.replace(//$/, '') + '</span>' +
+        (extra ? extra(r) : '') +
+        '<div class="hs-bar-wrap"><div class="hs-bar" style="width:' +
+          Math.round(barValue(r) / barMax * 100) + '%;background:' + RISK_COLOR[r.maxRisk] + '"></div></div>' +
+        '<span class="hs-count">' + barValue(r) + '</span>' +
+        '</div>'
+      ).join('') +
+      '</div>';
+  }
+
+  el.innerHTML =
+    card('Most Decisions', byDec, r => r.decisions, maxDec, null) +
+    card('Most Rejections', byRej.length ? byRej : [{id:'(none yet)',decisions:0,rejections:0,maxRisk:'none',titles:[]}],
+         r => r.rejections, Math.max(maxRej, 1), null) +
+    card('Highest Risk Modules', byRisk.length ? byRisk : [{id:'(none yet)',decisions:0,rejections:0,maxRisk:'none',titles:[]}],
+         r => r.decisions, maxDec,
+         r => '<span class="risk-badge risk-' + r.maxRisk + '-bg">' + r.maxRisk + '</span> ') +
+    card('Most Connected', mostLinked, r => r.links, Math.max(1,...mostLinked.map(r => r.links)), null);
+}
+
+// Draw topology on load
+requestAnimationFrame(drawGraph);
+</script>
+</body>
+</html>

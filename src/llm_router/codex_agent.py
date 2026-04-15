@@ -44,6 +44,58 @@ All models run through the user's OpenAI subscription (separate from
 Claude quota), making Codex a free-from-Claude fallback.
 """
 
+# ── BLOCKING I/O MITIGATION ──────────────────────────────────────────────
+# CRITICAL: is_codex_available() is called from _build_and_filter_chain(),
+# which is async. Any synchronous filesystem I/O (os.path.isfile, os.access,
+# Path.is_dir) blocks the entire asyncio event loop, causing routing hangs
+# when the filesystem is slow (network mounts, USB drives) or unavailable.
+#
+# Solution: Cache results at module import time, before any async code runs.
+# Pre-compute both Codex binary and plugin availability on module load.
+# ─────────────────────────────────────────────────────────────────────────
+
+_CODEX_BINARY_PATH: str | None = None
+_CODEX_PLUGIN_AVAILABLE: bool = False
+
+
+def _initialize_codex_cache() -> None:
+    """Initialize Codex availability cache at module import time.
+
+    Called once during module initialization to populate module-level caches
+    with synchronous filesystem checks. This ensures is_codex_available() and
+    is_codex_plugin_available() never block the event loop during async routing.
+    """
+    global _CODEX_BINARY_PATH, _CODEX_PLUGIN_AVAILABLE
+
+    # Compute Codex binary path synchronously (once, at import time)
+    env_path = os.environ.get("CODEX_PATH")
+    if env_path:
+        full = os.path.expanduser(env_path)
+        if os.path.isfile(full) and os.access(full, os.X_OK):
+            _CODEX_BINARY_PATH = full
+            _CODEX_PLUGIN_AVAILABLE = _check_codex_plugin()
+            return
+
+    for path in CODEX_PATHS:
+        full = os.path.expanduser(path)
+        if os.path.isfile(full) and os.access(full, os.X_OK):
+            _CODEX_BINARY_PATH = full
+            break
+
+    _CODEX_PLUGIN_AVAILABLE = _check_codex_plugin()
+
+
+def _check_codex_plugin() -> bool:
+    """Synchronously check for Codex plugin (called only at module init time)."""
+    candidates = [
+        Path.home() / ".claude" / "plugins" / "codex",
+        Path.cwd() / ".claude" / "plugins" / "codex",
+    ]
+    try:
+        return any(d.is_dir() for d in candidates)
+    except Exception:
+        return False
+
 
 def find_codex_binary() -> str | None:
     """Search for an executable Codex CLI binary.
@@ -74,38 +126,28 @@ def find_codex_binary() -> str | None:
 def is_codex_available() -> bool:
     """Check whether a usable Codex CLI binary exists on this system.
 
+    Returns the cached result from module import time (pre-computed to avoid
+    blocking I/O in async contexts). Calling this during async routing is safe.
+
     Returns:
-        ``True`` if ``find_codex_binary()`` finds an executable binary.
+        ``True`` if a Codex binary was found at module import time.
     """
-    return find_codex_binary() is not None
+    return _CODEX_BINARY_PATH is not None
 
 
 def is_codex_plugin_available() -> bool:
     """Check whether the openai/codex-plugin-cc Claude Code plugin is installed.
 
     The plugin provides slash commands (/codex:review, /codex:rescue, etc.)
-    and background job management on top of the same Codex CLI binary.
+    and background job management on top of the Codex CLI binary.
 
-    Detection searches known plugin install locations. Returns ``False``
-    safely on any error — plugin presence is informational only; the router
-    degrades gracefully to direct ``codex exec`` when the plugin is absent.
+    Returns the cached result from module import time (pre-computed to avoid
+    blocking I/O in async contexts). Calling this during async routing is safe.
 
     Returns:
-        ``True`` if the plugin directory is found under the Claude Code
-        global or project-local plugin directories.
+        ``True`` if the plugin directory was found at module import time.
     """
-    # Claude Code installs plugins under ~/.claude/plugins/<name>/
-    candidates = [
-        Path.home() / ".claude" / "plugins" / "codex",
-    ]
-    # Also check project-local plugin path if we're in a project dir
-    cwd_plugin = Path.cwd() / ".claude" / "plugins" / "codex"
-    candidates.append(cwd_plugin)
-
-    try:
-        return any(d.is_dir() for d in candidates)
-    except Exception:
-        return False
+    return _CODEX_PLUGIN_AVAILABLE
 
 
 @dataclass
@@ -206,3 +248,8 @@ async def run_codex(
             content=f"Codex error: {e}",
             model=model, exit_code=1, duration_sec=time.monotonic() - start,
         )
+
+
+# Initialize Codex cache at module import time (before any async routing code runs).
+# This is critical to prevent blocking I/O from hanging the event loop.
+_initialize_codex_cache()

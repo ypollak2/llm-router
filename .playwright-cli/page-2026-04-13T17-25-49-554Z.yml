@@ -1,0 +1,267 @@
+- generic [ref=e3]:
+  - link "Skip to main content" [ref=e4] [cursor=pointer]:
+    - /url: "#main-content"
+  - banner [ref=e5]:
+    - generic [ref=e6]:
+      - generic [ref=e7]:
+        - img "Anaplan logo" [ref=e8]
+        - generic [ref=e9]:
+          - heading "Anaplan ML Framework" [level=1] [ref=e10]
+          - paragraph [ref=e11]: Intelligent Pipeline Orchestration
+      - navigation "Main navigation" [ref=e12]:
+        - link "Pipelines" [ref=e13] [cursor=pointer]:
+          - /url: /
+        - link "⬡ Architect" [ref=e14] [cursor=pointer]:
+          - /url: /architect
+        - link "Data" [ref=e15] [cursor=pointer]:
+          - /url: /data
+        - link "Agent" [ref=e16] [cursor=pointer]:
+          - /url: /conversations
+        - link "Governance" [ref=e17] [cursor=pointer]:
+          - /url: /governance
+        - link "Anaplan" [ref=e18] [cursor=pointer]:
+          - /url: /anaplan
+        - link "Schedules" [ref=e19] [cursor=pointer]:
+          - /url: /schedules
+        - link "Admin" [ref=e20] [cursor=pointer]:
+          - /url: /admin
+      - navigation "Header actions" [ref=e21]:
+        - button "Switch to dark mode" [ref=e22] [cursor=pointer]:
+          - img [ref=e23]
+        - status "Demo mode active" [ref=e25]: Demo Mode
+  - main [ref=e27]:
+    - application "ML Analysis Dashboard" [ref=e28]:
+      - generic [ref=e29]:
+        - region "Analysis input" [ref=e30]:
+          - generic [ref=e31]:
+            - heading "Review AI Understanding" [level=2] [ref=e271]
+            - paragraph [ref=e33]: Confirm the parsed intent before running
+          - generic [ref=e273]:
+            - generic [ref=e274]:
+              - generic [ref=e275]:
+                - heading "AI Understanding" [level=3] [ref=e276]
+                - generic [ref=e277]: 92% confident
+              - paragraph [ref=e278]: Group accounts by behavioral similarity and score each segment's potential
+              - paragraph [ref=e279]: "Approach: Clustering for segmentation, classification for scoring within segments"
+              - paragraph [ref=e280]: "Multi-step: Segment first to find natural groupings, then score for quota allocation"
+            - generic [ref=e281]:
+              - heading "Structured Intent" [level=3] [ref=e282]
+              - generic [ref=e283]:
+                - generic [ref=e284]:
+                  - generic [ref=e285]: Task Type
+                  - generic [ref=e286]: Clustering
+                - generic [ref=e287]:
+                  - generic [ref=e288]: Algorithm
+                  - generic [ref=e289]: Auto
+                - generic [ref=e290]:
+                  - generic [ref=e291]: Selection Policy
+                  - generic [ref=e292]: Fast Auto
+                - generic [ref=e293]:
+                  - generic [ref=e294]: Persona
+                  - generic [ref=e295]: BUSINESS
+                - generic [ref=e296]:
+                  - generic [ref=e297]: Data Source
+                  - generic [ref=e298]: crm_account_performance.csv
+                - generic [ref=e299]:
+                  - generic [ref=e300]: n_clusters
+                  - generic [ref=e301]: "4"
+                - generic [ref=e302]:
+                  - generic [ref=e303]: additional_tasks
+                  - generic [ref=e304]: "[\"CLASSIFICATION\"]"
+                - generic [ref=e305]:
+                  - generic [ref=e306]: target_column
+                  - generic [ref=e307]: "\"account_potential\""
+                - generic [ref=e308]:
+                  - generic [ref=e309]: validation_mode
+                  - generic [ref=e310]: "\"auto\""
+                - generic [ref=e311]:
+                  - generic [ref=e312]: selection_policy
+                  - generic [ref=e313]: "\"fast_auto\""
+                - generic [ref=e314]:
+                  - generic [ref=e315]: selection_sample_size
+                  - generic [ref=e316]: "8000"
+                - generic [ref=e317]:
+                  - generic [ref=e318]: selection_max_candidates
+                  - generic [ref=e319]: "3"
+            - generic [ref=e320]:
+              - heading "Algorithm Selection" [level=3] [ref=e321]
+              - generic [ref=e322]:
+                - paragraph [ref=e323]: "Family: Unsupervised Clustering"
+                - combobox [ref=e324]:
+                  - option "Auto" [selected]
+                  - option "K-Means"
+                  - option "Mini-Batch K-Means"
+                  - option "Bisecting K-Means"
+                  - option "DBSCAN"
+                  - option "Agglomerative"
+                  - option "Gaussian Mixture (GMM)"
+                  - option "BIRCH"
+                  - option "Spectral Clustering"
+                  - option "OPTICS"
+                - paragraph [ref=e325]: "Default: Auto"
+                - generic [ref=e326]:
+                  - paragraph [ref=e327]: Auto Selection Policy
+                  - combobox [ref=e328]:
+                    - option "Manual"
+                    - option "Fast Auto" [selected]
+                    - option "Balanced Auto"
+                    - option "Exhaustive Auto"
+                  - paragraph [ref=e329]: "Default: Fast Auto"
+                - generic [ref=e330]:
+                  - paragraph [ref=e331]: F1 Escalation Threshold
+                  - spinbutton [ref=e332]: "0.8"
+                  - paragraph [ref=e333]: Gate target — escalates policy if F1 falls below this
+                - paragraph [ref=e334]: "Fine-tune profiles available for: K-Means, Mini-Batch K-Means, Bisecting K-Means, DBSCAN, Agglomerative, Gaussian Mixture (GMM), BIRCH, Spectral Clustering, OPTICS"
+            - generic [ref=e335]:
+              - button "Start Over" [ref=e336] [cursor=pointer]
+              - button "Run Pipeline" [ref=e337] [cursor=pointer]:
+                - img [ref=e338]
+                - text: Run Pipeline
+        - region "Workflow pipeline visualization" [ref=e115]:
+          - generic [ref=e117]:
+            - img [ref=e118]
+            - paragraph [ref=e120]: Pipeline DAG will appear here
+            - paragraph [ref=e121]: Submit a request to see the workflow
+        - complementary "Analysis results" [ref=e122]:
+          - generic [ref=e124]:
+            - img [ref=e125]
+            - paragraph [ref=e127]: Results & insights will appear here
+            - paragraph [ref=e128]: After pipeline completion
+      - region "Live execution logs" [ref=e129]:
+        - button "Collapse live logs (30 entries)" [expanded] [ref=e139] [cursor=pointer]:
+          - generic [ref=e131]:
+            - status "Connected to log stream" [ref=e132]
+            - generic [ref=e133]: Live Logs
+            - generic [ref=e140]: (30)
+          - img [ref=e135]
+        - log [ref=e137]:
+          - generic [ref=e141]:
+            - generic [ref=e142]: 17:59:14
+            - generic [ref=e143]: Executor
+            - generic [ref=e144]: "[2/2] Initializing CLASSIFICATION engine..."
+          - generic [ref=e145]:
+            - generic [ref=e146]: 17:59:15
+            - generic [ref=e147]: FeatureEngineering
+            - generic [ref=e148]: "[2/2] Building task-specific features for CLASSIFICATION..."
+          - generic [ref=e149]:
+            - generic [ref=e150]: 17:59:15
+            - generic [ref=e151]: FineTune
+            - generic [ref=e152]: "[2/2] Running hyperparameter tuning (quick)..."
+          - generic [ref=e153]:
+            - generic [ref=e154]: 17:59:16
+            - generic [ref=e155]: Executor
+            - generic [ref=e156]: Dispatching CLASSIFICATION engine (node=run-classification-1)
+            - generic [ref=e157]: data_ref=ml-artifacts/seed/crm_account_performance.csv, config_keys=['algorithm', 'n_estimators', 'target_column', 'n_clusters', 'additional_tasks', 'validation_mode', 'selection_policy', 'selection_sample_size', 'selection_max_candidates', 'f1_escalation_threshold', 'algorithm_family', 'input_path', 'output_path', 'fine_tune', '_data_ref', '_planning_confidence']
+          - generic [ref=e158]:
+            - generic [ref=e159]: 17:59:16
+            - generic [ref=e160]: Engine:Classification
+            - generic [ref=e161]: Classification with algorithm='auto'
+            - generic [ref=e162]: n_estimators=100, max_depth=None, target=account_potential, test_size=0.2, calibration=none, imbalance=class_weight
+          - generic [ref=e163]:
+            - generic [ref=e164]: 17:59:16
+            - generic [ref=e165]: Engine:Classification
+            - generic [ref=e166]: Using CRM account performance data with account_potential target
+          - generic [ref=e167]:
+            - generic [ref=e168]: 17:59:16
+            - generic [ref=e169]: Engine:Classification
+            - generic [ref=e170]: Preparing 50000 samples, 8 features for training...
+            - generic [ref=e171]: "classes=['high', 'low', 'medium'], distribution={'high': 35932, 'low': 2959, 'medium': 11109}"
+          - generic [ref=e172]:
+            - generic [ref=e173]: 17:59:17
+            - generic [ref=e174]: Engine:Classification
+            - generic [ref=e175]: "Train/test split: 40000 train, 10000 test"
+          - generic [ref=e176]:
+            - generic [ref=e177]: 17:59:18
+            - generic [ref=e178]: Engine:Classification
+            - generic [ref=e179]: Training model (auto)...
+          - generic [ref=e180]:
+            - generic [ref=e181]: 17:59:18
+            - generic [ref=e182]: Engine:Classification
+            - generic [ref=e183]: Class-weight policy ignored for algorithm='auto'
+            - generic [ref=e184]: using default weighting
+          - generic [ref=e185]:
+            - generic [ref=e186]: 17:59:18
+            - generic [ref=e187]: Engine:Classification
+            - generic [ref=e188]: "Model selection (fast_auto): evaluating 3 algorithms"
+          - generic [ref=e189]:
+            - generic [ref=e190]: 17:59:23
+            - generic [ref=e191]: Engine:Classification
+            - generic [ref=e192]: "random_forest: F1=0.896 (3.86s)"
+          - generic [ref=e193]:
+            - generic [ref=e194]: 17:59:39
+            - generic [ref=e195]: Engine:Classification
+            - generic [ref=e196]: "gradient_boosting: F1=0.9026 (16.13s)"
+          - generic [ref=e197]:
+            - generic [ref=e198]: 17:59:39
+            - generic [ref=e199]: Engine:Classification
+            - generic [ref=e200]: "logistic_regression: F1=0.9008 (0.18s)"
+          - generic [ref=e201]:
+            - generic [ref=e202]: 17:59:39
+            - generic [ref=e203]: Engine:Classification
+            - generic [ref=e204]: "Selected best algorithm: gradient_boosting (F1=0.9026)"
+          - generic [ref=e205]:
+            - generic [ref=e206]: 17:59:56
+            - generic [ref=e207]: Engine:Classification
+            - generic [ref=e208]: Model fit in 37.74s
+            - generic [ref=e209]: "params={}"
+          - generic [ref=e210]:
+            - generic [ref=e211]: 17:59:56
+            - generic [ref=e212]: Engine:Classification
+            - generic [ref=e213]: Evaluating model on hold-out test set...
+          - generic [ref=e214]:
+            - generic [ref=e215]: 18:00:07
+            - generic [ref=e216]: Engine:Classification
+            - generic [ref=e217]: "Accuracy: 0.903, F1: 0.903, Precision: 0.902, Recall: 0.903, Brier: 0.1362, Train-Test F1 gap: 0.007"
+          - generic [ref=e218]:
+            - generic [ref=e219]: 18:00:07
+            - generic [ref=e220]: Engine:Classification
+            - generic [ref=e221]: Computing feature importance and driver analysis...
+          - generic [ref=e222]:
+            - generic [ref=e223]: 18:00:07
+            - generic [ref=e224]: Engine:Classification
+            - generic [ref=e225]: "Top 3 features: ['acv_3yr_growth', 'win_rate', 'renewal_rate']"
+            - generic [ref=e226]: importances=[0.452, 0.275, 0.162]
+          - generic [ref=e227]:
+            - generic [ref=e228]: 18:00:07
+            - generic [ref=e229]: Engine:Classification
+            - generic [ref=e230]: "Extracted tree structure: 15 nodes, source=first_estimator"
+          - generic [ref=e231]:
+            - generic [ref=e232]: 18:00:08
+            - generic [ref=e233]: Engine:Classification
+            - generic [ref=e234]: "Top at-risk item: 0011H0002AdaJHQdWs"
+            - generic [ref=e235]: risk_score=99.9%
+          - generic [ref=e236]:
+            - generic [ref=e237]: 18:00:08
+            - generic [ref=e238]: Engine:Classification
+            - generic [ref=e239]: "Per-item details: 100 rows (sampled from 50000)"
+          - generic [ref=e240]:
+            - generic [ref=e241]: 18:00:08
+            - generic [ref=e242]: Executor
+            - generic [ref=e243]: All 2 engine(s) completed in 69.4s — assembling results...
+            - generic [ref=e244]: engines=['CLUSTERING', 'CLASSIFICATION']
+          - generic [ref=e245]:
+            - generic [ref=e246]: 18:00:09
+            - generic [ref=e247]: Explainer
+            - generic [ref=e248]: Generating business-level narrative and driver explanations...
+          - generic [ref=e249]:
+            - generic [ref=e250]: 18:00:10
+            - generic [ref=e251]: Knowledge
+            - generic [ref=e252]: Recorded Phase-A knowledge for workflow 863b990c
+          - generic [ref=e253]:
+            - generic [ref=e254]: 18:00:10
+            - generic [ref=e255]: ModelRegistry
+            - generic [ref=e256]: Auto-registered draft model for CLUSTERING
+          - generic [ref=e257]:
+            - generic [ref=e258]: 18:00:11
+            - generic [ref=e259]: Explainability
+            - generic [ref=e260]: Generating explanation via LLM
+            - generic [ref=e261]: workflow=863b990c
+          - generic [ref=e262]:
+            - generic [ref=e263]: 18:00:11
+            - generic [ref=e264]: Explainability
+            - generic [ref=e265]: "Task type: CLUSTERING"
+          - generic [ref=e266]:
+            - generic [ref=e267]: 18:00:24
+            - generic [ref=e268]: Explainability
+            - generic [ref=e269]: LLM generated explanation in 13.0s
+            - generic [ref=e270]: findings=8, recs=2

@@ -1123,7 +1123,11 @@ async def import_savings_log() -> int:
     Returns:
         Number of records imported.
     """
-    if not SAVINGS_LOG_PATH.exists():
+    import asyncio
+
+    # Offload synchronous Path.exists() to thread pool to avoid blocking event loop
+    exists = await asyncio.to_thread(SAVINGS_LOG_PATH.exists)
+    if not exists:
         return 0
 
     try:

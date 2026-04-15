@@ -1,0 +1,1678 @@
+{
+  "f12b27fccdd0bd5c542d32e8fb5c7633971a3fe1": {
+    "hash": "unknown_hash",
+    "isDecision": true,
+    "isRejection": false,
+    "title": "Multi-agent CLI compatibility and version bump to v3.5.0",
+    "affects": [
+      "src/llm_router/",
+      ".claude-plugin/",
+      ".codex-plugin/",
+      ".factory-plugin/",
+      "tests/"
+    ],
+    "risk": "high",
+    "rationale": "The core router must achieve wider compatibility with multiple agent/plugin environments (Claude, Codex, Factory) to standardize its API and integration points, ensuring consistent LLM routing regardless of the initiating platform. This massive expansion increases the system's reach but also significantly increases integration complexity.",
+    "rejected": null,
+    "isDeep": true
+  },
+  "f9d1edf8a93947da8f5df26aebeab2c31999ee03": {
+    "hash": "HEAD",
+    "isDecision": true,
+    "isRejection": false,
+    "title": "agent-context chain reordering",
+    "affects": [
+      "src/llm_router/router.py",
+      "src/llm_router/state.py",
+      "src/llm_router/tools/routing.py",
+      ".claude-plugin/",
+      ".codex-plugin/"
+    ],
+    "risk": "high",
+    "rationale": "The system was updated to make the model chain aware of the active agent context (e.g., Claude Code or Codex). By reordering the chain, the application maximizes the use of models covered by existing paid subscriptions before defaulting to potentially expensive pay-per-call APIs, optimizing both cost and perceived value for the user.",
+    "rejected": null,
+    "isDeep": true
+  },
+  "5b3fd668a66f2dbe2253cd7b30b6d1a7b2b6aae7": {
+    "hash": "HEAD",
+    "isDecision": true,
+    "isRejection": false,
+    "title": "Implement Codex plugin integration for LLM Router",
+    "affects": [
+      ".codex-plugin/",
+      "src/llm_router/cli.py",
+      "src/llm_router/hooks/codex-post-tool.py",
+      "skills/routing/SKILL.md",
+      "skills/savings/SKILL.md",
+      "CHANGELOG.md"
+    ],
+    "risk": "high",
+    "rationale": "The primary goal was to make the LLM Router a first-class, discoverable plugin within the Codex ecosystem. This integration shifts the deployment model from local package installation to marketplace discovery, significantly expanding the tool's reach and usability for developers using Codex.",
+    "rejected": null,
+    "isDeep": true
+  },
+  "161e2656086f2f2040c48c32a944c3634aae7137": {
+    "hash": "2026-04-09",
+    "isDecision": true,
+    "isRejection": false,
+    "title": "Fix: Flush JSONL savings log before calculating cumulative usage totals",
+    "affects": [
+      "src/llm_router/hooks/session-end.py",
+      "llm_router usage tracking logic"
+    ],
+    "risk": "medium",
+    "rationale": "The previous flow caused a 'one-session lag' in calculating cumulative savings for free-provider usage. The fix requires synchronously importing pending raw savings records (JSONL) into the statistical table before the cumulative query runs, ensuring accurate and timely period totals across all providers.",
+    "rejected": null,
+    "isDeep": true
+  },
+  "7cadfd29776b72bb9b4491f128262d81eaef7ac1": {
+    "hash": "2026-04-09",
+    "isDecision": true,
+    "isRejection": false,
+    "title": "Implement structured Policy Engine, Savings Digest, and Community Benchmarks",
+    "affects": [
+      "src/llm_router/policy.py",
+      "src/llm_router/digest.py",
+      "src/llm_router/community.py",
+      "src/llm_router/router.py",
+      "src/llm_router/config.py"
+    ],
+    "risk": "high",
+    "rationale": "To move the LLM router from a simple mechanism to a governed, enterprise-grade tool. The Policy Engine provides necessary governance (precedence, allow/deny lists, cost capping); the Savings Digest provides financial transparency (spend spike detection, reporting); and the Community Benchmarks enable data-driven model optimization based on observed performance.",
+    "rejected": null,
+    "isDeep": true
+  },
+  "d595ba3cf1ec0120451a92c37c5e9724ff58edbc": {
+    "hash": "multi-host-adapter-support",
+    "isDecision": true,
+    "isRejection": true,
+    "title": "Architecting Multi-Host Support and Refactoring Core Cost/Usage Logic",
+    "affects": [
+      "llm_router/cli.py",
+      "llm_router/hooks/stop-enforce.py",
+      "cost.py",
+      "admin.py",
+      "llm_usage_logic"
+    ],
+    "risk": "high",
+    "rationale": "The primary goal is to enable tracking of usage and savings across multiple host environments (Codex, Claude Desktop, Copilot) and to ensure persistent, cross-session cost accounting. This required fixing the gap in cross-session savings data logging.",
+    "rejected": "1. Full Phase 1 'core refactor' is deemed unnecessary due to existing infrastructure. 2. Codex CLI does not expose a suitable hook API, accepting a capability extension fallback. 3. The output format for llm_auto will be a formatted string, not JSON, simplifying implementation.",
+    "isDeep": true
+  },
+  "abb2109e003df02b4684f723c50db79bc8f2f7d5": {
+    "hash": "2026-04-09",
+    "isDecision": true,
+    "isRejection": false,
+    "title": "Implement llm_auto wrapper for persistent savings tracking",
+    "affects": [
+      "src/llm_router/tools/admin.py",
+      "src/llm_router/tools/routing.py",
+      "llm_router/tools/"
+    ],
+    "risk": "high",
+    "rationale": "The standard usage hooks (JSONL) can be unreliable or unavailable when integrating with external clients (e.g., Codex CLI, Claude Desktop) that lack a standard UserPromptSubmit hook. This change introduces `llm_auto`, which forces the import of local savings records (`import_savings_log`) at critical points (routing, usage summary, savings report) to ensure that cost and usage tracking is persistent and accurate regardless of which client or host triggered the call. This centralizes cost calculation logic.",
+    "rejected": null,
+    "isDeep": true
+  },
+  "bc9cd2e511af1ea5fa2ece04e9440f13185e344d": {
+    "hash": "2026-04-09",
+    "isDecision": true,
+    "isRejection": false,
+    "title": "Improve cost data fidelity by adding source host attribution and enhancing usage projection logic",
+    "affects": [
+      "src/llm_router/cost.py",
+      "src/llm_router/hooks/session-end.py"
+    ],
+    "risk": "high",
+    "rationale": "The addition of the 'host' column ensures better attribution and tracking of cost savings sources across different systems/call origins. Furthermore, updating the cost projection logic to prioritize a 30-day monthly average (over weekly/daily) improves the reliability and stability of forecasted resource costs.",
+    "rejected": null,
+    "isDeep": true
+  },
+  "0ff67357f156eaea0622c15a7995ff2eae971395": {
+    "hash": null,
+    "isDecision": true,
+    "isRejection": false,
+    "title": "Block local file reading tools (Glob/Read/Grep/LS) for Q&A tasks in hard enforcement mode",
+    "affects": [
+      "src/llm_router/hooks/enforce-route.py",
+      "tests/test_route_enforcement_hooks.py"
+    ],
+    "risk": "high",
+    "rationale": "The previous architecture allowed the LLM to read local files (Glob, Read, Grep, LS) directly, which the team determined was functionally equivalent to the LLM self-answering, bypassing necessary controls. By introducing task-specific blocklisting, file reading is only permitted for code tasks, forcing Q&A content through explicit, controlled analysis pipelines (llm_analyze/llm_query).",
+    "rejected": null,
+    "isDeep": true
+  },
+  "03ab0263cc7d1deb7d1540b08d9be6aaa4fce69e": {
+    "hash": "2026-04-08",
+    "isDecision": true,
+    "isRejection": false,
+    "title": "Implement Team Dashboard and Multi-Channel Reporting",
+    "affects": [
+      "src/llm_router/team.py",
+      "src/llm_router/config.py",
+      "src/llm_router/cost.py",
+      "src/llm_router/tools/admin.py",
+      "src/llm_router/cli.py",
+      "src/llm_router/router.py",
+      ".llm-router.yml"
+    ],
+    "risk": "high",
+    "rationale": "The decision was made to treat the LLM router as a managed resource for an entire team, not just an individual. This centralizes identity resolution (user/project ID), aggregates usage costs/savings, and automates communication of usage reports to various team channels (Slack, Discord, Telegram). This provides critical visibility needed for enterprise adoption and cost management.",
+    "rejected": null,
+    "isDeep": true
+  },
+  "13ac6ca729dda1737436d916764bf625c49b68b8": {
+    "hash": "N/A",
+    "isDecision": true,
+    "isRejection": false,
+    "title": "Always prioritize local Ollama inference in the routing chain",
+    "affects": [
+      "src/llm_router/config.py",
+      "src/llm_router/router.py"
+    ],
+    "risk": "high",
+    "rationale": "Previously, local Ollama models were only injected conditionally (e.g., in BUDGET profiles or when paid API quota pressure was high). The decision changed this to *always* inject Ollama when configured because local models are free and do not consume quotas. This increases the reliability of the fallback chain, ensuring a local attempt is made for virtually all tasks, improving resilience and local-first operations.",
+    "rejected": null,
+    "isDeep": true
+  },
+  "2ab3c6a0d08419dc8393a1faf9b2ee59221a1485": {
+    "hash": "v2.6.0",
+    "isDecision": true,
+    "isRejection": false,
+    "title": "Implement Latency-Aware User Acceptance Scoring in Router",
+    "affects": [
+      "src/llm_router/cost.py",
+      "src/llm_router/benchmarks.py",
+      "src/llm_router/profiles.py",
+      "src/llm_router/router.py",
+      "src/llm_router/tools/admin.py"
+    ],
+    "risk": "medium",
+    "rationale": "The system is moving beyond simple cost or raw latency metrics. By incorporating a user-acceptance feedback loop (calculating acceptance scores from `was_good` flags), the routing engine can automatically penalize or deprioritize models that, while fast, fail to meet user expectations, improving the overall quality and utility of the suggestions.",
+    "rejected": null,
+    "isDeep": true
+  },
+  "153c5cedb28000e306051237094d88221867bdba": {
+    "hash": "v2.6.0",
+    "isDecision": true,
+    "isRejection": false,
+    "title": "Change Default Enforcement Mode to 'Smart' for Improved UX",
+    "affects": [
+      "src/llm_router/hooks/enforce-route.py",
+      "README.md"
+    ],
+    "risk": "medium",
+    "rationale": "The previous default of 'hard' enforcement was too restrictive, blocking developer workflows for code tasks. The 'smart' mode default is adopted to provide maximum savings/guidance for Q&A tasks (query/research/generate/analyze) while maintaining a soft enforcement approach for code tasks, significantly improving the developer workflow experience without sacrificing core routing goals.",
+    "rejected": null,
+    "isDeep": true
+  },
+  "df21d97f68eb34a3af6f21ac1b699df775db4e13": {
+    "hash": "v2.6.0",
+    "isDecision": true,
+    "isRejection": false,
+    "title": "Fix Stale State Cleanup on Session Start",
+    "affects": [
+      "src/llm_router/hooks/session-start.py"
+    ],
+    "risk": "low",
+    "rationale": "A state management bug was addressed where forcefully terminating a Claude session would leave behind orphaned temporary state files (`pending_route_*.json`), which would prevent the start of subsequent sessions. This cleanup ensures robust session continuity.",
+    "rejected": null,
+    "isDeep": false
+  },
+  "d7e08e4aa506290c5c77a713978480e01f0b7bcf": {
+    "hash": "N/A_commit",
+    "isDecision": true,
+    "isRejection": false,
+    "title": "Context-Aware Routing: Continuation Prompt State Inheritance",
+    "affects": [
+      "src/llm_router/hooks/auto-route.py"
+    ],
+    "risk": "medium",
+    "rationale": "To significantly improve performance and reduce latency during conversational flows, the system was updated to detect simple continuation prompts (e.g., 'ok', 'yes', 'stop'). Instead of running the full, expensive classification chain for these inputs, the system now inherits the prior turn's task context, allowing the router to process the input instantly and efficiently.",
+    "rejected": null,
+    "isDeep": true
+  },
+  "f8f2410179d76c4c11e722633cc0ec149ca19cb3": {
+    "hash": "N/A",
+    "isDecision": true,
+    "isRejection": false,
+    "title": "Implement repo-aware, layered configuration system",
+    "affects": [
+      "src/llm_router/cli.py",
+      "src/llm_router/repo_config.py",
+      "src/llm_router/hooks/auto-route.py",
+      "src/llm_router/hooks/session-end.py"
+    ],
+    "risk": "high",
+    "rationale": "The core decision is to move configuration management from a single source to a hierarchical, 'effective' system. This allows the system to respect project-specific settings (.llm-router.yml) while enabling necessary global overrides (user routing.yaml) and maintaining strict type checking/linting, dramatically improving reliability and usability for multi-project environments.",
+    "rejected": null,
+    "isDeep": true
+  },
+  "c8f3b80b9693a7df2ddd6a2171fa251cf0775607": {
+    "hash": "N/A",
+    "isDecision": true,
+    "isRejection": false,
+    "title": "Implement Comprehensive Onboarding Wizard and Operational Mode Selection",
+    "affects": [
+      "src/llm_router/cli.py",
+      "src/llm_router/hooks/auto-route.py",
+      "src/llm_router/hooks/enforce-route.py",
+      "src/llm_router/hooks/session-end.py",
+      "src/llm_router/hooks/session-start.py"
+    ],
+    "risk": "high",
+    "rationale": "The routing system architecture requires a standardized, zero-friction setup. This decision formalizes the initialization process by detecting available backends (local, paid APIs), recommending a profile, and, critically, allowing the user to select a required operational enforcement mode (shadow, suggest, enforce). This stabilizes the system's entry point and initial configuration.",
+    "rejected": null,
+    "isDeep": true
+  },
+  "336375d9d3284d501c1aac924214756faf973c50": {
+    "hash": "N/A (feat: cumulative savings)",
+    "isDecision": true,
+    "isRejection": false,
+    "title": "Implement cumulative savings reporting (daily/weekly/monthly) in session-end hook",
+    "affects": [
+      "src/llm_router/hooks/session-end.py"
+    ],
+    "risk": "medium",
+    "rationale": "To improve user transparency and demonstrate the tangible value proposition of the service. By quantifying the cost savings against a predefined baseline (Sonnet cost) across various time frames, the system provides stronger justification for its use.",
+    "rejected": null,
+    "isDeep": false
+  },
+  "574f0dd06cbd910572bf33f4d33db26714fa1bbd": {
+    "hash": "2026-04-08",
+    "isDecision": true,
+    "isRejection": false,
+    "title": "Improve robustness and state reliability of session hooks",
+    "affects": [
+      "src/llm_router/hooks/session-start.py",
+      "src/llm_router/hooks/session-end.py"
+    ],
+    "risk": "high",
+    "rationale": "To ensure the usage tracking mechanism maintains accurate state and billing data. This required implementing two key enhancements: 1) Writing a fresh snapshot of current usage metrics upon session end, making the state less dependent on the next session's start hook. 2) Introducing robust, multi-source .env loading to guarantee that necessary configuration variables are available when hooks run in potentially limited environments.",
+    "rejected": null,
+    "isDeep": true
+  },
+  "d1e880d949eaf6c9bdfb97563f7dbe2e091330d9": {
+    "hash": "2026-04-08_auto-route",
+    "isDecision": true,
+    "isRejection": false,
+    "title": "Implement MCP-aware routing bypass",
+    "affects": [
+      "src/llm_router/hooks/auto-route.py"
+    ],
+    "risk": "high",
+    "rationale": "The implementation introduces pattern-matching logic to bypass standard LLM routing directives when the incoming user prompt explicitly matches a known, high-confidence external MCP (e.g., GitHub, Notion, Calendar). This makes the router more robust, more efficient, and reduces unnecessary context complexity for specialized service interactions.",
+    "rejected": null,
+    "isDeep": true
+  },
+  "9c3bbf326e7df98fddf9130bc4a3c3bbd1aa8f66": {
+    "hash": "2026-04-08",
+    "isDecision": true,
+    "isRejection": false,
+    "title": "Explainable Routing and Cost Transparency (v2.2.0)",
+    "affects": [
+      "src/llm_router/cost.py",
+      "src/llm_router/router.py",
+      "src/llm_router/tools/routing.py",
+      "src/llm_router/tools/text.py"
+    ],
+    "risk": "high",
+    "rationale": "To transform LLM usage from a 'black box' cost center into a transparent, cost-aware utility. By providing real-time explanations (cost prefixes, model comparisons), the system guides the user toward optimal, cheaper model selection at the point of decision.",
+    "rejected": null,
+    "isDeep": true
+  },
+  "b9ca201be64233f0b84cea973f6d76a3f6734b12": {
+    "hash": "2026-04-08",
+    "isDecision": true,
+    "isRejection": false,
+    "title": "Implement Routing Simulation and Savings Dashboard for Building Trust",
+    "affects": [
+      "src/llm_router/cli.py",
+      "src/llm_router/tools/admin.py",
+      "src/llm_router/cost.py",
+      "database/usage_table",
+      "src/llm_router/hooks/status-bar.py"
+    ],
+    "risk": "high",
+    "rationale": "The primary architectural goal was moving the product from merely being a router to being a trusted cost-management tool. By introducing a Route Simulator and a Savings Dashboard, the development team aimed to address the 'adoption blocker,' which is user trust. The system now quantifies value (cost savings, efficiency multiplier 'Nx') to prove its utility before the user fully commits to the optimized routing.",
+    "rejected": null,
+    "isDeep": true
+  },
+  "a999431cf866f57c2046f6e5b637c3d3cbd2074a": {
+    "hash": "N/A",
+    "isDecision": true,
+    "isRejection": false,
+    "title": "Implement LLM Route Simulator and Cost Analysis Dashboard",
+    "affects": [
+      "src/llm_router/cli.py",
+      "src/llm_router/cost.py",
+      "src/llm_router/tools/admin.py",
+      "tests/test_server.py"
+    ],
+    "risk": "high",
+    "rationale": "To provide users with a transparent, pre-run cost estimation and performance simulation dashboard. This feature is critical for adoption and understanding the value proposition of the automated LLM routing and cost optimization features, preventing unexpected usage costs.",
+    "rejected": null,
+    "isDeep": true
+  },
+  "612597d8aca757a5b10f4f3062e4f6e760ecc51a": {
+    "hash": "unknown",
+    "isDecision": true,
+    "isRejection": false,
+    "title": "Improve robustness by hiding provider health segment when status data is missing or stale",
+    "affects": [
+      "src/llm_router/hooks/status-bar.py"
+    ],
+    "risk": "low",
+    "rationale": "Previously, the status bar would display stale or default 'unknown' health values if the health tracking file (health.json) was missing, corrupted, or too old. This change updates the reading logic to return 'None' under these failure conditions, causing the entire health segment to be gracefully hidden, thus preventing the UI from misleading the user with inaccurate data.",
+    "rejected": null,
+    "isDeep": false
+  },
+  "87fb31601084ec6e8042e7397443b8c86d4da314": {
+    "hash": "N/A",
+    "isDecision": true,
+    "isRejection": false,
+    "title": "Strategic Product Roadmap: Phased adoption prioritizing Trust and Explainability",
+    "affects": [
+      "llm-router core logic",
+      "usage/billing tracking (DB schema)",
+      "status bar/UI components",
+      "configuration schema/config layer"
+    ],
+    "risk": "high",
+    "rationale": "The development strategy pivots to address user trust as the primary adoption blocker, rather than solely focusing on cost savings. The rollout is gated into phases (Trust & Proof -> Smarter Routing) to ensure foundational visibility and user confidence are established before advanced features are implemented.",
+    "rejected": "A development focus solely on cost-optimization without first addressing the visibility and trust surrounding the model routing decisions.",
+    "isDeep": true
+  },
+  "08aa7dd243bfd145f049c6d63e7ffd298eca98c5": {
+    "hash": "7d33137",
+    "isDecision": true,
+    "isRejection": false,
+    "title": "Harden and enforce structured routing in Claude Code hooks",
+    "affects": [
+      "src/llm_router/hooks/auto-route.py",
+      "src/llm_router/hooks/enforce-route.py",
+      "src/llm_router/tools/setup.py",
+      "README.md",
+      "CHANGELOG.md",
+      "tests/test_route_enforcement_hooks.py"
+    ],
+    "risk": "high",
+    "rationale": "The primary goal is to enforce a stricter contract for how the LLM interacts with the tools, preventing the model from arbitrarily jumping to tools (like Bash/Write) without the necessary routing signals. This hard-by-default enforcement improves system reliability and data integrity by making the LLM's output flow more predictable. It also introduces logging to detect and alert users about missed or incomplete routing turns, improving debugging and observability.",
+    "rejected": null,
+    "isDeep": true
+  },
+  "0f7fb559d762b5fe6241b317a9f5a4ec528deca8": {
+    "hash": "2026-04-07",
+    "isDecision": true,
+    "isRejection": false,
+    "title": "Implement 'claw-code' mode for mandatory local inference routing",
+    "affects": [
+      "src/llm_router/config.py",
+      "src/llm_router/install_hooks.py",
+      "src/llm_router/router.py"
+    ],
+    "risk": "high",
+    "rationale": "The previous routing logic only prioritized local inference (Ollama) when running in 'BUDGET' profiles or when hitting high cloud quota pressure. This change introduces a 'claw-code' mode, recognizing that when running inside open-source alternatives to paid APIs (like claw-code), *every* API call is paid. Therefore, the decision mandates that Ollama must always be injected and attempted first, regardless of the profile or quota status, to minimize operational costs.",
+    "rejected": null,
+    "isDeep": true
+  },
+  "0ef50c18f8fa54f87aaa04aeeb49bd9ff3969cae": {
+    "hash": "N/A_v2.0.0",
+    "isDecision": true,
+    "isRejection": false,
+    "title": "Implement Agno integration via RouteredModel and RouteredTeam",
+    "affects": [
+      "src/llm_router/integrations/agno.py",
+      "README.md",
+      "CHANGELOG.md",
+      "tests/test_agno_integration.py"
+    ],
+    "risk": "high",
+    "rationale": "To solve the problem of scalable, cost-optimized multi-agent LLM usage. By implementing RouteredModel, agent calls can automatically be routed to the cheapest capable LLM provider (e.g., Ollama -> Codex -> paid APIs) based on complexity. RouteredTeam provides centralized, automated budget enforcement for multi-agent workflows.",
+    "rejected": null,
+    "isDeep": true
+  },
+  "a9c57515fd341b371d510c2eeeb03edabeb455a8": {
+    "hash": "2026-04-07_llm_router_enhancement",
+    "isDecision": true,
+    "isRejection": false,
+    "title": "Improved API Error Handling: Content Filtering & Model Subscription Compliance",
+    "affects": [
+      "src/llm_router/router.py",
+      "tests/test_router.py",
+      "CHANGELOG.md"
+    ],
+    "risk": "high",
+    "rationale": "Previously, content filter errors (policy blocks) were treated as hard infrastructure failures, causing unnecessary circuit breaker trips. This change treats them as soft errors, allowing the router to silently skip them and continue attempting the next model. Additionally, explicit model overrides now respect subscription mode, ensuring the LLM router never calls a non-subscribed model while operating in restricted mode.",
+    "rejected": null,
+    "isDeep": true
+  },
+  "da40c8743ff84c499add04bc583b0e48505d1f5c": {
+    "hash": "c86937a",
+    "isDecision": true,
+    "isRejection": false,
+    "title": "Active API Key Purging for Subscription Mode",
+    "affects": [
+      "src/llm_router/config.py",
+      "CHANGELOG.md"
+    ],
+    "risk": "medium",
+    "rationale": "Implemented active purging of the ANTHROPIC_API_KEY from the runtime environment on every configuration lookup. This ensures that the key is fresh and secure, addressing the issue where long-lived processes or external environment setups could cause the key to persist and leak to the LLM router, even after previous hotfixes were applied.",
+    "rejected": null,
+    "isDeep": false
+  },
+  "db901220759c0dc8cdb3cf7d04ea4e7c2da29793": {
+    "hash": "2026-04-07",
+    "isDecision": true,
+    "isRejection": false,
+    "title": "Block ANTHROPIC_API_KEY export in subscription mode",
+    "affects": [
+      "src/llm_router/config.py",
+      "CHANGELOG.md"
+    ],
+    "risk": "high",
+    "rationale": "The previous logic unconditionally exported the ANTHROPIC_API_KEY, meaning that even when running in a controlled Claude Code subscription environment, auxiliary code paths could still make direct Anthropic API calls. This fix implements a hard guarantee by skipping key export when in subscription mode, preventing unexpected separate billing and maintaining the integrity of the billing model.",
+    "rejected": null,
+    "isDeep": true
+  },
+  "7abd3a655dbc127c26d1d368b14846cea6d4169d": {
+    "hash": null,
+    "isDecision": true,
+    "isRejection": false,
+    "title": "Improve Codex agent detection mechanism",
+    "affects": [
+      "src/llm_router/tools/routing.py"
+    ],
+    "risk": "medium",
+    "rationale": "The agent selection logic was previously flawed, relying on `is_codex_plugin_available()` which only checked for a specific plugin directory. This change correctly switches to using `is_codex_available()` to check for the actual Codex CLI binary path. This ensures better compatibility and detection accuracy for users who install Codex via global CLI tools.",
+    "rejected": null,
+    "isDeep": false
+  },
+  "0cb3cb0bd08cef80cd51515df9ae473e6b3a0414": {
+    "hash": "N/A",
+    "isDecision": true,
+    "isRejection": true,
+    "title": "Overhaul Model Routing Strategy: From Direct Directives to Free-First Tool Chains",
+    "affects": [
+      "CHANGELOG.md",
+      "CLAUDE.md",
+      "README.md",
+      "src/llm_router/hooks/auto-route.py",
+      "src/llm_router/hooks/session-start.py"
+    ],
+    "risk": "high",
+    "rationale": "The previous model routing strategy relied on deprecated and unreliable '/model' directives, which were found to be functionally broken or ignored by the underlying Claude Code model in context. The new architecture mandates that all routing (simple, moderate, complex) goes through a structured, 'free-first' Multi-Chain Processor (MCP) tool chain. This approach ensures cost efficiency and reliability by chaining through inexpensive local/prepaid LLMs (Ollama -> Codex) before escalating to more expensive APIs (Gemini/GPT-4o).",
+    "rejected": "The previous model-specific routing directives (`/model claude-haiku-4-5-20251001`, etc.) and the associated complex subscription-based model switching logic.",
+    "isDeep": true
+  },
+  "00f8396d59e33c565a217d78a6f967c547d36556": {
+    "hash": "v1.8.3-protocol-update",
+    "isDecision": true,
+    "isRejection": false,
+    "title": "Standardized Routing Protocol and Fixed MCP Registration Scope",
+    "affects": [
+      "src/llm_router/hooks/auto-route.py",
+      "src/llm_router/install_hooks.py",
+      "src/llm_router/rules/llm-router.md",
+      "pyproject.toml"
+    ],
+    "risk": "high",
+    "rationale": "Two major architectural decisions were implemented: 1) The tool's core communication protocol (the routing directive format) was standardized from an informal '⚡ ROUTE→' to a mandatory '⚡ MANDATORY ROUTE:' format. This prevents LLMs from ignoring critical tool calls. 2) The installation process was fixed to ensure the Multi-LLM MCP server registers in *both* the Code Desktop location and the Code CLI location, guaranteeing tool visibility across deployment types.",
+    "rejected": null,
+    "isDeep": true
+  },
+  "c51438b6c815b7a8b30f9f66f98f13045737409b": {
+    "hash": "2026-04-06",
+    "isDecision": true,
+    "isRejection": false,
+    "title": "Implement headless mode and dynamic banner for Docker/CI Agents",
+    "affects": [
+      "src/llm_router/cli.py",
+      "src/llm_router/hooks/session-start.py",
+      "llm-router install command structure"
+    ],
+    "risk": "high",
+    "rationale": "The primary goal is to enable reliable, non-interactive deployment in containerized environments (Docker/CI/K8s agents). Traditional authentication methods relying on local OAuth or Keychain services fail or are unsuitable in these stateless, ephemeral environments. This required implementing a dedicated `--headless` mode and ensuring the startup banner and initialization logic dynamically adjust to API-key or subscription modes to avoid misleading log warnings and maintain service continuity.",
+    "rejected": null,
+    "isDeep": true
+  },
+  "5795334fe61bf1c72de95cfa546a8d656b5bd239": {
+    "hash": "N/A",
+    "isDecision": true,
+    "isRejection": null,
+    "title": "inline OAuth refresh prevents session 100% exhaustion",
+    "affects": [
+      "src/llm_router/hooks/auto-route.py",
+      "CHANGELOG.md"
+    ],
+    "risk": "high",
+    "rationale": "The previous usage monitoring failed when usage.json was stale (>30 min) and resource pressure was high (≥70%). Stale data caused the system to underestimate true consumption, leading to catastrophic under-routing and eventual session exhaustion. The fix implements an inline OAuth refresh mechanism to ensure that the core routing decision process uses the freshest possible resource pressure data, maintaining system stability.",
+    "rejected": null,
+    "isDeep": true
+  },
+  "cc90433ab00398a635cec633e2594eea6139e340": {
+    "hash": "N/A",
+    "isDecision": true,
+    "isRejection": false,
+    "title": "Integrate dedicated platform support for Claw-Code Environment",
+    "affects": [
+      "src/llm_router/cli.py",
+      "src/llm_router/install_hooks.py",
+      "src/llm_router/hooks/session-end-clawcode.py",
+      "src/llm_router/hooks/status-bar-clawcode.py"
+    ],
+    "risk": "high",
+    "rationale": "The system needed to add dedicated, context-aware hook logic to support the specific environment of 'claw-code'. This environment operates differently from standard integrations (e.g., it does not use Anthropic OAuth; calls are paid API calls), requiring specialized installation hooks and CLI flagging to ensure correct functionality.",
+    "rejected": null,
+    "isDeep": true
+  },
+  "2bd789c6ee8356d6e7186b87b3ae6d40f9bbc28e": {
+    "hash": "N/A",
+    "isDecision": true,
+    "isRejection": false,
+    "title": "Implement user evangelism hooks: shareable savings card and one-time star CTA",
+    "affects": [
+      "src/llm_router/cli.py",
+      "src/llm_router/hooks/session-end.py",
+      "README.md",
+      "CHANGELOG.md"
+    ],
+    "risk": "medium",
+    "rationale": "The goal is to move beyond utility and incorporate a 'growth' mechanic. By making the accumulated savings quantifiable and easily shareable (via a pre-filled tweet/clipboard card), the product aims to drive organic adoption and evangelism from satisfied users. The one-time CTA is a nuanced design choice to avoid annoying the user while maximizing impact.",
+    "rejected": null,
+    "isDeep": true
+  },
+  "f1e2864b5ad4765b5b51f0448e522ab241588327": {
+    "hash": "2026-04-06",
+    "isDecision": true,
+    "isRejection": false,
+    "title": "Granular call breakdown in status bar (sub/free/paid)",
+    "affects": [
+      "src/llm_router/hooks/status-bar.py",
+      "CHANGELOG.md"
+    ],
+    "risk": "medium",
+    "rationale": "To provide users with significantly better visibility into cost savings by differentiating between the type of LLM call (subscription, free provider, or paid provider). This improves user understanding of cost attribution.",
+    "rejected": null,
+    "isDeep": true
+  },
+  "436fa8086a07a28c82d86168baa87bb31570fe6b": {
+    "hash": "2026-04-06",
+    "isDecision": true,
+    "isRejection": false,
+    "title": "Separate free-model savings in session-end summary",
+    "affects": [
+      "src/llm_router/hooks/session-end.py",
+      "CHANGELOG.md"
+    ],
+    "risk": "medium",
+    "rationale": "The cost summary calculation was updated to provide better cost transparency by explicitly separating and quantifying savings achieved using 'free-model' providers (Ollama, Codex) from paid subscriptions, improving user understanding of total cost savings.",
+    "rejected": null,
+    "isDeep": true
+  },
+  "6a82d4cf0a776dea3d2ea4fb360b3d4b9adebba2": {
+    "hash": "ae59828",
+    "isDecision": true,
+    "isRejection": false,
+    "title": "Implement Filesystem Reasoning Tools and detailed Free-model Cost Savings tracking",
+    "affects": [
+      "CHANGELOG.md",
+      "TODO.md",
+      "pyproject.toml",
+      "src/llm_router/cli.py",
+      "src/llm_router/tools/fs.py"
+    ],
+    "risk": "high",
+    "rationale": "The addition of filesystem tools (`llm_fs_*`) drastically increases the system's actionable complexity, allowing LLMs to perform real-world actions (find, rename, bulk edit). The cost savings tracking adds critical transparency, quantifying the value derived from using free/cheap models (Ollama/Codex) versus paid APIs. These features extend the core functionality of the router and require careful handling.",
+    "rejected": null,
+    "isDeep": true
+  },
+  "f8320eda833992f741ce3a852f1ec554c632d96c": {
+    "hash": "N/A",
+    "isDecision": true,
+    "isRejection": false,
+    "title": "Enhance dashboard metrics calculation and implement runtime version reporting",
+    "affects": [
+      "src/llm_router/dashboard/server.py",
+      "dashboard/frontend_components"
+    ],
+    "risk": "high",
+    "rationale": "To improve data fidelity and ensure the single source of truth for core metrics. Savings calculations were refactored to pull data directly from the granular `usage` table, eliminating reliance on a potentially stale or separate `savings_stats` table. Additionally, runtime version tracking was implemented on the dashboard for better operational visibility.",
+    "rejected": null,
+    "isDeep": true
+  },
+  "e1a1379b49c11ff82f9a83abf7dc652444eddc30": {
+    "hash": "2026-04-05",
+    "isDecision": false,
+    "isRejection": false,
+    "title": "Animated SVG Demo in README",
+    "affects": [
+      "README.md",
+      "docs/demo.cast",
+      "docs/images/demo.svg",
+      "scripts/gen_cast.py"
+    ],
+    "risk": "low",
+    "rationale": "Replaced a static PNG demo image with a dynamically generated, animated SVG demonstration to improve the visual quality and perceived interactivity of the product showcase in the README.",
+    "rejected": null,
+    "isDeep": false
+  },
+  "1ab69188797b6fd74ab5afd7c44ffaaa4877b50f": {
+    "hash": "N/A",
+    "isDecision": true,
+    "isRejection": false,
+    "title": "Implement complete local state purging and real routing history demo",
+    "affects": [
+      "CHANGELOG.md",
+      "pyproject.toml",
+      "src/llm_router/cli.py"
+    ],
+    "risk": "high",
+    "rationale": "The decision was made to provide users with a definitive, irreversible method to wipe the entire local application state (database, credentials, logs) via 'uninstall --purge'. This improves data lifecycle management and user control. The added real routing history also significantly increases the utility and complexity of the demo.",
+    "rejected": null,
+    "isDeep": true
+  },
+  "e9efc08a5757c87e684a8aad8d3942207c3866f2": {
+    "hash": "commit_hash",
+    "isDecision": true,
+    "isRejection": false,
+    "title": "Deployment adaptation: Use environment variables for Port/Host binding",
+    "affects": [
+      "src/llm_router/server.py",
+      "railway.toml",
+      "Procfile"
+    ],
+    "risk": "high",
+    "rationale": "The SSE server's binding logic was updated to prioritize reading the necessary network parameters (PORT and HOST) from environment variables ($PORT, $HOST). This change decouples the application from specific CLI argument formats and ensures compatibility with modern Platform-as-a-Service (PaaS) environments (e.g., Railway, Render).",
+    "rejected": null,
+    "isDeep": true
+  },
+  "8f80c855c27c5b82146cf971bfbb949f59985321": {
+    "hash": "N/A",
+    "isDecision": true,
+    "isRejection": false,
+    "title": "Implement savings dashboard, update CLI, and improve cross-platform compatibility",
+    "affects": [
+      "src/llm_router/cli.py",
+      "pyproject.toml",
+      ".github/workflows/ci.yml"
+    ],
+    "risk": "medium",
+    "rationale": "The addition of the savings dashboard provides users with critical visibility into cumulative costs vs. potential savings, enhancing user trust and usage monitoring. Furthermore, updating the compatibility layer to handle OS differences (like skipping `dst.chmod(0o755)` on Windows and using `sys.executable`) ensures the tool functions robustly across various environments (venv, pipx, etc.).",
+    "rejected": null,
+    "isDeep": true
+  },
+  "bfab03f63e6d8a05f193695660ac0899224e1421": {
+    "hash": "2026-04-05",
+    "isDecision": false,
+    "isRejection": false,
+    "title": "fix(v1.3.8): cleaner demo GIF — no username path, no wrapping",
+    "affects": [
+      "CHANGELOG.md",
+      "demo/demo.tape",
+      "docs/images/demo.gif",
+      "pyproject.toml",
+      "src/llm_router/cli.py"
+    ],
+    "risk": "low",
+    "rationale": "N/A (This was a cleanup and documentation update. The changes standardized demo paths by removing hardcoded user paths and updated model names for better readability, which improves usability but does not represent a core architectural shift.)",
+    "rejected": null,
+    "isDeep": false
+  },
+  "9ca4918aff0110ac2e6998f13f81347642612fcd": {
+    "hash": "2026-04-05",
+    "isDecision": true,
+    "isRejection": false,
+    "title": "Implement actionable and structured authentication error handling",
+    "affects": [
+      "CHANGELOG.md",
+      "pyproject.toml",
+      "src/llm_router/router.py"
+    ],
+    "risk": "high",
+    "rationale": "The previous error handling surfaced raw, cryptic exception text, making debugging difficult for users. This update centralizes authentication error detection (401/unauthorized) and provides specific, provider-aware hints (including the exact required environment variable) to greatly improve the developer experience and time-to-fix.",
+    "rejected": null,
+    "isDeep": true
+  },
+  "43f29426cbe91d6bbfef6548c7d154936e27d39e": {
+    "hash": "2026-04-05",
+    "isDecision": true,
+    "isRejection": false,
+    "title": "Implement Deep Reasoning Tier, Setup Wizard, and Demo Command",
+    "affects": [
+      "src/llm_router/classifier.py",
+      "src/llm_router/cli.py",
+      "src/llm_router/router.py",
+      "CHANGELOG.md"
+    ],
+    "risk": "medium",
+    "rationale": "The addition of a 'deep_reasoning' complexity tier fundamentally expands the router's capability to handle highly advanced tasks (formal proofs, first-principles derivation), requiring special handling in the classification and routing layers. Furthermore, the interactive setup wizard standardizes initial configuration, and the demo command improves transparency regarding routing decisions.",
+    "rejected": null,
+    "isDeep": true
+  },
+  "2508169464ecd25a1e2bd014d349d9f00d2b27c6": {
+    "hash": "b9eaab4",
+    "isDecision": true,
+    "isRejection": false,
+    "title": "Enhance diagnostics and standardize multi-IDE integration patterns",
+    "affects": [
+      "README.md",
+      "pyproject.toml",
+      "src/llm_router/cli.py",
+      "CHANGELOG.md"
+    ],
+    "risk": "medium",
+    "rationale": "The primary goals were to significantly improve the developer experience and product reliability by adding a comprehensive 'doctor' health check command. Secondly, explicit documentation was needed to guide users through the unique Model Context Protocol (MCP) registration patterns required by popular IDEs (Cursor, Windsurf, Zed), ensuring the router can be correctly implemented across varied developer ecosystems.",
+    "rejected": null,
+    "isDeep": true
+  },
+  "41960b46062de6a8d383cb07929b9df589476b39": {
+    "hash": "2026-04-05",
+    "isDecision": true,
+    "isRejection": false,
+    "title": "Enhance Visibility, Distribution, and User Trust through Status and Smithery Integration",
+    "affects": [
+      "src/llm_router/cli.py",
+      "src/llm_router/hooks/auto-route.py",
+      "src/llm_router/hooks/session-end.py",
+      "README.md",
+      "smithery.yaml"
+    ],
+    "risk": "medium",
+    "rationale": "The architectural focus shifted to improved user experience, transparency, and ease of adoption. Visible routing indicators were added to make the complex process observable. The 'Shareable savings' feature proves immediate value and cost efficiency. Integrating with Smithery and standardizing the quick-start guide (zero-config) lowers the barrier to entry for new users, increasing adoption.",
+    "rejected": null,
+    "isDeep": true
+  },
+  "318cf5698f8d6b7a7cb79c9ac25c134e0a11f31b": {
+    "hash": "2026-04-05",
+    "isDecision": true,
+    "isRejection": false,
+    "title": "Implement deep integration validation with Claude Desktop",
+    "affects": [
+      "src/llm_router/cli.py",
+      "src/llm_router/install_hooks.py",
+      "mcp-registry.json"
+    ],
+    "risk": "high",
+    "rationale": "The setup process was enhanced to provide deep runtime validation. This change automatically checks if the 'llm-router' is correctly registered within the Claude Desktop configuration file and validates user-provided API keys, drastically improving the user onboarding and setup experience.",
+    "rejected": null,
+    "isDeep": true
+  },
+  "5eb0d12fd058444befe2878c96475b51a7ec26f0": {
+    "hash": "placeholder_hash",
+    "isDecision": true,
+    "isRejection": false,
+    "title": "Stitch Liquid Glass redesign — 4-tab SPA with real data",
+    "affects": [
+      "src/llm_router/dashboard/server.py"
+    ],
+    "risk": "high",
+    "rationale": "Complete overhaul of the dashboard's front-end architecture and design system. The change moves from a previous 'Liquid Glass' design to 'The Ethereal Engine,' adopting a new color palette, font stack (adding JetBrains Mono), and significantly improving data sanitization and XSS protection by ensuring all rendered database values are HTML-escaped.",
+    "rejected": null,
+    "isDeep": true
+  },
+  "e584d609e32883220ca9ee8fcea89cc8f57e5ebd": {
+    "hash": "N/A",
+    "isDecision": true,
+    "isRejection": false,
+    "title": "Implement centralized, persistent usage tracking for LLM calls",
+    "affects": [
+      "src/llm_router/hooks/cc-usage-track.py",
+      "src/llm_router/install_hooks.py",
+      "src/llm_router/tools/codex.py"
+    ],
+    "risk": "high",
+    "rationale": "To provide observability for the dashboard, tracking all LLM model usage (tokens, model name, latency) in a centralized database, regardless of whether the underlying cost is flat-rate (subscription). This ensures metric availability for future savings estimation and usage analysis.",
+    "rejected": null,
+    "isDeep": true
+  },
+  "8b1e4889bd8faa860c8771d7050b40d47d567d17": {
+    "hash": null,
+    "isDecision": true,
+    "isRejection": false,
+    "title": "Implement 'Liquid Glass' Dark Theme Design System",
+    "affects": [
+      "src/llm_router/dashboard/server.py"
+    ],
+    "risk": "medium",
+    "rationale": "To provide a modern, visually rich, and cohesive user experience (UX) by adopting a 'Liquid Glass' dark theme inspired by modern design systems (e.g., Google Stitch). This standardizes colors, typography (Inter, Space Grotesk), and general aesthetic components (using CSS variables) across the entire dashboard.",
+    "rejected": null,
+    "isDeep": true
+  },
+  "814def6f8b0f858d45b85eb32ae858060167c600": {
+    "hash": "2026-04-04",
+    "isDecision": true,
+    "isRejection": false,
+    "title": "Implement comprehensive observability, cost control, and deduplication caching",
+    "affects": [
+      "src/llm_router/cli.py",
+      "src/llm_router/config.py",
+      "src/llm_router/cost.py",
+      "src/llm_router/dashboard/*",
+      "src/llm_router/prompt_cache.py",
+      "src/llm_router/router.py",
+      "src/llm_router/semantic_cache.py",
+      "src/llm_router/tools/admin.py",
+      "tests/*"
+    ],
+    "risk": "high",
+    "rationale": "The core decision is to introduce financial guardrails (daily spending caps) and efficiency mechanisms (prompt and semantic caching) to manage the growing operational costs associated with LLM API usage. The web dashboard provides necessary visibility into usage and cost trends.",
+    "rejected": null,
+    "isDeep": true
+  },
+  "ba423f7f02325c09779db57c4c07226fa8e10c64": {
+    "hash": "2026-04-01",
+    "isDecision": true,
+    "isRejection": false,
+    "title": "Expand Codex utilization across all eligible task types",
+    "affects": [
+      "src/llm_router/router.py"
+    ],
+    "risk": "medium",
+    "rationale": "The routing logic was expanded to include `TaskType.QUERY` in the list of tasks eligible for Codex injection, moving from a limited set (CODE, ANALYZE, GENERATE) to a broader scope. This standardizes the prioritization principle (free local → free prepaid → paid per-call) across more use cases, ensuring that the relatively 'free' Codex capacity is utilized whenever possible, not just for code generation.",
+    "rejected": null,
+    "isDeep": true
+  },
+  "b9af7b74ce60cddbbba17706ea64b1d87732260b": {
+    "hash": "2026-04-01",
+    "isDecision": true,
+    "isRejection": false,
+    "title": "Decomposition of Monolith and Introduction of Standardized State Management",
+    "affects": [
+      "server.py (deprecated)",
+      "tools/ (multiple modules)",
+      "state.py",
+      "src/llm_router/cli.py",
+      "mcp-registry.json"
+    ],
+    "risk": "high",
+    "rationale": "The original `server.py` was a 2,328-line monolith, making it difficult to maintain, extend, and test. The decision was made to decompose this into 8 smaller, focused tools/modules and extract all shared, mutable state into a dedicated `state.py` module. This promotes extensibility, improves testability, and isolates state changes, enabling stateless scaling for the LLM routing service.",
+    "rejected": "The monolithic structure of `server.py` was rejected in favor of a modular, composer-based architecture.",
+    "isDeep": true
+  },
+  "030f625025ee667c56f062de7d030c36aacd23fb": {
+    "hash": "N/A",
+    "isDecision": true,
+    "isRejection": false,
+    "title": "Decompose monolithic server.py into structured tool modules",
+    "affects": [
+      "src/llm_router/server.py",
+      "src/llm_router/tools/",
+      "llm_router package"
+    ],
+    "risk": "medium",
+    "rationale": "The monolithic `server.py` file exceeded 2,300 lines, making it difficult to maintain, navigate, and test. This refactor decomposes the functionality into specialized, focused modules (e.g., `admin.py`, `codex.py`, `text.py`), adhering to the Single Responsibility Principle and improving the overall architectural modularity and separation of concerns.",
+    "rejected": null,
+    "isDeep": true
+  },
+  "8be2dfad62655d04b97ad663150326aa24b504fc": {
+    "hash": "2026-04-01",
+    "isDecision": true,
+    "isRejection": false,
+    "title": "Revamp LLM Routing Strategy: Codex Prioritization and Capacity Optimization",
+    "affects": [
+      "src/llm_router/codex_agent.py",
+      "src/llm_router/hooks/auto-route.py",
+      "src/llm_router/router.py"
+    ],
+    "risk": "high",
+    "rationale": "The routing logic was updated in two major ways: 1) Implemented dedicated plugin detection for Codex to ensure the highest fidelity routing path. 2) Optimized capacity triggering by refining the thresholds for using external/paid models. The primary goal is to ensure cost efficiency while maintaining functionality, by correctly prioritizing pre-paid/subscription capacity.",
+    "rejected": "Reverted the 'session ≥ 85%' capacity threshold rule. This rule was rejected because at 85% usage, there is still sufficient Haiku subscription capacity remaining (15%), which violates the architectural principle of preferring already-paid capacity before triggering expensive external routing.",
+    "isDeep": true
+  },
+  "ea22ac8bd28dc35bd0a243b4079f7499db1731f0": {
+    "hash": "placeholder_commit_hash",
+    "isDecision": true,
+    "isRejection": false,
+    "title": "Implement LLM Cost Monitoring and Routing Feedback Loop",
+    "affects": [
+      "src/llm_router/config.py",
+      "src/llm_router/cost.py",
+      "src/llm_router/router.py",
+      "llm cost calculation logic",
+      "user feedback mechanism"
+    ],
+    "risk": "high",
+    "rationale": "The integration of daily spend limits and alerts is necessary for financial governance regarding external LLM API costs. Furthermore, implementing a user feedback loop (thumbs up/down) allows the router to continuously learn and improve its decision-making process, moving toward a quality-aware routing system.",
+    "rejected": null,
+    "isDeep": true
+  },
+  "6177c5e456bcdfbf8fc74c5d0497ed34479a965c": {
+    "hash": "2026-04-01",
+    "isDecision": true,
+    "isRejection": false,
+    "title": "Implement separate tracking for internal CC subscription model usage",
+    "affects": [
+      "src/llm_router/cost.py",
+      "src/llm_router/hooks/session-end.py"
+    ],
+    "risk": "medium",
+    "rationale": "To accurately report and distinguish usage derived from internal subscription hints (CC-MODE) from external API calls. This separation is necessary for improved cost visibility and a comprehensive session summary.",
+    "rejected": null,
+    "isDeep": true
+  },
+  "d09604b471e5dc794b279f73d02f33ffc9af2573": {
+    "hash": "2026-04-01",
+    "isDecision": true,
+    "isRejection": false,
+    "title": "Implement CC subscription delta tracking for session summary",
+    "affects": [
+      "src/llm_router/hooks/session-start.py",
+      "src/llm_router/hooks/session-end.py"
+    ],
+    "risk": "medium",
+    "rationale": "To provide a unified and accurate session summary by tracking the delta usage (change) of the Claude Code (CC) subscription percentage between the start and end of a session, improving usage visibility for the user.",
+    "rejected": null,
+    "isDeep": false
+  },
+  "5b75da5d09932f4f9560f0e0c0b458cbd9ca3505": {
+    "hash": "2026-04-01",
+    "isDecision": true,
+    "isRejection": false,
+    "title": "Live OAuth Refresh for Usage Tracking",
+    "affects": [
+      "src/llm_router/hooks/session-end.py"
+    ],
+    "risk": "high",
+    "rationale": "Replaced stale file usage tracking with live API calls (OAuth) to fetch fresh, accurate subscription usage data for both Claude and external services, ensuring real-time cost awareness at session end. This significantly increases data reliability for cost tracking.",
+    "rejected": null,
+    "isDeep": true
+  },
+  "15cf0936459a06ee08dc299d1144f7bd0040524b": {
+    "isDecision": true,
+    "isRejection": false,
+    "title": "Implement Subscription-Aware Routing and Ollama Health Probe",
+    "affects": [
+      "src/llm_router/config.py",
+      "src/llm_router/server.py",
+      "llm_router core logic"
+    ],
+    "risk": "high",
+    "rationale": "Two major architectural improvements were implemented: 1) Proactive and cached health checking for the local Ollama service to increase reliability and reduce network calls. 2) Implementing subscription-aware routing logic to detect when the internal Claude Code quota has sufficient headroom, preventing costly external API calls and optimizing usage costs.",
+    "rejected": null,
+    "isDeep": true
+  },
+  "de1d44331671e63e08d56458b65ee65e79af8847": {
+    "hash": "N/A",
+    "isDecision": true,
+    "isRejection": false,
+    "title": "Externalize and formalize Ollama startup logic",
+    "affects": [
+      "src/llm_router/hooks/session-start.py",
+      "src/llm_router/hooks/start-ollama.sh"
+    ],
+    "risk": "high",
+    "rationale": "The core Python hook logic for starting the local LLM service (Ollama) was refactored to delegate the startup process to a dedicated shell script. This decision improves modularity, centralizes complex system process management (timeouts, failure modes, logging) outside of Python, and increases the reliability of the service initialization process.",
+    "rejected": null,
+    "isDeep": true
+  },
+  "6e4788d925b96be36d847e058dbc9a11a4445b8e": {
+    "hash": "placeholder_hash",
+    "isDecision": true,
+    "isRejection": false,
+    "title": "Implement proactive service health checks and usage refresh at session start",
+    "affects": [
+      "src/llm_router/hooks/session-start.py"
+    ],
+    "risk": "medium",
+    "rationale": "The router needs to ensure that required external dependencies (Ollama) are running and available, and that the current usage metrics for paid services (Claude) are up-to-date upon session initialization. This transition moves resource management from reactive to proactive.",
+    "rejected": null,
+    "isDeep": false
+  },
+  "1a9a840337dfc6c48fd511acef4d92a2f31bf44f": {
+    "hash": "20260401_hooks",
+    "isDecision": true,
+    "isRejection": false,
+    "title": "Implement real-time resource tracking and enhanced session summary",
+    "affects": [
+      "src/llm_router/hooks/session-end.py",
+      "src/llm_router/hooks/status-bar.py",
+      "state_management/usage.json"
+    ],
+    "risk": "medium",
+    "rationale": "To provide users with high visibility into their computational resource usage. The new status bar displays live usage of Claude Code subscription credits (session %, weekly %, sonnet %), while the end-of-session hook updates the summary to include this credit status and explicitly reports percentage savings vs. the Sonnet baseline.",
+    "rejected": null,
+    "isDeep": true
+  },
+  "78c06bbec17ebdd6377720291184e15f6f9ab264": {
+    "hash": "2026-03-31",
+    "isDecision": true,
+    "isRejection": false,
+    "title": "Roadmap Update and Completion of Core Architectural Features (v1.0.0)",
+    "affects": [
+      "README.md",
+      "ROADMAP.md",
+      "src/llm_router/server.py"
+    ],
+    "risk": "high",
+    "rationale": "The system transitioned from an experimental proof-of-concept to a robust, production-grade routing layer (v1.0.0). Key decisions formalized were optimizing cost-efficiency (e.g., quality-cost tier sorting, DeepSeek preference), ensuring high availability via comprehensive routing rules, and implementing sophisticated memory management (cross-session context injection) to improve user experience and reliability.",
+    "rejected": null,
+    "isDeep": true
+  },
+  "4d6b39434e9f8f58bd884e253d1e3e4526074125": {
+    "hash": "v1.0.0-routing-fix",
+    "isDecision": true,
+    "isRejection": false,
+    "title": "Unify LLM Routing Profile Generation",
+    "affects": [
+      "src/llm_router/server.py",
+      "src/llm_router/hooks/agent-route.py",
+      "src/llm_router/hooks/auto-route.py",
+      "src/llm_router/hooks/subagent-start.py",
+      "src/llm_router/config.py"
+    ],
+    "risk": "high",
+    "rationale": "The previous implementation allowed `llm_route` and `llm_classify` to derive routing profiles based on different inputs (complexity vs. budget pressure), leading to non-deterministic routing. Unification ensures that all tools use a shared, consistent decision path for profile generation, eliminating ambiguity.",
+    "rejected": null,
+    "isDeep": true
+  },
+  "9a3252ddcb9fe87b0729b6c6faf99ac975659078": {
+    "hash": "v0.9.2-claude-subscription",
+    "isDecision": true,
+    "isRejection": false,
+    "title": "Implement Claude Code Subscription Mode",
+    "affects": [
+      "README.md",
+      "src/llm_router/config.py"
+    ],
+    "risk": "medium",
+    "rationale": "To allow users running the LLM Router inside the Claude Code environment to benefit from their Pro/Max subscription quota (zero API cost) without triggering accidental double-billing. This requires explicitly filtering out the 'anthropic' provider from API routing chains when the subscription flag is set.",
+    "rejected": null,
+    "isDeep": true
+  },
+  "7de93ecb4f250a905006f095d01d236567b08350": {
+    "hash": "2026-03-31",
+    "isDecision": true,
+    "isRejection": false,
+    "title": "Improve LLM Routing Resilience and Graceful Degradation",
+    "affects": [
+      "src/llm_router/hooks/session-start.py",
+      "src/llm_router/server.py"
+    ],
+    "risk": "medium",
+    "rationale": "The system was updated to gracefully handle the unavailability or misconfiguration of external LLM services (Ollama and Perplexity) rather than failing hard. This involves checking Ollama connectivity upfront, providing clear fallbacks (e.g., using Gemini Flash), and notifying the user if necessary keys or models are missing, improving overall operational reliability.",
+    "rejected": null,
+    "isDeep": true
+  },
+  "a66a6118cc6125ebb3009fa067697085879880df": {
+    "hash": "N/A",
+    "isDecision": true,
+    "isRejection": false,
+    "title": "Switch usage data fetching from AppleScript injection to OAuth API",
+    "affects": [
+      "src/llm_router/claude_usage.py",
+      "src/llm_router/server.py"
+    ],
+    "risk": "medium",
+    "rationale": "The mechanism for retrieving usage data was migrated from a brittle, platform-specific AppleScript injection (which was hard to maintain) to using the standardized Claude Code OAuth usage API. This ensures greater reliability and portability across different client environments.",
+    "rejected": null,
+    "isDeep": true
+  },
+  "6318e867d4ae8f148ca1bb6d752ab5a9ce9a3606": {
+    "hash": "2026-03-31",
+    "isDecision": true,
+    "isRejection": false,
+    "title": "Implement SubagentStart hook for dynamic routing context injection",
+    "affects": [
+      "src/llm_router/hooks/subagent-start.py",
+      "src/llm_router/install_hooks.py",
+      "tests/test_subagent_start_hook.py"
+    ],
+    "risk": "high",
+    "rationale": "The routing mechanism is decoupled from simple logic and now dynamically adapts based on real-time 'subscription pressure' (usage of Claude APIs). This ensures that when primary LLM resources are nearing capacity (HIGH/CRITICAL pressure), agents are automatically rerouted to external/fallback services to maintain operational continuity and prevent unexpected cost overruns.",
+    "rejected": null,
+    "isDeep": true
+  },
+  "819dcbb6dd9a3edb2bf24989551b51a8a9341fec": {
+    "hash": "2026-03-31",
+    "isDecision": true,
+    "isRejection": false,
+    "title": "Enforce structured routing and integrate native usage tracking for external LLMs",
+    "affects": [
+      "src/llm_router/hooks/auto-route.py",
+      "src/llm_router/server.py"
+    ],
+    "risk": "high",
+    "rationale": "Two major changes: 1) The auto-route hook is updated to eliminate silent passthrough, forcing the LLM to use a designated tool for 'moderate' complexity tasks instead of self-answering, ensuring 100% routing coverage. 2) New logic is added to retrieve external LLM (Claude) usage data by using AppleScript injection into the browser, avoiding the overhead and complexity of Playwright and browser locking.",
+    "rejected": null,
+    "isDeep": true
+  },
+  "f04669948e25101679fa5af9233c249c1379947e": {
+    "hash": "20260331",
+    "isDecision": true,
+    "isRejection": false,
+    "title": "Implement granular, multi-metric quota tracking and adaptive LLM routing logic",
+    "affects": [
+      "src/llm_router/config.py",
+      "src/llm_router/hooks/agent-route.py",
+      "src/llm_router/hooks/auto-route.py",
+      "src/llm_router/media.py",
+      "src/llm_router/profiles.py",
+      "src/llm_router/router.py"
+    ],
+    "risk": "high",
+    "rationale": "The previous single-pressure quota tracking was too simplistic for managing diverse LLM resources. This update replaces it with separate tracking for session, sonnet, and weekly usage. This granularity allows the router to make highly nuanced, budget-aware routing decisions and implement robust failover mechanisms, thereby preventing unexpected cost overruns or rate limiting.",
+    "rejected": null,
+    "isDeep": true
+  },
+  "79466bd01da33f8ade1b322eec58dc26d4f06a1d": {
+    "hash": "N/A_v0.9.1",
+    "isDecision": false,
+    "isRejection": false,
+    "title": "fix(v0.9.1): version bump, pressure fallback, validation, error hints, CODEX_PATH",
+    "affects": [
+      "pyproject.toml",
+      "src/llm_router/*"
+    ],
+    "risk": "low",
+    "rationale": "This commit is primarily a version bump and maintenance release. The changes implement robustness improvements (validation, error handling, path management for CODEX) and update configuration files to improve project structure and tooling compatibility rather than introducing a new core architectural paradigm.",
+    "rejected": null,
+    "isDeep": false
+  },
+  "a30a6879cad57d3ca871b66fd1edbaa77508e071": {
+    "hash": "2026-03-31",
+    "isDecision": true,
+    "isRejection": false,
+    "title": "Wire complexity to profile as foundational routing rule",
+    "affects": [
+      "src/llm_router/hooks/auto-route.py",
+      "src/llm_router/router.py",
+      "src/llm_router/server.py"
+    ],
+    "risk": "high",
+    "rationale": "Standardizes the LLM call process by making task complexity (simple, moderate, complex) the single source of truth for determining the required model profile (BUDGET, BALANCED, PREMIUM). This ensures that the cost/capability tier automatically aligns with the task difficulty, greatly improving consistency and manageability.",
+    "rejected": null,
+    "isDeep": true
+  },
+  "71d590dc29cc10df6b091509a21ce9104bd55ed0": {
+    "hash": "2026-03-31",
+    "isDecision": true,
+    "isRejection": false,
+    "title": "Implemented controlled usage budgets and full cost savings tracking",
+    "affects": [
+      "src/llm_router/config.py",
+      "src/llm_router/cost.py",
+      "src/llm_router/health.py"
+    ],
+    "risk": "high",
+    "rationale": "The system was transitioned from unlimited, uncontrolled usage (default budgets of 0) to finite, controlled budgets (e.g., $20 monthly cap, 500k tokens/day). Furthermore, the core logic in `cost.py` was upgraded to implement a sophisticated calculation that tracks and quantifies 'routing savings' by comparing actual incurred costs against a standardized baseline (Sonnet 4.6 pricing).",
+    "rejected": null,
+    "isDeep": true
+  },
+  "f037530dd2a0d4c359c4f1f7c4cf50f822e5e8d8": {
+    "hash": "a1b2c3d4e5f6",
+    "isDecision": true,
+    "isRejection": false,
+    "title": "Implement pressure-aware routing and formal cost tracking",
+    "affects": [
+      "src/llm_router/hooks/agent-route.py",
+      "src/llm_router/hooks/session-end.py",
+      "State/Persistence layer (usage.json, usage.db)"
+    ],
+    "risk": "high",
+    "rationale": "The architecture is upgraded to include two key features: 1) Quota/Resource Awareness: The router now reads a usage JSON file to detect pressure on premium models (like Claude), dynamically adjusting routing to use less costly/more available models when quotas are low. 2) Financial Transparency: Cost tracking is moved to a structured SQLite database, establishing a formal baseline (Sonnet 4.6) against which all savings can be accurately measured, providing real business value reporting.",
+    "rejected": null,
+    "isDeep": true
+  },
+  "995eddb8242cd068013693b14096466e1013d72f": {
+    "hash": "N/A",
+    "isDecision": true,
+    "isRejection": false,
+    "title": "Implement PreToolUse Hook for Cost-Aware Subagent Routing",
+    "affects": [
+      "src/llm_router/hooks/agent-route.py",
+      "llm_router core logic",
+      "agent tooling/execution flow"
+    ],
+    "risk": "high",
+    "rationale": "The primary goal is to enforce strict cost controls by intercepting subagent spawning. The system analyzes agent intent (retrieval vs. reasoning) and routes tasks accordingly. Reasoning tasks are funneled to a more cost-effective MCP tool rather than directly using expensive models like Opus, mitigating high operational costs and enabling scalable usage based on real-time quota pressure.",
+    "rejected": null,
+    "isDeep": true
+  },
+  "f79cf86894593773120f860523c0b0b908f8ecfd": {
+    "hash": "2026-03-31",
+    "isDecision": true,
+    "isRejection": false,
+    "title": "Architectural overhaul of asynchronous model routing and penalty calculation",
+    "affects": [
+      "src/llm_router/router.py",
+      "src/llm_router/benchmarks.py",
+      "src/llm_router/profiles.py",
+      "tests/test_profiles.py"
+    ],
+    "risk": "high",
+    "rationale": "The previous model routing system failed to correctly calculate model penalties (based on failure rates and latency stats) in production asynchronous contexts due to deadlocks and event loop detection errors. This fix implements a robust, pre-fetching pattern: all necessary operational metrics are now gathered asynchronously using asyncio.gather() *before* model chain construction. These results are then passed down as optional parameters, ensuring the self-learning feedback system remains accurate and functional in a highly concurrent production environment. Additionally, core business logic for profile-specific routing (BUDGET and RESEARCH) was corrected to reliably manage model quota pressure.",
+    "rejected": null,
+    "isDeep": true
+  },
+  "dee75eca0cd2f7c01489b2aff00863a782e6672d": {
+    "hash": "2026-03-31-v0.7.1",
+    "isDecision": true,
+    "isRejection": false,
+    "title": "Implementing advanced routing strategies and code-edit tooling",
+    "affects": [
+      "llm_router/edit.py",
+      "README.md",
+      "core_routing_logic",
+      "model_chaining_service"
+    ],
+    "risk": "high",
+    "rationale": "Multiple critical architectural improvements were implemented to improve cost efficiency, system robustness, and stability. Key improvements include: 1) Introducing `llm_edit` to route mechanical code-editing reasoning to a cheap model, significantly reducing expensive calls to flagship models (e.g., Opus). 2) Implementing availability-aware routing, which incorporates P95 latency into the benchmark scoring, ensuring system performance degrades gracefully as external services struggle. 3) Setting cold-start defaults for Codex to prevent costly latency spikes and maintain predictable system behavior on fresh installs.",
+    "rejected": null,
+    "isDeep": true
+  },
+  "255c3e12b979a6858230440519aa6e2df43fb0bc": {
+    "hash": "2026-03-31",
+    "isDecision": true,
+    "isRejection": false,
+    "title": "Implement Availability-Aware Routing and Latency Penalties",
+    "affects": [
+      "src/llm_router/cost.py",
+      "src/llm_router/benchmarks.py",
+      "src/llm_router/server.py",
+      "tests/test_availability_routing.py"
+    ],
+    "risk": "high",
+    "rationale": "The original scoring mechanism only considered failure rates. By folding P50/P95 latency into the quality score, the system prioritizes not just capability, but actual real-world performance consistency, making routing decisions far more robust.",
+    "rejected": null,
+    "isDeep": true
+  },
+  "80d7fa11935a32efdbe824149741a00f890f3bc2": {
+    "hash": "2026-03-31",
+    "isDecision": true,
+    "isRejection": false,
+    "title": "Introduce Dedicated Code-Edit MCP Tool Workflow (llm_edit)",
+    "affects": [
+      "src/llm_router/edit.py",
+      "CHANGELOG.md",
+      "tests/test_edit.py"
+    ],
+    "risk": "high",
+    "rationale": "To reduce operational cost and complexity when editing code, the system now offloads the creative/reasoning step (determining file/old/new strings) to a cheaper, dedicated LLM. Claude is reserved for mechanical, execution-only application of the instructions, thereby optimizing the entire editing pipeline.",
+    "rejected": null,
+    "isDeep": true
+  },
+  "eea6aa772ac0f8ef0f4da98e07c254f96b124c80": {
+    "hash": "2026-03-31",
+    "isDecision": true,
+    "isRejection": false,
+    "title": "Establish Cold-Start Latency Defaults for Models",
+    "affects": [
+      "src/llm_router/benchmarks.py"
+    ],
+    "risk": "medium",
+    "rationale": "Models that have no historical routing data (cold-start) must be assigned pessimistic P95 latency defaults (e.g., 60s or 90s) to prevent them from being artificially prioritized in routing decisions until sufficient usage history is available.",
+    "rejected": null,
+    "isDeep": false
+  },
+  "78c5b21a48a60bfd4180aed9d2ba3399b46ea56b": {
+    "hash": "2026-03-30",
+    "isDecision": true,
+    "isRejection": false,
+    "title": "Implement Quality-Cost Aware LLM Routing & Subscription Mode",
+    "affects": [
+      "src/llm_router/router.py",
+      "src/llm_router/benchmarks.py",
+      "src/llm_router/config.py",
+      "demo/app_builder_demo.py",
+      "demo/saas_builder_demo.py"
+    ],
+    "risk": "high",
+    "rationale": "The system was upgraded to dynamically route tasks based on a complex interplay of economic cost and model quality. Key decisions include: 1) Implementing a 'Subscription Mode' to prevent double-billing and preserve API quotas when using paid services. 2) Establishing a formal 'Quality-Cost' sorting heuristic (cost-per-token blended analysis) to ensure the cheapest model that meets the quality requirement is always chosen. 3) Integrating high-performance, cost-effective models like DeepSeek-Reasoner into core chains to maintain performance at high utilization.",
+    "rejected": null,
+    "isDeep": true
+  },
+  "eca0e75b4273d6561bd675f8e42889067dbd9396": {
+    "hash": "2026-03-30",
+    "isDecision": true,
+    "isRejection": false,
+    "title": "Implement subscription-aware and pressure-aware LLM routing",
+    "affects": [
+      "src/llm_router/router.py",
+      "src/llm_router/claude_usage.py",
+      "src/llm_router/profiles.py",
+      "README.md",
+      "CLAUDE.md"
+    ],
+    "risk": "high",
+    "rationale": "The system was upgraded to dynamically monitor and adapt model routing chains based on live Claude Pro/Max subscription usage ('quota pressure'). This ensures that the most expensive, high-quality models are prioritized until quota is nearly exhausted (85% usage), after which the router automatically falls back to cheaper, open-source, or lower-tier models to maintain operational continuity and manage costs effectively.",
+    "rejected": null,
+    "isDeep": true
+  },
+  "d6f465bdf4a02b90ebd4dc77a46495b94150fc3e": {
+    "hash": "2026-03-30",
+    "isDecision": true,
+    "isRejection": false,
+    "title": "Implementing Structured Hooks and Mandating Prompt Directives for Routing Enforcement",
+    "affects": [
+      "src/llm_router/hooks/auto-route.py",
+      "src/llm_router/hooks/session-end.py",
+      "src/llm_router/hooks/session-start.py",
+      "src/llm_router/install_hooks.py"
+    ],
+    "risk": "high",
+    "rationale": "The primary goal was to enforce routing mandates and improve system observability. The directive was moved from a soft, multi-line hint to a high-density, mandatory single-line format to minimize LLM deviation. New session start/end hooks were added to track operational metrics (tool usage, missed routing instances, estimated cost savings) necessary for measuring and optimizing the routing layer's efficiency.",
+    "rejected": null,
+    "isDeep": true
+  },
+  "7e18b4e6388e89b0fb62c4c357fa642236af1e8a": {
+    "hash": "N/A_20260330",
+    "isDecision": true,
+    "isRejection": false,
+    "title": "Enforce routing as hard constraint with MANDATORY ROUTE directive",
+    "affects": [
+      "CLAUDE.md",
+      "src/llm_router/hooks/auto-route.py"
+    ],
+    "risk": "high",
+    "rationale": "The previous soft routing hints were insufficient for cost control. The decision elevates routing hints to a mandatory, hard constraint (⚡ MANDATORY ROUTE:). This is necessary to strictly enforce the use of cheaper models (Gemini Flash, Haiku) and prevent costly hallucinations or over-processing by the high-cost Opus model, by prohibiting actions like subagents, WebSearch, or self-answering when a route is given.",
+    "rejected": null,
+    "isDeep": true
+  },
+  "dc0f442c4fbaaf63c14c2f669811c0e35062ba75": {
+    "hash": "2026-03-30",
+    "isDecision": true,
+    "isRejection": false,
+    "title": "Implement Benchmark-Driven Model Routing Transparency",
+    "affects": [
+      "README.md",
+      "docs/BENCHMARKS.md",
+      ".github/workflows/benchmarks.yml",
+      "src/llm_router/benchmark_fetcher.py"
+    ],
+    "risk": "high",
+    "rationale": "To establish transparency and confidence in the model selection process. By documenting how models are quantitatively ranked (based on performance, cost, and task type), the team can educate users on why certain models are recommended for specific tasks, thereby setting clear expectations for system performance and cost.",
+    "rejected": null,
+    "isDeep": true
+  },
+  "c8c9ad1d906dfff1b7538f512355feec791f24bc": {
+    "hash": "2026-03-30",
+    "isDecision": true,
+    "isRejection": false,
+    "title": "Multi-stage prompt classification and self-updating hooks",
+    "affects": [
+      "src/llm_router/hooks/auto-route.py",
+      "src/llm_router/hooks/usage-refresh.py",
+      "src/llm_router/install_hooks.py",
+      "src/llm_router/server.py",
+      "README.md"
+    ],
+    "risk": "high",
+    "rationale": "To significantly improve cost efficiency and reduce latency by implementing a multi-stage prompt classification funnel. Simple tasks are now routed through free/local methods (Heuristics -> Ollama) before escalating to paid APIs (Gemini/GPT-4o-mini), ensuring high-cost models are only used when necessary.",
+    "rejected": null,
+    "isDeep": true
+  },
+  "68e50b26910000090ae10c2e6a56833888189e27": {
+    "hash": "N/A",
+    "isDecision": true,
+    "isRejection": false,
+    "title": "Refactor and stabilize LLM Benchmark Sources and Model Aliasing",
+    "affects": [
+      "src/llm_router/benchmark_fetcher.py",
+      ".github/workflows/benchmarks.yml",
+      "pyproject.toml"
+    ],
+    "risk": "high",
+    "rationale": "Migrated benchmark data fetching from deprecated/general sources (like LMSYS) to specialized, structured, and current sources (e.g., Arena Hard Auto CSV, v2 leaderboards) to ensure benchmark reliability and accuracy. Also significantly refactored and expanded the model aliasing map to support versioning and new frontier models correctly.",
+    "rejected": null,
+    "isDeep": true
+  },
+  "bc0ff924352acbb8e7850b5ad70eb07a0764de21": {
+    "hash": null,
+    "isDecision": true,
+    "isRejection": false,
+    "title": "Implement benchmark-driven routing table with weekly auto-update",
+    "affects": [
+      "src/llm_router/benchmark_fetcher.py",
+      "src/llm_router/benchmarks.py",
+      "src/llm_router/cost.py",
+      ".github/workflows/benchmarks.yml",
+      "pyproject.toml"
+    ],
+    "risk": "high",
+    "rationale": "To ensure the routing logic always uses the most up-to-date, performance-validated model pairings available in the LLM ecosystem, decoupling the core router from manually maintained, potentially stale configuration rules.",
+    "rejected": null,
+    "isDeep": true
+  },
+  "1e8ecb492259b5e5789e854565b1d6f43ebb6b58": {
+    "hash": "c0d3e2f",
+    "isDecision": true,
+    "isRejection": false,
+    "title": "Restrict Ollama local model usage exclusively to the budget tier",
+    "affects": [
+      "docs/PROVIDERS.md",
+      "src/llm_router/config.py",
+      "llm_router/router.py"
+    ],
+    "risk": "high",
+    "rationale": "The system determined that local Ollama models are only suitable for simple, low-complexity tasks (budget tier). They lack the capability required for heavy-weight reasoning, complex architecture decisions, or multi-step analysis, necessitating the restriction of their use to the budget routing chain, while reserving balanced and premium tasks for cloud providers.",
+    "rejected": null,
+    "isDeep": true
+  },
+  "5a929669ddd8ffe23c77edda497d3bf5f4697b84": {
+    "hash": "2026-03-30",
+    "isDecision": true,
+    "isRejection": false,
+    "title": "Support for local model execution via Ollama and cost-optimization explainer.",
+    "affects": [
+      "docs/PROVIDERS.md",
+      "README.md",
+      "src/llm_router/config.py",
+      "src/llm_router/router.py",
+      "src/llm_router/types.py"
+    ],
+    "risk": "high",
+    "rationale": "The core rationale is cost reduction, privacy, and enhancing local development capability. By adding Ollama support, simple tasks can be routed to free local models, dramatically cutting cloud API costs (up to 85%). This shift makes the system more private (no data leaves the machine) and sustainable regarding API budgets.",
+    "rejected": null,
+    "isDeep": true
+  },
+  "e6bb8597ea718b38ce1bdcc03b4d7e81b87e9a86": {
+    "hash": "2026-03-30",
+    "isDecision": true,
+    "isRejection": false,
+    "title": "Improve model routing and result representation for better observability",
+    "affects": [
+      "llm_router/router.py",
+      "llm_router/types.py"
+    ],
+    "risk": "low",
+    "rationale": "Standardized and cleaned up the logging and result reporting mechanism. The goal was to make the output (both console logs and structured responses) more readable, informative, and visually consistent by utilizing emojis and grouping key metrics (tokens, cost, latency) clearly.",
+    "rejected": null,
+    "isDeep": false
+  },
+  "3876778fbc3dc56400e0571aecf97bbb2a21e9f2": {
+    "hash": "2026-03-30",
+    "isDecision": true,
+    "isRejection": false,
+    "title": "Implement persistent session context injection and auto-update rules",
+    "affects": [
+      "src/llm_router/context.py",
+      "src/llm_router/router.py",
+      "src/llm_router/install_hooks.py",
+      "CHANGELOG.md",
+      "docs/pr-drafts.md"
+    ],
+    "risk": "high",
+    "rationale": "To provide external Large Language Models (LLMs) with complete conversation history and persistent cross-session context. This solves the problem of models losing context between interactions by introducing a two-layer system: a temporary buffer (current session) and persistent SQLite summaries (previous sessions). It also increases reliability by implementing auto-update checks for routing rules, ensuring users receive the latest model logic upon package upgrade.",
+    "rejected": null,
+    "isDeep": true
+  },
+  "77b7be1d01c59d03ce89947599a6f94d356c8ba2": {
+    "hash": "2026-03-29",
+    "isDecision": true,
+    "isRejection": false,
+    "title": "Major feature release v0.4.0: Context Compaction, Global Hooks, and Media Support",
+    "affects": [
+      "src/llm_router/compaction.py",
+      "src/llm_router/config.py",
+      "src/llm_router/cost.py",
+      "src/llm_router/hooks/auto-route.py",
+      "src/llm_router/router.py",
+      "src/llm_router/media.py"
+    ],
+    "risk": "high",
+    "rationale": "The system is significantly enhanced across several fronts: 1) **Efficiency/Cost:** Implementing structural context compaction reduces token usage. 2) **Observability:** Introducing quality logging tracks the full routing lifecycle for better auditing and analysis. 3) **Capability:** Adding support for multimodal outputs (Gemini Imagen/Veo) expands the toolset. 4) **Persistence:** Global hooks and savings logging ensure consistent, system-wide enforcement of rules and resource tracking.",
+    "rejected": null,
+    "isDeep": true
+  },
+  "87b9d4072bd1dd96683661a5adb1dba602e43b5e": {
+    "hash": "2026-03-29",
+    "isDecision": true,
+    "isRejection": false,
+    "title": "Multi-layer auto-classification with Ollama + API fallback chain",
+    "affects": [
+      ".claude/hooks/auto-route.py",
+      ".claude/hooks/usage-refresh.py",
+      "docs/images/classification-flow.mmd",
+      "skills/route/SKILL.md"
+    ],
+    "risk": "high",
+    "rationale": "Replaced simple first-match regex classification with a sophisticated, multi-stage scoring pipeline. This ensures robust and reliable routing by prioritizing local, free, and fast mechanisms (skips, heuristics, Ollama) before falling back to costly cloud APIs (GPT-4o-mini/Gemini Flash), maximizing both efficiency and accuracy.",
+    "rejected": null,
+    "isDeep": true
+  },
+  "127b35616792e4bc6daecec460d1dfe4e53c381d": {
+    "hash": "N/A (Based on provided commit)",
+    "isDecision": true,
+    "isRejection": false,
+    "title": "Global routing overhaul: Rewriting the auto-route hook to classify all user prompts.",
+    "affects": [
+      "src/llm_router/",
+      "tests/test_auto_route_hook.py",
+      "tests/test_edge_cases.py"
+    ],
+    "risk": "high",
+    "rationale": "The previous system limited routing to specific task domains (e.g., only research). This change makes the auto-route hook classify ALL user prompts and inject routing hints. This significantly increases coverage and aims for better user experience by ensuring that any complex or ambiguous prompt is routed to the most appropriate LLM tool, rather than failing or being miscategorized.",
+    "rejected": null,
+    "isDeep": true
+  },
+  "9baa33d10cc43c0886245755b7efe232b00a6adf": {
+    "hash": "2026-03-29_feature",
+    "isDecision": true,
+    "isRejection": false,
+    "title": "Implement robust prompt handling layer: Caching, Auto-Routing, Streaming, and Rate Limiting",
+    "affects": [
+      "src/llm_router/",
+      ".claude/hooks/auto-route.py",
+      "tests/test_auto_route_hook.py",
+      "src/llm_router/cache.py",
+      "src/llm_router/server.py"
+    ],
+    "risk": "high",
+    "rationale": "To improve overall system reliability, performance, and resource efficiency. Auto-routing redirects prompts to the most appropriate LLM tool pre-emptively (saving costly round-trips). Caching prevents reprocessing identical requests. Rate limiting and streaming enhance stability and user experience under load.",
+    "rejected": null,
+    "isDeep": true
+  },
+  "2a74c0199921588ce80705c0503880ed1e523a04": {
+    "hash": "2026-03-29",
+    "isDecision": false,
+    "isRejection": false,
+    "title": "Resolve Ruff lint errors (Unused imports, unused vars)",
+    "affects": [
+      "src/llm_router/claude_usage.py",
+      "src/llm_router/model_selector.py",
+      "src/llm_router/server.py",
+      "tests/test_classifier.py",
+      "tests/test_model_selector.py",
+      "tests/test_route.py"
+    ],
+    "risk": "low",
+    "rationale": "This commit consists solely of linting fixes (unused imports, unused variables, semicolons) and does not represent an architectural or design decision.",
+    "rejected": null,
+    "isDeep": false
+  },
+  "24860296eefca679c79dff791021a217bd59a736": {
+    "hash": "2026-03-29",
+    "isDecision": true,
+    "isRejection": false,
+    "title": "Implement Complexity-First Routing and Unified Provider Monitoring",
+    "affects": [
+      "src/llm_router/router.py",
+      "src/llm_router/model_selector.py",
+      "src/llm_router/profiles.py",
+      "src/llm_router/cost.py",
+      "src/llm_router/config.py",
+      "tests/test_integration.py",
+      "CHANGELOG.md"
+    ],
+    "risk": "high",
+    "rationale": "The system is upgrading from simple budget-based downshifting to a 'Complexity-first' routing mechanism. This enhances resilience and intelligence by matching the task complexity (S/M/C) to the optimal model (Haiku/Sonnet/Opus) first, and using budget monitoring (Claude/Codex/API spend) as a secondary safety net. This allows for better scalability and cost prediction.",
+    "rejected": null,
+    "isDeep": true
+  },
+  "9bc3701f3d3eb2f1d6835985dd52daafaed3c28d": {
+    "hash": "2026-03-29",
+    "isDecision": true,
+    "isRejection": false,
+    "title": "Implement smart, budget-aware LLM routing based on complexity classification",
+    "affects": [
+      "src/llm_router/classifier.py",
+      "src/llm_router/model_selector.py",
+      "src/llm_router/cost.py",
+      "src/llm_router/server.py",
+      "src/llm_router/profiles.py",
+      "src/llm_router/types.py",
+      "tests/test_classifier.py",
+      "tests/test_model_selector.py",
+      "tests/test_route.py",
+      "README.md"
+    ],
+    "risk": "high",
+    "rationale": "To move beyond simple routing, the system now uses an intelligent classifier to determine the required complexity of a task and selects the optimal LLM (from Claude Code's internal models or external APIs). Crucially, it incorporates a 'Progressive Budget Downshift' mechanism, automatically switching to cheaper models (e.g., Opus -> Sonnet -> Haiku) as the user approaches their allocated daily token budget, thus optimizing cost and ensuring reliability.",
+    "rejected": null,
+    "isDeep": true
+  },
+  "c24a020171f4dd2f83d2d1024c68358d406378b0": {
+    "hash": "abc123",
+    "isDecision": true,
+    "isRejection": false,
+    "title": "Restructure components to follow installable plugin convention",
+    "affects": [
+      "agents/",
+      "skills/",
+      ".claude-plugin/plugin.json",
+      "marketplace.json",
+      "README.md"
+    ],
+    "risk": "medium",
+    "rationale": "To align the project structure and plugin components with the official 'installable Claude Code plugin' convention, moving agents and skills from an internal subdirectory to the repo root. This improves discoverability and deployment flow.",
+    "rejected": null,
+    "isDeep": true
+  },
+  "8bd834eae6554d900b34f41628278e2a4283aef8": {
+    "hash": "2026-03-28",
+    "isDecision": true,
+    "isRejection": false,
+    "title": "Implement Freemium Gating, Budget Enforcement, and Advanced Tooling",
+    "affects": [
+      "src/llm_router/",
+      ".claude-plugin/agents/llm-orchestrator.md",
+      ".github/workflows/ci.yml",
+      "README.md"
+    ],
+    "risk": "high",
+    "rationale": "The core business model requires revenue gating and predictable cost management. We implemented freemium limitations and budget enforcement (cost tracking). Architecturally, this required expanding the tool registry to include media generation, orchestration pipelines, and dedicated management tools, significantly increasing the system's capability and complexity.",
+    "rejected": null,
+    "isDeep": true
+  },
+  "51f3e3c88b522a1e5ae6beb5dfa2975fefc09207": {
+    "hash": "N/A",
+    "isDecision": true,
+    "isRejection": false,
+    "title": "Enhanced multi-modal and provider orchestration capabilities",
+    "affects": [
+      "src/llm_router/config.py",
+      "src/llm_router/media.py",
+      "src/llm_router/orchestrator.py",
+      "src/llm_router/profiles.py",
+      "src/llm_router/router.py",
+      "src/llm_router/server.py",
+      "src/llm_router/types.py",
+      ".env.example"
+    ],
+    "risk": "high",
+    "rationale": "To achieve maximum vendor neutrality and flexibility, the router was expanded from supporting a limited number of providers to supporting a comprehensive suite of 20+ text LLMs and multiple media generation APIs. This dynamic selection capability allows the system to automatically choose the optimal provider based on cost, performance, or required modality, fundamentally improving system resilience and expanding the feature set.",
+    "rejected": null,
+    "isDeep": true
+  }
+}

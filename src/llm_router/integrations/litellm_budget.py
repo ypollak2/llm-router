@@ -55,8 +55,14 @@ async def get_litellm_spend(provider: str | None = None) -> dict[str, float]:
     Returns:
         ``{"openai": 3.50, "anthropic": 12.00}``
     """
+    import asyncio
+
     db_path = os.environ.get(_DB_ENV, "")
-    if not db_path or not Path(db_path).exists():
+    if not db_path:
+        return {}
+    # Offload synchronous Path.exists() to thread pool to avoid blocking event loop
+    exists = await asyncio.to_thread(Path(db_path).exists)
+    if not exists:
         return {}
 
     user_filter = os.environ.get(_USER_ENV, "")
@@ -118,8 +124,14 @@ async def get_litellm_budget_cap(provider: str, user: str | None = None) -> floa
     Returns:
         Monthly cap in USD, or 0.0 if not set.
     """
+    import asyncio
+
     db_path = os.environ.get(_DB_ENV, "")
-    if not db_path or not Path(db_path).exists():
+    if not db_path:
+        return 0.0
+    # Offload synchronous Path.exists() to thread pool to avoid blocking event loop
+    exists = await asyncio.to_thread(Path(db_path).exists)
+    if not exists:
         return 0.0
 
     user = user or os.environ.get(_USER_ENV, "")

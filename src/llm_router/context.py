@@ -267,10 +267,13 @@ async def get_recent_session_summaries(limit: int = 3) -> list[dict]:
         List of dicts with keys: summary, session_start, session_end,
         message_count, task_types. Ordered newest first.
     """
+    import asyncio
     import sqlite3
 
     db_path = _get_db_path()
-    if not db_path.exists():
+    # Offload synchronous Path.exists() to thread pool to avoid blocking event loop
+    exists = await asyncio.to_thread(db_path.exists)
+    if not exists:
         return []
 
     _ensure_session_table(db_path)

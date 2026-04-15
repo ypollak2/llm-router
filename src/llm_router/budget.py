@@ -144,7 +144,9 @@ async def _claude_subscription_state() -> BudgetState:
     import os
     stale_floor = float(os.environ.get("LLM_ROUTER_STALE_PRESSURE_FLOOR", "0.5"))
     try:
-        age_sec = time.monotonic() - _USAGE_JSON.stat().st_mtime
+        # Offload synchronous stat() to thread pool to avoid blocking event loop
+        st_mtime = await asyncio.to_thread(lambda: _USAGE_JSON.stat().st_mtime)
+        age_sec = time.monotonic() - st_mtime
         if age_sec > _USAGE_STALENESS_LIMIT_SEC:
             return BudgetState(provider="anthropic", pressure=stale_floor, quota_pct=stale_floor)
     except OSError:
@@ -269,7 +271,9 @@ async def _get_provider_monthly_spend(provider: str) -> float:
     try:
         import aiosqlite
         db_path = get_config().llm_router_db_path
-        if not Path(db_path).exists():
+        # Offload synchronous Path.exists() to thread pool to avoid blocking event loop
+        exists = await asyncio.to_thread(Path(db_path).exists)
+        if not exists:
             return 0.0
         async with aiosqlite.connect(db_path) as db:
             cursor = await db.execute(

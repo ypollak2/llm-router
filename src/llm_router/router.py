@@ -274,7 +274,13 @@ def _resolve_profile(
 
     if profile is None and not model_override:
         if complexity_hint is not None:
-            c = Complexity(complexity_hint) if isinstance(complexity_hint, str) else complexity_hint
+            if isinstance(complexity_hint, str):
+                try:
+                    c = Complexity(complexity_hint)
+                except ValueError:
+                    c = Complexity.MODERATE
+            else:
+                c = complexity_hint
         elif classification_data and "complexity" in classification_data:
             try:
                 c = Complexity(classification_data["complexity"])
@@ -476,6 +482,388 @@ async def _notify(ctx: Any | None, level: str, message: str) -> None:
         await getattr(ctx, level)(message)
     except Exception:
         pass
+
+
+async def _dispatch_model_loop(
+    models_to_try: list[str],
+    task_type: TaskType,
+    profile: RoutingProfile,
+    prompt: str,
+    system_prompt: str | None,
+    temperature: float | None,
+    max_tokens: int | None,
+    media_params: dict | None,
+    ctx: Any | None,
+    classification_data: dict | None,
+    caller_context: str | None,
+    use_thinking: bool,
+    correlation_id: str,
+    complexity_hint: Complexity | str | None,
+    c: Complexity,
+    config: Any,
+    route_span: Any,
+    route_log: Any,
+    _reservation: float,
+    effective_complexity: str,
+) -> LLMResponse:
+    """Execute the main model dispatch loop with primary + emergency fallback chains.
+
+    Walks through models_to_try in order, calling each until one succeeds.
+    On complete failure of the primary chain, attempts emergency BUDGET fallback
+    (if profile != BUDGET) to prevent total routing failure when external providers are down.
+
+    Args:
+        models_to_try: Ordered list of model IDs to attempt.
+        task_type: The task type being routed.
+        profile: Resolved routing profile.
+        prompt: User prompt/query.
+        system_prompt: Optional system message.
+        temperature: Optional temperature override.
+        max_tokens: Optional max tokens override.
+        media_params: Media task parameters (image/video/audio).
+        ctx: MCP RequestContext for progress notifications.
+        classification_data: Classification metadata for logging.
+        caller_context: Caller/agent context for tracing.
+        use_thinking: Whether to enable extended thinking (Claude only).
+        correlation_id: Request correlation ID for tracing.
+        complexity_hint: Raw complexity hint from caller.
+        c: Resolved Complexity enum.
+        config: Application config.
+        route_span: Tracing span for the route operation.
+        route_log: Structured logger instance.
+        _reservation: Reserved budget amount for this call.
+        effective_complexity: Stringified complexity for logging.
+
+    Returns:
+        LLMResponse on success.
+
+    Raises:
+        RuntimeError: When all models in primary + emergency chains fail.
+    """
+    global _pending_spend
+    tracker = get_tracker()
+    last_error: Exception | None = None
+
+    for attempt, model in enumerate(models_to_try, start=1):
+        provider = provider_from_model(model)
+        model_name = model.split("/", 1)[1] if "/" in model else model
+
+        if not tracker.is_healthy(provider):
+            await _notify(ctx, "warning", f"⚠️  {provider} unhealthy — trying next")
+            log.info("Skipping unhealthy provider: %s", provider)
+            route_log.warning(
+                "provider_unhealthy_skip",
+                correlation_id=correlation_id,
+                provider=provider,
+                model=model,
+            )
+            continue
+
+        # Refresh provider budget state for each attempt so long fallback walks
+        # do not keep routing to providers that exhausted their budget mid-chain.
+        budget_state = await get_budget_state(provider)
+        if budget_state.pressure >= 0.8:
+            route_log.warning(
+                "provider_budget_pressure_high",
+                correlation_id=correlation_id,
+                provider=provider,
+                model=model,
+                pressure=budget_state.pressure,
+            )
+        if budget_state.pressure >= 1.0:
+            await _notify(ctx, "warning", f"⚠️  {provider} budget exhausted — trying next")
+            log.info("Skipping budget-exhausted provider: %s", provider)
+            last_error = BudgetExceededError(f"{provider} budget exhausted")
+            continue
+
+        await _notify(ctx, "info", f"⏳ {model_name} working...")
+
+        try:
+            with traced_span(
+                "provider_call",
+                tracer_name="llm_router.router",
+                correlation_id=correlation_id,
+                attempt=attempt,
+                model=model,
+                provider=provider,
+                task_type=task_type,
+            ) as provider_span:
+                if task_type in MEDIA_TASK_TYPES:
+                    response = await _call_media(task_type, provider, model_name, prompt,
+                                                 _filter_media_params(task_type, media_params),
+                                                 correlation_id=correlation_id)
+                elif provider == "codex":
+                    codex_result = await run_codex(prompt, model=model_name)
+                    if not codex_result.success:
+                        raise RuntimeError(f"Codex exited {codex_result.exit_code}: {codex_result.content[:200]}")
+                    response = LLMResponse(
+                        content=codex_result.content,
+                        model=f"codex/{model_name}",
+                        input_tokens=0,
+                        output_tokens=0,
+                        cost_usd=0.0,
+                        latency_ms=codex_result.duration_sec * 1000,
+                        provider="codex",
+                    )
+                else:
+                    response = await _call_text(
+                        model, prompt, system_prompt, temperature, max_tokens, task_type,
+                        caller_context=caller_context,
+                        use_thinking=use_thinking,
+                        correlation_id=correlation_id,
+                    )
+
+                set_span_attributes(
+                    provider_span,
+                    response_model=response.model,
+                    response_provider=response.provider,
+                    cost_usd=response.cost_usd,
+                    latency_ms=response.latency_ms,
+                )
+
+            tracker.record_success(provider)
+            await cost.log_usage(response, task_type, profile, correlation_id=correlation_id)
+
+            # Record spend for real-time session spend meter (v4.0)
+            try:
+                from llm_router.session_spend import get_session_spend
+                get_session_spend().record(
+                    model=model,
+                    tool=task_type.value,
+                    input_tokens=response.input_tokens,
+                    output_tokens=response.output_tokens,
+                    cost_usd=response.cost_usd,
+                )
+            except Exception:
+                pass
+
+            # Record exchange in session buffer for future context injection
+            buf = get_session_buffer()
+            buf.record("user", prompt, task_type=task_type.value)
+            buf.record("assistant", response.content, task_type=task_type.value)
+
+            # Log routing decision for quality analytics
+            if classification_data:
+                try:
+                    await cost.log_routing_decision(
+                        prompt=prompt,
+                        task_type=classification_data.get("task_type", task_type.value),
+                        profile=classification_data.get("profile", profile.value),
+                        classifier_type=classification_data.get("classifier_type", "unknown"),
+                        classifier_model=classification_data.get("classifier_model"),
+                        classifier_confidence=classification_data.get("classifier_confidence", 0.0),
+                        classifier_latency_ms=classification_data.get("classifier_latency_ms", 0.0),
+                        complexity=classification_data.get("complexity", "moderate"),
+                        recommended_model=classification_data.get("recommended_model", model),
+                        base_model=classification_data.get("base_model", model),
+                        was_downshifted=classification_data.get("was_downshifted", False),
+                        budget_pct_used=classification_data.get("budget_pct_used", 0.0),
+                        quality_mode=classification_data.get("quality_mode", "balanced"),
+                        final_model=response.model,
+                        final_provider=response.provider,
+                        success=True,
+                        input_tokens=response.input_tokens,
+                        output_tokens=response.output_tokens,
+                        cost_usd=response.cost_usd,
+                        latency_ms=response.latency_ms,
+                        reason_code=classification_data.get("reason_code"),
+                        correlation_id=correlation_id,
+                    )
+                except Exception as e:
+                    log.warning("Failed to log routing decision: %s", e)
+
+            await _notify(
+                ctx, "info",
+                f"✅ {model_name} — {response.latency_ms:.0f}ms · ${response.cost_usd:.6f}"
+            )
+            route_log.info(
+                "routing_decision",
+                correlation_id=correlation_id,
+                task_type=task_type.value,
+                complexity=effective_complexity,
+                profile=profile.value,
+                model=response.model,
+                provider=response.provider,
+                cost_usd=response.cost_usd,
+                latency_ms=response.latency_ms,
+            )
+            set_span_attributes(
+                route_span,
+                final_model=response.model,
+                final_provider=response.provider,
+                cost_usd=response.cost_usd,
+                latency_ms=response.latency_ms,
+                attempts=attempt,
+            )
+
+            # Daily spend alert — fire async so it never blocks the response
+            _raw_limit = getattr(config, "llm_router_daily_spend_limit", 0.0)
+            daily_limit = float(_raw_limit) if isinstance(_raw_limit, (int, float)) else 0.0
+            if daily_limit > 0:
+                try:
+                    daily_spend = await cost.get_daily_spend()
+                    if daily_spend >= daily_limit:
+                        cost.fire_budget_alert(
+                            "LLM Router — Daily Limit Reached",
+                            f"Daily spend ${daily_spend:.3f} has crossed the "
+                            f"${daily_limit:.2f} limit.",
+                        )
+                    elif daily_spend >= daily_limit * 0.9:
+                        cost.fire_budget_alert(
+                            "LLM Router — Daily Spend Warning",
+                            f"Daily spend ${daily_spend:.3f} is at "
+                            f"{100 * daily_spend / daily_limit:.0f}% of the "
+                            f"${daily_limit:.2f} limit.",
+                        )
+                except Exception as e:
+                    log.debug("Daily budget alert check failed: %s", e)
+
+            # Store in semantic cache for future dedup (fire-and-forget)
+            if task_type not in MEDIA_TASK_TYPES:
+                try:
+                    from llm_router import semantic_cache
+                    await semantic_cache.store(prompt, task_type, response)
+                except Exception as _sc_err:
+                    log.debug("Semantic cache store failed (non-fatal): %s", _sc_err)
+
+            async with _budget_lock:
+                _pending_spend = max(0.0, _pending_spend - _reservation)
+            return response
+
+        except Exception as e:
+            is_rate_limit = _is_rate_limit_error(e)
+            is_content_filter = not is_rate_limit and _is_content_filter_error(e)
+            is_auth = not is_rate_limit and not is_content_filter and _is_auth_error(e)
+            if is_rate_limit:
+                await _notify(ctx, "warning", f"{model} rate-limited — switching provider...")
+                log.warning("Rate limit on %s, switching to next", model)
+                route_log.warning(
+                    "routing_fallback",
+                    correlation_id=correlation_id,
+                    model=model,
+                    provider=provider,
+                    error_type=type(e).__name__,
+                    fallback_reason="rate_limit",
+                )
+                tracker.record_rate_limit(provider)
+            elif is_content_filter:
+                log.info("Content filter on %s, trying next model silently", model)
+            elif is_auth:
+                hint = _auth_error_hint(provider)
+                await _notify(ctx, "warning", hint)
+                log.warning("Auth error on %s: %s", model, e)
+                route_log.warning(
+                    "routing_fallback",
+                    correlation_id=correlation_id,
+                    model=model,
+                    provider=provider,
+                    error_type=type(e).__name__,
+                    fallback_reason="auth_error",
+                )
+                tracker.record_failure(provider)
+            else:
+                await _notify(ctx, "warning", f"{model} failed: {e} — trying next...")
+                log.warning("Model %s failed: %s", model, e)
+                route_log.warning(
+                    "routing_fallback",
+                    correlation_id=correlation_id,
+                    model=model,
+                    provider=provider,
+                    error_type=type(e).__name__,
+                    fallback_reason="provider_error",
+                )
+                tracker.record_failure(provider)
+            last_error = e
+            continue
+
+    # ── Emergency fallback: try BUDGET chain when primary chain exhausts ────
+    if profile != RoutingProfile.BUDGET and task_type not in MEDIA_TASK_TYPES:
+        await _notify(
+            ctx, "warning",
+            f"⚠️  {profile.value} chain exhausted — trying budget models as fallback"
+        )
+        log.warning(
+            "Primary %s chain exhausted, attempting BUDGET emergency fallback",
+            profile.value
+        )
+        emergency_chain = await _build_and_filter_chain(
+            task_type, RoutingProfile.BUDGET, None, complexity_hint, Complexity.SIMPLE, config
+        )
+        if emergency_chain and emergency_chain != models_to_try:
+            for attempt, model in enumerate(emergency_chain, start=len(models_to_try) + 1):
+                provider = provider_from_model(model)
+                model_name = model.split("/", 1)[1] if "/" in model else model
+
+                if not tracker.is_healthy(provider):
+                    log.info("Skipping unhealthy provider in emergency fallback: %s", provider)
+                    continue
+
+                try:
+                    await _notify(ctx, "info", f"⏳ {model_name} (emergency fallback) working...")
+
+                    if task_type in MEDIA_TASK_TYPES:
+                        response = await _call_media(
+                            task_type, provider, model_name, prompt,
+                            _filter_media_params(task_type, media_params),
+                            correlation_id=correlation_id
+                        )
+                    else:
+                        response = await _call_text(
+                            model, prompt, system_prompt, temperature, max_tokens, task_type,
+                            caller_context=caller_context,
+                            use_thinking=use_thinking,
+                            correlation_id=correlation_id,
+                        )
+
+                    tracker.record_success(provider)
+                    await cost.log_usage(response, task_type, RoutingProfile.BUDGET, correlation_id=correlation_id)
+
+                    route_log.info(
+                        "emergency_fallback_success",
+                        correlation_id=correlation_id,
+                        task_type=task_type.value,
+                        original_profile=profile.value,
+                        fallback_model=response.model,
+                        fallback_provider=response.provider,
+                        cost_usd=response.cost_usd,
+                        latency_ms=response.latency_ms,
+                    )
+
+                    await _notify(
+                        ctx, "info",
+                        f"✅ Emergency fallback {model_name} — {response.latency_ms:.0f}ms · ${response.cost_usd:.6f}"
+                    )
+
+                    async with _budget_lock:
+                        _pending_spend = max(0.0, _pending_spend - _reservation)
+                    return response
+
+                except Exception as e:
+                    log.warning(
+                        "Emergency fallback model %s failed: %s", model, e
+                    )
+                    last_error = e
+                    continue
+
+    last_is_auth = last_error is not None and _is_auth_error(last_error)
+    setup_hint = (
+        " Run `llm-router setup` to configure provider API keys, or "
+        "`llm-router doctor` to diagnose all issues."
+        if last_is_auth else
+        " Run `llm_health()` to see circuit breaker status, or "
+        "`llm-router doctor` to diagnose all issues."
+    )
+    set_span_attributes(
+        route_span,
+        attempts=len(models_to_try),
+        last_error_type=type(last_error).__name__ if last_error else None,
+    )
+    async with _budget_lock:
+        _pending_spend = max(0.0, _pending_spend - _reservation)
+    raise RuntimeError(
+        f"All models failed for {task_type.value}/{profile.value}. "
+        f"Last error: {last_error}.{setup_hint}"
+    )
 
 
 async def route_and_call(
@@ -748,261 +1136,33 @@ async def route_and_call(
             except Exception:
                 pass  # Never block routing due to escalation check errors
 
-        last_error: Exception | None = None
-        for attempt, model in enumerate(models_to_try, start=1):
-            provider = provider_from_model(model)
-            model_name = model.split("/", 1)[1] if "/" in model else model
-
-            if not tracker.is_healthy(provider):
-                await _notify(ctx, "warning", f"⚠️  {provider} unhealthy — trying next")
-                log.info("Skipping unhealthy provider: %s", provider)
-                route_log.warning(
-                    "provider_unhealthy_skip",
-                    correlation_id=correlation_id,
-                    provider=provider,
-                    model=model,
-                )
-                continue
-
-            # Refresh provider budget state for each attempt so long fallback walks
-            # do not keep routing to providers that exhausted their budget mid-chain.
-            budget_state = await get_budget_state(provider)
-            if budget_state.pressure >= 0.8:
-                route_log.warning(
-                    "provider_budget_pressure_high",
-                    correlation_id=correlation_id,
-                    provider=provider,
-                    model=model,
-                    pressure=budget_state.pressure,
-                )
-            if budget_state.pressure >= 1.0:
-                await _notify(ctx, "warning", f"⚠️  {provider} budget exhausted — trying next")
-                log.info("Skipping budget-exhausted provider: %s", provider)
-                last_error = BudgetExceededError(f"{provider} budget exhausted")
-                continue
-
-            await _notify(ctx, "info", f"⏳ {model_name} working...")
-
-            try:
-                with traced_span(
-                    "provider_call",
-                    tracer_name="llm_router.router",
-                    correlation_id=correlation_id,
-                    attempt=attempt,
-                    model=model,
-                    provider=provider,
-                    task_type=task_type,
-                ) as provider_span:
-                    if task_type in MEDIA_TASK_TYPES:
-                        response = await _call_media(task_type, provider, model_name, prompt,
-                                                     _filter_media_params(task_type, media_params),
-                                                     correlation_id=correlation_id)
-                    elif provider == "codex":
-                        codex_result = await run_codex(prompt, model=model_name)
-                        if not codex_result.success:
-                            raise RuntimeError(f"Codex exited {codex_result.exit_code}: {codex_result.content[:200]}")
-                        response = LLMResponse(
-                            content=codex_result.content,
-                            model=f"codex/{model_name}",
-                            input_tokens=0,   # CLI doesn't report token counts
-                            output_tokens=0,
-                            cost_usd=0.0,     # free via OpenAI subscription
-                            latency_ms=codex_result.duration_sec * 1000,
-                            provider="codex",
-                        )
-                    else:
-                        response = await _call_text(
-                            model, prompt, system_prompt, temperature, max_tokens, task_type,
-                            caller_context=caller_context,
-                            use_thinking=use_thinking,
-                            correlation_id=correlation_id,
-                        )
-
-                    set_span_attributes(
-                        provider_span,
-                        response_model=response.model,
-                        response_provider=response.provider,
-                        cost_usd=response.cost_usd,
-                        latency_ms=response.latency_ms,
-                    )
-
-                tracker.record_success(provider)
-                await cost.log_usage(response, task_type, profile, correlation_id=correlation_id)
-
-                # Record spend for real-time session spend meter (v4.0)
-                try:
-                    from llm_router.session_spend import get_session_spend
-                    get_session_spend().record(
-                        model=model,
-                        tool=task_type.value,
-                        input_tokens=response.input_tokens,
-                        output_tokens=response.output_tokens,
-                        cost_usd=response.cost_usd,
-                    )
-                except Exception:
-                    pass  # Never block routing due to spend tracking errors
-
-                # Record exchange in session buffer for future context injection
-                buf = get_session_buffer()
-                buf.record("user", prompt, task_type=task_type.value)
-                buf.record("assistant", response.content, task_type=task_type.value)
-
-                # Log routing decision for quality analytics
-                if classification_data:
-                    try:
-                        await cost.log_routing_decision(
-                            prompt=prompt,
-                            task_type=classification_data.get("task_type", task_type.value),
-                            profile=classification_data.get("profile", profile.value),
-                            classifier_type=classification_data.get("classifier_type", "unknown"),
-                            classifier_model=classification_data.get("classifier_model"),
-                            classifier_confidence=classification_data.get("classifier_confidence", 0.0),
-                            classifier_latency_ms=classification_data.get("classifier_latency_ms", 0.0),
-                            complexity=classification_data.get("complexity", "moderate"),
-                            recommended_model=classification_data.get("recommended_model", model),
-                            base_model=classification_data.get("base_model", model),
-                            was_downshifted=classification_data.get("was_downshifted", False),
-                            budget_pct_used=classification_data.get("budget_pct_used", 0.0),
-                            quality_mode=classification_data.get("quality_mode", "balanced"),
-                            final_model=response.model,
-                            final_provider=response.provider,
-                            success=True,
-                            input_tokens=response.input_tokens,
-                            output_tokens=response.output_tokens,
-                            cost_usd=response.cost_usd,
-                            latency_ms=response.latency_ms,
-                            reason_code=classification_data.get("reason_code"),
-                            correlation_id=correlation_id,
-                        )
-                    except Exception as e:
-                        log.warning("Failed to log routing decision: %s", e)
-
-                await _notify(
-                    ctx, "info",
-                    f"✅ {model_name} — {response.latency_ms:.0f}ms · ${response.cost_usd:.6f}"
-                )
-                route_log.info(
-                    "routing_decision",
-                    correlation_id=correlation_id,
-                    task_type=task_type.value,
-                    complexity=effective_complexity,
-                    profile=profile.value,
-                    model=response.model,
-                    provider=response.provider,
-                    cost_usd=response.cost_usd,
-                    latency_ms=response.latency_ms,
-                )
-                set_span_attributes(
-                    route_span,
-                    final_model=response.model,
-                    final_provider=response.provider,
-                    cost_usd=response.cost_usd,
-                    latency_ms=response.latency_ms,
-                    attempts=attempt,
-                )
-
-                # Daily spend alert — fire async so it never blocks the response
-                # Guard: llm_router_daily_spend_limit may be MagicMock in tests
-                _raw_limit = getattr(config, "llm_router_daily_spend_limit", 0.0)
-                daily_limit = float(_raw_limit) if isinstance(_raw_limit, (int, float)) else 0.0
-                if daily_limit > 0:
-                    try:
-                        daily_spend = await cost.get_daily_spend()
-                        if daily_spend >= daily_limit:
-                            cost.fire_budget_alert(
-                                "LLM Router — Daily Limit Reached",
-                                f"Daily spend ${daily_spend:.3f} has crossed the "
-                                f"${daily_limit:.2f} limit.",
-                            )
-                        elif daily_spend >= daily_limit * 0.9:
-                            cost.fire_budget_alert(
-                                "LLM Router — Daily Spend Warning",
-                                f"Daily spend ${daily_spend:.3f} is at "
-                                f"{100 * daily_spend / daily_limit:.0f}% of the "
-                                f"${daily_limit:.2f} limit.",
-                            )
-                    except Exception as e:
-                        log.debug("Daily budget alert check failed: %s", e)
-
-                # Store in semantic cache for future dedup (fire-and-forget)
-                if task_type not in MEDIA_TASK_TYPES and not model_override:
-                    try:
-                        from llm_router import semantic_cache
-                        await semantic_cache.store(prompt, task_type, response)
-                    except Exception as _sc_err:
-                        log.debug("Semantic cache store failed (non-fatal): %s", _sc_err)
-
-                async with _budget_lock:
-                    _pending_spend = max(0.0, _pending_spend - _reservation)
-                return response
-
-            except Exception as e:
-                is_rate_limit = _is_rate_limit_error(e)
-                is_content_filter = not is_rate_limit and _is_content_filter_error(e)
-                is_auth = not is_rate_limit and not is_content_filter and _is_auth_error(e)
-                if is_rate_limit:
-                    await _notify(ctx, "warning", f"{model} rate-limited — switching provider...")
-                    log.warning("Rate limit on %s, switching to next", model)
-                    route_log.warning(
-                        "routing_fallback",
-                        correlation_id=correlation_id,
-                        model=model,
-                        provider=provider,
-                        error_type=type(e).__name__,
-                        fallback_reason="rate_limit",
-                    )
-                    tracker.record_rate_limit(provider)
-                elif is_content_filter:
-                    # Silent skip — content filter is a provider policy decision, not a
-                    # reliability failure. Don't show a warning or trip the circuit breaker.
-                    log.info("Content filter on %s, trying next model silently", model)
-                elif is_auth:
-                    hint = _auth_error_hint(provider)
-                    await _notify(ctx, "warning", hint)
-                    log.warning("Auth error on %s: %s", model, e)
-                    route_log.warning(
-                        "routing_fallback",
-                        correlation_id=correlation_id,
-                        model=model,
-                        provider=provider,
-                        error_type=type(e).__name__,
-                        fallback_reason="auth_error",
-                    )
-                    tracker.record_failure(provider)
-                else:
-                    await _notify(ctx, "warning", f"{model} failed: {e} — trying next...")
-                    log.warning("Model %s failed: %s", model, e)
-                    route_log.warning(
-                        "routing_fallback",
-                        correlation_id=correlation_id,
-                        model=model,
-                        provider=provider,
-                        error_type=type(e).__name__,
-                        fallback_reason="provider_error",
-                    )
-                    tracker.record_failure(provider)
-                last_error = e
-                continue
-
-        last_is_auth = last_error is not None and _is_auth_error(last_error)
-        setup_hint = (
-            " Run `llm-router setup` to configure provider API keys, or "
-            "`llm-router doctor` to diagnose all issues."
-            if last_is_auth else
-            " Run `llm_health()` to see circuit breaker status, or "
-            "`llm-router doctor` to diagnose all issues."
-        )
-        set_span_attributes(
-            route_span,
-            attempts=len(models_to_try),
-            last_error_type=type(last_error).__name__ if last_error else None,
+        # Dispatch through the extracted model loop, which handles both primary
+        # and emergency BUDGET fallback chains atomically.
+        response = await _dispatch_model_loop(
+            models_to_try=models_to_try,
+            task_type=task_type,
+            profile=profile,
+            prompt=prompt,
+            system_prompt=system_prompt,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            media_params=media_params,
+            ctx=ctx,
+            classification_data=classification_data,
+            caller_context=caller_context,
+            use_thinking=use_thinking,
+            correlation_id=correlation_id,
+            complexity_hint=complexity_hint,
+            c=c,
+            config=config,
+            route_span=route_span,
+            route_log=route_log,
+            _reservation=_reservation,
+            effective_complexity=effective_complexity,
         )
         async with _budget_lock:
             _pending_spend = max(0.0, _pending_spend - _reservation)
-        raise RuntimeError(
-            f"All models failed for {task_type.value}/{profile.value}. "
-            f"Last error: {last_error}.{setup_hint}"
-        )
+        return response
 
 
 async def _call_text(

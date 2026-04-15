@@ -125,9 +125,13 @@ async def get_provider_spend() -> dict[str, float]:
     Returns:
         Dict mapping provider name to USD spent this calendar month.
     """
+    import asyncio
+
     config = get_config()
     db_path = config.llm_router_db_path
-    if not db_path.exists():
+    # Offload synchronous Path.exists() to thread pool to avoid blocking event loop
+    exists = await asyncio.to_thread(db_path.exists)
+    if not exists:
         return {}
 
     db = await aiosqlite.connect(str(db_path))

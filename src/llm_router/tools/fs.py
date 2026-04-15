@@ -205,16 +205,19 @@ async def llm_fs_analyze_context(
 
     for key_file in KEY_FILES:
         candidate = workspace / key_file
-        if candidate.exists() and len(found_files) < max_files:
-            try:
-                content = candidate.read_text(encoding="utf-8", errors="ignore")
-                # Cap each file at 2KB to keep the summary compact
-                if len(content) > 2048:
-                    content = content[:2048] + "\n[... truncated ...]"
-                collected.append(f"=== {key_file} ===\n{content}")
-                found_files.append(key_file)
-            except OSError:
-                pass
+        if len(found_files) < max_files:
+            # Offload synchronous Path.exists() to thread pool to avoid blocking event loop
+            exists = await asyncio.to_thread(candidate.exists)
+            if exists:
+                try:
+                    content = await asyncio.to_thread(lambda c=candidate: c.read_text(encoding="utf-8", errors="ignore"))
+                    # Cap each file at 2KB to keep the summary compact
+                    if len(content) > 2048:
+                        content = content[:2048] + "\n[... truncated ...]"
+                    collected.append(f"=== {key_file} ===\n{content}")
+                    found_files.append(key_file)
+                except OSError:
+                    pass
 
     if not collected:
         return (
