@@ -115,24 +115,34 @@ async def _build_and_filter_chain(
                 _penalty_err,
             )
 
-    # ── Dynamic chain selection (v5.0) with availability filtering ─────────────
-    # Get static chain from profiles.py, then filter by discovered availability.
-    # This ensures chains always reflect the actual configured providers.
-    models_to_try = get_model_chain(
-        profile, task_type,
-        failure_rates=_failure_rates,
-        latency_stats=_latency_stats,
-        acceptance_scores=_acceptance_scores,
-    )
+    # ── Dynamic chain selection (v5.0) with session-start discovery ──────────────
+    # At session start, discover available providers and build optimized routing tables.
+    # All subsequent routing requests use these pre-built tables.
+    # Fallback to static chain if dynamic routing failed to initialize.
+    models_to_try = None
     
-    # Discover available providers and filter chain
     try:
-        from llm_router.discover import discover_and_build_chain
-        models_to_try = await discover_and_build_chain(models_to_try)
-    except Exception as _discover_err:
+        from llm_router.dynamic_routing import get_dynamic_model_chain
+        dynamic_chain = get_dynamic_model_chain(profile, task_type)
+        if dynamic_chain is not None:
+            models_to_try = dynamic_chain
+            log.debug(
+                "Using session-start dynamic routing table for %s/%s",
+                profile.value, task_type.value,
+            )
+    except Exception as _dynroute_err:
         log.debug(
-            "Discovery filtering failed, using static chain: %s",
-            _discover_err,
+            "Dynamic routing table lookup failed: %s",
+            _dynroute_err,
+        )
+    
+    # Fall back to static chain if dynamic tables not available
+    if models_to_try is None:
+        models_to_try = get_model_chain(
+            profile, task_type,
+            failure_rates=_failure_rates,
+            latency_stats=_latency_stats,
+            acceptance_scores=_acceptance_scores,
         )
 
     if task_type not in MEDIA_TASK_TYPES:

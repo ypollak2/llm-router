@@ -76,6 +76,16 @@ try:
 except Exception:
     pass
 
+# ── Initialize dynamic routing tables on startup ────────────────────────────────
+# Build custom routing tables based on discovered available providers.
+# This happens once at session start, so all routing decisions use optimized
+# chains that reflect what's actually configured.
+try:
+    from llm_router.dynamic_routing import initialize_dynamic_routing
+    initialize_dynamic_routing()
+except Exception as _dynroute_err:
+    log.warning("Failed to initialize dynamic routing, will fall back to static tables: %s", _dynroute_err)
+
 # ── Tool slim mode (v4.0) ─────────────────────────────────────────────────────
 # Gating happens at registration time so unused tools never appear in Claude's
 # tool list at all — saving tokens before any request is made.
