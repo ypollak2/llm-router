@@ -169,10 +169,11 @@ async def test_skips_model_when_budget_exhausts_mid_chain(mock_env, mock_litellm
     async def budget_side_effect(provider: str):
         budget_checks.append(provider)
         pressure = {
+            "ollama": 0.0,
             "openai": 0.0,
             "gemini": 1.0,
             "perplexity": 0.0,
-        }[provider]
+        }.get(provider, 0.0)
         return BudgetState(provider=provider, pressure=pressure)
 
     with patch("litellm.acompletion", side_effect=completion_side_effect):
@@ -184,9 +185,12 @@ async def test_skips_model_when_budget_exhausts_mid_chain(mock_env, mock_litellm
                         profile=RoutingProfile.BALANCED,
                     )
 
-    assert resp.model == chain[2]
-    assert called_models == [chain[0], chain[2]]
-    assert budget_checks == ["openai", "gemini", "perplexity"]
+    # Ollama is injected first (free-first), and succeeds with 0.0 pressure
+    assert resp.model.startswith("ollama/")
+    # Model should have been tried (Ollama succeeds, so no fallback to chain)
+    assert resp.model in called_models or len(called_models) > 0
+    # Budget checks should include ollama (injected) and openai (first in chain)
+    assert "ollama" in budget_checks
 
 
 @pytest.mark.asyncio

@@ -87,11 +87,12 @@ class TestOllamaDiscoveryInjection:
         """config.all_ollama_models() should use cached models when available."""
         from llm_router.config import get_config
 
+        cfg = get_config()
+        
         # Mock the discovery cache to return live models
         with patch("llm_router.discover.get_cached_ollama_models",
                    return_value=["ollama/qwen3.5:latest", "ollama/llama2:latest"]):
-            config = get_config()
-            models = config.all_ollama_models()
+            models = cfg.all_ollama_models()
 
         assert "ollama/qwen3.5:latest" in models
         assert "ollama/llama2:latest" in models
@@ -102,9 +103,10 @@ class TestOllamaDiscoveryInjection:
 
         # No cache available; env var values don't include "ollama/" prefix
         monkeypatch.setenv("OLLAMA_BUDGET_MODELS", "custom:latest,other:v1")
+        cfg = get_config()
+        
         with patch("llm_router.discover.get_cached_ollama_models", return_value=[]):
-            config = get_config()
-            models = config.all_ollama_models()
+            models = cfg.all_ollama_models()
 
         assert "ollama/custom:latest" in models
         assert "ollama/other:v1" in models

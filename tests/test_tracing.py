@@ -150,8 +150,8 @@ async def test_build_chain_emits_span():
 
     span = next(span for span in tracer.spans if span.name == "build_chain")
     assert chain[0] == capability.model_id
-    assert span.attributes["dynamic_enabled"] is True
     assert span.attributes["top_model"] == capability.model_id
+    assert span.attributes["chain_length"] == len(chain)
 
 
 @pytest.mark.asyncio
