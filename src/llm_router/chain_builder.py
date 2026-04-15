@@ -1,8 +1,8 @@
-"""Dynamic Chain Builder — phase 6 of the Adaptive Universal Router v5.0.
+"""Dynamic Chain Builder — core routing engine for Adaptive Universal Router v5.0+.
 
 Assembles a ranked model chain for a given (task_type, complexity) pair using
-the output of the Unified Scorer.  This replaces the static routing tables in
-``profiles.py`` when ``LLM_ROUTER_DYNAMIC=true``.
+the output of the Unified Scorer.  This is the primary chain selection mechanism
+(always-on as of v5.0; feature flag removed).
 
 Design constraints
 ------------------
@@ -14,16 +14,13 @@ Design constraints
    fall below the minimum chain length.
 4. **Offline-safe**: All failures return the static chain from ``profiles.py``
    so routing is never blocked when the dynamic system has an error.
-5. **Feature flag**: Only activated when ``LLM_ROUTER_DYNAMIC=true``.
-   Returns static chain unchanged otherwise.
+5. **Always-on**: Dynamic chain building is now always active (v5.0).
+   Gracefully falls back to static profiles if discovery hasn't populated yet.
 
 Public API
 ----------
 build_chain(task_type, complexity, profile)
     → list[str]   (async, returns model IDs best-first)
-
-is_dynamic_routing_enabled()
-    → bool
 """
 
 from __future__ import annotations
@@ -50,19 +47,6 @@ _MIN_CHAIN_LENGTH = 2
 _MAX_CHAIN_LENGTH = 8
 
 
-def is_dynamic_routing_enabled() -> bool:
-    """Return True if the dynamic chain builder is active.
-
-    Reads ``llm_router_dynamic`` from config (env: ``LLM_ROUTER_DYNAMIC``).
-    Defaults to ``False`` so all existing v4.x behaviour is preserved.
-    """
-    try:
-        from llm_router.config import get_config
-        return get_config().llm_router_dynamic
-    except Exception:
-        return False
-
-
 async def build_chain(
     task_type: "TaskType",
     complexity: str,
@@ -70,16 +54,9 @@ async def build_chain(
 ) -> list[str]:
     """Build a ranked model chain for the given task context.
 
-    When dynamic routing is enabled:
-      1. Discovers all available models (cached, from Phase 3).
-      2. Scores each model (from Phase 5) in parallel.
-      3. Separates into LOCAL tier and paid-API tiers.
-      4. Merges: LOCAL models first (free), then paid-API models, sorted by score.
-      5. Applies score floor and max chain length.
-      6. Falls back to static chain from ``profiles.py`` on any error.
-
-    When ``LLM_ROUTER_DYNAMIC=false`` (default), returns the static chain from
-    ``profiles.py`` immediately without any discovery or scoring overhead.
+    Dynamic routing is always-on (v5.0+). Discovers available models,
+    scores each, and ranks best-first. Falls back gracefully to static
+    chain from ``profiles.py`` on any error or when cache is empty.
 
     Args:
         task_type: The task type being routed (``TaskType.CODE``, etc.).
@@ -96,17 +73,10 @@ async def build_chain(
         complexity=complexity,
         profile=profile,
     ) as span:
-        dynamic_enabled = is_dynamic_routing_enabled()
-        set_span_attributes(span, dynamic_enabled=dynamic_enabled)
-
-        if not dynamic_enabled:
-            chain = _static_chain(task_type, profile)
-            set_span_attributes(span, chain_length=len(chain), top_model=chain[0] if chain else None)
-            return chain
-
         try:
             chain = await _build_dynamic_chain(task_type, complexity, profile)
-            set_span_attributes(span, chain_length=len(chain), top_model=chain[0] if chain else None)
+            top = chain[0] if chain else None
+            set_span_attributes(span, chain_length=len(chain), top_model=top)
             return chain
         except Exception as e:
             log.debug("dynamic chain builder failed, using static: %s", e)

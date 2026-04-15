@@ -144,10 +144,9 @@ async def test_build_chain_emits_span():
     )
 
     with patch("llm_router.tracing.get_tracer", return_value=tracer):
-        with patch("llm_router.chain_builder.is_dynamic_routing_enabled", return_value=True):
-            with patch("llm_router.discover.discover_available_models", new_callable=AsyncMock, return_value={capability.model_id: capability}):
-                with patch("llm_router.scorer.score_all_models", new_callable=AsyncMock, return_value=[scored_model]):
-                    chain = await build_chain(TaskType.QUERY, "simple", RoutingProfile.BUDGET)
+        with patch("llm_router.discover.discover_available_models", new_callable=AsyncMock, return_value={capability.model_id: capability}):
+            with patch("llm_router.scorer.score_all_models", new_callable=AsyncMock, return_value=[scored_model]):
+                chain = await build_chain(TaskType.QUERY, "simple", RoutingProfile.BUDGET)
 
     span = next(span for span in tracer.spans if span.name == "build_chain")
     assert chain[0] == capability.model_id

@@ -890,7 +890,7 @@ async def llm_approve_route(
 
 
 async def llm_budget() -> str:
-    """Show real-time budget pressure for all configured providers (v5.0).
+    """Show real-time budget pressure for all configured providers (v5.0+).
 
     Reads live budget state from the Budget Oracle, which normalises provider
     quota into a single pressure value (0.0 = fully available, 1.0 = exhausted).
@@ -901,21 +901,13 @@ async def llm_budget() -> str:
       API-key providers     — monthly spend / configured cap (0.0 if no cap)
 
     Returns:
-        A formatted budget summary with pressure bars per provider, plus the
-        current dynamic routing status (enabled/disabled).
+        A formatted budget summary with pressure bars per provider.
     """
     try:
         from llm_router.budget import get_all_budget_states, format_budget_summary
-        from llm_router.chain_builder import is_dynamic_routing_enabled
 
         states = await get_all_budget_states()
         summary = format_budget_summary(states)
-
-        dynamic_status = (
-            "✅ Active (LLM_ROUTER_DYNAMIC=true)"
-            if is_dynamic_routing_enabled()
-            else "⏸ Inactive (set LLM_ROUTER_DYNAMIC=true to enable)"
-        )
 
         from llm_router.types import LOCAL_PROVIDERS
         uncapped = [
@@ -930,7 +922,7 @@ async def llm_budget() -> str:
                 f"   Run `llm-router budget set <provider> <amount>` to protect against runaway costs."
             )
 
-        return f"{summary}{nudge}\n\n**Adaptive Router v5.0**: {dynamic_status}"
+        return f"{summary}{nudge}\n\n**Adaptive Router v5.0+**: ✅ Always-on dynamic routing (feature flag removed)"
     except Exception as e:
         return f"Budget Oracle error: {e}"
 

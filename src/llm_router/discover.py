@@ -138,10 +138,12 @@ async def discover_available_models(force: bool = False) -> dict[str, ModelCapab
         if cached is not None:
             return cached
 
-    # Parallel scan — all sources run concurrently
+    # Parallel scan — all sources run concurrently (v5.0: added _scan_openai, _scan_gemini)
     results = await asyncio.gather(
         _scan_ollama(cfg),
         _scan_huggingface(cfg),
+        _scan_openai(),          # NEW: live OpenAI API enumeration
+        _scan_gemini(),          # NEW: live Gemini API enumeration
         _scan_api_key_providers(cfg),
         _scan_codex(),
         return_exceptions=True,
@@ -173,6 +175,26 @@ def get_local_model_ids() -> list[str]:
     return [
         mid for mid, cap in cached.items()
         if cap.provider in LOCAL_PROVIDERS and cap.available
+    ]
+
+
+def get_cached_ollama_models() -> list[str]:
+    """Return Ollama model IDs from the discovery cache.
+
+    Reads ``discovery.json`` and extracts only the Ollama models (prefix ``ollama/``).
+    Used by config.all_ollama_models() to inject live-discovered models instead of
+    reading the static OLLAMA_BUDGET_MODELS env var.
+
+    Returns:
+        List of Ollama model IDs like ``["ollama/qwen3.5:latest", "ollama/llama3.2"]``,
+        or empty list if cache is missing/expired.
+    """
+    cached = _load_cache(ttl=float("inf"))  # any age is fine for this helper
+    if cached is None:
+        return []
+    return [
+        mid for mid, cap in cached.items()
+        if cap.provider == "ollama" and cap.available
     ]
 
 
@@ -297,23 +319,13 @@ async def _scan_api_key_providers(cfg) -> list[ModelCapability]:
     Uses a curated list of the best model per provider × task type.
     These are the models the existing profiles.py chains use, so they
     are guaranteed to be wired up in LiteLLM.
+
+    Note (v5.0): OpenAI and Gemini are now enumerated live by _scan_openai()
+    and _scan_gemini(). This function handles static-only providers and
+    Anthropic (which has no public /models endpoint).
     """
     # (provider, model_suffix, task_types, tier, cost_per_1k, latency_ms, ctx)
     _PROVIDER_MODELS: list[tuple] = [
-        # OpenAI
-        ("openai", "gpt-4o-mini",     frozenset({TaskType.QUERY, TaskType.GENERATE, TaskType.CODE}),
-         ProviderTier.CHEAP_PAID,  0.00015, 800,  128_000),
-        ("openai", "gpt-4o",          frozenset({TaskType.CODE, TaskType.ANALYZE, TaskType.GENERATE}),
-         ProviderTier.EXPENSIVE,   0.005,   1200, 128_000),
-        ("openai", "o3-mini",         frozenset({TaskType.CODE, TaskType.ANALYZE}),
-         ProviderTier.EXPENSIVE,   0.004,   3000, 200_000),
-        # Gemini
-        ("gemini", "gemini/gemini-2.0-flash-exp",
-         frozenset({TaskType.QUERY, TaskType.GENERATE, TaskType.CODE, TaskType.ANALYZE}),
-         ProviderTier.CHEAP_PAID,  0.000075, 600, 1_000_000),
-        ("gemini", "gemini/gemini-2.5-pro-exp-03-25",
-         frozenset({TaskType.CODE, TaskType.ANALYZE, TaskType.RESEARCH}),
-         ProviderTier.SUBSCRIPTION, 0.00125, 2000, 1_000_000),
         # Groq (free-tier rate limited — quota_type: daily_rate)
         ("groq",   "groq/llama-3.3-70b-versatile",
          frozenset({TaskType.QUERY, TaskType.GENERATE, TaskType.CODE, TaskType.ANALYZE}),
@@ -348,6 +360,8 @@ async def _scan_api_key_providers(cfg) -> list[ModelCapability]:
 
     available = cfg.available_providers
     result = []
+
+    # Add static provider models (non-enumerable providers)
     for provider, model_suffix, task_types, tier, cost, latency, ctx in _PROVIDER_MODELS:
         if provider not in available:
             continue
@@ -364,6 +378,21 @@ async def _scan_api_key_providers(cfg) -> list[ModelCapability]:
             context_window=ctx,
             available=True,
         ))
+
+    # Add Anthropic models (no public /models endpoint, so static list)
+    if "anthropic" in available:
+        for model_id, task_types, tier, cost, latency, ctx in _ANTHROPIC_MODELS:
+            result.append(ModelCapability(
+                model_id=model_id,
+                provider="anthropic",
+                provider_tier=tier,
+                task_types=task_types,
+                cost_per_1k=cost,
+                latency_p50_ms=float(latency),
+                context_window=ctx,
+                available=True,
+            ))
+
     return result
 
 
@@ -395,6 +424,170 @@ async def _scan_codex() -> list[ModelCapability]:
         )
         for mid, task_types, lat in _CODEX_MODELS
     ]
+
+
+# ── Curated static model lists for providers without enumeration APIs ──────────
+
+# Anthropic has no public /models endpoint — using curated list of latest models.
+_ANTHROPIC_ALL_TASKS = frozenset({
+    TaskType.CODE, TaskType.ANALYZE, TaskType.GENERATE, TaskType.QUERY
+})
+_ANTHROPIC_BASIC_TASKS = frozenset({TaskType.QUERY, TaskType.GENERATE, TaskType.CODE})
+
+_ANTHROPIC_MODELS = [
+    ("anthropic/claude-opus-4-6", _ANTHROPIC_ALL_TASKS,
+     ProviderTier.SUBSCRIPTION, 0.003, 2000, 200_000),
+    ("anthropic/claude-sonnet-4-6", _ANTHROPIC_ALL_TASKS,
+     ProviderTier.EXPENSIVE, 0.0005, 1500, 200_000),
+    ("anthropic/claude-haiku-4-5-20251001", _ANTHROPIC_BASIC_TASKS,
+     ProviderTier.CHEAP_PAID, 0.00008, 800, 200_000),
+]
+
+
+async def _scan_openai() -> list[ModelCapability]:
+    """Scan OpenAI API for available models.
+
+    Calls GET https://api.openai.com/v1/models with the configured API key.
+    Filters to models containing 'gpt', 'o1', 'o3', 'text-' or 'embedding-'.
+    Falls back gracefully if API key missing or request fails.
+
+    Returns:
+        List of ModelCapability records for available OpenAI models, or [] on error.
+    """
+    cfg = get_config()
+    if not cfg.openai_api_key:
+        return []
+
+    try:
+        # Query OpenAI models endpoint with timeout
+        url = "https://api.openai.com/v1/models"
+        req = urllib.request.Request(
+            url,
+            headers={"Authorization": f"Bearer {cfg.openai_api_key}"}
+        )
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            data = json.loads(resp.read())
+    except Exception:
+        # Silent failure — will use static fallback list
+        return []
+
+    models = []
+    for entry in data.get("models", []):
+        model_id: str = entry.get("id", "")
+        if not model_id or model_id.startswith("babbage"):  # skip old models
+            continue
+
+        # Only include chat/completion models
+        if not any(x in model_id for x in ["gpt", "o1", "o3", "text-", "embedding-"]):
+            continue
+
+        # Classify task types based on model name
+        if "o3" in model_id or "o1" in model_id:
+            task_types = frozenset({TaskType.CODE, TaskType.ANALYZE})
+        elif "gpt-4" in model_id:
+            task_types = frozenset({TaskType.CODE, TaskType.ANALYZE, TaskType.GENERATE})
+        else:
+            task_types = frozenset({TaskType.QUERY, TaskType.GENERATE, TaskType.CODE})
+
+        # Determine tier and cost heuristically
+        if "o3" in model_id:
+            tier = ProviderTier.EXPENSIVE
+            cost = 0.004
+            latency = 3000.0
+        elif "o1" in model_id:
+            tier = ProviderTier.EXPENSIVE
+            cost = 0.015
+            latency = 5000.0
+        elif "gpt-4o" in model_id and "mini" not in model_id:
+            tier = ProviderTier.EXPENSIVE
+            cost = 0.005
+            latency = 1200.0
+        else:
+            tier = ProviderTier.CHEAP_PAID
+            cost = 0.00015
+            latency = 800.0
+
+        models.append(ModelCapability(
+            model_id=f"openai/{model_id}",
+            provider="openai",
+            provider_tier=tier,
+            task_types=task_types,
+            cost_per_1k=cost,
+            latency_p50_ms=latency,
+            context_window=128_000,
+            available=True,
+        ))
+
+    return models
+
+
+async def _scan_gemini() -> list[ModelCapability]:
+    """Scan Google Gemini API for available models.
+
+    Calls GET https://generativelanguage.googleapis.com/v1beta/models
+    with the configured API key. Filters to models supporting generateContent.
+    Falls back gracefully if API key missing or request fails.
+
+    Returns:
+        List of ModelCapability records for available Gemini models, or [] on error.
+    """
+    cfg = get_config()
+    if not cfg.gemini_api_key:
+        return []
+
+    try:
+        # Query Gemini models endpoint with timeout
+        url = f"https://generativelanguage.googleapis.com/v1beta/models?key={cfg.gemini_api_key}"
+        with urllib.request.urlopen(url, timeout=5) as resp:
+            data = json.loads(resp.read())
+    except Exception:
+        # Silent failure — will use static fallback list
+        return []
+
+    models = []
+    for entry in data.get("models", []):
+        model_id: str = entry.get("name", "")
+        if not model_id or "gemini" not in model_id.lower():
+            continue
+
+        # Extract just the model name (models/xyz -> xyz)
+        if "/" in model_id:
+            model_id = model_id.split("/")[-1]
+
+        # Only include models that support generateContent
+        supported_methods = entry.get("supportedGenerationMethods", [])
+        if "generateContent" not in supported_methods:
+            continue
+
+        # Classify task types based on model name
+        all_tasks = frozenset({
+            TaskType.CODE, TaskType.ANALYZE, TaskType.GENERATE, TaskType.QUERY
+        })
+        pro_tasks = frozenset({TaskType.CODE, TaskType.ANALYZE, TaskType.GENERATE})
+
+        if "pro" in model_id.lower():
+            task_types = pro_tasks
+            tier = ProviderTier.EXPENSIVE
+            cost = 0.00125
+            latency = 2000.0
+        else:
+            task_types = all_tasks
+            tier = ProviderTier.CHEAP_PAID
+            cost = 0.000075
+            latency = 600.0
+
+        models.append(ModelCapability(
+            model_id=f"gemini/{model_id}",
+            provider="gemini",
+            provider_tier=tier,
+            task_types=task_types,
+            cost_per_1k=cost,
+            latency_p50_ms=latency,
+            context_window=1_000_000,
+            available=True,
+        ))
+
+    return models
 
 
 # ── Model classification helpers ──────────────────────────────────────────────

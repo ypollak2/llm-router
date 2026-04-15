@@ -61,6 +61,21 @@ class ClassifyResponse(BaseModel):
     skip_routing: bool = False  # skip routing entirely for this prompt
 
 
+
+class ScoreRequest(BaseModel):
+    """Request to score and rank a list of models for a task."""
+    task_type: str
+    complexity: str
+    models: list[str]  # LiteLLM model IDs (e.g., ollama, openai, gemini)
+
+
+class ScoreResponse(BaseModel):
+    """Response with ranked models and scores."""
+    ranked_models: list[str]  # sorted best-first
+    scores: dict[str, float]  # model_id → composite score (0.0-1.0)
+    reasoning: str = ""  # optional explanation of ranking logic
+
+
 # ────────────────────────────────────────────────────────────────────────────
 # Infrastructure Detection
 
@@ -129,15 +144,15 @@ HEURISTIC_RULES = {
 
 def _heuristic_classify(prompt: str) -> tuple[str, int]:
     """Fast heuristic classification.
-    
+
     Returns (task_type, confidence_score).
     Confidence: 1-10 scale.
     """
     prompt_lower = prompt.lower()
-    
+
     best_match = None
     best_score = 0
-    
+
     for task_type, patterns in HEURISTIC_RULES.items():
         for pattern in patterns:
             if re.search(pattern, prompt_lower):
@@ -145,19 +160,19 @@ def _heuristic_classify(prompt: str) -> tuple[str, int]:
                 if score > best_score:
                     best_score = score
                     best_match = task_type
-    
+
     # Default to query for ambiguous
     if best_match is None:
         best_match = "query"
         best_score = 3  # Low confidence
-    
+
     return best_match, best_score
 
 
 def _complexity_from_heuristic(prompt: str, task_type: str) -> str:
     """Estimate complexity from prompt length and vocabulary."""
     words = len(prompt.split())
-    
+
     if words < 10:
         return "simple"
     elif words < 30:
@@ -200,7 +215,7 @@ def _route_for_task(task_type: str) -> str:
 @app.post("/classify")
 async def classify_endpoint(req: ClassifyRequest) -> ClassifyResponse:
     """Classify a prompt and return routing decision.
-    
+
     This endpoint is called by hooks via HTTP. It never blocks.
     Classification runs async; if slow, returns medium/low confidence.
     """
@@ -216,15 +231,15 @@ async def classify_endpoint(req: ClassifyRequest) -> ClassifyResponse:
                 should_block=False,
                 skip_routing=True,
             )
-        
+
         # Fast heuristic classification
         task_type, heuristic_score = _heuristic_classify(req.prompt)
         complexity = _complexity_from_heuristic(req.prompt, task_type)
         confidence = _score_confidence(task_type, complexity, heuristic_score)
         route_to = _route_for_task(task_type)
-        
+
         reasoning = f"Heuristic match ({heuristic_score}/10): {task_type}/{complexity}"
-        
+
         return ClassifyResponse(
             task_type=task_type,
             complexity=complexity,
@@ -234,11 +249,70 @@ async def classify_endpoint(req: ClassifyRequest) -> ClassifyResponse:
             should_block=False,
             skip_routing=False,
         )
-    
+
     except Exception as e:
         logger.error(f"Classification error: {e}", exc_info=True)
         # Graceful degradation: allow everything on error
         raise HTTPException(status_code=500, detail=str(e))
+
+
+
+@app.post("/score")
+async def score_endpoint(req: ScoreRequest) -> ScoreResponse:
+    """Score and rank models for a given task.
+
+    Calls the scorer module to compute a composite quality score for each model,
+    then returns a ranked list best-first. Useful for hook clients and policy
+    engines that need to reorder the model chain dynamically.
+
+    Falls back gracefully to the original order if scoring fails.
+    """
+    try:
+        from llm_router.types import TaskType, Complexity
+        from llm_router.scorer import score_all_models
+
+        # Validate task_type and complexity
+        try:
+            task = TaskType(req.task_type)
+        except ValueError:
+            return ScoreResponse(
+                ranked_models=req.models,
+                scores={m: 0.5 for m in req.models},
+                reasoning=f"Invalid task_type: {req.task_type}",
+            )
+
+        try:
+            Complexity(req.complexity)  # Validate but don't store
+        except ValueError:
+            return ScoreResponse(
+                ranked_models=req.models,
+                scores={m: 0.5 for m in req.models},
+                reasoning=f"Invalid complexity: {req.complexity}",
+            )
+
+        # Score all models (may take a few seconds; hook client has timeout)
+        scored = await score_all_models(req.models, task, req.complexity)
+
+        # ranked list is already sorted best-first by score_all_models
+        ranked = [m.model_id for m in scored]
+        scores = {m.model_id: m.score for m in scored}
+
+        reasoning = f"Scored {len(req.models)} models for {req.task_type}/{req.complexity}"
+
+        return ScoreResponse(
+            ranked_models=ranked,
+            scores=scores,
+            reasoning=reasoning,
+        )
+
+    except Exception as e:
+        logger.error(f"Score endpoint error: {e}", exc_info=True)
+        # Graceful degradation: return models in original order with equal scores
+        return ScoreResponse(
+            ranked_models=req.models,
+            scores={m: 0.5 for m in req.models},
+            reasoning=f"Scoring failed: {e}; returning original order",
+        )
 
 
 @app.get("/health")
@@ -251,13 +325,35 @@ async def health_check():
     }
 
 
+
+# ────────────────────────────────────────────────────────────────────────────
+# Startup Event (v5.0)
+
+@app.on_event("startup")
+async def startup_discovery_warmup():
+    """Warm up the discovery cache on service startup (v5.0).
+
+    Triggers a background discovery run so dynamic routing has live model data
+    available for the first request. This is critical for reliable dynamic routing.
+    """
+    try:
+        import asyncio
+        from llm_router.discover import discover_available_models
+
+        # Non-blocking: spawn as a task and let it complete in background
+        asyncio.create_task(discover_available_models(force=False))
+        logger.info("Discovery warmup started in background")
+    except Exception as e:
+        logger.warning(f"Failed to start discovery warmup: {e}")
+
+
 # ────────────────────────────────────────────────────────────────────────────
 # Service Launch
 
 def start_service(host: str = "127.0.0.1", port: int = 7337, log_level: str = "warning"):
     """Start the sidecar service."""
     logger.info(f"Starting llm-router service on {host}:{port}")
-    
+
     uvicorn.run(
         app,
         host=host,

@@ -26,35 +26,14 @@ _FAKE_CAPS: dict[str, ModelCapability] = {
 }
 
 
-# ── is_dynamic_routing_enabled ────────────────────────────────────────────────
-
-class TestIsDynamicRoutingEnabled:
-    def test_false_by_default(self):
-        from llm_router.chain_builder import is_dynamic_routing_enabled
-        with patch("llm_router.config.get_config") as mock_cfg:
-            mock_cfg.return_value.llm_router_dynamic = False
-            assert is_dynamic_routing_enabled() is False
-
-    def test_true_when_enabled(self):
-        from llm_router.chain_builder import is_dynamic_routing_enabled
-        with patch("llm_router.config.get_config") as mock_cfg:
-            mock_cfg.return_value.llm_router_dynamic = True
-            assert is_dynamic_routing_enabled() is True
-
-    def test_returns_false_on_exception(self):
-        from llm_router.chain_builder import is_dynamic_routing_enabled
-        with patch("llm_router.config.get_config", side_effect=RuntimeError("cfg missing")):
-            assert is_dynamic_routing_enabled() is False
-
-
 # ── build_chain (static path) ─────────────────────────────────────────────────
 
 class TestBuildChainStatic:
     @pytest.mark.asyncio
-    async def test_returns_static_chain_when_dynamic_disabled(self):
+    async def test_returns_chain_with_fallback_to_static(self):
+        """Test that build_chain always returns a chain (dynamic or static fallback)."""
         from llm_router.chain_builder import build_chain
-        with patch("llm_router.chain_builder.is_dynamic_routing_enabled", return_value=False):
-            result = await build_chain(TaskType.CODE, "simple", RoutingProfile.BUDGET)
+        result = await build_chain(TaskType.CODE, "simple", RoutingProfile.BUDGET)
         assert isinstance(result, list)
         assert len(result) > 0
 
@@ -62,11 +41,11 @@ class TestBuildChainStatic:
     async def test_falls_back_to_static_on_exception(self):
         """Dynamic chain failure must fall back to static, never raise."""
         from llm_router.chain_builder import build_chain
-        with (
-            patch("llm_router.chain_builder.is_dynamic_routing_enabled", return_value=True),
-            patch("llm_router.chain_builder._build_dynamic_chain", side_effect=RuntimeError("boom")),
-        ):
-            result = await build_chain(TaskType.CODE, "simple", RoutingProfile.BUDGET)
+        mock_error = RuntimeError("boom")
+        with patch("llm_router.chain_builder._build_dynamic_chain",
+                   side_effect=mock_error):
+            result = await build_chain(TaskType.CODE, "simple",
+                                       RoutingProfile.BUDGET)
         assert isinstance(result, list)
         assert len(result) > 0
 
@@ -392,7 +371,6 @@ class TestEndToEndDynamicRouting:
         ]
 
         with (
-            patch("llm_router.chain_builder.is_dynamic_routing_enabled", return_value=True),
             patch("llm_router.discover.discover_available_models",
                   new_callable=AsyncMock, return_value=_FAKE_CAPS),
             patch("llm_router.scorer.score_all_models",
@@ -408,11 +386,8 @@ class TestEndToEndDynamicRouting:
         """Even with zero discovered models, build_chain returns a non-empty static fallback."""
         from llm_router.chain_builder import build_chain
 
-        with (
-            patch("llm_router.chain_builder.is_dynamic_routing_enabled", return_value=True),
-            patch("llm_router.discover.discover_available_models",
-                  new_callable=AsyncMock, return_value={}),
-        ):
+        with patch("llm_router.discover.discover_available_models",
+                   new_callable=AsyncMock, return_value={}):
             result = await build_chain(TaskType.CODE, "simple", RoutingProfile.BUDGET)
 
         assert isinstance(result, list)

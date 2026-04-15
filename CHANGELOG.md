@@ -1,5 +1,29 @@
 # Changelog
 
+## v5.4.0 — Adaptive Universal Router: Live API Discovery + Always-On Dynamic Routing (2026-04-15)
+
+### Added
+
+- **Phase 1: Ollama Live Discovery Injection** — `config.all_ollama_models()` now checks discovery cache first, falling back to env var for backward compatibility. Eliminates manual `OLLAMA_BUDGET_MODELS` synchronization.
+- **Phase 2: Live API Enumeration** — New scanners for OpenAI (`/v1/models`) and Gemini (`/v1beta/models`) APIs provide real-time model availability. Anthropic remains static (no public `/models` endpoint). All scanners run in parallel with 5s timeout and graceful degradation.
+- **Phase 3: Always-On Dynamic Routing** — Removed `LLM_ROUTER_DYNAMIC` feature flag. Dynamic chain building now runs for all non-media tasks (no opt-in needed). Static `profiles.py` serves as emergency fallback when discovery cache is empty or discovery fails.
+- **Phase 4: Sidecar `/score` Endpoint** — New `POST /score` HTTP endpoint ranks models by composite quality score (task-aware). Hook client `score_models()` provides convenient interface with 1s timeout and graceful fallback to original order.
+- **Comprehensive v5.0 test suite** — 27 tests covering all 4 phases: Ollama injection, OpenAI/Gemini scanners, always-on dynamic routing, and `/score` endpoint. Includes integration tests for the full routing path.
+
+### Changed
+
+- **Feature flag removed** — `llm_router_dynamic` config field eliminated. All routing now uses dynamic chain builder (no flag check needed).
+- **Router always tries `build_chain()` first** — Static chain fallback only used when dynamic routing fails or returns empty. Improves model freshness in all scenarios.
+- **Discovery cache warmup on startup** — Service now triggers background discovery run on startup (v5.0 feature), ensuring live model data available for first request.
+
+### Technical Notes
+
+- All 940 tests passing (including 27 new adaptive router tests)
+- Free-first invariant preserved: Ollama/Codex always before paid APIs (even if scored lower)
+- Discovery cache TTL: 30 minutes; graceful degradation when unavailable
+- API scanner timeouts: 5s per scanner; failures don't block discovery (returns `[]`)
+- Backward compatible: `OLLAMA_BUDGET_MODELS` env var still supported as fallback
+
 ## v5.3.2 — Code Quality: Ruff Linting + v5.3 Audit Demo (2026-04-15)
 
 ### Fixed

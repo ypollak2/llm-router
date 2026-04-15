@@ -178,12 +178,11 @@ async def test_skips_model_when_budget_exhausts_mid_chain(mock_env, mock_litellm
     with patch("litellm.acompletion", side_effect=completion_side_effect):
         with patch("litellm.completion_cost", return_value=0.001):
             with patch("llm_router.router.get_model_chain", return_value=chain):
-                with patch("llm_router.chain_builder.is_dynamic_routing_enabled", return_value=False):
-                    with patch("llm_router.router.get_budget_state", side_effect=budget_side_effect):
-                        resp = await route_and_call(
-                            TaskType.QUERY, "Hello",
-                            profile=RoutingProfile.BALANCED,
-                        )
+                with patch("llm_router.router.get_budget_state", side_effect=budget_side_effect):
+                    resp = await route_and_call(
+                        TaskType.QUERY, "Hello",
+                        profile=RoutingProfile.BALANCED,
+                    )
 
     assert resp.model == chain[2]
     assert called_models == [chain[0], chain[2]]

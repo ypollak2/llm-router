@@ -162,11 +162,7 @@ class RouterConfig(BaseSettings):
     # Accepts HF_TOKEN or HUGGINGFACE_API_KEY from environment.
     huggingface_api_key: str = ""   # HF_TOKEN / HUGGINGFACE_API_KEY
 
-    # ── Adaptive Universal Router settings (v5.0) ──
-    # Feature flag: False = v4.x static routing (default, no breaking change).
-    # Set LLM_ROUTER_DYNAMIC=true to enable dynamic chain building.
-    llm_router_dynamic: bool = False         # LLM_ROUTER_DYNAMIC
-
+    # ── Adaptive Universal Router settings (v5.0+) ──
     # Discovery cache TTL in seconds. After this window, available models are
     # re-scanned (Ollama list, HF API check, env var re-read). Default: 30 min.
     llm_router_discovery_ttl: int = 1800     # LLM_ROUTER_DISCOVERY_TTL
@@ -187,9 +183,9 @@ class RouterConfig(BaseSettings):
     llm_router_budget_mistral: float = 0.0      # LLM_ROUTER_BUDGET_MISTRAL
 
     # ── Enterprise integrations (v5.1) ──
-    helicone_api_key: str = ""              # HELICONE_API_KEY
-    llm_router_helicone_pull: bool = False  # LLM_ROUTER_HELICONE_PULL — pull spend from Helicone API
-    llm_router_litellm_budget_db: str = ""  # LLM_ROUTER_LITELLM_BUDGET_DB — path to LiteLLM proxy DB
+    helicone_api_key: str = ""
+    llm_router_helicone_pull: bool = False  # Pull spend from Helicone API
+    llm_router_litellm_budget_db: str = ""  # Path to LiteLLM proxy budget DB
     # How to combine spend seen across multiple tracking systems:
     # "max" assumes sources overlap and keeps the highest single observed total.
     # "sum" treats sources as independent traffic channels and adds them together.
@@ -328,12 +324,26 @@ class RouterConfig(BaseSettings):
         Used by the pressure-aware routing layer to inject local/free models
         when Claude subscription quota is running high (>= 85%).
 
+        Try live discovery cache first; fall back to OLLAMA_BUDGET_MODELS env var
+        for backward compatibility when cache is empty or missing.
+
         Returns:
             List of LiteLLM model IDs like ``["ollama/llama3.2", "ollama/qwen2.5-coder:7b"]``,
             or an empty list when Ollama is not configured.
         """
         if not self.ollama_base_url:
             return []
+
+        # Try live discovery cache first (Phase 1 of v5.0)
+        try:
+            from llm_router.discover import get_cached_ollama_models
+            cached_models = get_cached_ollama_models()
+            if cached_models:
+                return cached_models
+        except Exception:
+            pass
+
+        # Fall back to env var for backward compatibility
         return [f"ollama/{m.strip()}" for m in self.ollama_budget_models.split(",") if m.strip()]
 
     def apply_keys_to_env(self) -> None:
