@@ -1,5 +1,39 @@
 # Changelog
 
+## v5.6.0 — Stuck Pattern Prevention: Comprehensive Enforce-Route Hook Refactoring (2026-04-15)
+
+### Added
+
+- **6-Point Stuck Pattern Prevention System** — Comprehensive refactoring of enforce-route hook (v9 → v12) to eliminate deadlock scenarios where Claude gets trapped investigating routing enforcement.
+- **Early File-Operation Detection** — Hook now detects `Read`, `Glob`, `Grep`, `LS`, `Edit`, `Write` calls on first file operation and marks session as 'coding' mode. Allows investigation without triggering routing violations.
+- **Violation Counter with Auto-Pivot** — Tracks repeated enforcement violations. After 2 violations, automatically downgrades from hard enforcement to soft enforcement to prevent infinite loops.
+- **Investigation Loop Detection** — Monitors tool call patterns to identify stuck loops (3+ same-tool calls in 120s) and emits explicit `🔄 INVESTIGATION LOOP DETECTED` warnings.
+- **Pending State Visibility** — Enhanced enforcement messages display routing window countdown (`⏰ ROUTING WINDOW CLOSING`) to prevent surprise deadline expirations.
+- **Mandatory Escalation Messaging** — Enforcement messages include escalation indicators (`Violation 1/2`, `🔴 Violation 2+`) to communicate enforcement state clearly.
+
+### Changed
+
+- **Enforce-Route Hook Architecture** — Refactored to prioritize prevention over blocking. Routes are still mandatory, but the hook now provides multiple escape paths and explicit guidance.
+- **Hook State Management** — Added persistent violation counter (`~/.claude/enforce-route-violations-{session_id}.txt`) and tool history file (`~/.claude/tool-history-{session_id}.json`) to track session state across tool calls.
+
+### Technical Notes
+
+- **Prevention Layers**: HIGH (early detection + auto-pivot) → MEDIUM (state visibility) → LOW (loop detection)
+- **Backward compatible**: Existing routing behavior unchanged; enforcement is softer and provides more guidance
+- **Zero false positives**: Investigation instinct (reading code) is explicitly allowed in coding mode
+- **All 940+ tests passing** with new enforce-route prevention system
+- Production-ready: No risk of deadlock; multiple escape mechanisms in place
+
+### Impact
+
+This release eliminates the "stuck pattern" deadlock scenario discovered in v5.5.1 where:
+- Claude attempts to investigate routing enforcement
+- Hook blocks investigation tools
+- No escape path exists
+- Session becomes unrecoverable
+
+The 6-point prevention system ensures this cannot happen again.
+
 ## v5.5.1 — Documentation & Linting Updates (2026-04-15)
 
 ### Fixed

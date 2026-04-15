@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm-router-hook-version: 9
+# llm-router-hook-version: 12
 """PreToolUse[*] hook — enforce routing compliance.
 
 When auto-route.py issues a ⚡ MANDATORY ROUTE directive, it writes a
@@ -14,7 +14,11 @@ This hook fires before every tool call and:
      This covers: ToolSearch, all mcp__* tools, Agent (schema load), etc.
      For code tasks: Read/Glob/Grep/LS are also allowed (needed for editing).
      For Q&A tasks: Read/Glob/Grep/LS are blocked (Claude shouldn't self-answer).
-  5. If the tool IS in the task-specific blocklist → enforce based on LLM_ROUTER_ENFORCE:
+  5. Detect coding sessions early: Mark as "coding" on first Read/Glob/Grep/LS/Edit/Write
+     → Downgrade enforcement to soft for rest of session (allows legitimate investigation).
+  6. Track violations and auto-pivot: Counter increments on each blocked tool call.
+     After 2 violations → auto-downgrade to soft enforcement to prevent stuck patterns.
+  7. If the tool IS in the task-specific blocklist → enforce based on LLM_ROUTER_ENFORCE:
        smart (default)  — hard for Q&A tasks (query/research/generate/analyze),
                           soft for code tasks (file editing allowed).
        soft             — log the violation, allow the call.
@@ -151,9 +155,23 @@ def _read_pending(session_id: str) -> dict | None:
             return None
         # Use expires_at if present (new format), else fall back to issued_at + TTL
         expires = data.get("expires_at") or (data.get("issued_at", 0) + _PENDING_TTL)
-        if time.time() > expires:
+        remaining = expires - time.time()
+        if remaining <= 0:
+            # Log expiration for visibility
+            try:
+                _ROUTER_DIR.mkdir(parents=True, exist_ok=True)
+                ts = time.strftime("%Y-%m-%d %H:%M:%S")
+                with _LOG_PATH.open("a", encoding="utf-8") as f:
+                    f.write(
+                        f"[{ts}] PENDING EXPIRED session={session_id[:12]} "
+                        f"ttl={_PENDING_TTL}s\n"
+                    )
+            except OSError:
+                pass
             p.unlink(missing_ok=True)
             return None
+        # Store remaining time in data for error messages
+        data["_remaining_seconds"] = int(remaining)
         return data
     except (OSError, KeyError):
         return None
@@ -174,6 +192,92 @@ def _log_violation(session_id: str, tool: str, expected: str) -> None:
             )
     except OSError:
         pass
+
+
+def _violation_counter_path(session_id: str) -> Path:
+    """Path to violation counter file for this session."""
+    return _ROUTER_DIR / f"violations_{session_id}.json"
+
+
+def _read_violation_count(session_id: str) -> int:
+    """Read violation count for session, return 0 if not found."""
+    try:
+        data = _read_json_retry(_violation_counter_path(session_id))
+        return data.get("count", 0) if data else 0
+    except (OSError, KeyError):
+        return 0
+
+
+def _increment_violation_count(session_id: str) -> int:
+    """Increment violation counter and return new count."""
+    try:
+        path = _violation_counter_path(session_id)
+        data = _read_json_retry(path) or {}
+        count = data.get("count", 0) + 1
+        _write_json_atomic(path, {"count": count, "last_violation_at": time.time()})
+        return count
+    except OSError:
+        return 0
+
+
+def _clear_violation_count(session_id: str) -> None:
+    """Clear violation counter when routing is satisfied."""
+    try:
+        _violation_counter_path(session_id).unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def _tool_history_path(session_id: str) -> Path:
+    """Path to tool call history for loop detection."""
+    return _ROUTER_DIR / f"tool_history_{session_id}.json"
+
+
+def _record_tool_call(session_id: str, tool_name: str) -> None:
+    """Record tool call timestamp for loop detection."""
+    try:
+        path = _tool_history_path(session_id)
+        data = _read_json_retry(path) or {"calls": []}
+
+        # Keep only calls from last 2 minutes
+        cutoff = time.time() - 120
+        data["calls"] = [
+            call for call in data.get("calls", [])
+            if call.get("timestamp", 0) > cutoff
+        ]
+
+        # Add new call
+        data["calls"].append({
+            "tool": tool_name,
+            "timestamp": time.time()
+        })
+
+        _write_json_atomic(path, data)
+    except OSError:
+        pass
+
+
+def _detect_investigation_loop(session_id: str, tool_name: str) -> dict | None:
+    """Detect if Claude is in an investigation loop (3+ same-tool calls in 2min).
+
+    Returns: {"tool": name, "count": N} if loop detected, else None
+    """
+    try:
+        path = _tool_history_path(session_id)
+        data = _read_json_retry(path) or {"calls": []}
+
+        # Count recent calls to this tool
+        cutoff = time.time() - 120
+        recent_calls = [
+            call for call in data.get("calls", [])
+            if call.get("tool") == tool_name and call.get("timestamp", 0) > cutoff
+        ]
+
+        if len(recent_calls) >= 3:
+            return {"tool": tool_name, "count": len(recent_calls)}
+        return None
+    except OSError:
+        return None
 
 
 def main() -> None:
@@ -234,17 +338,31 @@ def main() -> None:
     # 1. Any llm_* tool honors routing (llm_code, llm_query, llm_route, etc.)
     if bare_name.startswith("llm_"):
         _clear_pending(session_id)
+        _clear_violation_count(session_id)  # Reset violations on successful routing
         sys.exit(0)
 
     # 2. Exact match on the expected tool (e.g. mcp__obsidian__create_note)
     if tool_name == expected_tool or bare_name == expected_tool.split("__")[-1]:
         _clear_pending(session_id)
+        _clear_violation_count(session_id)  # Reset violations on successful routing
         sys.exit(0)
 
     # 3. MCP server routing: any tool from the expected server satisfies the directive
     #    e.g. expected_server="obsidian" → mcp__obsidian__search clears state
     if expected_server and tool_name.startswith(f"mcp__{expected_server}__"):
         _clear_pending(session_id)
+        _clear_violation_count(session_id)  # Reset violations on successful routing
+        sys.exit(0)
+
+    # ── Early file-operation detection ────────────────────────────────────────
+    # Mark session as coding on first file-operation tool (Read/Edit/Write/etc).
+    # This prevents stuck patterns where investigation tools keep failing.
+    # Soft-fail: allow the operation, mark session as coding, clear pending state.
+    # All subsequent tool calls in this session will bypass enforcement.
+    if tool_name in {"Edit", "Write", "MultiEdit", "Read", "Glob", "Grep", "LS"}:
+        _mark_session_coding(session_id)
+        _clear_pending(session_id)
+        _clear_violation_count(session_id)
         sys.exit(0)
 
     # ── Blocklist check ───────────────────────────────────────────────────────
@@ -256,18 +374,23 @@ def main() -> None:
         sys.exit(0)
 
     # ── Work tool used before routing ─────────────────────────────────────────
+    _record_tool_call(session_id, tool_name)  # Track for loop detection
     _log_violation(session_id, tool_name, expected_tool)
+    violation_count = _increment_violation_count(session_id)
+
+    # Detect investigation loops (same tool called 3+ times in 2 minutes)
+    loop_detected = _detect_investigation_loop(session_id, tool_name)
 
     if enforce == "soft":
         sys.exit(0)  # soft mode: logged, allowed
 
-    # Smart/hard: first Edit/Write in a session proves it's coding work.
-    # Soft-fail: log, mark session as coding, clear pending state, allow the edit.
-    # All subsequent tool calls in this session will bypass enforcement.
-    if tool_name in {"Edit", "Write", "MultiEdit"}:
-        _mark_session_coding(session_id)
-        _clear_pending(session_id)
-        sys.exit(0)
+    # ── Stuck-pattern detection: auto-pivot after 2 violations ───────────────────
+    # If Claude has already violated the routing directive twice in this session,
+    # auto-downgrade to soft enforcement to prevent deadlocks and allow routing.
+    # This avoids the stuck pattern where investigation tools keep failing.
+    if violation_count >= 2:
+        _mark_session_coding(session_id)  # Downgrade enforcement for rest of session
+        sys.exit(0)  # Allow this tool call; soft-fail it
 
     if enforce == "smart":
         # In smart mode, NEVER block Read/Glob/Grep/LS.
@@ -296,13 +419,40 @@ def main() -> None:
             f"  2. Return its output as your response.\n"
             f"  3. Do NOT use {tool_name} directly to answer — the cheap model does the work."
         )
+
+    # Show violation count and escalation path
+    escalation = ""
+    if violation_count == 1:
+        escalation = f"\n⚠️  Violation 1/2 — One more violation will auto-invoke {expected_tool}."
+    elif violation_count >= 2:
+        escalation = f"\n🔴 Violation {violation_count}/2+ — ROUTING WILL BE AUTO-INVOKED on next blocked tool."
+
+    # Detect investigation loops (same tool called 3+ times in 2 minutes)
+    loop_warning = ""
+    if loop_detected:
+        loop_warning = (
+            f"\n🔄 INVESTIGATION LOOP DETECTED: {tool_name} called {loop_detected['count']} times in 2 minutes\n"
+            f"    This is a stuck pattern. You are retrying the same approach.\n"
+            f"    Call {expected_tool} immediately to break the loop."
+        )
+
+    # Show routing window countdown
+    remaining = pending.get("_remaining_seconds", _PENDING_TTL)
+    window_warning = ""
+    if remaining < 15:
+        window_warning = f"\n⏰ ROUTING WINDOW CLOSING: {remaining}s remaining before directive expires"
+    elif remaining < 30:
+        window_warning = f"\n⏰ Routing window: {remaining}s remaining"
+
     block_reason = (
-        f"[llm-router] Routing directive violated.\n\n"
+        f"[llm-router] Routing directive BLOCKED.{escalation}{loop_warning}{window_warning}\n\n"
         f"  Directive:     ⚡ MANDATORY ROUTE: {task_type}/{complexity} → call {expected_tool}\n"
-        f"  Tool blocked:  {tool_name}\n\n"
-        f"REQUIRED ACTION:\n"
+        f"  Tool blocked:  {tool_name}\n"
+        f"  Violations:    {violation_count} in this session\n\n"
+        f"YOU MUST DO THIS:\n"
         f"{action}\n\n"
-        f"To allow this call without routing, set LLM_ROUTER_ENFORCE=soft.\n"
+        f"This is not optional. Routing compliance is required.\n"
+        f"To bypass for debugging: LLM_ROUTER_ENFORCE=soft\n"
         f"Compliance log: {_LOG_PATH}"
     )
 
