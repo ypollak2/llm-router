@@ -1,6 +1,6 @@
 {
   "name": "llm-router",
-  "version": "5.6.0",
+  "version": "5.6.1",
   "description": "Smart LLM routing with Claude subscription monitoring, Codex desktop integration, complexity-first model selection, and 20+ AI providers",
   "author": {
     "name": "ypollak2"
