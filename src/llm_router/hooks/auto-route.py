@@ -120,7 +120,7 @@ def _get_pressure() -> dict[str, float]:
                 last_inline_file = str(Path.home() / ".llm-router" / "last_inline_refresh.txt")
                 last_inline = 0.0
                 try:
-                    last_inline = float(open(last_inline_file).read().strip())
+                    last_inline = float(Path(last_inline_file).read_text().strip())
                 except Exception:
                     pass
                 if (time.time() - last_inline) >= _INLINE_REFRESH_MIN_INTERVAL_SEC:

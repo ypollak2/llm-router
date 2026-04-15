@@ -24,14 +24,13 @@ async def test_logs_structured_routing_decision(mock_env, mock_acompletion):
     fake_uuid = MagicMock(hex="deadbeefcafebabe")
 
     with patch("llm_router.router.log") as mock_log:
-        with patch("llm_router.router.configure_logging"):
-            with patch("llm_router.router.uuid4", return_value=fake_uuid):
-                mock_log.bind.return_value = route_log
-                resp = await route_and_call(
-                    TaskType.QUERY,
-                    "Hello",
-                    complexity_hint="simple",
-                )
+        with patch("llm_router.router.uuid4", return_value=fake_uuid):
+            mock_log.bind.return_value = route_log
+            resp = await route_and_call(
+                TaskType.QUERY,
+                "Hello",
+                complexity_hint="simple",
+            )
 
     decision_calls = [
         call for call in route_log.info.call_args_list

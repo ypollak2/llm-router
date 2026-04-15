@@ -9,6 +9,18 @@ Anomaly detection fires when session spend exceeds a threshold in under
 10 minutes — a signal of runaway costs (e.g. accidentally routing a tight
 loop to an expensive model).
 
+**Known limitation — spend resets on MCP server restart.**
+The in-memory accumulator (`_spend_singleton`) resets to $0.00 every time
+the MCP server process restarts (e.g. Claude Code update, crash, or manual
+restart). This means:
+  - ``LLM_ROUTER_ESCALATE_ABOVE`` and ``LLM_ROUTER_HARD_STOP_ABOVE`` thresholds
+    are per-process-lifetime, not per-session.
+  - A user who restarts mid-session gets a fresh $0.00 baseline, allowing
+    escalation thresholds to be crossed again.
+There is no fix without adding a persistent SQLite read on every call.
+Workaround: set thresholds conservatively, or use ``LLM_ROUTER_MONTHLY_BUDGET``
+which reads from the persistent SQLite store and is not affected by restarts.
+
 Usage:
     from llm_router.session_spend import get_session_spend
     get_session_spend().record(model="gpt-4o", tool="llm_code",

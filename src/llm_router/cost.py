@@ -166,6 +166,12 @@ MIGRATE_SAVINGS_STATS_ADD_HOST = [
 MIGRATE_ROUTING_DECISIONS_ADD_POLICY = [
     "ALTER TABLE routing_decisions ADD COLUMN policy_applied TEXT",
 ]
+
+MIGRATE_ADD_CORRELATION_ID = [
+    "ALTER TABLE usage ADD COLUMN correlation_id TEXT",
+    "ALTER TABLE routing_decisions ADD COLUMN correlation_id TEXT",
+]
+"""Idempotent migration to add correlation_id for log↔DB tracing (v5.3)."""
 """Idempotent migration to add policy audit column to routing_decisions (v3.2).
 
 policy_applied: JSON string of policy actions, e.g.
@@ -252,6 +258,21 @@ async def _get_db() -> aiosqlite.Connection:
     await db.execute(CREATE_SEMANTIC_CACHE_TABLE)
     await db.execute(CREATE_SEMANTIC_CACHE_INDEX)
     await db.execute(CREATE_CORRECTIONS_TABLE)
+    # Performance indices — `IF NOT EXISTS` makes these idempotent.
+    # These prevent full-table scans on the monthly-spend queries that fire
+    # on every routing decision once the tables grow beyond ~10k rows.
+    await db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_usage_provider_ts ON usage(provider, timestamp)"
+    )
+    await db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_usage_model_ts ON usage(model, timestamp)"
+    )
+    await db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_routing_ts ON routing_decisions(timestamp)"
+    )
+    await db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_routing_model ON routing_decisions(final_model)"
+    )
     # Run all migrations idempotently — _safe_migrate checks column existence
     # before executing, so re-running on an existing DB is always safe.
     all_migrations = (
@@ -262,6 +283,7 @@ async def _get_db() -> aiosqlite.Connection:
         + MIGRATE_USAGE_ADD_TEAM
         + MIGRATE_SAVINGS_STATS_ADD_HOST
         + MIGRATE_ROUTING_DECISIONS_ADD_POLICY
+        + MIGRATE_ADD_CORRELATION_ID
     )
     for stmt in all_migrations:
         await _safe_migrate(db, stmt)
@@ -291,6 +313,7 @@ async def log_usage(
     task_type: TaskType,
     profile: RoutingProfile,
     success: bool = True,
+    correlation_id: str | None = None,
 ) -> None:
     """Persist a completed external LLM call to the usage database.
 
@@ -304,6 +327,8 @@ async def log_usage(
         profile: The active routing profile (e.g. balanced, speed, quality).
         success: Whether the call completed successfully. Failed calls are
             still logged for observability but flagged with success=0.
+        correlation_id: Optional hex ID linking this DB row to the structlog
+            trace for the same routing call (first 8 chars of UUID4).
     """
     user_id, project_id = _get_team_identity()
     db = await _get_db()
@@ -311,8 +336,8 @@ async def log_usage(
         await db.execute(
             """INSERT INTO usage (model, provider, task_type, profile,
                input_tokens, output_tokens, cost_usd, latency_ms, success,
-               user_id, project_id)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               user_id, project_id, correlation_id)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 response.model,
                 response.provider,
@@ -325,6 +350,7 @@ async def log_usage(
                 1 if success else 0,
                 user_id or None,
                 project_id or None,
+                correlation_id,
             ),
         )
         await db.commit()
@@ -644,6 +670,7 @@ async def log_routing_decision(
     cost_usd: float,
     latency_ms: float,
     reason_code: str | None = None,
+    correlation_id: str | None = None,
 ) -> None:
     """Persist a complete routing decision to the routing_decisions table.
 
@@ -681,8 +708,9 @@ async def log_routing_decision(
                 classifier_confidence, classifier_latency_ms, complexity,
                 recommended_model, base_model, was_downshifted, budget_pct_used,
                 quality_mode, final_model, final_provider, success,
-                input_tokens, output_tokens, cost_usd, latency_ms, reason_code)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                input_tokens, output_tokens, cost_usd, latency_ms, reason_code,
+                correlation_id)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 _prompt_hash(prompt),
                 task_type,
@@ -705,6 +733,7 @@ async def log_routing_decision(
                 cost_usd,
                 latency_ms,
                 reason_code,
+                correlation_id,
             ),
         )
         await db.commit()

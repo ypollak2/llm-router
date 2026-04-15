@@ -1,5 +1,34 @@
 # Changelog
 
+## v5.3.0 — Production Hardening: TOCTOU Fix, Correlation IDs, and Routing Refactor (2026-04-15)
+
+### Fixed
+
+- **TOCTOU in budget enforcement** — concurrent calls could both slip under the daily/monthly spend limit before either recorded its cost. Fixed with a provisional `_pending_spend` reservation made inside `_budget_lock` before releasing it; the reservation is decremented after the call completes (success, failure, or escalation raise).
+- **Staleness guard for Claude quota** — `usage.json` older than 24 hours now returns `pressure=0.5` instead of optimistic `0.0`, preventing indefinitely-free routing when the session-start hook is absent. Configurable via `LLM_ROUTER_STALE_PRESSURE_FLOOR`.
+- **Sync filesystem read blocking event loop** — `_claude_subscription_state()` now offloads the `usage.json` read to `asyncio.to_thread()`, preventing event-loop stalls on slow/encrypted filesystems.
+- **File handle leak in auto-route hook** — replaced `open(path).read()` with `Path(path).read_text()` to close the handle immediately.
+- **Duplicate models in routing chain** — Ollama/Codex injection could re-add models already in the static chain; dedup now runs after all injections while preserving free-first order.
+
+### Added
+
+- **Correlation ID tracking** — `route_and_call()` generates a `uuid4().hex[:8]` correlation ID per call, stored in both `usage` and `routing_decisions` SQLite tables (`correlation_id TEXT` column added via idempotent migration). Enables log↔DB joins for debugging.
+- **DB indices for query performance** — four new `CREATE INDEX IF NOT EXISTS` statements on `usage(provider, timestamp)`, `usage(model, timestamp)`, `routing_decisions(timestamp)`, and `routing_decisions(final_model)`.
+- **Session spend reset documentation** — `session_spend.py` now documents the known limitation that `_pending_spend` resets on MCP server restart, with the recommended workaround (`LLM_ROUTER_MONTHLY_BUDGET`).
+
+### Changed
+
+- **`route_and_call()` refactored** — extracted two helper functions to reduce the 960-line god function:
+  - `_resolve_profile()` — resolves routing profile, complexity, and thinking flag
+  - `_build_and_filter_chain()` — builds and filters the model chain (override validation, dynamic/static selection, provider filter, policy engine, Ollama/Codex injection, dedup)
+  - `route_and_call()` reduced from ~960 to ~527 lines.
+- **Dashboard token auth moved to middleware** — `aiohttp` middleware validates `X-Dashboard-Token` on all API routes; token is server-generated, persisted to `~/.llm-router/dashboard.token` (mode 0600), and injected into the HTML template at render time.
+
+### Technical Notes
+
+- All changes are backward-compatible. No config changes required.
+- Verification: `uv run pytest tests/ -q --ignore=tests/test_integration.py && uv run ruff check src/ tests/`
+
 ## v5.2.0 — Audit Remediation, Observability, and Release Automation (2026-04-14)
 
 ### Added

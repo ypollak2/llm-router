@@ -27,6 +27,7 @@ import asyncio
 import json
 import time
 from pathlib import Path
+from typing import Any
 
 from llm_router.config import get_config
 from llm_router.types import BudgetState, LOCAL_PROVIDERS
@@ -38,6 +39,14 @@ _CACHE_TTL = 60.0  # seconds
 
 _USAGE_JSON = Path.home() / ".llm-router" / "usage.json"
 _ROUTER_DIR = Path.home() / ".llm-router"
+
+# If usage.json is absent or older than this threshold, treat Claude subscription
+# pressure as _STALE_PRESSURE_FLOOR instead of the optimistic 0.0 default.
+# Rationale: without the session-start hook installed, usage.json never exists
+# and the router would permanently see 0.0 pressure — routing everything to
+# Claude subscription models even when the quota is exhausted.
+# Env var override: LLM_ROUTER_STALE_PRESSURE_FLOOR (float 0.0–1.0, default 0.5)
+_USAGE_STALENESS_LIMIT_SEC = 24 * 3600  # 24 hours
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
@@ -110,24 +119,41 @@ async def _compute_budget_state(provider: str) -> BudgetState:
     if provider in LOCAL_PROVIDERS:
         return _neutral(provider)
 
-    # Claude subscription — read from usage.json snapshot
+    # Claude subscription — read from usage.json snapshot (async to avoid blocking
+    # the event loop on slow filesystems such as NFS or encrypted volumes).
     if provider == "anthropic":
-        return _claude_subscription_state()
+        return await _claude_subscription_state()
 
     # Generic API-key providers — check per-provider spend vs. configured cap
     return await _api_provider_state(provider)
 
 
-def _claude_subscription_state() -> BudgetState:
+async def _claude_subscription_state() -> BudgetState:
     """Compute pressure from the cached Claude quota snapshot.
 
     Uses all three quota dimensions — session (5h window), weekly (all models),
     and weekly Sonnet — so pressure reflects whichever limit is closest to
     exhaustion. The pre-computed ``highest_pressure`` field is used when present
     (written by the session-start hook); individual fields are the fallback.
+
+    File read is offloaded to a thread so the asyncio event loop is never
+    blocked, even on slow filesystems (NFS, VeraCrypt volumes, etc.).
     """
+    # Staleness guard: if usage.json doesn't exist or is older than 24h, return
+    # a non-zero pressure floor so routing doesn't assume unlimited quota forever.
+    import os
+    stale_floor = float(os.environ.get("LLM_ROUTER_STALE_PRESSURE_FLOOR", "0.5"))
     try:
-        data = json.loads(_USAGE_JSON.read_text())
+        age_sec = time.monotonic() - _USAGE_JSON.stat().st_mtime
+        if age_sec > _USAGE_STALENESS_LIMIT_SEC:
+            return BudgetState(provider="anthropic", pressure=stale_floor, quota_pct=stale_floor)
+    except OSError:
+        # File doesn't exist — treat as stale
+        return BudgetState(provider="anthropic", pressure=stale_floor, quota_pct=stale_floor)
+
+    try:
+        raw: str = await asyncio.to_thread(_USAGE_JSON.read_text)
+        data: dict[str, Any] = json.loads(raw)
         # highest_pressure is the authoritative field (pre-computed by the hook)
         if "highest_pressure" in data:
             pressure = min(float(data["highest_pressure"]), 1.0)
