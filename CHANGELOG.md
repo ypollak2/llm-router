@@ -1,5 +1,23 @@
 # Changelog
 
+## v5.3.2 — Code Quality: Ruff Linting + v5.3 Audit Demo (2026-04-15)
+
+### Fixed
+
+- **14 ruff linting violations** — Removed unused imports from refactoring in hook_client.py, service.py, service_manager.py, and test files. Eliminated unused variable assignment in router.py. Code now passes `uvx ruff check src/ tests/` with 0 errors.
+
+### Added
+
+- **Comprehensive v5.3 audit demo test suite** (`tests/test_demo_v53.py`) — 16 tests organized in 4 demo classes validating core v5.3 features: heuristic classifier, sidecar service HTTP API, enforce-route observation mode, and correlation ID propagation. Serves as both regression tests and feature documentation.
+- **Audit verification script** (`scripts/audit_demo.sh`) — Automated script that runs ruff linting, demo tests, and full test suite with chronicle-ready summary output. Used as part of release verification checklist.
+
+### Technical Notes
+
+- All 913 tests passing (including 16 new demo tests)
+- Ruff now fully clean across src/ and tests/
+- Demo tests serve dual purpose: regression validation and v5.3 architecture documentation
+- Audit script output suitable for release notes and session summaries
+
 ## v5.3.1 — Sidecar Service Architecture + Async I/O Fixes (2026-04-15)
 
 ### Fixed

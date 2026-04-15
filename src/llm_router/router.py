@@ -930,7 +930,6 @@ async def route_and_call(
         RuntimeError: All candidate models failed (wraps the last error).
     """
     config = get_config()
-    tracker = get_tracker()
     correlation_id = uuid4().hex[:8]
 
     # ── Profile resolution (foundational routing rule) ────────────────────────

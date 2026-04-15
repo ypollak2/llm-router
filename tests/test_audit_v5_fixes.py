@@ -12,7 +12,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 from llm_router.router import route_and_call
 from llm_router.types import (
-    TaskType, RoutingProfile, Complexity, BudgetExceededError, LLMResponse
+    TaskType, BudgetExceededError, LLMResponse
 )
 
 

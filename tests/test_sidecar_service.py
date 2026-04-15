@@ -1,10 +1,5 @@
 """Tests for llm-router sidecar service."""
 
-import pytest
-import json
-import subprocess
-import time
-from pathlib import Path
 
 
 def test_service_modules_exist():
@@ -23,7 +18,7 @@ def test_service_modules_exist():
 
 def test_heuristic_classifier():
     """Test heuristic classification without service."""
-    from llm_router.service import _heuristic_classify, _score_confidence
+    from llm_router.service import _heuristic_classify
     
     # Query detection
     task_type, score = _heuristic_classify("what does os.path.join do?")

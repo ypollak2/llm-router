@@ -5,7 +5,6 @@ Handles start/stop, health checks, and graceful degradation.
 
 from __future__ import annotations
 
-import json
 import logging
 import os
 import signal
@@ -63,7 +62,6 @@ def start_service() -> bool:
     
     try:
         # Import here to avoid circular dependency
-        import pkg_resources
         
         # Find the service script
         service_script = Path(__file__).parent / "service.py"
