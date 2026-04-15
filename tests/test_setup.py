@@ -12,7 +12,7 @@ class TestSetupStatus:
         assert "providers configured" in result
 
     @pytest.mark.asyncio
-    async def test_status_shows_recommended(self, mock_env):
+    async def test_status_shows_recommended(self, minimal_env):
         from llm_router.server import llm_setup
         result = await llm_setup(action="status")
         assert "Recommended to Add" in result

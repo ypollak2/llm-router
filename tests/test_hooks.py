@@ -78,5 +78,11 @@ def test_enforce_route_retries_partial_pending_state_reads(tmp_path, monkeypatch
 
     pending = enforce_route._read_pending(session_id)
 
-    assert pending == valid_data
+    # _read_pending adds _remaining_seconds field for routing window visibility
+    assert pending is not None
+    assert pending["expected_tool"] == valid_data["expected_tool"]
+    assert pending["task_type"] == valid_data["task_type"]
+    assert pending["complexity"] == valid_data["complexity"]
+    assert pending["session_id"] == valid_data["session_id"]
+    assert "_remaining_seconds" in pending  # Added by _read_pending
     assert sleeps == [0.01]

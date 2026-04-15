@@ -64,6 +64,31 @@ def mock_env(monkeypatch):
 
 
 @pytest.fixture
+def minimal_env(monkeypatch):
+    """Minimal test environment with few configured providers.
+
+    Used for setup status tests that need to verify "Recommended to Add" section.
+    This fixture intentionally leaves some recommended providers (groq, deepseek)
+    unconfigured so the status output includes recommendations.
+    """
+    from llm_router.types import BudgetState
+
+    # Only configure openai and gemini, leaving groq/deepseek unconfigured
+    monkeypatch.setenv("OPENAI_API_KEY", "test-openai-key")
+    monkeypatch.setenv("GEMINI_API_KEY", "test-gemini-key")
+    monkeypatch.setenv("LLM_ROUTER_PROFILE", "balanced")
+    monkeypatch.setenv("LLM_ROUTER_CLAUDE_SUBSCRIPTION", "0")
+    # Disable Codex and Ollama
+    monkeypatch.setattr("llm_router.router.is_codex_available", lambda: False)
+    monkeypatch.setattr("llm_router.profiles.is_codex_available", lambda: False, raising=False)
+    monkeypatch.setenv("OLLAMA_BASE_URL", "")
+    # Mock budget pressure
+    async def mock_get_budget_state(provider: str) -> BudgetState:
+        return BudgetState(provider=provider, pressure=0.0)
+    monkeypatch.setattr("llm_router.router.get_budget_state", mock_get_budget_state)
+
+
+@pytest.fixture
 def sample_response() -> LLMResponse:
     return LLMResponse(
         content="Test response content",
