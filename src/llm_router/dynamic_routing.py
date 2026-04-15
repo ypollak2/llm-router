@@ -17,8 +17,7 @@ from llm_router.profiles import (
     TaskType,
     provider_from_model,
 )
-from llm_router.types import Complexity
-from llm_router.discover import get_available_providers, get_cached_ollama_models
+from llm_router.discover import get_available_providers
 
 log = get_logger("llm_router.dynamic_routing")
 

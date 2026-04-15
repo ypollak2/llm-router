@@ -12,7 +12,7 @@ the current state of configured keys and running services.
 from __future__ import annotations
 
 import asyncio
-from functools import lru_cache
+import os
 
 from llm_router.config import get_config
 from llm_router.logging import get_logger
@@ -25,7 +25,6 @@ _ollama_cache: dict[str, tuple[bool, float]] = {}
 _OLLAMA_CACHE_TTL = 5.0
 
 # Discovery cache file path
-import os
 _DISCOVERY_CACHE = os.path.expanduser("~/.llm-router/discovery.json")
 
 
@@ -266,7 +265,7 @@ def _load_cache(ttl: int = 3600) -> dict | None:
     """
     import json
     import time
-    from llm_router.types import ModelCapability, ProviderTier, TaskType
+    from llm_router.types import ProviderTier, TaskType
     
     if not os.path.exists(_DISCOVERY_CACHE):
         return None

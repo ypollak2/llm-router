@@ -1,8 +1,5 @@
 """llm-router init-claude-memory — Auto-discover setup and generate Claude Code memory files."""
 
-import os
-from pathlib import Path
-
 from llm_router.config import get_config
 from llm_router.safe_config import write_safe_config_template, safe_config_path
 
