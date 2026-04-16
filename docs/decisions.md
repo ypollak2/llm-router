@@ -61,4 +61,28 @@ Append a new entry after every meaningful feature or architectural change.
 
 **Alternatives considered**: Synchronous judge evaluation (would block on scoring), or deferring documentation (needed for usability). Selected async + quality reordering as highest ROI for Option B.
 
-**Outcome**: Per-task budgeting now enforced. Router automatically deprioritizes low-quality models based on historical judge scores. TROUBLESHOOTING.md provides users with actionable solutions for all common issues. Option B complete. Next: Option D (documentation refresh), Option A (silent failure fixes), Option C (test coverage).
+**Outcome**: Per-task budgeting now enforced. Router automatically deprioritizes low-quality models based on historical judge scores. TROUBLESHOOTING.md provides users with actionable solutions for all common issues. Option B complete.
+
+---
+
+## 2026-04-16 — Hook health monitoring and error visibility (Option A: Silent Failures)
+
+**Decision**: Implemented hook health monitoring and error visibility system:
+1. **hook_health.py module**: Central error tracking for hooks with:
+   - `record_hook_error()`: Log failures with context to ~/.llm-router/hook_errors.log (JSONL format)
+   - `get_hook_health()`: Retrieve execution stats and health status (healthy/degraded/failing)
+   - `check_hook_permissions()`: Identify not-executable hooks (discovered session-start/session-end issues)
+   - `get_recent_hook_errors()`: Query errors with time filtering
+   - `cleanup_old_logs()`: Retention policy for 30+ day old logs
+
+2. **llm_hook_health MCP tool**: User-facing diagnostic endpoint showing:
+   - Hook permission status and executable validation
+   - Success/error counts and health trends
+   - Recent errors (last 24 hours) with timestamps
+   - Link to full error log at ~/.llm-router/hook_errors.log
+
+3. **Permission fixes**: Discovered and fixed session-start and session-end hooks not being executable (would have caused silent hook failures).
+
+**Alternatives considered**: Adding logging directly to hooks (invasive), or centralized syslog (less discoverable). Selected dedicated hook_health module for encapsulation and user visibility.
+
+**Outcome**: Users can now diagnose hook failures via `Use llm_hook_health`. Silent failures are no longer invisible — all hook errors logged with context. Hook permission issues detected proactively. Next: Option C (test coverage for hooks).
