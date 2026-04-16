@@ -546,6 +546,44 @@ llm_usage("month")
 
 The router tracks spend in SQLite across all providers and routes away from providers approaching their monthly caps.
 
+### Per-Task Daily Caps (Policy-Based)
+
+Enforce spending limits on specific task types within a single day:
+
+```yaml
+# ~/.llm-router/routing.yaml
+task_caps:
+  code: 10.00         # Max $10/day for code generation
+  research: 5.00      # Max $5/day for research tasks
+  analyze: 20.00      # Max $20/day for analysis
+  query: 2.00         # Max $2/day for simple queries
+```
+
+When a task type's daily spend exceeds its cap, the router raises `BudgetExceededError` and prevents further calls for that task type until the next day (UTC).
+
+This prevents runaway costs for expensive task types while allowing other task types to continue working.
+
+### Quality-Based Model Reordering
+
+The router tracks quality feedback from evaluations and automatically deprioritizes models with consistently low quality:
+
+```
+Judge Evaluation Scores (0–1):
+  relevance:    "Does response address the prompt?"
+  completeness: "Is response sufficiently thorough?"
+  correctness:  "Is content factually accurate?"
+```
+
+Models with average judge score < 0.7 over the past 7 days are moved to the end of the model chain. This allows the router to automatically learn from quality trends and avoid routing to models that produce poor outputs.
+
+Sample rate (default 10%):
+```bash
+export LLM_ROUTER_JUDGE_SAMPLE_RATE=0.1    # Score 10% of calls
+export LLM_ROUTER_JUDGE_SAMPLE_RATE=1.0    # Score every call (more expensive)
+```
+
+Quality tracking is opt-in and fire-and-forget — evaluations run asynchronously without blocking the primary task.
+
 ---
 
 ## Dashboard
