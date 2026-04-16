@@ -21,6 +21,15 @@
   - Auto-Discovery Initialization command (llm-router init-claude-memory)
   - Claude Code Memory Integration for persistent environment setup
 
+## v5.9.1 — Linting Fixes (2026-04-16)
+
+### Fixed
+- Removed unused `asyncio` import from `forecast.py`
+- Removed unused `timedelta` from datetime import in `forecast.py`
+- Removed unused `top_model` variable assignment in `router.py` (dead code from v5.9.0 model chain visibility feature)
+- Converted f-strings without placeholders to regular strings in `enforce-route.py` and `test_enforce_route_safety.py` (F541 linting errors)
+- All ruff linting errors now pass (0 errors, 0 warnings)
+
 ## v5.9.0 — Caveman Mode (Token-Efficient Output) (2026-04-16)
 
 ### Added
