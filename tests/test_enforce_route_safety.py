@@ -60,7 +60,7 @@ def test_qa_only_block_doesnt_block_all_investigations():
     # So deadlock is prevented by architecture, not by allowing blocked tools
 
     print(f"✅ Q&A blocklist is complete and correct: {len(qa_block_combined)} tools blocked")
-    print(f"   (Early detection prevents deadlock by allowing pre-directive investigation)")
+    print("   (Early detection prevents deadlock by allowing pre-directive investigation)")
 
 
 def test_early_file_op_detection_before_blocklist():

@@ -526,7 +526,7 @@ def main() -> None:
     # Show violation count and escalation path
     escalation = ""
     if violation_count == 1:
-        escalation = f"\n⚠️  Violation 1/2 — One more blocked tool will auto-downgrade enforcement & allow routing."
+        escalation = "\n⚠️  Violation 1/2 — One more blocked tool will auto-downgrade enforcement & allow routing."
     elif violation_count >= 2:
         escalation = f"\n🔴 Violation {violation_count}/2+ — This session will auto-downgrade to soft enforcement after this turn.\n" \
                      f"    CALL {expected_tool} NOW to avoid being soft-blocked."

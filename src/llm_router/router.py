@@ -1088,7 +1088,6 @@ async def route_and_call(
             candidate_count=len(models_to_try),
             top_model=models_to_try[0],
         )
-        top_model = models_to_try[0].split("/", 1)[1] if "/" in models_to_try[0] else models_to_try[0]
 
         # Format model chain for visibility: "model1 → model2 → model3" (up to 3 shown)
         chain_display = " → ".join([m.split("/", 1)[1] if "/" in m else m for m in models_to_try[:3]])

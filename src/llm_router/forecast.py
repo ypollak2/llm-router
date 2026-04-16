@@ -6,9 +6,8 @@ forward to month-end using linear regression + exponential smoothing.
 
 from __future__ import annotations
 
-import asyncio
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime
 from statistics import linear_regression
 
 from llm_router.cost import _get_db
