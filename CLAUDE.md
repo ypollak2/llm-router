@@ -181,12 +181,25 @@ Caveman applies structured terseness rules:
 
 ## Testing
 
-Always run tests with:
+**Fast tests (10–15 seconds)** — dev iteration during active coding:
 ```bash
-uv run pytest tests/ -q --ignore=tests/test_agno_integration.py
+uv run pytest tests/ -q  # Runs only unmarked "fast" tests by default
+uv run pytest tests/test_classifier.py -x -q  # Single file
 ```
+
+**Full test suite (30–45 seconds)** — before commits:
+```bash
+uv run pytest tests/ -m "" -q  # Include @pytest.mark.slow tests
+```
+
+**Parallel execution** (faster on multi-core machines):
+```bash
+uv run pytest tests/ -n auto -q  # Uses all CPU cores
+uv run pytest tests/ -n 4 -m "" -q  # Full suite in parallel
+```
+
 Never use bare `pytest` — it will fail without the venv context `uv run` provides.
-For a single test file: `uv run pytest tests/test_classifier.py -x -q`
+All test runs automatically skip `test_agno_integration.py` (too slow/flaky).
 
 ## Version Management
 

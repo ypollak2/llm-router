@@ -9,6 +9,30 @@ import pytest
 from llm_router.types import LLMResponse
 
 
+def pytest_collection_modifyitems(config, items):
+    """Auto-mark slow test files to improve dev iteration speed.
+
+    Heavy test files (>30 tests) are marked @pytest.mark.slow and excluded from
+    default runs with `pytest` (which uses -m 'not slow' via pyproject.toml).
+    Run with `pytest -m "" -q` for full suite.
+    """
+    slow_files = {
+        "test_multi_host_install.py",      # 45 tests - filesystem heavy
+        "test_policy_digest_community.py",  # 37 tests - policy eval
+        "test_benchmark_registry.py",       # 37 tests - benchmarking
+        "test_auto_route_hook.py",          # 52 tests - hook operations
+        "test_routing_value.py",            # 37 tests - value eval
+        "test_tool_tiers.py",               # 38 tests - tier eval
+        "test_adaptive_router.py",          # 27 tests - complex routing
+        "test_agent_context_routing.py",    # 34 tests - context routing
+        "test_edge_cases.py",               # 28 tests - edge case coverage
+    }
+
+    for item in items:
+        if any(slow in item.nodeid for slow in slow_files):
+            item.add_marker(pytest.mark.slow)
+
+
 @pytest.fixture(autouse=True)
 def _reset_singletons():
     """Reset module-level singletons between tests."""

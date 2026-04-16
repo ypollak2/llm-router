@@ -1,5 +1,26 @@
 # Changelog
 
+## [5.5.1] - 2026-04-15
+
+### Fixed
+- Removed unused imports from cli_init_memory.py, discover.py, and dynamic_routing.py
+- Reorganized module-level imports to follow PEP 8 conventions
+
+### Documentation  
+- Updated README.md with v5.5.0 feature documentation: Security-Friendly YAML Config, Auto-Discovery Init, Claude Code Memory
+
+## [5.5.1] - 2026-04-15
+
+### Fixed
+- Removed unused imports from `cli_init_memory.py`, `discover.py`, and `dynamic_routing.py`
+- Reorganized module-level imports to follow PEP 8 conventions (moved `os` import to top of file in discover.py)
+
+### Documentation
+- Updated README.md with comprehensive "New in v5.5.0" section documenting three major features:
+  - Security-Friendly YAML Configuration (~/.llm-router/config.yaml for enterprises)
+  - Auto-Discovery Initialization command (llm-router init-claude-memory)
+  - Claude Code Memory Integration for persistent environment setup
+
 ## v5.9.0 — Caveman Mode (Token-Efficient Output) (2026-04-16)
 
 ### Added
