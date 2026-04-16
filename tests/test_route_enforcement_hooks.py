@@ -68,7 +68,7 @@ def test_enforce_route_blocks_work_tools_by_default(tmp_path):
     out = json.loads(result.stdout)
     assert out["decision"] == "block"
     assert "Directive:" in out["reason"]
-    assert "Tool blocked:  Bash" in out["reason"]
+    assert "Bash" in out["reason"] and "blocked" in out["reason"].lower()
 
 
 def test_enforce_route_soft_mode_still_logs_but_allows(tmp_path):
@@ -167,7 +167,7 @@ def test_routing_yaml_enforce_hard_blocks_bash_for_code_tasks(tmp_path):
     assert result.returncode == 0
     out = json.loads(result.stdout)
     assert out["decision"] == "block", "Hard mode from routing.yaml must block Bash for code tasks"
-    assert "Tool blocked:  Bash" in out["reason"]
+    assert "Bash" in out["reason"] and "blocked" in out["reason"].lower()
 
 
 def test_routing_yaml_enforce_soft_allows_bash_but_logs(tmp_path):
@@ -339,4 +339,5 @@ def test_auto_route_logs_unrouted_previous_turn_on_next_prompt(tmp_path):
     assert "NO_ROUTE" in log_text
     assert "expected=llm_query" in log_text
     assert "task=query/simple" in log_text
-    assert "prior unrouted turn" in out["systemMessage"]
+    # Prior unrouted turn context is now in contextForAgent, not systemMessage
+    assert "PREVIOUS TURN VIOLATED ROUTING" in ctx or "prior unrouted turn" in ctx

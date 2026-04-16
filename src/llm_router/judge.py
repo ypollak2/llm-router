@@ -199,3 +199,68 @@ async def get_judge_scores_for_model(
         }
     finally:
         await db.close()
+
+
+async def reorder_by_quality(models: list[str], days: int = 7) -> list[str]:
+    """Reorder a model chain by average judge scores, deprioritizing low-quality models.
+
+    Models with average judge score < 0.7 over the past N days are moved to the
+    end of the chain. Models with insufficient history (< 3 samples) are unaffected.
+
+    This allows the router to automatically learn from quality feedback and avoid
+    repeatedly routing to models that produce poor outputs.
+
+    Args:
+        models: Ordered list of model identifiers (provider/model format).
+        days: Number of days of history to consider (default 7).
+
+    Returns:
+        Reordered model list with low-quality models deprioritized.
+        Returns original list unchanged if database is unavailable or has no judge data.
+    """
+    if not models:
+        return models
+
+    try:
+        # Get quality scores for each model
+        model_quality: dict[str, float] = {}
+        model_samples: dict[str, int] = {}
+
+        for model in models:
+            try:
+                scores = await get_judge_scores_for_model(model, days=days)
+                model_quality[model] = scores.get("avg_score", 0.0)
+                model_samples[model] = scores.get("sample_count", 0)
+            except Exception:
+                # If a single model fails, just skip its quality data
+                model_quality[model] = 0.0
+                model_samples[model] = 0
+
+        # Partition: high quality (≥0.7 or insufficient data) vs low quality (<0.7 with ≥3 samples)
+        high_quality = []
+        low_quality = []
+
+        for model in models:
+            samples = model_samples.get(model, 0)
+            quality = model_quality.get(model, 0.0)
+
+            # Keep in original position if: no samples, or quality is acceptable
+            if samples < 3 or quality >= 0.7:
+                high_quality.append(model)
+            else:
+                low_quality.append(model)
+
+        # Return reordered: high quality first, then low quality (no removal, just demotion)
+        if low_quality:
+            from llm_router.logging import get_logger
+            log = get_logger("llm_router.judge")
+            log.info(
+                "Quality-based reordering: demoted %d model(s) due to low avg scores ≥%dd",
+                len(low_quality), days
+            )
+            return high_quality + low_quality
+
+        return models
+    except Exception:
+        # If anything goes wrong, return original chain unchanged
+        return models

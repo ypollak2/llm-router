@@ -498,6 +498,28 @@ async def get_daily_spend() -> float:
         await db.close()
 
 
+async def get_daily_spend_by_task_type(task_type: str) -> float:
+    """Get total USD spent on external LLMs today for a specific task type.
+
+    Args:
+        task_type: Task type string (e.g., 'query', 'code', 'research', 'generate', 'analyze').
+
+    Returns:
+        Total spend for that task type as a float. Returns 0.0 if no usage data exists.
+    """
+    db = await _get_db()
+    try:
+        cursor = await db.execute(
+            "SELECT COALESCE(SUM(cost_usd), 0) FROM usage "
+            "WHERE timestamp >= datetime('now', 'start of day') AND task_type = ?",
+            (task_type,),
+        )
+        row = await cursor.fetchone()
+        return float(row[0]) if row else 0.0
+    finally:
+        await db.close()
+
+
 def fire_budget_alert(title: str, message: str) -> None:
     """Send a desktop notification for budget threshold events.
 

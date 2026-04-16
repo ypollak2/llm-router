@@ -989,6 +989,20 @@ async def route_and_call(
                         "To raise the limit: set LLM_ROUTER_DAILY_SPEND_LIMIT env var."
                     )
 
+            # Per-task daily cap enforcement (from org policy)
+            from llm_router.policy import get_task_cap, load_org_policy
+            org_policy = load_org_policy()
+            task_cap = get_task_cap(task_type.value, org_policy)
+            if task_cap and task_cap > 0:
+                task_daily_spend = await cost.get_daily_spend_by_task_type(task_type.value)
+                if task_daily_spend + _pending_spend >= task_cap:
+                    raise BudgetExceededError(
+                        f"Task-type daily limit for {task_type.value} (${task_cap:.2f}) exceeded "
+                        f"(spent: ${task_daily_spend:.4f} today UTC). "
+                        f"Resets at midnight UTC. "
+                        f"To raise the limit: update ~/.llm-router/org-policy.yaml task_caps."
+                    )
+
             if config.llm_router_monthly_budget > 0:
                 monthly_spend = await cost.get_monthly_spend()
                 budget = config.llm_router_monthly_budget
@@ -1047,6 +1061,14 @@ async def route_and_call(
         models_to_try = await _build_and_filter_chain(
             task_type, profile, model_override, complexity_hint, c, config
         )
+
+        # Quality-based reordering: demote models with low avg judge scores
+        if models_to_try and not model_override:  # Only reorder if no manual override
+            try:
+                from llm_router.judge import reorder_by_quality
+                models_to_try = await reorder_by_quality(models_to_try, days=7)
+            except Exception as _judge_err:
+                log.debug("Quality reordering failed (continuing): %s", _judge_err)
 
         if not models_to_try:
             set_span_attributes(
