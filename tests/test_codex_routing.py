@@ -89,6 +89,17 @@ async def test_code_task_codex_after_first_claude_not_last(
     monkeypatch.setattr("llm_router.router.is_codex_available", lambda: True)
     monkeypatch.setattr("llm_router.claude_usage.get_claude_pressure", lambda: 0.2)
 
+    # Disable Ollama to ensure Claude is first in chain
+    monkeypatch.delenv("OLLAMA_BASE_URL", raising=False)
+    monkeypatch.setenv("OLLAMA_BUDGET_MODELS", "")
+
+    # Mock discovery cache to return empty BEFORE any config is accessed
+    monkeypatch.setattr("llm_router.discover.get_cached_ollama_models", lambda: [])
+
+    # Reset config singleton to pick up env var changes
+    import llm_router.config as config_module
+    config_module._config = None
+
     # Make Claude (first model) fail, then verify second model is Codex
     call_count = 0
 
