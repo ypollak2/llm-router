@@ -1,5 +1,5 @@
 """Management tools — llm_save_session, llm_set_profile, llm_usage, llm_cache_stats,
-llm_cache_clear, llm_quality_report, llm_health, llm_providers."""
+llm_cache_clear, llm_quality_report, llm_health, llm_hook_health, llm_providers."""
 
 from __future__ import annotations
 
@@ -382,6 +382,73 @@ async def llm_health() -> str:
         lines.append(f"\n🦙 Ollama ({config.ollama_base_url}): {ollama_status}")
 
     lines.append("\nTip: use llm_dashboard to open the visual web dashboard at localhost:7337")
+    return "\n".join(lines)
+
+
+async def llm_hook_health() -> str:
+    """Check the health status of all routing hooks.
+
+    Shows:
+    - Hook permission status (executable vs not)
+    - Success/error counts
+    - Recent errors with timestamps
+    - Health status (healthy/degraded/failing)
+    """
+    from llm_router.hook_health import (
+        check_hook_permissions, get_hook_health, get_recent_hook_errors
+    )
+
+    lines = ["## Hook Health Status", ""]
+
+    # Check permissions
+    perms = check_hook_permissions()
+    perm_issues = [h for h, s in perms.items() if s != "ok"]
+    if perm_issues:
+        lines.append(f"⚠️  **Permission Issues**: {len(perm_issues)} hook(s) not executable")
+        for hook in perm_issues:
+            lines.append(f"  - {hook}: {perms[hook]}")
+        lines.append("")
+    else:
+        lines.append("✅ All hooks have correct permissions")
+        lines.append("")
+
+    # Show health status
+    health = get_hook_health()
+    if not health:
+        lines.append("No hook execution history yet.")
+    else:
+        lines.append("**Hook Execution History:**")
+        for hook_name in sorted(health.keys()):
+            info = health[hook_name]
+            status_icon = {
+                "healthy": "✅",
+                "degraded": "⚠️",
+                "failing": "🔴",
+            }.get(info.get("health_status", "?"), "❓")
+
+            success = info.get("success_count", 0)
+            errors = info.get("error_count", 0)
+            lines.append(
+                f"- {status_icon} **{hook_name}**: "
+                f"{success} success, {errors} error(s)"
+            )
+
+            if info.get("last_error_msg"):
+                lines.append(f"    Last error: {info['last_error_msg'][:80]}")
+
+    # Show recent errors
+    recent_errors = get_recent_hook_errors(hours=24)
+    if recent_errors:
+        lines.append("\n**Recent Errors (last 24 hours):**")
+        for err in recent_errors[-5:]:  # Show last 5
+            ts = err.get("timestamp", "?")[:16]
+            hook = err.get("hook", "?")
+            msg = err.get("error", "?")[:60]
+            lines.append(f"- [{ts}] {hook}: {msg}...")
+
+    lines.append(
+        "\n💡 Tip: Check ~/.llm-router/hook_errors.log for full error history"
+    )
     return "\n".join(lines)
 
 
@@ -973,6 +1040,8 @@ def register(mcp, should_register=None) -> None:
         mcp.tool()(llm_quality_report)
     if gate("llm_health"):
         mcp.tool()(llm_health)
+    if gate("llm_hook_health"):
+        mcp.tool()(llm_hook_health)
     if gate("llm_providers"):
         mcp.tool()(llm_providers)
     if gate("llm_dashboard"):
