@@ -84,8 +84,6 @@ class TestTierGating:
     @pytest.mark.asyncio
     async def test_free_tier_blocks_long_templates(self, mock_env, mock_acompletion, monkeypatch):
         monkeypatch.setenv("LLM_ROUTER_TIER", "free")
-        import llm_router.config as config_module
-        config_module._config = None
         from llm_router.server import llm_orchestrate
         # research_report has 3 steps — exceeds free tier limit of 2
         result = await llm_orchestrate("AI trends", template="research_report")

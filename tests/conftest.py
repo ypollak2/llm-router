@@ -148,6 +148,19 @@ def mock_litellm_response():
     return _make_response
 
 
+@pytest.fixture(autouse=True)
+def _reset_config_singleton():
+    """Reset config singleton before and after each test.
+
+    Ensures that monkeypatched environment variables are picked up by get_config(),
+    and prevents test pollution from config state changes.
+    """
+    import llm_router.config as config_module
+    config_module._config = None
+    yield
+    config_module._config = None
+
+
 @pytest.fixture(scope="session", autouse=True)
 def _close_db_connections():
     """Force close all aiosqlite connections at end of test session.

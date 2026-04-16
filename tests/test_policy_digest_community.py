@@ -197,8 +197,6 @@ class TestDetectSpendSpike:
     @pytest.mark.asyncio
     async def test_no_spike_on_empty_db(self, mock_env, tmp_path, monkeypatch):
         monkeypatch.setenv("LLM_ROUTER_DB_PATH", str(tmp_path / "test.db"))
-        import llm_router.config as config_module
-        config_module._config = None
         from llm_router.digest import detect_spend_spike
 
         is_spike, today, avg = await detect_spend_spike()
@@ -230,8 +228,6 @@ class TestSimulateWithoutRouting:
     @pytest.mark.asyncio
     async def test_empty_db_returns_zeros(self, mock_env, tmp_path, monkeypatch):
         monkeypatch.setenv("LLM_ROUTER_DB_PATH", str(tmp_path / "test.db"))
-        import llm_router.config as config_module
-        config_module._config = None
         from llm_router.digest import simulate_without_routing
 
         actual, baseline, pct = await simulate_without_routing("week")
