@@ -1133,14 +1133,31 @@ def _prior_violation_notice(pending: dict | None) -> str:
 
 # ── Entry Point ──────────────────────────────────────────────────────────────
 
+_DEBUG_LOG = Path.home() / ".llm-router" / "auto-route-debug.log"
+
+
+def _debug_log(msg: str) -> None:
+    """Log debug info to help diagnose hook invocation issues."""
+    try:
+        timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+        with open(_DEBUG_LOG, "a") as f:
+            f.write(f"[{timestamp}] {msg}\n")
+    except Exception:
+        pass  # Silently fail if logging doesn't work
+
 
 def main() -> None:
+    invocation_id = time.time()
+    _debug_log(f"[INVOCATION START] ID={invocation_id:.3f}")
+
     try:
         hook_input = json.load(sys.stdin)
     except (json.JSONDecodeError, EOFError):
+        _debug_log(f"[INVOCATION {invocation_id:.3f}] JSON parse failed, exiting")
         sys.exit(0)
 
     prompt = hook_input.get("prompt", "")
+    _debug_log(f"[INVOCATION {invocation_id:.3f}] prompt_len={len(prompt)} session_id={hook_input.get('session_id', 'unknown')[:8]}")
     if not prompt:
         sys.exit(0)
 
@@ -1169,6 +1186,7 @@ def main() -> None:
             },
             "systemMessage": f"💡 llm-router → {matched_server} MCP  [direct route]",
         }
+        _debug_log(f"[INVOCATION {invocation_id:.3f}] EARLY EXIT: direct MCP route to {matched_server}")
         json.dump(output, sys.stdout)
         sys.exit(0)
 
@@ -1261,6 +1279,7 @@ def main() -> None:
                         f" | Handle directly. Subscription = no API cost."
                         f" Do NOT call external llm_* tools."
                     )
+                _debug_log(f"[INVOCATION {invocation_id:.3f}] EARLY EXIT: CC-MODE pressure exceeded")
                 json.dump({"hookSpecificOutput": {"hookEventName": "UserPromptSubmit",
                                                    "contextForAgent": _prior_violation_notice(previous_unrouted) + directive}}, sys.stdout)
                 sys.exit(0)
@@ -1364,7 +1383,9 @@ def main() -> None:
         },
         "systemMessage": indicator,
     }
+    _debug_log(f"[INVOCATION {invocation_id:.3f}] OUTPUTTING: tool={tool} task={task_type}/{complexity} method={method}")
     json.dump(output, sys.stdout)
+    _debug_log(f"[INVOCATION {invocation_id:.3f}] OUTPUT COMPLETE")
 
 
 if __name__ == "__main__":
