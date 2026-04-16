@@ -69,6 +69,28 @@ LLM_ROUTER_CLAUDE_SUBSCRIPTION=true
 
 ---
 
+## New in v6.0
+
+- **Live Routing HUD** — Real-time statusline shows every routing decision with confidence score:
+  - Format: `→ haiku [87%] (code/simple) $0.001 ⚡`
+  - Performance: <5ms render time, <50 char width
+  - Works with NO_COLOR environment variable
+- **Session Replay Command** — `llm-router replay` prints formatted transcript of all routing decisions:
+  - Shows timestamp, model, confidence (as stars), reasoning, cost, and quality score
+  - Useful for auditing sessions and understanding what was routed where
+  - Optional filters: `--session SESSION_ID`, `--limit N`
+- **Health Check Command** — `llm-router verify` runs 30-second end-to-end system test:
+  - Verifies configuration, database, Ollama, OpenAI, Gemini API keys
+  - Shows hook installation status and last 5 routing decisions
+  - Returns zero exit code on success, non-zero on failure
+- **Design System** — Comprehensive terminal styling with ANSI colors, Unicode symbols, and components:
+  - Confidence visualization (★★★★★☆☆☆☆☆ format)
+  - Savings cards, profile headers, alert boxes
+  - Full accessibility support (no color-only info, 4.5:1 contrast minimum)
+  - Reference: [docs/DESIGN_SYSTEM_v6.md](docs/DESIGN_SYSTEM_v6.md)
+
+---
+
 ## New in v5.9.1
 
 - **Linting Cleanup**: Removed unused imports and dead code from v5.9.0. All ruff checks now pass.
@@ -148,6 +170,102 @@ Under the hood, every prompt goes through a `UserPromptSubmit` hook before your 
 | "Generate a hero image" | image | Flux Pro via fal.ai |
 
 **Free-first chain** (subscription mode): Ollama → Codex (free via OpenAI sub) → paid API
+
+---
+
+## CLI Commands (v6.0+)
+
+### Session Replay — Review all routing decisions
+
+```bash
+llm-router replay                    # Show all decisions this session
+llm-router replay --limit 20         # Show last 20 decisions only
+llm-router replay --session SESSION_ID
+```
+
+**Example output:**
+
+```
+═══════════════════════════════════════════════════════════
+  SESSION REPLAY — 14:30–15:45
+═══════════════════════════════════════════════════════════
+
+14:30 → routed to haiku (code/simple)
+    ★ Confidence: ★★★★★★★★☆☆ 87%
+    🧠 Reasoning: Simple code generation, low risk
+    💰 Cost: $0.0001
+    ✅ Quality: 97%
+
+14:31 → routed to sonnet (analysis/moderate)
+    ★ Confidence: ★★★★★★★★★☆ 92%
+    🧠 Reasoning: Architecture analysis requires deeper reasoning
+    💰 Cost: $0.0062
+    ✅ Quality: 98%
+
+───────────────────────────────────────────────────────────
+SUMMARY
+───────────────────────────────────────────────────────────
+  Total routed: 12 calls
+  Cost: $0.186
+  Saved: $1.847 (90%)
+```
+
+### Health Check — Verify system is healthy
+
+```bash
+llm-router verify
+```
+
+**Example output:**
+
+```
+══════════════════════════════════════════════════════════
+              llm-router health check
+══════════════════════════════════════════════════════════
+
+Configuration
+──────────────────────────────────────────────────────────
+✅ Configuration loaded from ~/.llm-router/config.yaml
+✅ SQLite database: ~/.llm-router/usage.db (45 MB, last write 5 mins ago)
+
+Providers
+──────────────────────────────────────────────────────────
+✅ Ollama (http://localhost:11434) — 2 models: gemma4:latest | qwen3.5:latest
+✅ OpenAI API configured
+✅ Gemini API configured
+
+Hooks
+──────────────────────────────────────────────────────────
+✅ llm-router-auto-route.py (installed + executable)
+✅ llm-router-session-end.py (installed + executable)
+✅ llm-router-enforce-route.py (installed + executable)
+
+Recent Decisions
+──────────────────────────────────────────────────────────
+  2 min ago  → haiku (code, simple)      $0.0001
+  5 min ago  → sonnet (analysis, mod)    $0.0062
+  12 min ago → opus (planning, complex)  $0.062
+
+──────────────────────────────────────────────────────────
+✅ No issues detected. You're good! 🚀
+```
+
+### Live Statusline HUD
+
+When you run a routed prompt in Claude Code, the statusline shows the routing decision in real time:
+
+```
+→ haiku [87%] (code/simple) $0.001 ⚡
+```
+
+- `→` — routing arrow
+- `haiku` — selected model (color: Orchestrate Blue)
+- `[87%]` — confidence score
+- `(code/simple)` — task type and complexity
+- `$0.001` — estimated cost (color: Confidence Green)
+- `⚡` — performance indicator
+
+---
 
 ### Why teams keep it on
 
@@ -825,12 +943,20 @@ llm-router share   # copies savings card to clipboard + opens tweet
 | **v5.7** | **Advanced Budget Control + Quality Scoring** — per-task daily caps, quality-based reordering, judge sample rate |
 | **v5.8** | **Pressure-Aware Hooks + LLM-as-Judge** — hooks monitor real-time pressure, auto-downgrade complexity, burn-rate forecasting, quality evaluation |
 
-### What's Next
+### Phase 6 — Visibility & Learning (v6.0–v7.0) 🎯 In Progress
+
+The next 6 months focus on making routing decisions visible, learnable, and shareable.
 
 | Version | Headline | Status |
 |---------|----------|--------|
-| **v5.9** | **Learned Routing** — self-training classifier from `llm_rate` feedback, prompt-set benchmarks, personal routing patterns | 📅 Planned |
-| **v6.0** | **Team Controls** — policy approvals, richer dashboard analytics, provider-level SLO alerts | 📅 Planned |
+| **v6.0** | **"Visible"** — Live routing HUD, session replay, health checks, design system | 🚀 May 2026 |
+| **v6.1** | **"Memory"** — Personal routing profiles, override learning, community sharing | 📅 Jun 2026 |
+| **v6.2** | **"Quality"** — Quality Guard, benchmarks, degradation alerts, accuracy reports | 📅 Jul 2026 |
+| **v6.3** | **"Local First"** — Ollama dashboard, model discovery, auto-recommendations | 📅 Aug 2026 |
+| **v6.4** | **"Community"** — Savings card, README badge, routing config marketplace | 📅 Sep 2026 |
+| **v7.0** | **"Platform"** — Public routing API, agent chains, plugin SDK, marketplace | 📅 Oct 2026 |
+
+**Details:** [docs/ROADMAP_v6.md](docs/ROADMAP_v6.md) — competitive positioning, design decisions, monthly product cycle framework.
 
 ---
 

@@ -1,5 +1,54 @@
 # Changelog
 
+## v6.0.0 — "Visible" (2026-04-16)
+
+### Added
+
+- **Live Routing HUD** — Real-time statusline visibility for every routing decision
+  - New `src/llm_router/statusline_hud.py` module with `initialize_hud()` and `record_routing_decision()` 
+  - Displays: model selected, confidence %, task type/complexity, cost, reasoning
+  - Integrated into auto-route hook for session-level initialization
+  - Records decisions in routing workflow for immediate feedback
+
+- **Session Replay CLI** — Transcript view of all routing decisions
+  - New command: `llm-router replay [--session ID] [--limit N]`
+  - Shows: timestamps, model selection, confidence, reasoning, cost, quality scores
+  - Session summary with total cost and savings calculation
+  - Stored in routing_decisions table via `record_routing_decision()`
+
+- **Health Check CLI** — End-to-end system verification (30 seconds)
+  - New command: `llm-router verify`
+  - Checks: configuration, database, active providers (Ollama/OpenAI/Gemini), hooks, recent decisions
+  - Displays model availability, hook status, live routing chain
+  - Helps diagnose connectivity and configuration issues
+
+- **Terminal Styling Design System** — Reusable ANSI formatting
+  - New `src/llm_router/terminal_style.py` with Color, Symbol, ConfidenceLevel classes
+  - Unicode symbols: ✅ ❌ ⭐ 💾 🧠 💰 → ✓
+  - Color palette: blues, greens, reds with semantic meaning
+  - Confidence visualizations (star ratings 0-10)
+  - Applied to HUD, CLI commands, terminal output
+
+### Changed
+
+- **Hook Integration** — auto-route.py now initializes HUD and routing.py records decisions
+  - Calls `initialize_hud()` at session start
+  - Calls `record_routing_decision()` after each routing selection
+  - Full routing pipeline visibility: classify → select → route → **record** → respond
+
+- **README.md** — Comprehensive feature and command documentation
+  - New "New in v6.0" section highlighting visibility features
+  - New "CLI Commands" section with replay/verify usage and sample output
+  - Updated "Roadmap" section with Phase 6 (v6.0-v7.0) six-month plan
+  - Competitive positioning vs NadirClaw and RouteLLM
+
+### Technical Notes
+
+- HUD state initialized per session, persisted via routing_decisions table
+- record_routing_decision() is synchronous (called from async routing context)
+- Confidence stored as 0.0-1.0 float, rendered as star ratings (0-10 stars)
+- Terminal styling uses ANSI codes compatible with Claude Code statusline and standard terminals
+
 ## [5.5.1] - 2026-04-15
 
 ### Fixed

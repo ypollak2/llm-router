@@ -16,6 +16,7 @@ from llm_router.model_selector import select_model
 from llm_router.profiles import complexity_to_profile
 from llm_router.provider_budget import get_provider_budgets, rank_external_models
 from llm_router.router import route_and_call
+from llm_router.statusline_hud import record_routing_decision
 from llm_router.types import (
     ClassificationResult, Complexity, QualityMode,
     RoutingProfile, RoutingRecommendation, TaskType, _budget_bar,
@@ -354,6 +355,15 @@ async def llm_route(
         caller_context=context,
         ctx=ctx,
         classification_data=_classification_data,
+    )
+
+    # Record routing decision for HUD visibility
+    record_routing_decision(
+        model=resp.model,
+        confidence=classification.confidence,
+        task=f"{resolved_task_type.value}/{classification.complexity.value}",
+        cost=resp.cost_usd,
+        reason=classification.reasoning,
     )
 
     # Step 5: Build response with classification + routing info

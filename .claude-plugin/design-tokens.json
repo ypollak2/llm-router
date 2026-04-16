@@ -1,0 +1,371 @@
+{
+  "version": "1.0",
+  "metadata": {
+    "name": "llm-router Design Tokens",
+    "description": "Design system tokens for v6.0+ (Visibility + Memory)",
+    "updated": "2026-04-16"
+  },
+  "colors": {
+    "primary": {
+      "orchestrate_blue": {
+        "hex": "#0066CC",
+        "rgb": "0, 102, 204",
+        "ansi": 34,
+        "ansi_bright": "\\033[34m",
+        "description": "Primary color for routing flow, intelligence, trust",
+        "usage": ["routing decisions", "model selection", "primary actions"]
+      }
+    },
+    "secondary": {
+      "memory_amber": {
+        "hex": "#CC8800",
+        "rgb": "204, 136, 0",
+        "ansi": 33,
+        "ansi_bright": "\\033[33m",
+        "description": "Secondary color for memory, personalization, learning",
+        "usage": ["learned patterns", "personal profiles", "override notifications"]
+      }
+    },
+    "semantic": {
+      "confidence_green": {
+        "hex": "#00AA44",
+        "rgb": "0, 170, 68",
+        "ansi": 32,
+        "ansi_bright": "\\033[32m",
+        "description": "Success, high confidence, savings, positive outcomes",
+        "usage": ["successful routing", "confidence scores 80%+", "savings display"]
+      },
+      "warning_red": {
+        "hex": "#DD3333",
+        "rgb": "221, 51, 51",
+        "ansi": 31,
+        "ansi_bright": "\\033[31m",
+        "description": "Low confidence, escalation, errors, warnings",
+        "usage": ["confidence <60%", "escalation alerts", "error states"]
+      },
+      "info_gray": {
+        "hex": "#666666",
+        "rgb": "102, 102, 102",
+        "ansi": 37,
+        "ansi_bright": "\\033[37m",
+        "description": "Secondary information, metadata, timestamps",
+        "usage": ["timestamps", "secondary text", "metadata labels"]
+      },
+      "subtle": {
+        "hex": "#AAAAAA",
+        "rgb": "170, 170, 170",
+        "ansi": 90,
+        "ansi_bright": "\\033[90m",
+        "description": "Tertiary information, less important details",
+        "usage": ["tertiary text", "dividers", "minor information"]
+      }
+    },
+    "reset": {
+      "ansi_reset": "\\033[0m",
+      "description": "ANSI reset code to clear formatting"
+    }
+  },
+  "typography": {
+    "heading_1": {
+      "style": "UPPERCASE",
+      "max_width": 80,
+      "ansi_format": "\\033[1m",
+      "description": "Main title, features, chapters",
+      "example": "╔═ PERSONAL ROUTING PROFILE ═╗"
+    },
+    "heading_2": {
+      "style": "Title Case",
+      "max_width": 60,
+      "ansi_format": "\\033[1m",
+      "description": "Section title",
+      "example": "Your Routing Patterns"
+    },
+    "heading_3": {
+      "style": "Sentence case",
+      "max_width": 50,
+      "description": "Subsection",
+      "example": "Task distribution by frequency"
+    },
+    "body": {
+      "style": "Regular",
+      "max_width": 80,
+      "description": "Body text, standard content"
+    },
+    "monospace": {
+      "style": "Monospace (`)\"",
+      "description": "Code, model names, costs, file paths",
+      "example": "`haiku`, `$0.001`, `config.yaml`"
+    },
+    "emphasis": {
+      "style": "Bold (**text**)",
+      "ansi_format": "\\033[1m",
+      "description": "Emphasis, important points, decisions"
+    },
+    "secondary": {
+      "style": "Dim (~~text~~)",
+      "ansi_format": "\\033[2m",
+      "description": "Secondary info, metadata, timestamps"
+    }
+  },
+  "symbols": {
+    "routing": {
+      "arrow": {
+        "unicode": "→",
+        "description": "Direct routing to model",
+        "usage": "Statusline: → haiku"
+      },
+      "lightning": {
+        "unicode": "⚡",
+        "description": "Fast, efficient, power-saving",
+        "usage": "$0.001 saved ⚡"
+      },
+      "escalate_up": {
+        "unicode": "⬆",
+        "description": "Upgrade to more powerful model",
+        "usage": "Confidence too low, escalating ⬆"
+      },
+      "escalate_down": {
+        "unicode": "⬇",
+        "description": "Downgrade to cheaper model",
+        "usage": "Budget pressure, downgrading ⬇"
+      }
+    },
+    "memory": {
+      "memory": {
+        "unicode": "💾",
+        "description": "Personalization, learning, profile",
+        "usage": "💾 Your Routing Profile"
+      },
+      "brain": {
+        "unicode": "🧠",
+        "description": "Intelligence, learned behavior",
+        "usage": "🧠 Smart routing recommendation"
+      },
+      "library": {
+        "unicode": "📚",
+        "description": "Knowledge, history, patterns",
+        "usage": "📚 Community Profiles"
+      }
+    },
+    "quality": {
+      "star_full": {
+        "unicode": "★",
+        "description": "High confidence (80-100%)",
+        "usage": "★★★★★★★★☆☆ 87% confidence"
+      },
+      "star_empty": {
+        "unicode": "☆",
+        "description": "Low confidence (0-40%)",
+        "usage": "★★☆☆☆☆☆☆☆☆ 20% confidence"
+      },
+      "warning": {
+        "unicode": "⚠",
+        "description": "Potential quality issue",
+        "usage": "⚠ Quality dropped to 82%"
+      },
+      "check": {
+        "unicode": "✓",
+        "description": "Confirmed pattern, learned",
+        "usage": "✓ Security reviews now use Opus"
+      }
+    },
+    "status": {
+      "success": {
+        "unicode": "✅",
+        "description": "Task completed well",
+        "usage": "✅ Routed successfully"
+      },
+      "clock": {
+        "unicode": "⏱",
+        "description": "Time, latency tracking",
+        "usage": "⏱ 1.2s response time"
+      },
+      "money": {
+        "unicode": "💰",
+        "description": "Cost, savings",
+        "usage": "💰 Saved $2.29"
+      },
+      "chart": {
+        "unicode": "📊",
+        "description": "Data, analytics",
+        "usage": "📊 Your Routing Patterns"
+      },
+      "alert": {
+        "unicode": "🚨",
+        "description": "Critical issue",
+        "usage": "🚨 Quality Guard Alert"
+      }
+    }
+  },
+  "components": {
+    "statusline_hud": {
+      "format": "→ MODEL [CONFIDENCE%] (TASK/COMPLEXITY) $COST saved ⚡",
+      "max_width": 50,
+      "performance_target_ms": 100,
+      "example": "→ haiku [87%] (code/simple) $0.001 ⚡",
+      "colors": {
+        "arrow": "primary.orchestrate_blue",
+        "model": "primary.orchestrate_blue",
+        "confidence": "semantic.confidence_green",
+        "cost": "semantic.confidence_green",
+        "lightning": "semantic.confidence_green"
+      }
+    },
+    "session_replay": {
+      "format": "Structured transcript with routing decisions",
+      "width": 80,
+      "sections": [
+        "timestamp",
+        "user_query",
+        "routed_model",
+        "confidence",
+        "reasoning",
+        "cost",
+        "quality_check"
+      ],
+      "colors": {
+        "model_name": "primary.orchestrate_blue",
+        "confidence_high": "semantic.confidence_green",
+        "confidence_low": "semantic.warning_red",
+        "reasoning": "secondary.memory_amber"
+      }
+    },
+    "profile_card": {
+      "format": "Personal routing profile with ASCII charts",
+      "width": 60,
+      "sections": [
+        "header (💾 Personal Routing Profile)",
+        "task_distribution (bar charts)",
+        "model_accuracy (by task)",
+        "savings (monthly/annual)",
+        "learned_overrides",
+        "recommendations"
+      ],
+      "colors": {
+        "header": "secondary.memory_amber",
+        "accuracy_high": "semantic.confidence_green",
+        "savings": "semantic.confidence_green",
+        "overrides": "primary.orchestrate_blue"
+      }
+    },
+    "savings_card": {
+      "format": "Beautiful ASCII card for sharing",
+      "width": 50,
+      "style": "box_drawing",
+      "sections": [
+        "title (💰 Session Summary)",
+        "session_cost",
+        "baseline_cost",
+        "savings_amount",
+        "monthly_summary",
+        "annual_projection"
+      ],
+      "colors": {
+        "savings_amount": "semantic.confidence_green",
+        "footer": "primary.orchestrate_blue"
+      }
+    },
+    "quality_alert": {
+      "format": "Alert box for quality degradation",
+      "width": 50,
+      "style": "box_drawing",
+      "sections": [
+        "alert_header (🚨 Quality Alert)",
+        "issue_description",
+        "action_taken",
+        "learned_insight",
+        "debug_command"
+      ],
+      "colors": {
+        "alert_icon": "semantic.warning_red",
+        "issue": "semantic.warning_red",
+        "action": "semantic.confidence_green",
+        "insight": "secondary.memory_amber"
+      }
+    }
+  },
+  "spacing": {
+    "padding": {
+      "small": 1,
+      "medium": 2,
+      "large": 3
+    },
+    "line_height": {
+      "compact": 1,
+      "normal": 1.5,
+      "spacious": 2
+    },
+    "max_widths": {
+      "statusline": 50,
+      "card": 60,
+      "terminal": 80
+    }
+  },
+  "accessibility": {
+    "no_color_mode": {
+      "env_var": "NO_COLOR=1",
+      "description": "Fallback to ASCII symbols only, no ANSI colors"
+    },
+    "contrast_minimum": "4.5:1",
+    "symbol_descriptions": true,
+    "text_alternatives": true
+  },
+  "variants": {
+    "dark_terminal": {
+      "description": "Optimized for dark terminal backgrounds",
+      "primary_color": "orchestrate_blue",
+      "semantic_colors": "all_bright_ansi"
+    },
+    "light_terminal": {
+      "description": "Optimized for light terminal backgrounds",
+      "primary_color": "orchestrate_blue_dim",
+      "semantic_colors": "dim_ansi"
+    },
+    "monochrome": {
+      "description": "Fallback for no-color terminals",
+      "uses_symbols": true,
+      "uses_text": true,
+      "no_colors": true
+    }
+  },
+  "web_dashboard": {
+    "css_variables": {
+      "--color-orchestrate": "#0066CC",
+      "--color-memory": "#CC8800",
+      "--color-confidence": "#00AA44",
+      "--color-warning": "#DD3333",
+      "--color-info": "#666666",
+      "--color-subtle": "#AAAAAA",
+      "--font-heading": "system-ui, -apple-system, sans-serif",
+      "--font-body": "system-ui, -apple-system, sans-serif",
+      "--font-mono": "Menlo, Monaco, Courier New, monospace",
+      "--max-width-card": "600px",
+      "--max-width-content": "1000px"
+    },
+    "animations": {
+      "routing_decision": {
+        "type": "slide_in",
+        "duration_ms": 300,
+        "easing": "ease-out"
+      },
+      "escalation": {
+        "type": "pulse",
+        "duration_ms": 600,
+        "easing": "ease-in-out",
+        "color": "#DD3333"
+      },
+      "savings_update": {
+        "type": "bounce",
+        "duration_ms": 400,
+        "easing": "ease-out",
+        "color": "#00AA44"
+      }
+    }
+  },
+  "implementation": {
+    "python_module": "src/llm_router/terminal_style.py",
+    "test_module": "tests/test_terminal_styling.py",
+    "documentation": "docs/DESIGN_SYSTEM_v6.md",
+    "usage_example": "from llm_router.terminal_style import Color, Symbol, format_routing_hud"
+  }
+}

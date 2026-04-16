@@ -28,6 +28,14 @@ import time
 import urllib.request
 from pathlib import Path
 
+# ── v6.0 Visibility: HUD integration ─────────────────────────────────────────
+try:
+    from llm_router.statusline_hud import initialize_hud
+except ImportError:
+    def initialize_hud():
+        """Fallback stub if statusline_hud is unavailable."""
+        pass
+
 # ── .env loader (reads llm-router's .env for API keys) ──────────────────────
 
 _ENV_PATHS = [
@@ -1162,6 +1170,10 @@ def main() -> None:
         sys.exit(0)
 
     session_id = hook_input.get("session_id", "")
+
+    # ── v6.0 Visibility: Initialize HUD session state ─────────────────────────
+    initialize_hud()
+
     previous_unrouted = _consume_unresolved_pending(session_id) if session_id else None
 
     # ── MCP capability check — runs before LLM classification ────────────────
