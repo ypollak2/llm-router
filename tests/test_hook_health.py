@@ -2,10 +2,9 @@
 
 import json
 import os
-import pytest
 from datetime import datetime, timedelta
 from pathlib import Path
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 
 from llm_router.hook_health import (
     record_hook_error,

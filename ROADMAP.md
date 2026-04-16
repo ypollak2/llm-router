@@ -1,6 +1,6 @@
 # LLM Router — Roadmap
 
-> Last updated: 2026-04-09
+> Last updated: 2026-04-16
 
 ## Vision
 
@@ -452,6 +452,98 @@ No hooks in Claude Desktop means a fundamentally different model: **tool-based d
 | **Stable Cursor integration** | Same feature set via Cursor's extension API |
 | **Cross-editor shared config** | One `.llm-router.yml` governs all editors + Claude Code |
 | **Cross-editor analytics** | Team dashboard aggregates savings across Claude Code + VS Code + Cursor |
+
+---
+
+## Phase 5 — Market Leadership (May–Oct 2026)
+
+**Context:** Market research shows visibility (claude-hud, 19k stars) + memory (claude-mem, 59k stars) are the #1 drivers of Claude Code plugin adoption. Our routing is currently invisible and forgets you. This phase fixes both.
+
+**See:** [docs/ROADMAP_v6.md](docs/ROADMAP_v6.md) for full product strategy, market signals, and monthly product cycle framework.
+
+### v6.0 — "Visible" (May 2026)
+
+**Market Signal:** claude-hud (19k stars) — developers crave seeing what Claude does
+
+| Feature | Priority | Status |
+|---------|----------|--------|
+| **Live routing HUD in statusline** | High | ⬜ Inline `→ haiku $0.001 saved ⚡` on every message |
+| **`llm-router replay` session transcript** | High | ⬜ Print all routing decisions this session with reasoning |
+| **Confidence scores on decisions** | High | ⬜ `→ haiku [87% confidence]` — trust the low-cost escalation |
+| **`llm-router verify` health check** | Medium | ⬜ 30-second end-to-end test; shows routing chain + hook status |
+
+---
+
+### v6.1 — "Memory" (June 2026)
+
+**Market Signal:** claude-mem (59k stars) — memory + personalization = #1 retention driver
+
+| Feature | Priority | Status |
+|---------|----------|--------|
+| **Personal routing profile auto-generation** | High | ⬜ After 50 calls, generate `profile.json`: task distribution + learned_overrides |
+| **Override learning** | High | ⬜ 3x manual overrides → remember permanently |
+| **Usage pattern visualization** | Medium | ⬜ `llm-router profile` shows ASCII charts + recommendations |
+| **Profile export/import** | Medium | ⬜ Share patterns with community; import battle-tested profiles |
+
+---
+
+### v6.2 — "Quality" (July 2026)
+
+**Market Signal:** UncommonRoute messaging — "82% cost savings, 79.4% accuracy" converts skeptics
+
+| Feature | Priority | Status |
+|---------|----------|--------|
+| **Quality Guard** | High | ⬜ Pre-check high-stakes tasks; auto-escalate if risky |
+| **Quality score tracking** | High | ⬜ Lightweight judge scores every response; track per (model, task) |
+| **Degradation alerts** | Medium | ⬜ If quality drops → auto-escalate + alert |
+| **Published benchmarks** | High | ⬜ `llm-router benchmark` generates shareable markdown with real data |
+
+---
+
+### v6.3 — "Local First" (August 2026)
+
+**Market Signal:** Ollama explosive growth (40% YoY), NadirClaw threat (416 stars, +120/mo)
+
+| Feature | Priority | Status |
+|---------|----------|--------|
+| **Model discovery dashboard** | High | ⬜ `llm-router models` — show all local models + quality + usage |
+| **Auto model recommendation** | Medium | ⬜ Analyze patterns; recommend new models that fit your workflow |
+| **Offline graceful mode** | Medium | ⬜ No internet → route everything locally, silent recovery |
+| **Local model benchmarking** | Medium | ⬜ `llm-router benchmark local` — calibrate to your hardware |
+
+---
+
+### v6.4 — "Community" (September 2026)
+
+**Market Signal:** Plugin marketplace success (1.9k stars), word-of-mouth distribution
+
+| Feature | Priority | Status |
+|---------|----------|--------|
+| **Savings proof card** | High | ⬜ Beautiful ASCII card: `Saved $367.20 this month (96%)` — one-click share |
+| **README badge** | Medium | ⬜ `[![llm-router: 87% efficiency](badge.llm-router.dev/...)]` — social proof |
+| **Routing config marketplace** | Medium | ⬜ Share + import profiles: `python-backend-dev`, `typescript-frontend`, etc. |
+| **Anonymous leaderboard** | Low | ⬜ Opt-in weekly top savers; gamification drives adoption |
+
+---
+
+### v7.0 — "Platform" (October 2026)
+
+**Market Signal:** plano (6.3k stars, +250/mo) — agent routing is the next wave
+
+| Feature | Priority | Status |
+|---------|----------|--------|
+| **Public routing API** | High | ⬜ `POST /route` endpoint; other tools call us for intelligence |
+| **Agent chain routing** | High | ⬜ Route multi-step chains; optimize each step independently |
+| **Plugin SDK** | Medium | ⬜ Community registers custom task types + routing rules |
+| **IDE marketplace listings** | High | ⬜ One-click install on Claude Code, Cursor, VS Code, Windsurf |
+
+---
+
+### Market Data Sources
+
+- **Competitive intelligence:** `docs/market/2026-04.md` (GitHub stars, PyPI downloads, HN sentiment)
+- **Monthly pulse:** `docs/market/YYYY-MM.md` (updated first week of each month)
+- **Roadmap rationale:** Each version maps to a proven market signal (real GitHub stars + growth trends)
 
 ---
 

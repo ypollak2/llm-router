@@ -21,17 +21,14 @@ from llm_router.terminal_style import (
     format_savings_bar,
     format_box,
     format_profile_header,
-    format_alert_box,
     format_savings_card,
     disable_colors,
     enable_colors,
     colors_enabled,
 )
 from llm_router.statusline_hud import (
-    StatuslineState,
     initialize_hud,
     record_routing_decision,
-    get_current_hud,
     get_session_summary,
     on_routing_decision,
 )

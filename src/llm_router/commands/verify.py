@@ -53,8 +53,6 @@ import argparse
 import json
 import os
 import sqlite3
-import subprocess
-import sys
 import urllib.request
 from datetime import datetime
 from pathlib import Path
@@ -124,7 +122,7 @@ def check_ollama() -> tuple[bool, str]:
         models = data.get("models", [])
 
         if not models:
-            return True, f"Ollama running but no models loaded"
+            return True, "Ollama running but no models loaded"
 
         model_str = " | ".join([m.get("name", "unknown") for m in models[:3]])
         if len(models) > 3:

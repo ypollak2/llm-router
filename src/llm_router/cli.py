@@ -138,6 +138,12 @@ def main() -> None:
         _run_team(subcmd=args[1] if len(args) > 1 else "report", flags=args[2:])
     elif args and args[0] == "budget":
         _run_budget(subcmd=args[1] if len(args) > 1 else "list", flags=args[2:])
+    elif args and args[0] == "replay":
+        from llm_router.commands.replay import main as _replay_main
+        _replay_main(args[1:])
+    elif args and args[0] == "verify":
+        from llm_router.commands.verify import main as _verify_main
+        _verify_main(args[1:])
     else:
         # Default: start the MCP server (original behavior)
         from llm_router.server import main as _mcp_main

@@ -1,20 +1,16 @@
 """Tests for LLM-as-Judge quality evaluation."""
 
-import asyncio
-import json
 import pytest
-from unittest.mock import AsyncMock, patch, MagicMock
+from unittest.mock import patch
 from datetime import datetime, timedelta
 
 from llm_router.judge import (
     evaluate_response_async,
     _build_judge_prompt,
     _parse_judge_score,
-    _store_judge_score,
     get_judge_scores_for_model,
     reorder_by_quality,
 )
-from llm_router.types import LLMResponse, RoutingProfile, TaskType
 from llm_router import cost
 
 

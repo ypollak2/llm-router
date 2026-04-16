@@ -23,3 +23,5 @@
 | Introduce repository-aware YAML configuration, con | src/llm_router/cli.py, src/llm_router/ho | medium | [→](decisions/introduce-repository-aware-yaml-configuration-config-linting.md) |
 | Ensure Claude OAuth usage is always refreshed and  | src/llm_router/hooks/session-end.py, src | medium | [→](decisions/ensure-claude-oauth-usage-is-always-refreshed-and-snapshot-u.md) |
 | Introduce MCP-aware routing and enforce-route bloc | src/llm_router/hooks/auto-route.py, src/ | high | [→](decisions/introduce-mcp-aware-routing-and-enforce-route-blocklist-in-a.md) |
+
+| Complete HUD integration with record_routing_decision calls | src/llm_router/tools/routing.py | low | |

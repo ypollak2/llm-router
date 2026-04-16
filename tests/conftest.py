@@ -1,6 +1,5 @@
 """Shared pytest fixtures for all llm-router tests."""
 
-from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest

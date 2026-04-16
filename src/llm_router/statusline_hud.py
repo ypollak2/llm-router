@@ -15,17 +15,14 @@ Integration:
 - Cleared by session-end hook
 """
 
-import os
 import time
 from dataclasses import dataclass
 from typing import Optional
-from datetime import datetime
 
 from llm_router.terminal_style import (
     Color,
     Symbol,
     RoutingDecision,
-    format_confidence_bar,
 )
 
 
@@ -250,7 +247,7 @@ def format_replay_summary() -> str:
         return "No routed calls this session."
 
     summary_lines = [
-        f"Session Summary:",
+        "Session Summary:",
         f"  {Symbol.LIGHTNING.value} Total routed: {_statusline_state.decision_count} calls",
         f"  {Symbol.MONEY.value} Cost: ${_statusline_state.total_cost_session:.2f}",
     ]

@@ -14,7 +14,7 @@ Design tokens: .claude-plugin/design-tokens.json
 
 import os
 from enum import Enum
-from typing import Optional, Tuple
+from typing import Optional
 from dataclasses import dataclass
 
 
