@@ -74,8 +74,45 @@ def mock_env(monkeypatch):
 
 @pytest.fixture
 def mock_acompletion():
-    """Mock async completion for provider tests."""
-    return AsyncMock()
+    """Mock async completion for provider tests.
+    
+    Patches llm_router.providers.call_llm to return a mock LLM response,
+    preventing actual API calls in tests.
+    """
+    from llm_router.types import LLMResponse
+
+    mock_response = LLMResponse(
+        content="Mock response",
+        model="test/mock-model",
+        input_tokens=10,
+        output_tokens=5,
+        cost_usd=0.001,
+        latency_ms=100.0,
+        provider="test",
+    )
+
+    async_mock = AsyncMock(return_value=mock_response)
+
+    with patch("llm_router.providers.call_llm", async_mock):
+        yield async_mock
+
+
+@pytest.fixture
+def mock_litellm_response():
+    """Factory for mock litellm completion responses (for tests patching litellm directly)."""
+    from llm_router.types import LLMResponse
+    
+    def _make_response():
+        return LLMResponse(
+            content="Mock response",
+            model="test/mock-model",
+            input_tokens=10,
+            output_tokens=5,
+            cost_usd=0.001,
+            latency_ms=100.0,
+            provider="test",
+        )
+    return _make_response
 
 
 @pytest.fixture(scope="session", autouse=True)
