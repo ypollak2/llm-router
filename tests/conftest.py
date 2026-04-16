@@ -1,7 +1,7 @@
 """Shared pytest fixtures for all llm-router tests."""
 
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -77,7 +77,8 @@ def mock_acompletion():
     """Mock async completion for provider tests.
     
     Patches llm_router.providers.call_llm to return a mock LLM response,
-    preventing actual API calls in tests.
+    preventing actual API calls in tests. Also disables Codex injection
+    and marks all providers as healthy to avoid skipping injected models.
     """
     from llm_router.types import LLMResponse
 
@@ -93,25 +94,41 @@ def mock_acompletion():
 
     async_mock = AsyncMock(return_value=mock_response)
 
+    # Mock health tracker to mark all providers as healthy
+    mock_tracker = MagicMock()
+    mock_tracker.is_healthy.return_value = True
+
     with patch("llm_router.providers.call_llm", async_mock):
-        yield async_mock
+        with patch("llm_router.codex_agent.is_codex_available", return_value=False):
+            with patch("llm_router.router.get_tracker", return_value=mock_tracker):
+                yield async_mock
 
 
 @pytest.fixture
 def mock_litellm_response():
-    """Factory for mock litellm completion responses (for tests patching litellm directly)."""
-    from llm_router.types import LLMResponse
+    """Factory for mock litellm completion responses (for tests patching litellm directly).
     
+    Returns a mock object that mimics litellm.acompletion response with:
+    - response.choices[0].message.content
+    - response.usage.prompt_tokens / completion_tokens
+    """
     def _make_response():
-        return LLMResponse(
-            content="Mock response",
-            model="test/mock-model",
-            input_tokens=10,
-            output_tokens=5,
-            cost_usd=0.001,
-            latency_ms=100.0,
-            provider="test",
-        )
+        # Create mock litellm response structure
+        mock_msg = MagicMock()
+        mock_msg.content = "Mock response"
+        
+        mock_choice = MagicMock()
+        mock_choice.message = mock_msg
+        
+        mock_usage = MagicMock()
+        mock_usage.prompt_tokens = 10
+        mock_usage.completion_tokens = 5
+        
+        mock_response = MagicMock()
+        mock_response.choices = [mock_choice]
+        mock_response.usage = mock_usage
+        
+        return mock_response
     return _make_response
 
 
