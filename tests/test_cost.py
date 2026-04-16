@@ -7,15 +7,6 @@ from llm_router import cost
 from llm_router.types import LLMResponse, RoutingProfile, TaskType
 
 
-@pytest.fixture
-def temp_db(tmp_path, monkeypatch):
-    """Use a temporary database for testing."""
-    db_path = tmp_path / "test_usage.db"
-    monkeypatch.setenv("GEMINI_API_KEY", "test")
-    monkeypatch.setenv("LLM_ROUTER_DB_PATH", str(db_path))
-    return db_path
-
-
 @pytest.mark.asyncio
 async def test_log_and_query_usage(temp_db):
     resp = LLMResponse(

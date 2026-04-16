@@ -15,7 +15,7 @@ from llm_router.router import route_and_call
 from llm_router.types import RoutingProfile, TaskType
 
 @pytest.mark.asyncio
-async def test_openai_query_model_override_end_to_end(mock_env, mock_litellm_response):
+async def test_openai_query_model_override_end_to_end(temp_db, mock_env, mock_litellm_response):
     captured: dict = {}
 
     async def side_effect(**kwargs):
@@ -38,7 +38,7 @@ async def test_openai_query_model_override_end_to_end(mock_env, mock_litellm_res
 
 
 @pytest.mark.asyncio
-async def test_gemini_query_model_override_end_to_end(mock_env, mock_litellm_response):
+async def test_gemini_query_model_override_end_to_end(temp_db, mock_env, mock_litellm_response):
     captured: dict = {}
 
     async def side_effect(**kwargs):
@@ -60,7 +60,7 @@ async def test_gemini_query_model_override_end_to_end(mock_env, mock_litellm_res
 
 
 @pytest.mark.asyncio
-async def test_perplexity_research_uses_recency_filter_end_to_end(mock_env, mock_litellm_response):
+async def test_perplexity_research_uses_recency_filter_end_to_end(temp_db, mock_env, mock_litellm_response):
     captured: dict = {}
 
     async def side_effect(**kwargs):
@@ -82,7 +82,7 @@ async def test_perplexity_research_uses_recency_filter_end_to_end(mock_env, mock
 
 
 @pytest.mark.asyncio
-async def test_budget_profile_routes_code_end_to_end(mock_env, mock_litellm_response):
+async def test_budget_profile_routes_code_end_to_end(temp_db, mock_env, mock_litellm_response):
     captured: dict = {}
 
     async def side_effect(**kwargs):

@@ -17,7 +17,12 @@ from llm_router import cost
 def savings_db(tmp_path, monkeypatch):
     db_path = tmp_path / "test.db"
     log_path = tmp_path / "savings_log.jsonl"
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
     monkeypatch.setenv("LLM_ROUTER_DB_PATH", str(db_path))
+    # Reset config singleton so it reads the new env vars
+    import llm_router.config as config_module
+    config_module._config = None
     monkeypatch.setattr(cost, "SAVINGS_LOG_PATH", log_path)
     return db_path, log_path
 

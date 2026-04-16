@@ -7,15 +7,6 @@ import pytest
 from llm_router import cost
 
 
-@pytest.fixture
-def temp_db(tmp_path, monkeypatch):
-    """Use a temporary database for testing."""
-    db_path = tmp_path / "test_usage.db"
-    monkeypatch.setenv("GEMINI_API_KEY", "test")
-    monkeypatch.setenv("LLM_ROUTER_DB_PATH", str(db_path))
-    return db_path
-
-
 async def _log_decision(prompt: str = "test prompt", **overrides) -> None:
     """Helper to log a routing decision with sensible defaults."""
     defaults = dict(

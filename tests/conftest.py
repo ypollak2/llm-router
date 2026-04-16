@@ -73,6 +73,21 @@ def mock_env(monkeypatch):
 
 
 @pytest.fixture
+def minimal_env(monkeypatch):
+    """Minimal environment with only one API key, for testing 'Recommended to Add' messages."""
+    # Clear all API keys except one
+    for key in ["OPENAI_API_KEY", "GEMINI_API_KEY", "ANTHROPIC_API_KEY", "PERPLEXITY_API_KEY",
+                "DEEPSEEK_API_KEY", "GROQ_API_KEY", "MISTRAL_API_KEY", "TOGETHER_API_KEY",
+                "XAI_API_KEY", "COHERE_API_KEY", "OLLAMA_BASE_URL"]:
+        monkeypatch.delenv(key, raising=False)
+    
+    # Set only one key to trigger "Recommended to Add"
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("LLM_ROUTER_PROFILE", "balanced")
+    yield
+
+
+@pytest.fixture
 def mock_acompletion():
     """Mock async completion for provider tests.
     
@@ -112,17 +127,18 @@ def mock_litellm_response():
     - response.choices[0].message.content
     - response.usage.prompt_tokens / completion_tokens
     """
-    def _make_response():
+    def _make_response(content="Mock response", input_tokens=10, output_tokens=5, **kwargs):
         # Create mock litellm response structure
+        # Accepts content, input_tokens, output_tokens as well as arbitrary kwargs
         mock_msg = MagicMock()
-        mock_msg.content = "Mock response"
+        mock_msg.content = content
         
         mock_choice = MagicMock()
         mock_choice.message = mock_msg
         
         mock_usage = MagicMock()
-        mock_usage.prompt_tokens = 10
-        mock_usage.completion_tokens = 5
+        mock_usage.prompt_tokens = input_tokens
+        mock_usage.completion_tokens = output_tokens
         
         mock_response = MagicMock()
         mock_response.choices = [mock_choice]

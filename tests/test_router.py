@@ -1,6 +1,6 @@
 """Tests for core routing logic."""
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -9,7 +9,7 @@ from llm_router.types import BudgetState, LLMResponse, RoutingProfile, TaskType
 
 
 @pytest.mark.asyncio
-async def test_routes_to_first_available_model(mock_env, mock_acompletion, monkeypatch):
+async def test_routes_to_first_available_model(temp_db, mock_env, mock_acompletion, monkeypatch):
     # Disable Ollama to test pure API chain
     monkeypatch.delenv("OLLAMA_BASE_URL", raising=False)
     resp = await route_and_call(TaskType.QUERY, "Hello", profile=RoutingProfile.BUDGET)
@@ -22,7 +22,7 @@ async def test_routes_to_first_available_model(mock_env, mock_acompletion, monke
 
 
 @pytest.mark.asyncio
-async def test_logs_structured_routing_decision(mock_env, mock_acompletion):
+async def test_logs_structured_routing_decision(temp_db, mock_env, mock_acompletion):
     route_log = MagicMock()
     fake_uuid = MagicMock(hex="deadbeefcafebabe")
 
@@ -49,7 +49,7 @@ async def test_logs_structured_routing_decision(mock_env, mock_acompletion):
 
 
 @pytest.mark.asyncio
-async def test_model_override_bypasses_routing(mock_env, mock_acompletion):
+async def test_model_override_bypasses_routing(temp_db, mock_env, mock_acompletion):
     await route_and_call(
         TaskType.QUERY, "Hello",
         model_override="openai/gpt-4o",
@@ -59,7 +59,7 @@ async def test_model_override_bypasses_routing(mock_env, mock_acompletion):
 
 
 @pytest.mark.asyncio
-async def test_system_prompt_included(mock_env, mock_acompletion):
+async def test_system_prompt_included(temp_db, mock_env, mock_acompletion):
     await route_and_call(
         TaskType.GENERATE, "Write a poem",
         system_prompt="You are a poet",
@@ -71,7 +71,9 @@ async def test_system_prompt_included(mock_env, mock_acompletion):
 
 
 @pytest.mark.asyncio
-async def test_falls_back_on_failure(mock_env, mock_litellm_response):
+async def test_falls_back_on_failure(temp_db, mock_env, mock_litellm_response):
+    from llm_router.types import LLMResponse
+
     call_count = 0
 
     async def side_effect(**kwargs):
@@ -79,27 +81,35 @@ async def test_falls_back_on_failure(mock_env, mock_litellm_response):
         call_count += 1
         if call_count == 1:
             raise Exception("Provider down")
-        return mock_litellm_response()
+        # Return LLMResponse for providers.call_llm (not litellm response)
+        return LLMResponse(
+            content="Mock response",
+            model=kwargs.get("model", "test/mock"),
+            input_tokens=10,
+            output_tokens=5,
+            cost_usd=0.001,
+            latency_ms=100.0,
+            provider="test",
+        )
 
-    with patch("litellm.acompletion", side_effect=side_effect):
-        with patch("litellm.completion_cost", return_value=0.001):
-            resp = await route_and_call(
-                TaskType.QUERY, "Hello",
-                profile=RoutingProfile.BUDGET,
-            )
+    with patch("llm_router.providers.call_llm", new_callable=lambda: AsyncMock(side_effect=side_effect)):
+        resp = await route_and_call(
+            TaskType.QUERY, "Hello",
+            profile=RoutingProfile.BUDGET,
+        )
     assert resp.content == "Mock response"
     assert call_count == 2  # first failed, second succeeded
 
 
 @pytest.mark.asyncio
-async def test_raises_when_all_fail(mock_env):
+async def test_raises_when_all_fail(temp_db, mock_env):
     with patch("litellm.acompletion", side_effect=Exception("All down")):
         with pytest.raises(RuntimeError, match="All models failed"):
             await route_and_call(TaskType.QUERY, "Hello")
 
 
 @pytest.mark.asyncio
-async def test_no_providers_configured(monkeypatch):
+async def test_no_providers_configured(temp_db, monkeypatch):
     # Explicitly clear all API keys — use setenv("", "") pattern to also
     # override values that may be present in the shell environment.
     for key in ["GEMINI_API_KEY", "OPENAI_API_KEY", "PERPLEXITY_API_KEY",
@@ -108,13 +118,16 @@ async def test_no_providers_configured(monkeypatch):
                 "COHERE_API_KEY", "OLLAMA_BASE_URL"]:
         monkeypatch.setenv(key, "")
     monkeypatch.chdir("/tmp")  # no .env file here
+    # Reset config singleton so it reloads with empty env vars
+    import llm_router.config as config_module
+    config_module._config = None
     monkeypatch.setattr("llm_router.router.is_codex_available", lambda: False)
     with pytest.raises(ValueError, match="No available models"):
         await route_and_call(TaskType.QUERY, "Hello")
 
 
 @pytest.mark.asyncio
-async def test_research_no_search_params_for_non_perplexity(mock_env, mock_acompletion):
+async def test_research_no_search_params_for_non_perplexity(temp_db, mock_env, mock_acompletion):
     # Non-Perplexity models explicitly overridden must NOT receive search_recency_filter.
     await route_and_call(TaskType.RESEARCH, "What happened today?", model_override="openai/gpt-4o")
     call_kwargs = mock_acompletion.call_args.kwargs
@@ -123,17 +136,21 @@ async def test_research_no_search_params_for_non_perplexity(mock_env, mock_acomp
 
 
 @pytest.mark.asyncio
-async def test_research_adds_search_params_for_perplexity(mock_env, mock_acompletion, monkeypatch):
+async def test_research_adds_search_params_for_perplexity(temp_db, mock_env, mock_acompletion, monkeypatch):
     # Perplexity sonar models should receive the recency filter.
     monkeypatch.setenv("LLM_ROUTER_PROFILE", "balanced")
     await route_and_call(TaskType.RESEARCH, "What happened today?", model_override="perplexity/sonar")
     call_kwargs = mock_acompletion.call_args.kwargs
-    assert call_kwargs.get("extra_body", {}).get("search_recency_filter") == "week"
+    # extra_body is passed via extra_params dict
+    extra_params = call_kwargs.get("extra_params", {})
+    assert extra_params.get("extra_body", {}).get("search_recency_filter") == "week"
 
 
 @pytest.mark.asyncio
-async def test_content_filter_error_is_silent_fallback(mock_env, mock_litellm_response):
+async def test_content_filter_error_is_silent_fallback(temp_db, mock_env, mock_litellm_response):
     """Content filter errors should silently skip to next model without warning."""
+    from llm_router.types import LLMResponse
+
     call_count = 0
 
     async def side_effect(**kwargs):
@@ -141,20 +158,28 @@ async def test_content_filter_error_is_silent_fallback(mock_env, mock_litellm_re
         call_count += 1
         if call_count == 1:
             raise Exception("litellm.BadRequestError: Output blocked by content filtering policy")
-        return mock_litellm_response()
+        # Return LLMResponse for providers.call_llm (not litellm response)
+        return LLMResponse(
+            content="Mock response",
+            model=kwargs.get("model", "test/mock"),
+            input_tokens=10,
+            output_tokens=5,
+            cost_usd=0.001,
+            latency_ms=100.0,
+            provider="test",
+        )
 
-    with patch("litellm.acompletion", side_effect=side_effect):
-        with patch("litellm.completion_cost", return_value=0.001):
-            resp = await route_and_call(
-                TaskType.QUERY, "Hello",
-                profile=RoutingProfile.BUDGET,
-            )
+    with patch("llm_router.providers.call_llm", new_callable=lambda: AsyncMock(side_effect=side_effect)):
+        resp = await route_and_call(
+            TaskType.QUERY, "Hello",
+            profile=RoutingProfile.BUDGET,
+        )
     assert resp.content == "Mock response"
     assert call_count == 2  # first content-filtered, second succeeded
 
 
 @pytest.mark.asyncio
-async def test_skips_model_when_budget_exhausts_mid_chain(mock_env, mock_litellm_response, monkeypatch):
+async def test_skips_model_when_budget_exhausts_mid_chain(temp_db, mock_env, mock_litellm_response, monkeypatch):
     # Enable Ollama for this test so it gets injected in the chain
     monkeypatch.setenv("OLLAMA_BASE_URL", "http://localhost:11434")
     monkeypatch.setenv("OLLAMA_BUDGET_MODELS", "llama3.2,qwen2.5-coder:7b")
@@ -183,15 +208,20 @@ async def test_skips_model_when_budget_exhausts_mid_chain(mock_env, mock_litellm
         }.get(provider, 0.0)
         return BudgetState(provider=provider, pressure=pressure)
 
+    # Mock the health tracker so providers aren't skipped as unhealthy
+    mock_tracker = MagicMock()
+    mock_tracker.is_healthy.return_value = True
+
     with patch("litellm.acompletion", side_effect=completion_side_effect):
         with patch("litellm.completion_cost", return_value=0.001):
             with patch("llm_router.router.get_model_chain", return_value=chain):
                 with patch("llm_router.router.get_budget_state", side_effect=budget_side_effect):
-                    with patch("llm_router.chain_builder.build_chain", return_value=[]):
-                        resp = await route_and_call(
-                            TaskType.QUERY, "Hello",
-                            profile=RoutingProfile.BALANCED,
-                        )
+                    with patch("llm_router.router.get_tracker", return_value=mock_tracker):
+                        with patch("llm_router.chain_builder.build_chain", return_value=[]):
+                            resp = await route_and_call(
+                                TaskType.QUERY, "Hello",
+                                profile=RoutingProfile.BALANCED,
+                            )
 
     # Ollama is injected first (free-first), and succeeds with 0.0 pressure
     assert resp.model.startswith("ollama/")
@@ -202,7 +232,7 @@ async def test_skips_model_when_budget_exhausts_mid_chain(mock_env, mock_litellm
 
 
 @pytest.mark.asyncio
-async def test_subscription_mode_blocks_anthropic_override(mock_env, mock_acompletion, monkeypatch):
+async def test_subscription_mode_blocks_anthropic_override(temp_db, mock_env, mock_acompletion, monkeypatch):
     """In subscription mode, explicit anthropic/ model_override should be redirected."""
     monkeypatch.setenv("LLM_ROUTER_CLAUDE_SUBSCRIPTION", "true")
     import llm_router.router as _router
@@ -220,7 +250,7 @@ async def test_subscription_mode_blocks_anthropic_override(mock_env, mock_acompl
 
 @pytest.mark.asyncio
 async def test_claw_code_mode_injects_ollama_for_balanced_profile(
-    mock_env, mock_acompletion, monkeypatch
+    temp_db, mock_env, mock_acompletion, monkeypatch
 ):
     """In claw-code mode, Ollama should be injected for BALANCED profile (not just BUDGET)."""
     monkeypatch.setenv("LLM_ROUTER_CLAW_CODE", "true")
@@ -240,7 +270,7 @@ async def test_claw_code_mode_injects_ollama_for_balanced_profile(
 
 @pytest.mark.asyncio
 async def test_claw_code_mode_injects_ollama_for_premium_profile(
-    mock_env, mock_acompletion, monkeypatch
+    temp_db, mock_env, mock_acompletion, monkeypatch
 ):
     """In claw-code mode, Ollama should also be injected for PREMIUM profile."""
     monkeypatch.setenv("LLM_ROUTER_CLAW_CODE", "true")
@@ -260,7 +290,7 @@ async def test_claw_code_mode_injects_ollama_for_premium_profile(
 
 @pytest.mark.asyncio
 async def test_ollama_always_injected_for_balanced(
-    mock_env, mock_acompletion, monkeypatch
+    temp_db, mock_env, mock_acompletion, monkeypatch
 ):
     """Ollama should always inject when configured, regardless of profile or pressure."""
     monkeypatch.setenv("LLM_ROUTER_CLAW_CODE", "false")

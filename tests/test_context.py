@@ -165,15 +165,23 @@ class TestPersistentSummaries:
 
 
 class TestBuildContextMessages:
+    @pytest.fixture
+    def reset_session_buffer(self):
+        """Reset the global session buffer before each test."""
+        import llm_router.context as context_module
+        context_module._session_buffer = None
+        yield
+        context_module._session_buffer = None
+
     @pytest.mark.asyncio
-    async def test_no_context_returns_empty(self, tmp_path):
+    async def test_no_context_returns_empty(self, tmp_path, reset_session_buffer):
         db_path = tmp_path / "empty.db"
         with patch("llm_router.context._get_db_path", return_value=db_path):
             msgs = await build_context_messages()
             assert msgs == []
 
     @pytest.mark.asyncio
-    async def test_with_session_buffer_only(self, tmp_path):
+    async def test_with_session_buffer_only(self, tmp_path, reset_session_buffer):
         db_path = tmp_path / "empty.db"
         with patch("llm_router.context._get_db_path", return_value=db_path):
             buf = get_session_buffer()
@@ -241,8 +249,16 @@ class TestAutoSummarize:
         with patch("llm_router.context._get_db_path", return_value=path):
             yield path
 
+    @pytest.fixture
+    def reset_session_buffer(self):
+        """Reset the global session buffer before each test."""
+        import llm_router.context as context_module
+        context_module._session_buffer = None
+        yield
+        context_module._session_buffer = None
+
     @pytest.mark.asyncio
-    async def test_skips_short_sessions(self, db_path):
+    async def test_skips_short_sessions(self, db_path, reset_session_buffer):
         with patch("llm_router.context._get_db_path", return_value=db_path):
             buf = get_session_buffer()
             buf.record("user", "hello")
@@ -250,7 +266,7 @@ class TestAutoSummarize:
             assert result is None
 
     @pytest.mark.asyncio
-    async def test_summarizes_via_llm(self, db_path):
+    async def test_summarizes_via_llm(self, db_path, reset_session_buffer):
         mock_response = LLMResponse(
             content="User asked about FastAPI and received an explanation of the framework.",
             model="gemini/gemini-2.5-flash",
@@ -296,7 +312,7 @@ class TestAutoSummarize:
             assert "Build a REST API" in summary
 
     @pytest.mark.asyncio
-    async def test_collects_task_types(self, db_path):
+    async def test_collects_task_types(self, db_path, reset_session_buffer):
         mock_response = LLMResponse(
             content="Mixed session with research and code tasks.",
             model="gemini/gemini-2.5-flash",

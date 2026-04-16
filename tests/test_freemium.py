@@ -9,7 +9,7 @@ from llm_router.types import BudgetExceededError, TaskType
 
 class TestBudgetEnforcement:
     @pytest.mark.asyncio
-    async def test_blocks_when_budget_exceeded(self, mock_env, mock_acompletion, monkeypatch):
+    async def test_blocks_when_budget_exceeded(self, temp_db, mock_env, mock_acompletion, monkeypatch):
         monkeypatch.setenv("LLM_ROUTER_MONTHLY_BUDGET", "5.00")
 
         with patch("llm_router.cost.get_monthly_spend", return_value=5.50):
@@ -18,7 +18,7 @@ class TestBudgetEnforcement:
                 await route_and_call(TaskType.QUERY, "Hello")
 
     @pytest.mark.asyncio
-    async def test_allows_when_under_budget(self, mock_env, mock_acompletion, monkeypatch):
+    async def test_allows_when_under_budget(self, temp_db, mock_env, mock_acompletion, monkeypatch):
         monkeypatch.setenv("LLM_ROUTER_MONTHLY_BUDGET", "10.00")
 
         with patch("llm_router.cost.get_monthly_spend", return_value=3.50):
@@ -27,7 +27,7 @@ class TestBudgetEnforcement:
             assert resp.content == "Mock response"
 
     @pytest.mark.asyncio
-    async def test_no_budget_means_unlimited(self, mock_env, mock_acompletion, monkeypatch):
+    async def test_no_budget_means_unlimited(self, temp_db, mock_env, mock_acompletion, monkeypatch):
         monkeypatch.setenv("LLM_ROUTER_MONTHLY_BUDGET", "0")
 
         from llm_router.router import route_and_call
@@ -35,7 +35,7 @@ class TestBudgetEnforcement:
         assert resp.content == "Mock response"
 
     @pytest.mark.asyncio
-    async def test_budget_exactly_at_limit(self, mock_env, mock_acompletion, monkeypatch):
+    async def test_budget_exactly_at_limit(self, temp_db, mock_env, mock_acompletion, monkeypatch):
         monkeypatch.setenv("LLM_ROUTER_MONTHLY_BUDGET", "5.00")
 
         with patch("llm_router.cost.get_monthly_spend", return_value=5.00):
@@ -53,7 +53,7 @@ class TestTierGating:
         assert "Pro tier" in result
 
     @pytest.mark.asyncio
-    async def test_pro_tier_allows_auto_orchestrate(self, mock_env, monkeypatch):
+    async def test_pro_tier_allows_auto_orchestrate(self, temp_db, mock_env, monkeypatch):
         monkeypatch.setenv("LLM_ROUTER_TIER", "pro")
 
         call_count = 0
@@ -82,7 +82,7 @@ class TestTierGating:
             assert "Pro tier" not in result
 
     @pytest.mark.asyncio
-    async def test_free_tier_blocks_long_templates(self, mock_env, monkeypatch):
+    async def test_free_tier_blocks_long_templates(self, mock_env, mock_acompletion, monkeypatch):
         monkeypatch.setenv("LLM_ROUTER_TIER", "free")
         from llm_router.server import llm_orchestrate
         # research_report has 3 steps — exceeds free tier limit of 2
@@ -98,7 +98,7 @@ class TestTierGating:
         assert _check_tier("nonexistent_feature") is None
 
     @pytest.mark.asyncio
-    async def test_pro_tier_check_function(self, mock_env, monkeypatch):
+    async def test_pro_tier_check_function(self, temp_db, mock_env, monkeypatch):
         monkeypatch.setenv("LLM_ROUTER_TIER", "pro")
         from llm_router.server import _check_tier
         assert _check_tier("multi_step") is None

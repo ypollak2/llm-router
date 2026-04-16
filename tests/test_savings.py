@@ -73,15 +73,13 @@ class TestLogClaudeUsageReturns:
 
 class TestSavingsSummary:
     @pytest.mark.asyncio
-    async def test_empty_summary(self, tmp_path, monkeypatch):
-        monkeypatch.setenv("LLM_ROUTER_DB_PATH", str(tmp_path / "test.db"))
+    async def test_empty_summary(self, temp_db):
         summary = await get_savings_summary("today")
         assert summary["total_calls"] == 0
         assert summary["cost_saved_usd"] == 0.0
 
     @pytest.mark.asyncio
-    async def test_cumulative_savings(self, tmp_path, monkeypatch):
-        monkeypatch.setenv("LLM_ROUTER_DB_PATH", str(tmp_path / "test.db"))
+    async def test_cumulative_savings(self, temp_db):
 
         await log_claude_usage("haiku", 5000, "simple")
         await log_claude_usage("sonnet", 10000, "moderate")
@@ -97,8 +95,7 @@ class TestSavingsSummary:
         assert "opus" in summary["by_model"]
 
     @pytest.mark.asyncio
-    async def test_haiku_contributes_most_savings(self, tmp_path, monkeypatch):
-        monkeypatch.setenv("LLM_ROUTER_DB_PATH", str(tmp_path / "test.db"))
+    async def test_haiku_contributes_most_savings(self, temp_db):
 
         await log_claude_usage("haiku", 10000, "simple")
         await log_claude_usage("sonnet", 10000, "moderate")
@@ -116,8 +113,12 @@ class TestSavingsSummary:
 def temp_savings_db(tmp_path, monkeypatch):
     """Temp DB + temp JSONL path for savings persistence tests."""
     db_path = tmp_path / "test_savings.db"
-    monkeypatch.setenv("GEMINI_API_KEY", "test")
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
     monkeypatch.setenv("LLM_ROUTER_DB_PATH", str(db_path))
+    # Reset config singleton so it reads the new env vars
+    import llm_router.config as config_module
+    config_module._config = None
     log_path = tmp_path / "savings_log.jsonl"
     monkeypatch.setattr(cost, "SAVINGS_LOG_PATH", log_path)
     return db_path, log_path

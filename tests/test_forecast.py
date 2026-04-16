@@ -6,18 +6,6 @@ from datetime import datetime, timedelta
 from llm_router.forecast import BurnForecast, get_burn_forecast
 
 
-@pytest.fixture
-def temp_db(tmp_path, monkeypatch):
-    """Use a temporary database for testing."""
-    db_path = tmp_path / "test_usage.db"
-    monkeypatch.setenv("GEMINI_API_KEY", "test")
-    monkeypatch.setenv("LLM_ROUTER_DB_PATH", str(db_path))
-    # Reset config singleton so it reads the new env vars
-    import llm_router.config as config_module
-    config_module._config = None
-    return db_path
-
-
 async def _insert_usage_data(provider: str, days: int, cost_per_day: float = 0.01):
     """Helper to insert usage data with specific timestamps."""
     from llm_router import cost

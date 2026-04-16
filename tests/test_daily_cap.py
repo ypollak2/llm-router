@@ -14,6 +14,9 @@ def _patch_routing(mock_env, monkeypatch, tmp_path):
     """Minimal routing patches: tmp DB, no Codex, no compaction, no caches."""
     monkeypatch.setenv("LLM_ROUTER_DB_PATH", str(tmp_path / "test.db"))
     monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    # Reset config singleton so it reads the new env vars
+    import llm_router.config as config_module
+    config_module._config = None
     monkeypatch.setattr("llm_router.router.is_codex_available", lambda: False)
 
 

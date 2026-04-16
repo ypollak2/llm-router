@@ -69,6 +69,38 @@ LLM_ROUTER_CLAUDE_SUBSCRIPTION=true
 
 ---
 
+## New in v5.9.1
+
+- **Linting Cleanup**: Removed unused imports and dead code from v5.9.0. All ruff checks now pass.
+
+---
+
+## New in v5.9.0
+
+- **Caveman Mode** — Token-efficient output compression (~75% reduction) with three intensity levels:
+  - `lite`: Professional, minimal filler words
+  - `full`: Standard compression (default)
+  - `ultra`: Telegraphic, maximum brevity
+  - Auto-injects system prompt when no user-provided message
+  - Safe for all chat models (Claude, GPT-4, Gemini, Groq, etc.)
+  - Control via `LLM_ROUTER_CAVEMAN_INTENSITY` env var
+- **Model Chain Visibility** — Routing logs now show fallback chain (e.g., "claude → gemini → groq") for transparency
+- **Complexity Downgrade Tracking** — New `requested_complexity` and `complexity_downgraded` columns in usage database for pressure-aware analytics
+- **Enforcement Guidance** — Task-specific remediation advice in blocklist messages with cost justification
+
+---
+
+## New in v5.8.0
+
+- **Pressure-Aware Routing Hooks**: Hooks now monitor real-time subscription/API budget pressure and automatically downgrade task complexity when models near exhaustion. Prevents stuck sessions when Sonnet hits 100% quota.
+- **Hook Health Monitoring**: New `llm_health` shows per-hook success/error counts, health status (healthy/degraded/failing), and recent error log. Enables diagnosing hook failures without restarting.
+- **Budget Burn-Rate Forecasting**: `forecast.py` analyzes 7-day spend history with linear regression + exponential smoothing, projects monthly spend, and shows days-to-limit. Integrated into `llm_usage` dashboard and auto-route warning when forecast exceeds 90% of monthly budget.
+- **LLM-as-Judge Quality Evaluation**: `judge.py` evaluates response quality (relevance/completeness/correctness) on 10% sample rate (configurable). Models with avg score < 0.7 over past 7 days are automatically demoted in the routing chain. Fire-and-forget background task — zero latency impact.
+- **Per-Task Daily Spend Caps**: Enforce per-task-type daily limits via `.llm-router.yml`, independent of per-provider monthly caps. Prevents runaway costs on expensive task types (e.g., max $10/day code generation) while allowing other task types to continue.
+- **Quality-Based Model Reordering**: Router automatically reorders model chain based on historical quality scores. Low-quality models move to the end until they improve, enabling continuous learning without manual intervention.
+
+---
+
 ## New in v5.5.0
 
 - **Security-Friendly YAML Configuration**: Enterprises with .env restrictions can now store API keys in `~/.llm-router/config.yaml` (permissions: 600). Priority order: .env (project) → config.yaml (user home) → env vars → defaults. Run `llm-router init-claude-memory` to auto-discover and generate the template.
@@ -174,14 +206,14 @@ Under the hood, every prompt goes through a `UserPromptSubmit` hook before your 
 ### Monitoring & Admin
 | Tool | What it does |
 |------|-------------|
-| `llm_usage` | Unified dashboard — Claude sub, Codex, APIs, savings |
+| `llm_usage` | Unified dashboard — Claude sub, Codex, APIs, savings, **burn-rate forecast** |
 | `llm_savings` | Cross-session savings breakdown by period, host, and task type |
 | `llm_check_usage` | Live Claude subscription usage (session %, weekly %) |
-| `llm_health` | Provider availability + circuit breaker status |
+| `llm_health` | Provider availability + hook health status (success/error counts, recent errors) |
 | `llm_providers` | List all configured providers and models |
 | `llm_set_profile` | Switch profile: `budget` / `balanced` / `premium` |
 | `llm_setup` | Interactive provider wizard — add keys, validate, install hooks |
-| `llm_quality_report` | Routing accuracy, savings metrics, classifier stats |
+| `llm_quality_report` | Routing accuracy, judge quality scores, classifier stats |
 | `llm_rate` | Rate last response 👍/👎 — logged for quality tracking |
 | `llm_codex` | Route task to local Codex desktop agent (free) |
 | `llm_save_session` | Persist session summary for cross-session context |
@@ -464,6 +496,9 @@ LLM_ROUTER_BUDGET_GEMINI=5.0
 LLM_ROUTER_BUDGET_GROQ=3.0
 LLM_ROUTER_BUDGET_DEEPSEEK=3.0
 
+# Quality evaluation (LLM-as-Judge)
+LLM_ROUTER_JUDGE_SAMPLE_RATE=0.1    # 10% of calls, 0.0 = disabled
+
 # Enterprise integrations
 HELICONE_API_KEY=sk-helicone-...         # enables Helicone routing properties
 LLM_ROUTER_HELICONE_PULL=false           # pull spend from Helicone API
@@ -491,6 +526,7 @@ Commit a routing policy alongside your code — no env vars required:
 ```yaml
 profile: balanced
 enforce: suggest          # shadow | suggest | enforce
+
 block_providers:
   - openai                # never use OpenAI in this repo
 
@@ -500,9 +536,13 @@ routing:
   research:
     provider: perplexity           # always use Perplexity for research
 
+task_caps:
+  code: 10.00            # Max $10/day for code generation
+  research: 5.00         # Max $5/day for research tasks
+  analyze: 20.00         # Max $20/day for analysis
+
 daily_caps:
-  _total: 2.00            # global $2/day cap
-  code: 0.50              # code tasks capped at $0.50/day
+  _total: 2.00           # global $2/day cap
 ```
 
 User-level overrides live in `~/.llm-router/routing.yaml` (same schema). Repo config wins.
@@ -563,6 +603,19 @@ When a task type's daily spend exceeds its cap, the router raises `BudgetExceede
 
 This prevents runaway costs for expensive task types while allowing other task types to continue working.
 
+### Burn-Rate Forecasting
+
+The router analyzes 7-day spend history to forecast monthly spend and project days until budget exhaustion:
+
+```
+📈 Burn-Rate Forecast
+Current pace: $12.50/month (150 calls this week)
+Days to limit: 8 days remaining until $20.00 budget exhausted
+Confidence: 85% (7 days of data)
+```
+
+Forecast appears in `llm_usage("month")` dashboard and auto-route warns when projected spend exceeds 90% of monthly budget.
+
 ### Quality-Based Model Reordering
 
 The router tracks quality feedback from evaluations and automatically deprioritizes models with consistently low quality:
@@ -586,15 +639,35 @@ Quality tracking is opt-in and fire-and-forget — evaluations run asynchronousl
 
 ---
 
+## Hook Health Monitoring
+
+Monitor the health of auto-route and enforce-route hooks:
+
+```bash
+llm_health
+→ auto-route: healthy (1,247 successes, 0 errors)
+→ enforce-route: healthy (1,247 successes, 3 errors in last 2 days)
+```
+
+Hook errors are logged to `~/.llm-router/hook_errors.log` with context (session_id, task_type). View recent errors:
+
+```bash
+llm_health  # shows per-hook success/error counts + health status (healthy/degraded/failing)
+```
+
+This enables diagnosing hook failures without restarting Claude Code.
+
+---
+
 ## Dashboard
 
 ```bash
 llm-router dashboard   # opens localhost:7337
 ```
 
-Live view of routing decisions, cost trends, model distribution, and subscription pressure. Auto-refreshes every 30s.
+Live view of routing decisions, cost trends, model distribution, subscription pressure, and burn-rate forecast. Auto-refreshes every 30s.
 
-Tabs: **Overview** · **Performance** · **Config** · **Logs** · **💰 Budget**
+Tabs: **Overview** · **Performance** · **Config** · **Logs** · **💰 Budget** · **📈 Forecast**
 
 The dashboard now starts with a tokenized local URL and protects API calls with that token, so local metrics stay private by default.
 
@@ -745,13 +818,19 @@ llm-router share   # copies savings card to clipboard + opens tweet
 | **v5.0** | **Adaptive Universal Router** — budget oracle, model discovery, live benchmarks, scorer, dynamic chain builder |
 | **v5.1** | **Budget Management UX + Enterprise Integrations** — persistent caps, dashboard budget tab, Prometheus metrics, Helicone + LiteLLM spend |
 | **v5.2** | **Audit Remediation Release** — atomic hooks, stricter CI, structlog, OpenTelemetry spans, classifier evals, release automation |
+| **v5.3** | **Sidecar Service + Zero-Deadlock Hooks** — independent FastAPI service, context-aware routing, observation-only enforcement |
+| **v5.4** | **Config Security + Claude Code Memory** — YAML config fallback, auto-discovery, memory persistence |
+| **v5.5** | **Security-Friendly YAML Configuration** — enterprise .env bypass, auto-discovery init, Claude Code memory integration |
+| **v5.6** | **Hook Enforcement Refactoring + Stuck Pattern Prevention** — 6-point hook health system, prevent routing deadlocks, atomic budget checks |
+| **v5.7** | **Advanced Budget Control + Quality Scoring** — per-task daily caps, quality-based reordering, judge sample rate |
+| **v5.8** | **Pressure-Aware Hooks + LLM-as-Judge** — hooks monitor real-time pressure, auto-downgrade complexity, burn-rate forecasting, quality evaluation |
 
 ### What's Next
 
 | Version | Headline | Status |
 |---------|----------|--------|
-| **v5.3** | **Learned Routing** — self-training classifier from `llm_rate` feedback, prompt-set benchmarks, personal routing patterns | 📅 Planned |
-| **v5.4** | **Team Controls** — policy approvals, richer dashboard analytics, provider-level SLO alerts | 📅 Planned |
+| **v5.9** | **Learned Routing** — self-training classifier from `llm_rate` feedback, prompt-set benchmarks, personal routing patterns | 📅 Planned |
+| **v6.0** | **Team Controls** — policy approvals, richer dashboard analytics, provider-level SLO alerts | 📅 Planned |
 
 ---
 
@@ -762,7 +841,7 @@ uv sync --extra dev
 uv run pytest tests/ -q --ignore=tests/test_agno_integration.py
 uv run ruff check src/ tests/
 uv run python scripts/eval_classifier.py --limit 20
-uv run python scripts/release.py 5.2.0 --dry-run
+uv run python scripts/release.py 5.8.0 --dry-run
 ```
 
 See [CLAUDE.md](CLAUDE.md) for architecture and module layout.
