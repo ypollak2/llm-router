@@ -100,11 +100,13 @@ class TestOllamaDiscoveryInjection:
     def test_config_all_ollama_models_falls_back_to_env_var(self, monkeypatch):
         """When cache is empty, fall back to OLLAMA_BUDGET_MODELS env var."""
         from llm_router.config import get_config
+        import llm_router.config as config_module
 
         # No cache available; env var values don't include "ollama/" prefix
         monkeypatch.setenv("OLLAMA_BUDGET_MODELS", "custom:latest,other:v1")
+        config_module._config = None
         cfg = get_config()
-        
+
         with patch("llm_router.discover.get_cached_ollama_models", return_value=[]):
             models = cfg.all_ollama_models()
 
