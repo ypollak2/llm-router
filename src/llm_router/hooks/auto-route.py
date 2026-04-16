@@ -1371,11 +1371,6 @@ def main() -> None:
         except OSError:
             pass
 
-    if previous_unrouted is not None:
-        indicator = (
-            f"⚠ prior unrouted turn ({previous_unrouted.get('expected_tool', 'llm_route')}) | "
-            f"{indicator}"
-        )
     output = {
         "hookSpecificOutput": {
             "hookEventName": "UserPromptSubmit",
