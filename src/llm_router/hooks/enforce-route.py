@@ -228,6 +228,47 @@ def _clear_violation_count(session_id: str) -> None:
         pass
 
 
+def _read_pressure() -> dict[str, float]:
+    """Read subscription pressure from ~/.llm-router/usage.json.
+
+    Returns: Dict with 'sonnet' and 'weekly' keys as fractions 0.0–1.0.
+    """
+    try:
+        data = json.loads((Path.home() / ".llm-router" / "usage.json").read_text())
+
+        def _frac(k: str) -> float:
+            v = float(data.get(k, 0.0))
+            return v / 100.0 if v > 1.0 else v
+
+        return {"sonnet": _frac("sonnet_pct"), "weekly": _frac("weekly_pct")}
+    except Exception:
+        return {"sonnet": 0.0, "weekly": 0.0}
+
+
+def _downgrade_pending_for_pressure(pending: dict) -> dict:
+    """Downgrade pending route complexity if subscription budget is exhausted.
+
+    When Sonnet or weekly pressure ≥95%, reduce task complexity to stay within
+    cheaper model tiers (complex→moderate, moderate→simple).
+
+    Args:
+        pending: Routing directive dict with 'complexity' key
+
+    Returns:
+        Updated pending dict (original if no downgrade needed)
+    """
+    pressure = _read_pressure()
+    if pressure["sonnet"] < 0.95 and pressure["weekly"] < 0.95:
+        return pending
+
+    complexity = pending.get("complexity", "simple")
+    if complexity == "complex":
+        return {**pending, "complexity": "moderate"}
+    if complexity == "moderate":
+        return {**pending, "complexity": "simple"}
+    return pending
+
+
 def _tool_history_path(session_id: str) -> Path:
     """Path to tool call history for loop detection."""
     return _ROUTER_DIR / f"tool_history_{session_id}.json"
@@ -318,6 +359,38 @@ def main() -> None:
     pending = _read_pending(session_id)
     if pending is None:
         sys.exit(0)  # No routing directive was issued
+    pending = _downgrade_pending_for_pressure(pending)
+
+    # ── Session Budget Kill-Switch ────────────────────────────────────────────────
+    # Check if this session has exceeded its LLM spend budget.
+    # If so, hard-block all non-file tools to prevent runaway costs.
+    session_budget_limit = float(os.environ.get("LLM_ROUTER_SESSION_BUDGET", "5.00"))
+    session_spend_path = _ROUTER_DIR / f"session_{session_id}_spend.json"
+    try:
+        spend_data = _read_json_retry(session_spend_path) or {"total_usd": 0.0}
+        session_spend = spend_data.get("total_usd", 0.0)
+
+        if session_budget_limit > 0 and session_spend > session_budget_limit:
+            # Hard block all non-file tools
+            if tool_name not in {"Read", "Edit", "Write", "MultiEdit", "Glob", "Grep", "LS", "Bash"}:
+                block_reason = (
+                    f"[llm-router] SESSION BUDGET EXCEEDED\n\n"
+                    f"  Spent:    ${session_spend:.2f}\n"
+                    f"  Limit:    ${session_budget_limit:.2f}\n"
+                    f"  Status:   🔴 HARD BLOCKED\n\n"
+                    f"  To continue:\n"
+                    f"  1. Contact your admin to reset the session budget\n"
+                    f"  2. Or unset LLM_ROUTER_SESSION_BUDGET to disable the limit"
+                )
+                print(block_reason, file=sys.stderr)
+                sys.exit(1)
+        elif session_budget_limit > 0 and session_spend > (session_budget_limit * 0.8):
+            # Warning at 80% threshold — don't block, just warn
+            pct_used = (session_spend / session_budget_limit) * 100
+            # Inject warning into context via env var for hook consumer
+            os.environ["_SESSION_BUDGET_WARNING"] = f"⚠️  Session budget at {pct_used:.0f}% (${session_spend:.2f}/${session_budget_limit:.2f})"
+    except (OSError, ValueError):
+        pass  # If spend tracking file doesn't exist or is invalid, allow the call
 
     # Session-type check: if Claude has called Edit/Write in this session already,
     # it's confirmed coding work — downgrade enforcement to soft for the whole session.

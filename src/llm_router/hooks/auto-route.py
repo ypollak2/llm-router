@@ -163,6 +163,35 @@ def _get_pressure() -> dict[str, float]:
     return {"session": 0.0, "sonnet": 0.0, "weekly": 0.0}
 
 
+def _apply_pressure_downgrade(complexity: str, pressure: dict[str, float]) -> tuple[str, str]:
+    """Downgrade complexity when subscription budget pressure is high.
+
+    When Sonnet or weekly quota is ≥95% exhausted, reduce task complexity to stay
+    within cheaper model tiers (simple → Haiku, moderate → Sonnet fallback).
+
+    Args:
+        complexity: Original complexity level ('simple', 'moderate', 'complex')
+        pressure: Dict with 'sonnet' and 'weekly' keys (fractions 0.0–1.0)
+
+    Returns:
+        (downgraded_complexity, suffix_message) tuple. suffix_message is empty string
+        if no downgrade occurred.
+    """
+    sonnet_pct = pressure.get("sonnet", 0.0)
+    weekly_pct = pressure.get("weekly", 0.0)
+
+    if sonnet_pct >= 0.95 or weekly_pct >= 0.95:
+        if complexity == "complex":
+            return "moderate", " [⬇ sonnet-exhausted: complex→moderate]"
+        if complexity == "moderate":
+            return "simple", " [⬇ sonnet-exhausted: moderate→simple]"
+    elif sonnet_pct >= 0.85:
+        if complexity == "complex":
+            return "moderate", " [⬇ sonnet-high: complex→moderate]"
+
+    return complexity, ""
+
+
 _USAGE_JSON = str(Path.home() / ".llm-router" / "usage.json")
 # Inline refresh fires when data is stale AND last known session ≥ this threshold.
 # Below this threshold, stale data is safe to use (pressure is low, risk of hitting
@@ -1187,6 +1216,7 @@ def main() -> None:
 
     if _CC_MODE:
         pressure = _get_pressure()
+        complexity, _pressure_suffix = _apply_pressure_downgrade(complexity, pressure)
         if _MODEL_SWITCH:
             session_pct = pressure["session"]
             sonnet_pct  = pressure["sonnet"]
@@ -1216,6 +1246,7 @@ def main() -> None:
                     # simple/moderate + no pressure → route via MCP tool (Ollama-first)
                     directive = (
                         f"⚡ MANDATORY ROUTE: {task_type}/{complexity} → call {tool}(complexity=\"{complexity}\")"
+                        f"{_pressure_suffix}"
                         f" [CC-MODE {pressure_summary} via {method}]"
                         f" | FORBIDDEN: self-answer · Agent subagents · WebSearch · WebFetch"
                         f" | Call the tool NOW as your ONLY action."

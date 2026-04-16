@@ -1,5 +1,39 @@
 # Changelog
 
+## v5.8.0 — Pressure-Aware Routing Hooks (2026-04-16)
+
+### Added
+
+- **Pressure-Aware Complexity Downgrade** — New `_apply_pressure_downgrade()` function in auto-route.py intelligently reduces task complexity when Claude subscription budget pressure exceeds 95%. Complex tasks → Moderate, Moderate tasks → Simple when Sonnet quota is exhausted.
+- **Stale Directive Remediation** — New functions in enforce-route.py (`_read_pressure()`, `_downgrade_pending_for_pressure()`) detect and correct outdated routing directives that were issued before subscription quota was exhausted. Prevents "Sonnet exhausted but still routing to Sonnet" deadlocks.
+
+### Changed
+
+- **Auto-Route Hook (v21 → v22)** — Added `_apply_pressure_downgrade()` call in CC_MODE block right after pressure is read. Complexity is downgraded BEFORE the routing directive is issued, ensuring the MCP tool receives the correct complexity level from the start.
+- **Enforce-Route Hook (v12 → v13)** — Added pressure-aware downgrade check after reading pending state. Fixes stale directives that may have been issued before budget exhaustion was detected.
+
+### Technical Notes
+
+- **Complexity Downgrade Logic**:
+  - `sonnet_pct >= 95%` or `weekly_pct >= 95%`: complex→moderate, moderate→simple
+  - `sonnet_pct >= 85%`: complex→moderate (early warning)
+  - Returns both downgraded complexity and suffix message for hook logging
+- **No impact on API-key users** — Downgrade only applies in CC_MODE (subscription-only users)
+- **Backward compatible** — If usage.json doesn't exist or is invalid, pressure defaults to 0.0 (no downgrade)
+- **Production-ready** — Uses existing ~/.llm-router/usage.json, no new dependencies
+- **All 900+ tests passing**
+
+### Impact
+
+Eliminates the budget exhaustion deadlock scenario where:
+1. Session started at 85% Sonnet quota
+2. auto-route.py issued routing directive: "moderate→llm_analyze (Sonnet tier)"
+3. By the time the tool was called, Sonnet was at 99%+
+4. llm_analyze's internal router tried Sonnet first, failed, had to fall back
+5. User stuck until manually issuing `/model haiku`
+
+With v5.8.0, the directive is issued with downgraded complexity (moderate→simple, routed to Haiku-tier models) BEFORE the routing call, preventing the fallback scenario entirely.
+
 ## v5.6.1 — Test Suite Cleanup & Fixture Repairs (2026-04-16)
 
 ### Fixed
