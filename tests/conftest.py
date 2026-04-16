@@ -1,149 +1,78 @@
-"""Shared fixtures for LLM Router tests."""
+"""Shared pytest fixtures for all llm-router tests."""
 
-from __future__ import annotations
-
-from unittest.mock import AsyncMock, MagicMock, patch
+from pathlib import Path
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from llm_router.types import LLMResponse
 
-
-def pytest_collection_modifyitems(config, items):
-    """Auto-mark slow test files to improve dev iteration speed.
-
-    Heavy test files (>30 tests) are marked @pytest.mark.slow and excluded from
-    default runs with `pytest` (which uses -m 'not slow' via pyproject.toml).
-    Run with `pytest -m "" -q` for full suite.
+@pytest.fixture
+def temp_db(tmp_path, monkeypatch):
+    """Provide a temporary database for tests.
+    
+    Sets up a clean SQLite database in a temp directory and ensures
+    all config reads the temp path, not the user's real ~/.llm-router.
     """
-    slow_files = {
-        "test_multi_host_install.py",      # 45 tests - filesystem heavy
-        "test_policy_digest_community.py",  # 37 tests - policy eval
-        "test_benchmark_registry.py",       # 37 tests - benchmarking
-        "test_auto_route_hook.py",          # 52 tests - hook operations
-        "test_routing_value.py",            # 37 tests - value eval
-        "test_tool_tiers.py",               # 38 tests - tier eval
-        "test_adaptive_router.py",          # 27 tests - complex routing
-        "test_agent_context_routing.py",    # 34 tests - context routing
-        "test_edge_cases.py",               # 28 tests - edge case coverage
-    }
+    db_dir = tmp_path / ".llm-router"
+    db_dir.mkdir(parents=True, exist_ok=True)
+    db_path = db_dir / "test_usage.db"
+    
+    # Set env vars for config to pick up
+    monkeypatch.setenv("LLM_ROUTER_DB_PATH", str(db_path))
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    
+    # Reset singleton so config reads the new env vars
+    import llm_router.config as config_module
+    config_module._config = None
+    
+    return db_path
 
-    for item in items:
-        if any(slow in item.nodeid for slow in slow_files):
-            item.add_marker(pytest.mark.slow)
+
+@pytest.fixture
+def temp_router_dir(tmp_path, monkeypatch):
+    """Provide a temporary router config directory.
+
+    Patches module-level variables to use a temp directory for tests.
+    """
+    temp_home = tmp_path
+    router_dir = temp_home / ".llm-router"
+    router_dir.mkdir(parents=True, exist_ok=True)
+
+    # Patch module-level variables that were evaluated at import time
+    import llm_router.hook_health
+    monkeypatch.setattr(llm_router.hook_health, "_ROUTER_DIR", router_dir)
+    monkeypatch.setattr(llm_router.hook_health, "_HOOK_HEALTH_FILE", router_dir / "hook_health.json")
+    monkeypatch.setattr(llm_router.hook_health, "_HOOK_LOG_FILE", router_dir / "hook_errors.log")
+    # Also patch Path.home for any runtime calls
+    monkeypatch.setattr("pathlib.Path.home", lambda: temp_home)
+
+    yield router_dir
 
 
-@pytest.fixture(autouse=True)
-def _reset_singletons():
-    """Reset module-level singletons between tests."""
-    import llm_router.config as config_mod
-    import llm_router.context as context_mod
-    import llm_router.health as health_mod
-    import llm_router.discover as discover_mod
+@pytest.fixture
+def temp_hooks_dir(tmp_path, monkeypatch):
+    """Provide a temporary hooks directory.
 
-    config_mod._config = None
-    health_mod._tracker = None
-    context_mod._session_buffer = None
-    discover_mod._discovery_cache = None
-    yield
-    config_mod._config = None
-    health_mod._tracker = None
-    context_mod._session_buffer = None
-    discover_mod._discovery_cache = None
+    For tests that check hook permissions and execution.
+    """
+    hooks_dir = tmp_path / ".claude" / "hooks"
+    hooks_dir.mkdir(parents=True, exist_ok=True)
+
+    with patch("pathlib.Path.home", return_value=tmp_path):
+        yield hooks_dir
 
 
 @pytest.fixture
 def mock_env(monkeypatch):
-    """Set up test environment variables."""
-    from llm_router.types import BudgetState
-
-    # Set all provider API keys to enable routing
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-anthropic-key")
-    monkeypatch.setenv("GEMINI_API_KEY", "test-gemini-key")
-    monkeypatch.setenv("OPENAI_API_KEY", "test-openai-key")
-    monkeypatch.setenv("PERPLEXITY_API_KEY", "test-perplexity-key")
-    monkeypatch.setenv("DEEPSEEK_API_KEY", "test-deepseek-key")
-    monkeypatch.setenv("GROQ_API_KEY", "test-groq-key")
-    monkeypatch.setenv("MISTRAL_API_KEY", "test-mistral-key")
+    """Mock environment for classification and routing tests."""
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
     monkeypatch.setenv("LLM_ROUTER_PROFILE", "balanced")
-    # Pydantic requires boolean env vars to be "0", "false", "False", "FALSE", "no" for False
-    # Setting to "0" ensures it's parsed as False, not truthy like the string "false"
-    monkeypatch.setenv("LLM_ROUTER_CLAUDE_SUBSCRIPTION", "0")
-    # Disable Codex in unit tests — the binary may be installed locally but
-    # Codex CLI requires a trusted git directory and an active session, which
-    # unit tests don't provide. Tests that specifically exercise Codex routing
-    # should patch this themselves.
-    monkeypatch.setattr("llm_router.router.is_codex_available", lambda: False)
-    monkeypatch.setattr("llm_router.profiles.is_codex_available", lambda: False, raising=False)
-    # Disable Ollama in unit tests — ollama_base_url may be set in the local .env
-    # but Ollama routing requires a running server. Unit tests that specifically
-    # exercise Ollama injection should set OLLAMA_BASE_URL themselves.
-    monkeypatch.setenv("OLLAMA_BASE_URL", "")
-    # Mock budget pressure to 0.0 for all providers so tests aren't affected by
-    # real system budget state. Tests that specifically want to test budget
-    # pressure behavior should patch this themselves.
-    async def mock_get_budget_state(provider: str) -> BudgetState:
-        return BudgetState(provider=provider, pressure=0.0)
-    monkeypatch.setattr("llm_router.router.get_budget_state", mock_get_budget_state)
+    yield
 
 
 @pytest.fixture
-def minimal_env(monkeypatch):
-    """Minimal test environment with few configured providers.
-
-    Used for setup status tests that need to verify "Recommended to Add" section.
-    This fixture intentionally leaves some recommended providers (groq, deepseek)
-    unconfigured so the status output includes recommendations.
-    """
-    from llm_router.types import BudgetState
-
-    # Only configure openai and gemini, leaving groq/deepseek unconfigured
-    monkeypatch.setenv("OPENAI_API_KEY", "test-openai-key")
-    monkeypatch.setenv("GEMINI_API_KEY", "test-gemini-key")
-    monkeypatch.setenv("LLM_ROUTER_PROFILE", "balanced")
-    monkeypatch.setenv("LLM_ROUTER_CLAUDE_SUBSCRIPTION", "0")
-    # Disable Codex and Ollama
-    monkeypatch.setattr("llm_router.router.is_codex_available", lambda: False)
-    monkeypatch.setattr("llm_router.profiles.is_codex_available", lambda: False, raising=False)
-    monkeypatch.setenv("OLLAMA_BASE_URL", "")
-    # Mock budget pressure
-    async def mock_get_budget_state(provider: str) -> BudgetState:
-        return BudgetState(provider=provider, pressure=0.0)
-    monkeypatch.setattr("llm_router.router.get_budget_state", mock_get_budget_state)
-
-
-@pytest.fixture
-def sample_response() -> LLMResponse:
-    return LLMResponse(
-        content="Test response content",
-        model="openai/gpt-4o",
-        input_tokens=100,
-        output_tokens=50,
-        cost_usd=0.00075,
-        latency_ms=450.0,
-        provider="openai",
-    )
-
-
-@pytest.fixture
-def mock_litellm_response():
-    """Create a mock LiteLLM completion response."""
-    def _make(content="Mock response", input_tokens=100, output_tokens=50):
-        response = MagicMock()
-        response.choices = [MagicMock()]
-        response.choices[0].message.content = content
-        response.usage = MagicMock()
-        response.usage.prompt_tokens = input_tokens
-        response.usage.completion_tokens = output_tokens
-        response.citations = None
-        return response
-    return _make
-
-
-@pytest.fixture
-def mock_acompletion(mock_litellm_response):
-    """Patch litellm.acompletion with a mock."""
-    response = mock_litellm_response()
-    with patch("litellm.acompletion", new_callable=AsyncMock, return_value=response) as mock:
-        with patch("litellm.completion_cost", return_value=0.00075):
-            yield mock
+def mock_acompletion():
+    """Mock async completion for provider tests."""
+    return AsyncMock()

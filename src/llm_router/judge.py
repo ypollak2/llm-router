@@ -173,7 +173,7 @@ async def get_judge_scores_for_model(
                 MIN(judge_score) as min_score,
                 MAX(judge_score) as max_score
             FROM routing_decisions
-            WHERE model = ? AND judge_score IS NOT NULL AND timestamp >= ?
+            WHERE final_model = ? AND judge_score IS NOT NULL AND timestamp >= ?
             """,
             (model, cutoff),
         )
