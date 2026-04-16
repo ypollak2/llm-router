@@ -251,6 +251,10 @@ def _downgrade_pending_for_pressure(pending: dict) -> dict:
     When Sonnet or weekly pressure ≥95%, reduce task complexity to stay within
     cheaper model tiers (complex→moderate, moderate→simple).
 
+    Preserves the original requested_complexity for mismatch tracking:
+    - If requested_complexity is already set (from auto-route), keep it
+    - If not set, save current complexity as requested before downgrading
+
     Args:
         pending: Routing directive dict with 'complexity' key
 
@@ -262,11 +266,16 @@ def _downgrade_pending_for_pressure(pending: dict) -> dict:
         return pending
 
     complexity = pending.get("complexity", "simple")
+    # Preserve the original requested_complexity if not already set
+    result = dict(pending)
+    if "requested_complexity" not in result:
+        result["requested_complexity"] = complexity
+
     if complexity == "complex":
-        return {**pending, "complexity": "moderate"}
+        return {**result, "complexity": "moderate"}
     if complexity == "moderate":
-        return {**pending, "complexity": "simple"}
-    return pending
+        return {**result, "complexity": "simple"}
+    return result
 
 
 def _tool_history_path(session_id: str) -> Path:
@@ -480,25 +489,47 @@ def main() -> None:
 
     # Hard mode: block with clear remediation instructions
     is_file_reader = tool_name in _QA_ONLY_BLOCK_TOOLS
-    if is_file_reader:
+
+    # Context-aware remediation guidance
+    if task_type in ("research", "research/web"):
         action = (
-            f"  1. Call {expected_tool}(prompt=\"...\", context=\"<paste file contents here>\").\n"
-            f"  2. Do NOT use {tool_name} to read files and reason about them yourself —\n"
-            f"     that is equivalent to answering directly. Pass the content to the cheap model."
+            f"  1. Call {expected_tool}(prompt=\"{{'Use the user request as-is'}}\") with the query.\n"
+            f"  2. Return the search results or analysis directly from the cheap model.\n"
+            f"  3. Reasoning about web results yourself defeats the point — let the cheap model do it."
+        )
+    elif task_type in ("query", "analyze"):
+        action = (
+            f"  1. Call {expected_tool}(prompt=\"{{'User request here'}}\") for the analysis.\n"
+            f"  2. Return the result as-is — do not re-analyze.\n"
+            f"  3. Reading and reasoning yourself = full cost; routing = cost saving."
+        )
+    elif task_type in ("generate", "code"):
+        action = (
+            f"  1. Call {expected_tool}(prompt=\"{{'User request here'}}\") to generate the solution.\n"
+            f"  2. Return its output without modification.\n"
+            f"  3. Do NOT generate your own solution — use the routed model."
+        )
+    elif is_file_reader:
+        action = (
+            f"  1. Extract the file content and pass it to {expected_tool}.\n"
+            f"     Example: {expected_tool}(prompt=\"analyze this\", context=file_content)\n"
+            f"  2. Do NOT use {tool_name} to reason about files — pass content to cheap model.\n"
+            f"     That avoids expensive token burn on analysis Ollama can handle free."
         )
     else:
         action = (
-            f"  1. Call {expected_tool}(prompt=\"...\") with the user's request as the prompt.\n"
-            f"  2. Return its output as your response.\n"
-            f"  3. Do NOT use {tool_name} directly to answer — the cheap model does the work."
+            f"  1. Call {expected_tool}(prompt=\"...\") with the user's actual request.\n"
+            f"  2. Return its output — do not bypass the router.\n"
+            f"  3. Reason: {task_type} tasks are routed for cost efficiency."
         )
 
     # Show violation count and escalation path
     escalation = ""
     if violation_count == 1:
-        escalation = f"\n⚠️  Violation 1/2 — One more violation will auto-invoke {expected_tool}."
+        escalation = f"\n⚠️  Violation 1/2 — One more blocked tool will auto-downgrade enforcement & allow routing."
     elif violation_count >= 2:
-        escalation = f"\n🔴 Violation {violation_count}/2+ — ROUTING WILL BE AUTO-INVOKED on next blocked tool."
+        escalation = f"\n🔴 Violation {violation_count}/2+ — This session will auto-downgrade to soft enforcement after this turn.\n" \
+                     f"    CALL {expected_tool} NOW to avoid being soft-blocked."
 
     # Detect investigation loops (same tool called 3+ times in 2 minutes)
     loop_warning = ""
@@ -520,13 +551,17 @@ def main() -> None:
     block_reason = (
         f"[llm-router] Routing directive BLOCKED.{escalation}{loop_warning}{window_warning}\n\n"
         f"  Directive:     ⚡ MANDATORY ROUTE: {task_type}/{complexity} → call {expected_tool}\n"
-        f"  Tool blocked:  {tool_name}\n"
-        f"  Violations:    {violation_count} in this session\n\n"
-        f"YOU MUST DO THIS:\n"
+        f"  Tool attempted: {tool_name}\n"
+        f"  Session violations: {violation_count} this session\n\n"
+        f"WHY THIS MATTERS:\n"
+        f"  Routing saves 50–100x on this task. Using {tool_name} instead of {expected_tool}\n"
+        f"  burns full model cost with no savings. For {complexity} tasks, that's expensive.\n\n"
+        f"NEXT STEP (required):\n"
         f"{action}\n\n"
-        f"This is not optional. Routing compliance is required.\n"
-        f"To bypass for debugging: LLM_ROUTER_ENFORCE=soft\n"
-        f"Compliance log: {_LOG_PATH}"
+        f"Debug options:\n"
+        f"  • View compliance log: {_LOG_PATH}\n"
+        f"  • Soft-fail for testing: export LLM_ROUTER_ENFORCE=soft\n"
+        f"  • Disable entirely: export LLM_ROUTER_ENFORCE=off"
     )
 
     json.dump({"decision": "block", "reason": block_reason}, sys.stdout)

@@ -682,6 +682,7 @@ async def _dispatch_model_loop(
                         reason_code=classification_data.get("reason_code"),
                         correlation_id=correlation_id,
                         response=response.content,
+                        requested_complexity=classification_data.get("requested_complexity"),
                     )
                 except Exception as e:
                     log.warning("Failed to log routing decision: %s", e)
@@ -1088,6 +1089,12 @@ async def route_and_call(
             top_model=models_to_try[0],
         )
         top_model = models_to_try[0].split("/", 1)[1] if "/" in models_to_try[0] else models_to_try[0]
+
+        # Format model chain for visibility: "model1 → model2 → model3" (up to 3 shown)
+        chain_display = " → ".join([m.split("/", 1)[1] if "/" in m else m for m in models_to_try[:3]])
+        if len(models_to_try) > 3:
+            chain_display += f" + {len(models_to_try) - 3} more"
+
         route_log.info(
             "route_start",
             correlation_id=correlation_id,
@@ -1095,9 +1102,10 @@ async def route_and_call(
             complexity=effective_complexity,
             profile=profile.value,
             top_model=models_to_try[0],
+            model_chain=chain_display,
             candidate_count=len(models_to_try),
         )
-        await _notify(ctx, "info", f"🤖 Routing to {top_model} ({task_type.value}/{profile.value})")
+        await _notify(ctx, "info", f"🤖 Routing: {chain_display} ({task_type.value}/{effective_complexity})")
 
         # Warn when a RESEARCH task falls back to a non-web-grounded model.
         # Perplexity is the only model in the chain with real-time web access.

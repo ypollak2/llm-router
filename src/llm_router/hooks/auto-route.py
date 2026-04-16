@@ -1216,7 +1216,10 @@ def main() -> None:
 
     if _CC_MODE:
         pressure = _get_pressure()
+        requested_complexity = complexity  # Save original before pressure downgrade
         complexity, _pressure_suffix = _apply_pressure_downgrade(complexity, pressure)
+    else:
+        requested_complexity = None
         if _MODEL_SWITCH:
             session_pct = pressure["session"]
             sonnet_pct  = pressure["sonnet"]
@@ -1339,6 +1342,7 @@ def main() -> None:
                     "expected_server": "",
                     "task_type": task_type,
                     "complexity": complexity,
+                    "requested_complexity": requested_complexity,  # Original before pressure downgrade
                     "issued_at": _now,
                     "expires_at": _now + _PENDING_ROUTE_TTL_SEC,
                     "turn_id": int(_now),  # proxy for turn — clears when next prompt arrives

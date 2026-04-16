@@ -13,6 +13,9 @@
 ### Changed
 
 - **Router Message Building** — Updated `_call_text()` in router.py to inject Caveman system prompt when configured and safe model is selected.
+- **Model Selection Visibility** — Routing logs now include `model_chain` field showing fallback chain (e.g., "claude → gemini → groq") for transparency
+- **Enforcement Messages** — Task-specific remediation guidance in hook blocklist messages with cost justification and debug options
+- **Complexity Mismatch Tracking** — Added `requested_complexity` and `complexity_downgraded` columns to routing_decisions table for pressure-aware downgrade analytics
 
 ### Technical Notes
 

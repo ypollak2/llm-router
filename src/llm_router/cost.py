@@ -182,7 +182,12 @@ MIGRATE_ROUTING_DECISIONS_ADD_JUDGE_SCORE = [
     "ALTER TABLE routing_decisions ADD COLUMN judge_score REAL DEFAULT NULL",
 ]
 """Idempotent migration to add judge_score for LLM-as-Judge quality evaluation (v5.8)."""
-"""Idempotent migration to add correlation_id for log↔DB tracing (v5.3)."""
+
+MIGRATE_ROUTING_DECISIONS_ADD_COMPLEXITY_TRACKING = [
+    "ALTER TABLE routing_decisions ADD COLUMN requested_complexity TEXT",
+    "ALTER TABLE routing_decisions ADD COLUMN complexity_downgraded INTEGER DEFAULT 0",
+]
+"""Idempotent migration to track pressure-based complexity downgrades (v5.9)."""
 """Idempotent migration to add policy audit column to routing_decisions (v3.2).
 
 policy_applied: JSON string of policy actions, e.g.
@@ -297,6 +302,7 @@ async def _get_db() -> aiosqlite.Connection:
         + MIGRATE_ADD_CORRELATION_ID
         + MIGRATE_ADD_CACHE_METRICS
         + MIGRATE_ROUTING_DECISIONS_ADD_JUDGE_SCORE
+        + MIGRATE_ROUTING_DECISIONS_ADD_COMPLEXITY_TRACKING
     )
     for stmt in all_migrations:
         await _safe_migrate(db, stmt)
@@ -685,6 +691,7 @@ async def log_routing_decision(
     reason_code: str | None = None,
     correlation_id: str | None = None,
     response: str | None = None,
+    requested_complexity: str | None = None,
 ) -> None:
     """Persist a complete routing decision to the routing_decisions table.
 
@@ -700,7 +707,7 @@ async def log_routing_decision(
         classifier_model: Which model classified, or None for non-LLM classifiers.
         classifier_confidence: Classifier confidence (0.0-1.0).
         classifier_latency_ms: Classification latency in milliseconds.
-        complexity: Classified complexity (simple/moderate/complex).
+        complexity: Classified complexity (simple/moderate/complex) — final value used.
         recommended_model: Model recommended by the selector.
         base_model: What complexity alone would pick (before budget adjustment).
         was_downshifted: Whether budget pressure caused a cheaper model.
@@ -710,12 +717,17 @@ async def log_routing_decision(
         final_provider: Provider of the final model.
         success: Whether the call completed successfully.
         input_tokens: Input tokens consumed.
+        requested_complexity: Original complexity before pressure downgrade (for mismatch tracking).
+            If omitted, defaults to complexity (no downgrade detected).
         output_tokens: Output tokens generated.
         cost_usd: Total cost of the LLM call.
         latency_ms: Total latency of the LLM call.
     """
     db = await _get_db()
     try:
+        # Track complexity mismatch: if requested_complexity differs from final complexity,
+        # a pressure downgrade occurred (e.g., complex→moderate when budget high)
+        complexity_downgraded = 1 if requested_complexity and requested_complexity != complexity else 0
         await db.execute(
             """INSERT INTO routing_decisions
                (prompt_hash, task_type, profile, classifier_type, classifier_model,
@@ -723,8 +735,8 @@ async def log_routing_decision(
                 recommended_model, base_model, was_downshifted, budget_pct_used,
                 quality_mode, final_model, final_provider, success,
                 input_tokens, output_tokens, cost_usd, latency_ms, reason_code,
-                correlation_id)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                correlation_id, requested_complexity, complexity_downgraded)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 _prompt_hash(prompt),
                 task_type,
@@ -748,6 +760,8 @@ async def log_routing_decision(
                 latency_ms,
                 reason_code,
                 correlation_id,
+                requested_complexity,
+                complexity_downgraded,
             ),
         )
         await db.commit()
