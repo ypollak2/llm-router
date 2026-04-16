@@ -171,6 +171,17 @@ MIGRATE_ADD_CORRELATION_ID = [
     "ALTER TABLE usage ADD COLUMN correlation_id TEXT",
     "ALTER TABLE routing_decisions ADD COLUMN correlation_id TEXT",
 ]
+
+MIGRATE_ADD_CACHE_METRICS = [
+    "ALTER TABLE usage ADD COLUMN cache_hit INTEGER DEFAULT 0",
+    "ALTER TABLE usage ADD COLUMN cache_savings_usd REAL DEFAULT 0.0",
+]
+"""Idempotent migration to add prompt caching metrics (v5.7)."""
+
+MIGRATE_ROUTING_DECISIONS_ADD_JUDGE_SCORE = [
+    "ALTER TABLE routing_decisions ADD COLUMN judge_score REAL DEFAULT NULL",
+]
+"""Idempotent migration to add judge_score for LLM-as-Judge quality evaluation (v5.8)."""
 """Idempotent migration to add correlation_id for log↔DB tracing (v5.3)."""
 """Idempotent migration to add policy audit column to routing_decisions (v3.2).
 
@@ -284,6 +295,8 @@ async def _get_db() -> aiosqlite.Connection:
         + MIGRATE_SAVINGS_STATS_ADD_HOST
         + MIGRATE_ROUTING_DECISIONS_ADD_POLICY
         + MIGRATE_ADD_CORRELATION_ID
+        + MIGRATE_ADD_CACHE_METRICS
+        + MIGRATE_ROUTING_DECISIONS_ADD_JUDGE_SCORE
     )
     for stmt in all_migrations:
         await _safe_migrate(db, stmt)
@@ -671,6 +684,7 @@ async def log_routing_decision(
     latency_ms: float,
     reason_code: str | None = None,
     correlation_id: str | None = None,
+    response: str | None = None,
 ) -> None:
     """Persist a complete routing decision to the routing_decisions table.
 
@@ -737,6 +751,25 @@ async def log_routing_decision(
             ),
         )
         await db.commit()
+
+        # Fire-and-forget judge evaluation for successful calls with response
+        if success and response:
+            try:
+                from llm_router.judge import evaluate_response_async
+                # Get the ID of the row we just inserted
+                cursor = await db.execute("SELECT last_insert_rowid()")
+                row_id_result = await cursor.fetchone()
+                routing_decision_id = row_id_result[0] if row_id_result else None
+
+                # Trigger background judge evaluation (non-blocking)
+                await evaluate_response_async(
+                    prompt=prompt,
+                    response=response,
+                    task_type=task_type,
+                    routing_decision_id=routing_decision_id,
+                )
+            except Exception:
+                pass  # Silent failure — judge is optional enhancement
     finally:
         await db.close()
 
@@ -1539,6 +1572,59 @@ async def get_routing_savings_vs_sonnet(days: int = 0) -> dict:
         }
     except Exception:
         return empty
+    finally:
+        await db.close()
+
+
+async def get_cache_savings(period: str = "today") -> dict[str, float]:
+    """Get prompt caching savings for the period.
+
+    Queries the usage table for rows where cache_hit=1 and sums cache_savings_usd.
+
+    Args:
+        period: Time period — "today", "week", "month", or "all".
+
+    Returns:
+        Dict with ``total_calls_cached``, ``total_savings_usd``, ``cache_hit_rate``.
+    """
+    db = await _get_db()
+    try:
+        # Determine time filter
+        if period == "today":
+            time_filter = "timestamp >= datetime('now', 'start of day')"
+        elif period == "week":
+            time_filter = "timestamp >= datetime('now', '-7 days')"
+        elif period == "month":
+            time_filter = "timestamp >= datetime('now', 'start of month')"
+        else:  # all
+            time_filter = "1"
+
+        # Get cache hit stats
+        cursor = await db.execute(
+            f"""SELECT COUNT(*), COALESCE(SUM(cache_savings_usd), 0)
+                FROM usage WHERE {time_filter} AND cache_hit = 1"""
+        )
+        cached_row = await cursor.fetchone()
+        cached_calls, cached_savings = cached_row if cached_row else (0, 0.0)
+
+        # Get total calls for hit rate
+        cursor = await db.execute(f"SELECT COUNT(*) FROM usage WHERE {time_filter}")
+        total_row = await cursor.fetchone()
+        total_calls = total_row[0] if total_row else 0
+
+        cache_hit_rate = (cached_calls / total_calls * 100) if total_calls > 0 else 0.0
+
+        return {
+            "total_calls_cached": int(cached_calls),
+            "total_savings_usd": float(cached_savings),
+            "cache_hit_rate": float(cache_hit_rate),
+        }
+    except Exception:
+        return {
+            "total_calls_cached": 0,
+            "total_savings_usd": 0.0,
+            "cache_hit_rate": 0.0,
+        }
     finally:
         await db.close()
 

@@ -681,6 +681,7 @@ async def _dispatch_model_loop(
                         latency_ms=response.latency_ms,
                         reason_code=classification_data.get("reason_code"),
                         correlation_id=correlation_id,
+                        response=response.content,
                     )
                 except Exception as e:
                     log.warning("Failed to log routing decision: %s", e)
@@ -1212,8 +1213,22 @@ async def _call_text(
     """
     config = get_config()
     messages: list[dict[str, str]] = []
+
+    # Inject system prompt (user-provided or Caveman mode)
     if system_prompt:
         messages.append({"role": "system", "content": system_prompt})
+    else:
+        # Apply Caveman mode if no user system prompt
+        caveman_mode = getattr(config, "caveman_mode", "full")
+        if caveman_mode != "off":
+            from llm_router.caveman import CavemanIntensity, get_caveman_prompt, should_use_caveman
+            if should_use_caveman(model):
+                try:
+                    caveman_intensity = CavemanIntensity(caveman_mode)
+                    messages.append({"role": "system", "content": get_caveman_prompt(caveman_intensity)})
+                except ValueError:
+                    # Invalid caveman mode — skip
+                    pass
 
     # Inject session + persistent context between system prompt and user prompt
     # Guard: context_enabled may be MagicMock in test mocks

@@ -18,6 +18,7 @@ from collections.abc import AsyncIterator
 import litellm
 
 from llm_router.config import get_config
+from llm_router.prompt_cache import inject_cache_control
 from llm_router.types import LLMResponse
 
 # LiteLLM emits noisy debug output by default (model mappings, retries, etc.)
@@ -98,9 +99,12 @@ async def call_llm(
 
     start = time.monotonic()
 
+    # Inject provider-agnostic cache control hints (Anthropic: system message caching)
+    cached_messages = inject_cache_control(messages, model)
+
     kwargs: dict = {
         "model": model,
-        "messages": messages,
+        "messages": cached_messages,
         "temperature": temperature,
         "max_tokens": max_tokens,
         "timeout": config.request_timeout,
@@ -181,9 +185,12 @@ async def call_llm_stream(
 
     start = time.monotonic()
 
+    # Inject provider-agnostic cache control hints
+    cached_messages = inject_cache_control(messages, model)
+
     kwargs: dict = {
         "model": model,
-        "messages": messages,
+        "messages": cached_messages,
         "temperature": temperature,
         "max_tokens": max_tokens,
         "timeout": config.request_timeout,

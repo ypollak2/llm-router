@@ -6,12 +6,45 @@
 The following tools must ALWAYS be allowed, unconditionally:
 `Read, Edit, MultiEdit, Write, Bash, Grep, Glob, LS, ToolSearch, Agent`
 
-Blocking these creates an unresolvable deadlock — Claude cannot fix the hook
-because the hook blocks the tools needed to fix it. This killed 6+ sessions.
+### Why This Matters
 
-- Use a **blocklist** approach: block specific routing violations only
-- Never use an **allowlist** that omits core Claude tools
-- If you suspect a deadlock: `export LLM_ROUTER_ENFORCE=off` then fix the hook
+Blocking these creates an **unresolvable deadlock**:
+1. Hook blocks Read/Edit/Bash (to enforce routing)
+2. Claude tries to investigate or fix the issue
+3. Hook blocks those tools as violations
+4. Claude cannot read the hook source code to understand/fix it
+5. **Session is permanently stuck** — only recovery is manual intervention
+
+This pattern has destroyed 6+ sessions and is why enforce-route.py v5.6.0+ includes early file-op detection and auto-pivot mechanisms.
+
+### Blocklist Safety Rules
+
+**In enforce-route.py:**
+- `_BASE_BLOCK_TOOLS` must NOT contain: Read, Glob, Grep, LS, Agent
+- `_QA_ONLY_BLOCK_TOOLS` can block file-read tools ONLY in Q&A mode
+- File-op detection (line 393) must come BEFORE blocklist check
+- If first tool call is Read/Edit/Write → immediately mark "coding" session
+
+**Tests verify this invariant:**
+- tests/test_enforce_route_safety.py confirms core tools are never blocked simultaneously
+- Run: `uv run pytest tests/test_enforce_route_safety.py -v`
+
+### Recovery Procedure
+
+If you suspect a deadlock:
+```bash
+export LLM_ROUTER_ENFORCE=off  # Disable enforcement entirely
+# Claude can now use Read/Bash/Edit to investigate and fix the hook
+# Then remove the env var and restart
+```
+
+### Architecture Guarantee
+
+The enforce-route hook is structured to NEVER reach a state where all core tools are blocked together:
+- Early file-op detection exits BEFORE blocklist
+- Auto-pivot downgrades to soft after 2 violations
+- Session-type tracking prevents overly aggressive blocking
+- Investigation loop detection warns when stuck patterns form
 
 ## Project Overview
 
@@ -89,6 +122,62 @@ llm_router_claude_subscription: true
 - **Team/Enterprise**: Security blocks `.env` → use `config.yaml` instead
 - **Multi-Project**: Share credentials across projects without copying `.env` files
 - **Simplified Setup**: Only Ollama + minimal keys → just configure `config.yaml`
+
+## Caveman Mode — Token-Efficient Output (v5.9.0)
+
+**Caveman reduces output tokens by ~75%** by removing filler, using fragments, and preserving only technical substance.
+
+### Configuration
+
+```bash
+# Enable Caveman (default: "full")
+export LLM_ROUTER_CAVEMAN_INTENSITY=full
+
+# Options: off | lite | full | ultra
+# - off:   Disable Caveman mode (use default verbose output)
+# - lite:  Professional, readable, minimal filler (Recommended)
+# - full:  Standard caveman with fragments (Max savings, still readable)
+# - ultra: Telegraphic, maximum compression (Use with caution)
+```
+
+Or in `.env` / `config.yaml`:
+```yaml
+caveman_mode: "full"
+```
+
+### Example Output (Caveman vs Normal)
+
+**Problem**: React component re-renders on every parent update.
+
+**Normal** (69 tokens):
+> "I think the best approach would be to basically use the `useMemo` hook here because it prevents unnecessary re-renders, which is really important for performance in React applications. The `useMemo` hook memoizes the component so it only re-renders when its dependencies change, rather than re-rendering on every parent update."
+
+**Caveman Full** (18 tokens):
+> "Wrap in useMemo. Prevents re-renders on parent update."
+
+**Caveman Ultra** (12 tokens):
+> "useMemo. Prevents parent re-renders."
+
+### How It Works
+
+Caveman applies structured terseness rules:
+- **Removes**: "I think", "basically", "just", "really", articles ("a"/"the") when omittable
+- **Preserves**: Code, file paths, command syntax, all technical detail
+- **Uses**: Fragments ("Returns mutated object" not "This returns a mutated object")
+- **Leads**: With answer, not explanation
+
+### When to Use
+
+- **Code generation & refactoring**: Fragment output is natural, saves tokens
+- **Research & analysis**: Terse answers to direct questions work well
+- **Long conversations**: 75% savings multiply across many turns
+- **Budget-constrained sessions**: Max token efficiency
+
+### When NOT to Use
+
+- **Long-form content**: Articles, blog posts (brevity compromises quality)
+- **Specialized domains**: Medical, legal (terseness risks critical detail)
+- **User-provided system prompts**: Caveman only injects when no custom system message
 
 ## Testing
 

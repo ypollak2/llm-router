@@ -11,11 +11,12 @@ from llm_router.cache import get_cache
 from llm_router.codex_agent import is_codex_available
 from llm_router.config import get_config
 from llm_router.cost import (
-    get_model_acceptance_scores, get_model_latency_stats,
+    get_cache_savings, get_model_acceptance_scores, get_model_latency_stats,
     get_monthly_spend, get_quality_report,
     get_routing_savings_vs_sonnet, get_savings_summary,
     import_savings_log,
 )
+from llm_router.forecast import get_burn_forecast
 from llm_router.health import get_tracker
 from llm_router.provider_budget import get_provider_budgets
 from llm_router.types import RoutingProfile, colorize_provider, MODEL_COST_PER_1K
@@ -135,7 +136,15 @@ async def llm_usage(period: str = "today") -> str:
         lines.append(row("  (no external API usage)"))
     lines.append(HR)
 
-    # ── Section 4: Routing Savings ──
+    # ── Section 4: Prompt Caching Savings ──
+    cache_stats = await get_cache_savings(period)
+    if cache_stats["total_calls_cached"] > 0:
+        lines.append(section("💾 PROMPT CACHE SAVINGS ({})".format(period)))
+        lines.append(row(f"  Cached calls:  {cache_stats['total_calls_cached']}  ({cache_stats['cache_hit_rate']:.1f}% hit rate)"))
+        lines.append(row(f"  Saved:         ${cache_stats['total_savings_usd']:.4f}"))
+        lines.append(HR)
+
+    # ── Section 5: Routing Savings ──
     # Flush any pending hook JSONL records into SQLite before querying
     await import_savings_log()
     savings = await get_savings_summary(period)
@@ -169,7 +178,7 @@ async def llm_usage(period: str = "today") -> str:
             lines.append(row(f"  Opus would cost: ${opus_would_cost:.4f}  ->  Actual: ${actual_cost:.4f}  ({pct_saved:.0f}% saved)"))
         lines.append(HR)
 
-    # ── Section 5: Lifetime Savings (from routing_decisions SQLite table) ──
+    # ── Section 6: Lifetime Savings (from routing_decisions SQLite table) ──
     real_lifetime = await get_routing_savings_vs_sonnet(days=0)
     if real_lifetime["total_calls"] > 0:
         lt = real_lifetime
@@ -189,7 +198,7 @@ async def llm_usage(period: str = "today") -> str:
                 ))
         lines.append(HR)
 
-    # ── Section 6: Model Performance (latency + acceptance) ──
+    # ── Section 7: Model Performance (latency + acceptance) ──
     latency_stats, acceptance_scores = await asyncio.gather(
         get_model_latency_stats(window_days=7),
         get_model_acceptance_scores(window_days=30),
@@ -224,6 +233,20 @@ async def llm_usage(period: str = "today") -> str:
         lines.append(section("MONTHLY BUDGET"))
         bar = _bar(pct, 16)
         lines.append(row(f"  ${monthly_spend:.2f} / ${budget:.2f}  {bar}  ${remaining:.2f} left"))
+        lines.append(HR)
+
+    # ── Section 9: Burn Rate Forecast ──
+    forecast = await get_burn_forecast(budget_limit=config.llm_router_monthly_budget)
+    if forecast.days_of_data >= 3:
+        lines.append(section("📈 FORECAST (next 30d)"))
+        lines.append(row(f"  Daily burn:  ${forecast.daily_burn_usd:.4f}  ({forecast.confidence:.0%} confidence)"))
+
+        if config.llm_router_monthly_budget > 0 and forecast.pct_remaining >= 0:
+            color = "🟢" if forecast.pct_remaining > 20 else "🟡" if forecast.pct_remaining > 5 else "🔴"
+            lines.append(row(f"  At this pace: {color} ${forecast.projected_monthly_usd:.2f} by month-end"))
+            lines.append(row(f"  Budget left:  {forecast.pct_remaining:.0f}%  ({forecast.days_to_limit}d remaining)"))
+        else:
+            lines.append(row(f"  Projected:   ${forecast.projected_monthly_usd:.2f} for full month"))
         lines.append(HR)
 
     lines.append(row("  Tip: use llm_dashboard to open the visual web dashboard"))

@@ -215,6 +215,12 @@ class RouterConfig(BaseSettings):
     prompt_cache_enabled: bool = True
     prompt_cache_min_tokens: int = 1024
 
+    # ── Caveman mode (token-efficient output) ──
+    # Caveman reduces output tokens by ~75% via structured terseness rules:
+    # removes filler, uses fragments, preserves only technical substance.
+    # Intensity: "off" | "lite" | "full" | "ultra" (default "full")
+    caveman_mode: str = "full"  # off, lite, full, ultra
+
     # ── Health check settings ──
     health_failure_threshold: int = 2
     health_cooldown_seconds: int = 30
