@@ -76,3 +76,34 @@ def mock_env(monkeypatch):
 def mock_acompletion():
     """Mock async completion for provider tests."""
     return AsyncMock()
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _close_db_connections():
+    """Force close all aiosqlite connections at end of test session.
+    
+    Prevents 'pytest is hanging on exit' due to unclosed async database connections.
+    """
+    yield
+    # After all tests, force cleanup of aiosqlite connections
+    try:
+        import asyncio
+        import gc
+        
+        # Close any pending event loops
+        loop = None
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            pass
+        
+        if loop and not loop.is_closed():
+            # Give any pending tasks a chance to finish
+            pending = asyncio.all_tasks(loop)
+            for task in pending:
+                task.cancel()
+        
+        # Force garbage collection to release aiosqlite threads
+        gc.collect()
+    except Exception:
+        pass
