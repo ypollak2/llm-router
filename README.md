@@ -1,7 +1,7 @@
 # llm-router
 
 > Route every AI call to the cheapest model that can do the job well.
-> 46 tools · 20+ providers · budget caps, dashboards, traces, and one-command installs.
+> 48 tools · 20+ providers · personal routing memory · budget caps, dashboards, traces, and one-command installs.
 
 [![PyPI](https://img.shields.io/pypi/v/claude-code-llm-router?style=flat-square)](https://pypi.org/project/claude-code-llm-router/)
 [![Tests](https://img.shields.io/github/actions/workflow/status/ypollak2/llm-router/ci.yml?style=flat-square&label=tests)](https://github.com/ypollak2/llm-router/actions)
@@ -69,48 +69,26 @@ LLM_ROUTER_CLAUDE_SUBSCRIPTION=true
 
 ---
 
+## New in v6.1 — "Memory"
+
+**Theme:** Your routing decisions are now stateful. The router learns from corrections and applies learned patterns automatically.
+
+- **Personal Routing Memory** — After 3+ corrections for the same task type, learned routes become hard overrides in future sessions
+- **Session Memory Injection** — See your learned patterns at session start with confidence levels
+- **Learned Route Application** — Auto-route hook applies learned overrides before normal classification
+- **Community Profile Sharing** — Export/import routing profiles via `llm_share_profile()` and `llm_import_profile(url)`
+- **Persistent Storage** — Learned routes stored in `~/.llm-router/learned_routes.json` across sessions
+
+---
+
 ## New in v6.0 — "Visible"
 
-**Theme:** Every routing decision should be legible. v6.0 makes llm-router visible through CLI commands.
+**Theme:** Every routing decision should be legible. v6.0 makes llm-router visible through CLI commands and HUD integration.
 
-- **`llm-router replay` — Session Routing Transcript**
-  ```bash
-  $ llm-router replay --limit 5
-  ```
-  Prints formatted transcript of all routed decisions in a session with:
-  - Timestamp, model, task type, complexity level
-  - Confidence score (star visualization: ★★★★★★★★☆☆ = 87%)
-  - Cost per decision and cumulative cost
-  - Reasoning code and quality scores (when available)
-  
-  Example output:
-  ```
-  14:30 → routed to haiku (code/simple)
-      ★ Confidence: ★★★★★★★★☆☆ 87%
-      🧠 Reasoning: Simple standard library task
-      💰 Cost: $0.0001
-      ✅ Quality: 97% (excellent)
-  ```
-
-- **`llm-router verify` — Health Check CLI**
-  ```bash
-  $ llm-router verify
-  ```
-  Runs end-to-end system diagnostics (30 seconds):
-  - Configuration status (env vars, config.yaml, API keys)
-  - Database health (size, last write, record count)
-  - Provider availability (Ollama, OpenAI, Gemini, etc.)
-  - Hook installation and execution status
-  - Last 5 routing decisions with costs
-  - Summary: shows any issues that need attention
-  
-  Example: `✅ Ollama running with 4 models · ✅ OpenAI API configured · ❌ Gemini key missing`
-
-- **Terminal Styling System** — Foundation for v6.0 visibility
-  - ANSI color codes with NO_COLOR support (accessibility)
-  - Unicode symbol library for routing flow (→ ⚡), memory (💾 🧠), quality (★ ✓ ⚠)
-  - Formatted components: replay transcript, health check, future dashboards
-  - Design tokens in `.claude-plugin/design-tokens.json`
+- **Live Session HUD** — Real-time routing indicators show which model handled each decision
+- **Session Replay** — `llm-router replay` shows formatted transcript of all routed decisions with confidence, cost, and quality scores
+- **Health Checks** — `llm-router verify` runs end-to-end system diagnostics (config, hooks, providers, recent decisions)
+- **Terminal Styling System** — ANSI color codes, Unicode symbols, and accessible design tokens for routing flow visibility
 
 ---
 
@@ -321,7 +299,7 @@ The **three CLI commands** make every routing decision visible:
 
 ## MCP Tools
 
-46 tools across 6 categories:
+48 tools across 7 categories:
 
 ### Smart Routing
 | Tool | What it does |
@@ -392,6 +370,12 @@ The **three CLI commands** make every routing decision visible:
 | `llm_session_spend` | Real-time API spend breakdown for the current session |
 | `llm_approve_route` | Approve or reject a pending high-cost routing call |
 | `llm_budget` | Budget Oracle — real-time spend vs. cap per provider with pressure bars |
+
+### Community Sharing (v6.1+)
+| Tool | What it does |
+|------|-------------|
+| `llm_share_profile` | Export your learned routing profile for community sharing |
+| `llm_import_profile` | Import and merge shared routing profiles from URLs |
 
 ---
 
@@ -993,7 +977,7 @@ The next 6 months focus on making routing decisions visible, learnable, and shar
 | Version | Headline | Status |
 |---------|----------|--------|
 | **v6.0** | **"Visible"** — Live routing HUD, session replay, health checks, design system | 🚀 May 2026 |
-| **v6.1** | **"Memory"** — Personal routing profiles, override learning, community sharing | 📅 Jun 2026 |
+| **v6.1** | **"Memory"** — Personal routing profiles, override learning, community sharing | 🚀 Apr 2026 |
 | **v6.2** | **"Quality"** — Quality Guard, benchmarks, degradation alerts, accuracy reports | 📅 Jul 2026 |
 | **v6.3** | **"Local First"** — Ollama dashboard, model discovery, auto-recommendations | 📅 Aug 2026 |
 | **v6.4** | **"Community"** — Savings card, README badge, routing config marketplace | 📅 Sep 2026 |
