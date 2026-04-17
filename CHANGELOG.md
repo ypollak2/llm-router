@@ -1,5 +1,17 @@
 # Changelog
 
+## v6.1.1 — Linting Cleanup (2026-04-17)
+
+### Fixed
+
+- Removed unused imports for cleaner codebase
+  - Removed unused `Optional` from `memory/profiles.py`
+  - Removed unused `LEARNED_ROUTES_FILE` from `tools/admin.py`
+  - Removed unused imports from `test_memory.py`
+- All linting passes with ruff
+
+---
+
 ## v6.1.0 — Memory System (2026-04-17)
 
 ### Added
