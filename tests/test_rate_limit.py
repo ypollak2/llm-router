@@ -113,6 +113,7 @@ class TestHealthTrackerRateLimit:
 # ── Router Integration ───────────────────────────────────────────────────────
 
 
+@pytest.mark.requires_api_keys
 class TestRouterRateLimitSwitching:
     @pytest.mark.asyncio
     async def test_switches_provider_on_rate_limit(self):

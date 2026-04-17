@@ -191,6 +191,7 @@ def test_get_recent_hook_errors_no_data(temp_router_dir):
     assert errors == []
 
 
+@pytest.mark.requires_api_keys
 def test_get_recent_hook_errors_invalid_json(temp_router_dir):
     """Test that invalid JSON in log is skipped gracefully."""
     log_file = temp_router_dir / "hook_errors.log"

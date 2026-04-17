@@ -9,6 +9,7 @@ from llm_router.types import BudgetState, LLMResponse, RoutingProfile, TaskType
 
 
 @pytest.mark.asyncio
+@pytest.mark.requires_api_keys
 async def test_routes_to_first_available_model(temp_db, mock_env, mock_acompletion, monkeypatch):
     # Disable Ollama to test pure API chain
     monkeypatch.delenv("OLLAMA_BASE_URL", raising=False)
@@ -22,6 +23,7 @@ async def test_routes_to_first_available_model(temp_db, mock_env, mock_acompleti
 
 
 @pytest.mark.asyncio
+@pytest.mark.requires_api_keys
 async def test_logs_structured_routing_decision(temp_db, mock_env, mock_acompletion):
     route_log = MagicMock()
     fake_uuid = MagicMock(hex="deadbeefcafebabe")
@@ -59,6 +61,7 @@ async def test_model_override_bypasses_routing(temp_db, mock_env, mock_acompleti
 
 
 @pytest.mark.asyncio
+@pytest.mark.requires_api_keys
 async def test_system_prompt_included(temp_db, mock_env, mock_acompletion):
     await route_and_call(
         TaskType.GENERATE, "Write a poem",
@@ -71,6 +74,7 @@ async def test_system_prompt_included(temp_db, mock_env, mock_acompletion):
 
 
 @pytest.mark.asyncio
+@pytest.mark.requires_api_keys
 async def test_falls_back_on_failure(temp_db, mock_env, mock_litellm_response):
     from llm_router.types import LLMResponse
 
@@ -102,6 +106,7 @@ async def test_falls_back_on_failure(temp_db, mock_env, mock_litellm_response):
 
 
 @pytest.mark.asyncio
+@pytest.mark.requires_api_keys
 async def test_raises_when_all_fail(temp_db, mock_env):
     with patch("litellm.acompletion", side_effect=Exception("All down")):
         with pytest.raises(RuntimeError, match="All models failed"):
@@ -147,6 +152,7 @@ async def test_research_adds_search_params_for_perplexity(temp_db, mock_env, moc
 
 
 @pytest.mark.asyncio
+@pytest.mark.requires_api_keys
 async def test_content_filter_error_is_silent_fallback(temp_db, mock_env, mock_litellm_response):
     """Content filter errors should silently skip to next model without warning."""
     from llm_router.types import LLMResponse

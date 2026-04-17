@@ -76,6 +76,7 @@ async def test_code_task_codex_before_paid_externals_subscription_mode(
 
 
 @pytest.mark.asyncio
+@pytest.mark.requires_codex
 async def test_code_task_codex_after_first_claude_not_last(
     mock_env, mock_acompletion, monkeypatch
 ):

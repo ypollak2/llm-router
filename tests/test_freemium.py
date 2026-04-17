@@ -7,6 +7,7 @@ import pytest
 from llm_router.types import BudgetExceededError, TaskType
 
 
+@pytest.mark.requires_api_keys
 class TestBudgetEnforcement:
     @pytest.mark.asyncio
     async def test_blocks_when_budget_exceeded(self, temp_db, mock_env, mock_acompletion, monkeypatch):

@@ -82,6 +82,7 @@ async def test_perplexity_research_uses_recency_filter_end_to_end(temp_db, mock_
 
 
 @pytest.mark.asyncio
+@pytest.mark.requires_api_keys
 async def test_budget_profile_routes_code_end_to_end(temp_db, mock_env, mock_litellm_response):
     captured: dict = {}
 

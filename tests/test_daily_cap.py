@@ -20,6 +20,7 @@ def _patch_routing(mock_env, monkeypatch, tmp_path):
     monkeypatch.setattr("llm_router.router.is_codex_available", lambda: False)
 
 
+@pytest.mark.requires_api_keys
 class TestDailySpendCap:
     @pytest.mark.asyncio
     async def test_blocks_when_daily_limit_exceeded(self, _patch_routing, monkeypatch):

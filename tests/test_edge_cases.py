@@ -271,6 +271,7 @@ class TestHealthEdgeCases:
 
 
 @pytest.mark.asyncio
+@pytest.mark.requires_api_keys
 class TestRouterEdgeCases:
     async def test_empty_model_chain_raises(self):
         """No available models should raise ValueError, not crash."""

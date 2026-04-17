@@ -104,8 +104,11 @@ markers = [
     "slow: marks tests as slow (deselect with '-m \"not slow\"' for fast feedback)",
     "fast: marks tests as fast (run with '-m fast' for quick validation)",
     "integration: marks tests as integration tests (slow external calls)",
+    "requires_ollama: marks tests that require local Ollama instance (skip in CI)",
+    "requires_api_keys: marks tests that require mocked API keys (skip in CI)",
+    "requires_codex: marks tests that require Codex availability (skip in CI)",
 ]
-addopts = "-m 'not slow' -q --tb=short"
+addopts = "-m 'not slow and not requires_ollama and not requires_api_keys and not requires_codex' -q --tb=short"
 
 [tool.ruff]
 line-length = 100

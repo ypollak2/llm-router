@@ -21,6 +21,7 @@ from llm_router.types import ModelCapability, ProviderTier, RoutingProfile, Task
 
 # ── Phase 1: Ollama Discovery Injection ───────────────────────────────────────
 
+@pytest.mark.requires_ollama
 class TestOllamaDiscoveryInjection:
     """Test Ollama live-discovery integration with env var fallback."""
 
