@@ -12,13 +12,11 @@ All analysis data comes from existing usage.db — no new data collection needed
 
 from __future__ import annotations
 
-import json
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
-from llm_router.types import TaskType
 
 
 # ── Constants ──────────────────────────────────────────────────────────────
@@ -338,7 +336,7 @@ def classify_root_causes(gaps: list[dict]) -> list[dict]:
                 "task_type": task,
                 "root_cause": "CLASSIFIER_ERROR",
                 "confidence": 1,  # Medium (quality is weaker signal)
-                "evidence": f"Quality score below threshold",
+                "evidence": "Quality score below threshold",
             })
         else:
             causes.append({
@@ -594,11 +592,8 @@ def write_claude_mem_entry(retro: dict) -> Optional[Path]:
     """
     # Try to find claude-mem project directory
     from pathlib import Path
-    import hashlib
-    import os
 
     project_root = Path.cwd()
-    project_hash = hashlib.md5(str(project_root).encode()).hexdigest()[:8]
 
     mem_dir = Path.home() / ".claude" / "projects" / f"-{project_root.name}" / "memory"
 

@@ -183,7 +183,6 @@ def format_savings_bar(saved: float, baseline: float, width: int = 20) -> str:
 
     savings_pct = min(100, int(percentage))
     savings_colored = Color.CONFIDENCE_GREEN(f"${saved:.2f}")
-    baseline_text = f"${baseline:.2f}"
 
     return f"{bar} {savings_colored} saved ({savings_pct}%)"
 

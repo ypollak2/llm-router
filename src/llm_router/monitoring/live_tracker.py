@@ -5,20 +5,14 @@ Runs during active sessions to track routing accuracy trends and gap emergence.
 
 from __future__ import annotations
 
-import asyncio
 from datetime import datetime, timezone
-from pathlib import Path
 
 from llm_router.monitoring.periodic import (
     take_session_snapshot,
     save_session_snapshot,
     load_session_snapshots,
-    analyze_session_trends,
-    format_trend_summary,
 )
 from llm_router.retrospective import (
-    fetch_session_decisions,
-    fetch_session_corrections,
     get_session_window,
 )
 
@@ -46,7 +40,7 @@ async def check_and_capture_hourly_snapshot() -> dict | None:
         
         # Time to capture a new snapshot
         snapshot = await take_session_snapshot(start_dt, end_dt, current_hour)
-        saved_path = save_session_snapshot(snapshot)
+        save_session_snapshot(snapshot)
         
         return snapshot
     except Exception:
@@ -109,7 +103,6 @@ def display_hourly_progress() -> str:
         calls = facts.get("total_calls", 0)
         accuracy = int(facts.get("accuracy", 1.0) * 100)
         gaps = current.get("gap_count", 0)
-        cost = facts.get("total_cost", 0)
         saved = facts.get("total_saved", 0)
         
         line = f"【Hour {current_hour}】 {calls} calls · {accuracy}% accuracy"

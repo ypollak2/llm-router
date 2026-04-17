@@ -10,9 +10,7 @@ Tests cover:
 from __future__ import annotations
 
 import json
-import tempfile
 from datetime import datetime, timezone
-from pathlib import Path
 from unittest import mock
 
 import pytest

@@ -90,7 +90,7 @@ def check_database() -> tuple[bool, str]:
         conn = sqlite3.connect(db_path)
         cursor = conn.cursor()
         cursor.execute("SELECT COUNT(*) FROM routing_decisions")
-        count = cursor.fetchone()[0]
+        cursor.fetchone()
         conn.close()
 
         size_mb = db_path.stat().st_size / (1024 * 1024)

@@ -35,7 +35,6 @@ Example output:
 
 import argparse
 import asyncio
-from pathlib import Path
 from typing import Optional
 
 from llm_router.retrospective import (

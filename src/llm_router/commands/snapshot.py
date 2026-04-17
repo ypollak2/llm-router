@@ -34,15 +34,13 @@ Example output:
 
 import argparse
 from datetime import datetime
-from pathlib import Path
 
 from llm_router.monitoring.periodic import (
     load_session_snapshots,
     analyze_session_trends,
     format_trend_summary,
-    get_current_snapshot,
 )
-from llm_router.terminal_style import Color, Symbol
+from llm_router.terminal_style import Color
 
 
 def format_snapshot_status(snapshot: dict) -> str:
@@ -57,7 +55,6 @@ def format_snapshot_status(snapshot: dict) -> str:
     lines = []
 
     facts = snapshot.get("facts", {})
-    hour = snapshot.get("hour", 1)
 
     lines.append(Color.ORCHESTRATE_BLUE("【Current Status】"))
     lines.append(

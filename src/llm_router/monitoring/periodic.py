@@ -238,7 +238,7 @@ def format_trend_summary(trend: dict) -> str:
 
     # Gap emergence timeline
     if trend["gap_emergence"]:
-        lines.append(f"  Gap emergence:")
+        lines.append("  Gap emergence:")
         for emergence in trend["gap_emergence"]:
             if "delta" in emergence:
                 lines.append(
@@ -253,9 +253,9 @@ def format_trend_summary(trend: dict) -> str:
     # Warning if concerning
     if trend["concerning"]:
         if trend["trend_type"] == "degrading":
-            lines.append(f"  ⚠️  Accuracy degrading - profile may be stale")
+            lines.append("  ⚠️  Accuracy degrading - profile may be stale")
         if len(trend["gap_emergence"]) >= 2:
-            lines.append(f"  ⚠️  Recurring gaps - consider adjusting routing rules")
+            lines.append("  ⚠️  Recurring gaps - consider adjusting routing rules")
 
     return "\n".join(lines)
 

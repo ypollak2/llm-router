@@ -119,7 +119,6 @@ def get_hook_health() -> dict:
 
         # Add health status for each hook
         for hook_name, info in data.items():
-            success_count = info.get("success_count", 0)
             error_count = info.get("error_count", 0)
             last_error = info.get("last_error")
 

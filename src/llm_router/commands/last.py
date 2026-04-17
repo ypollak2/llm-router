@@ -114,9 +114,6 @@ def print_recent_decisions(decisions: list[dict]) -> None:
         complexity = decision.get("complexity", "unknown")
         cost = decision.get("cost_usd", 0)
         
-        # Extract provider from model (e.g., "ollama/gemma4:latest" -> "ollama")
-        provider = model.split("/")[0] if "/" in model else model
-        
         cost_indicator = format_cost_indicator(cost)
         
         print(
