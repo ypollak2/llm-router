@@ -146,6 +146,34 @@ def _subscription_hint(task_type_label: str, complexity: str | None, prompt: str
     return hint
 
 
+def _format_response(resp: LLMResponse, explain: str | None = None) -> str:
+    """Format a response with consistent header and optional explanation prefix.
+
+    All tools use this function to ensure uniform response formatting across
+    all 48 MCP tools. Format:
+
+        [explain prefix if enabled]
+        > 🤖 **model** · tokens · $cost · duration
+        [optional empty line]
+        [content]
+
+    Args:
+        resp: The LLM response object with model, tokens, cost, latency.
+        explain: Optional explanation prefix (from _explain_prefix).
+
+    Returns:
+        Formatted response string.
+    """
+    parts = []
+    if explain:
+        parts.append(explain.rstrip())
+    parts.append(resp.header())
+    if resp.content:
+        parts.append("")
+        parts.append(resp.content)
+    return "\n".join(parts)
+
+
 async def llm_query(
     prompt: str,
     ctx: Context,
@@ -180,21 +208,7 @@ async def llm_query(
         temperature=temperature, max_tokens=max_tokens, ctx=ctx,
         caller_context=context,
     )
-    
-    # Add visible routing indicator footer
-    model_name = resp.model.split("/")[-1] if "/" in resp.model else resp.model
-    routing_footer = f"🔀 **Routed to:** {model_name} · Cost: ${resp.cost_usd:.4f}"
-    
-    lines = [
-        _explain_prefix(resp, 'query'),
-        resp.header(),
-        "",
-        resp.content,
-        "",
-        "---",
-        routing_footer,
-    ]
-    return "\n".join(lines)
+    return _format_response(resp, _explain_prefix(resp, "query"))
 
 
 async def llm_research(
@@ -239,16 +253,10 @@ async def llm_research(
         temperature=0.3, ctx=ctx, caller_context=context,
     )
     
-    # Add visible routing indicator footer
-    model_name = resp.model.split("/")[-1] if "/" in resp.model else resp.model
-    routing_footer = f"🔀 **Routed to:** {model_name} · Cost: ${resp.cost_usd:.4f}"
+    result = _format_response(resp, _explain_prefix(resp, "research"))
     
-    result = _explain_prefix(resp, "research") + resp.header() + "\n\n" + resp.content
     if resp.citations:
         result += "\n\n**Sources:**\n" + "\n".join(f"- {c}" for c in resp.citations)
-    
-    # Add routing footer before any warnings
-    result += "\n\n---\n" + routing_footer
     
     if no_perplexity and "perplexity" not in resp.model.lower():
         result += (
@@ -291,20 +299,7 @@ async def llm_generate(
         max_tokens=max_tokens, ctx=ctx, caller_context=context,
     )
     
-    # Add visible routing indicator footer
-    model_name = resp.model.split("/")[-1] if "/" in resp.model else resp.model
-    routing_footer = f"🔀 **Routed to:** {model_name} · Cost: ${resp.cost_usd:.4f}"
-    
-    lines = [
-        _explain_prefix(resp, 'generate'),
-        resp.header(),
-        "",
-        resp.content,
-        "",
-        "---",
-        routing_footer,
-    ]
-    return "\n".join(lines)
+    return _format_response(resp, _explain_prefix(resp, "generate"))
 
 
 async def llm_analyze(
@@ -340,20 +335,7 @@ async def llm_analyze(
         max_tokens=max_tokens, ctx=ctx, caller_context=context,
     )
     
-    # Add visible routing indicator footer
-    model_name = resp.model.split("/")[-1] if "/" in resp.model else resp.model
-    routing_footer = f"🔀 **Routed to:** {model_name} · Cost: ${resp.cost_usd:.4f}"
-    
-    lines = [
-        _explain_prefix(resp, 'analyze'),
-        resp.header(),
-        "",
-        resp.content,
-        "",
-        "---",
-        routing_footer,
-    ]
-    return "\n".join(lines)
+    return _format_response(resp, _explain_prefix(resp, "analyze"))
 
 
 async def llm_code(
@@ -386,20 +368,7 @@ async def llm_code(
         max_tokens=max_tokens, ctx=ctx, caller_context=context,
     )
     
-    # Add visible routing indicator footer
-    model_name = resp.model.split("/")[-1] if "/" in resp.model else resp.model
-    routing_footer = f"🔀 **Routed to:** {model_name} · Cost: ${resp.cost_usd:.4f}"
-    
-    lines = [
-        _explain_prefix(resp, 'code'),
-        resp.header(),
-        "",
-        resp.content,
-        "",
-        "---",
-        routing_footer,
-    ]
-    return "\n".join(lines)
+    return _format_response(resp, _explain_prefix(resp, "code"))
 
 
 async def llm_edit(
