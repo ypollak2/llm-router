@@ -14,7 +14,7 @@ def test_all_tools_registered():
         "llm_query", "llm_research", "llm_generate",
         "llm_analyze", "llm_code", "llm_image", "llm_video", "llm_audio",
         "llm_orchestrate", "llm_pipeline_templates",
-        "llm_save_session",
+        "llm_save_session", "llm_retrospect",
         "llm_set_profile", "llm_usage", "llm_savings", "llm_health", "llm_hook_health", "llm_providers",
         "llm_check_usage", "llm_update_usage", "llm_refresh_claude_usage", "llm_codex", "llm_setup",
         "llm_cache_stats", "llm_cache_clear", "llm_quality_report",
