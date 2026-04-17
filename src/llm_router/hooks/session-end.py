@@ -625,7 +625,22 @@ def main() -> None:
     cumulative                  = _query_cumulative_savings()
 
     has_cumulative = any(calls > 0 for _, calls, *_ in cumulative)
-    if not tools and not cc_rows and not current and not free_rows and not has_cumulative:
+
+    # Collect retrospective if enabled (default: auto = show if gaps detected)
+    retrospect_mode = os.environ.get("LLM_ROUTER_RETROSPECT", "auto")
+    retrospect_output = None
+    if retrospect_mode in ("auto", "always"):
+        try:
+            result = subprocess.run(
+                [sys.executable, "-m", "llm_router.commands.retrospect", "--compact", "--no-directives"],
+                capture_output=True, text=True, timeout=15
+            )
+            if result.stdout.strip():
+                retrospect_output = result.stdout.strip()
+        except Exception:
+            pass  # Graceful failure — never break session-end
+
+    if not tools and not cc_rows and not current and not free_rows and not has_cumulative and not retrospect_output:
         sys.exit(0)
 
     summary = _format(tools, cc_rows, free_rows, paid_rows, start, current, is_live, cumulative)
@@ -643,6 +658,23 @@ def main() -> None:
         if spend.get("anomaly_flag"):
             spend_line = "  ⚠️  ANOMALY DETECTED: " + spend_line.lstrip()
         summary = summary.rstrip("─" * WIDTH) + "\n" + spend_line + "\n" + "─" * WIDTH
+
+    # Append retrospective summary if available
+    if retrospect_output:
+        summary = summary.rstrip("─" * WIDTH) + "\n" + retrospect_output + "\n" + "─" * WIDTH
+
+    # Append mid-session trends if any snapshots exist
+    try:
+        from llm_router.monitoring.periodic import load_session_snapshots, analyze_session_trends, format_trend_summary
+        snapshots = load_session_snapshots()
+        if len(snapshots) > 1:
+            trends = analyze_session_trends(snapshots)
+            if trends.get("snapshot_count", 0) > 0:
+                trend_output = format_trend_summary(trends)
+                if trend_output and "No snapshots" not in trend_output:
+                    summary = summary.rstrip("─" * WIDTH) + "\n【TRENDS】\n" + trend_output + "\n" + "─" * WIDTH
+    except Exception:
+        pass  # Graceful failure — never break session-end
 
     print(json.dumps({"systemMessage": summary}))
 

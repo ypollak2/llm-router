@@ -1017,6 +1017,45 @@ async def llm_budget() -> str:
         return f"Budget Oracle error: {e}"
 
 
+async def llm_retrospect(session_id: str = "", weekly: bool = False, no_directives: bool = False) -> str:
+    """Run an IAF-style session retrospective.
+
+    Analyzes routing decisions from this session, detects gaps where routing fell
+    short of expectations, classifies root causes (classifier error, stale profile,
+    budget pressure, etc.), and generates binding directives to improve next session.
+
+    All analysis data comes from existing usage.db - no new data collection needed.
+    No PII or sensitive data is surfaced in the report.
+
+    Args:
+        session_id: Optional session ID to analyze (currently unused - analyzes current session)
+        weekly: If True, aggregate last 7 days into a weekly report instead of today
+        no_directives: If True, skip writing directives.md and claude-mem entries
+
+    Returns:
+        Formatted IAF debrief with FACTS, GAPS, ROOT CAUSES, and ACTIONS
+    """
+    from llm_router.retrospective import (
+        run_session_retrospective,
+        run_weekly_retrospective,
+        format_full_report,
+    )
+
+    try:
+        if weekly:
+            retro = await run_weekly_retrospective()
+        else:
+            write_files = not no_directives
+            retro = await run_session_retrospective(write_files=write_files)
+
+        if not retro:
+            return "No routing decisions found in this session."
+
+        return format_full_report(retro)
+    except Exception as e:
+        return f"Retrospective error: {e}"
+
+
 def register(mcp, should_register=None) -> None:
     """Register management tools with the FastMCP instance.
 
@@ -1062,3 +1101,6 @@ def register(mcp, should_register=None) -> None:
         mcp.tool()(llm_approve_route)
     if gate("llm_budget"):
         mcp.tool()(llm_budget)
+
+    if gate("llm_retrospect"):
+        mcp.tool()(llm_retrospect)

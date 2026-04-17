@@ -1,5 +1,64 @@
 # Changelog
 
+## v6.0.5 — Mid-Session Monitoring (2026-04-17)
+
+### Added
+
+- **Mid-Session Snapshot Monitoring** — Hourly session tracking with live trends
+  - New module: `src/llm_router/monitoring/periodic.py`
+  - Captures hourly snapshots: calls, cost, savings, accuracy, gaps detected
+  - Auto-stores to `~/.llm-router/session_snapshots/YYYY-MM-DD-HHh.json`
+  - Trend analysis: accuracy improving/degrading/stable, gap emergence timeline
+  - Cleanup function: removes snapshots older than 7 days
+
+- **Live Feedback During Session** — Real-time routing visibility
+  - Auto-route hook displays trend indicators after each routing call
+  - Background async task captures hourly snapshots automatically
+  - Shows compact metrics: ↑ 95% (H1) ⚠ 2 gaps
+  - Session-end hook displays complete trend analysis with warnings
+
+- **Session Snapshot CLI Command**
+  - New command: `llm-router snapshot [--date YYYY-MM-DD] [--compact]`
+  - Full format: Shows current session facts, hourly breakdown, trend analysis
+  - Compact mode: Quick 1-liner for mid-session status checks
+  - Displays: accuracy trends, gap emergence timeline, concerning pattern alerts
+
+- **Live Tracker Module** — Session progress tracking
+  - New module: `src/llm_router/monitoring/live_tracker.py`
+  - Functions: `check_and_capture_hourly_snapshot()`, `get_live_trend_indicator()`, `display_hourly_progress()`
+  - Enables real-time monitoring without blocking the user's session
+
+### Changed
+
+- **Session-End Hook Enhanced** — Now displays mid-session trends
+  - Loads and analyzes all hourly snapshots from session
+  - Appends trend analysis (【TRENDS】 section) to session summary
+  - Shows accuracy deltas, gap emergence timeline, concerning patterns
+
+- **Auto-Route Hook Enhanced** — Live feedback integration
+  - After each routing decision, appends trend indicator to system message
+  - Background thread auto-captures snapshots every hour
+  - Gracefully handles failures to never block routing
+
+### Tests
+
+- New test suite: `tests/test_periodic.py` (14 tests)
+  - Snapshot creation, persistence, loading, and cleanup
+  - Trend analysis: improving, degrading, stable patterns
+  - Gap emergence detection
+  - Output formatting and display
+  - All 31 monitoring + retrospective tests passing
+
+### Design Notes
+
+- **Live Visibility**: v6.0.5 extends v6.0 "Visible" with automatic hourly monitoring
+- **Non-Blocking**: Snapshot captures run in background async threads; never interfere with user's routing
+- **Graceful Degradation**: All monitoring features fail silently; never break session-end or routing
+- **Trend Analysis**: Uses same retrospective engine as session-end for consistency
+- **Storage Efficient**: JSON snapshots (~500 bytes/hour) stored locally; auto-cleanup after 7 days
+
+---
+
 ## v6.0.0 — "Visible" (2026-04-16)
 
 ### Added

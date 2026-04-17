@@ -1383,6 +1383,32 @@ def main() -> None:
         except OSError:
             pass
 
+    # ── Append mid-session trend indicator for visibility ────────────────────────
+    trend_indicator = ""
+    try:
+        from llm_router.monitoring.live_tracker import get_live_trend_indicator
+        trend_indicator = get_live_trend_indicator()
+        
+        # Attempt to capture hourly snapshot (async, fire-and-forget)
+        try:
+            from llm_router.monitoring.live_tracker import check_and_capture_hourly_snapshot
+            import threading
+            def _capture_snapshot():
+                try:
+                    import asyncio
+                    asyncio.run(check_and_capture_hourly_snapshot())
+                except Exception:
+                    pass
+            thread = threading.Thread(target=_capture_snapshot, daemon=True)
+            thread.start()
+        except Exception:
+            pass
+    except Exception:
+        pass
+    
+    if trend_indicator:
+        indicator = f"{indicator}  {trend_indicator}"
+
     output = {
         "hookSpecificOutput": {
             "hookEventName": "UserPromptSubmit",

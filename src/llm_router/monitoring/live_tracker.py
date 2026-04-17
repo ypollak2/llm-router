@@ -1,0 +1,122 @@
+"""Live session snapshot tracking — captures hourly snapshots and displays progress.
+
+Runs during active sessions to track routing accuracy trends and gap emergence.
+"""
+
+from __future__ import annotations
+
+import asyncio
+from datetime import datetime, timezone
+from pathlib import Path
+
+from llm_router.monitoring.periodic import (
+    take_session_snapshot,
+    save_session_snapshot,
+    load_session_snapshots,
+    analyze_session_trends,
+    format_trend_summary,
+)
+from llm_router.retrospective import (
+    fetch_session_decisions,
+    fetch_session_corrections,
+    get_session_window,
+)
+
+
+async def check_and_capture_hourly_snapshot() -> dict | None:
+    """Check if it's time for a new hourly snapshot and capture it.
+
+    Returns:
+        Snapshot dict if captured, None if not yet time for next snapshot
+    """
+    try:
+        # Get current session window
+        start_dt, end_dt = get_session_window()
+        
+        # Calculate which hour we're in
+        now_ts = datetime.now(timezone.utc).timestamp()
+        start_ts = start_dt.timestamp()
+        hours_elapsed = (now_ts - start_ts) / 3600
+        current_hour = max(1, int(hours_elapsed) + 1)
+        
+        # Check if we already have a snapshot for this hour
+        snapshots = load_session_snapshots()
+        if snapshots and snapshots[-1].get("hour") == current_hour:
+            return None  # Already captured for this hour
+        
+        # Time to capture a new snapshot
+        snapshot = await take_session_snapshot(start_dt, end_dt, current_hour)
+        saved_path = save_session_snapshot(snapshot)
+        
+        return snapshot
+    except Exception:
+        return None
+
+
+def get_live_trend_indicator() -> str:
+    """Get a compact trend indicator for display during session.
+
+    Returns:
+        Formatted trend string like "↑ 95% (Hour 2)" or "↓ 88% ⚠ gaps emerging"
+    """
+    try:
+        snapshots = load_session_snapshots()
+        if not snapshots:
+            return ""
+        
+        current = snapshots[-1]
+        current_hour = current.get("hour", 1)
+        accuracy = int(current.get("facts", {}).get("accuracy", 1.0) * 100)
+        gaps = current.get("gap_count", 0)
+        
+        # Show trend indicator
+        if len(snapshots) > 1:
+            prev_accuracy = int(snapshots[-2].get("facts", {}).get("accuracy", 1.0) * 100)
+            if accuracy > prev_accuracy:
+                indicator = f"↑ {accuracy}% (H{current_hour})"
+            elif accuracy < prev_accuracy:
+                indicator = f"↓ {accuracy}% (H{current_hour})"
+            else:
+                indicator = f"→ {accuracy}% (H{current_hour})"
+        else:
+            indicator = f"📊 {accuracy}% (H{current_hour})"
+        
+        # Add gap warning
+        if gaps > 0:
+            indicator += f" ⚠ {gaps} gap{'s' if gaps != 1 else ''}"
+        
+        return indicator
+    except Exception:
+        return ""
+
+
+def display_hourly_progress() -> str:
+    """Display current session progress for mid-session checks.
+
+    Returns:
+        Formatted progress string
+    """
+    try:
+        snapshots = load_session_snapshots()
+        if not snapshots:
+            return ""
+        
+        current = snapshots[-1]
+        current_hour = current.get("hour", 1)
+        facts = current.get("facts", {})
+        
+        # Build compact progress line
+        calls = facts.get("total_calls", 0)
+        accuracy = int(facts.get("accuracy", 1.0) * 100)
+        gaps = current.get("gap_count", 0)
+        cost = facts.get("total_cost", 0)
+        saved = facts.get("total_saved", 0)
+        
+        line = f"【Hour {current_hour}】 {calls} calls · {accuracy}% accuracy"
+        if gaps > 0:
+            line += f" · {gaps} gap{'s' if gaps != 1 else ''}"
+        line += f" · ${saved:.2f} saved"
+        
+        return line
+    except Exception:
+        return ""

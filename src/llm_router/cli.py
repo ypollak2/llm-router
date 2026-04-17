@@ -34,6 +34,8 @@ Usage:
     llm-router budget remove <p>     — clear the cap for provider p
     llm-router last [--count N]      — show your last N routing decisions (default: 5)
     llm-router replay [--limit N]    — full transcript of routing decisions this session
+    llm-router snapshot [--date DATE] — mid-session monitoring: accuracy trends and gap detection
+    llm-router retrospect [--weekly] — IAF-style session debrief with routing directives
     llm-router verify                — end-to-end health check (30 seconds)
 """
 
@@ -150,6 +152,12 @@ def main() -> None:
     elif args and args[0] == "last":
         from llm_router.commands.last import main as _last_main
         _last_main(args[1:])
+    elif args and args[0] == "retrospect":
+        from llm_router.commands.retrospect import main as _retrospect_main
+        _retrospect_main(args[1:])
+    elif args and args[0] == "snapshot":
+        from llm_router.commands.snapshot import main as _snapshot_main
+        _snapshot_main(args[1:])
     else:
         # Default: start the MCP server (original behavior)
         from llm_router.server import main as _mcp_main
