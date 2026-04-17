@@ -69,25 +69,48 @@ LLM_ROUTER_CLAUDE_SUBSCRIPTION=true
 
 ---
 
-## New in v6.0
+## New in v6.0 — "Visible"
 
-- **Live Routing HUD** — Real-time statusline shows every routing decision with confidence score:
-  - Format: `→ haiku [87%] (code/simple) $0.001 ⚡`
-  - Performance: <5ms render time, <50 char width
-  - Works with NO_COLOR environment variable
-- **Session Replay Command** — `llm-router replay` prints formatted transcript of all routing decisions:
-  - Shows timestamp, model, confidence (as stars), reasoning, cost, and quality score
-  - Useful for auditing sessions and understanding what was routed where
-  - Optional filters: `--session SESSION_ID`, `--limit N`
-- **Health Check Command** — `llm-router verify` runs 30-second end-to-end system test:
-  - Verifies configuration, database, Ollama, OpenAI, Gemini API keys
-  - Shows hook installation status and last 5 routing decisions
-  - Returns zero exit code on success, non-zero on failure
-- **Design System** — Comprehensive terminal styling with ANSI colors, Unicode symbols, and components:
-  - Confidence visualization (★★★★★☆☆☆☆☆ format)
-  - Savings cards, profile headers, alert boxes
-  - Full accessibility support (no color-only info, 4.5:1 contrast minimum)
-  - Reference: [docs/DESIGN_SYSTEM_v6.md](docs/DESIGN_SYSTEM_v6.md)
+**Theme:** Every routing decision should be legible. v6.0 makes llm-router visible through CLI commands.
+
+- **`llm-router replay` — Session Routing Transcript**
+  ```bash
+  $ llm-router replay --limit 5
+  ```
+  Prints formatted transcript of all routed decisions in a session with:
+  - Timestamp, model, task type, complexity level
+  - Confidence score (star visualization: ★★★★★★★★☆☆ = 87%)
+  - Cost per decision and cumulative cost
+  - Reasoning code and quality scores (when available)
+  
+  Example output:
+  ```
+  14:30 → routed to haiku (code/simple)
+      ★ Confidence: ★★★★★★★★☆☆ 87%
+      🧠 Reasoning: Simple standard library task
+      💰 Cost: $0.0001
+      ✅ Quality: 97% (excellent)
+  ```
+
+- **`llm-router verify` — Health Check CLI**
+  ```bash
+  $ llm-router verify
+  ```
+  Runs end-to-end system diagnostics (30 seconds):
+  - Configuration status (env vars, config.yaml, API keys)
+  - Database health (size, last write, record count)
+  - Provider availability (Ollama, OpenAI, Gemini, etc.)
+  - Hook installation and execution status
+  - Last 5 routing decisions with costs
+  - Summary: shows any issues that need attention
+  
+  Example: `✅ Ollama running with 4 models · ✅ OpenAI API configured · ❌ Gemini key missing`
+
+- **Terminal Styling System** — Foundation for v6.0 visibility
+  - ANSI color codes with NO_COLOR support (accessibility)
+  - Unicode symbol library for routing flow (→ ⚡), memory (💾 🧠), quality (★ ✓ ⚠)
+  - Formatted components: replay transcript, health check, future dashboards
+  - Design tokens in `.claude-plugin/design-tokens.json`
 
 ---
 
@@ -175,6 +198,29 @@ Under the hood, every prompt goes through a `UserPromptSubmit` hook before your 
 
 ## CLI Commands (v6.0+)
 
+### See What Model Just Handled Your Request
+
+```bash
+llm-router last                      # Show your last 5 routing decisions
+llm-router last --count 10           # Show last 10 decisions
+```
+
+**Real-time feedback on every routed decision:**
+
+```
+══════════════════════════════════════════════════════════
+  5 Most Recent Routing Decisions
+══════════════════════════════════════════════════════════
+
+just now   → routed to ollama/gemma4:latest (query/simple) - FREE
+2 min ago  → routed to openai/gpt-4o-mini (code/simple) - $0.0010
+5 min ago  → routed to openai/gpt-4o (analysis/moderate) - $0.0062
+```
+
+**Answer: "What model handled my last question?"** → Run `llm-router last`
+
+---
+
 ### Session Replay — Review all routing decisions
 
 ```bash
@@ -250,12 +296,9 @@ Recent Decisions
 ✅ No issues detected. You're good! 🚀
 ```
 
-### Live Statusline HUD
+### Summary of v6.0 Visibility
 
-When you run a routed prompt in Claude Code, the statusline shows the routing decision in real time:
-
-```
-→ haiku [87%] (code/simple) $0.001 ⚡
+The **three CLI commands** make every routing decision visible:
 ```
 
 - `→` — routing arrow

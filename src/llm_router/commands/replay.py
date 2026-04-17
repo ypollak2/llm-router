@@ -61,7 +61,7 @@ def fetch_routing_decisions(
     Args:
         db_path: Path to usage.db
         limit: Maximum decisions to fetch
-        session_id: Optional session ID to filter by
+        session_id: Optional session ID to filter by (currently unused - no session tracking)
 
     Returns:
         List of routing decision dicts
@@ -74,12 +74,8 @@ def fetch_routing_decisions(
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
 
-        query = "SELECT * FROM routing_decisions WHERE is_simulated = 0"
+        query = "SELECT * FROM routing_decisions WHERE success = 1"
         params: list = []
-
-        if session_id:
-            query += " AND session_id = ?"
-            params.append(session_id)
 
         query += " ORDER BY timestamp DESC LIMIT ?"
         params.append(limit)
@@ -116,16 +112,17 @@ def format_decision_line(decision: dict) -> str:
     # Decision header with timestamp
     timestamp = format_timestamp(decision.get("timestamp", ""))
     task = decision.get("task_type", "unknown")
-    complexity = decision.get("task_complexity", "unknown")
+    complexity = decision.get("complexity", "unknown")
+    model = decision.get("final_model", "unknown")
 
     lines.append(
         f"{timestamp} {Symbol.ARROW.value} "
-        f"routed to {Color.ORCHESTRATE_BLUE(decision.get('model', 'unknown'))} "
+        f"routed to {Color.ORCHESTRATE_BLUE(model)} "
         f"({task}/{complexity})"
     )
 
     # Confidence
-    confidence = decision.get("confidence_percent", 0)
+    confidence = decision.get("classifier_confidence", 0) * 100
     level = ConfidenceLevel.MEDIUM
     stars = level.stars(confidence)
     lines.append(
@@ -133,7 +130,7 @@ def format_decision_line(decision: dict) -> str:
     )
 
     # Reasoning
-    reason = decision.get("reason_code") or decision.get("reason", "N/A")
+    reason = decision.get("reason_code", "N/A")
     lines.append(f"    {Symbol.BRAIN.value} Reasoning: {reason}")
 
     # Cost
@@ -143,7 +140,7 @@ def format_decision_line(decision: dict) -> str:
     )
 
     # Quality score (if available)
-    quality = decision.get("quality_score")
+    quality = decision.get("judge_score")
     if quality is not None:
         quality_pct = int(quality * 100)
         if quality_pct >= 90:

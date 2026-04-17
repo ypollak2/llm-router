@@ -32,6 +32,9 @@ Usage:
     llm-router budget                — show all providers with spend, cap, pressure
     llm-router budget set <p> <amt>  — set monthly cap in USD for provider p
     llm-router budget remove <p>     — clear the cap for provider p
+    llm-router last [--count N]      — show your last N routing decisions (default: 5)
+    llm-router replay [--limit N]    — full transcript of routing decisions this session
+    llm-router verify                — end-to-end health check (30 seconds)
 """
 
 from __future__ import annotations
@@ -144,6 +147,9 @@ def main() -> None:
     elif args and args[0] == "verify":
         from llm_router.commands.verify import main as _verify_main
         _verify_main(args[1:])
+    elif args and args[0] == "last":
+        from llm_router.commands.last import main as _last_main
+        _last_main(args[1:])
     else:
         # Default: start the MCP server (original behavior)
         from llm_router.server import main as _mcp_main

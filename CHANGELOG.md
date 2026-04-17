@@ -4,50 +4,51 @@
 
 ### Added
 
-- **Live Routing HUD** — Real-time statusline visibility for every routing decision
-  - New `src/llm_router/statusline_hud.py` module with `initialize_hud()` and `record_routing_decision()` 
-  - Displays: model selected, confidence %, task type/complexity, cost, reasoning
-  - Integrated into auto-route hook for session-level initialization
-  - Records decisions in routing workflow for immediate feedback
+- **Session Replay CLI** — Complete transcript of routing decisions
+  - New command: `llm-router replay [--limit N]`
+  - Shows: timestamp, routed model, task type, confidence %, reasoning, cost, quality scores
+  - Formatted with color-coded output and Unicode symbols
+  - Summary: total calls, cumulative cost, projected savings
+  - Queries `routing_decisions` table for accurate historical data
 
-- **Session Replay CLI** — Transcript view of all routing decisions
-  - New command: `llm-router replay [--session ID] [--limit N]`
-  - Shows: timestamps, model selection, confidence, reasoning, cost, quality scores
-  - Session summary with total cost and savings calculation
-  - Stored in routing_decisions table via `record_routing_decision()`
-
-- **Health Check CLI** — End-to-end system verification (30 seconds)
+- **Health Check CLI** — End-to-end system diagnostics
   - New command: `llm-router verify`
-  - Checks: configuration, database, active providers (Ollama/OpenAI/Gemini), hooks, recent decisions
-  - Displays model availability, hook status, live routing chain
-  - Helps diagnose connectivity and configuration issues
+  - Verifies: configuration, database, Ollama, OpenAI API, Gemini API, hook status
+  - Shows: installed hooks (auto-route, session-end, enforce-route) and their status
+  - Displays: last 5 routing decisions with costs
+  - Quick diagnostics for setup troubleshooting (30 seconds)
 
-- **Terminal Styling Design System** — Reusable ANSI formatting
-  - New `src/llm_router/terminal_style.py` with Color, Symbol, ConfidenceLevel classes
-  - Unicode symbols: ✅ ❌ ⭐ 💾 🧠 💰 → ✓
-  - Color palette: blues, greens, reds with semantic meaning
-  - Confidence visualizations (star ratings 0-10)
-  - Applied to HUD, CLI commands, terminal output
+- **Routing Decision Recording** — Track all routing calls automatically
+  - New `src/llm_router/statusline_hud.py` with `record_routing_decision()` function
+  - Integrated into routing workflow to log model, confidence, task, cost, reasoning
+  - Enables replay and verify commands with complete historical data
+  - Stored in `routing_decisions` table with proper schema mapping
+
+- **Terminal Styling Design System** — Professional ANSI formatting
+  - New `src/llm_router/terminal_style.py` with Color, Symbol, ConfidenceLevel enums
+  - Unicode symbols: ✓ ✅ ❌ 💾 🧠 💰 → ★ ⚡ etc.
+  - ANSI color codes with NO_COLOR accessibility fallback
+  - Confidence visualizations as star ratings (★★★★★★★★☆☆)
+  - Semantic colors: orchestrate_blue, memory_amber, confidence_green, warning_red
 
 ### Changed
 
-- **Hook Integration** — auto-route.py now initializes HUD and routing.py records decisions
-  - Calls `initialize_hud()` at session start
-  - Calls `record_routing_decision()` after each routing selection
-  - Full routing pipeline visibility: classify → select → route → **record** → respond
+- **Routing Pipeline Recording** — routing.py now records decisions after selection
+  - Calls `record_routing_decision()` with model, confidence, task, cost, reason
+  - Enables historical analysis of routing patterns and decisions
+  - Data persisted to routing_decisions table for CLI access
 
-- **README.md** — Comprehensive feature and command documentation
-  - New "New in v6.0" section highlighting visibility features
-  - New "CLI Commands" section with replay/verify usage and sample output
-  - Updated "Roadmap" section with Phase 6 (v6.0-v7.0) six-month plan
-  - Competitive positioning vs NadirClaw and RouteLLM
+- **Documentation** — Refocused on CLI-based visibility
+  - Updated README.md: "New in v6.0" now emphasizes replay and verify commands
+  - "CLI Commands" section with full examples and sample output
+  - Updated roadmap with v6.0-v7.0 six-month phases
 
-### Technical Notes
+### Design Notes
 
-- HUD state initialized per session, persisted via routing_decisions table
-- record_routing_decision() is synchronous (called from async routing context)
-- Confidence stored as 0.0-1.0 float, rendered as star ratings (0-10 stars)
-- Terminal styling uses ANSI codes compatible with Claude Code statusline and standard terminals
+- **CLI-First Visibility**: v6.0 focuses on making routing decisions legible through CLI commands (`replay`, `verify`), not statusline overlays
+- **No Statusline HUD**: Architectural limitation of Claude Code hooks prevents statusline updates; focus is CLI commands instead
+- **Full Auditability**: Every routing decision is logged and queryable via `llm-router replay`
+- **System Health**: `llm-router verify` is the quick health check for setup validation and troubleshooting
 
 ## [5.5.1] - 2026-04-15
 
