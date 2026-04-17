@@ -415,6 +415,41 @@ def _preflight_check() -> str:
     return "\n".join(lines)
 
 
+def _format_learned_memory() -> str:
+    """Format learned routing profiles for injection into session banner.
+
+    Loads ~/.llm-router/learned_routes.json and formats as:
+    【ROUTING MEMORY】
+      security_review → opus (learned from 3 corrections)
+      ...
+    """
+    try:
+        learned_path = os.path.join(STATE_DIR, "learned_routes.json")
+        if not os.path.exists(learned_path):
+            return ""
+
+        with open(learned_path) as f:
+            learned = json.load(f)
+
+        if not learned:
+            return ""
+
+        lines = ["\n【ROUTING MEMORY】"]
+        for task_type, route_data in sorted(learned.items()):
+            model = route_data.get("model", "?")
+            confidence = route_data.get("confidence", 0)
+            source = route_data.get("source", "?")
+            model_short = model.split("/", 1)[-1] if "/" in model else model
+            lines.append(
+                f"  {task_type:<20} → {model_short:<20} "
+                f"(learned from {confidence} {source})"
+            )
+        lines.append("  Use llm_reroute to override.")
+        return "\n".join(lines)
+    except Exception:
+        return ""
+
+
 def _maybe_refresh_benchmarks_bg() -> None:
     """Trigger a background benchmark refresh if the local file is stale.
 
@@ -504,6 +539,7 @@ def main() -> None:
         banner = BANNER_API_KEYS
 
     hints += usage_hint
+    hints += _format_learned_memory()
     hints += _weekly_digest()
     hints += _latency_hint()
     hints += _preflight_check()

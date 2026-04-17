@@ -1,5 +1,51 @@
 # Changelog
 
+## v6.1.0 — Memory System (2026-04-17)
+
+### Added
+
+- **Personal Routing Memory** — Learn from user corrections and build persistent routing profiles
+  - New module: `src/llm_router/memory/profiles.py`
+  - Tracks user corrections via `llm_reroute` tool in corrections table
+  - Aggregates by task_type: after 3+ corrections for same task, locks a routing override
+  - Stores to `~/.llm-router/learned_routes.json` for persistence across sessions
+
+- **Session Memory Injection** — Display learned routes at session start
+  - New function in `session-start.py`: `_format_learned_memory()`
+  - Shows learned routes with confidence levels in 【ROUTING MEMORY】 banner
+  - Reminds users to use `llm_reroute` to override if needed
+
+- **Learned Route Application** — Hard override in auto-route hook
+  - New functions in `auto-route.py`: `_load_learned_routes()`, `_check_learned_override()`
+  - If task_type has learned route with confidence >= 3, applies immediately before normal routing
+  - Respects user's learned patterns: session learns, next session applies
+
+- **Community Profile Sharing** — Share and import learned routing profiles
+  - New tool: `llm_share_profile()` — export your learned routes for community
+  - New tool: `llm_import_profile(url)` — import shared profiles from URLs
+  - Enables community-driven routing patterns and best practices
+
+### Fixed
+
+- **Critical Hotfix** — Missing pytest import in test_hook_health.py
+  - Added `import pytest` to fix NameError on @pytest.mark usage
+
+### Changed
+
+- **Session-End Hook Enhanced** — Build and save learned profiles
+  - Calls `_build_and_save_learned_profile()` before session summary
+  - Updates `~/.llm-router/learned_routes.json` with new corrections
+
+### Tests
+
+- New test suite: `tests/test_memory.py` (11 tests)
+  - Corrections history fetching, profile building, persistence
+  - Threshold validation (< 3 not applied, >= 3 locked)
+  - Save/load round-trip with data integrity
+  - All tests passing; full suite: 1009 tests passing
+
+---
+
 ## v6.0.5 — Mid-Session Monitoring (2026-04-17)
 
 ### Added

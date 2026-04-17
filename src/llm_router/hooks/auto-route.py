@@ -1139,6 +1139,64 @@ def _prior_violation_notice(pending: dict | None) -> str:
     )
 
 
+def _load_learned_routes() -> dict[str, dict]:
+    """Load learned routing overrides from ~/.llm-router/learned_routes.json.
+
+    Returns:
+        Dict mapping task_type → {model, confidence, source, last_correction}
+        Empty dict if file doesn't exist or is invalid.
+    """
+    try:
+        learned_path = Path.home() / ".llm-router" / "learned_routes.json"
+        if not learned_path.exists():
+            return {}
+        return json.loads(learned_path.read_text())
+    except Exception:
+        return {}
+
+
+def _check_learned_override(task_type: str, learned_routes: dict) -> tuple[str, str] | None:
+    """Check if task_type has a learned route override with confidence >= 3.
+
+    Args:
+        task_type: The classified task type (e.g., "code", "analyze")
+        learned_routes: Loaded learned routes dict
+
+    Returns:
+        Tuple of (tool, method_suffix) if override applies, else None
+    """
+    if task_type not in learned_routes:
+        return None
+
+    route_data = learned_routes[task_type]
+    confidence = route_data.get("confidence", 0)
+
+    # Only apply if confidence >= 3 (locked in)
+    if confidence < 3:
+        return None
+
+    model = route_data.get("model", "")
+    if not model:
+        return None
+
+    # Infer tool from model name
+    tool = "llm_route"  # fallback
+    if "claude" in model.lower():
+        # Claude models shouldn't be used here (subscription mode routes via MCP anyway)
+        # but if a user learned this, respect it
+        tool = "llm_route"
+    elif "gpt" in model.lower() or "openai" in model.lower():
+        # Likely a coding/analysis task for external model
+        tool = "llm_code"
+    elif "gemini" in model.lower():
+        tool = "llm_query"  # or llm_analyze, but query is conservative
+    else:
+        tool = "llm_route"
+
+    method_suffix = f" [learned route: {model}]"
+    return (tool, method_suffix)
+
+
 # ── Entry Point ──────────────────────────────────────────────────────────────
 
 _DEBUG_LOG = Path.home() / ".llm-router" / "auto-route-debug.log"
@@ -1230,6 +1288,15 @@ def main() -> None:
         complexity = result["complexity"]
         method     = result["method"]
         tool       = TOOL_MAP.get(task_type, "llm_route")
+
+        # ── v6.1: Check for learned routing overrides ─────────────────────────────
+        learned_routes = _load_learned_routes()
+        learned_override = _check_learned_override(task_type, learned_routes)
+        if learned_override:
+            tool, method_suffix = learned_override
+            method = f"learned{method_suffix}"
+        # ────────────────────────────────────────────────────────────────────────
+
         # Save classification so the next turn can inherit if it's a continuation
         _save_last_route(session_id, task_type, complexity, tool)
 

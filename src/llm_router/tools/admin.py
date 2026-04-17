@@ -4,6 +4,10 @@ llm_cache_clear, llm_quality_report, llm_health, llm_hook_health, llm_providers.
 from __future__ import annotations
 
 import asyncio
+import json
+import urllib.request
+from datetime import datetime, timezone
+from pathlib import Path
 
 from mcp.server.fastmcp import Context
 
@@ -1017,6 +1021,119 @@ async def llm_budget() -> str:
         return f"Budget Oracle error: {e}"
 
 
+async def llm_share_profile() -> str:
+    """Share your learned routing profile with the community.
+
+    Exports ~/.llm-router/learned_routes.json and prepares it for upload
+    to a shared community repository. Useful for publishing routing patterns
+    you've learned that may benefit other llm-router users.
+
+    Returns:
+        Path to exported profile and upload instructions
+    """
+    from llm_router.memory.profiles import load_learned_profile, LEARNED_ROUTES_FILE
+
+    try:
+        profile = load_learned_profile()
+        if not profile:
+            return "No learned routes to share. Build your profile first with corrections."
+
+        # Format for community sharing
+        export_data = {
+            "version": "6.1",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "routes": {
+                task: {
+                    "model": route.model,
+                    "confidence": route.confidence,
+                    "source": route.source,
+                }
+                for task, route in profile.items()
+            },
+        }
+
+        # Save to temp location for export
+        export_path = Path.home() / ".llm-router" / "profile_export.json"
+        export_path.write_text(json.dumps(export_data, indent=2))
+
+        return (
+            f"✅ Profile exported to: {export_path}\n\n"
+            f"Share at: https://github.com/ypollak2/llm-router-profiles\n"
+            f"Your routes:\n"
+            + "\n".join(
+                f"  • {task}: {route.model} (confidence={route.confidence})"
+                for task, route in sorted(profile.items())
+            )
+        )
+    except Exception as e:
+        return f"Export error: {e}"
+
+
+async def llm_import_profile(url: str = "") -> str:
+    """Import a learned routing profile from community or URL.
+
+    Imports a shared profile and merges it with your existing learned routes.
+    Community profiles must have confidence >= 2 to be imported (strict validation).
+
+    Args:
+        url: URL to a profile JSON file (optional; defaults to community latest)
+
+    Returns:
+        Merge summary and new routes imported
+    """
+    try:
+        from llm_router.memory.profiles import load_learned_profile, save_learned_profile, LearnedRoute
+
+        # Load existing profile
+        existing = load_learned_profile()
+
+        # Default to latest community profile if no URL provided
+        if not url:
+            return "Profile import requires a URL. Share your profile at: https://github.com/ypollak2/llm-router-profiles"
+
+        # Fetch and parse remote profile
+        try:
+            with urllib.request.urlopen(url, timeout=10) as resp:
+                remote_data = json.loads(resp.read().decode())
+        except Exception as e:
+            return f"Failed to fetch profile from {url}: {e}"
+
+        # Validate and merge
+        routes = remote_data.get("routes", {})
+        imported = 0
+        skipped = 0
+
+        for task, route_data in routes.items():
+            confidence = route_data.get("confidence", 0)
+            if confidence < 2:
+                skipped += 1
+                continue  # Skip low-confidence routes
+
+            # Don't override existing high-confidence routes
+            if task in existing and existing[task].confidence >= 3:
+                skipped += 1
+                continue
+
+            existing[task] = LearnedRoute(
+                model=route_data.get("model", ""),
+                confidence=confidence,
+                source=f"imported from {url}",
+                last_correction=datetime.now(timezone.utc).isoformat(),
+            )
+            imported += 1
+
+        # Save merged profile
+        if imported > 0:
+            save_learned_profile(existing)
+
+        return (
+            f"✅ Imported {imported} routes, skipped {skipped} (low confidence)\n"
+            f"Current profile now has {len(existing)} routes total"
+        )
+    except Exception as e:
+        return f"Import error: {e}"
+
+
 async def llm_retrospect(session_id: str = "", weekly: bool = False, no_directives: bool = False) -> str:
     """Run an IAF-style session retrospective.
 
@@ -1104,3 +1221,7 @@ def register(mcp, should_register=None) -> None:
 
     if gate("llm_retrospect"):
         mcp.tool()(llm_retrospect)
+    if gate("llm_share_profile"):
+        mcp.tool()(llm_share_profile)
+    if gate("llm_import_profile"):
+        mcp.tool()(llm_import_profile)

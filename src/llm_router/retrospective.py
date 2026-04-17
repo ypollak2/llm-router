@@ -99,20 +99,40 @@ def fetch_session_decisions(
 def fetch_session_corrections(
     start: datetime, end: datetime
 ) -> list[dict]:
-    """Fetch all manual routing corrections (llm_rate feedback) in the session.
+    """Fetch all manual routing corrections (llm_reroute feedback) in the session.
 
-    Note: Currently no rate table exists; this is a placeholder for future
-    integration with the quality feedback system.
+    Queries the corrections table populated by llm_reroute MCP tool.
 
     Args:
         start: Session start datetime (UTC)
         end: Session end datetime (UTC)
 
     Returns:
-        List of correction dicts (empty until rate table is implemented)
+        List of correction dicts with: original_model, corrected_model, reason, timestamp
     """
-    # TODO: Implement once quality.py has a rate/feedback table
-    return []
+    if not DB_PATH.exists():
+        return []
+
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+
+        start_iso = start.isoformat()
+        end_iso = end.isoformat()
+
+        rows = conn.execute(
+            """
+            SELECT * FROM corrections
+            WHERE timestamp >= ? AND timestamp <= ?
+            ORDER BY timestamp ASC
+            """,
+            (start_iso, end_iso),
+        ).fetchall()
+        conn.close()
+
+        return [dict(row) for row in rows]
+    except sqlite3.Error:
+        return []
 
 
 # ── IAF Debrief Steps ──────────────────────────────────────────────────────

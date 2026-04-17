@@ -611,6 +611,29 @@ def _read_session_spend() -> dict | None:
         return None
 
 
+def _build_and_save_learned_profile() -> None:
+    """Build learned routing profile from corrections and save to disk.
+
+    This is called at session-end to update ~/.llm-router/learned_routes.json
+    with any new routing patterns learned from user corrections (llm_reroute).
+    """
+    try:
+        # Import here to avoid dependency issues in hook context
+        import sys
+        sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
+
+        from llm_router.memory.profiles import (
+            build_learned_profile,
+            save_learned_profile,
+        )
+
+        profile = build_learned_profile()
+        if profile:
+            save_learned_profile(profile)
+    except Exception:
+        pass  # Graceful failure — never break session-end
+
+
 def main() -> None:
     try:
         json.load(sys.stdin)
@@ -623,6 +646,7 @@ def main() -> None:
     start, current, is_live     = _get_cc_usage()
     _sync_import_savings_log()          # flush JSONL before cumulative query
     cumulative                  = _query_cumulative_savings()
+    _build_and_save_learned_profile()   # v6.1: build profile from corrections
 
     has_cumulative = any(calls > 0 for _, calls, *_ in cumulative)
 
