@@ -2,10 +2,8 @@
 
 import json
 import sqlite3
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
-
-import pytest
 
 from llm_router.memory.profiles import (
     LearnedRoute,
@@ -13,7 +11,6 @@ from llm_router.memory.profiles import (
     fetch_corrections_history,
     load_learned_profile,
     save_learned_profile,
-    CONFIDENCE_THRESHOLD,
 )
 
 

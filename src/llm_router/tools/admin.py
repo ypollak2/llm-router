@@ -1031,7 +1031,7 @@ async def llm_share_profile() -> str:
     Returns:
         Path to exported profile and upload instructions
     """
-    from llm_router.memory.profiles import load_learned_profile, LEARNED_ROUTES_FILE
+    from llm_router.memory.profiles import load_learned_profile
 
     try:
         profile = load_learned_profile()
