@@ -366,14 +366,25 @@ async def llm_route(
         reason=classification.reasoning,
     )
 
-    # Step 5: Build response with classification + routing info
+    # Step 5: Build response with visible routing indicator
     total_cost = classification.classifier_cost_usd + resp.cost_usd
+    
+    # Add visible routing indicator footer
+    model_name = resp.model.split("/")[-1] if "/" in resp.model else resp.model
+    routing_footer = (
+        f"🔀 **Routed to:** {model_name} ({resolved_task_type.value}/{classification.complexity.value.lower()}) · "
+        f"Cost: ${resp.cost_usd:.4f}"
+    )
+    
     lines = [
         classification.header(),
         resp.header(),
         f"> **Total cost: ${total_cost:.6f}**",
         "",
         resp.content,
+        "",
+        "---",
+        routing_footer,
     ]
 
     return "\n".join(lines)
@@ -495,12 +506,23 @@ async def llm_auto(
     )
 
     total_cost = classification.classifier_cost_usd + resp.cost_usd
+    
+    # Add visible routing indicator footer
+    model_name = resp.model.split("/")[-1] if "/" in resp.model else resp.model
+    routing_footer = (
+        f"🔀 **Routed to:** {model_name} ({resolved_task_type.value}/{classification.complexity.value.lower()}) · "
+        f"Cost: ${resp.cost_usd:.4f}"
+    )
+    
     lines = [
         classification.header(),
         resp.header(),
         f"> **Total cost: ${total_cost:.6f}** | routed via llm_auto",
         "",
         resp.content,
+        "",
+        "---",
+        routing_footer,
     ]
 
     # Periodic savings envelope — show every 5 calls so value is visible without
@@ -510,7 +532,7 @@ async def llm_auto(
     if tasks_routed > 0 and tasks_routed % 5 == 0:
         net = lifetime["net_savings"]
         lines.append(
-            f"\n---\n📊 **{tasks_routed} tasks routed** — ~${net:.2f} net saved lifetime. "
+            f"\n📊 **{tasks_routed} tasks routed** — ~${net:.2f} net saved lifetime. "
             "Run `llm_savings` for the full breakdown."
         )
 

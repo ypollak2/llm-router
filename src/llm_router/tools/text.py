@@ -180,7 +180,21 @@ async def llm_query(
         temperature=temperature, max_tokens=max_tokens, ctx=ctx,
         caller_context=context,
     )
-    return f"{_explain_prefix(resp, 'query')}{resp.header()}\n\n{resp.content}"
+    
+    # Add visible routing indicator footer
+    model_name = resp.model.split("/")[-1] if "/" in resp.model else resp.model
+    routing_footer = f"🔀 **Routed to:** {model_name} · Cost: ${resp.cost_usd:.4f}"
+    
+    lines = [
+        _explain_prefix(resp, 'query'),
+        resp.header(),
+        "",
+        resp.content,
+        "",
+        "---",
+        routing_footer,
+    ]
+    return "\n".join(lines)
 
 
 async def llm_research(
@@ -224,12 +238,21 @@ async def llm_research(
         system_prompt=system_prompt, max_tokens=max_tokens,
         temperature=0.3, ctx=ctx, caller_context=context,
     )
+    
+    # Add visible routing indicator footer
+    model_name = resp.model.split("/")[-1] if "/" in resp.model else resp.model
+    routing_footer = f"🔀 **Routed to:** {model_name} · Cost: ${resp.cost_usd:.4f}"
+    
     result = _explain_prefix(resp, "research") + resp.header() + "\n\n" + resp.content
     if resp.citations:
         result += "\n\n**Sources:**\n" + "\n".join(f"- {c}" for c in resp.citations)
+    
+    # Add routing footer before any warnings
+    result += "\n\n---\n" + routing_footer
+    
     if no_perplexity and "perplexity" not in resp.model.lower():
         result += (
-            "\n\n---\n⚠️  No PERPLEXITY_API_KEY — web search unavailable. "
+            "\n\n⚠️  No PERPLEXITY_API_KEY — web search unavailable. "
             "Escalated to PREMIUM non-web model (results may be stale). "
             "Set PERPLEXITY_API_KEY for live web search."
         )
@@ -267,7 +290,21 @@ async def llm_generate(
         system_prompt=system_prompt, temperature=temperature,
         max_tokens=max_tokens, ctx=ctx, caller_context=context,
     )
-    return f"{_explain_prefix(resp, 'generate')}{resp.header()}\n\n{resp.content}"
+    
+    # Add visible routing indicator footer
+    model_name = resp.model.split("/")[-1] if "/" in resp.model else resp.model
+    routing_footer = f"🔀 **Routed to:** {model_name} · Cost: ${resp.cost_usd:.4f}"
+    
+    lines = [
+        _explain_prefix(resp, 'generate'),
+        resp.header(),
+        "",
+        resp.content,
+        "",
+        "---",
+        routing_footer,
+    ]
+    return "\n".join(lines)
 
 
 async def llm_analyze(
@@ -302,7 +339,21 @@ async def llm_analyze(
         system_prompt=system_prompt, temperature=0.3,
         max_tokens=max_tokens, ctx=ctx, caller_context=context,
     )
-    return f"{_explain_prefix(resp, 'analyze')}{resp.header()}\n\n{resp.content}"
+    
+    # Add visible routing indicator footer
+    model_name = resp.model.split("/")[-1] if "/" in resp.model else resp.model
+    routing_footer = f"🔀 **Routed to:** {model_name} · Cost: ${resp.cost_usd:.4f}"
+    
+    lines = [
+        _explain_prefix(resp, 'analyze'),
+        resp.header(),
+        "",
+        resp.content,
+        "",
+        "---",
+        routing_footer,
+    ]
+    return "\n".join(lines)
 
 
 async def llm_code(
@@ -334,7 +385,21 @@ async def llm_code(
         system_prompt=system_prompt, temperature=0.2,
         max_tokens=max_tokens, ctx=ctx, caller_context=context,
     )
-    return f"{_explain_prefix(resp, 'code')}{resp.header()}\n\n{resp.content}"
+    
+    # Add visible routing indicator footer
+    model_name = resp.model.split("/")[-1] if "/" in resp.model else resp.model
+    routing_footer = f"🔀 **Routed to:** {model_name} · Cost: ${resp.cost_usd:.4f}"
+    
+    lines = [
+        _explain_prefix(resp, 'code'),
+        resp.header(),
+        "",
+        resp.content,
+        "",
+        "---",
+        routing_footer,
+    ]
+    return "\n".join(lines)
 
 
 async def llm_edit(
