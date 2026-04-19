@@ -1,0 +1,9 @@
+<svg width="800" height="180" xmlns="http://www.w3.org/2000/svg">
+  <!-- Black background -->
+  <rect width="800" height="180" fill="#000000"/>
+
+  <!-- Orange text: LLM ROUTER in block style -->
+  <text x="400" y="100" font-family="'Courier New', monospace" font-size="72" font-weight="bold" fill="#FFA500" text-anchor="middle" letter-spacing="8">
+    LLM ROUTER
+  </text>
+</svg>
