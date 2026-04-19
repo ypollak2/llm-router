@@ -381,102 +381,79 @@ uv run llm-router
 - Classification results ARE cached (complexity doesn't change with budget)
 - MCP tools return formatted strings, not structured data
 
-## MANDATORY Release Checklist
+## Automated Release Process
 
-**Every user-facing change MUST complete ALL steps before moving to the next feature.**
-This checklist is not optional. Missing any step means the release is incomplete.
+**One command to release:** `bash scripts/release.sh`
 
-### Step 1 — Tests (always)
+This script automates the entire release process with built-in verification and rollback:
+
+### What the script does (automatically)
+
+1. **Verifies version sync** — ensures pyproject.toml, plugin.json, and marketplace.json match
+2. **Runs full test suite** — tests must pass before release
+3. **Checks linting** — ruff validation
+4. **Builds & publishes to PyPI** — handles token from ~/.pypirc
+5. **Creates GitHub release** — tag, release, with changelog extracted
+6. **Runs post-release verification** — confirms PyPI availability, GitHub release exists, tests still pass
+
+### Release execution
+
 ```bash
-uv run pytest tests/ -q --ignore=tests/test_agno_integration.py
-uv run ruff check src/ tests/
+# Full automated release (recommended)
+bash scripts/release.sh
+
+# Or run individual steps manually (not recommended — use script instead)
+python3 scripts/verify-release.py  # Check current release status only
 ```
 
-### Step 2 — Hook deploy (after any hook change)
-```bash
-install -m 755 src/llm_router/hooks/auto-route.py ~/.claude/hooks/llm-router-auto-route.py
-install -m 755 src/llm_router/hooks/session-end.py ~/.claude/hooks/llm-router-session-end.py
-install -m 755 src/llm_router/hooks/session-start.py ~/.claude/hooks/llm-router-session-start.py
-install -m 755 src/llm_router/hooks/enforce-route.py ~/.claude/hooks/llm-router-enforce-route.py
+### Recovery on failure
+
+If release fails at any step (test failure, PyPI unavailable, GitHub API down):
+
+1. **Script automatically rolls back** — reverts version files, deletes git tags
+2. **Displays error** — shows which check failed and why
+3. **No manual cleanup needed** — local main is back to previous version
+4. **Fix and retry** — address the issue, then run `bash scripts/release.sh` again
+
+Example failure flow:
+```
+❌ Tests failed
+Rolled back to v6.1.0
+Fix the tests, then: bash scripts/release.sh
 ```
 
-### Step 3 — Version bump (every user-facing change)
-Bump `pyproject.toml` AND `.claude-plugin/plugin.json` to the same version:
+### Pre-release checklist (before running script)
+
+Ensure these are done BEFORE calling the release script:
+
+- [ ] All code changes committed: `git status` shows clean working tree
+- [ ] CHANGELOG.md updated with new version entry (or script extracts existing)
+- [ ] Version bumped in `pyproject.toml` (script validates it matches other files)
+- [ ] No uncommitted version changes (script will reject if they exist)
+
+### Version bumping
+
+When ready to release, bump the version in `pyproject.toml`:
+
 ```bash
-# Edit both files, then verify:
-python3 -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])"
-python3 -c "import json; print(json.load(open('.claude-plugin/plugin.json'))['version'])"
+# Patch release (bugfixes): 6.2.0 → 6.2.1
+# Minor release (features): 6.1.0 → 6.2.0
+# Major release (breaking): 5.0.0 → 6.0.0
+
+# Edit pyproject.toml:
+version = "X.Y.Z"
+
+# Then add CHANGELOG entry:
+## vX.Y.Z — Release title (YYYY-MM-DD)
+### Added/Fixed/Changed
+- bullet points
 ```
 
-### Step 4 — CHANGELOG.md (every version bump)
-Add entry at the top with: version, date, feature summary, technical notes.
+The script will then synchronize version across plugin.json and marketplace.json automatically.
 
-### Step 5 — README.md (when new features/commands are added)
-Update the feature list, command reference, and any version badges.
+### Post-release monitoring
 
-### Step 6 — Commit + push
-```bash
-git add -p   # stage deliberately, never `git add .`
-git commit -m "feat(vX.Y.Z): ..."
-git push
-```
-
-### Step 7 — PyPI publish (every version bump)
-```bash
-rm -rf dist/ && uv build
-PYPI_TOKEN=$(python3 -c "import configparser; c=configparser.ConfigParser(); c.read('/Users/yali.pollak/.pypirc'); print(c['pypi']['password'])")
-uv publish --token "$PYPI_TOKEN"
-```
-
-### Step 8 — Git tag + GitHub Release (every version bump)
-```bash
-# Tag
-git tag v$(python3 -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")
-git push origin --tags
-
-# GitHub Release (use --latest for the newest version)
-gh release create vX.Y.Z \
-  --title "vX.Y.Z — <headline>" \
-  --latest \
-  --notes "$(cat <<'NOTES'
-## What's new
-- bullet points from CHANGELOG
-
-## Upgrade
-\`\`\`bash
-pip install --upgrade claude-code-llm-router && llm-router install
-\`\`\`
-NOTES
-)"
-```
-
-### Step 9 — Bump marketplace.json (REQUIRED — controls plugin install version)
-```bash
-# .claude-plugin/marketplace.json "version" is what `claude plugin install llm-router`
-# uses to determine which git tag to clone. Without this, other machines stay on old versions.
-# Update the version field to match pyproject.toml:
-# "version": "X.Y.Z"
-```
-
-### Step 10 — Plugin reinstall (every version bump)
-```bash
-# Reinstall the CC plugin from the updated repo so the installed version matches
-claude plugin reinstall llm-router
-# Verify installed version matches pyproject.toml
-claude plugin list | grep llm-router
-```
-
----
-
-**Why this matters**: skipping CHANGELOG/version/PyPI/plugin leaves users on stale builds,
-breaks `pip install --upgrade`, and creates drift between installed plugin and live code.
-
----
-
-## Push to Production Rules (legacy — superseded by checklist above)
-
-Additional rules that apply on every push:
-
-1. **Bump server tool count in test_server.py** when adding new MCP tools
-2. **Push immediately after commit** — never let local main diverge from remote
-3. **One concern per commit** — routing changes, tool additions, and hook fixes each get their own commit
+After the script completes successfully:
+- Users can upgrade: `pip install --upgrade claude-code-llm-router`
+- Plugin updates automatically via marketplace
+- All three checks passed (PyPI ✅ GitHub ✅ Tests ✅)
