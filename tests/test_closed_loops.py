@@ -2,25 +2,18 @@
 
 from __future__ import annotations
 
-import json
 import tempfile
-from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
 
 import pytest
 
 from llm_router.cost import log_correction, get_correction_count
-from llm_router.memory.profiles import (
-    parse_routing_directives,
-    get_primary_model_for_tool,
-    LearnedRoute,
-    save_learned_profile,
-)
+from llm_router.memory.profiles import parse_routing_directives
 from llm_router.monitoring.live_tracker import get_trend_pressure
 from llm_router.retrospective import run_weekly_retrospective
 from llm_router.model_selector import select_model
-from llm_router.types import ClassificationResult, Complexity, RoutingProfile, QualityMode
+from llm_router.types import ClassificationResult, Complexity, QualityMode
 
 
 class TestCriticalBugFix:
@@ -187,13 +180,10 @@ class TestTrendPressureIntegration:
             classifier_latency_ms=50.0,
         )
 
-        # Without trend pressure: haiku
-        rec_no_trend = select_model(classification, 0.0, QualityMode.BALANCED, "haiku", 0.0)
-
         # With trend pressure: should consider escalation
         rec_with_trend = select_model(classification, 0.0, QualityMode.BALANCED, "haiku", 0.2)
 
-        # Both should be valid, trend doesn't force escalation under no budget pressure
+        # Should be valid, trend doesn't force escalation under no budget pressure
         # but reasoning should mention trend
         assert rec_with_trend.reasoning is not None
 

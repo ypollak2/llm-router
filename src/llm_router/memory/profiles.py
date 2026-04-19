@@ -196,8 +196,8 @@ async def get_primary_model_for_tool(tool_name: str) -> str:
         Model ID in "provider/model" format, or tool_name if unmapped
     """
     # Import here to avoid circular dependency
-    from llm_router.profiles import ROUTING_TABLE, complexity_to_profile
-    from llm_router.types import TaskType, RoutingProfile
+    from llm_router.profiles import ROUTING_TABLE
+    from llm_router.types import TaskType
     from llm_router import state
     
     # Map tool name to task type

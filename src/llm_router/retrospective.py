@@ -757,10 +757,8 @@ async def run_weekly_retrospective() -> dict:
         # Map root cause to recommended model escalation
         if root_cause in ("CLASSIFIER_ERROR", "ACCURACY_MISS"):
             recommended_model = "anthropic/claude-sonnet-4-6"  # escalate
-            confidence = "high" if count >= 5 else "medium"
         else:
             recommended_model = "anthropic/claude-sonnet-4-6"
-            confidence = "medium"
         
         directives.append({
             "type": "ROUTING_RULE",
