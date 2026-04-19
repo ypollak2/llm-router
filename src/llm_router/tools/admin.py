@@ -1,5 +1,5 @@
 """Management tools — llm_save_session, llm_set_profile, llm_usage, llm_cache_stats,
-llm_cache_clear, llm_quality_report, llm_health, llm_hook_health, llm_providers."""
+llm_cache_clear, llm_quality_report, llm_health, llm_hook_health, llm_providers, llm_gain."""
 
 from __future__ import annotations
 
@@ -10,6 +10,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from mcp.server.fastmcp import Context
+
+from llm_router.commands.gain import show_gain
 
 from llm_router.cache import get_cache
 from llm_router.codex_agent import is_codex_available
@@ -1174,6 +1176,33 @@ async def llm_retrospect(session_id: str = "", weekly: bool = False, no_directiv
         return f"Retrospective error: {e}"
 
 
+async def llm_gain(period: str = "week") -> str:
+    """Show token savings dashboard (RTK-style).
+
+    Displays comprehensive token savings metrics across all routing decisions,
+    showing actual costs vs. Opus baseline and efficiency multiplier.
+
+    Features:
+    - Total savings and efficiency multiplier
+    - Breakdown by model, complexity, and tool
+    - Daily trend analysis
+    - Cost comparisons
+
+    Args:
+        period: Time period to analyze: "today", "week" (default), "month", or "all"
+
+    Returns:
+        Formatted savings dashboard
+    """
+    try:
+        period_lower = period.lower().strip()
+        if period_lower not in ("today", "week", "month", "all"):
+            period_lower = "week"
+        return show_gain(period=period_lower)
+    except Exception as e:
+        return f"Savings dashboard error: {e}"
+
+
 def register(mcp, should_register=None) -> None:
     """Register management tools with the FastMCP instance.
 
@@ -1222,6 +1251,8 @@ def register(mcp, should_register=None) -> None:
 
     if gate("llm_retrospect"):
         mcp.tool()(llm_retrospect)
+    if gate("llm_gain"):
+        mcp.tool()(llm_gain)
     if gate("llm_share_profile"):
         mcp.tool()(llm_share_profile)
     if gate("llm_import_profile"):
