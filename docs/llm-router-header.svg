@@ -1,9 +1,24 @@
-<svg width="800" height="180" xmlns="http://www.w3.org/2000/svg">
+<svg width="1000" height="200" xmlns="http://www.w3.org/2000/svg">
   <!-- Black background -->
-  <rect width="800" height="180" fill="#000000"/>
+  <rect width="1000" height="200" fill="#000000"/>
 
-  <!-- Orange text: LLM ROUTER in block style -->
-  <text x="400" y="100" font-family="'Courier New', monospace" font-size="72" font-weight="bold" fill="#FFA500" text-anchor="middle" letter-spacing="8">
-    LLM ROUTER
+  <!-- Orange ASCII art in block characters -->
+  <text x="50" y="40" font-family="'Courier New', monospace" font-size="16" font-weight="bold" fill="#FFA500">
+ ██╗     ██╗     ███╗   ███╗        ██████╗  ██████╗ ██╗   ██╗████████╗███████╗██████╗
+  </text>
+  <text x="50" y="60" font-family="'Courier New', monospace" font-size="16" font-weight="bold" fill="#FFA500">
+ ██║     ██║     ████╗ ████║        ██╔══██╗██╔═══██╗██║   ██║╚══██╔══╝██╔════╝██╔══██╗
+  </text>
+  <text x="50" y="80" font-family="'Courier New', monospace" font-size="16" font-weight="bold" fill="#FFA500">
+ ██║     ██║     ██╔████╔██║        ██████╔╝██║   ██║██║   ██║   ██║   █████╗  ██████╔╝
+  </text>
+  <text x="50" y="100" font-family="'Courier New', monospace" font-size="16" font-weight="bold" fill="#FFA500">
+ ██║     ██║     ██║╚██╔╝██║        ██╔══██╗██║   ██║██║   ██║   ██║   ██╔══╝  ██╔══██╗
+  </text>
+  <text x="50" y="120" font-family="'Courier New', monospace" font-size="16" font-weight="bold" fill="#FFA500">
+ ███████╗███████╗██║ ╚═╝ ██║        ██║  ██║╚██████╔╝╚██████╔╝   ██║   ███████╗██║  ██║
+  </text>
+  <text x="50" y="140" font-family="'Courier New', monospace" font-size="16" font-weight="bold" fill="#FFA500">
+ ╚══════╝╚══════╝╚═╝     ╚═╝        ╚═╝  ╚═╝ ╚═════╝  ╚═════╝    ╚═╝   ╚══════╝╚═╝  ╚═╝
   </text>
 </svg>
