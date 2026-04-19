@@ -4,9 +4,8 @@ Compresses shell command outputs before they reach the LLM context,
 reducing context pollution by 80-90%.
 """
 
-import re
 from dataclasses import dataclass
-from typing import Callable, Optional
+from typing import Callable
 
 
 @dataclass
@@ -201,7 +200,7 @@ class RTKAdapter:
         """
         lines = output.split("\n")
         current = None
-        total = len([l for l in lines if l.strip()])
+        total = len([line_content for line_content in lines if line_content.strip()])
 
         for line in lines:
             if line.startswith("*"):
@@ -248,8 +247,8 @@ class RTKAdapter:
         Keep: errors only, skip warnings and intermediate steps
         """
         lines = output.split("\n")
-        errors = [l for l in lines if "error" in l.lower()]
-        summary = [l for l in lines if "finished" in l.lower() or "compiling" in l]
+        errors = [line_content for line_content in lines if "error" in line_content.lower()]
+        summary = [line_content for line_content in lines if "finished" in line_content.lower() or "compiling" in line_content]
 
         if errors:
             return "ERRORS:\n" + "\n".join(errors[:5])
@@ -287,8 +286,8 @@ class RTKAdapter:
 
         header = lines[0]
         containers = lines[1:]
-        running = [l for l in containers if "Up" in l]
-        exited = [l for l in containers if "Exited" in l]
+        running = [line_content for line_content in containers if "Up" in line_content]
+        exited = [line_content for line_content in containers if "Exited" in line_content]
 
         summary = f"{header}\n{len(running)} running, {len(exited)} exited"
         return summary
@@ -299,7 +298,7 @@ class RTKAdapter:
         Keep: last 10 lines + errors
         """
         lines = output.split("\n")
-        errors = [l for l in lines if "error" in l.lower()]
+        errors = [line_content for line_content in lines if "error" in line_content.lower()]
 
         if errors:
             return "Recent errors:\n" + "\n".join(errors[-5:])
@@ -337,7 +336,7 @@ class RTKAdapter:
         Keep: errors/failures only, skip compilation details
         """
         lines = output.split("\n")
-        errors = [l for l in lines if "error" in l.lower()]
+        errors = [line_content for line_content in lines if "error" in line_content.lower()]
 
         if errors:
             return "ERRORS:\n" + "\n".join(errors[:5])

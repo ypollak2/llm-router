@@ -1,7 +1,5 @@
 """Tests for RTK-style command output compression."""
 
-import pytest
-
 from llm_router.compression.rtk_adapter import RTKAdapter, CompressionResult
 
 
@@ -182,7 +180,6 @@ class TestRTKAdapter:
 
     def test_compression_ratio_calculation(self):
         """Test compression ratio is correctly calculated."""
-        adapter = RTKAdapter(enable=True)
         original = "x" * 400  # 100 tokens
         compressed = "y" * 40  # 10 tokens
 

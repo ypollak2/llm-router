@@ -1,0 +1,2557 @@
+- generic [ref=e2]:
+  - region
+  - generic [ref=e3]:
+    - link "Skip to content" [ref=e4] [cursor=pointer]:
+      - /url: "#start-of-content"
+    - banner [ref=e6]:
+      - heading "Navigation Menu" [level=2] [ref=e7]
+      - generic [ref=e8]:
+        - link "Homepage" [ref=e10] [cursor=pointer]:
+          - /url: /
+          - img [ref=e11]
+        - generic [ref=e13]:
+          - navigation "Global" [ref=e16]:
+            - list [ref=e17]:
+              - listitem [ref=e18]:
+                - button "Platform" [ref=e20] [cursor=pointer]:
+                  - text: Platform
+                  - img [ref=e21]
+              - listitem [ref=e23]:
+                - button "Solutions" [ref=e25] [cursor=pointer]:
+                  - text: Solutions
+                  - img [ref=e26]
+              - listitem [ref=e28]:
+                - button "Resources" [ref=e30] [cursor=pointer]:
+                  - text: Resources
+                  - img [ref=e31]
+              - listitem [ref=e33]:
+                - button "Open Source" [ref=e35] [cursor=pointer]:
+                  - text: Open Source
+                  - img [ref=e36]
+              - listitem [ref=e38]:
+                - button "Enterprise" [ref=e40] [cursor=pointer]:
+                  - text: Enterprise
+                  - img [ref=e41]
+              - listitem [ref=e43]:
+                - link "Pricing" [ref=e44] [cursor=pointer]:
+                  - /url: https://github.com/pricing
+                  - generic [ref=e45]: Pricing
+          - generic [ref=e46]:
+            - button "Search or jump to…" [ref=e49] [cursor=pointer]:
+              - img [ref=e51]
+              - generic [ref=e53]: Search or jump to...
+              - img [ref=e55]
+            - link "Sign in" [ref=e59] [cursor=pointer]:
+              - /url: /login?return_to=https%3A%2F%2Fgithub.com%2Fhesreallyhim%2Fawesome-claude-code
+            - link "Sign up" [ref=e60] [cursor=pointer]:
+              - /url: /signup?ref_cta=Sign+up&ref_loc=header+logged+out&ref_page=%2F%3Cuser-name%3E%2F%3Crepo-name%3E&source=header-repo&source_repo=hesreallyhim%2Fawesome-claude-code
+            - button "Appearance settings" [disabled] [ref=e63]:
+              - img
+  - main [ref=e67]:
+    - generic [ref=e68]:
+      - generic [ref=e69]:
+        - generic [ref=e71]:
+          - img [ref=e72]
+          - link "hesreallyhim" [ref=e75] [cursor=pointer]:
+            - /url: /hesreallyhim
+          - generic [ref=e76]: /
+          - strong [ref=e77]:
+            - link "awesome-claude-code" [ref=e78] [cursor=pointer]:
+              - /url: /hesreallyhim/awesome-claude-code
+          - generic [ref=e79]: Public
+        - generic [ref=e80]:
+          - list:
+            - listitem [ref=e81]:
+              - link "You must be signed in to change notification settings" [ref=e82] [cursor=pointer]:
+                - /url: /login?return_to=%2Fhesreallyhim%2Fawesome-claude-code
+                - img [ref=e83]
+                - text: Notifications
+            - listitem [ref=e85]:
+              - link "Fork 3.3k" [ref=e86] [cursor=pointer]:
+                - /url: /login?return_to=%2Fhesreallyhim%2Fawesome-claude-code
+                - img [ref=e87]
+                - text: Fork
+                - generic "3,285" [ref=e89]: 3.3k
+            - listitem [ref=e90]:
+              - link "You must be signed in to star a repository" [ref=e92] [cursor=pointer]:
+                - /url: /login?return_to=%2Fhesreallyhim%2Fawesome-claude-code
+                - img [ref=e93]
+                - text: Star
+                - generic "39740 users starred this repository" [ref=e95]: 39.7k
+      - navigation "Repository" [ref=e96]:
+        - list [ref=e97]:
+          - listitem [ref=e98]:
+            - link "Code" [ref=e99] [cursor=pointer]:
+              - /url: /hesreallyhim/awesome-claude-code
+              - img [ref=e100]
+              - generic [ref=e102]: Code
+          - listitem [ref=e103]:
+            - link "Issues 230" [ref=e104] [cursor=pointer]:
+              - /url: /hesreallyhim/awesome-claude-code/issues
+              - img [ref=e105]
+              - generic [ref=e108]: Issues
+              - generic "230" [ref=e109]
+          - listitem [ref=e110]:
+            - link "Pull requests" [ref=e111] [cursor=pointer]:
+              - /url: /hesreallyhim/awesome-claude-code/pulls
+              - img [ref=e112]
+              - generic [ref=e114]: Pull requests
+          - listitem [ref=e115]:
+            - link "Discussions" [ref=e116] [cursor=pointer]:
+              - /url: /hesreallyhim/awesome-claude-code/discussions
+              - img [ref=e117]
+              - generic [ref=e119]: Discussions
+          - listitem [ref=e120]:
+            - link "Actions" [ref=e121] [cursor=pointer]:
+              - /url: /hesreallyhim/awesome-claude-code/actions
+              - img [ref=e122]
+              - generic [ref=e124]: Actions
+          - listitem [ref=e125]:
+            - link "Security and quality" [ref=e126] [cursor=pointer]:
+              - /url: /hesreallyhim/awesome-claude-code/security
+              - img [ref=e127]
+              - generic [ref=e129]: Security and quality
+          - listitem [ref=e130]:
+            - link "Insights" [ref=e131] [cursor=pointer]:
+              - /url: /hesreallyhim/awesome-claude-code/pulse
+              - img [ref=e132]
+              - generic [ref=e134]: Insights
+    - generic [ref=e147]:
+      - heading "hesreallyhim/awesome-claude-code" [level=1] [ref=e149]
+      - generic [ref=e150]:
+        - generic [ref=e153]:
+          - generic [ref=e154]:
+            - generic [ref=e155]:
+              - button "main branch" [ref=e157] [cursor=pointer]:
+                - generic [ref=e158]:
+                  - generic [ref=e160]:
+                    - img [ref=e162]
+                    - generic [ref=e165]: main
+                  - generic:
+                    - img
+              - generic [ref=e166]:
+                - link "10 Branches" [ref=e167] [cursor=pointer]:
+                  - /url: /hesreallyhim/awesome-claude-code/branches
+                  - generic [ref=e168]:
+                    - generic:
+                      - img
+                    - generic [ref=e170]:
+                      - strong [ref=e171]: "10"
+                      - text: Branches
+                - link "3 Tags" [ref=e172] [cursor=pointer]:
+                  - /url: /hesreallyhim/awesome-claude-code/tags
+                  - generic [ref=e173]:
+                    - generic:
+                      - img
+                    - generic [ref=e175]:
+                      - strong [ref=e176]: "3"
+                      - text: Tags
+            - generic [ref=e177]:
+              - generic [ref=e181]:
+                - img [ref=e183]
+                - combobox "Go to file" [ref=e185]
+              - button "Code" [ref=e186] [cursor=pointer]:
+                - generic [ref=e187]:
+                  - generic:
+                    - img
+                  - generic [ref=e188]: Code
+                  - generic:
+                    - img
+          - generic [ref=e189]:
+            - generic [ref=e190]:
+              - heading "Folders and files" [level=2] [ref=e191]
+              - table "Folders and files" [ref=e192]:
+                - rowgroup:
+                  - row "Name Last commit message Last commit date":
+                    - columnheader "Name"
+                    - columnheader "Last commit message":
+                      - generic "Last commit message"
+                    - columnheader "Last commit date":
+                      - generic "Last commit date"
+                - rowgroup [ref=e193]:
+                  - 'row "Latest commit github-actions[bot] commits by github-actions[bot] chore: update repo ticker data and SVGs [skip ci] Commit a7e34f4 · Apr 19, 202610 minutes ago History 1,093 Commits" [ref=e194]':
+                    - 'cell "Latest commit github-actions[bot] commits by github-actions[bot] chore: update repo ticker data and SVGs [skip ci] Commit a7e34f4 · Apr 19, 202610 minutes ago History 1,093 Commits" [ref=e195]':
+                      - generic [ref=e196]:
+                        - heading "Latest commit" [level=2] [ref=e197]
+                        - generic [ref=e198]:
+                          - generic [ref=e200]:
+                            - link "github-actions[bot]" [ref=e201] [cursor=pointer]:
+                              - /url: /apps/github-actions
+                              - img "github-actions[bot]" [ref=e202]
+                            - link "commits by github-actions[bot]" [ref=e203] [cursor=pointer]:
+                              - /url: /hesreallyhim/awesome-claude-code/commits?author=github-actions%5Bbot%5D
+                              - text: github-actions[bot]
+                          - 'link "chore: update repo ticker data and SVGs [skip ci]" [ref=e207] [cursor=pointer]':
+                            - /url: /hesreallyhim/awesome-claude-code/commit/a7e34f4fce88c020f34213a2ee89b10f38873b83
+                        - generic [ref=e208]:
+                          - generic [ref=e210]:
+                            - link "Commit a7e34f4" [ref=e211] [cursor=pointer]:
+                              - /url: /hesreallyhim/awesome-claude-code/commit/a7e34f4fce88c020f34213a2ee89b10f38873b83
+                              - text: a7e34f4
+                            - text: ·
+                            - generic "Apr 19, 2026, 10:17 PM GMT+1" [ref=e212]: Apr 19, 202610 minutes ago
+                          - generic [ref=e213]:
+                            - heading "History" [level=2] [ref=e214]
+                            - link "1,093 Commits" [ref=e215] [cursor=pointer]:
+                              - /url: /hesreallyhim/awesome-claude-code/commits/main/
+                              - generic [ref=e216]:
+                                - generic:
+                                  - img
+                                - generic [ref=e217]: 1,093 Commits
+                  - row ".claude/commands, (Directory) enforce using issue template Jan 14, 20263 months ago" [ref=e218]:
+                    - cell ".claude/commands, (Directory)" [ref=e219]:
+                      - generic [ref=e220]:
+                        - img [ref=e221]
+                        - link ".claude/commands, (Directory)" [ref=e226] [cursor=pointer]:
+                          - /url: /hesreallyhim/awesome-claude-code/tree/main/.claude/commands
+                          - text: .claude/commands
+                    - cell "enforce using issue template" [ref=e227]:
+                      - link "enforce using issue template" [ref=e230] [cursor=pointer]:
+                        - /url: /hesreallyhim/awesome-claude-code/commit/8083aab30b9bc7444eaa9ff44bb9c50086e7634d
+                    - cell "Jan 14, 20263 months ago" [ref=e231]:
+                      - generic [ref=e232]: Jan 14, 20263 months ago
+                  - 'row ".github, (Directory) feat: filter generic \"claude-code\" repos from ticker, run every 3h Apr 5, 20262 weeks ago" [ref=e233]':
+                    - cell ".github, (Directory)" [ref=e234]:
+                      - generic [ref=e235]:
+                        - img [ref=e236]
+                        - link ".github, (Directory)" [ref=e241] [cursor=pointer]:
+                          - /url: /hesreallyhim/awesome-claude-code/tree/main/.github
+                          - text: .github
+                    - 'cell "feat: filter generic \"claude-code\" repos from ticker, run every 3h" [ref=e242]':
+                      - 'link "feat: filter generic \"claude-code\" repos from ticker, run every 3h" [ref=e245] [cursor=pointer]':
+                        - /url: /hesreallyhim/awesome-claude-code/commit/04bd8d9e5e61c588de3faa0c5da0ac3f651e9403
+                    - cell "Apr 5, 20262 weeks ago" [ref=e246]:
+                      - generic [ref=e247]: Apr 5, 20262 weeks ago
+                  - 'row "README_ALTERNATIVES, (Directory) Add resource: claude-pace (#1565) Apr 15, 20265 days ago" [ref=e248]':
+                    - cell "README_ALTERNATIVES, (Directory)" [ref=e249]:
+                      - generic [ref=e250]:
+                        - img [ref=e251]
+                        - link "README_ALTERNATIVES, (Directory)" [ref=e256] [cursor=pointer]:
+                          - /url: /hesreallyhim/awesome-claude-code/tree/main/README_ALTERNATIVES
+                          - text: README_ALTERNATIVES
+                    - 'cell "Add resource: claude-pace (#1565)" [ref=e257]':
+                      - generic [ref=e259]:
+                        - 'link "Add resource: claude-pace (" [ref=e260] [cursor=pointer]':
+                          - /url: /hesreallyhim/awesome-claude-code/commit/67a66ebd75f84c84b981b9d6e8d602cf77d66560
+                        - link "#1565" [ref=e261] [cursor=pointer]:
+                          - /url: https://github.com/hesreallyhim/awesome-claude-code/pull/1565
+                        - link ")" [ref=e262] [cursor=pointer]:
+                          - /url: /hesreallyhim/awesome-claude-code/commit/67a66ebd75f84c84b981b9d6e8d602cf77d66560
+                    - cell "Apr 15, 20265 days ago" [ref=e263]:
+                      - generic [ref=e264]: Apr 15, 20265 days ago
+                  - 'row "assets, (Directory) chore: update repo ticker data and SVGs [skip ci] Apr 19, 202610 minutes ago" [ref=e265]':
+                    - cell "assets, (Directory)" [ref=e266]:
+                      - generic [ref=e267]:
+                        - img [ref=e268]
+                        - link "assets, (Directory)" [ref=e273] [cursor=pointer]:
+                          - /url: /hesreallyhim/awesome-claude-code/tree/main/assets
+                          - text: assets
+                    - 'cell "chore: update repo ticker data and SVGs [skip ci]" [ref=e274]':
+                      - 'link "chore: update repo ticker data and SVGs [skip ci]" [ref=e277] [cursor=pointer]':
+                        - /url: /hesreallyhim/awesome-claude-code/commit/a7e34f4fce88c020f34213a2ee89b10f38873b83
+                    - cell "Apr 19, 202610 minutes ago" [ref=e278]:
+                      - generic [ref=e279]: Apr 19, 202610 minutes ago
+                  - 'row "data, (Directory) chore: update repo ticker data and SVGs [skip ci] Apr 19, 202610 minutes ago" [ref=e280]':
+                    - cell "data, (Directory)" [ref=e281]:
+                      - generic [ref=e282]:
+                        - img [ref=e283]
+                        - link "data, (Directory)" [ref=e288] [cursor=pointer]:
+                          - /url: /hesreallyhim/awesome-claude-code/tree/main/data
+                          - text: data
+                    - 'cell "chore: update repo ticker data and SVGs [skip ci]" [ref=e289]':
+                      - 'link "chore: update repo ticker data and SVGs [skip ci]" [ref=e292] [cursor=pointer]':
+                        - /url: /hesreallyhim/awesome-claude-code/commit/a7e34f4fce88c020f34213a2ee89b10f38873b83
+                    - cell "Apr 19, 202610 minutes ago" [ref=e293]:
+                      - generic [ref=e294]: Apr 19, 202610 minutes ago
+                  - 'row "docs, (Directory) fix: update cooldown escalation to 7d/14d/30d/ban Mar 31, 20263 weeks ago" [ref=e295]':
+                    - cell "docs, (Directory)" [ref=e296]:
+                      - generic [ref=e297]:
+                        - img [ref=e298]
+                        - link "docs, (Directory)" [ref=e303] [cursor=pointer]:
+                          - /url: /hesreallyhim/awesome-claude-code/tree/main/docs
+                          - text: docs
+                    - 'cell "fix: update cooldown escalation to 7d/14d/30d/ban" [ref=e304]':
+                      - 'link "fix: update cooldown escalation to 7d/14d/30d/ban" [ref=e307] [cursor=pointer]':
+                        - /url: /hesreallyhim/awesome-claude-code/commit/a541124cc4385e07c33de2aebe511d043abcca5b
+                    - cell "Mar 31, 20263 weeks ago" [ref=e308]:
+                      - generic [ref=e309]: Mar 31, 20263 weeks ago
+                  - 'row "resources, (Directory) feat: add Awesome style - ONE SHOT Jan 9, 20263 months ago" [ref=e310]':
+                    - cell "resources, (Directory)" [ref=e311]:
+                      - generic [ref=e312]:
+                        - img [ref=e313]
+                        - link "resources, (Directory)" [ref=e318] [cursor=pointer]:
+                          - /url: /hesreallyhim/awesome-claude-code/tree/main/resources
+                          - text: resources
+                    - 'cell "feat: add Awesome style - ONE SHOT" [ref=e319]':
+                      - 'link "feat: add Awesome style - ONE SHOT" [ref=e322] [cursor=pointer]':
+                        - /url: /hesreallyhim/awesome-claude-code/commit/8df95691ceebc2f0a44122fd525dc04de6200fac
+                    - cell "Jan 9, 20263 months ago" [ref=e323]:
+                      - generic [ref=e324]: Jan 9, 20263 months ago
+                  - row "scripts, (Directory) New banner (#1381) Apr 6, 20262 weeks ago" [ref=e325]:
+                    - cell "scripts, (Directory)" [ref=e326]:
+                      - generic [ref=e327]:
+                        - img [ref=e328]
+                        - link "scripts, (Directory)" [ref=e333] [cursor=pointer]:
+                          - /url: /hesreallyhim/awesome-claude-code/tree/main/scripts
+                          - text: scripts
+                    - cell "New banner (#1381)" [ref=e334]:
+                      - generic [ref=e336]:
+                        - link "New banner (" [ref=e337] [cursor=pointer]:
+                          - /url: /hesreallyhim/awesome-claude-code/commit/9e4ab156080168b9d9cdb171c6b2a9434333a95b
+                        - link "#1381" [ref=e338] [cursor=pointer]:
+                          - /url: https://github.com/hesreallyhim/awesome-claude-code/pull/1381
+                        - link ")" [ref=e339] [cursor=pointer]:
+                          - /url: /hesreallyhim/awesome-claude-code/commit/9e4ab156080168b9d9cdb171c6b2a9434333a95b
+                    - cell "Apr 6, 20262 weeks ago" [ref=e340]:
+                      - generic [ref=e341]: Apr 6, 20262 weeks ago
+                  - 'row "templates, (Directory) feat: add \"Teams\" subcategory under Workflows & Knowledge Guides Apr 4, 20262 weeks ago" [ref=e342]':
+                    - cell "templates, (Directory)" [ref=e343]:
+                      - generic [ref=e344]:
+                        - img [ref=e345]
+                        - link "templates, (Directory)" [ref=e350] [cursor=pointer]:
+                          - /url: /hesreallyhim/awesome-claude-code/tree/main/templates
+                          - text: templates
+                    - 'cell "feat: add \"Teams\" subcategory under Workflows & Knowledge Guides" [ref=e351]':
+                      - 'link "feat: add \"Teams\" subcategory under Workflows & Knowledge Guides" [ref=e354] [cursor=pointer]':
+                        - /url: /hesreallyhim/awesome-claude-code/commit/78675ad5bf1a7f08d934625eea166c2f57ef5e27
+                    - cell "Apr 4, 20262 weeks ago" [ref=e355]:
+                      - generic [ref=e356]: Apr 4, 20262 weeks ago
+                  - 'row "tests, (Directory) feat: add Harness to Teams subcategory under Workflows Apr 4, 20262 weeks ago" [ref=e357]':
+                    - cell "tests, (Directory)" [ref=e358]:
+                      - generic [ref=e359]:
+                        - img [ref=e360]
+                        - link "tests, (Directory)" [ref=e365] [cursor=pointer]:
+                          - /url: /hesreallyhim/awesome-claude-code/tree/main/tests
+                          - text: tests
+                    - 'cell "feat: add Harness to Teams subcategory under Workflows" [ref=e366]':
+                      - 'link "feat: add Harness to Teams subcategory under Workflows" [ref=e369] [cursor=pointer]':
+                        - /url: /hesreallyhim/awesome-claude-code/commit/564945e3ba3d91c53ab8ca8107a7dc9629f533a3
+                    - cell "Apr 4, 20262 weeks ago" [ref=e370]:
+                      - generic [ref=e371]: Apr 4, 20262 weeks ago
+                  - 'row "tools, (Directory) feat: add Awesome style - ONE SHOT Jan 9, 20263 months ago" [ref=e372]':
+                    - cell "tools, (Directory)" [ref=e373]:
+                      - generic [ref=e374]:
+                        - img [ref=e375]
+                        - link "tools, (Directory)" [ref=e380] [cursor=pointer]:
+                          - /url: /hesreallyhim/awesome-claude-code/tree/main/tools
+                          - text: tools
+                    - 'cell "feat: add Awesome style - ONE SHOT" [ref=e381]':
+                      - 'link "feat: add Awesome style - ONE SHOT" [ref=e384] [cursor=pointer]':
+                        - /url: /hesreallyhim/awesome-claude-code/commit/8df95691ceebc2f0a44122fd525dc04de6200fac
+                    - cell "Jan 9, 20263 months ago" [ref=e385]:
+                      - generic [ref=e386]: Jan 9, 20263 months ago
+                  - row ".gitignore, (File) enforce using issue template Jan 14, 20263 months ago" [ref=e387]:
+                    - cell ".gitignore, (File)" [ref=e388]:
+                      - generic [ref=e389]:
+                        - img [ref=e390]
+                        - link ".gitignore, (File)" [ref=e395] [cursor=pointer]:
+                          - /url: /hesreallyhim/awesome-claude-code/blob/main/.gitignore
+                          - text: .gitignore
+                    - cell "enforce using issue template" [ref=e396]:
+                      - link "enforce using issue template" [ref=e399] [cursor=pointer]:
+                        - /url: /hesreallyhim/awesome-claude-code/commit/8083aab30b9bc7444eaa9ff44bb9c50086e7634d
+                    - cell "Jan 14, 20263 months ago" [ref=e400]:
+                      - generic [ref=e401]: Jan 14, 20263 months ago
+                  - row ".pre-commit-config.yaml, (File) refactor ToC - improve DRYness Jan 9, 20263 months ago" [ref=e402]:
+                    - cell ".pre-commit-config.yaml, (File)" [ref=e403]:
+                      - generic [ref=e404]:
+                        - img [ref=e405]
+                        - link ".pre-commit-config.yaml, (File)" [ref=e410] [cursor=pointer]:
+                          - /url: /hesreallyhim/awesome-claude-code/blob/main/.pre-commit-config.yaml
+                          - text: .pre-commit-config.yaml
+                    - cell "refactor ToC - improve DRYness" [ref=e411]:
+                      - link "refactor ToC - improve DRYness" [ref=e414] [cursor=pointer]:
+                        - /url: /hesreallyhim/awesome-claude-code/commit/1546b1a851bd1fe974bef7d0d648e640b1e4ef52
+                    - cell "Jan 9, 20263 months ago" [ref=e415]:
+                      - generic [ref=e416]: Jan 9, 20263 months ago
+                  - 'row ".python-version, (File) feat: improve CI-CD, remove stale resources Jun 29, 202510 months ago" [ref=e417]':
+                    - cell ".python-version, (File)" [ref=e418]:
+                      - generic [ref=e419]:
+                        - img [ref=e420]
+                        - link ".python-version, (File)" [ref=e425] [cursor=pointer]:
+                          - /url: /hesreallyhim/awesome-claude-code/blob/main/.python-version
+                          - text: .python-version
+                    - 'cell "feat: improve CI-CD, remove stale resources" [ref=e426]':
+                      - 'link "feat: improve CI-CD, remove stale resources" [ref=e429] [cursor=pointer]':
+                        - /url: /hesreallyhim/awesome-claude-code/commit/faa789979c54213f06a0f7165913b7b311e4d657
+                    - cell "Jun 29, 202510 months ago" [ref=e430]:
+                      - generic [ref=e431]: Jun 29, 202510 months ago
+                  - row "LICENSE, (File) Update LlCENSE Sep 15, 20257 months ago" [ref=e432]:
+                    - cell "LICENSE, (File)" [ref=e433]:
+                      - generic [ref=e434]:
+                        - img [ref=e435]
+                        - link "LICENSE, (File)" [ref=e440] [cursor=pointer]:
+                          - /url: /hesreallyhim/awesome-claude-code/blob/main/LICENSE
+                          - text: LICENSE
+                    - cell "Update LlCENSE" [ref=e441]:
+                      - link "Update LlCENSE" [ref=e444] [cursor=pointer]:
+                        - /url: /hesreallyhim/awesome-claude-code/commit/1aa840c4ce63f93e8edc0f419db7e7c0ff5b8580
+                    - cell "Sep 15, 20257 months ago" [ref=e445]:
+                      - generic [ref=e446]: Sep 15, 20257 months ago
+                  - 'row "Makefile, (File) feat: new sub-category config managers Feb 15, 20262 months ago" [ref=e447]':
+                    - cell "Makefile, (File)" [ref=e448]:
+                      - generic [ref=e449]:
+                        - img [ref=e450]
+                        - link "Makefile, (File)" [ref=e455] [cursor=pointer]:
+                          - /url: /hesreallyhim/awesome-claude-code/blob/main/Makefile
+                          - text: Makefile
+                    - 'cell "feat: new sub-category config managers" [ref=e456]':
+                      - 'link "feat: new sub-category config managers" [ref=e459] [cursor=pointer]':
+                        - /url: /hesreallyhim/awesome-claude-code/commit/96132e6089d974bc65d5ac8e2d5c197615e17a4a
+                    - cell "Feb 15, 20262 months ago" [ref=e460]:
+                      - generic [ref=e461]: Feb 15, 20262 months ago
+                  - 'row "README.md, (File) Add resource: claude-pace (#1565) Apr 15, 20265 days ago" [ref=e462]':
+                    - cell "README.md, (File)" [ref=e463]:
+                      - generic [ref=e464]:
+                        - img [ref=e465]
+                        - link "README.md, (File)" [ref=e470] [cursor=pointer]:
+                          - /url: /hesreallyhim/awesome-claude-code/blob/main/README.md
+                          - text: README.md
+                    - 'cell "Add resource: claude-pace (#1565)" [ref=e471]':
+                      - generic [ref=e473]:
+                        - 'link "Add resource: claude-pace (" [ref=e474] [cursor=pointer]':
+                          - /url: /hesreallyhim/awesome-claude-code/commit/67a66ebd75f84c84b981b9d6e8d602cf77d66560
+                        - link "#1565" [ref=e475] [cursor=pointer]:
+                          - /url: https://github.com/hesreallyhim/awesome-claude-code/pull/1565
+                        - link ")" [ref=e476] [cursor=pointer]:
+                          - /url: /hesreallyhim/awesome-claude-code/commit/67a66ebd75f84c84b981b9d6e8d602cf77d66560
+                    - cell "Apr 15, 20265 days ago" [ref=e477]:
+                      - generic [ref=e478]: Apr 15, 20265 days ago
+                  - 'row "THE_RESOURCES_TABLE.csv, (File) Add resource: claude-pace (#1565) Apr 15, 20265 days ago" [ref=e479]':
+                    - cell "THE_RESOURCES_TABLE.csv, (File)" [ref=e480]:
+                      - generic [ref=e481]:
+                        - img [ref=e482]
+                        - link "THE_RESOURCES_TABLE.csv, (File)" [ref=e487] [cursor=pointer]:
+                          - /url: /hesreallyhim/awesome-claude-code/blob/main/THE_RESOURCES_TABLE.csv
+                          - text: THE_RESOURCES_TABLE.csv
+                    - 'cell "Add resource: claude-pace (#1565)" [ref=e488]':
+                      - generic [ref=e490]:
+                        - 'link "Add resource: claude-pace (" [ref=e491] [cursor=pointer]':
+                          - /url: /hesreallyhim/awesome-claude-code/commit/67a66ebd75f84c84b981b9d6e8d602cf77d66560
+                        - link "#1565" [ref=e492] [cursor=pointer]:
+                          - /url: https://github.com/hesreallyhim/awesome-claude-code/pull/1565
+                        - link ")" [ref=e493] [cursor=pointer]:
+                          - /url: /hesreallyhim/awesome-claude-code/commit/67a66ebd75f84c84b981b9d6e8d602cf77d66560
+                    - cell "Apr 15, 20265 days ago" [ref=e494]:
+                      - generic [ref=e495]: Apr 15, 20265 days ago
+                  - 'row "acc-config.yaml, (File) feat: add Awesome style - ONE SHOT Jan 9, 20263 months ago" [ref=e496]':
+                    - cell "acc-config.yaml, (File)" [ref=e497]:
+                      - generic [ref=e498]:
+                        - img [ref=e499]
+                        - link "acc-config.yaml, (File)" [ref=e504] [cursor=pointer]:
+                          - /url: /hesreallyhim/awesome-claude-code/blob/main/acc-config.yaml
+                          - text: acc-config.yaml
+                    - 'cell "feat: add Awesome style - ONE SHOT" [ref=e505]':
+                      - 'link "feat: add Awesome style - ONE SHOT" [ref=e508] [cursor=pointer]':
+                        - /url: /hesreallyhim/awesome-claude-code/commit/8df95691ceebc2f0a44122fd525dc04de6200fac
+                    - cell "Jan 9, 20263 months ago" [ref=e509]:
+                      - generic [ref=e510]: Jan 9, 20263 months ago
+                  - 'row "pyproject.toml, (File) feat: add Awesome style - ONE SHOT Jan 9, 20263 months ago" [ref=e511]':
+                    - cell "pyproject.toml, (File)" [ref=e512]:
+                      - generic [ref=e513]:
+                        - img [ref=e514]
+                        - link "pyproject.toml, (File)" [ref=e519] [cursor=pointer]:
+                          - /url: /hesreallyhim/awesome-claude-code/blob/main/pyproject.toml
+                          - text: pyproject.toml
+                    - 'cell "feat: add Awesome style - ONE SHOT" [ref=e520]':
+                      - 'link "feat: add Awesome style - ONE SHOT" [ref=e523] [cursor=pointer]':
+                        - /url: /hesreallyhim/awesome-claude-code/commit/8df95691ceebc2f0a44122fd525dc04de6200fac
+                    - cell "Jan 9, 20263 months ago" [ref=e524]:
+                      - generic [ref=e525]: Jan 9, 20263 months ago
+            - generic [ref=e527]:
+              - generic [ref=e528]:
+                - heading "Repository files navigation" [level=2] [ref=e529]
+                - navigation "Repository files" [ref=e530]:
+                  - list [ref=e531]:
+                    - listitem [ref=e532]:
+                      - link "README" [ref=e533] [cursor=pointer]:
+                        - /url: "#"
+                        - img [ref=e535]
+                        - generic [ref=e537]: README
+                    - listitem [ref=e538]:
+                      - link "Code of conduct" [ref=e539] [cursor=pointer]:
+                        - /url: "#"
+                        - img [ref=e541]
+                        - generic [ref=e543]: Code of conduct
+                    - listitem [ref=e544]:
+                      - link "Contributing" [ref=e545] [cursor=pointer]:
+                        - /url: "#"
+                        - img [ref=e547]
+                        - generic [ref=e549]: Contributing
+                    - listitem [ref=e550]:
+                      - link "License" [ref=e551] [cursor=pointer]:
+                        - /url: "#"
+                        - img [ref=e553]
+                        - generic [ref=e555]: License
+                    - listitem [ref=e556]:
+                      - link "Security" [ref=e557] [cursor=pointer]:
+                        - /url: "#"
+                        - img [ref=e559]
+                        - generic [ref=e561]: Security
+                - button "Outline" [ref=e562] [cursor=pointer]:
+                  - img [ref=e563]
+              - article [ref=e566]:
+                - generic [ref=e567]:
+                  - heading "Pick Your Style:" [level=3] [ref=e568]
+                  - 'link "Permalink: Pick Your Style:" [ref=e569] [cursor=pointer]':
+                    - /url: "#pick-your-style"
+                    - img [ref=e570]
+                - paragraph [ref=e572]:
+                  - link "Awesome" [ref=e573] [cursor=pointer]:
+                    - /url: /hesreallyhim/awesome-claude-code/blob/main
+                    - img "Awesome" [ref=e574]
+                  - link "Extra" [ref=e575] [cursor=pointer]:
+                    - /url: /hesreallyhim/awesome-claude-code/blob/main/README_ALTERNATIVES/README_EXTRA.md
+                    - img "Extra" [ref=e576]
+                  - link "Classic" [ref=e577] [cursor=pointer]:
+                    - /url: /hesreallyhim/awesome-claude-code/blob/main/README_ALTERNATIVES/README_CLASSIC.md
+                    - img "Classic" [ref=e578]
+                  - link "Flat" [ref=e579] [cursor=pointer]:
+                    - /url: /hesreallyhim/awesome-claude-code/blob/main/README_ALTERNATIVES/README_FLAT_ALL_AZ.md
+                    - img "Flat" [ref=e580]
+                - paragraph [ref=e581]:
+                  - img "Awesome Claude Code" [ref=e584]
+                - generic [ref=e585]:
+                  - heading "Awesome Claude Code" [level=1] [ref=e586]
+                  - 'link "Permalink: Awesome Claude Code" [ref=e587] [cursor=pointer]':
+                    - /url: "#awesome-claude-code"
+                    - img [ref=e588]
+                - paragraph [ref=e590]:
+                  - link "Awesome" [ref=e591] [cursor=pointer]:
+                    - /url: https://awesome.re
+                    - img "Awesome" [ref=e592]
+                - blockquote [ref=e593]:
+                  - paragraph [ref=e594]:
+                    - text: A selectively curated list of skills, agents, plugins, hooks, and other amazing tools for enhancing your
+                    - link "Claude Code" [ref=e595] [cursor=pointer]:
+                      - /url: https://docs.anthropic.com/en/docs/claude-code
+                    - text: workflow.
+                - link "Featured Claude Code Projects" [ref=e597] [cursor=pointer]:
+                  - /url: /hesreallyhim/awesome-claude-code/blob/main/assets/repo-ticker-awesome.svg
+                  - img "Featured Claude Code Projects" [ref=e598]
+                - generic [ref=e599]:
+                  - heading "Latest Additions" [level=2] [ref=e600]
+                  - 'link "Permalink: Latest Additions" [ref=e601] [cursor=pointer]':
+                    - /url: "#latest-additions"
+                    - img [ref=e602]
+                - list [ref=e604]:
+                  - listitem [ref=e605]:
+                    - link "claude-pace" [ref=e606] [cursor=pointer]:
+                      - /url: https://github.com/Astro-Han/claude-pace
+                    - text: by
+                    - link "Astro-Han" [ref=e607] [cursor=pointer]:
+                      - /url: https://github.com/Astro-Han
+                    - text: "- A lightweight Bash + jq statusline for Claude Code that displays rate limit pace delta (burn rate vs. time remaining), 5h/7d usage percentage, context window usage, git branch and diff stats. Compares current consumption rate against time remaining in each rate limit window to indicate whether quota is being used faster or slower than the window allows. Single file with no external dependencies beyond jq."
+                  - listitem [ref=e608]:
+                    - link "Clawd on Desk" [ref=e609] [cursor=pointer]:
+                      - /url: https://github.com/rullerzhou-afk/clawd-on-desk
+                    - text: by
+                    - link "Ruller_Lulu" [ref=e610] [cursor=pointer]:
+                      - /url: https://github.com/rullerzhou-afk
+                    - text: "- A desktop pet that reacts to your Claude Code sessions in real-time — thinking, typing, juggling, sleeping, and more. Yep. It's undeniably endearing. And at the end of the day, isn't that what Claude Code is all about?"
+                  - listitem [ref=e611]:
+                    - link "ccxray" [ref=e612] [cursor=pointer]:
+                      - /url: https://github.com/lis186/ccxray
+                    - text: by
+                    - link "lis186" [ref=e613] [cursor=pointer]:
+                      - /url: https://github.com/lis186
+                    - text: "- A transparent HTTP proxy and real-time dashboard that sits between Claude Code and the Anthropic API. Captures every request and response without configuration, presenting them in a Miller-column interface with session grouping, token/cost tracking, and context-window visualization."
+                  - listitem [ref=e614]:
+                    - link "Encyclopedia of Agentic Coding Patterns" [ref=e615] [cursor=pointer]:
+                      - /url: https://aipatternbook.com
+                    - text: by
+                    - link "Wolf McNally" [ref=e616] [cursor=pointer]:
+                      - /url: https://github.com/wolfmcnally
+                    - text: "- A freely available reference covering 190+ patterns for AI-assisted software development (and actually a whole bunch of related technical topics) from foundational concepts through agentic construction patterns, governance, testing, and socio-technical systems. Each entry follows a consistent pattern-language format with Context, Problem, Forces, Solution, Consequences, and Related Patterns. Opinionated and erudiate, which is actually good for an \"encyclopedia\" in some ways."
+                - generic [ref=e617]:
+                  - heading "Contents" [level=2] [ref=e618]
+                  - 'link "Permalink: Contents" [ref=e619] [cursor=pointer]':
+                    - /url: "#contents"
+                    - img [ref=e620]
+                - list [ref=e622]:
+                  - listitem [ref=e623]:
+                    - link "Agent Skills 🤖" [ref=e624] [cursor=pointer]:
+                      - /url: "#agent-skills-"
+                    - list [ref=e625]:
+                      - listitem [ref=e626]:
+                        - link "General" [ref=e627] [cursor=pointer]:
+                          - /url: "#general"
+                  - listitem [ref=e628]:
+                    - link "Workflows & Knowledge Guides 🧠" [ref=e629] [cursor=pointer]:
+                      - /url: "#workflows--knowledge-guides-"
+                    - list [ref=e630]:
+                      - listitem [ref=e631]:
+                        - link "General" [ref=e632] [cursor=pointer]:
+                          - /url: "#general-1"
+                      - listitem [ref=e633]:
+                        - link "Teams" [ref=e634] [cursor=pointer]:
+                          - /url: "#teams"
+                      - listitem [ref=e635]:
+                        - link "Ralph Wiggum" [ref=e636] [cursor=pointer]:
+                          - /url: "#ralph-wiggum"
+                  - listitem [ref=e637]:
+                    - link "Tooling 🧰" [ref=e638] [cursor=pointer]:
+                      - /url: "#tooling-"
+                    - list [ref=e639]:
+                      - listitem [ref=e640]:
+                        - link "General" [ref=e641] [cursor=pointer]:
+                          - /url: "#general-2"
+                      - listitem [ref=e642]:
+                        - link "IDE Integrations" [ref=e643] [cursor=pointer]:
+                          - /url: "#ide-integrations"
+                      - listitem [ref=e644]:
+                        - link "Usage Monitors" [ref=e645] [cursor=pointer]:
+                          - /url: "#usage-monitors"
+                      - listitem [ref=e646]:
+                        - link "Orchestrators" [ref=e647] [cursor=pointer]:
+                          - /url: "#orchestrators"
+                      - listitem [ref=e648]:
+                        - link "Config Managers" [ref=e649] [cursor=pointer]:
+                          - /url: "#config-managers"
+                  - listitem [ref=e650]:
+                    - link "Status Lines 📊" [ref=e651] [cursor=pointer]:
+                      - /url: "#status-lines-"
+                    - list [ref=e652]:
+                      - listitem [ref=e653]:
+                        - link "General" [ref=e654] [cursor=pointer]:
+                          - /url: "#general-3"
+                  - listitem [ref=e655]:
+                    - link "Hooks 🪝" [ref=e656] [cursor=pointer]:
+                      - /url: "#hooks-"
+                    - list [ref=e657]:
+                      - listitem [ref=e658]:
+                        - link "General" [ref=e659] [cursor=pointer]:
+                          - /url: "#general-4"
+                  - listitem [ref=e660]:
+                    - link "Slash-Commands 🔪" [ref=e661] [cursor=pointer]:
+                      - /url: "#slash-commands-"
+                    - list [ref=e662]:
+                      - listitem [ref=e663]:
+                        - link "General" [ref=e664] [cursor=pointer]:
+                          - /url: "#general-5"
+                      - listitem [ref=e665]:
+                        - link "Version Control & Git" [ref=e666] [cursor=pointer]:
+                          - /url: "#version-control--git"
+                      - listitem [ref=e667]:
+                        - link "Code Analysis & Testing" [ref=e668] [cursor=pointer]:
+                          - /url: "#code-analysis--testing"
+                      - listitem [ref=e669]:
+                        - link "Context Loading & Priming" [ref=e670] [cursor=pointer]:
+                          - /url: "#context-loading--priming"
+                      - listitem [ref=e671]:
+                        - link "Documentation & Changelogs" [ref=e672] [cursor=pointer]:
+                          - /url: "#documentation--changelogs"
+                      - listitem [ref=e673]:
+                        - link "CI / Deployment" [ref=e674] [cursor=pointer]:
+                          - /url: "#ci--deployment"
+                      - listitem [ref=e675]:
+                        - link "Project & Task Management" [ref=e676] [cursor=pointer]:
+                          - /url: "#project--task-management"
+                      - listitem [ref=e677]:
+                        - link "Miscellaneous" [ref=e678] [cursor=pointer]:
+                          - /url: "#miscellaneous"
+                  - listitem [ref=e679]:
+                    - link "CLAUDE.md Files 📂" [ref=e680] [cursor=pointer]:
+                      - /url: "#claudemd-files-"
+                    - list [ref=e681]:
+                      - listitem [ref=e682]:
+                        - link "Language-Specific" [ref=e683] [cursor=pointer]:
+                          - /url: "#language-specific"
+                      - listitem [ref=e684]:
+                        - link "Domain-Specific" [ref=e685] [cursor=pointer]:
+                          - /url: "#domain-specific"
+                      - listitem [ref=e686]:
+                        - link "Project Scaffolding & MCP" [ref=e687] [cursor=pointer]:
+                          - /url: "#project-scaffolding--mcp"
+                  - listitem [ref=e688]:
+                    - link "Alternative Clients 📱" [ref=e689] [cursor=pointer]:
+                      - /url: "#alternative-clients-"
+                    - list [ref=e690]:
+                      - listitem [ref=e691]:
+                        - link "General" [ref=e692] [cursor=pointer]:
+                          - /url: "#general-6"
+                  - listitem [ref=e693]:
+                    - link "Official Documentation 🏛️" [ref=e694] [cursor=pointer]:
+                      - /url: "#official-documentation-%EF%B8%8F"
+                    - list [ref=e695]:
+                      - listitem [ref=e696]:
+                        - link "General" [ref=e697] [cursor=pointer]:
+                          - /url: "#general-7"
+                - generic [ref=e698]:
+                  - heading "Agent Skills 🤖" [level=2] [ref=e699]
+                  - 'link "Permalink: Agent Skills 🤖" [ref=e700] [cursor=pointer]':
+                    - /url: "#agent-skills-"
+                    - img [ref=e701]
+                - blockquote [ref=e703]:
+                  - paragraph [ref=e704]: Agent skills are model-controlled configurations (files, scripts, resources, etc.) that enable Claude Code to perform specialized tasks requiring specific knowledge or capabilities.
+                - generic [ref=e705]:
+                  - heading "General" [level=3] [ref=e706]
+                  - 'link "Permalink: General" [ref=e707] [cursor=pointer]':
+                    - /url: "#general"
+                    - img [ref=e708]
+                - list [ref=e710]:
+                  - listitem [ref=e711]:
+                    - link "AgentSys" [ref=e712] [cursor=pointer]:
+                      - /url: https://github.com/avifenesh/agentsys
+                    - text: by
+                    - link "avifenesh" [ref=e713] [cursor=pointer]:
+                      - /url: https://github.com/avifenesh
+                    - text: "- Workflow automation system for Claude with a group of useful plugins, agents, and skills. Automates task-to-production workflows, PR management, code cleanup, performance investigation, drift detection, and multi-agent code review. Includes"
+                    - link "agnix" [ref=e714] [cursor=pointer]:
+                      - /url: https://github.com/avifenesh/agnix
+                    - text: for linting agent configurations. Built on thousands of lines of code with thousands of tests. Uses deterministic detection (regex, AST) with LLM judgment for efficiency. Used on many production systems.
+                  - listitem [ref=e715]:
+                    - link "AI Agent, AI Spy" [ref=e716] [cursor=pointer]:
+                      - /url: https://youtu.be/0ANECpNdt-4
+                    - text: by
+                    - link "Whittaker & Tiwari" [ref=e717] [cursor=pointer]:
+                      - /url: https://signalfoundation.org/
+                    - text: "- Members from the Signal Foundation with some really great tips and tricks on how to turn your operating system into an instrument of total surveillance, and why some companies are doing this really awesome thing. [warning: YouTube link]."
+                  - listitem [ref=e718]:
+                    - link "Book Factory" [ref=e719] [cursor=pointer]:
+                      - /url: https://github.com/robertguss/claude-skills
+                    - text: by
+                    - link "Robert Guss" [ref=e720] [cursor=pointer]:
+                      - /url: https://github.com/robertguss
+                    - text: "- A comprehensive pipeline of Skills that replicates traditional publishing infrastructure for nonfiction book creation using specialized Claude skills."
+                  - listitem [ref=e721]:
+                    - link "cc-devops-skills" [ref=e722] [cursor=pointer]:
+                      - /url: https://github.com/akin-ozer/cc-devops-skills
+                    - text: by
+                    - link "akin-ozer" [ref=e723] [cursor=pointer]:
+                      - /url: https://github.com/akin-ozer
+                    - text: "- Immensely detailed set of skills for DevOps Engineers (or anyone who has to deploy code, really). Works with validations, generators, shell scripts and CLI tools to create high quality IaC code for about any platform you've ever struggled painfully to work with. Worth downloading even just as a source of documentation."
+                  - listitem [ref=e724]:
+                    - link "Claude Code Agents" [ref=e725] [cursor=pointer]:
+                      - /url: https://github.com/undeadlist/claude-code-agents
+                    - text: by
+                    - link "Paul - UndeadList" [ref=e726] [cursor=pointer]:
+                      - /url: https://github.com/undeadlist
+                    - text: "- Comprehensive E2E development workflow with helpful Claude Code subagent prompts for solo devs. Run multiple auditors in parallel, automate fix cycles with micro-checkpoint protocols, and do browser-based QA. Includes strict protocols to prevent AI going rogue."
+                  - listitem [ref=e727]:
+                    - link "Claude Codex Settings" [ref=e728] [cursor=pointer]:
+                      - /url: https://github.com/fcakyon/claude-codex-settings
+                    - text: by
+                    - link "fatih akyon" [ref=e729] [cursor=pointer]:
+                      - /url: https://github.com/fcakyon
+                    - text: "- A well-organized, well-written set of plugins covering core developer activities, such as working with common cloud platforms like GitHub, Azure, MongoDB, and popular services such as Tavily, Playwright, and more. Clear, not overly-opinionated, and compatible with a few other providers."
+                  - listitem [ref=e730]:
+                    - link "Claude Mountaineering Skills" [ref=e731] [cursor=pointer]:
+                      - /url: https://github.com/dreamiurg/claude-mountaineering-skills
+                    - text: by
+                    - link "Dmytro Gaivoronsky" [ref=e732] [cursor=pointer]:
+                      - /url: https://github.com/dreamiurg
+                    - text: "- Claude Code skill that automates mountain route research for North American peaks. Aggregates data from 10+ mountaineering sources like Mountaineers.org, PeakBagger.com and SummitPost.com to generate detailed route beta reports with weather, avalanche conditions, and trip reports."
+                  - listitem [ref=e733]:
+                    - link "Claude Scientific Skills" [ref=e734] [cursor=pointer]:
+                      - /url: https://github.com/K-Dense-AI/claude-scientific-skills
+                    - text: by
+                    - link "K-Dense" [ref=e735] [cursor=pointer]:
+                      - /url: https://github.com/K-Dense-AI/
+                    - text: "- \"A set of ready-to-use Agent Skills for research, science, engineering, analysis, finance and writing.\" That's their description - modest, simple. That's how you can tell this is really one of the best skills repos on GitHub. If you've ever thought about getting a PhD... just read all of these documents instead. Also I think it IS an AI agent or something? Awesome."
+                  - listitem [ref=e736]:
+                    - link "Codebase to Course" [ref=e737] [cursor=pointer]:
+                      - /url: https://github.com/zarazhangrui/codebase-to-course
+                    - text: by
+                    - link "Zara Zhang" [ref=e738] [cursor=pointer]:
+                      - /url: https://github.com/zarazhangrui
+                    - text: "- A Claude Code skill that turns any codebase into a beautiful, interactive single-page HTML course for non-technical vibe coders."
+                  - listitem [ref=e739]:
+                    - link "Codex Skill" [ref=e740] [cursor=pointer]:
+                      - /url: https://github.com/skills-directory/skill-codex
+                    - text: by
+                    - link "klaudworks" [ref=e741] [cursor=pointer]:
+                      - /url: https://github.com/klaudworks
+                    - text: "- Enables users to prompt codex from claude code. Unlike the raw codex mcp server, this skill infers parameters such as model, reasoning effort, sandboxing from your prompt or asks you to specify them. It also simplifies continuing prior codex sessions so that codex can continue with the prior context."
+                  - listitem [ref=e742]:
+                    - link "Compound Engineering Plugin" [ref=e743] [cursor=pointer]:
+                      - /url: https://github.com/EveryInc/compound-engineering-plugin
+                    - text: by
+                    - link "EveryInc" [ref=e744] [cursor=pointer]:
+                      - /url: https://github.com/EveryInc
+                    - text: "- A very pragmatic set of well-designed agents, skills, and commands, built around a discipline of turning past mistakes and errors into lessons and opportunities for future growth and improvement. Good documentation."
+                  - listitem [ref=e745]:
+                    - link "Context Engineering Kit" [ref=e746] [cursor=pointer]:
+                      - /url: https://github.com/NeoLabHQ/context-engineering-kit
+                    - text: by
+                    - link "Vlad Goncharov" [ref=e747] [cursor=pointer]:
+                      - /url: https://github.com/LeoVS09
+                    - text: "- Hand-crafted collection of advanced context engineering techniques and patterns with minimal token footprint focused on improving agent result quality."
+                  - listitem [ref=e748]:
+                    - link "Everything Claude Code" [ref=e749] [cursor=pointer]:
+                      - /url: https://github.com/affaan-m/everything-claude-code
+                    - text: by
+                    - link "Affaan Mustafa" [ref=e750] [cursor=pointer]:
+                      - /url: https://github.com/affaan-m/
+                    - text: "- Top-notch, well-written resources covering \"just about everything\" from core engineering domains. What's nice about this \"everything-\" store is most of the resources have significant standalone value and unlike some all-encompassing frameworks, although you can opt in to the author's own specific workflow patterns if you choose, the individual resources offer exemplary patterns in (just about) every Claude Code feature you can find (apologies to the Output Styles devotees)."
+                  - listitem [ref=e751]:
+                    - link "Fullstack Dev Skills" [ref=e752] [cursor=pointer]:
+                      - /url: https://github.com/jeffallan/claude-skills
+                    - text: by
+                    - link "jeffallan" [ref=e753] [cursor=pointer]:
+                      - /url: https://github.com/jeffallan
+                    - text: "- A comprehensive Claude Code plugin with 65 specialized skills covering full-stack development across a wide range of specific frameworks. Features 9 project workflow commands for Jira/Confluence integration and, notably, an interesting approach to context engineering via a"
+                    - code [ref=e754]: /common-ground
+                    - text: command that surfaces Claude's hidden assumptions about your project. This is a smart thing to do.
+                  - listitem [ref=e755]:
+                    - link "read-only-postgres" [ref=e756] [cursor=pointer]:
+                      - /url: https://github.com/jawwadfirdousi/agent-skills
+                    - text: by
+                    - link "jawwadfirdousi" [ref=e757] [cursor=pointer]:
+                      - /url: https://github.com/jawwadfirdousi
+                    - text: "- Read-only PostgreSQL query skill for Claude Code. Executes SELECT/SHOW/EXPLAIN/WITH queries across configured databases with strict validation, timeouts, and row limits. Supports multiple connections with descriptions for database selection."
+                  - listitem [ref=e758]:
+                    - link "Superpowers" [ref=e759] [cursor=pointer]:
+                      - /url: https://github.com/obra/superpowers
+                    - text: by
+                    - link "Jesse Vincent" [ref=e760] [cursor=pointer]:
+                      - /url: https://github.com/obra
+                    - text: "- A strong bundle of core competencies for software engineering, with good coverage of a large portion of the SDLC - from planning, reviewing, testing, debugging... Well written, well organized, and adaptable. The author refers to them as \"superpowers\", but many of them are just consolidating engineering best practices - which sometimes does feel like a superpower when working with Claude Code."
+                  - listitem [ref=e761]:
+                    - link "Trail of Bits Security Skills" [ref=e762] [cursor=pointer]:
+                      - /url: https://github.com/trailofbits/skills
+                    - text: by
+                    - link "Trail of Bits" [ref=e763] [cursor=pointer]:
+                      - /url: https://github.com/trailofbits
+                    - text: "- A very professional collection of over a dozen security-focused skills for code auditing and vulnerability detection. Includes skills for static analysis with CodeQL and Semgrep, variant analysis across codebases, fix verification, and differential code review."
+                  - listitem [ref=e764]:
+                    - link "TÂCHES Claude Code Resources" [ref=e765] [cursor=pointer]:
+                      - /url: https://github.com/glittercowboy/taches-cc-resources
+                    - text: by
+                    - link "TÂCHES" [ref=e766] [cursor=pointer]:
+                      - /url: https://github.com/glittercowboy
+                    - text: "- A well-balanced, \"down-to-Earth\" set of sub agents, skills, and commands, that are well-organized, easy to read, and a healthy focus on \"meta\"-skills/agents, like \"skill-auditor\", hook creation, etc. - the kind of things you can adapt to your workflow, and not the other way around."
+                  - listitem [ref=e767]:
+                    - link "Web Assets Generator Skill" [ref=e768] [cursor=pointer]:
+                      - /url: https://github.com/alonw0/web-asset-generator
+                    - text: by
+                    - link "Alon Wolenitz" [ref=e769] [cursor=pointer]:
+                      - /url: https://github.com/alonw0
+                    - text: "- Easily generate web assets from Claude Code including favicons, app icons (PWA), and social media meta images (Open Graph) for Facebook, Twitter, WhatsApp, and LinkedIn. Handles image resizing, text-to-image generation, emojis, and provides proper HTML meta tags."
+                - generic [ref=e770]:
+                  - heading "Workflows & Knowledge Guides 🧠" [level=2] [ref=e771]
+                  - 'link "Permalink: Workflows & Knowledge Guides 🧠" [ref=e772] [cursor=pointer]':
+                    - /url: "#workflows--knowledge-guides-"
+                    - img [ref=e773]
+                - blockquote [ref=e775]:
+                  - paragraph [ref=e776]: A workflow is a tightly coupled set of Claude Code-native resources that facilitate specific projects
+                - generic [ref=e777]:
+                  - heading "General" [level=3] [ref=e778]
+                  - 'link "Permalink: General" [ref=e779] [cursor=pointer]':
+                    - /url: "#general-1"
+                    - img [ref=e780]
+                - list [ref=e782]:
+                  - listitem [ref=e783]:
+                    - link "AB Method" [ref=e784] [cursor=pointer]:
+                      - /url: https://github.com/ayoubben18/ab-method
+                    - text: by
+                    - link "Ayoub Bensalah" [ref=e785] [cursor=pointer]:
+                      - /url: https://github.com/ayoubben18
+                    - text: "- A principled, spec-driven workflow that transforms large problems into focused, incremental missions using Claude Code's specialized sub agents. Includes slash-commands, sub agents, and specialized workflows designed for specific parts of the SDLC."
+                  - listitem [ref=e786]:
+                    - link "Agentic Workflow Patterns" [ref=e787] [cursor=pointer]:
+                      - /url: https://github.com/ThibautMelen/agentic-workflow-patterns
+                    - text: by
+                    - link "ThibautMelen" [ref=e788] [cursor=pointer]:
+                      - /url: https://github.com/ThibautMelen
+                    - text: "- A comprehensive and well-documented collection of agentic patterns from Anthropic docs, with colorful Mermaid diagrams and code examples for each pattern. Covers Subagent Orchestration, Progressive Skills, Parallel Tool Calling, Master-Clone Architecture, Wizard Workflows, and more. Also compatible with other providers."
+                  - listitem [ref=e789]:
+                    - link "Blogging Platform Instructions" [ref=e790] [cursor=pointer]:
+                      - /url: https://github.com/cloudartisan/cloudartisan.github.io/tree/main/.claude/commands
+                    - text: by
+                    - link "cloudartisan" [ref=e791] [cursor=pointer]:
+                      - /url: https://github.com/cloudartisan
+                    - text: "- Provides a well-structured set of commands for publishing and maintaining a blogging platform, including commands for creating posts, managing categories, and handling media files."
+                  - listitem [ref=e792]:
+                    - link "Claude Code Documentation Mirror" [ref=e793] [cursor=pointer]:
+                      - /url: https://github.com/ericbuess/claude-code-docs
+                    - text: by
+                    - link "Eric Buess" [ref=e794] [cursor=pointer]:
+                      - /url: https://github.com/ericbuess
+                    - text: "- A mirror of the Anthropic © PBC documentation pages for Claude Code, updated every few hours. Can come in handy when trying to stay on top of the ever-expanding feature-set of Dr. Claw D. Code, Ph.D."
+                  - listitem [ref=e795]:
+                    - link "Claude Code Handbook" [ref=e796] [cursor=pointer]:
+                      - /url: https://nikiforovall.blog/claude-code-rules/
+                    - text: by
+                    - link "nikiforovall" [ref=e797] [cursor=pointer]:
+                      - /url: https://github.com/nikiforovall
+                    - text: "- Collection of best practices, tips, and techniques for Claude Code development workflows, enhanced with distributable plugins."
+                  - listitem [ref=e798]:
+                    - link "Claude Code Infrastructure Showcase" [ref=e799] [cursor=pointer]:
+                      - /url: https://github.com/diet103/claude-code-infrastructure-showcase
+                    - text: by
+                    - link "diet103" [ref=e800] [cursor=pointer]:
+                      - /url: https://github.com/diet103
+                    - text: "- A remarkably innovative approach to working with Skills, the centerpiece of which being a technique that leverages hooks to ensure that Claude intelligently selects and activates the appropriate Skill given the current context. Well-documented and adaptable to different projects and workflows."
+                  - listitem [ref=e801]:
+                    - link "Claude Code PM" [ref=e802] [cursor=pointer]:
+                      - /url: https://github.com/automazeio/ccpm
+                    - text: by
+                    - link "Ran Aroussi" [ref=e803] [cursor=pointer]:
+                      - /url: https://github.com/ranaroussi
+                    - text: "- Really comprehensive and feature-packed project-management workflow for Claude Code. Numerous specialized agents, slash-commands, and strong documentation."
+                  - listitem [ref=e804]:
+                    - link "Claude Code Repos Index" [ref=e805] [cursor=pointer]:
+                      - /url: https://github.com/danielrosehill/Claude-Code-Repos-Index
+                    - text: by
+                    - link "Daniel Rosehill" [ref=e806] [cursor=pointer]:
+                      - /url: https://github.com/danielrosehill
+                    - text: "- This is either the work of a prolific genius, or a very clever bot (or both), although it hardly matters because the quality is so good - an index of 75+ Claude Code repositories published by the author - and I'm not talking about slop. CMS, system design, deep research, IoT, agentic workflows, server management, personal health... If you spot the lie, let me know, otherwise please check these out."
+                  - listitem [ref=e807]:
+                    - link "Claude Code System Prompts" [ref=e808] [cursor=pointer]:
+                      - /url: https://github.com/Piebald-AI/claude-code-system-prompts
+                    - text: by
+                    - link "Piebald AI" [ref=e809] [cursor=pointer]:
+                      - /url: https://github.com/Piebald-AI
+                    - text: "- All parts of Claude Code's system prompt, including builtin tool descriptions, sub agent prompts (Plan/Explore/Task), utility prompts (CLAUDE.md, compact, Bash cmd, security review, agent creation, etc.). Updated for each Claude Code version."
+                  - listitem [ref=e810]:
+                    - link "Claude Code Tips" [ref=e811] [cursor=pointer]:
+                      - /url: https://github.com/ykdojo/claude-code-tips
+                    - text: by
+                    - link "ykdojo" [ref=e812] [cursor=pointer]:
+                      - /url: https://github.com/ykdojo
+                    - text: "- A nice variety of 35+ brief but information-dense Claude Code tips covering voice input, system prompt patching, container workflows for risky tasks, conversation cloning(!), multi-model orchestration with Gemini CLI, and plenty more. Nice demos, working scripts, a plugin, I'd say this probably has a little something for everyone."
+                  - listitem [ref=e813]:
+                    - link "Claude Code Ultimate Guide" [ref=e814] [cursor=pointer]:
+                      - /url: https://github.com/FlorianBruniaux/claude-code-ultimate-guide
+                    - text: by
+                    - link "Florian BRUNIAUX" [ref=e815] [cursor=pointer]:
+                      - /url: https://www.linkedin.com/in/florian-bruniaux-43408b83/
+                    - text: "- A tremendous feat of documentation, this guide covers Claude Code from beginner to power user, with production-ready templates for Claude Code features, guides on agentic workflows, and a lot of great learning materials, including quizzes and a handy \"cheatsheet\". Whether it's the \"ultimate\" guide to Claude Code will be up to the reader, but a valuable resource nonetheless (as with all documentation sites, make sure it's up to date before you bet the farm)."
+                  - listitem [ref=e816]:
+                    - link "Claude CodePro" [ref=e817] [cursor=pointer]:
+                      - /url: https://github.com/maxritter/claude-codepro
+                    - text: by
+                    - link "Max Ritter" [ref=e818] [cursor=pointer]:
+                      - /url: https://www.maxritter.net
+                    - text: "- Professional development environment for Claude Code with spec-driven workflow, TDD enforcement, cross-session memory, semantic search, quality hooks, and modular rules integration. A bit \"heavyweight\" but feature-packed and has wide coverage."
+                  - listitem [ref=e819]:
+                    - link "claude-code-docs" [ref=e820] [cursor=pointer]:
+                      - /url: https://github.com/costiash/claude-code-docs
+                    - text: by
+                    - link "Constantin Shafranski" [ref=e821] [cursor=pointer]:
+                      - /url: https://github.com/costiash
+                    - text: "- A mirror of the Anthropic© PBC documentation site for Claude/Code, but with bonus features like full-text search and query-time updates - a nice companion to"
+                    - code [ref=e822]: claude-code-docs
+                    - text: for up-to-the-minute, fully-indexed information so that Claude Code can read about itself.
+                  - listitem [ref=e823]:
+                    - link "ClaudoPro Directory" [ref=e824] [cursor=pointer]:
+                      - /url: https://github.com/JSONbored/claudepro-directory
+                    - text: by
+                    - link "ghost" [ref=e825] [cursor=pointer]:
+                      - /url: https://github.com/JSONbored
+                    - text: "- Well-crafted, wide selection of Claude Code hooks, slash commands, subagent files, and more, covering a range of specialized tasks and workflows. Better resources than your average \"Claude-template-for-everything\" site."
+                  - listitem [ref=e826]:
+                    - link "Context Priming" [ref=e827] [cursor=pointer]:
+                      - /url: https://github.com/disler/just-prompt/tree/main/.claude/commands
+                    - text: by
+                    - link "disler" [ref=e828] [cursor=pointer]:
+                      - /url: https://github.com/disler
+                    - text: "- Provides a systematic approach to priming Claude Code with comprehensive project context through specialized commands for different project scenarios and development contexts."
+                  - listitem [ref=e829]:
+                    - link "Design Review Workflow" [ref=e830] [cursor=pointer]:
+                      - /url: https://github.com/OneRedOak/claude-code-workflows/tree/main/design-review
+                    - text: by
+                    - link "Patrick Ellis" [ref=e831] [cursor=pointer]:
+                      - /url: https://github.com/OneRedOak
+                    - text: "- A tailored workflow for enabling automated UI/UX design review, including specialized sub agents, slash commands,"
+                    - code [ref=e832]: CLAUDE.md
+                    - text: excerpts, and more. Covers a broad range of criteria from responsive design to accessibility.
+                  - listitem [ref=e833]:
+                    - link "Encyclopedia of Agentic Coding Patterns" [ref=e834] [cursor=pointer]:
+                      - /url: https://aipatternbook.com
+                    - text: by
+                    - link "Wolf McNally" [ref=e835] [cursor=pointer]:
+                      - /url: https://github.com/wolfmcnally
+                    - text: "- A freely available reference covering 190+ patterns for AI-assisted software development (and actually a whole bunch of related technical topics) from foundational concepts through agentic construction patterns, governance, testing, and socio-technical systems. Each entry follows a consistent pattern-language format with Context, Problem, Forces, Solution, Consequences, and Related Patterns. Opinionated and erudiate, which is actually good for an \"encyclopedia\" in some ways."
+                  - listitem [ref=e836]:
+                    - link "Laravel TALL Stack AI Development Starter Kit" [ref=e837] [cursor=pointer]:
+                      - /url: https://github.com/tott/laravel-tall-claude-ai-configs
+                    - text: by
+                    - link "tott" [ref=e838] [cursor=pointer]:
+                      - /url: https://github.com/tott
+                    - text: "- Transform your Laravel TALL (Tailwind, AlpineJS, Laravel, Livewire) stack development with comprehensive Claude Code configurations that provide intelligent assistance, systematic workflows, and domain expert consultation."
+                  - listitem [ref=e839]:
+                    - link "Learn Claude Code" [ref=e840] [cursor=pointer]:
+                      - /url: https://github.com/shareAI-lab/learn-claude-code
+                    - text: by
+                    - link "shareAI-Lab" [ref=e841] [cursor=pointer]:
+                      - /url: https://github.com/shareAI-lab/
+                    - text: "- A really interesting analysis of how coding agents like Claude Code are designed. It attempts to break an agent down into its fundamental parts and reconstruct it with minimal code. Great learning resource. Final product is a rudimentary agent with skills, sub-agents, and a todo-list in roughly a few hundred lines of Python."
+                  - listitem [ref=e842]:
+                    - link "learn-faster-kit" [ref=e843] [cursor=pointer]:
+                      - /url: https://github.com/cheukyin175/learn-faster-kit
+                    - text: by
+                    - link "Hugo Lau" [ref=e844] [cursor=pointer]:
+                      - /url: https://github.com/cheukyin175
+                    - text: "- A creative educational framework for Claude Code, inspired by the \"FASTER\" approach to self-teaching. Ships with a variety of agents, slash commands, and tools that enable Claude Code to help you progress at your own pace, employing well-established pedagogical techniques like active learning and spaced repetition."
+                  - listitem [ref=e845]:
+                    - link "n8n_agent" [ref=e846] [cursor=pointer]:
+                      - /url: https://github.com/kingler/n8n_agent/tree/main/.claude/commands
+                    - text: by
+                    - link "kingler" [ref=e847] [cursor=pointer]:
+                      - /url: https://github.com/kingler
+                    - text: "- Amazing comprehensive set of comments for code analysis, QA, design, documentation, project structure, project management, optimization, and many more."
+                  - listitem [ref=e848]:
+                    - link "Project Bootstrapping and Task Management" [ref=e849] [cursor=pointer]:
+                      - /url: https://github.com/steadycursor/steadystart/tree/main/.claude/commands
+                    - text: by
+                    - link "steadycursor" [ref=e850] [cursor=pointer]:
+                      - /url: https://github.com/steadycursor
+                    - text: "- Provides a structured set of commands for bootstrapping and managing a new project, including meta-commands for creating and editing custom slash-commands."
+                  - listitem [ref=e851]:
+                    - link "Project Management, Implementation, Planning, and Release" [ref=e852] [cursor=pointer]:
+                      - /url: https://github.com/scopecraft/command/tree/main/.claude/commands
+                    - text: by
+                    - link "scopecraft" [ref=e853] [cursor=pointer]:
+                      - /url: https://github.com/scopecraft
+                    - text: "- Really comprehensive set of commands for all aspects of SDLC."
+                  - listitem [ref=e854]:
+                    - link "Project Workflow System" [ref=e855] [cursor=pointer]:
+                      - /url: https://github.com/harperreed/dotfiles/tree/master/.claude/commands
+                    - text: by
+                    - link "harperreed" [ref=e856] [cursor=pointer]:
+                      - /url: https://github.com/harperreed
+                    - text: "- A set of commands that provide a comprehensive workflow system for managing projects, including task management, code review, and deployment processes."
+                  - listitem [ref=e857]:
+                    - link "RIPER Workflow" [ref=e858] [cursor=pointer]:
+                      - /url: https://github.com/tony/claude-code-riper-5
+                    - text: by
+                    - link "Tony Narlock" [ref=e859] [cursor=pointer]:
+                      - /url: https://tony.sh
+                    - text: "- Structured development workflow enforcing separation between Research, Innovate, Plan, Execute, and Review phases. Features consolidated subagents for context-efficiency, branch-aware memory bank, and strict mode enforcement for guided development."
+                  - listitem [ref=e860]:
+                    - link "Shipping Real Code w/ Claude" [ref=e861] [cursor=pointer]:
+                      - /url: https://diwank.space/field-notes-from-shipping-real-code-with-claude
+                    - text: by
+                    - link "Diwank" [ref=e862] [cursor=pointer]:
+                      - /url: https://github.com/creatorrr
+                    - text: "- A detailed blog post explaining the author's process for shipping a product with Claude Code, including CLAUDE.md files and other interesting resources."
+                  - listitem [ref=e863]:
+                    - link "Simone" [ref=e864] [cursor=pointer]:
+                      - /url: https://github.com/Helmi/claude-simone
+                    - text: by
+                    - link "Helmi" [ref=e865] [cursor=pointer]:
+                      - /url: https://github.com/Helmi
+                    - text: "- A broader project management workflow for Claude Code that encompasses not just a set of commands, but a system of documents, guidelines, and processes to facilitate project planning and execution."
+                - generic [ref=e866]:
+                  - heading "Teams" [level=3] [ref=e867]
+                  - 'link "Permalink: Teams" [ref=e868] [cursor=pointer]':
+                    - /url: "#teams"
+                    - img [ref=e869]
+                - list [ref=e871]:
+                  - listitem [ref=e872]:
+                    - 'link "Claude Code Agent Teams: Exercises" [ref=e873] [cursor=pointer]':
+                      - /url: https://github.com/panaversity/claude-code-agent-teams-exercises
+                    - text: by
+                    - link "Panaversity" [ref=e874] [cursor=pointer]:
+                      - /url: https://github.com/panaversity
+                    - text: "- Practical exercises for Claude Code Agent Teams - 6 exercises + 2 capstones covering team creation, task coordination, quality hooks, and parallel code review - good learning resource."
+                  - listitem [ref=e875]:
+                    - link "Harness" [ref=e876] [cursor=pointer]:
+                      - /url: https://github.com/revfactory/harness
+                    - text: by
+                    - link "revfactory" [ref=e877] [cursor=pointer]:
+                      - /url: https://github.com/revfactory
+                    - text: "- A meta-skill that designs domain-specific agent teams, defines specialized agents, and generates the skills they use. Resources are in Korean but can produce high-quality English-language output."
+                - generic [ref=e878]:
+                  - heading "Ralph Wiggum" [level=3] [ref=e879]
+                  - 'link "Permalink: Ralph Wiggum" [ref=e880] [cursor=pointer]':
+                    - /url: "#ralph-wiggum"
+                    - img [ref=e881]
+                - list [ref=e883]:
+                  - listitem [ref=e884]:
+                    - link "awesome-ralph" [ref=e885] [cursor=pointer]:
+                      - /url: https://github.com/snwfdhmp/awesome-ralph
+                    - text: by
+                    - link "Martin Joly" [ref=e886] [cursor=pointer]:
+                      - /url: https://github.com/snwfdhmp
+                    - text: "- A curated list of resources about Ralph, the AI coding technique that runs AI coding agents in automated loops until specifications are fulfilled."
+                  - listitem [ref=e887]:
+                    - link "Ralph for Claude Code" [ref=e888] [cursor=pointer]:
+                      - /url: https://github.com/frankbria/ralph-claude-code
+                    - text: by
+                    - link "Frank Bria" [ref=e889] [cursor=pointer]:
+                      - /url: https://github.com/frankbria
+                    - text: "- An autonomous AI development framework that enables Claude Code to work iteratively on projects until completion. Features intelligent exit detection, rate limiting, circuit breaker patterns, and comprehensive safety guardrails to prevent infinite loops and API overuse. Built with Bash, integrated with tmux for live monitoring, and includes 75+ comprehensive tests."
+                  - listitem [ref=e890]:
+                    - link "Ralph Wiggum Marketer" [ref=e891] [cursor=pointer]:
+                      - /url: https://github.com/muratcankoylan/ralph-wiggum-marketer
+                    - text: by
+                    - link "Muratcan Koylan" [ref=e892] [cursor=pointer]:
+                      - /url: https://github.com/muratcankoylan
+                    - text: "- A Claude Code plugin that provides an autonomous AI copywriter, integrating the Ralph loop with customized knowledge bases for market research agents. The agents do the research, Ralph writes the copy, you stay in bed. Whether or not you practice Ralph-Driven Development (RDD), I think these projects are interesting and creative explorations of general agentic patterns."
+                  - listitem [ref=e893]:
+                    - link "ralph-orchestrator" [ref=e894] [cursor=pointer]:
+                      - /url: https://github.com/mikeyobrien/ralph-orchestrator
+                    - text: by
+                    - link "mikeyobrien" [ref=e895] [cursor=pointer]:
+                      - /url: https://github.com/mikeyobrien
+                    - text: "- Ralph Orchestrator implements the simple but effective \"Ralph Wiggum\" technique for autonomous task completion, continuously running an AI agent against a prompt file until the task is marked as complete or limits are reached. This implementation provides a robust, well-tested, and feature-complete orchestration system for AI-driven development. Also cited in the Anthropic Ralph plugin documentation."
+                  - listitem [ref=e896]:
+                    - link "ralph-wiggum-bdd" [ref=e897] [cursor=pointer]:
+                      - /url: https://github.com/marcindulak/ralph-wiggum-bdd
+                    - text: by
+                    - link "marcindulak" [ref=e898] [cursor=pointer]:
+                      - /url: https://github.com/marcindulak
+                    - text: "- A standalone Bash script for Behavior-Driven Development with Ralph Wiggum Loop. In principle, while running unattended, the script can keep code and requirements in sync, but in practice it still requires interactive human supervision, so it supports both modes. The script is standalone and can be modified and committed into your project."
+                  - listitem [ref=e899]:
+                    - link "The Ralph Playbook" [ref=e900] [cursor=pointer]:
+                      - /url: https://github.com/ClaytonFarr/ralph-playbook
+                    - text: by
+                    - link "Clayton Farr" [ref=e901] [cursor=pointer]:
+                      - /url: https://github.com/ClaytonFarr
+                    - text: "- A remarkably detailed and comprehensive guide to the Ralph Wiggum technique, featuring well-written theoretical commentary paired with practical guidelines and advice."
+                - generic [ref=e902]:
+                  - heading "Tooling 🧰" [level=2] [ref=e903]
+                  - 'link "Permalink: Tooling 🧰" [ref=e904] [cursor=pointer]':
+                    - /url: "#tooling-"
+                    - img [ref=e905]
+                - blockquote [ref=e907]:
+                  - paragraph [ref=e908]:
+                    - text: Tooling denotes applications that are built on top of Claude Code and consist of more components than slash-commands and
+                    - code [ref=e909]: CLAUDE.md
+                    - text: files
+                - generic [ref=e910]:
+                  - heading "General" [level=3] [ref=e911]
+                  - 'link "Permalink: General" [ref=e912] [cursor=pointer]':
+                    - /url: "#general-2"
+                    - img [ref=e913]
+                - list [ref=e915]:
+                  - listitem [ref=e916]:
+                    - link "cc-sessions" [ref=e917] [cursor=pointer]:
+                      - /url: https://github.com/GWUDCAP/cc-sessions
+                    - text: by
+                    - link "toastdev" [ref=e918] [cursor=pointer]:
+                      - /url: https://github.com/satoastshi
+                    - text: "- An opinionated approach to productive development with Claude Code."
+                  - listitem [ref=e919]:
+                    - link "cc-tools" [ref=e920] [cursor=pointer]:
+                      - /url: https://github.com/Veraticus/cc-tools
+                    - text: by
+                    - link "Josh Symonds" [ref=e921] [cursor=pointer]:
+                      - /url: https://github.com/Veraticus
+                    - text: "- High-performance Go implementation of Claude Code hooks and utilities. Provides smart linting, testing, and statusline generation with minimal overhead."
+                  - listitem [ref=e922]:
+                    - link "ccexp" [ref=e923] [cursor=pointer]:
+                      - /url: https://github.com/nyatinte/ccexp
+                    - text: by
+                    - link "nyatinte" [ref=e924] [cursor=pointer]:
+                      - /url: https://github.com/nyatinte
+                    - text: "- Interactive CLI tool for discovering and managing Claude Code configuration files and slash commands with a beautiful terminal UI."
+                  - listitem [ref=e925]:
+                    - link "cchistory" [ref=e926] [cursor=pointer]:
+                      - /url: https://github.com/eckardt/cchistory
+                    - text: by
+                    - link "eckardt" [ref=e927] [cursor=pointer]:
+                      - /url: https://github.com/eckardt
+                    - text: "- Like the shell history command but for your Claude Code sessions. Easily list all Bash or \"Bash-mode\" ("
+                    - code [ref=e928]: "!"
+                    - text: ) commands Claude Code ran in a session for reference.
+                  - listitem [ref=e929]:
+                    - link "cclogviewer" [ref=e930] [cursor=pointer]:
+                      - /url: https://github.com/Brads3290/cclogviewer
+                    - text: by
+                    - link "Brad S." [ref=e931] [cursor=pointer]:
+                      - /url: https://github.com/Brads3290
+                    - text: "- A humble but handy utility for viewing Claude Code"
+                    - code [ref=e932]: .jsonl
+                    - text: conversation files in a pretty HTML UI.
+                  - listitem [ref=e933]:
+                    - link "Claude Code Templates" [ref=e934] [cursor=pointer]:
+                      - /url: https://github.com/davila7/claude-code-templates
+                    - text: by
+                    - link "Daniel Avila" [ref=e935] [cursor=pointer]:
+                      - /url: https://github.com/davila7
+                    - text: "- Incredibly awesome collection of resources from every category in this list, presented with a neatly polished UI, great features like usage dashboard, analytics, and everything from slash commands to hooks to agents. An awesome companion for this awesome list."
+                  - listitem [ref=e936]:
+                    - link "Claude Composer" [ref=e937] [cursor=pointer]:
+                      - /url: https://github.com/possibilities/claude-composer
+                    - text: by
+                    - link "Mike Bannister" [ref=e938] [cursor=pointer]:
+                      - /url: https://github.com/possibilities
+                    - text: "- A tool that adds small enhancements to Claude Code."
+                  - listitem [ref=e939]:
+                    - link "Claude Hub" [ref=e940] [cursor=pointer]:
+                      - /url: https://github.com/claude-did-this/claude-hub
+                    - text: by
+                    - link "Claude Did This" [ref=e941] [cursor=pointer]:
+                      - /url: https://github.com/claude-did-this
+                    - text: "- A webhook service that connects Claude Code to GitHub repositories, enabling AI-powered code assistance directly through pull requests and issues. This integration allows Claude to analyze repositories, answer technical questions, and help developers understand and improve their codebase through simple @mentions."
+                  - listitem [ref=e942]:
+                    - link "Claude Session Restore" [ref=e943] [cursor=pointer]:
+                      - /url: https://github.com/ZENG3LD/claude-session-restore
+                    - text: by
+                    - link "ZENG3LD" [ref=e944] [cursor=pointer]:
+                      - /url: https://github.com/ZENG3LD
+                    - text: "- Efficiently restore context from previous Claude Code sessions by analyzing session files and git history. Features multi-factor data collection across numerous Claude Code capacities with time-based filtering. Uses tail-based parsing for efficient handling of large session files up to 2GB. Includes both a CLI tool for manual analysis and a Claude Code skill for automatic session restoration."
+                  - listitem [ref=e945]:
+                    - link "claude-code-tools" [ref=e946] [cursor=pointer]:
+                      - /url: https://github.com/pchalasani/claude-code-tools
+                    - text: by
+                    - link "Prasad Chalasani" [ref=e947] [cursor=pointer]:
+                      - /url: https://github.com/pchalasani
+                    - text: "- Well-crafted toolset for session continuity, featuring skills/commands to avoid compaction and recover context across sessions with cross-agent handoff between Claude Code and Codex CLI. Includes a fast Rust/Tantivy-powered full-text session search (TUI for humans, skill/CLI for agents), tmux-cli skill + command for interacting with scripts and CLI agents, and safety hooks to block dangerous commands."
+                  - listitem [ref=e948]:
+                    - link "claude-devtools" [ref=e949] [cursor=pointer]:
+                      - /url: https://github.com/matt1398/claude-devtools
+                    - text: by
+                    - link "matt1398" [ref=e950] [cursor=pointer]:
+                      - /url: https://github.com/matt1398
+                    - text: "- A well-designed desktop app that provides detailed observability into your Claude Code sessions by analyzing the session logs. Provides turn-based context data across numerous categories, compaction visualization, subagent execution trees, and custom notification triggers. Easy to install, and nice visual design."
+                  - listitem [ref=e951]:
+                    - link "claude-toolbox" [ref=e952] [cursor=pointer]:
+                      - /url: https://github.com/serpro69/claude-toolbox
+                    - text: by
+                    - link "serpro69" [ref=e953] [cursor=pointer]:
+                      - /url: https://github.com/serpro69
+                    - text: "- This is a starter template repository designed to provide a complete development environment for Claude-Code with pre-configured MCP servers and tools for AI-powered development workflows. The repository is intentionally minimal, containing only configuration templates for three primary systems: Claude Code, Serena, and Task Master."
+                  - listitem [ref=e954]:
+                    - link "claudekit" [ref=e955] [cursor=pointer]:
+                      - /url: https://github.com/carlrannaberg/claudekit
+                    - text: by
+                    - link "Carl Rannaberg" [ref=e956] [cursor=pointer]:
+                      - /url: https://github.com/carlrannaberg
+                    - text: "- Impressive CLI toolkit providing auto-save checkpointing, code quality hooks, specification generation and execution, and 20+ specialized subagents including oracle (gpt-5), code-reviewer (6-aspect deep analysis), ai-sdk-expert (Vercel AI SDK), typescript-expert and many more for Claude Code workflows."
+                  - listitem [ref=e957]:
+                    - link "Container Use" [ref=e958] [cursor=pointer]:
+                      - /url: https://github.com/dagger/container-use
+                    - text: by
+                    - link "dagger" [ref=e959] [cursor=pointer]:
+                      - /url: https://github.com/dagger
+                    - text: "- Development environments for coding agents. Enable multiple agents to work safely and independently with your preferred stack."
+                  - listitem [ref=e960]:
+                    - link "ContextKit" [ref=e961] [cursor=pointer]:
+                      - /url: https://github.com/FlineDev/ContextKit
+                    - text: by
+                    - link "Cihat Gündüz" [ref=e962] [cursor=pointer]:
+                      - /url: https://github.com/Jeehut
+                    - text: "- A systematic development framework that transforms Claude Code into a proactive development partner. Features 4-phase planning methodology, specialized quality agents, and structured workflows that help AI produce production-ready code on first try."
+                  - listitem [ref=e963]:
+                    - link "recall" [ref=e964] [cursor=pointer]:
+                      - /url: https://github.com/zippoxer/recall
+                    - text: by
+                    - link "zippoxer" [ref=e965] [cursor=pointer]:
+                      - /url: https://github.com/zippoxer
+                    - text: "- Full-text search your Claude Code sessions. Run"
+                    - code [ref=e966]: recall
+                    - text: in terminal, type to search, Enter to resume. Alternative to
+                    - code [ref=e967]: claude --resume
+                    - text: .
+                  - listitem [ref=e968]:
+                    - link "Rulesync" [ref=e969] [cursor=pointer]:
+                      - /url: https://github.com/dyoshikawa/rulesync
+                    - text: by
+                    - link "dyoshikawa" [ref=e970] [cursor=pointer]:
+                      - /url: https://github.com/dyoshikawa
+                    - text: "- A Node.js CLI tool that automatically generates configs (rules, ignore files, MCP servers, commands, and subagents) for various AI coding agents. Rulesync can convert configs between Claude Code and other AI agents in both directions."
+                  - listitem [ref=e971]:
+                    - link "run-claude-docker" [ref=e972] [cursor=pointer]:
+                      - /url: https://github.com/icanhasjonas/run-claude-docker
+                    - text: by
+                    - link "Jonas" [ref=e973] [cursor=pointer]:
+                      - /url: https://github.com/icanhasjonas/
+                    - text: "- A self-contained Docker runner that forwards your current workspace into a safe(r) isolated docker container, where you still have access to your Claude Code settings, authentication, ssh agent, pgp, optionally aws keys etc."
+                  - listitem [ref=e974]:
+                    - link "stt-mcp-server-linux" [ref=e975] [cursor=pointer]:
+                      - /url: https://github.com/marcindulak/stt-mcp-server-linux
+                    - text: by
+                    - link "marcindulak" [ref=e976] [cursor=pointer]:
+                      - /url: https://github.com/marcindulak
+                    - text: "- A push-to-talk speech transcription setup for Linux using a Python MCP server. Runs locally in Docker with no external API calls. Your speech is recorded, transcribed into text, and then sent to Claude running in a Tmux session."
+                  - listitem [ref=e977]:
+                    - link "SuperClaude" [ref=e978] [cursor=pointer]:
+                      - /url: https://github.com/SuperClaude-Org/SuperClaude_Framework
+                    - text: by
+                    - link "SuperClaude-Org" [ref=e979] [cursor=pointer]:
+                      - /url: https://github.com/SuperClaude-Org
+                    - text: "- A versatile configuration framework that enhances Claude Code with specialized commands, cognitive personas, and development methodologies, such as \"Introspection\" and \"Orchestration\"."
+                  - listitem [ref=e980]:
+                    - link "tweakcc" [ref=e981] [cursor=pointer]:
+                      - /url: https://github.com/Piebald-AI/tweakcc
+                    - text: by
+                    - link "Piebald-AI" [ref=e982] [cursor=pointer]:
+                      - /url: https://github.com/Piebald-AI
+                    - text: "- Command-line tool to customize your Claude Code styling."
+                  - listitem [ref=e983]:
+                    - link "Vibe-Log" [ref=e984] [cursor=pointer]:
+                      - /url: https://github.com/vibe-log/vibe-log-cli
+                    - text: by
+                    - link "Vibe-Log" [ref=e985] [cursor=pointer]:
+                      - /url: https://github.com/vibe-log
+                    - text: "- Analyzes your Claude Code prompts locally (using CC), provides intelligent session analysis and actionable strategic guidance - works in the statusline and produces very pretty HTML reports as well. Easy to install and remove."
+                  - listitem [ref=e986]:
+                    - link "viwo-cli" [ref=e987] [cursor=pointer]:
+                      - /url: https://github.com/OverseedAI/viwo
+                    - text: by
+                    - link "Hal Shin" [ref=e988] [cursor=pointer]:
+                      - /url: https://github.com/hal-shin
+                    - text: "- Run Claude Code in a Docker container with git worktrees as volume mounts to enable safer usage of"
+                    - code [ref=e989]: "--dangerously-skip-permissions"
+                    - text: for frictionless one-shotting prompts. Allows users to spin up multiple instances of Claude Code in the background easily with reduced permission fatigue.
+                  - listitem [ref=e990]:
+                    - link "VoiceMode MCP" [ref=e991] [cursor=pointer]:
+                      - /url: https://github.com/mbailey/voicemode
+                    - text: by
+                    - link "Mike Bailey" [ref=e992] [cursor=pointer]:
+                      - /url: https://github.com/mbailey
+                    - text: "- VoiceMode MCP brings natural conversations to Claude Code. It supports any OpenAI API compatible voice services and installs free and open source voice services (Whisper.cpp and Kokoro-FastAPI)."
+                - generic [ref=e993]:
+                  - heading "IDE Integrations" [level=3] [ref=e994]
+                  - 'link "Permalink: IDE Integrations" [ref=e995] [cursor=pointer]':
+                    - /url: "#ide-integrations"
+                    - img [ref=e996]
+                - list [ref=e998]:
+                  - listitem [ref=e999]:
+                    - link "Claude Code Chat" [ref=e1000] [cursor=pointer]:
+                      - /url: https://marketplace.visualstudio.com/items?itemName=AndrePimenta.claude-code-chat
+                    - text: by
+                    - link "andrepimenta" [ref=e1001] [cursor=pointer]:
+                      - /url: https://github.com/andrepimenta
+                    - text: "- An elegant and user-friendly Claude Code chat interface for VS Code."
+                  - listitem [ref=e1002]:
+                    - link "claude-code-ide.el" [ref=e1003] [cursor=pointer]:
+                      - /url: https://github.com/manzaltu/claude-code-ide.el
+                    - text: by
+                    - link "manzaltu" [ref=e1004] [cursor=pointer]:
+                      - /url: https://github.com/manzaltu
+                    - text: "- claude-code-ide.el integrates Claude Code with Emacs, like Anthropic’s VS Code/IntelliJ extensions. It shows ediff-based code suggestions, pulls LSP/flymake/flycheck diagnostics, and tracks buffer context. It adds an extensible MCP tool support for symbol refs/defs, project metadata, and tree-sitter AST queries."
+                  - listitem [ref=e1005]:
+                    - link "claude-code.el" [ref=e1006] [cursor=pointer]:
+                      - /url: https://github.com/stevemolitor/claude-code.el
+                    - text: by
+                    - link "stevemolitor" [ref=e1007] [cursor=pointer]:
+                      - /url: https://github.com/stevemolitor
+                    - text: "- An Emacs interface for Claude Code CLI."
+                  - listitem [ref=e1008]:
+                    - link "claude-code.nvim" [ref=e1009] [cursor=pointer]:
+                      - /url: https://github.com/greggh/claude-code.nvim
+                    - text: by
+                    - link "greggh" [ref=e1010] [cursor=pointer]:
+                      - /url: https://github.com/greggh
+                    - text: "- A seamless integration between Claude Code AI assistant and Neovim."
+                  - listitem [ref=e1011]:
+                    - link "Claudix - Claude Code for VSCode" [ref=e1012] [cursor=pointer]:
+                      - /url: https://github.com/Haleclipse/Claudix
+                    - text: by
+                    - link "Haleclipse" [ref=e1013] [cursor=pointer]:
+                      - /url: https://github.com/Haleclipse
+                    - text: "- A VSCode extension that brings Claude Code directly into your editor with interactive chat interface, session management, intelligent file operations, terminal execution, and real-time streaming responses. Built with Vue 3, TypeScript."
+                  - listitem [ref=e1014]:
+                    - link "Clawd on Desk" [ref=e1015] [cursor=pointer]:
+                      - /url: https://github.com/rullerzhou-afk/clawd-on-desk
+                    - text: by
+                    - link "Ruller_Lulu" [ref=e1016] [cursor=pointer]:
+                      - /url: https://github.com/rullerzhou-afk
+                    - text: "- A desktop pet that reacts to your Claude Code sessions in real-time — thinking, typing, juggling, sleeping, and more. Yep. It's undeniably endearing. And at the end of the day, isn't that what Claude Code is all about?"
+                - generic [ref=e1017]:
+                  - heading "Usage Monitors" [level=3] [ref=e1018]
+                  - 'link "Permalink: Usage Monitors" [ref=e1019] [cursor=pointer]':
+                    - /url: "#usage-monitors"
+                    - img [ref=e1020]
+                - list [ref=e1022]:
+                  - listitem [ref=e1023]:
+                    - link "CC Usage" [ref=e1024] [cursor=pointer]:
+                      - /url: https://github.com/ryoppippi/ccusage
+                    - text: by
+                    - link "ryoppippi" [ref=e1025] [cursor=pointer]:
+                      - /url: https://github.com/ryoppippi
+                    - text: "- Handy CLI tool for managing and analyzing Claude Code usage, based on analyzing local Claude Code logs. Presents a nice dashboard regarding cost information, token consumption, etc."
+                  - listitem [ref=e1026]:
+                    - link "ccflare" [ref=e1027] [cursor=pointer]:
+                      - /url: https://github.com/snipeship/ccflare
+                    - text: by
+                    - link "snipeship" [ref=e1028] [cursor=pointer]:
+                      - /url: https://github.com/snipeship
+                    - text: "- Claude Code usage dashboard with a web-UI that would put Tableau to shame. Thoroughly comprehensive metrics, frictionless setup, detailed logging, really really nice UI."
+                  - listitem [ref=e1029]:
+                    - link "ccflare -> better-ccflare" [ref=e1030] [cursor=pointer]:
+                      - /url: https://github.com/tombii/better-ccflare/
+                      - text: ccflare ->
+                      - strong [ref=e1031]: better-ccflare
+                    - text: by
+                    - link "tombii" [ref=e1032] [cursor=pointer]:
+                      - /url: https://github.com/tombii
+                    - text: "- A well-maintained and feature-enhanced fork of the glorious"
+                    - code [ref=e1033]: ccflare
+                    - text: usage dashboard by @snipeship (which at the time of writing has not had an update in a few months).
+                    - code [ref=e1034]: better-ccflare
+                    - text: builds on this foundation with some performance enhancements, extended provider support, bug fixes, Docker deployment, and more.
+                  - listitem [ref=e1035]:
+                    - link "ccxray" [ref=e1036] [cursor=pointer]:
+                      - /url: https://github.com/lis186/ccxray
+                    - text: by
+                    - link "lis186" [ref=e1037] [cursor=pointer]:
+                      - /url: https://github.com/lis186
+                    - text: "- A transparent HTTP proxy and real-time dashboard that sits between Claude Code and the Anthropic API. Captures every request and response without configuration, presenting them in a Miller-column interface with session grouping, token/cost tracking, and context-window visualization."
+                  - listitem [ref=e1038]:
+                    - link "Claude Code Usage Monitor" [ref=e1039] [cursor=pointer]:
+                      - /url: https://github.com/Maciek-roboblog/Claude-Code-Usage-Monitor
+                    - text: by
+                    - link "Maciek-roboblog" [ref=e1040] [cursor=pointer]:
+                      - /url: https://github.com/Maciek-roboblog
+                    - text: "- A real-time terminal-based tool for monitoring Claude Code token usage. It shows live token consumption, burn rate, and predictions for token depletion. Features include visual progress bars, session-aware analytics, and support for multiple subscription plans."
+                  - listitem [ref=e1041]:
+                    - link "Claudex" [ref=e1042] [cursor=pointer]:
+                      - /url: https://github.com/kunwar-shah/claudex
+                    - text: by
+                    - link "Kunwar Shah" [ref=e1043] [cursor=pointer]:
+                      - /url: https://github.com/kunwar-shah
+                    - text: "- Claudex - A web-based browser for exploring your Claude Code conversation history across projects. Indexes your codebase for full-text search. Nice, easy-to-navigate UI. Simple dashboard interface for high-level analytics, and multiple export options as well. (And completely local w/ no telemetry!)."
+                  - listitem [ref=e1044]:
+                    - link "viberank" [ref=e1045] [cursor=pointer]:
+                      - /url: https://github.com/sculptdotfun/viberank
+                    - text: by
+                    - link "nikshepsvn" [ref=e1046] [cursor=pointer]:
+                      - /url: https://github.com/nikshepsvn
+                    - text: "- A community-driven leaderboard tool that enables developers to visualize, track, and compete based on their Claude Code usage statistics. It features robust data analytics, GitHub OAuth, data validation, and user-friendly CLI/web submission methods."
+                - generic [ref=e1047]:
+                  - heading "Orchestrators" [level=3] [ref=e1048]
+                  - 'link "Permalink: Orchestrators" [ref=e1049] [cursor=pointer]':
+                    - /url: "#orchestrators"
+                    - img [ref=e1050]
+                - list [ref=e1052]:
+                  - listitem [ref=e1053]:
+                    - link "Auto-Claude" [ref=e1054] [cursor=pointer]:
+                      - /url: https://github.com/AndyMik90/Auto-Claude
+                    - text: by
+                    - link "AndyMik90" [ref=e1055] [cursor=pointer]:
+                      - /url: https://github.com/AndyMik90
+                    - text: "- Autonomous multi-agent coding framework for Claude Code (Claude Agent SDK) that integrates the full SDLC - \"plans, builds, and validates software for you\". Features a slick kanban-style UI and a well-designed but not over-engineered agent orchestration system."
+                  - listitem [ref=e1056]:
+                    - link "Claude Code Flow" [ref=e1057] [cursor=pointer]:
+                      - /url: https://github.com/ruvnet/claude-code-flow
+                    - text: by
+                    - link "ruvnet" [ref=e1058] [cursor=pointer]:
+                      - /url: https://github.com/ruvnet
+                    - text: "- This mode serves as a code-first orchestration layer, enabling Claude to write, edit, test, and optimize code autonomously across recursive agent cycles."
+                  - listitem [ref=e1059]:
+                    - link "Claude Squad" [ref=e1060] [cursor=pointer]:
+                      - /url: https://github.com/smtg-ai/claude-squad
+                    - text: by
+                    - link "smtg-ai" [ref=e1061] [cursor=pointer]:
+                      - /url: https://github.com/smtg-ai
+                    - text: "- Claude Squad is a terminal app that manages multiple Claude Code, Codex (and other local agents including Aider) in separate workspaces, allowing you to work on multiple tasks simultaneously."
+                  - listitem [ref=e1062]:
+                    - link "Claude Swarm" [ref=e1063] [cursor=pointer]:
+                      - /url: https://github.com/parruda/claude-swarm
+                    - text: by
+                    - link "parruda" [ref=e1064] [cursor=pointer]:
+                      - /url: https://github.com/parruda
+                    - text: "- Launch Claude Code session that is connected to a swarm of Claude Code Agents."
+                  - listitem [ref=e1065]:
+                    - link "Claude Task Master" [ref=e1066] [cursor=pointer]:
+                      - /url: https://github.com/eyaltoledano/claude-task-master
+                    - text: by
+                    - link "eyaltoledano" [ref=e1067] [cursor=pointer]:
+                      - /url: https://github.com/eyaltoledano
+                    - text: "- A task management system for AI-driven development with Claude, designed to work seamlessly with Cursor AI."
+                  - listitem [ref=e1068]:
+                    - link "Claude Task Runner" [ref=e1069] [cursor=pointer]:
+                      - /url: https://github.com/grahama1970/claude-task-runner
+                    - text: by
+                    - link "grahama1970" [ref=e1070] [cursor=pointer]:
+                      - /url: https://github.com/grahama1970
+                    - text: "- A specialized tool to manage context isolation and focused task execution with Claude Code, solving the critical challenge of context length limitations and task focus when working with Claude on complex, multi-step projects."
+                  - listitem [ref=e1071]:
+                    - link "Happy Coder" [ref=e1072] [cursor=pointer]:
+                      - /url: https://github.com/slopus/happy
+                    - text: by
+                    - link "GrocerPublishAgent" [ref=e1073] [cursor=pointer]:
+                      - /url: https://peoplesgrocers.com/en/projects
+                    - text: "- Spawn and control multiple Claude Codes in parallel from your phone or desktop. Happy Coder runs Claude Code on your hardware, sends push notifications when Claude needs more input or permission, and costs nothing."
+                  - listitem [ref=e1074]:
+                    - link "Ruflo" [ref=e1075] [cursor=pointer]:
+                      - /url: https://github.com/ruvnet/ruflo
+                    - text: by
+                    - link "rUv" [ref=e1076] [cursor=pointer]:
+                      - /url: https://github.com/ruvnet
+                    - text: "- An orchestration platform for deploying and coordinating multi-agent swarms. If I tried to go into detail it would probably crash my browser. An impressive feat of engineering that tries to cover everything and actually does a good job. Self-learning, autonomous multi-agent swarms, vector-based multi-layered memory, systematic planning, security guardrails, and so on. It's a growing project, and YMMV, but even just studying the patterns is immensely valuable, and it's clearly well-engineered."
+                  - listitem [ref=e1077]:
+                    - link "sudocode" [ref=e1078] [cursor=pointer]:
+                      - /url: https://github.com/sudocode-ai/sudocode
+                    - text: by
+                    - link "ssh-randy" [ref=e1079] [cursor=pointer]:
+                      - /url: https://github.com/ssh-randy
+                    - text: "- Lightweight agent orchestration dev tool that lives in your repo. Integrates with various specification frameworks. It's giving Jira."
+                  - listitem [ref=e1080]:
+                    - link "The Agentic Startup" [ref=e1081] [cursor=pointer]:
+                      - /url: https://github.com/rsmdt/the-startup
+                    - text: by
+                    - link "Rudolf Schmidt" [ref=e1082] [cursor=pointer]:
+                      - /url: https://github.com/rsmdt
+                    - text: "- Yet Another Claude Orchestrator - a collection of agents, commands, etc., for shipping production code - but I like this because it's comprehensive, well-written, and one of the few resources that actually uses Output Styles! +10 points!"
+                  - listitem [ref=e1083]:
+                    - link "TSK - AI Agent Task Manager and Sandbox" [ref=e1084] [cursor=pointer]:
+                      - /url: https://github.com/dtormoen/tsk
+                    - text: by
+                    - link "dtormoen" [ref=e1085] [cursor=pointer]:
+                      - /url: https://github.com/dtormoen
+                    - text: "- A Rust CLI tool that lets you delegate development tasks to AI agents running in sandboxed Docker environments. Multiple agents work in parallel, returning git branches for human review."
+                - generic [ref=e1086]:
+                  - heading "Config Managers" [level=3] [ref=e1087]
+                  - 'link "Permalink: Config Managers" [ref=e1088] [cursor=pointer]':
+                    - /url: "#config-managers"
+                    - img [ref=e1089]
+                - list [ref=e1091]:
+                  - listitem [ref=e1092]:
+                    - link "agnix" [ref=e1093] [cursor=pointer]:
+                      - /url: https://github.com/agent-sh/agnix
+                    - text: by
+                    - link "agent-sh" [ref=e1094] [cursor=pointer]:
+                      - /url: https://github.com/agent-sh
+                    - text: "- A comprehensive linter for Claude Code agent files. Validate CLAUDE.md, AGENTS.md, SKILL.md, hooks, MCP, and more. Plugin for all major IDEs included, with auto-fixes."
+                  - listitem [ref=e1095]:
+                    - link "claude-rules-doctor" [ref=e1096] [cursor=pointer]:
+                      - /url: https://github.com/nulone/claude-rules-doctor
+                    - text: by
+                    - link "nulone" [ref=e1097] [cursor=pointer]:
+                      - /url: https://github.com/nulone
+                    - text: "- CLI that detects dead"
+                    - code [ref=e1098]: .claude/rules/
+                    - text: files by checking if
+                    - code [ref=e1099]: "paths:"
+                    - text: globs actually match files in your repo. Catches silent rule failures where renamed directories or typos in glob patterns cause rules to never apply. Features CI mode (exit 1 on dead rules), JSON output, and verbose mode showing matched files.
+                  - listitem [ref=e1100]:
+                    - link "ClaudeCTX" [ref=e1101] [cursor=pointer]:
+                      - /url: https://github.com/foxj77/claudectx
+                    - text: by
+                    - link "John Fox" [ref=e1102] [cursor=pointer]:
+                      - /url: https://github.com/foxj77
+                    - text: "- claudectx lets you switch your entire Claude Code configuration with a single command."
+                - generic [ref=e1103]:
+                  - heading "Status Lines 📊" [level=2] [ref=e1104]
+                  - 'link "Permalink: Status Lines 📊" [ref=e1105] [cursor=pointer]':
+                    - /url: "#status-lines-"
+                    - img [ref=e1106]
+                - blockquote [ref=e1108]:
+                  - paragraph [ref=e1109]: Status lines - Configurations and customizations for Claude Code's status bar functionality
+                - generic [ref=e1110]:
+                  - heading "General" [level=3] [ref=e1111]
+                  - 'link "Permalink: General" [ref=e1112] [cursor=pointer]':
+                    - /url: "#general-3"
+                    - img [ref=e1113]
+                - list [ref=e1115]:
+                  - listitem [ref=e1116]:
+                    - link "CCometixLine - Claude Code Statusline" [ref=e1117] [cursor=pointer]:
+                      - /url: https://github.com/Haleclipse/CCometixLine
+                    - text: by
+                    - link "Haleclipse" [ref=e1118] [cursor=pointer]:
+                      - /url: https://github.com/Haleclipse
+                    - text: "- A high-performance Claude Code statusline tool written in Rust with Git integration, usage tracking, interactive TUI configuration, and Claude Code enhancement utilities."
+                  - listitem [ref=e1119]:
+                    - link "ccstatusline" [ref=e1120] [cursor=pointer]:
+                      - /url: https://github.com/sirmalloc/ccstatusline
+                    - text: by
+                    - link "sirmalloc" [ref=e1121] [cursor=pointer]:
+                      - /url: https://github.com/sirmalloc
+                    - text: "- A highly customizable status line formatter for Claude Code CLI that displays model info, git branch, token usage, and other metrics in your terminal."
+                  - listitem [ref=e1122]:
+                    - link "claude-code-statusline" [ref=e1123] [cursor=pointer]:
+                      - /url: https://github.com/rz1989s/claude-code-statusline
+                    - text: by
+                    - link "rz1989s" [ref=e1124] [cursor=pointer]:
+                      - /url: https://github.com/rz1989s
+                    - text: "- Enhanced 4-line statusline for Claude Code with themes, cost tracking, and MCP server monitoring."
+                  - listitem [ref=e1125]:
+                    - link "claude-pace" [ref=e1126] [cursor=pointer]:
+                      - /url: https://github.com/Astro-Han/claude-pace
+                    - text: by
+                    - link "Astro-Han" [ref=e1127] [cursor=pointer]:
+                      - /url: https://github.com/Astro-Han
+                    - text: "- A lightweight Bash + jq statusline for Claude Code that displays rate limit pace delta (burn rate vs. time remaining), 5h/7d usage percentage, context window usage, git branch and diff stats. Compares current consumption rate against time remaining in each rate limit window to indicate whether quota is being used faster or slower than the window allows. Single file with no external dependencies beyond jq."
+                  - listitem [ref=e1128]:
+                    - link "claude-powerline" [ref=e1129] [cursor=pointer]:
+                      - /url: https://github.com/Owloops/claude-powerline
+                    - text: by
+                    - link "Owloops" [ref=e1130] [cursor=pointer]:
+                      - /url: https://github.com/Owloops
+                    - text: "- A vim-style powerline statusline for Claude Code with real-time usage tracking, git integration, custom themes, and more."
+                  - listitem [ref=e1131]:
+                    - link "claudia-statusline" [ref=e1132] [cursor=pointer]:
+                      - /url: https://github.com/hagan/claudia-statusline
+                    - text: by
+                    - link "Hagan Franks" [ref=e1133] [cursor=pointer]:
+                      - /url: https://github.com/hagan
+                    - text: "- High-performance Rust-based statusline for Claude Code with persistent stats tracking, progress bars, and optional cloud sync. Features SQLite-first persistence, git integration, context progress bars, burn rate calculation, XDG-compliant with theme support (dark/light, NO_COLOR)."
+                - generic [ref=e1134]:
+                  - heading "Hooks 🪝" [level=2] [ref=e1135]
+                  - 'link "Permalink: Hooks 🪝" [ref=e1136] [cursor=pointer]':
+                    - /url: "#hooks-"
+                    - img [ref=e1137]
+                - blockquote [ref=e1139]:
+                  - paragraph [ref=e1140]: Hooks are a powerful API for Claude Code that allows users to activate commands and run scripts at different points in Claude's agentic lifecycle.
+                - generic [ref=e1141]:
+                  - heading "General" [level=3] [ref=e1142]
+                  - 'link "Permalink: General" [ref=e1143] [cursor=pointer]':
+                    - /url: "#general-4"
+                    - img [ref=e1144]
+                - list [ref=e1146]:
+                  - listitem [ref=e1147]:
+                    - link "Britfix" [ref=e1148] [cursor=pointer]:
+                      - /url: https://github.com/Talieisin/britfix
+                    - text: by
+                    - link "Talieisin" [ref=e1149] [cursor=pointer]:
+                      - /url: https://github.com/Talieisin
+                    - text: "- Claude outputs American spellings by default, which can have an impact on: professional credibility, compliance, documentation, and more. Britfix converts to British English, with a Claude Code hook for automatic conversion as files are written. Context-aware: handles code files intelligently by only converting comments and docstrings, never identifiers or string literals."
+                  - listitem [ref=e1150]:
+                    - link "CC Notify" [ref=e1151] [cursor=pointer]:
+                      - /url: https://github.com/dazuiba/CCNotify
+                    - text: by
+                    - link "dazuiba" [ref=e1152] [cursor=pointer]:
+                      - /url: https://github.com/dazuiba
+                    - text: "- CCNotify provides desktop notifications for Claude Code, alerting you to input needs or task completion, with one-click jumps back to VS Code and task duration display."
+                  - listitem [ref=e1153]:
+                    - link "cchooks" [ref=e1154] [cursor=pointer]:
+                      - /url: https://github.com/GowayLee/cchooks
+                    - text: by
+                    - link "GowayLee" [ref=e1155] [cursor=pointer]:
+                      - /url: https://github.com/GowayLee
+                    - text: "- A lightweight Python SDK with a clean API and good documentation; simplifies the process of writing hooks and integrating them into your codebase, providing a nice abstraction over the JSON configuration files."
+                  - listitem [ref=e1156]:
+                    - link "Claude Code Hook Comms (HCOM)" [ref=e1157] [cursor=pointer]:
+                      - /url: https://github.com/aannoo/claude-hook-comms
+                    - text: by
+                    - link "aannoo" [ref=e1158] [cursor=pointer]:
+                      - /url: https://github.com/aannoo
+                    - text: "- Lightweight CLI tool for real-time communication between Claude Code sub agents using hooks. Enables multi-agent collaboration with @-mention targeting, live dashboard monitoring, and zero-dependency implementation. [NOTE: At the time of posting, this resource is a little unstable - I'm sharing it anyway, because I think it's incredibly promising and creative. I hope by the time you read this, it is production-ready.]."
+                  - listitem [ref=e1159]:
+                    - link "claude-code-hooks-sdk" [ref=e1160] [cursor=pointer]:
+                      - /url: https://github.com/beyondcode/claude-hooks-sdk
+                    - text: by
+                    - link "beyondcode" [ref=e1161] [cursor=pointer]:
+                      - /url: https://github.com/beyondcode
+                    - text: "- A Laravel-inspired PHP SDK for building Claude Code hook responses with a clean, fluent API. This SDK makes it easy to create structured JSON responses for Claude Code hooks using an expressive, chainable interface."
+                  - listitem [ref=e1162]:
+                    - link "claude-hooks" [ref=e1163] [cursor=pointer]:
+                      - /url: https://github.com/johnlindquist/claude-hooks
+                    - text: by
+                    - link "John Lindquist" [ref=e1164] [cursor=pointer]:
+                      - /url: https://github.com/johnlindquist
+                    - text: "- A TypeScript-based system for configuring and customizing Claude Code hooks with a powerful and flexible interface."
+                  - listitem [ref=e1165]:
+                    - link "Claudio" [ref=e1166] [cursor=pointer]:
+                      - /url: https://github.com/ctoth/claudio
+                    - text: by
+                    - link "Christopher Toth" [ref=e1167] [cursor=pointer]:
+                      - /url: https://github.com/ctoth
+                    - text: "- A no-frills little library that adds delightful OS-native sounds to Claude Code via simple hooks. It really sparks joy."
+                  - listitem [ref=e1168]:
+                    - link "Dippy" [ref=e1169] [cursor=pointer]:
+                      - /url: https://github.com/ldayton/Dippy
+                    - text: by
+                    - link "Lily Dayton" [ref=e1170] [cursor=pointer]:
+                      - /url: https://github.com/ldayton
+                    - text: "- Auto-approve safe bash commands using AST-based parsing, while prompting for destructive operations. Solves permission fatigue without disabling safety. Supports Claude Code, Gemini CLI, and Cursor."
+                  - listitem [ref=e1171]:
+                    - link "parry" [ref=e1172] [cursor=pointer]:
+                      - /url: https://github.com/vaporif/parry
+                    - text: by
+                    - link "Dmytro Onypko" [ref=e1173] [cursor=pointer]:
+                      - /url: https://github.com/vaporif
+                    - text: "- Prompt injection scanner for Claude Code hooks. Scans tool inputs and outputs for injection attacks, secrets, and data exfiltration attempts. [NOTE: Early development phase but worth a look.]."
+                  - listitem [ref=e1174]:
+                    - link "TDD Guard" [ref=e1175] [cursor=pointer]:
+                      - /url: https://github.com/nizos/tdd-guard
+                    - text: by
+                    - link "Nizar Selander" [ref=e1176] [cursor=pointer]:
+                      - /url: https://github.com/nizos
+                    - text: "- A hooks-driven system that monitors file operations in real-time and blocks changes that violate TDD principles."
+                  - listitem [ref=e1177]:
+                    - link "TypeScript Quality Hooks" [ref=e1178] [cursor=pointer]:
+                      - /url: https://github.com/bartolli/claude-code-typescript-hooks
+                    - text: by
+                    - link "bartolli" [ref=e1179] [cursor=pointer]:
+                      - /url: https://github.com/bartolli
+                    - text: "- Quality check hook for Node.js TypeScript projects with TypeScript compilation. ESLint auto-fixing, and Prettier formatting. Uses SHA256 config caching for < 5ms validation performance during real-time editing."
+                - generic [ref=e1180]:
+                  - heading "Slash-Commands 🔪" [level=2] [ref=e1181]
+                  - 'link "Permalink: Slash-Commands 🔪" [ref=e1182] [cursor=pointer]':
+                    - /url: "#slash-commands-"
+                    - img [ref=e1183]
+                - blockquote [ref=e1185]:
+                  - paragraph [ref=e1186]: "\"Slash Commands are customized, carefully refined prompts that control Claude's behavior in order to perform a specific task\""
+                - generic [ref=e1187]:
+                  - heading "General" [level=3] [ref=e1188]
+                  - 'link "Permalink: General" [ref=e1189] [cursor=pointer]':
+                    - /url: "#general-5"
+                    - img [ref=e1190]
+                - list [ref=e1192]:
+                  - listitem [ref=e1193]:
+                    - link "/create-hook" [ref=e1194] [cursor=pointer]:
+                      - /url: https://github.com/omril321/automated-notebooklm/blob/main/.claude/commands/create-hook.md
+                    - text: by
+                    - link "Omri Lavi" [ref=e1195] [cursor=pointer]:
+                      - /url: https://github.com/omril321
+                    - text: "- Slash command for hook creation - intelligently prompts you through the creation process with smart suggestions based on your project setup (TS, Prettier, ESLint...)."
+                  - listitem [ref=e1196]:
+                    - link "/linux-desktop-slash-commands" [ref=e1197] [cursor=pointer]:
+                      - /url: https://github.com/danielrosehill/Claude-Code-Linux-Desktop-Slash-Commands
+                    - text: by
+                    - link "Daniel Rosehill" [ref=e1198] [cursor=pointer]:
+                      - /url: https://github.com/danielrosehill
+                    - text: "- A library of slash commands intended specifically to facilitate common and advanced operations on Linux desktop environments (although many would also be useful on Linux servers). Command groups include hardware benchmarking, filesystem organisation, and security posture validation."
+                - generic [ref=e1199]:
+                  - heading "Version Control & Git" [level=3] [ref=e1200]
+                  - 'link "Permalink: Version Control & Git" [ref=e1201] [cursor=pointer]':
+                    - /url: "#version-control--git"
+                    - img [ref=e1202]
+                - list [ref=e1204]:
+                  - listitem [ref=e1205]:
+                    - link "/analyze-issue" [ref=e1206] [cursor=pointer]:
+                      - /url: https://github.com/jerseycheese/Narraitor/blob/feature/issue-227-ai-suggestions/.claude/commands/analyze-issue.md
+                    - text: by
+                    - link "jerseycheese" [ref=e1207] [cursor=pointer]:
+                      - /url: https://github.com/jerseycheese
+                    - text: "- Fetches GitHub issue details to create comprehensive implementation specifications, analyzing requirements and planning structured approach with clear implementation steps."
+                  - listitem [ref=e1208]:
+                    - link "/commit" [ref=e1209] [cursor=pointer]:
+                      - /url: https://github.com/evmts/tevm-monorepo/blob/main/.claude/commands/commit.md
+                    - text: by
+                    - link "evmts" [ref=e1210] [cursor=pointer]:
+                      - /url: https://github.com/evmts
+                    - text: "- Creates git commits using conventional commit format with appropriate emojis, following project standards and creating descriptive messages that explain the purpose of changes."
+                  - listitem [ref=e1211]:
+                    - link "/commit-fast" [ref=e1212] [cursor=pointer]:
+                      - /url: https://github.com/steadycursor/steadystart/blob/main/.claude/commands/2-commit-fast.md
+                    - text: by
+                    - link "steadycursor" [ref=e1213] [cursor=pointer]:
+                      - /url: https://github.com/steadycursor
+                    - text: "- Automates git commit process by selecting the first suggested message, generating structured commits with consistent formatting while skipping manual confirmation and removing Claude co-Contributorship footer."
+                  - listitem [ref=e1214]:
+                    - link "/create-pr" [ref=e1215] [cursor=pointer]:
+                      - /url: https://github.com/toyamarinyon/giselle/blob/main/.claude/commands/create-pr.md
+                    - text: by
+                    - link "toyamarinyon" [ref=e1216] [cursor=pointer]:
+                      - /url: https://github.com/toyamarinyon
+                    - text: "- Streamlines pull request creation by handling the entire workflow: creating a new branch, committing changes, formatting modified files with Biome, and submitting the PR."
+                  - listitem [ref=e1217]:
+                    - link "/create-pull-request" [ref=e1218] [cursor=pointer]:
+                      - /url: https://github.com/liam-hq/liam/blob/main/.claude/commands/create-pull-request.md
+                    - text: by
+                    - link "liam-hq" [ref=e1219] [cursor=pointer]:
+                      - /url: https://github.com/liam-hq
+                    - text: "- Provides comprehensive PR creation guidance with GitHub CLI, enforcing title conventions, following template structure, and offering concrete command examples with best practices."
+                  - listitem [ref=e1220]:
+                    - link "/create-worktrees" [ref=e1221] [cursor=pointer]:
+                      - /url: https://github.com/evmts/tevm-monorepo/blob/main/.claude/commands/create-worktrees.md
+                    - text: by
+                    - link "evmts" [ref=e1222] [cursor=pointer]:
+                      - /url: https://github.com/evmts
+                    - text: "- Creates git worktrees for all open PRs or specific branches, handling branches with slashes, cleaning up stale worktrees, and supporting custom branch creation for development."
+                  - listitem [ref=e1223]:
+                    - link "/fix-github-issue" [ref=e1224] [cursor=pointer]:
+                      - /url: https://github.com/jeremymailen/kotlinter-gradle/blob/master/.claude/commands/fix-github-issue.md
+                    - text: by
+                    - link "jeremymailen" [ref=e1225] [cursor=pointer]:
+                      - /url: https://github.com/jeremymailen
+                    - text: "- Analyzes and fixes GitHub issues using a structured approach with GitHub CLI for issue details, implementing necessary code changes, running tests, and creating proper commit messages."
+                  - listitem [ref=e1226]:
+                    - link "/fix-issue" [ref=e1227] [cursor=pointer]:
+                      - /url: https://github.com/metabase/metabase/blob/master/.claude/commands/fix-issue.md
+                    - text: by
+                    - link "metabase" [ref=e1228] [cursor=pointer]:
+                      - /url: https://github.com/metabase
+                    - text: "- Addresses GitHub issues by taking issue number as parameter, analyzing context, implementing solution, and testing/validating the fix for proper integration."
+                  - listitem [ref=e1229]:
+                    - link "/fix-pr" [ref=e1230] [cursor=pointer]:
+                      - /url: https://github.com/metabase/metabase/blob/master/.claude/commands/fix-pr.md
+                    - text: by
+                    - link "metabase" [ref=e1231] [cursor=pointer]:
+                      - /url: https://github.com/metabase
+                    - text: "- Fetches and fixes unresolved PR comments by automatically retrieving feedback, addressing reviewer concerns, making targeted code improvements, and streamlining the review process."
+                  - listitem [ref=e1232]:
+                    - link "/husky" [ref=e1233] [cursor=pointer]:
+                      - /url: https://github.com/evmts/tevm-monorepo/blob/main/.claude/commands/husky.md
+                    - text: by
+                    - link "evmts" [ref=e1234] [cursor=pointer]:
+                      - /url: https://github.com/evmts
+                    - text: "- Sets up and manages Husky Git hooks by configuring pre-commit hooks, establishing commit message standards, integrating with linting tools, and ensuring code quality on commits."
+                  - listitem [ref=e1235]:
+                    - link "/update-branch-name" [ref=e1236] [cursor=pointer]:
+                      - /url: https://github.com/giselles-ai/giselle/blob/main/.claude/commands/update-branch-name.md
+                    - text: by
+                    - link "giselles-ai" [ref=e1237] [cursor=pointer]:
+                      - /url: https://github.com/giselles-ai
+                    - text: "- Updates branch names with proper prefixes and formats, enforcing naming conventions, supporting semantic prefixes, and managing remote branch updates."
+                - generic [ref=e1238]:
+                  - heading "Code Analysis & Testing" [level=3] [ref=e1239]
+                  - 'link "Permalink: Code Analysis & Testing" [ref=e1240] [cursor=pointer]':
+                    - /url: "#code-analysis--testing"
+                    - img [ref=e1241]
+                - list [ref=e1243]:
+                  - listitem [ref=e1244]:
+                    - link "/check" [ref=e1245] [cursor=pointer]:
+                      - /url: https://github.com/rygwdn/slack-tools/blob/main/.claude/commands/check.md
+                    - text: by
+                    - link "rygwdn" [ref=e1246] [cursor=pointer]:
+                      - /url: https://github.com/rygwdn
+                    - text: "- Performs comprehensive code quality and security checks, featuring static analysis integration, security vulnerability scanning, code style enforcement, and detailed reporting."
+                  - listitem [ref=e1247]:
+                    - link "/code_analysis" [ref=e1248] [cursor=pointer]:
+                      - /url: https://github.com/kingler/n8n_agent/blob/main/.claude/commands/code_analysis.md
+                    - text: by
+                    - link "kingler" [ref=e1249] [cursor=pointer]:
+                      - /url: https://github.com/kingler
+                    - text: "- Provides a menu of advanced code analysis commands for deep inspection, including knowledge graph generation, optimization suggestions, and quality evaluation."
+                  - listitem [ref=e1250]:
+                    - link "/optimize" [ref=e1251] [cursor=pointer]:
+                      - /url: https://github.com/to4iki/ai-project-rules/blob/main/.claude/commands/optimize.md
+                    - text: by
+                    - link "to4iki" [ref=e1252] [cursor=pointer]:
+                      - /url: https://github.com/to4iki
+                    - text: "- Analyzes code performance to identify bottlenecks, proposing concrete optimizations with implementation guidance for improved application performance."
+                  - listitem [ref=e1253]:
+                    - link "/repro-issue" [ref=e1254] [cursor=pointer]:
+                      - /url: https://github.com/rzykov/metabase/blob/master/.claude/commands/repro-issue.md
+                    - text: by
+                    - link "rzykov" [ref=e1255] [cursor=pointer]:
+                      - /url: https://github.com/rzykov
+                    - text: "- Creates reproducible test cases for GitHub issues, ensuring tests fail reliably and documenting clear reproduction steps for developers."
+                  - listitem [ref=e1256]:
+                    - link "/tdd" [ref=e1257] [cursor=pointer]:
+                      - /url: https://github.com/zscott/pane/blob/main/.claude/commands/tdd.md
+                    - text: by
+                    - link "zscott" [ref=e1258] [cursor=pointer]:
+                      - /url: https://github.com/zscott
+                    - text: "- Guides development using Test-Driven Development principles, enforcing Red-Green-Refactor discipline, integrating with git workflow, and managing PR creation."
+                  - listitem [ref=e1259]:
+                    - link "/tdd-implement" [ref=e1260] [cursor=pointer]:
+                      - /url: https://github.com/jerseycheese/Narraitor/blob/feature/issue-227-ai-suggestions/.claude/commands/tdd-implement.md
+                    - text: by
+                    - link "jerseycheese" [ref=e1261] [cursor=pointer]:
+                      - /url: https://github.com/jerseycheese
+                    - text: "- Implements Test-Driven Development by analyzing feature requirements, creating tests first (red), implementing minimal passing code (green), and refactoring while maintaining tests."
+                - generic [ref=e1262]:
+                  - heading "Context Loading & Priming" [level=3] [ref=e1263]
+                  - 'link "Permalink: Context Loading & Priming" [ref=e1264] [cursor=pointer]':
+                    - /url: "#context-loading--priming"
+                    - img [ref=e1265]
+                - list [ref=e1267]:
+                  - listitem [ref=e1268]:
+                    - link "/context-prime" [ref=e1269] [cursor=pointer]:
+                      - /url: https://github.com/elizaOS/elizaos.github.io/blob/main/.claude/commands/context-prime.md
+                    - text: by
+                    - link "elizaOS" [ref=e1270] [cursor=pointer]:
+                      - /url: https://github.com/elizaOS
+                    - text: "- Primes Claude with comprehensive project understanding by loading repository structure, setting development context, establishing project goals, and defining collaboration parameters."
+                  - listitem [ref=e1271]:
+                    - link "/initref" [ref=e1272] [cursor=pointer]:
+                      - /url: https://github.com/okuvshynov/cubestat/blob/main/.claude/commands/initref.md
+                    - text: by
+                    - link "okuvshynov" [ref=e1273] [cursor=pointer]:
+                      - /url: https://github.com/okuvshynov
+                    - text: "- Initializes reference documentation structure with standard doc templates, API reference setup, documentation conventions, and placeholder content generation."
+                  - listitem [ref=e1274]:
+                    - link "/load-llms-txt" [ref=e1275] [cursor=pointer]:
+                      - /url: https://github.com/ethpandaops/xatu-data/blob/master/.claude/commands/load-llms-txt.md
+                    - text: by
+                    - link "ethpandaops" [ref=e1276] [cursor=pointer]:
+                      - /url: https://github.com/ethpandaops
+                    - text: "- Loads LLM configuration files to context, importing specific terminology, model configurations, and establishing baseline terminology for AI discussions."
+                  - listitem [ref=e1277]:
+                    - link "/load_coo_context" [ref=e1278] [cursor=pointer]:
+                      - /url: https://github.com/Mjvolk3/torchcell/blob/main/.claude/commands/load_coo_context.md
+                    - text: by
+                    - link "Mjvolk3" [ref=e1279] [cursor=pointer]:
+                      - /url: https://github.com/Mjvolk3
+                    - text: "- References specific files for sparse matrix operations, explains transform usage, compares with previous approaches, and sets data formatting context for development."
+                  - listitem [ref=e1280]:
+                    - link "/load_dango_pipeline" [ref=e1281] [cursor=pointer]:
+                      - /url: https://github.com/Mjvolk3/torchcell/blob/main/.claude/commands/load_dango_pipeline.md
+                    - text: by
+                    - link "Mjvolk3" [ref=e1282] [cursor=pointer]:
+                      - /url: https://github.com/Mjvolk3
+                    - text: "- Sets context for model training by referencing pipeline files, establishing working context, and preparing for pipeline work with relevant documentation."
+                  - listitem [ref=e1283]:
+                    - link "/prime" [ref=e1284] [cursor=pointer]:
+                      - /url: https://github.com/yzyydev/AI-Engineering-Structure/blob/main/.claude/commands/prime.md
+                    - text: by
+                    - link "yzyydev" [ref=e1285] [cursor=pointer]:
+                      - /url: https://github.com/yzyydev
+                    - text: "- Sets up initial project context by viewing directory structure and reading key files, creating standardized context with directory visualization and key documentation focus."
+                  - listitem [ref=e1286]:
+                    - link "/rsi" [ref=e1287] [cursor=pointer]:
+                      - /url: https://github.com/ddisisto/si/blob/main/.claude/commands/rsi.md
+                    - text: by
+                    - link "ddisisto" [ref=e1288] [cursor=pointer]:
+                      - /url: https://github.com/ddisisto
+                    - text: "- Reads all commands and key project files to optimize AI-assisted development by streamlining the process, loading command context, and setting up for better development workflow."
+                - generic [ref=e1289]:
+                  - heading "Documentation & Changelogs" [level=3] [ref=e1290]
+                  - 'link "Permalink: Documentation & Changelogs" [ref=e1291] [cursor=pointer]':
+                    - /url: "#documentation--changelogs"
+                    - img [ref=e1292]
+                - list [ref=e1294]:
+                  - listitem [ref=e1295]:
+                    - link "/add-to-changelog" [ref=e1296] [cursor=pointer]:
+                      - /url: https://github.com/berrydev-ai/blockdoc-python/blob/main/.claude/commands/add-to-changelog.md
+                    - text: by
+                    - link "berrydev-ai" [ref=e1297] [cursor=pointer]:
+                      - /url: https://github.com/berrydev-ai
+                    - text: "- Adds new entries to changelog files while maintaining format consistency, properly documenting changes, and following established project standards for version tracking."
+                  - listitem [ref=e1298]:
+                    - link "/create-docs" [ref=e1299] [cursor=pointer]:
+                      - /url: https://github.com/jerseycheese/Narraitor/blob/feature/issue-227-ai-suggestions/.claude/commands/create-docs.md
+                    - text: by
+                    - link "jerseycheese" [ref=e1300] [cursor=pointer]:
+                      - /url: https://github.com/jerseycheese
+                    - text: "- Analyzes code structure and purpose to create comprehensive documentation detailing inputs/outputs, behavior, user interaction flows, and edge cases with error handling."
+                  - listitem [ref=e1301]:
+                    - link "/docs" [ref=e1302] [cursor=pointer]:
+                      - /url: https://github.com/slunsford/coffee-analytics/blob/main/.claude/commands/docs.md
+                    - text: by
+                    - link "slunsford" [ref=e1303] [cursor=pointer]:
+                      - /url: https://github.com/slunsford
+                    - text: "- Generates comprehensive documentation that follows project structure, documenting APIs and usage patterns with consistent formatting for better user understanding."
+                  - listitem [ref=e1304]:
+                    - link "/explain-issue-fix" [ref=e1305] [cursor=pointer]:
+                      - /url: https://github.com/hackdays-io/toban-contribution-viewer/blob/main/.claude/commands/explain-issue-fix.md
+                    - text: by
+                    - link "hackdays-io" [ref=e1306] [cursor=pointer]:
+                      - /url: https://github.com/hackdays-io
+                    - text: "- Documents solution approaches for GitHub issues, explaining technical decisions, detailing challenges overcome, and providing implementation context for better understanding."
+                  - listitem [ref=e1307]:
+                    - link "/update-docs" [ref=e1308] [cursor=pointer]:
+                      - /url: https://github.com/Consiliency/Flutter-Structurizr/blob/main/.claude/commands/update-docs.md
+                    - text: by
+                    - link "Consiliency" [ref=e1309] [cursor=pointer]:
+                      - /url: https://github.com/Consiliency
+                    - text: "- Reviews current documentation status, updates implementation progress, reviews phase documents, and maintains documentation consistency across the project."
+                - generic [ref=e1310]:
+                  - heading "CI / Deployment" [level=3] [ref=e1311]
+                  - 'link "Permalink: CI / Deployment" [ref=e1312] [cursor=pointer]':
+                    - /url: "#ci--deployment"
+                    - img [ref=e1313]
+                - list [ref=e1315]:
+                  - listitem [ref=e1316]:
+                    - link "/release" [ref=e1317] [cursor=pointer]:
+                      - /url: https://github.com/kelp/webdown/blob/main/.claude/commands/release.md
+                    - text: by
+                    - link "kelp" [ref=e1318] [cursor=pointer]:
+                      - /url: https://github.com/kelp
+                    - text: "- Manages software releases by updating changelogs, reviewing README changes, evaluating version increments, and documenting release changes for better version tracking."
+                  - listitem [ref=e1319]:
+                    - link "/run-ci" [ref=e1320] [cursor=pointer]:
+                      - /url: https://github.com/hackdays-io/toban-contribution-viewer/blob/main/.claude/commands/run-ci.md
+                    - text: by
+                    - link "hackdays-io" [ref=e1321] [cursor=pointer]:
+                      - /url: https://github.com/hackdays-io
+                    - text: "- Activates virtual environments, runs CI-compatible check scripts, iteratively fixes errors, and ensures all tests pass before completion."
+                - generic [ref=e1322]:
+                  - heading "Project & Task Management" [level=3] [ref=e1323]
+                  - 'link "Permalink: Project & Task Management" [ref=e1324] [cursor=pointer]':
+                    - /url: "#project--task-management"
+                    - img [ref=e1325]
+                - list [ref=e1327]:
+                  - listitem [ref=e1328]:
+                    - link "/create-command" [ref=e1329] [cursor=pointer]:
+                      - /url: https://github.com/scopecraft/command/blob/main/.claude/commands/create-command.md
+                    - text: by
+                    - link "scopecraft" [ref=e1330] [cursor=pointer]:
+                      - /url: https://github.com/scopecraft
+                    - text: "- Guides Claude through creating new custom commands with proper structure by analyzing requirements, templating commands by category, enforcing command standards, and creating supporting documentation."
+                  - listitem [ref=e1331]:
+                    - link "/create-plan" [ref=e1332] [cursor=pointer]:
+                      - /url: https://github.com/hesreallyhim/inkverse-fork/blob/preserve-claude-resources/.claude/commands/create-plan.md
+                    - text: by
+                    - link "taddyorg" [ref=e1333] [cursor=pointer]:
+                      - /url: https://github.com/taddyorg
+                    - text: "- Generates comprehensive product requirement documents outlining detailed specifications, requirements, and features following standardized document structure and format."
+                    - emphasis [ref=e1334]: (Removed from origin)
+                  - listitem [ref=e1335]:
+                    - link "/create-prp" [ref=e1336] [cursor=pointer]:
+                      - /url: https://github.com/Wirasm/claudecode-utils/blob/main/.claude/commands/create-prp.md
+                    - text: by
+                    - link "Wirasm" [ref=e1337] [cursor=pointer]:
+                      - /url: https://github.com/Wirasm
+                    - text: "- Creates product requirement plans by reading PRP methodology, following template structure, creating comprehensive requirements, and structuring product definitions for development."
+                  - listitem [ref=e1338]:
+                    - link "/do-issue" [ref=e1339] [cursor=pointer]:
+                      - /url: https://github.com/jerseycheese/Narraitor/blob/feature/issue-227-ai-suggestions/.claude/commands/do-issue.md
+                    - text: by
+                    - link "jerseycheese" [ref=e1340] [cursor=pointer]:
+                      - /url: https://github.com/jerseycheese
+                    - text: "- Implements GitHub issues with manual review points, following a structured approach with issue number parameter and offering alternative automated mode for efficiency."
+                  - listitem [ref=e1341]:
+                    - link "/prd-generator" [ref=e1342] [cursor=pointer]:
+                      - /url: https://github.com/dredozubov/prd-generator
+                    - text: by
+                    - link "Denis Redozubov" [ref=e1343] [cursor=pointer]:
+                      - /url: https://github.com/dredozubov
+                    - text: "- A Claude Code plugin that generates comprehensive Product Requirements Documents (PRDs) from conversation context. Invoke"
+                    - code [ref=e1344]: /create-prd
+                    - text: after discussing requirements and it produces a complete PRD with all standard sections including Executive Summary, User Stories, MVP Scope, Architecture, Success Criteria, and Implementation Phases.
+                  - listitem [ref=e1345]:
+                    - link "/project_hello_w_name" [ref=e1346] [cursor=pointer]:
+                      - /url: https://github.com/disler/just-prompt/blob/main/.claude/commands/project_hello_w_name.md
+                    - text: by
+                    - link "disler" [ref=e1347] [cursor=pointer]:
+                      - /url: https://github.com/disler
+                    - text: "- Creates customizable greeting components with name input, demonstrating argument passing, component reusability, state management, and user input handling."
+                  - listitem [ref=e1348]:
+                    - link "/todo" [ref=e1349] [cursor=pointer]:
+                      - /url: https://github.com/chrisleyva/todo-slash-command/blob/main/todo.md
+                    - text: by
+                    - link "chrisleyva" [ref=e1350] [cursor=pointer]:
+                      - /url: https://github.com/chrisleyva
+                    - text: "- A convenient command to quickly manage project todo items without leaving the Claude Code interface, featuring due dates, sorting, task prioritization, and comprehensive todo list management."
+                - generic [ref=e1351]:
+                  - heading "Miscellaneous" [level=3] [ref=e1352]
+                  - 'link "Permalink: Miscellaneous" [ref=e1353] [cursor=pointer]':
+                    - /url: "#miscellaneous"
+                    - img [ref=e1354]
+                - list [ref=e1356]:
+                  - listitem [ref=e1357]:
+                    - link "/fixing_go_in_graph" [ref=e1358] [cursor=pointer]:
+                      - /url: https://github.com/Mjvolk3/torchcell/blob/main/.claude/commands/fixing_go_in_graph.md
+                    - text: by
+                    - link "Mjvolk3" [ref=e1359] [cursor=pointer]:
+                      - /url: https://github.com/Mjvolk3
+                    - text: "- Focuses on Gene Ontology annotation integration in graph databases, handling multiple data sources, addressing graph representation issues, and ensuring correct data incorporation."
+                  - listitem [ref=e1360]:
+                    - link "/review_dcell_model" [ref=e1361] [cursor=pointer]:
+                      - /url: https://github.com/Mjvolk3/torchcell/blob/main/.claude/commands/review_dcell_model.md
+                    - text: by
+                    - link "Mjvolk3" [ref=e1362] [cursor=pointer]:
+                      - /url: https://github.com/Mjvolk3
+                    - text: "- Reviews old Dcell implementation files, comparing with newer Dango model, noting changes over time, and analyzing refactoring approaches for better code organization."
+                  - listitem [ref=e1363]:
+                    - link "/use-stepper" [ref=e1364] [cursor=pointer]:
+                      - /url: https://github.com/zuplo/docs/blob/main/.claude/commands/use-stepper.md
+                    - text: by
+                    - link "zuplo" [ref=e1365] [cursor=pointer]:
+                      - /url: https://github.com/zuplo
+                    - text: "- Reformats documentation to use React Stepper component, transforming heading formats, applying proper indentation, and maintaining markdown compatibility with admonition formatting."
+                - generic [ref=e1366]:
+                  - heading "CLAUDE.md Files 📂" [level=2] [ref=e1367]
+                  - 'link "Permalink: CLAUDE.md Files 📂" [ref=e1368] [cursor=pointer]':
+                    - /url: "#claudemd-files-"
+                    - img [ref=e1369]
+                - blockquote [ref=e1371]:
+                  - paragraph [ref=e1372]:
+                    - code [ref=e1373]: CLAUDE.md
+                    - text: files are files that contain important guidelines and context-specific information or instructions that help Claude Code to better understand your project and your coding standards
+                - generic [ref=e1374]:
+                  - heading "Language-Specific" [level=3] [ref=e1375]
+                  - 'link "Permalink: Language-Specific" [ref=e1376] [cursor=pointer]':
+                    - /url: "#language-specific"
+                    - img [ref=e1377]
+                - list [ref=e1379]:
+                  - listitem [ref=e1380]:
+                    - link "AI IntelliJ Plugin" [ref=e1381] [cursor=pointer]:
+                      - /url: https://github.com/didalgolab/ai-intellij-plugin/blob/main/CLAUDE.md
+                    - text: by
+                    - link "didalgolab" [ref=e1382] [cursor=pointer]:
+                      - /url: https://github.com/didalgolab
+                    - text: "- Provides comprehensive Gradle commands for IntelliJ plugin development with platform-specific coding patterns, detailed package structure guidelines, and clear internationalization standards."
+                  - listitem [ref=e1383]:
+                    - link "AWS MCP Server" [ref=e1384] [cursor=pointer]:
+                      - /url: https://github.com/alexei-led/aws-mcp-server/blob/main/CLAUDE.md
+                    - text: by
+                    - link "alexei-led" [ref=e1385] [cursor=pointer]:
+                      - /url: https://github.com/alexei-led
+                    - text: "- Features multiple Python environment setup options with detailed code style guidelines, comprehensive error handling recommendations, and security considerations for AWS CLI interactions."
+                  - listitem [ref=e1386]:
+                    - link "DroidconKotlin" [ref=e1387] [cursor=pointer]:
+                      - /url: https://github.com/touchlab/DroidconKotlin/blob/main/CLAUDE.md
+                    - text: by
+                    - link "touchlab" [ref=e1388] [cursor=pointer]:
+                      - /url: https://github.com/touchlab
+                    - text: "- Delivers comprehensive Gradle commands for cross-platform Kotlin Multiplatform development with clear module structure and practical guidance for dependency injection."
+                  - listitem [ref=e1389]:
+                    - link "EDSL" [ref=e1390] [cursor=pointer]:
+                      - /url: https://github.com/hesreallyhim/awesome-claude-code/blob/main/resources/claude.md-files/EDSL/CLAUDE.md
+                    - text: by
+                    - link "expectedparrot" [ref=e1391] [cursor=pointer]:
+                      - /url: https://github.com/expectedparrot
+                    - text: "- Offers detailed build and test commands with strict code style enforcement, comprehensive testing requirements, and standardized development workflow using Black and mypy."
+                    - emphasis [ref=e1392]: (Removed from origin)
+                  - listitem [ref=e1393]:
+                    - link "Giselle" [ref=e1394] [cursor=pointer]:
+                      - /url: https://github.com/giselles-ai/giselle/blob/main/CLAUDE.md
+                    - text: by
+                    - link "giselles-ai" [ref=e1395] [cursor=pointer]:
+                      - /url: https://github.com/giselles-ai
+                    - text: "- Provides detailed build and test commands using pnpm and Vitest with strict code formatting requirements and comprehensive naming conventions for code consistency."
+                  - listitem [ref=e1396]:
+                    - link "HASH" [ref=e1397] [cursor=pointer]:
+                      - /url: https://github.com/hashintel/hash/blob/main/CLAUDE.md
+                    - text: by
+                    - link "hashintel" [ref=e1398] [cursor=pointer]:
+                      - /url: https://github.com/hashintel
+                    - text: "- Features comprehensive repository structure breakdown with strong emphasis on coding standards, detailed Rust documentation guidelines, and systematic PR review process."
+                  - listitem [ref=e1399]:
+                    - link "Inkline" [ref=e1400] [cursor=pointer]:
+                      - /url: https://github.com/inkline/inkline/blob/main/CLAUDE.md
+                    - text: by
+                    - link "inkline" [ref=e1401] [cursor=pointer]:
+                      - /url: https://github.com/inkline
+                    - text: "- Structures development workflow using pnpm with emphasis on TypeScript and Vue 3 Composition API, detailed component creation process, and comprehensive testing recommendations."
+                  - listitem [ref=e1402]:
+                    - link "JSBeeb" [ref=e1403] [cursor=pointer]:
+                      - /url: https://github.com/mattgodbolt/jsbeeb/blob/main/CLAUDE.md
+                    - text: by
+                    - link "mattgodbolt" [ref=e1404] [cursor=pointer]:
+                      - /url: https://github.com/mattgodbolt
+                    - text: "- Provides development guide for JavaScript BBC Micro emulator with build and testing instructions, architecture documentation, and debugging workflows."
+                  - listitem [ref=e1405]:
+                    - link "Lamoom Python" [ref=e1406] [cursor=pointer]:
+                      - /url: https://github.com/LamoomAI/lamoom-python/blob/main/CLAUDE.md
+                    - text: by
+                    - link "LamoomAI" [ref=e1407] [cursor=pointer]:
+                      - /url: https://github.com/LamoomAI
+                    - text: "- Serves as reference for production prompt engineering library with load balancing of AI Models, API documentation, and usage patterns with examples."
+                  - listitem [ref=e1408]:
+                    - link "LangGraphJS" [ref=e1409] [cursor=pointer]:
+                      - /url: https://github.com/langchain-ai/langgraphjs/blob/main/CLAUDE.md
+                    - text: by
+                    - link "langchain-ai" [ref=e1410] [cursor=pointer]:
+                      - /url: https://github.com/langchain-ai
+                    - text: "- Offers comprehensive build and test commands with detailed TypeScript style guidelines, layered library architecture, and monorepo structure using yarn workspaces."
+                  - listitem [ref=e1411]:
+                    - link "Metabase" [ref=e1412] [cursor=pointer]:
+                      - /url: https://github.com/metabase/metabase/blob/master/CLAUDE.md
+                    - text: by
+                    - link "metabase" [ref=e1413] [cursor=pointer]:
+                      - /url: https://github.com/metabase
+                    - text: "- Details workflow for REPL-driven development in Clojure/ClojureScript with emphasis on incremental development, testing, and step-by-step approach for feature implementation."
+                  - listitem [ref=e1414]:
+                    - link "SG Cars Trends Backend" [ref=e1415] [cursor=pointer]:
+                      - /url: https://github.com/sgcarstrends/backend/blob/main/CLAUDE.md
+                    - text: by
+                    - link "sgcarstrends" [ref=e1416] [cursor=pointer]:
+                      - /url: https://github.com/sgcarstrends
+                    - text: "- Provides comprehensive structure for TypeScript monorepo projects with detailed commands for development, testing, deployment, and AWS/Cloudflare integration."
+                  - listitem [ref=e1417]:
+                    - link "SPy" [ref=e1418] [cursor=pointer]:
+                      - /url: https://github.com/spylang/spy/blob/main/CLAUDE.md
+                    - text: by
+                    - link "spylang" [ref=e1419] [cursor=pointer]:
+                      - /url: https://github.com/spylang
+                    - text: "- Enforces strict coding conventions with comprehensive testing guidelines, multiple code compilation options, and backend-specific test decorators for targeted filtering."
+                  - listitem [ref=e1420]:
+                    - link "TPL" [ref=e1421] [cursor=pointer]:
+                      - /url: https://github.com/KarpelesLab/tpl/blob/master/CLAUDE.md
+                    - text: by
+                    - link "KarpelesLab" [ref=e1422] [cursor=pointer]:
+                      - /url: https://github.com/KarpelesLab
+                    - text: "- Details Go project conventions with comprehensive error handling recommendations, table-driven testing approach guidelines, and modernization suggestions for latest Go features."
+                - generic [ref=e1423]:
+                  - heading "Domain-Specific" [level=3] [ref=e1424]
+                  - 'link "Permalink: Domain-Specific" [ref=e1425] [cursor=pointer]':
+                    - /url: "#domain-specific"
+                    - img [ref=e1426]
+                - list [ref=e1428]:
+                  - listitem [ref=e1429]:
+                    - link "AVS Vibe Developer Guide" [ref=e1430] [cursor=pointer]:
+                      - /url: https://github.com/Layr-Labs/avs-vibe-developer-guide/blob/master/CLAUDE.md
+                    - text: by
+                    - link "Layr-Labs" [ref=e1431] [cursor=pointer]:
+                      - /url: https://github.com/Layr-Labs
+                    - text: "- Structures AI-assisted EigenLayer AVS development workflow with consistent naming conventions for prompt files and established terminology standards for blockchain concepts."
+                  - listitem [ref=e1432]:
+                    - link "Comm" [ref=e1433] [cursor=pointer]:
+                      - /url: https://github.com/CommE2E/comm/blob/master/AGENTS.md
+                    - text: by
+                    - link "CommE2E" [ref=e1434] [cursor=pointer]:
+                      - /url: https://github.com/CommE2E
+                    - text: "- Serves as a development reference for E2E-encrypted messaging applications with code organization architecture, security implementation details, and testing procedures."
+                  - listitem [ref=e1435]:
+                    - link "Cursor Tools" [ref=e1436] [cursor=pointer]:
+                      - /url: https://github.com/eastlondoner/cursor-tools/blob/main/CLAUDE.md
+                    - text: by
+                    - link "eastlondoner" [ref=e1437] [cursor=pointer]:
+                      - /url: https://github.com/eastlondoner
+                    - text: "- Creates a versatile AI command interface supporting multiple providers and models with flexible command options and browser automation through \"Stagehand\" feature."
+                  - listitem [ref=e1438]:
+                    - link "Guitar" [ref=e1439] [cursor=pointer]:
+                      - /url: https://github.com/soramimi/Guitar/blob/master/CLAUDE.md
+                    - text: by
+                    - link "soramimi" [ref=e1440] [cursor=pointer]:
+                      - /url: https://github.com/soramimi
+                    - text: "- Serves as development guide for Guitar Git GUI Client with build commands for various platforms, code style guidelines for contributing, and project structure explanation."
+                  - listitem [ref=e1441]:
+                    - link "Network Chronicles" [ref=e1442] [cursor=pointer]:
+                      - /url: https://github.com/Fimeg/NetworkChronicles/blob/legacy-v1/CLAUDE.md
+                    - text: by
+                    - link "Fimeg" [ref=e1443] [cursor=pointer]:
+                      - /url: https://github.com/Fimeg
+                    - text: "- Presents detailed implementation plan for AI-driven game characters with technical specifications for LLM integration, character guidelines, and service discovery mechanics."
+                  - listitem [ref=e1444]:
+                    - link "Pareto Mac" [ref=e1445] [cursor=pointer]:
+                      - /url: https://github.com/ParetoSecurity/pareto-mac/blob/main/CLAUDE.md
+                    - text: by
+                    - link "ParetoSecurity" [ref=e1446] [cursor=pointer]:
+                      - /url: https://github.com/ParetoSecurity
+                    - text: "- Serves as development guide for Mac security audit tool with build instructions, contribution guidelines, testing procedures, and workflow documentation."
+                  - listitem [ref=e1447]:
+                    - link "pre-commit-hooks" [ref=e1448] [cursor=pointer]:
+                      - /url: https://github.com/aRustyDev/pre-commit-hooks
+                    - text: by
+                    - link "aRustyDev" [ref=e1449] [cursor=pointer]:
+                      - /url: https://github.com/aRustyDev
+                    - text: "- This repository is about pre-commit-hooks in general, but the"
+                    - code [ref=e1450]: CLAUDE.md
+                    - text: and related
+                    - code [ref=e1451]: .claude/
+                    - text: documentation is exemplary. Thorough but not verbose. Unlike a lot of
+                    - code [ref=e1452]: CLAUDE.md
+                    - text: files, it doesn't primarily consist in shouting at Claude in all-caps. Great learning resource. Also, hooks.
+                  - listitem [ref=e1453]:
+                    - link "SteadyStart" [ref=e1454] [cursor=pointer]:
+                      - /url: https://github.com/steadycursor/steadystart/blob/main/CLAUDE.md
+                    - text: by
+                    - link "steadycursor" [ref=e1455] [cursor=pointer]:
+                      - /url: https://github.com/steadycursor
+                    - text: "- Clear and direct instructives about style, permissions, Claude's \"role\", communications, and documentation of Claude Code sessions for other team members to stay abreast."
+                - generic [ref=e1456]:
+                  - heading "Project Scaffolding & MCP" [level=3] [ref=e1457]
+                  - 'link "Permalink: Project Scaffolding & MCP" [ref=e1458] [cursor=pointer]':
+                    - /url: "#project-scaffolding--mcp"
+                    - img [ref=e1459]
+                - list [ref=e1461]:
+                  - listitem [ref=e1462]:
+                    - link "Basic Memory" [ref=e1463] [cursor=pointer]:
+                      - /url: https://github.com/basicmachines-co/basic-memory/blob/main/CLAUDE.md
+                    - text: by
+                    - link "basicmachines-co" [ref=e1464] [cursor=pointer]:
+                      - /url: https://github.com/basicmachines-co
+                    - text: "- Presents an innovative AI-human collaboration framework with Model Context Protocol for bidirectional LLM-markdown communication and flexible knowledge structure for complex projects."
+                  - listitem [ref=e1465]:
+                    - link "claude-code-mcp-enhanced" [ref=e1466] [cursor=pointer]:
+                      - /url: https://github.com/grahama1970/claude-code-mcp-enhanced/blob/main/CLAUDE.md
+                    - text: by
+                    - link "grahama1970" [ref=e1467] [cursor=pointer]:
+                      - /url: https://github.com/grahama1970
+                    - text: "- Provides detailed and emphatic instructions for Claude to follow as a coding agent, with testing guidance, code examples, and compliance checks."
+                - generic [ref=e1468]:
+                  - heading "Alternative Clients 📱" [level=2] [ref=e1469]
+                  - 'link "Permalink: Alternative Clients 📱" [ref=e1470] [cursor=pointer]':
+                    - /url: "#alternative-clients-"
+                    - img [ref=e1471]
+                - blockquote [ref=e1473]:
+                  - paragraph [ref=e1474]: Alternative Clients are alternative UIs and front-ends for interacting with Claude Code, either on mobile or on the desktop.
+                - generic [ref=e1475]:
+                  - heading "General" [level=3] [ref=e1476]
+                  - 'link "Permalink: General" [ref=e1477] [cursor=pointer]':
+                    - /url: "#general-6"
+                    - img [ref=e1478]
+                - list [ref=e1480]:
+                  - listitem [ref=e1481]:
+                    - link "Claudable" [ref=e1482] [cursor=pointer]:
+                      - /url: https://github.com/opactorai/Claudable
+                    - text: by
+                    - link "Ethan Park" [ref=e1483] [cursor=pointer]:
+                      - /url: https://www.linkedin.com/in/seongil-park/
+                    - text: "- Claudable is an open-source web builder that leverages local CLI agents, such as Claude Code and Cursor Agent, to build and deploy products effortlessly."
+                  - listitem [ref=e1484]:
+                    - link "claude-esp" [ref=e1485] [cursor=pointer]:
+                      - /url: https://github.com/phiat/claude-esp
+                    - text: by
+                    - link "phiat" [ref=e1486] [cursor=pointer]:
+                      - /url: https://github.com/phiat
+                    - text: "- Go-based TUI that streams Claude Code's hidden output (thinking, tool calls, subagents) to a separate terminal. Watch multiple sessions simultaneously, filter by content type, and track background tasks. Ideal for debugging or understanding what Claude is doing under the hood without interrupting your main session."
+                  - listitem [ref=e1487]:
+                    - link "claude-tmux" [ref=e1488] [cursor=pointer]:
+                      - /url: https://github.com/nielsgroen/claude-tmux
+                    - text: by
+                    - link "Niels Groeneveld" [ref=e1489] [cursor=pointer]:
+                      - /url: https://github.com/nielsgroen
+                    - text: "- Manage Claude Code within tmux. A tmux popup of all your Claude Code instances, enabling quick switching, status monitoring, session lifecycle management, with git worktree and pull request support."
+                  - listitem [ref=e1490]:
+                    - link "crystal" [ref=e1491] [cursor=pointer]:
+                      - /url: https://github.com/stravu/crystal
+                    - text: by
+                    - link "stravu" [ref=e1492] [cursor=pointer]:
+                      - /url: https://github.com/stravu
+                    - text: "- A full-fledged desktop application for orchestrating, monitoring, and interacting with Claude Code agents."
+                  - listitem [ref=e1493]:
+                    - link "Omnara" [ref=e1494] [cursor=pointer]:
+                      - /url: https://github.com/omnara-ai/omnara
+                    - text: by
+                    - link "Ishaan Sehgal" [ref=e1495] [cursor=pointer]:
+                      - /url: https://github.com/ishaansehgal99
+                    - text: "- A command center for AI agents that syncs Claude Code sessions across terminal, web, and mobile. Allows for remote monitoring, human-in-the-loop interaction, and team collaboration."
+                - generic [ref=e1496]:
+                  - heading "Official Documentation 🏛️" [level=2] [ref=e1497]
+                  - 'link "Permalink: Official Documentation 🏛️" [ref=e1498] [cursor=pointer]':
+                    - /url: "#official-documentation-️"
+                    - img [ref=e1499]
+                - blockquote [ref=e1501]:
+                  - paragraph [ref=e1502]: Links to some of Anthropic's terrific documentation and resources regarding Claude Code
+                - generic [ref=e1503]:
+                  - heading "General" [level=3] [ref=e1504]
+                  - 'link "Permalink: General" [ref=e1505] [cursor=pointer]':
+                    - /url: "#general-7"
+                    - img [ref=e1506]
+                - list [ref=e1508]:
+                  - listitem [ref=e1509]:
+                    - link "Anthropic Documentation" [ref=e1510] [cursor=pointer]:
+                      - /url: https://docs.claude.com/en/home
+                    - text: by
+                    - link "Anthropic" [ref=e1511] [cursor=pointer]:
+                      - /url: https://github.com/anthropics
+                    - text: "- The official documentation for Claude Code, including installation instructions, usage guidelines, API references, tutorials, examples, loads of information that I won't list individually. Like Claude Code, the documentation is frequently updated."
+                  - listitem [ref=e1512]:
+                    - link "Anthropic Quickstarts" [ref=e1513] [cursor=pointer]:
+                      - /url: https://github.com/anthropics/claude-quickstarts
+                    - text: by
+                    - link "Anthropic" [ref=e1514] [cursor=pointer]:
+                      - /url: https://github.com/anthropics
+                    - text: "- Offers comprehensive development guides for three distinct AI-powered demo projects with standardized workflows, strict code style guidelines, and containerization instructions."
+                  - listitem [ref=e1515]:
+                    - link "Claude Code GitHub Actions" [ref=e1516] [cursor=pointer]:
+                      - /url: https://github.com/anthropics/claude-code-action/tree/main/examples
+                    - text: by
+                    - link "Anthropic" [ref=e1517] [cursor=pointer]:
+                      - /url: https://github.com/anthropics
+                    - text: "- Official GitHub Actions integration for Claude Code with examples and documentation for automating AI-powered workflows in CI/CD pipelines."
+                - generic [ref=e1518]:
+                  - heading "Contributing 🔝" [level=2] [ref=e1519]:
+                    - text: Contributing
+                    - link "🔝" [ref=e1520] [cursor=pointer]:
+                      - /url: "#awesome-claude-code"
+                  - 'link "Permalink: Contributing 🔝" [ref=e1521] [cursor=pointer]':
+                    - /url: "#contributing-"
+                    - img [ref=e1522]
+                - generic [ref=e1524]:
+                  - heading "Recommend a new resource here!" [level=3] [ref=e1525]:
+                    - strong [ref=e1526]:
+                      - link "Recommend a new resource here!" [ref=e1527] [cursor=pointer]:
+                        - /url: https://github.com/hesreallyhim/awesome-claude-code/issues/new?template=recommend-resource.yml
+                  - 'link "Permalink: Recommend a new resource here!" [ref=e1528] [cursor=pointer]':
+                    - /url: "#recommend-a-new-resource-here"
+                    - img [ref=e1529]
+                - paragraph [ref=e1531]: Recommending a resource for the list is very simple, and the automated system handles everything for you. Please do not open a PR to submit a recommendation - the only person who is allowed to submit PRs to this repo is Claude.
+                - paragraph [ref=e1532]: Make sure that you have read the CONTRIBUTING.md document and CODE_OF_CONDUCT.md before you submit a recommendation.
+                - paragraph [ref=e1533]:
+                  - text: For suggestions about the repository itself, please
+                  - link "open a repository enhancement issue" [ref=e1534] [cursor=pointer]:
+                    - /url: https://github.com/hesreallyhim/awesome-claude-code/issues/new?template=repository-enhancement.yml
+                  - text: .
+                - paragraph [ref=e1535]: This project is released with a Code of Conduct. By participating, you agree to abide by its terms. And although I take strong measures to uphold the quality and safety of this list, I take no responsibility or liability for anything that might happen as a result of these third-party resources.
+                - generic [ref=e1536]:
+                  - heading "Growing thanks to you" [level=2] [ref=e1537]
+                  - 'link "Permalink: Growing thanks to you" [ref=e1538] [cursor=pointer]':
+                    - /url: "#growing-thanks-to-you"
+                    - img [ref=e1539]
+                - paragraph [ref=e1541]:
+                  - link "Stargazers over time" [ref=e1542] [cursor=pointer]:
+                    - /url: https://starchart.cc/hesreallyhim/awesome-claude-code
+                    - img "Stargazers over time" [ref=e1543]
+                - generic [ref=e1544]:
+                  - heading "License" [level=2] [ref=e1545]
+                  - 'link "Permalink: License" [ref=e1546] [cursor=pointer]':
+                    - /url: "#license"
+                    - img [ref=e1547]
+                - paragraph [ref=e1549]:
+                  - text: This list is licensed under
+                  - link "Creative Commons CC BY-NC-ND 4.0" [ref=e1550] [cursor=pointer]:
+                    - /url: https://creativecommons.org/licenses/by-nc-nd/4.0/
+                  - text: "- this means you are welcome to fork, clone, copy and redistribute the list, provided you include appropriate attribution; however you are not permitted to distribute any modified versions or to use it for any commercial purposes. This is to prevent disregard for the licenses of the authors whose resources are listed here. Please note that all resources included in this list have their own license terms."
+        - generic [ref=e1554]:
+          - generic [ref=e1557]:
+            - heading "About" [level=2] [ref=e1558]
+            - paragraph [ref=e1559]: A curated list of awesome skills, hooks, slash-commands, agent orchestrators, applications, and plugins for Claude Code by Anthropic
+            - heading "Topics" [level=3] [ref=e1560]
+            - generic [ref=e1562]:
+              - link "awesome" [ref=e1563] [cursor=pointer]:
+                - /url: /topics/awesome
+              - link "awesome-list" [ref=e1564] [cursor=pointer]:
+                - /url: /topics/awesome-list
+              - link "awesome-lists" [ref=e1565] [cursor=pointer]:
+                - /url: /topics/awesome-lists
+              - link "awesome-resources" [ref=e1566] [cursor=pointer]:
+                - /url: /topics/awesome-resources
+              - link "claude" [ref=e1567] [cursor=pointer]:
+                - /url: /topics/claude
+              - link "coding-assistant" [ref=e1568] [cursor=pointer]:
+                - /url: /topics/coding-assistant
+              - link "llm" [ref=e1569] [cursor=pointer]:
+                - /url: /topics/llm
+              - link "ai-workflows" [ref=e1570] [cursor=pointer]:
+                - /url: /topics/ai-workflows
+              - link "anthropic" [ref=e1571] [cursor=pointer]:
+                - /url: /topics/anthropic
+              - link "anthropic-claude" [ref=e1572] [cursor=pointer]:
+                - /url: /topics/anthropic-claude
+              - link "coding-agents" [ref=e1573] [cursor=pointer]:
+                - /url: /topics/coding-agents
+              - link "ai-workflow-optimization" [ref=e1574] [cursor=pointer]:
+                - /url: /topics/ai-workflow-optimization
+              - link "coding-assistants" [ref=e1575] [cursor=pointer]:
+                - /url: /topics/coding-assistants
+              - link "agent-skills" [ref=e1576] [cursor=pointer]:
+                - /url: /topics/agent-skills
+              - link "claude-code" [ref=e1577] [cursor=pointer]:
+                - /url: /topics/claude-code
+              - link "agentic-code" [ref=e1578] [cursor=pointer]:
+                - /url: /topics/agentic-code
+              - link "coding-agent" [ref=e1579] [cursor=pointer]:
+                - /url: /topics/coding-agent
+              - link "agentic-coding" [ref=e1580] [cursor=pointer]:
+                - /url: /topics/agentic-coding
+              - link "awesome-claude-code" [ref=e1581] [cursor=pointer]:
+                - /url: /topics/awesome-claude-code
+            - heading "Resources" [level=3] [ref=e1582]
+            - link "Readme" [ref=e1584] [cursor=pointer]:
+              - /url: "#readme-ov-file"
+              - img [ref=e1585]
+              - text: Readme
+            - heading "License" [level=3] [ref=e1587]
+            - link "View license" [ref=e1589] [cursor=pointer]:
+              - /url: "#License-1-ov-file"
+              - img [ref=e1590]
+              - text: View license
+            - heading "Code of conduct" [level=3] [ref=e1592]
+            - link "Code of conduct" [ref=e1594] [cursor=pointer]:
+              - /url: "#coc-ov-file"
+              - img [ref=e1595]
+              - text: Code of conduct
+            - heading "Contributing" [level=3] [ref=e1597]
+            - link "Contributing" [ref=e1599] [cursor=pointer]:
+              - /url: "#contributing-ov-file"
+              - img [ref=e1600]
+              - text: Contributing
+            - heading "Security policy" [level=3] [ref=e1602]
+            - link "Security policy" [ref=e1604] [cursor=pointer]:
+              - /url: "#security-ov-file"
+              - img [ref=e1605]
+              - text: Security policy
+            - link "Activity" [ref=e1608] [cursor=pointer]:
+              - /url: /hesreallyhim/awesome-claude-code/activity
+              - img [ref=e1609]
+              - text: Activity
+            - heading "Stars" [level=3] [ref=e1611]
+            - link "39.7k stars" [ref=e1613] [cursor=pointer]:
+              - /url: /hesreallyhim/awesome-claude-code/stargazers
+              - img [ref=e1614]
+              - strong [ref=e1616]: 39.7k
+              - text: stars
+            - heading "Watchers" [level=3] [ref=e1617]
+            - link "264 watching" [ref=e1619] [cursor=pointer]:
+              - /url: /hesreallyhim/awesome-claude-code/watchers
+              - img [ref=e1620]
+              - strong [ref=e1622]: "264"
+              - text: watching
+            - heading "Forks" [level=3] [ref=e1623]
+            - link "3.3k forks" [ref=e1625] [cursor=pointer]:
+              - /url: /hesreallyhim/awesome-claude-code/forks
+              - img [ref=e1626]
+              - strong [ref=e1628]: 3.3k
+              - text: forks
+            - link "Report repository" [ref=e1630] [cursor=pointer]:
+              - /url: /contact/report-content?content_url=https%3A%2F%2Fgithub.com%2Fhesreallyhim%2Fawesome-claude-code&report=hesreallyhim+%28user%29
+          - generic [ref=e1632]:
+            - heading "Contributors 18" [level=2] [ref=e1633]:
+              - link "Contributors 18" [ref=e1634] [cursor=pointer]:
+                - /url: /hesreallyhim/awesome-claude-code/graphs/contributors
+                - text: Contributors
+                - generic "18" [ref=e1635]
+            - list [ref=e1636]:
+              - listitem [ref=e1637]:
+                - link "@github-actions[bot]" [ref=e1638] [cursor=pointer]:
+                  - /url: https://github.com/apps/github-actions
+                  - img "@github-actions[bot]" [ref=e1639]
+              - listitem [ref=e1640]:
+                - link "@hesreallyhim" [ref=e1641] [cursor=pointer]:
+                  - /url: https://github.com/hesreallyhim
+                  - img "@hesreallyhim" [ref=e1642]
+              - listitem [ref=e1643]:
+                - link "@claude" [ref=e1644] [cursor=pointer]:
+                  - /url: https://github.com/claude
+                  - img "@claude" [ref=e1645]
+              - listitem [ref=e1646]:
+                - link "@Copilot" [ref=e1647] [cursor=pointer]:
+                  - /url: https://github.com/apps/copilot-pull-request-reviewer
+                  - img "@Copilot" [ref=e1648]
+              - listitem [ref=e1649]:
+                - link "@tninja" [ref=e1650] [cursor=pointer]:
+                  - /url: https://github.com/tninja
+                  - img "@tninja" [ref=e1651]
+              - listitem [ref=e1652]:
+                - link "@chrisleyva" [ref=e1653] [cursor=pointer]:
+                  - /url: https://github.com/chrisleyva
+                  - img "@chrisleyva" [ref=e1654]
+              - listitem [ref=e1655]:
+                - link "@bl-ue" [ref=e1656] [cursor=pointer]:
+                  - /url: https://github.com/bl-ue
+                  - img "@bl-ue" [ref=e1657]
+              - listitem [ref=e1658]:
+                - link "@actions-user" [ref=e1659] [cursor=pointer]:
+                  - /url: https://github.com/actions-user
+                  - img "@actions-user" [ref=e1660]
+              - listitem [ref=e1661]:
+                - link "@GowayLee" [ref=e1662] [cursor=pointer]:
+                  - /url: https://github.com/GowayLee
+                  - img "@GowayLee" [ref=e1663]
+              - listitem [ref=e1664]:
+                - link "@ktheory" [ref=e1665] [cursor=pointer]:
+                  - /url: https://github.com/ktheory
+                  - img "@ktheory" [ref=e1666]
+              - listitem [ref=e1667]:
+                - link "@ShallmentMo" [ref=e1668] [cursor=pointer]:
+                  - /url: https://github.com/ShallmentMo
+                  - img "@ShallmentMo" [ref=e1669]
+              - listitem [ref=e1670]:
+                - link "@didier-durand" [ref=e1671] [cursor=pointer]:
+                  - /url: https://github.com/didier-durand
+                  - img "@didier-durand" [ref=e1672]
+              - listitem [ref=e1673]:
+                - link "@adamwangxx" [ref=e1674] [cursor=pointer]:
+                  - /url: https://github.com/adamwangxx
+                  - img "@adamwangxx" [ref=e1675]
+            - link "+ 4 contributors" [ref=e1677] [cursor=pointer]:
+              - /url: /hesreallyhim/awesome-claude-code/graphs/contributors
+          - generic [ref=e1679]:
+            - heading "Languages" [level=2] [ref=e1680]
+            - list [ref=e1685]:
+              - listitem [ref=e1686]:
+                - link "Python 98.1%" [ref=e1687] [cursor=pointer]:
+                  - /url: /hesreallyhim/awesome-claude-code/search?l=python
+                  - img [ref=e1688]
+                  - generic [ref=e1690]: Python
+                  - generic [ref=e1691]: 98.1%
+              - listitem [ref=e1692]:
+                - link "Makefile 1.9%" [ref=e1693] [cursor=pointer]:
+                  - /url: /hesreallyhim/awesome-claude-code/search?l=makefile
+                  - img [ref=e1694]
+                  - generic [ref=e1696]: Makefile
+                  - generic [ref=e1697]: 1.9%
+  - contentinfo [ref=e1699]:
+    - heading "Footer" [level=2] [ref=e1700]
+    - generic [ref=e1701]:
+      - generic [ref=e1702]:
+        - link "GitHub Homepage" [ref=e1703] [cursor=pointer]:
+          - /url: https://github.com
+          - img [ref=e1704]
+        - generic [ref=e1706]: © 2026 GitHub, Inc.
+      - navigation "Footer" [ref=e1707]:
+        - heading "Footer navigation" [level=3] [ref=e1708]
+        - list "Footer navigation" [ref=e1709]:
+          - listitem [ref=e1710]:
+            - link "Terms" [ref=e1711] [cursor=pointer]:
+              - /url: https://docs.github.com/site-policy/github-terms/github-terms-of-service
+          - listitem [ref=e1712]:
+            - link "Privacy" [ref=e1713] [cursor=pointer]:
+              - /url: https://docs.github.com/site-policy/privacy-policies/github-privacy-statement
+          - listitem [ref=e1714]:
+            - link "Security" [ref=e1715] [cursor=pointer]:
+              - /url: https://github.com/security
+          - listitem [ref=e1716]:
+            - link "Status" [ref=e1717] [cursor=pointer]:
+              - /url: https://www.githubstatus.com/
+          - listitem [ref=e1718]:
+            - link "Community" [ref=e1719] [cursor=pointer]:
+              - /url: https://github.community/
+          - listitem [ref=e1720]:
+            - link "Docs" [ref=e1721] [cursor=pointer]:
+              - /url: https://docs.github.com/
+          - listitem [ref=e1722]:
+            - link "Contact" [ref=e1723] [cursor=pointer]:
+              - /url: https://support.github.com?tags=dotcom-footer
+          - listitem [ref=e1724]:
+            - button "Manage cookies" [ref=e1726] [cursor=pointer]
+          - listitem [ref=e1727]:
+            - button "Do not share my personal information" [ref=e1729] [cursor=pointer]

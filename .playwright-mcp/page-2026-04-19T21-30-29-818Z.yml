@@ -1,0 +1,245 @@
+- generic [ref=e2]:
+  - region
+  - generic [ref=e3]:
+    - link "Skip to content" [ref=e4] [cursor=pointer]:
+      - /url: "#start-of-content"
+    - banner [ref=e6]:
+      - heading "Navigation Menu" [level=2] [ref=e7]
+      - generic [ref=e8]:
+        - link "Homepage" [ref=e10] [cursor=pointer]:
+          - /url: /
+          - img [ref=e11]
+        - generic [ref=e13]:
+          - navigation "Global" [ref=e16]:
+            - list [ref=e17]:
+              - listitem [ref=e18]:
+                - button "Platform" [ref=e20] [cursor=pointer]:
+                  - text: Platform
+                  - img [ref=e21]
+              - listitem [ref=e23]:
+                - button "Solutions" [ref=e25] [cursor=pointer]:
+                  - text: Solutions
+                  - img [ref=e26]
+              - listitem [ref=e28]:
+                - button "Resources" [ref=e30] [cursor=pointer]:
+                  - text: Resources
+                  - img [ref=e31]
+              - listitem [ref=e33]:
+                - button "Open Source" [ref=e35] [cursor=pointer]:
+                  - text: Open Source
+                  - img [ref=e36]
+              - listitem [ref=e38]:
+                - button "Enterprise" [ref=e40] [cursor=pointer]:
+                  - text: Enterprise
+                  - img [ref=e41]
+              - listitem [ref=e43]:
+                - link "Pricing" [ref=e44] [cursor=pointer]:
+                  - /url: https://github.com/pricing
+                  - generic [ref=e45]: Pricing
+          - generic [ref=e46]:
+            - button "Search or jump to…" [ref=e49] [cursor=pointer]:
+              - img [ref=e51]
+              - generic [ref=e53]: Search or jump to...
+              - img [ref=e55]
+            - link "Sign in" [ref=e59] [cursor=pointer]:
+              - /url: /login?return_to=https%3A%2F%2Fgithub.com%2Fhesreallyhim%2Fawesome-claude-code%2Fcompare%2Fmain...ypollak2%3Aawesome-claude-code%3Aadd-llm-router%3Fexpand%3D1
+            - link "Sign up" [ref=e60] [cursor=pointer]:
+              - /url: /signup?ref_cta=Sign+up&ref_loc=header+logged+out&ref_page=%2F%3Cuser-name%3E%2F%3Crepo-name%3E%2Fcompare%2Fshow&source=header-repo&source_repo=hesreallyhim%2Fawesome-claude-code
+            - button "Appearance settings" [ref=e63] [cursor=pointer]:
+              - img
+  - main [ref=e67]:
+    - generic [ref=e68]:
+      - generic [ref=e69]:
+        - generic [ref=e71]:
+          - img [ref=e72]
+          - link "hesreallyhim" [ref=e75] [cursor=pointer]:
+            - /url: /hesreallyhim
+          - generic [ref=e76]: /
+          - strong [ref=e77]:
+            - link "awesome-claude-code" [ref=e78] [cursor=pointer]:
+              - /url: /hesreallyhim/awesome-claude-code
+          - generic [ref=e79]: Public
+        - generic [ref=e80]:
+          - list:
+            - listitem [ref=e81]:
+              - link "You must be signed in to change notification settings" [ref=e82] [cursor=pointer]:
+                - /url: /login?return_to=%2Fhesreallyhim%2Fawesome-claude-code
+                - img [ref=e83]
+                - text: Notifications
+            - listitem [ref=e85]:
+              - link "Fork 3.3k" [ref=e86] [cursor=pointer]:
+                - /url: /login?return_to=%2Fhesreallyhim%2Fawesome-claude-code
+                - img [ref=e87]
+                - text: Fork
+                - generic "3,285" [ref=e89]: 3.3k
+            - listitem [ref=e90]:
+              - link "You must be signed in to star a repository" [ref=e92] [cursor=pointer]:
+                - /url: /login?return_to=%2Fhesreallyhim%2Fawesome-claude-code
+                - img [ref=e93]
+                - text: Star
+                - generic "39740 users starred this repository" [ref=e95]: 39.7k
+      - navigation "Repository" [ref=e96]:
+        - list [ref=e97]:
+          - listitem [ref=e98]:
+            - link "Code" [ref=e99] [cursor=pointer]:
+              - /url: /hesreallyhim/awesome-claude-code
+              - img [ref=e100]
+              - generic [ref=e102]: Code
+          - listitem [ref=e103]:
+            - link "Issues 230" [ref=e104] [cursor=pointer]:
+              - /url: /hesreallyhim/awesome-claude-code/issues
+              - img [ref=e105]
+              - generic [ref=e108]: Issues
+              - generic "230" [ref=e109]
+          - listitem [ref=e110]:
+            - link "Pull requests" [ref=e111] [cursor=pointer]:
+              - /url: /hesreallyhim/awesome-claude-code/pulls
+              - img [ref=e112]
+              - generic [ref=e114]: Pull requests
+          - listitem [ref=e115]:
+            - link "Discussions" [ref=e116] [cursor=pointer]:
+              - /url: /hesreallyhim/awesome-claude-code/discussions
+              - img [ref=e117]
+              - generic [ref=e119]: Discussions
+          - listitem [ref=e120]:
+            - link "Actions" [ref=e121] [cursor=pointer]:
+              - /url: /hesreallyhim/awesome-claude-code/actions
+              - img [ref=e122]
+              - generic [ref=e124]: Actions
+          - listitem [ref=e125]:
+            - link "Security and quality" [ref=e126] [cursor=pointer]:
+              - /url: /hesreallyhim/awesome-claude-code/security
+              - img [ref=e127]
+              - generic [ref=e129]: Security and quality
+          - listitem [ref=e130]:
+            - link "Insights" [ref=e131] [cursor=pointer]:
+              - /url: /hesreallyhim/awesome-claude-code/pulse
+              - img [ref=e132]
+              - generic [ref=e134]: Insights
+    - generic [ref=e137]:
+      - generic [ref=e138]:
+        - heading "Comparing changes" [level=1] [ref=e139]
+        - generic [ref=e140]:
+          - text: Choose two branches to see what’s changed or to start a new pull request. If you need to, you can also
+          - button "compare across forks" [ref=e141] [cursor=pointer]
+          - text: or
+          - link "learn more about diff comparisons" [ref=e142] [cursor=pointer]:
+            - /url: https://docs.github.com/pull-requests/collaborating-with-pull-requests/proposing-changes-to-your-work-with-pull-requests/about-comparing-branches-in-pull-requests#three-dot-and-two-dot-git-diff-comparisons
+          - text: .
+      - generic [ref=e143]:
+        - img [ref=e144]
+        - generic [ref=e146]:
+          - group [ref=e147]:
+            - 'button "base repository: hesreallyhim/awesome-claude-code" [ref=e148] [cursor=pointer]':
+              - generic [ref=e150]:
+                - text: "base repository:"
+                - generic [ref=e151]: hesreallyhim/awesome-claude-code
+              - generic:
+                - img
+          - group [ref=e152]:
+            - 'generic "base: main" [ref=e153] [cursor=pointer]':
+              - generic [ref=e155]:
+                - text: "base:"
+                - generic [ref=e156]: main
+              - generic:
+                - img
+        - generic [ref=e158]:
+          - 'img "Three-dot diff: changes since branches diverged" [ref=e159]'
+          - generic [ref=e161]: ...
+        - generic [ref=e162]:
+          - group [ref=e163]:
+            - 'button "head repository: ypollak2/awesome-claude-code" [ref=e164] [cursor=pointer]':
+              - generic [ref=e166]:
+                - text: "head repository:"
+                - generic [ref=e167]: ypollak2/awesome-claude-code
+              - generic:
+                - img
+          - group [ref=e168]:
+            - 'generic "compare: add-llm-router" [ref=e169] [cursor=pointer]':
+              - generic [ref=e171]:
+                - text: "compare:"
+                - generic [ref=e172]: add-llm-router
+              - generic:
+                - img
+        - generic [ref=e174]:
+          - generic:
+            - strong [ref=e175]: Checking mergeability…
+            - text: Don’t worry, you can still create the pull request.
+      - list [ref=e177]:
+        - listitem [ref=e178]:
+          - img [ref=e179]
+          - text: 1 commit
+        - listitem [ref=e181]:
+          - img [ref=e182]
+          - text: 1 file changed
+        - listitem [ref=e184]:
+          - img [ref=e185]
+          - text: 1 contributor
+      - generic [ref=e188]:
+        - img [ref=e190]
+        - generic [ref=e192]:
+          - heading "Commits on Mar 30, 2026" [level=3] [ref=e193]
+          - list [ref=e194]:
+            - listitem [ref=e195]:
+              - generic [ref=e196]:
+                - paragraph [ref=e197]:
+                  - link "Add LLM Router to Project Scaffolding & MCP" [ref=e198] [cursor=pointer]:
+                    - /url: /hesreallyhim/awesome-claude-code/commit/c233930a2ffd3c66bfc6f4efc2ff31b6dffe8a9e
+                - generic [ref=e199]:
+                  - link "@ypollak2" [ref=e202] [cursor=pointer]:
+                    - /url: /ypollak2
+                    - img "@ypollak2" [ref=e203]
+                  - generic [ref=e204]:
+                    - link "ypollak2" [ref=e205] [cursor=pointer]:
+                      - /url: /hesreallyhim/awesome-claude-code/commits?author=ypollak2
+                    - text: committed Mar 30, 20263 weeks ago
+              - generic [ref=e206]:
+                - generic [ref=e207]:
+                  - button "Copy the full SHA" [ref=e210] [cursor=pointer]:
+                    - img [ref=e211]
+                  - link "c233930" [ref=e216] [cursor=pointer]:
+                    - /url: /hesreallyhim/awesome-claude-code/commit/c233930a2ffd3c66bfc6f4efc2ff31b6dffe8a9e
+                    - generic [ref=e218]: c233930
+                - link "Browse the repository at this point in the history" [ref=e221] [cursor=pointer]:
+                  - /url: /hesreallyhim/awesome-claude-code/tree/c233930a2ffd3c66bfc6f4efc2ff31b6dffe8a9e
+                  - img
+      - generic "Loading Files" [ref=e223]:
+        - generic [ref=e225]:
+          - img [ref=e226]
+          - generic [ref=e229]: Loading
+  - contentinfo [ref=e230]:
+    - heading "Footer" [level=2] [ref=e231]
+    - generic [ref=e232]:
+      - generic [ref=e233]:
+        - link "GitHub Homepage" [ref=e234] [cursor=pointer]:
+          - /url: https://github.com
+          - img [ref=e235]
+        - generic [ref=e237]: © 2026 GitHub, Inc.
+      - navigation "Footer" [ref=e238]:
+        - heading "Footer navigation" [level=3] [ref=e239]
+        - list "Footer navigation" [ref=e240]:
+          - listitem [ref=e241]:
+            - link "Terms" [ref=e242] [cursor=pointer]:
+              - /url: https://docs.github.com/site-policy/github-terms/github-terms-of-service
+          - listitem [ref=e243]:
+            - link "Privacy" [ref=e244] [cursor=pointer]:
+              - /url: https://docs.github.com/site-policy/privacy-policies/github-privacy-statement
+          - listitem [ref=e245]:
+            - link "Security" [ref=e246] [cursor=pointer]:
+              - /url: https://github.com/security
+          - listitem [ref=e247]:
+            - link "Status" [ref=e248] [cursor=pointer]:
+              - /url: https://www.githubstatus.com/
+          - listitem [ref=e249]:
+            - link "Community" [ref=e250] [cursor=pointer]:
+              - /url: https://github.community/
+          - listitem [ref=e251]:
+            - link "Docs" [ref=e252] [cursor=pointer]:
+              - /url: https://docs.github.com/
+          - listitem [ref=e253]:
+            - link "Contact" [ref=e254] [cursor=pointer]:
+              - /url: https://support.github.com?tags=dotcom-footer
+          - listitem [ref=e255]:
+            - button "Manage cookies" [ref=e257] [cursor=pointer]
+          - listitem [ref=e258]:
+            - button "Do not share my personal information" [ref=e260] [cursor=pointer]
