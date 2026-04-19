@@ -1,5 +1,14 @@
 # Changelog
 
+## v6.2.1 — Linting Cleanup (2026-04-19)
+
+### Fixed
+
+- Remove unused imports and variables from profiles, retrospective, and test modules
+- Clean up linting violations detected by ruff
+
+---
+
 ## v6.2.0 — Closed Loops (2026-04-19)
 
 ### Added
