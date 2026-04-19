@@ -181,3 +181,113 @@ def load_learned_profile() -> dict[str, LearnedRoute]:
         }
     except (json.JSONDecodeError, KeyError):
         return {}
+
+
+async def get_primary_model_for_tool(tool_name: str) -> str:
+    """Get the primary model for a tool based on current routing profile.
+    
+    Maps tool names like "llm_code" to their primary model under the current
+    routing profile (e.g., "anthropic/claude-sonnet-4-6").
+    
+    Args:
+        tool_name: Tool name (e.g., "llm_query", "llm_code", "llm_analyze")
+    
+    Returns:
+        Model ID in "provider/model" format, or tool_name if unmapped
+    """
+    # Import here to avoid circular dependency
+    from llm_router.profiles import ROUTING_TABLE, complexity_to_profile
+    from llm_router.types import TaskType, RoutingProfile
+    from llm_router import state
+    
+    # Map tool name to task type
+    tool_to_task: dict[str, TaskType] = {
+        "llm_query": TaskType.QUERY,
+        "llm_research": TaskType.RESEARCH,
+        "llm_generate": TaskType.GENERATE,
+        "llm_analyze": TaskType.ANALYZE,
+        "llm_code": TaskType.CODE,
+        "llm_edit": TaskType.CODE,  # edit uses CODE routing
+    }
+    
+    task_type = tool_to_task.get(tool_name)
+    if not task_type:
+        return tool_name  # unknown tool, return as-is
+    
+    # Get current routing profile
+    profile = state.get_active_profile()
+    
+    # Look up the routing table
+    key = (profile, task_type)
+    models = ROUTING_TABLE.get(key, [])
+    
+    # Return the first (primary) model, or tool_name if none found
+    return models[0] if models else tool_name
+
+
+def parse_routing_directives(path: Path) -> dict[str, str]:
+    """Parse routing directives from directives.md.
+
+    Reads directives.md and extracts ROUTING_RULE entries to build
+    a task_type → model override mapping.
+
+    Format:
+        ROUTING_RULE: task_type → model_id (confidence: high/medium/low)
+
+    Can appear in the file as:
+        - Standalone line: ROUTING_RULE: task_type → model_id
+        - Within list item: - Rule: ROUTING_RULE: task_type → model_id
+
+    Example:
+        ROUTING_RULE: security_review → anthropic/claude-opus-4-6 (confidence: high)
+
+    Args:
+        path: Path to directives.md file
+
+    Returns:
+        Dict mapping task_type to model_id (non-empty models only),
+        empty dict if file not found
+    """
+    if not path.exists():
+        return {}
+
+    directives: dict[str, str] = {}
+
+    try:
+        content = path.read_text()
+        for line in content.split('\n'):
+            line = line.strip()
+
+            # Skip lines that don't contain ROUTING_RULE
+            if 'ROUTING_RULE:' not in line:
+                continue
+
+            # Parse: [prefix] ROUTING_RULE: task_type → model_id [confidence info]
+            try:
+                # Extract the ROUTING_RULE part
+                rule_start = line.index('ROUTING_RULE:')
+                rule_part = line[rule_start + len('ROUTING_RULE:'):].strip()
+
+                # Split on →
+                if '→' not in rule_part:
+                    continue
+
+                task_part, model_part = rule_part.split('→', 1)
+                task_type = task_part.strip()
+
+                # Extract model (before the parenthesis with confidence)
+                if '(' in model_part:
+                    model_id = model_part.split('(')[0].strip()
+                else:
+                    model_id = model_part.strip()
+
+                # Only add if both task_type and model_id are non-empty
+                if task_type and model_id:
+                    directives[task_type] = model_id
+            except (ValueError, IndexError):
+                # Skip malformed lines
+                continue
+    except (OSError, UnicodeDecodeError):
+        pass
+
+    return directives

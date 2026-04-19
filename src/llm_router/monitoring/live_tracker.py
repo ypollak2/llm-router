@@ -113,3 +113,41 @@ def display_hourly_progress() -> str:
         return line
     except Exception:
         return ""
+
+
+def get_trend_pressure() -> float:
+    """Get trend-based pressure modifier for model selection.
+    
+    Analyzes accuracy trend across snapshots:
+    - Returns 0.0 when no snapshots or trend is flat/improving
+    - Returns 0.1–0.3 when accuracy trend is declining
+    
+    The pressure is applied in model_selector to soft-escalate model tier
+    when quality is declining, independent of budget pressure.
+    
+    Returns:
+        Trend pressure value (0.0–0.3)
+    """
+    try:
+        snapshots = load_session_snapshots()
+        if not snapshots or len(snapshots) < 2:
+            return 0.0  # Not enough data
+        
+        # Compare last 2 snapshots
+        current_accuracy = snapshots[-1].get("facts", {}).get("accuracy", 1.0)
+        prev_accuracy = snapshots[-2].get("facts", {}).get("accuracy", 1.0)
+        
+        # Calculate trend
+        trend = current_accuracy - prev_accuracy
+        
+        if trend >= 0:
+            return 0.0  # Flat or improving
+        
+        # Declining — escalate pressure based on magnitude
+        # -0.05 drop → 0.1 pressure
+        # -0.10 drop → 0.2 pressure
+        # -0.15+ drop → 0.3 pressure
+        pressure = min(0.3, abs(trend) * 2)  # rough mapping: -0.15 → 0.3
+        return pressure
+    except Exception:
+        return 0.0

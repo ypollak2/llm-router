@@ -1,5 +1,59 @@
 # Changelog
 
+## v6.2.0 — Closed Loops (2026-04-19)
+
+### Added
+
+- **Loop 1: Directives Feedback** — Load routing directives from memory and apply as overrides
+  - New function: `parse_routing_directives()` in `memory/profiles.py`
+  - Session-start hook displays active directives in 【DIRECTIVES】 banner
+  - Auto-route hook applies ROUTING_RULE directives as classifier overrides
+  - Enables permanent routing rules based on retrospective learnings
+
+- **Loop 2: Weekly Retrospective** — Aggregate patterns from daily retrospectives
+  - Implemented `run_weekly_retrospective()` in `retrospective.py` (was a stub)
+  - Parses last 7 days of retrospective files
+  - Detects recurring patterns (root causes appearing 3+ times)
+  - Auto-generates ROUTING_RULE directives and persists them
+  - Callable via `llm-router retrospect --weekly` or `llm_retrospect(weekly=True)`
+
+- **Loop 3: Trend Pressure → Routing** — Quality decline triggers model escalation
+  - New function: `get_trend_pressure()` in `monitoring/live_tracker.py`
+  - Analyzes hourly snapshot accuracy trends
+  - Returns 0.0 when flat/improving, 0.1–0.3 when declining
+  - Blends with budget pressure: `effective = 0.8 * budget + 0.2 * trend`
+  - Auto-route hook passes trend_pressure to model selection
+
+- **Loop 4: Community Profile Default** — Fallback URL for profile imports
+  - `llm_import_profile()` now uses default community URL when none provided
+  - Default: `https://raw.githubusercontent.com/ypollak2/llm-router-profiles/main/community.json`
+  - Enables one-click imports of community-maintained routing profiles
+
+### Fixed
+
+- **Critical Bug: `llm_reroute` not recording corrected_model**
+  - `llm_reroute()` now extracts model from `to_tool` and passes `corrected_model` to `log_correction()`
+  - Added `get_primary_model_for_tool()` to resolve tool → primary model mapping
+  - Fixes silent bug where learned profiles had `model="unknown"` from corrections
+  - All corrections now record the actual model used, enabling quality learning
+
+### Changed
+
+- **Enhanced `select_model()`** — Now accepts optional `trend_pressure` parameter
+  - Blends trend and budget pressure for quality-aware escalation
+  - Independent of budget: pure quality decline can trigger tier escalation
+  - Backward compatible: defaults to 0.0 if not provided
+
+### Technical Notes
+
+- All 4 loops close data flows that were one-way in v6.1:
+  - Corrections → learned profiles → directives (1-way → closed loop)
+  - Retrospectives → actions → directives (stub → implemented)
+  - Snapshots → trends → model selection (display-only → active feedback)
+  - Profile imports → community sharing (no default → with default)
+
+---
+
 ## v6.1.1 — Linting Cleanup (2026-04-17)
 
 ### Fixed

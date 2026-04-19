@@ -1088,8 +1088,9 @@ async def llm_import_profile(url: str = "") -> str:
         existing = load_learned_profile()
 
         # Default to latest community profile if no URL provided
+        DEFAULT_COMMUNITY_URL = "https://raw.githubusercontent.com/ypollak2/llm-router-profiles/main/community.json"
         if not url:
-            return "Profile import requires a URL. Share your profile at: https://github.com/ypollak2/llm-router-profiles"
+            url = DEFAULT_COMMUNITY_URL
 
         # Fetch and parse remote profile
         try:

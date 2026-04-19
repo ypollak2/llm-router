@@ -12,6 +12,7 @@ from llm_router.cost import (
     get_correction_count, get_daily_claude_breakdown, get_daily_claude_tokens,
     get_savings_summary, log_claude_usage, log_correction,
 )
+from llm_router.memory.profiles import get_primary_model_for_tool
 from llm_router.model_selector import select_model
 from llm_router.profiles import complexity_to_profile
 from llm_router.provider_budget import get_provider_budgets, rank_external_models
@@ -78,8 +79,12 @@ async def llm_classify(
     q_mode = QualityMode(quality) if quality else config.quality_mode
     floor = min_model or config.min_model
 
+    # Get trend pressure from monitoring (quality declining triggers escalation)
+    from llm_router.monitoring.live_tracker import get_trend_pressure
+    trend_pressure = get_trend_pressure()
+
     # Get smart recommendation
-    rec = select_model(classification, budget_pct, q_mode, floor)
+    rec = select_model(classification, budget_pct, q_mode, floor, trend_pressure)
 
     # If Claude is tight and task is complex, find best external fallback
     external_fallback = None
@@ -780,10 +785,13 @@ async def llm_reroute(
             f"Valid tools: {', '.join(sorted(valid_tools))}"
         )
 
+    corrected_model = await get_primary_model_for_tool(to_tool)
+    
     await log_correction(
         original_tool=original_tool or "unknown",
         original_model=original_model or "unknown",
         corrected_tool=to_tool,
+        corrected_model=corrected_model,
         reason=reason,
     )
 

@@ -693,13 +693,92 @@ async def run_weekly_retrospective() -> dict:
     Returns:
         Aggregated weekly retrospective
     """
-    # Placeholder for future implementation
-    # Load last 7 daily .md files, detect recurring patterns
+    RETROSPECT_DIR.mkdir(parents=True, exist_ok=True)
+    
+    # Find retrospective files from the last 7 days
+    cutoff = datetime.now(timezone.utc) - timedelta(days=7)
+    all_retros = sorted(RETROSPECT_DIR.glob("session_*.md"), reverse=True)
+    
+    recent_retros = []
+    for filepath in all_retros:
+        try:
+            # Extract timestamp from filename: session_YYYY-MM-DDTHH-MM-SS.md
+            parts = filepath.stem.split('_')[1]  # YYYY-MM-DDTHH-MM-SS
+            dt_str = parts.replace('-', ':', 2)  # YYYY-MM-DD:HH-MM-SS → YYYY-MM-DDTHH:MM:SS
+            dt = datetime.fromisoformat(dt_str.replace('T', 'T').replace(':', '-', 2))
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            
+            if dt >= cutoff:
+                recent_retros.append(filepath)
+        except (ValueError, IndexError):
+            continue
+    
+    if not recent_retros:
+        return {
+            "period": "weekly",
+            "daily_retrospectives": 0,
+            "recurring_patterns": [],
+            "permanent_directives_generated": 0,
+        }
+    
+    # Parse each retrospective to extract root causes
+    all_causes: dict[tuple[str, str], int] = {}  # (root_cause, task_type) → count
+    
+    for filepath in recent_retros:
+        try:
+            content = filepath.read_text()
+            
+            # Parse "## 3. Root Causes" section
+            if "## 3. Root Causes" in content:
+                root_causes_section = content.split("## 3. Root Causes")[1]
+                if "##" in root_causes_section:
+                    root_causes_section = root_causes_section.split("##")[0]
+                
+                for line in root_causes_section.split('\n'):
+                    line = line.strip()
+                    # Expected format: "- {task_type}: {root_cause}"
+                    if line.startswith('- ') and ':' in line:
+                        parts = line[2:].split(':', 1)
+                        if len(parts) == 2:
+                            task_type = parts[0].strip()
+                            cause = parts[1].strip()
+                            key = (cause, task_type)
+                            all_causes[key] = all_causes.get(key, 0) + 1
+        except (OSError, UnicodeDecodeError):
+            continue
+    
+    # Detect recurring patterns (3+ occurrences)
+    recurring = {k: v for k, v in all_causes.items() if v >= 3}
+    
+    # Generate ROUTING_RULE directives for each recurring pattern
+    directives = []
+    for (root_cause, task_type), count in recurring.items():
+        # Map root cause to recommended model escalation
+        if root_cause in ("CLASSIFIER_ERROR", "ACCURACY_MISS"):
+            recommended_model = "anthropic/claude-sonnet-4-6"  # escalate
+            confidence = "high" if count >= 5 else "medium"
+        else:
+            recommended_model = "anthropic/claude-sonnet-4-6"
+            confidence = "medium"
+        
+        directives.append({
+            "type": "ROUTING_RULE",
+            "task_type": task_type,
+            "directive": f"ROUTING_RULE: {task_type} → {recommended_model}",
+            "confidence": count,
+            "evidence": f"{count} retrospectives agree on {root_cause}",
+        })
+    
+    # Write directives to disk
+    if directives:
+        write_directives(directives)
+    
     return {
         "period": "weekly",
-        "daily_retrospectives": 0,
-        "recurring_patterns": [],
-        "permanent_directives_generated": 0,
+        "daily_retrospectives": len(recent_retros),
+        "recurring_patterns": list(recurring.keys()),
+        "permanent_directives_generated": len(directives),
     }
 
 

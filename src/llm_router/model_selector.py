@@ -77,6 +77,7 @@ def select_model(
     budget_pct_used: float,
     quality_mode: QualityMode = QualityMode.BALANCED,
     min_model: str = "haiku",
+    trend_pressure: float = 0.0,
 ) -> RoutingRecommendation:
     """Select the optimal Claude Code model tier (haiku/sonnet/opus).
 
@@ -85,8 +86,9 @@ def select_model(
          ``CONSERVE`` returns the cheapest model that meets complexity needs.
       2. **Complexity base** — in ``BALANCED`` mode, complexity picks the
          starting model (simple->haiku, moderate->sonnet, complex->opus).
-      3. **Budget downshift** — if ``budget_pct_used > 0`` and the budget is
-         under pressure (>85%), shift down 1-2 tiers to preserve budget.
+      3. **Budget + trend downshift** — if ``budget_pct_used > 0`` or
+         ``trend_pressure > 0`` and thresholds are exceeded, shift down 1-2 tiers.
+         Trend pressure (quality declining) is blended with budget pressure.
       4. **Min model floor** — the final result is never below ``min_model``,
          ensuring a quality floor even under heavy budget pressure.
 
@@ -98,6 +100,8 @@ def select_model(
             or cost is prioritized.
         min_model: Minimum model floor — the selector never routes below this
             tier, even under heavy budget pressure.
+        trend_pressure: Optional quality trend pressure (0.0-0.3). When accuracy
+            is declining, soft-escalates model tier independent of budget.
 
     Returns:
         A ``RoutingRecommendation`` containing the selected model, the base
@@ -119,16 +123,27 @@ def select_model(
         recommended_idx = max(min_idx, base_idx - 1)
         reasoning = f"quality_mode=conserve: using cheapest viable ({CLAUDE_MODELS[recommended_idx]})"
     else:
-        # Balanced: complexity picks the model, budget is a late safety net
+        # Balanced: complexity picks the model, budget/trend are late safety nets
         recommended_idx = base_idx
         reasoning = f"{base_model} matches {complexity} complexity"
 
-        if budget_pct_used > 0:
-            shift = _downshift_amount(budget_pct_used)
+        # Apply budget pressure (primary) and trend pressure (soft boost)
+        # Trend adds to budget pressure to escalate when quality is declining
+        # Formula: keep budget_pct as-is, add trend as additional pressure
+        effective_pressure = budget_pct_used + (trend_pressure * 0.2)
+        effective_pressure = min(1.0, effective_pressure)  # cap at 100%
+        
+        if effective_pressure > 0:
+            shift = _downshift_amount(effective_pressure)
             if shift > 0:
                 recommended_idx = max(0, base_idx - shift)
+                pressure_source = []
+                if budget_pct_used > 0:
+                    pressure_source.append(f"budget {budget_pct_used:.0%}")
+                if trend_pressure > 0:
+                    pressure_source.append(f"trend {trend_pressure:.2f}")
                 reasoning = (
-                    f"budget safety ({budget_pct_used:.0%} used): "
+                    f"{', '.join(pressure_source)}: "
                     f"downshifted {base_model}→{CLAUDE_MODELS[recommended_idx]}"
                 )
 
