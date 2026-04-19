@@ -6,6 +6,21 @@ Three-layer compression pipeline:
 3. Token-Savior: Compress LLM responses (future)
 """
 
-from llm_router.compression.rtk_adapter import RTKAdapter
+from llm_router.compression.rtk_adapter import RTKAdapter, CompressionResult
 
-__all__ = ["RTKAdapter"]
+__all__ = ["RTKAdapter", "CompressionResult", "compress_command_output"]
+
+
+def compress_command_output(command: str, output: str, enabled: bool = True) -> CompressionResult:
+    """Convenience function to compress command output.
+    
+    Args:
+        command: Full command string (e.g., "git log --oneline")
+        output: Command output to compress
+        enabled: Whether compression is enabled (default: True)
+    
+    Returns:
+        CompressionResult with compression metrics
+    """
+    adapter = RTKAdapter(enable=enabled)
+    return adapter.compress(command, output)
