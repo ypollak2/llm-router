@@ -213,6 +213,34 @@ lower confidence scores for repeatedly corrected tools, providing a basic
 feedback loop between user corrections and routing quality.
 """
 
+CREATE_COMPRESSION_STATS_TABLE = """
+CREATE TABLE IF NOT EXISTS compression_stats (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp TEXT DEFAULT (datetime('now')),
+    session_id TEXT,
+    command TEXT NOT NULL,
+    layer TEXT NOT NULL,
+    original_tokens INTEGER NOT NULL,
+    compressed_tokens INTEGER NOT NULL,
+    compression_ratio REAL NOT NULL,
+    tokens_saved INTEGER NOT NULL,
+    strategy TEXT
+)
+"""
+"""Schema for the ``compression_stats`` table tracking token compression metrics.
+
+Each row represents one compression operation (command output or response).
+- layer: 'rtk' for command output, 'token-savior' for response compression
+- command: The shell command (e.g., 'git log --oneline') or 'response'
+- compression_ratio: compressed_tokens / original_tokens (0.0-1.0)
+- strategy: Which filter was applied (e.g., 'git:log', 'docker:ps', 'generic')
+"""
+
+MIGRATE_ADD_COMPRESSION_STATS = [
+    "CREATE TABLE IF NOT EXISTS compression_stats (id INTEGER PRIMARY KEY, timestamp TEXT DEFAULT (datetime('now')), session_id TEXT, command TEXT NOT NULL, layer TEXT NOT NULL, original_tokens INTEGER NOT NULL, compressed_tokens INTEGER NOT NULL, compression_ratio REAL NOT NULL, tokens_saved INTEGER NOT NULL, strategy TEXT)",
+]
+"""Idempotent migration to add compression tracking table (v6.2)."""
+
 """Idempotent migration to add per-call savings columns to usage table.
 
 baseline_model:     Model that would have been used without routing (e.g. claude-sonnet)
@@ -1664,3 +1692,139 @@ async def get_cache_savings(period: str = "today") -> dict[str, float]:
     finally:
         await db.close()
 
+
+
+async def log_compression_stat(
+    *,
+    session_id: str | None = None,
+    command: str,
+    layer: str,
+    original_tokens: int,
+    compressed_tokens: int,
+    compression_ratio: float,
+    strategy: str | None = None,
+) -> None:
+    """Log a compression operation (RTK command output or Token-Savior response).
+    
+    Args:
+        session_id: Session ID for correlation with routing decisions
+        command: The shell command (e.g., 'git log') or 'response'
+        layer: 'rtk' for command output, 'token-savior' for response
+        original_tokens: Token count before compression
+        compressed_tokens: Token count after compression
+        compression_ratio: compressed_tokens / original_tokens
+        strategy: Which filter applied (e.g., 'git:log', 'docker:ps')
+    """
+    from datetime import datetime, timezone
+    
+    db = await _get_db()
+    try:
+        tokens_saved = original_tokens - compressed_tokens
+        await db.execute(
+            """INSERT INTO compression_stats
+               (session_id, command, layer, original_tokens, compressed_tokens,
+                compression_ratio, tokens_saved, strategy)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                session_id,
+                command,
+                layer,
+                original_tokens,
+                compressed_tokens,
+                compression_ratio,
+                tokens_saved,
+                strategy,
+            ),
+        )
+        await db.commit()
+    finally:
+        await db.close()
+
+
+async def get_compression_stats(days: int = 7) -> dict:
+    """Get compression statistics for the last N days.
+    
+    Returns:
+        Dict with compression metrics by layer and strategy.
+    """
+    from datetime import datetime, timedelta, timezone
+    
+    db = await _get_db()
+    try:
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+        
+        # Total operations
+        cursor = await db.execute(
+            "SELECT COUNT(*) as count FROM compression_stats WHERE timestamp >= ?",
+            (cutoff,)
+        )
+        result = await cursor.fetchone()
+        total_ops = result[0] if result else 0
+        
+        # RTK stats
+        cursor = await db.execute(
+            """SELECT 
+                COUNT(*) as operations,
+                SUM(original_tokens) as original_tokens,
+                SUM(compressed_tokens) as compressed_tokens,
+                SUM(tokens_saved) as tokens_saved,
+                AVG(compression_ratio) as avg_ratio
+               FROM compression_stats 
+               WHERE layer = 'rtk' AND timestamp >= ?""",
+            (cutoff,)
+        )
+        rtk_row = await cursor.fetchone()
+        rtk_stats = {
+            "operations": rtk_row[0] or 0,
+            "original_tokens": rtk_row[1] or 0,
+            "compressed_tokens": rtk_row[2] or 0,
+            "tokens_saved": rtk_row[3] or 0,
+            "avg_compression_ratio": float(rtk_row[4]) if rtk_row[4] else 0.0,
+        }
+        
+        # By strategy breakdown
+        cursor = await db.execute(
+            """SELECT 
+                strategy,
+                COUNT(*) as operations,
+                SUM(tokens_saved) as tokens_saved,
+                AVG(compression_ratio) as avg_ratio
+               FROM compression_stats 
+               WHERE timestamp >= ?
+               GROUP BY strategy
+               ORDER BY tokens_saved DESC""",
+            (cutoff,)
+        )
+        strategies = {}
+        async for row in cursor:
+            strategies[row[0]] = {
+                "operations": row[1],
+                "tokens_saved": row[2] or 0,
+                "avg_compression_ratio": float(row[3]) if row[3] else 0.0,
+            }
+        
+        # Total tokens saved
+        cursor = await db.execute(
+            "SELECT SUM(tokens_saved) FROM compression_stats WHERE timestamp >= ?",
+            (cutoff,)
+        )
+        result = await cursor.fetchone()
+        total_saved = result[0] if result and result[0] else 0
+        
+        return {
+            "period_days": days,
+            "total_operations": total_ops,
+            "rtk_stats": rtk_stats,
+            "by_strategy": strategies,
+            "total_tokens_saved": total_saved,
+        }
+    except Exception:
+        return {
+            "period_days": days,
+            "total_operations": 0,
+            "rtk_stats": {},
+            "by_strategy": {},
+            "total_tokens_saved": 0,
+        }
+    finally:
+        await db.close()

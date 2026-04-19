@@ -223,7 +223,7 @@ class SavingsAnalytics:
             "daily_breakdown": daily_breakdown,
         }
 
-    def format_savings(self, savings: dict) -> str:
+    def format_savings(self, savings: dict, period_days: int = 7) -> str:
         """Format savings metrics as terminal output."""
         output = []
 
@@ -362,9 +362,55 @@ class SavingsAnalytics:
             output.append(dim("Run some LLM tasks and savings will appear here."))
             output.append("")
 
+        # Compression statistics
+        output.append("")
+        output.append(bold("⚙️  COMPRESSION LAYER"))
+        output.append("")
+        
+        # Get compression stats
+        try:
+            from llm_router.cost import get_compression_stats
+            import asyncio
+            compression_data = asyncio.run(get_compression_stats(days=period_days if period_days else 7))
+            
+            if compression_data.get("total_operations", 0) > 0:
+                rtk = compression_data.get("rtk_stats", {})
+                if rtk.get("operations", 0) > 0:
+                    output.append(bold("RTK Command Output Compression"))
+                    ops_count = rtk.get('operations', 0)
+                    output.append(f"  Commands processed: {cyan(str(ops_count))}")
+                    original = rtk.get('original_tokens', 0)
+                    compressed = rtk.get('compressed_tokens', 0)
+                    saved = rtk.get('tokens_saved', 0)
+                    output.append(f"  Original tokens: {original:,}")
+                    output.append(f"  Compressed tokens: {compressed:,}")
+                    output.append(f"  Tokens saved: {green(str(saved))}")
+                    
+                    if original > 0:
+                        compression_pct = (1 - rtk.get("avg_compression_ratio", 1)) * 100
+                        output.append(f"  Compression ratio: {cyan(f'{compression_pct:.1f}%')} reduction")
+                    
+                    # By strategy
+                    strategies = compression_data.get("by_strategy", {})
+                    if strategies:
+                        output.append("")
+                        output.append(f"  {dim('Top compression strategies:')}")
+                        for i, (strategy, stats) in enumerate(list(strategies.items())[:3]):
+                            saved_tokens = stats.get("tokens_saved", 0)
+                            ops_count = stats.get("operations", 0)
+                            output.append(f"    {i+1}. {strategy}: {saved_tokens:,} tokens saved ({ops_count} ops)")
+                    
+                    output.append("")
+            else:
+                output.append(dim("No command compression yet. Compression activates when shell commands are used."))
+                output.append("")
+        except Exception:
+            pass
+
         # Footer
         output.append(dim("💡 Tip: Use 'llm_usage' to see detailed cost breakdown by provider"))
         output.append(dim("        Use 'llm_savings' to see savings over different time periods"))
+        output.append(dim("        RTK compression activates on shell commands (git, pytest, cargo, etc)"))
         output.append("")
 
         return "\n".join(output)
@@ -383,7 +429,7 @@ def show_gain(period: str = "week") -> str:
     analytics = SavingsAnalytics()
     savings = analytics.compute_savings(days=days)
 
-    return analytics.format_savings(savings)
+    return analytics.format_savings(savings, period_days=days)
 
 
 if __name__ == "__main__":
