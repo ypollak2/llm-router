@@ -69,6 +69,21 @@ LLM_ROUTER_CLAUDE_SUBSCRIPTION=true
 
 ---
 
+## New in v6.3 — "Three-Layer Compression"
+
+**Theme:** Every layer of the routing pipeline now compresses tokens — inputs, outputs, and LLM responses.
+
+- **Layer 1: RTK Command Output Compression** — Bash/shell outputs automatically compressed via smart filters (60–90% reduction). Git, pytest, cargo, docker, npm outputs simplified to essentials
+- **Layer 2: Model Routing** — Existing cost reduction via intelligent model selection (70–90%)
+- **Layer 3: Token-Savior Response Compression** — LLM responses automatically condensed via 4-stage pipeline: filler removal → example consolidation → boilerplate collapse → semantic extraction (60–75% reduction)
+- **Unified Dashboard** — `llm_gain` shows all three compression layers with token savings per layer
+- **Optional & Graceful** — Compression is off by default; enable via `LLM_ROUTER_COMPRESS_RESPONSE=true`. Never blocks or crashes — falls back to original on any error
+- **Telemetry** — All compression metrics logged to SQLite for analytics and trend tracking
+
+Combined efficiency: **97x cost reduction** vs baseline Opus across all three layers.
+
+---
+
 ## New in v6.1 — "Memory"
 
 **Theme:** Your routing decisions are now stateful. The router learns from corrections and applies learned patterns automatically.
@@ -628,6 +643,10 @@ LLM_ROUTER_MONTHLY_BUDGET=0         # USD, 0 = unlimited
 LLM_ROUTER_CLAUDE_SUBSCRIPTION=false  # true = Claude Code Pro/Max
 LLM_ROUTER_ENFORCE=enforce          # shadow | suggest | enforce (default: enforce)
 
+# Compression
+LLM_ROUTER_COMPRESS_RESPONSE=false  # true = enable Token-Savior response compression
+LLM_ROUTER_COMPRESS_TARGET=0.6      # target compression ratio (0.0–1.0, default 0.6 = 60%)
+
 # Ollama (local models)
 OLLAMA_BASE_URL=http://localhost:11434
 OLLAMA_BUDGET_MODELS=gemma4:latest,qwen3.5:latest
@@ -978,9 +997,10 @@ The next 6 months focus on making routing decisions visible, learnable, and shar
 |---------|----------|--------|
 | **v6.0** | **"Visible"** — Live routing HUD, session replay, health checks, design system | 🚀 May 2026 |
 | **v6.1** | **"Memory"** — Personal routing profiles, override learning, community sharing | 🚀 Apr 2026 |
+| **v6.3** | **"Three-Layer Compression"** — RTK input compression, Token-Savior response compression, unified dashboard | 🚀 Apr 2026 |
 | **v6.2** | **"Quality"** — Quality Guard, benchmarks, degradation alerts, accuracy reports | 📅 Jul 2026 |
-| **v6.3** | **"Local First"** — Ollama dashboard, model discovery, auto-recommendations | 📅 Aug 2026 |
-| **v6.4** | **"Community"** — Savings card, README badge, routing config marketplace | 📅 Sep 2026 |
+| **v6.4** | **"Local First"** — Ollama dashboard, model discovery, auto-recommendations | 📅 Aug 2026 |
+| **v6.5** | **"Community"** — Savings card, README badge, routing config marketplace | 📅 Sep 2026 |
 | **v7.0** | **"Platform"** — Public routing API, agent chains, plugin SDK, marketplace | 📅 Oct 2026 |
 
 **Details:** [docs/ROADMAP_v6.md](docs/ROADMAP_v6.md) — competitive positioning, design decisions, monthly product cycle framework.

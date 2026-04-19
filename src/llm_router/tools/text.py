@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 
 from mcp.server.fastmcp import Context
 
 from llm_router.config import get_config
-from llm_router.cost import log_cc_hint
+from llm_router.cost import log_cc_hint, log_compression_stat
 from llm_router.router import route_and_call
 from llm_router.types import LLMResponse, RoutingProfile, TaskType
 from llm_router import state as _state
@@ -146,6 +147,71 @@ def _subscription_hint(task_type_label: str, complexity: str | None, prompt: str
     return hint
 
 
+def _apply_response_compression(content: str) -> tuple[str, bool]:
+    """Apply response compression if enabled and beneficial.
+    
+    Args:
+        content: The response content to potentially compress
+        
+    Returns:
+        Tuple of (possibly_compressed_content, was_compressed)
+    """
+    # Check if compression is enabled
+    if os.getenv("LLM_ROUTER_COMPRESS_RESPONSE", "").lower() != "true":
+        return content, False
+    
+    # Skip compression for very short responses
+    if len(content.strip()) < 200:
+        return content, False
+    
+    try:
+        from llm_router.compression import ResponseCompressor
+        
+        compressor = ResponseCompressor(enable=True)
+        result = compressor.compress(content, target_reduction=0.5)
+        
+        # Only use compressed version if meaningful compression achieved
+        if result.compression_ratio < 0.95:
+            # Log compression stat asynchronously (fire and forget)
+            def _log_async():
+                try:
+                    asyncio.run(
+                        log_compression_stat(
+                            command="response",
+                            layer="token-savior",
+                            original_tokens=result.original_tokens,
+                            compressed_tokens=result.compressed_tokens,
+                            compression_ratio=result.compression_ratio,
+                            strategy=",".join(result.stages_applied),
+                        )
+                    )
+                except Exception:
+                    pass  # Silent failure on logging
+            
+            # Try to log in background (non-blocking)
+            try:
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    loop.create_task(
+                        log_compression_stat(
+                            command="response",
+                            layer="token-savior",
+                            original_tokens=result.original_tokens,
+                            compressed_tokens=result.compressed_tokens,
+                            compression_ratio=result.compression_ratio,
+                            strategy=",".join(result.stages_applied),
+                        )
+                    )
+            except Exception:
+                pass  # Silent failure - don't block response
+            
+            return result.output, True
+    except Exception:
+        pass  # Silent failure - return original if compression fails
+    
+    return content, False
+
+
 def _format_response(resp: LLMResponse, explain: str | None = None) -> str:
     """Format a response with consistent header and optional explanation prefix.
 
@@ -156,6 +222,10 @@ def _format_response(resp: LLMResponse, explain: str | None = None) -> str:
         > 🤖 **model** · tokens · $cost · duration
         [optional empty line]
         [content]
+        [optional compression note]
+
+    Applies response compression (Layer 3: Token-Savior) if enabled via
+    LLM_ROUTER_COMPRESS_RESPONSE=true environment variable.
 
     Args:
         resp: The LLM response object with model, tokens, cost, latency.
@@ -170,7 +240,11 @@ def _format_response(resp: LLMResponse, explain: str | None = None) -> str:
     parts.append(resp.header())
     if resp.content:
         parts.append("")
-        parts.append(resp.content)
+        # Apply response compression if enabled
+        content, was_compressed = _apply_response_compression(resp.content)
+        parts.append(content)
+        if was_compressed:
+            parts.append("\n[Response compressed via Token-Savior. Original available if needed.]")
     return "\n".join(parts)
 
 

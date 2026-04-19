@@ -3,12 +3,19 @@
 Three-layer compression pipeline:
 1. RTK: Compress shell command outputs
 2. Router: Choose model by complexity
-3. Token-Savior: Compress LLM responses (future)
+3. Token-Savior: Compress LLM responses
 """
 
+from llm_router.compression.response_compressor import ResponseCompressor, compress_response
 from llm_router.compression.rtk_adapter import RTKAdapter, CompressionResult
 
-__all__ = ["RTKAdapter", "CompressionResult", "compress_command_output"]
+__all__ = [
+    "RTKAdapter",
+    "CompressionResult",
+    "ResponseCompressor",
+    "compress_command_output",
+    "compress_response",
+]
 
 
 def compress_command_output(command: str, output: str, enabled: bool = True) -> CompressionResult:

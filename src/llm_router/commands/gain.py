@@ -360,21 +360,27 @@ class SavingsAnalytics:
             output.append(dim("Run some LLM tasks and savings will appear here."))
             output.append("")
 
-        # Compression statistics
+        # Compression statistics (Layer 1: RTK + Layer 3: Token-Savior)
         output.append("")
-        output.append(bold("⚙️  COMPRESSION LAYER"))
+        output.append(bold("⚙️  COMPRESSION LAYERS"))
         output.append("")
         
         # Get compression stats
         try:
             from llm_router.cost import get_compression_stats
             import asyncio
-            compression_data = asyncio.run(get_compression_stats(days=period_days if period_days else 7))
+            days = period_days if period_days else 7
+            compression_data = asyncio.run(get_compression_stats(days=days))
             
+            has_rtk = False
+            has_token_savior = False
+            
+            # Layer 1: RTK (Command Output Compression)
             if compression_data.get("total_operations", 0) > 0:
                 rtk = compression_data.get("rtk_stats", {})
                 if rtk.get("operations", 0) > 0:
-                    output.append(bold("RTK Command Output Compression"))
+                    has_rtk = True
+                    output.append(bold("Layer 1: RTK Command Output Compression"))
                     ops_count = rtk.get('operations', 0)
                     output.append(f"  Commands processed: {cyan(str(ops_count))}")
                     original = rtk.get('original_tokens', 0)
@@ -385,30 +391,63 @@ class SavingsAnalytics:
                     output.append(f"  Tokens saved: {green(str(saved))}")
                     
                     if original > 0:
-                        compression_pct = (1 - rtk.get("avg_compression_ratio", 1)) * 100
-                        output.append(f"  Compression ratio: {cyan(f'{compression_pct:.1f}%')} reduction")
+                        ratio = 1 - rtk.get("avg_compression_ratio", 1)
+                        compression_pct = ratio * 100
+                        pct_str = cyan(f"{compression_pct:.1f}%")
+                        output.append(f"  Compression ratio: {pct_str} reduction")
                     
                     # By strategy
                     strategies = compression_data.get("by_strategy", {})
                     if strategies:
                         output.append("")
                         output.append(f"  {dim('Top compression strategies:')}")
-                        for i, (strategy, stats) in enumerate(list(strategies.items())[:3]):
+                        for i, (strat, stats) in enumerate(list(strategies.items())[:3]):
                             saved_tokens = stats.get("tokens_saved", 0)
                             ops_count = stats.get("operations", 0)
-                            output.append(f"    {i+1}. {strategy}: {saved_tokens:,} tokens saved ({ops_count} ops)")
+                            line = f"    {i+1}. {strat}: {saved_tokens:,} tokens saved ({ops_count} ops)"
+                            output.append(line)
                     
                     output.append("")
-            else:
-                output.append(dim("No command compression yet. Compression activates when shell commands are used."))
+            
+            # Layer 3: Token-Savior (Response Compression)
+            try:
+                token_savior = compression_data.get("token_savior_stats", {})
+                if token_savior.get("operations", 0) > 0:
+                    has_token_savior = True
+                    output.append(bold("Layer 3: Token-Savior Response Compression"))
+                    ops_count = token_savior.get('operations', 0)
+                    output.append(f"  Responses compressed: {cyan(str(ops_count))}")
+                    original = token_savior.get('original_tokens', 0)
+                    compressed = token_savior.get('compressed_tokens', 0)
+                    saved = token_savior.get('tokens_saved', 0)
+                    output.append(f"  Original tokens: {original:,}")
+                    output.append(f"  Compressed tokens: {compressed:,}")
+                    output.append(f"  Tokens saved: {green(str(saved))}")
+                    
+                    if original > 0:
+                        ratio = 1 - token_savior.get("avg_compression_ratio", 1)
+                        compression_pct = ratio * 100
+                        pct_str = cyan(f"{compression_pct:.1f}%")
+                        output.append(f"  Compression ratio: {pct_str} reduction")
+                    
+                    output.append("")
+            except Exception:
+                pass
+            
+            if not has_rtk and not has_token_savior:
+                msg = "No compression yet. Layers activate when shell commands or responses"
+                msg += " are compressed."
+                output.append(dim(msg))
                 output.append("")
         except Exception:
             pass
 
         # Footer
-        output.append(dim("💡 Tip: Use 'llm_usage' to see detailed cost breakdown by provider"))
-        output.append(dim("        Use 'llm_savings' to see savings over different time periods"))
-        output.append(dim("        RTK compression activates on shell commands (git, pytest, cargo, etc)"))
+        output.append(dim("💡 Tips:"))
+        output.append(dim("  • Use 'llm_usage' for detailed cost breakdown by provider"))
+        output.append(dim("  • Use 'llm_savings' for savings over different time periods"))
+        output.append(dim("  • Layer 1 (RTK): Enable via shell commands (git, pytest, etc)"))
+        output.append(dim("  • Layer 3 (Token-Savior): Enable via LLM_ROUTER_COMPRESS_RESPONSE=true"))
         output.append("")
 
         return "\n".join(output)

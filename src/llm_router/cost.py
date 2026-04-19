@@ -1715,8 +1715,6 @@ async def log_compression_stat(
         compression_ratio: compressed_tokens / original_tokens
         strategy: Which filter applied (e.g., 'git:log', 'docker:ps')
     """
-    from datetime import datetime, timezone
-    
     db = await _get_db()
     try:
         tokens_saved = original_tokens - compressed_tokens
@@ -1761,7 +1759,7 @@ async def get_compression_stats(days: int = 7) -> dict:
         result = await cursor.fetchone()
         total_ops = result[0] if result else 0
         
-        # RTK stats
+        # RTK stats (Layer 1: Command output compression)
         cursor = await db.execute(
             """SELECT 
                 COUNT(*) as operations,
@@ -1780,6 +1778,27 @@ async def get_compression_stats(days: int = 7) -> dict:
             "compressed_tokens": rtk_row[2] or 0,
             "tokens_saved": rtk_row[3] or 0,
             "avg_compression_ratio": float(rtk_row[4]) if rtk_row[4] else 0.0,
+        }
+        
+        # Token-Savior stats (Layer 3: Response compression)
+        cursor = await db.execute(
+            """SELECT 
+                COUNT(*) as operations,
+                SUM(original_tokens) as original_tokens,
+                SUM(compressed_tokens) as compressed_tokens,
+                SUM(tokens_saved) as tokens_saved,
+                AVG(compression_ratio) as avg_ratio
+               FROM compression_stats 
+               WHERE layer = 'token-savior' AND timestamp >= ?""",
+            (cutoff,)
+        )
+        token_savior_row = await cursor.fetchone()
+        token_savior_stats = {
+            "operations": token_savior_row[0] or 0,
+            "original_tokens": token_savior_row[1] or 0,
+            "compressed_tokens": token_savior_row[2] or 0,
+            "tokens_saved": token_savior_row[3] or 0,
+            "avg_compression_ratio": float(token_savior_row[4]) if token_savior_row[4] else 0.0,
         }
         
         # By strategy breakdown
@@ -1815,6 +1834,7 @@ async def get_compression_stats(days: int = 7) -> dict:
             "period_days": days,
             "total_operations": total_ops,
             "rtk_stats": rtk_stats,
+            "token_savior_stats": token_savior_stats,
             "by_strategy": strategies,
             "total_tokens_saved": total_saved,
         }
@@ -1823,6 +1843,7 @@ async def get_compression_stats(days: int = 7) -> dict:
             "period_days": days,
             "total_operations": 0,
             "rtk_stats": {},
+            "token_savior_stats": {},
             "by_strategy": {},
             "total_tokens_saved": 0,
         }
