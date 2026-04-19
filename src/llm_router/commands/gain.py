@@ -1,13 +1,11 @@
 """Token savings analytics dashboard (RTK-style)."""
 
-import json
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
-from llm_router.config import get_config
-from llm_router.terminal_style import Color, Symbol
+from llm_router.terminal_style import Color
 
 
 def bold(text: str) -> str:
@@ -257,11 +255,11 @@ class SavingsAnalytics:
             # Savings percentage
             savings_pct = ((opus_cost - cost) / opus_cost * 100) if opus_cost > 0 else 0
             if savings_pct >= 80:
-                savings_bar = green(f"█" * 8) + dim(f"█" * 2)
+                savings_bar = green("█" * 8) + dim("█" * 2)
             elif savings_pct >= 60:
-                savings_bar = yellow(f"█" * 7) + dim(f"█" * 3)
+                savings_bar = yellow("█" * 7) + dim("█" * 3)
             else:
-                savings_bar = red(f"█" * 6) + dim(f"█" * 4)
+                savings_bar = red("█" * 6) + dim("█" * 4)
             output.append(f"Savings: {savings_bar} {savings_pct:.1f}%")
             output.append("")
 
