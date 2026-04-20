@@ -26,6 +26,16 @@ import urllib.request
 import uuid
 from datetime import datetime
 
+# Import timeout config from llm_router package if available
+try:
+    from llm_router.timeout_config import subprocess_timeout, http_timeout
+except ImportError:
+    # Fallback to hardcoded defaults if llm_router not installed
+    def subprocess_timeout() -> int:
+        return int(os.environ.get("LLM_ROUTER_SUBPROCESS_TIMEOUT", "15"))
+    def http_timeout() -> int:
+        return int(os.environ.get("LLM_ROUTER_HTTP_TIMEOUT", "10"))
+
 STATE_DIR              = os.path.expanduser("~/.llm-router")
 SESSION_START_FILE     = os.path.join(STATE_DIR, "session_start.txt")
 SESSION_ID_FILE        = os.path.join(STATE_DIR, "session_id.txt")
@@ -161,7 +171,7 @@ def _ensure_ollama_running() -> str:
     try:
         result = subprocess.run(
             ["bash", script],
-            capture_output=True, text=True, timeout=15,
+            capture_output=True, text=True, timeout=subprocess_timeout(),
         )
         stdout = result.stdout.strip()
         if result.returncode != 0:
@@ -188,7 +198,7 @@ def _refresh_claude_usage() -> str:
     try:
         r = subprocess.run(
             ["security", "find-generic-password", "-s", "Claude Code-credentials", "-w"],
-            capture_output=True, text=True, timeout=8,
+            capture_output=True, text=True, timeout=subprocess_timeout(),
         )
         if r.returncode != 0 or not r.stdout.strip():
             return "\n⚠️  Could not read Claude credentials — run llm_check_usage manually"
@@ -387,7 +397,7 @@ def _preflight_check() -> str:
     try:
         import subprocess
         result = subprocess.run(
-            ["ollama", "list"], capture_output=True, timeout=3
+            ["ollama", "list"], capture_output=True, timeout=subprocess_timeout()
         )
         if result.returncode == 0:
             ok.append("Ollama")

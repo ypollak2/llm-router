@@ -177,13 +177,16 @@ async def run_codex(
     prompt: str,
     model: str = "gpt-5.4",
     working_dir: str | None = None,
-    timeout: int = 300,
+    timeout: int | None = None,
 ) -> CodexResult:
     """Run a task through the Codex CLI agent as a subprocess.
 
     Invokes ``codex exec`` with an explicit argument list via
     ``asyncio.create_subprocess_exec`` — no shell expansion is involved,
     so the prompt string is safe from injection regardless of content.
+    
+    SECURITY: Subprocess runs with a filtered environment that excludes
+    all API keys and tokens to prevent exposure via /proc/[pid]/environ.
 
     Error recovery strategy:
         - If the binary is not found, returns a ``CodexResult`` with
@@ -199,14 +202,16 @@ async def run_codex(
         model: Which OpenAI model to use (default: ``"gpt-5.4"``).
         working_dir: Working directory for the Codex process.  Defaults
             to the current working directory.
-        timeout: Maximum seconds to wait before killing the process
-            (default: 300).
+        timeout: Maximum seconds to wait before killing the process.
+            Defaults to ``LLM_ROUTER_CODEX_TIMEOUT`` env var (300s).
 
     Returns:
         A ``CodexResult`` with the process output, model name, exit code,
         and wall-clock duration.  Never raises; all errors are captured
         in the result.
     """
+    from llm_router.safe_subprocess import get_safe_env
+    
     binary = find_codex_binary()
     if not binary:
         return CodexResult(
@@ -216,16 +221,25 @@ async def run_codex(
 
     cwd = working_dir or os.getcwd()
 
+    # Use configurable timeout if not explicitly provided
+    if timeout is None:
+        from llm_router.timeout_config import codex_timeout
+        timeout = codex_timeout()
+
     # All arguments passed as separate list items — no shell expansion
     args = [binary, "exec", "-m", model, "--color", "never", "-C", cwd, prompt]
 
     start = time.monotonic()
     try:
+        # Use safe environment that excludes API keys and tokens
+        safe_env = get_safe_env()
+        
         proc = await asyncio.create_subprocess_exec(
             *args,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             cwd=cwd,
+            env=safe_env,
         )
         stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
         duration = time.monotonic() - start

@@ -12,8 +12,12 @@ from llm_router.cost import (
     get_correction_count, get_daily_claude_breakdown, get_daily_claude_tokens,
     get_savings_summary, log_claude_usage, log_correction,
 )
+from llm_router.input_validation import (
+    ValidationError, validate_routing_parameters,
+)
 from llm_router.memory.profiles import get_primary_model_for_tool
 from llm_router.model_selector import select_model
+from llm_router.prompt_injection import sanitize_prompt
 from llm_router.profiles import complexity_to_profile
 from llm_router.provider_budget import get_provider_budgets, rank_external_models
 from llm_router.router import route_and_call
@@ -262,6 +266,27 @@ async def llm_route(
         max_tokens: Maximum output tokens.
         context: Optional conversation context to help the model understand the broader task.
     """
+    # Step 0: Sanitize prompt to prevent injection attacks
+    prompt = sanitize_prompt(prompt, log_suspected=True)
+
+    # Step 0.5: Validate routing parameters
+    try:
+        validated = validate_routing_parameters(
+            task_type=task_type,
+            complexity=complexity_override,
+            temperature=temperature,
+            max_tokens=max_tokens,
+        )
+        task_type = validated["task_type"].value if validated["task_type"] else None
+        complexity_override = (
+            validated["complexity"].value if validated["complexity"] else None
+        )
+        temperature = validated["temperature"]
+        max_tokens = validated["max_tokens"]
+    except ValidationError as e:
+        await ctx.warning(f"Invalid parameters: {e}")
+        return f"Parameter validation failed:\n{e}"
+
     # Step 1: Classify complexity (or use override)
     if complexity_override:
         try:

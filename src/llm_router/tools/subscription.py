@@ -95,15 +95,15 @@ async def llm_refresh_claude_usage() -> str:
     Requires: Claude Code installed and authenticated on macOS.
     """
     import json as _json
-    import subprocess
     import urllib.request
 
     from llm_router.claude_usage import parse_oauth_response, set_claude_pressure
+    from llm_router.safe_subprocess import safe_subprocess_run
 
-    # ── Step 1: read OAuth token from macOS Keychain ──────────────────────────
+    # ── Step 1: read OAuth token from macOS Keychain (using safe subprocess) ──
     try:
-        r = subprocess.run(
-            ["security", "find-generic-password", "-s", "Claude Code-credentials", "-w"],
+        r = safe_subprocess_run(
+            "security", "find-generic-password", "-s", "Claude Code-credentials", "-w",
             capture_output=True, text=True, timeout=8,
         )
         if r.returncode != 0 or not r.stdout.strip():
@@ -115,12 +115,14 @@ async def llm_refresh_claude_usage() -> str:
         token = creds.get("claudeAiOauth", {}).get("accessToken", "")
         if not token:
             return "OAuth token not found in Keychain credentials. Try signing out and back into Claude Code."
-    except subprocess.TimeoutExpired:
-        return "Keychain read timed out."
-    except _json.JSONDecodeError as e:
-        return f"Could not parse Keychain credentials: {e}"
-    except FileNotFoundError:
-        return "`security` command not available — macOS only."
+    except Exception as e:
+        if "TimeoutExpired" in str(type(e)):
+            return "Keychain read timed out."
+        elif "JSONDecodeError" in str(type(e)):
+            return f"Could not parse Keychain credentials: {e}"
+        elif "FileNotFoundError" in str(type(e)):
+            return "`security` command not available — macOS only."
+        return f"Keychain error: {e}"
 
     # ── Step 2: call the OAuth usage API ─────────────────────────────────────
     url = "https://api.anthropic.com/api/oauth/usage"

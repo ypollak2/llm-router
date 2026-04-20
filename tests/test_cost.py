@@ -75,3 +75,30 @@ async def test_column_exists_helper(temp_db):
     assert await cost._column_exists(db, "usage", "nonexistent_col_xyz") is False
     await db.close()
     _cfg._config = None
+
+
+@pytest.mark.asyncio
+async def test_column_exists_rejects_sql_injection(temp_db):
+    """_column_exists rejects malicious table names to prevent SQL injection."""
+    import llm_router.config as _cfg
+    _cfg._config = None
+    db = await cost._get_db()
+    
+    # Test SQL injection attempts — all should return False (invalid table name)
+    injection_attempts = [
+        "usage'); DROP TABLE usage; --",
+        "usage' OR '1'='1",
+        "usage'; DELETE FROM usage; --",
+        "usage` OR 1=1 --",
+        "nonexistent_table",  # Invalid table name (not in allowlist)
+    ]
+    
+    for malicious_table in injection_attempts:
+        result = await cost._column_exists(db, malicious_table, "timestamp")
+        assert result is False, f"SQL injection check failed for: {malicious_table}"
+    
+    # Verify valid tables still work
+    assert await cost._column_exists(db, "usage", "timestamp") is True
+    
+    await db.close()
+    _cfg._config = None

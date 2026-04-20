@@ -13,6 +13,16 @@ import time
 import urllib.request
 from datetime import datetime, timezone
 
+# Import timeout config from llm_router package if available
+try:
+    from llm_router.timeout_config import subprocess_timeout, http_timeout
+except ImportError:
+    # Fallback to hardcoded defaults if llm_router not installed
+    def subprocess_timeout() -> int:
+        return int(os.environ.get("LLM_ROUTER_SUBPROCESS_TIMEOUT", "15"))
+    def http_timeout() -> int:
+        return int(os.environ.get("LLM_ROUTER_HTTP_TIMEOUT", "10"))
+
 STATE_DIR            = os.path.expanduser("~/.llm-router")
 SESSION_START_FILE   = os.path.join(STATE_DIR, "session_start.txt")
 SESSION_CC_SNAP_FILE = os.path.join(STATE_DIR, "session_start_cc_pct.json")
@@ -36,7 +46,7 @@ def _fetch_live_usage() -> dict | None:
     try:
         r = subprocess.run(
             ["security", "find-generic-password", "-s", "Claude Code-credentials", "-w"],
-            capture_output=True, text=True, timeout=6,
+            capture_output=True, text=True, timeout=subprocess_timeout(),
         )
         if r.returncode != 0 or not r.stdout.strip():
             return None
@@ -626,7 +636,7 @@ def main() -> None:
         try:
             result = subprocess.run(
                 [sys.executable, "-m", "llm_router.commands.retrospect", "--compact", "--no-directives"],
-                capture_output=True, text=True, timeout=15
+                capture_output=True, text=True, timeout=subprocess_timeout()
             )
             if result.stdout.strip():
                 retrospect_output = result.stdout.strip()

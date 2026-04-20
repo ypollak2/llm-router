@@ -17,6 +17,7 @@ Configuration is organized into five sections:
 from __future__ import annotations
 
 import os as _os
+import threading
 import time
 import urllib.request
 from pathlib import Path
@@ -427,6 +428,7 @@ class RouterConfig(BaseSettings):
 
 
 _config: RouterConfig | None = None
+_config_lock = threading.Lock()
 
 
 def get_config() -> RouterConfig:
@@ -446,9 +448,13 @@ def get_config() -> RouterConfig:
     """
     import os as _os
     global _config
+    # Thread-safe singleton initialization using double-checked locking pattern
     if _config is None:
-        _config = RouterConfig()
-        _config.apply_keys_to_env()
+        with _config_lock:
+            # Double-check inside lock to prevent race condition
+            if _config is None:
+                _config = RouterConfig()
+                _config.apply_keys_to_env()
     # Active purge: remove ANTHROPIC_API_KEY from the live environment every
     # time get_config() is called in subscription mode. This handles the case
     # where the key was already present before the server started.

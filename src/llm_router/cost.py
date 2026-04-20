@@ -277,7 +277,21 @@ is_simulated:       1 for dry-run test calls (llm-router test), 0 for real calls
 
 
 async def _column_exists(db: aiosqlite.Connection, table: str, column: str) -> bool:
-    """Return True if *column* exists in *table* (uses SQLite PRAGMA, no exceptions)."""
+    """Return True if *column* exists in *table* (uses SQLite PRAGMA, no exceptions).
+    
+    SECURITY: Table name is validated against allowlist before SQL execution
+    to prevent SQL injection. Column name is parameterized.
+    """
+    # Allowlist of valid tables — prevents SQL injection via table parameter
+    allowed_tables = {
+        "usage", "claude_usage", "routing_decisions", "savings_stats",
+        "semantic_cache", "corrections", "compression_stats", "model_quality_trends"
+    }
+    
+    # Validate table parameter against allowlist
+    if table not in allowed_tables:
+        return False  # Invalid table name — return False rather than raise
+    
     cursor = await db.execute(
         f"SELECT name FROM pragma_table_info('{table}') WHERE name = ?", (column,)
     )
