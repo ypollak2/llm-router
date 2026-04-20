@@ -20,3 +20,8 @@ PRICING.md
 
 # Local AI assistant instructions — machine-specific, never commit
 CLAUDE.md
+
+# Task management (local only)
+.claude/tasks/
+.claude/task-list.md
+.tasks.json

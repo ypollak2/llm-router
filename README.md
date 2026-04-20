@@ -35,12 +35,26 @@ llm-router keeps cheap work on cheap/free models, escalates to premium models on
 - Works in: Claude Code, Cursor, VS Code, Codex, Windsurf, Zed, claw-code, Agno
 - Free-first: Ollama (local) → Codex → Gemini Flash → OpenAI → Claude (subscription)
 
+## Mental Model
+
+Think of llm-router as a **smart task dispatcher**. When you ask a question:
+
+1. **Analyze** — What kind of task is this? (simple lookup vs. complex reasoning)
+2. **Choose** — Which model can handle this best *and* cheapest?
+3. **Check Constraints** — Are we over budget? Is this model degraded?
+4. **Execute** — Send to that model
+
+The dispatcher learns over time: if a model starts performing poorly (judge scores drop), it gets demoted in future decisions. If you're running low on quota (budget pressure), it automatically uses cheaper models. You don't manage any of this—it just happens behind the scenes.
+
+**Example:** "Explain this error message" → Simple task → Route to Haiku (fast, cheap) → Done. vs. "Refactor this complex architecture" → Complex task → Route to Opus (expensive but thorough) → Done.
+
+The savings come from not using Opus for every question.
+
 ## New in v6.4 — Quality Guard
 
 - **Judge-based quality feedback** integrated into routing decisions
 - **Quality reordering** — models demoted if scores drop below threshold
 - **Hard floor enforcement** — poor-performing models automatically escalated to better tier
-- **Cross-agent discovery** — registered on Agoragentic for other agents to use
 
 See [CHANGELOG.md](CHANGELOG.md) for all changes.
 
