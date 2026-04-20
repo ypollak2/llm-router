@@ -12,14 +12,14 @@ def test_all_tools_registered():
     This test prevents tool registration drift by dynamically discovering
     all @mcp.tool() decorated functions rather than hardcoding names.
     """
-    from llm_router.tools import routing, text, media, pipeline, admin, subscription, codex, setup
+    from llm_router.tools import routing, text, media, pipeline, admin, subscription, codex, setup, agoragentic
     
     # Get all tools from the MCP server
     registered_tools = mcp._tool_manager.list_tools()
     registered_names = {t.name for t in registered_tools}
     
     # Dynamically collect expected tools from all modules
-    tool_modules = [routing, text, media, pipeline, admin, subscription, codex, setup]
+    tool_modules = [routing, text, media, pipeline, admin, subscription, codex, setup, agoragentic]
     expected_names = set()
     
     for module in tool_modules:
@@ -47,6 +47,7 @@ def test_all_tools_registered():
         "llm_policy", "llm_digest", "llm_benchmark",
         "llm_reroute", "llm_session_spend", "llm_approve_route",
         "llm_budget", "llm_share_profile", "llm_import_profile",
+        "agoragentic_task", "agoragentic_browse", "agoragentic_wallet", "agoragentic_status",
     }
     
     # Registered tools should include all known tools
