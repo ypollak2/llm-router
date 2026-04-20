@@ -189,27 +189,6 @@ def _format(tools: dict[str, dict], free_rows: list[dict], paid_rows: list[dict]
         lines.append("")
         lines += _format_routing_section(tools)
 
-    # Combined savings tip
-    paid_saved = _total_saved(tools) if tools else 0.0
-    free_saved = sum(
-        max(0.0, _sonnet_baseline(
-            r.get("input_tokens", 0) or 0,
-            r.get("output_tokens", 0) or 0,
-        ))
-        for r in free_rows
-    )
-    total_saved = paid_saved + free_saved
-    if total_saved >= 0.001:
-        lines.append("")
-        if _should_show_star_cta(total_saved):
-            lines.append(f'  💡 Saved ~${total_saved:.2f} this session with llm-router')
-            lines.append("")
-            lines.append('  ⭐  Enjoying the savings? A star on GitHub helps others find it:')
-            lines.append('      github.com/ypollak2/llm-router')
-        else:
-            lines.append(
-                f'  💡 Saved ~${total_saved:.2f} this session with llm-router'
-            )
 
     lines.append("─" * WIDTH)
     return "\n".join(lines)
