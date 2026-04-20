@@ -84,7 +84,7 @@ async def llm_classify(
     trend_pressure = get_trend_pressure()
 
     # Get smart recommendation
-    rec = select_model(classification, budget_pct, q_mode, floor, trend_pressure)
+    rec = await select_model(classification, budget_pct, q_mode, floor, trend_pressure)
 
     # If Claude is tight and task is complex, find best external fallback
     external_fallback = None
@@ -307,7 +307,7 @@ async def llm_route(
 
     q_mode = get_config().quality_mode
     floor = get_config().min_model
-    rec = select_model(classification, budget_pct, q_mode, floor)
+    rec = await select_model(classification, budget_pct, q_mode, floor)
 
     # When under budget pressure, respect the downshifted profile from select_model
     # rather than deriving profile purely from complexity (which ignores pressure).
@@ -464,7 +464,7 @@ async def llm_auto(
             return f"Invalid profile_override: {profile_override}. Choose: budget, balanced, premium."
     else:
         from llm_router.profiles import complexity_to_profile
-        rec = select_model(classification, budget_pct, q_mode, floor)
+        rec = await select_model(classification, budget_pct, q_mode, floor)
         if budget_pct >= 0.85 and rec.was_downshifted:
             _tier_to_profile = {
                 "haiku": RoutingProfile.BUDGET,
@@ -494,8 +494,8 @@ async def llm_auto(
         "classifier_confidence": classification.confidence,
         "classifier_latency_ms": classification.classifier_latency_ms,
         "complexity": classification.complexity.value,
-        "recommended_model": getattr(select_model(classification, budget_pct, q_mode, floor), "recommended_model", "sonnet"),
-        "base_model": getattr(select_model(classification, budget_pct, q_mode, floor), "base_model", "sonnet"),
+        "recommended_model": getattr(await select_model(classification, budget_pct, q_mode, floor), "recommended_model", "sonnet"),
+        "base_model": getattr(await select_model(classification, budget_pct, q_mode, floor), "base_model", "sonnet"),
         "was_downshifted": False,
         "budget_pct_used": budget_pct,
         "quality_mode": q_mode.value if hasattr(q_mode, "value") else str(q_mode),

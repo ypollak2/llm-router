@@ -247,6 +247,15 @@ async def _build_and_filter_chain(
             models_to_try, get_active_agent(), c,
         )
 
+        # ── Quality-based reordering (v6.2) ───────────────────────────────────
+        # Demote models with low quality scores to the end of the chain.
+        # This allows the router to learn from historical quality feedback.
+        try:
+            from llm_router.judge import reorder_by_quality
+            models_to_try = await reorder_by_quality(models_to_try, days=7)
+        except Exception as _quality_err:
+            log.debug("Quality reordering skipped: %s", _quality_err)
+
         # Dedup: preserve free-first order, remove injected duplicates
         _seen: set[str] = set()
         models_to_try = [

@@ -72,7 +72,41 @@ def _downshift_amount(budget_pct: float) -> int:
     return 2  # max downshift if over 100%
 
 
-def select_model(
+async def _get_quality_floor(model: str, task_type: str) -> str | None:
+    """Return min_model override if model quality is degraded (v6.2 Quality Guard).
+
+    Hard threshold enforcement: if rolling judge score < 0.6 for 5+ calls,
+    force min_model up one tier to maintain quality standards.
+
+    Args:
+        model: Model identifier (e.g., 'claude-sonnet-4-6')
+        task_type: Task type for context (e.g., 'code', 'research')
+
+    Returns:
+        Upgraded min_model string if quality floor violated, else None.
+    """
+    try:
+        from llm_router.judge import get_judge_scores_for_model
+        scores = await get_judge_scores_for_model(model, days=3)
+
+        # Quality Guard threshold: < 0.6 avg with >= 5 samples
+        sample_count = scores.get("sample_count", 0)
+        avg_score = scores.get("avg_score", 1.0)
+
+        if sample_count >= 5 and avg_score < 0.6:
+            # Escalate to next tier
+            current_idx = _model_index(model.split("-")[-1].lower())
+            if current_idx < 2:  # Not already at opus
+                upgraded_idx = min(current_idx + 1, 2)  # upgrade by one tier, cap at opus
+                return CLAUDE_MODELS[upgraded_idx]
+    except Exception:
+        # Quality floor check is best-effort — never block routing
+        pass
+
+    return None
+
+
+async def select_model(
     classification: ClassificationResult,
     budget_pct_used: float,
     quality_mode: QualityMode = QualityMode.BALANCED,
@@ -146,6 +180,18 @@ def select_model(
                     f"{', '.join(pressure_source)}: "
                     f"downshifted {base_model}→{CLAUDE_MODELS[recommended_idx]}"
                 )
+
+    # Quality Guard: check if recommended model has degraded quality (v6.2)
+    # Upgrade min_model floor if quality is below 0.6 with sufficient samples
+    recommended_name = CLAUDE_MODELS[recommended_idx]
+    task_type = classification.inferred_task_type.value if classification.inferred_task_type else "query"
+    quality_floor_upgrade = await _get_quality_floor(recommended_name, task_type)
+    if quality_floor_upgrade:
+        quality_floor_idx = _model_index(quality_floor_upgrade)
+        if quality_floor_idx > min_idx:
+            min_idx = quality_floor_idx
+            min_model = quality_floor_upgrade
+            reasoning += f" (quality floor: {recommended_name} degraded, raised min_model to {min_model})"
 
     # Enforce minimum model floor
     if recommended_idx < min_idx:

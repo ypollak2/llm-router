@@ -1,5 +1,47 @@
 # Changelog
 
+## v6.4.0 — Quality Guard (2026-04-20)
+
+### Added
+
+- **Quality Guard** — Hard threshold enforcement for model quality:
+  - Real-time quality reordering in routing chain based on judge scores
+  - Automatic min_model floor escalation when rolling quality < 0.6
+  - Per-model rolling quality trends tracked in `model_quality_trends` table
+  - New `llm_quality_guard` MCP tool for quality monitoring and alerts
+
+- **Judge Score Integration** — Quality feedback integrated into routing decisions:
+  - `judge.reorder_by_quality()` now called in router hot path
+  - Models with low avg scores (< 0.7 over 7 days) automatically deprioritized
+  - Quality trends logged at session-end for historical analysis
+  - 3-day rolling window for quality floor guard checks
+
+- **Quality Floor Guard** — Hard enforcement mechanism in `model_selector.py`:
+  - If recommended model's quality < 0.6 with ≥ 5 samples → escalate min_model by 1 tier
+  - Prevents sustained routing to degraded models
+  - Non-blocking design: quality guard is best-effort, never interrupts routing
+
+### Architecture
+
+- **Database Schema**: Added `model_quality_trends` table with indices for fast rolling window queries
+- **Router Changes**: Quality reordering integrated after agent-context reordering, before model dedup
+- **Model Selector**: Async `select_model()` now enforces quality floor checks before applying min_model
+- **Performance**: Composite DB index on `(final_model, judge_score, timestamp)` prevents full-table scans
+
+### Files Created
+
+- `tests/test_quality_guard.py` — 9 comprehensive tests for all quality guard components
+
+### Files Modified
+
+- `src/llm_router/router.py` — Wire in quality reordering after chain build
+- `src/llm_router/cost.py` — Add `model_quality_trends` table, `log_quality_trend()` function, DB indices
+- `src/llm_router/model_selector.py` — Make `select_model()` async, add `_get_quality_floor()` check
+- `src/llm_router/tools/admin.py` — Add `llm_quality_guard` MCP tool for monitoring
+- `src/llm_router/tools/routing.py` — Update all `select_model()` calls to use await
+
+---
+
 ## v6.3.0 — Three-Layer Compression Pipeline (2026-04-19)
 
 ### Added

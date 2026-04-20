@@ -1203,6 +1203,78 @@ async def llm_gain(period: str = "week") -> str:
         return f"Savings dashboard error: {e}"
 
 
+async def llm_quality_guard(days: int = 7) -> str:
+    """Show quality scores per model with degradation alerts (v6.2).
+
+    Displays rolling average judge scores for all routed models over the past N days.
+    Alerts if any model's score < 0.7 with sufficient samples (quality degradation).
+
+    Args:
+        days: Number of days of history to analyze (default 7).
+
+    Returns:
+        Formatted table with model scores, trend arrows, and alerts.
+    """
+    from llm_router.judge import get_judge_scores_for_model
+    from llm_router.cost import _get_db
+
+    try:
+        db = await _get_db()
+        # Get distinct models from routing_decisions with judge scores
+        cursor = await db.execute(
+            """SELECT DISTINCT final_model FROM routing_decisions
+               WHERE final_model IS NOT NULL AND judge_score IS NOT NULL
+               ORDER BY final_model"""
+        )
+        models = [row[0] for row in await cursor.fetchall()]
+        await db.close()
+
+        if not models:
+            return "No quality data available. Run a few routed tasks with judge scoring enabled."
+
+        lines = [
+            f"{'Model':<30} {'Score':<10} {'Samples':<10} {'Status':<15}",
+            "─" * 70,
+        ]
+
+        alerts = []
+        for model in models:
+            scores = await get_judge_scores_for_model(model, days=days)
+            avg_score = scores.get("avg_score", 0.0)
+            sample_count = scores.get("sample_count", 0)
+
+            # Determine status
+            if sample_count < 3:
+                status = "insufficient"
+            elif avg_score >= 0.85:
+                status = "✨ excellent"
+            elif avg_score >= 0.70:
+                status = "✓ good"
+            elif avg_score < 0.60:
+                status = "⚠️  degraded"
+                alerts.append(f"{model}: avg score {avg_score:.2f} (alert threshold < 0.60)")
+            else:
+                status = "⚠️  warning"
+
+            score_display = f"{avg_score:.2f}" if sample_count > 0 else "—"
+            sample_display = str(sample_count) if sample_count > 0 else "—"
+
+            lines.append(f"{model:<30} {score_display:<10} {sample_display:<10} {status:<15}")
+
+        result = "\n".join(lines)
+
+        if alerts:
+            result += "\n\n🚨 **Quality Guard Alerts:**\n"
+            for alert in alerts:
+                result += f"  • {alert}\n"
+            result += "\n⚙️  Quality Guard may upgrade min_model to maintain standards."
+
+        return result
+
+    except Exception as e:
+        return f"Quality Guard error: {e}"
+
+
 def register(mcp, should_register=None) -> None:
     """Register management tools with the FastMCP instance.
 
@@ -1224,6 +1296,8 @@ def register(mcp, should_register=None) -> None:
         mcp.tool()(llm_cache_clear)
     if gate("llm_quality_report"):
         mcp.tool()(llm_quality_report)
+    if gate("llm_quality_guard"):
+        mcp.tool()(llm_quality_guard)
     if gate("llm_health"):
         mcp.tool()(llm_health)
     if gate("llm_hook_health"):

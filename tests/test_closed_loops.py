@@ -168,7 +168,8 @@ class TestLoop4CommunityProfiles:
 class TestTrendPressureIntegration:
     """Test: Trend pressure integrates with model selection."""
 
-    def test_select_model_with_trend_pressure(self):
+    @pytest.mark.asyncio
+    async def test_select_model_with_trend_pressure(self):
         """Trend pressure soft-escalates model tier."""
         classification = ClassificationResult(
             complexity=Complexity.SIMPLE,
@@ -181,13 +182,14 @@ class TestTrendPressureIntegration:
         )
 
         # With trend pressure: should consider escalation
-        rec_with_trend = select_model(classification, 0.0, QualityMode.BALANCED, "haiku", 0.2)
+        rec_with_trend = await select_model(classification, 0.0, QualityMode.BALANCED, "haiku", 0.2)
 
         # Should be valid, trend doesn't force escalation under no budget pressure
         # but reasoning should mention trend
         assert rec_with_trend.reasoning is not None
 
-    def test_select_model_blends_budget_and_trend(self):
+    @pytest.mark.asyncio
+    async def test_select_model_blends_budget_and_trend(self):
         """Effective pressure = 0.8 * budget + 0.2 * trend."""
         classification = ClassificationResult(
             complexity=Complexity.MODERATE,
@@ -200,7 +202,7 @@ class TestTrendPressureIntegration:
         )
 
         # Test: combined pressure
-        rec = select_model(
+        rec = await select_model(
             classification,
             budget_pct_used=0.5,  # 50% budget
             quality_mode=QualityMode.BALANCED,

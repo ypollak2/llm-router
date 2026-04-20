@@ -241,6 +241,32 @@ MIGRATE_ADD_COMPRESSION_STATS = [
 ]
 """Idempotent migration to add compression tracking table (v6.2)."""
 
+CREATE_MODEL_QUALITY_TRENDS_TABLE = """
+CREATE TABLE IF NOT EXISTS model_quality_trends (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp TEXT DEFAULT (datetime('now')),
+    model TEXT NOT NULL,
+    task_type TEXT,
+    window_start TEXT,
+    window_end TEXT,
+    avg_score REAL,
+    sample_count INTEGER,
+    trend_direction TEXT
+)
+"""
+"""Schema for the ``model_quality_trends`` table tracking rolling quality scores per model.
+
+Each row represents a quality window (e.g., 7-day rolling average) for a single model.
+- avg_score: Average judge score (0–1) over the window
+- sample_count: Number of evaluated responses in the window
+- trend_direction: 'improving'|'stable'|'degrading' based on previous window
+"""
+
+MIGRATE_ADD_MODEL_QUALITY_TRENDS = [
+    "CREATE TABLE IF NOT EXISTS model_quality_trends (id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp TEXT DEFAULT (datetime('now')), model TEXT NOT NULL, task_type TEXT, window_start TEXT, window_end TEXT, avg_score REAL, sample_count INTEGER, trend_direction TEXT)",
+]
+"""Idempotent migration to add model quality trends table (v6.2)."""
+
 """Idempotent migration to add per-call savings columns to usage table.
 
 baseline_model:     Model that would have been used without routing (e.g. claude-sonnet)
@@ -302,6 +328,7 @@ async def _get_db() -> aiosqlite.Connection:
     await db.execute(CREATE_SEMANTIC_CACHE_TABLE)
     await db.execute(CREATE_SEMANTIC_CACHE_INDEX)
     await db.execute(CREATE_CORRECTIONS_TABLE)
+    await db.execute(CREATE_MODEL_QUALITY_TRENDS_TABLE)
     # Performance indices — `IF NOT EXISTS` makes these idempotent.
     # These prevent full-table scans on the monthly-spend queries that fire
     # on every routing decision once the tables grow beyond ~10k rows.
@@ -331,9 +358,19 @@ async def _get_db() -> aiosqlite.Connection:
         + MIGRATE_ADD_CACHE_METRICS
         + MIGRATE_ROUTING_DECISIONS_ADD_JUDGE_SCORE
         + MIGRATE_ROUTING_DECISIONS_ADD_COMPLEXITY_TRACKING
+        + MIGRATE_ADD_MODEL_QUALITY_TRENDS
     )
     for stmt in all_migrations:
         await _safe_migrate(db, stmt)
+
+    # Quality tracking indices for v6.4 (created after migrations so judge_score exists)
+    await db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_routing_quality ON routing_decisions(final_model, judge_score, timestamp DESC) WHERE judge_score IS NOT NULL"
+    )
+    await db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_model_quality_trends ON model_quality_trends(model, window_start DESC)"
+    )
+
     await db.commit()
     return db
 
@@ -1732,6 +1769,50 @@ async def log_compression_stat(
                 compression_ratio,
                 tokens_saved,
                 strategy,
+            ),
+        )
+        await db.commit()
+    finally:
+        await db.close()
+
+
+async def log_quality_trend(
+    model: str,
+    task_type: str | None,
+    avg_score: float,
+    sample_count: int,
+    trend_direction: str = "stable",
+) -> None:
+    """Log a quality trend snapshot for a model over a time window.
+
+    Called at session-end or periodically to track rolling quality scores.
+    Allows Quality Guard to make decisions based on recent quality degradation.
+
+    Args:
+        model: Model identifier (e.g., 'openai/gpt-4o')
+        task_type: Optional task type filter (e.g., 'code', 'research')
+        avg_score: Average judge score (0–1) over the window
+        sample_count: Number of evaluated responses in the window
+        trend_direction: 'improving', 'stable', or 'degrading'
+    """
+    from datetime import datetime, timedelta
+
+    db = await _get_db()
+    try:
+        now = datetime.now().isoformat()
+        window_start = (datetime.now() - timedelta(days=7)).isoformat()
+        await db.execute(
+            """INSERT INTO model_quality_trends
+               (model, task_type, window_start, window_end, avg_score, sample_count, trend_direction)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (
+                model,
+                task_type,
+                window_start,
+                now,
+                avg_score,
+                sample_count,
+                trend_direction,
             ),
         )
         await db.commit()

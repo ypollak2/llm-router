@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 
+import pytest
 from llm_router.model_selector import select_model, _downshift_amount
 from llm_router.types import (
     ClassificationResult, Complexity, QualityMode, TaskType,
@@ -51,18 +52,21 @@ class TestDownshiftAmount:
 
 
 class TestBaseSelection:
-    def test_simple_gets_haiku(self):
-        rec = select_model(_make_classification("simple"), budget_pct_used=0)
+    @pytest.mark.asyncio
+    async def test_simple_gets_haiku(self):
+        rec = await select_model(_make_classification("simple"), budget_pct_used=0)
         assert rec.recommended_model == "haiku"
         assert not rec.was_downshifted
 
-    def test_moderate_gets_sonnet(self):
-        rec = select_model(_make_classification("moderate"), budget_pct_used=0)
+    @pytest.mark.asyncio
+    async def test_moderate_gets_sonnet(self):
+        rec = await select_model(_make_classification("moderate"), budget_pct_used=0)
         assert rec.recommended_model == "sonnet"
         assert not rec.was_downshifted
 
-    def test_complex_gets_opus(self):
-        rec = select_model(_make_classification("complex"), budget_pct_used=0)
+    @pytest.mark.asyncio
+    async def test_complex_gets_opus(self):
+        rec = await select_model(_make_classification("complex"), budget_pct_used=0)
         assert rec.recommended_model == "opus"
         assert not rec.was_downshifted
 
@@ -71,43 +75,50 @@ class TestBaseSelection:
 
 
 class TestBudgetPressure:
-    def test_complex_at_60pct_no_downshift(self):
+    @pytest.mark.asyncio
+    async def test_complex_at_60pct_no_downshift(self):
         """Below 85% — complexity routing only, no budget pressure."""
-        rec = select_model(_make_classification("complex"), budget_pct_used=0.60)
+        rec = await select_model(_make_classification("complex"), budget_pct_used=0.60)
         assert rec.recommended_model == "opus"
         assert not rec.was_downshifted
 
-    def test_complex_at_90pct_downshifts_to_sonnet(self):
+    @pytest.mark.asyncio
+    async def test_complex_at_90pct_downshifts_to_sonnet(self):
         """85-95% — downshift by 1 tier."""
-        rec = select_model(_make_classification("complex"), budget_pct_used=0.90)
+        rec = await select_model(_make_classification("complex"), budget_pct_used=0.90)
         assert rec.recommended_model == "sonnet"
         assert rec.base_model == "opus"
         assert rec.was_downshifted
 
-    def test_complex_at_96pct_downshifts_to_haiku(self):
+    @pytest.mark.asyncio
+    async def test_complex_at_96pct_downshifts_to_haiku(self):
         """95%+ — downshift by 2 tiers."""
-        rec = select_model(_make_classification("complex"), budget_pct_used=0.96)
+        rec = await select_model(_make_classification("complex"), budget_pct_used=0.96)
         assert rec.recommended_model == "haiku"
         assert rec.was_downshifted
 
-    def test_moderate_at_90pct_downshifts_to_haiku(self):
+    @pytest.mark.asyncio
+    async def test_moderate_at_90pct_downshifts_to_haiku(self):
         """85-95% — moderate (sonnet) downshifts by 1 to haiku."""
-        rec = select_model(_make_classification("moderate"), budget_pct_used=0.90)
+        rec = await select_model(_make_classification("moderate"), budget_pct_used=0.90)
         assert rec.recommended_model == "haiku"
         assert rec.was_downshifted
 
-    def test_simple_cannot_downshift_below_haiku(self):
-        rec = select_model(_make_classification("simple"), budget_pct_used=0.99)
+    @pytest.mark.asyncio
+    async def test_simple_cannot_downshift_below_haiku(self):
+        rec = await select_model(_make_classification("simple"), budget_pct_used=0.99)
         assert rec.recommended_model == "haiku"
 
-    def test_moderate_at_30pct_no_downshift(self):
-        rec = select_model(_make_classification("moderate"), budget_pct_used=0.30)
+    @pytest.mark.asyncio
+    async def test_moderate_at_30pct_no_downshift(self):
+        rec = await select_model(_make_classification("moderate"), budget_pct_used=0.30)
         assert rec.recommended_model == "sonnet"
         assert not rec.was_downshifted
 
-    def test_moderate_at_80pct_no_downshift(self):
+    @pytest.mark.asyncio
+    async def test_moderate_at_80pct_no_downshift(self):
         """80% is still below the 85% threshold — no downshift."""
-        rec = select_model(_make_classification("moderate"), budget_pct_used=0.80)
+        rec = await select_model(_make_classification("moderate"), budget_pct_used=0.80)
         assert rec.recommended_model == "sonnet"
         assert not rec.was_downshifted
 
@@ -116,24 +127,27 @@ class TestBudgetPressure:
 
 
 class TestQualityMode:
-    def test_best_always_opus(self):
-        rec = select_model(
+    @pytest.mark.asyncio
+    async def test_best_always_opus(self):
+        rec = await select_model(
             _make_classification("simple"),
             budget_pct_used=0.90,
             quality_mode=QualityMode.BEST,
         )
         assert rec.recommended_model == "opus"
 
-    def test_conserve_uses_cheaper(self):
-        rec = select_model(
+    @pytest.mark.asyncio
+    async def test_conserve_uses_cheaper(self):
+        rec = await select_model(
             _make_classification("complex"),
             budget_pct_used=0,
             quality_mode=QualityMode.CONSERVE,
         )
         assert rec.recommended_model == "sonnet"  # one below complex's opus
 
-    def test_conserve_respects_min_model(self):
-        rec = select_model(
+    @pytest.mark.asyncio
+    async def test_conserve_respects_min_model(self):
+        rec = await select_model(
             _make_classification("moderate"),
             budget_pct_used=0,
             quality_mode=QualityMode.CONSERVE,
@@ -146,16 +160,18 @@ class TestQualityMode:
 
 
 class TestMinModel:
-    def test_min_sonnet_prevents_haiku(self):
-        rec = select_model(
+    @pytest.mark.asyncio
+    async def test_min_sonnet_prevents_haiku(self):
+        rec = await select_model(
             _make_classification("simple"),
             budget_pct_used=0,
             min_model="sonnet",
         )
         assert rec.recommended_model == "sonnet"
 
-    def test_min_sonnet_with_budget_pressure(self):
-        rec = select_model(
+    @pytest.mark.asyncio
+    async def test_min_sonnet_with_budget_pressure(self):
+        rec = await select_model(
             _make_classification("complex"),
             budget_pct_used=0.90,
             min_model="sonnet",
@@ -163,8 +179,9 @@ class TestMinModel:
         # Would downshift to haiku, but floor prevents it
         assert rec.recommended_model == "sonnet"
 
-    def test_min_opus_forces_opus(self):
-        rec = select_model(
+    @pytest.mark.asyncio
+    async def test_min_opus_forces_opus(self):
+        rec = await select_model(
             _make_classification("simple"),
             budget_pct_used=0.99,
             min_model="opus",
@@ -176,14 +193,16 @@ class TestMinModel:
 
 
 class TestRecommendationHeader:
-    def test_header_shows_downshift_warning(self):
-        rec = select_model(_make_classification("complex"), budget_pct_used=0.90)
+    @pytest.mark.asyncio
+    async def test_header_shows_downshift_warning(self):
+        rec = await select_model(_make_classification("complex"), budget_pct_used=0.90)
         header = rec.header()
         assert "downshifted" in header
         assert "opus" in header
 
-    def test_header_shows_budget_bar(self):
-        rec = select_model(_make_classification("simple"), budget_pct_used=0.60)
+    @pytest.mark.asyncio
+    async def test_header_shows_budget_bar(self):
+        rec = await select_model(_make_classification("simple"), budget_pct_used=0.60)
         header = rec.header()
         assert "60%" in header
         assert "[" in header  # budget bar
