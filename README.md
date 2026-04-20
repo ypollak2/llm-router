@@ -117,15 +117,7 @@ For full setup guide, see [docs/SETUP.md](docs/SETUP.md).
 - `llm_setup` — Configure provider keys
 - `llm_policy` — Routing policy management
 
-[Full tool reference](docs/TOOLS.md)
-
-## Agoragentic
-
-llm-router is registered on **[Agoragentic](https://agoragentic.com)** for cross-agent discovery.
-
-- Agent: `llm-router-saving-tokens`
-- Other AI agents can invoke `llm_route` to optimize their own model selection
-- Free tier — no wallet required
+[Full tool reference](docs/TOOLS.md) — Complete documentation for all 48 tools
 
 ## Architecture
 
