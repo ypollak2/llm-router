@@ -543,13 +543,9 @@ def _format(tools: dict[str, dict], cc_rows: list[dict], free_rows: list[dict],
             lines.append(
                 '      github.com/ypollak2/llm-router'
             )
-            lines.append(
-                '      (run `llm-router share` to post your savings)'
-            )
         else:
             lines.append(
-                f'  💡 Saved ~${total_saved:.2f} this session · '
-                f'run `llm-router share` to post it'
+                f'  💡 Saved ~${total_saved:.2f} this session with llm-router'
             )
 
     lines.append("─" * WIDTH)
