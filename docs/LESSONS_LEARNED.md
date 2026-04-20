@@ -4,6 +4,39 @@ Analysis of last 15+ commits (v6.0 → v6.4). Identifies patterns to prevent fut
 
 ---
 
+## Implementation Status
+
+✅ **Issue #1 (Header/Styling Rabbit Holes)** — IMPLEMENTED
+- Created `docs/STYLE.md` to lock visual style decisions
+- Documents styling iteration prevention strategy
+- Includes approval workflow for style changes
+
+✅ **Issue #2 (Linting Violations)** — IMPLEMENTED
+- Added `.git/hooks/pre-commit` to enforce `ruff check` before commits
+- Created `scripts/pre-release-verify.sh` for automated pre-release verification
+- Hook prevents commits with linting violations
+
+✅ **Issue #3 (Tool Registration Drift)** — IMPLEMENTED
+- Refactored `tests/test_server.py::test_all_tools_registered()` with dynamic tool discovery
+- Test no longer requires manual updates when new tools are added
+- Scans modules and validates against known tools list
+
+✅ **Issue #4 (Test State Isolation)** — ALREADY IN PLACE
+- Autouse fixtures reset config singleton between tests
+- Prevents test pollution and cross-test state bleeding
+
+✅ **Issue #5 (Version Sync Mismatches)** — PARTIALLY IMPLEMENTED
+- Created `scripts/pre-release-verify.sh` (checks version sync)
+- Added `.git/hooks/commit-msg` to detect version mismatches in release commits
+- Prevents commits with version inconsistencies
+
+⚠️  **Issue #6 (Documentation-First Requirement)** — MANUAL ENFORCEMENT
+- No automated enforcement (requires code review discipline)
+- Recommendation: Include "docs updated" checklist in PR templates
+- Future improvement: Pre-commit hook to detect code changes without docs
+
+---
+
 ## Issue #1: Header/Styling Rabbit Holes (11 commits wasted)
 
 **Pattern:** Commits 57a307a through a0bd266 (11 total commits) iterating on README header styling.
