@@ -17,7 +17,7 @@ from llm_router.input_validation import (
 )
 from llm_router.memory.profiles import get_primary_model_for_tool
 from llm_router.model_selector import select_model
-from llm_router.prompt_injection import sanitize_prompt
+from llm_router.prompt_injection import wrap_prompt_with_boundaries
 from llm_router.profiles import complexity_to_profile
 from llm_router.provider_budget import get_provider_budgets, rank_external_models
 from llm_router.router import route_and_call
@@ -267,7 +267,7 @@ async def llm_route(
         context: Optional conversation context to help the model understand the broader task.
     """
     # Step 0: Sanitize prompt to prevent injection attacks
-    prompt = sanitize_prompt(prompt, log_suspected=True)
+    prompt = wrap_prompt_with_boundaries(prompt, log_suspected=True)
 
     # Step 0.5: Validate routing parameters
     try:

@@ -81,7 +81,7 @@ def _is_injection_attempt(text: str) -> bool:
     return False
 
 
-def sanitize_prompt(user_prompt: str, log_suspected: bool = True) -> str:
+def wrap_prompt_with_boundaries(user_prompt: str, log_suspected: bool = True) -> str:
     """Sanitize user prompt to prevent injection attacks.
 
     Wraps the user prompt with clear delimiters to separate it from

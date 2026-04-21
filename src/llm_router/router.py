@@ -701,7 +701,7 @@ async def _dispatch_model_loop(
                 elif provider == "codex":
                     codex_result = await run_codex(prompt, model=model_name)
                     if not codex_result.success:
-                        raise RuntimeError(f"Codex exited {codex_result.exit_code}: {codex_result.content[:200]}")
+                        raise RuntimeError(f"Codex exited {codex_result.exit_code}: (response omitted)")
                     response = LLMResponse(
                         content=codex_result.content,
                         model=f"codex/{model_name}",
@@ -714,7 +714,7 @@ async def _dispatch_model_loop(
                 elif provider == "gemini_cli":
                     gemini_result = await run_gemini_cli(prompt, model=model_name)
                     if not gemini_result.success:
-                        raise RuntimeError(f"Gemini CLI exited {gemini_result.exit_code}: {gemini_result.content[:200]}")
+                        raise RuntimeError(f"Gemini CLI exited {gemini_result.exit_code}: (response omitted)")
                     response = LLMResponse(
                         content=gemini_result.content,
                         model=f"gemini_cli/{model_name}",
