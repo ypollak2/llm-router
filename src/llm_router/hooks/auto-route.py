@@ -1482,15 +1482,29 @@ def main() -> None:
     
     # Log routing decision for later evaluation
     try:
-        log_routing_decision(
-            task_type=task_type,
-            complexity=complexity,
-            classification_method=method,
-            selected_model=selected_model,
-            provider=provider,
-            tool_name=tool,
-            requested_complexity=requested_complexity,
-        )
+        # Suppress all output during tracking (handlers may output to stdout)
+        import io
+        import logging
+        _old_stdout = sys.stdout
+        _old_stderr = sys.stderr
+        sys.stdout = io.StringIO()
+        sys.stderr = io.StringIO()
+        _old_level = logging.getLogger("llm_router.model_tracking").level
+        logging.getLogger("llm_router.model_tracking").setLevel(logging.CRITICAL)
+        
+        try:
+            log_routing_decision(
+                task_type=task_type,
+                complexity=complexity,
+                classification_method=method,
+                selected_model=selected_model,
+                provider=provider,
+                notes=f"routed via {tool}" if tool != TOOL_MAP.get(task_type) else None,
+            )
+        finally:
+            sys.stdout = _old_stdout
+            sys.stderr = _old_stderr
+            logging.getLogger("llm_router.model_tracking").setLevel(_old_level)
     except Exception:
         pass  # Silently fail if tracking is unavailable
 
