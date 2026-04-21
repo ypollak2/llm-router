@@ -535,6 +535,37 @@ def _is_rate_limit_error(exc: Exception) -> bool:
     )
 
 
+def _extract_retry_after(exc: Exception) -> int | None:
+    """Extract Retry-After header value from a rate-limit exception.
+    
+    Attempts to read the Retry-After header from LiteLLM exceptions,
+    which wrap provider-specific error details. Returns the number of
+    seconds to wait before retrying, or None if not available.
+    
+    Args:
+        exc: The exception from a failed LLM call.
+    
+    Returns:
+        The Retry-After value in seconds, or None if not found.
+    """
+    try:
+        # Check for LiteLLM-specific error attribute
+        if hasattr(exc, 'http_response'):
+            headers = getattr(exc.http_response, 'headers', {})
+            if 'retry-after' in headers:
+                val = headers['retry-after']
+                return int(val)
+        # Fallback: check exception attributes for common patterns
+        if hasattr(exc, '_response'):
+            headers = getattr(exc._response, 'headers', {})
+            if 'retry-after' in headers:
+                val = headers['retry-after']
+                return int(val)
+    except (ValueError, TypeError, AttributeError):
+        pass
+    return None
+
+
 async def _notify(ctx: Any | None, level: str, message: str) -> None:
     """Send a log notification to the MCP client if a context object is available.
 
@@ -835,7 +866,9 @@ async def _dispatch_model_loop(
                     error_type=type(e).__name__,
                     fallback_reason="rate_limit",
                 )
-                tracker.record_rate_limit(provider)
+                # Extract Retry-After header if available for more accurate cooldown
+                retry_after = _extract_retry_after(e)
+                tracker.record_rate_limit(provider, cooldown_seconds=retry_after)
             elif is_content_filter:
                 log.info("Content filter on %s, trying next model silently", model)
             elif is_auth:

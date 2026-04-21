@@ -236,9 +236,14 @@ def _fetch_usage_inline() -> dict | None:
     if sys.platform != "darwin":
         return None  # Keychain only available on macOS
     try:
+        # Filter environment to exclude API keys and sensitive tokens
+        safe_env = {k: v for k, v in os.environ.items() 
+                   if not any(x in k.upper() for x in ("KEY", "TOKEN", "SECRET", "PASS", "AUTH"))}
+        
         r = subprocess.run(
             ["security", "find-generic-password", "-s", "Claude Code-credentials", "-w"],
             capture_output=True, text=True, timeout=4,
+            env=safe_env,
         )
         if r.returncode != 0 or not r.stdout.strip():
             return None
@@ -368,6 +373,8 @@ def _write_json_atomic(path: Path, data: dict) -> None:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             json.dump(data, handle)
         os.replace(tmp_path, path)
+        # Secure the file (may contain routing analysis or session metadata)
+        os.chmod(path, 0o600)
     except Exception:
         try:
             os.unlink(tmp_path)
@@ -1275,13 +1282,13 @@ def _get_selected_model(task_type: str, complexity: str) -> tuple[str, str]:
         
         # For Ollama, enhance with the actual model name from auto-route config
         if provider == "ollama":
-            # In the hook context, we don't have the original prompt, but we can use the task type
-            if task_type.lower() == "code":
-                # Use Kimi for code if available, otherwise qwen3.5
-                selected = "ollama/kimi-k2.6:cloud"
+            # Read from OLLAMA_BUDGET_MODELS env var (set in .env)
+            ollama_models = os.environ.get("OLLAMA_BUDGET_MODELS", "").split(",")
+            if ollama_models and ollama_models[0].strip():
+                selected = f"ollama/{ollama_models[0].strip()}"
             else:
-                # Use qwen3.5 for general tasks
-                selected = "ollama/qwen3.5:latest"
+                # Fallback to configured model
+                selected = f"ollama/{OLLAMA_MODEL}"
         
         return selected, provider
     except Exception:

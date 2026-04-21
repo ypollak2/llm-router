@@ -36,8 +36,9 @@ _state_lock = threading.Lock()
 
 def get_active_profile():
     """Return the currently active routing profile (override or config default)."""
-    if _active_profile is not None:
-        return _active_profile
+    with _state_lock:
+        if _active_profile is not None:
+            return _active_profile
     return get_config().llm_router_profile
 
 

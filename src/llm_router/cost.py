@@ -332,6 +332,9 @@ async def _get_db() -> aiosqlite.Connection:
     """
     config = get_config()
     config.llm_router_db_path.parent.mkdir(parents=True, exist_ok=True)
+    # Secure file before creation (stores sensitive cost/token data)
+    if not config.llm_router_db_path.exists():
+        config.llm_router_db_path.touch(mode=0o600)
     db = await aiosqlite.connect(str(config.llm_router_db_path))
     # WAL mode allows concurrent readers while a writer is active
     await db.execute("PRAGMA journal_mode=WAL")
@@ -431,6 +434,9 @@ async def log_usage(
     user_id, project_id = _get_team_identity()
     db = await _get_db()
     try:
+        # Local providers (ollama, codex) are free — override any calculated cost
+        cost_usd = 0.0 if response.provider in {"ollama", "codex"} else response.cost_usd
+        
         await db.execute(
             """INSERT INTO usage (model, provider, task_type, profile,
                input_tokens, output_tokens, cost_usd, latency_ms, success,
@@ -443,7 +449,7 @@ async def log_usage(
                 profile.value,
                 response.input_tokens,
                 response.output_tokens,
-                response.cost_usd,
+                cost_usd,
                 response.latency_ms,
                 1 if success else 0,
                 user_id or None,
@@ -1376,10 +1382,20 @@ async def get_model_latency_stats(window_days: int = 7) -> dict[str, dict]:
     return result
 
 
-# Sonnet baseline costs used when per-call saved_usd is not populated (pre-v2.1 rows)
-_SONNET_INPUT_PER_M = 3.0
-_SONNET_OUTPUT_PER_M = 15.0
+# ── Cost baseline models and pricing (used for savings calculations) ────────
+# These constants define the reference models used to calculate cost savings.
+# All savings are calculated relative to these baseline costs.
+
+BASELINE_MODEL_FOR_SAVINGS = "opus"  # Quality ceiling — savings are always vs Opus
+"""The premium reference model used for savings calculations. All savings computed
+as the cost difference between the baseline (Opus) and the actually-used model."""
+
+# Sonnet 4.6 pricing used as the secondary baseline for historical calculations
+# when per-call saved_usd is not populated (pre-v2.1 rows)
+_SONNET_INPUT_PER_M = 3.0      # $3 per million input tokens
+_SONNET_OUTPUT_PER_M = 15.0    # $15 per million output tokens
 _FREE_PROVIDERS = {"ollama", "codex"}
+"""Providers that incur zero cost (local or included in subscription)."""
 
 
 async def get_savings_by_period() -> dict[str, dict]:

@@ -58,12 +58,13 @@ class TokenRefreshStrategy:
         """
         now = time.time()
 
-        # Check if refresh is needed (interval-based)
+        # Check if refresh is needed (interval-based, without lock)
         if now - self._last_refresh_time > self.refresh_interval:
             await self._refresh_token_internal()
 
-        # Return current token (may be None if all refreshes failed)
-        return self._current_token
+        # Return current token inside lock for consistency
+        async with self._refresh_lock:
+            return self._current_token
 
     async def _refresh_token_internal(self) -> None:
         """Refresh token with locking to prevent concurrent refreshes."""

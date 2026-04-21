@@ -44,6 +44,9 @@ _INJECTION_PATTERNS = {
 
 def _is_injection_attempt(text: str) -> bool:
     """Check if text contains potential injection patterns.
+    
+    Normalizes encoding to detect bypass attempts using URL encoding, 
+    unicode obfuscation, or zero-width characters before pattern matching.
 
     Args:
         text: User input to analyze
@@ -51,7 +54,27 @@ def _is_injection_attempt(text: str) -> bool:
     Returns:
         True if suspicious patterns detected, False otherwise
     """
+    import unicodedata
+    import urllib.parse
+    
+    # Normalize unicode (NFKC) to decompose lookalike characters
+    text = unicodedata.normalize('NFKC', text)
+    
+    # Decode URL-encoded sequences (e.g., "%2F" → "/")
+    try:
+        text = urllib.parse.unquote(text)
+    except Exception:
+        pass  # If decoding fails, continue with original text
+    
+    # Remove zero-width characters that attackers use to bypass filters
+    # Includes zero-width space, zero-width joiner, zero-width non-joiner, etc.
+    zero_width_chars = ['\u200b', '\u200c', '\u200d', '\ufeff']
+    for zwc in zero_width_chars:
+        text = text.replace(zwc, '')
+    
+    # Convert to lowercase for case-insensitive pattern matching
     text_lower = text.lower()
+    
     for pattern in _INJECTION_PATTERNS:
         if re.search(pattern, text_lower):
             return True

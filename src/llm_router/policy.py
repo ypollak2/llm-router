@@ -132,9 +132,11 @@ def apply_policy(
         allowed.append(model)
 
     if blocked:
-        log.debug(
-            "Policy blocked %d model(s) for %s: %s",
+        # Upgrade to WARNING for audit visibility with rule source
+        log.warning(
+            "POLICY AUDIT: blocked %d model(s) for task=%s: %s (rule source: %s)",
             len(blocked), task_type, blocked,
+            getattr(org, '_source', 'org-policy.yaml'),
         )
 
     return allowed, blocked

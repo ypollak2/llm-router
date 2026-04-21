@@ -50,6 +50,7 @@ class ProviderHealth:
     rate_limited: bool = False
     rate_limit_time: float = 0.0
     rate_limit_count: int = 0
+    _rate_limit_cooldown: int = field(default=RATE_LIMIT_COOLDOWN_SECONDS, init=False, repr=False)
 
     def record_success(self) -> None:
         """Record a successful API call.
@@ -72,17 +73,23 @@ class ProviderHealth:
         self.total_calls += 1
         self.last_failure_time = time.monotonic()
 
-    def record_rate_limit(self) -> None:
+    def record_rate_limit(self, cooldown_seconds: int | None = None) -> None:
         """Record a 429/rate-limit error.
 
         Uses a separate, shorter cooldown than hard failures because rate
         limits typically resolve within seconds once the provider's token
         bucket refills.
+        
+        Args:
+            cooldown_seconds: Override the default RATE_LIMIT_COOLDOWN_SECONDS.
+                Useful when provider includes Retry-After header.
         """
         self.rate_limited = True
         self.rate_limit_time = time.monotonic()
         self.rate_limit_count += 1
         self.total_calls += 1
+        # Store custom cooldown if provided; otherwise uses class constant
+        self._rate_limit_cooldown = cooldown_seconds or RATE_LIMIT_COOLDOWN_SECONDS
 
     def is_healthy(self) -> bool:
         """Determine whether this provider should receive traffic.
@@ -101,7 +108,7 @@ class ProviderHealth:
         # Check rate limit first (shorter cooldown)
         if self.rate_limited:
             elapsed = time.monotonic() - self.rate_limit_time
-            if elapsed < RATE_LIMIT_COOLDOWN_SECONDS:
+            if elapsed < self._rate_limit_cooldown:
                 return False
             self.rate_limited = False
 
@@ -128,7 +135,7 @@ class ProviderHealth:
         """
         if self.rate_limited:
             elapsed = time.monotonic() - self.rate_limit_time
-            remaining = max(0, RATE_LIMIT_COOLDOWN_SECONDS - elapsed)
+            remaining = max(0, self._rate_limit_cooldown - elapsed)
             return f"rate-limited ({remaining:.0f}s remaining)"
         if self.is_healthy():
             return "healthy"
@@ -189,13 +196,15 @@ class HealthTracker:
         """
         self._get(provider).record_failure()
 
-    def record_rate_limit(self, provider: str) -> None:
+    def record_rate_limit(self, provider: str, cooldown_seconds: int | None = None) -> None:
         """Record a rate-limit (429) error for the given provider.
 
         Args:
             provider: Provider name.
+            cooldown_seconds: Override the default RATE_LIMIT_COOLDOWN_SECONDS.
+                Useful when provider includes Retry-After header.
         """
-        self._get(provider).record_rate_limit()
+        self._get(provider).record_rate_limit(cooldown_seconds)
 
     def reset_stale(self, max_age_seconds: float = 1800.0) -> list[str]:
         """Reset circuit breakers for providers whose last failure is older than max_age_seconds.

@@ -206,6 +206,9 @@ def initialize_dynamic_routing(available_providers: set[str] | None = None) -> N
     Args:
         available_providers: Optional set of providers. If None, discovers automatically.
     """
+    import time
+    import traceback
+    
     global _dynamic_routing_table, _discovery_complete
     
     if _discovery_complete:
@@ -247,8 +250,27 @@ def initialize_dynamic_routing(available_providers: set[str] | None = None) -> N
                 usable_chains=dynamic_chains,
             )
     except Exception as e:
-        log.warning("Failed to initialize dynamic routing, will fall back to static: %s", e)
+        # Log failure with full traceback for debugging
+        log.warning(
+            "Failed to initialize dynamic routing, will fall back to static: %s\n%s",
+            e, traceback.format_exc()
+        )
         _discovery_complete = True
+        
+        # Schedule a retry after 10 minutes for transient failures (network, timeouts, etc.)
+        # This prevents permanently disabling dynamic routing due to one-time infrastructure issues
+        try:
+            import threading
+            def _retry_after_delay():
+                time.sleep(600)  # 10 minutes
+                global _discovery_complete
+                _discovery_complete = False
+                log.info("Retrying dynamic routing discovery after 10-minute delay")
+            
+            retry_thread = threading.Thread(target=_retry_after_delay, daemon=True)
+            retry_thread.start()
+        except Exception as retry_err:
+            log.debug("Failed to schedule dynamic routing retry: %s", retry_err)
 
 
 def get_dynamic_routing_table() -> dict[tuple[RoutingProfile, TaskType], list[str]] | None:
