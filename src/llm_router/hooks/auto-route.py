@@ -1272,6 +1272,17 @@ def _get_selected_model(task_type: str, complexity: str) -> tuple[str, str]:
         selected = chain[0]
         # Extract provider from "provider/model" format
         provider = selected.split("/")[0] if "/" in selected else selected
+        
+        # For Ollama, enhance with the actual model name from auto-route config
+        if provider == "ollama":
+            # In the hook context, we don't have the original prompt, but we can use the task type
+            if task_type.lower() == "code":
+                # Use Kimi for code if available, otherwise qwen3.5
+                selected = "ollama/kimi-k2.6:cloud"
+            else:
+                # Use qwen3.5 for general tasks
+                selected = "ollama/qwen3.5:latest"
+        
         return selected, provider
     except Exception:
         return "unknown", "unknown"
