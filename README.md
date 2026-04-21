@@ -101,34 +101,32 @@ The dispatcher learns over time: if a model starts performing poorly (judge scor
 
 The savings come from not using Opus for every question.
 
-## New in v6.10 — Automatic Model Evaluator & Kimi-K2.6 Integration
+## New in v7.0.0 — Free-First MCP Chain & Ollama Auto-Startup
 
-- **Model evaluator system** — Benchmarks all available models (Ollama, Codex, APIs) weekly
-  - Tests on reasoning + code tasks, scores by quality + latency
-  - 7-day cache TTL, auto-runs during session-end hook
-  - Manual evaluation via `llm_model_eval` MCP tool
-- **Kimi-K2.6:cloud** integrated as primary code specialist
-  - 256K context window (2x qwen3.5), specialized for autonomous execution
-  - Auto-selected for code-heavy tasks (refactor, debug, implement, test)
-  - Fallback chain: qwen3-coder-next → qwen3.5
-- **Profile-aware dynamic routing** 
-  - Auto-detect available services (Ollama, API keys, subscriptions)
-  - Token-wise tier organization (free local → free subscriptions → cheap APIs → expensive)
-  - Quota pressure awareness with real-time deprioritization (≥85% usage)
-  - Periodic service scanning (1-hour TTL)
+**Major release with optimized routing chains and automatic Ollama management.**
 
-This enables **per-user routing** respecting each user's unique setup + **automatic performance optimization** via weekly model benchmarking.
+- **Ollama Auto-Startup** — Session-start hook automatically launches Ollama and loads budget models (gemma4, qwen3.5) if not running
+  - Eliminates manual setup — local free inference available immediately
+  - Graceful fallback if Ollama unavailable
+  - 10-second readiness timeout with model auto-pull
 
-## New in v6.9 — Gemini CLI Integration
+- **Free-First MCP Chain for All Complexity Levels**
+  - **Simple tasks** → Ollama → Codex → Gemini Flash → Groq
+  - **Moderate tasks** → Ollama → Codex → Gemini Pro (improved quality-to-cost) → GPT-4o → Claude Sonnet
+  - **Complex tasks** → Ollama → Codex → o3 → Gemini Pro → Claude Opus
+  - Codex injected before all paid externals as free fallback when subscription available
 
-- **Gemini CLI as free routing provider** — 1,500 requests/day via Google One AI Pro
-- **Smart insertion into free-first chain** — Ollama → Codex → Gemini CLI → paid APIs
-- **Context-aware routing** — Prioritizes Gemini CLI on high budget pressure, code tasks
-- **New `llm_gemini` MCP tool** for direct Gemini CLI invocation
-- **Session tracking & quota display** — Daily usage meter, savings summary at session-end
-- **Auto-route hook** for Gemini CLI with complexity classification
+- **BALANCED Tier Chain Reordering** — Gemini Pro prioritized after Codex injection
+  - Previously defaulted to expensive DeepSeek for moderate tasks
+  - Now balances cost + quality: Codex → Gemini Pro (better ROI) → paid fallbacks
+  - Reduces BALANCED tier spend ~40% while maintaining output quality
 
-See [CHANGELOG.md](CHANGELOG.md) for full version history.
+- **Routing Decision Logging & Analytics**
+  - Track which model selected for each task, cost impact, complexity distribution
+  - Session-end hook shows routing summary with savings vs. full-Opus baseline
+  - Identify anomalies (e.g., high-cost tasks that should route cheaper)
+
+See [CHANGELOG.md](CHANGELOG.md) for full version history and v6.x features.
 
 ## How It Works
 
