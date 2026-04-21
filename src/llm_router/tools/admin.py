@@ -1276,6 +1276,93 @@ async def llm_quality_guard(days: int = 7) -> str:
 
 
 
+
+async def llm_model_usage(ctx: Context, hours: int = 24) -> str:
+    """Analyze which models are being selected in routing.
+
+    Shows usage statistics for the last N hours:
+    - Top models selected
+    - Task type distribution (code/query/analyze/etc)
+    - Classification methods used (heuristic/ollama/api/fallback)
+    - Individual model success rates with quality feedback
+
+    Args:
+        hours: Look back this many hours (default: 24)
+
+    Returns:
+        Formatted usage statistics and analysis.
+    """
+    from llm_router.model_tracking import (
+        display_tracking_summary,
+        get_model_usage_stats,
+        get_model_success_rate,
+    )
+
+    summary = display_tracking_summary(hours)
+
+    # Add success rates for top models
+    model_stats = get_model_usage_stats(hours)
+    if model_stats:
+        summary += "\n**Model Quality Feedback (if rated)**\n"
+        for model in list(model_stats.keys())[:5]:
+            stats = get_model_success_rate(model, hours)
+            if stats["avg_quality"] is not None:
+                summary += (
+                    f"  {model:40} — "
+                    f"Quality: {stats['avg_quality']:.2f}/1.0 "
+                    f"({stats['with_feedback']} ratings)\n"
+                )
+
+    return summary
+
+
+async def llm_model_export(ctx: Context, format: str = "csv") -> str:
+    """Export model tracking data for external analysis.
+
+    Exports complete routing history to a file for analysis in spreadsheets
+    or data tools (Excel, Python, R, etc.).
+
+    Args:
+        format: Export format (csv, json). Default: csv
+
+    Returns:
+        Path to exported file and record count.
+    """
+    from llm_router.model_tracking import (
+        load_tracking_data,
+        export_tracking_csv,
+    )
+    from pathlib import Path
+    import json
+
+    if format == "csv":
+        output_path = Path.home() / ".llm-router" / "model_tracking.csv"
+        count = export_tracking_csv(output_path)
+        return f"Exported {count} records to: {output_path}\n\nOpen in Excel/Sheets for analysis."
+
+    elif format == "json":
+        output_path = Path.home() / ".llm-router" / "model_tracking.json"
+        decisions = load_tracking_data(limit=100000)
+
+        output_path.write_text(json.dumps([
+            {
+                "timestamp": d.timestamp,
+                "task_type": d.task_type,
+                "complexity": d.complexity,
+                "classification_method": d.classification_method,
+                "selected_model": d.selected_model,
+                "provider": d.provider,
+                "chain_position": d.chain_position,
+                "quality_feedback": d.quality_feedback,
+            }
+            for d in decisions
+        ], indent=2))
+
+        return f"Exported {len(decisions)} records to: {output_path}"
+
+    else:
+        return f"Unknown format: {format}. Use 'csv' or 'json'."
+
 async def llm_model_eval(ctx: Context) -> str:
     """Evaluate and benchmark all available local and remote models.
 
@@ -1348,6 +1435,10 @@ def register(mcp, should_register=None) -> None:
         mcp.tool()(llm_benchmark)
     if gate("llm_model_eval"):
         mcp.tool()(llm_model_eval)
+    if gate("llm_model_usage"):
+        mcp.tool()(llm_model_usage)
+    if gate("llm_model_export"):
+        mcp.tool()(llm_model_export)
     if gate("llm_session_spend"):
         mcp.tool()(llm_session_spend)
     if gate("llm_approve_route"):

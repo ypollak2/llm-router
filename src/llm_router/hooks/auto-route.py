@@ -36,6 +36,22 @@ except ImportError:
         """Fallback stub if statusline_hud is unavailable."""
         pass
 
+# ── Model tracking integration ────────────────────────────────────────────────
+try:
+    from llm_router.model_tracking import log_routing_decision
+except ImportError:
+    def log_routing_decision(*args, **kwargs):
+        """Fallback stub if model_tracking is unavailable."""
+        pass
+
+try:
+    from llm_router.profiles import ROUTING_TABLE
+    from llm_router.types import RoutingProfile, TaskType
+except ImportError:
+    ROUTING_TABLE = {}
+    RoutingProfile = None
+    TaskType = None
+
 # ── .env loader (reads llm-router's .env for API keys) ──────────────────────
 
 _ENV_PATHS = [
@@ -1219,6 +1235,48 @@ def _check_learned_override(task_type: str, learned_routes: dict) -> tuple[str, 
 
 # ── Entry Point ──────────────────────────────────────────────────────────────
 
+def _get_selected_model(task_type: str, complexity: str) -> tuple[str, str]:
+    """Get the selected model for a task type/complexity pair.
+    
+    Returns:
+        (model_name, provider) tuple. Falls back to ("unknown", "unknown") if not found.
+    """
+    if not ROUTING_TABLE or not TaskType or not RoutingProfile:
+        return "unknown", "unknown"
+    
+    try:
+        # Map task_type string to TaskType enum
+        task_map = {
+            "query": TaskType.QUERY,
+            "research": TaskType.RESEARCH,
+            "generate": TaskType.GENERATE,
+            "analyze": TaskType.ANALYZE,
+            "code": TaskType.CODE,
+            "image": TaskType.IMAGE,
+            "video": TaskType.VIDEO,
+            "audio": TaskType.AUDIO,
+        }
+        task_enum = task_map.get(task_type.lower())
+        if not task_enum:
+            return "unknown", "unknown"
+        
+        # Use BALANCED profile as default (can be customized per user)
+        profile_enum = RoutingProfile.BALANCED
+        
+        # Get the routing chain
+        chain = ROUTING_TABLE.get((profile_enum, task_enum))
+        if not chain or not chain:
+            return "unknown", "unknown"
+        
+        # Return the first (selected) model
+        selected = chain[0]
+        # Extract provider from "provider/model" format
+        provider = selected.split("/")[0] if "/" in selected else selected
+        return selected, provider
+    except Exception:
+        return "unknown", "unknown"
+
+
 _DEBUG_LOG = Path.home() / ".llm-router" / "auto-route-debug.log"
 
 
@@ -1419,6 +1477,23 @@ def main() -> None:
     args_str = f"({tool_args})" if tool_args else ""
     stale_suffix = " [⚠️ STALE USAGE DATA >30min — run llm_check_usage]" if _is_pressure_stale() else ""
 
+    # Get selected model for tracking and indicator enhancement
+    selected_model, provider = _get_selected_model(task_type, complexity)
+    
+    # Log routing decision for later evaluation
+    try:
+        log_routing_decision(
+            task_type=task_type,
+            complexity=complexity,
+            classification_method=method,
+            selected_model=selected_model,
+            provider=provider,
+            tool_name=tool,
+            requested_complexity=requested_complexity,
+        )
+    except Exception:
+        pass  # Silently fail if tracking is unavailable
+
     if _enforce_mode == "shadow":
         # Passive observation — no pending state, no blocking
         directive = (
@@ -1426,7 +1501,7 @@ def main() -> None:
             f"would route to {tool}{args_str} [via {method}{stale_suffix}] "
             f"(shadow mode — no enforcement)"
         )
-        indicator = f"👁 shadow → {tool}  [{task_type}/{complexity} · {method}]"
+        indicator = f"👁 shadow → {tool}  [{task_type}/{complexity} · {selected_model}]"
         write_pending = False
     elif _enforce_mode == "suggest":
         # Soft hint — pending state written but enforce-route only logs, never blocks
@@ -1434,7 +1509,7 @@ def main() -> None:
             f"💡 SUGGESTED ROUTE: {task_type}/{complexity} → consider calling {tool}{args_str} "
             f"[via {method}{stale_suffix}] | suggest mode: you may answer directly if needed"
         )
-        indicator = f"💡 suggest → {tool}  [{task_type}/{complexity} · {method}]"
+        indicator = f"💡 suggest → {tool}  [{task_type}/{complexity} · {selected_model}]"
         write_pending = True
     else:
         # enforce / hard (default)
@@ -1443,7 +1518,7 @@ def main() -> None:
             f" | FORBIDDEN: self-answer · Agent subagents · WebSearch · WebFetch"
             f" | Call the tool NOW as your ONLY action. Cheap model output IS your response."
         )
-        indicator = f"⚡ llm-router → {tool}  [{task_type}/{complexity} · {method}]"
+        indicator = f"⚡ llm-router → {tool}  [{task_type}/{complexity} · {selected_model}]"
         write_pending = True
 
     directive = _prior_violation_notice(previous_unrouted) + directive
