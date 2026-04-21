@@ -14,6 +14,7 @@ but remove unavailable providers and deprioritize quota-depleted services.
 
 from __future__ import annotations
 
+import threading
 from pathlib import Path
 
 from llm_router.logging import get_logger
@@ -28,8 +29,10 @@ from llm_router.discover import get_available_providers
 log = get_logger("llm_router.dynamic_routing")
 
 # Cache for dynamic routing tables (built at session startup)
+# Protected by _routing_lock to prevent race conditions between async event loop and daemon thread
 _dynamic_routing_table: dict[tuple[RoutingProfile, TaskType], list[str]] | None = None
 _discovery_complete = False
+_routing_lock = threading.Lock()  # Protects _dynamic_routing_table and _discovery_complete
 
 PROFILE_PATH = Path.home() / ".llm-router" / "profile.yaml"
 
@@ -211,66 +214,67 @@ def initialize_dynamic_routing(available_providers: set[str] | None = None) -> N
     
     global _dynamic_routing_table, _discovery_complete
     
-    if _discovery_complete:
-        return  # Already initialized
-    
-    try:
-        if available_providers is None:
-            available_providers = get_available_providers()
+    with _routing_lock:
+        if _discovery_complete:
+            return  # Already initialized
         
-        _dynamic_routing_table = build_dynamic_routing_table(available_providers)
-        _discovery_complete = True
-        
-        # Log summary
-        provider_names = ", ".join(sorted(available_providers))
-        total_chains = len(ROUTING_TABLE)
-        dynamic_chains = sum(1 for chain in _dynamic_routing_table.values() if chain)
-        
-        # Log quota pressure if available
-        quota_pressure = _get_quota_pressure()
-        if quota_pressure:
-            pressure_str = ", ".join(
-                f"{p}={int(pr*100)}%"
-                for p, pr in sorted(quota_pressure.items())
-            )
-            log.info(
-                "Dynamic routing initialized with quota pressure",
-                available_providers=provider_names,
-                provider_count=len(available_providers),
-                quota_pressure=pressure_str,
-                total_chains=total_chains,
-                usable_chains=dynamic_chains,
-            )
-        else:
-            log.info(
-                "Dynamic routing initialized",
-                available_providers=provider_names,
-                provider_count=len(available_providers),
-                total_chains=total_chains,
-                usable_chains=dynamic_chains,
-            )
-    except Exception as e:
-        # Log failure with full traceback for debugging
-        log.warning(
-            "Failed to initialize dynamic routing, will fall back to static: %s\n%s",
-            e, traceback.format_exc()
-        )
-        _discovery_complete = True
-        
-        # Schedule a retry after 10 minutes for transient failures (network, timeouts, etc.)
-        # This prevents permanently disabling dynamic routing due to one-time infrastructure issues
         try:
-            import threading
-            def _retry_after_delay():
-                time.sleep(600)  # 10 minutes
-                global _discovery_complete
-                _discovery_complete = False
-                log.info("Retrying dynamic routing discovery after 10-minute delay")
+            if available_providers is None:
+                available_providers = get_available_providers()
             
-            retry_thread = threading.Thread(target=_retry_after_delay, daemon=True)
-            retry_thread.start()
-        except Exception as retry_err:
-            log.debug("Failed to schedule dynamic routing retry: %s", retry_err)
+            _dynamic_routing_table = build_dynamic_routing_table(available_providers)
+            _discovery_complete = True
+            
+            # Log summary
+            provider_names = ", ".join(sorted(available_providers))
+            total_chains = len(ROUTING_TABLE)
+            dynamic_chains = sum(1 for chain in _dynamic_routing_table.values() if chain)
+            
+            # Log quota pressure if available
+            quota_pressure = _get_quota_pressure()
+            if quota_pressure:
+                pressure_str = ", ".join(
+                    f"{p}={int(pr*100)}%"
+                    for p, pr in sorted(quota_pressure.items())
+                )
+                log.info(
+                    "Dynamic routing initialized with quota pressure",
+                    available_providers=provider_names,
+                    provider_count=len(available_providers),
+                    quota_pressure=pressure_str,
+                    total_chains=total_chains,
+                    usable_chains=dynamic_chains,
+                )
+            else:
+                log.info(
+                    "Dynamic routing initialized",
+                    available_providers=provider_names,
+                    provider_count=len(available_providers),
+                    total_chains=total_chains,
+                    usable_chains=dynamic_chains,
+                )
+        except Exception as e:
+            # Log failure with full traceback for debugging
+            log.warning(
+                "Failed to initialize dynamic routing, will fall back to static: %s\n%s",
+                e, traceback.format_exc()
+            )
+            _discovery_complete = True
+            
+            # Schedule a retry after 10 minutes for transient failures (network, timeouts, etc.)
+            # This prevents permanently disabling dynamic routing due to one-time infrastructure issues
+            try:
+                def _retry_after_delay():
+                    time.sleep(600)  # 10 minutes
+                    with _routing_lock:
+                        global _discovery_complete
+                        _discovery_complete = False
+                    log.info("Retrying dynamic routing discovery after 10-minute delay")
+                
+                retry_thread = threading.Thread(target=_retry_after_delay, daemon=True)
+                retry_thread.start()
+            except Exception as retry_err:
+                log.debug("Failed to schedule dynamic routing retry: %s", retry_err)
 
 
 def get_dynamic_routing_table() -> dict[tuple[RoutingProfile, TaskType], list[str]] | None:
@@ -282,7 +286,8 @@ def get_dynamic_routing_table() -> dict[tuple[RoutingProfile, TaskType], list[st
     Returns:
         Custom routing table, or None if not yet initialized.
     """
-    return _dynamic_routing_table
+    with _routing_lock:
+        return _dynamic_routing_table
 
 
 def get_dynamic_model_chain(
@@ -300,10 +305,11 @@ def get_dynamic_model_chain(
     Returns:
         Model chain for this profile/task combo, or None if unavailable.
     """
-    if _dynamic_routing_table is None:
-        return None
-    
-    return _dynamic_routing_table.get((profile, task_type))
+    with _routing_lock:
+        if _dynamic_routing_table is None:
+            return None
+        
+        return _dynamic_routing_table.get((profile, task_type))
 
 
 def reset_dynamic_routing() -> None:
@@ -312,5 +318,6 @@ def reset_dynamic_routing() -> None:
     Clears the cached tables so the next initialize call will rediscover.
     """
     global _dynamic_routing_table, _discovery_complete
-    _dynamic_routing_table = None
-    _discovery_complete = False
+    with _routing_lock:
+        _dynamic_routing_table = None
+        _discovery_complete = False

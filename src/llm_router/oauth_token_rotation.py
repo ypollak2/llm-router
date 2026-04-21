@@ -14,8 +14,11 @@ Strategy:
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 from typing import Optional
+
+logger = logging.getLogger(__name__)
 
 
 class OAuthTokenRefreshError(Exception):
@@ -56,14 +59,20 @@ class TokenRefreshStrategy:
         Returns:
             Current valid token, or None if refresh failed and no token available.
         """
-        now = time.time()
-
-        # Check if refresh is needed (interval-based, without lock)
-        if now - self._last_refresh_time > self.refresh_interval:
-            await self._refresh_token_internal()
-
-        # Return current token inside lock for consistency
         async with self._refresh_lock:
+            now = time.time()
+            # Check if refresh is needed (inside lock to prevent multiple concurrent refreshes)
+            if now - self._last_refresh_time > self.refresh_interval:
+                # Double-check after acquiring lock (another coroutine may have refreshed)
+                now = time.time()
+                if now - self._last_refresh_time > self.refresh_interval:
+                    try:
+                        new_token = await self.token_refresher()
+                        if new_token:
+                            self._current_token = new_token
+                            self._last_refresh_time = now
+                    except Exception as exc:
+                        logger.warning("OAuth token refresh failed: %s", exc, exc_info=True)
             return self._current_token
 
     async def _refresh_token_internal(self) -> None:
@@ -83,10 +92,10 @@ class TokenRefreshStrategy:
                 else:
                     # Refresh returned None — log but don't crash
                     pass
-            except Exception:
+            except Exception as exc:
                 # Refresh failed but we don't raise — graceful degradation
                 # Log the error for debugging, but allow old token to be used
-                pass
+                logger.warning("OAuth token refresh failed in _refresh_token_internal: %s", exc, exc_info=True)
 
     async def force_refresh(self) -> bool:
         """Force immediate token refresh (e.g., after detecting expiry).
@@ -129,7 +138,7 @@ class ExpiryTracker:
             token: JWT token string (format: header.payload.signature)
 
         Returns:
-            Unix timestamp of expiration, or None if token is invalid/expired.
+            Unix timestamp of expiration, or None if token is invalid/expired/implausible.
         """
         try:
             # JWT format: header.payload.signature
@@ -150,7 +159,18 @@ class ExpiryTracker:
             payload_json = base64.urlsafe_b64decode(payload_str)
             payload = json.loads(payload_json)
 
-            return payload.get("exp")  # Unix timestamp
+            exp = payload.get("exp")
+            if exp is None:
+                return None
+            
+            # Sanity check: reject implausibly far-future expirations (>1 year)
+            # This prevents attackers from setting exp to arbitrary values
+            now = time.time()
+            if exp > now + 365 * 86400:
+                logger.warning("JWT has implausibly far-future expiration (%d > now+1yr); rejecting", exp)
+                return None
+            
+            return exp  # Unix timestamp
         except Exception:
             return None
 
@@ -164,10 +184,13 @@ class ExpiryTracker:
 
         Returns:
             True if token is expired or expiring soon, False otherwise.
+            For undecodeable tokens, returns True to force refresh (safety-first).
         """
         exp = ExpiryTracker.decode_jwt_exp(token)
         if exp is None:
-            return False  # Can't determine expiry, assume valid
+            # Can't determine expiry (invalid token, implausible exp, etc.)
+            # Force refresh for safety rather than trusting the token indefinitely
+            return True
 
         now = time.time()
         return now + buffer_seconds >= exp
