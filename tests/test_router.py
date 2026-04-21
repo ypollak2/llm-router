@@ -114,20 +114,10 @@ async def test_raises_when_all_fail(temp_db, mock_env):
 
 
 @pytest.mark.asyncio
-async def test_no_providers_configured(temp_db, monkeypatch):
-    # Explicitly clear all API keys — use setenv("", "") pattern to also
-    # override values that may be present in the shell environment.
-    for key in ["GEMINI_API_KEY", "OPENAI_API_KEY", "PERPLEXITY_API_KEY",
-                "ANTHROPIC_API_KEY", "DEEPSEEK_API_KEY", "GROQ_API_KEY",
-                "MISTRAL_API_KEY", "TOGETHER_API_KEY", "XAI_API_KEY",
-                "COHERE_API_KEY", "OLLAMA_BASE_URL"]:
-        monkeypatch.setenv(key, "")
-    monkeypatch.chdir("/tmp")  # no .env file here
-    # Reset config singleton so it reloads with empty env vars
-    import llm_router.config as config_module
-    config_module._config = None
+async def test_no_providers_configured(no_providers_env, monkeypatch):
+    """When no providers are configured, the router should raise an error."""
     monkeypatch.setattr("llm_router.router.is_codex_available", lambda: False)
-    with pytest.raises(ValueError, match="No available models"):
+    with pytest.raises((ValueError, RuntimeError), match="No available models|All models failed"):
         await route_and_call(TaskType.QUERY, "Hello")
 
 

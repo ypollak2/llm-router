@@ -79,11 +79,47 @@ def minimal_env(monkeypatch):
                 "DEEPSEEK_API_KEY", "GROQ_API_KEY", "MISTRAL_API_KEY", "TOGETHER_API_KEY",
                 "XAI_API_KEY", "COHERE_API_KEY", "OLLAMA_BASE_URL"]:
         monkeypatch.delenv(key, raising=False)
-    
+
     # Set only one key to trigger "Recommended to Add"
     monkeypatch.setenv("OPENAI_API_KEY", "test-key")
     monkeypatch.setenv("LLM_ROUTER_PROFILE", "balanced")
     yield
+
+
+@pytest.fixture
+def no_providers_env(monkeypatch):
+    """Create a truly empty config with no providers configured.
+
+    This fixture mocks the config loader to return a RouterConfig with all
+    API keys and Ollama disabled, regardless of local environment files.
+    Used by tests that verify error handling when no providers are available.
+    """
+    from llm_router.config import RouterConfig
+
+    # Create a truly empty config
+    empty_config = RouterConfig(
+        openai_api_key="",
+        gemini_api_key="",
+        perplexity_api_key="",
+        anthropic_api_key="",
+        deepseek_api_key="",
+        groq_api_key="",
+        mistral_api_key="",
+        together_api_key="",
+        xai_api_key="",
+        cohere_api_key="",
+        ollama_base_url="",  # Disable Ollama
+        llm_router_profile="balanced",
+    )
+
+    # Mock the get_config function to return our empty config
+    import llm_router.config as config_module
+    monkeypatch.setattr(config_module, "get_config", lambda: empty_config)
+
+    # Also reset the singleton so it uses the mocked function
+    config_module._config = None
+
+    yield empty_config
 
 
 @pytest.fixture
