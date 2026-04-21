@@ -1777,6 +1777,23 @@ def _run_routing() -> None:
             reordered = reorder_for_pressure(chain, pressure, RoutingProfile.BALANCED)
 
             print(f"\n  {bold}{task_name}{reset}")
+            
+            # Show selected model (first in reordered chain)
+            if reordered:
+                selected = reordered[0]
+                selected_indicator = ""
+                if selected in _FREE_EXTERNAL_MODELS:
+                    selected_indicator = " " + _green("✓ FREE")
+                elif "ollama" in selected:
+                    selected_indicator = " " + _green("✓ LOCAL")
+                elif "claude" in selected:
+                    selected_indicator = " " + _bold("✓ SUB")
+                else:
+                    selected_indicator = " ✓"
+                print(f"    {_bold('→ Selected:')} {selected}{selected_indicator}")
+            
+            # Show fallback chain
+            print(f"    {_dim('Fallback chain:')}")
             for i, model in enumerate(reordered[:5], 1):
                 cost_indicator = ""
                 if model in _FREE_EXTERNAL_MODELS:
