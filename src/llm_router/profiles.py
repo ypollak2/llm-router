@@ -24,9 +24,10 @@ from llm_router.types import Complexity, RoutingProfile, TaskType
 
 log = get_logger("llm_router.profiles")
 
-# Models treated as "free" under a Claude Pro subscription — tried first.
-_CLAUDE_MODELS: frozenset[str] = frozenset({
-    "anthropic/claude-opus-4-6",
+# Models treated as "cheap" under a Claude subscription — Haiku/Sonnet only.
+# Opus ($15/1M) is NOT cheap, so it's NOT included. Only Haiku ($3/1M) and
+# Sonnet ($3/1M) are reasonable fallbacks when quota is available.
+_CLAUDE_CHEAP_MODELS: frozenset[str] = frozenset({
     "anthropic/claude-sonnet-4-6",
     "anthropic/claude-haiku-4-5-20251001",
 })
@@ -325,8 +326,8 @@ def reorder_for_pressure(
     Returns:
         Reordered list, possibly with Claude models removed at ≥ 99%.
     """
-    claude_models = [m for m in chain if m in _CLAUDE_MODELS]
-    other_models = [m for m in chain if m not in _CLAUDE_MODELS]
+    claude_cheap_models = [m for m in chain if m in _CLAUDE_CHEAP_MODELS]
+    other_models = [m for m in chain if m not in _CLAUDE_CHEAP_MODELS]
 
     if pressure >= 0.99:
         # Hard cap: never touch Claude quota.
@@ -348,8 +349,8 @@ def reorder_for_pressure(
         return other_models
 
     if pressure < 0.85:
-        # Quota available: Claude is free, put it first
-        return claude_models + other_models
+        # Quota available: cheap Claude models (Haiku/Sonnet) first, then external, then expensive
+        return claude_cheap_models + other_models
 
     # 85–98%: quota tightening — externals first, Claude as last resort
     try:
@@ -366,7 +367,7 @@ def reorder_for_pressure(
         return 2       # paid: GPT-4o, Gemini Pro, o3, etc.
 
     other_models.sort(key=_priority)
-    return other_models + claude_models
+    return other_models + claude_cheap_models
 
 
 def complexity_to_profile(complexity: Complexity) -> RoutingProfile:

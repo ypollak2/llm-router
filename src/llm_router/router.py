@@ -320,12 +320,6 @@ async def _build_and_filter_chain(
                     reorder_chain_by_providers,
                 )
                 pressures = await get_provider_pressures()
-                old_order = [
-                    "codex" if "codex/" in models_to_try[0] else
-                    "gemini_cli" if "gemini_cli/" in models_to_try[0] else
-                    "claude" if "anthropic/" in models_to_try[0] else
-                    "other"
-                ]
                 order = get_balanced_provider_order(pressures)
                 models_to_try = reorder_chain_by_providers(models_to_try, order)
 
