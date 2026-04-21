@@ -130,8 +130,8 @@ ROUTING_TABLE: dict[tuple[RoutingProfile, TaskType], list[str]] = {
     (RoutingProfile.BALANCED, TaskType.QUERY): [
         "anthropic/claude-sonnet-4-6",
         "deepseek/deepseek-chat",       # quality 1.0, $0.0007 — leads when Claude is out
-        "openai/gpt-4o",
-        "gemini/gemini-2.5-pro",
+        "gemini/gemini-2.5-pro",        # $0.01/1M — cheaper than OpenAI
+        "openai/gpt-4o",                # $0.03/1M — more expensive, last paid resort
         "mistral/mistral-large-latest",
         "anthropic/claude-haiku-4-5-20251001",
         "ollama/qwen3.5:32b",           # free local; auto-promoted to first in CC mode
@@ -146,25 +146,25 @@ ROUTING_TABLE: dict[tuple[RoutingProfile, TaskType], list[str]] = {
     (RoutingProfile.BALANCED, TaskType.GENERATE): [
         "anthropic/claude-sonnet-4-6",
         "deepseek/deepseek-chat",       # quality 1.0 for generation, $0.0007
-        "gemini/gemini-2.5-pro",
-        "openai/gpt-4o",
+        "gemini/gemini-2.5-pro",        # $0.01/1M — cheaper than OpenAI
+        "openai/gpt-4o",                # $0.03/1M — more expensive, last paid resort
         "cohere/command-r-plus",
         "anthropic/claude-haiku-4-5-20251001",
         "ollama/qwen3.5:32b",           # free local; auto-promoted to first in CC mode
     ],
     (RoutingProfile.BALANCED, TaskType.ANALYZE): [
         "anthropic/claude-sonnet-4-6",
-        "openai/gpt-4o",
-        "gemini/gemini-2.5-pro",
         "deepseek/deepseek-reasoner",
+        "gemini/gemini-2.5-pro",        # $0.01/1M — cheaper than OpenAI
+        "openai/gpt-4o",                # $0.03/1M — more expensive, last paid resort
         "anthropic/claude-haiku-4-5-20251001",
         "ollama/qwen3.5:32b",           # free local; auto-promoted to first in CC mode
     ],
     (RoutingProfile.BALANCED, TaskType.CODE): [
         "anthropic/claude-sonnet-4-6",
-        "openai/gpt-4o",
-        "gemini/gemini-2.5-pro",
         "deepseek/deepseek-chat",
+        "gemini/gemini-2.5-pro",        # $0.01/1M — cheaper than OpenAI
+        "openai/gpt-4o",                # $0.03/1M — more expensive, last paid resort
         "anthropic/claude-haiku-4-5-20251001",
         "ollama/qwen3.5:32b",           # free local; auto-promoted to first in CC mode
     ],
@@ -193,8 +193,8 @@ ROUTING_TABLE: dict[tuple[RoutingProfile, TaskType], list[str]] = {
         "anthropic/claude-opus-4-6",
         "anthropic/claude-sonnet-4-6",
         "deepseek/deepseek-chat",       # quality 1.0, $0.0007 — leads at >85% pressure
-        "openai/gpt-4o",
-        "gemini/gemini-2.5-pro",
+        "gemini/gemini-2.5-pro",        # $0.01/1M — cheaper than OpenAI
+        "openai/gpt-4o",                # $0.03/1M — more expensive
         "openai/o3",                    # expensive last resort ($0.025)
         "xai/grok-3",
     ],
@@ -202,30 +202,31 @@ ROUTING_TABLE: dict[tuple[RoutingProfile, TaskType], list[str]] = {
         "perplexity/sonar-pro",       # web-grounded, stays first always
         "perplexity/sonar",
         "anthropic/claude-opus-4-6",
-        "openai/o3",
-        "gemini/gemini-2.5-pro",
+        "gemini/gemini-2.5-pro",        # $0.01/1M — cheaper than OpenAI/o3
+        "openai/o3",                    # expensive last resort
     ],
     (RoutingProfile.PREMIUM, TaskType.GENERATE): [
         "anthropic/claude-opus-4-6",
         "anthropic/claude-sonnet-4-6",
         "deepseek/deepseek-chat",       # quality 1.0 for generation, cheap fallback
-        "gemini/gemini-2.5-pro",
-        "openai/gpt-4o",
-        "openai/o3",
+        "gemini/gemini-2.5-pro",        # $0.01/1M — cheaper than OpenAI
+        "openai/gpt-4o",                # $0.03/1M — more expensive
+        "openai/o3",                    # expensive last resort
     ],
     (RoutingProfile.PREMIUM, TaskType.ANALYZE): [
         "anthropic/claude-opus-4-6",
         "anthropic/claude-sonnet-4-6",
-        "openai/o3",
         "deepseek/deepseek-reasoner",
-        "gemini/gemini-2.5-pro",
+        "gemini/gemini-2.5-pro",        # $0.01/1M — cheaper than OpenAI/o3
+        "openai/o3",                    # expensive last resort
     ],
     (RoutingProfile.PREMIUM, TaskType.CODE): [
         "anthropic/claude-opus-4-6",
         "anthropic/claude-sonnet-4-6",
         "deepseek/deepseek-reasoner",   # quality 1.0, $0.0014 — leads at >85% pressure
-        "openai/gpt-4o",
-        "openai/o3",
+        "gemini/gemini-2.5-pro",        # $0.01/1M — cheaper than OpenAI
+        "openai/gpt-4o",                # $0.03/1M — more expensive
+        "openai/o3",                    # expensive last resort
     ],
     (RoutingProfile.PREMIUM, TaskType.IMAGE): [
         "gemini/imagen-3",
