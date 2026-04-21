@@ -115,6 +115,8 @@ def main() -> None:
         _run_status()
     elif args and args[0] == "routing":
         _run_routing()
+    elif args and args[0] == "profile":
+        _run_profile(subcmd=args[1] if len(args) > 1 else "show")
     elif args and args[0] == "init-claude-memory":
         from llm_router.cli_init_memory import run_init_claude_memory
         run_init_claude_memory()
@@ -1794,6 +1796,40 @@ def _run_routing() -> None:
     print(_dim("Run: llm-router status     # Usage & savings"))
     print(_dim("Run: llm-router routing    # This command"))
     print(_dim("Run: llm-router budget     # Budget management\n"))
+
+
+# ── profile ────────────────────────────────────────────────────────────────────
+
+def _run_profile(subcmd: str = "show") -> None:
+    """Show or auto-generate token-wise routing profile."""
+    from llm_router.auto_profile import (
+        auto_generate_profile, detect_services, display_detected_services, PROFILE_PATH
+    )
+
+    if subcmd == "auto":
+        # Auto-detect and generate profile
+        print(f"\n{_bold('🔍 Auto-Detecting Services')}\n")
+        detected = detect_services()
+        print(display_detected_services(detected))
+
+        print(f"{_bold('💾 Generating Profile')}\n")
+        profile_path = auto_generate_profile()
+        print(f"✓ Profile saved to {profile_path}\n")
+        print("Review and edit the profile to customize priorities:")
+        print(f"  {_dim(f'nano {profile_path}')}\n")
+
+    elif subcmd == "show":
+        # Show current profile or auto-detect
+        if PROFILE_PATH.exists():
+            print(f"\n{_bold('📋 Current Profile')}\n")
+            print(PROFILE_PATH.read_text())
+        else:
+            print(f"\n{_bold('No profile found.')}")
+            print(f"Run: {_dim('llm-router profile auto')} to generate one.\n")
+
+    else:
+        print(f"Unknown profile command: {subcmd}")
+        print("Try: llm-router profile {auto|show}")
 
 
 def _run_update() -> None:
