@@ -1,5 +1,6 @@
 """Shared pytest fixtures for all llm-router tests."""
 
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -94,29 +95,45 @@ def no_providers_env(monkeypatch):
     API keys and Ollama disabled, regardless of local environment files.
     Used by tests that verify error handling when no providers are available.
     """
-    from llm_router.config import RouterConfig
-
-    # Create a truly empty config
-    empty_config = RouterConfig(
-        openai_api_key="",
-        gemini_api_key="",
-        perplexity_api_key="",
-        anthropic_api_key="",
-        deepseek_api_key="",
-        groq_api_key="",
-        mistral_api_key="",
-        together_api_key="",
-        xai_api_key="",
-        cohere_api_key="",
-        ollama_base_url="",  # Disable Ollama
-        llm_router_profile="balanced",
-    )
+    # Create a manual config object without reading from env or .env
+    from llm_router.types import QualityMode
+    
+    # Create a mock config with all providers disabled
+    class EmptyConfig:
+        openai_api_key = ""
+        gemini_api_key = ""
+        perplexity_api_key = ""
+        anthropic_api_key = ""
+        deepseek_api_key = ""
+        groq_api_key = ""
+        mistral_api_key = ""
+        together_api_key = ""
+        xai_api_key = ""
+        cohere_api_key = ""
+        ollama_base_url = ""
+        llm_router_profile = "balanced"
+        llm_router_claw_code = False
+        llm_router_claude_subscription = False
+        llm_router_enforce = "soft"
+        llm_router_db_path = str(Path.home() / ".llm-router" / "routing.db")
+        token_budget = 10_000_000
+        quality = QualityMode.BALANCED
+        min_model_floor = "haiku"
+        semantic_cache_ttl = 86400
+        health_circuit_breaker_threshold = 0.5
+        health_circuit_breaker_ttl = 300
+        health_request_timeout = 30
+        
+        def apply_keys_to_env(self):
+            pass  # No-op
+    
+    empty_config = EmptyConfig()
 
     # Mock the get_config function to return our empty config
     import llm_router.config as config_module
     monkeypatch.setattr(config_module, "get_config", lambda: empty_config)
 
-    # Also reset the singleton so it uses the mocked function
+    # Also reset the singleton
     config_module._config = None
 
     yield empty_config
