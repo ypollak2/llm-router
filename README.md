@@ -101,6 +101,16 @@ The dispatcher learns over time: if a model starts performing poorly (judge scor
 
 The savings come from not using Opus for every question.
 
+## New in v6.10 — Profile-Aware Dynamic Routing
+
+- **Auto-detect available services** — Ollama, API keys, Claude subscription, Gemini CLI, Codex
+- **Profile.yaml generation** — Token-wise service tier organization (free local → free subscriptions → cheap APIs → balanced → expensive)
+- **Quota pressure awareness** — Real-time Claude %, Gemini CLI daily usage tracking
+- **Dynamic chain reordering** — Auto-deprioritize quota-depleted providers (≥85% used)
+- **Periodic service scanning** — Detect changes every hour, auto-update profile
+
+This enables **true per-user routing** where the system respects each user's unique setup (which subscriptions they have, which APIs are configured, which services are running).
+
 ## New in v6.4 — Quality Guard
 
 - **Judge-based quality feedback** integrated into routing decisions
