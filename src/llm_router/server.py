@@ -1,6 +1,6 @@
 """FastMCP server — MCP entry point for llm-router.
 
-All 50 tools are registered by modules in llm_router/tools/:
+All 51 tools are registered by modules in llm_router/tools/:
 - routing.py  — llm_classify, llm_track_usage, llm_route, llm_auto, llm_stream,
                 llm_select_agent, llm_reroute
 - text.py     — llm_query, llm_research, llm_generate, llm_analyze, llm_code, llm_edit
@@ -11,6 +11,7 @@ All 50 tools are registered by modules in llm_router/tools/:
                 llm_team_report, llm_team_push, llm_session_spend, llm_approve_route
 - subscription.py — llm_check_usage, llm_update_usage, llm_refresh_claude_usage
 - codex.py    — llm_codex
+- gemini_cli.py — llm_gemini
 - setup.py    — llm_setup, llm_rate
 - fs.py       — llm_fs_find, llm_fs_rename, llm_fs_edit_many, llm_fs_analyze_context
 - agoragentic.py — agoragentic_task, agoragentic_browse, agoragentic_wallet,
@@ -31,7 +32,7 @@ from llm_router.config import get_config
 from llm_router.health import get_tracker
 from llm_router.logging import configure_logging, get_logger
 from llm_router.state import _check_tier, get_active_profile  # noqa: F401  (backward compat)
-from llm_router.tools import admin, agoragentic, codex, fs, media, pipeline, routing, setup, subscription, text
+from llm_router.tools import admin, agoragentic, codex, fs, gemini_cli, media, pipeline, routing, setup, subscription, text
 from llm_router.tools.admin import llm_health, llm_set_profile, llm_usage  # noqa: F401
 from llm_router.tools.pipeline import llm_orchestrate  # noqa: F401
 from llm_router.tools.routing import llm_route  # noqa: F401
@@ -108,6 +109,7 @@ pipeline.register(mcp, _gate)
 admin.register(mcp, _gate)
 subscription.register(mcp, _gate)
 codex.register(mcp, _gate)
+gemini_cli.register(mcp, _gate)
 setup.register(mcp, _gate)
 fs.register(mcp, _gate)
 agoragentic.register(mcp)

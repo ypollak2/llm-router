@@ -25,6 +25,57 @@ pipx install claude-code-llm-router && llm-router install
 | VS Code | `llm-router install --host vscode` |
 | Cursor | `llm-router install --host cursor` |
 | Codex CLI | `llm-router install --host codex` |
+| Gemini CLI | `llm-router install --host gemini-cli` |
+
+## Supported Development Tools
+
+llm-router works as an MCP server inside any tool that supports MCP, providing unified routing across your entire development environment.
+
+| Tool | Status | What You Get |
+|------|--------|--------------|
+| **Claude Code** | ✅ Full | Auto-routing hooks + session tracking + quota display |
+| **Gemini CLI** | ✅ Full | Auto-routing hooks + session tracking + quota display |
+| **Codex CLI** | ✅ Full | Auto-routing hooks + savings tracking |
+| **VS Code + Copilot** | ✅ MCP | llm-router tools available (routing is model-voluntary) |
+| **Cursor** | ✅ MCP | llm-router tools available (routing is model-voluntary) |
+| **OpenCode** | ✅ MCP | llm-router tools available (routing is model-voluntary) |
+| **Windsurf** | ✅ MCP | llm-router tools available (routing is model-voluntary) |
+| **Any MCP-compatible tool** | ⚡ Manual | Add llm-router to your tool's MCP config |
+
+### Full Support vs MCP Support
+
+**Full support** = auto-routing hooks fire before the model answers, enforcing your routing policy.
+**MCP support** = tools are available, but the model chooses whether to use them.
+
+### Quick Setup by Tool
+
+#### Claude Code
+```bash
+pipx install claude-code-llm-router
+llm-router install
+```
+Then in Claude Code, llm_route and friends appear as built-in tools. Your settings control the profile (budget/balanced/premium).
+
+#### Gemini CLI
+```bash
+pipx install claude-code-llm-router
+llm-router install --host gemini-cli
+```
+Gemini CLI users get full routing experience: auto-routing suggestions, quota display, and free-first chaining (Ollama → Codex → Gemini CLI → paid).
+
+#### Codex CLI
+```bash
+pipx install claude-code-llm-router
+llm-router install --host codex
+```
+Codex integrates deep into the routing chain as a free fallback when your OpenAI subscription is available.
+
+#### VS Code / Cursor / Others
+```bash
+pipx install claude-code-llm-router
+llm-router install --host vscode  # or --host cursor
+```
+The MCP server loads automatically. Tools appear in your IDE's model UI.
 
 ## What It Does
 

@@ -12,14 +12,14 @@ def test_all_tools_registered():
     This test prevents tool registration drift by dynamically discovering
     all @mcp.tool() decorated functions rather than hardcoding names.
     """
-    from llm_router.tools import routing, text, media, pipeline, admin, subscription, codex, setup, agoragentic
-    
+    from llm_router.tools import routing, text, media, pipeline, admin, subscription, codex, gemini_cli, setup, agoragentic
+
     # Get all tools from the MCP server
     registered_tools = mcp._tool_manager.list_tools()
     registered_names = {t.name for t in registered_tools}
-    
+
     # Dynamically collect expected tools from all modules
-    tool_modules = [routing, text, media, pipeline, admin, subscription, codex, setup, agoragentic]
+    tool_modules = [routing, text, media, pipeline, admin, subscription, codex, gemini_cli, setup, agoragentic]
     expected_names = set()
     
     for module in tool_modules:
@@ -36,10 +36,10 @@ def test_all_tools_registered():
         "llm_query", "llm_research", "llm_generate", "llm_analyze", "llm_code",
         "llm_image", "llm_video", "llm_audio",
         "llm_orchestrate", "llm_pipeline_templates",
-        "llm_save_session", "llm_retrospect", "llm_gain",
+        "llm_save_session", "llm_gain",
         "llm_set_profile", "llm_usage", "llm_savings", "llm_health", "llm_hook_health", "llm_providers",
         "llm_check_usage", "llm_update_usage", "llm_refresh_claude_usage",
-        "llm_codex", "llm_setup", "llm_cache_stats", "llm_cache_clear",
+        "llm_codex", "llm_gemini", "llm_setup", "llm_cache_stats", "llm_cache_clear",
         "llm_quality_report", "llm_quality_guard",
         "llm_edit", "llm_rate", "llm_dashboard",
         "llm_fs_find", "llm_fs_rename", "llm_fs_edit_many", "llm_fs_analyze_context",

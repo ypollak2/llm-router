@@ -629,21 +629,7 @@ def main() -> None:
 
     has_cumulative = any(calls > 0 for _, calls, *_ in cumulative)
 
-    # Collect retrospective if enabled (default: auto = show if gaps detected)
-    retrospect_mode = os.environ.get("LLM_ROUTER_RETROSPECT", "auto")
-    retrospect_output = None
-    if retrospect_mode in ("auto", "always"):
-        try:
-            result = subprocess.run(
-                [sys.executable, "-m", "llm_router.commands.retrospect", "--compact", "--no-directives"],
-                capture_output=True, text=True, timeout=subprocess_timeout()
-            )
-            if result.stdout.strip():
-                retrospect_output = result.stdout.strip()
-        except Exception:
-            pass  # Graceful failure — never break session-end
-
-    if not tools and not cc_rows and not current and not free_rows and not has_cumulative and not retrospect_output:
+    if not tools and not cc_rows and not current and not free_rows and not has_cumulative:
         sys.exit(0)
 
     summary = _format(tools, cc_rows, free_rows, paid_rows, start, current, is_live, cumulative)
@@ -662,9 +648,7 @@ def main() -> None:
             spend_line = "  ⚠️  ANOMALY DETECTED: " + spend_line.lstrip()
         summary = summary.rstrip("─" * WIDTH) + "\n" + spend_line + "\n" + "─" * WIDTH
 
-    # Append retrospective summary if available
-    if retrospect_output:
-        summary = summary.rstrip("─" * WIDTH) + "\n" + retrospect_output + "\n" + "─" * WIDTH
+    # Retrospective output removed per user preference
 
     # Append mid-session trends if any snapshots exist
     try:

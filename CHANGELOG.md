@@ -4,6 +4,58 @@
 
 ---
 
+## v6.9.0 — Gemini CLI Integration (2026-04-21)
+
+### Added
+
+- **Gemini CLI as Free Routing Provider**
+  - Route tasks to Gemini CLI (Google One AI Pro, 1,500 requests/day)
+  - Seamless integration into free-first routing chain (Ollama → Codex → Gemini CLI → paid)
+  - Smart insertion: front on high budget pressure, after first Claude on code tasks
+  - New `gemini_cli_agent.py` for binary detection and async subprocess invocation
+  - New `llm_gemini` MCP tool for direct Gemini CLI invocation
+
+- **Gemini Quota Tracking**
+  - Two-layer quota system: parse `gemini /stats` for real data, local counter fallback
+  - Daily request tracking with tier-based limits (Google One AI Pro: 1,500/day)
+  - Budget pressure signals (0.0-1.0) for routing decisions
+  - `gemini_cli_quota.json` cache with 5-minute TTL
+  - `get_gemini_pressure()` and `get_gemini_quota_status()` APIs
+
+- **Gemini CLI Host Support** (Part B — Hooks)
+  - Auto-route hook for UserPromptSubmit with 3-layer classifier (heuristics → Ollama → Gemini Flash)
+  - Session-end hook displaying quota usage and savings from free provider routing
+  - Install support: `llm-router install --host gemini-cli`
+
+- **Enhanced Tool Documentation**
+  - New "Supported Development Tools" section in README with installation matrix
+  - Full support vs MCP support explained
+  - Quick setup guides for Claude Code, Gemini CLI, Codex CLI, and IDE plugins
+
+### Changed
+
+- `src/llm_router/router.py` — Added Gemini CLI to local provider list, injection in dispatch chain, agent-context reordering
+- `src/llm_router/profiles.py` — Added Gemini CLI models to `_FREE_EXTERNAL_MODELS`
+- `src/llm_router/server.py` — Registered new `gemini_cli` tools module (51 total tools)
+- README.md — Added comprehensive "Supported Development Tools" section
+
+### Files Added
+
+- `src/llm_router/gemini_cli_agent.py` — Binary detection, subprocess invocation
+- `src/llm_router/gemini_cli_quota.py` — Quota tracking and pressure calculation
+- `src/llm_router/tools/gemini_cli.py` — `llm_gemini` MCP tool
+- `src/llm_router/hooks/gemini-cli-auto-route.py` — Auto-routing hook
+- `src/llm_router/hooks/gemini-cli-session-end.py` — Session summary with quota display
+- `tests/test_gemini_cli.py` — Unit and integration tests (12 tests, all passing)
+
+### Performance
+
+- Gemini CLI invocation timeout: 30 seconds (configurable via `GEMINI_CLI_TIMEOUT`)
+- Quota cache TTL: 5 minutes (prevents excessive subprocess overhead)
+- Import-time caching of binary location (no event loop blocking)
+
+---
+
 ## v6.4.0 — Quality Guard (2026-04-20)
 
 ### Added

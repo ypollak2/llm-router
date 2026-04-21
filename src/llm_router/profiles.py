@@ -31,11 +31,14 @@ _CLAUDE_MODELS: frozenset[str] = frozenset({
     "anthropic/claude-haiku-4-5-20251001",
 })
 
-# Free external models (Codex uses OpenAI subscription, no API spend).
+# Free external models (Codex uses OpenAI subscription, Gemini CLI uses Google One AI Pro).
 _FREE_EXTERNAL_MODELS: frozenset[str] = frozenset({
     "codex/gpt-5.4",
     "codex/o3",
     "codex/gpt-4o",
+    "gemini_cli/gemini-2.5-flash",
+    "gemini_cli/gemini-2.0-flash",
+    "gemini_cli/gemini-3-flash-preview",
 })
 
 # Cheap-but-not-free models (< $0.002/1K tokens blended).

@@ -1323,8 +1323,9 @@ def register(mcp, should_register=None) -> None:
     if gate("llm_budget"):
         mcp.tool()(llm_budget)
 
-    if gate("llm_retrospect"):
-        mcp.tool()(llm_retrospect)
+    # Retrospective tool disabled per user preference
+    # if gate("llm_retrospect"):
+    #     mcp.tool()(llm_retrospect)
     if gate("llm_gain"):
         mcp.tool()(llm_gain)
     if gate("llm_share_profile"):

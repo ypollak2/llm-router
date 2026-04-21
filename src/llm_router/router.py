@@ -19,6 +19,7 @@ from llm_router import cost, media, providers
 from llm_router.budget import get_budget_state
 from llm_router.state import get_active_agent
 from llm_router.codex_agent import CODEX_MODELS, is_codex_available, run_codex
+from llm_router.gemini_cli_agent import GEMINI_MODELS, is_gemini_cli_available, run_gemini_cli
 from llm_router.logging import get_logger
 from llm_router.compaction import compact_structural
 from llm_router.config import get_config
@@ -69,7 +70,7 @@ async def _build_and_filter_chain(
         Ordered list of model identifiers, highest priority first. May be empty.
     """
     if model_override:
-        _local_prefixes = {"codex", "ollama"}
+        _local_prefixes = {"codex", "ollama", "gemini_cli"}
         if "/" not in model_override and model_override not in _local_prefixes:
             raise ValueError(
                 f"Invalid model_override format: {model_override!r}. "
@@ -154,7 +155,7 @@ async def _build_and_filter_chain(
         models_to_try = [
             m for m in models_to_try
             if provider_from_model(m) in available
-            or provider_from_model(m) in {"codex", "ollama"}
+            or provider_from_model(m) in {"codex", "ollama", "gemini_cli"}
         ]
 
         # ── Repo config: block_providers + model/provider pin ─────────────────
@@ -241,6 +242,51 @@ async def _build_and_filter_chain(
                     first_paid, task_type.value,
                 )
                 models_to_try = models_to_try[:first_paid] + codex_chain + models_to_try[first_paid:]
+
+        # ── Gemini CLI injection ──────────────────────────────────────────────
+        _gemini_eligible_tasks = {TaskType.CODE, TaskType.ANALYZE, TaskType.GENERATE, TaskType.QUERY}
+        if (
+            profile != RoutingProfile.BUDGET
+            and task_type in _gemini_eligible_tasks
+            and is_gemini_cli_available()
+        ):
+            gemini_chain = [f"gemini_cli/{m}" for m in GEMINI_MODELS[:2]]
+            has_claude = any(m.startswith("anthropic/") for m in models_to_try)
+            from llm_router.claude_usage import get_claude_pressure
+            pressure = get_claude_pressure()
+            if pressure >= 0.95:
+                log.debug("Gemini CLI injected at front (pressure=%.0f%%)", pressure * 100)
+                models_to_try = gemini_chain + models_to_try
+            elif has_claude and task_type == TaskType.CODE:
+                first_claude = next(
+                    i for i, m in enumerate(models_to_try) if m.startswith("anthropic/")
+                )
+                insert_at = first_claude + 1
+                log.debug("Gemini CLI injected after first Claude at index %d (CODE task)", insert_at)
+                models_to_try = models_to_try[:insert_at] + gemini_chain + models_to_try[insert_at:]
+            elif has_claude:
+                last_claude = max(
+                    (i for i, m in enumerate(models_to_try) if m.startswith("anthropic/")),
+                    default=-1,
+                )
+                insert_at = last_claude + 1
+                log.debug(
+                    "Gemini CLI injected after last Claude at index %d (%s task)",
+                    insert_at, task_type.value,
+                )
+                models_to_try = models_to_try[:insert_at] + gemini_chain + models_to_try[insert_at:]
+            else:
+                # Subscription mode: inject Gemini CLI after Ollama/Codex, before paid externals
+                first_paid = next(
+                    (i for i, m in enumerate(models_to_try)
+                     if provider_from_model(m) not in {"ollama", "codex", "gemini_cli"}),
+                    len(models_to_try),
+                )
+                log.debug(
+                    "Gemini CLI injected before paid externals at index %d (%s task, subscription mode)",
+                    first_paid, task_type.value,
+                )
+                models_to_try = models_to_try[:first_paid] + gemini_chain + models_to_try[first_paid:]
 
         # ── Agent-context chain reordering ────────────────────────────────────
         models_to_try = _reorder_for_agent_context(
@@ -329,30 +375,37 @@ def _reorder_for_agent_context(
     """Reorder model chain to prefer subscription-covered models for the active agent.
 
     Priority matrix (subscription-first ordering):
-      Codex session + simple/moderate  : Ollama → Codex → rest (GPT-4o etc.) → Claude
-      Codex session + complex          : Codex → Claude → rest → Ollama
-      Claude Code session + simple/moderate : Ollama → Claude → rest → Codex
-      Claude Code session + complex    : Claude → rest → Codex → Ollama
+      Codex session + simple/moderate  : Ollama → Codex → Gemini CLI → rest → Claude
+      Codex session + complex          : Codex → Gemini CLI → Claude → rest → Ollama
+      Gemini CLI session + simple/moderate : Ollama → Gemini CLI → Codex → rest → Claude
+      Gemini CLI session + complex     : Gemini CLI → Codex → Claude → rest → Ollama
+      Claude Code session + simple/moderate : Ollama → Claude → Gemini CLI → rest → Codex
+      Claude Code session + complex    : Claude → Gemini CLI → rest → Codex → Ollama
 
     Does not filter any models — every model stays in the chain, just reordered
     so the cheapest/already-paid tier is attempted first.
     """
     if agent is None:
         return models
-    ollama = [m for m in models if provider_from_model(m) == "ollama"]
-    codex  = [m for m in models if provider_from_model(m) == "codex"]
-    claude = [m for m in models if provider_from_model(m) == "anthropic"]
-    rest   = [m for m in models if m not in set(ollama + codex + claude)]
+    ollama     = [m for m in models if provider_from_model(m) == "ollama"]
+    codex      = [m for m in models if provider_from_model(m) == "codex"]
+    gemini_cli = [m for m in models if provider_from_model(m) == "gemini_cli"]
+    claude     = [m for m in models if provider_from_model(m) == "anthropic"]
+    rest       = [m for m in models if m not in set(ollama + codex + gemini_cli + claude)]
     if complexity in (Complexity.SIMPLE, Complexity.MODERATE):
         if agent == "codex":
-            return ollama + codex + rest + claude
+            return ollama + codex + gemini_cli + rest + claude
+        elif agent == "gemini_cli":
+            return ollama + gemini_cli + codex + rest + claude
         else:  # claude_code
-            return ollama + claude + rest + codex
+            return ollama + claude + gemini_cli + rest + codex
     else:  # COMPLEX / DEEP_REASONING
         if agent == "codex":
-            return codex + claude + rest + ollama
+            return codex + gemini_cli + claude + rest + ollama
+        elif agent == "gemini_cli":
+            return gemini_cli + codex + claude + rest + ollama
         else:  # claude_code
-            return claude + rest + codex + ollama
+            return claude + gemini_cli + rest + codex + ollama
 
 # Guards the check-then-spend budget sequence so concurrent calls cannot
 # both slip through the limit before either has recorded its spend.
@@ -626,6 +679,19 @@ async def _dispatch_model_loop(
                         cost_usd=0.0,
                         latency_ms=codex_result.duration_sec * 1000,
                         provider="codex",
+                    )
+                elif provider == "gemini_cli":
+                    gemini_result = await run_gemini_cli(prompt, model=model_name)
+                    if not gemini_result.success:
+                        raise RuntimeError(f"Gemini CLI exited {gemini_result.exit_code}: {gemini_result.content[:200]}")
+                    response = LLMResponse(
+                        content=gemini_result.content,
+                        model=f"gemini_cli/{model_name}",
+                        input_tokens=0,
+                        output_tokens=0,
+                        cost_usd=0.0,
+                        latency_ms=gemini_result.duration_sec * 1000,
+                        provider="gemini_cli",
                     )
                 else:
                     response = await _call_text(
