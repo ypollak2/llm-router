@@ -101,30 +101,34 @@ The dispatcher learns over time: if a model starts performing poorly (judge scor
 
 The savings come from not using Opus for every question.
 
-## New in v6.10 — Profile-Aware Dynamic Routing
+## New in v6.10 — Automatic Model Evaluator & Kimi-K2.6 Integration
 
-- **Auto-detect available services** — Ollama, API keys, Claude subscription, Gemini CLI, Codex
-- **Profile.yaml generation** — Token-wise service tier organization (free local → free subscriptions → cheap APIs → balanced → expensive)
-- **Quota pressure awareness** — Real-time Claude %, Gemini CLI daily usage tracking
-- **Dynamic chain reordering** — Auto-deprioritize quota-depleted providers (≥85% used)
-- **Periodic service scanning** — Detect changes every hour, auto-update profile
+- **Model evaluator system** — Benchmarks all available models (Ollama, Codex, APIs) weekly
+  - Tests on reasoning + code tasks, scores by quality + latency
+  - 7-day cache TTL, auto-runs during session-end hook
+  - Manual evaluation via `llm_model_eval` MCP tool
+- **Kimi-K2.6:cloud** integrated as primary code specialist
+  - 256K context window (2x qwen3.5), specialized for autonomous execution
+  - Auto-selected for code-heavy tasks (refactor, debug, implement, test)
+  - Fallback chain: qwen3-coder-next → qwen3.5
+- **Profile-aware dynamic routing** 
+  - Auto-detect available services (Ollama, API keys, subscriptions)
+  - Token-wise tier organization (free local → free subscriptions → cheap APIs → expensive)
+  - Quota pressure awareness with real-time deprioritization (≥85% usage)
+  - Periodic service scanning (1-hour TTL)
 
-This enables **true per-user routing** where the system respects each user's unique setup (which subscriptions they have, which APIs are configured, which services are running).
+This enables **per-user routing** respecting each user's unique setup + **automatic performance optimization** via weekly model benchmarking.
 
-## New in v6.4 — Quality Guard
+## New in v6.9 — Gemini CLI Integration
 
-- **Judge-based quality feedback** integrated into routing decisions
-- **Quality reordering** — models demoted if scores drop below threshold
-- **Hard floor enforcement** — poor-performing models automatically escalated to better tier
+- **Gemini CLI as free routing provider** — 1,500 requests/day via Google One AI Pro
+- **Smart insertion into free-first chain** — Ollama → Codex → Gemini CLI → paid APIs
+- **Context-aware routing** — Prioritizes Gemini CLI on high budget pressure, code tasks
+- **New `llm_gemini` MCP tool** for direct Gemini CLI invocation
+- **Session tracking & quota display** — Daily usage meter, savings summary at session-end
+- **Auto-route hook** for Gemini CLI with complexity classification
 
-See [CHANGELOG.md](CHANGELOG.md) for all changes.
-
-## New in v6.3 — Three-Layer Compression
-
-- **RTK command compression** — bash output filtered (60–90% reduction)
-- **Model-based routing** — existing cost reduction (70–90%)
-- **Response compression** — LLM outputs condensed (60–75% reduction)
-- **Unified dashboard** — `llm_gain` shows all layers
+See [CHANGELOG.md](CHANGELOG.md) for full version history.
 
 ## How It Works
 
