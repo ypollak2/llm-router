@@ -663,6 +663,18 @@ def main() -> None:
     except Exception:
         pass  # Graceful failure — never break session-end
 
+    # Check for service configuration changes (periodic scan)
+    try:
+        from llm_router.auto_profile import should_rescan, rescan_and_update
+        if should_rescan():
+            updated, changes = rescan_and_update()
+            if updated and changes:
+                changes_str = ", ".join(changes)
+                config_note = f"\n  🔄 Profile updated: {changes_str}"
+                summary = summary.rstrip("─" * WIDTH) + config_note + "\n" + "─" * WIDTH
+    except Exception:
+        pass  # Graceful failure — never break session-end
+
     print(json.dumps({"systemMessage": summary}))
 
     # Update the session-start snapshot AFTER the delta has been reported,

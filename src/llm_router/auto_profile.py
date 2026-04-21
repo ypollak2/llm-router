@@ -9,6 +9,8 @@ This module:
 
 from __future__ import annotations
 
+import json
+import time
 from pathlib import Path
 from typing import TypedDict
 
@@ -21,6 +23,8 @@ from llm_router.logging import get_logger
 log = get_logger("llm_router.auto_profile")
 
 PROFILE_PATH = Path.home() / ".llm-router" / "profile.yaml"
+PROFILE_CACHE_PATH = Path.home() / ".llm-router" / "profile_cache.json"
+SCAN_INTERVAL_SECONDS = 3600  # Rescan every hour
 
 
 class ServiceDetection(TypedDict, total=False):
@@ -253,6 +257,114 @@ def auto_generate_profile() -> Path:
     detected = detect_services()
     yaml = generate_profile_yaml(detected)
     return save_profile(yaml)
+
+
+def should_rescan() -> bool:
+    """Check if enough time has passed to rescan services.
+
+    Returns:
+        True if last scan was >1 hour ago, False otherwise
+    """
+    if not PROFILE_CACHE_PATH.exists():
+        return True
+
+    try:
+        cache = json.loads(PROFILE_CACHE_PATH.read_text())
+        last_scan = cache.get("last_scan", 0)
+        now = time.time()
+        return (now - last_scan) > SCAN_INTERVAL_SECONDS
+    except Exception:
+        return True
+
+
+def save_detection_cache(detected: ServiceDetection) -> None:
+    """Cache detection results with timestamp for later comparison.
+
+    Args:
+        detected: ServiceDetection from detect_services()
+    """
+    PROFILE_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    cache = {
+        "last_scan": time.time(),
+        "detected": dict(detected),
+    }
+    PROFILE_CACHE_PATH.write_text(json.dumps(cache, indent=2))
+
+
+def detect_changes() -> tuple[bool, list[str]]:
+    """Compare current detection with cached detection.
+
+    Returns:
+        (has_changes, list of change descriptions)
+    """
+    if not PROFILE_CACHE_PATH.exists():
+        return False, []
+
+    try:
+        cache = json.loads(PROFILE_CACHE_PATH.read_text())
+        old_detected = cache.get("detected", {})
+    except Exception:
+        return False, []
+
+    new_detected = detect_services()
+    changes = []
+
+    # Check each service
+    if old_detected.get("claude_subscription") != new_detected.get("claude_subscription"):
+        status = "enabled" if new_detected.get("claude_subscription") else "disabled"
+        changes.append(f"Claude subscription: {status}")
+
+    if old_detected.get("ollama_available") != new_detected.get("ollama_available"):
+        status = "available" if new_detected.get("ollama_available") else "unavailable"
+        changes.append(f"Ollama: {status}")
+
+    if old_detected.get("codex_available") != new_detected.get("codex_available"):
+        status = "available" if new_detected.get("codex_available") else "unavailable"
+        changes.append(f"Codex CLI: {status}")
+
+    if old_detected.get("gemini_cli_available") != new_detected.get("gemini_cli_available"):
+        status = "available" if new_detected.get("gemini_cli_available") else "unavailable"
+        changes.append(f"Gemini CLI: {status}")
+
+    # Check API keys (show only count, not actual keys)
+    old_apis = sum(1 for k in old_detected if k.endswith("_available") and old_detected[k])
+    new_apis = sum(1 for k in new_detected if k.endswith("_available") and new_detected[k])
+    if old_apis != new_apis:
+        changes.append(f"API keys: {old_apis} → {new_apis} configured")
+
+    # Check quotas
+    old_claude_quota = old_detected.get("claude_quota_remaining", 0)
+    new_claude_quota = new_detected.get("claude_quota_remaining", 0)
+    quota_changed = abs(old_claude_quota - new_claude_quota) > 5  # >5% change
+    if quota_changed:
+        changes.append(f"Claude quota: {old_claude_quota:.0f}% → {new_claude_quota:.0f}%")
+
+    old_gemini_quota = old_detected.get("gemini_cli_quota", {}).get("count", 0)
+    new_gemini_quota = new_detected.get("gemini_cli_quota", {}).get("count", 0)
+    if old_gemini_quota != new_gemini_quota:
+        changes.append(f"Gemini CLI quota: {old_gemini_quota} → {new_gemini_quota} used today")
+
+    return len(changes) > 0, changes
+
+
+def rescan_and_update() -> tuple[bool, list[str]]:
+    """Rescan services and update profile if changes detected.
+
+    Returns:
+        (profile_updated, list of changes)
+    """
+    has_changes, changes = detect_changes()
+
+    if has_changes:
+        log.info(f"Service configuration changed: {', '.join(changes)}")
+        detected = detect_services()
+        yaml = generate_profile_yaml(detected)
+        save_profile(yaml)
+        save_detection_cache(detected)
+        return True, changes
+
+    save_detection_cache(detect_services())
+    return False, []
 
 
 def display_detected_services(detected: ServiceDetection) -> str:
