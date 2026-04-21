@@ -266,12 +266,12 @@ class TestExpiryTracker:
         assert is_expired is True
 
     def test_is_token_expired_invalid_token(self):
-        """is_token_expired() returns False for invalid tokens (assume valid)."""
+        """is_token_expired() returns True for invalid tokens (force refresh for safety)."""
         is_expired = ExpiryTracker.is_token_expired("invalid", buffer_seconds=0)
-        assert is_expired is False  # Can't determine, assume valid
+        assert is_expired is True  # Can't determine, force refresh (safety-first)
 
     def test_is_token_expired_no_exp_claim(self):
-        """is_token_expired() returns False when JWT has no exp claim."""
+        """is_token_expired() returns True when JWT has no exp claim (force refresh for safety)."""
         # Create JWT without exp
         header = {"alg": "HS256"}
         payload = {"sub": "test"}  # No exp
@@ -284,4 +284,4 @@ class TestExpiryTracker:
 
         token = f"{encode(header)}.{encode(payload)}.signature"
         is_expired = ExpiryTracker.is_token_expired(token)
-        assert is_expired is False  # No exp → assume valid
+        assert is_expired is True  # No exp → force refresh (safety-first)
