@@ -62,16 +62,17 @@ _CHEAP_MODELS: frozenset[str] = frozenset({
 ROUTING_TABLE: dict[tuple[RoutingProfile, TaskType], list[str]] = {
     # ═══════════════════════════════════════════════════════════════════
     # BUDGET — cheapest models, good enough for most tasks
+    # FREE-FIRST: Ollama → Codex → cheap APIs (never Claude for budget)
     # ═══════════════════════════════════════════════════════════════════
-    # BUDGET chains: Haiku leads so the pattern is always
-    #   (with Ollama)    Ollama → Haiku → cheap externals
-    #   (without Ollama) Haiku  → cheap externals
+    # BUDGET chains: Free/cheap first, only Claude Haiku as last resort
     (RoutingProfile.BUDGET, TaskType.QUERY): [
-        "anthropic/claude-haiku-4-5-20251001",
-        "gemini/gemini-2.5-flash",
-        "groq/llama-3.3-70b-versatile",
-        "deepseek/deepseek-chat",
-        "openai/gpt-4o-mini",
+        "ollama/qwen2.5:1.5b",          # fastest free model for simple queries
+        "codex/gpt-4o-mini",            # free via OpenAI subscription (injected dynamically)
+        "gemini/gemini-2.5-flash",      # $0.00076/1M — ultra-cheap
+        "groq/llama-3.3-70b-versatile", # $0.0001/1M — cheapest cloud option
+        "deepseek/deepseek-chat",       # $0.0007/1M
+        "openai/gpt-4o-mini",           # $0.00015/1M
+        "anthropic/claude-haiku-4-5-20251001",  # last resort only
     ],
     (RoutingProfile.BUDGET, TaskType.RESEARCH): [
         "perplexity/sonar",               # web-grounded first
@@ -80,25 +81,31 @@ ROUTING_TABLE: dict[tuple[RoutingProfile, TaskType], list[str]] = {
         "openai/gpt-4o-mini",
     ],
     (RoutingProfile.BUDGET, TaskType.GENERATE): [
-        "anthropic/claude-haiku-4-5-20251001",
-        "gemini/gemini-2.5-flash",
-        "deepseek/deepseek-chat",
+        "ollama/qwen2.5:1.5b",          # fast local inference
+        "codex/gpt-4o-mini",            # free via OpenAI subscription
+        "gemini/gemini-2.5-flash",      # $0.00076/1M
+        "deepseek/deepseek-chat",       # $0.0007/1M
         "mistral/mistral-small-latest",
-        "openai/gpt-4o-mini",
+        "openai/gpt-4o-mini",           # $0.00015/1M
+        "anthropic/claude-haiku-4-5-20251001",  # last resort only
     ],
     (RoutingProfile.BUDGET, TaskType.ANALYZE): [
-        "anthropic/claude-haiku-4-5-20251001",
-        "gemini/gemini-2.5-flash",
-        "deepseek/deepseek-reasoner",
-        "groq/llama-3.3-70b-versatile",
-        "openai/gpt-4o-mini",
+        "ollama/qwen3.5:latest",        # free local
+        "codex/gpt-4o-mini",            # free via OpenAI subscription
+        "gemini/gemini-2.5-flash",      # $0.00076/1M
+        "deepseek/deepseek-reasoner",   # $0.0014/1M — best reasoning at budget tier
+        "groq/llama-3.3-70b-versatile", # $0.0001/1M
+        "openai/gpt-4o-mini",           # $0.00015/1M
+        "anthropic/claude-haiku-4-5-20251001",  # last resort only
     ],
     (RoutingProfile.BUDGET, TaskType.CODE): [
-        "anthropic/claude-haiku-4-5-20251001",
-        "deepseek/deepseek-chat",
-        "gemini/gemini-2.5-flash",
-        "groq/llama-3.3-70b-versatile",
-        "openai/gpt-4o-mini",
+        "ollama/qwen3.5:latest",        # free local
+        "codex/gpt-4o-mini",            # free via OpenAI subscription
+        "deepseek/deepseek-chat",       # $0.0007/1M — decent code
+        "gemini/gemini-2.5-flash",      # $0.00076/1M
+        "groq/llama-3.3-70b-versatile", # $0.0001/1M
+        "openai/gpt-4o-mini",           # $0.00015/1M
+        "anthropic/claude-haiku-4-5-20251001",  # last resort only
     ],
     (RoutingProfile.BUDGET, TaskType.IMAGE): [
         "fal/flux-dev",
@@ -118,23 +125,24 @@ ROUTING_TABLE: dict[tuple[RoutingProfile, TaskType], list[str]] = {
 
     # ═══════════════════════════════════════════════════════════════════
     # BALANCED — quality/cost sweet spot
-    # Claude models lead: they're "free" under a Pro subscription.
-    # External models are fallbacks or activated under quota pressure.
+    # FREE-FIRST CHAIN: Protect Claude subscription by default
+    # Ollama (free local) → Codex (free via OpenAI sub) → Gemini Pro → Claude
     # RESEARCH is the exception: Claude can't browse the web, so
-    # Perplexity (web-grounded) stays first regardless of pressure.
+    # Perplexity (web-grounded) stays first regardless.
     # ═══════════════════════════════════════════════════════════════════
-    # BALANCED chains: Sonnet → paid externals → Haiku (last resort cheap Claude)
+    # BALANCED chains: Ollama (free) → Codex (free) → Gemini Pro → Claude (fallback)
+    # This protects your Claude subscription limits by using free/cheap alternatives first.
     # Codex (free via OpenAI sub) is injected dynamically by router.py when
     # is_codex_available() — it cannot be in the static table since it routes
     # through codex_agent.run_codex(), not LiteLLM.
     (RoutingProfile.BALANCED, TaskType.QUERY): [
-        "anthropic/claude-sonnet-4-6",
-        "gemini/gemini-2.5-pro",        # $0.01/1M — moved up before DeepSeek; Codex injected before this
-        "deepseek/deepseek-chat",       # quality 1.0, $0.0007 — cheaper fallback
-        "openai/gpt-4o",                # $0.03/1M — more expensive, last paid resort
-        "mistral/mistral-large-latest",
+        "ollama/qwen3.5:latest",        # free local inference — try first
+        "codex/gpt-4o",                 # free via OpenAI subscription (injected dynamically)
+        "gemini/gemini-2.5-pro",        # $0.015/1M — cheap, high quality
+        "deepseek/deepseek-chat",       # $0.0007/1M — ultra-cheap fallback
+        "openai/gpt-4o",                # $0.03/1M — more expensive
+        "anthropic/claude-sonnet-4-6",  # fallback only — protects subscription
         "anthropic/claude-haiku-4-5-20251001",
-        "ollama/qwen3.5:32b",           # free local; auto-promoted to first in CC mode
     ],
     (RoutingProfile.BALANCED, TaskType.RESEARCH): [
         "perplexity/sonar-pro",       # web-grounded, Claude can't search
@@ -144,29 +152,32 @@ ROUTING_TABLE: dict[tuple[RoutingProfile, TaskType], list[str]] = {
         "openai/gpt-4o",
     ],
     (RoutingProfile.BALANCED, TaskType.GENERATE): [
-        "anthropic/claude-sonnet-4-6",
-        "gemini/gemini-2.5-pro",        # $0.01/1M — moved up before DeepSeek; Codex injected before this
-        "deepseek/deepseek-chat",       # quality 1.0 for generation, $0.0007 — cheaper fallback
-        "openai/gpt-4o",                # $0.03/1M — more expensive, last paid resort
+        "ollama/qwen3.5:latest",        # free local inference — try first
+        "codex/gpt-4o",                 # free via OpenAI subscription (injected dynamically)
+        "gemini/gemini-2.5-pro",        # $0.015/1M — good quality for generation
+        "deepseek/deepseek-chat",       # $0.0007/1M — ultra-cheap fallback
+        "openai/gpt-4o",                # $0.03/1M — more expensive
         "cohere/command-r-plus",
+        "anthropic/claude-sonnet-4-6",  # fallback only — protects subscription
         "anthropic/claude-haiku-4-5-20251001",
-        "ollama/qwen3.5:32b",           # free local; auto-promoted to first in CC mode
     ],
     (RoutingProfile.BALANCED, TaskType.ANALYZE): [
-        "anthropic/claude-sonnet-4-6",
-        "gemini/gemini-2.5-pro",        # $0.01/1M — moved up before DeepSeek; Codex injected before this
-        "deepseek/deepseek-reasoner",   # reasoning model, $0.0014 — cheaper fallback
-        "openai/gpt-4o",                # $0.03/1M — more expensive, last paid resort
+        "ollama/qwen3.5:latest",        # free local inference — try first
+        "codex/gpt-4o",                 # free via OpenAI subscription (injected dynamically)
+        "gemini/gemini-2.5-pro",        # $0.015/1M — good for analysis
+        "deepseek/deepseek-reasoner",   # reasoning model, $0.0014 — excellent analysis, cheap
+        "openai/gpt-4o",                # $0.03/1M — more expensive
+        "anthropic/claude-sonnet-4-6",  # fallback only — protects subscription
         "anthropic/claude-haiku-4-5-20251001",
-        "ollama/qwen3.5:32b",           # free local; auto-promoted to first in CC mode
     ],
     (RoutingProfile.BALANCED, TaskType.CODE): [
-        "anthropic/claude-sonnet-4-6",
-        "gemini/gemini-2.5-pro",        # $0.01/1M — moved up before DeepSeek; Codex injected before this
-        "deepseek/deepseek-chat",       # quality 1.0, $0.0007 — cheaper fallback
-        "openai/gpt-4o",                # $0.03/1M — more expensive, last paid resort
+        "ollama/qwen3.5:latest",        # free local inference — try first
+        "codex/gpt-4o",                 # free via OpenAI subscription (injected dynamically)
+        "gemini/gemini-2.5-pro",        # $0.015/1M — capable for code generation
+        "deepseek/deepseek-chat",       # $0.0007/1M — ultra-cheap, decent code quality
+        "openai/gpt-4o",                # $0.03/1M — more expensive
+        "anthropic/claude-sonnet-4-6",  # fallback only — protects subscription
         "anthropic/claude-haiku-4-5-20251001",
-        "ollama/qwen3.5:32b",           # free local; auto-promoted to first in CC mode
     ],
     (RoutingProfile.BALANCED, TaskType.IMAGE): [
         "fal/flux-pro",
