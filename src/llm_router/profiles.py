@@ -30,8 +30,6 @@ log = get_logger("llm_router.profiles")
 _CLAUDE_CHEAP_MODELS: frozenset[str] = frozenset({
     "anthropic/claude-sonnet-4-6",
     "anthropic/claude-haiku-4-5-20251001",
-    "claude-sonnet-4-6",
-    "claude-haiku-4-5-20251001",
 })
 
 # Free external models (Codex uses OpenAI subscription, Gemini CLI uses Google One AI Pro).
