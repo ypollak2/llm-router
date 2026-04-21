@@ -1389,69 +1389,36 @@ def main() -> None:
         # Save classification so the next turn can inherit if it's a continuation
         _save_last_route(session_id, task_type, complexity, tool)
 
-    # ── Claude Code subscription mode ─────────────────────────────────────────
-    # Trigger inline OAuth refresh if usage data is stale (side-effect of _get_pressure).
+    # ── Claude Code routing: Always use MCP tools (free-first chain) ──────────
+    # v6.11.1: Prioritize Ollama → Codex → OpenAI → Gemini over subscription Sonnet
+    # This ensures maximum cost savings by routing through available models first.
     #
-    # NOTE: /model slash commands cannot be executed by the model from hook context
-    # (neither interactive nor -p mode), so subscription tier routing via /model is
-    # disabled. All tasks route through MCP tools (free-first chain).
-    #
-    # Set LLM_ROUTER_MODEL_SWITCH=true to re-enable /model directives once Claude Code
-    # gains the ability to execute slash commands from hook context.
-    _MODEL_SWITCH = os.environ.get("LLM_ROUTER_MODEL_SWITCH", "").lower() in ("1", "true", "yes")
-
+    # Even in subscription mode, MCP tools handle fallback to Sonnet if needed.
+    # Ollama can be used for free; Codex is free tier; APIs as fallbacks.
+    
+    requested_complexity = None
+    _pressure_suffix = ""
+    
     if _CC_MODE:
         pressure = _get_pressure()
         requested_complexity = complexity  # Save original before pressure downgrade
         complexity, _pressure_suffix = _apply_pressure_downgrade(complexity, pressure)
-    else:
-        requested_complexity = None
-        if _MODEL_SWITCH:
-            session_pct = pressure["session"]
-            sonnet_pct  = pressure["sonnet"]
-            weekly_pct  = pressure["weekly"]
-            all_external = weekly_pct >= 0.95 or session_pct >= 0.95
-            use_external = {
-                "simple":   all_external or sonnet_pct >= 0.95,
-                "moderate": all_external or sonnet_pct >= 0.95,
-                "complex":  all_external,
-            }
-            if not use_external.get(complexity, False):
-                _SUBSCRIPTION_MODELS = {
-                    # simple → None: route via llm_* MCP tool (Ollama-first chain) to preserve
-                    #   subscription quota. Ollama handles simple tasks for free; Haiku is the
-                    #   fallback inside the MCP tool if Ollama is unavailable.
-                    # moderate → None: passthrough — Sonnet handles directly, no model switch.
-                    # complex → Opus: genuinely needs top-tier reasoning.
-                    "simple":   None,
-                    "moderate": None,
-                    "complex":  "claude-opus-4-6",
-                }
-                target = _SUBSCRIPTION_MODELS.get(complexity)
-                pressure_summary = (
-                    f"session={session_pct:.0%} sonnet={sonnet_pct:.0%} weekly={weekly_pct:.0%}"
+        
+        # Only override routing to /model if pressure is CRITICAL (>95%)
+        # Otherwise always use MCP tools which have better cost optimization
+        if pressure.get("session_pct", 0) >= 95 or pressure.get("weekly_pct", 0) >= 95:
+            # Critical pressure: use direct subscription fallback
+            if complexity == "complex":
+                # Complex tasks truly need Opus
+                directive = (
+                    f"⚡ SUBSCRIPTION OVERRIDE: {task_type}/{complexity} → /model claude-opus-4-6"
+                    f" [CRITICAL PRESSURE: session={pressure.get('session_pct', 0):.0%}] "
+                    f"| Handle directly (subscription included). Do NOT call llm_* tools."
                 )
-                if target is None:
-                    # simple/moderate + no pressure → route via MCP tool (Ollama-first)
-                    directive = (
-                        f"⚡ MANDATORY ROUTE: {task_type}/{complexity} → call {tool}(complexity=\"{complexity}\")"
-                        f"{_pressure_suffix}"
-                        f" [CC-MODE {pressure_summary} via {method}]"
-                        f" | FORBIDDEN: self-answer · Agent subagents · WebSearch · WebFetch"
-                        f" | Call the tool NOW as your ONLY action."
-                    )
-                else:
-                    directive = (
-                        f"⚡ MANDATORY ROUTE: {task_type}/{complexity} → /model {target} (subscription)"
-                        f" [CC-MODE {pressure_summary} via {method}]"
-                        f" | Handle directly. Subscription = no API cost."
-                        f" Do NOT call external llm_* tools."
-                    )
-                _debug_log(f"[INVOCATION {invocation_id:.3f}] EARLY EXIT: CC-MODE pressure exceeded")
+                _debug_log(f"[INVOCATION {invocation_id:.3f}] CRITICAL PRESSURE: routing to Opus")
                 json.dump({"hookSpecificOutput": {"hookEventName": "UserPromptSubmit",
                                                    "contextForAgent": _prior_violation_notice(previous_unrouted) + directive}}, sys.stdout)
                 sys.exit(0)
-            # Pressure exceeded → fall through to external routing
 
     # ── Activation mode (shadow / suggest / enforce) ──────────────────────────
     # Priority: env var > .llm-router.yml repo config > ~/.llm-router/.env > "hard"
