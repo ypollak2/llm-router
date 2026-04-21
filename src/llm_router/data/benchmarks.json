@@ -1,11 +1,11 @@
 {
-  "version": 2,
-  "generated_at": "2026-03-30T15:30:35.036737+00:00",
+  "version": 3,
+  "generated_at": "2026-04-06T07:17:04.175260+00:00",
   "sources": {
-    "lmsys_fetched_at": "2026-03-30T15:30:35.036737+00:00",
-    "aider_fetched_at": "2026-03-30T15:30:35.036737+00:00",
+    "lmsys_fetched_at": "2026-04-06T07:17:04.175260+00:00",
+    "aider_fetched_at": "2026-04-06T07:17:04.175260+00:00",
     "huggingface_fetched_at": null,
-    "litellm_fetched_at": "2026-03-30T15:30:35.036737+00:00"
+    "litellm_fetched_at": "2026-04-06T07:17:04.175260+00:00"
   },
   "raw_scores": {
     "anthropic/claude-haiku-4-5-20251001": {
@@ -67,8 +67,8 @@
   },
   "task_scores": {
     "code": {
-      "deepseek/deepseek-chat": 0.9995264404104183,
       "deepseek/deepseek-reasoner": 0.9995264404104183,
+      "deepseek/deepseek-chat": 0.9995264404104183,
       "claude-haiku-4-5-20251001": 0.8208366219415943,
       "anthropic/claude-sonnet-4-6": 0.8030836621941595,
       "openai/gpt-4o": 0.774281132875887,
@@ -81,8 +81,8 @@
       "anthropic/claude-haiku-4-5-20251001": 0.29624999999999996
     },
     "analyze": {
-      "deepseek/deepseek-chat": 0.9995264404104183,
       "deepseek/deepseek-reasoner": 0.9995264404104183,
+      "deepseek/deepseek-chat": 0.9995264404104183,
       "openai/gpt-4o-mini": 0.9223864836325237,
       "openai/gpt-4o": 0.8615192411711805,
       "claude-haiku-4-5-20251001": 0.8208366219415943,
@@ -95,8 +95,8 @@
       "anthropic/claude-haiku-4-5-20251001": 0.0
     },
     "query": {
-      "deepseek/deepseek-chat": 0.9995264404104183,
       "deepseek/deepseek-reasoner": 0.9995264404104183,
+      "deepseek/deepseek-chat": 0.9995264404104183,
       "openai/gpt-4o-mini": 0.9223864836325237,
       "openai/gpt-4o": 0.8615192411711805,
       "claude-haiku-4-5-20251001": 0.8208366219415943,
@@ -109,8 +109,8 @@
       "anthropic/claude-haiku-4-5-20251001": 0.0
     },
     "generate": {
-      "deepseek/deepseek-chat": 0.9995264404104183,
       "deepseek/deepseek-reasoner": 0.9995264404104183,
+      "deepseek/deepseek-chat": 0.9995264404104183,
       "openai/gpt-4o-mini": 0.916842661034847,
       "openai/gpt-4o": 0.8807742236136143,
       "anthropic/claude-sonnet-4-6": 0.8315480888487992,
@@ -123,8 +123,8 @@
       "anthropic/claude-haiku-4-5-20251001": 0.0
     },
     "research": {
-      "deepseek/deepseek-chat": 0.9995264404104183,
       "deepseek/deepseek-reasoner": 0.9995264404104183,
+      "deepseek/deepseek-chat": 0.9995264404104183,
       "openai/gpt-4o-mini": 0.9301478352692715,
       "openai/gpt-4o": 0.8345622657517737,
       "claude-haiku-4-5-20251001": 0.8208366219415943,
@@ -140,8 +140,8 @@
   "tiers": {
     "code": {
       "premium": [
-        "deepseek/deepseek-chat",
         "deepseek/deepseek-reasoner",
+        "deepseek/deepseek-chat",
         "claude-haiku-4-5-20251001"
       ],
       "balanced": [
@@ -160,8 +160,8 @@
     },
     "analyze": {
       "premium": [
-        "deepseek/deepseek-chat",
         "deepseek/deepseek-reasoner",
+        "deepseek/deepseek-chat",
         "openai/gpt-4o-mini"
       ],
       "balanced": [
@@ -180,8 +180,8 @@
     },
     "query": {
       "premium": [
-        "deepseek/deepseek-chat",
         "deepseek/deepseek-reasoner",
+        "deepseek/deepseek-chat",
         "openai/gpt-4o-mini"
       ],
       "balanced": [
@@ -200,8 +200,8 @@
     },
     "generate": {
       "premium": [
-        "deepseek/deepseek-chat",
         "deepseek/deepseek-reasoner",
+        "deepseek/deepseek-chat",
         "openai/gpt-4o-mini"
       ],
       "balanced": [
@@ -220,8 +220,8 @@
     },
     "research": {
       "premium": [
-        "deepseek/deepseek-chat",
         "deepseek/deepseek-reasoner",
+        "deepseek/deepseek-chat",
         "openai/gpt-4o-mini"
       ],
       "balanced": [
