@@ -309,6 +309,27 @@ async def _build_and_filter_chain(
             if m not in _seen and not _seen.add(m)  # type: ignore[func-returns-value]
         ]
 
+        # ── Quota-balanced reordering (v7.1.0) ─────────────────────────────────
+        # QUOTA_BALANCED: dynamically reorder chain to balance usage across
+        # Claude, Gemini CLI, and Codex subscription providers.
+        if profile == RoutingProfile.QUOTA_BALANCED:
+            try:
+                from llm_router.quota_balance import (
+                    get_provider_pressures,
+                    get_balanced_provider_order,
+                    reorder_chain_by_providers,
+                )
+                pressures = await get_provider_pressures()
+                order = get_balanced_provider_order(pressures)
+                models_to_try = reorder_chain_by_providers(models_to_try, order)
+                log.debug(
+                    "QUOTA_BALANCED reordering: pressures=%s, order=%s",
+                    {k: f"{v:.1%}" for k, v in pressures.items()},
+                    order,
+                )
+            except Exception as _quota_err:
+                log.warning("QUOTA_BALANCED reordering failed: %s", _quota_err)
+
     return models_to_try
 
 
@@ -742,6 +763,20 @@ async def _dispatch_model_loop(
 
             tracker.record_success(provider)
             await cost.log_usage(response, task_type, profile, correlation_id=correlation_id)
+
+            # Record Codex/Gemini CLI requests for quota tracking (v7.1.0)
+            if provider == "codex":
+                try:
+                    from llm_router.quota_balance import record_codex_request
+                    record_codex_request(config.codex_daily_limit)
+                except Exception as _quota_err:
+                    log.debug("Failed to record Codex request: %s", _quota_err)
+            elif provider == "gemini_cli":
+                try:
+                    from llm_router.gemini_cli_quota import record_gemini_request
+                    record_gemini_request()
+                except Exception as _quota_err:
+                    log.debug("Failed to record Gemini CLI request: %s", _quota_err)
 
             # Record spend for real-time session spend meter (v4.0)
             try:

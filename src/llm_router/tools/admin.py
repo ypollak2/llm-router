@@ -985,6 +985,73 @@ async def llm_approve_route(
     )
 
 
+async def llm_quota_status() -> str:
+    """Show quota balance across Claude, Gemini CLI, and Codex subscriptions.
+
+    Monitors three subscription providers to help you understand which quota
+    is being exhausted, and make routing decisions accordingly.
+
+    The QUOTA_BALANCED profile uses this data to dynamically reorder the
+    routing chain — keeping usage balanced across all three subscriptions.
+
+    Returns:
+        Formatted quota status with usage percentages and route recommendations.
+    """
+    try:
+        from llm_router.quota_balance import get_provider_pressures, get_balanced_provider_order
+
+        pressures = await get_provider_pressures()
+        order = get_balanced_provider_order(pressures)
+
+        # Format status table
+        rows = []
+        rows.append("Provider       │ Usage    │ Route Priority")
+        rows.append("───────────────┼──────────┼────────────────")
+
+        provider_info = {
+            "Codex": ("codex", pressures.get("codex", 0.0)),
+            "Claude": ("claude", pressures.get("claude", 0.0)),
+            "Gemini CLI": ("gemini_cli", pressures.get("gemini_cli", 0.0)),
+        }
+
+        for i, (label, provider_key) in enumerate(provider_info.items()):
+            provider, pressure = provider_key
+            pct_str = f"{pressure:.0%}".rjust(5)
+            bar = "█" * int(pressure * 10) + "░" * (10 - int(pressure * 10))
+            priority_icon = "1st ← next" if order[0] == provider else ""
+            if order[1] == provider:
+                priority_icon = "2nd" if not priority_icon else "2nd (in band)"
+            elif order[2] == provider and not priority_icon:
+                priority_icon = "3rd (in band)"
+
+            rows.append(f"{label:14} │ {bar} {pct_str} │ {priority_icon}")
+
+        max_p = max(pressures.values())
+        min_p = min(pressures.values())
+        spread = max_p - min_p
+
+        status_lines = [
+            "",
+            "\n".join(rows),
+            "",
+            f"Balance: spread={spread:.0%} — {'routing to {0} (exceeds ±10% band)'.format(order[0].upper()) if spread > 0.10 else 'all providers in ±10% band'}",
+        ]
+
+        # Reset times
+        from datetime import datetime, timezone, timedelta
+
+        now = datetime.now(timezone.utc)
+        midnight_today = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        midnight_next = midnight_today + timedelta(days=1)
+        minutes_to_reset = (midnight_next - now).total_seconds() / 60
+
+        status_lines.append(f"Reset: Codex and Gemini at midnight UTC ({minutes_to_reset:.0f}m)")
+
+        return "\n".join(status_lines)
+    except Exception as e:
+        return f"Quota tracking unavailable: {e}"
+
+
 async def llm_budget() -> str:
     """Show real-time budget pressure for all configured providers (v5.0+).
 
@@ -1443,6 +1510,8 @@ def register(mcp, should_register=None) -> None:
         mcp.tool()(llm_session_spend)
     if gate("llm_approve_route"):
         mcp.tool()(llm_approve_route)
+    if gate("llm_quota_status"):
+        mcp.tool()(llm_quota_status)
     if gate("llm_budget"):
         mcp.tool()(llm_budget)
 

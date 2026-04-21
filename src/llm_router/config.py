@@ -132,6 +132,10 @@ class RouterConfig(BaseSettings):
     quality_mode: QualityMode = QualityMode.BALANCED
     min_model: str = "haiku"                # floor: never route below this
 
+    # ── Quota-balanced routing settings (v7.1.0) ──
+    # Used by QUOTA_BALANCED profile to track Codex daily quota independently.
+    codex_daily_limit: int = 1000           # Codex free tier = 1000 requests/day
+
     # ── Team Dashboard settings (v3.0) ──
     # llm_router_team_endpoint: webhook URL for push notifications.
     # Channel auto-detected: hooks.slack.com → Slack, discord.com → Discord,

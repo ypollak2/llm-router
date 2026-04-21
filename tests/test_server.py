@@ -46,7 +46,7 @@ def test_all_tools_registered():
         "llm_team_report", "llm_team_push",
         "llm_policy", "llm_digest", "llm_benchmark",
         "llm_reroute", "llm_session_spend", "llm_approve_route",
-        "llm_budget", "llm_share_profile", "llm_import_profile",
+        "llm_budget", "llm_quota_status", "llm_share_profile", "llm_import_profile",
         "llm_model_eval", "llm_model_usage", "llm_model_export",
         "agoragentic_task", "agoragentic_browse", "agoragentic_wallet", "agoragentic_status",
     }

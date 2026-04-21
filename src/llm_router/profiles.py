@@ -403,8 +403,11 @@ def get_model_chain(
     so Perplexity stays first (the only web-grounded option) while still
     demoting Claude models when quota is tight.
 
+    QUOTA_BALANCED uses BALANCED as its base chain; the final reordering is
+    applied in _build_and_filter_chain() by quota_balance.reorder_chain_by_providers().
+
     Args:
-        profile: The routing profile (budget/balanced/premium).
+        profile: The routing profile (budget/balanced/premium/quota_balanced).
         task_type: The task type.
         failure_rates: Pre-fetched dict of ``{model: failure_rate}`` from
             ``cost.get_model_failure_rates()``. Passed into benchmark ordering
@@ -418,7 +421,9 @@ def get_model_chain(
     Returns:
         Ordered list of model IDs to try, best-fit first.
     """
-    static_chain = ROUTING_TABLE.get((profile, task_type), ["anthropic/claude-sonnet-4-6"])
+    # QUOTA_BALANCED uses BALANCED as base chain — reordering happens in router.py
+    profile_for_lookup = RoutingProfile.BALANCED if profile == RoutingProfile.QUOTA_BALANCED else profile
+    static_chain = ROUTING_TABLE.get((profile_for_lookup, task_type), ["anthropic/claude-sonnet-4-6"])
 
     # Media tasks: no benchmark data, no pressure reordering — use static order.
     if task_type in {TaskType.IMAGE, TaskType.VIDEO, TaskType.AUDIO}:

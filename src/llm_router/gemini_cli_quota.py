@@ -271,3 +271,7 @@ def log_gemini_request() -> None:
         _save_quota_cache(local)
     except Exception:
         pass  # Silently fail
+
+
+# Alias for quota_balance.py compatibility (v7.1.0)
+record_gemini_request = log_gemini_request

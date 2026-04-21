@@ -94,6 +94,7 @@ class RoutingProfile(str, Enum):
     BUDGET = "budget"       # Cheapest viable models
     BALANCED = "balanced"   # Quality/cost sweet spot (default)
     PREMIUM = "premium"     # Best available, cost secondary
+    QUOTA_BALANCED = "quota_balanced"  # Balance usage across Claude/Gemini CLI/Codex
 
 
 class Tier(str, Enum):
