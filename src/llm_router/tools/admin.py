@@ -1037,6 +1037,15 @@ async def llm_quota_status() -> str:
             f"Balance: spread={spread:.0%} — {'routing to {0} (exceeds ±10% band)'.format(order[0].upper()) if spread > 0.10 else 'all providers in ±10% band'}",
         ]
 
+        # Show model routing priorities
+        model_map = {
+            "codex": "gpt-4o / gpt-5.4",
+            "claude": "claude-sonnet / claude-opus",
+            "gemini_cli": "gemini-pro",
+        }
+        priority_models = " → ".join([f"{p} ({model_map.get(p, p)})" for p in order])
+        status_lines.append(f"Model chain: {priority_models}")
+
         # Reset times
         from datetime import datetime, timezone, timedelta
 

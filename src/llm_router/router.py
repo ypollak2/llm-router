@@ -320,12 +320,23 @@ async def _build_and_filter_chain(
                     reorder_chain_by_providers,
                 )
                 pressures = await get_provider_pressures()
+                old_order = [
+                    "codex" if "codex/" in models_to_try[0] else
+                    "gemini_cli" if "gemini_cli/" in models_to_try[0] else
+                    "claude" if "anthropic/" in models_to_try[0] else
+                    "other"
+                ]
                 order = get_balanced_provider_order(pressures)
                 models_to_try = reorder_chain_by_providers(models_to_try, order)
-                log.debug(
-                    "QUOTA_BALANCED reordering: pressures=%s, order=%s",
-                    {k: f"{v:.1%}" for k, v in pressures.items()},
-                    order,
+
+                # Log priority change with visual indicator
+                spread = max(pressures.values()) - min(pressures.values())
+                in_band = spread <= 0.10
+                log.info(
+                    "🔄 QUOTA_BALANCED: Provider priorities reordered | Spread: %s | Providers: %s | Reason: %s",
+                    f"{spread:.0%}",
+                    " → ".join([f"{p}({pressures[p]:.0%})" for p in order]),
+                    "all balanced (free-first tiebreak)" if in_band else f"imbalanced — prioritize {order[0]}",
                 )
             except Exception as _quota_err:
                 log.warning("QUOTA_BALANCED reordering failed: %s", _quota_err)
@@ -703,7 +714,18 @@ async def _dispatch_model_loop(
             last_error = BudgetExceededError(f"{provider} budget exhausted")
             continue
 
-        await _notify(ctx, "info", f"⏳ {model_name} working...")
+        # Show provider context for QUOTA_BALANCED
+        provider_context = f" [{provider.upper()}]" if profile == RoutingProfile.QUOTA_BALANCED else ""
+        await _notify(ctx, "info", f"⏳ {model_name}{provider_context} working...")
+
+        if profile == RoutingProfile.QUOTA_BALANCED:
+            log.debug(
+                "🧪 QUOTA_BALANCED attempting model: %s (%s) — Attempt %d/%d",
+                model_name,
+                provider.upper(),
+                attempt,
+                len(models_to_try),
+            )
 
         try:
             with traced_span(
@@ -828,10 +850,14 @@ async def _dispatch_model_loop(
                 except Exception as e:
                     log.warning("Failed to log routing decision: %s", e)
 
+            # Enhanced notification showing provider for QUOTA_BALANCED
+            provider_tag = f" [{response.provider.upper()}]" if profile == RoutingProfile.QUOTA_BALANCED else ""
             await _notify(
                 ctx, "info",
-                f"✅ {model_name} — {response.latency_ms:.0f}ms · ${response.cost_usd:.6f}"
+                f"✅ {model_name}{provider_tag} — {response.latency_ms:.0f}ms · ${response.cost_usd:.6f}"
             )
+
+            # Log routing decision with quota context
             route_log.info(
                 "routing_decision",
                 correlation_id=correlation_id,
@@ -843,6 +869,16 @@ async def _dispatch_model_loop(
                 cost_usd=response.cost_usd,
                 latency_ms=response.latency_ms,
             )
+
+            # Additional log for QUOTA_BALANCED to show which provider was selected
+            if profile == RoutingProfile.QUOTA_BALANCED:
+                log.info(
+                    "📊 QUOTA_BALANCED model selected: %s (%s provider) | Cost: $%.6f | Latency: %.0fms",
+                    response.model,
+                    response.provider.upper(),
+                    response.cost_usd,
+                    response.latency_ms,
+                )
             set_span_attributes(
                 route_span,
                 final_model=response.model,
