@@ -1275,6 +1275,36 @@ async def llm_quality_guard(days: int = 7) -> str:
         return f"Quality Guard error: {e}"
 
 
+
+async def llm_model_eval(ctx: Context) -> str:
+    """Evaluate and benchmark all available local and remote models.
+
+    Runs a suite of benchmark tasks (reasoning, code) against each available
+    model (Ollama, Codex, APIs) to determine quality, speed, and accuracy.
+    Results are cached for 7 days and used to optimize routing priorities.
+
+    Can be called manually to force a re-evaluation, or automatically runs
+    once per week during session-end.
+
+    Returns:
+        Formatted evaluation results with quality scores and latency metrics.
+    """
+    from llm_router.model_evaluator import (
+        evaluate_available_models,
+        display_evaluation_results,
+    )
+
+    await ctx.info("Benchmarking models (this may take 30-60 seconds)...")
+
+    try:
+        result = await evaluate_available_models(task_types=["reasoning", "code"])
+
+        output = display_evaluation_results(result)
+        return output
+    except Exception as e:
+        return f"Model evaluation failed: {e}"
+
+
 def register(mcp, should_register=None) -> None:
     """Register management tools with the FastMCP instance.
 
@@ -1316,6 +1346,8 @@ def register(mcp, should_register=None) -> None:
         mcp.tool()(llm_digest)
     if gate("llm_benchmark"):
         mcp.tool()(llm_benchmark)
+    if gate("llm_model_eval"):
+        mcp.tool()(llm_model_eval)
     if gate("llm_session_spend"):
         mcp.tool()(llm_session_spend)
     if gate("llm_approve_route"):

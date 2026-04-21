@@ -126,10 +126,13 @@ def generate_profile_yaml(detected: ServiceDetection) -> str:
     balanced_apis = []
     expensive_apis = []
 
-    # Tier 1: Free local
+    # Tier 1: Free local (prioritized by task type + speed)
     if detected.get("ollama_available"):
-        free_local.append("ollama/qwen3.5:32b")
-        free_local.append("ollama/gemma4:latest")
+        free_local.append("ollama/qwen3.5:latest")      # Primary: best reasoning (Feb 2025)
+        free_local.append("ollama/kimi-k2.6:cloud")     # Code expert: 256K context, autonomous
+        free_local.append("ollama/qwen3-coder-next")    # Code-specialized fallback
+        free_local.append("ollama/qwen2.5:latest")      # Secondary fallback
+        free_local.append("ollama/gemma4:latest")       # Lightweight pre-check
 
     # Tier 2: Free subscriptions
     if detected.get("claude_subscription"):
@@ -381,7 +384,8 @@ def display_detected_services(detected: ServiceDetection) -> str:
 
     output += "🆓 FREE LOCAL (Unlimited)\n"
     if detected.get("ollama_available"):
-        output += "  ✓ Ollama (local models)\n"
+        output += "  ✓ Ollama — Qwen3.5 (primary), Kimi-K2.6 (code expert, 256K context)\n"
+        output += "           Qwen3-Coder (code), Qwen2.5 (fallback), Gemma4 (lightweight)\n"
     else:
         output += "  ✗ Ollama (not running on localhost:11434)\n"
 

@@ -668,9 +668,17 @@ def _extract_category(raw: str) -> str | None:
 
 
 OLLAMA_MODELS = [
-    OLLAMA_MODEL,       # Primary: gemma4 (or env override)
-    "qwen3.5:latest",  # Fallback: smaller
-    "qwen2.5:1.5b",    # Fast fallback: tiny, no thinking mode
+    "qwen3.5:latest",      # Primary: best reasoning (Feb 2025)
+    "qwen3-coder-next",    # Code specialization
+    "qwen2.5:latest",      # Secondary fallback
+    "gemma4:latest",       # Lightweight validation
+]
+
+# Task-specific model selection (code tasks use specialized model)
+OLLAMA_CODE_MODELS = [
+    "kimi-k2.6:cloud",      # Primary: best for code (256K context, autonomous execution)
+    "qwen3-coder-next",     # Secondary: specialized code model
+    "qwen3.5:latest",       # Fallback: general reasoning
 ]
 
 
@@ -679,8 +687,20 @@ def classify_with_ollama(text: str) -> str | None:
 
     Uses the chat API with think=False to disable thinking mode on reasoning
     models (qwen3.5, etc.) — otherwise they waste the token budget on CoT.
+    
+    Automatically uses qwen3-coder-next for code-looking text, qwen3.5 for others.
     """
-    for model in OLLAMA_MODELS:
+    # Detect if this looks like a code task
+    code_indicators = re.compile(
+        r"\b(refactor|debug|implement|fix|bug|function|class|method|test|import|module)\b",
+        re.IGNORECASE
+    )
+    is_code_task = code_indicators.search(text[:500])
+    
+    # Select model priority: code-specialized for code tasks, general for others
+    models_to_try = OLLAMA_CODE_MODELS if is_code_task else OLLAMA_MODELS
+    
+    for model in models_to_try:
         try:
             body = json.dumps({
                 "model": model,

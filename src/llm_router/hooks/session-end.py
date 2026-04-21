@@ -675,6 +675,30 @@ def main() -> None:
     except Exception:
         pass  # Graceful failure — never break session-end
 
+    # Check for model evaluation (7-day TTL — benchmark available models)
+    try:
+        import asyncio
+        from llm_router.model_evaluator import EVAL_CACHE_PATH, EVAL_TTL_SECONDS
+        
+        should_eval = (
+            not EVAL_CACHE_PATH.exists() or 
+            (time.time() - EVAL_CACHE_PATH.stat().st_mtime) > EVAL_TTL_SECONDS
+        )
+        
+        if should_eval:
+            from llm_router.model_evaluator import evaluate_available_models
+            try:
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                loop.run_until_complete(evaluate_available_models(task_types=["reasoning"]))
+                loop.close()
+                eval_note = "\n  📊 Model benchmarks updated (next: 7 days)"
+                summary = summary.rstrip("─" * WIDTH) + eval_note + "\n" + "─" * WIDTH
+            except Exception:
+                pass  # Don't fail session if eval fails
+    except Exception:
+        pass  # Graceful failure
+
     print(json.dumps({"systemMessage": summary}))
 
     # Update the session-start snapshot AFTER the delta has been reported,
