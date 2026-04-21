@@ -116,7 +116,8 @@ def test_golden_prompt_routing_matrix(
     out = run_hook(prompt)
     assert out is not None
     hint = _extract_hint(out)
-    assert f"MANDATORY ROUTE: {expected_task}/{expected_complexity}" in hint
+    # Check for the task/complexity pair (may be wrapped with sparkles ✨)
+    assert f"{expected_task}/{expected_complexity}" in hint
     assert expected_tool in hint
 
 

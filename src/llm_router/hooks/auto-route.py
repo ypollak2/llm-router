@@ -1468,13 +1468,6 @@ def main() -> None:
         _enforce_mode = "hard"
 
     # ── Standard external routing directive ───────────────────────────────────
-    if tool == "llm_route":
-        tool_args = f'complexity_override="{complexity}"'
-    elif tool in ("llm_query", "llm_code", "llm_analyze", "llm_generate"):
-        tool_args = f'complexity="{complexity}"'
-    else:
-        tool_args = ""
-    args_str = f"({tool_args})" if tool_args else ""
     stale_suffix = " [⚠️ STALE USAGE DATA >30min — run llm_check_usage]" if _is_pressure_stale() else ""
 
     # Get selected model for tracking and indicator enhancement
@@ -1511,26 +1504,26 @@ def main() -> None:
     if _enforce_mode == "shadow":
         # Passive observation — no pending state, no blocking
         directive = (
-            f"👁 ROUTING OBSERVATION [{_enforce_mode}]: {task_type}/{complexity} "
-            f"would route to {tool}{args_str} [via {method}{stale_suffix}] "
-            f"(shadow mode — no enforcement)"
+            f"👁 OBSERVATION [{_enforce_mode}]: ✨ {task_type}/{complexity} ✨ "
+            f"would route to {tool} → 🧠 {selected_model} [via {method}{stale_suffix}]"
         )
         indicator = f"👁 {task_type}/{complexity} ✨ {tool} → 🧠 {selected_model}"
         write_pending = False
     elif _enforce_mode == "suggest":
         # Soft hint — pending state written but enforce-route only logs, never blocks
         directive = (
-            f"💡 SUGGESTED ROUTE: {task_type}/{complexity} → consider calling {tool}{args_str} "
-            f"[via {method}{stale_suffix}] | suggest mode: you may answer directly if needed"
+            f"💡 SUGGESTED: ✨ {task_type}/{complexity} ✨ {tool} → 🧠 {selected_model} "
+            f"[via {method}{stale_suffix}] | You may answer directly if preferred"
         )
         indicator = f"💡 {task_type}/{complexity} ✨ {tool} → 🧠 {selected_model}"
         write_pending = True
     else:
         # enforce / hard (default)
         directive = (
-            f"⚡ MANDATORY ROUTE: {task_type}/{complexity} → call {tool}{args_str} [via {method}{stale_suffix}]"
-            f" | FORBIDDEN: self-answer · Agent subagents · WebSearch · WebFetch"
-            f" | Call the tool NOW as your ONLY action. Cheap model output IS your response."
+            f"⚡ MANDATORY ROUTE: ✨ {task_type}/{complexity} ✨ {tool} → 🧠 {selected_model} "
+            f"[via {method}{stale_suffix}] | "
+            f"FORBIDDEN: self-answer · Agent subagents · WebSearch · WebFetch | "
+            f"Call the tool NOW as your ONLY action."
         )
         indicator = f"✨ {task_type}/{complexity} ✨ {tool} → 🧠 {selected_model}"
         write_pending = True
