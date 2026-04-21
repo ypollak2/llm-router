@@ -1,0 +1,6 @@
+
+mcp:
+  servers:
+    llm-router:
+      command: uvx
+      args: [claude-code-llm-router]

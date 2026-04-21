@@ -37,6 +37,9 @@ from llm_router.types import BudgetState, LOCAL_PROVIDERS
 _cache: dict[str, tuple[BudgetState, float]] = {}
 _CACHE_TTL = 60.0  # seconds
 
+# In-flight token reservations per provider
+_pending_tokens: dict[str, int] = {}
+
 _USAGE_JSON = Path.home() / ".llm-router" / "usage.json"
 _ROUTER_DIR = Path.home() / ".llm-router"
 
@@ -91,6 +94,36 @@ async def get_all_budget_states() -> dict[str, BudgetState]:
         p: r if isinstance(r, BudgetState) else _neutral(p)
         for p, r in zip(providers, results)
     }
+
+
+
+def reserve_tokens(provider: str, tokens: int) -> None:
+    """Add estimated tokens to the in-flight reservation for *provider*."""
+    if provider in LOCAL_PROVIDERS:
+        return
+    _pending_tokens[provider] = _pending_tokens.get(provider, 0) + tokens
+
+
+def release_tokens(provider: str, tokens: int) -> None:
+    """Remove tokens from the in-flight reservation (call finished)."""
+    if provider in _pending_tokens:
+        _pending_tokens[provider] = max(0, _pending_tokens[provider] - tokens)
+
+
+def _get_pending_pressure_offset(provider: str) -> float:
+    """Convert pending tokens into a pressure decimal (best-guess).
+    
+    For subscriptions, assumes a session bucket of ~15,000 tokens (conservative).
+    1,500 pending tokens -> +0.10 pressure.
+    """
+    pending = _pending_tokens.get(provider, 0)
+    if pending <= 0:
+        return 0.0
+    
+    # Conservative bucket sizes for "guessing" pressure
+    # 25,000 is a safe lower bound for a 5-hour session window
+    bucket_size = 25000 
+    return min(pending / bucket_size, 0.5) # Cap at 50% to avoid over-blocking
 
 
 def invalidate_cache(provider: str | None = None) -> None:
@@ -158,13 +191,13 @@ async def _claude_subscription_state() -> BudgetState:
         data: dict[str, Any] = json.loads(raw)
         # highest_pressure is the authoritative field (pre-computed by the hook)
         if "highest_pressure" in data:
-            pressure = min(float(data["highest_pressure"]), 1.0)
+            pressure = min(float(data["highest_pressure"]) / 100.0 + _get_pending_pressure_offset("anthropic"), 1.0)
         else:
             # Fallback: compute from individual quota dimensions
             session_pct = float(data.get("session_pct", 0.0)) / 100.0
             weekly_pct = float(data.get("weekly_pct", 0.0)) / 100.0
             sonnet_pct = float(data.get("sonnet_pct", 0.0)) / 100.0
-            pressure = min(max(session_pct, weekly_pct, sonnet_pct), 1.0)
+            pressure = min(max(session_pct, weekly_pct, sonnet_pct) + _get_pending_pressure_offset("anthropic"), 1.0)
         return BudgetState(
             provider="anthropic",
             pressure=pressure,

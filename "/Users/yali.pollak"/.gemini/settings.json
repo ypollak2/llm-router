@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "llm-router": {
+      "command": "uvx",
+      "args": [
+        "claude-code-llm-router"
+      ]
+    }
+  }
+}

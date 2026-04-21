@@ -1,0 +1,10 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "*",
+        "command": "\"/Users/yali.pollak\"/.llm-router/hooks/gemini-cli-post-tool.py"
+      }
+    ]
+  }
+}

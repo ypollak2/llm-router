@@ -16,7 +16,7 @@ from typing import Any
 from uuid import uuid4
 
 from llm_router import cost, media, providers
-from llm_router.budget import get_budget_state
+from llm_router.budget import get_budget_state, reserve_tokens, release_tokens
 from llm_router.state import get_active_agent
 from llm_router.codex_agent import CODEX_MODELS, is_codex_available, run_codex
 from llm_router.gemini_cli_agent import GEMINI_MODELS, is_gemini_cli_available, run_gemini_cli
@@ -667,13 +667,14 @@ async def _dispatch_model_loop(
         effective_complexity: Stringified complexity for logging.
 
     Returns:
-        LLMResponse on success.
+        LLMResponse: The successful response.
 
     Raises:
         RuntimeError: When all models in primary + emergency chains fail.
     """
     global _pending_spend
     tracker = get_tracker()
+
     last_error: Exception | None = None
 
     for attempt, model in enumerate(models_to_try, start=1):
@@ -739,11 +740,13 @@ async def _dispatch_model_loop(
                     codex_result = await run_codex(prompt, model=model_name)
                     if not codex_result.success:
                         raise RuntimeError(f"Codex exited {codex_result.exit_code}: (response omitted)")
+                    in_tokens = max(1, len(prompt) // 4)
+                    out_tokens = max(1, len(codex_result.content) // 4)
                     response = LLMResponse(
                         content=codex_result.content,
                         model=f"codex/{model_name}",
-                        input_tokens=0,
-                        output_tokens=0,
+                        input_tokens=in_tokens,
+                        output_tokens=out_tokens,
                         cost_usd=0.0,
                         latency_ms=codex_result.duration_sec * 1000,
                         provider="codex",
@@ -752,11 +755,13 @@ async def _dispatch_model_loop(
                     gemini_result = await run_gemini_cli(prompt, model=model_name)
                     if not gemini_result.success:
                         raise RuntimeError(f"Gemini CLI exited {gemini_result.exit_code}: (response omitted)")
+                    in_tokens = max(1, len(prompt) // 4)
+                    out_tokens = max(1, len(gemini_result.content) // 4)
                     response = LLMResponse(
                         content=gemini_result.content,
                         model=f"gemini_cli/{model_name}",
-                        input_tokens=0,
-                        output_tokens=0,
+                        input_tokens=in_tokens,
+                        output_tokens=out_tokens,
                         cost_usd=0.0,
                         latency_ms=gemini_result.duration_sec * 1000,
                         provider="gemini_cli",
@@ -779,6 +784,9 @@ async def _dispatch_model_loop(
 
             tracker.record_success(provider)
             await cost.log_usage(response, task_type, profile, correlation_id=correlation_id)
+            release_tokens("anthropic", 500)
+            # Release the quota reservation as it is now reflected in the actual usage logs
+            release_tokens("anthropic", 500)
 
             # Record Codex/Gemini CLI requests for quota tracking (v7.1.0)
             if provider == "codex":
@@ -1048,6 +1056,7 @@ async def _dispatch_model_loop(
     )
     async with _budget_lock:
         _pending_spend = max(0.0, _pending_spend - _reservation)
+    release_tokens("anthropic", 500)
     raise RuntimeError(
         f"All models failed for {task_type.value}/{profile.value}. "
         f"Last error: {last_error}.{setup_hint}"
@@ -1202,6 +1211,12 @@ async def route_and_call(
             except Exception:
                 _reservation = 0.0
             _pending_spend += _reservation
+            reserve_tokens("anthropic", 500)
+            
+            # Quota reservation for subscriptions (v7.2.0)
+            # Reserve 500 tokens as a baseline for the session pressure oracle
+            _quota_reservation = 500
+            reserve_tokens("anthropic", _quota_reservation)
 
         # Structural compaction — shrink prompt before sending to external LLMs
         # Guard: compaction_mode/threshold may be MagicMock in test mocks

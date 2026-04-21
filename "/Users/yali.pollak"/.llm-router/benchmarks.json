@@ -1,0 +1,242 @@
+{
+  "version": 2,
+  "generated_at": "2026-03-30T15:30:35.036737+00:00",
+  "sources": {
+    "lmsys_fetched_at": "2026-03-30T15:30:35.036737+00:00",
+    "aider_fetched_at": "2026-03-30T15:30:35.036737+00:00",
+    "huggingface_fetched_at": null,
+    "litellm_fetched_at": "2026-03-30T15:30:35.036737+00:00"
+  },
+  "raw_scores": {
+    "anthropic/claude-haiku-4-5-20251001": {
+      "lmsys_elo": 41.47,
+      "aider_pass_rate": 0.474,
+      "hf_score": null,
+      "cost_per_1m_input": null,
+      "cost_per_1m_output": null
+    },
+    "anthropic/claude-opus-4-6": {
+      "lmsys_elo": 60.36,
+      "aider_pass_rate": 0.684,
+      "hf_score": null,
+      "cost_per_1m_input": 5.0,
+      "cost_per_1m_output": 25.0
+    },
+    "anthropic/claude-sonnet-4-6": {
+      "lmsys_elo": 79.35,
+      "aider_pass_rate": 0.8420000000000001,
+      "hf_score": null,
+      "cost_per_1m_input": 3.0,
+      "cost_per_1m_output": 15.0
+    },
+    "gemini/gemini-2.5-flash": {
+      "lmsys_elo": 49.61,
+      "aider_pass_rate": null,
+      "hf_score": null,
+      "cost_per_1m_input": 0.3,
+      "cost_per_1m_output": 2.5
+    },
+    "gemini/gemini-2.5-pro": {
+      "lmsys_elo": 71.96,
+      "aider_pass_rate": null,
+      "hf_score": null,
+      "cost_per_1m_input": 1.25,
+      "cost_per_1m_output": 10.0
+    },
+    "groq/llama-3.3-70b-versatile": {
+      "lmsys_elo": null,
+      "aider_pass_rate": 0.594,
+      "hf_score": null,
+      "cost_per_1m_input": null,
+      "cost_per_1m_output": null
+    },
+    "openai/gpt-4o": {
+      "lmsys_elo": 79.21,
+      "aider_pass_rate": 0.7140000000000001,
+      "hf_score": null,
+      "cost_per_1m_input": 2.5,
+      "cost_per_1m_output": 10.0
+    },
+    "openai/gpt-4o-mini": {
+      "lmsys_elo": 74.94,
+      "aider_pass_rate": 0.556,
+      "hf_score": null,
+      "cost_per_1m_input": 0.15,
+      "cost_per_1m_output": 0.6
+    }
+  },
+  "task_scores": {
+    "code": {
+      "deepseek/deepseek-chat": 0.9995264404104183,
+      "deepseek/deepseek-reasoner": 0.9995264404104183,
+      "claude-haiku-4-5-20251001": 0.8208366219415943,
+      "anthropic/claude-sonnet-4-6": 0.8030836621941595,
+      "openai/gpt-4o": 0.774281132875887,
+      "gemini/gemini-2.5-pro": 0.7434039199932657,
+      "openai/gpt-4o-mini": 0.7430739176346357,
+      "openai/o3": 0.6787687450670876,
+      "groq/llama-3.3-70b-versatile": 0.594,
+      "gemini/gemini-2.5-flash": 0.5020984307191989,
+      "anthropic/claude-opus-4-6": 0.49160401267159454,
+      "anthropic/claude-haiku-4-5-20251001": 0.29624999999999996
+    },
+    "analyze": {
+      "deepseek/deepseek-chat": 0.9995264404104183,
+      "deepseek/deepseek-reasoner": 0.9995264404104183,
+      "openai/gpt-4o-mini": 0.9223864836325237,
+      "openai/gpt-4o": 0.8615192411711805,
+      "claude-haiku-4-5-20251001": 0.8208366219415943,
+      "anthropic/claude-sonnet-4-6": 0.803472770323599,
+      "gemini/gemini-2.5-pro": 0.753654973806426,
+      "openai/o3": 0.6787687450670876,
+      "groq/llama-3.3-70b-versatile": 0.5,
+      "gemini/gemini-2.5-flash": 0.4542302128573401,
+      "anthropic/claude-opus-4-6": 0.33245336149243226,
+      "anthropic/claude-haiku-4-5-20251001": 0.0
+    },
+    "query": {
+      "deepseek/deepseek-chat": 0.9995264404104183,
+      "deepseek/deepseek-reasoner": 0.9995264404104183,
+      "openai/gpt-4o-mini": 0.9223864836325237,
+      "openai/gpt-4o": 0.8615192411711805,
+      "claude-haiku-4-5-20251001": 0.8208366219415943,
+      "anthropic/claude-sonnet-4-6": 0.803472770323599,
+      "gemini/gemini-2.5-pro": 0.753654973806426,
+      "openai/o3": 0.6787687450670876,
+      "groq/llama-3.3-70b-versatile": 0.5,
+      "gemini/gemini-2.5-flash": 0.4542302128573401,
+      "anthropic/claude-opus-4-6": 0.33245336149243226,
+      "anthropic/claude-haiku-4-5-20251001": 0.0
+    },
+    "generate": {
+      "deepseek/deepseek-chat": 0.9995264404104183,
+      "deepseek/deepseek-reasoner": 0.9995264404104183,
+      "openai/gpt-4o-mini": 0.916842661034847,
+      "openai/gpt-4o": 0.8807742236136143,
+      "anthropic/claude-sonnet-4-6": 0.8315480888487992,
+      "claude-haiku-4-5-20251001": 0.8208366219415943,
+      "gemini/gemini-2.5-pro": 0.7609771551015407,
+      "openai/o3": 0.6787687450670876,
+      "groq/llama-3.3-70b-versatile": 0.5,
+      "gemini/gemini-2.5-flash": 0.4200386286702983,
+      "anthropic/claude-opus-4-6": 0.3562000301704632,
+      "anthropic/claude-haiku-4-5-20251001": 0.0
+    },
+    "research": {
+      "deepseek/deepseek-chat": 0.9995264404104183,
+      "deepseek/deepseek-reasoner": 0.9995264404104183,
+      "openai/gpt-4o-mini": 0.9301478352692715,
+      "openai/gpt-4o": 0.8345622657517737,
+      "claude-haiku-4-5-20251001": 0.8208366219415943,
+      "anthropic/claude-sonnet-4-6": 0.7641673243883189,
+      "gemini/gemini-2.5-pro": 0.7434039199932657,
+      "openai/o3": 0.6787687450670876,
+      "gemini/gemini-2.5-flash": 0.5020984307191989,
+      "groq/llama-3.3-70b-versatile": 0.5,
+      "anthropic/claude-opus-4-6": 0.299208025343189,
+      "anthropic/claude-haiku-4-5-20251001": 0.0
+    }
+  },
+  "tiers": {
+    "code": {
+      "premium": [
+        "deepseek/deepseek-chat",
+        "deepseek/deepseek-reasoner",
+        "claude-haiku-4-5-20251001"
+      ],
+      "balanced": [
+        "anthropic/claude-sonnet-4-6",
+        "openai/gpt-4o",
+        "gemini/gemini-2.5-pro",
+        "openai/gpt-4o-mini"
+      ],
+      "budget": [
+        "openai/o3",
+        "groq/llama-3.3-70b-versatile",
+        "gemini/gemini-2.5-flash",
+        "anthropic/claude-opus-4-6",
+        "anthropic/claude-haiku-4-5-20251001"
+      ]
+    },
+    "analyze": {
+      "premium": [
+        "deepseek/deepseek-chat",
+        "deepseek/deepseek-reasoner",
+        "openai/gpt-4o-mini"
+      ],
+      "balanced": [
+        "openai/gpt-4o",
+        "claude-haiku-4-5-20251001",
+        "anthropic/claude-sonnet-4-6",
+        "gemini/gemini-2.5-pro"
+      ],
+      "budget": [
+        "openai/o3",
+        "groq/llama-3.3-70b-versatile",
+        "gemini/gemini-2.5-flash",
+        "anthropic/claude-opus-4-6",
+        "anthropic/claude-haiku-4-5-20251001"
+      ]
+    },
+    "query": {
+      "premium": [
+        "deepseek/deepseek-chat",
+        "deepseek/deepseek-reasoner",
+        "openai/gpt-4o-mini"
+      ],
+      "balanced": [
+        "openai/gpt-4o",
+        "claude-haiku-4-5-20251001",
+        "anthropic/claude-sonnet-4-6",
+        "gemini/gemini-2.5-pro"
+      ],
+      "budget": [
+        "openai/o3",
+        "groq/llama-3.3-70b-versatile",
+        "gemini/gemini-2.5-flash",
+        "anthropic/claude-opus-4-6",
+        "anthropic/claude-haiku-4-5-20251001"
+      ]
+    },
+    "generate": {
+      "premium": [
+        "deepseek/deepseek-chat",
+        "deepseek/deepseek-reasoner",
+        "openai/gpt-4o-mini"
+      ],
+      "balanced": [
+        "openai/gpt-4o",
+        "anthropic/claude-sonnet-4-6",
+        "claude-haiku-4-5-20251001",
+        "gemini/gemini-2.5-pro"
+      ],
+      "budget": [
+        "openai/o3",
+        "groq/llama-3.3-70b-versatile",
+        "gemini/gemini-2.5-flash",
+        "anthropic/claude-opus-4-6",
+        "anthropic/claude-haiku-4-5-20251001"
+      ]
+    },
+    "research": {
+      "premium": [
+        "deepseek/deepseek-chat",
+        "deepseek/deepseek-reasoner",
+        "openai/gpt-4o-mini"
+      ],
+      "balanced": [
+        "openai/gpt-4o",
+        "claude-haiku-4-5-20251001",
+        "anthropic/claude-sonnet-4-6",
+        "gemini/gemini-2.5-pro"
+      ],
+      "budget": [
+        "openai/o3",
+        "gemini/gemini-2.5-flash",
+        "groq/llama-3.3-70b-versatile",
+        "anthropic/claude-opus-4-6",
+        "anthropic/claude-haiku-4-5-20251001"
+      ]
+    }
+  }
+}

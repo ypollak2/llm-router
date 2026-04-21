@@ -2,7 +2,7 @@
 
 **For releases v6.2 and earlier, see [CHANGELOG_ARCHIVE.md](docs/CHANGELOG_ARCHIVE.md).**
 
----
+## v7.2.0 — Reliability & Quota Precision (2026-04-21)\n### Fixed\n- **Token Reporting**: Added estimation logic for Codex and Gemini CLI providers to ensure accurate usage tracking in SQLite database.\n- **In-Flight Pressure**: Implemented a token reservation system to \"guess\" upcoming pressure and downshift models proactively before calls finish.\n- **Hard Cap Safety**: Disabled optimistic reset discounting when usage reaches 100% capacity to prevent credit depletion.\n- **Routing Integrity**: Fixed model string mismatches that prevented correct demotion of Claude models under high pressure.\n- **CI Stability**: Resolved a RuntimeError in tests when no providers were configured/healthy.\n\n---
 
 ## v7.1.0 — Quota-Balanced Routing & Cross-Subscription Load Balancing (2026-04-21)
 

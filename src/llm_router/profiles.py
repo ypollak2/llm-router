@@ -30,6 +30,8 @@ log = get_logger("llm_router.profiles")
 _CLAUDE_CHEAP_MODELS: frozenset[str] = frozenset({
     "anthropic/claude-sonnet-4-6",
     "anthropic/claude-haiku-4-5-20251001",
+    "claude-sonnet-4-6",
+    "claude-haiku-4-5-20251001",
 })
 
 # Free external models (Codex uses OpenAI subscription, Gemini CLI uses Google One AI Pro).
@@ -330,8 +332,9 @@ def reorder_for_pressure(
     other_models = [m for m in chain if m not in _CLAUDE_CHEAP_MODELS]
 
     if pressure >= 0.99:
-        # Hard cap: never touch Claude quota.
-        # Order: Codex (free) → Ollama injected by router → cheap → paid.
+        # Hard cap: remove ALL Claude models (including Opus) to protect quota.
+        # Return only non-Claude models: Codex (free) → cheap → paid.
+        non_claude_models = [m for m in chain if m not in _CLAUDE_CHEAP_MODELS and not m.startswith("anthropic/")]
         try:
             from llm_router.codex_agent import is_codex_available
             codex_available = is_codex_available()
@@ -345,8 +348,8 @@ def reorder_for_pressure(
                 return 1
             return 2
 
-        other_models.sort(key=_hard_cap_priority)
-        return other_models
+        non_claude_models.sort(key=_hard_cap_priority)
+        return non_claude_models
 
     if pressure < 0.85:
         # Quota available: cheap Claude models (Haiku/Sonnet) first, then external, then expensive

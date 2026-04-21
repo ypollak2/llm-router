@@ -16,7 +16,6 @@ Configuration is organized into five sections:
 
 from __future__ import annotations
 
-import os as _os
 import threading
 import time
 import urllib.request
@@ -359,24 +358,9 @@ class RouterConfig(BaseSettings):
         return [f"ollama/{m.strip()}" for m in self.ollama_budget_models.split(",") if m.strip()]
 
     def model_post_init(self, __context: dict) -> None:
-        """Load fallback configuration from ~/.llm-router/config.yaml if needed.
-
-        This is called after Pydantic loads the config from .env / env vars.
-        If .env is not readable (e.g. blocked by security team), we try to load
-        from ~/.llm-router/config.yaml as a fallback. This allows enterprise
-        users to configure Ollama and API keys without needing project-level
-        .env access.
-
-        Priority: .env (already loaded) → ~/.llm-router/config.yaml (fallback)
-                  → env vars → defaults
-
-        Fields that are still empty after .env load are filled from config.yaml.
-
-        NOTE: Fallback loading is skipped in test mode to prevent test isolation
-        issues. Tests explicitly configure RouterConfig via constructor params.
-        """
         # Skip in test mode (pytest sets this env var)
-        if _os.getenv("PYTEST_CURRENT_TEST"):
+        import os
+        if os.getenv("PYTEST_CURRENT_TEST"):
             return
 
         try:
@@ -434,34 +418,15 @@ class RouterConfig(BaseSettings):
 _config: RouterConfig | None = None
 _config_lock = threading.Lock()
 
-
 def get_config() -> RouterConfig:
-    """Return the singleton ``RouterConfig`` instance.
-
-    On first call, loads configuration from environment variables / ``.env``
-    and exports API keys into ``os.environ`` for LiteLLM. Subsequent calls
-    return the cached instance.
-
-    In subscription mode the Anthropic key is actively removed from
-    ``os.environ`` on every call — not just skipped during init — so that
-    a pre-existing ``ANTHROPIC_API_KEY`` (e.g. set before the server started)
-    cannot slip through to LiteLLM.
-
-    Returns:
-        The global ``RouterConfig`` singleton.
-    """
-    import os as _os
+    """Return the singleton RouterConfig instance."""
+    import os
     global _config
-    # Thread-safe singleton initialization using double-checked locking pattern
     if _config is None:
         with _config_lock:
-            # Double-check inside lock to prevent race condition
             if _config is None:
                 _config = RouterConfig()
                 _config.apply_keys_to_env()
-    # Active purge: remove ANTHROPIC_API_KEY from the live environment every
-    # time get_config() is called in subscription mode. This handles the case
-    # where the key was already present before the server started.
     if _config.llm_router_claude_subscription:
-        _os.environ.pop("ANTHROPIC_API_KEY", None)
+        os.environ.pop("ANTHROPIC_API_KEY", None)
     return _config

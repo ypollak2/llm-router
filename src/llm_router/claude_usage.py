@@ -157,7 +157,7 @@ class ClaudeSubscriptionUsage:
         raw = self.highest_pressure
         mins = self.minutes_until_session_reset
 
-        if mins is None or raw < 0.85:
+        if mins is None or raw < 0.85 or raw >= 1.0:
             return raw
 
         # Session is 85%+ -- factor in time until reset
