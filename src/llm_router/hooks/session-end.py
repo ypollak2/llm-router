@@ -590,6 +590,31 @@ def _read_session_spend() -> dict | None:
         return None
 
 
+
+def _get_session_routing_analysis(session_start: float) -> str:
+    """Get routing analysis summary for the session using model_tracking.
+    
+    Returns formatted string with routing statistics, or empty string if no data.
+    Also logs routing patterns to chronicle for future reference.
+    """
+    try:
+        import sys
+        sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
+        from llm_router.model_tracking import (
+            get_session_routing_summary,
+            format_session_summary,
+            log_routing_patterns_to_chronicle,
+        )
+        summary = get_session_routing_summary(since_timestamp=session_start)
+        if summary.get("total_decisions", 0) > 0:
+            # Log routing patterns to chronicle for architectural insights
+            log_routing_patterns_to_chronicle(summary)
+            return format_session_summary(summary)
+    except Exception:
+        pass  # Graceful failure — never break session-end
+    return ""
+
+
 def _build_and_save_learned_profile() -> None:
     """Build learned routing profile from corrections and save to disk.
 
@@ -626,13 +651,18 @@ def main() -> None:
     _sync_import_savings_log()          # flush JSONL before cumulative query
     cumulative                  = _query_cumulative_savings()
     _build_and_save_learned_profile()   # v6.1: build profile from corrections
+    routing_analysis            = _get_session_routing_analysis(session_start)
 
     has_cumulative = any(calls > 0 for _, calls, *_ in cumulative)
 
-    if not tools and not cc_rows and not current and not free_rows and not has_cumulative:
+    if not tools and not cc_rows and not current and not free_rows and not has_cumulative and not routing_analysis:
         sys.exit(0)
 
     summary = _format(tools, cc_rows, free_rows, paid_rows, start, current, is_live, cumulative)
+    
+    # Append session routing analysis if available
+    if routing_analysis:
+        summary = summary.rstrip("─" * WIDTH) + "\n" + routing_analysis + "─" * WIDTH
 
     # Append session spend one-liner if available (v4.0)
     spend = _read_session_spend()

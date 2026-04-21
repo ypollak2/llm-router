@@ -299,3 +299,201 @@ def export_tracking_csv(filepath: Path) -> int:
     except Exception as e:
         log.error(f"Failed to export tracking data: {e}")
         return 0
+
+
+def get_session_routing_summary(since_timestamp: float | None = None) -> dict:
+    """Aggregate routing decisions since session start for understanding routing behavior.
+    
+    Args:
+        since_timestamp: Unix timestamp of session start. If None, uses last 2 hours.
+    
+    Returns:
+        Dict with aggregated statistics:
+        - total_decisions: Total routing decisions
+        - model_usage: {model: count} for each selected model
+        - task_distribution: {task_type/complexity: count}
+        - classification_methods: {method: count}
+        - most_used_model: (model, count) tuple
+        - least_used_model: (model, count) tuple if >1 model used
+        - provider_breakdown: {provider: count}
+        - ollama_models: {specific_model: count} if Ollama was used
+    """
+    if since_timestamp is None:
+        since_timestamp = time.time() - (2 * 3600)  # Last 2 hours
+    
+    decisions = load_tracking_data(limit=10000)
+    
+    session_decisions = [d for d in decisions if d.timestamp >= since_timestamp]
+    
+    if not session_decisions:
+        return {
+            "total_decisions": 0,
+            "message": "No routing decisions in session",
+        }
+    
+    # Aggregate model usage
+    model_usage = {}
+    for decision in session_decisions:
+        model_usage[decision.selected_model] = model_usage.get(decision.selected_model, 0) + 1
+    
+    # Aggregate task distribution
+    task_distribution = {}
+    for decision in session_decisions:
+        key = f"{decision.task_type}/{decision.complexity}"
+        task_distribution[key] = task_distribution.get(key, 0) + 1
+    
+    # Aggregate classification methods
+    classification_methods = {}
+    for decision in session_decisions:
+        classification_methods[decision.classification_method] = \
+            classification_methods.get(decision.classification_method, 0) + 1
+    
+    # Aggregate providers
+    provider_breakdown = {}
+    for decision in session_decisions:
+        provider_breakdown[decision.provider] = provider_breakdown.get(decision.provider, 0) + 1
+    
+    # Extract Ollama-specific model usage
+    ollama_models = {}
+    for decision in session_decisions:
+        if decision.provider == "ollama":
+            # Extract specific model from "ollama/model-name" format
+            model_parts = decision.selected_model.split("/", 1)
+            if len(model_parts) > 1:
+                specific = model_parts[1]
+            else:
+                specific = "ollama"
+            ollama_models[specific] = ollama_models.get(specific, 0) + 1
+    
+    # Sort for display
+    sorted_models = sorted(model_usage.items(), key=lambda x: x[1], reverse=True)
+    most_used = sorted_models[0] if sorted_models else ("unknown", 0)
+    least_used = sorted_models[-1] if len(sorted_models) > 1 else None
+    
+    return {
+        "total_decisions": len(session_decisions),
+        "model_usage": model_usage,
+        "task_distribution": task_distribution,
+        "classification_methods": classification_methods,
+        "provider_breakdown": provider_breakdown,
+        "ollama_models": ollama_models if ollama_models else None,
+        "most_used_model": most_used,
+        "least_used_model": least_used,
+        "session_duration_minutes": (time.time() - since_timestamp) / 60,
+    }
+
+
+def format_session_summary(summary: dict) -> str:
+    """Format session routing summary for display.
+    
+    Args:
+        summary: Output from get_session_routing_summary()
+    
+    Returns:
+        Formatted string for display
+    """
+    if summary.get("total_decisions", 0) == 0:
+        return "\n📊 Routing Summary: No decisions in session\n"
+    
+    output = "\n📊 Session Routing Analysis\n"
+    output += "─" * 70 + "\n\n"
+    
+    total = summary["total_decisions"]
+    output += f"**Total Routing Decisions**: {total}\n"
+    output += f"**Session Duration**: {summary['session_duration_minutes']:.1f} minutes\n\n"
+    
+    # Most/least used models
+    most_model, most_count = summary["most_used_model"]
+    output += f"**Most Used**: {most_model} ({most_count}x, {most_count*100//total}%)\n"
+    if summary["least_used_model"]:
+        least_model, least_count = summary["least_used_model"]
+        output += f"**Least Used**: {least_model} ({least_count}x, {least_count*100//total}%)\n"
+    output += "\n"
+    
+    # Provider breakdown
+    output += "**Provider Distribution**\n"
+    providers = summary["provider_breakdown"]
+    for provider, count in sorted(providers.items(), key=lambda x: x[1], reverse=True):
+        pct = count * 100 // total
+        output += f"  {provider:15} — {count:3d} ({pct:3d}%)\n"
+    
+    # Ollama model specifics if used
+    if summary["ollama_models"]:
+        output += "\n**Ollama Model Usage**\n"
+        for model, count in sorted(summary["ollama_models"].items(), key=lambda x: x[1], reverse=True):
+            pct = count * 100 // total
+            output += f"  {model:30} — {count:3d} ({pct:3d}%)\n"
+    
+    # Task type distribution (top 5)
+    output += "\n**Task Type Distribution** (Top 5)\n"
+    tasks = summary["task_distribution"]
+    for task_key, count in sorted(tasks.items(), key=lambda x: x[1], reverse=True)[:5]:
+        pct = count * 100 // total
+        output += f"  {task_key:25} — {count:3d} ({pct:3d}%)\n"
+    
+    # Classification methods
+    output += "\n**Classification Methods**\n"
+    methods = summary["classification_methods"]
+    for method, count in sorted(methods.items(), key=lambda x: x[1], reverse=True):
+        pct = count * 100 // total
+        output += f"  {method:20} — {count:3d} ({pct:3d}%)\n"
+    
+    output += f"\n{'─' * 70}\n"
+    return output
+
+
+def log_routing_patterns_to_chronicle(summary: dict) -> bool:
+    """Log discovered routing patterns to chronicle ADR system.
+    
+    Args:
+        summary: Output from get_session_routing_summary()
+    
+    Returns:
+        True if logged successfully, False otherwise
+    """
+    if summary.get("total_decisions", 0) == 0:
+        return False
+    
+    try:
+        from llm_router.chronicle import chronicle_log_decision
+    except ImportError:
+        return False
+    
+    total = summary["total_decisions"]
+    most_model, most_count = summary["most_used_model"]
+    most_pct = (most_count * 100) // total
+    
+    # Log primary insight about most-used model
+    providers = summary["provider_breakdown"]
+    provider_list = ", ".join(f"{p}({count})" for p, count in sorted(providers.items(), key=lambda x: -x[1]))
+    
+    # Determine if Ollama models are being used and log specifics
+    ollama_models = summary.get("ollama_models")
+    ollama_detail = ""
+    if ollama_models:
+        top_ollama = max(ollama_models.items(), key=lambda x: x[1]) if ollama_models else None
+        if top_ollama:
+            ollama_detail = f"\nOllama model selection: {top_ollama[0]} most utilized ({top_ollama[1]} times)"
+    
+    # Log task distribution insight
+    tasks = summary["task_distribution"]
+    top_task = max(tasks.items(), key=lambda x: x[1]) if tasks else ("unknown", 0)
+    task_detail = f"\nTask distribution: {top_task[0]} most routed ({top_task[1]} decisions, {(top_task[1]*100)//total}%)"
+    
+    try:
+        chronicle_log_decision(
+            title=f"Routing Pattern: {most_model} optimal for session",
+            rationale=(
+                f"Session analysis shows {most_model} was selected for {most_count}/{total} decisions ({most_pct}%). "
+                f"Provider breakdown: {provider_list}. "
+                f"Classification methods: {', '.join(f'{m}({c})' for m, c in summary['classification_methods'].items())}."
+                f"{task_detail}"
+                f"{ollama_detail}"
+            ),
+            affects=["src/llm_router/router.py", "src/llm_router/profiles.py"],
+            risk="low",
+        )
+        return True
+    except Exception:
+        log.warning("Failed to log routing patterns to chronicle")
+        return False
