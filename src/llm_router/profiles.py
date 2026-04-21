@@ -129,8 +129,8 @@ ROUTING_TABLE: dict[tuple[RoutingProfile, TaskType], list[str]] = {
     # through codex_agent.run_codex(), not LiteLLM.
     (RoutingProfile.BALANCED, TaskType.QUERY): [
         "anthropic/claude-sonnet-4-6",
-        "deepseek/deepseek-chat",       # quality 1.0, $0.0007 — leads when Claude is out
-        "gemini/gemini-2.5-pro",        # $0.01/1M — cheaper than OpenAI
+        "gemini/gemini-2.5-pro",        # $0.01/1M — moved up before DeepSeek; Codex injected before this
+        "deepseek/deepseek-chat",       # quality 1.0, $0.0007 — cheaper fallback
         "openai/gpt-4o",                # $0.03/1M — more expensive, last paid resort
         "mistral/mistral-large-latest",
         "anthropic/claude-haiku-4-5-20251001",
@@ -145,8 +145,8 @@ ROUTING_TABLE: dict[tuple[RoutingProfile, TaskType], list[str]] = {
     ],
     (RoutingProfile.BALANCED, TaskType.GENERATE): [
         "anthropic/claude-sonnet-4-6",
-        "deepseek/deepseek-chat",       # quality 1.0 for generation, $0.0007
-        "gemini/gemini-2.5-pro",        # $0.01/1M — cheaper than OpenAI
+        "gemini/gemini-2.5-pro",        # $0.01/1M — moved up before DeepSeek; Codex injected before this
+        "deepseek/deepseek-chat",       # quality 1.0 for generation, $0.0007 — cheaper fallback
         "openai/gpt-4o",                # $0.03/1M — more expensive, last paid resort
         "cohere/command-r-plus",
         "anthropic/claude-haiku-4-5-20251001",
@@ -154,16 +154,16 @@ ROUTING_TABLE: dict[tuple[RoutingProfile, TaskType], list[str]] = {
     ],
     (RoutingProfile.BALANCED, TaskType.ANALYZE): [
         "anthropic/claude-sonnet-4-6",
-        "deepseek/deepseek-reasoner",
-        "gemini/gemini-2.5-pro",        # $0.01/1M — cheaper than OpenAI
+        "gemini/gemini-2.5-pro",        # $0.01/1M — moved up before DeepSeek; Codex injected before this
+        "deepseek/deepseek-reasoner",   # reasoning model, $0.0014 — cheaper fallback
         "openai/gpt-4o",                # $0.03/1M — more expensive, last paid resort
         "anthropic/claude-haiku-4-5-20251001",
         "ollama/qwen3.5:32b",           # free local; auto-promoted to first in CC mode
     ],
     (RoutingProfile.BALANCED, TaskType.CODE): [
         "anthropic/claude-sonnet-4-6",
-        "deepseek/deepseek-chat",
-        "gemini/gemini-2.5-pro",        # $0.01/1M — cheaper than OpenAI
+        "gemini/gemini-2.5-pro",        # $0.01/1M — moved up before DeepSeek; Codex injected before this
+        "deepseek/deepseek-chat",       # quality 1.0, $0.0007 — cheaper fallback
         "openai/gpt-4o",                # $0.03/1M — more expensive, last paid resort
         "anthropic/claude-haiku-4-5-20251001",
         "ollama/qwen3.5:32b",           # free local; auto-promoted to first in CC mode
