@@ -1515,7 +1515,7 @@ def main() -> None:
             f"would route to {tool}{args_str} [via {method}{stale_suffix}] "
             f"(shadow mode — no enforcement)"
         )
-        indicator = f"👁 shadow → {tool}  [{task_type}/{complexity} · {selected_model}]"
+        indicator = f"👁 {task_type}/{complexity} ✨ {tool} → 🧠 {selected_model}"
         write_pending = False
     elif _enforce_mode == "suggest":
         # Soft hint — pending state written but enforce-route only logs, never blocks
@@ -1523,7 +1523,7 @@ def main() -> None:
             f"💡 SUGGESTED ROUTE: {task_type}/{complexity} → consider calling {tool}{args_str} "
             f"[via {method}{stale_suffix}] | suggest mode: you may answer directly if needed"
         )
-        indicator = f"💡 suggest → {tool}  [{task_type}/{complexity} · {selected_model}]"
+        indicator = f"💡 {task_type}/{complexity} ✨ {tool} → 🧠 {selected_model}"
         write_pending = True
     else:
         # enforce / hard (default)
@@ -1532,7 +1532,7 @@ def main() -> None:
             f" | FORBIDDEN: self-answer · Agent subagents · WebSearch · WebFetch"
             f" | Call the tool NOW as your ONLY action. Cheap model output IS your response."
         )
-        indicator = f"⚡ llm-router → {tool}  [{task_type}/{complexity} · {selected_model}]"
+        indicator = f"✨ {task_type}/{complexity} ✨ {tool} → 🧠 {selected_model}"
         write_pending = True
 
     directive = _prior_violation_notice(previous_unrouted) + directive
