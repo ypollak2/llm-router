@@ -25,3 +25,21 @@ CLAUDE.md
 .claude/tasks/
 .claude/task-list.md
 .tasks.json
+
+# Session artifacts — development/presentation files, never commit
+CAROUSEL-BLUEPRINT.md
+INTEGRATION_PLAN.md
+JOURNEY-COMPLETE-v3-to-v7.md
+PRESENTATION.md
+SECURITY_AUDIT_REPORT.md
+SECURITY_REMEDIATION.md
+STATUS_v*.md
+chronicle-graph.html
+glama.json
+journey-into-llm-router-v3-to-v7.md
+mcp-registry.json
+presentation.html
+token-savings-viz.html
+
+# Session memories — Claude Memory database, machine-specific
+.serena/
