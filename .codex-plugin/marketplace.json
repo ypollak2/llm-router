@@ -3,7 +3,7 @@
   "owner": {
     "name": "Yali Pollak"
   },
-  "version": "7.2.0",
+  "version": "7.3.0",
   "plugins": [
     {
       "name": "llm-router",

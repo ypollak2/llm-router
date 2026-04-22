@@ -2,6 +2,58 @@
 
 **For releases v6.2 and earlier, see [CHANGELOG_ARCHIVE.md](docs/CHANGELOG_ARCHIVE.md).**
 
+## v7.3.0 — Session Complexity Insights & Model Distribution Dashboard (2026-04-22)
+
+### Added
+
+- **Session Complexity Breakdown Dashboard** — New section in session-end hook showing task distribution by complexity tier
+  - Displays models used for simple, moderate, and complex tasks within the session
+  - Shows call count and cost per complexity level
+  - Includes insight metrics: free-vs-paid ratio and average cost per call
+  - Example output:
+    ```
+    Model selection by task complexity (this session)
+    ─────────────────────────────────────────────────
+    simple       3×   ollama/qwen2.5 (3×)                      [free]
+    moderate     5×   codex/gpt-5.4 (3×) · gemini/flash (2×)   [$0.0018]
+    complex      1×   openai/gpt-4o (1×)                       [$0.0123]
+    
+    💡 Insight: 60% free models · avg cost ~$0.0141/call
+    ```
+
+- **Database Schema Migration** — Added `complexity` column to `usage` table for persistent complexity tracking
+  - Backward-compatible migration with `DEFAULT 'moderate'` for existing records
+  - Enables post-hoc analysis and complexity-based cost trending
+
+- **Complexity Parameter in Usage Logging** — Updated all usage recording functions
+  - `log_usage(complexity: str = "moderate")` — tracks complexity for each model invocation
+  - `log_cc_hint(complexity: str = "moderate")` — tracks complexity for Claude subscription hints
+  - Default to 'moderate' for backward compatibility with existing calls
+
+### Changed
+
+- `src/llm_router/cost.py` — Added database migration `MIGRATE_USAGE_ADD_COMPLEXITY` and updated logging functions
+- `src/llm_router/hooks/session-end.py` — New `_query_session_complexity_breakdown()` and `_format_complexity_breakdown()` functions
+- Session-end dashboard now includes three sections: routing decisions, complexity breakdown, cumulative savings
+
+### Technical
+
+- Database migration: `ALTER TABLE usage ADD COLUMN complexity TEXT DEFAULT 'moderate'`
+- Migration applied at schema version check (idempotent, no-op if column exists)
+- Session breakdown queries group usage by complexity + model combination
+- Cost calculation per complexity tier respects free vs paid provider distinction (Ollama/Codex marked as free)
+
+### Performance
+
+- Complexity breakdown queries indexed on (model, complexity, timestamp) for fast session analysis
+- No performance impact on routing chain (complexity parameter is optional, defaults to moderate)
+
+### Breaking Changes
+
+None — fully backward-compatible. Existing sessions without complexity data default to 'moderate'.
+
+---
+
 ## v7.2.0 — Reliability & Quota Precision (2026-04-21)\n### Fixed\n- **Token Reporting**: Added estimation logic for Codex and Gemini CLI providers to ensure accurate usage tracking in SQLite database.\n- **In-Flight Pressure**: Implemented a token reservation system to \"guess\" upcoming pressure and downshift models proactively before calls finish.\n- **Hard Cap Safety**: Disabled optimistic reset discounting when usage reaches 100% capacity to prevent credit depletion.\n- **Routing Integrity**: Fixed model string mismatches that prevented correct demotion of Claude models under high pressure.\n- **CI Stability**: Resolved a RuntimeError in tests when no providers were configured/healthy.\n\n---
 
 ## v7.1.0 — Quota-Balanced Routing & Cross-Subscription Load Balancing (2026-04-21)

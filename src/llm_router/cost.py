@@ -158,6 +158,11 @@ MIGRATE_USAGE_ADD_TEAM = [
 ]
 """Idempotent migration to add team identity columns (v3.0)."""
 
+MIGRATE_USAGE_ADD_COMPLEXITY = [
+    "ALTER TABLE usage ADD COLUMN complexity TEXT DEFAULT 'moderate'",
+]
+"""Idempotent migration to track task complexity in usage table (v7.3)."""
+
 MIGRATE_SAVINGS_STATS_ADD_HOST = [
     "ALTER TABLE savings_stats ADD COLUMN host TEXT NOT NULL DEFAULT 'claude_code'",
 ]
@@ -369,6 +374,7 @@ async def _get_db() -> aiosqlite.Connection:
         + MIGRATE_ROUTING_DECISIONS_ADD_REASON
         + MIGRATE_USAGE_ADD_SAVINGS
         + MIGRATE_USAGE_ADD_TEAM
+        + MIGRATE_USAGE_ADD_COMPLEXITY
         + MIGRATE_SAVINGS_STATS_ADD_HOST
         + MIGRATE_ROUTING_DECISIONS_ADD_POLICY
         + MIGRATE_ADD_CORRELATION_ID
@@ -415,6 +421,7 @@ async def log_usage(
     profile: RoutingProfile,
     success: bool = True,
     correlation_id: str | None = None,
+    complexity: str = "moderate",
 ) -> None:
     """Persist a completed external LLM call to the usage database.
 
@@ -430,6 +437,7 @@ async def log_usage(
             still logged for observability but flagged with success=0.
         correlation_id: Optional hex ID linking this DB row to the structlog
             trace for the same routing call (first 8 chars of UUID4).
+        complexity: Task complexity level (simple, moderate, complex).
     """
     user_id, project_id = _get_team_identity()
     db = await _get_db()
@@ -440,8 +448,8 @@ async def log_usage(
         await db.execute(
             """INSERT INTO usage (model, provider, task_type, profile,
                input_tokens, output_tokens, cost_usd, latency_ms, success,
-               user_id, project_id, correlation_id)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               user_id, project_id, correlation_id, complexity)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 response.model,
                 response.provider,
@@ -455,6 +463,7 @@ async def log_usage(
                 user_id or None,
                 project_id or None,
                 correlation_id,
+                complexity,
             ),
         )
         await db.commit()
@@ -462,7 +471,7 @@ async def log_usage(
         await db.close()
 
 
-async def log_cc_hint(task_type: str, model: str) -> None:
+async def log_cc_hint(task_type: str, model: str, complexity: str = "moderate") -> None:
     """Log a Claude Code subscription model hint to the usage table.
 
     Called when _subscription_hint() returns a CC-MODE directive instead of
@@ -470,14 +479,19 @@ async def log_cc_hint(task_type: str, model: str) -> None:
     the session-end summary can report per-model CC call counts.
 
     provider='subscription' distinguishes these rows from external API calls.
+    
+    Args:
+        task_type: The task type (e.g., 'query', 'code', 'research').
+        model: The Claude model used (e.g., 'claude-haiku', 'claude-sonnet').
+        complexity: Task complexity level (simple, moderate, complex).
     """
     db = await _get_db()
     try:
         await db.execute(
             """INSERT INTO usage (model, provider, task_type, profile,
-               input_tokens, output_tokens, cost_usd, latency_ms, success)
-               VALUES (?, 'subscription', ?, 'subscription', 0, 0, 0.0, 0.0, 1)""",
-            (model, task_type),
+               input_tokens, output_tokens, cost_usd, latency_ms, success, complexity)
+               VALUES (?, 'subscription', ?, 'subscription', 0, 0, 0.0, 0.0, 1, ?)""",
+            (model, task_type, complexity),
         )
         await db.commit()
     except Exception:

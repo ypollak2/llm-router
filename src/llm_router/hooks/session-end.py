@@ -503,10 +503,110 @@ def _format_cumulative_section(periods: list[tuple[str, int, int, int, float]]) 
     return lines
 
 
+
+
+def _query_session_complexity_breakdown(session_start: float) -> dict:
+    """Query usage data grouped by task complexity.
+    
+    Returns {complexity: [(short_model, count, cost, provider), ...]}
+    """
+    if not os.path.exists(DB_PATH):
+        return {}
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            """
+            SELECT complexity, model, COUNT(*) as cnt, 
+                   COALESCE(SUM(cost_usd), 0) as total_cost,
+                   provider
+            FROM usage
+            WHERE timestamp >= ? AND success = 1
+            GROUP BY complexity, model
+            ORDER BY complexity, cnt DESC
+            """,
+            (_session_start_iso(session_start),),
+        ).fetchall()
+        conn.close()
+        
+        by_complexity = {}
+        for r in rows:
+            complexity = r["complexity"] or "moderate"
+            model = r["model"]
+            cnt = r["cnt"]
+            cost = r["total_cost"]
+            provider = r["provider"]
+            
+            if complexity not in by_complexity:
+                by_complexity[complexity] = []
+            
+            short_model = model.split("/")[-1] if "/" in model else model
+            if len(short_model) > 20:
+                short_model = short_model[:18] + "…"
+            
+            by_complexity[complexity].append((short_model, cnt, cost, provider))
+        
+        return by_complexity
+    except Exception:
+        return {}
+
+
+def _format_complexity_breakdown(session_start: float) -> list[str]:
+    """Format session breakdown by task complexity."""
+    complexity_data = _query_session_complexity_breakdown(session_start)
+    
+    if not complexity_data:
+        return []
+    
+    lines = ["  Model selection by task complexity (this session)", ""]
+    
+    total_calls = sum(
+        cnt for models in complexity_data.values() 
+        for _, cnt, _, _ in models
+    )
+    free_calls = 0
+    total_cost = 0.0
+    
+    # Process in order: simple, moderate, complex
+    for complexity in ["simple", "moderate", "complex"]:
+        if complexity not in complexity_data:
+            continue
+        
+        models_list = complexity_data[complexity]
+        cnt_sum = sum(cnt for _, cnt, _, _ in models_list)
+        cost_sum = sum(cost for _, _, cost, _ in models_list)
+        total_cost += cost_sum
+        
+        # Format model list
+        model_str_parts = []
+        for model, cnt, cost, provider in models_list:
+            if provider in ("ollama", "codex"):
+                free_calls += cnt
+            model_str_parts.append(f"{model} ({cnt}×)")
+        
+        model_str = " · ".join(model_str_parts)
+        cost_tag = f"  [${ cost_sum:.4f}]" if cost_sum > 0 else "  [free]"
+        
+        lines.append(
+            f"  {complexity:<10} {cnt_sum:>2}×    {model_str:<45} {cost_tag}"
+        )
+    
+    # Efficiency insight
+    if total_calls > 0:
+        free_pct = round(free_calls / total_calls * 100)
+        lines.append("")
+        lines.append(
+            f"  💡 Insight: {free_pct}% free models · "
+            f"avg cost ~${(total_cost/total_calls if total_calls else 0):.4f}/call"
+        )
+    
+    return lines
+
 def _format(tools: dict[str, dict], cc_rows: list[dict], free_rows: list[dict],
             paid_rows: list[dict],
             start: dict | None, current: dict | None, is_live: bool,
-            cumulative: list[tuple[str, int, int, int, float]] | None = None) -> str:
+            cumulative: list[tuple[str, int, int, int, float]] | None = None,
+            session_start: float | None = None) -> str:
     lines = ["─" * WIDTH]
 
     if current:
@@ -523,6 +623,12 @@ def _format(tools: dict[str, dict], cc_rows: list[dict], free_rows: list[dict],
     if tools:
         lines.append("")
         lines += _format_routing_section(tools)
+
+    if session_start is not None:
+        complexity_lines = _format_complexity_breakdown(session_start)
+        if complexity_lines:
+            lines.append("")
+            lines += complexity_lines
 
     if cumulative:
         cum_lines = _format_cumulative_section(cumulative)
@@ -658,7 +764,7 @@ def main() -> None:
     if not tools and not cc_rows and not current and not free_rows and not has_cumulative and not routing_analysis:
         sys.exit(0)
 
-    summary = _format(tools, cc_rows, free_rows, paid_rows, start, current, is_live, cumulative)
+    summary = _format(tools, cc_rows, free_rows, paid_rows, start, current, is_live, cumulative, session_start)
     
     # Append session routing analysis if available
     if routing_analysis:
