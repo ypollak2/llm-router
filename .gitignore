@@ -43,3 +43,16 @@ token-savings-viz.html
 
 # Session memories — Claude Memory database, machine-specific
 .serena/
+
+# User-specific config files — should never be committed (absolute paths, user configs, secrets)
+"/Users/yali.pollak"/
+/Users/yali.pollak/
+~/.*/
+.claude/
+.codex/
+.config/
+.cursor/
+.gemini/
+.llm-router/
+.openclaw/
+Library/
