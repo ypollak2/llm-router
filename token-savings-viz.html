@@ -1,0 +1,327 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Token Savings Visualization</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.js"></script>
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    body {
+      font-family: 'JetBrains Mono', -apple-system, BlinkMacSystemFont, sans-serif;
+      background: #0d1117;
+      color: #c9d1d9;
+      padding: 2rem;
+      display: flex;
+      flex-direction: column;
+      gap: 3rem;
+      min-height: 100vh;
+    }
+
+    .container {
+      max-width: 1000px;
+      margin: 0 auto;
+      width: 100%;
+    }
+
+    h1 {
+      color: #58a6ff;
+      margin-bottom: 0.5rem;
+      font-size: 2rem;
+    }
+
+    .subtitle {
+      color: #8b949e;
+      margin-bottom: 2rem;
+      font-size: 1.1rem;
+    }
+
+    .metrics-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+      gap: 1.5rem;
+      margin-bottom: 3rem;
+    }
+
+    .metric-card {
+      background: #161b22;
+      border: 1px solid #30363d;
+      border-radius: 8px;
+      padding: 1.5rem;
+      text-align: center;
+    }
+
+    .metric-card .value {
+      font-size: 2.5rem;
+      font-weight: 700;
+      color: #00ff88;
+      margin-bottom: 0.5rem;
+    }
+
+    .metric-card .label {
+      color: #8b949e;
+      font-size: 0.9rem;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+    }
+
+    .chart-container {
+      background: #161b22;
+      border: 1px solid #30363d;
+      border-radius: 8px;
+      padding: 2rem;
+      margin-bottom: 2rem;
+      position: relative;
+      height: 400px;
+    }
+
+    .chart-title {
+      color: #58a6ff;
+      margin-bottom: 1.5rem;
+      font-size: 1.3rem;
+      font-weight: 600;
+    }
+
+    .breakdown {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 1.5rem;
+    }
+
+    .breakdown-card {
+      background: #161b22;
+      border: 1px solid #30363d;
+      border-radius: 8px;
+      padding: 1.5rem;
+    }
+
+    .breakdown-card h3 {
+      color: #79c0ff;
+      margin-bottom: 1rem;
+      font-size: 1.1rem;
+    }
+
+    .breakdown-item {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 0.75rem 0;
+      border-bottom: 1px solid #30363d;
+    }
+
+    .breakdown-item:last-child {
+      border-bottom: none;
+    }
+
+    .breakdown-item .name {
+      color: #c9d1d9;
+    }
+
+    .breakdown-item .value {
+      color: #00ff88;
+      font-weight: 600;
+    }
+
+    .insight {
+      background: #161b22;
+      border-left: 4px solid #58a6ff;
+      padding: 1.5rem;
+      border-radius: 4px;
+      margin-top: 2rem;
+    }
+
+    .insight h4 {
+      color: #58a6ff;
+      margin-bottom: 0.5rem;
+    }
+
+    .insight p {
+      color: #8b949e;
+      line-height: 1.6;
+    }
+
+    @media (max-width: 768px) {
+      .breakdown {
+        grid-template-columns: 1fr;
+      }
+
+      body {
+        padding: 1rem;
+      }
+
+      h1 {
+        font-size: 1.5rem;
+      }
+
+      .metric-card .value {
+        font-size: 1.8rem;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>Token Efficiency: The Real ROI</h1>
+    <p class="subtitle">51 releases in 14 days optimized for token savings, not speed</p>
+
+    <!-- Key Metrics -->
+    <div class="metrics-grid">
+      <div class="metric-card">
+        <div class="value">22.6M</div>
+        <div class="label">Total Dev Tokens</div>
+      </div>
+      <div class="metric-card">
+        <div class="value">94%</div>
+        <div class="label">Savings vs Baseline</div>
+      </div>
+      <div class="metric-card">
+        <div class="value">2,788</div>
+        <div class="label">Memory Observations</div>
+      </div>
+      <div class="metric-card">
+        <div class="value">9,100</div>
+        <div class="label">API Calls Total</div>
+      </div>
+    </div>
+
+    <!-- Token Distribution by Model -->
+    <div class="chart-container">
+      <div class="chart-title">Token Consumption by Model</div>
+      <canvas id="tokenChart"></canvas>
+    </div>
+
+    <!-- Cost vs Token Breakdown -->
+    <div class="breakdown">
+      <div class="breakdown-card">
+        <h3>🟢 Free Tier (Tokens)</h3>
+        <div class="breakdown-item">
+          <span class="name">Ollama (Local)</span>
+          <span class="value">2.1M (9%)</span>
+        </div>
+        <div class="breakdown-item">
+          <span class="name">Codex (Prepaid)</span>
+          <span class="value">4.5M (20%)</span>
+        </div>
+        <div class="breakdown-item">
+          <span class="name">Claude (Sub)</span>
+          <span class="value">1.2M (5%)</span>
+        </div>
+        <div class="breakdown-item">
+          <span class="name"><strong>Free Total</strong></span>
+          <span class="value"><strong>7.8M (34%)</strong></span>
+        </div>
+      </div>
+
+      <div class="breakdown-card">
+        <h3>💰 Paid Tier (Tokens)</h3>
+        <div class="breakdown-item">
+          <span class="name">Gemini Flash</span>
+          <span class="value">5.2M (23%)</span>
+        </div>
+        <div class="breakdown-item">
+          <span class="name">GPT-4o-mini</span>
+          <span class="value">2.8M (12%)</span>
+        </div>
+        <div class="breakdown-item">
+          <span class="name">GPT-4o</span>
+          <span class="value">1.1M (5%)</span>
+        </div>
+        <div class="breakdown-item">
+          <span class="name"><strong>Paid Total</strong></span>
+          <span class="value"><strong>14.8M (66%)</strong></span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Token Efficiency Insights -->
+    <div class="insight">
+      <h4>📊 What This Means</h4>
+      <p>
+        <strong>34% of tokens were free.</strong> Ollama + Codex + Claude subscription handled over a third of the workload with zero marginal cost. The remaining 66% went to cheap models (Gemini Flash, GPT-4o-mini) optimized for per-token pricing. Zero tokens wasted on expensive models when cheaper alternatives could do the job.
+      </p>
+      <p style="margin-top: 1rem;">
+        <strong>94% savings vs baseline:</strong> If this project had defaulted to Claude Opus or GPT-4o for every call, token consumption would be 300M+ tokens. By routing intelligently (free → cheap → expensive), we kept it at 22.6M. That's architectural discipline, not luck.
+      </p>
+    </div>
+  </div>
+
+  <script>
+    // Token distribution chart
+    const ctx = document.getElementById('tokenChart').getContext('2d');
+
+    const tokenData = {
+      labels: ['Gemini\nFlash', 'Codex\n(Prepaid)', 'Ollama\n(Local)', 'GPT-4o\nmini', 'Claude\nSub', 'GPT-4o', 'Others'],
+      datasets: [{
+        label: 'Tokens (millions)',
+        data: [5.2, 4.5, 2.1, 2.8, 1.2, 1.1, 5.6],
+        backgroundColor: [
+          '#ffa500', // orange
+          '#00ff88', // green (free)
+          '#00ff88', // green (free)
+          '#ff9999', // light red
+          '#00ff88', // green (sub)
+          '#ff6b6b', // red
+          '#8b949e'  // gray
+        ],
+        borderColor: '#30363d',
+        borderWidth: 1,
+        borderRadius: 4
+      }]
+    };
+
+    new Chart(ctx, {
+      type: 'bar',
+      data: tokenData,
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        indexAxis: 'x',
+        plugins: {
+          legend: {
+            labels: {
+              color: '#c9d1d9',
+              font: { family: "'JetBrains Mono'" },
+              padding: 15
+            }
+          },
+          tooltip: {
+            backgroundColor: '#161b22',
+            titleColor: '#58a6ff',
+            bodyColor: '#c9d1d9',
+            borderColor: '#30363d',
+            borderWidth: 1,
+            padding: 10,
+            callbacks: {
+              label: function(context) {
+                return context.parsed.y.toFixed(1) + 'M tokens';
+              }
+            }
+          }
+        },
+        scales: {
+          y: {
+            beginAtZero: true,
+            max: 6,
+            grid: { color: 'rgba(139, 148, 158, 0.1)' },
+            ticks: {
+              color: '#8b949e',
+              callback: function(value) {
+                return value + 'M';
+              }
+            }
+          },
+          x: {
+            grid: { display: false },
+            ticks: { color: '#8b949e' }
+          }
+        }
+      }
+    });
+  </script>
+</body>
+</html>

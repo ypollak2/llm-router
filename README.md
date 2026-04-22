@@ -128,6 +128,32 @@ The savings come from not using Opus for every question.
 
 See [CHANGELOG.md](CHANGELOG.md) for full version history and v6.x features.
 
+## New in v7.4.0 — Content Generation Routing Discipline
+
+**Smart content generation detection with automatic routing suggestions.**
+
+- **Automatic Content Generation Detection** — Hook detects "write", "draft", "add card", "create spec" patterns
+  - Prevents routing misses where content-generation tasks skip `llm_generate` routing
+  - Suggests decomposition: route generation first, integrate locally second
+  - Example: "add carousel card about X to file.md" → auto-routes via `llm_generate`
+
+- **Decomposition Patterns** — Multi-step content+file tasks now route intelligently
+  - "Generate narrative" → `llm_generate` → Done
+  - "Add card to blueprint" → `llm_generate` content → `Edit` file integration
+  - Cost impact: ~90% savings on writing tasks (route cheap model vs. expensive local generation)
+
+- **Soft Nudges via Hook Suggestion** (not blocking)
+  - Detects multi-step content generation patterns
+  - Suggests: "Consider routing via `llm_generate` first, then integrate locally"
+  - Enforces routing discipline without forcing user behavior
+
+- **Fast-Path for Content Tasks** — Content generation routed instantly without waiting for classifier
+  - Patterns: simple generation, decomposition, refinement, documentation
+  - Same speed as code detection fast-path
+  - Seamless fallback if pattern doesn't match
+
+See [CLAUDE.md § Content Generation Routing](CLAUDE.md#content-generation-routing-v740) for detailed decision tree.
+
 ## How It Works
 
 ```

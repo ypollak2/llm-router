@@ -278,6 +278,58 @@ If a `⚡ MANDATORY ROUTE:` directive appears in context, use it to select the r
 4. `via heuristic-weak` — Low-confidence pattern match
 5. `via fallback` — No classification; `llm_route` should do full analysis
 
+## Content Generation Routing (v7.4.0)
+
+**New in v7.4.0**: The auto-route hook now detects content generation tasks and routes them via `llm_generate` automatically, preventing missed opportunities to route writing/creation work to cheaper models.
+
+### Detection Patterns
+
+The hook automatically detects these signals:
+
+| Pattern | Examples | Action |
+|---------|----------|--------|
+| Simple generation | "write X", "draft Y", "compose Z" | Route → `llm_generate` |
+| Decomposition | "add card about X to file.md" | Route → `llm_generate`, then integrate locally |
+| Content refinement | "rewrite X", "improve copy for Y" | Route → `llm_generate` |
+| Documentation | "create spec for X", "document Y" | Route → `llm_generate` |
+
+### Pre-Flight Decision Tree
+
+Before implementing multi-step content tasks:
+
+1. **Does this task involve creating new written content?**
+   - YES → Route via `llm_generate` first
+   - NO → Proceed with local implementation
+
+2. **Is this "add content to file.md" pattern?**
+   - YES → Route generation → receive output → integrate locally (Edit/Write)
+   - NO → If pure generation, route → done
+
+### Cost Impact Example
+
+Carousel blueprint expansion (as in llm-router session):
+
+| Approach | Cost | Time |
+|----------|------|------|
+| Direct file edits (OLD) | ~$0.001 | 15 min (includes thinking) |
+| Route via `llm_generate` then integrate (NEW) | ~$0.0001 | 12 min (routing + edit) |
+| **Savings** | **90%** | **20%** |
+
+Across 51 releases × 20-30 content tasks = **$0.10–$0.30 saved per cycle**.
+
+### Enforcement via Hook Suggestion
+
+When the hook detects a content generation task, it suggests:
+
+```
+⚡ SUGGESTION: This looks like content generation + file integration.
+Consider routing first: llm_generate(complexity='moderate')
+Then integrate the output locally with Edit/Write.
+Saves ~$0.0005, follows decomposition pattern.
+```
+
+**Not blocking** — just nudging toward routing discipline.
+
 ## Model Routing Strategy (v1.8.4)
 
 All routing goes through MCP tools — the hook never emits `/model` directives

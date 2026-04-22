@@ -322,6 +322,59 @@ SKIP_PATTERNS = re.compile(
 # When a prompt clearly asks for write/edit/fix/implement work, we can skip the
 # slower classifier layers and route straight to llm_code. This keeps auto-route
 # aligned with the repo rule that coding work still routes through llm_* tools.
+# ── Content Generation Detection (v7.4.0+) ────────────────────────────────────
+#
+# When a prompt involves creating written content (narratives, design specs, cards,
+# documentation), route via llm_generate FIRST, then integrate result locally.
+# This prevents the routing miss where "add content to file" skips generation routing.
+#
+# Pattern: "write/create/draft X" → route llm_generate
+# Pattern: "add card/section Y to file Z" → route llm_generate then integrate
+#
+
+_CONTENT_GENERATION_VERBS = re.compile(
+    r"\b(write|draft|compose|create.*content|author|"
+    r"rewrite|improve.*wording|refactor.*text|edit.*copy|"
+    r"add.*card|add.*section|add.*paragraph|add.*slide|add.*visualization)\b",
+    re.IGNORECASE,
+)
+
+_CONTENT_FILE_PATTERNS = re.compile(
+    r"(?:to|in|at)\s+(?:\w+/)*\w+\.(?:md|txt|rst|html|json|yaml|yml)(?:\s|$|,)",
+    re.IGNORECASE,
+)
+
+_DECOMPOSITION_PATTERNS = re.compile(
+    r"(?:write|generate|create|add).*(?:card|section|paragraph|narrative|blueprint|spec).*"
+    r"(?:to|in)\s+\w+\.(?:md|blueprint|carousel)",
+    re.IGNORECASE,
+)
+
+
+def _is_content_generation_task(prompt: str) -> bool:
+    """Return True when the prompt involves creating written content.
+    
+    Detects patterns like:
+    - "write narrative about X"
+    - "add carousel card about Y to file.md"
+    - "create design spec for Z"
+    - "draft documentation for module"
+    
+    These should route via llm_generate FIRST, then integrate locally.
+    """
+    has_generation_verb = bool(_CONTENT_GENERATION_VERBS.search(prompt))
+    
+    # Simple generation: just the verb
+    if has_generation_verb and not _CONTENT_FILE_PATTERNS.search(prompt):
+        return True
+    
+    # Decomposition pattern: "add X to file.md" = generate + integrate
+    if _DECOMPOSITION_PATTERNS.search(prompt):
+        return True
+    
+    return False
+
+
 #
 # Criteria: must have BOTH a build verb AND a build object to avoid false positives.
 # "implement" alone might be "how do I implement X?" → still route to query.
@@ -845,6 +898,15 @@ def classify_prompt(text: str) -> dict | None:
             "task_type": "code",
             "complexity": classify_complexity(text, "code"),
             "method": "build-fast-path",
+        }
+
+    # Content generation detection (v7.4.0+): Suggest routing for create/write/add tasks
+    if _is_content_generation_task(stripped):
+        return {
+            "task_type": "generate",
+            "complexity": classify_complexity(text, "generate"),
+            "method": "content-generation-fast-path",
+            "suggestion": "content-generation-decomposition",
         }
 
     # Layer 1: Heuristic scoring (instant, free)
