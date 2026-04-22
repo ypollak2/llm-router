@@ -2,6 +2,20 @@
 
 **For releases v6.2 and earlier, see [CHANGELOG_ARCHIVE.md](docs/CHANGELOG_ARCHIVE.md).**
 
+## v7.4.1 — Repository Cleanup (2026-04-22)
+
+### Changed
+
+- **Repository Sanitization** — Moved session artifacts and development files to Documents
+  - Moved 14 session-specific files: presentation materials, development status files, visualizations
+  - Moved `.serena/memories/` (Claude Memory database) to Documents folder
+  - Updated `.gitignore` to prevent re-adding session artifacts and machine-specific memories
+  - Kept full history in git; removed from working tree
+
+### Why
+
+Session artifacts (presentation decks, development planning docs, audit reports) and Claude Memory databases are machine-specific and should not be committed to the repository. These files are now stored locally under `~/Documents/llm-router-session-artifacts/` for reference, while the repository contains only production code and essential documentation.
+
 ## v7.4.0 — Content Generation Routing Discipline (2026-04-22)
 
 ### Added
