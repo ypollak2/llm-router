@@ -35,6 +35,20 @@ from llm_router.types import BudgetExceededError, Complexity, LLMResponse, Routi
 # honours it automatically. simple→BUDGET (Haiku/cheap), moderate→BALANCED
 # (Sonnet/GPT-4o), complex→PREMIUM (Opus/o3). An explicit profile= argument
 # overrides this (escape hatch for power users), but no caller should need to.
+
+def _estimate_opus_cost(input_tokens: int, output_tokens: int) -> float:
+    """Estimate what this call would have cost if handled by Claude Opus.
+    
+    Used for savings calculation: actual_cost - opus_estimate = savings.
+    
+    Opus cost: $15/M input tokens, $75/M output tokens
+    Blended rate: ~$0.045/1K tokens
+    """
+    # Opus pricing: $15/1M input, $75/1M output
+    input_cost = (input_tokens / 1_000_000) * 15.0
+    output_cost = (output_tokens / 1_000_000) * 75.0
+    return input_cost + output_cost
+
 _COMPLEXITY_TO_PROFILE: dict[Complexity, RoutingProfile] = {
     Complexity.SIMPLE: RoutingProfile.BUDGET,
     Complexity.MODERATE: RoutingProfile.BALANCED,
@@ -849,6 +863,24 @@ async def _dispatch_model_loop(
                         response=response.content,
                         requested_complexity=classification_data.get("requested_complexity"),
                     )
+                    
+                    # Auto-log Claude usage when router selects Claude model
+                    if response.provider in {"claude_subscription", "subscription", "anthropic", "claude"}:
+                        try:
+                            # Estimate Opus cost as baseline for savings calculation
+                            estimated_opus_cost = _estimate_opus_cost(
+                                response.input_tokens, response.output_tokens
+                            )
+                            cost_saved = estimated_opus_cost - response.cost_usd
+                            
+                            await cost.log_claude_usage(
+                                model=response.model,
+                                tokens_used=response.input_tokens + response.output_tokens,
+                                complexity=classification_data.get("complexity", "moderate"),
+                                cost_saved_usd=cost_saved,
+                            )
+                        except Exception as e:
+                            log.debug("Failed to log claude_usage: %s", e)
                 except Exception as e:
                     log.warning("Failed to log routing decision: %s", e)
 

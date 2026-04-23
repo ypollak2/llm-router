@@ -201,7 +201,7 @@ def check_last_decisions(limit: int = 5) -> list[str]:
         cursor = conn.cursor()
         cursor.execute(
             "SELECT timestamp, model, task_type, task_complexity, cost_usd FROM routing_decisions "
-            "WHERE is_simulated = 0 ORDER BY timestamp DESC LIMIT ?",
+            "WHERE is_real = 1 ORDER BY timestamp DESC LIMIT ?",
             (limit,),
         )
         rows = cursor.fetchall()

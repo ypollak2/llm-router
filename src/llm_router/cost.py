@@ -281,6 +281,91 @@ is_simulated:       1 for dry-run test calls (llm-router test), 0 for real calls
 """
 
 
+CREATE_QUOTA_SNAPSHOTS_TABLE = """
+CREATE TABLE IF NOT EXISTS quota_snapshots (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp TEXT DEFAULT (datetime('now')),
+    session_id TEXT NOT NULL,
+    prompt_sequence INTEGER NOT NULL,
+    prompt_hash TEXT,
+    -- Quota state at the moment this prompt arrived
+    claude_session_pct REAL NOT NULL,
+    claude_weekly_pct REAL NOT NULL,
+    claude_sonnet_pct REAL NOT NULL,
+    openai_spent_usd REAL NOT NULL DEFAULT 0,
+    gemini_spent_usd REAL NOT NULL DEFAULT 0,
+    ollama_available INTEGER NOT NULL DEFAULT 1,
+    cache_age_seconds REAL NOT NULL,
+    was_cache_fresh INTEGER NOT NULL,    -- 1=fresh, 0=stale fallback
+    -- Routing outcome
+    routing_decision_id INTEGER,         -- FK → routing_decisions.id (nullable: Ollama has no row)
+    final_model TEXT,
+    final_provider TEXT,
+    complexity_requested TEXT,
+    complexity_used TEXT,
+    was_downgraded INTEGER DEFAULT 0     -- 1 if pressure forced complexity downgrade
+)
+"""
+"""Schema for the ``quota_snapshots`` table tracking per-prompt quota state audit trail.
+
+Each row captures the quota state (Claude session%, weekly%, provider spend) at the
+moment a prompt arrived, enabling retrospective analysis of quota pressure patterns
+and correlation with routing decisions. Rows are retained forever (no TTL) for
+complete audit trail.
+"""
+
+MIGRATE_ROUTING_DECISIONS_ADD_REAL_FLAG = [
+    "ALTER TABLE routing_decisions ADD COLUMN is_real INTEGER DEFAULT 1",
+    "ALTER TABLE routing_decisions ADD COLUMN session_id TEXT",
+    "ALTER TABLE routing_decisions ADD COLUMN prompt_sequence INTEGER",
+]
+"""Idempotent migration to add data quality and audit columns to routing_decisions (v7.5).
+
+is_real: 1 for production calls, 0 for test/simulated data
+session_id: Correlation ID for grouping prompts within a session
+prompt_sequence: Sequential prompt number within session (0, 1, 2, ...)
+"""
+
+MIGRATE_ROUTING_DECISIONS_MARK_CONTAMINATED = [
+    """UPDATE routing_decisions
+    SET is_real = 0
+    WHERE is_real IS NULL
+       OR final_model LIKE 'test/%'
+       OR (cost_usd = 0.01 AND final_provider = 'test')
+       OR final_model IS NULL""",
+]
+"""One-time fixup to mark contaminated routing records with is_real=0 (v7.5).
+
+Marks 1,974 test/demo records as contaminated but retains them for audit trail.
+All downstream analytics queries use "WHERE is_real = 1" to filter them out.
+This migration runs idempotently — subsequent runs are no-ops after first execution.
+"""
+
+MIGRATE_ADD_QUOTA_SNAPSHOTS_TABLE = [
+    """CREATE TABLE IF NOT EXISTS quota_snapshots (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        timestamp TEXT DEFAULT (datetime('now')),
+        session_id TEXT NOT NULL,
+        prompt_sequence INTEGER NOT NULL,
+        prompt_hash TEXT,
+        claude_session_pct REAL NOT NULL,
+        claude_weekly_pct REAL NOT NULL,
+        claude_sonnet_pct REAL NOT NULL,
+        openai_spent_usd REAL NOT NULL DEFAULT 0,
+        gemini_spent_usd REAL NOT NULL DEFAULT 0,
+        ollama_available INTEGER NOT NULL DEFAULT 1,
+        cache_age_seconds REAL NOT NULL,
+        was_cache_fresh INTEGER NOT NULL,
+        routing_decision_id INTEGER,
+        final_model TEXT,
+        final_provider TEXT,
+        complexity_requested TEXT,
+        complexity_used TEXT,
+        was_downgraded INTEGER DEFAULT 0
+    )""",
+]
+"""Idempotent migration to create quota_snapshots table (v7.5)."""
+
 async def _column_exists(db: aiosqlite.Connection, table: str, column: str) -> bool:
     """Return True if *column* exists in *table* (uses SQLite PRAGMA, no exceptions).
     
@@ -290,7 +375,8 @@ async def _column_exists(db: aiosqlite.Connection, table: str, column: str) -> b
     # Allowlist of valid tables — prevents SQL injection via table parameter
     allowed_tables = {
         "usage", "claude_usage", "routing_decisions", "savings_stats",
-        "semantic_cache", "corrections", "compression_stats", "model_quality_trends"
+        "semantic_cache", "corrections", "compression_stats", "model_quality_trends",
+        "quota_snapshots"
     }
     
     # Validate table parameter against allowlist
@@ -382,6 +468,9 @@ async def _get_db() -> aiosqlite.Connection:
         + MIGRATE_ROUTING_DECISIONS_ADD_JUDGE_SCORE
         + MIGRATE_ROUTING_DECISIONS_ADD_COMPLEXITY_TRACKING
         + MIGRATE_ADD_MODEL_QUALITY_TRENDS
+        + MIGRATE_ROUTING_DECISIONS_ADD_REAL_FLAG
+        + MIGRATE_ROUTING_DECISIONS_MARK_CONTAMINATED
+        + MIGRATE_ADD_QUOTA_SNAPSHOTS_TABLE
     )
     for stmt in all_migrations:
         await _safe_migrate(db, stmt)
@@ -787,6 +876,54 @@ def _prompt_hash(prompt: str) -> str:
     return hashlib.sha256(prompt[:500].encode("utf-8")).hexdigest()
 
 
+def _validate_routing_insert(
+    final_model: str,
+    final_provider: str,
+    cost_usd: float,
+) -> None:
+    """Validate routing_decisions insert parameters. Raises ValueError on invalid data.
+    
+    Prevents contaminated test data from entering production database.
+    
+    Checks:
+    - final_provider is in allowlist of real providers
+    - final_model doesn't look like test data
+    - cost_usd is within plausible range
+    
+    Raises:
+        ValueError: On invalid provider, test-like model, or implausible cost
+    """
+    VALID_PROVIDERS = frozenset({
+        'ollama', 'openai', 'gemini', 'codex',
+        'claude_subscription', 'subscription', 'anthropic',
+        'perplexity', 'groq', 'deepseek', 'cc',
+        'anthropic', 'claude'  # variations
+    })
+
+    # Check provider is valid
+    if final_provider not in VALID_PROVIDERS:
+        raise ValueError(
+            f"routing_decisions insert rejected: invalid provider '{final_provider}'. "
+            f"Valid providers: {sorted(VALID_PROVIDERS)}. "
+            f"If this is a test, use LLM_ROUTER_DB_PATH to isolate test databases."
+        )
+
+    # Check model doesn't look like test data
+    if not final_model or final_model.startswith('test/'):
+        raise ValueError(
+            f"routing_decisions insert rejected: model '{final_model}' looks like test data. "
+            f"Real models include 'gpt-4o', 'claude-opus', 'gemini-pro', etc. "
+            f"If this is a test, use LLM_ROUTER_DB_PATH to isolate test databases."
+        )
+
+    # Check cost is plausible
+    if cost_usd < 0 or cost_usd > 100:
+        raise ValueError(
+            f"routing_decisions insert rejected: cost_usd={cost_usd} is implausible. "
+            f"Expected 0 < cost < 100 USD. Real costs: Haiku ~$0.00002, Opus ~$0.015 per 1K tokens."
+        )
+
+
 async def log_routing_decision(
     *,
     prompt: str,
@@ -844,6 +981,9 @@ async def log_routing_decision(
         cost_usd: Total cost of the LLM call.
         latency_ms: Total latency of the LLM call.
     """
+    # Validate inputs before database insert
+    _validate_routing_insert(final_model, final_provider, cost_usd)
+    
     db = await _get_db()
     try:
         # Track complexity mismatch: if requested_complexity differs from final complexity,
@@ -1045,6 +1185,20 @@ async def log_claude_usage(model: str, tokens_used: int, complexity: str) -> dic
     Returns:
         Dict with ``cost_saved_usd`` and ``time_saved_sec`` for this call.
     """
+    # Safeguard: detect if running in test context and validate isolation
+    import sys
+    if "pytest" in sys.modules:
+        config = get_config()
+        prod_path = Path.home() / ".llm-router" / "usage.db"
+        if str(config.llm_router_db_path) == str(prod_path):
+            raise RuntimeError(
+                "CRITICAL: log_claude_usage is writing to production database in test context!\n"
+                "Tests must use the temp_db fixture to isolate the database.\n"
+                f"Production path: {prod_path}\n"
+                f"Config path: {config.llm_router_db_path}\n"
+                "Fix: Add temp_db fixture to your test method parameters."
+            )
+    
     cost_saved, time_saved = calc_savings(model, tokens_used)
 
     db = await _get_db()
@@ -1059,6 +1213,97 @@ async def log_claude_usage(model: str, tokens_used: int, complexity: str) -> dic
         await db.close()
 
     return {"cost_saved_usd": cost_saved, "time_saved_sec": time_saved}
+
+
+async def log_quota_snapshot(
+    *,
+    session_id: str,
+    prompt_sequence: int,
+    prompt_hash: str | None,
+    claude_session_pct: float,
+    claude_weekly_pct: float,
+    claude_sonnet_pct: float,
+    openai_spent_usd: float,
+    gemini_spent_usd: float,
+    ollama_available: bool,
+    cache_age_seconds: float,
+    was_cache_fresh: bool,
+    routing_decision_id: int | None,
+    final_model: str | None,
+    final_provider: str | None,
+    complexity_requested: str | None,
+    complexity_used: str | None,
+    was_downgraded: bool,
+) -> int:
+    """Log per-prompt quota state to quota_snapshots table for audit trail.
+
+    Captures the quota pressure at the moment a prompt arrived, enabling
+    retrospective analysis of quota patterns and correlation with routing
+    decisions. Each row documents exactly what the router "saw" when making
+    its decision.
+
+    Args:
+        session_id: Session UUID from session_id.txt
+        prompt_sequence: Sequential number of this prompt within the session (0, 1, 2, ...)
+        prompt_hash: Hash of the prompt text (for deduplication detection)
+        claude_session_pct: Claude session % (5h window) at decision time
+        claude_weekly_pct: Claude weekly % (7d window) at decision time
+        claude_sonnet_pct: Claude Sonnet % (7d window) at decision time
+        openai_spent_usd: OpenAI spend (last 24h) in USD
+        gemini_spent_usd: Gemini spend (last 24h) in USD
+        ollama_available: Whether Ollama is configured and reachable
+        cache_age_seconds: Age of quota cache in seconds
+        was_cache_fresh: Whether cache was within TTL
+        routing_decision_id: FK to routing_decisions.id (None if Ollama-only)
+        final_model: Model that executed the request
+        final_provider: Provider of the model
+        complexity_requested: Original complexity before pressure downgrade
+        complexity_used: Final complexity after pressure downgrade
+        was_downgraded: Whether pressure caused complexity downgrade
+
+    Returns:
+        ID of the inserted row for correlation tracking
+    """
+    db = await _get_db()
+    try:
+        await db.execute(
+            """INSERT INTO quota_snapshots (
+                session_id, prompt_sequence, prompt_hash,
+                claude_session_pct, claude_weekly_pct, claude_sonnet_pct,
+                openai_spent_usd, gemini_spent_usd, ollama_available,
+                cache_age_seconds, was_cache_fresh,
+                routing_decision_id, final_model, final_provider,
+                complexity_requested, complexity_used, was_downgraded
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                session_id,
+                prompt_sequence,
+                prompt_hash,
+                claude_session_pct,
+                claude_weekly_pct,
+                claude_sonnet_pct,
+                openai_spent_usd,
+                gemini_spent_usd,
+                1 if ollama_available else 0,
+                cache_age_seconds,
+                1 if was_cache_fresh else 0,
+                routing_decision_id,
+                final_model,
+                final_provider,
+                complexity_requested,
+                complexity_used,
+                1 if was_downgraded else 0,
+            ),
+        )
+        await db.commit()
+
+        # Get the row ID that was just inserted
+        cursor = await db.execute("SELECT last_insert_rowid()")
+        row_id_result = await cursor.fetchone()
+        row_id = row_id_result[0] if row_id_result else None
+        return row_id or 0
+    finally:
+        await db.close()
 
 
 async def get_daily_claude_tokens() -> int:

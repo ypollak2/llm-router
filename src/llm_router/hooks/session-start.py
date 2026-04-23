@@ -121,7 +121,8 @@ BANNER = BANNER_SUBSCRIPTION if _CC_MODE else BANNER_API_KEYS
 
 def _reset_session_stats() -> None:
     """Write current timestamp and a fresh UUID as session identifiers.
-    Also resets session_spend.json so per-session cost tracking starts clean."""
+    Also resets session_spend.json so per-session cost tracking starts clean.
+    Initialize prompt_sequence counter for per-prompt quota audit trail."""
     os.makedirs(STATE_DIR, exist_ok=True)
     try:
         with open(SESSION_START_FILE, "w") as f:
@@ -140,6 +141,7 @@ def _reset_session_stats() -> None:
             "top_model": None,
             "per_model": {},
             "per_tool": {},
+            "prompt_sequence": 0,  # Counter for per-prompt audit trail
         }
         tmp = SESSION_SPEND_FILE + ".tmp"
         with open(tmp, "w") as f:
@@ -186,13 +188,93 @@ def _ensure_ollama_running() -> str:
 
 
 def _refresh_claude_usage() -> str:
-    """Fetch fresh Claude subscription usage from the OAuth API.
+    """Fetch fresh Claude subscription usage from the OAuth API with retries.
 
-    Reads the OAuth token from macOS Keychain, calls the Anthropic usage
-    endpoint, and writes the result to ~/.llm-router/usage.json so pressure-
-    based routing is accurate from the first request of this session.
+    Attempts up to 3 times to refresh quota data, backing off 2s between retries.
+    On success: writes to ~/.llm-router/usage.json and session_start_cc_pct.json
+    On all-retries failure: writes conservative fallback (50% all pressures)
 
     Returns a one-line status string for the banner (empty on success).
+    """
+    max_retries = 3
+    retry_delay = 2.0
+    
+    for attempt in range(max_retries):
+        result = _refresh_claude_usage_attempt()
+        if result["success"]:
+            # Write both usage.json and session snapshot
+            os.makedirs(STATE_DIR, exist_ok=True)
+            usage_path = os.path.join(STATE_DIR, "usage.json")
+            snap_path = os.path.join(STATE_DIR, "session_start_cc_pct.json")
+            
+            snapshot = {
+                "session_pct": result["session_pct"],
+                "weekly_pct": result["weekly_pct"],
+                "sonnet_pct": result["sonnet_pct"],
+                "highest_pressure": result["highest_pressure"],
+                "updated_at": time.time(),
+            }
+            
+            try:
+                with open(usage_path, "w") as f:
+                    json.dump(snapshot, f)
+                with open(snap_path, "w") as f:
+                    json.dump(snapshot, f)
+            except OSError:
+                pass
+            
+            # Return success banner
+            session_pct = result["session_pct"]
+            weekly_pct = result["weekly_pct"]
+            sonnet_pct = result["sonnet_pct"]
+            highest_pressure = result["highest_pressure"]
+            pressure_str = f"session={session_pct:.0f}% weekly={weekly_pct:.0f}% sonnet={sonnet_pct:.0f}%"
+            
+            if highest_pressure >= 0.95:
+                return f"\n🔴 Usage: {pressure_str} — ALL external (full pressure)"
+            if highest_pressure >= 0.85:
+                return f"\n🟡 Usage: {pressure_str} — partial pressure active"
+            return f"\n✅ Usage: {pressure_str}"
+        
+        # Retry on failure
+        if attempt < max_retries - 1:
+            time.sleep(retry_delay)
+    
+    # All retries failed — write conservative fallback (50% pressure)
+    os.makedirs(STATE_DIR, exist_ok=True)
+    usage_path = os.path.join(STATE_DIR, "usage.json")
+    snap_path = os.path.join(STATE_DIR, "session_start_cc_pct.json")
+    
+    fallback = {
+        "session_pct": 50,
+        "weekly_pct": 50,
+        "sonnet_pct": 50,
+        "highest_pressure": 0.5,
+        "updated_at": time.time(),
+        "is_fallback": True,
+    }
+    
+    try:
+        with open(usage_path, "w") as f:
+            json.dump(fallback, f)
+        with open(snap_path, "w") as f:
+            json.dump(fallback, f)
+    except OSError:
+        pass
+    
+    sys.stderr.write(
+        "[llm-router] ⚠ Quota refresh failed (3 attempts)\n"
+        "[llm-router]   Using conservative 50% pressure defaults\n"
+    )
+    return "\n⚠️  Usage: refresh failed (50% pressure fallback)"
+
+
+def _refresh_claude_usage_attempt() -> dict:
+    """Single attempt to fetch Claude subscription usage via OAuth.
+    
+    Returns:
+        {"success": True, "session_pct": X, "weekly_pct": Y, "sonnet_pct": Z, "highest_pressure": P}
+        or {"success": False} on any error
     """
     # Read OAuth token from macOS Keychain
     try:
@@ -201,15 +283,13 @@ def _refresh_claude_usage() -> str:
             capture_output=True, text=True, timeout=subprocess_timeout(),
         )
         if r.returncode != 0 or not r.stdout.strip():
-            return "\n⚠️  Could not read Claude credentials — run llm_check_usage manually"
+            return {"success": False}
         creds = json.loads(r.stdout.strip())
         token = creds.get("claudeAiOauth", {}).get("accessToken", "")
         if not token:
-            return "\n⚠️  OAuth token not found — run llm_check_usage manually"
-    except subprocess.TimeoutExpired:
-        return "\n⚠️  Keychain read timed out — run llm_check_usage manually"
-    except Exception as e:
-        return f"\n⚠️  Keychain error: {e}"
+            return {"success": False}
+    except Exception:
+        return {"success": False}
 
     # Call the OAuth usage API
     url = "https://api.anthropic.com/api/oauth/usage"
@@ -218,10 +298,10 @@ def _refresh_claude_usage() -> str:
         "anthropic-beta": "oauth-2025-04-20",
     })
     try:
-        with urllib.request.urlopen(req, timeout=10) as resp:
+        with urllib.request.urlopen(req, timeout=http_timeout()) as resp:
             data = json.loads(resp.read().decode())
-    except Exception as e:
-        return f"\n⚠️  Usage API failed: {e}"
+    except Exception:
+        return {"success": False}
 
     # Parse — the OAuth response has utilization as a percentage (0-100)
     try:
@@ -229,32 +309,16 @@ def _refresh_claude_usage() -> str:
         weekly_pct = float(data.get("seven_day", {}).get("utilization", 0.0))
         sonnet_pct = float(data.get("seven_day_sonnet", {}).get("utilization", 0.0))
         highest_pressure = max(session_pct, weekly_pct, sonnet_pct) / 100.0
-
-        os.makedirs(STATE_DIR, exist_ok=True)
-        snapshot = {
+        
+        return {
+            "success": True,
             "session_pct": round(session_pct, 1),
             "weekly_pct": round(weekly_pct, 1),
             "sonnet_pct": round(sonnet_pct, 1),
             "highest_pressure": round(highest_pressure, 4),
-            "updated_at": time.time(),
         }
-        usage_path = os.path.join(STATE_DIR, "usage.json")
-        with open(usage_path, "w") as f:
-            json.dump(snapshot, f)
-        # Snapshot for session-end delta reporting
-        snap_path = os.path.join(STATE_DIR, "session_start_cc_pct.json")
-        with open(snap_path, "w") as f:
-            json.dump(snapshot, f)
-
-        # Pressure indicator for the banner
-        pressure_str = f"session={session_pct:.0f}% weekly={weekly_pct:.0f}% sonnet={sonnet_pct:.0f}%"
-        if highest_pressure >= 0.95:
-            return f"\n🔴 Usage: {pressure_str} — ALL external (full pressure)"
-        if highest_pressure >= 0.85:
-            return f"\n🟡 Usage: {pressure_str} — partial pressure active"
-        return f"\n✅ Usage: {pressure_str}"
-    except Exception as e:
-        return f"\n⚠️  Usage parse failed: {e}"
+    except Exception:
+        return {"success": False}
 
 
 def _weekly_digest() -> str:

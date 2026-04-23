@@ -12,6 +12,10 @@ def temp_db(tmp_path, monkeypatch):
     
     Sets up a clean SQLite database in a temp directory and ensures
     all config reads the temp path, not the user's real ~/.llm-router.
+    
+    CRITICAL: This fixture MUST be used by any test that writes to the database
+    (including log_claude_usage, log_routing_decision, etc.). Failure to use this
+    fixture will contaminate the production database.
     """
     db_dir = tmp_path / ".llm-router"
     db_dir.mkdir(parents=True, exist_ok=True)
@@ -26,7 +30,19 @@ def temp_db(tmp_path, monkeypatch):
     import llm_router.config as config_module
     config_module._config = None
     
-    return db_path
+    # Verify isolation: make sure we're NOT using production path
+    from llm_router.config import get_config
+    config = get_config()
+    assert str(config.llm_router_db_path) != str(Path.home() / ".llm-router" / "usage.db"), \
+        f"CRITICAL: Fixture failed to isolate database. Using production path: {config.llm_router_db_path}"
+    assert "test" in str(db_path).lower(), \
+        f"CRITICAL: Database path should contain 'test': {db_path}"
+    
+    yield db_path
+    
+    # Cleanup: verify the isolated database was actually used (has non-zero size)
+    if db_path.exists():
+        assert db_path.stat().st_size > 0, f"Test database was never written to: {db_path}"
 
 
 @pytest.fixture
