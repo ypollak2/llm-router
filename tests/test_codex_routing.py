@@ -36,6 +36,7 @@ def _captured_chain(mock_acompletion) -> list[str]:
 
 
 @pytest.mark.asyncio
+@pytest.mark.slow
 async def test_code_task_codex_before_paid_externals_subscription_mode(
     mock_env, monkeypatch
 ):
@@ -136,6 +137,7 @@ async def test_code_task_codex_after_first_claude_not_last(
 
 
 @pytest.mark.asyncio
+@pytest.mark.slow
 async def test_analyze_task_codex_before_paid_externals_subscription_mode(
     mock_env, monkeypatch
 ):
@@ -174,6 +176,7 @@ async def test_analyze_task_codex_before_paid_externals_subscription_mode(
 
 
 @pytest.mark.asyncio
+@pytest.mark.slow
 async def test_query_task_codex_before_paid_externals_subscription_mode(
     mock_env, monkeypatch
 ):

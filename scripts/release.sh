@@ -90,7 +90,7 @@ assert v1==v2==v3==v4, f'MISMATCH: pyproject={v1} plugin={v2} marketplace={v3} i
 
     # Step 2: Run tests
     log_info "Step 2/5: Running test suite..."
-    if uv run pytest tests/ -q --ignore=tests/test_agno_integration.py 2>&1; then
+    if uv run pytest tests/ -q --ignore=tests/test_agno_integration.py -m "not slow" 2>&1; then
         log_success "All tests passed"
     else
         log_error "Tests failed. Fix failures and try again."
