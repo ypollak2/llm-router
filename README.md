@@ -17,16 +17,21 @@
 
 Real numbers from a 14-day sprint: **51 releases, 22.6M tokens, $6.95 spent.**
 
-![Cost Breakdown](docs/slides/5.png)
+### Quota Pressure Reduction
+Free-first routing eliminated budget pressure over 14 days—allowing sustainable feature velocity.
+
+![Quota Pressure Trajectory](docs/slides/15.png)
 
 ### Cost Impact
 - **Actual spend:** $6.95 (22.6M development tokens)
 - **Opus baseline:** $50–60 (300M+ tokens, traditional approach)
 - **Savings:** $43–53 (87% cost reduction, 94% token reduction)
 
+![Cost Breakdown](docs/slides/19.png)
+
 ### Token Distribution by Routing Tier
 
-![Token Distribution](docs/slides/6.png)
+![Token Distribution Tiers](docs/slides/20.png)
 
 Free-first routing achieved:
 - **31% from free models** — Ollama (local) + Codex (prepaid): 7.0M tokens, $0 cost
