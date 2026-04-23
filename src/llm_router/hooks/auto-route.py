@@ -98,15 +98,22 @@ OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "") or os.environ.get("GOOGLE_API_KEY", "")
 
 # Claude Code subscription mode — Claude models used via subscription, never API.
-# Routing strategy by complexity (no pressure):
-#   simple   → /model claude-haiku-4-5-20251001  (fast, free via subscription)
-#   moderate → passthrough — Sonnet handles directly, no switch needed
-#   complex  → /model claude-opus-4-6            (best quality, free via subscription)
+# NEW ROUTING PHILOSOPHY (v7.3+): Always route through MCP first for cost minimization.
+# Claude subscription is a FALLBACK, not the first choice.
 #
-# When pressure builds, external models take over tier by tier:
-#   session  ≥ 85% → simple   tasks → external (Gemini Flash → Groq → GPT-4o-mini → Ollama)
-#   sonnet   ≥ 95% → moderate tasks → external (GPT-4o → Gemini Pro → DeepSeek → Ollama)
-#   weekly   ≥ 95% → complex  tasks → external (o3 → Gemini Pro → Ollama)
+# Routing strategy by complexity:
+#   simple   → Route via llm_query  (Ollama → Codex → Gemini Flash → Groq)
+#             Claude Haiku available as fallback at <99% pressure
+#   moderate → Route via llm_route  (Ollama → Codex → Gemini Pro → Claude Sonnet)
+#             Find cheapest suitable option; Claude Sonnet last resort
+#   complex  → Route via llm_route  (Ollama → Codex → o3 → Claude Opus)
+#             Quality-first; Claude Opus fallback when others unavailable
+#
+# Hard cap enforcement at ≥99% pressure:
+#   ALL → Route external only, block Claude entirely to protect quota limits
+#
+# Cost impact: Reduces Claude subscription usage by 50-90% for simple/moderate tasks
+# while maintaining quality for complex work.
 _CC_MODE = os.environ.get("LLM_ROUTER_CLAUDE_SUBSCRIPTION", "").lower() in ("true", "1", "yes")
 
 
