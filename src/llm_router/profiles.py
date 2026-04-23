@@ -286,6 +286,108 @@ CLASSIFIER_MODELS: list[str] = [
 # from mid-tier quality (balanced), and complex tasks warrant frontier models
 # (premium). This mapping is the bridge between the classifier and the
 # routing table.
+# ── Model-Profile Constraints ───────────────────────────────────────────────
+# SAFEGUARD #3: Explicit data structures defining which models are allowed
+# per profile. Used by _validate_chain_invariants() to catch policy violations.
+#
+# These constraints are the SOURCE OF TRUTH for policy enforcement:
+# - BUDGET: Never include Opus or even Sonnet (use Haiku only as last resort)
+# - BALANCED: Never include Opus (use Sonnet/Haiku as fallback only)
+# - PREMIUM: Can include Opus, but it must be first (best quality)
+MODELS_PER_PROFILE: dict[RoutingProfile, dict[str, list[str]]] = {
+    RoutingProfile.BUDGET: {
+        "forbidden": ["anthropic/claude-opus-4-6"],  # Opus forbidden in BUDGET
+        "discouraged": [
+            "anthropic/claude-sonnet-4-6",  # Sonnet discouraged (use only Haiku)
+        ],
+        "allowed_claude": ["anthropic/claude-haiku-4-5-20251001"],  # Haiku only as last resort
+    },
+    RoutingProfile.BALANCED: {
+        "forbidden": ["anthropic/claude-opus-4-6"],  # Opus forbidden in BALANCED
+        "discouraged": [],
+        "allowed_claude": [
+            "anthropic/claude-sonnet-4-6",
+            "anthropic/claude-haiku-4-5-20251001",
+        ],
+    },
+    RoutingProfile.PREMIUM: {
+        "forbidden": [],  # No models forbidden in PREMIUM
+        "discouraged": [],
+        "allowed_claude": [
+            "anthropic/claude-opus-4-6",  # Opus allowed, should be first
+            "anthropic/claude-sonnet-4-6",
+            "anthropic/claude-haiku-4-5-20251001",
+        ],
+    },
+}
+
+
+# ── Profile-Model Invariant Validation ───────────────────────────────────────
+# SAFEGUARD #1 & #2: Runtime assertions and logging on policy mismatch.
+#
+# These functions catch Opus in wrong profiles at runtime (invariant assertions)
+# and log violations with immediate alerts (logging on policy mismatch).
+def _validate_chain_invariants(
+    chain: list[str],
+    profile: RoutingProfile,
+    context: str = "unknown",
+) -> None:
+    """Validate that a model chain follows profile-model constraints.
+
+    This is SAFEGUARD #1 — profile-model invariant assertions that catch Opus
+    in wrong profiles at runtime.
+
+    Raises:
+        AssertionError if Opus appears in BUDGET or BALANCED profiles.
+
+    SAFEGUARD #2: Logs warnings on policy mismatches (constraints that don't
+    raise but should be noted).
+
+    Args:
+        chain: The model chain to validate.
+        profile: The routing profile it's used for.
+        context: String describing where the chain came from (e.g.,
+            "get_model_chain(BALANCED, CODE)", "reorder_for_pressure(BALANCED)").
+    """
+    if profile == RoutingProfile.QUOTA_BALANCED:
+        # QUOTA_BALANCED uses BALANCED constraints as its base
+        profile_for_check = RoutingProfile.BALANCED
+    else:
+        profile_for_check = profile
+
+    constraints = MODELS_PER_PROFILE.get(profile_for_check)
+    if not constraints:
+        return  # No constraints defined, skip validation
+
+    forbidden = constraints.get("forbidden", [])
+    discouraged = constraints.get("discouraged", [])
+
+    # SAFEGUARD #1: Invariant assertions — these MUST never happen
+    for forbidden_model in forbidden:
+        if forbidden_model in chain:
+            error_msg = (
+                f"POLICY VIOLATION: {forbidden_model} appears in {profile.name} profile chain. "
+                f"Context: {context}. Chain: {chain}"
+            )
+            log.error(error_msg)  # SAFEGUARD #2: Log the violation
+            raise AssertionError(error_msg)
+
+    # SAFEGUARD #2: Logging on discouraged matches
+    for discouraged_model in discouraged:
+        if discouraged_model in chain:
+            # Check if it's at the front (bad) vs. end (acceptable fallback)
+            is_first = chain[0] == discouraged_model
+            if is_first:
+                log.warning(
+                    "POLICY MISMATCH: %s appears first in %s chain (should be fallback). "
+                    "Context: %s. Chain: %s",
+                    discouraged_model,
+                    profile.name,
+                    context,
+                    chain,
+                )
+
+
 COMPLEXITY_TO_PROFILE: dict[Complexity, RoutingProfile] = {
     Complexity.SIMPLE: RoutingProfile.BUDGET,
     Complexity.MODERATE: RoutingProfile.BALANCED,
@@ -368,7 +470,17 @@ def reorder_for_pressure(
         return 2       # paid: GPT-4o, Gemini Pro, o3, etc.
 
     other_models.sort(key=_priority)
-    return other_models + claude_cheap_models
+    result = other_models + claude_cheap_models
+
+    # SAFEGUARD #1 & #2: Validate reordered chain against constraints
+    try:
+        _validate_chain_invariants(
+            result, profile, context=f"reorder_for_pressure({profile.name}, pressure={pressure:.2f})"
+        )
+    except AssertionError:
+        raise  # Policy violations are critical
+
+    return result
 
 
 def complexity_to_profile(complexity: Complexity) -> RoutingProfile:
@@ -470,6 +582,15 @@ def get_model_chain(
         chain = reorder_for_pressure(chain, pressure, profile)
     except Exception as _e:
         log.warning("Pressure reordering failed — using static chain order: %s", _e)
+
+    # SAFEGUARD #1 & #2: Validate chain against profile-model constraints
+    # This catches Opus in BALANCED/BUDGET at runtime with an AssertionError
+    try:
+        _validate_chain_invariants(
+            chain, profile, context=f"get_model_chain({profile.name}, {task_type.name})"
+        )
+    except AssertionError:
+        raise  # Policy violations are critical — let them propagate
 
     return chain
 
