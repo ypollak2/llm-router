@@ -25,6 +25,7 @@ except ImportError:
 
 STATE_DIR            = os.path.expanduser("~/.llm-router")
 SESSION_START_FILE   = os.path.join(STATE_DIR, "session_start.txt")
+SESSION_ID_FILE      = os.path.join(STATE_DIR, "session_id.txt")
 SESSION_CC_SNAP_FILE = os.path.join(STATE_DIR, "session_start_cc_pct.json")
 DB_PATH              = os.path.join(STATE_DIR, "usage.db")
 USAGE_JSON           = os.path.join(STATE_DIR, "usage.json")
@@ -100,6 +101,72 @@ def _get_cc_usage() -> tuple[dict | None, dict | None, bool]:
         return start, live, True
     cached = _read_json(USAGE_JSON)
     return start, cached, False
+
+
+def _render_quota_timeline(session_id: str | None, db_path: str) -> str:
+    """Render per-prompt Claude quota timeline for audit trail.
+    
+    Shows how weekly quota pressure changed throughout the session,
+    correlated with routing decisions and complexity downgrade events.
+    Returns an empty string if no session_id or no quota snapshots found.
+    """
+    if not session_id:
+        return ""
+    
+    try:
+        conn = sqlite3.connect(db_path)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        
+        # Query quota snapshots in order
+        cursor.execute("""
+            SELECT prompt_sequence, timestamp, final_model, final_provider,
+                   claude_weekly_pct, was_cache_fresh, was_downgraded
+            FROM quota_snapshots
+            WHERE session_id = ?
+            ORDER BY prompt_sequence
+        """, (session_id,))
+        
+        rows = cursor.fetchall()
+        conn.close()
+        
+        if not rows:
+            return ""
+        
+        # Build timeline
+        lines = ["\n  Claude Quota — Session Timeline", "  " + "─" * 60]
+        lines.append(f"  {'#':<4} {'Time':<8} {'Model':<18} {'Weekly%':>8}  {'Fresh':>5}")
+        
+        for row in rows:
+            seq = row["prompt_sequence"]
+            ts = row["timestamp"]
+            model = row["final_model"] or "?"
+            weekly_pct = row["claude_weekly_pct"]
+            fresh = "✓" if row["was_cache_fresh"] else "⚠"
+            down = "↓" if row["was_downgraded"] else ""
+            
+            # Parse timestamp and extract time
+            try:
+                time_str = ts[11:19] if ts and len(ts) > 11 else "?"
+            except (IndexError, TypeError):
+                time_str = "?"
+            
+            pct_str = f"{weekly_pct*100:.0f}%"
+            model_short = model[:18] if len(model) > 18 else model
+            
+            lines.append(f"  {seq:<4} {time_str:<8} {model_short:<18} {pct_str:>8}  {fresh:>5} {down}")
+        
+        if rows:
+            start_pct = rows[0]["claude_weekly_pct"] * 100
+            end_pct = rows[-1]["claude_weekly_pct"] * 100
+            delta_pct = end_pct - start_pct
+            lines.append("  " + "─" * 60)
+            delta_str = f"+{delta_pct:.0f}pp" if delta_pct > 0 else f"{delta_pct:.0f}pp"
+            lines.append(f"  Weekly quota: {start_pct:.0f}% → {end_pct:.0f}% ({delta_str})")
+        
+        return "\n".join(lines)
+    except Exception:
+        return ""  # Silently fail if quota timeline unavailable
 
 
 # ── External routing (SQLite) ──────────────────────────────────────────────────
@@ -834,6 +901,23 @@ def main() -> None:
                 pass  # Don't fail session if eval fails
     except Exception:
         pass  # Graceful failure
+
+    # ── Add quota timeline for session-end reporting ──────────────────────────────
+    # Shows per-prompt Claude quota pressure for audit and visibility.
+    try:
+        session_id = None
+        try:
+            with open(SESSION_ID_FILE) as f:
+                session_id = f.read().strip()
+        except Exception:
+            pass
+        
+        if session_id:
+            quota_timeline = _render_quota_timeline(session_id, DB_PATH)
+            if quota_timeline:
+                summary = summary.rstrip("─" * WIDTH) + quota_timeline + "\n" + "─" * WIDTH
+    except Exception:
+        pass  # Graceful failure — never break session-end
 
     print(json.dumps({"systemMessage": summary}))
 

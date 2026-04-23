@@ -116,16 +116,15 @@ def _get_pressure() -> dict[str, float]:
     Returns keys: session (5h window), sonnet (weekly Sonnet), weekly (all models)
     as fractions 0.0–1.0.
 
-    Staleness handling:
-    - If usage.json is fresh (≤30 min): use it directly.
-    - If usage.json is stale AND last known session ≥ 70%: attempt an inline OAuth
-      refresh before routing. Subscription usage only goes up in a session window,
-      so stale data underestimates pressure. At high pressure (≥70%), this
-      underestimate can cause catastrophic under-routing and session exhaustion.
-    - If usage.json does not exist (new session): fall back to 0.0 — this is safe
-      because there genuinely is no pressure to speak of.
+    Staleness handling (v7.5+ TTL-based):
+    - Always validate cache age against TTL (default 300s)
+    - Removed session_pct >= 70% gate — refresh regardless of pressure level
+    - If cache fresh (age < TTL): use directly
+    - If cache stale (age >= TTL): attempt inline refresh before routing
+    - If no cache or OAuth fails: use conservative fallback (0.0)
     """
     usage_path = Path.home() / ".llm-router" / "usage.json"
+    ttl_seconds = int(os.environ.get("LLM_ROUTER_QUOTA_TTL", "300"))
 
     def _frac(d: dict, key: str) -> float:
         v = float(d.get(key, 0.0))
@@ -134,33 +133,20 @@ def _get_pressure() -> dict[str, float]:
     try:
         raw = json.loads(usage_path.read_text())
         age_s = time.time() - float(raw.get("updated_at", 0))
-        stale = age_s > 1800  # 30 minutes
+        is_fresh = age_s < ttl_seconds
 
-        if stale:
-            last_session = _frac(raw, "session_pct")
-            # Only pay the ~300ms OAuth round-trip when we're actually at risk.
-            if last_session >= _INLINE_REFRESH_PRESSURE_FLOOR:
-                # Rate-limit the refresh to avoid hammering the API every prompt.
-                last_inline_file = str(Path.home() / ".llm-router" / "last_inline_refresh.txt")
-                last_inline = 0.0
-                try:
-                    last_inline = float(Path(last_inline_file).read_text().strip())
-                except Exception:
-                    pass
-                if (time.time() - last_inline) >= _INLINE_REFRESH_MIN_INTERVAL_SEC:
-                    fresh = _fetch_usage_inline()
-                    if fresh:
-                        try:
-                            with open(last_inline_file, "w") as _f:
-                                _f.write(str(time.time()))
-                        except Exception:
-                            pass
-                        return {
-                            "session": _frac(fresh, "session_pct"),
-                            "sonnet":  _frac(fresh, "sonnet_pct"),
-                            "weekly":  _frac(fresh, "weekly_pct"),
-                        }
+        # Always validate TTL, refresh if stale
+        if not is_fresh:
+            # Attempt inline refresh regardless of pressure level
+            fresh = _fetch_usage_inline()
+            if fresh:
+                return {
+                    "session": _frac(fresh, "session_pct"),
+                    "sonnet":  _frac(fresh, "sonnet_pct"),
+                    "weekly":  _frac(fresh, "weekly_pct"),
+                }
 
+        # Cache is fresh or refresh failed — use cached values
         return {
             "session": _frac(raw, "session_pct"),
             "sonnet":  _frac(raw, "sonnet_pct"),
@@ -300,6 +286,64 @@ def _is_pressure_stale(max_age_seconds: int = 1800) -> bool:
     if not usage_path.exists():
         return True
     return (time.time() - usage_path.stat().st_mtime) > max_age_seconds
+
+
+def _log_quota_snapshot_sync(
+    session_id: str,
+    prompt_sequence: int,
+    prompt_hash: str | None,
+    pressure: dict,
+    routing_decision_id: int | None,
+    final_model: str | None,
+    final_provider: str | None,
+    complexity_requested: str | None,
+    complexity_used: str | None,
+    was_downgraded: bool,
+    db_path: str,
+) -> None:
+    """Log per-prompt quota state to quota_snapshots table for audit trail.
+    
+    Inline implementation for hook scripts (stdlib-only, no imports needed).
+    Captures the quota pressure at the moment a prompt arrived.
+    """
+    try:
+        import sqlite3
+        conn = sqlite3.connect(db_path, timeout=5)
+        try:
+            conn.execute(
+                """INSERT INTO quota_snapshots (
+                    session_id, prompt_sequence, prompt_hash,
+                    claude_session_pct, claude_weekly_pct, claude_sonnet_pct,
+                    openai_spent_usd, gemini_spent_usd, ollama_available,
+                    cache_age_seconds, was_cache_fresh,
+                    routing_decision_id, final_model, final_provider,
+                    complexity_requested, complexity_used, was_downgraded
+                ) VALUES (?,?,?, ?,?,?, ?,?,?, ?,?, ?,?,?, ?,?,?)""",
+                (
+                    session_id,
+                    prompt_sequence,
+                    prompt_hash,
+                    pressure.get("session_pct", 0.0),
+                    pressure.get("weekly_pct", 0.0),
+                    pressure.get("sonnet_pct", 0.0),
+                    0.0,  # openai_spent_usd (would need separate query to usage table)
+                    0.0,  # gemini_spent_usd (would need separate query to usage table)
+                    1,    # ollama_available
+                    pressure.get("cache_age_seconds", 0.0),
+                    1 if pressure.get("is_fresh", False) else 0,
+                    routing_decision_id,
+                    final_model,
+                    final_provider,
+                    complexity_requested,
+                    complexity_used,
+                    1 if was_downgraded else 0,
+                ),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+    except Exception:
+        pass  # Silent failure — quota snapshot is optional enhancement
 
 
 # ── Skip Patterns (truly local operations) ───────────────────────────────────
@@ -1547,6 +1591,56 @@ def main() -> None:
             logging.getLogger("llm_router.model_tracking").setLevel(_old_level)
     except Exception:
         pass  # Silently fail if tracking is unavailable
+
+    # ── Log quota snapshot for per-prompt audit trail ──────────────────────────
+    # Increment prompt_sequence counter and log quota state at routing time
+    if _CC_MODE and session_id:
+        try:
+            # Increment prompt_sequence in session_spend.json
+            session_spend_path = os.path.expanduser("~/.llm-router/session_spend.json")
+            prompt_sequence = 0
+            if os.path.exists(session_spend_path):
+                try:
+                    with open(session_spend_path, "r") as f:
+                        spend_data = json.load(f)
+                        prompt_sequence = spend_data.get("prompt_sequence", 0)
+                except Exception:
+                    pass
+            
+            prompt_sequence += 1
+            
+            # Update session_spend.json with new prompt_sequence
+            if os.path.exists(session_spend_path):
+                try:
+                    with open(session_spend_path, "r") as f:
+                        spend_data = json.load(f)
+                    spend_data["prompt_sequence"] = prompt_sequence
+                    tmp = session_spend_path + ".tmp"
+                    with open(tmp, "w") as f:
+                        json.dump(spend_data, f)
+                    os.replace(tmp, session_spend_path)
+                except Exception:
+                    pass
+            
+            # Log quota snapshot (fire-and-forget)
+            db_path = os.path.expanduser("~/.llm-router/usage.db")
+            pressure = _get_pressure() if _CC_MODE else {"session_pct": 0.0, "weekly_pct": 0.0, "sonnet_pct": 0.0}
+            was_downgraded = requested_complexity is not None and requested_complexity != complexity
+            _log_quota_snapshot_sync(
+                session_id=session_id,
+                prompt_sequence=prompt_sequence,
+                prompt_hash=None,  # Could add prompt hash here if needed
+                pressure=pressure,
+                routing_decision_id=None,  # Hook doesn't have access to this
+                final_model=selected_model,
+                final_provider=provider,
+                complexity_requested=requested_complexity,
+                complexity_used=complexity,
+                was_downgraded=was_downgraded,
+                db_path=db_path,
+            )
+        except Exception:
+            pass  # Silent failure — quota snapshot is optional enhancement
 
     if _enforce_mode == "shadow":
         # Passive observation — no pending state, no blocking
