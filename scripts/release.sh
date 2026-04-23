@@ -45,7 +45,7 @@ rollback() {
     log_warning "Rolling back from v${current_version} to v${previous_version}..."
 
     # Revert version files
-    git checkout HEAD~1 -- pyproject.toml .claude-plugin/plugin.json .claude-plugin/marketplace.json CHANGELOG.md
+    git checkout HEAD~1 -- pyproject.toml .claude-plugin/plugin.json .claude-plugin/marketplace.json src/llm_router/__init__.py CHANGELOG.md
     git commit -m "rollback: revert v${current_version} due to release failure" || true
     git push || true
 
@@ -74,11 +74,12 @@ main() {
     # Step 1: Verify version sync
     log_info "Step 1/5: Verifying version files are synchronized..."
     if python3 -c "
-import tomllib, json
+import tomllib, json, re
 v1 = tomllib.load(open('pyproject.toml','rb'))['project']['version']
 v2 = json.load(open('.claude-plugin/plugin.json'))['version']
 v3 = json.load(open('.claude-plugin/marketplace.json'))['version']
-assert v1==v2==v3, f'MISMATCH: {v1}!={v2}!={v3}'
+v4 = re.search(r'__version__ = \"([^\"]+)\"', open('src/llm_router/__init__.py').read()).group(1)
+assert v1==v2==v3==v4, f'MISMATCH: pyproject={v1} plugin={v2} marketplace={v3} init={v4}'
 " 2>&1; then
         log_success "All versions synchronized: v${current_version}"
     else
