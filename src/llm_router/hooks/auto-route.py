@@ -1462,8 +1462,7 @@ def main() -> None:
             "hookSpecificOutput": {
                 "hookEventName": "UserPromptSubmit",
                 "contextForAgent": hint,
-            },
-            "systemMessage": f"💡 llm-router → {matched_server} MCP  [direct route]",
+            }
         }
         _debug_log(f"[INVOCATION {invocation_id:.3f}] EARLY EXIT: direct MCP route to {matched_server}")
         json.dump(output, sys.stdout)
