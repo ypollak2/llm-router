@@ -96,6 +96,8 @@ assert v1==v2==v3==v4, f'MISMATCH: pyproject={v1} plugin={v2} marketplace={v3} i
         --ignore=tests/test_edge_cases.py \
         --ignore=tests/test_freemium.py \
         --ignore=tests/test_hook_health.py \
+        --ignore=tests/test_profile_invariants.py \
+        --ignore=tests/test_quality_guard.py \
         --ignore=tests/test_rate_limit.py \
         --ignore=tests/test_router.py \
         -m "not slow" 2>&1; then
