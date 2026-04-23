@@ -8,10 +8,12 @@ from llm_router.types import RoutingProfile, TaskType
 
 class TestGetModelChain:
     def test_budget_research_prefers_perplexity(self):
-        # Disable benchmark reordering so we test the static routing table.
+        # Regression test: Perplexity should NOT be in the chain if API key is not configured.
+        # See: User reported Perplexity usage (50%) without having API key.
         with patch("llm_router.benchmarks.get_benchmark_data", return_value=None):
             chain = get_model_chain(RoutingProfile.BUDGET, TaskType.RESEARCH)
-        assert chain[0].startswith("perplexity/")
+        # Verify Perplexity is NOT in the chain (since no API key is configured)
+        assert not any(model.startswith("perplexity/") for model in chain)
 
     def test_premium_code_prefers_o3(self):
         with patch("llm_router.benchmarks.get_benchmark_data", return_value=None):
@@ -38,13 +40,14 @@ class TestResearchPressureTail:
     """RESEARCH chains must keep Perplexity first but demote Claude in the tail."""
 
     def test_research_perplexity_stays_first_at_high_pressure(self):
-        """At ≥ 85% pressure Perplexity must remain at position 0."""
+        """Regression test: Perplexity should NOT be in chain even at high pressure."""
         with (
             patch("llm_router.benchmarks.get_benchmark_data", return_value=None),
             patch("llm_router.claude_usage.get_claude_pressure", return_value=0.90),
         ):
             chain = get_model_chain(RoutingProfile.BALANCED, TaskType.RESEARCH)
-        assert chain[0].startswith("perplexity/"), f"Expected perplexity first, got: {chain}"
+        # Verify Perplexity is NOT in the chain (since no API key is configured)
+        assert not any(model.startswith("perplexity/") for model in chain), f"Perplexity should not be in chain, got: {chain}"
 
     def test_research_claude_demoted_from_tail_at_high_pressure(self):
         """At ≥ 85% pressure Claude models in RESEARCH tail move to the end."""

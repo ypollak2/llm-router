@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
 import shutil
 import sys
 from pathlib import Path
@@ -110,30 +111,59 @@ def _hook_version(path: Path) -> int:
         return 0
 
 
+def _command_script_path(command: str) -> Path | None:
+    """Extract the script path from a Python hook command, if present."""
+    try:
+        parts = shlex.split(command)
+    except ValueError:
+        return None
+
+    if len(parts) >= 2 and Path(parts[0]).name.startswith("python") and parts[1].endswith(".py"):
+        return Path(os.path.expanduser(parts[1]))
+    return None
+
+
 def check_and_update_hooks() -> list[str]:
     """Re-copy bundled hooks to ~/.claude/hooks/ if the installed versions are stale.
 
     Returns a list of human-readable update messages (one per updated hook).
     Called automatically on MCP server startup so existing users get hook updates
     after ``pip install --upgrade claude-code-llm-router`` without re-running install.
-    Only overwrites hooks that were originally installed by llm-router (identified
-    by the ``# llm-router-hook-version:`` marker in the file).
+    Missing managed hooks are also restored. Existing files are only overwritten
+    when the bundled version is newer, to avoid clobbering user-managed scripts.
     """
     updates: list[str] = []
+    settings = _load_settings()
     for src_name, dst_name, _event, _matcher in _HOOK_DEFS:
         src = _HOOKS_SRC / src_name
         dst = _HOOKS_DST / dst_name
-        if not src.exists() or not dst.exists():
+        if not src.exists():
             continue
+
         src_v = _hook_version(src)
-        dst_v = _hook_version(dst)
-        if src_v <= dst_v:
-            continue
-        try:
-            shutil.copy2(src, dst)
-            updates.append(f"Updated {dst_name} v{dst_v} → v{src_v}")
-        except OSError as e:
-            updates.append(f"Failed to update {dst_name}: {e}")
+        if not dst.exists():
+            try:
+                _HOOKS_DST.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(src, dst)
+                if sys.platform != "win32":
+                    dst.chmod(0o755)
+                updates.append(f"Restored missing {dst_name} v{src_v}")
+            except OSError as e:
+                updates.append(f"Failed to restore {dst_name}: {e}")
+        else:
+            dst_v = _hook_version(dst)
+            if src_v > dst_v:
+                try:
+                    shutil.copy2(src, dst)
+                    if sys.platform != "win32":
+                        dst.chmod(0o755)
+                    updates.append(f"Updated {dst_name} v{dst_v} → v{src_v}")
+                except OSError as e:
+                    updates.append(f"Failed to update {dst_name}: {e}")
+
+        legacy_msg = _sync_legacy_hook_alias(_HOOKS_DST, settings, src_name, dst_name, src)
+        if legacy_msg:
+            updates.append(legacy_msg)
     return updates
 
 
@@ -208,24 +238,147 @@ def _save_settings(settings: dict) -> None:
     _SETTINGS_PATH.write_text(json.dumps(settings, indent=2) + "\n")
 
 
-def _register_hook(settings: dict, event: str, matcher: str, command: str) -> bool:
-    """Add a hook to settings if not already present. Returns True if added."""
+def _legacy_alias_path(hooks_dir: Path, src_name: str, dst_name: str) -> Path | None:
+    """Return the legacy unprefixed hook path for a managed hook, if any."""
+    if src_name == dst_name or not dst_name.startswith("llm-router-"):
+        return None
+    return hooks_dir / src_name
+
+
+def _settings_reference_path(settings: dict, hook_path: Path) -> bool:
+    """Return True when any configured hook command targets ``hook_path``."""
+    normalized_target = Path(os.path.expanduser(str(hook_path)))
+    for event_entries in settings.get("hooks", {}).values():
+        for entry in event_entries:
+            if not isinstance(entry, dict):
+                continue
+            for hook in entry.get("hooks", []):
+                command_path = _command_script_path(hook.get("command", ""))
+                if command_path == normalized_target:
+                    return True
+    return False
+
+
+def _sync_legacy_hook_alias(
+    hooks_dir: Path,
+    settings: dict,
+    src_name: str,
+    dst_name: str,
+    src: Path,
+) -> str | None:
+    """Keep an existing llm-router legacy alias in sync with the canonical hook.
+
+    We only sync unprefixed hook aliases when they are clearly managed by
+    llm-router already, or when settings explicitly reference the alias path and
+    the alias file is missing. This avoids overwriting unrelated third-party
+    hook files with generic names like ``auto-route.py``.
+    """
+    alias_path = _legacy_alias_path(hooks_dir, src_name, dst_name)
+    if alias_path is None:
+        return None
+
+    alias_exists = alias_path.exists()
+    alias_managed = alias_exists and _hook_version(alias_path) > 0
+    alias_referenced = _settings_reference_path(settings, alias_path)
+    if not alias_managed and not (alias_referenced and not alias_exists):
+        return None
+
+    src_v = _hook_version(src)
+    alias_v = _hook_version(alias_path) if alias_exists else 0
+    if alias_exists and alias_v >= src_v:
+        return None
+
+    try:
+        hooks_dir.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src, alias_path)
+        if sys.platform != "win32":
+            alias_path.chmod(0o755)
+    except OSError as e:
+        return f"Failed to sync legacy alias {src_name}: {e}"
+
+    if alias_exists:
+        return f"Updated legacy alias {src_name} v{alias_v} → v{src_v}"
+    return f"Restored legacy alias {src_name} v{src_v}"
+
+
+def _remove_legacy_hook_alias(hooks_dir: Path, src_name: str, dst_name: str) -> str | None:
+    """Remove a managed legacy alias if it exists."""
+    alias_path = _legacy_alias_path(hooks_dir, src_name, dst_name)
+    if alias_path is None or not alias_path.exists() or _hook_version(alias_path) == 0:
+        return None
+    try:
+        alias_path.unlink()
+    except OSError as e:
+        return f"Failed to remove legacy alias {src_name}: {e}"
+    return f"Removed legacy alias {alias_path}"
+
+
+def _normalize_command(command: str) -> str:
+    """Normalize a hook command for comparison.
+
+    Python hook commands are compared by script path rather than interpreter
+    path so repeated installs with ``python`` vs ``python3`` or different venv
+    shim paths do not create duplicate registrations.
+    """
+    try:
+        script_path = _command_script_path(command)
+    except ValueError:
+        script_path = None
+
+    if script_path is not None:
+        return f"python::{script_path}"
+    return command
+
+
+def _register_hook(settings: dict, event: str, matcher: str, command: str) -> str:
+    """Add or normalize a hook registration.
+
+    Returns ``"added"``, ``"updated"``, or ``"existing"``.
+    """
     hooks = settings.setdefault("hooks", {})
     event_hooks = hooks.setdefault(event, [])
 
-    # Check if already registered
-    for entry in event_hooks:
+    # Normalize the incoming command for comparison
+    normalized_cmd = _normalize_command(command)
+
+    matches: list[tuple[int, int]] = []
+    for entry_idx, entry in enumerate(event_hooks):
         if not isinstance(entry, dict):
             continue
-        for h in entry.get("hooks", []):
-            if h.get("command", "") == command:
-                return False
+        if entry.get("matcher", "") != matcher:
+            continue
+        for hook_idx, hook in enumerate(entry.get("hooks", [])):
+            existing_cmd = hook.get("command", "")
+            if _normalize_command(existing_cmd) == normalized_cmd:
+                matches.append((entry_idx, hook_idx))
 
-    event_hooks.append({
-        "matcher": matcher,
-        "hooks": [{"type": "command", "command": command}],
-    })
-    return True
+    if not matches:
+        event_hooks.append({
+            "matcher": matcher,
+            "hooks": [{"type": "command", "command": command}],
+        })
+        return "added"
+
+    first_entry_idx, first_hook_idx = matches[0]
+    first_entry = event_hooks[first_entry_idx]
+    first_hook = first_entry["hooks"][first_hook_idx]
+    changed = (
+        first_hook.get("type") != "command"
+        or first_hook.get("command", "") != command
+        or len(matches) > 1
+    )
+    first_hook["type"] = "command"
+    first_hook["command"] = command
+
+    for entry_idx, hook_idx in reversed(matches[1:]):
+        entry = event_hooks[entry_idx]
+        hook_list = entry.get("hooks", [])
+        if hook_idx < len(hook_list):
+            del hook_list[hook_idx]
+        if not hook_list:
+            del event_hooks[entry_idx]
+
+    return "updated" if changed else "existing"
 
 
 def claude_desktop_config_path() -> Path | None:
@@ -424,10 +577,17 @@ def install() -> list[str]:
         actions.append(f"Copied {src_name} → {dst}")
 
         command = f"{_python_exe()} {dst}"
-        if _register_hook(settings, event, matcher, command):
+        status = _register_hook(settings, event, matcher, command)
+        if status == "added":
             actions.append(f"Registered {event} hook: {dst_name}")
+        elif status == "updated":
+            actions.append(f"Normalized {event} hook: {dst_name}")
         else:
             actions.append(f"Hook already registered: {dst_name}")
+
+        legacy_msg = _sync_legacy_hook_alias(_HOOKS_DST, settings, src_name, dst_name, src)
+        if legacy_msg:
+            actions.append(legacy_msg)
 
     _save_settings(settings)
 
@@ -479,21 +639,28 @@ def uninstall() -> list[str]:
     settings = _load_settings()
 
     # Remove hook files and settings entries
-    for _, dst_name, event, _ in _HOOK_DEFS:
+    for src_name, dst_name, event, _ in _HOOK_DEFS:
         dst = _HOOKS_DST / dst_name
-        command = f"python3 {dst}"
 
         if dst.exists():
             dst.unlink()
             actions.append(f"Removed {dst}")
 
-        # Remove from settings
+        legacy_msg = _remove_legacy_hook_alias(_HOOKS_DST, src_name, dst_name)
+        if legacy_msg:
+            actions.append(legacy_msg)
+
+        # Remove from settings (normalize commands for matching)
         hooks = settings.get("hooks", {})
         event_hooks = hooks.get(event, [])
+        # Build expected normalized command for this hook
+        expected_cmd = f"{_python_exe()} {dst}"
+        normalized_expected = _normalize_command(expected_cmd)
+        
         filtered = [
             entry for entry in event_hooks
             if not any(
-                h.get("command", "") == command
+                _normalize_command(h.get("command", "")) == normalized_expected
                 for h in entry.get("hooks", [])
             )
         ]
@@ -564,10 +731,17 @@ def install_claw_code() -> list[str]:
         actions.append(f"Copied {src_name} → {dst}")
 
         command = f"{_python_exe()} {dst}"
-        if _register_hook(settings, event, matcher, command):
+        status = _register_hook(settings, event, matcher, command)
+        if status == "added":
             actions.append(f"Registered {event} hook: {dst_name}")
+        elif status == "updated":
+            actions.append(f"Normalized {event} hook: {dst_name}")
         else:
             actions.append(f"Hook already registered: {dst_name}")
+
+        legacy_msg = _sync_legacy_hook_alias(hooks_dst, settings, src_name, dst_name, src)
+        if legacy_msg:
+            actions.append(legacy_msg)
 
     settings_path.parent.mkdir(parents=True, exist_ok=True)
     settings_path.write_text(json.dumps(settings, indent=2) + "\n")
@@ -622,19 +796,26 @@ def uninstall_claw_code() -> list[str]:
         except (json.JSONDecodeError, OSError):
             pass
 
-    for _, dst_name, event, _ in _CLAW_CODE_HOOK_DEFS:
+    for src_name, dst_name, event, _ in _CLAW_CODE_HOOK_DEFS:
         dst = hooks_dst / dst_name
         if dst.exists():
             dst.unlink()
             actions.append(f"Removed {dst}")
 
+        legacy_msg = _remove_legacy_hook_alias(hooks_dst, src_name, dst_name)
+        if legacy_msg:
+            actions.append(legacy_msg)
+
         hooks = settings.get("hooks", {})
         event_hooks = hooks.get(event, [])
-        command = f"python3 {dst}"
+        # Build expected normalized command for this hook
+        expected_cmd = f"{_python_exe()} {dst}"
+        normalized_expected = _normalize_command(expected_cmd)
+        
         filtered = [
             entry for entry in event_hooks
             if not any(
-                h.get("command", "") == command
+                _normalize_command(h.get("command", "")) == normalized_expected
                 for h in entry.get("hooks", [])
             )
         ]

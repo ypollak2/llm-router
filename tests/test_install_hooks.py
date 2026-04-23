@@ -1,6 +1,13 @@
-"""Tests for install_hooks version-check logic."""
+"""Tests for install_hooks update logic."""
 
-from llm_router.install_hooks import _rules_version, check_and_update_rules
+import os
+
+from llm_router.install_hooks import (
+    _register_hook,
+    _rules_version,
+    check_and_update_hooks,
+    check_and_update_rules,
+)
 
 
 class TestRulesVersion:
@@ -119,3 +126,135 @@ class TestCheckAndUpdateRules:
         monkeypatch.setattr("llm_router.install_hooks._RULES_DST", dst_dir)
 
         assert check_and_update_rules() is None
+
+
+class TestCheckAndUpdateHooks:
+    def test_restores_missing_managed_hook(self, tmp_path, monkeypatch):
+        src_dir = tmp_path / "src"
+        dst_dir = tmp_path / "dst"
+        src_dir.mkdir()
+        dst_dir.mkdir()
+
+        hook_content = "#!/usr/bin/env python3\n# llm-router-hook-version: 7\nprint('ok')\n"
+        (src_dir / "auto-route.py").write_text(hook_content)
+
+        monkeypatch.setattr(
+            "llm_router.install_hooks._HOOK_DEFS",
+            [("auto-route.py", "llm-router-auto-route.py", "UserPromptSubmit", "")],
+        )
+        monkeypatch.setattr("llm_router.install_hooks._HOOKS_SRC", src_dir)
+        monkeypatch.setattr("llm_router.install_hooks._HOOKS_DST", dst_dir)
+
+        updates = check_and_update_hooks()
+
+        restored = dst_dir / "llm-router-auto-route.py"
+        assert restored.exists()
+        assert restored.read_text() == hook_content
+        assert os.access(restored, os.X_OK)
+        assert updates == ["Restored missing llm-router-auto-route.py v7"]
+
+    def test_updates_managed_legacy_alias(self, tmp_path, monkeypatch):
+        src_dir = tmp_path / "src"
+        dst_dir = tmp_path / "dst"
+        src_dir.mkdir()
+        dst_dir.mkdir()
+
+        src_content = "#!/usr/bin/env python3\n# llm-router-hook-version: 8\nprint('new')\n"
+        old_alias = "#!/usr/bin/env python3\n# llm-router-hook-version: 7\nprint('old')\n"
+        (src_dir / "auto-route.py").write_text(src_content)
+        (dst_dir / "llm-router-auto-route.py").write_text(src_content)
+        (dst_dir / "auto-route.py").write_text(old_alias)
+
+        monkeypatch.setattr(
+            "llm_router.install_hooks._HOOK_DEFS",
+            [("auto-route.py", "llm-router-auto-route.py", "UserPromptSubmit", "")],
+        )
+        monkeypatch.setattr("llm_router.install_hooks._HOOKS_SRC", src_dir)
+        monkeypatch.setattr("llm_router.install_hooks._HOOKS_DST", dst_dir)
+        monkeypatch.setattr("llm_router.install_hooks._load_settings", lambda: {})
+
+        updates = check_and_update_hooks()
+
+        assert (dst_dir / "auto-route.py").read_text() == src_content
+        assert updates == ["Updated legacy alias auto-route.py v7 → v8"]
+
+    def test_restores_legacy_alias_when_settings_reference_it(self, tmp_path, monkeypatch):
+        src_dir = tmp_path / "src"
+        dst_dir = tmp_path / "dst"
+        src_dir.mkdir()
+        dst_dir.mkdir()
+
+        src_content = "#!/usr/bin/env python3\n# llm-router-hook-version: 8\nprint('new')\n"
+        (src_dir / "auto-route.py").write_text(src_content)
+        (dst_dir / "llm-router-auto-route.py").write_text(src_content)
+        settings = {
+            "hooks": {
+                "UserPromptSubmit": [
+                    {
+                        "matcher": "",
+                        "hooks": [
+                            {
+                                "type": "command",
+                                "command": f"python3 {dst_dir / 'auto-route.py'}",
+                            }
+                        ],
+                    }
+                ]
+            }
+        }
+
+        monkeypatch.setattr(
+            "llm_router.install_hooks._HOOK_DEFS",
+            [("auto-route.py", "llm-router-auto-route.py", "UserPromptSubmit", "")],
+        )
+        monkeypatch.setattr("llm_router.install_hooks._HOOKS_SRC", src_dir)
+        monkeypatch.setattr("llm_router.install_hooks._HOOKS_DST", dst_dir)
+        monkeypatch.setattr("llm_router.install_hooks._load_settings", lambda: settings)
+
+        updates = check_and_update_hooks()
+
+        assert (dst_dir / "auto-route.py").read_text() == src_content
+        assert updates == ["Restored legacy alias auto-route.py v8"]
+
+
+class TestRegisterHook:
+    def test_dedupes_same_script_with_different_python_paths(self):
+        settings = {
+            "hooks": {
+                "UserPromptSubmit": [
+                    {
+                        "matcher": "",
+                        "hooks": [
+                            {
+                                "type": "command",
+                                "command": "/tmp/venv/bin/python3 /Users/yali.pollak/.claude/hooks/llm-router-auto-route.py",
+                            }
+                        ],
+                    },
+                    {
+                        "matcher": "",
+                        "hooks": [
+                            {
+                                "type": "command",
+                                "command": "/tmp/venv/bin/python /Users/yali.pollak/.claude/hooks/llm-router-auto-route.py",
+                            }
+                        ],
+                    },
+                ]
+            }
+        }
+
+        status = _register_hook(
+            settings,
+            "UserPromptSubmit",
+            "",
+            "/Users/yali.pollak/Projects/llm-router/.venv/bin/python /Users/yali.pollak/.claude/hooks/llm-router-auto-route.py",
+        )
+
+        assert status == "updated"
+        hooks = settings["hooks"]["UserPromptSubmit"]
+        assert len(hooks) == 1
+        assert hooks[0]["hooks"][0]["command"] == (
+            "/Users/yali.pollak/Projects/llm-router/.venv/bin/python "
+            "/Users/yali.pollak/.claude/hooks/llm-router-auto-route.py"
+        )

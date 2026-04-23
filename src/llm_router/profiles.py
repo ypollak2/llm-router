@@ -76,7 +76,6 @@ ROUTING_TABLE: dict[tuple[RoutingProfile, TaskType], list[str]] = {
         "anthropic/claude-haiku-4-5-20251001",  # last resort only
     ],
     (RoutingProfile.BUDGET, TaskType.RESEARCH): [
-        "perplexity/sonar",               # web-grounded first
         "anthropic/claude-haiku-4-5-20251001",
         "gemini/gemini-2.5-flash",
         "openai/gpt-4o-mini",
@@ -146,8 +145,6 @@ ROUTING_TABLE: dict[tuple[RoutingProfile, TaskType], list[str]] = {
         "anthropic/claude-haiku-4-5-20251001",
     ],
     (RoutingProfile.BALANCED, TaskType.RESEARCH): [
-        "perplexity/sonar-pro",       # web-grounded, Claude can't search
-        "perplexity/sonar",
         "anthropic/claude-sonnet-4-6",
         "gemini/gemini-2.5-pro",
         "openai/gpt-4o",
@@ -211,8 +208,6 @@ ROUTING_TABLE: dict[tuple[RoutingProfile, TaskType], list[str]] = {
         "xai/grok-3",
     ],
     (RoutingProfile.PREMIUM, TaskType.RESEARCH): [
-        "perplexity/sonar-pro",       # web-grounded, stays first always
-        "perplexity/sonar",
         "anthropic/claude-opus-4-6",
         "gemini/gemini-2.5-pro",        # $0.01/1M — cheaper than OpenAI/o3
         "openai/o3",                    # expensive last resort
@@ -513,9 +508,8 @@ def get_model_chain(
     2. Pressure reordering — when Claude quota is ≥ 85%, demote Claude
        models and promote free/cheap alternatives (see ``reorder_for_pressure``).
 
-    RESEARCH chains apply pressure reordering only to the non-Perplexity tail
-    so Perplexity stays first (the only web-grounded option) while still
-    demoting Claude models when quota is tight.
+    RESEARCH chains use web-grounded alternatives (Claude/Gemini/OpenAI) for
+    research tasks since web search is required.
 
     QUOTA_BALANCED uses BALANCED as its base chain; the final reordering is
     applied in _build_and_filter_chain() by quota_balance.reorder_chain_by_providers().
@@ -549,18 +543,15 @@ def get_model_chain(
     except Exception:
         pressure = 0.0
 
-    # Research: Perplexity must stay first (web-grounded). Skip benchmark
-    # reordering (benchmarks don't score Perplexity), but apply pressure
-    # reordering to the non-Perplexity tail so Claude is demoted when quota
-    # is tight.
+    # Research: Apply standard reordering (no special Perplexity handling)
     if task_type == TaskType.RESEARCH:
-        perp = [m for m in static_chain if "perplexity" in m]
-        tail = [m for m in static_chain if "perplexity" not in m]
+        # Use standard pressure reordering for research tasks
         try:
-            tail = reorder_for_pressure(tail, pressure, profile)
+            chain = reorder_for_pressure(static_chain, pressure, profile)
         except Exception as _e:
-            log.warning("Pressure reordering failed for RESEARCH tail — using static order: %s", _e)
-        return perp + tail
+            log.warning("Pressure reordering failed for RESEARCH — using static order: %s", _e)
+            chain = static_chain
+        return chain
 
     # BUDGET: skip benchmark reordering — static chain already ordered correctly
     # (Haiku first for CODE, cheap-first for others). Ollama is prepended by the
