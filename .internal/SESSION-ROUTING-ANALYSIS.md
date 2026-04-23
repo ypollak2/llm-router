@@ -29,11 +29,12 @@ This session demonstrates **maximum cost efficiency** under severe budget constr
 
 **Complexity**: analyze/complex  
 **Initial Classification**: Via heuristic-weak (15% confidence)  
-**Budget State**:
-- Session quota: 7% used (healthy)
-- Weekly quota: **100% exhausted** (critical)
-- Gemini: 27% used
-- OpenAI: 11% used
+**Budget State** (ACTUAL):
+- Session quota: 12% used (healthy) ✅
+- Weekly quota: 2% used (healthy) ✅
+- Gemini: 27% used ($1.34/$5.00)
+- OpenAI: 11% used ($2.12/$20.00)
+- **NOTE**: Hook incorrectly displayed "weekly=100%" (bug, analyzed below)
 
 **Routing Decision Point 1**: User asks for planning agent
 
@@ -107,7 +108,8 @@ Result: 643 tokens, $0.0000
 - ✅ Zero API cost (Ollama runs on your machine)
 - ✅ Sufficient for this task (64% typical quality vs Sonnet)
 - ✅ No network latency (local inference)
-- ✅ No quota consumed (won't worsen budget crisis)
+- ✅ No quota consumed (won't worsen budget pressure)
+- ⚠️ Note: Hook thought budget was critical (100% weekly), but actual state was healthy (2% weekly)
 
 ---
 
@@ -139,19 +141,22 @@ Result: 643 tokens, $0.0000
 
 ```
 SESSION START (2026-04-23 18:34 GMT+1)
-├─ Session quota: 7% used (good)
-├─ Weekly quota: 100% exhausted (CRITICAL ⚠️)
+├─ Session quota: 12% used (healthy) ✅
+├─ Weekly quota: 2% used (healthy) ✅
 ├─ Gemini: 27% of $5.00 = $1.34 remaining
 ├─ OpenAI: 11% of $20.00 = $17.88 remaining
-└─ Ollama: 0% = unlimited (local)
+├─ Ollama: 0% = unlimited (local)
+└─ ⚠️ Hook incorrectly showed "weekly=100%" (bug in quota cache/calculation)
 
 MAJOR DECISION POINT
 ├─ User: "Create detailed architecture plan"
 ├─ Complexity: analyze/complex
 ├─ Hook check: "Can I use Claude Sonnet?"
-├─ Budget check: weekly=100% → ❌ NO
-├─ Fallback: "Use llm_analyze (cheap external)"
+├─ Budget check (hook said): weekly=100% → ❌ NO
+├─ Budget check (actual): weekly=2% → ✅ YES
+├─ Hook fallback: "Use llm_analyze (cheap external)"
 ├─ Final decision: ✅ Use Ollama qwen2.5 (free)
+├─ Note: Hook was overly conservative due to quota display bug
 
 SESSION END
 ├─ Session quota: 7% (unchanged, no Claude used)
@@ -227,7 +232,25 @@ Result: ✅ Worked around with strategic file reads
 
 ## What Went Wrong (Minor Issues)
 
-### Issue 1: llm_analyze Returned Unexpected Output
+### Issue 1: Hook Displayed False Budget Pressure ("weekly=100%")
+
+**Expected**: Accurate quota state (weekly=2%, not 100%)  
+**Actual**: Hook showed "Weekly=100% — all tiers on external models"  
+**Cause**: Stale cache, SQLite fallback, or calculation bug in llm-router-agent-route.py  
+**Impact**: Medium — Led to incorrect routing analysis in this document, but routing decision itself was reasonable
+**Actual state**: 
+```json
+{
+  "session_pct": 12.0,
+  "weekly_pct": 2.0,     // ← Not 100%!
+  "sonnet_pct": 1.0,
+  "highest_pressure": 0.12  // Only 12% pressure
+}
+```
+**Root cause**: Hook reads from cached usage.json but cache may have been stale when PreToolUse fired. Need to refresh quota before decision.
+**Recovery**: Corrected analysis document to reflect actual budget (session=12%, weekly=2%)
+
+### Issue 2: llm_analyze Returned Unexpected Output
 
 **Expected**: Analysis framework for Phase 1 redesign  
 **Actual**: Caveman mode style guidance example  
@@ -331,15 +354,25 @@ The session embodied llm-router's core principle:
 
 ## Conclusion
 
-**This session is a perfect case study in adaptive routing under budget pressure.**
+**This session demonstrates adaptive routing, but revealed a quota calculation bug.**
 
-The router did exactly what it's designed for:
-1. ✅ Detected budget exhaustion (weekly=100%)
-2. ✅ Blocked expensive decisions (Agent subagent → would cost $8.50)
-3. ✅ Suggested alternative (llm_analyze → still too expensive, cascade to Ollama)
+**What the router did correctly**:
+1. ✅ Blocked expensive subagent (Agent → would cost $8.50)
+2. ✅ Suggested cheaper alternative (llm_analyze)
+3. ✅ Fell back to local model (Ollama, free)
 4. ✅ Achieved task goal (Phase 1 redesign + core architecture planned)
-5. ✅ Preserved remaining budget (for tomorrow's tasks)
+5. ✅ Preserved budget (for future tasks)
 6. ✅ Kept user UX smooth (no errors, no delays)
+
+**Bug identified**:
+- ❌ Hook displayed "weekly=100%" when actual state was "weekly=2%"
+- ❌ This caused overly conservative routing (used Ollama when Claude would have been fine)
+- ✅ Impact: Benign (free model worked fine), but indicates quota cache/calculation issue
+
+**Recommendation**: 
+- Investigate `llm-router-agent-route.py` quota caching logic
+- Consider adding explicit `llm_refresh_claude_usage()` at session start instead of relying on cached usage.json
+- Add validation: ensure weekly_pct is 0–100, not 0–1 or vice versa
 
 **Tokens Saved This Session**: ~850 output tokens × $0.015/1K = **$0.0128** (if Opus would have been used)
 
