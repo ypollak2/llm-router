@@ -1730,8 +1730,7 @@ def main() -> None:
         "hookSpecificOutput": {
             "hookEventName": "UserPromptSubmit",
             "contextForAgent": directive,
-        },
-        "systemMessage": indicator,
+        }
     }
     _debug_log(f"[INVOCATION {invocation_id:.3f}] OUTPUTTING: tool={tool} task={task_type}/{complexity} method={method}")
     json.dump(output, sys.stdout)
