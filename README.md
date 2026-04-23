@@ -17,12 +17,17 @@
 
 Real numbers from a 14-day sprint: **51 releases, 22.6M tokens, $6.95 spent.**
 
+![Cost Breakdown](docs/slides/5.png)
+
 ### Cost Impact
 - **Actual spend:** $6.95 (22.6M development tokens)
 - **Opus baseline:** $50–60 (300M+ tokens, traditional approach)
 - **Savings:** $43–53 (87% cost reduction, 94% token reduction)
 
 ### Token Distribution by Routing Tier
+
+![Token Distribution](docs/slides/6.png)
+
 Free-first routing achieved:
 - **31% from free models** — Ollama (local) + Codex (prepaid): 7.0M tokens, $0 cost
 - **38% from budget models** — Gemini Flash + GPT-4o-mini: 8.6M tokens, $2.82 cost  
