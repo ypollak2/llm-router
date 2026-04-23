@@ -14,6 +14,27 @@ from llm_router.model_selector import _get_quality_floor
 from llm_router.tools.admin import llm_quality_guard
 
 
+def _get_provider_for_model(model: str) -> str:
+    """Map model name to a valid provider."""
+    if "openai" in model or "gpt" in model:
+        return "openai"
+    elif "gemini" in model:
+        return "gemini"
+    elif "claude" in model:
+        return "anthropic"
+    elif "ollama" in model:
+        return "ollama"
+    elif "deepseek" in model:
+        return "deepseek"
+    elif "groq" in model:
+        return "groq"
+    elif "perplexity" in model:
+        return "perplexity"
+    else:
+        # Default to gemini for test models
+        return "gemini"
+
+
 async def _create_routing_decision(
     final_model: str,
     task_type: str = "code",
@@ -34,7 +55,7 @@ async def _create_routing_decision(
         budget_pct_used=0.5,
         quality_mode="balanced",
         final_model=final_model,
-        final_provider="openai" if "openai" in final_model else "other",
+        final_provider=_get_provider_for_model(final_model),
         success=True,
         input_tokens=100,
         output_tokens=50,
@@ -166,7 +187,7 @@ class TestQualityGuardTool:
     async def test_llm_quality_guard_days_parameter(self) -> None:
         """llm_quality_guard(days=N) accepts different time windows."""
         for i in range(2):
-            await _create_routing_decision("test/model", "code")
+            await _create_routing_decision("openai/gpt-4o", "code")
 
         # Should work with different day parameters
         output_7d = await llm_quality_guard(days=7)

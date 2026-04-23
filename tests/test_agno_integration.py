@@ -8,6 +8,9 @@ import pytest
 
 from llm_router.types import LLMResponse, RoutingProfile, TaskType
 
+# Skip all tests in this module if agno is not installed
+pytest.importorskip("agno")
+
 
 @pytest.fixture
 def mock_llm_response():

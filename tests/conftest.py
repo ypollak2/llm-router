@@ -85,7 +85,15 @@ def mock_env(monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "test-key")
     monkeypatch.setenv("GEMINI_API_KEY", "test-key")
     monkeypatch.setenv("LLM_ROUTER_PROFILE", "balanced")
+    
+    # Reset singleton so config reads fresh env vars
+    import llm_router.config as config_module
+    config_module._config = None
+    
     yield
+    
+    # Reset again after test to avoid polluting other tests
+    config_module._config = None
 
 
 @pytest.fixture
