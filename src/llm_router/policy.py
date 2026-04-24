@@ -278,27 +278,157 @@ def get_active_policy() -> RoutingPolicy:
     return _policy_manager.get_active_policy()
 
 
-# ── Organization Policy Stubs (for budget enforcement) ───────────────────────
-# These are placeholders for org-level policy enforcement features.
-# Full implementation TBD.
+# ── Organization Policy (for org-level budget enforcement) ─────────────────────
 
 
+@dataclass(frozen=True)
 class OrgPolicy:
-    """Organization-level policy (stub for budget enforcement)."""
+    """Organization-level policy for model/provider blocking and task caps.
 
-    pass
+    Attributes:
+        block_providers: List of providers to block (e.g., ["openai"])
+        block_models: List of model patterns to block (e.g., ["openai/gpt-4o", "openai/*"])
+        allow_models: List of models to allow (blocklist → allowlist mode)
+        task_caps: Dict mapping task type to daily spend cap in cents (e.g., {"code": 5000})
+    """
+
+    block_providers: list[str] = field(default_factory=list)
+    block_models: list[str] = field(default_factory=list)
+    allow_models: list[str] = field(default_factory=list)
+    task_caps: dict[str, int] = field(default_factory=dict)
 
 
-def load_org_policy() -> OrgPolicy | None:
-    """Load organization policy (stub implementation)."""
-    return None
+def load_org_policy(path: Path | None = None) -> OrgPolicy | None:
+    """Load organization policy from YAML file.
+
+    Args:
+        path: Path to org policy YAML file. Defaults to ~/.llm-router/org-policy.yaml
+
+    Returns:
+        OrgPolicy if file exists, else None
+    """
+    if path is None:
+        path = Path.home() / ".llm-router" / "org-policy.yaml"
+
+    if not path.exists():
+        return OrgPolicy()  # Return default permissive policy
+
+    try:
+        with open(path) as f:
+            data = yaml.safe_load(f) or {}
+
+        return OrgPolicy(
+            block_providers=data.get("block_providers", []),
+            block_models=data.get("block_models", []),
+            allow_models=data.get("allow_models", []),
+            task_caps=data.get("task_caps", {}),
+        )
+    except (yaml.YAMLError, OSError):
+        # On any error, return permissive default
+        return OrgPolicy()
 
 
 def get_task_cap(task_type: str, org_policy: OrgPolicy | None) -> int | None:
-    """Get per-task daily spend cap (stub implementation)."""
-    return None
+    """Get per-task daily spend cap for a task type.
+
+    Args:
+        task_type: Task type (e.g., "code", "analyze")
+        org_policy: Organization policy (or None for no limit)
+
+    Returns:
+        Daily spend cap in cents, or None if no limit
+    """
+    if org_policy is None:
+        return None
+    return org_policy.task_caps.get(task_type)
 
 
-def apply_policy(policy: OrgPolicy) -> None:
-    """Apply organization policy (stub implementation)."""
-    pass
+def apply_policy(
+    models: list[str],
+    task_type: str,
+    policy: OrgPolicy | None,
+) -> tuple[list[str], list[str]]:
+    """Filter a list of models based on org policy.
+
+    Args:
+        models: List of available models (e.g., ["ollama/qwen", "openai/gpt-4o"])
+        task_type: Task type (for future per-task filtering)
+        policy: Organization policy (or None for no filtering)
+
+    Returns:
+        Tuple of (allowed_models, blocked_models)
+    """
+    if policy is None:
+        return models, []
+
+    blocked = []
+    allowed = []
+
+    # If allowlist is configured, use it (default to empty = block all)
+    if policy.allow_models:
+        for model in models:
+            if _matches_patterns(model, policy.allow_models):
+                allowed.append(model)
+            else:
+                blocked.append(model)
+        return allowed, blocked
+
+    # Otherwise use blocklist
+    for model in models:
+        # Check if blocked by provider
+        provider = model.split("/")[0] if "/" in model else model
+        if provider in policy.block_providers:
+            blocked.append(model)
+            continue
+
+        # Check if blocked by exact model or glob pattern
+        if _matches_patterns(model, policy.block_models):
+            blocked.append(model)
+            continue
+
+        allowed.append(model)
+
+    return allowed, blocked
+
+
+def _matches_patterns(text: str, patterns: list[str]) -> bool:
+    """Check if text matches any pattern (supports glob wildcard *)."""
+    for pattern in patterns:
+        if "*" in pattern:
+            # Convert glob to regex: "openai/*" → "^openai/.*$"
+            regex = re.escape(pattern).replace(r"\*", ".*")
+            if re.match(f"^{regex}$", text):
+                return True
+        elif text == pattern:
+            return True
+    return False
+
+
+def policy_summary(policy: OrgPolicy) -> str:
+    """Generate human-readable summary of an org policy.
+
+    Args:
+        policy: Organization policy
+
+    Returns:
+        Text summary of policy restrictions
+    """
+    if not any([policy.block_providers, policy.block_models, policy.allow_models, policy.task_caps]):
+        return "📋 Organization Policy: Permissive (no restrictions)"
+
+    lines = ["📋 Organization Policy:"]
+
+    if policy.allow_models:
+        lines.append(f"  ✅ Allow only: {', '.join(policy.allow_models)}")
+
+    if policy.block_providers:
+        lines.append(f"  ❌ Block providers: {', '.join(policy.block_providers)}")
+
+    if policy.block_models:
+        lines.append(f"  ❌ Block models: {', '.join(policy.block_models)}")
+
+    if policy.task_caps:
+        cap_strs = [f"{k}=${v/100:.2f}" for k, v in policy.task_caps.items()]
+        lines.append(f"  💰 Task caps: {', '.join(cap_strs)}")
+
+    return "\n".join(lines)
