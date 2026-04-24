@@ -1,173 +1,278 @@
-"""Policy Engine — org/user/repo routing policy precedence (v3.2).
+"""Flexible routing policies — user-configurable routing behavior.
 
-Policy files are loaded in precedence order (highest → lowest):
-  1. ~/.llm-router/org-policy.yaml  — site/team-wide rules (new in v3.2)
-  2. ~/.llm-router/routing.yaml     — user-level overrides (existing RepoConfig)
-  3. .llm-router.yml                — repo-level overrides (existing RepoConfig)
+Policies control:
+- Confidence threshold for routing decisions
+- Which prompts to skip (e.g., acknowledgements, system commands)
+- Whether to route coordination tasks (git, deploy, etc.)
+- Task type routing preferences
 
-The org layer (this module) adds model-level allow/deny rules that sit above
-the existing provider-level block_providers in repo_config.
-
-Org policy schema (all fields optional):
-  block_providers: [openai, anthropic]
-  block_models:    [openai/gpt-4o]
-  allow_models:    [ollama/*, codex/*]   # if set, ONLY these pass
-  task_caps:                              # per-task daily USD caps
-    code: 0.50
-    research: 1.00
-    _total: 5.00
-
-When both block_models and allow_models are set, allow_models wins for
-matching entries (explicit allow overrides a pattern-level block).
+Users can select from preset policies (aggressive, balanced, conservative)
+or create custom policies via the wizard.
 """
 
-from __future__ import annotations
-
-import fnmatch
-import logging
+import os
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Dict, List, Optional
 
-log = logging.getLogger("llm_router.policy")
-
-ORG_POLICY_PATH = Path.home() / ".llm-router" / "org-policy.yaml"
-
-
-@dataclass(frozen=False)
-class OrgPolicy:
-    """Policy loaded from ~/.llm-router/org-policy.yaml."""
-
-    block_providers: list[str] = field(default_factory=list)
-    block_models: list[str] = field(default_factory=list)
-    allow_models: list[str] = field(default_factory=list)  # empty = allow all
-    task_caps: dict[str, float] = field(default_factory=dict)
-    source: str = "default"
+import yaml
 
 
-def load_org_policy(path: Path = ORG_POLICY_PATH) -> OrgPolicy:
-    """Load org-level policy from YAML file.
+@dataclass(frozen=True)
+class RoutingPolicy:
+    """A routing policy defines how prompts are classified and routed.
 
-    Returns a default (permissive) OrgPolicy if the file is absent or invalid.
+    Attributes:
+        name: Policy name (e.g., 'aggressive', 'balanced')
+        description: Human-readable description
+        confidence_threshold: Min heuristic score (0-10) to route without Ollama
+        skip_patterns: Regex patterns for prompts to skip routing
+        skip_acknowledgements: Skip routing for "yes", "ok", "thanks", etc.
+        route_coordination: Route git/deploy/test/execution tasks
+        prefer_ollama: Always try Ollama first before Claude (budget mode)
     """
-    if not path.exists():
-        return OrgPolicy()
-    try:
-        import yaml  # pyyaml installed via litellm transitive dep
-        with open(path) as f:
-            data = yaml.safe_load(f) or {}
-    except Exception as exc:
-        log.warning("Failed to load org policy from %s: %s", path, exc)
-        return OrgPolicy()
 
-    if not isinstance(data, dict):
-        return OrgPolicy()
+    name: str
+    description: str
+    confidence_threshold: int = 4
+    skip_patterns: List[str] = field(default_factory=list)
+    skip_acknowledgements: bool = False
+    route_coordination: bool = False
+    prefer_ollama: bool = True
 
-    raw_caps = data.get("task_caps", {})
-    caps = {k: float(v) for k, v in raw_caps.items() if isinstance(v, (int, float))} if isinstance(raw_caps, dict) else {}
+    def __post_init__(self):
+        """Validate policy after creation."""
+        if not 0 <= self.confidence_threshold <= 10:
+            raise ValueError(
+                f"confidence_threshold must be 0-10, got {self.confidence_threshold}"
+            )
+        if not self.name.isidentifier():
+            raise ValueError(f"Policy name must be valid identifier, got '{self.name}'")
 
-    return OrgPolicy(
-        block_providers=list(data.get("block_providers", [])),
-        block_models=list(data.get("block_models", [])),
-        allow_models=list(data.get("allow_models", [])),
-        task_caps=caps,
-        source=str(path),
-    )
+    def skip_prompt(self, text: str) -> bool:
+        """Check if prompt should skip routing based on this policy.
+
+        Args:
+            text: User prompt text
+
+        Returns:
+            True if prompt should be skipped (not routed)
+        """
+        # Check skip patterns
+        for pattern in self.skip_patterns:
+            try:
+                if re.search(pattern, text, re.IGNORECASE | re.MULTILINE):
+                    return True
+            except re.error as e:
+                # Log but don't fail on invalid regex
+                print(f"⚠️ Invalid regex in policy skip_patterns: {pattern}: {e}")
+
+        # Check acknowledgements
+        if self.skip_acknowledgements:
+            ack_pattern = r'^\s*(yes|yeah|yep|y|no|nope|n|ok|okay|sure|thanks|thank you|cool|got it|good|sure thing)\s*$'
+            if re.match(ack_pattern, text.strip(), re.IGNORECASE):
+                return True
+
+        return False
 
 
-def _model_matches(model: str, patterns: list[str]) -> bool:
-    """Return True if *model* matches any pattern in *patterns* (glob supported)."""
-    for pat in patterns:
-        if fnmatch.fnmatch(model, pat) or model == pat:
-            return True
-        # Provider-only match: "openai" matches "openai/gpt-4o"
-        if "/" not in pat and model.startswith(pat + "/"):
-            return True
-    return False
+class PolicyManager:
+    """Manages loading, switching, and persisting routing policies."""
 
+    DEFAULT_POLICY_DIR = Path.home() / ".llm-router" / "policies"
+    PRESET_POLICY_DIR = Path(__file__).parent / "policies"
 
-def apply_policy(
-    models: list[str],
-    task_type: str,
-    org: OrgPolicy | None = None,
-) -> tuple[list[str], list[str]]:
-    """Filter a model list through org policy rules.
+    def __init__(self):
+        """Initialize policy manager."""
+        self._active_policy: Optional[RoutingPolicy] = None
+        self._policy_cache: Dict[str, RoutingPolicy] = {}
+        self._ensure_policy_dir()
 
-    Args:
-        models:    Ordered list of candidate model strings (provider/model).
-        task_type: Task type string (e.g. "code", "query").
-        org:       Org policy to apply. Loads from disk if None.
+    def _ensure_policy_dir(self) -> None:
+        """Create policy directory if it doesn't exist."""
+        self.DEFAULT_POLICY_DIR.mkdir(parents=True, exist_ok=True)
 
-    Returns:
-        (allowed, blocked) — allowed models in original order, blocked list.
-    """
-    if org is None:
-        org = load_org_policy()
+    def load_policy(self, name: str) -> RoutingPolicy:
+        """Load a policy by name.
 
-    allowed: list[str] = []
-    blocked: list[str] = []
+        Searches in order:
+        1. User custom policies (~/.llm-router/policies/)
+        2. Preset policies (bundled with llm-router)
 
-    for model in models:
-        from llm_router.profiles import provider_from_model
-        provider = provider_from_model(model)
+        Args:
+            name: Policy name (without .yaml extension)
 
-        # 1. Provider-level block
-        if provider in org.block_providers:
-            blocked.append(model)
-            continue
+        Returns:
+            Loaded RoutingPolicy
 
-        # 2. Model-level block (unless explicitly allowed)
-        if org.block_models and _model_matches(model, org.block_models):
-            # Check if it's explicitly allowed — allow overrides block
-            if org.allow_models and _model_matches(model, org.allow_models):
-                allowed.append(model)
-            else:
-                blocked.append(model)
-            continue
+        Raises:
+            FileNotFoundError: If policy not found
+            ValueError: If policy YAML is invalid
+        """
+        # Check cache first
+        if name in self._policy_cache:
+            return self._policy_cache[name]
 
-        # 3. Allow-list: if set, only listed models pass
-        if org.allow_models and not _model_matches(model, org.allow_models):
-            blocked.append(model)
-            continue
+        # Try user custom policies
+        user_policy_path = self.DEFAULT_POLICY_DIR / f"{name}.yaml"
+        if user_policy_path.exists():
+            policy = self._load_yaml_policy(user_policy_path)
+            self._policy_cache[name] = policy
+            return policy
 
-        allowed.append(model)
+        # Try preset policies
+        preset_path = self.PRESET_POLICY_DIR / f"{name}.yaml"
+        if preset_path.exists():
+            policy = self._load_yaml_policy(preset_path)
+            self._policy_cache[name] = policy
+            return policy
 
-    if blocked:
-        # Upgrade to WARNING for audit visibility with rule source
-        log.warning(
-            "POLICY AUDIT: blocked %d model(s) for task=%s: %s (rule source: %s)",
-            len(blocked), task_type, blocked,
-            getattr(org, '_source', 'org-policy.yaml'),
+        raise FileNotFoundError(
+            f"Policy '{name}' not found in {self.DEFAULT_POLICY_DIR} or presets"
         )
 
-    return allowed, blocked
+    def _load_yaml_policy(self, path: Path) -> RoutingPolicy:
+        """Load policy from YAML file.
+
+        Args:
+            path: Path to policy YAML file
+
+        Returns:
+            Loaded RoutingPolicy
+
+        Raises:
+            ValueError: If YAML is invalid or missing required fields
+        """
+        try:
+            with open(path) as f:
+                data = yaml.safe_load(f)
+        except yaml.YAMLError as e:
+            raise ValueError(f"Invalid YAML in {path}: {e}")
+        except OSError as e:
+            raise FileNotFoundError(f"Cannot read {path}: {e}")
+
+        if not isinstance(data, dict):
+            raise ValueError(f"Policy YAML must be a dict, got {type(data)}")
+
+        # Validate required fields
+        required = {"name", "description"}
+        if not required.issubset(data.keys()):
+            missing = required - set(data.keys())
+            raise ValueError(f"Missing required fields: {missing}")
+
+        # Build policy with defaults
+        return RoutingPolicy(
+            name=data["name"],
+            description=data["description"],
+            confidence_threshold=int(data.get("confidence_threshold", 4)),
+            skip_patterns=data.get("skip_patterns", []),
+            skip_acknowledgements=bool(data.get("skip_acknowledgements", False)),
+            route_coordination=bool(data.get("route_coordination", False)),
+            prefer_ollama=bool(data.get("prefer_ollama", True)),
+        )
+
+    def set_active_policy(self, name: str) -> RoutingPolicy:
+        """Set the active routing policy.
+
+        Args:
+            name: Policy name to activate
+
+        Returns:
+            The activated policy
+
+        Raises:
+            FileNotFoundError: If policy doesn't exist
+        """
+        policy = self.load_policy(name)
+        self._active_policy = policy
+        return policy
+
+    def get_active_policy(self) -> RoutingPolicy:
+        """Get the currently active policy.
+
+        Loads from LLM_ROUTER_POLICY env var, or returns default (balanced).
+
+        Returns:
+            Active RoutingPolicy
+        """
+        if self._active_policy is not None:
+            return self._active_policy
+
+        policy_name = os.environ.get("LLM_ROUTER_POLICY", "balanced")
+        try:
+            return self.set_active_policy(policy_name)
+        except FileNotFoundError:
+            # Fallback to balanced if policy not found
+            return self.set_active_policy("balanced")
+
+    def save_custom_policy(self, policy: RoutingPolicy) -> Path:
+        """Save a custom policy to ~/.llm-router/policies/.
+
+        Args:
+            policy: RoutingPolicy to save
+
+        Returns:
+            Path to saved policy file
+        """
+        self._ensure_policy_dir()
+        path = self.DEFAULT_POLICY_DIR / f"{policy.name}.yaml"
+
+        data = {
+            "name": policy.name,
+            "description": policy.description,
+            "confidence_threshold": policy.confidence_threshold,
+            "skip_patterns": policy.skip_patterns,
+            "skip_acknowledgements": policy.skip_acknowledgements,
+            "route_coordination": policy.route_coordination,
+            "prefer_ollama": policy.prefer_ollama,
+        }
+
+        with open(path, "w") as f:
+            yaml.dump(data, f, default_flow_style=False, sort_keys=False)
+
+        # Clear cache so reload gets fresh copy
+        if policy.name in self._policy_cache:
+            del self._policy_cache[policy.name]
+
+        return path
+
+    def list_policies(self) -> Dict[str, str]:
+        """List all available policies.
+
+        Returns:
+            Dict mapping policy name to description (preset + custom)
+        """
+        policies = {}
+
+        # Preset policies
+        for preset_path in self.PRESET_POLICY_DIR.glob("*.yaml"):
+            try:
+                policy = self._load_yaml_policy(preset_path)
+                policies[policy.name] = policy.description
+            except ValueError:
+                pass  # Skip invalid policies
+
+        # Custom policies
+        for custom_path in self.DEFAULT_POLICY_DIR.glob("*.yaml"):
+            try:
+                policy = self._load_yaml_policy(custom_path)
+                policies[policy.name] = policy.description
+            except ValueError:
+                pass
+
+        return policies
 
 
-def get_task_cap(task_type: str, org: OrgPolicy | None = None) -> float | None:
-    """Return the per-task daily USD cap from org policy, or None if not set."""
-    if org is None:
-        org = load_org_policy()
-    return org.task_caps.get(task_type) or org.task_caps.get("_total") or None
+# Global policy manager singleton
+_policy_manager = PolicyManager()
 
 
-def policy_summary(org: OrgPolicy | None = None) -> str:
-    """Return a formatted summary of the active org policy."""
-    if org is None:
-        org = load_org_policy()
+def get_policy_manager() -> PolicyManager:
+    """Get the global policy manager instance."""
+    return _policy_manager
 
-    if org.source == "default":
-        return "  No org policy file found (~/.llm-router/org-policy.yaml)\n  All providers and models allowed."
 
-    lines = [f"  Source: {org.source}", ""]
-    if org.block_providers:
-        lines.append(f"  Blocked providers:  {', '.join(org.block_providers)}")
-    if org.block_models:
-        lines.append(f"  Blocked models:     {', '.join(org.block_models)}")
-    if org.allow_models:
-        lines.append(f"  Allow-list models:  {', '.join(org.allow_models)}")
-    if org.task_caps:
-        lines.append("  Per-task daily caps:")
-        for task, cap in org.task_caps.items():
-            lines.append(f"    {task:<12}  ${cap:.2f}/day")
-    if len(lines) == 2:
-        lines.append("  No restrictions configured.")
-    return "\n".join(lines)
+def get_active_policy() -> RoutingPolicy:
+    """Get the currently active routing policy."""
+    return _policy_manager.get_active_policy()

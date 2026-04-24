@@ -20,6 +20,7 @@ Usage:
     llm-router uninstall        — remove hooks and MCP registration
     llm-router uninstall --purge — also delete ~/.llm-router/ (usage DB, .env, logs)
     llm-router setup            — interactive wizard: configure providers and API keys
+    llm-router init-policy      — interactive wizard: choose or create a routing policy (v7.5.0)
     llm-router status           — show routing status, today's savings, subscription pressure
     llm-router doctor           — check that everything is wired up correctly
     llm-router demo             — show routing decisions for sample prompts
@@ -141,6 +142,9 @@ def main() -> None:
         _run_onboard()
     elif args and args[0] == "config":
         _run_config(flags=args[1:])
+    elif args and args[0] == "init-policy":
+        from llm_router.cli_init_policy import run_init_policy_wizard
+        run_init_policy_wizard()
     elif args and args[0] == "set-enforce":
         _run_set_enforce(mode=args[1] if len(args) > 1 else "")
     elif args and args[0] == "team":

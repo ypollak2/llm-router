@@ -1,0 +1,13 @@
+name: aggressive
+description: |
+  Aggressive routing: Routes everything possible to the cheapest models.
+  Routes: simple questions, acknowledgements (yes/ok), git commands, deployments.
+  Cost savings: 60-75% reduction vs Claude-only.
+  Use when: You want maximum cost savings, comfortable with local Ollama for simple tasks.
+
+confidence_threshold: 2
+skip_patterns:
+  - "^/(help|clear|login|version)"
+skip_acknowledgements: false
+route_coordination: true
+prefer_ollama: true

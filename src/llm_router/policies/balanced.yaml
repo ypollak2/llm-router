@@ -1,0 +1,13 @@
+name: balanced
+description: |
+  Balanced routing: Routes moderate complexity tasks while protecting simple ones.
+  Routes: code generation, analysis, research; skips acknowledgements and system commands.
+  Cost savings: 35-45% reduction vs Claude-only.
+  Use when: You want cost savings without sacrificing quality on simple tasks.
+
+confidence_threshold: 4
+skip_patterns:
+  - "^/(help|clear|login|version)"
+skip_acknowledgements: true
+route_coordination: false
+prefer_ollama: true

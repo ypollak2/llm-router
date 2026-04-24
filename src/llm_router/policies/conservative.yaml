@@ -1,0 +1,13 @@
+name: conservative
+description: |
+  Conservative routing: Only routes complex tasks that benefit from cheaper models.
+  Routes: deep analysis, architecture decisions; skips simple questions and acknowledgements.
+  Cost savings: 10-15% reduction vs Claude-only (mostly avoids over-routing).
+  Use when: You prefer quality over cost, want Claude for most work.
+
+confidence_threshold: 6
+skip_patterns:
+  - "^/(help|clear|login|version)"
+skip_acknowledgements: true
+route_coordination: false
+prefer_ollama: false

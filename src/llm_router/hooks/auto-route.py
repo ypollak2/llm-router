@@ -86,12 +86,49 @@ _load_dotenv()
 OLLAMA_MODEL = os.environ.get("LLM_ROUTER_OLLAMA_MODEL", "gemma4:latest")
 OLLAMA_URL = os.environ.get("LLM_ROUTER_OLLAMA_URL", "http://localhost:11434")
 OLLAMA_TIMEOUT = int(os.environ.get("LLM_ROUTER_OLLAMA_TIMEOUT", "5"))
-CONFIDENCE_THRESHOLD = int(os.environ.get("LLM_ROUTER_CONFIDENCE_THRESHOLD", "4"))
+CONFIDENCE_THRESHOLD = int(os.environ.get("LLM_ROUTER_CONFIDENCE_THRESHOLD", "2"))  # v7.5.0: Aggressive routing — route more with lower threshold
 DISABLE_LLM_CLASSIFIERS = os.environ.get("LLM_ROUTER_DISABLE_LLM_CLASSIFIERS", "").lower() in (
     "1",
     "true",
     "yes",
 )
+
+# ── Flexible Routing Policy (v7.5.0) ──────────────────────────────────────────
+# Load active policy to customize routing behavior per user
+
+_ACTIVE_POLICY = None
+
+
+def _get_active_policy():
+    """Load and cache the active routing policy."""
+    global _ACTIVE_POLICY
+    if _ACTIVE_POLICY is not None:
+        return _ACTIVE_POLICY
+
+    try:
+        # Avoid circular imports by importing here
+        from llm_router.policy import get_active_policy as get_policy
+        _ACTIVE_POLICY = get_policy()
+        return _ACTIVE_POLICY
+    except Exception:
+        # Fallback if policy system unavailable
+        return None
+
+
+def _policy_skip_prompt(text: str) -> bool:
+    """Check if prompt should skip routing based on active policy."""
+    policy = _get_active_policy()
+    if policy:
+        return policy.skip_prompt(text)
+    return False
+
+
+def _policy_confidence_threshold() -> int:
+    """Get confidence threshold from active policy or environment."""
+    policy = _get_active_policy()
+    if policy:
+        return policy.confidence_threshold
+    return CONFIDENCE_THRESHOLD
 
 # API keys for cheap fallback (read from env or .env files)
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
@@ -355,16 +392,12 @@ def _log_quota_snapshot_sync(
 
 # ── Skip Patterns (truly local operations) ───────────────────────────────────
 
-# Only skip: slash commands, raw shell one-liners, and pure acknowledgement words.
-# Anything that looks like a question or task goes through the classifier so it
-# can be routed to Haiku / Ollama instead of burning top-tier model tokens.
+# v7.5.0: Aggressive routing — only skip system commands that shouldn't be routed.
+# Everything else (including "yes", git commands, shell one-liners) gets assessed
+# by the classifier so Ollama can handle coordination/execution tasks cheaply.
 SKIP_PATTERNS = re.compile(
-    r"^/(?:route|help|clear|compact|init|login|doctor|memory|model|cost|config|"
-    r"permissions|review|status|mcp|bug|learn|verify|tdd|plan|eval|claw|loop|"
-    r"checkpoint|save-session|resume-session|sessions|instinct|skill|usage)\b|"
-    r"^\s*(?:git |npm |pip |uv |cargo |make |docker |brew |curl |wget |"
-    r"chmod |mkdir |rm |mv |cp |ls |cd |cat |grep |rtk )\b|"
-    r"^\s*(?:yes|no|ok|sure|thanks|thank you|y|n|k|go ahead|do it|looks good|lgtm)\s*$",
+    r"^/(?:help|clear|login|doctor|config|permissions|status|mcp|bug|"
+    r"claw|loop|checkpoint|save-session|resume-session|sessions|skill)\b",
     re.IGNORECASE,
 )
 
@@ -704,6 +737,26 @@ SIGNALS: dict[str, dict[str, re.Pattern]] = {
             re.IGNORECASE,
         ),
     },
+    "coordination": {
+        "intent": re.compile(
+            r"\b(?:push|pull|deploy|release|publish|execute|run|go ahead|"
+            r"proceed|continue|confirm|verify|check|test|build|compile|"
+            r"check if|is|are|does|can you|please|thanks|yes|ok|y|n|"
+            r"commit|merge|sync|update|fetch|rebase)\b",
+            re.IGNORECASE,
+        ),
+        "topic": re.compile(
+            r"\b(?:git|github|push|pull|commit|merge|branch|"
+            r"release|deploy|publish|pypi|pipeline|ci|test(?:s)?|"
+            r"script|build|version|setup|install|initialize|"
+            r"verification|approval|confirmation)\b",
+            re.IGNORECASE,
+        ),
+        "format": re.compile(
+            r"\b(?:quick|just|go|proceed|now|asap|ready|done|finished|complete)\b",
+            re.IGNORECASE,
+        ),
+    },
 }
 
 # ── Complexity Patterns ──────────────────────────────────────────────────────
@@ -777,12 +830,13 @@ CLASSIFY_PROMPT = (
     "- analyze: Evaluation, debugging, comparison, deep reasoning, trade-offs, code review\n"
     "- code: Programming, implementation, building software, fixing bugs, refactoring\n"
     "- query: Simple factual questions, definitions, explanations, how things work\n"
-    "- image: Image/visual generation, design, artwork creation\n\n"
+    "- image: Image/visual generation, design, artwork creation\n"
+    "- coordination: Execution coordination, approvals, git commands, deployments, verification\n\n"
     "User prompt: {prompt}\n\n"
     "Category:"
 )
 
-VALID_CATEGORIES = {"research", "generate", "analyze", "code", "query", "image"}
+VALID_CATEGORIES = {"research", "generate", "analyze", "code", "query", "image", "coordination"}
 
 
 def _extract_category(raw: str) -> str | None:
@@ -1141,6 +1195,7 @@ TOOL_MAP = {
     "code": "llm_code",
     "query": "llm_query",
     "image": "llm_image",
+    "coordination": "llm_query",  # Use llm_query for coordination (cheap model, instant decision)
     "auto": "llm_route",
 }
 

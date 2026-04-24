@@ -330,6 +330,70 @@ Saves ~$0.0005, follows decomposition pattern.
 
 **Not blocking** — just nudging toward routing discipline.
 
+## Flexible Routing Policies (v7.5.0)
+
+**New in v7.5.0**: Users can now choose their routing policy to match their cost/quality preferences.
+
+Three preset policies ship with llm-router:
+
+| Policy | Threshold | Skip Acks | Route Coord | Savings | Best For |
+|--------|-----------|-----------|-------------|---------|----------|
+| **Aggressive** | 2 | ❌ No | ✅ Yes | 60-75% | Maximum savings, comfortable with Ollama |
+| **Balanced** | 4 | ✅ Yes | ❌ No | 35-45% | Good cost/quality tradeoff (default) |
+| **Conservative** | 6 | ✅ Yes | ❌ No | 10-15% | Quality over cost, minimal over-routing |
+
+### Setup
+
+```bash
+# Interactive wizard to choose or create a policy
+llm-router init-policy
+
+# Or set directly via environment
+export LLM_ROUTER_POLICY=aggressive
+```
+
+### Policy Behavior
+
+Each policy controls:
+- **confidence_threshold** (0-10) — How confident the heuristic must be before routing (lower = route more)
+- **skip_acknowledgements** — Whether to skip "yes", "ok", "thanks", etc.
+- **route_coordination** — Whether to route git/deploy/execution commands
+- **skip_patterns** — Regex patterns for prompts to always skip
+
+### Examples
+
+**User: "yes"**
+- Aggressive policy → routes to `llm_query` (Ollama)
+- Balanced policy → skipped (not routed)
+- Conservative policy → skipped
+
+**User: "Implement user authentication"**
+- All policies → route to `llm_code` (Ollama tries first)
+
+**User: "/help"**
+- All policies → skipped (system commands never routed)
+
+### Custom Policies
+
+Create custom policies by running `llm-router init-policy` and answering preference questions:
+
+```yaml
+# ~/.llm-router/policies/my-policy.yaml
+name: my_policy
+description: Custom policy for my workflow
+confidence_threshold: 3
+skip_patterns:
+  - "^/(help|login|version)"
+skip_acknowledgements: false
+route_coordination: true
+prefer_ollama: true
+```
+
+Then activate:
+```bash
+export LLM_ROUTER_POLICY=my_policy
+```
+
 ## Model Routing Strategy (v1.8.4)
 
 All routing goes through MCP tools — the hook never emits `/model` directives
