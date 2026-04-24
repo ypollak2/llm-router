@@ -276,3 +276,29 @@ def get_policy_manager() -> PolicyManager:
 def get_active_policy() -> RoutingPolicy:
     """Get the currently active routing policy."""
     return _policy_manager.get_active_policy()
+
+
+# ── Organization Policy Stubs (for budget enforcement) ───────────────────────
+# These are placeholders for org-level policy enforcement features.
+# Full implementation TBD.
+
+
+class OrgPolicy:
+    """Organization-level policy (stub for budget enforcement)."""
+
+    pass
+
+
+def load_org_policy() -> OrgPolicy | None:
+    """Load organization policy (stub implementation)."""
+    return None
+
+
+def get_task_cap(task_type: str, org_policy: OrgPolicy | None) -> int | None:
+    """Get per-task daily spend cap (stub implementation)."""
+    return None
+
+
+def apply_policy(policy: OrgPolicy) -> None:
+    """Apply organization policy (stub implementation)."""
+    pass
