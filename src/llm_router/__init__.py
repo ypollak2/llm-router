@@ -10,7 +10,7 @@ to reduce session quota consumption by 60-70%.
 See README.md for full documentation.
 """
 
-__version__ = "7.4.3"
+__version__ = "7.5.0"
 
 # Export response router for easy access
 from llm_router.response_router import route_response as route_response_explanations
