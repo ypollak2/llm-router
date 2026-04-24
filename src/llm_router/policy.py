@@ -290,12 +290,14 @@ class OrgPolicy:
         block_models: List of model patterns to block (e.g., ["openai/gpt-4o", "openai/*"])
         allow_models: List of models to allow (blocklist → allowlist mode)
         task_caps: Dict mapping task type to daily spend cap in cents (e.g., {"code": 5000})
+        source: Source of this policy ("default", "file", or "merged")
     """
 
     block_providers: list[str] = field(default_factory=list)
     block_models: list[str] = field(default_factory=list)
     allow_models: list[str] = field(default_factory=list)
     task_caps: dict[str, int] = field(default_factory=dict)
+    source: str = "default"
 
 
 def load_org_policy(path: Path | None = None) -> OrgPolicy | None:
@@ -305,13 +307,13 @@ def load_org_policy(path: Path | None = None) -> OrgPolicy | None:
         path: Path to org policy YAML file. Defaults to ~/.llm-router/org-policy.yaml
 
     Returns:
-        OrgPolicy if file exists, else None
+        OrgPolicy if file exists, else default permissive policy
     """
     if path is None:
         path = Path.home() / ".llm-router" / "org-policy.yaml"
 
     if not path.exists():
-        return OrgPolicy()  # Return default permissive policy
+        return OrgPolicy(source="default")  # Return default permissive policy
 
     try:
         with open(path) as f:
@@ -322,10 +324,11 @@ def load_org_policy(path: Path | None = None) -> OrgPolicy | None:
             block_models=data.get("block_models", []),
             allow_models=data.get("allow_models", []),
             task_caps=data.get("task_caps", {}),
+            source="file",
         )
     except (yaml.YAMLError, OSError):
         # On any error, return permissive default
-        return OrgPolicy()
+        return OrgPolicy(source="default")
 
 
 def get_task_cap(task_type: str, org_policy: OrgPolicy | None) -> int | None:
@@ -414,9 +417,9 @@ def policy_summary(policy: OrgPolicy) -> str:
         Text summary of policy restrictions
     """
     if not any([policy.block_providers, policy.block_models, policy.allow_models, policy.task_caps]):
-        return "📋 Organization Policy: Permissive (no restrictions)"
+        return "No org policy configured. All providers available."
 
-    lines = ["📋 Organization Policy:"]
+    lines = ["Organization Policy:"]
 
     if policy.allow_models:
         lines.append(f"  ✅ Allow only: {', '.join(policy.allow_models)}")

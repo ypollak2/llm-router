@@ -192,6 +192,7 @@ async def _build_and_filter_chain(
             block_models=_merged_block,
             allow_models=_merged_allow,
             task_caps=_org.task_caps,
+            source="merged",
         )
         if _merged_block or _merged_allow:
             models_to_try, _policy_blocked = apply_policy(
