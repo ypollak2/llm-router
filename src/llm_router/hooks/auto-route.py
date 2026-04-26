@@ -1746,16 +1746,17 @@ def main() -> None:
         _savings = _cost_estimate.get("savings", "$0.001") if isinstance(_cost_estimate, dict) else "$0.001"
         
         # New box-drawing format — harder to miss in long context
+        task_complexity = f"{task_type}/{complexity}"
         directive = (
             f"╔══════════════════════════════════════════════════╗\n"
             f"║  ⚡ MANDATORY ROUTE — DO NOT SKIP                ║\n"
-            f"║  task  : {task_type:35} ║\n"
+            f"║  task  : {task_complexity:35} ║\n"
             f"║  action: call {tool:32} ║\n"
             f"║  via   : {method:39} ║\n"
             f"║  saves : {_savings:39} ║\n"
             f"╚══════════════════════════════════════════════════╝\n"
             f"\n"
-            f"⚠️  IMPORTANT: Call the tool above as your FIRST action.\n"
+            f"⚠️  IMPORTANT ROUTE: Call the tool above as your FIRST action.\n"
             f"   • Do NOT use Bash, Read, Edit, or Write to self-answer\n"
             f"   • Do NOT spawn Agent subagents — they cost $0.10+\n"
             f"   • Do NOT use WebSearch or WebFetch — route via llm_research\n"

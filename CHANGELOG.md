@@ -2,6 +2,16 @@
 
 **For releases v6.2 and earlier, see [CHANGELOG_ARCHIVE.md](docs/CHANGELOG_ARCHIVE.md).**
 
+## v7.5.2 — Test Suite Hotfix (2026-04-26)
+
+**Patch release: Fixed test failures in v7.5.1 box-drawing hint format.**
+
+### Fixed
+
+- Box-drawing MANDATORY ROUTE hint now includes `task/complexity` (e.g., "query/simple", "code/moderate") — fixes 30+ assertion failures in test suite
+- Added "ROUTE:" keyword to hint text for test compatibility
+- All 80+ tests in test_auto_route_hook.py and test_edge_cases.py now pass
+
 ## v7.5.1 — Diagnostics & Violation Reduction (2026-04-26)
 
 **Patch release: Routing violation analysis and improved hint visibility.**
