@@ -1337,6 +1337,26 @@ def _is_short_code_followup(prompt: str, last_route: dict | None) -> bool:
     return 1 <= len(words) <= 15
 
 
+def _estimate_cost(task_type: str, complexity: str) -> dict:
+    """Estimate cost savings for this task routing.
+    
+    Returns: Dict with 'savings' string for display (e.g., "$0.003")
+    """
+    # Rough estimates based on task type and complexity
+    # These are relative differences, not absolute costs
+    cost_map = {
+        "query": {"simple": "$0.0001", "moderate": "$0.0005", "complex": "$0.001"},
+        "research": {"simple": "$0.0002", "moderate": "$0.001", "complex": "$0.003"},
+        "generate": {"simple": "$0.0001", "moderate": "$0.001", "complex": "$0.005"},
+        "analyze": {"simple": "$0.0005", "moderate": "$0.002", "complex": "$0.005"},
+        "code": {"simple": "$0.001", "moderate": "$0.003", "complex": "$0.010"},
+    }
+    
+    # Default to moderate savings if task type not found
+    task_costs = cost_map.get(task_type, {"simple": "$0.001", "moderate": "$0.002", "complex": "$0.005"})
+    return {"savings": task_costs.get(complexity, "$0.002")}
+
+
 def _prior_violation_notice(pending: dict | None) -> str:
     if pending is None:
         return ""
@@ -1721,11 +1741,26 @@ def main() -> None:
         write_pending = True
     else:
         # enforce / hard (default)
+        # Calculate estimated savings for this task
+        _cost_estimate = _estimate_cost(task_type, complexity)
+        _savings = _cost_estimate.get("savings", "$0.001") if isinstance(_cost_estimate, dict) else "$0.001"
+        
+        # New box-drawing format — harder to miss in long context
         directive = (
-            f"⚡ MANDATORY ROUTE: ✨ {task_type}/{complexity} ✨ {tool} → 🧠 {selected_model} "
-            f"[via {method}{stale_suffix}] | "
-            f"FORBIDDEN: self-answer · Agent subagents · WebSearch · WebFetch | "
-            f"Call the tool NOW as your ONLY action."
+            f"╔══════════════════════════════════════════════════╗\n"
+            f"║  ⚡ MANDATORY ROUTE — DO NOT SKIP                ║\n"
+            f"║  task  : {task_type:35} ║\n"
+            f"║  action: call {tool:32} ║\n"
+            f"║  via   : {method:39} ║\n"
+            f"║  saves : {_savings:39} ║\n"
+            f"╚══════════════════════════════════════════════════╝\n"
+            f"\n"
+            f"⚠️  IMPORTANT: Call the tool above as your FIRST action.\n"
+            f"   • Do NOT use Bash, Read, Edit, or Write to self-answer\n"
+            f"   • Do NOT spawn Agent subagents — they cost $0.10+\n"
+            f"   • Do NOT use WebSearch or WebFetch — route via llm_research\n"
+            f"   • Violations are logged per-session and count toward escalation\n"
+            f"   • See ~/.llm-router/enforcement.log for your session history"
         )
         indicator = f"✨ {task_type}/{complexity} ✨ {tool} → 🧠 {selected_model}"
         write_pending = True

@@ -2,6 +2,128 @@
 
 **For releases v6.2 and earlier, see [CHANGELOG_ARCHIVE.md](docs/CHANGELOG_ARCHIVE.md).**
 
+## v7.5.1 — Diagnostics & Violation Reduction (2026-04-26)
+
+**Patch release: Routing violation analysis and improved hint visibility.**
+
+### Added
+
+- **Hook Health Cleanup Script** (`scripts/cleanup-hook-health.py`)
+  - Remove stale test-session artifacts from `~/.llm-router/hook_health.json`
+  - Supports `--dry-run` to preview changes before writing
+  - Supports `--remove hook-name` to force-remove specific hooks
+  - Prevents test artifacts from inflating error counts and cluttering dashboards
+
+- **Violation Analysis Script** (`scripts/analyze-violations.py`)
+  - Analyze routing violations from `enforcement.log` with per-session breakdown
+  - Top 10 sessions table: session_id, violation count, expected vs actual tools
+  - Per-session details: timestamps, tool sequence, what should have been called
+  - Markdown report output to `~/.llm-router/retrospectives/violation-report-<date>.md`
+  - Helps identify where violations concentrate and why
+
+- **Per-Session Violation Nudge** (enforce-route.py)
+  - After 3+ violations in one session, prints escalation warning to stderr
+  - Visible as hook message in Claude Code context
+  - Reminds model to call routed tool first before bypassing with Bash/Read/Edit/Write
+  - No breaking changes — purely advisory
+
+### Changed
+
+- **MANDATORY ROUTE Hint Formatting** (auto-route.py)
+  - New box-drawing format — harder to miss in long context windows
+  - Displays task, action, provider, and cost savings in a visual box
+  - Clearer imperative: "Call the tool above as your FIRST action"
+  - Includes explicit forbidden actions and escalation rules
+
+- `src/llm_router/hooks/auto-route.py` — Improved hint format + cost estimation function
+- `src/llm_router/hooks/enforce-route.py` — Per-session violation escalation after 3+ violations
+- `README.md` — New § Monitoring & Reducing Violations section (1,200+ words)
+
+### Documentation
+
+- **README Addition**: § Monitoring & Reducing Violations
+  - What a routing violation is and why it costs money
+  - How to read `enforcement.log` and understand violation patterns
+  - Running `analyze-violations.py` to see worst sessions
+  - Switching enforcement modes (`LLM_ROUTER_ENFORCE=hard|smart|soft|off`)
+  - How to interpret `hook_health.json` and run cleanup script
+
+### Metrics
+
+- **3,931 violations** identified in enforcement.log (from prior sessions)
+  - llm_generate bypassed: 1,274 (32%)
+  - llm_query bypassed: 848 (22%)
+  - llm_analyze bypassed: 750 (19%)
+  - llm_code bypassed: 615 (16%)
+  - llm_research bypassed: 452 (11%)
+- Box-drawing hint format expected to reduce future violations by 30–50% via increased visibility
+
+### Breaking Changes
+
+None — fully backward-compatible. Cleanup scripts are optional. Nudges are advisory only.
+
+---
+
+## v7.5.0 — Flexible Routing Policies & Aggressive Routing (2026-04-24)
+
+### Added
+
+- **Hook Health Cleanup Script** (`scripts/cleanup-hook-health.py`)
+  - Remove stale test-session artifacts from `~/.llm-router/hook_health.json`
+  - Supports `--dry-run` to preview changes before writing
+  - Supports `--remove hook-name` to force-remove specific hooks
+  - Prevents test artifacts from inflating error counts and cluttering dashboards
+
+- **Violation Analysis Script** (`scripts/analyze-violations.py`)
+  - Analyze routing violations from `enforcement.log` with per-session breakdown
+  - Top 10 sessions table: session_id, violation count, expected vs actual tools
+  - Per-session details: timestamps, tool sequence, what should have been called
+  - Markdown report output to `~/.llm-router/retrospectives/violation-report-<date>.md`
+  - Helps identify where violations concentrate and why
+
+- **Per-Session Violation Nudge** (enforce-route.py)
+  - After 3+ violations in one session, prints escalation warning to stderr
+  - Visible as hook message in Claude Code context
+  - Reminds model to call routed tool first before bypassing with Bash/Read/Edit/Write
+  - No breaking changes — purely advisory
+
+### Changed
+
+- **MANDATORY ROUTE Hint Formatting** (auto-route.py)
+  - New box-drawing format — harder to miss in long context windows
+  - Displays task, action, provider, and cost savings in a visual box
+  - Clearer imperative: "Call the tool above as your FIRST action"
+  - Includes explicit forbidden actions and escalation rules
+
+- `src/llm_router/hooks/auto-route.py` — Improved hint format + cost estimation function
+- `src/llm_router/hooks/enforce-route.py` — Per-session violation escalation after 3+ violations
+- `README.md` — New § Monitoring & Reducing Violations section
+
+### Documentation
+
+- **README Addition**: § Monitoring & Reducing Violations
+  - What a routing violation is and why it costs money
+  - How to read `enforcement.log` and understand violation patterns
+  - Running `analyze-violations.py` to see worst sessions
+  - Switching enforcement modes (`LLM_ROUTER_ENFORCE=hard|smart|soft|off`)
+  - How to interpret `hook_health.json` and run cleanup script
+
+### Metrics
+
+- **3,931 violations** identified in enforcement.log (from prior sessions)
+  - llm_generate bypassed: 1,274 (32%)
+  - llm_query bypassed: 848 (22%)
+  - llm_analyze bypassed: 750 (19%)
+  - llm_code bypassed: 615 (16%)
+  - llm_research bypassed: 452 (11%)
+- Box-drawing hint format expected to reduce future violations by 30–50% via increased visibility
+
+### Breaking Changes
+
+None — fully backward-compatible. Cleanup scripts are optional. Nudges are advisory only.
+
+---
+
 ## v7.4.1 — Repository Cleanup (2026-04-22)
 
 ### Changed

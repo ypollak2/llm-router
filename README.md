@@ -217,6 +217,125 @@ LLM_ROUTER_COMPRESS_RESPONSE=true       # Enable response compression
 
 For full setup guide, see [docs/SETUP.md](docs/SETUP.md).
 
+## Monitoring & Reducing Violations
+
+**Routing violations** occur when Claude bypasses a routing directive by using `Bash`, `Read`, `Edit`, or `Write` instead of calling the routed MCP tool first. This burns expensive tokens with zero cost savings.
+
+### What Is a Violation?
+
+When llm-router issues a `⚡ MANDATORY ROUTE` hint, it writes a pending state file. If Claude uses `Bash` (or `Read`/`Edit`/`Write` for Q&A tasks) before calling the expected tool, enforce-route.py logs it as a violation.
+
+**Example violation sequence:**
+```
+⚡ MANDATORY ROUTE: query/simple → call llm_query
+  → Bash: "I'll answer this directly"  ❌ VIOLATION (should have called llm_query)
+```
+
+**Cost impact:** $0.10+ spent on full Claude model instead of $0.0001 via llm_query routing.
+
+### Analyze Your Violations
+
+Use the provided analysis script to see which sessions violate most and why:
+
+```bash
+python3 scripts/analyze-violations.py
+```
+
+Output:
+- Summary: total violations, date range, distinct sessions
+- Top 10 sessions table with violation counts
+- Per-session tool sequences showing what was used vs what should have been called
+- Report saved to `~/.llm-router/retrospectives/violation-report-<date>.md`
+
+### Common Violation Patterns
+
+| Pattern | Cause | Fix |
+|---------|-------|-----|
+| **Bash used for Q&A** | Claude answers directly | Route via `llm_query` / `llm_research` instead |
+| **Read after route hint** | Claude investigates before routing | Call `llm_analyze` first, pass file content |
+| **Edit without generation** | Claude codes directly | Route via `llm_code` first for simple tasks |
+| **Loop: same tool 3+ times** | Investigation stuck in debugging | Call the routed tool to break the deadlock |
+
+### Enforcement Modes
+
+Control violation behavior via `LLM_ROUTER_ENFORCE`:
+
+```bash
+export LLM_ROUTER_ENFORCE=smart   # (default) Hard for Q&A, soft for code
+export LLM_ROUTER_ENFORCE=hard    # Block all violations (strictest)
+export LLM_ROUTER_ENFORCE=soft    # Log violations, allow calls (permissive)
+export LLM_ROUTER_ENFORCE=off     # Disable enforcement entirely
+```
+
+- **smart**: Balances cost savings with developer UX. Q&A tasks (query/research/analyze/generate) are hard-blocked. Code tasks allow file-reading tools for investigation.
+- **hard**: Strict enforcement. All violations blocked until routing is satisfied. Use when budget pressure is high.
+- **soft**: Advisory only. Violations logged to `enforcement.log` but never blocked. Good for testing.
+- **off**: No routing enforcement. Hooks fire but don't block.
+
+### Session Violation Escalation
+
+After 3+ violations in a session, enforce-route.py prints a warning to stderr:
+
+```
+[llm-router] ⚠️  ESCALATION: 5 routing violations this session.
+  Next prompt expecting llm_query:
+  → Call the MCP tool FIRST before any Bash/Read/Edit/Write.
+  → See ~/.llm-router/enforcement.log for full history.
+  → Set LLM_ROUTER_ENFORCE=hard to block violations automatically.
+```
+
+This reminds the model to route first.
+
+### Interpreting enforcement.log
+
+The log file `~/.llm-router/enforcement.log` contains all violations:
+
+```
+[2026-04-26 10:30:45] VIOLATION session=abc12345678 expected=llm_query got=Bash
+[2026-04-26 10:31:02] VIOLATION session=abc12345678 expected=llm_query got=Read
+```
+
+Use `analyze-violations.py` to summarize and find patterns across sessions.
+
+### Improving Hint Visibility
+
+v7.5.0+ uses a box-drawing format that's harder to miss:
+
+```
+╔══════════════════════════════════════════════════╗
+║  ⚡ MANDATORY ROUTE — DO NOT SKIP                ║
+║  task  : query                                   ║
+║  action: call llm_query                          ║
+║  via   : heuristic                               ║
+║  saves : $0.001                                  ║
+╚══════════════════════════════════════════════════╝
+
+⚠️  IMPORTANT: Call the tool above as your FIRST action.
+   • Do NOT use Bash, Read, Edit, or Write to self-answer
+   • Do NOT spawn Agent subagents — they cost $0.10+
+   • Do NOT use WebSearch or WebFetch — route via llm_research
+   • Violations are logged per-session and count toward escalation
+```
+
+This format is visible even in long context windows.
+
+### Hook Health Cleanup
+
+Test artifacts from development can inflate error counts. Clean them up:
+
+```bash
+# Preview what will be removed
+python3 scripts/cleanup-hook-health.py --dry-run
+
+# Apply cleanup
+python3 scripts/cleanup-hook-health.py
+
+# Force-remove specific hooks
+python3 scripts/cleanup-hook-health.py --remove hook-a hook-b test-hook
+```
+
+This removes hooks that only have errors from test sessions (session_id: "abc123").
+
 ## MCP Tools (48 total)
 
 **Routing:**

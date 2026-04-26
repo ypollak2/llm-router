@@ -565,6 +565,18 @@ def main() -> None:
     )
 
     json.dump({"decision": "block", "reason": block_reason}, sys.stdout)
+    
+    # ── Per-session violation nudge ───────────────────────────────────────────
+    # After 3+ violations, output a strong nudge to stderr (visible as hook message)
+    if violation_count >= 3:
+        nudge = (
+            f"\n[llm-router] ⚠️  ESCALATION: {violation_count} routing violations this session.\n"
+            f"  Next prompt expecting {expected_tool}:\n"
+            f"  → Call the MCP tool FIRST before any Bash/Read/Edit/Write.\n"
+            f"  → See ~/.llm-router/enforcement.log for full history.\n"
+            f"  → Set LLM_ROUTER_ENFORCE=hard to block violations automatically.\n"
+        )
+        print(nudge, file=sys.stderr)
 
 
 if __name__ == "__main__":
