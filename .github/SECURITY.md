@@ -4,5 +4,5 @@ Please see [SECURITY.md](../SECURITY.md) in the root directory for full security
 
 **TL;DR:**
 - Do NOT open public issues for security vulnerabilities
-- Email security@llm-router.dev with details
+- Email yali.pollak@gmail.com with details
 - We will acknowledge within 24 hours and provide timeline

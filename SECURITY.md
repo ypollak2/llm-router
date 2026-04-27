@@ -4,7 +4,7 @@
 
 If you discover a security vulnerability in llm-router, please **do not open a public GitHub issue**. Instead, email:
 
-**security@llm-router.dev** (or replace with real email)
+**yali.pollak@gmail.com**
 
 Please include:
 - Description of the vulnerability

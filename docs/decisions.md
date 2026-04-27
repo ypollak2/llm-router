@@ -128,3 +128,38 @@ Append a new entry after every meaningful feature or architectural change.
 - ✅ Roadmap provides transparency on future security improvements
 
 Phase 0 (Critical Security) now complete: Prompt Sanitization (#1) → Secret Scrubber (#2) → Hook Deadlock (#3) → Security Policy (#4).
+
+---
+
+## 2026-04-27 — CLI Modularization Phase 1 (Architecture Checkpoint)
+
+**Decision**: Begin Phase 1 refactoring of monolithic 2699-line cli.py into modular command structure. Created foundational infrastructure and detailed migration plan.
+
+**Work completed:**
+1. Created `src/llm_router/cli/` directory structure
+2. Created `cli/shared.py` with ANSI formatting utilities (150 lines)
+3. Created `cli/__init__.py` and `commands/__init__.py`
+4. Created `docs/CLI_REFACTORING_PLAN.md` with 10-phase migration strategy
+
+**Key decisions:**
+- Use modular command files in `cli/commands/` rather than monolithic dispatcher
+- Preserve existing extracted commands: gain.py, last.py, replay.py, retrospect.py, snapshot.py, verify.py
+- Migrate remaining 12 commands from cli.py incrementally (install, doctor, dashboard, status, config, team, budget, etc.)
+- Maintain backward compatibility — no user-facing CLI changes
+- All commands should be async-ready for future MCP integration
+
+**Architecture (final state):**
+- `cli/cli.py` — Main dispatcher (~100 lines)
+- `cli/shared.py` — Formatting utilities (~150 lines)
+- `cli/commands/*.py` — Individual commands (install, doctor, dashboard, team, budget, etc.)
+- `tests/cli/` — Command tests (3-5 tests per command)
+
+**Scope (15 hours estimated):**
+- Phase 1 (Done): Setup & utilities
+- Phase 2-3: High-priority commands (install, doctor) — 4-6 hours
+- Phase 4-6: Medium-priority commands (dashboard, config, team, budget) — 6-8 hours
+- Phase 7-10: Dispatcher, entrypoint, testing, cleanup — 3-4 hours
+
+**Alternatives considered**: Immediate full refactoring vs. phased migration. Selected phased migration to maintain stability and allow for incremental testing at each stage.
+
+**Next steps**: Proceed with Phase 2 (install command extraction) or defer to next session depending on context window/user preference.
