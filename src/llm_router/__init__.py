@@ -14,13 +14,15 @@ See README.md for full documentation.
 import tomllib
 from pathlib import Path
 
+__version__ = "7.6.1"  # SYNCED FROM pyproject.toml — DO NOT EDIT MANUALLY
+
 try:
     _pyproject_path = Path(__file__).parent.parent.parent / "pyproject.toml"
     _pyproject_data = tomllib.load(_pyproject_path.open("rb"))
     __version__ = _pyproject_data["project"]["version"]
 except Exception:
-    # Fallback for edge cases
-    __version__ = "0.0.0.dev0"
+    # Fallback to hardcoded version above if pyproject.toml is unavailable
+    pass
 
 # Export response router for easy access
 from llm_router.response_router import route_response as route_response_explanations
