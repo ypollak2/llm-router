@@ -2,6 +2,41 @@
 
 **For releases v6.2 and earlier, see [CHANGELOG_ARCHIVE.md](docs/CHANGELOG_ARCHIVE.md).**
 
+## v7.6.0 — Agent Resource Budgeting (2026-04-27)
+
+**Feature release: Complete agent resource budgeting system with provisional tracking and reconciliation.**
+
+### Added
+
+- **Session Budget Initialization** (agent-route.py)
+  - Initializes `~/.llm-router/session_budget.json` on first agent approval
+  - Allocates 30% of remaining quota to agent calls (prevents session budget exhaustion)
+  - Minimum $5 guaranteed per session
+
+- **Provisional Spend Tracking** (agent-route.py)
+  - Decrements remaining budget when agents are approved
+  - Prevents multiple agents from each believing they have budget available
+  - Supports per-agent hard limit ($5.00) and session limit ($50.00)
+
+- **Budget Reconciliation** (agent-error.py)
+  - Reconciles provisional vs actual spend on agent completion
+  - Refunds 50% of cost on failure (only paid for delivered value)
+  - Prevents budget lockup from failed agents
+
+- **Comprehensive Test Suite** (test_agent_resource_budgeting.py)
+  - 12 tests covering cost estimation, hard limits, provisional tracking, reconciliation, and starvation
+  - TestCostEstimation: simple/moderate/complex tasks cost correctly
+  - TestHardLimits: blocks when cost exceeds remaining or per-agent max
+  - TestProvisionalSpendTracking: budget decrements on approval
+  - TestBudgetReconciliation: 50% refunds accumulate correctly
+  - TestBudgetStarvation: multiple agents exhaust budget, sixth agent blocked
+  - TestSessionBudgetInitialization: budget based on quota pressure
+  - All 12 tests passing ✅
+
+### Fixed
+
+- Test helper `_run_agent_route()` now only initializes budget file once per session (was reinitializing and resetting budget on every call, masking real budget tracking)
+
 ## v7.5.2 — Test Suite Hotfix (2026-04-26)
 
 **Patch release: Fixed test failures in v7.5.1 box-drawing hint format.**

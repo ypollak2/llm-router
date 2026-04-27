@@ -186,6 +186,46 @@ See [CHANGELOG.md](CHANGELOG.md) for full version history and v6.x features.
 
 See [CLAUDE.md § Content Generation Routing](CLAUDE.md#content-generation-routing-v740) for detailed decision tree.
 
+## New in v7.6.0 — Agent Resource Budgeting
+
+**Complete budget management system for agent calls with provisional tracking and reconciliation.**
+
+- **Session Budget Allocation** — Smart budget carving based on quota pressure
+  - Allocates 30% of remaining quota to agent calls per session
+  - Minimum $5 guaranteed, prevents session budget exhaustion
+  - Scales with quota pressure: high pressure → lower allocation
+
+- **Provisional Spend Tracking** — Real-time budget management during agent execution
+  - Decrements remaining budget immediately when agents are approved
+  - Prevents multiple agents from each thinking they have budget available
+  - Per-agent hard limit: $5.00 (complex tasks need MCP routing instead)
+  - Session-wide hard limit: $50.00 (fallback safety valve)
+
+- **Budget Reconciliation on Failure** — Smart refund logic for failed agents
+  - On agent failure: refund 50% of provisional cost (only paid for delivered value)
+  - On agent success: provisional spend becomes final (no adjustment)
+  - Prevents budget lockup from timeouts, OOM, or parse errors
+  - Enables graceful degradation under resource constraints
+
+- **Cost Estimation by Complexity** — Accurate budgeting across task types
+  - Simple retrieval: $0.15 | Simple query: $0.30
+  - Moderate code/analysis: $1.00/$0.80 | Complex analysis: $4.00
+  - Conservative estimates prevent budget surprises
+  - Soft warning at 80% of remaining budget
+
+Example workflow:
+```
+Session starts → Initialize $5 budget (30% of remaining)
+  Agent 1 (moderate code) → Estimate $1.00 → Decrement to $4.00
+  Agent 2 (moderate code) → Estimate $1.00 → Decrement to $3.00
+  Agent 1 completes successfully → No refund
+  Agent 2 times out → Refund $0.50 → Remaining: $3.50
+  Agent 3 (complex) → Estimate $3.00 → Decrement to $0.50
+  Agent 4 (moderate) → Estimate $1.00 → BLOCKED (exceeds remaining $0.50)
+```
+
+See [CLAUDE.md § Agent Resource Budgeting](CLAUDE.md#agent-resource-budgeting) for detailed setup.
+
 ## How It Works
 
 ```

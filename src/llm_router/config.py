@@ -162,6 +162,13 @@ class RouterConfig(BaseSettings):
     # 0.0 = disabled. Example: 1.0 = $1.00/session hard stop.
     llm_router_hard_stop_above: float = 0.0  # LLM_ROUTER_HARD_STOP_ABOVE (session USD)
 
+    # ── Agent loop circuit breaker (v8.0+) ──
+    # Maximum nesting depth for Agent tool calls. When an agent spawns another
+    # agent, nesting depth is incremented. If depth reaches this limit, new
+    # Agent calls are blocked. Exempt: Explore agents (pure retrieval, no cost).
+    # Use LLM_ROUTER_MAX_AGENT_DEPTH to override. Default: 3.
+    llm_router_max_agent_depth: int = 3  # LLM_ROUTER_MAX_AGENT_DEPTH
+
     # ── HuggingFace Inference API ──
     # Used by the discovery layer to access free-tier hosted models.
     # Accepts HF_TOKEN or HUGGINGFACE_API_KEY from environment.

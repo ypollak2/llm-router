@@ -29,10 +29,17 @@ Note: Mixed tasks (read files then analyze) are blocked; Claude is instructed
 from __future__ import annotations
 
 import json
+import os
 import re
 import sys
 import time
 from pathlib import Path
+
+# ── Agent resource limits ────────────────────────────────────────────────────
+
+AGENT_MAX_COST_USD = 5.0            # Hard per-agent cost limit
+SESSION_MAX_COST_USD = 50.0         # Hard per-session cost limit (fallback)
+SOFT_BUDGET_FACTOR = 0.8            # Warn if cost > 80% of remaining budget
 
 # ── Retrieval detection (approve subagent) ───────────────────────────────────
 # These signal that the subagent's job is FINDING/READING, not REASONING.
@@ -127,6 +134,217 @@ _TOOL_MAP = {
     "generate": "llm_generate",
     "query": "llm_query",
 }
+
+
+# ── Agent loop circuit breaker ──────────────────────────────────────────────
+
+def _get_max_depth() -> int:
+    """Read LLM_ROUTER_MAX_AGENT_DEPTH from environment, default 3."""
+    try:
+        return int(os.environ.get("LLM_ROUTER_MAX_AGENT_DEPTH", "3"))
+    except (ValueError, TypeError):
+        return 3
+
+
+def _get_session_id() -> str:
+    """Read current session ID from ~/.llm-router/session_id.txt."""
+    session_file = Path.home() / ".llm-router" / "session_id.txt"
+    try:
+        return session_file.read_text().strip()
+    except FileNotFoundError:
+        return "unknown"
+
+
+def _read_agent_depth(session_id: str) -> int:
+    """Read current agent nesting depth for the given session.
+
+    If the session ID in agent_depth.json doesn't match, return 0 (new session).
+    """
+    depth_file = Path.home() / ".llm-router" / "agent_depth.json"
+    try:
+        data = json.loads(depth_file.read_text())
+        if data.get("session_id") != session_id:
+            return 0  # New session — reset depth
+        return int(data.get("depth", 0))
+    except (FileNotFoundError, json.JSONDecodeError, ValueError):
+        return 0
+
+
+def _write_agent_depth(session_id: str, depth: int) -> None:
+    """Persist agent nesting depth for the current session."""
+    depth_file = Path.home() / ".llm-router" / "agent_depth.json"
+    depth_file.write_text(json.dumps({
+        "depth": depth,
+        "session_id": session_id,
+        "ts": time.time(),
+    }))
+
+
+# ── Agent call tracking (for error recovery) ────────────────────────────────
+
+def _log_agent_call(subagent_type: str, prompt: str, decision: str) -> None:
+    """Log agent call for error recovery tracking.
+    
+    Persists to ~/.llm-router/agent_calls.json with a rolling history of last 50 calls.
+    Used by PostToolUse[Agent] hook to suggest fallbacks when agents fail.
+    """
+    calls_file = Path.home() / ".llm-router" / "agent_calls.json"
+    
+    # Read existing history
+    history = []
+    try:
+        data = json.loads(calls_file.read_text())
+        history = data.get("calls", [])
+    except (FileNotFoundError, json.JSONDecodeError):
+        pass
+    
+    # Append new call
+    history.append({
+        "timestamp": time.time(),
+        "subagent_type": subagent_type,
+        "prompt": prompt[:500],  # Truncate long prompts
+        "decision": decision,
+        "session_id": _get_session_id(),
+    })
+    
+    # Keep last 50 calls only
+    history = history[-50:]
+    
+    # Write back
+    calls_file.write_text(json.dumps({
+        "calls": history,
+        "version": 1,
+    }))
+
+
+# ── Agent cost estimation ───────────────────────────────────────────────────
+
+def _estimate_agent_cost(complexity: str, task_type: str) -> float:
+    """Estimate agent call cost in USD based on complexity and task type.
+    
+    Base rates (conservative upper estimates):
+    - simple/retrieval: $0.15
+    - simple/query: $0.30
+    - simple/code: $0.20
+    - moderate/retrieval: $0.30
+    - moderate/query: $0.50
+    - moderate/code: $1.00
+    - moderate/analyze: $0.80
+    - complex/code: $3.00
+    - complex/analyze: $4.00
+    - complex/research: $2.50
+    
+    Returns conservative estimate to avoid budget surprises.
+    """
+    rates = {
+        ("simple", "retrieval"): 0.15,
+        ("simple", "query"): 0.30,
+        ("simple", "code"): 0.20,
+        ("moderate", "retrieval"): 0.30,
+        ("moderate", "query"): 0.50,
+        ("moderate", "code"): 1.00,
+        ("moderate", "analyze"): 0.80,
+        ("complex", "code"): 3.00,
+        ("complex", "analyze"): 4.00,
+        ("complex", "research"): 2.50,
+    }
+    # Default conservative estimate for unmapped types
+    return rates.get((complexity, task_type), 1.50)
+
+
+def _initialize_session_budget() -> float:
+    """Initialize session budget if not already done.
+
+    Creates ~/.llm-router/session_budget.json with initial budget based on
+    quota pressure. Called once per session to set up provisional tracking.
+
+    Returns the initial budget in USD.
+    """
+    budget_file = Path.home() / ".llm-router" / "session_budget.json"
+
+    # If already initialized this session, return existing
+    if budget_file.exists():
+        try:
+            data = json.loads(budget_file.read_text())
+            if data.get("session_id") == _get_session_id():
+                return float(data.get("initial", 30.0))
+        except (json.JSONDecodeError, ValueError):
+            pass
+
+    # Calculate initial budget based on quota pressure
+    pressure = _get_claude_pressure()
+    # Allocate 30% of available budget to agents this session
+    # This prevents a single session from consuming entire weekly quota
+    base_budget = 30.0
+    allocated = base_budget * (1.0 - pressure)
+    initial_budget = max(5.0, allocated)  # Minimum $5 always allocated
+
+    budget_file.write_text(json.dumps({
+        "session_id": _get_session_id(),
+        "initial": initial_budget,
+        "remaining": initial_budget,
+        "provisional_spend": 0.0,
+        "timestamp": time.time(),
+    }))
+
+    return initial_budget
+
+
+def _decrement_budget_provisional(estimated_cost: float) -> None:
+    """Decrement remaining budget provisionally when agent is approved.
+
+    This prevents multiple agents from each thinking they have budget available.
+    Provisional spend will be reconciled against actual cost when agent completes.
+    """
+    budget_file = Path.home() / ".llm-router" / "session_budget.json"
+
+    try:
+        data = json.loads(budget_file.read_text())
+    except (FileNotFoundError, json.JSONDecodeError):
+        _initialize_session_budget()
+        data = json.loads(budget_file.read_text())
+
+    remaining = float(data.get("remaining", 30.0))
+    provisional = float(data.get("provisional_spend", 0.0))
+
+    # Decrement remaining by estimated cost
+    new_remaining = max(0.0, remaining - estimated_cost)
+    new_provisional = provisional + estimated_cost
+
+    data["remaining"] = new_remaining
+    data["provisional_spend"] = new_provisional
+    data["timestamp"] = time.time()
+
+    budget_file.write_text(json.dumps(data))
+
+
+def _get_remaining_budget() -> float:
+    """Get remaining session budget in USD.
+
+    Priority:
+      1. ~/.llm-router/session_budget.json (provisional tracking)
+      2. Infer from usage.json (session % remaining)
+      3. Conservative default $10 (assume 1/3 remaining)
+
+    Returns a float >= 0.0 representing remaining budget in USD.
+    """
+    # Layer 1: Session budget file (tracking provisional spend)
+    budget_file = Path.home() / ".llm-router" / "session_budget.json"
+    try:
+        data = json.loads(budget_file.read_text())
+        if "remaining" in data:
+            remaining = float(data.get("remaining", 0.0))
+            return max(0.0, remaining)
+    except (FileNotFoundError, json.JSONDecodeError):
+        pass
+
+    # Layer 2: Infer from usage pressure
+    session_pct = _get_claude_pressure()  # 0.0–1.0
+    # Assume $30 typical session budget
+    session_budget = 30.0
+    spent = session_budget * session_pct
+    remaining = max(0.0, session_budget - spent)
+    return remaining
 
 
 # ── Session pressure ─────────────────────────────────────────────────────────
@@ -248,17 +466,91 @@ def main() -> None:
     if not prompt:
         sys.exit(0)  # approve: nothing to classify
 
+    # ── Initialize session budget if not already done ──────────────────────────
+    _initialize_session_budget()
+
     # ── Always approve Explore subagents — they're pure retrieval ────────────
     if subagent_type == "Explore":
+        _log_agent_call(subagent_type, prompt, "approved_explore")
         sys.exit(0)
+
+    # ── Circuit breaker: block if nesting too deep ──────────────────────────
+    session_id = _get_session_id()
+    current_depth = _read_agent_depth(session_id)
+    max_depth = _get_max_depth()
+
+    if current_depth >= max_depth:
+        result = {
+            "decision": "block",
+            "reason": (
+                f"[llm-router] Agent loop circuit breaker: depth {current_depth}/{max_depth}. "
+                f"Too many nested agents. Use llm_* MCP tools directly instead."
+            ),
+        }
+        json.dump(result, sys.stdout)
+        return
+
+    # Increment depth before approving any non-Explore agent
+    _write_agent_depth(session_id, current_depth + 1)
 
     # ── Detect retrieval-only tasks ──────────────────────────────────────────
     if _is_retrieval_only(prompt):
+        _log_agent_call(subagent_type, prompt, "approved_retrieval")
         sys.exit(0)
 
     # ── Classify reasoning task ──────────────────────────────────────────────
     task_type = _classify_task_type(prompt)
     complexity = _classify_complexity(prompt)
+    
+    # ── Estimate cost for this agent call ───────────────────────────────────
+    estimated_cost = _estimate_agent_cost(complexity, task_type)
+    remaining_budget = _get_remaining_budget()
+    
+    # ── Check resource limits ───────────────────────────────────────────────
+    # Soft limit: warn if cost > 80% of remaining budget (informational only)
+    soft_limit = remaining_budget * SOFT_BUDGET_FACTOR
+    if estimated_cost > soft_limit and remaining_budget > 0:
+        # Could log warning here if we had stderr access
+        # sys.stderr.write(f"[warning] Agent cost ${estimated_cost:.2f} exceeds soft limit (80% of remaining ${remaining_budget:.2f})\n")
+        pass
+    
+    # Hard limit: block if cost exceeds remaining budget
+    if estimated_cost > remaining_budget:
+        result = {
+            "decision": "block",
+            "reason": (
+                f"[llm-router] Agent would exceed session budget.\n\n"
+                f"  Estimated cost: ${estimated_cost:.2f}\n"
+                f"  Remaining budget: ${remaining_budget:.2f}\n\n"
+                f"Use llm_* MCP tools instead (typically cheaper and more efficient)."
+            ),
+        }
+        json.dump(result, sys.stdout)
+        return
+    
+    # Hard limit: block if cost exceeds per-agent maximum
+    if estimated_cost > AGENT_MAX_COST_USD:
+        result = {
+            "decision": "block",
+            "reason": (
+                f"[llm-router] Agent estimated cost exceeds per-agent limit.\n\n"
+                f"  Estimated: ${estimated_cost:.2f}\n"
+                f"  Per-agent limit: ${AGENT_MAX_COST_USD:.2f}\n\n"
+                f"Task is too complex for a single agent. Break it into smaller steps\n"
+                f"or use a series of llm_* MCP tool calls."
+            ),
+        }
+        json.dump(result, sys.stdout)
+        return
+
+    # ── All limit checks passed: decrement budget provisionally ──────────────────
+    # This tracks the estimated cost as "provisional spend" so multiple agents
+    # don't all think they have budget available. Will be reconciled on completion.
+    _decrement_budget_provisional(estimated_cost)
+
+    # Log the blocked reasoning task call for error recovery tracking
+    _log_agent_call(subagent_type, prompt, "blocked_reasoning")
+    
     raw_pressure = _get_claude_pressure()  # legacy single value for display
 
     # Read per-bucket pressure from usage.json for accurate threshold decisions
@@ -299,6 +591,7 @@ def main() -> None:
     block_reason = (
         f"[AGENT-ROUTE] Subagent blocked — routing reasoning to cheap model.\n\n"
         f"  Task:       {task_type}/{complexity}\n"
+        f"  Est. Cost:  ${estimated_cost:.2f} (remaining: ${remaining_budget:.2f})\n"
         f"  Profile:    {profile} → {model_hint}\n"
         f"  Quota:      session={_p['session']:.0%} sonnet={_p['sonnet']:.0%} weekly={_p['weekly']:.0%}\n"
         f"{pressure_note}"
