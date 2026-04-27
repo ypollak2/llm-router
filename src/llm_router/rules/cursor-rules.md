@@ -1,42 +1,25 @@
-<!-- llm-router-rules-version: 1 -->
-# LLM Router — Cursor IDE Routing Rules
+# llm-router Routing Rules for Cursor IDE
 
-> These rules apply when using llm-router MCP tools inside Cursor IDE.
-> Cursor loads MCP servers from ~/.cursor/mcp.json (global) or .cursor/mcp.json (project).
-> Use `llm_auto` for routing + cross-session savings tracking.
+Configure intelligent LLM routing for Cursor IDE with cost optimization.
 
----
+## Routing Commands
 
-## How to Route
+- `llm_auto` — Automatic routing (recommended)
+- `llm_research` — Web-grounded research and current events
+- `llm_code` — Code generation and refactoring
+- `llm_generate` — Writing, documentation, content creation
+- `llm_analyze` — Deep analysis and problem-solving
+- `llm_query` — Quick factual questions
 
-Cursor loads MCP servers on startup. Once llm-router is registered, call tools by name:
+## Best Practices
 
-```
-Rule: for research/generate/code/analyze tasks → call llm_auto(prompt=<the task>)
-```
+1. Use routing commands explicitly for complex tasks
+2. Let `llm_auto` handle simple requests
+3. Specify complexity level for better model selection: `llm_code(complexity="complex")`
+4. Check the Cursor status bar for current routing mode
 
----
+## Tips
 
-## Task Type → Tool Mapping
-
-| Task | Tool | Notes |
-|---|---|---|
-| Simple factual question | `llm_query` | Gemini Flash / Groq |
-| Research / current events | `llm_research` | Perplexity (web-grounded) |
-| Writing / content | `llm_generate` | Gemini Flash / Haiku |
-| Deep analysis | `llm_analyze` | GPT-4o / Gemini Pro |
-| Code generation | `llm_code` | Ollama → Codex → o3 |
-| Unknown / auto-detect | `llm_auto` | Classifies + routes |
-
----
-
-## Savings Visibility
-
-Run `llm_savings` in Cursor chat to see cross-session totals.
-
----
-
-## Token-Efficient Responses
-
-Skip preamble. Lead with result. Fragments fine when meaning is clear.
-No trailing summaries. ≥3 items → bullets. Never restate the user's request.
+- The router learns your preferences over time
+- Budget pressure automatically downgrades model tier when approaching limits
+- All routing decisions are logged for review

@@ -47,13 +47,17 @@ class TestDashboardCommandStructure:
         
         assert callable(cmd_dashboard)
 
-    def test_cmd_dashboard_takes_args(self):
+    def test_cmd_dashboard_takes_args(self, monkeypatch):
         """cmd_dashboard should accept a list of arguments."""
         from llm_router.commands.dashboard import cmd_dashboard
-        
-        # Should handle empty args (will fail due to missing server, but that's OK)
-        try:
-            cmd_dashboard([])
-        except (ModuleNotFoundError, TypeError):
-            # Expected when server module is not available or asyncio.run is called
-            pass
+
+        # Mock the run function to avoid blocking the test
+        async def mock_run(port):
+            return None
+
+        # Patch the server run function
+        monkeypatch.setattr("llm_router.dashboard.server.run", mock_run)
+
+        # Should handle empty args
+        result = cmd_dashboard([])
+        assert result == 0

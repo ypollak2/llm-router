@@ -1,39 +1,48 @@
-<!-- llm-router-rules-version: 1 -->
-# LLM Router — Claude Desktop Routing Rules
+# LLM Router — Claude Desktop Integration
 
-> These rules apply when using llm-router MCP tools inside Claude Desktop.
-> Claude Desktop has no hook system, so cost-routing (avoiding Claude charges) is
-> not possible — every call still goes through Claude. These rules enable
-> **capability extension**: using specialized external models for tasks where
-> they outperform Claude (e.g. live web search via Perplexity, image generation).
+This document explains how to use llm-router MCP tools within Claude Desktop.
 
----
+## Configuration for Claude Desktop
 
-## What llm-router Adds in Claude Desktop
+Add this to your `claude_desktop_config.json`:
 
-| Capability | Tool | Value |
-|---|---|---|
-| Live web search | `llm_research` | Perplexity Sonar — real-time results |
-| Image generation | `llm_image` | DALL-E 3 / Flux / Imagen 3 |
-| Video generation | `llm_video` | Veo / Kling / Gen-3 |
-| Audio / TTS | `llm_audio` | ElevenLabs / OpenAI TTS |
-| Savings visibility | `llm_savings` | Cross-session stats from all hosts |
+```json
+{
+  "mcpServers": {
+    "llm-router": {
+      "command": "uvx",
+      "args": ["claude-code-llm-router"]
+    }
+  }
+}
+```
 
----
+File location:
+- **macOS**: `~/Library/Application Support/Claude/claude_desktop_config.json`
+- **Windows**: `%APPDATA%\Claude\claude_desktop_config.json`
+- **Linux**: `~/.config/Claude/claude_desktop_config.json`
 
-## Honest Framing
+## Available MCP Tools
 
-Cost-routing (saving Claude API or subscription tokens) does NOT apply here —
-Claude Desktop routes all tasks through Claude regardless. The additive cost
-of external model calls is real. Use external tools only when:
-- The task requires live/current data (`llm_research`)
-- The task produces media that Claude cannot generate (`llm_image`, `llm_video`)
-- You explicitly want a second opinion from a different model
+Once configured, you'll have access to:
 
----
+### Smart Routing
+- `llm_auto` - Auto-route with savings tracking (recommended for all tasks)
+- `llm_route` - Full complexity classification and routing
+- `llm_classify` - Quick complexity detection
 
-## Savings Tracking
+### Text Tools
+- `llm_query` - Questions, lookups, Q&A
+- `llm_research` - Web-grounded research
+- `llm_generate` - Writing, content creation
+- `llm_analyze` - Deep analysis and reasoning
+- `llm_code` - Code generation and refactoring
 
-Even though cost-routing is unavailable, calls to `llm_*` tools are tracked
-in the shared SQLite database. `llm_savings` shows cross-host totals — useful
-to see savings accumulated via Claude Code or Codex alongside Desktop usage.
+### Usage & Admin
+- `llm_usage` - Check savings and usage
+- `llm_health` - Provider status
+- `llm_budget` - Spending caps and pressure
+
+## Recommended Usage
+
+Start with `llm_auto` for all tasks — it handles cost optimization automatically and tracks your savings across sessions.

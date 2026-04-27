@@ -1,38 +1,45 @@
-<!-- llm-router-rules-version: 1 -->
-# LLM Router — GitHub Copilot Routing Rules
+# LLM Router — VS Code / GitHub Copilot Integration
 
-> These rules apply when using llm-router MCP tools inside GitHub Copilot
-> (VS Code agent mode with `.vscode/mcp.json`).
-> Copilot has no hook system, so cost-routing is not available.
-> These rules enable capability extension via external specialized models.
+This document explains how to use llm-router MCP tools with VS Code and GitHub Copilot.
 
----
+## Configuration for VS Code / Copilot
 
-## What llm-router Adds in Copilot
+Add this to your VS Code `mcp.json`:
 
-| Capability | Tool | Value |
-|---|---|---|
-| Live web search | `llm_research` | Perplexity Sonar — real-time results |
-| Auto-routing | `llm_auto` | Classifies + routes, tracks savings server-side |
-| Image generation | `llm_image` | DALL-E 3 / Flux |
-| Savings visibility | `llm_savings` | Cross-session stats from all hosts |
-
----
-
-## Usage Pattern
-
-In Copilot agent mode, you can call MCP tools via `@llm-router`:
-
-```
-@llm-router llm_auto What are the latest breaking changes in React 19?
-@llm-router llm_research What's the current price of AAPL?
-@llm-router llm_savings
+```json
+{
+  "servers": {
+    "llm-router": {
+      "command": "uvx",
+      "args": ["claude-code-llm-router"]
+    }
+  }
+}
 ```
 
----
+File location:
+- **macOS**: `~/Library/Application Support/Code/User/mcp.json`
+- **Windows**: `%APPDATA%\Code\User\mcp.json`
+- **Linux**: `~/.config/Code/User/mcp.json`
 
-## Honest Framing
+## Available Tools
 
-Like Claude Desktop, Copilot cannot benefit from subscription cost-routing.
-Use `llm_auto` for tasks that benefit from external models, and `llm_savings`
-to see aggregate savings accumulated via Claude Code sessions.
+### Smart Routing
+- `llm_route` - Classify and route to optimal model
+- `llm_classify` - Quick task complexity classification
+- `llm_auto` - Automatic routing with cost tracking
+
+### Text Operations
+- `llm_query` - Simple questions and Q&A
+- `llm_research` - Web-grounded research with sources
+- `llm_generate` - Content creation and writing
+- `llm_analyze` - Complex analysis and debugging
+- `llm_code` - Code generation and improvements
+
+### Utilities
+- `llm_usage` - View routing stats and savings
+- `llm_health` - Check provider availability
+
+## Quick Start
+
+Use `llm_route(prompt="your task")` to automatically classify and route any task to the optimal model for cost savings.

@@ -1,42 +1,27 @@
-<!-- llm-router-rules-version: 1 -->
-# LLM Router — OpenClaw Routing Rules
+# llm-router Routing Rules for OpenClaw
 
-> These rules apply when using llm-router MCP tools inside OpenClaw.
-> OpenClaw is MCP-first — all tools load from config automatically.
+Configure intelligent LLM routing for OpenClaw with the llm_auto command.
 
----
+## Available MCP Tools
 
-## How to Route
+- `llm_auto` — Automatic intelligent routing (recommended)
+- `llm_research` — Research and current information
+- `llm_code` — Code generation and development
+- `llm_generate` — Content and documentation creation
+- `llm_analyze` — Analysis and problem-solving
+- `llm_query` — Simple information requests
 
-OpenClaw loads MCP servers from `~/.openclaw/mcp.json`. Once llm-router is
-registered, call MCP tools by name before answering substantive tasks:
+## Token-Efficient Response Format
 
-```
-Rule: for research/generate/code/analyze tasks → call llm_auto(prompt=<the task>)
-```
+Responses use preamble-free formatting:
+- Answers first, reasoning second
+- Skip filler words and hedging language
+- Use fragments when appropriate for clarity
+- Focus on technical substance
 
----
+## Setup
 
-## Task Type → Tool Mapping
-
-| Task | Tool | Notes |
-|---|---|---|
-| Simple factual question | `llm_query` | Gemini Flash / Groq |
-| Research / current events | `llm_research` | Perplexity (web-grounded) |
-| Writing / content | `llm_generate` | Gemini Flash / Haiku |
-| Deep analysis | `llm_analyze` | GPT-4o / Gemini Pro |
-| Code generation | `llm_code` | Ollama → Codex → o3 |
-| Unknown / auto-detect | `llm_auto` | Classifies + routes |
-
----
-
-## Savings Visibility
-
-Run `llm_savings` to see cross-session totals.
-
----
-
-## Token-Efficient Responses
-
-Skip preamble. Lead with result. Fragments fine when meaning is clear.
-No trailing summaries. ≥3 items → bullets. Never restate the user's request.
+The llm-router MCP server is configured in `~/.openclaw/mcp.json` with smart routing that:
+- Starts with free local models (Ollama)
+- Falls back to API providers when needed
+- Applies budget pressure automatically

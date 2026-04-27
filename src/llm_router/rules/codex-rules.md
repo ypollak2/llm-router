@@ -1,61 +1,63 @@
-<!-- llm-router-rules-version: 1 -->
-# LLM Router — Codex CLI Routing Rules
+# LLM Router — Codex CLI Integration
 
-> These rules apply when using llm-router MCP tools inside Codex CLI (openai/codex).
-> Codex CLI has no UserPromptSubmit hook, so auto-routing is not available.
-> Use `llm_auto` to get equivalent routing + cross-session savings tracking.
+This document explains how to use llm-router MCP tools within the Codex CLI agent.
 
----
+## Available MCP Tools
 
-## How to Route Without a Hook
+When Codex CLI has the llm-router plugin registered, the following MCP tools are available:
 
-Since Codex CLI cannot inject routing hints automatically, call `llm_auto` explicitly
-for any task that benefits from a cheaper external model.
+### Text & Analysis
+- `llm_query` - Simple questions, lookups, quick facts
+- `llm_research` - Web-grounded research, current events
+- `llm_generate` - Writing, content creation, brainstorming
+- `llm_analyze` - Deep analysis, code review, debugging
+- `llm_code` - Code generation, refactoring, algorithm design
+- `llm_edit` - Bulk code edits across multiple files
+
+### Media
+- `llm_image` - Image generation
+- `llm_video` - Video generation
+- `llm_audio` - Text-to-speech
+
+### Administration
+- `llm_route` - Classify task complexity and route to best model
+- `llm_classify` - Quick complexity classification
+- `llm_usage` - Check API usage and savings
+- `llm_providers` - List configured providers and status
+- `llm_health` - Check provider health and circuit breaker status
+
+## Usage Examples
 
 ```
-Rule: before answering research, code generation, writing, or analysis tasks,
-call llm_auto(prompt=<the task>) and return its output.
+# Simple question routing to Ollama or Haiku
+llm_query(prompt="What's the difference between async/await and promises?")
+
+# Web research routing to Perplexity
+llm_research(prompt="Latest developments in quantum computing in 2026")
+
+# Code generation with complexity detection
+llm_code(prompt="Generate a React component for a todo list with hooks")
+
+# Content generation
+llm_generate(prompt="Write a 500-word article about AI safety")
+
+# Deep code analysis
+llm_analyze(prompt="Analyze this function for performance bottlenecks", complexity="complex")
 ```
 
-This gives you:
-- Same free-first routing chain as Claude Code (Ollama → Codex built-in → paid APIs)
-- Cross-session savings tracking (server-side SQLite, not per-session hooks)
-- Periodic savings envelope every 5 calls
+## Token-Efficient Response Style
 
----
+When using Codex CLI with llm-router, prefer output that:
+- **Leads with the answer** — no preamble like "I'll help", "Let me think", "Sure"
+- **Uses fragments** — "Returns mutated object" not "This returns a mutated object"
+- **Skips filler** — drop articles (a/the) when meaning is clear
+- **Preserves code** — all technical detail stays, only prose is condensed
 
-## Task Type → Tool Mapping
+Example: Instead of "I think you should use the useCallback hook because it prevents unnecessary re-renders of child components", output: "useCallback. Prevents child re-renders."
 
-| Task | Tool | Notes |
-|---|---|---|
-| Simple factual question | `llm_query` | Gemini Flash / Groq |
-| Research / current events | `llm_research` | Perplexity (web-grounded) |
-| Writing / content | `llm_generate` | Gemini Flash / Haiku |
-| Deep analysis | `llm_analyze` | GPT-4o / Gemini Pro |
-| Code generation | `llm_code` | Ollama → Codex → o3 |
-| Unknown / auto-detect | `llm_auto` | Classifies + routes |
+## Cost Optimization Tips
 
----
-
-## When NOT to Route
-
-- File edits (Read/Write/Edit operations) — execute directly
-- Short inline questions where you already have the answer
-
----
-
-## Savings Visibility
-
-Codex CLI has no session-end hook for savings summaries.
-Run `llm_savings` periodically to see cross-session totals.
-`llm_auto` shows a reminder every 5 calls automatically.
-
----
-
-## Token-Efficient Responses
-
-Skip preamble. Lead with result. Fragments fine when meaning is clear.
-No trailing summaries. ≥3 items → bullets. Never restate the user's request.
-
-- ✗ "I'll help you with that. Let me route this to the appropriate model..."
-- ✓ "Routed → Haiku. [result]"
+- `llm_query` is cheapest for simple lookups
+- `llm_research` includes web access (use when you need current data)
+- `llm_auto` is the recommended tool — it automatically routes through the full cost-saving chain
+- Batch related tasks together to reduce overhead
