@@ -88,8 +88,8 @@ assert v1==v2==v3==v4, f'MISMATCH: pyproject={v1} plugin={v2} marketplace={v3} i
     fi
     echo ""
 
-    # Step 2: Run tests (fast + parallel)
-    log_info "Step 2/5: Running test suite (parallel, ~40s)..."
+    # Step 2: Run tests (core tests only)
+    log_info "Step 2/5: Running test suite (core tests only)..."
     if uv run pytest tests/ -q \
         --ignore=tests/test_agno_integration.py \
         --ignore=tests/test_codex_routing.py \
@@ -101,7 +101,6 @@ assert v1==v2==v3==v4, f'MISMATCH: pyproject={v1} plugin={v2} marketplace={v3} i
         --ignore=tests/test_rate_limit.py \
         --ignore=tests/test_router.py \
         -m "not slow" \
-        -n auto \
         --tb=line \
         --disable-warnings 2>&1; then
         log_success "All tests passed"
