@@ -17,6 +17,28 @@ jobs:
       - run: uv python install 3.11
       - run: uvx ruff check src/ tests/
 
+  version-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v4
+        with:
+          enable-cache: true
+      - run: uv python install 3.11
+      - name: Verify version sync
+        run: uv run python scripts/verify-version-sync.py
+
+  plugin-sync-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v4
+        with:
+          enable-cache: true
+      - run: uv python install 3.11
+      - name: Verify plugin distribution sync
+        run: python scripts/verify-plugin-sync.py
+
   test:
     runs-on: ubuntu-latest
     timeout-minutes: 10

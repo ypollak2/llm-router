@@ -10,7 +10,13 @@ to reduce session quota consumption by 60-70%.
 See README.md for full documentation.
 """
 
-__version__ = "7.6.1"
+# Version is read dynamically from pyproject.toml to maintain single source of truth
+try:
+    from importlib.metadata import version as _get_version
+    __version__ = _get_version("llm-router")
+except Exception:
+    # Fallback for development installations or when package metadata is unavailable
+    __version__ = "0.0.0.dev0"
 
 # Export response router for easy access
 from llm_router.response_router import route_response as route_response_explanations

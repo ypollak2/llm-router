@@ -1,7 +1,7 @@
 [project]
-name = "claude-code-llm-router"
+name = "llm-router"
 version = "7.6.1"
-description = "Multi-LLM router MCP server for Claude Code — smart complexity routing, Claude subscription monitoring, Codex integration, 20+ providers"
+description = "Multi-LLM router MCP server — smart complexity routing, budget-aware model selection, 20+ providers (Claude, OpenAI, Gemini, Ollama, etc.)"
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.10,<3.14"

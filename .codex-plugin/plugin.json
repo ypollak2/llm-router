@@ -1,7 +1,7 @@
 {
   "name": "llm-router",
-  "version": "7.3.0",
-  "description": "Route every Codex task to the cheapest capable model \u2014 Gemini Flash, Haiku, Ollama, Perplexity, and 20+ providers. Tracks cross-session savings.",
+  "version": "7.6.1",
+  "description": "Route every Codex task to the cheapest capable model \u2014 Gemini Flash, Haiku, Ollama, Perplexity, and 20+ providers. Tracks cross-session savings, enforces routing policy.",
   "author": {
     "name": "ypollak2",
     "url": "https://github.com/ypollak2"

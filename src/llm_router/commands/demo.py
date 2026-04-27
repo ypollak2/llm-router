@@ -96,27 +96,24 @@ def _run_demo() -> None:
     real_rows = _load_real_routing_history(db_path)
     using_real = bool(real_rows)
 
-    # Fallback static examples
+    # Fallback static examples — 3 focused cases showing cost savings
     cc_mode = os.getenv("LLM_ROUTER_CLAUDE_SUBSCRIPTION", "").lower() in ("true", "1", "yes")
     has_perplexity = bool(os.getenv("PERPLEXITY_API_KEY"))
     has_openai     = bool(os.getenv("OPENAI_API_KEY"))
     has_gemini     = bool(os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY"))
 
+    # 3 core examples: simple → moderate → complex cost story
     EXAMPLE_CASES = [
         ('"what does os.path.join do?"',          "query",    "simple",     "Claude Haiku",    "$0.00001"),
         ('"why is my async code slow?"',           "analyze",  "moderate",   "Claude Sonnet",   "$0.003"),
         ('"implement a Redis-backed rate limiter"',"code",     "complex",    "Claude Opus",     "$0.015"),
-        ('"prove the halting problem is undecidable"',"analyze","deep_reason","Opus+thinking",  "$0.030"),
-        ('"research latest Gemini 2.5 benchmarks"',"research", "moderate",  "Perplexity" if has_perplexity else "Claude Sonnet", "$0.002"),
-        ('"write a hero section for a SaaS landing"',"generate","moderate",  "Claude Sonnet",   "$0.001"),
-        ('"generate a dashboard screenshot mockup"',"image",   "—",          "Flux Pro",        "$0.040"),
     ]
 
     cases = real_rows if using_real else EXAMPLE_CASES
     col_w = [44, 8, 12, 18, 9]
     sep = "─" * (sum(col_w) + len(col_w) * 2 + 2)
 
-    title = "your last routing decisions" if using_real else "how smart routing handles your prompts"
+    title = "your last routing decisions" if using_real else "cost-optimized routing examples"
     print(f"\n{_bold('llm-router demo')}  — {title}\n")
 
     if not using_real:
@@ -176,10 +173,24 @@ def _run_demo() -> None:
 
     if total_opus > 0:
         savings_pct = 100 * (1 - total_routed / total_opus)
-        savings_str = f"${total_opus:.3f} → ${total_routed:.3f}  ({savings_pct:.0f}% cheaper)"
-        print(f"\n  {_bold('Savings vs always-Opus:')}  {_green(savings_str)}")
+        savings_amount = total_opus - total_routed
+
+        print(f"\n  {_bold('Cost Comparison:')}")
+        print(f"    {_red('Always-Opus:')} ${total_opus:.4f} per batch")
+        print(f"    {_green('Smart Routing:')} ${total_routed:.5f} per batch")
+        print(f"\n  {_bold('Savings:')}  {_green(f'${savings_amount:.4f}')} ({_green(f'{savings_pct:.0f}%')} cheaper)")
+
+        if savings_pct > 70:
+            print(f"  {_yellow('→')} {_green('Excellent savings')} — routing paid for itself immediately")
+        elif savings_pct > 50:
+            print(f"  {_yellow('→')} {_green('Good savings')} — paying for advanced features at budget prices")
 
     if not using_real:
-        print(f"\n  {_yellow('→')} Run {_bold('llm-router setup')} to configure API keys for more providers.")
-    print(f"  {_yellow('→')} Run {_bold('llm-router status')} for cumulative savings.")
-    print(f"  {_yellow('→')} Run {_bold('llm-router dashboard')} to see live routing decisions.\n")
+        print(f"\n  {_yellow('Next steps:')}")
+        print(f"    {_yellow('→')} Run {_bold('llm-router install')} to enable automatic routing")
+        if not cc_mode:
+            print(f"    {_yellow('→')} Set {_bold('LLM_ROUTER_CLAUDE_SUBSCRIPTION=true')} to use subscription models")
+    else:
+        print(f"\n  {_yellow('Your routing history:')}")
+    print(f"  {_yellow('→')} Check savings: {_bold('llm-router gain')}")
+    print(f"  {_yellow('→')} View dashboard: {_bold('llm-router dashboard')}\n")

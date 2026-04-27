@@ -206,8 +206,12 @@ def _run_doctor_host(host: str) -> None:
             print(_red(f"  {len(issues)} issue(s) found for {h}"))
 
 
-def _run_doctor(host: Optional[str] = None) -> None:
-    """Comprehensive health check — verify every component is wired up."""
+def _run_doctor(host: Optional[str] = None) -> tuple[int, list[str]]:
+    """Comprehensive health check — verify every component is wired up.
+
+    Returns:
+        (exit_code, issues) where exit_code is 0 for success, 1 for failure
+    """
     if host:
         _run_doctor_host(host)
         # Fall through to also run the full general checks
@@ -438,8 +442,8 @@ def _run_doctor(host: Optional[str] = None) -> None:
     try:
         from importlib.metadata import version
 
-        v = version("claude-code-llm-router")
-        print(_ok(f"claude-code-llm-router {v}"))
+        v = version("llm-router")
+        print(_ok(f"llm-router {v}"))
     except Exception:
         print(_warn("could not determine installed version"))
 
@@ -447,19 +451,27 @@ def _run_doctor(host: Optional[str] = None) -> None:
     print()
     if not issues:
         print(_green(_bold("  ✓ All checks passed. LLM Router is healthy.")))
+        exit_code = 0
     else:
-        print(_red(_bold(f"  {len(issues)} issue(s) found:")))
+        print(_red(_bold(f"  ✗ {len(issues)} issue(s) found:")))
         for issue in issues:
             print(f"    {_red('•')} {issue}")
+        exit_code = 1
     print()
+
+    return exit_code, issues
 
 
 def cmd_doctor(args: list[str]) -> int:
-    """Execute: llm-router doctor [--host claude|vscode|cursor|all]"""
+    """Execute: llm-router doctor [--host claude|vscode|cursor|all]
+
+    Returns:
+        0 if all checks passed, 1 if issues found
+    """
     host_flag = None
     if "--host" in args:
         idx = args.index("--host")
         host_flag = args[idx + 1] if idx + 1 < len(args) else None
 
-    _run_doctor(host=host_flag)
-    return 0
+    exit_code, _ = _run_doctor(host=host_flag)
+    return exit_code

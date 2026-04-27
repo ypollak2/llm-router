@@ -1,11 +1,37 @@
 {
   "name": "llm-router",
   "version": "7.6.1",
-  "description": "Smart LLM routing with Claude subscription monitoring, Codex desktop integration, complexity-first model selection, and 20+ AI providers",
+  "description": "Smart LLM routing with Claude subscription monitoring, complexity-first model selection, and 20+ AI providers",
   "author": {
-    "name": "ypollak2"
+    "name": "ypollak2",
+    "url": "https://github.com/ypollak2"
   },
   "homepage": "https://github.com/ypollak2/llm-router",
   "repository": "https://github.com/ypollak2/llm-router",
-  "license": "MIT"
+  "license": "MIT",
+  "skills": "skills/",
+  "mcpServers": ".mcp.json",
+  "interface": {
+    "displayName": "LLM Router",
+    "shortDescription": "Smart LLM routing — cheapest capable model, every task",
+    "longDescription": "llm-router is an MCP server that automatically routes prompts to the best-fit model from 20+ providers. Simple questions go to Gemini Flash or Haiku ($0.001); complex reasoning goes to o3 or GPT-4o only when needed. Tracks savings across sessions. Works with Claude Code, Codex CLI, Claude Desktop, and GitHub Copilot.",
+    "developerName": "ypollak2",
+    "category": "Developer Tools",
+    "capabilities": [
+      "routing",
+      "cost-tracking",
+      "multi-provider",
+      "ollama",
+      "claude",
+      "savings-analytics",
+      "policy-engine"
+    ],
+    "defaultPrompt": [
+      "How much have I saved with llm-router this week?",
+      "Route this task to the best model",
+      "Show my routing policy"
+    ],
+    "brandColor": "#6366f1",
+    "logo": "assets/logo.png"
+  }
 }

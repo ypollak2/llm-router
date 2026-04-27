@@ -47,8 +47,36 @@ jobs:
       - name: Build
         run: uv build
 
+      - name: Sign distributions (GPG)
+        if: vars.GPG_SIGNING_ENABLED == 'true'
+        env:
+          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+        run: |
+          if [ -z "$GPG_PRIVATE_KEY" ]; then
+            echo "GPG_PRIVATE_KEY secret not configured, skipping signing"
+            exit 0
+          fi
+
+          # Import the private key
+          echo "$GPG_PRIVATE_KEY" | gpg --import --batch --no-tty 2>/dev/null || true
+
+          # Sign all distribution files
+          for file in dist/*; do
+            if [[ "$file" != *.asc && "$file" != *.sig ]]; then
+              echo "Signing $file..."
+              gpg --batch --no-tty --passphrase "$GPG_PASSPHRASE" \
+                  --detach-sign --armor "$file"
+            fi
+          done
+
+          echo "✅ Distributions signed with GPG"
+          ls -la dist/
+
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
-          password: ${{ secrets.PYPI_TOKEN }}
           skip_existing: true
+          # Using OpenID Connect (OIDC) Trusted Publisher instead of API token
+          # This is more secure and requires no secrets management
+          # Configure at: https://pypi.org/manage/account/publishing/
