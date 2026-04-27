@@ -6,6 +6,37 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 
+# ── Path Helpers (for safe path resolution in CI/local environments) ────────────
+
+
+def get_project_root() -> Path:
+    """Get project root regardless of where tests are run.
+
+    Works in CI environments and local machines by resolving relative to this file.
+    Never use hardcoded absolute paths like /Users/... or /home/... in tests.
+    """
+    return Path(__file__).parent.parent
+
+
+def get_hook_path(hook_name: str) -> Path:
+    """Safely get hook file path.
+
+    Example:
+        hook = get_hook_path("session-end.py")
+        assert hook.exists()
+    """
+    return get_project_root() / "src" / "llm_router" / "hooks" / hook_name
+
+
+def get_src_path(*parts: str) -> Path:
+    """Safely get path in src/ directory.
+
+    Example:
+        cost_py = get_src_path("llm_router", "cost.py")
+    """
+    return get_project_root() / "src" / "llm_router" / Path(*parts)
+
+
 @pytest.fixture
 def temp_db(tmp_path, monkeypatch):
     """Provide a temporary database for tests.

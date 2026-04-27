@@ -201,6 +201,91 @@ uv run pytest tests/ -n 4 -m "" -q  # Full suite in parallel
 Never use bare `pytest` — it will fail without the venv context `uv run` provides.
 All test runs automatically skip `test_agno_integration.py` (too slow/flaky).
 
+## Test Path Safety — CI Compatibility (CRITICAL)
+
+**Problem**: Tests written with hardcoded absolute paths (e.g., `/Users/yali.pollak/Projects/llm-router/...`) work locally but fail in GitHub Actions CI environments with different filesystem layouts.
+
+**Solution**: Always use dynamic path resolution with helpers from `tests/conftest.py`.
+
+### Rule: NEVER hardcode absolute paths in tests
+
+❌ **WRONG** — fails in CI:
+```python
+session_end_path = "/Users/yali.pollak/Projects/llm-router/src/llm_router/hooks/session-end.py"
+with open(session_end_path) as f:
+    content = f.read()
+```
+
+✅ **CORRECT** — works everywhere:
+```python
+from tests.conftest import get_hook_path
+hook_path = get_hook_path("session-end.py")
+content = hook_path.read_text()
+```
+
+### Available Path Helpers (from conftest.py)
+
+| Helper | Usage | Example |
+|--------|-------|---------|
+| `get_project_root()` | Get repo root | `get_project_root() / "src"` |
+| `get_hook_path(name)` | Get hook file | `get_hook_path("session-end.py")` |
+| `get_src_path(*parts)` | Get src/ file | `get_src_path("cost.py")` or `get_src_path("rules", "vscode-rules.md")` |
+
+### Manual Resolution (when helpers insufficient)
+
+```python
+from pathlib import Path
+
+# Lowest level — resolve relative to current test file
+project_root = Path(__file__).parent.parent
+hook_path = project_root / "src" / "llm_router" / "hooks" / "session-end.py"
+```
+
+### Pre-Commit Hook Protection
+
+A pre-commit hook (`~/.claude/hooks/pre-commit-hardcoded-paths.sh`) catches hardcoded paths before commit:
+
+```bash
+# Install locally
+ln -sf ../../.claude/hooks/pre-commit-hardcoded-paths.sh .git/hooks/pre-commit
+
+# The hook will reject commits containing patterns:
+# /Users/, /home/, /workspace/, /root/
+```
+
+### Test Writing Checklist
+
+Before committing tests:
+- [ ] No hardcoded paths like `/Users/...`, `/home/...`, `/workspace/...`
+- [ ] Uses `get_project_root()` or conftest helpers
+- [ ] Test runs locally: `uv run pytest tests/test_file.py`
+- [ ] Paths resolve correctly on any machine (different users, CI, Docker)
+- [ ] Verified with: `uv run pytest tests/ -q`
+
+### Real Example
+
+From `tests/test_cost.py` — regression test for session-end.py localtime fix:
+
+```python
+# ❌ BEFORE (failed in CI)
+session_end_path = "/Users/yali.pollak/Projects/llm-router/src/llm_router/hooks/session-end.py"
+with open(session_end_path, 'r') as f:
+    content = f.read()
+
+# ✅ AFTER (works everywhere)
+project_root = Path(__file__).parent.parent
+session_end_path = project_root / "src" / "llm_router" / "hooks" / "session-end.py"
+with open(session_end_path, 'r') as f:
+    content = f.read()
+
+# ✅ BEST (using helpers)
+from tests.conftest import get_hook_path
+hook_path = get_hook_path("session-end.py")
+content = hook_path.read_text()
+```
+
+See `.claude/skills/test-patterns.md` for detailed guidance on dynamic path resolution patterns.
+
 ## Version Management
 
 Every user-facing change requires ALL of these files to stay in sync:
