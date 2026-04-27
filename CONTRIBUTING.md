@@ -12,6 +12,66 @@ cp .env.example .env
 # Add at least one API key to .env
 ```
 
+## Security Guidelines for Contributors
+
+Before submitting a PR, please review these security practices:
+
+### No Secrets in Code
+
+- ❌ API keys should never be hardcoded in source files
+- ✅ Use `.env` or `~/.llm-router/config.yaml` for API keys
+- ✅ Use `.env.example` with placeholder values (e.g., `sk-...`)
+- ⚠️ Run `git diff` before committing to verify no keys are visible
+
+### Prompt Handling
+
+- All user input should go through `PromptSanitizer` class
+- Test with injection attempts: "override", "bypass", "ignore routing", etc.
+- Dangerous keywords should be logged, not silently dropped
+- Example: `sanitized_prompt = PromptSanitizer().sanitize(user_input)`
+
+### Logging & Secrets
+
+- ✅ Use structured logging via `structlog` — secrets are automatically scrubbed
+- ❌ Never log full prompts; log only `task_type` and `complexity`
+- ✅ Test secret scrubbing: verify API keys don't appear in logs
+- ✅ When adding new patterns (passwords, tokens), add them to `SecretScrubber.patterns`
+
+### Dependencies
+
+- New dependencies must be approved by maintainers
+- Run `pip-audit` to check for known CVEs: `pip-audit --skip-editable`
+- Pin to major.minor version (e.g., `litellm>=1.40.0,<2.0`)
+- Avoid experimental or unaudited packages
+
+### Testing
+
+- Mark security-critical tests with `@pytest.mark.security`
+- Cover 5+ attack vectors for new features:
+  - Prompt injection
+  - Secret leakage
+  - Rate limit bypass
+  - Provider manipulation
+  - Hook deadlock
+- Example test: `test_prompt_injection_blocked.py`
+
+### Provider Integration
+
+- All provider calls must use the user's API key (stored in config, never logged)
+- Add request timeouts (30s default)
+- Sanitize error messages before logging (strip response content)
+
+### Submission Checklist
+
+- [ ] No hardcoded secrets (run `git diff` to verify)
+- [ ] All user input goes through `PromptSanitizer`
+- [ ] Logging doesn't expose prompts or keys
+- [ ] New dependencies checked with `pip-audit`
+- [ ] Security tests pass (`pytest tests/ -k security`)
+- [ ] Linting passes (`ruff check src/`)
+
+See [SECURITY.md](SECURITY.md) for full security policy.
+
 ## Running Tests
 
 ```bash

@@ -22,6 +22,7 @@ from llm_router.config import get_config
 from llm_router.health import get_tracker
 from llm_router.logging import get_logger
 from llm_router.profiles import CLASSIFIER_MODELS, provider_from_model
+from llm_router.sanitization import sanitize_prompt
 from llm_router.tracing import set_span_attributes, traced_span
 from llm_router.types import ClassificationResult, Complexity, TaskType
 
@@ -157,9 +158,17 @@ async def classify_complexity(
         min_model=min_model,
         prompt_version=CLASSIFIER_PROMPT_VERSION,
     ) as span:
+        # Sanitize prompt to prevent injection attacks
+        try:
+            sanitized_prompt = sanitize_prompt(prompt)
+        except ValueError as e:
+            log.warning("Prompt sanitization failed: %s. Using moderate fallback.", e)
+            set_span_attributes(span, sanitization_failed=True, sanitization_error=str(e))
+            return _fallback_result(f"prompt sanitization failed: {e}")
+
         # Check cache first
         cache = get_cache()
-        cached = await cache.get(prompt, quality_mode, min_model)
+        cached = await cache.get(sanitized_prompt, quality_mode, min_model)
         if cached is not None:
             log.info("Classification cache hit (%.0f%% confidence)", cached.confidence * 100)
             set_span_attributes(
@@ -200,7 +209,7 @@ async def classify_complexity(
 
         messages = [
             {"role": "system", "content": CLASSIFIER_SYSTEM_PROMPT},
-            {"role": "user", "content": prompt},
+            {"role": "user", "content": sanitized_prompt},
         ]
 
         last_error: Exception | None = None
@@ -240,7 +249,7 @@ async def classify_complexity(
                     classifier_latency_ms=resp.latency_ms,
                 )
                 # Cache successful classification
-                await cache.put(prompt, result, quality_mode, min_model)
+                await cache.put(sanitized_prompt, result, quality_mode, min_model)
                 set_span_attributes(
                     span,
                     complexity=result.complexity,

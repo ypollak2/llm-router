@@ -1,0 +1,26 @@
+INFO:__main__:Running small sample (10 tasks)
+INFO:__main__:Initializing benchmark runner...
+INFO:__main__:Loaded 10 tasks
+Traceback (most recent call last):
+  File "/Users/yali.pollak/Projects/llm-router/research/runners/benchmark_runner.py", line 500, in <module>
+    asyncio.run(main())
+    ~~~~~~~~~~~^^^^^^^^
+  File "/opt/homebrew/Cellar/python@3.14/3.14.3_1/Frameworks/Python.framework/Versions/3.14/lib/python3.14/asyncio/runners.py", line 204, in run
+    return runner.run(main)
+           ~~~~~~~~~~^^^^^^
+  File "/opt/homebrew/Cellar/python@3.14/3.14.3_1/Frameworks/Python.framework/Versions/3.14/lib/python3.14/asyncio/runners.py", line 127, in run
+    return self._loop.run_until_complete(task)
+           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^
+  File "/opt/homebrew/Cellar/python@3.14/3.14.3_1/Frameworks/Python.framework/Versions/3.14/lib/python3.14/asyncio/base_events.py", line 719, in run_until_complete
+    return future.result()
+           ~~~~~~~~~~~~~^^
+  File "/Users/yali.pollak/Projects/llm-router/research/runners/benchmark_runner.py", line 495, in main
+    await runner.initialize()
+  File "/Users/yali.pollak/Projects/llm-router/research/runners/benchmark_runner.py", line 109, in initialize
+    await self._register_tools()
+  File "/Users/yali.pollak/Projects/llm-router/research/runners/benchmark_runner.py", line 172, in _register_tools
+    from litellm_wrapper import LiteLLMWrapper
+  File "/Users/yali.pollak/Projects/llm-router/research/tools/litellm_wrapper.py", line 63
+    self.use_simulation = True ImportError(
+                               ^^^^^^^^^^^
+SyntaxError: invalid syntax

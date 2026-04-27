@@ -1,0 +1,293 @@
+"""
+GPTCache wrapper for token-saving benchmark.
+
+GPTCache implements semantic caching — stores responses and reuses them
+for semantically similar queries, reducing duplicate API calls by 40-70%.
+
+Key mechanisms:
+- Semantic similarity matching (embeddings)
+- Response caching with TTL
+- Hit rate tracking
+- Minimal latency overhead
+"""
+
+import asyncio
+import time
+from typing import Any, Dict, Optional
+from base_wrapper import (
+    SimulationMode,
+    BaseToolWrapper,
+    ToolInput,
+    ToolOutput,
+    register_tool,
+)
+
+
+@register_tool("gptcache")
+class GPTCacheWrapper(BaseToolWrapper):
+    """
+    Wrapper for GPTCache semantic caching engine.
+
+    GPTCache intercepts LLM calls and checks if a semantically similar query
+    has been answered before. If found, returns cached response (cache hit).
+    If not, calls LLM and caches the response.
+
+    Variants:
+    - strict_similarity: High similarity threshold (fewer false hits, higher coverage)
+    - loose_similarity: Low similarity threshold (more reuse, more false positives)
+    - rag_optimized: Cache optimized for RAG use cases
+    - aggressive_ttl: Cache entries expire faster, fresher responses
+    """
+
+    def __init__(self, tool_name: str, config: Dict[str, Any]):
+        super().__init__(tool_name, config)
+        self.use_simulation = False
+        self.cache_store = {}  # Simulate in-memory cache
+        self.similarity_threshold = config.get("similarity_threshold", 0.85)
+        self.cache_hits = 0
+        self.cache_misses = 0
+
+    async def initialize(self) -> None:
+        """Initialize GPTCache."""
+        await super().initialize()
+
+        try:
+            # In production: from gptcache import init_gptcache
+            # For now, simulate the cache
+            self.cache_store = {}
+            self.cache_hits = 0
+            self.cache_misses = 0
+        except (ImportError, Exception):
+            self.use_simulation = True
+
+    async def execute(
+        self,
+        task_input: ToolInput,
+        technique_variant: str = "default",
+    ) -> ToolOutput:
+        """
+        Execute GPTCache semantic caching.
+
+        Checks cache for similar queries; returns cached response on hit,
+        otherwise calls LLM and caches result.
+
+        Variants:
+        - strict_similarity: Fewer hits (90%+ similarity), higher quality
+        - loose_similarity: More hits (70%+ similarity), more reuse
+        - rag_optimized: Optimized for RAG context reuse
+        - aggressive_ttl: Shorter cache TTL, fresher data
+        """
+        self._increment_call_count()
+
+        # Use simulation if actual dependency unavailable
+        if self.use_simulation:
+            return SimulationMode.generate_output("gptcache", technique_variant, task_input)
+        start_time = time.time()
+
+        try:
+            # Determine similarity threshold from variant
+            if "strict" in technique_variant:
+                threshold = 0.90
+            elif "loose" in technique_variant:
+                threshold = 0.70
+            elif "rag" in technique_variant:
+                threshold = 0.80
+            else:
+                threshold = self.similarity_threshold
+
+            # Check cache for similar query
+            cache_start = time.time()
+            cached_response, similarity_score = await self._check_cache(
+                task_input.prompt,
+                threshold,
+            )
+            cache_check_ms = (time.time() - cache_start) * 1000
+
+            input_tokens = self._estimate_tokens(task_input.prompt)
+
+            if cached_response is not None:
+                # Cache hit: return cached response
+                self.cache_hits += 1
+                output_tokens = self._estimate_tokens(cached_response)
+
+                # Token savings: 0% since we skip LLM call entirely
+                # (response tokens are "saved" by not calling LLM)
+                compression_ratio = 0.0  # No API call = 100% savings
+
+                total_ms = (time.time() - start_time) * 1000
+
+                return ToolOutput(
+                    response=cached_response,
+                    input_tokens=input_tokens,
+                    output_tokens=output_tokens,
+                    compressed_input_tokens=None,
+                    compression_ratio=compression_ratio,  # 100% savings (no API call)
+                    latency_ms=total_ms,
+                    preprocessing_ms=cache_check_ms,
+                    inference_ms=0,  # No inference on cache hit
+                    quality_score=None,  # Evaluated by judge
+                    tool_name="gptcache",
+                    technique_variant=technique_variant,
+                )
+            else:
+                # Cache miss: call LLM and cache response
+                self.cache_misses += 1
+
+                # Generate response
+                response_start = time.time()
+                response = await self._generate_and_cache(task_input.prompt)
+                inference_ms = (time.time() - response_start) * 1000
+
+                output_tokens = self._estimate_tokens(response)
+
+                # No compression, but cache for future use
+                compression_ratio = None
+
+                total_ms = (time.time() - start_time) * 1000
+
+                return ToolOutput(
+                    response=response,
+                    input_tokens=input_tokens,
+                    output_tokens=output_tokens,
+                    compressed_input_tokens=None,
+                    compression_ratio=compression_ratio,
+                    latency_ms=total_ms,
+                    preprocessing_ms=cache_check_ms,
+                    inference_ms=inference_ms,
+                    quality_score=None,  # Evaluated by judge
+                    tool_name="gptcache",
+                    technique_variant=technique_variant,
+                )
+
+        except Exception as e:
+            return ToolOutput(
+                response="",
+                input_tokens=self._estimate_tokens(task_input.prompt),
+                output_tokens=0,
+                tool_name="gptcache",
+                technique_variant=technique_variant,
+                error=str(e),
+            )
+
+    async def _check_cache(
+        self,
+        prompt: str,
+        similarity_threshold: float,
+    ) -> tuple[Optional[str], float]:
+        """
+        Check cache for semantically similar query.
+
+        In production, uses embeddings to compute semantic similarity
+        between current prompt and cached queries.
+
+        For simulation, uses word overlap as proxy for similarity.
+        """
+        prompt_words = set(prompt.lower().split())
+
+        best_match = None
+        best_similarity = 0.0
+
+        # Check all cached entries
+        for cached_prompt, cached_response in self.cache_store.items():
+            cached_words = set(cached_prompt.lower().split())
+
+            # Jaccard similarity (word overlap)
+            if not prompt_words and not cached_words:
+                similarity = 1.0
+            else:
+                intersection = len(prompt_words & cached_words)
+                union = len(prompt_words | cached_words)
+                similarity = intersection / union if union > 0 else 0.0
+
+            if similarity > best_similarity:
+                best_similarity = similarity
+                best_match = cached_response
+
+        # Return cached response if similarity exceeds threshold
+        if best_similarity >= similarity_threshold:
+            return best_match, best_similarity
+        else:
+            return None, best_similarity
+
+    async def _generate_and_cache(self, prompt: str) -> str:
+        """
+        Generate response and cache it.
+
+        In production, calls actual LLM here.
+        For simulation, generates mock response and stores it.
+        """
+        # Simulate LLM call latency
+        await asyncio.sleep(0.1)
+
+        response = f"Response to: {prompt[:60]}... [Cached for future use]"
+
+        # Store in cache for future hits
+        self.cache_store[prompt] = response
+
+        return response
+
+    def _get_cache_stats(self) -> Dict[str, Any]:
+        """Get cache performance statistics."""
+        total = self.cache_hits + self.cache_misses
+        hit_rate = (
+            self.cache_hits / total * 100 if total > 0 else 0
+        )
+
+        return {
+            "cache_size": len(self.cache_store),
+            "cache_hits": self.cache_hits,
+            "cache_misses": self.cache_misses,
+            "hit_rate": hit_rate,
+        }
+
+    async def cleanup(self) -> None:
+        """Clean up GPTCache resources."""
+        self.cache_store.clear()
+        await super().cleanup()
+
+
+# Test
+async def test_gptcache_wrapper():
+    """Test GPTCache wrapper."""
+    config = {
+        "similarity_threshold": 0.85,
+    }
+
+    wrapper = GPTCacheWrapper("gptcache", config)
+    await wrapper.initialize()
+
+    # Test with repeated and similar queries
+    test_queries = [
+        "What is machine learning?",
+        "What is machine learning?",  # Exact repeat (100% cache hit)
+        "What is deep learning?",  # Similar but different
+        "Explain neural networks",  # Different query
+        "What is machine learning in simple terms?",  # Similar
+    ]
+
+    print("Testing GPTCache semantic caching:\n")
+
+    for i, query in enumerate(test_queries, 1):
+        output = await wrapper.execute(ToolInput(prompt=query))
+
+        stats = wrapper._get_cache_stats()
+        hit_rate = stats["hit_rate"]
+
+        status = (
+            "🔄 CACHE HIT" if output.compression_ratio == 0.0 else "❌ MISS"
+        )
+        print(
+            f"{i}. {status} — {query[:40]}... | Hit rate: {hit_rate:.0f}%"
+        )
+
+    print("\nFinal cache stats:")
+    stats = wrapper._get_cache_stats()
+    print(f"  Cache size: {stats['cache_size']} entries")
+    print(f"  Hits: {stats['cache_hits']}, Misses: {stats['cache_misses']}")
+    print(f"  Hit rate: {stats['hit_rate']:.1f}%")
+
+    await wrapper.cleanup()
+
+
+if __name__ == "__main__":
+    asyncio.run(test_gptcache_wrapper())

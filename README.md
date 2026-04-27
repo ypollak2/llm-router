@@ -217,6 +217,25 @@ LLM_ROUTER_COMPRESS_RESPONSE=true       # Enable response compression
 
 For full setup guide, see [docs/SETUP.md](docs/SETUP.md).
 
+## Security
+
+llm-router routes your prompts to multiple AI providers.
+
+**What we do:**
+- ✅ Sanitize inputs against prompt injection
+- ✅ Scrub secrets from logs
+- ✅ Verify hooks won't create deadlocks
+- ✅ Authenticate all provider calls with your API keys
+
+**What you should know:**
+- Your prompts are sent to configured providers (OpenAI, Gemini, etc.)
+- API keys are stored locally in `.env` or `~/.llm-router/config.yaml`
+- All routing decisions are logged to `~/.llm-router/usage.db` (local, unencrypted)
+
+**Have a security concern?** See [SECURITY.md](SECURITY.md) for responsible disclosure.
+
+More details: [Security Design](docs/SECURITY_DESIGN.md)
+
 ## Monitoring & Reducing Violations
 
 **Routing violations** occur when Claude bypasses a routing directive by using `Bash`, `Read`, `Edit`, or `Write` instead of calling the routed MCP tool first. This burns expensive tokens with zero cost savings.

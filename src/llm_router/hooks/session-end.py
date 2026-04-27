@@ -214,7 +214,7 @@ def _query_session_data(session_start: float) -> tuple[list[dict], list[dict], l
 
 
 _PERIODS = [
-    ("today",     "date(timestamp) = date('now')"),
+    ("today",     "date(timestamp, 'localtime') = date('now', 'localtime')"),
     ("this week", "timestamp >= datetime('now', '-7 days')"),
     ("this month","timestamp >= datetime('now', 'start of month')"),
     ("all time",  "1=1"),
@@ -252,9 +252,9 @@ def _sync_import_savings_log() -> None:
                 r.get("timestamp", ""),
                 r.get("session_id", ""),
                 r.get("task_type", "unknown"),
-                float(r.get("estimated_claude_cost_saved", 0.0)),
+                float(r.get("estimated_saved", 0.0)),
                 float(r.get("external_cost", 0.0)),
-                r.get("model_used", ""),
+                r.get("model", "unknown"),
                 r.get("host", "claude_code"),
             ))
         except (json.JSONDecodeError, KeyError, ValueError):
@@ -528,6 +528,112 @@ def _fmt_tok(n: int) -> str:
     return str(n)
 
 
+def _query_router_efficiency() -> dict:
+    """Query routing_decisions: return {total, on_target, efficiency_pct}."""
+    if not os.path.exists(DB_PATH):
+        return {}
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.execute("""
+            SELECT
+                COUNT(*) as total,
+                COUNT(CASE WHEN final_model = recommended_model THEN 1 END) as on_target
+            FROM routing_decisions
+            WHERE date(timestamp, 'localtime') = date('now', 'localtime')
+        """)
+        row = cursor.fetchone()
+        conn.close()
+        if not row or row[0] == 0:
+            return {}
+        total, on_target = row
+        efficiency_pct = (on_target / total) * 100 if total > 0 else 0.0
+        return {"total": total, "on_target": on_target, "efficiency_pct": efficiency_pct}
+    except Exception:
+        return {}
+
+
+def _query_classifier_overhead() -> dict:
+    """Query classifier_latency_ms: return {count, avg_ms, min_ms, max_ms}."""
+    if not os.path.exists(DB_PATH):
+        return {}
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.execute("""
+            SELECT
+                COUNT(*) as count,
+                AVG(classifier_latency_ms) as avg_ms,
+                MIN(classifier_latency_ms) as min_ms,
+                MAX(classifier_latency_ms) as max_ms
+            FROM routing_decisions
+            WHERE date(timestamp, 'localtime') = date('now', 'localtime')
+                AND classifier_latency_ms IS NOT NULL
+        """)
+        row = cursor.fetchone()
+        conn.close()
+        if not row or row[0] == 0:
+            return {}
+        count, avg_ms, min_ms, max_ms = row
+        return {"count": count, "avg_ms": float(avg_ms) if avg_ms else 0.0,
+                "min_ms": float(min_ms) if min_ms else 0.0,
+                "max_ms": float(max_ms) if max_ms else 0.0}
+    except Exception:
+        return {}
+
+
+def _query_cache_hit_stats() -> dict:
+    """Query semantic_cache: return {total_requests, cache_hits, hit_rate_pct, estimated_saved_usd}."""
+    if not os.path.exists(DB_PATH):
+        return {}
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.execute("""
+            SELECT
+                COUNT(*) as total_requests,
+                SUM(CASE WHEN cache_hit = 1 THEN 1 ELSE 0 END) as cache_hits,
+                ROUND(SUM(CASE WHEN cache_hit = 1 THEN tokens_saved ELSE 0 END) * 0.003 / 1000, 4) as estimated_saved
+            FROM semantic_cache
+            WHERE date(timestamp, 'localtime') = date('now', 'localtime')
+        """)
+        row = cursor.fetchone()
+        conn.close()
+        if not row or row[0] == 0:
+            return {}
+        total_requests, cache_hits, estimated_saved = row
+        cache_hits = cache_hits or 0
+        estimated_saved = float(estimated_saved) if estimated_saved else 0.0
+        hit_rate_pct = (cache_hits / total_requests) * 100 if total_requests > 0 else 0.0
+        return {"total_requests": total_requests, "cache_hits": cache_hits,
+                "hit_rate_pct": hit_rate_pct, "estimated_saved_usd": estimated_saved}
+    except Exception:
+        return {}
+
+
+def _query_savings_by_task_type() -> list[dict]:
+    """Query savings_stats and usage: return list of {task_type, calls, saved} sorted by saved DESC."""
+    if not os.path.exists(DB_PATH):
+        return []
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.execute("""
+            SELECT
+                task_type,
+                COUNT(*) as calls,
+                SUM(estimated_claude_cost_saved) as saved
+            FROM savings_stats
+            WHERE date(timestamp, 'localtime') = date('now', 'localtime')
+            GROUP BY task_type
+            ORDER BY saved DESC
+        """)
+        rows = cursor.fetchall()
+        conn.close()
+        result = []
+        for task_type, calls, saved in rows:
+            result.append({"task_type": task_type or "unknown", "calls": calls, "saved": float(saved) if saved else 0.0})
+        return result
+    except Exception:
+        return []
+
+
 def _format_cumulative_section(periods: list[tuple[str, int, int, int, float]]) -> list[str]:
     """Format daily/weekly/monthly/all-time cumulative savings table + yearly projection."""
     if not periods or all(p[1] == 0 for p in periods):
@@ -567,6 +673,40 @@ def _format_cumulative_section(periods: list[tuple[str, int, int, int, float]]) 
             f" · ~{_fmt_tok(int(rate_tok * 365))} tok/year"
             f"  (based on {basis})"
         )
+
+    # Part 2 metrics — router efficiency, cache hits, classifier overhead, task-type breakdown
+    lines.append("")
+    lines.append("  ⚙️  Quality & Performance")
+
+    # Router efficiency
+    efficiency = _query_router_efficiency()
+    if efficiency:
+        lines.append(f"  Router efficiency: {efficiency['efficiency_pct']:.0f}% on-target")
+
+    # Cache hit ratio
+    cache_stats = _query_cache_hit_stats()
+    if cache_stats:
+        lines.append(
+            f"  ⚡ {cache_stats['hit_rate_pct']:.1f}% cache hit rate "
+            f"({cache_stats['cache_hits']} hits, ${cache_stats['estimated_saved_usd']:.4f} saved)"
+        )
+
+    # Classifier overhead
+    overhead = _query_classifier_overhead()
+    if overhead and overhead['count'] > 0:
+        lines.append(f"  Routing overhead: ~{overhead['avg_ms']:.1f}ms avg (classifier)")
+
+    # Task-type breakdown
+    task_breakdown = _query_savings_by_task_type()
+    if task_breakdown:
+        lines.append("")
+        lines.append("  Top task categories (today):")
+        for item in task_breakdown[:5]:  # Show top 5
+            task_type = item['task_type']
+            calls = item['calls']
+            saved = item['saved']
+            lines.append(f"    {task_type:<12} {calls:>3} calls  ${saved:.4f} saved")
+
     return lines
 
 

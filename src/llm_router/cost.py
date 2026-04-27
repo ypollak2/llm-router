@@ -803,7 +803,7 @@ async def get_usage_summary(period: str = "today") -> str:
         Returns a "no data" message if no usage exists for the period.
     """
     where = {
-        "today": "WHERE date(timestamp) = date('now')",
+        "today": "WHERE date(timestamp, 'localtime') = date('now', 'localtime')",
         "week": "WHERE timestamp >= datetime('now', '-7 days')",
         "month": "WHERE timestamp >= datetime('now', '-30 days')",
         "all": "",
@@ -1316,7 +1316,7 @@ async def get_daily_claude_tokens() -> int:
     try:
         cursor = await db.execute(
             "SELECT COALESCE(SUM(tokens_used), 0) FROM claude_usage "
-            "WHERE date(timestamp) = date('now')"
+            "WHERE date(timestamp, 'localtime') = date('now', 'localtime')"
         )
         row = await cursor.fetchone()
         return int(row[0]) if row else 0
@@ -1335,7 +1335,7 @@ async def get_daily_claude_breakdown() -> dict[str, int]:
     try:
         cursor = await db.execute(
             "SELECT model, SUM(tokens_used) FROM claude_usage "
-            "WHERE date(timestamp) = date('now') GROUP BY model"
+            "WHERE date(timestamp, 'localtime') = date('now', 'localtime') GROUP BY model"
         )
         rows = await cursor.fetchall()
         return {model: int(tokens) for model, tokens in rows}
@@ -1361,7 +1361,7 @@ async def get_savings_summary(period: str = "today") -> dict:
         if no data exists or the query fails.
     """
     where = {
-        "today": "WHERE date(timestamp) = date('now')",
+        "today": "WHERE date(timestamp, 'localtime') = date('now', 'localtime')",
         "week": "WHERE timestamp >= datetime('now', '-7 days')",
         "month": "WHERE timestamp >= datetime('now', '-30 days')",
         "all": "",
@@ -1409,6 +1409,240 @@ async def get_savings_summary(period: str = "today") -> dict:
             "time_saved_sec": float(time_saved),
             "by_model": by_model,
         }
+    finally:
+        await db.close()
+
+
+# ── Baseline pricing configuration ─────────────────────────────────────────────
+
+# Configurable baseline pricing for savings calculations
+# Users can override via LLM_ROUTER_SAVINGS_BASELINE env var (default: "sonnet")
+BASELINE_PRICING = {
+    "sonnet": {"input": 3.0,  "output": 15.0},   # $ per 1M tokens
+    "opus":   {"input": 15.0, "output": 75.0},
+}
+
+def _get_baseline_model() -> str:
+    """Get the configured baseline model for savings calculations."""
+    import os
+    return os.environ.get("LLM_ROUTER_SAVINGS_BASELINE", "sonnet")
+
+def _get_baseline_cost(in_tokens: int, out_tokens: int, baseline_model: str = None) -> float:
+    """Calculate cost using specified baseline model (default: sonnet)."""
+    if baseline_model is None:
+        baseline_model = _get_baseline_model()
+    
+    pricing = BASELINE_PRICING.get(baseline_model, BASELINE_PRICING["sonnet"])
+    return (in_tokens * pricing["input"] + out_tokens * pricing["output"]) / 1_000_000
+
+
+async def get_router_efficiency(period: str = "today") -> dict:
+    """Get router efficiency score: what % of routing decisions matched recommendations.
+    
+    Analyzes routing_decisions table to compute on-target selection rate.
+    
+    Args:
+        period: Time window. One of "today", "week", "month", or "all".
+    
+    Returns:
+        Dict with keys: total, on_target, efficiency_pct (0-100).
+        Returns zeroed values if no routing decisions exist for the period.
+    """
+    where_map = {
+        "today": "WHERE date(timestamp, 'localtime') = date('now', 'localtime')",
+        "week": "WHERE timestamp >= datetime('now', '-7 days')",
+        "month": "WHERE timestamp >= datetime('now', '-30 days')",
+        "all": "",
+    }
+    where = where_map.get(period, "")
+    
+    db = await _get_db()
+    try:
+        # Count total decisions and on-target decisions
+        cursor = await db.execute(
+            f"""SELECT COUNT(*), 
+                COUNT(CASE WHEN final_model = recommended_model THEN 1 END)
+            FROM routing_decisions {where}"""
+        )
+        row = await cursor.fetchone()
+        if not row or row[0] == 0:
+            return {"total": 0, "on_target": 0, "efficiency_pct": 0.0}
+        
+        total, on_target = row
+        efficiency_pct = round(on_target / total * 100) if total > 0 else 0
+        return {
+            "total": int(total),
+            "on_target": int(on_target),
+            "efficiency_pct": float(efficiency_pct),
+        }
+    finally:
+        await db.close()
+
+
+async def get_classifier_overhead(period: str = "today") -> dict:
+    """Get routing classifier latency metrics.
+    
+    Analyzes classifier_latency_ms from routing_decisions to understand
+    the time cost of the routing classification step.
+    
+    Args:
+        period: Time window. One of "today", "week", "month", or "all".
+    
+    Returns:
+        Dict with keys: avg_ms (float), min_ms (float), max_ms (float), count (int).
+        Returns zeroed values if no routing decisions exist.
+    """
+    where_map = {
+        "today": "WHERE date(timestamp, 'localtime') = date('now', 'localtime')",
+        "week": "WHERE timestamp >= datetime('now', '-7 days')",
+        "month": "WHERE timestamp >= datetime('now', '-30 days')",
+        "all": "",
+    }
+    where = where_map.get(period, "")
+    
+    db = await _get_db()
+    try:
+        cursor = await db.execute(
+            f"""SELECT COUNT(*), AVG(classifier_latency_ms), 
+                MIN(classifier_latency_ms), MAX(classifier_latency_ms)
+            FROM routing_decisions {where}"""
+        )
+        row = await cursor.fetchone()
+        if not row or row[0] == 0:
+            return {"avg_ms": 0.0, "min_ms": 0.0, "max_ms": 0.0, "count": 0}
+        
+        count, avg_ms, min_ms, max_ms = row
+        return {
+            "count": int(count),
+            "avg_ms": float(avg_ms or 0.0),
+            "min_ms": float(min_ms or 0.0),
+            "max_ms": float(max_ms or 0.0),
+        }
+    finally:
+        await db.close()
+
+
+async def get_savings_by_task_type(period: str = "today") -> list:
+    """Get cumulative savings broken down by task type.
+    
+    Aggregates savings from both routing_decisions (paid APIs) and 
+    savings_stats (free providers like Ollama/Codex) to show which 
+    task categories are generating the most savings.
+    
+    Args:
+        period: Time window. One of "today", "week", "month", or "all".
+    
+    Returns:
+        List of dicts sorted by saved DESC: 
+        [{"task_type": "query", "calls": N, "saved": $X.XX}, ...]
+        Empty list if no savings data exists.
+    """
+    where_map = {
+        "today": "WHERE date(timestamp, 'localtime') = date('now', 'localtime')",
+        "week": "WHERE timestamp >= datetime('now', '-7 days')",
+        "month": "WHERE timestamp >= datetime('now', '-30 days')",
+        "all": "",
+    }
+    where = where_map.get(period, "")
+    
+    db = await _get_db()
+    try:
+        # Aggregate from savings_stats (free providers)
+        cursor = await db.execute(
+            f"""SELECT task_type, COUNT(*), COALESCE(SUM(estimated_claude_cost_saved), 0)
+            FROM savings_stats {where}
+            GROUP BY task_type ORDER BY SUM(estimated_claude_cost_saved) DESC"""
+        )
+        rows_free = {row[0]: (row[1], float(row[2])) for row in await cursor.fetchall()}
+        
+        # Aggregate from usage (paid APIs)
+        cursor = await db.execute(
+            f"""SELECT task_type, COUNT(*), 
+                COALESCE(SUM(input_tokens + output_tokens), 0),
+                COALESCE(SUM(cost_usd), 0)
+            FROM usage {where} AND success = 1
+            GROUP BY task_type"""
+        )
+        
+        baseline_model = _get_baseline_model()
+        results = {}
+        for task_type, calls, tokens, cost in await cursor.fetchall():
+            baseline = _get_baseline_cost(tokens // 2, tokens // 2, baseline_model)  # rough split
+            saved = max(0.0, baseline - cost)
+            if task_type not in results:
+                results[task_type] = [0, 0.0]
+            results[task_type][0] += calls
+            results[task_type][1] += saved
+        
+        # Merge free provider stats
+        for task_type, (calls, saved) in rows_free.items():
+            if task_type not in results:
+                results[task_type] = [0, 0.0]
+            results[task_type][0] += calls
+            results[task_type][1] += saved
+        
+        # Format and sort by savings
+        output = [
+            {"task_type": k, "calls": v[0], "saved": round(v[1], 4)}
+            for k, v in results.items()
+        ]
+        return sorted(output, key=lambda x: -x["saved"])
+    finally:
+        await db.close()
+
+
+async def get_cache_hit_stats(period: str = "today") -> dict:
+    """Get prompt caching statistics.
+    
+    Analyzes semantic_cache table to compute cache hit ratio and savings.
+    
+    Args:
+        period: Time window. One of "today", "week", "month", or "all".
+    
+    Returns:
+        Dict with keys: total_requests, cache_hits, hit_rate_pct (0-100), 
+        estimated_saved_usd. Returns zeroed values if no cache data exists.
+    """
+    where_map = {
+        "today": "WHERE date(accessed_at, 'localtime') = date('now', 'localtime')",
+        "week": "WHERE accessed_at >= datetime('now', '-7 days')",
+        "month": "WHERE accessed_at >= datetime('now', '-30 days')",
+        "all": "",
+    }
+    where = where_map.get(period, "")
+    
+    db = await _get_db()
+    try:
+        # Check if semantic_cache table exists
+        cursor = await db.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='semantic_cache'"
+        )
+        if not await cursor.fetchone():
+            return {"total_requests": 0, "cache_hits": 0, "hit_rate_pct": 0.0, "estimated_saved_usd": 0.0}
+        
+        # Query cache stats
+        cursor = await db.execute(
+            f"""SELECT COUNT(*), COUNT(CASE WHEN was_hit = 1 THEN 1 END)
+            FROM semantic_cache {where}"""
+        )
+        row = await cursor.fetchone()
+        if not row or row[0] == 0:
+            return {"total_requests": 0, "cache_hits": 0, "hit_rate_pct": 0.0, "estimated_saved_usd": 0.0}
+        
+        total_requests, cache_hits = row
+        hit_rate = round(cache_hits / total_requests * 100) if total_requests > 0 else 0
+        
+        # Estimate savings from cache hits (assume avg call would cost ~$0.0001)
+        estimated_saved = cache_hits * 0.0001  # Conservative estimate
+        
+        return {
+            "total_requests": int(total_requests),
+            "cache_hits": int(cache_hits),
+            "hit_rate_pct": float(hit_rate),
+            "estimated_saved_usd": round(estimated_saved, 4),
+        }
+    except Exception:
+        return {"total_requests": 0, "cache_hits": 0, "hit_rate_pct": 0.0, "estimated_saved_usd": 0.0}
     finally:
         await db.close()
 

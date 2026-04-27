@@ -7,6 +7,8 @@ import os
 
 import structlog
 
+from llm_router.secret_scrubber import structlog_scrubber_processor
+
 _CONFIGURED = False
 
 
@@ -28,6 +30,7 @@ def configure_logging(*, json_output: bool | None = None, level: str | int | Non
 
     shared_processors = [
         structlog.contextvars.merge_contextvars,
+        structlog_scrubber_processor,  # Scrub secrets before any other processing
         structlog.stdlib.add_logger_name,
         structlog.stdlib.add_log_level,
         structlog.stdlib.PositionalArgumentsFormatter(),

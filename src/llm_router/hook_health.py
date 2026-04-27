@@ -245,3 +245,40 @@ def cleanup_old_logs(days: int = 30) -> int:
         return removed_count
     except OSError:
         return 0
+
+
+def get_deadlock_report() -> dict | None:
+    """Get hook deadlock detection report.
+
+    Runs the deadlock detector on all hooks and returns a structured report
+    of circular dependencies, timeout issues, and resource contention.
+
+    Returns:
+        dict with keys:
+        - has_cycles: bool — has circular dependencies
+        - has_timeout_issues: bool — has subprocess calls without timeout
+        - has_resource_contention: bool — has resource contention
+        - cycles: list — circular dependency chains
+        - timeout_issues: list — hooks with timeout problems
+        - contention_patterns: list — (hook1, hook2) pairs with contention
+        - critical_path_length: int — longest dependency chain
+
+        Returns None if deadlock detector is not available.
+    """
+    try:
+        from llm_router.hook_deadlock_detector import HookDeadlockDetector
+
+        detector = HookDeadlockDetector()
+        report = detector.analyze()
+
+        return {
+            "has_cycles": report.has_cycles,
+            "has_timeout_issues": report.has_timeout_issues,
+            "has_resource_contention": report.has_resource_contention,
+            "cycles": report.cycles,
+            "timeout_issues": report.timeout_issues,
+            "contention_patterns": report.contention_patterns,
+            "critical_path_length": report.critical_path_length,
+        }
+    except ImportError:
+        return None
