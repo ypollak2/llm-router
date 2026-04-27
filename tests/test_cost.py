@@ -208,14 +208,16 @@ async def test_today_filter_uses_localtime(temp_db):
     expected_today_where = "date(timestamp, 'localtime') = date('now', 'localtime')"
 
     # Read the actual session-end.py to verify the fix is in place
-    session_end_path = "/Users/yali.pollak/Projects/llm-router/src/llm_router/hooks/session-end.py"
+    from pathlib import Path
+    project_root = Path(__file__).parent.parent
+    session_end_path = project_root / "src" / "llm_router" / "hooks" / "session-end.py"
     with open(session_end_path, 'r') as f:
         content = f.read()
         assert expected_today_where in content, \
             "session-end.py should use localtime in _PERIODS for 'today'"
 
     # Also verify in cost.py
-    cost_path = "/Users/yali.pollak/Projects/llm-router/src/llm_router/cost.py"
+    cost_path = project_root / "src" / "llm_router" / "cost.py"
     with open(cost_path, 'r') as f:
         content = f.read()
         # Should have multiple occurrences in get_usage_summary, get_daily_claude_tokens, etc.
