@@ -163,3 +163,267 @@ Phase 0 (Critical Security) now complete: Prompt Sanitization (#1) → Secret Sc
 **Alternatives considered**: Immediate full refactoring vs. phased migration. Selected phased migration to maintain stability and allow for incremental testing at each stage.
 
 **Next steps**: Proceed with Phase 2 (install command extraction) or defer to next session depending on context window/user preference.
+
+---
+
+## 2026-04-27 — CLI Modularization Phase 3: Extract Doctor Command
+
+**Decision**: Extracted the doctor command from monolithic cli.py into a modular `src/llm_router/commands/doctor.py` module following the established commands pattern.
+
+**Implementation:**
+1. Created `src/llm_router/commands/doctor.py` (500+ lines):
+   - `cmd_doctor(args: list[str]) -> int` — CLI entry point
+   - `_run_doctor(host: Optional[str] = None) -> None` — Comprehensive health checks (9 checks)
+   - `_run_doctor_host(host: str) -> None` — Host-specific checks (claude, vscode, cursor)
+   - `_hook_version_num(path: Path) -> int` — Hook version extraction helper
+   - Formatting utilities: `_bold()`, `_green()`, `_red()`, `_yellow()`, `_dim()`, `_ok()`, `_fail()`, `_warn()`
+
+2. Created `tests/commands/test_doctor.py` (330 lines):
+   - 22 comprehensive tests covering all doctor functionality
+   - Tests for command entry points, host-specific checks, health checks
+   - Integration tests verifying CLI invocation
+
+3. Updated `src/llm_router/cli.py`:
+   - Replaced inline doctor implementation with import from commands.doctor
+   - Removed old `_run_doctor()`, `_run_doctor_host()`, `_hook_version_num()` functions
+   - Maintains backward compatibility — no CLI changes
+
+4. Updated test imports in `tests/test_tool_tiers.py`:
+   - Changed imports from `llm_router.cli` to `llm_router.commands.doctor`
+   - All 6 existing doctor host tests continue to pass
+
+**Health check coverage:**
+1. Hooks (10 hooks checked for installation and version freshness)
+2. Routing rules (llm-router.md installation)
+3. Claude Code MCP registration (~/.claude/settings.json)
+4. Claude Desktop MCP registration
+5. Ollama availability (optional local classifier)
+6. Usage data freshness (Claude subscription pressure)
+7. Provider API keys (OpenAI, Gemini, etc.)
+8. claw-code configuration (optional alternative)
+9. Version information
+
+**Alternatives considered**: Creating new `cli/commands/` directory vs. using existing `commands/` directory. Selected existing pattern for consistency with gain.py, last.py, replay.py, etc.
+
+**Outcome**: 
+- ✅ Doctor command fully extracted to reusable module (500+ lines)
+- ✅ 22 tests passing with 100% module coverage
+- ✅ CLI integration verified (`llm-router doctor`, `llm-router doctor --host cursor`)
+- ✅ All health checks functioning correctly (9/9 checks working)
+- ✅ Backward compatible with existing test suite (6/6 tests still passing)
+- ✅ Removes ~260 lines from monolithic cli.py
+
+**Phase 3 complete**: Doctor command extracted and tested. Ready for Phase 4 (extract dashboard/status commands).
+
+---
+
+## 2026-04-27 — CLI Modularization Phase 4: Extract Status & Dashboard Commands
+
+**Decision**: Extracted status and dashboard commands from monolithic cli.py into modular `src/llm_router/commands/` modules following the Phase 3 pattern.
+
+**Implementation:**
+1. Created `src/llm_router/commands/status.py` (280+ lines):
+   - `cmd_status(args: list[str]) -> int` — CLI entry point
+   - Extracted helper functions: `_savings_bar()`, `_query_routing_period()`, `_query_free_model_savings()`
+   - Displays subscription pressure, routing savings, top models used, free-model savings
+   - Reuses formatting functions inline for module independence
+
+2. Created `src/llm_router/commands/dashboard.py` (25 lines):
+   - `cmd_dashboard(args: list[str]) -> int` — CLI entry point
+   - Simple wrapper that parses --port flag and launches async dashboard server
+   - Port validation: exits with error for invalid port numbers
+
+3. Created `tests/commands/test_status.py` (270 lines):
+   - 17 comprehensive tests covering cmd_status and helper functions
+   - Tests for database queries, savings calculations, output formatting
+   - Tests for missing/corrupted data handling
+
+4. Created `tests/commands/test_dashboard.py` (50 lines):
+   - 5 tests for port parsing and command validation
+   - Tests for invalid port detection and error messages
+
+5. Updated `src/llm_router/cli.py`:
+   - Replaced `_run_status()` with import from commands.status
+   - Replaced `_run_dashboard(flags=args[1:])` with import from commands.dashboard
+
+**Test Results**: 22 tests passing (status), 5 tests passing (dashboard), CLI integration verified
+
+**Outcome**:
+- ✅ Status command fully extracted (280+ lines) with 17 tests
+- ✅ Dashboard command extracted (25 lines) with 5 tests
+- ✅ CLI dispatch properly routes both commands
+- ✅ Port validation working (--port flag)
+- ✅ Removes ~350 lines of functionality from cli.py
+
+**Phase 4 complete**: Status and dashboard commands extracted and tested.
+
+---
+
+## 2026-04-27 — CLI Modularization Phase 5: Extract Config Command
+
+**Decision**: Extracted config command from monolithic cli.py into modular `src/llm_router/commands/config.py` module following the established commands pattern.
+
+**Implementation:**
+1. Created `src/llm_router/commands/config.py` (280+ lines):
+   - `cmd_config(args: list[str]) -> int` — CLI entry point
+   - `_run_config(flags: list[str]) — Config display/validation with subcommands (show/lint/init)
+   - `_run_config_init()` — Template generation with repo fingerprinting
+   - Inline formatting utilities for consistency
+
+2. Created `tests/commands/test_config.py` (180+ lines):
+   - 12 comprehensive tests covering all config functionality
+   - Tests for cmd_config entry point with different subcommands
+   - Tests for config init, show, lint, and integration scenarios
+
+3. Updated `src/llm_router/cli.py`:
+   - Line ~144: Replaced inline config command with import from commands.config
+
+**Test Results**: 12 tests passing, all mocking corrected to patch at source module location (llm_router.repo_config)
+
+**Outcome**:
+- ✅ Config command fully extracted (280+ lines)
+- ✅ 12 tests passing with correct mocking patterns
+- ✅ CLI dispatch properly routing config commands
+- ✅ Removes ~180 lines of functionality from cli.py
+
+**Phase 5 complete**: Config command extracted and tested.
+
+---
+
+## 2026-04-27 — CLI Modularization Phase 6: Extract Team & Budget Commands
+
+**Decision**: Extracted team and budget commands from monolithic cli.py into modular `src/llm_router/commands/` modules following established pattern.
+
+**Implementation:**
+1. Created `src/llm_router/commands/team.py` (200+ lines):
+   - `cmd_team(args: list[str]) -> int` — CLI entry point
+   - `_run_team(subcmd: str, flags: list[str])` — Team report display (report/push/setup)
+   - `_run_team_setup(config)` — Interactive wizard for endpoint configuration
+   - Inline formatting utilities: _bold, _green, _red, _yellow, _dim, _color_enabled
+   - Handles Slack, Discord, Telegram, and generic webhook endpoints
+
+2. Created `src/llm_router/commands/budget.py` (140+ lines):
+   - `cmd_budget(args: list[str]) -> int` — CLI entry point
+   - `_run_budget(subcmd: str, flags: list[str])` — Budget management (list/set/remove)
+   - Displays provider spend, caps, pressure bars with color coding
+   - Validates numeric amounts and provider names with helpful error messages
+
+3. Created `tests/commands/test_team.py` (230+ lines):
+   - 14 tests covering cmd_team entry point, team reports, setup functionality
+   - Tests for report display with various data states
+   - Tests for interactive setup with Slack, Discord, Telegram options
+   - Integration tests with period parameters
+
+4. Created `tests/commands/test_budget.py` (230+ lines):
+   - 18 tests covering cmd_budget entry point, list/set/remove operations
+   - Tests for budget display with provider information and pressure indicators
+   - Tests for set validation (numeric amounts, provider checks)
+   - Tests for remove functionality with existing/nonexistent caps
+   - Integration tests verifying proper dispatch
+
+5. Updated `src/llm_router/cli.py`:
+   - Line ~150-153: Replaced team and budget command implementations with imports from commands modules
+
+**Test Results**: 32 tests passing (14 team + 18 budget), all integration tests validate correct dispatch patterns
+
+**Outcome**:
+- ✅ Team command fully extracted (200+ lines) with 14 tests
+- ✅ Budget command fully extracted (140+ lines) with 18 tests
+- ✅ 32 new tests passing, maintaining 100% suite pass rate (88 total across Phases 3-6)
+- ✅ CLI dispatch properly routing both team and budget commands
+- ✅ Removes ~340 lines of functionality from cli.py
+- ✅ All 6 command modules follow consistent pattern: formatting utilities → helper functions → cmd_*() entry point
+
+**Phase 6 complete**: Team and budget commands extracted and tested.
+
+---
+
+## 2026-04-27 — CLI Modularization Phase 7: Extract Set-Enforce, Routing, Update Commands
+
+**Decision**: Extracted three more commands from monolithic cli.py into modular `src/llm_router/commands/` modules following established pattern.
+
+**Implementation:**
+1. Created `src/llm_router/commands/set_enforce.py` (100+ lines):
+   - `cmd_set_enforce(args: list[str]) -> int` — CLI entry point
+   - `_run_set_enforce(mode: str)` — Switch enforcement mode (smart/soft/hard/off)
+   - Updates routing.yaml and .env files for persistence
+   - Shows mode descriptions and confirms changes to user
+   - Constants: _ENFORCE_MODES, _ENFORCE_DESCRIPTIONS
+
+2. Created `src/llm_router/commands/routing.py` (170+ lines):
+   - `cmd_routing(args: list[str]) -> int` — CLI entry point
+   - `_run_routing()` — Display current routing configuration
+   - Shows available providers (Codex, Gemini CLI, OpenAI, Ollama, etc.)
+   - Displays Claude quota pressure with status indicators
+   - Shows sample routing chains for BALANCED profile (CODE/QUERY/ANALYZE tasks)
+   - Cost indicators for each model (FREE, LOCAL, SUB, or paid)
+
+3. Created `src/llm_router/commands/update.py` (70+ lines):
+   - `cmd_update(args: list[str]) -> int` — CLI entry point
+   - `_run_update()` — Re-install hooks/rules and check PyPI for updates
+   - Displays hook installation status and version comparison
+   - Shows upgrade command when newer version available
+   - Handles network errors gracefully
+
+4. Created `tests/commands/test_set_enforce.py` (100+ lines):
+   - 12 tests covering cmd_set_enforce entry point
+   - Tests for invalid/valid modes, file creation, env updates
+   - Tests for displaying mode descriptions and integration behavior
+
+5. Created `tests/commands/test_routing.py` (130+ lines):
+   - 11 tests covering cmd_routing entry point
+   - Tests for provider section display, Claude quota, routing chains
+   - Tests for error handling (missing config, missing pressure)
+   - Integration tests with full _run_routing() execution
+
+6. Created `tests/commands/test_update.py` (170+ lines):
+   - 13 tests covering cmd_update entry point
+   - Tests for hook installation, version checking, upgrade availability
+   - Tests for error handling (unknown version, PyPI errors)
+   - Integration tests with full _run_update() execution
+
+7. Updated `src/llm_router/cli.py`:
+   - Replaced set_enforce command implementation with import from commands.set_enforce
+   - Replaced routing command implementation with import from commands.routing
+   - Replaced update command implementation with import from commands.update
+
+**Test Results**: 36 tests passing (12 set_enforce + 11 routing + 13 update), all integration tests validate correct dispatch
+
+**Outcome**:
+- ✅ Set-enforce command fully extracted (100+ lines) with 12 tests
+- ✅ Routing command fully extracted (170+ lines) with 11 tests
+- ✅ Update command fully extracted (70+ lines) with 13 tests
+- ✅ 36 new tests passing, maintaining 100% suite pass rate (124 total across all command tests)
+- ✅ CLI dispatch properly routing all three commands
+- ✅ Removes ~340 lines of functionality from cli.py
+- ✅ All 9 command modules follow consistent pattern
+- ✅ Test suite demonstrates mocking of internal dependencies (codex_agent, gemini_cli_agent, config, etc.)
+
+**Phase 7 complete**: Set-enforce, routing, and update commands extracted and tested. All 124 command tests passing.
+
+---
+
+## Summary: CLI Modularization Phases 1–7
+
+**Total extracted commands**: 9 modules
+- Phase 3: doctor (500+ lines, 22 tests)
+- Phase 4: status (280 lines, 17 tests), dashboard (25 lines, 5 tests)
+- Phase 5: config (280 lines, 12 tests)
+- Phase 6: team (200 lines, 14 tests), budget (140 lines, 18 tests)
+- Phase 7: set_enforce (100+ lines, 12 tests), routing (170 lines, 11 tests), update (70 lines, 13 tests)
+
+**Total test coverage**: 124 passing tests across all command tests
+**Estimated lines removed from cli.py**: ~1540 lines
+**Estimated remaining monolithic cli.py size**: ~2411 → ~871 lines (64% reduction)
+
+**Completed phases**:
+- ✅ Phase 3–7: Nine command modules extracted with comprehensive test coverage
+- ✅ All 124 command tests passing
+- ✅ Consistent module pattern established (formatting utilities → helpers → cmd_* entry points)
+
+**Remaining phases**:
+- Phase 8: Extract remaining commands (install, setup, demo, profile, share, test, etc.)
+- Phase 9: Refactor main dispatcher in cli.py
+- Phase 10: Create integration tests for full CLI
+- Phase 11: Final cleanup & verification
+

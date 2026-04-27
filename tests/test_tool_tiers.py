@@ -297,7 +297,7 @@ class TestQuickstart:
 
 class TestDoctorHost:
     def test_doctor_host_vscode_missing_mcp_json(self, tmp_path, monkeypatch, capsys):
-        from llm_router.cli import _run_doctor_host
+        from llm_router.commands.doctor import _run_doctor_host
 
         monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
 
@@ -306,7 +306,7 @@ class TestDoctorHost:
         assert "mcp.json" in out.lower() or "not found" in out.lower() or "vscode" in out.lower()
 
     def test_doctor_host_cursor_missing_mcp_json(self, tmp_path, monkeypatch, capsys):
-        from llm_router.cli import _run_doctor_host
+        from llm_router.commands.doctor import _run_doctor_host
 
         monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
 
@@ -315,7 +315,7 @@ class TestDoctorHost:
         assert "cursor" in out.lower()
 
     def test_doctor_host_cursor_passes_when_configured(self, tmp_path, monkeypatch, capsys):
-        from llm_router.cli import _run_doctor_host
+        from llm_router.commands.doctor import _run_doctor_host
 
         monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
 
@@ -330,7 +330,7 @@ class TestDoctorHost:
         assert "registered" in out.lower() or "llm-router" in out.lower()
 
     def test_doctor_host_vscode_passes_when_configured(self, tmp_path, monkeypatch, capsys):
-        from llm_router.cli import _run_doctor_host
+        from llm_router.commands.doctor import _run_doctor_host
 
         monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
 
@@ -347,7 +347,7 @@ class TestDoctorHost:
         assert "llm-router" in out.lower() or "registered" in out.lower()
 
     def test_doctor_host_all_checks_multiple_hosts(self, tmp_path, monkeypatch, capsys):
-        from llm_router.cli import _run_doctor_host
+        from llm_router.commands.doctor import _run_doctor_host
         pass  # no additional imports needed
 
         monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
@@ -358,7 +358,7 @@ class TestDoctorHost:
         assert "cursor" in out.lower()
 
     def test_doctor_host_invalid_host(self, capsys):
-        from llm_router.cli import _run_doctor_host
+        from llm_router.commands.doctor import _run_doctor_host
 
         _run_doctor_host("unknown_host_xyz")
         out = capsys.readouterr().out
