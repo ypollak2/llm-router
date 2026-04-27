@@ -11,11 +11,15 @@ See README.md for full documentation.
 """
 
 # Version is read dynamically from pyproject.toml to maintain single source of truth
+import tomllib
+from pathlib import Path
+
 try:
-    from importlib.metadata import version as _get_version
-    __version__ = _get_version("llm-router")
+    _pyproject_path = Path(__file__).parent.parent.parent / "pyproject.toml"
+    _pyproject_data = tomllib.load(_pyproject_path.open("rb"))
+    __version__ = _pyproject_data["project"]["version"]
 except Exception:
-    # Fallback for development installations or when package metadata is unavailable
+    # Fallback for edge cases
     __version__ = "0.0.0.dev0"
 
 # Export response router for easy access
