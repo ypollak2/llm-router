@@ -2,6 +2,48 @@
 
 **For releases v6.2 and earlier, see [CHANGELOG_ARCHIVE.md](docs/CHANGELOG_ARCHIVE.md).**
 
+## v7.6.1 — Documentation & Test Infrastructure (2026-04-27)
+
+**Patch release: Comprehensive README redesign, test path safety framework, CI compatibility improvements.**
+
+### Added
+
+- **Comprehensive README Redesign**
+  - New Table of Contents for easy navigation
+  - Clear Problem & Solution section explaining value proposition
+  - Enhanced Real-World Savings with detailed cost breakdowns
+  - Quick Start section for faster onboarding (3 steps)
+  - Key Features section with organized categories (routing, cost, compatibility, learning, monitoring)
+  - Detailed routing chain examples for each complexity level
+  - Comparison table: llm-router vs manual routing vs always-Opus approach
+  - Better tool reference organization (48 tools in 7 categories)
+  - Cleaner structure and visual hierarchy
+
+- **Test Path Safety Framework**
+  - Added `get_project_root()`, `get_hook_path()`, `get_src_path()` helpers to conftest.py
+  - Dynamic path resolution for CI/local environment compatibility
+  - Pre-commit hook for catching hardcoded paths before commit
+  - Comprehensive guidance in `.claude/skills/test-patterns.md`
+
+- **Test Infrastructure Improvements**
+  - Fixed `test_today_filter_uses_localtime` to use dynamic paths instead of hardcoded `/Users/` paths
+  - Fixed dashboard test timeout by mocking server startup
+  - Fixed linting errors (unused imports, f-string prefixes)
+
+### Fixed
+
+- **CI Test Failures** — Tests now pass in GitHub Actions by using dynamic path resolution
+- **Hardcoded Path Prevention** — Pre-commit hook catches absolute paths before they're committed
+- **Test Isolation** — Proper mocking prevents server startup in tests
+
+### Documentation
+
+- Added "Test Path Safety" section to CLAUDE.md with complete guidance
+- Updated CLAUDE.md with test writing checklist and CI compatibility rules
+- Full migration guide from hardcoded to dynamic paths
+
+---
+
 ## v7.6.0 — Agent Resource Budgeting (2026-04-27)
 
 **Feature release: Complete agent resource budgeting system with provisional tracking and reconciliation.**
