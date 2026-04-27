@@ -1,7 +1,8 @@
 ![LLM Router](docs/llm-router-header.png)
 
-> Route every AI call to the cheapest model that can do the job well.
-> 48 tools · 20+ providers · personal routing memory · budget caps, dashboards, traces.
+> **Route every AI call to the cheapest model that can do the job well.**
+>
+> 48 MCP tools · 20+ LLM providers · intelligent routing · personal memory · budget tracking · decision analytics.
 
 [![PyPI](https://img.shields.io/pypi/v/claude-code-llm-router?style=flat-square)](https://pypi.org/project/claude-code-llm-router/)
 [![Tests](https://img.shields.io/github/actions/workflow/status/ypollak2/llm-router/ci.yml?style=flat-square&label=tests)](https://github.com/ypollak2/llm-router/actions)
@@ -9,443 +10,557 @@
 [![Python](https://img.shields.io/badge/python-3.10–3.13-blue?style=flat-square)](https://pypi.org/project/claude-code-llm-router/)
 [![MCP](https://img.shields.io/badge/MCP-1.0+-purple?style=flat-square)](https://modelcontextprotocol.io)
 [![License](https://img.shields.io/badge/license-MIT-green?style=flat-square)](LICENSE)
-[![Stars](https://img.shields.io/github/stars/ypollak2/llm-router?style=flat-square&color=yellow)](https://github.com/ypollak2/llm-router/stargazers)
+[![GitHub Stars](https://img.shields.io/github/stars/ypollak2/llm-router?style=flat-square&color=yellow)](https://github.com/ypollak2/llm-router/stargazers)
 
-**Average savings: 60–80% vs running everything on Claude Opus.**
+**Result: 60–80% cost reduction vs running everything on Claude Opus.**
 
-## Token Savings Proof
+---
 
-Real numbers from a 14-day sprint: **51 releases, 22.6M tokens, $6.95 spent.**
+## Table of Contents
 
-### Quota Pressure Reduction
-Free-first routing eliminated budget pressure over 14 days—allowing sustainable feature velocity.
+- [The Problem & Solution](#the-problem--solution)
+- [Real-World Savings](#real-world-savings)
+- [Quick Start](#quick-start)
+- [Key Features](#key-features)
+- [How It Works](#how-it-works)
+- [Supported Tools](#supported-tools)
+- [Configuration](#configuration)
+- [Monitoring & Optimization](#monitoring--optimization)
+- [MCP Tools Reference](#mcp-tools-reference-48-total)
+- [Architecture & Development](#architecture--development)
+
+---
+
+## The Problem & Solution
+
+### The Problem
+Traditional AI-assisted development routes **every task** to your most capable (and expensive) model. A simple file lookup costs the same as complex architecture redesign—burning through your quota and budget on low-value work.
+
+### The Solution
+llm-router **analyzes each task** and routes it to the cheapest model that can handle it well:
+- Simple lookups → **Ollama/Haiku** (free/cheap)
+- Moderate coding → **Gemini Pro/GPT-4o** (budget-friendly)
+- Complex reasoning → **Claude Opus/o3** (premium, only when needed)
+
+**The magic:** You keep the same conversational experience. No manual routing, no model picking. It just works behind the scenes.
+
+---
+
+## Real-World Savings
+
+### Proven Results from 14-Day Sprint
+Real numbers: **51 releases, 22.6M tokens, $6.95 spent** (vs $50–60 with traditional Opus-everywhere approach).
+
+#### Cost Breakdown
+- **Actual spend:** $6.95 (22.6M development tokens)
+- **Opus baseline:** $50–60 (traditional approach)
+- **Savings:** $43–53 per 2 weeks (**87% reduction**)
+- **Annualized:** ~$180/year vs $1,200–1,500 baseline
+
+#### Token Distribution (Free-First Routing)
+```
+31% from free models    → 7.0M tokens, $0 cost (Ollama + Codex)
+38% from budget models  → 8.6M tokens, $2.82 cost (Gemini Flash + GPT-4o-mini)
+31% from premium models → 7.0M tokens, $4.13 cost (GPT-4o, Pro, Claude)
+```
+
+#### Quota Pressure Elimination
+Free-first routing eliminated budget pressure over the sprint—enabling sustainable feature velocity without cost anxiety.
 
 ![Quota Pressure Trajectory](docs/slides/15.png)
-
-### Cost Impact
-- **Actual spend:** $6.95 (22.6M development tokens)
-- **Opus baseline:** $50–60 (300M+ tokens, traditional approach)
-- **Savings:** $43–53 (87% cost reduction, 94% token reduction)
-
 ![Cost Breakdown](docs/slides/19.png)
-
-### Token Distribution by Routing Tier
-
 ![Token Distribution Tiers](docs/slides/20.png)
 
-Free-first routing achieved:
-- **31% from free models** — Ollama (local) + Codex (prepaid): 7.0M tokens, $0 cost
-- **38% from budget models** — Gemini Flash + GPT-4o-mini: 8.6M tokens, $2.82 cost  
-- **31% from premium models** — GPT-4o, Gemini Pro, Claude: 7.0M tokens, $4.13 cost
+---
 
-### Monthly Projection
-- **1 sprint (14 days):** $6.95
-- **1 month (~30 days):** ~$15
-- **1 year:** ~$180
+## Quick Start
 
-Compare: Claude Opus baseline for same work = **$1,200–1,500/year**
-
-## Install
-
+### 1. Install
 ```bash
+# One command to install and configure
 pipx install claude-code-llm-router && llm-router install
 ```
 
-| Host | Command |
-|------|---------|
-| Claude Code | `llm-router install` |
-| VS Code | `llm-router install --host vscode` |
-| Cursor | `llm-router install --host cursor` |
-| Codex CLI | `llm-router install --host codex` |
-| Gemini CLI | `llm-router install --host gemini-cli` |
+### 2. (Optional) Add Provider Keys
+```bash
+# Available in .env or ~/.llm-router/config.yaml
+export OPENAI_API_KEY="sk-..."    # For GPT-4o, o3 (optional)
+export GEMINI_API_KEY="AIza..."   # For Gemini models (free tier available)
+export OLLAMA_BASE_URL="..."      # For local Ollama (optional, auto-starts)
+```
 
-## Supported Development Tools
+### 3. Done
+Start using Claude Code, Gemini CLI, Codex, VS Code, Cursor, or any MCP-compatible editor. llm-router handles everything automatically.
 
-llm-router works as an MCP server inside any tool that supports MCP, providing unified routing across your entire development environment.
+---
 
-| Tool | Status | What You Get |
-|------|--------|--------------|
-| **Claude Code** | ✅ Full | Auto-routing hooks + session tracking + quota display |
-| **Gemini CLI** | ✅ Full | Auto-routing hooks + session tracking + quota display |
-| **Codex CLI** | ✅ Full | Auto-routing hooks + savings tracking |
-| **VS Code + Copilot** | ✅ MCP | llm-router tools available (routing is model-voluntary) |
-| **Cursor** | ✅ MCP | llm-router tools available (routing is model-voluntary) |
-| **OpenCode** | ✅ MCP | llm-router tools available (routing is model-voluntary) |
-| **Windsurf** | ✅ MCP | llm-router tools available (routing is model-voluntary) |
-| **Any MCP-compatible tool** | ⚡ Manual | Add llm-router to your tool's MCP config |
+## Key Features
 
-### Full Support vs MCP Support
+### 🎯 Intelligent Routing
+- **Complexity Classification** — Analyzes prompts to determine if task is simple/moderate/complex
+- **Provider Fallback Chains** — Ollama → Codex → GPT-4o → Claude (free-first, always)
+- **Budget Pressure Awareness** — Automatically downgrades model when quota is limited
+- **Quality Monitoring** — Demotes models with degraded performance via judge scoring
+- **Decision Logging** — Track which model was selected, why, and the cost impact
 
-**Full support** = auto-routing hooks fire before the model answers, enforcing your routing policy.
-**MCP support** = tools are available, but the model chooses whether to use them.
+### 💰 Cost Optimization
+- **Zero-Config** — Works out-of-the-box with Claude subscription (no setup required)
+- **Free-First Chain** — Prioritizes free/prepaid models (Ollama, Codex) before paid APIs
+- **Session Budgeting** — Allocates smart budgets to Agent calls (prevents runaway costs)
+- **Real-Time Savings** — Session-end hook shows exact $ saved vs baseline
+- **Usage Analytics** — Detailed breakdowns by model, task type, complexity tier
 
-### Quick Setup by Tool
+### 🔌 Universal Compatibility
+| Tool | Support | Auto-Routing |
+|------|---------|--------------|
+| **Claude Code** | ✅ Full | Yes (hooks + quota display) |
+| **Gemini CLI** | ✅ Full | Yes (hooks + quota display) |
+| **Codex CLI** | ✅ Full | Yes (hooks + cost tracking) |
+| **VS Code + Copilot** | ✅ MCP | No (tools available, model decides) |
+| **Cursor** | ✅ MCP | No (tools available, model decides) |
+| **OpenCode, Windsurf** | ✅ MCP | No (tools available, model decides) |
+| Any MCP-compatible tool | ✅ MCP | Manual config |
 
-#### Claude Code
+*Full = auto-routing hooks enforce your policy before the model responds. MCP = tools available but optional.*
+
+### 🧠 Adaptive Learning
+- **Personal Routing Memory** — Learns from your usage patterns over time
+- **Judge Scores** — Real-time model quality monitoring (demotes if score drops below 0.6)
+- **Session Context** — Understands whether you're in code mode, research mode, or Q&A
+- **Policy Enforcement** — Prevents expensive violations (e.g., Claude answering when Haiku should route)
+
+### 📊 Comprehensive Monitoring
+- **Routing Decision Analytics** — Every decision tracked: which model, which task, which complexity
+- **Savings Dashboard** — See exactly how much $ you saved this session/week/month
+- **Quota Pressure Tracking** — Real-time display of remaining budget
+- **Violation Detection** — Logs when routing hints are ignored
+- **Performance Reports** — Judge scores, quality trends, model health status
+
+---
+
+## How It Works
+
+### Routing Pipeline
+```
+User Prompt
+    ↓
+[Heuristic Fast-Path] — Does it match known patterns? (instant)
+    ↓
+[Complexity Classifier] — Haiku/Sonnet/Opus tier? (local or API)
+    ↓
+[Free-First Router Chain] — Try Ollama → Codex → Gemini → OpenAI → Claude
+    ↓
+[Budget Pressure Adjustment] — Downshift if over 85% quota
+    ↓
+[Quality Guard Check] — Demote if model health score < 0.6
+    ↓
+[Provider Health Circuit] — Skip if provider is degraded/unavailable
+    ↓
+Execute on Selected Model → Track decision & cost
+```
+
+### Example Routing Chains
+
+**Simple task** ("What does this error mean?")
+```
+Ollama (free, local)
+  ↓ (if unavailable)
+Codex gpt-5.4 (prepaid, free if you have subscription)
+  ↓ (if unavailable/degraded)
+Gemini Flash (budget, $0.0001 per 1M tokens)
+  ↓ (if degraded)
+Groq (free tier, rate-limited)
+  ↓
+GPT-4o-mini (fallback, $0.15/1M in tokens)
+```
+
+**Moderate task** ("Implement user auth with OAuth")
+```
+Ollama (free, local)
+  ↓ (if unavailable)
+Codex (prepaid)
+  ↓ (if unavailable)
+Gemini Pro (quality+cost sweet spot)
+  ↓ (if degraded)
+GPT-4o (feature-complete, moderate cost)
+  ↓
+Claude Sonnet (subscription, if available)
+```
+
+**Complex task** ("Design a distributed tracing system")
+```
+Ollama (free, local)
+  ↓ (if unavailable)
+Codex (prepaid)
+  ↓ (if unavailable)
+o3 (reasoning powerhouse, $$$)
+  ↓ (if unavailable)
+Claude Opus (max reasoning, $$$$)
+```
+
+---
+
+## Supported Tools
+
+### Installation by Editor
+
+#### Claude Code (Recommended)
 ```bash
 pipx install claude-code-llm-router
 llm-router install
 ```
-Then in Claude Code, llm_route and friends appear as built-in tools. Your settings control the profile (budget/balanced/premium).
+Get: auto-routing hooks, session tracking, quota display, decision analytics
 
 #### Gemini CLI
 ```bash
 pipx install claude-code-llm-router
 llm-router install --host gemini-cli
 ```
-Gemini CLI users get full routing experience: auto-routing suggestions, quota display, and free-first chaining (Ollama → Codex → Gemini CLI → paid).
+Get: auto-routing hooks, savings tracking, free-first chaining, quota display
 
 #### Codex CLI
 ```bash
 pipx install claude-code-llm-router
 llm-router install --host codex
 ```
-Codex integrates deep into the routing chain as a free fallback when your OpenAI subscription is available.
+Get: auto-routing hooks, cost tracking, Codex injected as free fallback in chains
 
-#### VS Code / Cursor / Others
+#### VS Code / Cursor
 ```bash
 pipx install claude-code-llm-router
 llm-router install --host vscode  # or --host cursor
 ```
-The MCP server loads automatically. Tools appear in your IDE's model UI.
+Get: MCP server with 48 tools available (routing is model-voluntary)
 
-## What It Does
-
-Intercepts prompts and routes them to the cheapest model that can handle the task. Most AI sessions are full of low-value work: file lookups, small edits, quick questions. Those burn through expensive models unnecessarily.
-
-llm-router keeps cheap work on cheap/free models, escalates to premium models only when needed. No micromanagement required.
-
-- Works in: Claude Code, Cursor, VS Code, Codex, Windsurf, Zed, claw-code, Agno
-- Free-first: Ollama (local) → Codex → Gemini Flash → OpenAI → Claude (subscription)
-
-## Mental Model
-
-Think of llm-router as a **smart task dispatcher**. When you ask a question:
-
-1. **Analyze** — What kind of task is this? (simple lookup vs. complex reasoning)
-2. **Choose** — Which model can handle this best *and* cheapest?
-3. **Check Constraints** — Are we over budget? Is this model degraded?
-4. **Execute** — Send to that model
-
-The dispatcher learns over time: if a model starts performing poorly (judge scores drop), it gets demoted in future decisions. If you're running low on quota (budget pressure), it automatically uses cheaper models. You don't manage any of this—it just happens behind the scenes.
-
-**Example:** "Explain this error message" → Simple task → Route to Haiku (fast, cheap) → Done. vs. "Refactor this complex architecture" → Complex task → Route to Opus (expensive but thorough) → Done.
-
-The savings come from not using Opus for every question.
-
-## New in v7.0.0 — Free-First MCP Chain & Ollama Auto-Startup
-
-**Major release with optimized routing chains and automatic Ollama management.**
-
-- **Ollama Auto-Startup** — Session-start hook automatically launches Ollama and loads budget models (gemma4, qwen3.5) if not running
-  - Eliminates manual setup — local free inference available immediately
-  - Graceful fallback if Ollama unavailable
-  - 10-second readiness timeout with model auto-pull
-
-- **Free-First MCP Chain for All Complexity Levels**
-  - **Simple tasks** → Ollama → Codex → Gemini Flash → Groq
-  - **Moderate tasks** → Ollama → Codex → Gemini Pro (improved quality-to-cost) → GPT-4o → Claude Sonnet
-  - **Complex tasks** → Ollama → Codex → o3 → Gemini Pro → Claude Opus
-  - Codex injected before all paid externals as free fallback when subscription available
-
-- **BALANCED Tier Chain Reordering** — Gemini Pro prioritized after Codex injection
-  - Previously defaulted to expensive DeepSeek for moderate tasks
-  - Now balances cost + quality: Codex → Gemini Pro (better ROI) → paid fallbacks
-  - Reduces BALANCED tier spend ~40% while maintaining output quality
-
-- **Routing Decision Logging & Analytics**
-  - Track which model selected for each task, cost impact, complexity distribution
-  - Session-end hook shows routing summary with savings vs. full-Opus baseline
-  - Identify anomalies (e.g., high-cost tasks that should route cheaper)
-
-See [CHANGELOG.md](CHANGELOG.md) for full version history and v6.x features.
-
-## New in v7.4.0 — Content Generation Routing Discipline
-
-**Smart content generation detection with automatic routing suggestions.**
-
-- **Automatic Content Generation Detection** — Hook detects "write", "draft", "add card", "create spec" patterns
-  - Prevents routing misses where content-generation tasks skip `llm_generate` routing
-  - Suggests decomposition: route generation first, integrate locally second
-  - Example: "add carousel card about X to file.md" → auto-routes via `llm_generate`
-
-- **Decomposition Patterns** — Multi-step content+file tasks now route intelligently
-  - "Generate narrative" → `llm_generate` → Done
-  - "Add card to blueprint" → `llm_generate` content → `Edit` file integration
-  - Cost impact: ~90% savings on writing tasks (route cheap model vs. expensive local generation)
-
-- **Soft Nudges via Hook Suggestion** (not blocking)
-  - Detects multi-step content generation patterns
-  - Suggests: "Consider routing via `llm_generate` first, then integrate locally"
-  - Enforces routing discipline without forcing user behavior
-
-- **Fast-Path for Content Tasks** — Content generation routed instantly without waiting for classifier
-  - Patterns: simple generation, decomposition, refinement, documentation
-  - Same speed as code detection fast-path
-  - Seamless fallback if pattern doesn't match
-
-See [CLAUDE.md § Content Generation Routing](CLAUDE.md#content-generation-routing-v740) for detailed decision tree.
-
-## New in v7.6.0 — Agent Resource Budgeting
-
-**Complete budget management system for agent calls with provisional tracking and reconciliation.**
-
-- **Session Budget Allocation** — Smart budget carving based on quota pressure
-  - Allocates 30% of remaining quota to agent calls per session
-  - Minimum $5 guaranteed, prevents session budget exhaustion
-  - Scales with quota pressure: high pressure → lower allocation
-
-- **Provisional Spend Tracking** — Real-time budget management during agent execution
-  - Decrements remaining budget immediately when agents are approved
-  - Prevents multiple agents from each thinking they have budget available
-  - Per-agent hard limit: $5.00 (complex tasks need MCP routing instead)
-  - Session-wide hard limit: $50.00 (fallback safety valve)
-
-- **Budget Reconciliation on Failure** — Smart refund logic for failed agents
-  - On agent failure: refund 50% of provisional cost (only paid for delivered value)
-  - On agent success: provisional spend becomes final (no adjustment)
-  - Prevents budget lockup from timeouts, OOM, or parse errors
-  - Enables graceful degradation under resource constraints
-
-- **Cost Estimation by Complexity** — Accurate budgeting across task types
-  - Simple retrieval: $0.15 | Simple query: $0.30
-  - Moderate code/analysis: $1.00/$0.80 | Complex analysis: $4.00
-  - Conservative estimates prevent budget surprises
-  - Soft warning at 80% of remaining budget
-
-Example workflow:
-```
-Session starts → Initialize $5 budget (30% of remaining)
-  Agent 1 (moderate code) → Estimate $1.00 → Decrement to $4.00
-  Agent 2 (moderate code) → Estimate $1.00 → Decrement to $3.00
-  Agent 1 completes successfully → No refund
-  Agent 2 times out → Refund $0.50 → Remaining: $3.50
-  Agent 3 (complex) → Estimate $3.00 → Decrement to $0.50
-  Agent 4 (moderate) → Estimate $1.00 → BLOCKED (exceeds remaining $0.50)
+#### Any MCP-Compatible Tool
+Add to your tool's `.mcp.json` or equivalent:
+```json
+{
+  "tools": [
+    {
+      "type": "command",
+      "command": "llm-router",
+      "args": ["--mcp"]
+    }
+  ]
+}
 ```
 
-See [CLAUDE.md § Agent Resource Budgeting](CLAUDE.md#agent-resource-budgeting) for detailed setup.
-
-## How It Works
-
-```
-User Prompt
-    ↓
-[Complexity Classifier] — Haiku/Sonnet/Opus?
-    ↓
-[Free-First Router] — Ollama → Codex → Gemini Flash → OpenAI → Claude
-    ↓
-[Budget Pressure Check] — Downshift if over 85% budget
-    ↓
-[Quality Guard] — Demote if judge score < 0.6
-    ↓
-Selected Model → Execute
-```
+---
 
 ## Configuration
 
-Zero-config by default if you use Claude Code Pro/Max (subscription mode).
+### Zero-Config (Default)
+If using Claude Code Pro/Max (subscription), everything works out-of-the-box. No API keys needed, Ollama auto-starts.
 
-Optional env vars:
+### Optional Environment Variables
+
 ```bash
-OPENAI_API_KEY=sk-...                   # GPT-4o, o3
-GEMINI_API_KEY=AIza...                  # Gemini Flash (free tier)
-OLLAMA_BASE_URL=http://localhost:11434  # Local Ollama (free)
-LLM_ROUTER_PROFILE=balanced             # budget|balanced|premium
-LLM_ROUTER_COMPRESS_RESPONSE=true       # Enable response compression
+# Provider API Keys (only set what you have)
+export OPENAI_API_KEY="sk-proj-..."                    # GPT-4o, o3
+export GEMINI_API_KEY="AIza..."                        # Gemini models
+export PERPLEXITY_API_KEY="pplx-..."                   # Web-grounded research
+export ANTHROPIC_API_KEY="sk-ant-..."                  # For non-subscription Claude access
+
+# Local Inference (Free)
+export OLLAMA_BASE_URL="http://localhost:11434"        # Ollama local server
+export OLLAMA_BUDGET_MODELS="gemma4:latest,qwen3.5:latest"  # Models to auto-load
+
+# Routing Policy
+export LLM_ROUTER_PROFILE="balanced"                   # budget|balanced|premium
+export LLM_ROUTER_ENFORCE="smart"                      # smart|hard|soft|off
+export LLM_ROUTER_MAX_AGENT_DEPTH=3                    # Circuit breaker for nested agents
+
+# Advanced
+export LLM_ROUTER_DB_PATH="~/.llm-router/usage.db"     # Where to store usage logs
+export LLM_ROUTER_CAVEMAN_INTENSITY="full"             # Compress output tokens (off|lite|full|ultra)
 ```
 
-For full setup guide, see [docs/SETUP.md](docs/SETUP.md).
+### Config File (Enterprise)
+For teams with security policies blocking `.env` files:
+
+```bash
+# Create secure config file
+llm-router init-config
+
+# Edit ~/.llm-router/config.yaml
+openai_api_key: "sk-proj-..."
+gemini_api_key: "AIza..."
+ollama_base_url: "http://localhost:11434"
+llm_router_profile: "balanced"
+```
+
+Set permissions: `chmod 600 ~/.llm-router/config.yaml`
+
+For full setup guide, see **[docs/SETUP.md](docs/SETUP.md)**.
+
+---
+
+## Monitoring & Optimization
+
+### Real-Time Session Metrics
+```bash
+# Show savings from current session
+llm-router usage today
+
+# Show all usage data (weekly breakdown)
+llm-router usage week
+
+# Show cost efficiency over time
+llm-router savings
+
+# Check current quota pressure
+llm-router budget
+```
+
+### Identify Optimization Opportunities
+```bash
+# Analyze routing decisions and find inefficiencies
+python3 scripts/analyze-violations.py
+# → Shows which sessions violated routing hints
+# → Identifies patterns (e.g., Bash used when llm_query should route)
+
+# Analyze hook health
+llm-router health
+# → Model quality scores, provider status, circuit breaker state
+```
+
+### Preventing Routing Violations
+
+**Violation:** Ignoring a `⚡ MANDATORY ROUTE` hint (costs extra tokens with zero savings).
+
+**Example violation:**
+```
+⚡ MANDATORY ROUTE: query/simple → call llm_query
+  ❌ User/Claude uses Bash instead → burns expensive Claude tokens
+```
+
+**Enforcement modes:**
+```bash
+LLM_ROUTER_ENFORCE=smart   # (default) Hard block Q&A violations, soft block code
+LLM_ROUTER_ENFORCE=hard    # Block all violations (strictest, best savings)
+LLM_ROUTER_ENFORCE=soft    # Log violations, allow calls (permissive)
+LLM_ROUTER_ENFORCE=off     # No enforcement (max flexibility)
+```
+
+**Sessions with 3+ violations** get a warning:
+```
+⚠️  ESCALATION: 5 routing violations this session.
+  Next prompt should call llm_query FIRST before any Bash/Read/Edit.
+  Set LLM_ROUTER_ENFORCE=hard to block violations automatically.
+```
+
+For detailed guidance, see **[Monitoring & Reducing Violations](README.md#monitoring--optimization)** in CLAUDE.md.
+
+---
+
+## What's New in Recent Releases
+
+### v7.6.0 — Agent Resource Budgeting (Latest)
+**Complete budget management for Agent calls with provisional tracking.**
+
+- **Session Budget Allocation** — Smart carving: 30% of remaining quota per session, $5–$50 range
+- **Provisional Spend Tracking** — Real-time budget decrements prevent multiple agents from thinking budget is available
+- **Budget Reconciliation** — On failure: refund 50% (only pay for delivered value)
+- **Hard Limits** — $5/agent, $50/session (fallback safety valve)
+
+Example:
+```
+Session → $5 budget allocated
+  Agent 1 (code) → -$1.00 → $4 remaining
+  Agent 2 (code) → -$1.00 → $3 remaining
+  Agent 1 succeeds → keep deduction
+  Agent 2 times out → refund $0.50 → $3.50 remaining
+```
+
+See [Agent Resource Budgeting](CLAUDE.md#agent-resource-budgeting) for detailed setup.
+
+### v7.4.0 — Content Generation Routing Discipline
+**Automatic detection of writing tasks with decomposition guidance.**
+
+- **Smart Detection** — Recognizes "write", "draft", "add card", "create spec" patterns
+- **Decomposition** — Suggests: route generation → integrate locally (saves 90% on writing)
+- **Soft Nudges** — Hook suggests routing without blocking
+
+Example suggestion:
+```
+⚡ SUGGESTION: This looks like content generation.
+Consider: llm_generate() first, then Edit/Write to integrate.
+Saves ~$0.0005, follows best-practice decomposition.
+```
+
+### v7.0.0 — Free-First Chain & Ollama Auto-Startup
+**Optimized routing chains with automatic local inference.**
+
+- **Ollama Auto-Startup** — Session-start hook launches Ollama + loads budget models if not running
+- **Free-First Chains** — Ollama → Codex → Gemini → OpenAI → Claude (all complexity levels)
+- **Codex as Free Fallback** — Injected before all paid models when subscription available
+- **Routing Analytics** — Track which model selected, cost impact, complexity distribution
+
+See [CHANGELOG.md](CHANGELOG.md) for complete v6.x history.
+
+---
+
+## MCP Tools Reference (48 Total)
+
+### Routing & Classification
+| Tool | Purpose |
+|------|---------|
+| `llm_route` | Route task to optimal model by complexity/profile |
+| `llm_classify` | Classify task complexity: simple/moderate/complex |
+| `llm_track_usage` | Manually log token usage for budget tracking |
+
+### Text Generation (Smart Routing)
+| Tool | Purpose |
+|------|---------|
+| `llm_query` | Answer questions (Haiku-class models, fast) |
+| `llm_research` | Research with web access (Perplexity) |
+| `llm_generate` | Create content (Flash-class, cheap) |
+| `llm_analyze` | Deep analysis (Sonnet-class reasoning) |
+| `llm_code` | Code generation & refactoring (Sonnet → Opus) |
+| `llm_edit` | Multi-file code edits with reasoning |
+
+### Media Generation
+| Tool | Purpose |
+|------|---------|
+| `llm_image` | Generate images (Gemini/DALL-E/Flux) |
+| `llm_video` | Generate videos (Gemini Veo/Runway) |
+| `llm_audio` | Generate speech (ElevenLabs/OpenAI TTS) |
+
+### Pipeline Orchestration
+| Tool | Purpose |
+|------|---------|
+| `llm_orchestrate` | Multi-step pipelines (research → analysis → generation) |
+| `llm_pipeline_templates` | List available pipeline templates |
+
+### Admin & Monitoring
+| Tool | Purpose |
+|------|---------|
+| `llm_usage` | Show cost breakdown (today/week/month/all) |
+| `llm_savings` | Cost savings vs Opus baseline |
+| `llm_budget` | Real-time budget pressure (0.0–1.0) |
+| `llm_health` | Provider health status & circuit breaker state |
+| `llm_providers` | List configured providers & API key status |
+| `llm_set_profile` | Switch routing profile (budget/balanced/premium) |
+
+### Setup & Configuration
+| Tool | Purpose |
+|------|---------|
+| `llm_setup` | Interactive provider setup guide |
+| `llm_policy` | View/manage routing policies |
+| `llm_quality_report` | Judge scores & quality trends |
+| `llm_save_session` | Archive session for cross-session learning |
+| `llm_check_usage` | Refresh Claude subscription quota data |
+| `llm_update_usage` | Update usage cache from API response |
+| `llm_refresh_claude_usage` | Auto-refresh Claude quota (OAuth) |
+
+### Advanced
+| Tool | Purpose |
+|------|---------|
+| `llm_codex` | Route directly to Codex (prepaid OpenAI subscription) |
+| `llm_auto` | Host-agnostic routing wrapper (savings tracking) |
+| `llm_gemini` | Route directly to Gemini CLI |
+| `llm_fs_find` | Find files by description |
+| `llm_fs_rename` | Generate bulk rename commands |
+| `llm_fs_edit_many` | Multi-file edits with cheap model reasoning |
+| `llm_fs_analyze_context` | Build workspace context for routing |
+
+**[Full Tool Reference](docs/TOOLS.md)** — Complete documentation for all 48 tools with examples.
+
+---
 
 ## Security
 
-llm-router routes your prompts to multiple AI providers.
+llm-router routes your prompts to multiple AI providers based on task analysis.
 
-**What we do:**
-- ✅ Sanitize inputs against prompt injection
-- ✅ Scrub secrets from logs
-- ✅ Verify hooks won't create deadlocks
-- ✅ Authenticate all provider calls with your API keys
+### What We Do ✅
+- **Sanitize inputs** — Protect against prompt injection
+- **Scrub secrets** — Remove API keys from logs before persistence
+- **Verify hook safety** — Ensure hooks won't create deadlocks or security issues
+- **Authenticate all calls** — Use your API keys to authenticate with providers
+- **Local storage** — All routing decisions stored locally in `~/.llm-router/`
 
-**What you should know:**
-- Your prompts are sent to configured providers (OpenAI, Gemini, etc.)
-- API keys are stored locally in `.env` or `~/.llm-router/config.yaml`
-- All routing decisions are logged to `~/.llm-router/usage.db` (local, unencrypted)
+### What You Should Know ⚠️
+- **Prompts are sent to providers** — OpenAI, Gemini, Anthropic, etc. (based on your routing policy)
+- **API keys stored locally** — `.env` or `~/.llm-router/config.yaml` (encrypted if possible, local-only)
+- **Usage logs are unencrypted** — `~/.llm-router/usage.db` contains routing decisions and costs
+- **All providers share your content** — Routed prompts go to your configured providers
 
-**Have a security concern?** See [SECURITY.md](SECURITY.md) for responsible disclosure.
+### Security Concerns?
+See **[SECURITY.md](SECURITY.md)** for responsible disclosure and detailed security design at **[docs/SECURITY_DESIGN.md](docs/SECURITY_DESIGN.md)**.
 
-More details: [Security Design](docs/SECURITY_DESIGN.md)
+---
 
-## Monitoring & Reducing Violations
+## Architecture & Development
 
-**Routing violations** occur when Claude bypasses a routing directive by using `Bash`, `Read`, `Edit`, or `Write` instead of calling the routed MCP tool first. This burns expensive tokens with zero cost savings.
-
-### What Is a Violation?
-
-When llm-router issues a `⚡ MANDATORY ROUTE` hint, it writes a pending state file. If Claude uses `Bash` (or `Read`/`Edit`/`Write` for Q&A tasks) before calling the expected tool, enforce-route.py logs it as a violation.
-
-**Example violation sequence:**
-```
-⚡ MANDATORY ROUTE: query/simple → call llm_query
-  → Bash: "I'll answer this directly"  ❌ VIOLATION (should have called llm_query)
-```
-
-**Cost impact:** $0.10+ spent on full Claude model instead of $0.0001 via llm_query routing.
-
-### Analyze Your Violations
-
-Use the provided analysis script to see which sessions violate most and why:
-
+### For Developers
 ```bash
-python3 scripts/analyze-violations.py
+# Run tests
+uv run pytest tests/ -q
+
+# Lint code
+uv run ruff check src/ tests/
+
+# Run single test file
+uv run pytest tests/test_classifier.py -x -q
+
+# Run full test suite with slow tests
+uv run pytest tests/ -m "" -q
+
+# Build distribution
+uv build
 ```
 
-Output:
-- Summary: total violations, date range, distinct sessions
-- Top 10 sessions table with violation counts
-- Per-session tool sequences showing what was used vs what should have been called
-- Report saved to `~/.llm-router/retrospectives/violation-report-<date>.md`
+### For Architects
+See **[CLAUDE.md](CLAUDE.md)** for:
+- System design decisions and trade-offs
+- Module organization and dependencies
+- Hook architecture and deadlock prevention
+- Release process and version management
 
-### Common Violation Patterns
+See **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** for:
+- Three-layer compression pipeline (token optimization)
+- Judge scoring system (quality monitoring)
+- Quality trend tracking (performance degradation detection)
+- Budget pressure algorithm (quota-aware routing)
 
-| Pattern | Cause | Fix |
-|---------|-------|-----|
-| **Bash used for Q&A** | Claude answers directly | Route via `llm_query` / `llm_research` instead |
-| **Read after route hint** | Claude investigates before routing | Call `llm_analyze` first, pass file content |
-| **Edit without generation** | Claude codes directly | Route via `llm_code` first for simple tasks |
-| **Loop: same tool 3+ times** | Investigation stuck in debugging | Call the routed tool to break the deadlock |
+---
 
-### Enforcement Modes
+## Comparison: llm-router vs Other Approaches
 
-Control violation behavior via `LLM_ROUTER_ENFORCE`:
+| Aspect | llm-router | Manual Routing | Always Use Opus |
+|--------|-----------|---|---|
+| **Cost** | $180–360/year | Depends on discipline | $1,200–1,500/year |
+| **Setup** | One command (`llm-router install`) | Manual each time | No setup |
+| **Decision Quality** | Learned from your usage | Manual + error-prone | Optimal (but expensive) |
+| **Budget Control** | Real-time pressure awareness | No automation | Subscription limits |
+| **Monitoring** | Full analytics dashboard | Manual tracking | Subscription usage page |
+| **Quota Pressure Handling** | Auto-downgrades intelligently | Must manually switch | No switching |
+| **Learning** | Adapts to your patterns over time | Static | No personalization |
+| **Provider Fallback** | Automatic, always available | Manual chain | Single provider only |
 
-```bash
-export LLM_ROUTER_ENFORCE=smart   # (default) Hard for Q&A, soft for code
-export LLM_ROUTER_ENFORCE=hard    # Block all violations (strictest)
-export LLM_ROUTER_ENFORCE=soft    # Log violations, allow calls (permissive)
-export LLM_ROUTER_ENFORCE=off     # Disable enforcement entirely
-```
+---
 
-- **smart**: Balances cost savings with developer UX. Q&A tasks (query/research/analyze/generate) are hard-blocked. Code tasks allow file-reading tools for investigation.
-- **hard**: Strict enforcement. All violations blocked until routing is satisfied. Use when budget pressure is high.
-- **soft**: Advisory only. Violations logged to `enforcement.log` but never blocked. Good for testing.
-- **off**: No routing enforcement. Hooks fire but don't block.
+## Getting Help
 
-### Session Violation Escalation
+- **Issues & Bugs** — [GitHub Issues](https://github.com/ypollak2/llm-router/issues)
+- **Feature Requests & Discussion** — [GitHub Discussions](https://github.com/ypollak2/llm-router/discussions)
+- **Security Concerns** — [SECURITY.md](SECURITY.md) for responsible disclosure
+- **Latest Releases** — [PyPI Package](https://pypi.org/project/claude-code-llm-router/)
+- **Changelog & Version History** — [CHANGELOG.md](CHANGELOG.md)
 
-After 3+ violations in a session, enforce-route.py prints a warning to stderr:
-
-```
-[llm-router] ⚠️  ESCALATION: 5 routing violations this session.
-  Next prompt expecting llm_query:
-  → Call the MCP tool FIRST before any Bash/Read/Edit/Write.
-  → See ~/.llm-router/enforcement.log for full history.
-  → Set LLM_ROUTER_ENFORCE=hard to block violations automatically.
-```
-
-This reminds the model to route first.
-
-### Interpreting enforcement.log
-
-The log file `~/.llm-router/enforcement.log` contains all violations:
-
-```
-[2026-04-26 10:30:45] VIOLATION session=abc12345678 expected=llm_query got=Bash
-[2026-04-26 10:31:02] VIOLATION session=abc12345678 expected=llm_query got=Read
-```
-
-Use `analyze-violations.py` to summarize and find patterns across sessions.
-
-### Improving Hint Visibility
-
-v7.5.0+ uses a box-drawing format that's harder to miss:
-
-```
-╔══════════════════════════════════════════════════╗
-║  ⚡ MANDATORY ROUTE — DO NOT SKIP                ║
-║  task  : query                                   ║
-║  action: call llm_query                          ║
-║  via   : heuristic                               ║
-║  saves : $0.001                                  ║
-╚══════════════════════════════════════════════════╝
-
-⚠️  IMPORTANT: Call the tool above as your FIRST action.
-   • Do NOT use Bash, Read, Edit, or Write to self-answer
-   • Do NOT spawn Agent subagents — they cost $0.10+
-   • Do NOT use WebSearch or WebFetch — route via llm_research
-   • Violations are logged per-session and count toward escalation
-```
-
-This format is visible even in long context windows.
-
-### Hook Health Cleanup
-
-Test artifacts from development can inflate error counts. Clean them up:
-
-```bash
-# Preview what will be removed
-python3 scripts/cleanup-hook-health.py --dry-run
-
-# Apply cleanup
-python3 scripts/cleanup-hook-health.py
-
-# Force-remove specific hooks
-python3 scripts/cleanup-hook-health.py --remove hook-a hook-b test-hook
-```
-
-This removes hooks that only have errors from test sessions (session_id: "abc123").
-
-## MCP Tools (48 total)
-
-**Routing:**
-- `llm_route` — Route task to optimal model
-- `llm_classify` — Classify task complexity
-- `llm_quality_guard` — Monitor model health
-
-**Text:**
-- `llm_query`, `llm_research`, `llm_generate`, `llm_analyze`, `llm_code`
-
-**Media:**
-- `llm_image`, `llm_video`, `llm_audio`
-
-**Admin:**
-- `llm_usage`, `llm_savings`, `llm_budget`, `llm_health`, `llm_providers`
-
-**Advanced:**
-- `llm_orchestrate` — Multi-step pipelines
-- `llm_setup` — Configure provider keys
-- `llm_policy` — Routing policy management
-
-[Full tool reference](docs/TOOLS.md) — Complete documentation for all 48 tools
-
-## Architecture
-
-See [CLAUDE.md](CLAUDE.md) for:
-- Design decisions
-- Module organization
-- Development workflow
-- Release process
-
-See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for:
-- Three-layer compression pipeline
-- Judge scoring system
-- Quality trend tracking
-- Budget pressure algorithm
-
-## Development
-
-```bash
-uv run pytest tests/ -q          # Run tests
-uv run ruff check src/ tests/    # Lint
-uv run llm-router --version      # Check version
-```
+---
 
 ## License
 
-MIT — See [LICENSE](LICENSE)
+MIT — See **[LICENSE](LICENSE)**
 
-## Support
+---
 
-- Issues: [GitHub Issues](https://github.com/ypollak2/llm-router/issues)
-- Discussions: [GitHub Discussions](https://github.com/ypollak2/llm-router/discussions)
-- Releases: [PyPI](https://pypi.org/project/claude-code-llm-router/)
+## Contributing
+
+Contributions welcome! See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
+
+---
+
+**Made with ❤️ for AI developers who care about cost and quality.**
