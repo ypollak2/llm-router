@@ -1,6 +1,6 @@
 {
   "name": "llm-router",
-  "version": "7.6.1",
+  "version": "7.6.2",
   "description": "Smart LLM routing with Claude subscription monitoring, complexity-first model selection, and 20+ AI providers",
   "author": {
     "name": "ypollak2",

@@ -2,6 +2,18 @@
 
 **For releases v6.2 and earlier, see [CHANGELOG_ARCHIVE.md](docs/CHANGELOG_ARCHIVE.md).**
 
+## v7.6.2 — PyPI README Fix (2026-04-28)
+
+**Patch release: Fixed PyPI package name in README and installation instructions.**
+
+### Fixed
+
+- Updated README.md to reference correct PyPI package name `llm-routing` (was `llm-router`)
+- Fixed all installation instructions: `pip install llm-routing`
+- Updated PyPI badges to point to correct project
+
+---
+
 ## v7.6.1 — Documentation & Test Infrastructure (2026-04-27)
 
 **Patch release: Comprehensive README redesign, test path safety framework, CI compatibility improvements.**
