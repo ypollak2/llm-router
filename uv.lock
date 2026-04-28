@@ -1007,7 +1007,7 @@ wheels = [
 ]
 
 [[package]]
-name = "llm-router"
+name = "llm-routing"
 version = "7.6.1"
 source = { editable = "." }
 dependencies = [
