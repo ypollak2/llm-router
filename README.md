@@ -4,10 +4,10 @@
 >
 > 48 MCP tools · 20+ LLM providers · intelligent routing · personal memory · budget tracking · decision analytics.
 
-[![PyPI](https://img.shields.io/pypi/v/llm-router?style=flat-square)](https://pypi.org/project/llm-router/)
+[![PyPI](https://img.shields.io/pypi/v/llm-routing?style=flat-square)](https://pypi.org/project/llm-routing/)
 [![Tests](https://img.shields.io/github/actions/workflow/status/ypollak2/llm-router/ci.yml?style=flat-square&label=tests)](https://github.com/ypollak2/llm-router/actions)
-[![Downloads](https://img.shields.io/pypi/dm/llm-router?style=flat-square)](https://pypi.org/project/llm-router/)
-[![Python](https://img.shields.io/badge/python-3.10–3.13-blue?style=flat-square)](https://pypi.org/project/llm-router/)
+[![Downloads](https://img.shields.io/pypi/dm/llm-routing?style=flat-square)](https://pypi.org/project/llm-routing/)
+[![Python](https://img.shields.io/badge/python-3.10–3.13-blue?style=flat-square)](https://pypi.org/project/llm-routing/)
 [![MCP](https://img.shields.io/badge/MCP-1.0+-purple?style=flat-square)](https://modelcontextprotocol.io)
 [![License](https://img.shields.io/badge/license-MIT-green?style=flat-square)](LICENSE)
 [![GitHub Stars](https://img.shields.io/github/stars/ypollak2/llm-router?style=flat-square&color=yellow)](https://github.com/ypollak2/llm-router/stargazers)
@@ -78,7 +78,7 @@ Free-first routing eliminated budget pressure over the sprint—enabling sustain
 ### 1. Install
 ```bash
 # One command to install and configure
-pipx install llm-router && llm-router install
+pipx install llm-routing && llm-router install
 ```
 
 ### 2. (Optional) Add Provider Keys
@@ -206,28 +206,28 @@ Claude Opus (max reasoning, $$$$)
 
 #### Claude Code (Recommended)
 ```bash
-pipx install llm-router
+pipx install llm-routing
 llm-router install
 ```
 Get: auto-routing hooks, session tracking, quota display, decision analytics
 
 #### Gemini CLI
 ```bash
-pipx install llm-router
+pipx install llm-routing
 llm-router install --host gemini-cli
 ```
 Get: auto-routing hooks, savings tracking, free-first chaining, quota display
 
 #### Codex CLI
 ```bash
-pipx install llm-router
+pipx install llm-routing
 llm-router install --host codex
 ```
 Get: auto-routing hooks, cost tracking, Codex injected as free fallback in chains
 
 #### VS Code / Cursor
 ```bash
-pipx install llm-router
+pipx install llm-routing
 llm-router install --host vscode  # or --host cursor
 ```
 Get: MCP server with 48 tools available (routing is model-voluntary)
