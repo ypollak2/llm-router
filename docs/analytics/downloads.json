@@ -1,0 +1,15 @@
+{
+  "period": "recent",
+  "total_downloads": 0,
+  "packages": {
+    "llm-routing": {
+      "downloads": 0,
+      "description": "New package (current)"
+    },
+    "claude-code-llm-router": {
+      "downloads": 0,
+      "description": "Legacy package (deprecated)"
+    }
+  },
+  "fetched_at": "2026-04-28T14:34:55.150683"
+}
