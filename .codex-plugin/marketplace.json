@@ -3,12 +3,12 @@
   "owner": {
     "name": "Yali Pollak"
   },
-  "version": "7.6.1",
+  "version": "7.6.2",
   "plugins": [
     {
       "name": "llm-router",
       "description": "Route every Codex task to the cheapest capable model across 20+ AI providers. Tracks cross-session savings, enforces routing policy.",
-      "version": "7.6.1",
+      "version": "7.6.2",
       "source": {
         "source": "github",
         "repo": "ypollak2/llm-router"
