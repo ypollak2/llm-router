@@ -20,6 +20,7 @@ class TestDoctorCommand:
     def test_cmd_doctor_no_args(self, capsys):
         """Test doctor with no arguments runs full check."""
         with patch("llm_router.commands.doctor._run_doctor") as mock_run:
+            mock_run.return_value = (0, [])
             result = cmd_doctor([])
             assert result == 0
             mock_run.assert_called_once_with(host=None)
@@ -27,6 +28,7 @@ class TestDoctorCommand:
     def test_cmd_doctor_with_host_flag(self, capsys):
         """Test doctor with --host flag."""
         with patch("llm_router.commands.doctor._run_doctor") as mock_run:
+            mock_run.return_value = (0, [])
             result = cmd_doctor(["--host", "claude"])
             assert result == 0
             mock_run.assert_called_once_with(host="claude")
@@ -34,6 +36,7 @@ class TestDoctorCommand:
     def test_cmd_doctor_with_host_all(self, capsys):
         """Test doctor with --host all."""
         with patch("llm_router.commands.doctor._run_doctor") as mock_run:
+            mock_run.return_value = (0, [])
             result = cmd_doctor(["--host", "all"])
             assert result == 0
             mock_run.assert_called_once_with(host="all")
@@ -41,6 +44,7 @@ class TestDoctorCommand:
     def test_cmd_doctor_missing_host_value(self, capsys):
         """Test doctor with --host but no value."""
         with patch("llm_router.commands.doctor._run_doctor") as mock_run:
+            mock_run.return_value = (0, [])
             result = cmd_doctor(["--host"])
             assert result == 0
             mock_run.assert_called_once_with(host=None)
@@ -227,6 +231,7 @@ class TestDoctorIntegration:
     def test_doctor_formatting(self, capsys):
         """Test that doctor output is properly formatted."""
         with patch("llm_router.commands.doctor._run_doctor") as mock_run:
+            mock_run.return_value = (0, [])
             cmd_doctor([])
             capsys.readouterr().out
 
