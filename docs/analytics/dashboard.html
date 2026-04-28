@@ -1,0 +1,383 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LLM Router — Download Statistics Dashboard</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 900px;
+            width: 100%;
+        }
+
+        .header {
+            text-align: center;
+            color: white;
+            margin-bottom: 40px;
+        }
+
+        .header h1 {
+            font-size: 2.5em;
+            margin-bottom: 10px;
+            font-weight: 700;
+        }
+
+        .header p {
+            font-size: 1.1em;
+            opacity: 0.9;
+        }
+
+        .card {
+            background: white;
+            border-radius: 16px;
+            padding: 40px;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+            margin-bottom: 30px;
+        }
+
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 30px;
+            margin-bottom: 40px;
+        }
+
+        .stat-box {
+            text-align: center;
+        }
+
+        .stat-number {
+            font-size: 2.8em;
+            font-weight: 700;
+            color: #667eea;
+            margin-bottom: 10px;
+        }
+
+        .stat-label {
+            font-size: 1em;
+            color: #666;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            font-weight: 600;
+        }
+
+        .stat-description {
+            font-size: 0.85em;
+            color: #999;
+            margin-top: 8px;
+        }
+
+        .packages {
+            margin-top: 40px;
+            padding-top: 40px;
+            border-top: 1px solid #eee;
+        }
+
+        .packages h2 {
+            font-size: 1.5em;
+            color: #333;
+            margin-bottom: 25px;
+        }
+
+        .package-row {
+            display: grid;
+            grid-template-columns: 1fr 200px 150px;
+            gap: 20px;
+            align-items: center;
+            padding: 20px;
+            background: #f8f9fa;
+            border-radius: 12px;
+            margin-bottom: 15px;
+        }
+
+        .package-info h3 {
+            font-size: 1.1em;
+            color: #333;
+            margin-bottom: 5px;
+        }
+
+        .package-info p {
+            font-size: 0.9em;
+            color: #999;
+        }
+
+        .package-downloads {
+            font-size: 1.5em;
+            font-weight: 700;
+            color: #667eea;
+        }
+
+        .package-percentage {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .progress-bar {
+            width: 100%;
+            height: 8px;
+            background: #e0e0e0;
+            border-radius: 4px;
+            overflow: hidden;
+        }
+
+        .progress-fill {
+            height: 100%;
+            background: linear-gradient(90deg, #667eea, #764ba2);
+            transition: width 0.3s ease;
+        }
+
+        .percentage-text {
+            font-weight: 600;
+            color: #667eea;
+            min-width: 50px;
+            text-align: right;
+        }
+
+        .metadata {
+            margin-top: 30px;
+            padding: 20px;
+            background: #f8f9fa;
+            border-radius: 12px;
+            border-left: 4px solid #667eea;
+        }
+
+        .metadata-row {
+            display: flex;
+            justify-content: space-between;
+            padding: 8px 0;
+            font-size: 0.95em;
+        }
+
+        .metadata-label {
+            color: #666;
+            font-weight: 600;
+        }
+
+        .metadata-value {
+            color: #333;
+        }
+
+        .loading {
+            text-align: center;
+            padding: 40px;
+            color: #666;
+        }
+
+        .loading::after {
+            content: '';
+            display: inline-block;
+            width: 20px;
+            height: 20px;
+            border: 3px solid #e0e0e0;
+            border-top-color: #667eea;
+            border-radius: 50%;
+            animation: spin 0.8s linear infinite;
+            margin-left: 10px;
+            vertical-align: middle;
+        }
+
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+
+        .error {
+            background: #fee;
+            color: #c33;
+            padding: 20px;
+            border-radius: 8px;
+            border-left: 4px solid #c33;
+        }
+
+        .footer {
+            text-align: center;
+            color: white;
+            margin-top: 40px;
+            font-size: 0.9em;
+            opacity: 0.8;
+        }
+
+        .footer a {
+            color: white;
+            text-decoration: none;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.5);
+        }
+
+        .footer a:hover {
+            border-bottom-color: white;
+        }
+
+        @media (max-width: 768px) {
+            .header h1 {
+                font-size: 1.8em;
+            }
+
+            .package-row {
+                grid-template-columns: 1fr;
+                gap: 15px;
+            }
+
+            .stat-number {
+                font-size: 2em;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>📊 LLM Router Downloads</h1>
+            <p>Combined adoption metrics across all packages</p>
+        </div>
+
+        <div class="card" id="content">
+            <div class="loading">Loading statistics...</div>
+        </div>
+
+        <div class="footer">
+            <p>
+                🔗 <a href="https://github.com/ypollak2/llm-router">GitHub</a> •
+                <a href="https://pypi.org/project/llm-routing/">PyPI</a> •
+                <a href="https://github.com/ypollak2/llm-router#readme">Documentation</a>
+            </p>
+            <p style="margin-top: 15px; opacity: 0.6;">
+                Last updated: <span id="updated-time">loading...</span>
+            </p>
+        </div>
+    </div>
+
+    <script>
+        async function loadStats() {
+            try {
+                // Try to load from local file first
+                const response = await fetch('./downloads.json');
+                if (!response.ok) throw new Error('Failed to load stats');
+
+                const stats = await response.json();
+                renderStats(stats);
+            } catch (error) {
+                console.error('Error loading stats:', error);
+                showError('Could not load download statistics. Please try again later.');
+            }
+        }
+
+        function renderStats(stats) {
+            const { total_downloads, packages, fetched_at, period } = stats;
+
+            const date = new Date(fetched_at);
+            const formattedDate = date.toLocaleDateString('en-US', {
+                year: 'numeric',
+                month: 'short',
+                day: 'numeric',
+                hour: '2-digit',
+                minute: '2-digit'
+            });
+
+            document.getElementById('updated-time').textContent = formattedDate;
+
+            let packagesHTML = Object.entries(packages).map(([name, data]) => {
+                const percentage = total_downloads > 0
+                    ? ((data.downloads / total_downloads) * 100).toFixed(1)
+                    : 0;
+
+                return `
+                    <div class="package-row">
+                        <div class="package-info">
+                            <h3>${escapeHtml(name)}</h3>
+                            <p>${escapeHtml(data.description)}</p>
+                        </div>
+                        <div class="package-downloads">
+                            ${formatNumber(data.downloads)}
+                        </div>
+                        <div class="package-percentage">
+                            <div style="flex: 1;">
+                                <div class="progress-bar">
+                                    <div class="progress-fill" style="width: ${percentage}%"></div>
+                                </div>
+                            </div>
+                            <div class="percentage-text">${percentage}%</div>
+                        </div>
+                    </div>
+                `;
+            }).join('');
+
+            const html = `
+                <div class="stats-grid">
+                    <div class="stat-box">
+                        <div class="stat-number">${formatNumber(total_downloads)}</div>
+                        <div class="stat-label">Total Downloads</div>
+                        <div class="stat-description">${period === 'recent' ? 'Last 6 weeks' : period}</div>
+                    </div>
+                    <div class="stat-box">
+                        <div class="stat-number">${Object.keys(packages).length}</div>
+                        <div class="stat-label">Packages Tracked</div>
+                        <div class="stat-description">Including legacy</div>
+                    </div>
+                </div>
+
+                <div class="packages">
+                    <h2>📦 Package Breakdown</h2>
+                    ${packagesHTML}
+                </div>
+
+                <div class="metadata">
+                    <div class="metadata-row">
+                        <span class="metadata-label">Period:</span>
+                        <span class="metadata-value">${period === 'recent' ? 'Last 6 weeks' : period}</span>
+                    </div>
+                    <div class="metadata-row">
+                        <span class="metadata-label">Updated:</span>
+                        <span class="metadata-value">${formattedDate}</span>
+                    </div>
+                    <div class="metadata-row">
+                        <span class="metadata-label">Data Source:</span>
+                        <span class="metadata-value"><a href="https://pypistats.org" style="color: #667eea;">PyPI Stats</a></span>
+                    </div>
+                </div>
+            `;
+
+            document.getElementById('content').innerHTML = html;
+        }
+
+        function showError(message) {
+            document.getElementById('content').innerHTML = `
+                <div class="error">
+                    <strong>⚠️ Error:</strong> ${escapeHtml(message)}
+                </div>
+            `;
+        }
+
+        function formatNumber(num) {
+            return num.toLocaleString('en-US');
+        }
+
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+
+        // Load stats on page load
+        document.addEventListener('DOMContentLoaded', loadStats);
+
+        // Refresh every 5 minutes
+        setInterval(loadStats, 5 * 60 * 1000);
+    </script>
+</body>
+</html>

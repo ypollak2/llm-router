@@ -1,0 +1,88 @@
+name: Update Download Statistics
+
+on:
+  schedule:
+    # Run every Sunday at 00:00 UTC
+    - cron: '0 0 * * 0'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  update-stats:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v4
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install 3.11
+
+      - name: Install dependencies
+        run: uv sync
+
+      - name: Fetch combined download statistics
+        id: stats
+        run: |
+          STATS_JSON=$(uv run llm-router stats --format json)
+          echo "stats=$STATS_JSON" >> "$GITHUB_OUTPUT"
+
+          # Extract values for badge/display
+          TOTAL=$(echo "$STATS_JSON" | python3 -c "import sys, json; print(json.load(sys.stdin)['total_downloads'])")
+          echo "total_downloads=$TOTAL" >> "$GITHUB_OUTPUT"
+
+          # Pretty print for commit message
+          echo "$STATS_JSON" | python3 -m json.tool > /tmp/stats.json
+          echo "stats_formatted<<EOF" >> "$GITHUB_OUTPUT"
+          cat /tmp/stats.json >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
+
+      - name: Create/update stats file
+        run: |
+          mkdir -p docs/analytics
+          echo '${{ steps.stats.outputs.stats }}' | python3 -m json.tool > docs/analytics/downloads.json
+
+          # Create markdown summary
+          cat > docs/analytics/downloads.md << 'EOF'
+          # Download Statistics
+
+          > Last updated: $(date -u +'%Y-%m-%d %H:%M:%S UTC')
+
+          ## Combined Downloads
+
+          **Total**: ${{ steps.stats.outputs.total_downloads }} downloads
+
+          ```json
+          ${{ steps.stats.outputs.stats }}
+          ```
+
+          ## About These Statistics
+
+          - **llm-routing**: Current package (new naming convention)
+          - **claude-code-llm-router**: Legacy package (being deprecated)
+
+          Combined stats show total adoption across both package names as we transition users to the new package.
+          EOF
+
+      - name: Check for changes
+        id: changes
+        run: |
+          if git diff --quiet docs/analytics/; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Commit and push changes
+        if: steps.changes.outputs.changed == 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add docs/analytics/
+          git commit -m "chore: update download statistics (${{ steps.stats.outputs.total_downloads }} total downloads)"
+          git push

@@ -7,6 +7,7 @@
 [![PyPI](https://img.shields.io/pypi/v/llm-routing?style=flat-square)](https://pypi.org/project/llm-routing/)
 [![Tests](https://img.shields.io/github/actions/workflow/status/ypollak2/llm-router/ci.yml?style=flat-square&label=tests)](https://github.com/ypollak2/llm-router/actions)
 [![Downloads](https://img.shields.io/pypi/dm/llm-routing?style=flat-square)](https://pypi.org/project/llm-routing/)
+[![Combined Package Stats](https://img.shields.io/badge/stats-llm--routing%20%2B%20llm--router-informational?style=flat-square)](https://github.com/ypollak2/llm-router#combined-download-statistics)
 [![Python](https://img.shields.io/badge/python-3.10–3.13-blue?style=flat-square)](https://pypi.org/project/llm-routing/)
 [![MCP](https://img.shields.io/badge/MCP-1.0+-purple?style=flat-square)](https://modelcontextprotocol.io)
 [![License](https://img.shields.io/badge/license-MIT-green?style=flat-square)](LICENSE)
@@ -26,6 +27,7 @@
 - [Supported Tools](#supported-tools)
 - [Configuration](#configuration)
 - [Monitoring & Optimization](#monitoring--optimization)
+- [Combined Download Statistics](#combined-download-statistics)
 - [MCP Tools Reference](#mcp-tools-reference-48-total)
 - [Architecture & Development](#architecture--development)
 
@@ -523,6 +525,62 @@ See **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** for:
 - Judge scoring system (quality monitoring)
 - Quality trend tracking (performance degradation detection)
 - Budget pressure algorithm (quota-aware routing)
+
+---
+
+## Combined Download Statistics
+
+The `llm-router stats` command aggregates download statistics across the current package (`llm-routing`) and its legacy predecessor (`claude-code-llm-router`), providing unified adoption metrics.
+
+### View Statistics
+
+```bash
+# Display combined downloads for the last 6 weeks
+llm-router stats
+
+# View stats for a specific period
+llm-router stats --period last_month
+llm-router stats --period last_quarter
+llm-router stats --period all_time
+
+# Output as markdown (for README/docs)
+llm-router stats --format markdown
+
+# Output as JSON (for automation/dashboards)
+llm-router stats --format json
+```
+
+### Example Output
+
+```
+Combined Download Statistics
+========================================
+Total Downloads: 2,450
+Period: recent
+Breakdown:
+- llm-routing: 1,500 (61.2%)
+  New package (current)
+- claude-code-llm-router: 950 (38.8%)
+  Legacy package (deprecated)
+```
+
+### Why Both Packages?
+
+When the package was migrated from `claude-code-llm-router` to `llm-routing`, existing users with the legacy package continue to receive updates. The combined stats show:
+- **Total adoption** across both package names
+- **Migration progress** (new vs legacy usage ratio)
+- **Unified impact** for documentation and marketing
+
+### CI/CD Integration
+
+Integrate into your release pipeline to auto-update badges:
+
+```bash
+# Fetch combined stats and update a badge or config
+llm-router stats --format json | jq '.total_downloads'
+
+# Output: 2450
+```
 
 ---
 

@@ -1,0 +1,38 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "claude-code-llm-router"
+version = "1.0.0"
+description = "DEPRECATED: Use 'llm-routing' instead. This package provides redirect to the new package."
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+authors = [
+    {name = "Yali Pollak", email = "yali@example.com"}
+]
+keywords = ["llm", "routing", "ai", "claude", "deprecated"]
+classifiers = [
+    "Development Status :: 7 - Inactive",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Natural Language :: English",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+
+dependencies = [
+    "llm-routing>=7.6.2",  # Pull in the new package
+]
+
+[project.urls]
+Repository = "https://github.com/ypollak2/llm-router"
+Documentation = "https://github.com/ypollak2/llm-router"
+Changelog = "https://github.com/ypollak2/llm-router/blob/main/CHANGELOG.md"
+"Migration Guide" = "https://github.com/ypollak2/llm-router#deprecation-notice"

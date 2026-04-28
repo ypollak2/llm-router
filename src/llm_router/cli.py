@@ -37,6 +37,7 @@ Usage:
     llm-router replay [--limit N]    — full transcript of routing decisions this session
     llm-router snapshot [--date DATE] — mid-session monitoring: accuracy trends and gap detection
     llm-router retrospect [--weekly] — IAF-style session debrief with routing directives
+    llm-router stats [--period recent] — show combined download stats (llm-routing + claude-code-llm-router)
     llm-router verify                — end-to-end health check (30 seconds)
 """
 
@@ -542,6 +543,9 @@ def main() -> None:
     elif args and args[0] == "snapshot":
         from llm_router.commands.snapshot import main as _snapshot_main
         _snapshot_main(args[1:])
+    elif args and args[0] == "stats":
+        from llm_router.commands.stats import cmd_stats
+        sys.exit(cmd_stats(args[1:]))
     else:
         # Default: start the MCP server (original behavior)
         from llm_router.server import main as _mcp_main
