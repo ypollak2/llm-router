@@ -6,7 +6,7 @@
 
 [![PyPI](https://img.shields.io/pypi/v/llm-routing?style=flat-square)](https://pypi.org/project/llm-routing/)
 [![Tests](https://img.shields.io/github/actions/workflow/status/ypollak2/llm-router/ci.yml?style=flat-square&label=tests)](https://github.com/ypollak2/llm-router/actions)
-[![Downloads](https://img.shields.io/badge/downloads-tracking%20enabled-blue?style=flat-square)](docs/analytics/downloads.md)
+[![Downloads](https://img.shields.io/pypi/dm/llm-routing?style=flat-square)](https://pypi.org/project/llm-routing/)
 [![Combined Package Stats](https://img.shields.io/badge/stats-llm--routing%20%2B%20llm--router-informational?style=flat-square)](https://github.com/ypollak2/llm-router#combined-download-statistics)
 [![Python](https://img.shields.io/badge/python-3.10–3.13-blue?style=flat-square)](https://pypi.org/project/llm-routing/)
 [![MCP](https://img.shields.io/badge/MCP-1.0+-purple?style=flat-square)](https://modelcontextprotocol.io)
