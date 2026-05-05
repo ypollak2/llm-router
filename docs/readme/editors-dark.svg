@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 890 110" fill="none">
+  
+    <rect x="12" y="10" width="132" height="90" rx="10" fill="#34D399" opacity="0.06" stroke="#34D399" stroke-width="1"/>
+    <text x="78" y="38" text-anchor="middle" font-family="system-ui, sans-serif" font-size="13" font-weight="700" fill="#e6edf3">Claude Code</text>
+    <rect x="48" y="48" width="60" height="20" rx="10" fill="#34D399" opacity="0.2"/>
+    <text x="78" y="62" text-anchor="middle" font-family="system-ui, sans-serif" font-size="10" font-weight="600" fill="#34D399">Full</text>
+    <text x="78" y="88" text-anchor="middle" font-family="system-ui, sans-serif" font-size="10" fill="#8b949e">Auto-routing</text>
+    <rect x="158" y="10" width="132" height="90" rx="10" fill="#34D399" opacity="0.06" stroke="#34D399" stroke-width="1"/>
+    <text x="224" y="38" text-anchor="middle" font-family="system-ui, sans-serif" font-size="13" font-weight="700" fill="#e6edf3">Gemini CLI</text>
+    <rect x="194" y="48" width="60" height="20" rx="10" fill="#34D399" opacity="0.2"/>
+    <text x="224" y="62" text-anchor="middle" font-family="system-ui, sans-serif" font-size="10" font-weight="600" fill="#34D399">Full</text>
+    <text x="224" y="88" text-anchor="middle" font-family="system-ui, sans-serif" font-size="10" fill="#8b949e">Auto-routing</text>
+    <rect x="304" y="10" width="132" height="90" rx="10" fill="#34D399" opacity="0.06" stroke="#34D399" stroke-width="1"/>
+    <text x="370" y="38" text-anchor="middle" font-family="system-ui, sans-serif" font-size="13" font-weight="700" fill="#e6edf3">Codex CLI</text>
+    <rect x="340" y="48" width="60" height="20" rx="10" fill="#34D399" opacity="0.2"/>
+    <text x="370" y="62" text-anchor="middle" font-family="system-ui, sans-serif" font-size="10" font-weight="600" fill="#34D399">Full</text>
+    <text x="370" y="88" text-anchor="middle" font-family="system-ui, sans-serif" font-size="10" fill="#8b949e">Auto-routing</text>
+    <rect x="450" y="10" width="132" height="90" rx="10" fill="#FBBF24" opacity="0.06" stroke="#FBBF24" stroke-width="1"/>
+    <text x="516" y="38" text-anchor="middle" font-family="system-ui, sans-serif" font-size="13" font-weight="700" fill="#e6edf3">VS Code</text>
+    <rect x="486" y="48" width="60" height="20" rx="10" fill="#FBBF24" opacity="0.2"/>
+    <text x="516" y="62" text-anchor="middle" font-family="system-ui, sans-serif" font-size="10" font-weight="600" fill="#FBBF24">MCP</text>
+    <text x="516" y="88" text-anchor="middle" font-family="system-ui, sans-serif" font-size="10" fill="#8b949e">48 tools</text>
+    <rect x="596" y="10" width="132" height="90" rx="10" fill="#FBBF24" opacity="0.06" stroke="#FBBF24" stroke-width="1"/>
+    <text x="662" y="38" text-anchor="middle" font-family="system-ui, sans-serif" font-size="13" font-weight="700" fill="#e6edf3">Cursor</text>
+    <rect x="632" y="48" width="60" height="20" rx="10" fill="#FBBF24" opacity="0.2"/>
+    <text x="662" y="62" text-anchor="middle" font-family="system-ui, sans-serif" font-size="10" font-weight="600" fill="#FBBF24">MCP</text>
+    <text x="662" y="88" text-anchor="middle" font-family="system-ui, sans-serif" font-size="10" fill="#8b949e">48 tools</text>
+    <rect x="742" y="10" width="132" height="90" rx="10" fill="#FBBF24" opacity="0.06" stroke="#FBBF24" stroke-width="1"/>
+    <text x="808" y="38" text-anchor="middle" font-family="system-ui, sans-serif" font-size="13" font-weight="700" fill="#e6edf3">Any MCP</text>
+    <rect x="778" y="48" width="60" height="20" rx="10" fill="#FBBF24" opacity="0.2"/>
+    <text x="808" y="62" text-anchor="middle" font-family="system-ui, sans-serif" font-size="10" font-weight="600" fill="#FBBF24">MCP</text>
+    <text x="808" y="88" text-anchor="middle" font-family="system-ui, sans-serif" font-size="10" fill="#8b949e">48 tools</text>
+</svg>
