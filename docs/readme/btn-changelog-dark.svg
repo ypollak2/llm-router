@@ -1,4 +1,11 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 110 36" fill="none">
-  <rect width="110" height="36" rx="18" fill="#818CF8" opacity="0.1" stroke="#818CF8" stroke-width="1"/>
+  <style>
+    @keyframes btnShine {
+      0%, 100% { stroke-opacity: 0.5; }
+      50% { stroke-opacity: 1; }
+    }
+    .btn-border { animation: btnShine 3s ease-in-out infinite; }
+  </style>
+  <rect class="btn-border" width="110" height="36" rx="18" fill="#818CF8" opacity="0.1" stroke="#818CF8" stroke-width="1"/>
   <text x="55" y="23" text-anchor="middle" font-family="system-ui, sans-serif" font-size="13" font-weight="600" fill="#818CF8">Changelog</text>
 </svg>
