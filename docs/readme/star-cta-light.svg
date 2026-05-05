@@ -9,15 +9,12 @@
 
   <rect width="420" height="48" rx="12" fill="#f6f8fa" stroke="#d1d9e0" stroke-width="1"/>
 
-  <!-- Star icon -->
-  <g transform="translate(140 10)">
-    <path class="star" d="M14 1.2l3.4 6.9 7.6 1.1-5.5 5.4 1.3 7.6L14 18.6l-6.8 3.6 1.3-7.6-5.5-5.4 7.6-1.1L14 1.2z"
+  <!-- Star icon (scaled 0.75x, left of text) -->
+  <g transform="translate(52 14)">
+    <path class="star" d="M10.5 0.9l2.55 5.18 5.7 0.83-4.13 4.03 0.98 5.7L10.5 13.95l-5.1 2.69 0.98-5.7-4.13-4.03 5.7-0.83L10.5 0.9z"
           fill="#eef1f5" stroke="#656d76" stroke-width="0.8"/>
   </g>
 
-  <!-- Text -->
-  <text x="210" y="24" text-anchor="middle" font-family="system-ui, sans-serif" font-size="13" font-weight="700" fill="#1f2328">
-    <tspan dx="24">Star on GitHub</tspan>
-    <tspan dx="8" font-weight="400" fill="#656d76">if llm-router saves your quota</tspan>
-  </text>
+  <!-- Text block, left-aligned after star -->
+  <text x="78" y="28" font-family="system-ui, sans-serif" font-size="13" font-weight="700" fill="#1f2328">Star on GitHub<tspan dx="6" font-weight="400" fill="#656d76">if llm-router saves your quota</tspan></text>
 </svg>
