@@ -18,10 +18,20 @@
   <a href="https://pypi.org/project/llm-routing/"><img src="https://img.shields.io/pypi/v/llm-routing?style=flat-square&color=4F46E5" alt="PyPI"></a>
   <a href="https://github.com/ypollak2/llm-router/actions"><img src="https://img.shields.io/github/actions/workflow/status/ypollak2/llm-router/ci.yml?style=flat-square&label=tests" alt="Tests"></a>
   <a href="https://github.com/ypollak2/llm-router/stargazers"><img src="https://img.shields.io/github/stars/ypollak2/llm-router?style=flat-square&color=F59E0B" alt="Stars"></a>
-  <a href="https://pypi.org/project/llm-routing/"><img src="https://img.shields.io/pypi/dm/llm-routing?style=flat-square&color=10B981" alt="Downloads"></a>
+  <a href="https://pepy.tech/projects/claude-code-llm-router"><img src="https://static.pepy.tech/personalized-badge/claude-code-llm-router?period=total&units=INTERNATIONAL_SYSTEM&left_color=BLACK&right_color=GREEN&left_text=downloads" alt="Downloads"></a>
   <a href="https://pypi.org/project/llm-routing/"><img src="https://img.shields.io/badge/python-3.10–3.13-3572A5?style=flat-square" alt="Python"></a>
   <a href="https://modelcontextprotocol.io"><img src="https://img.shields.io/badge/MCP-1.0+-8B5CF6?style=flat-square" alt="MCP"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-10B981?style=flat-square" alt="License"></a>
+</p>
+
+<p align="center">
+  <a href="https://github.com/ypollak2/llm-router/stargazers">
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="docs/readme/star-cta-dark.svg">
+      <source media="(prefers-color-scheme: light)" srcset="docs/readme/star-cta-light.svg">
+      <img src="docs/readme/star-cta-light.svg" alt="Star llm-router on GitHub" width="420"/>
+    </picture>
+  </a>
 </p>
 
 ---
@@ -238,6 +248,14 @@ llm-router exposes 60 MCP tools organized by function:
 
 ## Savings: How It Works
 
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/readme/savings-dark.svg">
+    <source media="(prefers-color-scheme: light)" srcset="docs/readme/savings-light.svg">
+    <img src="docs/readme/savings-light.svg" alt="Animated savings breakdown showing 60-80% typical cost reduction with token distribution across free, budget, and premium tiers." width="100%"/>
+  </picture>
+</p>
+
 Savings are calculated by comparing actual spend against a baseline of routing every task to Claude Sonnet/Opus.
 
 **Methodology:**
@@ -354,16 +372,6 @@ uv run ruff check src/ tests/   # Lint
 | `claude-code-llm-router` | Deprecated legacy package (redirects to `llm-routing`) |
 
 ---
-
-<p align="center">
-  <a href="https://github.com/ypollak2/llm-router/stargazers">
-    <picture>
-      <source media="(prefers-color-scheme: dark)" srcset="docs/readme/star-cta-dark.svg">
-      <source media="(prefers-color-scheme: light)" srcset="docs/readme/star-cta-light.svg">
-      <img src="docs/readme/star-cta-light.svg" alt="Star llm-router on GitHub" width="420"/>
-    </picture>
-  </a>
-</p>
 
 <p align="center">
   <a href="https://github.com/ypollak2/llm-router/issues">Issues</a> · <a href="https://pypi.org/project/llm-routing/">PyPI</a> · <a href="CHANGELOG.md">Changelog</a>

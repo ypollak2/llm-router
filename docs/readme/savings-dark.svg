@@ -1,0 +1,74 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 890 200" fill="none">
+  <style>
+    @keyframes countUp {
+      0% { opacity: 0; transform: translateY(10px); }
+      100% { opacity: 1; transform: translateY(0); }
+    }
+    @keyframes barGrow {
+      0% { transform: scaleX(0); }
+      100% { transform: scaleX(1); }
+    }
+    @keyframes shimmer {
+      0% { opacity: 0.75; }
+      50% { opacity: 1; }
+      100% { opacity: 0.75; }
+    }
+    @keyframes numberPulse {
+      0%, 100% { transform: scale(1); }
+      50% { transform: scale(1.03); }
+    }
+    .big-stat { transform-box: fill-box; transform-origin: center center; animation: countUp 0.8s ease-out both, numberPulse 4s ease-in-out 1s infinite; }
+    .bar-free { transform-origin: left center; animation: barGrow 0.8s ease-out 0.2s both; }
+    .bar-budget { transform-origin: left center; animation: barGrow 0.8s ease-out 0.5s both; }
+    .bar-premium { transform-origin: left center; animation: barGrow 0.8s ease-out 0.8s both; }
+    .bar-label { animation: countUp 0.5s ease-out 1.2s both; }
+    .shimmer { animation: shimmer 3s ease-in-out infinite; }
+  </style>
+
+  <rect width="890" height="200" rx="14" fill="#161b22" stroke="#30363d" stroke-width="1"/>
+
+  <!-- Left: big stat with pulse -->
+  <text x="125" y="55" text-anchor="middle" font-family="system-ui, sans-serif" font-size="13" font-weight="600" fill="#8b949e" opacity="0.8">PROVEN SAVINGS</text>
+  <g class="big-stat">
+    <text x="125" y="115" text-anchor="middle" font-family="system-ui, sans-serif" font-size="52" font-weight="800" fill="#22D3EE">60&#8211;80%</text>
+  </g>
+  <text x="125" y="140" text-anchor="middle" font-family="system-ui, sans-serif" font-size="13" fill="#8b949e">cost reduction</text>
+  <text x="125" y="160" text-anchor="middle" font-family="system-ui, sans-serif" font-size="11" fill="#8b949e">Actual vs baseline spend</text>
+  <text x="125" y="178" text-anchor="middle" font-family="system-ui, sans-serif" font-size="11" fill="#8b949e">Cumulative across sessions</text>
+
+  <!-- Divider -->
+  <line x1="240" y1="30" x2="240" y2="170" stroke="#30363d" stroke-width="1" opacity="0.5"/>
+
+  <!-- Right: token distribution -->
+  <text x="565" y="42" text-anchor="middle" font-family="system-ui, sans-serif" font-size="13" font-weight="600" fill="#8b949e" opacity="0.8">TOKEN DISTRIBUTION</text>
+
+  <!-- Animated stacked bars -->
+  <g class="bar-free">
+    <rect x="260" y="60" width="180" height="36" rx="6" fill="#34D399" class="shimmer"/>
+    <text x="350" y="83" text-anchor="middle" font-family="system-ui, sans-serif" font-size="13" font-weight="700" fill="white">31% Free</text>
+  </g>
+  <g class="bar-budget">
+    <rect x="440" y="60" width="220" height="36" fill="#FBBF24" class="shimmer"/>
+    <text x="550" y="83" text-anchor="middle" font-family="system-ui, sans-serif" font-size="13" font-weight="700" fill="white">38% Budget</text>
+  </g>
+  <g class="bar-premium">
+    <rect x="660" y="60" width="180" height="36" rx="6" fill="#F87171" class="shimmer"/>
+    <text x="750" y="83" text-anchor="middle" font-family="system-ui, sans-serif" font-size="13" font-weight="700" fill="white">31% Premium</text>
+  </g>
+
+  <!-- Labels under bar (fade in after bars) -->
+  <g class="bar-label">
+    <text x="350" y="120" text-anchor="middle" font-family="system-ui, sans-serif" font-size="11" font-weight="700" fill="#34D399">Free</text>
+    <text x="350" y="140" text-anchor="middle" font-family="system-ui, sans-serif" font-size="10" fill="#8b949e">Ollama + Codex</text>
+  </g>
+  <g class="bar-label">
+    <text x="550" y="120" text-anchor="middle" font-family="system-ui, sans-serif" font-size="11" font-weight="700" fill="#FBBF24">Low cost</text>
+    <text x="550" y="140" text-anchor="middle" font-family="system-ui, sans-serif" font-size="10" fill="#8b949e">Flash + GPT-4o-mini</text>
+  </g>
+  <g class="bar-label">
+    <text x="750" y="120" text-anchor="middle" font-family="system-ui, sans-serif" font-size="11" font-weight="700" fill="#F87171">Premium</text>
+    <text x="750" y="140" text-anchor="middle" font-family="system-ui, sans-serif" font-size="10" fill="#8b949e">GPT-4o + Claude</text>
+  </g>
+
+  <text x="565" y="180" text-anchor="middle" font-family="system-ui, sans-serif" font-size="12" fill="#8b949e">Savings vary by workload &#8212; see methodology below</text>
+</svg>

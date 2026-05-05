@@ -125,46 +125,35 @@ def write_svg(name: str, content_fn):
 # ── 1. Hero Banner ─────────────────────────────────────────────────────────
 
 def hero_banner(c, mode):
+    # Route path definitions — dots follow these exactly via <animateMotion>
+    # Prompt → Classifier (horizontal)
+    path_input = "M200,168 L260,168"
+    # Classifier → Free tier (horizontal)
+    path_free  = "M430,148 L520,148"
+    # Classifier → Budget tier (diagonal down-right)
+    path_budget = "M430,168 L520,208"
+    # Classifier → Premium tier (steeper diagonal)
+    path_premium = "M430,188 L520,268"
+
     return f'''<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 320" fill="none">
   <style>
-    @keyframes flowDot {{
-      0% {{ opacity: 0; transform: translateX(-20px); }}
-      20% {{ opacity: 1; }}
-      80% {{ opacity: 1; }}
-      100% {{ opacity: 0; transform: translateX(20px); }}
-    }}
     @keyframes pulse {{
       0%, 100% {{ opacity: 0.12; }}
       50% {{ opacity: 0.22; }}
     }}
     @keyframes glow {{
       0%, 100% {{ filter: drop-shadow(0 0 2px {c['primary']}00); }}
-      50% {{ filter: drop-shadow(0 0 8px {c['primary']}66); }}
+      50% {{ filter: drop-shadow(0 0 6px {c['primary']}44); }}
     }}
-    @keyframes tierSlide {{
-      0% {{ opacity: 0; transform: translateX(-10px); }}
-      100% {{ opacity: 1; transform: translateX(0); }}
+    @keyframes tierFadeIn {{
+      0% {{ opacity: 0; }}
+      100% {{ opacity: 1; }}
     }}
-    @keyframes costPulse {{
-      0%, 100% {{ opacity: 0.6; }}
-      50% {{ opacity: 1; }}
-    }}
-    @keyframes pillFloat {{
-      0%, 100% {{ transform: translateY(0); }}
-      50% {{ transform: translateY(-3px); }}
-    }}
-    .flow-dot {{ animation: flowDot 2s ease-in-out infinite; }}
-    .flow-dot-2 {{ animation: flowDot 2s ease-in-out 0.7s infinite; }}
-    .flow-dot-3 {{ animation: flowDot 2s ease-in-out 1.4s infinite; }}
     .classifier-bg {{ animation: pulse 3s ease-in-out infinite; }}
     .classifier-box {{ animation: glow 3s ease-in-out infinite; }}
-    .tier-free {{ animation: tierSlide 0.6s ease-out 0.3s both; }}
-    .tier-budget {{ animation: tierSlide 0.6s ease-out 0.5s both; }}
-    .tier-premium {{ animation: tierSlide 0.6s ease-out 0.7s both; }}
-    .cost-bar {{ animation: costPulse 4s ease-in-out infinite; }}
-    .pill-1 {{ animation: pillFloat 3s ease-in-out infinite; }}
-    .pill-2 {{ animation: pillFloat 3s ease-in-out 0.5s infinite; }}
-    .pill-3 {{ animation: pillFloat 3s ease-in-out 1s infinite; }}
+    .tier-free {{ animation: tierFadeIn 0.5s ease-out 0.3s both; }}
+    .tier-budget {{ animation: tierFadeIn 0.5s ease-out 0.5s both; }}
+    .tier-premium {{ animation: tierFadeIn 0.5s ease-out 0.7s both; }}
   </style>
 
   <defs>
@@ -177,10 +166,14 @@ def hero_banner(c, mode):
       <stop offset="50%" stop-color="{c['budget']}"/>
       <stop offset="100%" stop-color="{c['premium']}"/>
     </linearGradient>
-    <marker id="arrowHead" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="{c['primary']}"/></marker>
     <marker id="arrowFree" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="{c['free']}"/></marker>
     <marker id="arrowBudget" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="{c['budget']}"/></marker>
     <marker id="arrowPremium" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="{c['premium']}"/></marker>
+    <!-- Motion paths for routing dots -->
+    <path id="pathInput" d="{path_input}" fill="none"/>
+    <path id="pathFree" d="{path_free}" fill="none"/>
+    <path id="pathBudget" d="{path_budget}" fill="none"/>
+    <path id="pathPremium" d="{path_premium}" fill="none"/>
   </defs>
 
   <rect width="900" height="320" rx="16" fill="url(#heroBg)"/>
@@ -195,10 +188,16 @@ def hero_banner(c, mode):
   <text x="130" y="164" text-anchor="middle" font-family="system-ui, sans-serif" font-size="11" fill="{c['text2']}">User Prompt</text>
   <text x="130" y="182" text-anchor="middle" font-family="monospace" font-size="10" fill="{c['text']}">"fix the auth bug"</text>
 
-  <!-- Arrow 1 with flowing dots -->
+  <!-- Arrow: Prompt → Classifier (horizontal) -->
   <line x1="200" y1="168" x2="260" y2="168" stroke="{c['primary']}" stroke-width="2" stroke-opacity="0.3"/>
-  <circle class="flow-dot" cx="230" cy="168" r="3" fill="{c['primary']}"/>
-  <circle class="flow-dot-2" cx="230" cy="168" r="3" fill="{c['primary']}"/>
+  <circle r="3" fill="{c['primary']}">
+    <animateMotion dur="2s" repeatCount="indefinite" begin="0s"><mpath href="#pathInput"/></animateMotion>
+    <animate attributeName="opacity" values="0;1;1;0" keyTimes="0;0.15;0.85;1" dur="2s" repeatCount="indefinite" begin="0s"/>
+  </circle>
+  <circle r="3" fill="{c['primary']}">
+    <animateMotion dur="2s" repeatCount="indefinite" begin="0.7s"><mpath href="#pathInput"/></animateMotion>
+    <animate attributeName="opacity" values="0;1;1;0" keyTimes="0;0.15;0.85;1" dur="2s" repeatCount="indefinite" begin="0.7s"/>
+  </circle>
 
   <!-- Classifier box with glow -->
   <rect class="classifier-bg" x="270" y="132" width="160" height="72" rx="12" fill="{c['primary']}"/>
@@ -207,22 +206,31 @@ def hero_banner(c, mode):
   <text x="350" y="174" text-anchor="middle" font-family="system-ui, sans-serif" font-size="12" font-weight="700" fill="{c['primary']}">Classifier</text>
   <text x="350" y="194" text-anchor="middle" font-family="system-ui, sans-serif" font-size="10" fill="{c['text2']}">heuristic + local LLM</text>
 
-  <!-- Branching arrows with flowing dots -->
+  <!-- Route: Classifier → Free (horizontal) -->
   <line x1="430" y1="148" x2="520" y2="148" stroke="{c['free']}" stroke-width="2" stroke-opacity="0.3" marker-end="url(#arrowFree)"/>
-  <circle class="flow-dot" cx="475" cy="148" r="3" fill="{c['free']}"/>
+  <circle r="3" fill="{c['free']}">
+    <animateMotion dur="2s" repeatCount="indefinite" begin="0s"><mpath href="#pathFree"/></animateMotion>
+    <animate attributeName="opacity" values="0;1;1;0" keyTimes="0;0.15;0.85;1" dur="2s" repeatCount="indefinite" begin="0s"/>
+  </circle>
 
+  <!-- Route: Classifier → Budget (diagonal) -->
   <line x1="430" y1="168" x2="520" y2="208" stroke="{c['budget']}" stroke-width="2" stroke-opacity="0.3" marker-end="url(#arrowBudget)"/>
-  <circle class="flow-dot-2" cx="475" cy="188" r="3" fill="{c['budget']}"/>
+  <circle r="3" fill="{c['budget']}">
+    <animateMotion dur="2s" repeatCount="indefinite" begin="0.7s"><mpath href="#pathBudget"/></animateMotion>
+    <animate attributeName="opacity" values="0;1;1;0" keyTimes="0;0.15;0.85;1" dur="2s" repeatCount="indefinite" begin="0.7s"/>
+  </circle>
 
+  <!-- Route: Classifier → Premium (steeper diagonal) -->
   <line x1="430" y1="188" x2="520" y2="268" stroke="{c['premium']}" stroke-width="2" stroke-opacity="0.3" marker-end="url(#arrowPremium)"/>
-  <circle class="flow-dot-3" cx="475" cy="228" r="3" fill="{c['premium']}"/>
+  <circle r="3" fill="{c['premium']}">
+    <animateMotion dur="2s" repeatCount="indefinite" begin="1.4s"><mpath href="#pathPremium"/></animateMotion>
+    <animate attributeName="opacity" values="0;1;1;0" keyTimes="0;0.15;0.85;1" dur="2s" repeatCount="indefinite" begin="1.4s"/>
+  </circle>
 
-  <!-- Free tier (animated slide-in) -->
+  <!-- Free tier -->
   <g class="tier-free">
     <rect x="530" y="126" width="200" height="44" rx="8" fill="{c['free']}" opacity="0.15" stroke="{c['free']}" stroke-width="1.5"/>
-    <circle cx="548" cy="148" r="6" fill="{c['free']}">
-      <animate attributeName="r" values="5;7;5" dur="2s" repeatCount="indefinite"/>
-    </circle>
+    <circle cx="548" cy="148" r="6" fill="{c['free']}"/>
     <text x="562" y="144" font-family="system-ui, sans-serif" font-size="12" font-weight="700" fill="{c['free']}">Simple</text>
     <text x="562" y="160" font-family="system-ui, sans-serif" font-size="10" fill="{c['text2']}">Ollama / Haiku / Gemini Flash</text>
     <text x="740" y="152" text-anchor="end" font-family="system-ui, sans-serif" font-size="11" font-weight="700" fill="{c['free']}">FREE</text>
@@ -231,9 +239,7 @@ def hero_banner(c, mode):
   <!-- Budget tier -->
   <g class="tier-budget">
     <rect x="530" y="186" width="200" height="44" rx="8" fill="{c['budget']}" opacity="0.15" stroke="{c['budget']}" stroke-width="1.5"/>
-    <circle cx="548" cy="208" r="6" fill="{c['budget']}">
-      <animate attributeName="r" values="5;7;5" dur="2.5s" repeatCount="indefinite"/>
-    </circle>
+    <circle cx="548" cy="208" r="6" fill="{c['budget']}"/>
     <text x="562" y="204" font-family="system-ui, sans-serif" font-size="12" font-weight="700" fill="{c['budget']}">Moderate</text>
     <text x="562" y="220" font-family="system-ui, sans-serif" font-size="10" fill="{c['text2']}">GPT-4o / Gemini Pro</text>
     <text x="740" y="212" text-anchor="end" font-family="system-ui, sans-serif" font-size="11" font-weight="700" fill="{c['budget']}">$0.01</text>
@@ -242,31 +248,29 @@ def hero_banner(c, mode):
   <!-- Premium tier -->
   <g class="tier-premium">
     <rect x="530" y="246" width="200" height="44" rx="8" fill="{c['premium']}" opacity="0.15" stroke="{c['premium']}" stroke-width="1.5"/>
-    <circle cx="548" cy="268" r="6" fill="{c['premium']}">
-      <animate attributeName="r" values="5;7;5" dur="3s" repeatCount="indefinite"/>
-    </circle>
+    <circle cx="548" cy="268" r="6" fill="{c['premium']}"/>
     <text x="562" y="264" font-family="system-ui, sans-serif" font-size="12" font-weight="700" fill="{c['premium']}">Complex</text>
     <text x="562" y="280" font-family="system-ui, sans-serif" font-size="10" fill="{c['text2']}">Claude Opus / o3</text>
     <text x="740" y="272" text-anchor="end" font-family="system-ui, sans-serif" font-size="11" font-weight="700" fill="{c['premium']}">$$$</text>
   </g>
 
   <!-- Cost gradient bar -->
-  <rect class="cost-bar" x="770" y="130" width="4" height="156" rx="2" fill="url(#routeGrad)"/>
+  <rect x="770" y="130" width="4" height="156" rx="2" fill="url(#routeGrad)" opacity="0.7"/>
   <text x="786" y="150" font-family="system-ui, sans-serif" font-size="12" fill="{c['free']}">$</text>
   <text x="786" y="282" font-family="system-ui, sans-serif" font-size="12" fill="{c['premium']}">$$$$</text>
 
-  <!-- Bottom stat pills with float animation -->
-  <g class="pill-1">
+  <!-- Bottom stat pills (static — no distracting float) -->
+  <g>
     <rect x="145" y="260" width="120" height="28" rx="14" fill="{c['primary']}" opacity="0.1" stroke="{c['primary']}" stroke-width="0.5"/>
     <text x="205" y="278" text-anchor="middle" font-family="system-ui, sans-serif" font-size="11" font-weight="600" fill="{c['primary']}">60 MCP Tools</text>
   </g>
-  <g class="pill-2">
+  <g>
     <rect x="285" y="260" width="120" height="28" rx="14" fill="{c['savings']}" opacity="0.1" stroke="{c['savings']}" stroke-width="0.5"/>
     <text x="345" y="278" text-anchor="middle" font-family="system-ui, sans-serif" font-size="11" font-weight="600" fill="{c['savings']}">20+ Providers</text>
   </g>
-  <g class="pill-3">
-    <rect x="425" y="260" width="80" height="28" rx="14" fill="{c['free']}" opacity="0.1" stroke="{c['free']}" stroke-width="0.5"/>
-    <text x="465" y="278" text-anchor="middle" font-family="system-ui, sans-serif" font-size="11" font-weight="600" fill="{c['free']}">87% saved</text>
+  <g>
+    <rect x="425" y="260" width="100" height="28" rx="14" fill="{c['free']}" opacity="0.1" stroke="{c['free']}" stroke-width="0.5"/>
+    <text x="475" y="278" text-anchor="middle" font-family="system-ui, sans-serif" font-size="11" font-weight="600" fill="{c['free']}">60&#8211;80% saved</text>
   </g>
 </svg>'''
 
@@ -316,7 +320,7 @@ def savings_infographic(c, mode):
     return f'''<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 890 200" fill="none">
   <style>
     @keyframes countUp {{
-      0% {{ opacity: 0; transform: translateY(15px); }}
+      0% {{ opacity: 0; transform: translateY(10px); }}
       100% {{ opacity: 1; transform: translateY(0); }}
     }}
     @keyframes barGrow {{
@@ -332,7 +336,7 @@ def savings_infographic(c, mode):
       0%, 100% {{ transform: scale(1); }}
       50% {{ transform: scale(1.03); }}
     }}
-    .big-stat {{ animation: countUp 0.8s ease-out both, numberPulse 4s ease-in-out 1s infinite; }}
+    .big-stat {{ transform-box: fill-box; transform-origin: center center; animation: countUp 0.8s ease-out both, numberPulse 4s ease-in-out 1s infinite; }}
     .bar-free {{ transform-origin: left center; animation: barGrow 0.8s ease-out 0.2s both; }}
     .bar-budget {{ transform-origin: left center; animation: barGrow 0.8s ease-out 0.5s both; }}
     .bar-premium {{ transform-origin: left center; animation: barGrow 0.8s ease-out 0.8s both; }}
@@ -343,52 +347,49 @@ def savings_infographic(c, mode):
   <rect width="890" height="200" rx="14" fill="{c['bg2']}" stroke="{c['border']}" stroke-width="1"/>
 
   <!-- Left: big stat with pulse -->
-  <text x="100" y="55" text-anchor="middle" font-family="system-ui, sans-serif" font-size="13" font-weight="600" fill="{c['text2']}" opacity="0.8">PROVEN SAVINGS</text>
+  <text x="125" y="55" text-anchor="middle" font-family="system-ui, sans-serif" font-size="13" font-weight="600" fill="{c['text2']}" opacity="0.8">PROVEN SAVINGS</text>
   <g class="big-stat">
-    <text x="100" y="115" text-anchor="middle" font-family="system-ui, sans-serif" font-size="58" font-weight="800" fill="{c['savings']}">87%</text>
+    <text x="125" y="115" text-anchor="middle" font-family="system-ui, sans-serif" font-size="52" font-weight="800" fill="{c['savings']}">60&#8211;80%</text>
   </g>
-  <text x="100" y="140" text-anchor="middle" font-family="system-ui, sans-serif" font-size="13" fill="{c['text2']}">cost reduction</text>
-  <text x="100" y="160" text-anchor="middle" font-family="system-ui, sans-serif" font-size="11" fill="{c['text2']}">$6.95 vs $50-60 baseline</text>
-  <text x="100" y="178" text-anchor="middle" font-family="system-ui, sans-serif" font-size="11" fill="{c['text2']}">22.6M tokens &middot; 51 releases</text>
+  <text x="125" y="140" text-anchor="middle" font-family="system-ui, sans-serif" font-size="13" fill="{c['text2']}">cost reduction</text>
+  <text x="125" y="160" text-anchor="middle" font-family="system-ui, sans-serif" font-size="11" fill="{c['text2']}">Actual vs baseline spend</text>
+  <text x="125" y="178" text-anchor="middle" font-family="system-ui, sans-serif" font-size="11" fill="{c['text2']}">Cumulative across sessions</text>
 
-  <!-- Divider with gradient -->
-  <line x1="210" y1="30" x2="210" y2="170" stroke="{c['border']}" stroke-width="1" opacity="0.5"/>
+  <!-- Divider -->
+  <line x1="240" y1="30" x2="240" y2="170" stroke="{c['border']}" stroke-width="1" opacity="0.5"/>
 
   <!-- Right: token distribution -->
-  <text x="550" y="42" text-anchor="middle" font-family="system-ui, sans-serif" font-size="13" font-weight="600" fill="{c['text2']}" opacity="0.8">TOKEN DISTRIBUTION</text>
+  <text x="565" y="42" text-anchor="middle" font-family="system-ui, sans-serif" font-size="13" font-weight="600" fill="{c['text2']}" opacity="0.8">TOKEN DISTRIBUTION</text>
 
   <!-- Animated stacked bars -->
   <g class="bar-free">
-    <rect x="240" y="60" width="186" height="36" rx="6" fill="{c['free']}" class="shimmer"/>
-    <text x="333" y="83" text-anchor="middle" font-family="system-ui, sans-serif" font-size="13" font-weight="700" fill="white">31% Free</text>
+    <rect x="260" y="60" width="180" height="36" rx="6" fill="{c['free']}" class="shimmer"/>
+    <text x="350" y="83" text-anchor="middle" font-family="system-ui, sans-serif" font-size="13" font-weight="700" fill="white">31% Free</text>
   </g>
   <g class="bar-budget">
-    <rect x="426" y="60" width="228" height="36" fill="{c['budget']}" class="shimmer"/>
-    <text x="540" y="83" text-anchor="middle" font-family="system-ui, sans-serif" font-size="13" font-weight="700" fill="white">38% Budget</text>
+    <rect x="440" y="60" width="220" height="36" fill="{c['budget']}" class="shimmer"/>
+    <text x="550" y="83" text-anchor="middle" font-family="system-ui, sans-serif" font-size="13" font-weight="700" fill="white">38% Budget</text>
   </g>
   <g class="bar-premium">
-    <rect x="654" y="60" width="186" height="36" rx="6" fill="{c['premium']}" class="shimmer"/>
-    <text x="747" y="83" text-anchor="middle" font-family="system-ui, sans-serif" font-size="13" font-weight="700" fill="white">31% Premium</text>
+    <rect x="660" y="60" width="180" height="36" rx="6" fill="{c['premium']}" class="shimmer"/>
+    <text x="750" y="83" text-anchor="middle" font-family="system-ui, sans-serif" font-size="13" font-weight="700" fill="white">31% Premium</text>
   </g>
 
   <!-- Labels under bar (fade in after bars) -->
   <g class="bar-label">
-    <text x="333" y="116" text-anchor="middle" font-family="system-ui, sans-serif" font-size="11" fill="{c['free']}">7.0M tokens</text>
-    <text x="333" y="132" text-anchor="middle" font-family="system-ui, sans-serif" font-size="11" font-weight="700" fill="{c['free']}">$0.00</text>
-    <text x="333" y="148" text-anchor="middle" font-family="system-ui, sans-serif" font-size="10" fill="{c['text2']}">Ollama + Codex</text>
+    <text x="350" y="120" text-anchor="middle" font-family="system-ui, sans-serif" font-size="11" font-weight="700" fill="{c['free']}">Free</text>
+    <text x="350" y="140" text-anchor="middle" font-family="system-ui, sans-serif" font-size="10" fill="{c['text2']}">Ollama + Codex</text>
   </g>
   <g class="bar-label">
-    <text x="540" y="116" text-anchor="middle" font-family="system-ui, sans-serif" font-size="11" fill="{c['budget']}">8.6M tokens</text>
-    <text x="540" y="132" text-anchor="middle" font-family="system-ui, sans-serif" font-size="11" font-weight="700" fill="{c['budget']}">$2.82</text>
-    <text x="540" y="148" text-anchor="middle" font-family="system-ui, sans-serif" font-size="10" fill="{c['text2']}">Flash + GPT-4o-mini</text>
+    <text x="550" y="120" text-anchor="middle" font-family="system-ui, sans-serif" font-size="11" font-weight="700" fill="{c['budget']}">Low cost</text>
+    <text x="550" y="140" text-anchor="middle" font-family="system-ui, sans-serif" font-size="10" fill="{c['text2']}">Flash + GPT-4o-mini</text>
   </g>
   <g class="bar-label">
-    <text x="747" y="116" text-anchor="middle" font-family="system-ui, sans-serif" font-size="11" fill="{c['premium']}">7.0M tokens</text>
-    <text x="747" y="132" text-anchor="middle" font-family="system-ui, sans-serif" font-size="11" font-weight="700" fill="{c['premium']}">$4.13</text>
-    <text x="747" y="148" text-anchor="middle" font-family="system-ui, sans-serif" font-size="10" fill="{c['text2']}">GPT-4o + Claude</text>
+    <text x="750" y="120" text-anchor="middle" font-family="system-ui, sans-serif" font-size="11" font-weight="700" fill="{c['premium']}">Premium</text>
+    <text x="750" y="140" text-anchor="middle" font-family="system-ui, sans-serif" font-size="10" fill="{c['text2']}">GPT-4o + Claude</text>
   </g>
 
-  <text x="550" y="180" text-anchor="middle" font-family="system-ui, sans-serif" font-size="12" fill="{c['text2']}">Annualized: ~$180/yr vs $1,500/yr baseline</text>
+  <text x="565" y="180" text-anchor="middle" font-family="system-ui, sans-serif" font-size="12" fill="{c['text2']}">Savings vary by workload &#8212; see methodology below</text>
 </svg>'''
 
 
