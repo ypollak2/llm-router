@@ -2,7 +2,7 @@
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="docs/readme/hero-dark.svg">
     <source media="(prefers-color-scheme: light)" srcset="docs/readme/hero-light.svg">
-    <img src="docs/readme/hero-light.svg" alt="LLM Router animated hero — route every AI call through a moving complexity pipeline into free, budget, and premium model tiers across 20+ providers and 60 MCP tools." width="100%"/>
+    <img src="docs/readme/hero-light.svg" alt="LLM Router animated hero — route every AI call through a moving complexity pipeline into free, budget, and premium model tiers across 20+ providers, 60 MCP tools, and 60-80% savings." width="100%"/>
   </picture>
 </p>
 
@@ -34,7 +34,7 @@
 <p align="center">
   <a href="https://pypi.org/project/llm-routing/"><img src="https://img.shields.io/pypi/v/llm-routing?style=flat-square&color=4F46E5" alt="PyPI"></a>
   <a href="https://github.com/ypollak2/llm-router/actions"><img src="https://img.shields.io/github/actions/workflow/status/ypollak2/llm-router/ci.yml?style=flat-square&label=tests" alt="Tests"></a>
-  <a href="https://github.com/ypollak2/llm-router/stargazers"><img src="https://img.shields.io/github/stars/ypollak2/llm-router?style=flat-square&label=stars&color=F59E0B" alt="Stars"></a>
+  <a href="https://github.com/ypollak2/llm-router/stargazers"><img src="https://img.shields.io/github/stars/ypollak2/llm-router?style=flat-square&color=F59E0B" alt="Stars"></a>
   <a href="https://pypi.org/project/llm-routing/"><img src="https://img.shields.io/pypi/dm/llm-routing?style=flat-square&color=10B981" alt="Downloads"></a>
   <a href="https://pypi.org/project/llm-routing/"><img src="https://img.shields.io/badge/python-3.10–3.13-3572A5?style=flat-square" alt="Python"></a>
   <a href="https://modelcontextprotocol.io"><img src="https://img.shields.io/badge/MCP-1.0+-8B5CF6?style=flat-square" alt="MCP"></a>
@@ -62,7 +62,7 @@
 </p>
 
 <p align="center">
-  <sub>As of May 5, 2026, Pepy's daily `llm-routing` series runs through May 4, 2026, so the page can show newer release metadata before the daily `8.x` line catches up.</sub>
+  <sub>Pepy's daily download data may lag 1-2 days behind PyPI releases. New version lines appear in the chart once daily aggregation catches up.</sub>
 </p>
 
 ---
@@ -88,7 +88,7 @@ llm-router sits between your AI tool and the LLM providers. It classifies each t
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="docs/readme/why-route-dark.svg">
     <source media="(prefers-color-scheme: light)" srcset="docs/readme/why-route-light.svg">
-    <img src="docs/readme/why-route-light.svg" alt="Animated benefits panel for llm-router showing cheaper routing, preserved quality, quota protection, and zero-config setup." width="100%"/>
+    <img src="docs/readme/why-route-light.svg" alt="Animated benefits panel for llm-router showing cheaper routing, preserved quality, quota protection, and low-config setup." width="100%"/>
   </picture>
 </p>
 
@@ -127,14 +127,6 @@ In Claude Code, ask a simple question. The session-end summary shows routing dec
 ---
 
 ## How It Works
-
-<p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="docs/readme/architecture-dark.svg">
-    <source media="(prefers-color-scheme: light)" srcset="docs/readme/architecture-light.svg">
-    <img src="docs/readme/architecture-light.svg" alt="Animated llm-router architecture diagram showing prompt intake, heuristics, complexity classification, free-first routing, and guard rails." width="100%"/>
-  </picture>
-</p>
 
 ```
 User prompt
@@ -291,7 +283,7 @@ llm-router exposes 60 MCP tools organized by function:
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="docs/readme/savings-dark.svg">
     <source media="(prefers-color-scheme: light)" srcset="docs/readme/savings-light.svg">
-    <img src="docs/readme/savings-light.svg" alt="Animated savings breakdown for llm-router showing 87 percent peak cost reduction and token distribution across free, budget, and premium tiers." width="100%"/>
+    <img src="docs/readme/savings-light.svg" alt="Animated savings breakdown for llm-router showing 60-80 percent typical cost reduction and token distribution across free, budget, and premium tiers." width="100%"/>
   </picture>
 </p>
 
@@ -413,7 +405,7 @@ uv run ruff check src/ tests/   # Lint
 ---
 
 <p align="center">
-  <a href="https://github.com/ypollak2/llm-router/issues">Issues</a> · <a href="https://github.com/ypollak2/llm-router/discussions">Discussions</a> · <a href="https://pypi.org/project/llm-routing/">PyPI</a> · <a href="CHANGELOG.md">Changelog</a>
+  <a href="https://github.com/ypollak2/llm-router/issues">Issues</a> · <a href="https://pypi.org/project/llm-routing/">PyPI</a> · <a href="CHANGELOG.md">Changelog</a>
 </p>
 
 <p align="center"><sub>MIT License</sub></p>

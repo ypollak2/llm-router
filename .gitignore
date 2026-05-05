@@ -58,3 +58,6 @@ token-savings-viz.html
 .llm-router/
 .openclaw/
 Library/
+
+# Internal planning docs
+.internal/

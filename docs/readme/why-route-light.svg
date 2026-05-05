@@ -46,7 +46,7 @@
         <animate attributeName="opacity" values="0.2;0.35;0.2" dur="3.4s" repeatCount="indefinite"/>
       </circle>
       <text x="696" y="43" text-anchor="middle" font-family="system-ui, sans-serif" font-size="14">⚙</text>
-      <text x="772" y="75" text-anchor="middle" font-family="system-ui, sans-serif" font-size="15" font-weight="700" fill="#4F46E5">Zero Config</text>
+      <text x="772" y="75" text-anchor="middle" font-family="system-ui, sans-serif" font-size="15" font-weight="700" fill="#4F46E5">Low Config</text>
       <text x="772" y="98" text-anchor="middle" font-family="system-ui, sans-serif" font-size="11" fill="#656d76">Works out of the box with</text>
       <text x="772" y="114" text-anchor="middle" font-family="system-ui, sans-serif" font-size="11" fill="#656d76">Claude Pro/Max subscription.</text>
     </g>

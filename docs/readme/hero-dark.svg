@@ -139,6 +139,6 @@
   </g>
   <g class="pill-3">
     <rect x="425" y="260" width="80" height="28" rx="14" fill="#34D399" opacity="0.1" stroke="#34D399" stroke-width="0.5"/>
-    <text x="465" y="278" text-anchor="middle" font-family="system-ui, sans-serif" font-size="11" font-weight="600" fill="#34D399">87% saved</text>
+    <text x="465" y="278" text-anchor="middle" font-family="system-ui, sans-serif" font-size="11" font-weight="600" fill="#34D399">60–80% saved</text>
   </g>
 </svg>
