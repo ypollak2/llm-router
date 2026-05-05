@@ -40,6 +40,43 @@ SONNET_INPUT_PER_M  = 3.0
 SONNET_OUTPUT_PER_M = 15.0
 WIDTH = 64
 
+# Model names that indicate test/mock data — never show in production reports.
+_TEST_MODEL_PATTERNS = {"mock-model", "test-model", "fake-model", "mock", "test"}
+
+# Known valid model prefixes from configured providers.
+_KNOWN_MODEL_PREFIXES = {
+    "gpt-", "o1", "o3", "o4", "chatgpt-",       # OpenAI
+    "claude-", "claude",                           # Anthropic
+    "gemini-", "gemma", "gemini",                  # Google
+    "llama", "mistral", "mixtral", "qwen",         # Open-source
+    "deepseek", "codex", "perplexity",             # Other providers
+    "command", "cohere",                           # Cohere
+    "phi-", "phi",                                 # Microsoft
+}
+
+
+def _is_test_model(model: str) -> bool:
+    """Return True if model name looks like test/mock data."""
+    if not model:
+        return True
+    low = model.lower().strip()
+    return low in _TEST_MODEL_PATTERNS or low.startswith("test/") or low.startswith("mock/")
+
+
+def _is_known_model(model: str) -> bool:
+    """Return True if model name matches a known provider pattern."""
+    if not model or model == "?":
+        return False
+    low = model.lower().strip()
+    # Check against known prefixes
+    for prefix in _KNOWN_MODEL_PREFIXES:
+        if low.startswith(prefix):
+            return True
+    # Ollama models often have format name:tag
+    if ":" in low:
+        return True
+    return False
+
 
 # ── Claude subscription ────────────────────────────────────────────────────────
 
@@ -204,10 +241,12 @@ def _query_session_data(session_start: float) -> tuple[list[dict], list[dict], l
         ).fetchall()
         conn.close()
         all_rows = [dict(r) for r in rows]
-        paid  = [r for r in all_rows
+        # Exclude rows with test/mock model names at the data level
+        clean = [r for r in all_rows if not _is_test_model(r.get("model", ""))]
+        paid  = [r for r in clean
                  if r.get("provider") not in _FREE_PROVIDERS | {"subscription"}]
-        cc    = [r for r in all_rows if r.get("provider") == "subscription"]
-        free  = [r for r in all_rows if r.get("provider") in _FREE_PROVIDERS]
+        cc    = [r for r in clean if r.get("provider") == "subscription"]
+        free  = [r for r in clean if r.get("provider") in _FREE_PROVIDERS]
         return paid, cc, free
     except Exception:
         return [], [], []
@@ -351,6 +390,10 @@ def _aggregate(rows: list[dict]) -> dict[str, dict]:
         in_tok  = r.get("input_tokens")  or 0
         out_tok = r.get("output_tokens") or 0
         cost    = r.get("cost_usd")      or 0.0
+        # Skip test/mock model rows entirely — they should never be in production
+        # data, but if they leak through, exclude from user-facing reports.
+        if _is_test_model(model):
+            continue
         if tool not in tools:
             tools[tool] = {"count": 0, "in": 0, "out": 0, "cost": 0.0, "models": {}}
         tools[tool]["count"]  += 1
@@ -380,11 +423,23 @@ def _cc_row(label: str, start_pct: float | None, end_pct: float) -> str:
     bar = _bar(end_pct)
     if start_pct is not None:
         delta = end_pct - start_pct
-        sign  = "+" if delta >= 0 else ""
-        return (
-            f"  {label:<16}  {bar}  "
-            f"{start_pct:>4.1f}% → {end_pct:>4.1f}%  ({sign}{delta:.1f}pp this session)"
-        )
+        # When raw delta is non-zero but rounds to 0.0, show higher precision
+        # When delta truly is 0.0 (or negligible <0.01), say so clearly
+        if abs(delta) < 0.01:
+            return f"  {label:<16}  {bar}  {end_pct:>4.1f}%  (no change this session)"
+        elif abs(delta) < 0.1:
+            # Sub-0.1pp delta: show 2 decimal places to avoid misleading +0.0pp
+            sign = "+" if delta >= 0 else ""
+            return (
+                f"  {label:<16}  {bar}  "
+                f"{start_pct:>4.1f}% → {end_pct:>4.1f}%  ({sign}{delta:.2f}pp this session)"
+            )
+        else:
+            sign = "+" if delta >= 0 else ""
+            return (
+                f"  {label:<16}  {bar}  "
+                f"{start_pct:>4.1f}% → {end_pct:>4.1f}%  ({sign}{delta:.1f}pp this session)"
+            )
     return f"  {label:<16}  {bar}  {end_pct:>4.1f}%"
 
 
@@ -414,6 +469,8 @@ def _format_cc_model_section(cc_rows: list[dict]) -> list[str]:
     models: dict[str, dict] = {}
     for r in cc_rows:
         model = r.get("model", "?")
+        if _is_test_model(model):
+            continue
         task  = r.get("task_type", "?")
         if model not in models:
             models[model] = {"count": 0, "tasks": {}}
@@ -444,11 +501,16 @@ def _format_routing_section(tools: dict[str, dict]) -> list[str]:
 
     lines = [
         f"  External routing  "
-        f"{total_calls} calls  ·  ${total_cost:.4f}  ·  {savings_pct}% saved vs Sonnet",
+        f"{total_calls} calls  ·  ${total_cost:.4f} actual  ·  "
+        f"${total_base:.4f} baseline  ·  {savings_pct}% saved",
         "",
     ]
     for tool, d in sorted(tools.items(), key=lambda x: -x[1]["count"]):
-        top_model   = max(d["models"], key=d["models"].get) if d["models"] else "?"
+        # Filter test/mock models from display
+        clean_models = {m: c for m, c in d["models"].items() if not _is_test_model(m)}
+        if not clean_models:
+            continue
+        top_model   = max(clean_models, key=clean_models.get)
         model_short = top_model.split("/", 1)[-1] if "/" in top_model else top_model
         if len(model_short) > 22:
             model_short = model_short[:20] + "…"
@@ -513,8 +575,15 @@ def _format_free_section(free_rows: list[dict], paid_rows: list[dict]) -> list[s
             f"{in_k}↑ {out_k}↓{est_tag:<5}  ${saved:.4f} saved"
         )
 
-    lines = [f"  Free models  {total_calls} calls  ·  ${total_saved:.4f} saved vs Sonnet"
-             + "  (Ollama/Codex)", ""]
+    # Label based on actual providers present
+    providers_present = list(by_provider.keys())
+    if providers_present == ["ollama"]:
+        label = "Local models (Ollama)"
+    elif providers_present == ["codex"]:
+        label = "Prepaid models (Codex)"
+    else:
+        label = "Local / prepaid models"
+    lines = [f"  {label}  {total_calls} calls  ·  ${total_saved:.4f} saved vs Sonnet", ""]
     lines += body
     return lines
 
@@ -643,8 +712,13 @@ def _format_cumulative_section(periods: list[tuple[str, int, int, int, float]]) 
     for label, calls, total_in, total_out, saved in periods:
         total_tok = total_in + total_out
         tok_str   = _fmt_tok(total_tok)
+        # Format savings: use $X.XX for amounts >= $1, $X.XXXX for sub-dollar
+        if saved >= 1.0:
+            saved_str = f"${saved:.2f}"
+        else:
+            saved_str = f"${saved:.4f}"
         lines.append(
-            f"  {label:<12}  {calls:>5} calls  {tok_str:>7} tok  ${saved:.4f} saved"
+            f"  {label:<12}  {calls:>5} calls  {tok_str:>7} tok  {saved_str} saved"
         )
     # Yearly projection — prefer 30-day monthly rate, fall back to 7-day, then today
     from datetime import datetime as _dt
@@ -678,10 +752,20 @@ def _format_cumulative_section(periods: list[tuple[str, int, int, int, float]]) 
     lines.append("")
     lines.append("  ⚙️  Quality & Performance")
 
-    # Router efficiency
+    # Router efficiency — measures how often the final model matched the classifier's
+    # recommendation (i.e. no fallback was needed). This is NOT a quality metric.
     efficiency = _query_router_efficiency()
     if efficiency:
-        lines.append(f"  Router efficiency: {efficiency['efficiency_pct']:.0f}% on-target")
+        total = efficiency["total"]
+        on_target = efficiency["on_target"]
+        fallbacks = total - on_target
+        pct = efficiency["efficiency_pct"]
+        if fallbacks == 0:
+            lines.append(f"  No fallbacks today ({total} routing decisions)")
+        else:
+            lines.append(
+                f"  Fallback rate: {fallbacks}/{total} decisions ({100 - pct:.0f}% needed fallback)"
+            )
 
     # Cache hit ratio
     cache_stats = _query_cache_hit_stats()
@@ -712,19 +796,19 @@ def _format_cumulative_section(periods: list[tuple[str, int, int, int, float]]) 
 
 
 
-def _query_session_complexity_breakdown(session_start: float) -> dict:
+def _query_session_complexity_breakdown(session_start: float) -> tuple[dict, int]:
     """Query usage data grouped by task complexity.
-    
-    Returns {complexity: [(short_model, count, cost, provider), ...]}
+
+    Returns ({complexity: [(short_model, count, cost, provider), ...]}, filtered_test_count)
     """
     if not os.path.exists(DB_PATH):
-        return {}
+        return {}, 0
     try:
         conn = sqlite3.connect(DB_PATH)
         conn.row_factory = sqlite3.Row
         rows = conn.execute(
             """
-            SELECT complexity, model, COUNT(*) as cnt, 
+            SELECT complexity, model, COUNT(*) as cnt,
                    COALESCE(SUM(cost_usd), 0) as total_cost,
                    provider
             FROM usage
@@ -735,33 +819,39 @@ def _query_session_complexity_breakdown(session_start: float) -> dict:
             (_session_start_iso(session_start),),
         ).fetchall()
         conn.close()
-        
+
         by_complexity = {}
+        filtered_test_calls = 0
         for r in rows:
             complexity = r["complexity"] or "moderate"
-            model = r["model"]
+            model = r["model"] or "unknown"
             cnt = r["cnt"]
             cost = r["total_cost"]
             provider = r["provider"]
-            
+
+            # Filter out test/mock models from production reports
+            if _is_test_model(model):
+                filtered_test_calls += cnt
+                continue
+
             if complexity not in by_complexity:
                 by_complexity[complexity] = []
-            
+
             short_model = model.split("/")[-1] if "/" in model else model
             if len(short_model) > 20:
                 short_model = short_model[:18] + "…"
-            
+
             by_complexity[complexity].append((short_model, cnt, cost, provider))
-        
-        return by_complexity
+
+        return by_complexity, filtered_test_calls
     except Exception:
-        return {}
+        return {}, 0
 
 
 def _format_complexity_breakdown(session_start: float) -> list[str]:
     """Format session breakdown by task complexity."""
-    complexity_data = _query_session_complexity_breakdown(session_start)
-    
+    complexity_data, filtered_test_calls = _query_session_complexity_breakdown(session_start)
+
     if not complexity_data:
         return []
     
@@ -798,15 +888,21 @@ def _format_complexity_breakdown(session_start: float) -> list[str]:
             f"  {complexity:<10} {cnt_sum:>2}×    {model_str:<45} {cost_tag}"
         )
     
-    # Efficiency insight
+    # Reconciliation and insight
     if total_calls > 0:
+        paid_calls = total_calls - free_calls
         free_pct = round(free_calls / total_calls * 100)
+        avg_cost = total_cost / total_calls if total_calls else 0
         lines.append("")
         lines.append(
-            f"  💡 Insight: {free_pct}% free models · "
-            f"avg cost ~${(total_cost/total_calls if total_calls else 0):.4f}/call"
+            f"  Total: {total_calls} routed = "
+            f"{free_calls} local/prepaid + {paid_calls} external"
+            + (f" + {filtered_test_calls} excluded (test)" if filtered_test_calls > 0 else "")
         )
-    
+        lines.append(
+            f"  {free_pct}% zero-cost · avg ${avg_cost:.4f}/call"
+        )
+
     return lines
 
 def _format(tools: dict[str, dict], cc_rows: list[dict], free_rows: list[dict],
