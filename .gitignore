@@ -17,9 +17,11 @@ dist/
 MONETIZATION.md
 STRATEGY.md
 PRICING.md
+ROADMAP.md
 
 # Local AI assistant instructions — machine-specific, never commit
 CLAUDE.md
+PHASE_COMPLETION_REVIEW.md
 
 # Task management (local only)
 .claude/tasks/
