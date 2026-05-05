@@ -15,23 +15,6 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/ypollak2/llm-router/stargazers">
-    <picture>
-      <source media="(prefers-color-scheme: dark)" srcset="docs/readme/star-cta-dark.svg">
-      <source media="(prefers-color-scheme: light)" srcset="docs/readme/star-cta-light.svg">
-      <img src="docs/readme/star-cta-light.svg" alt="Give llm-router the five-star treatment on GitHub." width="420"/>
-    </picture>
-  </a>
-</p>
-
-<p align="center">
-  <a href="#quick-start" title="Get started with llm-router in minutes"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/readme/btn-quick-start-dark.svg"><source media="(prefers-color-scheme: light)" srcset="docs/readme/btn-quick-start-light.svg"><img src="docs/readme/btn-quick-start-light.svg" alt="Quick Start" height="34" align="absmiddle"/></picture></a>&nbsp;&nbsp;
-  <a href="docs/GETTING_STARTED.md" title="Full setup and configuration guide"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/readme/btn-docs-dark.svg"><source media="(prefers-color-scheme: light)" srcset="docs/readme/btn-docs-light.svg"><img src="docs/readme/btn-docs-light.svg" alt="Docs" height="34" align="absmiddle"/></picture></a>&nbsp;&nbsp;
-  <a href="docs/TOOLS.md" title="Complete reference for all 60 MCP tools"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/readme/btn-tool-reference-dark.svg"><source media="(prefers-color-scheme: light)" srcset="docs/readme/btn-tool-reference-light.svg"><img src="docs/readme/btn-tool-reference-light.svg" alt="Tool Reference" height="34" align="absmiddle"/></picture></a>&nbsp;&nbsp;
-  <a href="CHANGELOG.md" title="Version history and release notes"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/readme/btn-changelog-dark.svg"><source media="(prefers-color-scheme: light)" srcset="docs/readme/btn-changelog-light.svg"><img src="docs/readme/btn-changelog-light.svg" alt="Changelog" height="34" align="absmiddle"/></picture></a>
-</p>
-
-<p align="center">
   <a href="https://pypi.org/project/llm-routing/"><img src="https://img.shields.io/pypi/v/llm-routing?style=flat-square&color=4F46E5" alt="PyPI"></a>
   <a href="https://github.com/ypollak2/llm-router/actions"><img src="https://img.shields.io/github/actions/workflow/status/ypollak2/llm-router/ci.yml?style=flat-square&label=tests" alt="Tests"></a>
   <a href="https://github.com/ypollak2/llm-router/stargazers"><img src="https://img.shields.io/github/stars/ypollak2/llm-router?style=flat-square&color=F59E0B" alt="Stars"></a>
@@ -39,30 +22,6 @@
   <a href="https://pypi.org/project/llm-routing/"><img src="https://img.shields.io/badge/python-3.10–3.13-3572A5?style=flat-square" alt="Python"></a>
   <a href="https://modelcontextprotocol.io"><img src="https://img.shields.io/badge/MCP-1.0+-8B5CF6?style=flat-square" alt="MCP"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-10B981?style=flat-square" alt="License"></a>
-</p>
-
-<p align="center">
-  <a href="https://pepy.tech/projects/llm-routing?timeRange=threeMonths&category=version&includeCIDownloads=true&granularity=daily&viewType=line&versions=Total%2C8.*%2C7.*">
-    <picture>
-      <source media="(prefers-color-scheme: dark)" srcset="docs/readme/pepy-routing-dark.svg">
-      <source media="(prefers-color-scheme: light)" srcset="docs/readme/pepy-routing-light.svg">
-      <img src="docs/readme/pepy-routing-light.svg" alt="Animated Pepy momentum panel for llm-routing showing daily installs on the renamed package with total, 8.x, and 7.x lines." width="100%"/>
-    </picture>
-  </a>
-</p>
-
-<p align="center">
-  <a href="https://pepy.tech/projects/claude-code-llm-router?timeRange=threeMonths&category=version&includeCIDownloads=true&granularity=daily&viewType=line&versions=Total%2C7.*%2C6.*">
-    <picture>
-      <source media="(prefers-color-scheme: dark)" srcset="docs/readme/pepy-momentum-dark.svg">
-      <source media="(prefers-color-scheme: light)" srcset="docs/readme/pepy-momentum-light.svg">
-      <img src="docs/readme/pepy-momentum-light.svg" alt="Animated Pepy momentum panel for llm-router showing daily installs from the pre-rename package with total, 7.x, and 6.x lines." width="100%"/>
-    </picture>
-  </a>
-</p>
-
-<p align="center">
-  <sub>Pepy's daily download data may lag 1-2 days behind PyPI releases. New version lines appear in the chart once daily aggregation catches up.</sub>
 </p>
 
 ---
@@ -279,14 +238,6 @@ llm-router exposes 60 MCP tools organized by function:
 
 ## Savings: How It Works
 
-<p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="docs/readme/savings-dark.svg">
-    <source media="(prefers-color-scheme: light)" srcset="docs/readme/savings-light.svg">
-    <img src="docs/readme/savings-light.svg" alt="Animated savings breakdown for llm-router showing 60-80 percent typical cost reduction and token distribution across free, budget, and premium tiers." width="100%"/>
-  </picture>
-</p>
-
 Savings are calculated by comparing actual spend against a baseline of routing every task to Claude Sonnet/Opus.
 
 **Methodology:**
@@ -403,6 +354,16 @@ uv run ruff check src/ tests/   # Lint
 | `claude-code-llm-router` | Deprecated legacy package (redirects to `llm-routing`) |
 
 ---
+
+<p align="center">
+  <a href="https://github.com/ypollak2/llm-router/stargazers">
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="docs/readme/star-cta-dark.svg">
+      <source media="(prefers-color-scheme: light)" srcset="docs/readme/star-cta-light.svg">
+      <img src="docs/readme/star-cta-light.svg" alt="Star llm-router on GitHub" width="420"/>
+    </picture>
+  </a>
+</p>
 
 <p align="center">
   <a href="https://github.com/ypollak2/llm-router/issues">Issues</a> · <a href="https://pypi.org/project/llm-routing/">PyPI</a> · <a href="CHANGELOG.md">Changelog</a>

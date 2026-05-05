@@ -46,6 +46,11 @@ token-savings-viz.html
 # Session memories — Claude Memory database, machine-specific
 .serena/
 
+# Tool artifacts — browser tests, decision logs
+.lore/
+.playwright-cli/
+.playwright-mcp/
+
 # User-specific config files — should never be committed (absolute paths, user configs, secrets)
 "/Users/yali.pollak"/
 /Users/yali.pollak/

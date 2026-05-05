@@ -243,8 +243,10 @@ async def test_get_router_efficiency(temp_db):
     """)
 
     # Insert test data for today
-    from datetime import datetime
-    today_iso = datetime.now().isoformat()
+    # Production code stores UTC timestamps; the query uses date(ts, 'localtime').
+    # Use UTC without microseconds to match SQLite's date() parsing.
+    from datetime import datetime, timezone
+    today_iso = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%S')
 
     # 10 decisions: 8 on-target (final = recommended), 2 off-target
     await conn.executemany(
@@ -288,8 +290,8 @@ async def test_get_classifier_overhead(temp_db):
     """)
 
     # Insert test data
-    from datetime import datetime
-    today_iso = datetime.now().isoformat()
+    from datetime import datetime, timezone
+    today_iso = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%S')
 
     latencies = [100.0, 150.0, 200.0, 250.0, 300.0]  # avg=200
     for latency in latencies:
@@ -328,8 +330,8 @@ async def test_get_savings_by_task_type(temp_db):
     """)
 
     # Insert test data
-    from datetime import datetime
-    today_iso = datetime.now().isoformat()
+    from datetime import datetime, timezone
+    today_iso = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%S')
 
     await conn.executemany(
         "INSERT INTO savings_stats (timestamp, session_id, task_type, estimated_claude_cost_saved, external_cost, model_used, host) "

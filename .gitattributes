@@ -1,0 +1,11 @@
+# Hide non-essential directories from GitHub archive downloads
+.claude-plugin export-ignore
+.codex-plugin export-ignore
+.factory-plugin export-ignore
+agents export-ignore
+demo export-ignore
+scripts export-ignore
+deprecation export-ignore
+
+# Exclude generated SVGs from GitHub language stats
+docs/readme/*.svg linguist-generated

@@ -2,6 +2,28 @@
 
 **For releases v6.2 and earlier, see [CHANGELOG_ARCHIVE.md](docs/CHANGELOG_ARCHIVE.md).**
 
+## v8.0.2 — CI Fix, README Cleanup, Root Directory Hygiene (2026-05-05)
+
+### Fixed
+
+- `test_get_router_efficiency` (and related tests) — timestamps now use UTC without microseconds, matching production code and SQLite's `date()` parsing
+- CI badge goes green (all tests pass)
+
+### Changed
+
+- Slimmed README above-the-fold from 11 elements to 5 (hero, title, badges, divider, content)
+- Removed Pepy download charts (low install count is not a trust signal yet)
+- Removed nav button SVGs (redundant with headings/TOC)
+- Moved star CTA SVG to bottom of README
+- Removed savings SVGs with stale hardcoded historical data (text explanation remains)
+
+### Added
+
+- `.gitattributes` — export-ignore for non-essential dirs, linguist-generated for SVGs
+- `.gitignore` entries for `.lore/`, `.playwright-cli/`, `.playwright-mcp/`
+
+---
+
 ## v8.0.1 — README Motion Refresh & Pepy Tracking Split (2026-05-05)
 
 **Patch release: restored animated README visuals, revived the GitHub star CTA, and added Pepy momentum panels for both the legacy and renamed PyPI package pages.**
