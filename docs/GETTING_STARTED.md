@@ -196,7 +196,7 @@ llm-router verify     # Full system health check
 ## Learn More
 
 - **[Host Support Matrix](HOST_SUPPORT_MATRIX.md)** — Which features work where
-- **[Tool Selection Guide](TOOL_SELECTION_GUIDE.md)** — 48 MCP tools reference
+- **[Tool Selection Guide](TOOL_SELECTION_GUIDE.md)** — 60 MCP tools reference
 - **[2-Minute Quickstart](QUICKSTART_2MIN.md)** — Fastest path to first routed call
 - **[Security Guide](../SECURITY.md)** — Data privacy and safety
 - **[Architecture](../README.md)** — How llm-router works under the hood

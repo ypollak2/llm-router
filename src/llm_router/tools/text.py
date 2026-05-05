@@ -14,6 +14,57 @@ from llm_router.types import LLMResponse, RoutingProfile, TaskType
 from llm_router import state as _state
 
 
+def _cache_result(
+    prompt: str,
+    resp: LLMResponse,
+    task_type: str,
+    complexity: str | None,
+) -> None:
+    """Store routed result in the BM25 cache for future context retrieval.
+
+    Non-blocking, fail-silent. Never interrupts the response flow.
+    """
+    try:
+        from llm_router.result_cache import store_result
+        store_result(
+            user_prompt=prompt,
+            response=resp.content or "",
+            task_type=task_type,
+            complexity=complexity or "moderate",
+            model_used=resp.model or "unknown",
+            tokens_in=resp.input_tokens or 0,
+            tokens_out=resp.output_tokens or 0,
+            cost_usd=resp.cost_usd or 0.0,
+            project_dir=os.getcwd(),
+        )
+    except Exception:
+        pass  # Cache storage is best-effort
+
+
+def _record_quality(resp: LLMResponse, task_type: str, complexity: str | None) -> None:
+    """Score response quality and record for routing feedback.
+
+    Non-blocking, fail-silent. Feeds quality data back into routing
+    so underperforming models are skipped for specific task patterns.
+    """
+    try:
+        from llm_router.quality_feedback import record_quality, score_response
+        qs = score_response(
+            response=resp.content or "",
+            task_type=task_type,
+            model=resp.model or "unknown",
+            complexity=complexity or "moderate",
+        )
+        record_quality(
+            model=resp.model or "unknown",
+            task_type=task_type,
+            complexity=complexity or "moderate",
+            score=qs.score,
+        )
+    except Exception:
+        pass  # Quality feedback is best-effort
+
+
 # ---------------------------------------------------------------------------
 # Explainability helper — injected into every routed response when
 # LLM_ROUTER_EXPLAIN=1 is set in the environment.
@@ -216,7 +267,7 @@ def _format_response(resp: LLMResponse, explain: str | None = None) -> str:
     """Format a response with consistent header and optional explanation prefix.
 
     All tools use this function to ensure uniform response formatting across
-    all 48 MCP tools. Format:
+    all 60 MCP tools. Format:
 
         [explain prefix if enabled]
         > 🤖 **model** · tokens · $cost · duration
@@ -282,6 +333,8 @@ async def llm_query(
         temperature=temperature, max_tokens=max_tokens, ctx=ctx,
         caller_context=context,
     )
+    _cache_result(prompt, resp, "query", complexity)
+    _record_quality(resp, "query", complexity)
     return _format_response(resp, _explain_prefix(resp, "query"))
 
 
@@ -326,7 +379,9 @@ async def llm_research(
         system_prompt=system_prompt, max_tokens=max_tokens,
         temperature=0.3, ctx=ctx, caller_context=context,
     )
-    
+    _cache_result(prompt, resp, "research", "moderate")
+    _record_quality(resp, "research", "moderate")
+
     result = _format_response(resp, _explain_prefix(resp, "research"))
     
     if resp.citations:
@@ -372,7 +427,8 @@ async def llm_generate(
         system_prompt=system_prompt, temperature=temperature,
         max_tokens=max_tokens, ctx=ctx, caller_context=context,
     )
-    
+    _cache_result(prompt, resp, "generate", complexity)
+    _record_quality(resp, "generate", complexity)
     return _format_response(resp, _explain_prefix(resp, "generate"))
 
 
@@ -408,7 +464,8 @@ async def llm_analyze(
         system_prompt=system_prompt, temperature=0.3,
         max_tokens=max_tokens, ctx=ctx, caller_context=context,
     )
-    
+    _cache_result(prompt, resp, "analyze", effective_complexity)
+    _record_quality(resp, "analyze", effective_complexity)
     return _format_response(resp, _explain_prefix(resp, "analyze"))
 
 
@@ -441,7 +498,8 @@ async def llm_code(
         system_prompt=system_prompt, temperature=0.2,
         max_tokens=max_tokens, ctx=ctx, caller_context=context,
     )
-    
+    _cache_result(prompt, resp, "code", complexity)
+    _record_quality(resp, "code", complexity)
     return _format_response(resp, _explain_prefix(resp, "code"))
 
 

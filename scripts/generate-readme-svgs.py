@@ -184,7 +184,7 @@ def hero_banner(c, mode):
   <!-- Bottom stat pills with float animation -->
   <g class="pill-1">
     <rect x="145" y="260" width="120" height="28" rx="14" fill="{c['primary']}" opacity="0.1" stroke="{c['primary']}" stroke-width="0.5"/>
-    <text x="205" y="278" text-anchor="middle" font-family="system-ui, sans-serif" font-size="11" font-weight="600" fill="{c['primary']}">48 MCP Tools</text>
+    <text x="205" y="278" text-anchor="middle" font-family="system-ui, sans-serif" font-size="11" font-weight="600" fill="{c['primary']}">60 MCP Tools</text>
   </g>
   <g class="pill-2">
     <rect x="285" y="260" width="120" height="28" rx="14" fill="{c['savings']}" opacity="0.1" stroke="{c['savings']}" stroke-width="0.5"/>
@@ -446,9 +446,9 @@ def editors(c, mode):
         ("Claude Code", "Full", c['free'], "Auto-routing"),
         ("Gemini CLI", "Full", c['free'], "Auto-routing"),
         ("Codex CLI", "Full", c['free'], "Auto-routing"),
-        ("VS Code", "MCP", c['budget'], "48 tools"),
-        ("Cursor", "MCP", c['budget'], "48 tools"),
-        ("Any MCP", "MCP", c['budget'], "48 tools"),
+        ("VS Code", "MCP", c['budget'], "60 tools"),
+        ("Cursor", "MCP", c['budget'], "60 tools"),
+        ("Any MCP", "MCP", c['budget'], "60 tools"),
     ]
     cards = ""
     for i, (name, level, color, desc) in enumerate(editors_data):

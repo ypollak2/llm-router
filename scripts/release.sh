@@ -9,7 +9,7 @@ BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
 # Configuration
-PACKAGE_NAME="claude-code-llm-router"
+PACKAGE_NAME="llm-routing"
 REPO="ypollak2/llm-router"
 MAX_RETRIES=3
 

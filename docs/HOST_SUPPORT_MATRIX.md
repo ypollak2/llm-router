@@ -9,7 +9,7 @@ This page documents **exactly which features work where**, without sugar-coating
 | **Auto-Routing Hooks** | ✅ Full | ✅ Full | ✅ Full | ❌ No | ❌ No | ✅ Limited |
 | **Session-End Tracking** | ✅ Yes | ✅ Yes | ✅ Yes | ❌ No | ❌ No | ✅ Manual |
 | **Quota Pressure Display** | ✅ Yes | ✅ Yes | ✅ Yes | ❌ No | ❌ No | ❌ No |
-| **48 MCP Tools (Direct)** | ✅ Yes | ✅ Yes | ✅ Yes | ✅ Yes | ✅ Yes | ✅ Yes |
+| **60 MCP Tools (Direct)** | ✅ Yes | ✅ Yes | ✅ Yes | ✅ Yes | ✅ Yes | ✅ Yes |
 | **Cost Optimization** | ✅ 60–80% | ✅ 60–80% | ✅ 50–70% | ⚠️ Partial* | ❌ No | ✅ Manual |
 | **Free-First Routing** | ✅ Yes | ✅ Yes | ✅ Yes | ⚠️ Opt-in | ❌ No | ⚠️ Opt-in |
 | **Saved Usage Analytics** | ✅ Yes | ✅ Yes | ✅ Yes | ⚠️ Manual** | ❌ No | ✅ Yes |
@@ -134,7 +134,7 @@ llm-router install --host vscode  # or --host cursor
 ```
 
 **Features:**
-- ✅ All 48 MCP tools available (llm_route, llm_query, llm_code, etc.)
+- ✅ All 60 MCP tools available (llm_route, llm_query, llm_code, etc.)
 - ✅ Manual invocation of routing tools
 - ⚠️ No automatic hook-based routing
 - ⚠️ No session tracking (unless you invoke tools)
@@ -189,7 +189,7 @@ llm-router dashboard
 Use llm-router directly from the shell. Useful for scripting and batch operations.
 
 **Activation:**
-Already installed with `pip install llm-router`
+Already installed with `pip install llm-routing`
 
 **Features:**
 - ✅ `llm-router route <prompt>` — Route a single prompt

@@ -706,6 +706,22 @@ async def _dispatch_model_loop(
             )
             continue
 
+        # Quality feedback: skip models with poor track record for this task pattern
+        try:
+            from llm_router.quality_feedback import should_skip_model
+            if should_skip_model(model, task_type.value, c.value):
+                log.info("Skipping low-quality model for %s/%s: %s", task_type.value, c.value, model)
+                route_log.info(
+                    "model_quality_skip",
+                    correlation_id=correlation_id,
+                    model=model,
+                    task_type=task_type.value,
+                    complexity=c.value,
+                )
+                continue
+        except Exception:
+            pass  # Quality feedback unavailable — don't block routing
+
         # Refresh provider budget state for each attempt so long fallback walks
         # do not keep routing to providers that exhausted their budget mid-chain.
         budget_state = await get_budget_state(provider)
@@ -1397,6 +1413,29 @@ async def route_and_call(
                 raise
             except Exception:
                 pass  # Never block routing due to escalation check errors
+
+        # ── Context preparation (v7.7) ──────────────────────────────────────────
+        # Enrich the system prompt with task-specific behavioral rules when the
+        # caller hasn't provided a custom system prompt. This gives cheap models
+        # focused instructions that improve response quality.
+        if system_prompt is None and task_type not in MEDIA_TASK_TYPES and models_to_try:
+            try:
+                from llm_router.context_prep import prepare_prompt as _prepare
+                _prepared = _prepare(
+                    user_prompt=prompt,
+                    task_type=task_type,
+                    complexity=c,
+                    target_model=models_to_try[0],
+                )
+                system_prompt = _prepared.full_system
+                if _prepared.context_source != "none":
+                    route_log.info(
+                        "context_prep enriched prompt (source=%s, tokens~%d)",
+                        _prepared.context_source,
+                        _prepared.estimated_total_tokens,
+                    )
+            except Exception as _prep_err:
+                log.debug("Context preparation failed (continuing without): %s", _prep_err)
 
         # Dispatch through the extracted model loop, which handles both primary
         # and emergency BUDGET fallback chains atomically.

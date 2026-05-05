@@ -1,6 +1,6 @@
 # Which Tool For Which Task?
 
-48 MCP tools, organized by what you're trying to do. Find your use case, find your tool.
+60 MCP tools, organized by what you're trying to do. Find your use case, find your tool.
 
 ---
 

@@ -1,6 +1,6 @@
 [project]
 name = "llm-routing"
-version = "7.6.2"
+version = "8.0.0"
 description = "Multi-LLM router MCP server — smart complexity routing, budget-aware model selection, 20+ providers (Claude, OpenAI, Gemini, Ollama, etc.)"
 readme = "README.md"
 license = "MIT"
@@ -51,6 +51,10 @@ agno = [
 tracing = [
     "opentelemetry-sdk>=1.20",
     "opentelemetry-exporter-otlp-proto-grpc>=1.20",
+]
+code-context = [
+    "tree-sitter>=0.23.0",
+    "tree-sitter-languages>=1.10.0",
 ]
 
 [project.urls]

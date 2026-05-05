@@ -216,7 +216,7 @@ If you believe llm-router or a contributor has a security vulnerability:
 
 4. **Mitigation:**
    - Clear all data: `rm -rf ~/.llm-router/`
-   - Reinstall: `pip install --upgrade claude-code-llm-router`
+   - Reinstall: `pip install --upgrade llm-routing`
    - Reconfigure with new API keys
 
 ### If We Report a Vulnerability

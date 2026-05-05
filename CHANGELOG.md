@@ -2,6 +2,42 @@
 
 **For releases v6.2 and earlier, see [CHANGELOG_ARCHIVE.md](docs/CHANGELOG_ARCHIVE.md).**
 
+## v8.0.0 — Quality Feedback Loop & Documentation Overhaul (2026-05-05)
+
+**Major release: Automatic quality scoring, developer-first README rewrite, documentation consistency pass, stale asset cleanup.**
+
+### Added
+
+- **Quality Feedback Loop (Sprint 4)** — `src/llm_router/quality_feedback.py`
+  - Auto-scores every routed response using content heuristics (code blocks, structure, refusals, citations)
+  - Per-model quality tracking with minimum-calls threshold (3) before trusting signal
+  - `should_skip_model()` — routing engine skips models with avg quality < 0.4 for specific task patterns
+  - Integrated into `router.py` dispatch loop and all `text.py` tools (query, research, generate, analyze, code)
+  - 23 new tests in `tests/test_quality_feedback.py`
+
+### Changed
+
+- **Complete README rewrite** — developer-first, text-based, high-trust landing page
+  - No images/SVGs — shields.io badges only
+  - Honest "Use this if / Don't use this if" section
+  - Accurate tool count (60 MCP tools), package names, provider list
+  - ASCII architecture diagram, markdown tables throughout
+- **Documentation consistency pass** — corrected "48 tools" → "60 tools" across 10+ docs
+- **Package name corrections** — `pip install llm-routing` consistently referenced
+- **Tool count standardized** — 60 MCP tools (56 llm_* + 4 agoragentic_*) across all docs
+
+### Removed
+
+- 18 orphaned SVG assets from `docs/readme/` (stale claims, zero references)
+
+### Fixed
+
+- `SECURITY.md` referenced wrong package name (`claude-code-llm-router` → `llm-routing`)
+- `HOST_SUPPORT_MATRIX.md` referenced wrong install command
+- `server.py` and `docs/TOOLS.md` had outdated tool counts
+
+---
+
 ## v7.6.2 — PyPI README Fix (2026-04-28)
 
 **Patch release: Fixed PyPI package name in README and installation instructions.**

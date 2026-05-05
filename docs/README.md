@@ -23,7 +23,7 @@ Learn how to use llm-router effectively.
 | Document | Purpose |
 |----------|---------|
 | **[ROUTING_EXAMPLES.md](ROUTING_EXAMPLES.md)** | Real-world routing decision examples with diagrams |
-| **[TOOL_SELECTION_GUIDE.md](TOOL_SELECTION_GUIDE.md)** | When to use which of 48 MCP tools |
+| **[TOOL_SELECTION_GUIDE.md](TOOL_SELECTION_GUIDE.md)** | When to use which of 60 MCP tools |
 | **[TROUBLESHOOTING.md](TROUBLESHOOTING.md)** | Common issues and solutions |
 | **[PROVIDERS.md](PROVIDERS.md)** | Supported LLM providers (OpenAI, Gemini, Ollama, etc.) |
 | **[STYLE.md](STYLE.md)** | Writing style guidelines for documentation |
@@ -47,7 +47,7 @@ API reference and detailed specifications.
 
 | Document | Purpose |
 |----------|---------|
-| **[TOOLS.md](TOOLS.md)** | Complete 48 MCP tools reference |
+| **[TOOLS.md](TOOLS.md)** | Complete 60 MCP tools reference |
 | **[ARCHITECTURE.md](ARCHITECTURE.md)** | System architecture overview |
 | **[BENCHMARKS.md](BENCHMARKS.md)** | Performance and cost benchmarks |
 

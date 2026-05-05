@@ -1,6 +1,6 @@
 """FastMCP server — MCP entry point for llm-router.
 
-All 51 tools are registered by modules in llm_router/tools/:
+All 60 tools are registered by modules in llm_router/tools/:
 - routing.py  — llm_classify, llm_track_usage, llm_route, llm_auto, llm_stream,
                 llm_select_agent, llm_reroute
 - text.py     — llm_query, llm_research, llm_generate, llm_analyze, llm_code, llm_edit

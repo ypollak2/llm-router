@@ -1,6 +1,6 @@
 # LLM Router Tools Reference
 
-Complete documentation of all 48 MCP tools provided by llm-router for Claude Code, Cursor, VS Code, Codex, and other AI development environments.
+Complete documentation of all 60 MCP tools provided by llm-router for Claude Code, Cursor, VS Code, Codex, and other AI development environments.
 
 ---
 

@@ -460,6 +460,6 @@ llm-router dashboard
 
 ## Next Steps
 
-- **[TOOL_SELECTION_GUIDE.md](TOOL_SELECTION_GUIDE.md)** — Detailed reference for all 48 MCP tools
+- **[TOOL_SELECTION_GUIDE.md](TOOL_SELECTION_GUIDE.md)** — Detailed reference for all 60 MCP tools
 - **[HOST_SUPPORT_MATRIX.md](HOST_SUPPORT_MATRIX.md)** — Which routing features work on which hosts
 - **[GETTING_STARTED.md](GETTING_STARTED.md)** — 5-minute setup guide

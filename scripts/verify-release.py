@@ -103,7 +103,7 @@ def main():
     print(f"Verifying version: {version}\n")
 
     results = {
-        "PyPI": check_pypi("claude-code-llm-router", version),
+        "PyPI": check_pypi("llm-routing", version),
         "GitHub": check_github("ypollak2", "llm-router", version),
         "Tests": run_tests(),
     }
