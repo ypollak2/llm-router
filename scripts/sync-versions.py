@@ -4,6 +4,10 @@
 Uses pyproject.toml as the source of truth and updates:
 - .claude-plugin/plugin.json
 - .claude-plugin/marketplace.json
+- .codex-plugin/plugin.json
+- .codex-plugin/marketplace.json
+- .factory-plugin/plugin.json
+- .factory-plugin/marketplace.json
 """
 
 import json
@@ -14,6 +18,9 @@ try:
     import tomllib
 except ImportError:
     import tomli as tomllib
+
+
+PLUGIN_DIRS = (".claude-plugin", ".codex-plugin", ".factory-plugin")
 
 
 def read_pyproject_version(project_root: Path) -> str:
@@ -28,9 +35,9 @@ def read_pyproject_version(project_root: Path) -> str:
     return data["project"]["version"]
 
 
-def sync_plugin_json(project_root: Path, version: str) -> bool:
+def sync_plugin_json(project_root: Path, version: str, plugin_dir: str) -> bool:
     """Update version in plugin.json."""
-    plugin_path = project_root / ".claude-plugin" / "plugin.json"
+    plugin_path = project_root / plugin_dir / "plugin.json"
     if not plugin_path.exists():
         print(f"⚠️  plugin.json not found at {plugin_path}, skipping")
         return False
@@ -45,13 +52,14 @@ def sync_plugin_json(project_root: Path, version: str) -> bool:
     data["version"] = version
     with open(plugin_path, "w") as f:
         json.dump(data, f, indent=2)
-    print(f"✅ Updated plugin.json to {version}")
+        f.write("\n")
+    print(f"✅ Updated {plugin_dir}/plugin.json to {version}")
     return True
 
 
-def sync_marketplace_json(project_root: Path, version: str) -> bool:
+def sync_marketplace_json(project_root: Path, version: str, plugin_dir: str) -> bool:
     """Update version in marketplace.json."""
-    marketplace_path = project_root / ".claude-plugin" / "marketplace.json"
+    marketplace_path = project_root / plugin_dir / "marketplace.json"
     if not marketplace_path.exists():
         print(f"⚠️  marketplace.json not found at {marketplace_path}, skipping")
         return False
@@ -77,7 +85,8 @@ def sync_marketplace_json(project_root: Path, version: str) -> bool:
 
     with open(marketplace_path, "w") as f:
         json.dump(data, f, indent=2)
-    print(f"✅ Updated marketplace.json to {version}")
+        f.write("\n")
+    print(f"✅ Updated {plugin_dir}/marketplace.json to {version}")
     return True
 
 
@@ -91,10 +100,10 @@ def main():
         print(f"📋 Syncing all versions to {version}")
         print("=" * 50)
 
-        # Update all files
         changes = []
-        changes.append(sync_plugin_json(project_root, version))
-        changes.append(sync_marketplace_json(project_root, version))
+        for plugin_dir in PLUGIN_DIRS:
+            changes.append(sync_plugin_json(project_root, version, plugin_dir))
+            changes.append(sync_marketplace_json(project_root, version, plugin_dir))
 
         print("=" * 50)
 

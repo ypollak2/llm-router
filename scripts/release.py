@@ -17,9 +17,8 @@ from typing import Sequence
 ROOT = Path(__file__).resolve().parent.parent
 PYPROJECT_PATH = ROOT / "pyproject.toml"
 INIT_PATH = ROOT / "src" / "llm_router" / "__init__.py"
-PLUGIN_PATH = ROOT / ".codex-plugin" / "plugin.json"
-MARKETPLACE_PATH = ROOT / ".codex-plugin" / "marketplace.json"
 CHANGELOG_PATH = ROOT / "CHANGELOG.md"
+PLUGIN_DIRS = (".claude-plugin", ".codex-plugin", ".factory-plugin")
 
 _PYPROJECT_VERSION_RE = re.compile(r'(?m)^version = "([^"]+)"$')
 _INIT_VERSION_RE = re.compile(r'(?m)^__version__ = "([^"]+)"$')
@@ -80,49 +79,53 @@ def _write_json(path: Path, data: dict) -> None:
 def bump_versions(version: str, *, root: Path = ROOT) -> None:
     pyproject_path = root / "pyproject.toml"
     init_path = root / "src" / "llm_router" / "__init__.py"
-    plugin_path = root / ".codex-plugin" / "plugin.json"
-    marketplace_path = root / ".codex-plugin" / "marketplace.json"
-
     pyproject_text = pyproject_path.read_text(encoding="utf-8")
     pyproject_path.write_text(update_pyproject_text(pyproject_text, version), encoding="utf-8")
 
     init_text = init_path.read_text(encoding="utf-8")
     init_path.write_text(update_init_version_text(init_text, version), encoding="utf-8")
 
-    plugin_data = json.loads(plugin_path.read_text(encoding="utf-8"))
-    _write_json(plugin_path, update_plugin_data(plugin_data, version))
+    for plugin_dir in PLUGIN_DIRS:
+        plugin_path = root / plugin_dir / "plugin.json"
+        marketplace_path = root / plugin_dir / "marketplace.json"
 
-    marketplace_data = json.loads(marketplace_path.read_text(encoding="utf-8"))
-    _write_json(marketplace_path, update_marketplace_data(marketplace_data, version))
+        plugin_data = json.loads(plugin_path.read_text(encoding="utf-8"))
+        _write_json(plugin_path, update_plugin_data(plugin_data, version))
+
+        marketplace_data = json.loads(marketplace_path.read_text(encoding="utf-8"))
+        _write_json(marketplace_path, update_marketplace_data(marketplace_data, version))
 
 
 def read_versions(*, root: Path = ROOT) -> dict[str, str]:
     pyproject_path = root / "pyproject.toml"
     init_path = root / "src" / "llm_router" / "__init__.py"
-    plugin_path = root / ".codex-plugin" / "plugin.json"
-    marketplace_path = root / ".codex-plugin" / "marketplace.json"
-
     pyproject_version = tomllib.loads(pyproject_path.read_text(encoding="utf-8"))["project"]["version"]
     init_match = _INIT_VERSION_RE.search(init_path.read_text(encoding="utf-8"))
     if init_match is None:
         raise ValueError(f"Could not find __version__ in {init_path}")
 
-    plugin_version = json.loads(plugin_path.read_text(encoding="utf-8"))["version"]
-    marketplace_data = json.loads(marketplace_path.read_text(encoding="utf-8"))
-    marketplace_version = None
-    for plugin in marketplace_data.get("plugins", []):
-        if plugin.get("name") == "llm-router":
-            marketplace_version = plugin.get("version")
-            break
-    if marketplace_version is None:
-        raise ValueError("Could not find llm-router entry in marketplace.json")
-
-    return {
+    versions = {
         "pyproject": pyproject_version,
         "__init__": init_match.group(1),
-        "plugin.json": plugin_version,
-        "marketplace.json": marketplace_version,
     }
+    for plugin_dir in PLUGIN_DIRS:
+        plugin_path = root / plugin_dir / "plugin.json"
+        marketplace_path = root / plugin_dir / "marketplace.json"
+
+        plugin_version = json.loads(plugin_path.read_text(encoding="utf-8"))["version"]
+        marketplace_data = json.loads(marketplace_path.read_text(encoding="utf-8"))
+        marketplace_version = None
+        for plugin in marketplace_data.get("plugins", []):
+            if plugin.get("name") == "llm-router":
+                marketplace_version = plugin.get("version")
+                break
+        if marketplace_version is None:
+            raise ValueError(f"Could not find llm-router entry in {marketplace_path}")
+
+        versions[f"{plugin_dir}/plugin.json"] = plugin_version
+        versions[f"{plugin_dir}/marketplace.json"] = marketplace_version
+
+    return versions
 
 
 def verify_versions(version: str, *, root: Path = ROOT) -> dict[str, str]:
@@ -180,7 +183,7 @@ def perform_release(
 
     print("2. Bumping versions...")
     if dry_run:
-        print("   Would update pyproject.toml, __init__.py, plugin.json, and marketplace.json")
+        print("   Would update pyproject.toml, __init__.py, and all plugin distribution manifests")
     else:
         bump_versions(version)
         verified = verify_versions(version)
@@ -201,8 +204,12 @@ def perform_release(
             "add",
             "pyproject.toml",
             "src/llm_router/__init__.py",
+            ".claude-plugin/plugin.json",
+            ".claude-plugin/marketplace.json",
             ".codex-plugin/plugin.json",
             ".codex-plugin/marketplace.json",
+            ".factory-plugin/plugin.json",
+            ".factory-plugin/marketplace.json",
             "CHANGELOG.md",
             "README.md",
             "CLAUDE.md",

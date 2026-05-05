@@ -5,6 +5,10 @@ This script ensures that version is in sync across:
 - pyproject.toml (source of truth)
 - .claude-plugin/plugin.json
 - .claude-plugin/marketplace.json
+- .codex-plugin/plugin.json
+- .codex-plugin/marketplace.json
+- .factory-plugin/plugin.json
+- .factory-plugin/marketplace.json
 
 Fails with exit code 1 if versions don't match, enabling use in CI.
 """
@@ -19,6 +23,9 @@ except ImportError:
     import tomli as tomllib
 
 
+PLUGIN_DIRS = (".claude-plugin", ".codex-plugin", ".factory-plugin")
+
+
 def read_pyproject_version(project_root: Path) -> str:
     """Read version from pyproject.toml."""
     pyproject_path = project_root / "pyproject.toml"
@@ -31,9 +38,9 @@ def read_pyproject_version(project_root: Path) -> str:
     return data["project"]["version"]
 
 
-def read_plugin_json_version(project_root: Path) -> str:
-    """Read version from .claude-plugin/plugin.json."""
-    plugin_path = project_root / ".claude-plugin" / "plugin.json"
+def read_plugin_json_version(project_root: Path, plugin_dir: str) -> str:
+    """Read version from <plugin_dir>/plugin.json."""
+    plugin_path = project_root / plugin_dir / "plugin.json"
     if not plugin_path.exists():
         raise FileNotFoundError(f"plugin.json not found at {plugin_path}")
 
@@ -43,12 +50,12 @@ def read_plugin_json_version(project_root: Path) -> str:
     return data["version"]
 
 
-def read_marketplace_json_versions(project_root: Path) -> tuple[str, str]:
-    """Read versions from .claude-plugin/marketplace.json.
+def read_marketplace_json_versions(project_root: Path, plugin_dir: str) -> tuple[str, str]:
+    """Read versions from <plugin_dir>/marketplace.json.
 
     Returns (plugin_version, marketplace_version).
     """
-    marketplace_path = project_root / ".claude-plugin" / "marketplace.json"
+    marketplace_path = project_root / plugin_dir / "marketplace.json"
     if not marketplace_path.exists():
         raise FileNotFoundError(f"marketplace.json not found at {marketplace_path}")
 
@@ -69,16 +76,15 @@ def main():
     try:
         # Read all versions
         pyproject_version = read_pyproject_version(project_root)
-        plugin_version = read_plugin_json_version(project_root)
-        marketplace_plugin_version, marketplace_version = read_marketplace_json_versions(project_root)
-
-        # Check for mismatches
-        versions = {
-            "pyproject.toml": pyproject_version,
-            ".claude-plugin/plugin.json": plugin_version,
-            ".claude-plugin/marketplace.json (plugin)": marketplace_plugin_version,
-            ".claude-plugin/marketplace.json (root)": marketplace_version,
-        }
+        versions = {"pyproject.toml": pyproject_version}
+        for plugin_dir in PLUGIN_DIRS:
+            plugin_version = read_plugin_json_version(project_root, plugin_dir)
+            marketplace_plugin_version, marketplace_version = read_marketplace_json_versions(
+                project_root, plugin_dir
+            )
+            versions[f"{plugin_dir}/plugin.json"] = plugin_version
+            versions[f"{plugin_dir}/marketplace.json (plugin)"] = marketplace_plugin_version
+            versions[f"{plugin_dir}/marketplace.json (root)"] = marketplace_version
 
         print("📋 Version Sync Check")
         print("=" * 50)
