@@ -1,0 +1,78 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 420 108" fill="none">
+  <style>
+    @keyframes cursorTap {
+      0%, 12%, 100% { transform: translate(0px, 0px) scale(1); }
+      18% { transform: translate(-3px, -3px) scale(1); }
+      24% { transform: translate(-10px, -10px) scale(0.96); }
+      30% { transform: translate(-3px, -3px) scale(1); }
+    }
+    @keyframes borderGlow {
+      0%, 100% { stroke-opacity: 0.45; }
+      50% { stroke-opacity: 1; }
+    }
+    @keyframes sparkle {
+      0%, 18%, 100% { opacity: 0; transform: scale(0.6); }
+      28%, 46% { opacity: 1; transform: scale(1); }
+      60% { opacity: 0; transform: scale(1.2); }
+    }
+    @keyframes heartBeat {
+      0%, 100% { transform: scale(1); }
+      50% { transform: scale(1.08); }
+    }
+    @keyframes captionFade {
+      0% { opacity: 0; transform: translateY(4px); }
+      100% { opacity: 1; transform: translateY(0); }
+    }
+    .button-border { animation: borderGlow 3s ease-in-out infinite; }
+    .cursor { animation: cursorTap 3.4s ease-in-out infinite; transform-origin: 56px 46px; }
+    .spark-1 { animation: sparkle 3.4s ease-in-out infinite; transform-origin: 0 0; }
+    .spark-2 { animation: sparkle 3.4s ease-in-out 0.12s infinite; transform-origin: 0 0; }
+    .spark-3 { animation: sparkle 3.4s ease-in-out 0.24s infinite; transform-origin: 0 0; }
+    .five-star { animation: heartBeat 2.4s ease-in-out infinite; transform-origin: center; }
+    .caption { animation: captionFade 0.45s ease-out both; }
+  </style>
+
+  <rect width="420" height="108" rx="16" fill="#f6f8fa" stroke="#d1d9e0" stroke-width="1"/>
+
+  <g transform="translate(18 18)">
+    <rect class="button-border" x="0" y="0" width="164" height="48" rx="12" fill="#ffffff" stroke="#d1d9e0" stroke-width="1.2"/>
+    <g transform="translate(16 12)">
+      <g>
+        <path d="M16 1.6l4.25 8.62 9.51 1.38-6.88 6.71 1.62 9.47L16 23.27 7.5 27.78l1.62-9.47-6.88-6.71 9.51-1.38L16 1.6z"
+              fill="#eef1f5" stroke="#656d76" stroke-width="1">
+          <animate attributeName="fill" values="#eef1f5;#eef1f5;#F59E0B;#F59E0B;#eef1f5" dur="3.4s" repeatCount="indefinite"/>
+          <animate attributeName="stroke" values="#656d76;#656d76;#F59E0B;#F59E0B;#656d76" dur="3.4s" repeatCount="indefinite"/>
+        </path>
+        <animateTransform attributeName="transform" type="scale" values="1;1;1.15;1;1" dur="3.4s" repeatCount="indefinite" additive="sum"/>
+      </g>
+      <text x="42" y="18" font-family="system-ui, sans-serif" font-size="13" font-weight="700" fill="#1f2328">Star on GitHub</text>
+      <text x="42" y="32" font-family="system-ui, sans-serif" font-size="10" fill="#656d76">if llm-router saves your quota</text>
+    </g>
+
+    <g class="spark-1" opacity="0">
+      <circle cx="40" cy="-2" r="3" fill="#F59E0B"/>
+      <circle cx="28" cy="-8" r="1.8" fill="#4F46E5"/>
+    </g>
+    <g class="spark-2" opacity="0">
+      <circle cx="148" cy="-6" r="2.2" fill="#10B981"/>
+      <circle cx="160" cy="4" r="1.6" fill="#F59E0B"/>
+    </g>
+    <g class="spark-3" opacity="0">
+      <circle cx="172" cy="14" r="2.3" fill="#EF4444"/>
+      <circle cx="178" cy="28" r="1.8" fill="#8B5CF6"/>
+    </g>
+
+    <g class="cursor" transform="translate(120 30)">
+      <path d="M0 0l18 8-7 3 3 11-4 1-3-11-6 5V0z" fill="#1f2328" opacity="0.85"/>
+    </g>
+  </g>
+
+  <g class="caption" transform="translate(206 18)">
+    <text x="0" y="20" font-family="system-ui, sans-serif" font-size="16" font-weight="800" fill="#1f2328">Give llm-router the five-star treatment.</text>
+    <text x="0" y="42" font-family="system-ui, sans-serif" font-size="11.5" fill="#656d76">If the router cuts your spend or saves your quota, send a star back on GitHub.</text>
+    <g class="five-star" transform="translate(0 58)">
+      <text x="0" y="0" font-family="system-ui, sans-serif" font-size="13" font-weight="700" fill="#F59E0B">★★★★★</text>
+      <text x="74" y="0" font-family="system-ui, sans-serif" font-size="11" fill="#656d76">cheap models for the work, premium stars for the love</text>
+    </g>
+  </g>
+</svg>

@@ -2,6 +2,30 @@
 
 **For releases v6.2 and earlier, see [CHANGELOG_ARCHIVE.md](docs/CHANGELOG_ARCHIVE.md).**
 
+## v8.0.1 — README Motion Refresh & Pepy Tracking Split (2026-05-05)
+
+**Patch release: restored animated README visuals, revived the GitHub star CTA, and added Pepy momentum panels for both the legacy and renamed PyPI package pages.**
+
+### Added
+
+- Animated Pepy momentum panel for the renamed `llm-routing` package page
+- Side-by-side README coverage for both package eras:
+  - `llm-routing` with `Total`, `8.x`, and `7.x`
+  - `claude-code-llm-router` with `Total`, `7.x`, and `6.x`
+
+### Changed
+
+- Restored the motion-heavy README hero and section graphics in a CocoIndex-style presentation
+- Brought back the animated five-star GitHub referral near the top of the README
+- Regenerated the full `docs/readme/` SVG asset set, including Pepy-specific visuals
+
+### Fixed
+
+- README Pepy notes now explain the daily-data lag without hardcoding a specific latest release number
+- Pepy SVG copy now stays accurate across future patch releases
+
+---
+
 ## v8.0.0 — Quality Feedback Loop & Documentation Overhaul (2026-05-05)
 
 **Major release: Automatic quality scoring, developer-first README rewrite, documentation consistency pass, stale asset cleanup.**

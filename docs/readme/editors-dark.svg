@@ -1,0 +1,63 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 890 110" fill="none">
+  <style>
+    @keyframes editorIn {
+      0% { opacity: 0; transform: translateY(10px) scale(0.95); }
+      100% { opacity: 1; transform: translateY(0) scale(1); }
+    }
+  </style>
+  
+    <g opacity="0" style="animation: editorIn 0.4s ease-out 0.0s both;">
+      <rect x="12" y="10" width="132" height="90" rx="10" fill="#34D399" opacity="0.06" stroke="#34D399" stroke-width="1">
+        <animate attributeName="stroke-opacity" values="0.4;0.9;0.4" dur="3.0s" repeatCount="indefinite"/>
+      </rect>
+      <text x="78" y="38" text-anchor="middle" font-family="system-ui, sans-serif" font-size="13" font-weight="700" fill="#e6edf3">Claude Code</text>
+      <rect x="48" y="48" width="60" height="20" rx="10" fill="#34D399" opacity="0.2"/>
+      <text x="78" y="62" text-anchor="middle" font-family="system-ui, sans-serif" font-size="10" font-weight="600" fill="#34D399">Full</text>
+      <text x="78" y="88" text-anchor="middle" font-family="system-ui, sans-serif" font-size="10" fill="#8b949e">Auto-routing</text>
+    </g>
+    <g opacity="0" style="animation: editorIn 0.4s ease-out 0.1s both;">
+      <rect x="158" y="10" width="132" height="90" rx="10" fill="#34D399" opacity="0.06" stroke="#34D399" stroke-width="1">
+        <animate attributeName="stroke-opacity" values="0.4;0.9;0.4" dur="3.2s" repeatCount="indefinite"/>
+      </rect>
+      <text x="224" y="38" text-anchor="middle" font-family="system-ui, sans-serif" font-size="13" font-weight="700" fill="#e6edf3">Gemini CLI</text>
+      <rect x="194" y="48" width="60" height="20" rx="10" fill="#34D399" opacity="0.2"/>
+      <text x="224" y="62" text-anchor="middle" font-family="system-ui, sans-serif" font-size="10" font-weight="600" fill="#34D399">Full</text>
+      <text x="224" y="88" text-anchor="middle" font-family="system-ui, sans-serif" font-size="10" fill="#8b949e">Auto-routing</text>
+    </g>
+    <g opacity="0" style="animation: editorIn 0.4s ease-out 0.2s both;">
+      <rect x="304" y="10" width="132" height="90" rx="10" fill="#34D399" opacity="0.06" stroke="#34D399" stroke-width="1">
+        <animate attributeName="stroke-opacity" values="0.4;0.9;0.4" dur="3.4s" repeatCount="indefinite"/>
+      </rect>
+      <text x="370" y="38" text-anchor="middle" font-family="system-ui, sans-serif" font-size="13" font-weight="700" fill="#e6edf3">Codex CLI</text>
+      <rect x="340" y="48" width="60" height="20" rx="10" fill="#34D399" opacity="0.2"/>
+      <text x="370" y="62" text-anchor="middle" font-family="system-ui, sans-serif" font-size="10" font-weight="600" fill="#34D399">Full</text>
+      <text x="370" y="88" text-anchor="middle" font-family="system-ui, sans-serif" font-size="10" fill="#8b949e">Auto-routing</text>
+    </g>
+    <g opacity="0" style="animation: editorIn 0.4s ease-out 0.30000000000000004s both;">
+      <rect x="450" y="10" width="132" height="90" rx="10" fill="#FBBF24" opacity="0.06" stroke="#FBBF24" stroke-width="1">
+        <animate attributeName="stroke-opacity" values="0.4;0.9;0.4" dur="3.6s" repeatCount="indefinite"/>
+      </rect>
+      <text x="516" y="38" text-anchor="middle" font-family="system-ui, sans-serif" font-size="13" font-weight="700" fill="#e6edf3">VS Code</text>
+      <rect x="486" y="48" width="60" height="20" rx="10" fill="#FBBF24" opacity="0.2"/>
+      <text x="516" y="62" text-anchor="middle" font-family="system-ui, sans-serif" font-size="10" font-weight="600" fill="#FBBF24">MCP</text>
+      <text x="516" y="88" text-anchor="middle" font-family="system-ui, sans-serif" font-size="10" fill="#8b949e">60 tools</text>
+    </g>
+    <g opacity="0" style="animation: editorIn 0.4s ease-out 0.4s both;">
+      <rect x="596" y="10" width="132" height="90" rx="10" fill="#FBBF24" opacity="0.06" stroke="#FBBF24" stroke-width="1">
+        <animate attributeName="stroke-opacity" values="0.4;0.9;0.4" dur="3.8s" repeatCount="indefinite"/>
+      </rect>
+      <text x="662" y="38" text-anchor="middle" font-family="system-ui, sans-serif" font-size="13" font-weight="700" fill="#e6edf3">Cursor</text>
+      <rect x="632" y="48" width="60" height="20" rx="10" fill="#FBBF24" opacity="0.2"/>
+      <text x="662" y="62" text-anchor="middle" font-family="system-ui, sans-serif" font-size="10" font-weight="600" fill="#FBBF24">MCP</text>
+      <text x="662" y="88" text-anchor="middle" font-family="system-ui, sans-serif" font-size="10" fill="#8b949e">60 tools</text>
+    </g>
+    <g opacity="0" style="animation: editorIn 0.4s ease-out 0.5s both;">
+      <rect x="742" y="10" width="132" height="90" rx="10" fill="#FBBF24" opacity="0.06" stroke="#FBBF24" stroke-width="1">
+        <animate attributeName="stroke-opacity" values="0.4;0.9;0.4" dur="4.0s" repeatCount="indefinite"/>
+      </rect>
+      <text x="808" y="38" text-anchor="middle" font-family="system-ui, sans-serif" font-size="13" font-weight="700" fill="#e6edf3">Any MCP</text>
+      <rect x="778" y="48" width="60" height="20" rx="10" fill="#FBBF24" opacity="0.2"/>
+      <text x="808" y="62" text-anchor="middle" font-family="system-ui, sans-serif" font-size="10" font-weight="600" fill="#FBBF24">MCP</text>
+      <text x="808" y="88" text-anchor="middle" font-family="system-ui, sans-serif" font-size="10" fill="#8b949e">60 tools</text>
+    </g>
+</svg>

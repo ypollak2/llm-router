@@ -39,6 +39,80 @@ DARK = {
     "accent": "#A78BFA",
 }
 
+PEPY_LEGACY_SERIES = [
+    ("2026-03-29", 229, 0, 0),
+    ("2026-03-30", 690, 0, 0),
+    ("2026-03-31", 144, 0, 0),
+    ("2026-04-01", 36, 0, 0),
+    ("2026-04-02", 45, 0, 0),
+    ("2026-04-03", 40, 0, 0),
+    ("2026-04-04", 11, 0, 0),
+    ("2026-04-05", 2249, 0, 0),
+    ("2026-04-06", 3393, 0, 0),
+    ("2026-04-07", 2055, 0, 0),
+    ("2026-04-08", 1369, 0, 0),
+    ("2026-04-09", 1115, 0, 0),
+    ("2026-04-10", 1422, 0, 0),
+    ("2026-04-11", 379, 0, 0),
+    ("2026-04-12", 810, 0, 0),
+    ("2026-04-13", 1587, 0, 0),
+    ("2026-04-14", 1255, 0, 0),
+    ("2026-04-15", 2257, 0, 0),
+    ("2026-04-16", 1714, 0, 200),
+    ("2026-04-17", 1131, 0, 683),
+    ("2026-04-18", 779, 0, 138),
+    ("2026-04-19", 1104, 0, 986),
+    ("2026-04-20", 2356, 0, 1871),
+    ("2026-04-21", 2504, 467, 1679),
+    ("2026-04-22", 1458, 813, 304),
+    ("2026-04-23", 930, 412, 137),
+    ("2026-04-24", 793, 552, 131),
+    ("2026-04-25", 483, 94, 96),
+    ("2026-04-26", 662, 511, 78),
+    ("2026-04-27", 936, 594, 147),
+    ("2026-04-28", 967, 326, 161),
+    ("2026-04-29", 557, 125, 83),
+    ("2026-04-30", 147, 41, 19),
+    ("2026-05-01", 804, 156, 199),
+    ("2026-05-02", 612, 96, 114),
+    ("2026-05-03", 696, 131, 173),
+    ("2026-05-04", 137, 102, 21),
+]
+
+PEPY_CURRENT_SERIES = [
+    ("2026-04-28", 451, 0, 451),
+    ("2026-04-29", 85, 0, 85),
+    ("2026-04-30", 31, 0, 31),
+    ("2026-05-01", 17, 0, 17),
+    ("2026-05-02", 7, 0, 7),
+    ("2026-05-03", 11, 0, 11),
+    ("2026-05-04", 52, 0, 52),
+]
+
+
+def compact_number(value: int) -> str:
+    if value >= 1_000_000:
+        return f"{value / 1_000_000:.1f}M"
+    if value >= 1_000:
+        return f"{value / 1_000:.1f}k"
+    return str(value)
+
+
+def line_path(values: list[int], x: float, y: float, width: float, height: float, max_value: float):
+    points = []
+    steps = max(1, len(values) - 1)
+    for index, value in enumerate(values):
+        px = x + (index / steps) * width
+        py = y + height - (value / max_value) * height
+        points.append((px, py))
+    path = "M " + " L ".join(f"{px:.1f} {py:.1f}" for px, py in points)
+    area = (
+        f"M {x:.1f} {y + height:.1f} "
+        + " L ".join(f"{px:.1f} {py:.1f}" for px, py in points)
+        + f" L {x + width:.1f} {y + height:.1f} Z"
+    )
+    return path, area, points
+
 
 def write_svg(name: str, content_fn):
     for mode, colors in [("light", LIGHT), ("dark", DARK)]:
@@ -492,6 +566,361 @@ def nav_button(c, mode, label, width=120):
 </svg>'''
 
 
+# ── 7. Star CTA ───────────────────────────────────────────────────────────
+
+def star_cta(c, mode):
+    return f'''<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 420 108" fill="none">
+  <style>
+    @keyframes cursorTap {{
+      0%, 12%, 100% {{ transform: translate(0px, 0px) scale(1); }}
+      18% {{ transform: translate(-3px, -3px) scale(1); }}
+      24% {{ transform: translate(-10px, -10px) scale(0.96); }}
+      30% {{ transform: translate(-3px, -3px) scale(1); }}
+    }}
+    @keyframes borderGlow {{
+      0%, 100% {{ stroke-opacity: 0.45; }}
+      50% {{ stroke-opacity: 1; }}
+    }}
+    @keyframes sparkle {{
+      0%, 18%, 100% {{ opacity: 0; transform: scale(0.6); }}
+      28%, 46% {{ opacity: 1; transform: scale(1); }}
+      60% {{ opacity: 0; transform: scale(1.2); }}
+    }}
+    @keyframes heartBeat {{
+      0%, 100% {{ transform: scale(1); }}
+      50% {{ transform: scale(1.08); }}
+    }}
+    @keyframes captionFade {{
+      0% {{ opacity: 0; transform: translateY(4px); }}
+      100% {{ opacity: 1; transform: translateY(0); }}
+    }}
+    .button-border {{ animation: borderGlow 3s ease-in-out infinite; }}
+    .cursor {{ animation: cursorTap 3.4s ease-in-out infinite; transform-origin: 56px 46px; }}
+    .spark-1 {{ animation: sparkle 3.4s ease-in-out infinite; transform-origin: 0 0; }}
+    .spark-2 {{ animation: sparkle 3.4s ease-in-out 0.12s infinite; transform-origin: 0 0; }}
+    .spark-3 {{ animation: sparkle 3.4s ease-in-out 0.24s infinite; transform-origin: 0 0; }}
+    .five-star {{ animation: heartBeat 2.4s ease-in-out infinite; transform-origin: center; }}
+    .caption {{ animation: captionFade 0.45s ease-out both; }}
+  </style>
+
+  <rect width="420" height="108" rx="16" fill="{c['bg2']}" stroke="{c['border']}" stroke-width="1"/>
+
+  <g transform="translate(18 18)">
+    <rect class="button-border" x="0" y="0" width="164" height="48" rx="12" fill="{c['bg']}" stroke="{c['border']}" stroke-width="1.2"/>
+    <g transform="translate(16 12)">
+      <g>
+        <path d="M16 1.6l4.25 8.62 9.51 1.38-6.88 6.71 1.62 9.47L16 23.27 7.5 27.78l1.62-9.47-6.88-6.71 9.51-1.38L16 1.6z"
+              fill="{c['bg3']}" stroke="{c['text2']}" stroke-width="1">
+          <animate attributeName="fill" values="{c['bg3']};{c['bg3']};{c['budget']};{c['budget']};{c['bg3']}" dur="3.4s" repeatCount="indefinite"/>
+          <animate attributeName="stroke" values="{c['text2']};{c['text2']};{c['budget']};{c['budget']};{c['text2']}" dur="3.4s" repeatCount="indefinite"/>
+        </path>
+        <animateTransform attributeName="transform" type="scale" values="1;1;1.15;1;1" dur="3.4s" repeatCount="indefinite" additive="sum"/>
+      </g>
+      <text x="42" y="18" font-family="system-ui, sans-serif" font-size="13" font-weight="700" fill="{c['text']}">Star on GitHub</text>
+      <text x="42" y="32" font-family="system-ui, sans-serif" font-size="10" fill="{c['text2']}">if llm-router saves your quota</text>
+    </g>
+
+    <g class="spark-1" opacity="0">
+      <circle cx="40" cy="-2" r="3" fill="{c['budget']}"/>
+      <circle cx="28" cy="-8" r="1.8" fill="{c['primary']}"/>
+    </g>
+    <g class="spark-2" opacity="0">
+      <circle cx="148" cy="-6" r="2.2" fill="{c['free']}"/>
+      <circle cx="160" cy="4" r="1.6" fill="{c['budget']}"/>
+    </g>
+    <g class="spark-3" opacity="0">
+      <circle cx="172" cy="14" r="2.3" fill="{c['premium']}"/>
+      <circle cx="178" cy="28" r="1.8" fill="{c['accent']}"/>
+    </g>
+
+    <g class="cursor" transform="translate(120 30)">
+      <path d="M0 0l18 8-7 3 3 11-4 1-3-11-6 5V0z" fill="{c['text']}" opacity="0.85"/>
+    </g>
+  </g>
+
+  <g class="caption" transform="translate(206 18)">
+    <text x="0" y="20" font-family="system-ui, sans-serif" font-size="16" font-weight="800" fill="{c['text']}">Give llm-router the five-star treatment.</text>
+    <text x="0" y="42" font-family="system-ui, sans-serif" font-size="11.5" fill="{c['text2']}">If the router cuts your spend or saves your quota, send a star back on GitHub.</text>
+    <g class="five-star" transform="translate(0 58)">
+      <text x="0" y="0" font-family="system-ui, sans-serif" font-size="13" font-weight="700" fill="{c['budget']}">★★★★★</text>
+      <text x="74" y="0" font-family="system-ui, sans-serif" font-size="11" fill="{c['text2']}">cheap models for the work, premium stars for the love</text>
+    </g>
+  </g>
+</svg>'''
+
+
+# ── 8. Pepy Momentum ─────────────────────────────────────────────────────
+
+def pepy_momentum(c, mode):
+    total_values = [row[1] for row in PEPY_LEGACY_SERIES]
+    v7_values = [row[2] for row in PEPY_LEGACY_SERIES]
+    v6_values = [row[3] for row in PEPY_LEGACY_SERIES]
+
+    total_sum = sum(total_values)
+    v7_sum = sum(v7_values)
+    v6_sum = sum(v6_values)
+
+    peak_v7_date, _, peak_v7, _ = max(PEPY_LEGACY_SERIES, key=lambda row: row[2])
+    launch_index = next(index for index, row in enumerate(PEPY_LEGACY_SERIES) if row[2] > 0)
+
+    chart_x = 280
+    chart_y = 48
+    chart_w = 574
+    chart_h = 146
+    max_value = max(total_values) * 1.08
+
+    total_path, total_area, total_points = line_path(total_values, chart_x, chart_y, chart_w, chart_h, max_value)
+    v7_path, _, v7_points = line_path(v7_values, chart_x, chart_y, chart_w, chart_h, max_value)
+    v6_path, _, v6_points = line_path(v6_values, chart_x, chart_y, chart_w, chart_h, max_value)
+
+    launch_x = total_points[launch_index][0]
+    latest_total = total_points[-1]
+    latest_v7 = v7_points[-1]
+    latest_v6 = v6_points[-1]
+
+    y_ticks = []
+    for fraction in [0, 0.25, 0.5, 0.75, 1]:
+        value = round(max_value * fraction)
+        y_pos = chart_y + chart_h - chart_h * fraction
+        y_ticks.append((y_pos, value))
+
+    peak_v7_label = peak_v7_date[5:].replace("-", "/")
+
+    return f'''<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 890 240" fill="none">
+  <style>
+    @keyframes panelIn {{
+      0% {{ opacity: 0; transform: translateY(10px); }}
+      100% {{ opacity: 1; transform: translateY(0); }}
+    }}
+    @keyframes drawLine {{
+      from {{ stroke-dashoffset: 100; }}
+      to {{ stroke-dashoffset: 0; }}
+    }}
+    @keyframes pulseDot {{
+      0%, 100% {{ transform: scale(1); opacity: 0.9; }}
+      50% {{ transform: scale(1.16); opacity: 1; }}
+    }}
+    @keyframes launchGlow {{
+      0%, 100% {{ opacity: 0.05; }}
+      50% {{ opacity: 0.14; }}
+    }}
+    @keyframes gridFade {{
+      0%, 100% {{ opacity: 0.22; }}
+      50% {{ opacity: 0.36; }}
+    }}
+    .panel {{ animation: panelIn 0.55s ease-out both; }}
+    .grid {{ animation: gridFade 4s ease-in-out infinite; }}
+    .total-line {{
+      stroke-dasharray: 100;
+      stroke-dashoffset: 100;
+      animation: drawLine 1.5s ease-out 0.05s forwards;
+    }}
+    .v7-line {{
+      stroke-dasharray: 100;
+      stroke-dashoffset: 100;
+      animation: drawLine 1.5s ease-out 0.22s forwards;
+    }}
+    .v6-line {{
+      stroke-dasharray: 100;
+      stroke-dashoffset: 100;
+      animation: drawLine 1.5s ease-out 0.38s forwards;
+    }}
+    .launch-band {{ animation: launchGlow 3.2s ease-in-out infinite; }}
+    .dot-total {{ animation: pulseDot 2.4s ease-in-out infinite; transform-origin: {latest_total[0]:.1f}px {latest_total[1]:.1f}px; }}
+    .dot-v7 {{ animation: pulseDot 2.4s ease-in-out 0.4s infinite; transform-origin: {latest_v7[0]:.1f}px {latest_v7[1]:.1f}px; }}
+    .dot-v6 {{ animation: pulseDot 2.4s ease-in-out 0.8s infinite; transform-origin: {latest_v6[0]:.1f}px {latest_v6[1]:.1f}px; }}
+  </style>
+
+  <rect class="panel" width="890" height="240" rx="16" fill="{c['bg2']}" stroke="{c['border']}" stroke-width="1"/>
+  <rect x="1" y="1" width="888" height="238" rx="15" fill="none" stroke="{c['border']}" stroke-opacity="0.35"/>
+
+  <rect x="24" y="22" width="220" height="196" rx="14" fill="{c['bg']}" stroke="{c['border']}" stroke-opacity="0.6"/>
+  <text x="42" y="54" font-family="system-ui, sans-serif" font-size="12" font-weight="700" fill="{c['text2']}">PYPI MOMENTUM</text>
+  <text x="42" y="84" font-family="system-ui, sans-serif" font-size="34" font-weight="800" fill="{c['text']}">{compact_number(total_sum)}</text>
+  <text x="42" y="106" font-family="system-ui, sans-serif" font-size="12" fill="{c['text2']}">legacy installs shown from Mar 29 to May 4</text>
+  <text x="42" y="130" font-family="system-ui, sans-serif" font-size="12" fill="{c['text2']}">Daily Pepy curve for the pre-rename package,</text>
+  <text x="42" y="147" font-family="system-ui, sans-serif" font-size="12" fill="{c['text2']}">with the 6.x → 7.x handoff highlighted.</text>
+
+  <rect x="42" y="166" width="78" height="26" rx="13" fill="{c['budget']}" opacity="0.12" stroke="{c['budget']}" stroke-width="0.8"/>
+  <text x="81" y="183" text-anchor="middle" font-family="system-ui, sans-serif" font-size="12" font-weight="700" fill="{c['budget']}">{compact_number(v7_sum)}</text>
+  <text x="81" y="201" text-anchor="middle" font-family="system-ui, sans-serif" font-size="10" fill="{c['text2']}">7.x</text>
+
+  <rect x="132" y="166" width="78" height="26" rx="13" fill="{c['free']}" opacity="0.12" stroke="{c['free']}" stroke-width="0.8"/>
+  <text x="171" y="183" text-anchor="middle" font-family="system-ui, sans-serif" font-size="12" font-weight="700" fill="{c['free']}">{compact_number(v6_sum)}</text>
+  <text x="171" y="201" text-anchor="middle" font-family="system-ui, sans-serif" font-size="10" fill="{c['text2']}">6.x</text>
+
+  <text x="42" y="217" font-family="system-ui, sans-serif" font-size="11" fill="{c['text2']}">Peak 7.x day: {peak_v7} installs on {peak_v7_label}</text>
+
+  <text x="280" y="30" font-family="system-ui, sans-serif" font-size="12" font-weight="700" fill="{c['text2']}">INTERACTIVE PEPY SPLIT</text>
+  <text x="280" y="214" font-family="system-ui, sans-serif" font-size="11" fill="{c['text2']}">Total, 7.x, and 6.x daily downloads on the legacy package before the rename to llm-routing.</text>
+
+  <rect x="280" y="22" width="56" height="18" rx="9" fill="{c['primary']}" opacity="0.12"/>
+  <text x="308" y="34" text-anchor="middle" font-family="system-ui, sans-serif" font-size="10" font-weight="700" fill="{c['primary']}">Total</text>
+  <rect x="342" y="22" width="46" height="18" rx="9" fill="{c['budget']}" opacity="0.12"/>
+  <text x="365" y="34" text-anchor="middle" font-family="system-ui, sans-serif" font-size="10" font-weight="700" fill="{c['budget']}">7.x</text>
+  <rect x="394" y="22" width="46" height="18" rx="9" fill="{c['free']}" opacity="0.12"/>
+  <text x="417" y="34" text-anchor="middle" font-family="system-ui, sans-serif" font-size="10" font-weight="700" fill="{c['free']}">6.x</text>
+
+  <rect class="launch-band" x="{launch_x - 11:.1f}" y="{chart_y:.1f}" width="22" height="{chart_h:.1f}" rx="11" fill="{c['accent']}"/>
+  <text x="{launch_x + 16:.1f}" y="{chart_y + 18:.1f}" font-family="system-ui, sans-serif" font-size="10" font-weight="700" fill="{c['accent']}">7.x lands</text>
+
+  {''.join(
+      f'<line class="grid" x1="{chart_x:.1f}" y1="{y_pos:.1f}" x2="{chart_x + chart_w:.1f}" y2="{y_pos:.1f}" '
+      f'stroke="{c["border"]}" stroke-width="1" opacity="0.25"/>'
+      f'<text x="{chart_x - 10:.1f}" y="{y_pos + 4:.1f}" text-anchor="end" font-family="system-ui, sans-serif" '
+      f'font-size="10" fill="{c["text2"]}">{compact_number(value)}</text>'
+      for y_pos, value in y_ticks
+  )}
+
+  <path d="{total_area}" fill="{c['primary']}" opacity="0.08"/>
+  <path class="total-line" pathLength="100" d="{total_path}" fill="none" stroke="{c['primary']}" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+  <path class="v7-line" pathLength="100" d="{v7_path}" fill="none" stroke="{c['budget']}" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>
+  <path class="v6-line" pathLength="100" d="{v6_path}" fill="none" stroke="{c['free']}" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>
+
+  <circle class="dot-total" cx="{latest_total[0]:.1f}" cy="{latest_total[1]:.1f}" r="5" fill="{c['primary']}"/>
+  <circle class="dot-v7" cx="{latest_v7[0]:.1f}" cy="{latest_v7[1]:.1f}" r="4.5" fill="{c['budget']}"/>
+  <circle class="dot-v6" cx="{latest_v6[0]:.1f}" cy="{latest_v6[1]:.1f}" r="4.5" fill="{c['free']}"/>
+
+  <text x="{chart_x:.1f}" y="{chart_y + chart_h + 22:.1f}" font-family="system-ui, sans-serif" font-size="10" fill="{c['text2']}">Mar 29</text>
+  <text x="{launch_x:.1f}" y="{chart_y + chart_h + 22:.1f}" text-anchor="middle" font-family="system-ui, sans-serif" font-size="10" fill="{c['text2']}">Apr 21</text>
+  <text x="{chart_x + chart_w:.1f}" y="{chart_y + chart_h + 22:.1f}" text-anchor="end" font-family="system-ui, sans-serif" font-size="10" fill="{c['text2']}">May 4</text>
+</svg>'''
+
+
+def pepy_routing(c, mode):
+    total_values = [row[1] for row in PEPY_CURRENT_SERIES]
+    v8_values = [row[2] for row in PEPY_CURRENT_SERIES]
+    v7_values = [row[3] for row in PEPY_CURRENT_SERIES]
+
+    total_sum = sum(total_values)
+    v8_sum = sum(v8_values)
+    v7_sum = sum(v7_values)
+
+    chart_x = 280
+    chart_y = 48
+    chart_w = 574
+    chart_h = 146
+    max_value = max(total_values) * 1.08
+
+    total_path, total_area, total_points = line_path(total_values, chart_x, chart_y, chart_w, chart_h, max_value)
+    v8_path, _, v8_points = line_path(v8_values, chart_x, chart_y, chart_w, chart_h, max_value)
+    v7_path, _, v7_points = line_path(v7_values, chart_x, chart_y, chart_w, chart_h, max_value)
+
+    release_band_x = total_points[-1][0]
+    latest_total = total_points[-1]
+    latest_v8 = v8_points[-1]
+    latest_v7 = v7_points[-1]
+
+    y_ticks = []
+    for fraction in [0, 0.25, 0.5, 0.75, 1]:
+        value = round(max_value * fraction)
+        y_pos = chart_y + chart_h - chart_h * fraction
+        y_ticks.append((y_pos, value))
+
+    peak_v7_date, _, _, peak_v7 = max(PEPY_CURRENT_SERIES, key=lambda row: row[3])
+    peak_v7_label = peak_v7_date[5:].replace("-", "/")
+
+    return f'''<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 890 240" fill="none">
+  <style>
+    @keyframes panelIn {{
+      0% {{ opacity: 0; transform: translateY(10px); }}
+      100% {{ opacity: 1; transform: translateY(0); }}
+    }}
+    @keyframes drawLine {{
+      from {{ stroke-dashoffset: 100; }}
+      to {{ stroke-dashoffset: 0; }}
+    }}
+    @keyframes pulseDot {{
+      0%, 100% {{ transform: scale(1); opacity: 0.9; }}
+      50% {{ transform: scale(1.16); opacity: 1; }}
+    }}
+    @keyframes releaseGlow {{
+      0%, 100% {{ opacity: 0.06; }}
+      50% {{ opacity: 0.16; }}
+    }}
+    @keyframes gridFade {{
+      0%, 100% {{ opacity: 0.22; }}
+      50% {{ opacity: 0.36; }}
+    }}
+    .panel {{ animation: panelIn 0.55s ease-out both; }}
+    .grid {{ animation: gridFade 4s ease-in-out infinite; }}
+    .total-line {{
+      stroke-dasharray: 100;
+      stroke-dashoffset: 100;
+      animation: drawLine 1.5s ease-out 0.05s forwards;
+    }}
+    .v8-line {{
+      stroke-dasharray: 100;
+      stroke-dashoffset: 100;
+      animation: drawLine 1.5s ease-out 0.22s forwards;
+    }}
+    .v7-line {{
+      stroke-dasharray: 100;
+      stroke-dashoffset: 100;
+      animation: drawLine 1.5s ease-out 0.38s forwards;
+    }}
+    .release-band {{ animation: releaseGlow 3.2s ease-in-out infinite; }}
+    .dot-total {{ animation: pulseDot 2.4s ease-in-out infinite; transform-origin: {latest_total[0]:.1f}px {latest_total[1]:.1f}px; }}
+    .dot-v8 {{ animation: pulseDot 2.4s ease-in-out 0.4s infinite; transform-origin: {latest_v8[0]:.1f}px {latest_v8[1]:.1f}px; }}
+    .dot-v7 {{ animation: pulseDot 2.4s ease-in-out 0.8s infinite; transform-origin: {latest_v7[0]:.1f}px {latest_v7[1]:.1f}px; }}
+  </style>
+
+  <rect class="panel" width="890" height="240" rx="16" fill="{c['bg2']}" stroke="{c['border']}" stroke-width="1"/>
+  <rect x="1" y="1" width="888" height="238" rx="15" fill="none" stroke="{c['border']}" stroke-opacity="0.35"/>
+
+  <rect x="24" y="22" width="220" height="196" rx="14" fill="{c['bg']}" stroke="{c['border']}" stroke-opacity="0.6"/>
+  <text x="42" y="54" font-family="system-ui, sans-serif" font-size="12" font-weight="700" fill="{c['text2']}">RENAMED PACKAGE</text>
+  <text x="42" y="84" font-family="system-ui, sans-serif" font-size="34" font-weight="800" fill="{c['text']}">{compact_number(total_sum)}</text>
+  <text x="42" y="106" font-family="system-ui, sans-serif" font-size="12" fill="{c['text2']}">llm-routing installs shown from Apr 28 to May 4</text>
+  <text x="42" y="130" font-family="system-ui, sans-serif" font-size="12" fill="{c['text2']}">New Pepy page after the rename, with</text>
+  <text x="42" y="147" font-family="system-ui, sans-serif" font-size="12" fill="{c['text2']}">the first week of llm-routing history.</text>
+
+  <rect x="42" y="166" width="78" height="26" rx="13" fill="{c['premium']}" opacity="0.12" stroke="{c['premium']}" stroke-width="0.8"/>
+  <text x="81" y="183" text-anchor="middle" font-family="system-ui, sans-serif" font-size="12" font-weight="700" fill="{c['premium']}">{compact_number(v8_sum)}</text>
+  <text x="81" y="201" text-anchor="middle" font-family="system-ui, sans-serif" font-size="10" fill="{c['text2']}">8.x</text>
+
+  <rect x="132" y="166" width="78" height="26" rx="13" fill="{c['budget']}" opacity="0.12" stroke="{c['budget']}" stroke-width="0.8"/>
+  <text x="171" y="183" text-anchor="middle" font-family="system-ui, sans-serif" font-size="12" font-weight="700" fill="{c['budget']}">{compact_number(v7_sum)}</text>
+  <text x="171" y="201" text-anchor="middle" font-family="system-ui, sans-serif" font-size="10" fill="{c['text2']}">7.x</text>
+
+  <text x="42" y="217" font-family="system-ui, sans-serif" font-size="11" fill="{c['text2']}">Pepy metadata can update before daily 8.x points do.</text>
+
+  <text x="280" y="30" font-family="system-ui, sans-serif" font-size="12" font-weight="700" fill="{c['text2']}">INTERACTIVE PEPY SPLIT</text>
+  <text x="280" y="214" font-family="system-ui, sans-serif" font-size="11" fill="{c['text2']}">Total, 8.x, and 7.x daily downloads on the renamed llm-routing package page.</text>
+
+  <rect x="280" y="22" width="56" height="18" rx="9" fill="{c['primary']}" opacity="0.12"/>
+  <text x="308" y="34" text-anchor="middle" font-family="system-ui, sans-serif" font-size="10" font-weight="700" fill="{c['primary']}">Total</text>
+  <rect x="342" y="22" width="46" height="18" rx="9" fill="{c['premium']}" opacity="0.12"/>
+  <text x="365" y="34" text-anchor="middle" font-family="system-ui, sans-serif" font-size="10" font-weight="700" fill="{c['premium']}">8.x</text>
+  <rect x="394" y="22" width="46" height="18" rx="9" fill="{c['budget']}" opacity="0.12"/>
+  <text x="417" y="34" text-anchor="middle" font-family="system-ui, sans-serif" font-size="10" font-weight="700" fill="{c['budget']}">7.x</text>
+
+  <rect class="release-band" x="{release_band_x - 11:.1f}" y="{chart_y:.1f}" width="22" height="{chart_h:.1f}" rx="11" fill="{c['accent']}"/>
+  <text x="{release_band_x - 80:.1f}" y="{chart_y + 18:.1f}" font-family="system-ui, sans-serif" font-size="10" font-weight="700" fill="{c['accent']}">metadata updates before daily points</text>
+
+  {''.join(
+      f'<line class="grid" x1="{chart_x:.1f}" y1="{y_pos:.1f}" x2="{chart_x + chart_w:.1f}" y2="{y_pos:.1f}" '
+      f'stroke="{c["border"]}" stroke-width="1" opacity="0.25"/>'
+      f'<text x="{chart_x - 10:.1f}" y="{y_pos + 4:.1f}" text-anchor="end" font-family="system-ui, sans-serif" '
+      f'font-size="10" fill="{c["text2"]}">{compact_number(value)}</text>'
+      for y_pos, value in y_ticks
+  )}
+
+  <path d="{total_area}" fill="{c['primary']}" opacity="0.08"/>
+  <path class="total-line" pathLength="100" d="{total_path}" fill="none" stroke="{c['primary']}" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+  <path class="v8-line" pathLength="100" d="{v8_path}" fill="none" stroke="{c['premium']}" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>
+  <path class="v7-line" pathLength="100" d="{v7_path}" fill="none" stroke="{c['budget']}" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>
+
+  <circle class="dot-total" cx="{latest_total[0]:.1f}" cy="{latest_total[1]:.1f}" r="5" fill="{c['primary']}"/>
+  <circle class="dot-v8" cx="{latest_v8[0]:.1f}" cy="{latest_v8[1]:.1f}" r="4.5" fill="{c['premium']}"/>
+  <circle class="dot-v7" cx="{latest_v7[0]:.1f}" cy="{latest_v7[1]:.1f}" r="4.5" fill="{c['budget']}"/>
+
+  <text x="{chart_x:.1f}" y="{chart_y + chart_h + 22:.1f}" font-family="system-ui, sans-serif" font-size="10" fill="{c['text2']}">Apr 28</text>
+  <text x="{release_band_x:.1f}" y="{chart_y + chart_h + 22:.1f}" text-anchor="end" font-family="system-ui, sans-serif" font-size="10" fill="{c['text2']}">May 4 data</text>
+  <text x="{chart_x + chart_w:.1f}" y="{chart_y + chart_h + 38:.1f}" text-anchor="end" font-family="system-ui, sans-serif" font-size="10" fill="{c['text2']}">Peak 7.x day: {peak_v7} installs on {peak_v7_label}</text>
+</svg>'''
+
+
 # ── Generate all assets ───────────────────────────────────────────────────
 
 if __name__ == "__main__":
@@ -501,6 +930,9 @@ if __name__ == "__main__":
     write_svg("savings", savings_infographic)
     write_svg("architecture", architecture)
     write_svg("editors", editors)
+    write_svg("star-cta", star_cta)
+    write_svg("pepy-momentum", pepy_momentum)
+    write_svg("pepy-routing", pepy_routing)
 
     for label, w in [("Quick Start", 120), ("Docs", 80), ("Tool Reference", 130), ("Changelog", 110)]:
         slug = label.lower().replace(" ", "-")

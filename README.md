@@ -1,3 +1,11 @@
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/readme/hero-dark.svg">
+    <source media="(prefers-color-scheme: light)" srcset="docs/readme/hero-light.svg">
+    <img src="docs/readme/hero-light.svg" alt="LLM Router animated hero — route every AI call through a moving complexity pipeline into free, budget, and premium model tiers across 20+ providers and 60 MCP tools." width="100%"/>
+  </picture>
+</p>
+
 <h1 align="center">LLM Router</h1>
 
 <p align="center">
@@ -7,8 +15,26 @@
 </p>
 
 <p align="center">
+  <a href="https://github.com/ypollak2/llm-router/stargazers">
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="docs/readme/star-cta-dark.svg">
+      <source media="(prefers-color-scheme: light)" srcset="docs/readme/star-cta-light.svg">
+      <img src="docs/readme/star-cta-light.svg" alt="Give llm-router the five-star treatment on GitHub." width="420"/>
+    </picture>
+  </a>
+</p>
+
+<p align="center">
+  <a href="#quick-start" title="Get started with llm-router in minutes"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/readme/btn-quick-start-dark.svg"><source media="(prefers-color-scheme: light)" srcset="docs/readme/btn-quick-start-light.svg"><img src="docs/readme/btn-quick-start-light.svg" alt="Quick Start" height="34" align="absmiddle"/></picture></a>&nbsp;&nbsp;
+  <a href="docs/GETTING_STARTED.md" title="Full setup and configuration guide"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/readme/btn-docs-dark.svg"><source media="(prefers-color-scheme: light)" srcset="docs/readme/btn-docs-light.svg"><img src="docs/readme/btn-docs-light.svg" alt="Docs" height="34" align="absmiddle"/></picture></a>&nbsp;&nbsp;
+  <a href="docs/TOOLS.md" title="Complete reference for all 60 MCP tools"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/readme/btn-tool-reference-dark.svg"><source media="(prefers-color-scheme: light)" srcset="docs/readme/btn-tool-reference-light.svg"><img src="docs/readme/btn-tool-reference-light.svg" alt="Tool Reference" height="34" align="absmiddle"/></picture></a>&nbsp;&nbsp;
+  <a href="CHANGELOG.md" title="Version history and release notes"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/readme/btn-changelog-dark.svg"><source media="(prefers-color-scheme: light)" srcset="docs/readme/btn-changelog-light.svg"><img src="docs/readme/btn-changelog-light.svg" alt="Changelog" height="34" align="absmiddle"/></picture></a>
+</p>
+
+<p align="center">
   <a href="https://pypi.org/project/llm-routing/"><img src="https://img.shields.io/pypi/v/llm-routing?style=flat-square&color=4F46E5" alt="PyPI"></a>
   <a href="https://github.com/ypollak2/llm-router/actions"><img src="https://img.shields.io/github/actions/workflow/status/ypollak2/llm-router/ci.yml?style=flat-square&label=tests" alt="Tests"></a>
+  <a href="https://github.com/ypollak2/llm-router/stargazers"><img src="https://img.shields.io/github/stars/ypollak2/llm-router?style=flat-square&label=stars&color=F59E0B" alt="Stars"></a>
   <a href="https://pypi.org/project/llm-routing/"><img src="https://img.shields.io/pypi/dm/llm-routing?style=flat-square&color=10B981" alt="Downloads"></a>
   <a href="https://pypi.org/project/llm-routing/"><img src="https://img.shields.io/badge/python-3.10–3.13-3572A5?style=flat-square" alt="Python"></a>
   <a href="https://modelcontextprotocol.io"><img src="https://img.shields.io/badge/MCP-1.0+-8B5CF6?style=flat-square" alt="MCP"></a>
@@ -16,7 +42,27 @@
 </p>
 
 <p align="center">
-  <a href="#quick-start">Quick Start</a> · <a href="#how-it-works">How It Works</a> · <a href="#host-support">Host Support</a> · <a href="docs/TOOLS.md">Tool Reference</a> · <a href="CHANGELOG.md">Changelog</a>
+  <a href="https://pepy.tech/projects/llm-routing?timeRange=threeMonths&category=version&includeCIDownloads=true&granularity=daily&viewType=line&versions=Total%2C8.*%2C7.*">
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="docs/readme/pepy-routing-dark.svg">
+      <source media="(prefers-color-scheme: light)" srcset="docs/readme/pepy-routing-light.svg">
+      <img src="docs/readme/pepy-routing-light.svg" alt="Animated Pepy momentum panel for llm-routing showing daily installs on the renamed package with total, 8.x, and 7.x lines." width="100%"/>
+    </picture>
+  </a>
+</p>
+
+<p align="center">
+  <a href="https://pepy.tech/projects/claude-code-llm-router?timeRange=threeMonths&category=version&includeCIDownloads=true&granularity=daily&viewType=line&versions=Total%2C7.*%2C6.*">
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="docs/readme/pepy-momentum-dark.svg">
+      <source media="(prefers-color-scheme: light)" srcset="docs/readme/pepy-momentum-light.svg">
+      <img src="docs/readme/pepy-momentum-light.svg" alt="Animated Pepy momentum panel for llm-router showing daily installs from the pre-rename package with total, 7.x, and 6.x lines." width="100%"/>
+    </picture>
+  </a>
+</p>
+
+<p align="center">
+  <sub>As of May 5, 2026, Pepy's daily `llm-routing` series runs through May 4, 2026, so the page can show newer release metadata before the daily `8.x` line catches up.</sub>
 </p>
 
 ---
@@ -37,6 +83,14 @@ llm-router sits between your AI tool and the LLM providers. It classifies each t
 - You always want the best possible model regardless of cost
 - You don't use MCP-compatible tools
 - You need guaranteed latency (routing adds classification overhead)
+
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/readme/why-route-dark.svg">
+    <source media="(prefers-color-scheme: light)" srcset="docs/readme/why-route-light.svg">
+    <img src="docs/readme/why-route-light.svg" alt="Animated benefits panel for llm-router showing cheaper routing, preserved quality, quota protection, and zero-config setup." width="100%"/>
+  </picture>
+</p>
 
 ---
 
@@ -73,6 +127,14 @@ In Claude Code, ask a simple question. The session-end summary shows routing dec
 ---
 
 ## How It Works
+
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/readme/architecture-dark.svg">
+    <source media="(prefers-color-scheme: light)" srcset="docs/readme/architecture-light.svg">
+    <img src="docs/readme/architecture-light.svg" alt="Animated llm-router architecture diagram showing prompt intake, heuristics, complexity classification, free-first routing, and guard rails." width="100%"/>
+  </picture>
+</p>
 
 ```
 User prompt
@@ -122,6 +184,14 @@ Classification is free (regex heuristics catch ~70% of tasks) or near-free (loca
 | **Gemini CLI** | Full (hooks) | 60 tools | 50–70% |
 | **VS Code / Cursor** | Manual | 60 tools | 30–50% |
 | **Any MCP client** | Manual | 60 tools | Varies |
+
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/readme/editors-dark.svg">
+    <source media="(prefers-color-scheme: light)" srcset="docs/readme/editors-light.svg">
+    <img src="docs/readme/editors-light.svg" alt="Animated host support cards for Claude Code, Codex CLI, Gemini CLI, VS Code, Cursor, and any MCP client." width="100%"/>
+  </picture>
+</p>
 
 **Full** = hooks intercept prompts and route automatically. No workflow change needed.
 **Manual** = MCP tools are available; you invoke them explicitly (e.g., call `llm_query`).
@@ -216,6 +286,14 @@ llm-router exposes 60 MCP tools organized by function:
 ---
 
 ## Savings: How It Works
+
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/readme/savings-dark.svg">
+    <source media="(prefers-color-scheme: light)" srcset="docs/readme/savings-light.svg">
+    <img src="docs/readme/savings-light.svg" alt="Animated savings breakdown for llm-router showing 87 percent peak cost reduction and token distribution across free, budget, and premium tiers." width="100%"/>
+  </picture>
+</p>
 
 Savings are calculated by comparing actual spend against a baseline of routing every task to Claude Sonnet/Opus.
 

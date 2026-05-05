@@ -1,0 +1,116 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 890 280" fill="none">
+  <style>
+    @keyframes dataFlow {
+      0% { offset-distance: 0%; opacity: 0; }
+      10% { opacity: 1; }
+      90% { opacity: 1; }
+      100% { offset-distance: 100%; opacity: 0; }
+    }
+    @keyframes stageGlow {
+      0%, 100% { stroke-opacity: 0.5; }
+      50% { stroke-opacity: 1; }
+    }
+    @keyframes guardPulse {
+      0%, 100% { opacity: 0.06; }
+      50% { opacity: 0.14; }
+    }
+    @keyframes stageAppear {
+      0% { opacity: 0; transform: translateY(8px); }
+      100% { opacity: 1; transform: translateY(0); }
+    }
+    .stage-1 { animation: stageAppear 0.4s ease-out 0s both; }
+    .stage-2 { animation: stageAppear 0.4s ease-out 0.15s both; }
+    .stage-3 { animation: stageAppear 0.4s ease-out 0.3s both; }
+    .stage-4 { animation: stageAppear 0.4s ease-out 0.45s both; }
+    .stage-5 { animation: stageAppear 0.4s ease-out 0.6s both; }
+    .guard { animation: guardPulse 3s ease-in-out infinite; }
+    .guard-2 { animation: guardPulse 3s ease-in-out 1s infinite; }
+    .guard-3 { animation: guardPulse 3s ease-in-out 2s infinite; }
+    .pipe-glow { animation: stageGlow 2s ease-in-out infinite; }
+  </style>
+
+  <defs>
+    <marker id="a1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="5" markerHeight="5" orient="auto"><path d="M0 0 L10 5 L0 10z" fill="#4F46E5"/></marker>
+    <marker id="a2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="5" markerHeight="5" orient="auto"><path d="M0 0 L10 5 L0 10z" fill="#10B981"/></marker>
+  </defs>
+
+  <rect width="890" height="280" rx="14" fill="#f6f8fa" stroke="#d1d9e0" stroke-width="1"/>
+
+  <!-- Title -->
+  <text x="445" y="35" text-anchor="middle" font-family="system-ui, sans-serif" font-size="18" font-weight="700" fill="#1f2328">How It Works</text>
+  <text x="445" y="56" text-anchor="middle" font-family="system-ui, sans-serif" font-size="12" fill="#656d76">Every prompt flows through a multi-layer classification and routing pipeline</text>
+
+  <!-- Stage 1: Prompt -->
+  <g class="stage-1">
+    <rect x="20" y="100" width="110" height="80" rx="10" fill="#ffffff" stroke="#d1d9e0"/>
+    <text x="75" y="130" text-anchor="middle" font-family="system-ui, sans-serif" font-size="11" font-weight="600" fill="#1f2328">User</text>
+    <text x="75" y="148" text-anchor="middle" font-family="system-ui, sans-serif" font-size="11" font-weight="600" fill="#1f2328">Prompt</text>
+    <text x="75" y="168" text-anchor="middle" font-family="system-ui, sans-serif" font-size="9" fill="#656d76">any task</text>
+  </g>
+
+  <!-- Animated connecting lines with flowing dots -->
+  <line x1="130" y1="140" x2="170" y2="140" stroke="#4F46E5" stroke-width="2" stroke-opacity="0.3"/>
+  <circle r="3.5" fill="#4F46E5"><animateMotion dur="1.5s" repeatCount="indefinite" path="M130,140 L170,140"/><animate attributeName="opacity" values="0;1;1;0" dur="1.5s" repeatCount="indefinite"/></circle>
+
+  <!-- Stage 2: Heuristic -->
+  <g class="stage-2">
+    <rect class="pipe-glow" x="180" y="100" width="120" height="80" rx="10" fill="#4F46E5" opacity="0.08" stroke="#4F46E5" stroke-width="1.5"/>
+    <text x="240" y="127" text-anchor="middle" font-family="system-ui, sans-serif" font-size="10" font-weight="700" fill="#4F46E5">Heuristic</text>
+    <text x="240" y="143" text-anchor="middle" font-family="system-ui, sans-serif" font-size="10" font-weight="700" fill="#4F46E5">Fast-Path</text>
+    <text x="240" y="162" text-anchor="middle" font-family="system-ui, sans-serif" font-size="9" fill="#656d76">regex patterns</text>
+    <text x="240" y="174" text-anchor="middle" font-family="system-ui, sans-serif" font-size="9" fill="#10B981">instant, free</text>
+  </g>
+
+  <line x1="300" y1="140" x2="340" y2="140" stroke="#4F46E5" stroke-width="2" stroke-opacity="0.3"/>
+  <circle r="3.5" fill="#4F46E5"><animateMotion dur="1.5s" begin="0.4s" repeatCount="indefinite" path="M300,140 L340,140"/><animate attributeName="opacity" values="0;1;1;0" dur="1.5s" begin="0.4s" repeatCount="indefinite"/></circle>
+
+  <!-- Stage 3: Classifier -->
+  <g class="stage-3">
+    <rect class="pipe-glow" x="350" y="100" width="120" height="80" rx="10" fill="#8B5CF6" opacity="0.08" stroke="#8B5CF6" stroke-width="1.5"/>
+    <text x="410" y="127" text-anchor="middle" font-family="system-ui, sans-serif" font-size="10" font-weight="700" fill="#8B5CF6">Complexity</text>
+    <text x="410" y="143" text-anchor="middle" font-family="system-ui, sans-serif" font-size="10" font-weight="700" fill="#8B5CF6">Classifier</text>
+    <text x="410" y="162" text-anchor="middle" font-family="system-ui, sans-serif" font-size="9" fill="#656d76">Ollama / Gemini Flash</text>
+    <text x="410" y="174" text-anchor="middle" font-family="system-ui, sans-serif" font-size="9" fill="#10B981">free or ~$0.0001</text>
+  </g>
+
+  <line x1="470" y1="140" x2="510" y2="140" stroke="#4F46E5" stroke-width="2" stroke-opacity="0.3"/>
+  <circle r="3.5" fill="#8B5CF6"><animateMotion dur="1.5s" begin="0.8s" repeatCount="indefinite" path="M470,140 L510,140"/><animate attributeName="opacity" values="0;1;1;0" dur="1.5s" begin="0.8s" repeatCount="indefinite"/></circle>
+
+  <!-- Stage 4: Router -->
+  <g class="stage-4">
+    <rect class="pipe-glow" x="520" y="85" width="140" height="110" rx="12" fill="#10B981" opacity="0.08" stroke="#10B981" stroke-width="1.5"/>
+    <text x="590" y="110" text-anchor="middle" font-family="system-ui, sans-serif" font-size="11" font-weight="700" fill="#10B981">Free-First Router</text>
+    <text x="590" y="132" text-anchor="middle" font-family="system-ui, sans-serif" font-size="9" fill="#656d76">Ollama (free, local)</text>
+    <text x="590" y="146" text-anchor="middle" font-family="system-ui, sans-serif" font-size="9" fill="#656d76">Codex (prepaid)</text>
+    <text x="590" y="160" text-anchor="middle" font-family="system-ui, sans-serif" font-size="9" fill="#656d76">Gemini / GPT (budget)</text>
+    <text x="590" y="174" text-anchor="middle" font-family="system-ui, sans-serif" font-size="9" fill="#656d76">Claude / o3 (premium)</text>
+    <text x="590" y="190" text-anchor="middle" font-family="system-ui, sans-serif" font-size="8" fill="#10B981">tries cheapest first</text>
+  </g>
+
+  <line x1="660" y1="140" x2="700" y2="140" stroke="#10B981" stroke-width="2" stroke-opacity="0.3"/>
+  <circle r="3.5" fill="#10B981"><animateMotion dur="1.5s" begin="1.2s" repeatCount="indefinite" path="M660,140 L700,140"/><animate attributeName="opacity" values="0;1;1;0" dur="1.5s" begin="1.2s" repeatCount="indefinite"/></circle>
+
+  <!-- Stage 5: Execute + Track -->
+  <g class="stage-5">
+    <rect class="pipe-glow" x="710" y="100" width="155" height="80" rx="10" fill="#06B6D4" opacity="0.08" stroke="#06B6D4" stroke-width="1.5"/>
+    <text x="787" y="127" text-anchor="middle" font-family="system-ui, sans-serif" font-size="10" font-weight="700" fill="#06B6D4">Execute + Track</text>
+    <text x="787" y="148" text-anchor="middle" font-family="system-ui, sans-serif" font-size="9" fill="#656d76">Run on best model</text>
+    <text x="787" y="162" text-anchor="middle" font-family="system-ui, sans-serif" font-size="9" fill="#656d76">Log decision + cost</text>
+    <text x="787" y="176" text-anchor="middle" font-family="system-ui, sans-serif" font-size="9" fill="#06B6D4">Update savings dashboard</text>
+  </g>
+
+  <!-- Guards with breathing pulse -->
+  <rect class="guard" x="180" y="210" width="160" height="40" rx="8" fill="#F59E0B" stroke="#F59E0B" stroke-width="1" stroke-opacity="0.3"/>
+  <text x="260" y="235" text-anchor="middle" font-family="system-ui, sans-serif" font-size="10" fill="#F59E0B">Budget Pressure Guard</text>
+
+  <rect class="guard-2" x="365" y="210" width="160" height="40" rx="8" fill="#EF4444" stroke="#EF4444" stroke-width="1" stroke-opacity="0.3"/>
+  <text x="445" y="235" text-anchor="middle" font-family="system-ui, sans-serif" font-size="10" fill="#EF4444">Quality Health Check</text>
+
+  <rect class="guard-3" x="550" y="210" width="160" height="40" rx="8" fill="#8B5CF6" stroke="#8B5CF6" stroke-width="1" stroke-opacity="0.3"/>
+  <text x="630" y="235" text-anchor="middle" font-family="system-ui, sans-serif" font-size="10" fill="#8B5CF6">Circuit Breaker</text>
+
+  <!-- Dashed connectors from guards -->
+  <line x1="260" y1="180" x2="260" y2="210" stroke="#F59E0B" stroke-width="1" stroke-dasharray="3,3" opacity="0.4"/>
+  <line x1="445" y1="180" x2="445" y2="210" stroke="#EF4444" stroke-width="1" stroke-dasharray="3,3" opacity="0.4"/>
+  <line x1="630" y1="195" x2="630" y2="210" stroke="#8B5CF6" stroke-width="1" stroke-dasharray="3,3" opacity="0.4"/>
+</svg>
