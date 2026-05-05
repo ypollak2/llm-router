@@ -570,83 +570,28 @@ def nav_button(c, mode, label, width=120):
 # ── 7. Star CTA ───────────────────────────────────────────────────────────
 
 def star_cta(c, mode):
-    return f'''<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 420 108" fill="none">
+    return f'''<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 420 48" fill="none">
   <style>
-    @keyframes cursorTap {{
-      0%, 12%, 100% {{ transform: translate(0px, 0px) scale(1); }}
-      18% {{ transform: translate(-3px, -3px) scale(1); }}
-      24% {{ transform: translate(-10px, -10px) scale(0.96); }}
-      30% {{ transform: translate(-3px, -3px) scale(1); }}
+    @keyframes starFill {{
+      0%, 30%, 100% {{ fill: {c['bg3']}; stroke: {c['text2']}; }}
+      40%, 70% {{ fill: {c['budget']}; stroke: {c['budget']}; }}
     }}
-    @keyframes borderGlow {{
-      0%, 100% {{ stroke-opacity: 0.45; }}
-      50% {{ stroke-opacity: 1; }}
-    }}
-    @keyframes sparkle {{
-      0%, 18%, 100% {{ opacity: 0; transform: scale(0.6); }}
-      28%, 46% {{ opacity: 1; transform: scale(1); }}
-      60% {{ opacity: 0; transform: scale(1.2); }}
-    }}
-    @keyframes heartBeat {{
-      0%, 100% {{ transform: scale(1); }}
-      50% {{ transform: scale(1.08); }}
-    }}
-    @keyframes captionFade {{
-      0% {{ opacity: 0; transform: translateY(4px); }}
-      100% {{ opacity: 1; transform: translateY(0); }}
-    }}
-    .button-border {{ animation: borderGlow 3s ease-in-out infinite; }}
-    .cursor {{ animation: cursorTap 3.4s ease-in-out infinite; transform-origin: 56px 46px; }}
-    .spark-1 {{ animation: sparkle 3.4s ease-in-out infinite; transform-origin: 0 0; }}
-    .spark-2 {{ animation: sparkle 3.4s ease-in-out 0.12s infinite; transform-origin: 0 0; }}
-    .spark-3 {{ animation: sparkle 3.4s ease-in-out 0.24s infinite; transform-origin: 0 0; }}
-    .five-star {{ animation: heartBeat 2.4s ease-in-out infinite; transform-origin: center; }}
-    .caption {{ animation: captionFade 0.45s ease-out both; }}
+    .star {{ animation: starFill 4s ease-in-out infinite; }}
   </style>
 
-  <rect width="420" height="108" rx="16" fill="{c['bg2']}" stroke="{c['border']}" stroke-width="1"/>
+  <rect width="420" height="48" rx="12" fill="{c['bg2']}" stroke="{c['border']}" stroke-width="1"/>
 
-  <g transform="translate(18 18)">
-    <rect class="button-border" x="0" y="0" width="164" height="48" rx="12" fill="{c['bg']}" stroke="{c['border']}" stroke-width="1.2"/>
-    <g transform="translate(16 12)">
-      <g>
-        <path d="M16 1.6l4.25 8.62 9.51 1.38-6.88 6.71 1.62 9.47L16 23.27 7.5 27.78l1.62-9.47-6.88-6.71 9.51-1.38L16 1.6z"
-              fill="{c['bg3']}" stroke="{c['text2']}" stroke-width="1">
-          <animate attributeName="fill" values="{c['bg3']};{c['bg3']};{c['budget']};{c['budget']};{c['bg3']}" dur="3.4s" repeatCount="indefinite"/>
-          <animate attributeName="stroke" values="{c['text2']};{c['text2']};{c['budget']};{c['budget']};{c['text2']}" dur="3.4s" repeatCount="indefinite"/>
-        </path>
-        <animateTransform attributeName="transform" type="scale" values="1;1;1.15;1;1" dur="3.4s" repeatCount="indefinite" additive="sum"/>
-      </g>
-      <text x="42" y="18" font-family="system-ui, sans-serif" font-size="13" font-weight="700" fill="{c['text']}">Star on GitHub</text>
-      <text x="42" y="32" font-family="system-ui, sans-serif" font-size="10" fill="{c['text2']}">if llm-router saves your quota</text>
-    </g>
-
-    <g class="spark-1" opacity="0">
-      <circle cx="40" cy="-2" r="3" fill="{c['budget']}"/>
-      <circle cx="28" cy="-8" r="1.8" fill="{c['primary']}"/>
-    </g>
-    <g class="spark-2" opacity="0">
-      <circle cx="148" cy="-6" r="2.2" fill="{c['free']}"/>
-      <circle cx="160" cy="4" r="1.6" fill="{c['budget']}"/>
-    </g>
-    <g class="spark-3" opacity="0">
-      <circle cx="172" cy="14" r="2.3" fill="{c['premium']}"/>
-      <circle cx="178" cy="28" r="1.8" fill="{c['accent']}"/>
-    </g>
-
-    <g class="cursor" transform="translate(120 30)">
-      <path d="M0 0l18 8-7 3 3 11-4 1-3-11-6 5V0z" fill="{c['text']}" opacity="0.85"/>
-    </g>
+  <!-- Star icon -->
+  <g transform="translate(140 10)">
+    <path class="star" d="M14 1.2l3.4 6.9 7.6 1.1-5.5 5.4 1.3 7.6L14 18.6l-6.8 3.6 1.3-7.6-5.5-5.4 7.6-1.1L14 1.2z"
+          fill="{c['bg3']}" stroke="{c['text2']}" stroke-width="0.8"/>
   </g>
 
-  <g class="caption" transform="translate(206 18)">
-    <text x="0" y="20" font-family="system-ui, sans-serif" font-size="16" font-weight="800" fill="{c['text']}">Give llm-router the five-star treatment.</text>
-    <text x="0" y="42" font-family="system-ui, sans-serif" font-size="11.5" fill="{c['text2']}">If the router cuts your spend or saves your quota, send a star back on GitHub.</text>
-    <g class="five-star" transform="translate(0 58)">
-      <text x="0" y="0" font-family="system-ui, sans-serif" font-size="13" font-weight="700" fill="{c['budget']}">★★★★★</text>
-      <text x="74" y="0" font-family="system-ui, sans-serif" font-size="11" fill="{c['text2']}">cheap models for the work, premium stars for the love</text>
-    </g>
-  </g>
+  <!-- Text -->
+  <text x="210" y="24" text-anchor="middle" font-family="system-ui, sans-serif" font-size="13" font-weight="700" fill="{c['text']}">
+    <tspan dx="24">Star on GitHub</tspan>
+    <tspan dx="8" font-weight="400" fill="{c['text2']}">if llm-router saves your quota</tspan>
+  </text>
 </svg>'''
 
 
