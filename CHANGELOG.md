@@ -2,6 +2,27 @@
 
 **For releases v6.2 and earlier, see [CHANGELOG_ARCHIVE.md](docs/CHANGELOG_ARCHIVE.md).**
 
+## v8.0.3 — SVG Animation Fixes & Visual Regression Tests (2026-05-05)
+
+### Fixed
+
+- Savings SVG: "60–80%" text no longer clips on the left during pulse animation (transform-box: fill-box, widened left column, reduced font size)
+- Savings SVG: `&mdash;` entity replaced with `&#8212;` (SVG doesn't support HTML entities)
+- Hero SVG: routing dots now follow actual route paths via `<animateMotion>` instead of drifting sideways with CSS `translateX`
+- Hero SVG: removed distracting pill float and tier slide animations for cleaner motion
+
+### Changed
+
+- Savings SVG: replaced hardcoded dollar amounts and token counts with generic tier labels
+- Hero SVG: updated "87% saved" pill to "60–80% saved"
+- Star CTA moved back to upper README section (between badges and divider)
+
+### Added
+
+- `tests/test_readme_svgs.py` — 15 regression tests for SVG layout, animation, and data correctness
+
+---
+
 ## v8.0.2 — CI Fix, README Cleanup, Root Directory Hygiene (2026-05-05)
 
 ### Fixed
