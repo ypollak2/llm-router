@@ -1,11 +1,11 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 890 110" fill="none">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1036 110" fill="none">
   <style>
     @keyframes editorIn {
       0% { opacity: 0; transform: translateY(10px) scale(0.95); }
       100% { opacity: 1; transform: translateY(0) scale(1); }
     }
   </style>
-  
+
     <g opacity="0" style="animation: editorIn 0.4s ease-out 0.0s both;">
       <rect x="12" y="10" width="132" height="90" rx="10" fill="#10B981" opacity="0.06" stroke="#10B981" stroke-width="1">
         <animate attributeName="stroke-opacity" values="0.4;0.9;0.4" dur="3.0s" repeatCount="indefinite"/>
@@ -33,20 +33,20 @@
       <text x="370" y="62" text-anchor="middle" font-family="system-ui, sans-serif" font-size="10" font-weight="600" fill="#10B981">Full</text>
       <text x="370" y="88" text-anchor="middle" font-family="system-ui, sans-serif" font-size="10" fill="#656d76">Auto-routing</text>
     </g>
-    <g opacity="0" style="animation: editorIn 0.4s ease-out 0.30000000000000004s both;">
-      <rect x="450" y="10" width="132" height="90" rx="10" fill="#F59E0B" opacity="0.06" stroke="#F59E0B" stroke-width="1">
+    <g opacity="0" style="animation: editorIn 0.4s ease-out 0.3s both;">
+      <rect x="450" y="10" width="132" height="90" rx="10" fill="#10B981" opacity="0.06" stroke="#10B981" stroke-width="1">
         <animate attributeName="stroke-opacity" values="0.4;0.9;0.4" dur="3.6s" repeatCount="indefinite"/>
       </rect>
-      <text x="516" y="38" text-anchor="middle" font-family="system-ui, sans-serif" font-size="13" font-weight="700" fill="#1f2328">VS Code</text>
-      <rect x="486" y="48" width="60" height="20" rx="10" fill="#F59E0B" opacity="0.2"/>
-      <text x="516" y="62" text-anchor="middle" font-family="system-ui, sans-serif" font-size="10" font-weight="600" fill="#F59E0B">MCP</text>
-      <text x="516" y="88" text-anchor="middle" font-family="system-ui, sans-serif" font-size="10" fill="#656d76">60 tools</text>
+      <text x="516" y="38" text-anchor="middle" font-family="system-ui, sans-serif" font-size="13" font-weight="700" fill="#1f2328">Pi</text>
+      <rect x="486" y="48" width="60" height="20" rx="10" fill="#10B981" opacity="0.2"/>
+      <text x="516" y="62" text-anchor="middle" font-family="system-ui, sans-serif" font-size="10" font-weight="600" fill="#10B981">Full</text>
+      <text x="516" y="88" text-anchor="middle" font-family="system-ui, sans-serif" font-size="10" fill="#656d76">MCP tools</text>
     </g>
     <g opacity="0" style="animation: editorIn 0.4s ease-out 0.4s both;">
       <rect x="596" y="10" width="132" height="90" rx="10" fill="#F59E0B" opacity="0.06" stroke="#F59E0B" stroke-width="1">
         <animate attributeName="stroke-opacity" values="0.4;0.9;0.4" dur="3.8s" repeatCount="indefinite"/>
       </rect>
-      <text x="662" y="38" text-anchor="middle" font-family="system-ui, sans-serif" font-size="13" font-weight="700" fill="#1f2328">Cursor</text>
+      <text x="662" y="38" text-anchor="middle" font-family="system-ui, sans-serif" font-size="13" font-weight="700" fill="#1f2328">VS Code</text>
       <rect x="632" y="48" width="60" height="20" rx="10" fill="#F59E0B" opacity="0.2"/>
       <text x="662" y="62" text-anchor="middle" font-family="system-ui, sans-serif" font-size="10" font-weight="600" fill="#F59E0B">MCP</text>
       <text x="662" y="88" text-anchor="middle" font-family="system-ui, sans-serif" font-size="10" fill="#656d76">60 tools</text>
@@ -55,9 +55,18 @@
       <rect x="742" y="10" width="132" height="90" rx="10" fill="#F59E0B" opacity="0.06" stroke="#F59E0B" stroke-width="1">
         <animate attributeName="stroke-opacity" values="0.4;0.9;0.4" dur="4.0s" repeatCount="indefinite"/>
       </rect>
-      <text x="808" y="38" text-anchor="middle" font-family="system-ui, sans-serif" font-size="13" font-weight="700" fill="#1f2328">Any MCP</text>
+      <text x="808" y="38" text-anchor="middle" font-family="system-ui, sans-serif" font-size="13" font-weight="700" fill="#1f2328">Cursor</text>
       <rect x="778" y="48" width="60" height="20" rx="10" fill="#F59E0B" opacity="0.2"/>
       <text x="808" y="62" text-anchor="middle" font-family="system-ui, sans-serif" font-size="10" font-weight="600" fill="#F59E0B">MCP</text>
       <text x="808" y="88" text-anchor="middle" font-family="system-ui, sans-serif" font-size="10" fill="#656d76">60 tools</text>
+    </g>
+    <g opacity="0" style="animation: editorIn 0.4s ease-out 0.6s both;">
+      <rect x="888" y="10" width="132" height="90" rx="10" fill="#F59E0B" opacity="0.06" stroke="#F59E0B" stroke-width="1">
+        <animate attributeName="stroke-opacity" values="0.4;0.9;0.4" dur="4.2s" repeatCount="indefinite"/>
+      </rect>
+      <text x="954" y="38" text-anchor="middle" font-family="system-ui, sans-serif" font-size="13" font-weight="700" fill="#1f2328">Any MCP</text>
+      <rect x="924" y="48" width="60" height="20" rx="10" fill="#F59E0B" opacity="0.2"/>
+      <text x="954" y="62" text-anchor="middle" font-family="system-ui, sans-serif" font-size="10" font-weight="600" fill="#F59E0B">MCP</text>
+      <text x="954" y="88" text-anchor="middle" font-family="system-ui, sans-serif" font-size="10" fill="#656d76">60 tools</text>
     </g>
 </svg>

@@ -43,7 +43,7 @@ AI coding assistants route every task — simple questions, complex architecture
 llm-router sits between your AI tool and the LLM providers. It classifies each task by complexity, picks the cheapest capable model, and falls back through a provider chain on failure. You don't change your workflow. The router handles model selection automatically.
 
 **Use this if:**
-- You use Claude Code, Codex CLI, or Gemini CLI and want to reduce spend
+- You use Claude Code, Codex CLI, Gemini CLI, or Pi and want to reduce spend
 - You want automatic fallback when a provider is down or rate-limited
 - You want local Ollama models tried first (free) before paid APIs
 - You want visibility into token spend across providers
@@ -150,7 +150,7 @@ Classification is free (regex heuristics catch ~70% of tasks) or near-free (loca
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="docs/readme/editors-dark.svg">
     <source media="(prefers-color-scheme: light)" srcset="docs/readme/editors-light.svg">
-    <img src="docs/readme/editors-light.svg" alt="Animated host support cards for Claude Code, Codex CLI, Gemini CLI, VS Code, Cursor, and any MCP client." width="100%"/>
+    <img src="docs/readme/editors-light.svg" alt="Animated host support cards for Claude Code, Codex CLI, Gemini CLI, Pi, VS Code, Cursor, and any MCP client." width="100%"/>
   </picture>
 </p>
 

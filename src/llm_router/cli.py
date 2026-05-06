@@ -13,6 +13,7 @@ Usage:
     llm-router install --host copilot-cli — write GitHub Copilot CLI config files
     llm-router install --host openclaw    — write OpenClaw config files
     llm-router install --host trae        — write Trae IDE config files
+    llm-router install --host pi          — write Pi coding agent (pi.dev) config files
     llm-router install --host factory     — confirm Factory Droid plugin manifest
     llm-router install --host desktop     — print Claude Desktop config snippet
     llm-router install --host copilot     — print VS Code / Copilot config snippet
@@ -348,6 +349,32 @@ def _install_trae_files() -> list[str]:
     return actions
 
 
+def _install_pi_files() -> list[str]:
+    """Install llm-router MCP config for Pi coding agent (pi.dev)."""
+    actions = []
+    home = Path.home()
+
+    # Pi agent MCP config: ~/.pi/agent/mcp.json
+    mcp_json = home / ".pi" / "agent" / "mcp.json"
+    actions.extend(
+        _merge_json_mcp_block(
+            mcp_json,
+            "llm-router",
+            {
+                "command": "uvx",
+                "args": ["claude-code-llm-router"],
+                "lifecycle": "lazy",
+            },
+        )
+    )
+
+    # Pi agent instructions
+    instructions = home / ".pi" / "agent" / "INSTRUCTIONS.md"
+    actions.extend(_append_routing_rules(instructions, "pi-rules.md"))
+
+    return actions
+
+
 def _install_codex_cli_files() -> list[str]:
     """Install llm-router MCP config for Codex CLI."""
     actions = []
@@ -439,6 +466,11 @@ def _install_host(host: str) -> None:
         print("Trae IDE configuration:")
         for action in actions:
             print(f"  {action}")
+    elif host == "pi":
+        actions = _install_pi_files()
+        print("Pi coding agent (pi.dev) configuration:")
+        for action in actions:
+            print(f"  {action}")
     elif host == "codex":
         actions = _install_codex_cli_files()
         print("Codex CLI configuration:")
@@ -455,7 +487,7 @@ def _install_host(host: str) -> None:
         for action in actions:
             print(f"  {action}")
     elif host == "all":
-        for h in ["vscode", "cursor", "opencode", "gemini-cli", "copilot-cli", "openclaw", "trae", "codex", "desktop", "copilot"]:
+        for h in ["vscode", "cursor", "opencode", "gemini-cli", "copilot-cli", "openclaw", "trae", "pi", "codex", "desktop", "copilot"]:
             _install_host(h)
             print()
     else:

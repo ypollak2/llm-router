@@ -4,16 +4,16 @@ This page documents **exactly which features work where**, without sugar-coating
 
 ## Feature Availability by Host
 
-| Feature | Claude Code | Codex CLI | Gemini CLI | VS Code/Cursor | Browser | Local CLI |
-|---------|:-----------:|:---------:|:----------:|:--------------:|:-------:|:---------:|
-| **Auto-Routing Hooks** | ✅ Full | ✅ Full | ✅ Full | ❌ No | ❌ No | ✅ Limited |
-| **Session-End Tracking** | ✅ Yes | ✅ Yes | ✅ Yes | ❌ No | ❌ No | ✅ Manual |
-| **Quota Pressure Display** | ✅ Yes | ✅ Yes | ✅ Yes | ❌ No | ❌ No | ❌ No |
-| **60 MCP Tools (Direct)** | ✅ Yes | ✅ Yes | ✅ Yes | ✅ Yes | ✅ Yes | ✅ Yes |
-| **Cost Optimization** | ✅ 60–80% | ✅ 60–80% | ✅ 50–70% | ⚠️ Partial* | ❌ No | ✅ Manual |
-| **Free-First Routing** | ✅ Yes | ✅ Yes | ✅ Yes | ⚠️ Opt-in | ❌ No | ⚠️ Opt-in |
-| **Saved Usage Analytics** | ✅ Yes | ✅ Yes | ✅ Yes | ⚠️ Manual** | ❌ No | ✅ Yes |
-| **Decision Replay** | ✅ Yes | ✅ Yes | ✅ Yes | ❌ No | ❌ No | ✅ Yes |
+| Feature | Claude Code | Codex CLI | Gemini CLI | Pi (pi.dev) | VS Code/Cursor | Browser | Local CLI |
+|---------|:-----------:|:---------:|:----------:|:-----------:|:--------------:|:-------:|:---------:|
+| **Auto-Routing Hooks** | ✅ Full | ✅ Full | ✅ Full | ✅ Full | ❌ No | ❌ No | ✅ Limited |
+| **Session-End Tracking** | ✅ Yes | ✅ Yes | ✅ Yes | ✅ Yes | ❌ No | ❌ No | ✅ Manual |
+| **Quota Pressure Display** | ✅ Yes | ✅ Yes | ✅ Yes | ❌ No | ❌ No | ❌ No | ❌ No |
+| **60 MCP Tools (Direct)** | ✅ Yes | ✅ Yes | ✅ Yes | ✅ Yes | ✅ Yes | ✅ Yes | ✅ Yes |
+| **Cost Optimization** | ✅ 60–80% | ✅ 60–80% | ✅ 50–70% | ✅ 50–70% | ⚠️ Partial* | ❌ No | ✅ Manual |
+| **Free-First Routing** | ✅ Yes | ✅ Yes | ✅ Yes | ✅ Yes | ⚠️ Opt-in | ❌ No | ⚠️ Opt-in |
+| **Saved Usage Analytics** | ✅ Yes | ✅ Yes | ✅ Yes | ✅ Yes | ⚠️ Manual** | ❌ No | ✅ Yes |
+| **Decision Replay** | ✅ Yes | ✅ Yes | ✅ Yes | ✅ Yes | ❌ No | ❌ No | ✅ Yes |
 
 **Legend:**
 - ✅ **Yes** — Fully supported, automatic
@@ -122,6 +122,38 @@ llm-router install --host gemini-cli
 
 ---
 
+### 🟡 Pi Coding Agent (Strong)
+
+**Tier: Full Cost Optimization**
+
+Inflection AI's coding agent. MCP support via `~/.pi/agent/mcp.json`, lazy lifecycle by default.
+
+**Activation:**
+```bash
+llm-router install --host pi
+```
+
+**Features:**
+- ✅ All 60 MCP tools available (via MCP proxy or directTools)
+- ✅ Session tracking (cost breakdown logged)
+- ✅ Free-first routing (Ollama → Gemini Flash → GPT-4o)
+- ✅ Budget tracking
+- ✅ Lazy lifecycle (connects on first tool call, auto-disconnects)
+
+**Cost savings:** 50–70% vs single-model usage
+
+**Why it's good:**
+- Pi's MCP adapter supports importing configs from other agents
+- Lazy lifecycle means zero overhead when not routing
+- `directTools` option makes key tools visible without proxy discovery
+- Works alongside Pi's native model
+
+**Limitations:**
+- No real-time quota display
+- Pi's native model isn't tracked by llm-router (only routed calls)
+
+---
+
 ### 🟠 VS Code / Cursor (MCP Only)
 
 **Tier: Manual Routing**
@@ -213,6 +245,9 @@ Already installed with `pip install llm-routing`
 ### "I want to use Gemini for free tier"
 → **Gemini CLI** (free tier included, 50–70% savings)
 
+### "I want to use Pi's coding agent"
+→ **Pi** (MCP tools, 50–70% savings, lazy lifecycle)
+
 ### "I prefer VS Code"
 → **VS Code MCP** (manual routing, 30–50% savings, but low friction)
 
@@ -232,6 +267,7 @@ Already installed with `pip install llm-routing`
 - Claude Code ✅
 - Codex CLI ✅
 - Gemini CLI ✅
+- Pi (pi.dev) ✅
 - VS Code/Cursor ❌
 - Browser ❌
 - Local CLI ⚠️ (manual only)
@@ -244,6 +280,7 @@ Hooks run **before** Claude's tool calls, analyzing the prompt to decide if rout
 - Claude Code ✅ (automatic)
 - Codex CLI ✅ (automatic)
 - Gemini CLI ✅ (automatic)
+- Pi (pi.dev) ✅ (automatic)
 - VS Code/Cursor ❌ (would need manual invocation)
 - Browser ❌
 - Local CLI ✅ (manual `llm-router snapshot`)
@@ -259,6 +296,7 @@ Automatic session tracking logs every routing decision for analytics. Manual tra
 | Claude Code | 80% | 70% | 50% | Optimal—hooks catch every decision |
 | Codex CLI | 80% | 70% | 50% | Excellent—hooks work automatically |
 | Gemini CLI | 70% | 55% | 40% | Good—Gemini Free tier included |
+| Pi (pi.dev) | 70% | 55% | 40% | Good—lazy lifecycle, MCP proxy |
 | VS Code/Cursor | 50% | 35% | 15% | Lower—only when you invoke tools |
 | Browser | 0% | 0% | 0% | Read-only—no active routing |
 | Local CLI | 60% | 40% | 20% | Scripting only—not continuous |
@@ -278,19 +316,23 @@ llm-router install
 # Also install for Codex
 llm-router install --host codex
 
-# Metrics are shared across both
+# Also install for Pi
+llm-router install --host pi
+
+# Metrics are shared across all hosts
 llm-router snapshot  # Shows combined stats
 ```
 
 ### "Which host should I use if I care about cost savings?"
 
-**Claude Code > Codex CLI > Gemini CLI > VS Code/Cursor**
+**Claude Code > Codex CLI > Gemini CLI / Pi > VS Code/Cursor**
 
 Ranking by cost optimization:
 1. **Claude Code** — Automatic hooks, 70–80% savings
 2. **Codex CLI** — Automatic hooks, 70–80% savings
 3. **Gemini CLI** — Automatic hooks, 50–70% savings
-4. **VS Code/Cursor** — Manual routing, 30–50% savings
+4. **Pi (pi.dev)** — MCP tools, 50–70% savings
+5. **VS Code/Cursor** — Manual routing, 30–50% savings
 
 ### "Do hooks ever break things?"
 
@@ -324,11 +366,11 @@ llm-router install --host <new-host>
 
 ## Summary
 
-| Dimension | Claude Code | Codex CLI | Gemini CLI | VS Code | Browser | CLI |
-|-----------|:-----------:|:---------:|:----------:|:-------:|:-------:|:---:|
-| Cost savings | 🟢 80% | 🟢 80% | 🟡 70% | 🟠 35% | ⚪ 0% | 🟡 40% |
-| Setup friction | 🟢 Low | 🟡 Med | 🟡 Med | 🟢 Low | 🟢 Low | 🟡 Med |
-| Auto-routing | ✅ Yes | ✅ Yes | ✅ Yes | ❌ No | ❌ No | ⚠️ Partial |
-| Recommend | **🥇 Gold** | **🥈 Silver** | **🥉 Bronze** | ⚠️ Manual | 📊 Analytics | 🔧 Advanced |
+| Dimension | Claude Code | Codex CLI | Gemini CLI | Pi (pi.dev) | VS Code | Browser | CLI |
+|-----------|:-----------:|:---------:|:----------:|:-----------:|:-------:|:-------:|:---:|
+| Cost savings | 🟢 80% | 🟢 80% | 🟡 70% | 🟡 70% | 🟠 35% | ⚪ 0% | 🟡 40% |
+| Setup friction | 🟢 Low | 🟡 Med | 🟡 Med | 🟢 Low | 🟢 Low | 🟢 Low | 🟡 Med |
+| Auto-routing | ✅ Yes | ✅ Yes | ✅ Yes | ✅ Yes | ❌ No | ❌ No | ⚠️ Partial |
+| Recommend | **🥇 Gold** | **🥈 Silver** | **🥉 Bronze** | **🥉 Bronze** | ⚠️ Manual | 📊 Analytics | 🔧 Advanced |
 
 **TL;DR:** Want max savings? Use Claude Code. Want flexibility? Pick your editor, use MCP tools manually. Want analytics? Check the dashboard.
