@@ -1,8 +1,0 @@
-{
-  "mcpServers": {
-    "llm-router": {
-      "command": "uv",
-      "args": ["run", "--directory", ".", "llm-router"]
-    }
-  }
-}

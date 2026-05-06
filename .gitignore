@@ -64,3 +64,59 @@ Library/
 
 # Internal planning docs
 .internal/
+
+# Development-only directories — not needed by end users
+research/
+deprecation/
+agents/
+demo/
+scripts/
+docs/slides/
+docs/plans/
+docs/market/
+docs/analytics/
+
+# Internal docs — dev/strategy, not user-facing
+docs/STRATEGIC-REVIEW-2026.md
+docs/V6_IMPLEMENTATION_PROGRESS.md
+docs/V6_1_MEMORY_MOCKUPS.md
+docs/ROADMAP_v6.md
+docs/VISION.md
+docs/DESIGN_SYSTEM_v6.md
+docs/LESSONS_LEARNED.md
+docs/POLICY-VIOLATION-ROOT-CAUSE.md
+docs/compression.md
+docs/STYLE.md
+docs/RESPONSE-ROUTER.md
+docs/SIDECAR_ARCHITECTURE.md
+docs/DOWNLOAD_STATS_GUIDE.md
+docs/GPG_SIGNING_SETUP.md
+docs/OIDC_SETUP.md
+docs/RELEASE_CHECKLIST.md
+docs/SECURITY_DESIGN.md
+docs/multi-host-research.md
+docs/decisions.md
+docs/pr-drafts.md
+docs/demo.cast
+docs/llm-router-header.png
+
+# Unused README SVGs (removed from README)
+docs/readme/architecture-*.svg
+docs/readme/btn-*.svg
+docs/readme/pepy-*.svg
+
+# Deployment artifacts
+Dockerfile
+Procfile
+
+# Dev lockfile (users install via pip)
+uv.lock
+
+# Local MCP config
+.mcp.json
+
+# Claude Code session/project artifacts (machine-specific)
+.claude/sessions/
+.claude/projects/
+.claude/settings.json
+.claude/mcp.json
