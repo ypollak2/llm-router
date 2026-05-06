@@ -51,9 +51,7 @@ token-savings-viz.html
 .playwright-cli/
 .playwright-mcp/
 
-# User-specific config files — should never be committed (absolute paths, user configs, secrets)
-"/Users/yali.pollak"/
-/Users/yali.pollak/
+# User-specific config files — should never be committed
 ~/.*/
 .claude/
 .codex/

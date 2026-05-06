@@ -78,20 +78,52 @@ build-backend = "hatchling.build"
 packages = ["src/llm_router"]
 
 [tool.hatch.build.targets.sdist]
+# Only ship: src/, pyproject.toml, LICENSE, README.md, CHANGELOG.md, CONTRIBUTING.md
+# Exclude everything else — internal docs, tools, test infra, plugin configs
 exclude = [
+    # Plugin / IDE configs
     ".claude/",
     ".claude-plugin/",
+    ".codex-plugin/",
+    ".factory-plugin/",
     ".serena/",
     ".playwright-mcp/",
+    ".playwright-cli/",
     ".github/",
+    ".lore/",
+    ".internal/",
+    # Directories not needed in package
     "agents/",
     "demo/",
     "docs/",
     "tests/",
+    "research/",
+    "deprecation/",
+    "scripts/",
+    "skills/",
+    # Private / internal docs — never publish
+    "CLAUDE.md",
+    "MONETIZATION.md",
+    "ROADMAP.md",
+    "STRATEGY.md",
+    "PRICING.md",
+    "SECURITY.md",
+    "PHASE_COMPLETION_REVIEW.md",
+    # Build / deploy artifacts
+    "Dockerfile",
+    "Procfile",
+    "uv.lock",
+    "mcp.json",
+    ".mcp.json",
+    # Images
     "*.png",
     "*.jpg",
-    "dashboard.png",
-    "stitch*.png",
+    # Git metadata not needed in package
+    ".gitignore",
+    ".gitattributes",
+    # Broken directory from gitignore quoting
+    '"/Users/',
+    '"/',
 ]
 
 [tool.pytest.ini_options]
