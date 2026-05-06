@@ -2,6 +2,27 @@
 
 **For releases v6.2 and earlier, see [CHANGELOG_ARCHIVE.md](docs/CHANGELOG_ARCHIVE.md).**
 
+## v8.0.5 — Pi.dev Host Support & Repo Cleanup (2026-05-06)
+
+### Added
+
+- Pi coding agent (pi.dev) as supported host: `llm-router install --host pi`
+- Pi routing rules (`src/llm_router/rules/pi-rules.md`)
+- Pi card in README editors SVG (light + dark)
+- Pi column in HOST_SUPPORT_MATRIX.md
+
+### Changed
+
+- Removed 174 internal/dev files from public repo (strategy docs, research, scripts, slides, deprecated package, unused SVGs, deployment artifacts, machine-specific state)
+- All removed files preserved locally via `.gitignore`
+- Updated README "Use this if" to include Pi
+
+### Fixed
+
+- sdist packaging: added leak detection gate in release script (blocks publish if private files detected)
+
+---
+
 ## v8.0.3 — SVG Animation Fixes & Visual Regression Tests (2026-05-05)
 
 ### Fixed
