@@ -126,10 +126,27 @@ main() {
     fi
     echo ""
 
-    # Step 4: Build and publish
+    # Step 4: Build, verify contents, and publish
     log_info "Step 4/5: Building and publishing to PyPI..."
     rm -rf dist/
     uv build
+
+    # Safety: verify sdist contains no private files before publishing
+    log_info "Verifying sdist contents..."
+    SDIST_FILE=$(ls dist/*.tar.gz 2>/dev/null | head -1)
+    if [ -z "$SDIST_FILE" ]; then
+        log_error "No sdist file found in dist/"
+        exit 1
+    fi
+
+    LEAKED_FILES=$(tar tzf "$SDIST_FILE" | grep -i -E '\.env$|CLAUDE\.md|MONETIZATION|ROADMAP|STRATEGY|PRICING|PHASE_COMPLETION|\.internal/|/research/|/deprecation/|/scripts/|/skills/' || true)
+    if [ -n "$LEAKED_FILES" ]; then
+        log_error "BLOCKED: sdist contains private/internal files:"
+        echo "$LEAKED_FILES"
+        log_error "Fix [tool.hatch.build.targets.sdist] exclude in pyproject.toml"
+        exit 1
+    fi
+    log_success "sdist is clean — no private files detected"
 
     PYPI_TOKEN=$(grep "password" ~/.pypirc 2>/dev/null | cut -d' ' -f3)
     if [ -z "$PYPI_TOKEN" ]; then
