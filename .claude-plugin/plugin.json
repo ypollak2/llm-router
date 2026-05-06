@@ -1,6 +1,6 @@
 {
   "name": "llm-router",
-  "version": "8.0.3",
+  "version": "8.0.4",
   "description": "Smart LLM routing with Claude subscription monitoring, complexity-first model selection, and 20+ AI providers",
   "author": {
     "name": "ypollak2",
@@ -13,7 +13,7 @@
   "mcpServers": ".mcp.json",
   "interface": {
     "displayName": "LLM Router",
-    "shortDescription": "Smart LLM routing — cheapest capable model, every task",
+    "shortDescription": "Smart LLM routing \u2014 cheapest capable model, every task",
     "longDescription": "llm-router is an MCP server that automatically routes prompts to the best-fit model from 20+ providers. Simple questions go to Gemini Flash or Haiku ($0.001); complex reasoning goes to o3 or GPT-4o only when needed. Tracks savings across sessions. Works with Claude Code, Codex CLI, Claude Desktop, and GitHub Copilot.",
     "developerName": "ypollak2",
     "category": "Developer Tools",
