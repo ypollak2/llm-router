@@ -109,9 +109,6 @@ docs/readme/pepy-*.svg
 Dockerfile
 Procfile
 
-# Dev lockfile (users install via pip)
-uv.lock
-
 # Local MCP config
 .mcp.json
 
