@@ -560,34 +560,6 @@ async def log_usage(
         await db.close()
 
 
-async def log_cc_hint(task_type: str, model: str, complexity: str = "moderate") -> None:
-    """Log a Claude Code subscription model hint to the usage table.
-
-    Called when _subscription_hint() returns a CC-MODE directive instead of
-    making an external API call. Records the model tier that was suggested so
-    the session-end summary can report per-model CC call counts.
-
-    provider='subscription' distinguishes these rows from external API calls.
-    
-    Args:
-        task_type: The task type (e.g., 'query', 'code', 'research').
-        model: The Claude model used (e.g., 'claude-haiku', 'claude-sonnet').
-        complexity: Task complexity level (simple, moderate, complex).
-    """
-    db = await _get_db()
-    try:
-        await db.execute(
-            """INSERT INTO usage (model, provider, task_type, profile,
-               input_tokens, output_tokens, cost_usd, latency_ms, success, complexity)
-               VALUES (?, 'subscription', ?, 'subscription', 0, 0, 0.0, 0.0, 1, ?)""",
-            (model, task_type, complexity),
-        )
-        await db.commit()
-    except Exception:
-        pass
-    finally:
-        await db.close()
-
 
 async def log_correction(
     original_tool: str,
