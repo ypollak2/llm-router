@@ -18,7 +18,8 @@
   <a href="https://pypi.org/project/llm-routing/"><img src="https://img.shields.io/pypi/v/llm-routing?style=flat-square&color=4F46E5" alt="PyPI"></a>
   <a href="https://github.com/ypollak2/llm-router/actions"><img src="https://img.shields.io/github/actions/workflow/status/ypollak2/llm-router/ci.yml?style=flat-square&label=tests" alt="Tests"></a>
   <a href="https://github.com/ypollak2/llm-router/stargazers"><img src="https://img.shields.io/github/stars/ypollak2/llm-router?style=flat-square&color=F59E0B&v=2" alt="Stars"></a>
-  <a href="https://pepy.tech/projects/claude-code-llm-router"><img src="https://static.pepy.tech/personalized-badge/claude-code-llm-router?period=total&units=INTERNATIONAL_SYSTEM&left_color=BLACK&right_color=GREEN&left_text=downloads" alt="Downloads"></a>
+  <a href="https://pepy.tech/projects/claude-code-llm-router"><img src="https://static.pepy.tech/personalized-badge/claude-code-llm-router?period=total&units=INTERNATIONAL_SYSTEM&left_color=BLACK&right_color=GREEN&left_text=downloads" alt="Downloads (claude-code-llm-router)"></a>
+  <a href="https://pepy.tech/projects/llm-routing"><img src="https://static.pepy.tech/personalized-badge/llm-routing?period=total&units=INTERNATIONAL_SYSTEM&left_color=BLUE&right_color=YELLOW&left_text=downloads" alt="Downloads (llm-routing)"></a>
   <a href="https://pypi.org/project/llm-routing/"><img src="https://img.shields.io/badge/python-3.10–3.13-3572A5?style=flat-square" alt="Python"></a>
   <a href="https://modelcontextprotocol.io"><img src="https://img.shields.io/badge/MCP-1.0+-8B5CF6?style=flat-square" alt="MCP"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-10B981?style=flat-square" alt="License"></a>
@@ -188,15 +189,33 @@ See [docs/HOST_SUPPORT_MATRIX.md](docs/HOST_SUPPORT_MATRIX.md) for full details 
 
 Routing chains are built from your configured providers. You only need one.
 
+### Text LLM Providers
+
 | Provider | Models | Cost | Setup |
 |----------|--------|------|-------|
 | **Ollama** | gemma4, qwen3.5, llama3, etc. | Free (local) | `OLLAMA_BASE_URL` |
 | **OpenAI** | GPT-4o, o3, GPT-4o-mini | Paid API | `OPENAI_API_KEY` |
 | **Google** | Gemini Flash, Pro | Free tier + paid | `GEMINI_API_KEY` |
 | **Anthropic** | Claude Sonnet, Opus, Haiku | Paid API or subscription | `ANTHROPIC_API_KEY` or subscription |
-| **Perplexity** | Web-grounded research | Paid API | `PERPLEXITY_API_KEY` |
+| **xAI** | Grok-3 | Paid API | `XAI_API_KEY` |
+| **DeepSeek** | DeepSeek Chat, Reasoner | Paid API (ultra-cheap) | `DEEPSEEK_API_KEY` |
+| **Mistral** | Mistral Large, Small | Paid API | `MISTRAL_API_KEY` |
+| **Cohere** | Command R+ | Paid API | `COHERE_API_KEY` |
+| **Perplexity** | Sonar Pro (web-grounded) | Paid API | `PERPLEXITY_API_KEY` |
 | **Groq** | Fast inference (Llama, Mixtral) | Free tier | `GROQ_API_KEY` |
+| **Together** | Open-source models | Paid API | `TOGETHER_API_KEY` |
+| **HuggingFace** | Open-source models | Free tier + paid | `HF_TOKEN` |
 | **Codex** | GPT-5.4, o3 (prepaid desktop) | Included with Codex CLI | Auto-detected |
+
+### Media Providers
+
+| Provider | Type | Setup |
+|----------|------|-------|
+| **fal** | Image (Flux), Video (Kling) | `FAL_KEY` |
+| **Stability** | Image (Stable Diffusion 3) | `STABILITY_API_KEY` |
+| **ElevenLabs** | Audio / TTS | `ELEVENLABS_API_KEY` |
+| **Runway** | Video (Gen-3) | `RUNWAY_API_KEY` |
+| **Replicate** | Various open-source models | `REPLICATE_API_TOKEN` |
 
 See [docs/PROVIDERS.md](docs/PROVIDERS.md) for setup instructions and model recommendations.
 

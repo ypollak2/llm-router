@@ -42,6 +42,9 @@ class ServiceDetection(TypedDict, total=False):
     deepseek_available: bool
     mistral_available: bool
     cohere_available: bool
+    xai_available: bool
+    together_available: bool
+    huggingface_available: bool
 
 
 def detect_services() -> ServiceDetection:
@@ -98,6 +101,12 @@ def detect_services() -> ServiceDetection:
         detected["mistral_available"] = True
     if cfg.cohere_api_key:
         detected["cohere_available"] = True
+    if cfg.xai_api_key:
+        detected["xai_available"] = True
+    if cfg.together_api_key:
+        detected["together_available"] = True
+    if cfg.huggingface_api_key:
+        detected["huggingface_available"] = True
 
     return detected
 
@@ -164,6 +173,12 @@ def generate_profile_yaml(detected: ServiceDetection) -> str:
         balanced_apis.append("mistral/mistral-large-latest")
     if detected.get("cohere_available"):
         balanced_apis.append("cohere/command-r-plus")
+    if detected.get("together_available"):
+        balanced_apis.append("together/meta-llama/Meta-Llama-3.1-70B-Instruct-Turbo")
+
+    # Tier 4.5: Premium APIs (xAI Grok — competitive with frontier models)
+    if detected.get("xai_available"):
+        expensive_apis.append("xai/grok-3")
 
     # Tier 5: Expensive APIs ($0.025+/1M)
     if detected.get("openai_available"):
@@ -422,6 +437,12 @@ def display_detected_services(detected: ServiceDetection) -> str:
         output += "  ✓ Mistral\n"
     if detected.get("cohere_available"):
         output += "  ✓ Cohere\n"
+    if detected.get("xai_available"):
+        output += "  ✓ xAI (Grok-3)\n"
+    if detected.get("together_available"):
+        output += "  ✓ Together AI\n"
+    if detected.get("huggingface_available"):
+        output += "  ✓ HuggingFace\n"
     if detected.get("perplexity_available"):
         output += "  ✓ Perplexity (web search)\n"
 

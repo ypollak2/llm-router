@@ -2,6 +2,22 @@
 
 **For releases v6.2 and earlier, see [CHANGELOG_ARCHIVE.md](docs/CHANGELOG_ARCHIVE.md).**
 
+## v8.1.0 — Expanded Provider Support & Dual Downloads Badge (2026-05-09)
+
+### Added
+
+- README: full provider table with all 18 supported providers (13 text + 5 media), split into Text LLM and Media sections
+- README: `llm-routing` PyPI downloads badge alongside existing `claude-code-llm-router` badge
+- Auto-profile detection for xAI/Grok, Together AI, and HuggingFace providers
+- xAI/Grok-3 added to expensive tier in auto-generated routing profiles
+- Together AI added to balanced tier in auto-generated routing profiles
+
+### Changed
+
+- README providers section now documents xAI, DeepSeek, Mistral, Cohere, Together, HuggingFace, fal, Stability, ElevenLabs, Runway, Replicate (previously undocumented despite being supported)
+
+---
+
 ## v8.0.6 — Fix None quotas crash in dynamic routing (2026-05-09)
 
 ### Fixed
