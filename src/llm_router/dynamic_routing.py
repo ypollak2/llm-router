@@ -72,7 +72,7 @@ def _get_quota_pressure() -> dict[str, float]:
         return {}
     
     pressure = {}
-    quotas = profile.get("quotas", {})
+    quotas = profile.get("quotas") or {}
     
     # Claude subscription pressure
     if "claude_subscription" in quotas:

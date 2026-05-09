@@ -2,6 +2,12 @@
 
 **For releases v6.2 and earlier, see [CHANGELOG_ARCHIVE.md](docs/CHANGELOG_ARCHIVE.md).**
 
+## v8.0.6 — Fix None quotas crash in dynamic routing (2026-05-09)
+
+### Fixed
+
+- `dynamic_routing.py`: Guard against `None` quotas when YAML key exists with no value, preventing `TypeError: argument of type 'NoneType' is not iterable`
+
 ## v8.0.5 — Pi.dev Host Support & Repo Cleanup (2026-05-06)
 
 ### Added
