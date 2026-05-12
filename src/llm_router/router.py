@@ -690,6 +690,7 @@ async def _dispatch_model_loop(
     tracker = get_tracker()
 
     last_error: Exception | None = None
+    chain_errors: list[tuple[str, str]] = []  # (model, error_summary) for diagnostics
 
     for attempt, model in enumerate(models_to_try, start=1):
         provider = provider_from_model(model)
@@ -737,6 +738,7 @@ async def _dispatch_model_loop(
             await _notify(ctx, "warning", f"⚠️  {provider} budget exhausted — trying next")
             log.info("Skipping budget-exhausted provider: %s", provider)
             last_error = BudgetExceededError(f"{provider} budget exhausted")
+            chain_errors.append((model, "budget exhausted"))
             continue
 
         # Show provider context for QUOTA_BALANCED
@@ -1018,6 +1020,7 @@ async def _dispatch_model_loop(
                 )
                 tracker.record_failure(provider)
             last_error = e
+            chain_errors.append((model, f"{type(e).__name__}: {e}"))
             continue
 
     # ── Emergency fallback: try BUDGET chain when primary chain exhausts ────
@@ -1087,6 +1090,7 @@ async def _dispatch_model_loop(
                         "Emergency fallback model %s failed: %s", model, e
                     )
                     last_error = e
+                    chain_errors.append((model, f"{type(e).__name__}: {e}"))
                     continue
 
     last_is_auth = last_error is not None and _is_auth_error(last_error)
@@ -1105,9 +1109,14 @@ async def _dispatch_model_loop(
     async with _budget_lock:
         _pending_spend = max(0.0, _pending_spend - _reservation)
     release_tokens("anthropic", 500)
+    # Build diagnostic chain summary showing every model that was tried
+    chain_summary = ""
+    if chain_errors:
+        lines = [f"  {i+1}. {m}: {err}" for i, (m, err) in enumerate(chain_errors)]
+        chain_summary = "\nChain failures:\n" + "\n".join(lines) + "\n"
     raise RuntimeError(
         f"All models failed for {task_type.value}/{profile.value}. "
-        f"Last error: {last_error}.{setup_hint}"
+        f"Last error: {last_error}.{chain_summary}{setup_hint}"
     )
 
 

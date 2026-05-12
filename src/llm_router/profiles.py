@@ -79,6 +79,7 @@ ROUTING_TABLE: dict[tuple[RoutingProfile, TaskType], list[str]] = {
         "anthropic/claude-haiku-4-5-20251001",
         "gemini/gemini-2.5-flash",
         "openai/gpt-4o-mini",
+        "ollama/qwen3.5:latest",            # last resort: no web search, but won't fail
     ],
     (RoutingProfile.BUDGET, TaskType.GENERATE): [
         "ollama/qwen2.5:1.5b",          # fast local inference
@@ -148,6 +149,7 @@ ROUTING_TABLE: dict[tuple[RoutingProfile, TaskType], list[str]] = {
         "anthropic/claude-sonnet-4-6",
         "gemini/gemini-2.5-pro",
         "openai/gpt-4o",
+        "ollama/qwen3.5:latest",            # last resort: no web search, but won't fail
     ],
     (RoutingProfile.BALANCED, TaskType.GENERATE): [
         "ollama/qwen3.5:latest",        # free local inference — try first
@@ -211,6 +213,7 @@ ROUTING_TABLE: dict[tuple[RoutingProfile, TaskType], list[str]] = {
         "anthropic/claude-opus-4-6",
         "gemini/gemini-2.5-pro",        # $0.01/1M — cheaper than OpenAI/o3
         "openai/o3",                    # expensive last resort
+        "ollama/qwen3.5:latest",        # safety net: no web search, but won't fail
     ],
     (RoutingProfile.PREMIUM, TaskType.GENERATE): [
         "anthropic/claude-opus-4-6",
