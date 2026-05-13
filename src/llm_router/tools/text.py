@@ -134,6 +134,16 @@ def _routing_explanation(resp: LLMResponse, task: str) -> str:
     savings_label, saved_usd = _savings_info(resp)
     cost_str = f"${resp.cost_usd:.5f}" if resp.cost_usd else "$0"
 
+    # Context optimization stats (v8.3.0)
+    ctx_info = ""
+    try:
+        from llm_router.context import get_last_optimization
+        opt = get_last_optimization()
+        if opt and opt.tokens_saved > 0:
+            ctx_info = f" | ctx {opt.original_tokens}→{opt.compressed_tokens}tok ({opt.reduction_pct:.0f}% saved)"
+    except Exception:
+        pass
+
     if mode == "verbose":
         # Full breakdown with chain walk
         conf_str = f"{resp.confidence:.0%}" if resp.confidence > 0 else "n/a"
@@ -153,6 +163,8 @@ def _routing_explanation(resp: LLMResponse, task: str) -> str:
                 chain_display.append(f"{m.split('/')[-1]} [✗]")
             chain_display.append(f"{model_short} [✓]")
             lines.append(f"→ Chain: {' → '.join(chain_display)}")
+        if ctx_info:
+            lines.append(f"→ Context{ctx_info.replace(' | ctx ', ': ')}")
         return "\n─────\n" + "\n".join(lines)
 
     # Compact one-line format for footer and header
@@ -162,7 +174,7 @@ def _routing_explanation(resp: LLMResponse, task: str) -> str:
     parts.append(cost_str)
     if savings_label:
         parts.append(f"({savings_label})")
-    compact = " · ".join(parts)
+    compact = " · ".join(parts) + ctx_info
 
     if mode == "header":
         return f"[→ {compact}]\n\n"

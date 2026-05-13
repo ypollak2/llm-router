@@ -25,8 +25,17 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from llm_router.compaction import compact_structural
+from llm_router.context_optimizer import ContextOptimizationResult, optimize_context
 
 log = logging.getLogger("llm_router")
+
+# Module-level storage for last optimization result (for footer display)
+_last_optimization: ContextOptimizationResult | None = None
+
+
+def get_last_optimization() -> ContextOptimizationResult | None:
+    """Return the result of the last context optimization pass."""
+    return _last_optimization
 
 # ── Session Buffer (in-process, ephemeral) ──────────────────────────────────
 
@@ -331,6 +340,7 @@ async def build_context_messages(
     max_session_messages: int = 5,
     max_previous_sessions: int = 3,
     max_context_tokens: int = 1500,
+    is_free_model: bool = False,
 ) -> list[dict[str, str]]:
     """Assemble context messages for injection into LLM calls.
 
@@ -339,18 +349,21 @@ async def build_context_messages(
       2. Current session messages (ephemeral, last N)
       3. Caller-supplied context (if any)
 
-    All context is compacted if it exceeds the token budget.
+    Context is optimized via the context_optimizer pipeline (v8.3.0),
+    then compacted if it still exceeds the token budget.
 
     Args:
         caller_context: Optional explicit context from the MCP tool caller.
         max_session_messages: How many recent session messages to include.
         max_previous_sessions: How many past session summaries to load.
         max_context_tokens: Token budget for all context combined.
+        is_free_model: If True, skip context optimization (no cost benefit).
 
     Returns:
         List of message dicts (role: "system") to insert between the
         system prompt and user prompt. May be empty if no context exists.
     """
+    global _last_optimization
     parts: list[str] = []
 
     # Layer 1: Previous session summaries
@@ -370,11 +383,30 @@ async def build_context_messages(
         parts.append(f"[Additional context]\n{caller_context}")
 
     if not parts:
+        _last_optimization = None
         return []
 
     combined = "\n\n".join(parts)
 
-    # Compact if over budget
+    # Context optimization (v8.3.0) — compress before sending to paid models
+    try:
+        import os
+        optimizer_mode = os.getenv("LLM_ROUTER_CONTEXT_OPTIMIZER", "auto").lower()
+        combined, opt_result = optimize_context(
+            combined, mode=optimizer_mode, is_free_model=is_free_model,
+        )
+        _last_optimization = opt_result
+        if opt_result.tokens_saved > 0:
+            log.info(
+                "Context optimized: %d → %d tokens (%.0f%% reduction, stages: %s)",
+                opt_result.original_tokens, opt_result.compressed_tokens,
+                opt_result.reduction_pct, ", ".join(opt_result.stages_applied),
+            )
+    except Exception as e:
+        log.debug("Context optimization failed (non-fatal): %s", e)
+        _last_optimization = None
+
+    # Compact if over budget (existing behavior)
     combined, _ = await compact_structural(combined, threshold=max_context_tokens)
 
     # Final hard truncation safety net

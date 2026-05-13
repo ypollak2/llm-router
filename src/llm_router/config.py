@@ -134,6 +134,11 @@ class RouterConfig(BaseSettings):
     # "off": no explanation shown
     llm_router_explain: str = "footer"
 
+    # ── Context optimization (v8.3.0) ──
+    # "auto" (default): Stage 1 (structural) + Stage 2 (recency weighting)
+    # "off": pass context unchanged
+    llm_router_context_optimizer: str = "auto"
+
     # ── Smart routing settings ──
     daily_token_budget: int = 500_000       # 500k tokens/day default cap
     quality_mode: QualityMode = QualityMode.BALANCED

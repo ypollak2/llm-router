@@ -1560,11 +1560,13 @@ async def _call_text(
     # Guard: context_enabled may be MagicMock in test mocks
     context_enabled = getattr(config, "context_enabled", True)
     if isinstance(context_enabled, bool) and context_enabled:
+        _is_free = model.startswith("ollama/") or model.startswith("codex/") or model.startswith("gemini_cli/")
         context_msgs = await build_context_messages(
             caller_context=caller_context,
             max_session_messages=getattr(config, "context_max_messages", 5),
             max_previous_sessions=getattr(config, "context_max_previous_sessions", 3),
             max_context_tokens=getattr(config, "context_max_tokens", 1500),
+            is_free_model=_is_free,
         )
         messages.extend(context_msgs)
 
