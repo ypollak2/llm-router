@@ -65,52 +65,109 @@ def _record_quality(resp: LLMResponse, task_type: str, complexity: str | None) -
 
 
 # ---------------------------------------------------------------------------
-# Explainability helper — injected into every routed response when
-# LLM_ROUTER_EXPLAIN=1 is set in the environment.
+# Explainability (v8.2.0) — routing rationale on every response.
+# Controlled by LLM_ROUTER_EXPLAIN config: "footer" (default), "header",
+# "verbose", "off". Legacy LLM_ROUTER_EXPLAIN=1 maps to "header".
 # ---------------------------------------------------------------------------
 
-#: Approximate cost-per-1k-output-tokens for the Sonnet baseline used in
-#: "why not Opus/Sonnet?" comparisons shown in explain mode.
+#: Approximate cost-per-1k-output-tokens for Sonnet baseline comparison.
 _COST_PER_1K = {
-    "claude-opus-4-6":            0.075,
-    "claude-sonnet-4-6":          0.015,
-    "claude-haiku-4-5-20251001":  0.00125,
-    "gemini/gemini-2.5-flash":    0.00035,
-    "openai/gpt-4o":              0.010,
-    "openai/gpt-4o-mini":         0.0006,
-    "groq/llama-3.3-70b-versatile": 0.00059,
+    "anthropic/claude-opus-4-6":         0.075,
+    "anthropic/claude-sonnet-4-6":       0.015,
+    "anthropic/claude-haiku-4-5-20251001": 0.00125,
+    "gemini/gemini-2.5-flash":           0.00035,
+    "gemini/gemini-2.5-pro":             0.00315,
+    "openai/gpt-4o":                     0.010,
+    "openai/gpt-4o-mini":                0.0006,
+    "openai/o3":                         0.040,
+    "groq/llama-3.3-70b-versatile":      0.00059,
+    "deepseek/deepseek-chat":            0.0007,
+    "deepseek/deepseek-reasoner":        0.0014,
+    "mistral/mistral-large-latest":      0.008,
+    "xai/grok-3":                        0.009,
 }
-_SONNET_BASELINE = "claude-sonnet-4-6"
-_SONNET_COST     = _COST_PER_1K[_SONNET_BASELINE]
+_SONNET_COST = _COST_PER_1K["anthropic/claude-sonnet-4-6"]
 
 
-def _explain_prefix(resp: LLMResponse, task: str, confidence: float = 0.0) -> str:
-    """Return a routing explanation prefix when LLM_ROUTER_EXPLAIN=1.
+def _get_explain_mode() -> str:
+    """Resolve explainability mode from env/config."""
+    # Legacy compat: LLM_ROUTER_EXPLAIN=1 → "header" (old behavior)
+    legacy = os.getenv("LLM_ROUTER_EXPLAIN", "")
+    if legacy == "1":
+        return "header"
+    if legacy.lower() in ("off", "header", "footer", "verbose"):
+        return legacy.lower()
+    try:
+        from llm_router.config import get_config
+        return getattr(get_config(), "llm_router_explain", "footer")
+    except Exception:
+        return "footer"
 
-    Format: ``[→ model-name · task · confidence% · $cost · Nx cheaper]``
 
-    The prefix is prepended to every routed response so the user can see at a
-    glance which model handled the request and why it was cheaper than Sonnet.
-    Returns an empty string when the env var is not set.
+def _savings_info(resp: LLMResponse) -> tuple[str, float]:
+    """Calculate savings vs Sonnet baseline. Returns (display_str, saved_usd)."""
+    model_key = resp.model if resp.model in _COST_PER_1K else None
+    if model_key is None:
+        # Try without provider prefix
+        for k in _COST_PER_1K:
+            if k.endswith("/" + resp.model) or k == resp.model:
+                model_key = k
+                break
+    actual_cost = _COST_PER_1K.get(model_key, _SONNET_COST) if model_key else _SONNET_COST
+    if actual_cost < _SONNET_COST and actual_cost > 0:
+        ratio = _SONNET_COST / actual_cost
+        saved = resp.cost_usd * (ratio - 1) / ratio if resp.cost_usd else 0.0
+        return f"{ratio:.0f}x cheaper", saved
+    return "", 0.0
+
+
+def _routing_explanation(resp: LLMResponse, task: str) -> str:
+    """Build routing explanation string based on configured mode.
+
+    Always-on by default (footer mode). Returns empty string only when off.
     """
-    if os.getenv("LLM_ROUTER_EXPLAIN") != "1":
+    mode = _get_explain_mode()
+    if mode == "off":
         return ""
 
     model_short = resp.model.split("/")[-1] if resp.model else "unknown"
-    conf_str = f" · {confidence:.0%}" if confidence > 0 else ""
+    savings_label, saved_usd = _savings_info(resp)
+    cost_str = f"${resp.cost_usd:.5f}" if resp.cost_usd else "$0"
 
-    # Cost comparison vs Sonnet baseline (per-call savings)
-    actual_cost = _COST_PER_1K.get(resp.model, _SONNET_COST)
-    if actual_cost < _SONNET_COST and actual_cost > 0:
-        ratio = _SONNET_COST / actual_cost
-        savings_str = f" · {ratio:.1f}x cheaper than Sonnet"
-    elif resp.model == _SONNET_BASELINE:
-        savings_str = " · baseline"
-    else:
-        savings_str = ""
+    if mode == "verbose":
+        # Full breakdown with chain walk
+        conf_str = f"{resp.confidence:.0%}" if resp.confidence > 0 else "n/a"
+        method = resp.classification_method or "unknown"
+        complexity = resp.complexity or "unknown"
+        lines = [
+            f"→ Model: {resp.model} (via {method}, {conf_str} confidence)",
+            f"→ Task: {task}/{complexity}",
+        ]
+        if savings_label:
+            lines.append(f"→ Cost: {cost_str} ({savings_label}, saved ${saved_usd:.5f})")
+        else:
+            lines.append(f"→ Cost: {cost_str}")
+        if resp.chain_attempts:
+            chain_display = []
+            for m in resp.chain_attempts[:-1]:
+                chain_display.append(f"{m.split('/')[-1]} [✗]")
+            chain_display.append(f"{model_short} [✓]")
+            lines.append(f"→ Chain: {' → '.join(chain_display)}")
+        return "\n─────\n" + "\n".join(lines)
 
-    cost_str = f" · ${resp.cost_usd:.5f}" if resp.cost_usd else ""
-    return f"[→ {model_short} · {task}{conf_str}{cost_str}{savings_str}]\n\n"
+    # Compact one-line format for footer and header
+    parts = [model_short]
+    if resp.complexity:
+        parts.append(resp.complexity)
+    parts.append(cost_str)
+    if savings_label:
+        parts.append(f"({savings_label})")
+    compact = " · ".join(parts)
+
+    if mode == "header":
+        return f"[→ {compact}]\n\n"
+    # footer (default)
+    return f"\n─────\n→ {compact}"
 
 
 def _apply_response_compression(content: str) -> tuple[str, bool]:
@@ -178,31 +235,31 @@ def _apply_response_compression(content: str) -> tuple[str, bool]:
     return content, False
 
 
-def _format_response(resp: LLMResponse, explain: str | None = None) -> str:
-    """Format a response with consistent header and optional explanation prefix.
+def _format_response(resp: LLMResponse, task: str = "") -> str:
+    """Format a response with consistent header and routing explanation.
 
     All tools use this function to ensure uniform response formatting across
     all 60 MCP tools. Format:
 
-        [explain prefix if enabled]
+        [header explanation if mode=header]
         > 🤖 **model** · tokens · $cost · duration
-        [optional empty line]
         [content]
+        [footer explanation if mode=footer (default)]
         [optional compression note]
-
-    Applies response compression (Layer 3: Token-Savior) if enabled via
-    LLM_ROUTER_COMPRESS_RESPONSE=true environment variable.
 
     Args:
         resp: The LLM response object with model, tokens, cost, latency.
-        explain: Optional explanation prefix (from _explain_prefix).
+        task: Task type string for explainability (e.g. "query", "code").
 
     Returns:
         Formatted response string.
     """
+    explanation = _routing_explanation(resp, task)
+    mode = _get_explain_mode()
+
     parts = []
-    if explain:
-        parts.append(explain.rstrip())
+    if mode == "header" and explanation:
+        parts.append(explanation.rstrip())
     parts.append(resp.header())
     if resp.content:
         parts.append("")
@@ -211,6 +268,8 @@ def _format_response(resp: LLMResponse, explain: str | None = None) -> str:
         parts.append(content)
         if was_compressed:
             parts.append("\n[Response compressed via Token-Savior. Original available if needed.]")
+    if mode in ("footer", "verbose") and explanation:
+        parts.append(explanation)
     return "\n".join(parts)
 
 
@@ -248,7 +307,7 @@ async def llm_query(
     )
     _cache_result(prompt, resp, "query", complexity)
     _record_quality(resp, "query", complexity)
-    return _format_response(resp, _explain_prefix(resp, "query"))
+    return _format_response(resp, "query")
 
 
 async def llm_research(
@@ -282,7 +341,7 @@ async def llm_research(
     _cache_result(prompt, resp, "research", "moderate")
     _record_quality(resp, "research", "moderate")
 
-    result = _format_response(resp, _explain_prefix(resp, "research"))
+    result = _format_response(resp, "research")
     
     if resp.citations:
         result += "\n\n**Sources:**\n" + "\n".join(f"- {c}" for c in resp.citations)
@@ -327,7 +386,7 @@ async def llm_generate(
     )
     _cache_result(prompt, resp, "generate", complexity)
     _record_quality(resp, "generate", complexity)
-    return _format_response(resp, _explain_prefix(resp, "generate"))
+    return _format_response(resp, "generate")
 
 
 async def llm_analyze(
@@ -362,7 +421,7 @@ async def llm_analyze(
     )
     _cache_result(prompt, resp, "analyze", effective_complexity)
     _record_quality(resp, "analyze", effective_complexity)
-    return _format_response(resp, _explain_prefix(resp, "analyze"))
+    return _format_response(resp, "analyze")
 
 
 async def llm_code(
@@ -394,7 +453,7 @@ async def llm_code(
     )
     _cache_result(prompt, resp, "code", complexity)
     _record_quality(resp, "code", complexity)
-    return _format_response(resp, _explain_prefix(resp, "code"))
+    return _format_response(resp, "code")
 
 
 async def llm_edit(

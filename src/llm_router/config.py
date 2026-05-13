@@ -126,6 +126,14 @@ class RouterConfig(BaseSettings):
     llm_router_monthly_budget: float = 20.0  # $20/month default cap
     llm_router_daily_spend_limit: float = 0.0  # 0 = disabled; >0 fires alert when crossed
 
+    # ── Explainability (v8.2.0) ──
+    # Controls routing explanation visibility on every response.
+    # "footer" (default): compact one-line after response
+    # "header": one-line before response
+    # "verbose": full chain breakdown
+    # "off": no explanation shown
+    llm_router_explain: str = "footer"
+
     # ── Smart routing settings ──
     daily_token_budget: int = 500_000       # 500k tokens/day default cap
     quality_mode: QualityMode = QualityMode.BALANCED

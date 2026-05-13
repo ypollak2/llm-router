@@ -346,6 +346,12 @@ class LLMResponse:
     provider: str
     citations: list[str] = field(default_factory=list)
     media_url: str | None = None
+    # Explainability fields (v8.2.0) — populated by router from classifier result
+    confidence: float = 0.0
+    classification_method: str = ""
+    complexity: str = ""
+    task_type_str: str = ""
+    chain_attempts: list[str] = field(default_factory=list)
 
     def summary(self) -> str:
         """Format a compact one-line summary for logging and CLI display.

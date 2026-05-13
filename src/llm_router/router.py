@@ -12,6 +12,7 @@ generation APIs directly, because LiteLLM has no media generation support.
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 from typing import Any
 from uuid import uuid4
 
@@ -630,6 +631,24 @@ async def _notify(ctx: Any | None, level: str, message: str) -> None:
         pass
 
 
+def _enrich_response(
+    response: LLMResponse,
+    classification_data: dict | None,
+    effective_complexity: str,
+    task_type: TaskType,
+    chain_attempts: list[str],
+) -> LLMResponse:
+    """Add explainability fields to a successful LLMResponse."""
+    return replace(
+        response,
+        confidence=classification_data.get("classifier_confidence", 0.0) if classification_data else 0.0,
+        classification_method=classification_data.get("classifier_type", "") if classification_data else "",
+        complexity=effective_complexity,
+        task_type_str=task_type.value,
+        chain_attempts=chain_attempts,
+    )
+
+
 async def _dispatch_model_loop(
     models_to_try: list[str],
     task_type: TaskType,
@@ -691,6 +710,7 @@ async def _dispatch_model_loop(
 
     last_error: Exception | None = None
     chain_errors: list[tuple[str, str]] = []  # (model, error_summary) for diagnostics
+    chain_attempts: list[str] = []  # models tried, for explainability
 
     for attempt, model in enumerate(models_to_try, start=1):
         provider = provider_from_model(model)
@@ -754,6 +774,7 @@ async def _dispatch_model_loop(
                 len(models_to_try),
             )
 
+        chain_attempts.append(model)
         try:
             with traced_span(
                 "provider_call",
@@ -972,7 +993,10 @@ async def _dispatch_model_loop(
 
             async with _budget_lock:
                 _pending_spend = max(0.0, _pending_spend - _reservation)
-            return response
+            return _enrich_response(
+                response, classification_data, effective_complexity,
+                task_type, chain_attempts,
+            )
 
         except Exception as e:
             is_rate_limit = _is_rate_limit_error(e)
@@ -1083,9 +1107,14 @@ async def _dispatch_model_loop(
 
                     async with _budget_lock:
                         _pending_spend = max(0.0, _pending_spend - _reservation)
-                    return response
+                    chain_attempts.append(model)
+                    return _enrich_response(
+                        response, classification_data, effective_complexity,
+                        task_type, chain_attempts,
+                    )
 
                 except Exception as e:
+                    chain_attempts.append(model)
                     log.warning(
                         "Emergency fallback model %s failed: %s", model, e
                     )
