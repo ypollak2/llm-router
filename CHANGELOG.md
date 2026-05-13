@@ -2,6 +2,29 @@
 
 **For releases v6.2 and earlier, see [CHANGELOG_ARCHIVE.md](docs/CHANGELOG_ARCHIVE.md).**
 
+## v8.4.0 — Semantic Cache Enhancements (2026-05-13)
+
+### Added
+
+- `cache_hit` and `cache_similarity` fields on `LLMResponse` — cache hits now carry the similarity score
+- Configurable similarity threshold via `LLM_ROUTER_SEMANTIC_CACHE_THRESHOLD` env var (default: 0.95)
+- Cache hits displayed in routing footer: `→ cache hit (97%) · gemini-2.5-flash · $0`
+- 9 new tests for threshold config, cache fields, and footer display
+
+### How It Works
+
+When a semantically similar prompt is found in the cache (cosine similarity ≥ threshold), the cached response is returned instantly with `$0` cost and `0ms` latency. The footer shows exactly what matched and how confident the match was.
+
+```bash
+# Lower threshold = more cache hits (but risk of wrong matches)
+export LLM_ROUTER_SEMANTIC_CACHE_THRESHOLD=0.90
+
+# Default (conservative, high precision)
+export LLM_ROUTER_SEMANTIC_CACHE_THRESHOLD=0.95
+```
+
+---
+
 ## v8.3.0 — Context-Window Cost Optimizer (2026-05-13)
 
 ### Added
