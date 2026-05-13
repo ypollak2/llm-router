@@ -130,6 +130,17 @@ def _routing_explanation(resp: LLMResponse, task: str) -> str:
     if mode == "off":
         return ""
 
+    # Semantic cache hit (v8.4.0) — special short-circuit footer
+    if resp.cache_hit:
+        cache_model = resp.model.replace("cache/", "") if resp.model.startswith("cache/") else resp.model
+        sim_pct = f"{resp.cache_similarity:.0%}"
+        if mode == "verbose":
+            return f"\n─────\n→ Semantic cache hit ({sim_pct} match) · original model: {cache_model} · $0 · 0ms"
+        compact = f"cache hit ({sim_pct}) · {cache_model} · $0"
+        if mode == "header":
+            return f"[→ {compact}]\n\n"
+        return f"\n─────\n→ {compact}"
+
     model_short = resp.model.split("/")[-1] if resp.model else "unknown"
     savings_label, saved_usd = _savings_info(resp)
     cost_str = f"${resp.cost_usd:.5f}" if resp.cost_usd else "$0"

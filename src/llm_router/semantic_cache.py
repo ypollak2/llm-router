@@ -22,6 +22,7 @@ from __future__ import annotations
 import json
 import logging
 import math
+import os
 import urllib.error
 import urllib.request
 from typing import TYPE_CHECKING
@@ -99,11 +100,19 @@ def _get_embedding(text: str, base_url: str) -> list[float] | None:
         return None
 
 
+def _get_threshold() -> float:
+    """Get similarity threshold from env or default."""
+    try:
+        return float(os.getenv("LLM_ROUTER_SEMANTIC_CACHE_THRESHOLD", str(DEFAULT_THRESHOLD)))
+    except ValueError:
+        return DEFAULT_THRESHOLD
+
+
 async def check(
     prompt: str,
     task_type: "TaskType",
     *,
-    threshold: float = DEFAULT_THRESHOLD,
+    threshold: float | None = None,
 ) -> "LLMResponse | None":
     """Check the semantic cache for a recent equivalent prompt.
 
@@ -113,11 +122,14 @@ async def check(
     Args:
         prompt: The user's prompt text.
         task_type: Task type used to scope the cache (code hits never match research hits).
-        threshold: Cosine similarity threshold (0–1). Default 0.95.
+        threshold: Cosine similarity threshold (0–1). Uses
+            ``LLM_ROUTER_SEMANTIC_CACHE_THRESHOLD`` env var or 0.95 default.
 
     Returns:
         A cached ``LLMResponse`` on hit, or ``None`` on miss / Ollama unavailable.
     """
+    if threshold is None:
+        threshold = _get_threshold()
     from llm_router.config import get_config
     config = get_config()
     if not config.ollama_base_url:
@@ -176,6 +188,8 @@ async def check(
             cost_usd=0.0,   # cached — no API cost
             latency_ms=0.0,
             provider="cache",
+            cache_hit=True,
+            cache_similarity=best_sim,
         )
 
     log.debug("semantic_cache: MISS (best_sim=%.3f, rows_scanned=%d)", best_sim, len(rows))

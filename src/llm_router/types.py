@@ -352,6 +352,9 @@ class LLMResponse:
     complexity: str = ""
     task_type_str: str = ""
     chain_attempts: list[str] = field(default_factory=list)
+    # Semantic cache fields (v8.4.0)
+    cache_hit: bool = False
+    cache_similarity: float = 0.0
 
     def summary(self) -> str:
         """Format a compact one-line summary for logging and CLI display.

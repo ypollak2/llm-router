@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -213,3 +214,93 @@ async def test_store_skips_empty_content(monkeypatch, tmp_path):
         await store("prompt", TaskType.QUERY, empty_resp)
 
     mock_embed.assert_not_called()
+
+
+# ── v8.4.0 enhancements ─────────────────────────────────────────────────────
+
+
+class TestThresholdConfig:
+    def test_default_threshold(self):
+        from llm_router.semantic_cache import DEFAULT_THRESHOLD, _get_threshold
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("LLM_ROUTER_SEMANTIC_CACHE_THRESHOLD", None)
+            assert _get_threshold() == DEFAULT_THRESHOLD
+
+    def test_custom_threshold(self):
+        from llm_router.semantic_cache import _get_threshold
+        with patch.dict(os.environ, {"LLM_ROUTER_SEMANTIC_CACHE_THRESHOLD": "0.85"}):
+            assert _get_threshold() == 0.85
+
+    def test_invalid_threshold_uses_default(self):
+        from llm_router.semantic_cache import DEFAULT_THRESHOLD, _get_threshold
+        with patch.dict(os.environ, {"LLM_ROUTER_SEMANTIC_CACHE_THRESHOLD": "bad"}):
+            assert _get_threshold() == DEFAULT_THRESHOLD
+
+
+class TestCacheHitFields:
+    def test_default_values(self):
+        resp = _make_response()
+        assert resp.cache_hit is False
+        assert resp.cache_similarity == 0.0
+
+    def test_cache_hit_set(self):
+        resp = LLMResponse(
+            content="cached", model="cache/gpt-4o",
+            input_tokens=0, output_tokens=0,
+            cost_usd=0.0, latency_ms=0.0, provider="cache",
+            cache_hit=True, cache_similarity=0.97,
+        )
+        assert resp.cache_hit is True
+        assert resp.cache_similarity == 0.97
+
+    def test_frozen_replace_cache_fields(self):
+        from dataclasses import replace
+        resp = _make_response()
+        resp2 = replace(resp, cache_hit=True, cache_similarity=0.96)
+        assert resp.cache_hit is False
+        assert resp2.cache_hit is True
+        assert resp2.cache_similarity == 0.96
+
+
+@pytest.mark.asyncio
+async def test_store_then_check_returns_cache_fields(monkeypatch, tmp_path):
+    """Cache hit response includes cache_hit=True and cache_similarity."""
+    monkeypatch.setenv("OLLAMA_BASE_URL", "http://localhost:11434")
+    monkeypatch.setenv("LLM_ROUTER_DB_PATH", str(tmp_path / "test.db"))
+    import llm_router.config as cfg_mod
+    cfg_mod._config = None
+
+    emb = _make_embedding()
+    response = _make_response("the answer")
+
+    with patch("llm_router.semantic_cache._get_embedding", return_value=emb):
+        from llm_router.semantic_cache import check, store
+        await store("test prompt", TaskType.QUERY, response)
+        hit = await check("test prompt", TaskType.QUERY)
+
+    assert hit is not None
+    assert hit.cache_hit is True
+    assert hit.cache_similarity >= 0.95
+
+
+class TestCacheHitFooter:
+    def test_footer_shows_cache_hit(self):
+        from llm_router.tools.text import _routing_explanation
+        with patch.dict(os.environ, {"LLM_ROUTER_EXPLAIN": "footer"}):
+            resp = LLMResponse(
+                content="cached", model="cache/gemini/gemini-2.5-flash",
+                input_tokens=0, output_tokens=0,
+                cost_usd=0.0, latency_ms=0.0, provider="cache",
+                cache_hit=True, cache_similarity=0.97,
+            )
+            result = _routing_explanation(resp, "query")
+            assert "cache hit" in result
+            assert "97%" in result
+            assert "$0" in result
+
+    def test_non_cache_normal_footer(self):
+        from llm_router.tools.text import _routing_explanation
+        with patch.dict(os.environ, {"LLM_ROUTER_EXPLAIN": "footer"}):
+            resp = _make_response()
+            result = _routing_explanation(resp, "query")
+            assert "cache hit" not in result
