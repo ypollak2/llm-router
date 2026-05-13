@@ -2,6 +2,26 @@
 
 **For releases v6.2 and earlier, see [CHANGELOG_ARCHIVE.md](docs/CHANGELOG_ARCHIVE.md).**
 
+## v8.3.0 — Context-Window Cost Optimizer (2026-05-13)
+
+### Added
+
+- 2-stage context compression pipeline: structural + recency weighting (zero latency, pure Python)
+- Context savings displayed in routing footer: `| ctx 1500→920tok (39% saved)`
+- Free models (Ollama, Codex, Gemini CLI) automatically skip compression
+- `LLM_ROUTER_CONTEXT_OPTIMIZER` config: `auto` (default) or `off`
+- 18 new tests for context optimizer
+
+### How It Works
+
+Before sending context to paid models, the optimizer:
+1. **Structural**: collapses whitespace, removes code comments, deduplicates repeated blocks
+2. **Recency**: keeps last 2 exchanges verbatim, truncates older messages, drops old code blocks
+
+No LLM calls. No latency. Context tokens reduced 20-50% on typical sessions.
+
+---
+
 ## v8.2.0 — Always-On Routing Explainability (2026-05-13)
 
 ### Added
