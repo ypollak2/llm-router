@@ -2,6 +2,26 @@
 
 **For releases v6.2 and earlier, see [CHANGELOG_ARCHIVE.md](docs/CHANGELOG_ARCHIVE.md).**
 
+## v8.2.0 — Always-On Routing Explainability (2026-05-13)
+
+### Added
+
+- Every routed response now shows a routing rationale footer by default: `→ gemini-2.5-flash · simple · $0.0002 (43x cheaper)`
+- 4 explainability modes: `footer` (default), `header`, `verbose`, `off` — controlled via `LLM_ROUTER_EXPLAIN` config
+- `verbose` mode shows full chain walk with per-model attempt status and confidence scores
+- `LLMResponse` now carries `confidence`, `classification_method`, `complexity`, `task_type_str`, `chain_attempts` fields
+- Savings calculation works independently (static cost table, no DB/API dependency)
+- Ollama fallback added to all RESEARCH routing chains (BUDGET, BALANCED, PREMIUM)
+- Full chain error diagnostics — error messages now show every model that was tried and why it failed
+- 27 new tests for explainability feature
+
+### Changed
+
+- `_explain_prefix` replaced by `_routing_explanation` — always-on by default, no env var needed
+- Legacy `LLM_ROUTER_EXPLAIN=1` maps to `header` mode for backward compatibility
+
+---
+
 ## v8.1.0 — Expanded Provider Support & Dual Downloads Badge (2026-05-09)
 
 ### Added
