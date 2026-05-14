@@ -38,7 +38,7 @@ STAR_CTA_THRESHOLD_USD = 0.50
 
 SONNET_INPUT_PER_M  = 3.0
 SONNET_OUTPUT_PER_M = 15.0
-WIDTH = 64
+WIDTH = 80
 
 # Model names that indicate test/mock data — never show in production reports.
 _TEST_MODEL_PATTERNS = {"mock-model", "test-model", "fake-model", "mock", "test"}
@@ -500,9 +500,8 @@ def _format_routing_section(tools: dict[str, dict]) -> list[str]:
     savings_pct = round(total_saved / total_base * 100) if total_base > 0 else 0
 
     lines = [
-        f"  External routing  "
-        f"{total_calls} calls  ·  ${total_cost:.4f} actual  ·  "
-        f"${total_base:.4f} baseline  ·  {savings_pct}% saved",
+        f"  External  {total_calls} calls  ${total_cost:.4f} actual  "
+        f"${total_base:.4f} baseline  {savings_pct}% saved",
         "",
     ]
     for tool, d in sorted(tools.items(), key=lambda x: -x[1]["count"]):
@@ -913,7 +912,7 @@ def _render_braille_chart(daily_data: list[tuple[str, int, int, float]]) -> list
     return lines
 
 
-def _box_top(title: str, width: int = 62) -> str:
+def _box_top(title: str, width: int = 76) -> str:
     # Strip ANSI codes for width calculation
     import re as _re
     plain = _re.sub(r'\033\[[0-9;]*m', '', title)
@@ -928,7 +927,7 @@ def _box_mid(text: str, width: int = 62) -> str:
     return f"  {_DIM}│{_RESET} {text}{' ' * max(0, padding)} {_DIM}│{_RESET}"
 
 
-def _box_bot(width: int = 62) -> str:
+def _box_bot(width: int = 76) -> str:
     return f"  {_DIM}╰{'─' * (width - 2)}╯{_RESET}"
 
 
@@ -957,7 +956,7 @@ def _format_routing_logic(session_start: float | None) -> list[str]:
         pct = (d["hits"] / total_hits) * 100
         method_display = d["method"][:20]
         symbol = d["symbol"]
-        reason = d["reason"][:28]
+        reason = d["reason"][:34]
 
         # Color code: green for zero-cost, yellow for LLM-based
         if d["method"] in ("heuristic", "heuristic-weak", "build-fast-path",
@@ -1082,7 +1081,7 @@ def _format_cumulative_section(periods: list[tuple[str, int, int, int, float]]) 
         chart_lines = _render_braille_chart(daily_14d)
         for cl in chart_lines:
             # Strip the leading 2 spaces since _box_mid adds its own padding
-            lines.append(f"  │ {cl.lstrip():<60}│")
+            lines.append(_box_mid(cl.lstrip()))
         lines.append(_box_mid(""))
         lines.append(_box_bot())
 
@@ -1256,7 +1255,7 @@ def _format(tools: dict[str, dict], cc_rows: list[dict], free_rows: list[dict],
         lines.append("")
         lines.append(_box_top("Claude Subscription"))
         for cl in _format_cc_section(start, current, is_live):
-            lines.append(f"  │ {cl.lstrip():<60}│")
+            lines.append(_box_mid(cl.lstrip()))
         lines.append(_box_bot())
 
     if cc_rows:
@@ -1283,7 +1282,7 @@ def _format(tools: dict[str, dict], cc_rows: list[dict], free_rows: list[dict],
         lines.append(_box_top("This Session"))
         lines.append(_box_mid(""))
         for sl in session_lines:
-            lines.append(f"  │ {sl.lstrip():<60}│")
+            lines.append(_box_mid(sl.lstrip()))
         lines.append(_box_mid(""))
         lines.append(_box_bot())
 
