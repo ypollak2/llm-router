@@ -746,113 +746,186 @@ def _query_daily_14d() -> list[tuple[str, int, int, float]]:
         return []
 
 
-def _render_daily_chart(daily_data: list[tuple[str, int, int, float]]) -> list[str]:
-    """Render a tall 14-day daily usage bar chart with labels and values."""
+def _render_vertical_chart(daily_data: list[tuple[str, int, int, float]]) -> list[str]:
+    """Render a vertical bar chart for 14-day daily usage — one column per day."""
     if not daily_data:
         return []
 
+    from datetime import datetime as _dt
+
+    chart_height = 8  # rows of bars
+    calls_list = [d[1] for d in daily_data]
+    max_calls = max(calls_list) if calls_list else 1
+    if max_calls == 0:
+        max_calls = 1
+
+    # Build columns: each day gets a 4-char wide column
+    n = len(daily_data)
+    col_w = 4
+
     lines = []
-    lines.append("  📊 Last 14 Days — Daily Usage")
-    lines.append("")
 
-    max_calls = max(d[1] for d in daily_data) if daily_data else 1
-    bar_width = 30
+    # Build the chart rows from top to bottom
+    for row in range(chart_height, 0, -1):
+        # Y-axis label
+        if row == chart_height:
+            y_label = f"{max_calls:>5} "
+        elif row == chart_height // 2:
+            y_label = f"{max_calls // 2:>5} "
+        else:
+            y_label = "      "
 
-    # Header
-    lines.append(f"  {'Date':<12} {'Calls':>5}  {'Tokens':>7}  {'Saved':>7}  {'':>{bar_width}}")
-    lines.append(f"  {'─' * 12} {'─' * 5}  {'─' * 7}  {'─' * 7}  {'─' * bar_width}")
+        bar_line = ""
+        for i, (day_str, calls, tokens, saved) in enumerate(daily_data):
+            # Use >= for top rows, > 0 check ensures minimum 1-row bar for any day with data
+            bar_height = (calls / max_calls) * chart_height
+            # Show at least 1 row for any day with data
+            if bar_height >= row or (row == 1 and calls > 0):
+                bar_line += " ██ "
+            else:
+                bar_line += "    "
 
-    for day_str, calls, tokens, saved in daily_data:
-        # Parse day to short label (e.g. "May 05 Mon")
+        lines.append(f"  {y_label}│{bar_line}")
+
+    # X-axis line
+    axis = "─" * (n * col_w + 1)
+    lines.append(f"  {'':>5} ╰{axis}")
+
+    # Day labels (DD)
+    day_labels = ""
+    weekday_labels = ""
+    for day_str, *_ in daily_data:
         try:
-            from datetime import datetime as _dt
             dt = _dt.strptime(day_str, "%Y-%m-%d")
-            label = dt.strftime("%b %d %a")
+            day_labels += f" {dt.strftime('%d')} "
+            weekday_labels += f" {dt.strftime('%a')[:2]} "
         except Exception:
-            label = day_str[-5:]  # fallback to MM-DD
+            day_labels += f" {day_str[-2:]} "
+            weekday_labels += "    "
 
-        # Two-tone bar: calls (filled) proportional to max
-        filled = max(1, round(calls / max(max_calls, 1) * bar_width))
-        bar = "█" * filled + "░" * (bar_width - filled)
+    lines.append(f"  {'':>5}  {day_labels}")
+    lines.append(f"  {'':>5}  {weekday_labels}")
 
-        tok_str = _fmt_tok(tokens)
-        saved_str = f"${saved:.2f}" if saved >= 1.0 else f"${saved:.4f}"
-
-        lines.append(f"  {label:<12} {calls:>5}  {tok_str:>7}  {saved_str:>7}  {bar}")
-
-    # Summary line
+    # Summary below chart
     total_calls = sum(d[1] for d in daily_data)
     total_tokens = sum(d[2] for d in daily_data)
     total_saved = sum(d[3] for d in daily_data)
     avg_calls = total_calls // max(len(daily_data), 1)
-    lines.append(f"  {'─' * 12} {'─' * 5}  {'─' * 7}  {'─' * 7}  {'─' * bar_width}")
-    saved_total = f"${total_saved:.2f}" if total_saved >= 1.0 else f"${total_saved:.4f}"
-    lines.append(f"  {'Total':<12} {total_calls:>5}  {_fmt_tok(total_tokens):>7}  {saved_total:>7}  avg {avg_calls} calls/day")
+    saved_str = f"${total_saved:.2f}" if total_saved >= 1.0 else f"${total_saved:.4f}"
+
+    lines.append("")
+    lines.append(f"  Total  {total_calls} calls  ·  {_fmt_tok(total_tokens)} tokens  ·  {saved_str} saved  ·  avg {avg_calls}/day")
 
     return lines
 
 
+def _box_top(title: str, width: int = 62) -> str:
+    inner = width - 4 - len(title)
+    return f"  ╭─ {title} {'─' * max(0, inner)}╮"
+
+
+def _box_mid(text: str, width: int = 62) -> str:
+    padding = width - 4 - len(text)
+    return f"  │ {text}{' ' * max(0, padding)} │"
+
+
+def _box_bot(width: int = 62) -> str:
+    return f"  ╰{'─' * (width - 2)}╯"
+
+
 def _format_cumulative_section(periods: list[tuple[str, int, int, int, float]]) -> list[str]:
-    """Format daily/weekly/monthly/all-time cumulative savings table + yearly projection."""
+    """Format cumulative savings with box frames, bars, vertical chart, and hero metrics."""
     if not periods or all(p[1] == 0 for p in periods):
         return []
-    lines = ["  Cumulative savings (vs Sonnet baseline)", ""]
 
     period_map = {label: (calls, ti, to, saved) for label, calls, ti, to, saved in periods}
+    all_time = period_map.get("all time", (0, 0, 0, 0.0))
+    today_d = period_map.get("today", (0, 0, 0, 0.0))
+    month_d = period_map.get("this month", (0, 0, 0, 0.0))
 
-    # Find max for bar scaling
+    lines: list[str] = []
+
+    # ── Hero metrics ─────────────────────────────────────────────
+    lifetime_saved = all_time[3]
+    lifetime_tok = all_time[1] + all_time[2]
+    lifetime_calls = all_time[0]
+    saved_hero = f"${lifetime_saved:.2f}" if lifetime_saved >= 1.0 else f"${lifetime_saved:.4f}"
+
+    lines.append(_box_top("Lifetime Savings"))
+    lines.append(_box_mid(""))
+    lines.append(_box_mid(
+        f"  💰 {saved_hero} saved    {_fmt_tok(lifetime_tok)} tokens    {lifetime_calls:,} calls"
+    ))
+
+    # Delta line: today + month
+    today_s = f"${today_d[3]:.2f}" if today_d[3] >= 1.0 else f"${today_d[3]:.4f}"
+    month_s = f"${month_d[3]:.2f}" if month_d[3] >= 1.0 else f"${month_d[3]:.4f}"
+    lines.append(_box_mid(
+        f"     ▲ {today_s} today  ·  ▲ {month_s} this month"
+    ))
+    lines.append(_box_mid(""))
+    lines.append(_box_bot())
+
+    # ── Savings by period ────────────────────────────────────────
+    lines.append("")
+    lines.append(_box_top("Savings by Period"))
+    lines.append(_box_mid(""))
+
     max_saved = max((p[4] for p in periods), default=1.0)
     if max_saved <= 0:
         max_saved = 1.0
-    bar_width = 20
+    bar_width = 24
 
     for label, calls, total_in, total_out, saved in periods:
-        total_tok = total_in + total_out
-        tok_str   = _fmt_tok(total_tok)
         if saved >= 1.0:
-            saved_str = f"${saved:.2f}"
+            saved_str = f"${saved:>6.2f}"
         else:
-            saved_str = f"${saved:.4f}"
-        # Proportional bar
+            saved_str = f"${saved:>6.4f}"
         filled = max(0, min(bar_width, round(saved / max_saved * bar_width)))
         bar = "█" * filled + "░" * (bar_width - filled)
-        lines.append(
-            f"  {label:<12}  {bar}  {calls:>5} calls  {tok_str:>7} tok  {saved_str} saved"
-        )
+        lines.append(_box_mid(
+            f"  {label:<12} {saved_str}  {bar}  {calls:>5,}"
+        ))
 
-    # Yearly projection — prefer 30-day monthly rate, fall back to 7-day, then today
+    lines.append(_box_mid(""))
+
+    # Yearly projection
     from datetime import datetime as _dt
-    days_this_month = max(1, _dt.now().day)  # days elapsed since start of month
-    month_data   = period_map.get("this month", (0, 0, 0, 0.0))
-    weekly_data  = period_map.get("this week",  (0, 0, 0, 0.0))
-    today_data   = period_map.get("today",      (0, 0, 0, 0.0))
-    month_saved  = month_data[3]
+    days_this_month = max(1, _dt.now().day)
+    month_saved = month_d[3]
+    weekly_data = period_map.get("this week", (0, 0, 0, 0.0))
     weekly_saved = weekly_data[3]
-    today_saved  = today_data[3]
-    month_tok    = month_data[1]  + month_data[2]
-    weekly_tok   = weekly_data[1] + weekly_data[2]
-    today_tok    = today_data[1]  + today_data[2]
+    today_saved = today_d[3]
+    month_tok = month_d[1] + month_d[2]
+    weekly_tok = weekly_data[1] + weekly_data[2]
+    today_tok = today_d[1] + today_d[2]
+    rate_usd = 0.0
     if month_saved > 0:
         rate_usd, rate_tok, basis = month_saved / days_this_month, month_tok / days_this_month, "30-day avg"
     elif weekly_saved > 0:
         rate_usd, rate_tok, basis = weekly_saved / 7, weekly_tok / 7, "7-day avg"
     elif today_saved > 0:
         rate_usd, rate_tok, basis = today_saved, today_tok, "today"
-    else:
-        rate_usd = 0.0
     if rate_usd > 0:
-        lines.append("")
-        lines.append(
-            f"  📈 Projection: ~${rate_usd * 365:.0f}/year"
-            f" · ~{_fmt_tok(int(rate_tok * 365))} tok/year"
-            f"  (based on {basis})"
-        )
+        lines.append(_box_mid(
+            f"  📈 ~${rate_usd * 365:.0f}/year  ·  ~{_fmt_tok(int(rate_tok * 365))} tok/year  ({basis})"
+        ))
+        lines.append(_box_mid(""))
 
-    # 14-day daily usage chart
+    lines.append(_box_bot())
+
+    # ── 14-day vertical chart ────────────────────────────────────
     daily_14d = _query_daily_14d()
     if daily_14d:
         lines.append("")
-        lines.extend(_render_daily_chart(daily_14d))
+        lines.append(_box_top("14-Day Usage"))
+        lines.append(_box_mid(""))
+        chart_lines = _render_vertical_chart(daily_14d)
+        for cl in chart_lines:
+            # Strip the leading 2 spaces since _box_mid adds its own padding
+            lines.append(f"  │ {cl.lstrip():<60}│")
+        lines.append(_box_mid(""))
+        lines.append(_box_bot())
 
     # Part 2 metrics — router efficiency, cache hits, classifier overhead, task-type breakdown
     lines.append("")
@@ -1016,28 +1089,44 @@ def _format(tools: dict[str, dict], cc_rows: list[dict], free_rows: list[dict],
             start: dict | None, current: dict | None, is_live: bool,
             cumulative: list[tuple[str, int, int, int, float]] | None = None,
             session_start: float | None = None) -> str:
-    lines = ["─" * WIDTH]
+    lines = ["╔" + "═" * (WIDTH - 2) + "╗"]
+    lines.append("║" + "  LLM Router · Session Summary".ljust(WIDTH - 2) + "║")
+    lines.append("╚" + "═" * (WIDTH - 2) + "╝")
 
     if current:
-        lines += _format_cc_section(start, current, is_live)
+        lines.append("")
+        lines.append(_box_top("Claude Subscription"))
+        for cl in _format_cc_section(start, current, is_live):
+            lines.append(f"  │ {cl.lstrip():<60}│")
+        lines.append(_box_bot())
 
     if cc_rows:
         lines.append("")
         lines += _format_cc_model_section(cc_rows)
 
+    # Session routing in a box
+    session_lines: list[str] = []
     if free_rows:
-        lines.append("")
-        lines += _format_free_section(free_rows, paid_rows)
-
+        session_lines += _format_free_section(free_rows, paid_rows)
     if tools:
-        lines.append("")
-        lines += _format_routing_section(tools)
-
+        if session_lines:
+            session_lines.append("")
+        session_lines += _format_routing_section(tools)
     if session_start is not None:
         complexity_lines = _format_complexity_breakdown(session_start)
         if complexity_lines:
-            lines.append("")
-            lines += complexity_lines
+            if session_lines:
+                session_lines.append("")
+            session_lines += complexity_lines
+
+    if session_lines:
+        lines.append("")
+        lines.append(_box_top("This Session"))
+        lines.append(_box_mid(""))
+        for sl in session_lines:
+            lines.append(f"  │ {sl.lstrip():<60}│")
+        lines.append(_box_mid(""))
+        lines.append(_box_bot())
 
     if cumulative:
         cum_lines = _format_cumulative_section(cumulative)
@@ -1045,7 +1134,7 @@ def _format(tools: dict[str, dict], cc_rows: list[dict], free_rows: list[dict],
             lines.append("")
             lines += cum_lines
 
-
+    lines.append("")
     lines.append("─" * WIDTH)
     return "\n".join(lines)
 
