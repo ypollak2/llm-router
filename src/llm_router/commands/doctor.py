@@ -264,6 +264,68 @@ def _run_doctor(host: Optional[str] = None) -> tuple[int, list[str]]:
             )
             issues.append(f"Hook {dst_name} not installed")
 
+    # ── 1b. Hook Python path validation (B1 from audit) ─────────────────
+    print(f"\n{_bold('  Hook interpreter paths')}")
+    if _SETTINGS_PATH.exists():
+        try:
+            _settings_data = json.loads(_SETTINGS_PATH.read_text())
+            _all_hooks = _settings_data.get("hooks", {})
+            for _event, _entries in _all_hooks.items():
+                if not isinstance(_entries, list):
+                    continue
+                for _entry in _entries:
+                    for _hook in _entry.get("hooks", []):
+                        _cmd = _hook.get("command", "")
+                        if "llm-router" not in _cmd:
+                            continue
+                        # Extract Python interpreter path (first token)
+                        _parts = _cmd.split()
+                        if _parts:
+                            _interp = _parts[0]
+                            if os.path.exists(_interp):
+                                print(_ok(f"{os.path.basename(_parts[-1])} → {_interp}"))
+                            else:
+                                print(
+                                    _fail(
+                                        f"{os.path.basename(_parts[-1])} → {_interp} NOT FOUND",
+                                        fix="llm-router install --force",
+                                    )
+                                )
+                                issues.append(
+                                    f"Hook interpreter missing: {_interp} — "
+                                    f"run `llm-router install --force` to fix"
+                                )
+        except Exception as _e:
+            print(_warn(f"Could not parse settings.json: {_e}"))
+
+    # ── 1c. Duplicate hook detection ──────────────────────────────────────
+    if _SETTINGS_PATH.exists():
+        try:
+            _settings_data = json.loads(_SETTINGS_PATH.read_text())
+            _all_hooks = _settings_data.get("hooks", {})
+            for _event, _entries in _all_hooks.items():
+                if not isinstance(_entries, list):
+                    continue
+                _seen_scripts: dict[str, int] = {}
+                for _entry in _entries:
+                    for _hook in _entry.get("hooks", []):
+                        _cmd = _hook.get("command", "")
+                        if "llm-router" not in _cmd:
+                            continue
+                        _script = _cmd.split()[-1] if _cmd.split() else _cmd
+                        _seen_scripts[_script] = _seen_scripts.get(_script, 0) + 1
+                for _script, _count in _seen_scripts.items():
+                    if _count > 1:
+                        print(
+                            _warn(
+                                f"Duplicate: {os.path.basename(_script)} registered "
+                                f"{_count}x in {_event} — manual cleanup needed in settings.json"
+                            )
+                        )
+                        issues.append(f"Duplicate hook: {os.path.basename(_script)} ({_count}x in {_event})")
+        except Exception:
+            pass
+
     # ── 2. Routing rules ───────────────────────────────────────────────────
     print(f"\n{_bold('  Routing rules')}")
     rules_dst = _RULES_DST / "llm-router.md"
