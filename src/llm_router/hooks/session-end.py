@@ -703,23 +703,123 @@ def _query_savings_by_task_type() -> list[dict]:
         return []
 
 
+def _query_daily_14d() -> list[tuple[str, int, int, float]]:
+    """Return last 14 days of daily usage: [(date_label, calls, tokens, saved), ...]."""
+    if not os.path.exists(DB_PATH):
+        return []
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        rows = conn.execute("""
+            SELECT date(timestamp, 'localtime') as day,
+                   COUNT(*) as calls,
+                   COALESCE(SUM(input_tokens),0) as in_tok,
+                   COALESCE(SUM(output_tokens),0) as out_tok,
+                   COALESCE(SUM(cost_usd),0) as cost,
+                   provider
+            FROM usage
+            WHERE success=1
+              AND timestamp >= datetime('now', '-14 days')
+            GROUP BY day, provider
+            ORDER BY day
+        """).fetchall()
+        conn.close()
+
+        # Aggregate per day with savings calculation
+        from collections import OrderedDict
+        daily: OrderedDict[str, dict] = OrderedDict()
+        for day, calls, in_tok, out_tok, cost, provider in rows:
+            if day not in daily:
+                daily[day] = {"calls": 0, "tokens": 0, "saved": 0.0}
+            daily[day]["calls"] += calls
+            daily[day]["tokens"] += in_tok + out_tok
+            baseline = _sonnet_baseline(in_tok, out_tok)
+            if provider in _FREE_PROVIDERS:
+                daily[day]["saved"] += baseline
+            elif provider != "subscription":
+                daily[day]["saved"] += max(0.0, baseline - cost)
+
+        return [
+            (day, d["calls"], d["tokens"], d["saved"])
+            for day, d in daily.items()
+        ]
+    except Exception:
+        return []
+
+
+def _render_daily_chart(daily_data: list[tuple[str, int, int, float]]) -> list[str]:
+    """Render a tall 14-day daily usage bar chart with labels and values."""
+    if not daily_data:
+        return []
+
+    lines = []
+    lines.append("  📊 Last 14 Days — Daily Usage")
+    lines.append("")
+
+    max_calls = max(d[1] for d in daily_data) if daily_data else 1
+    bar_width = 30
+
+    # Header
+    lines.append(f"  {'Date':<12} {'Calls':>5}  {'Tokens':>7}  {'Saved':>7}  {'':>{bar_width}}")
+    lines.append(f"  {'─' * 12} {'─' * 5}  {'─' * 7}  {'─' * 7}  {'─' * bar_width}")
+
+    for day_str, calls, tokens, saved in daily_data:
+        # Parse day to short label (e.g. "May 05 Mon")
+        try:
+            from datetime import datetime as _dt
+            dt = _dt.strptime(day_str, "%Y-%m-%d")
+            label = dt.strftime("%b %d %a")
+        except Exception:
+            label = day_str[-5:]  # fallback to MM-DD
+
+        # Two-tone bar: calls (filled) proportional to max
+        filled = max(1, round(calls / max(max_calls, 1) * bar_width))
+        bar = "█" * filled + "░" * (bar_width - filled)
+
+        tok_str = _fmt_tok(tokens)
+        saved_str = f"${saved:.2f}" if saved >= 1.0 else f"${saved:.4f}"
+
+        lines.append(f"  {label:<12} {calls:>5}  {tok_str:>7}  {saved_str:>7}  {bar}")
+
+    # Summary line
+    total_calls = sum(d[1] for d in daily_data)
+    total_tokens = sum(d[2] for d in daily_data)
+    total_saved = sum(d[3] for d in daily_data)
+    avg_calls = total_calls // max(len(daily_data), 1)
+    lines.append(f"  {'─' * 12} {'─' * 5}  {'─' * 7}  {'─' * 7}  {'─' * bar_width}")
+    saved_total = f"${total_saved:.2f}" if total_saved >= 1.0 else f"${total_saved:.4f}"
+    lines.append(f"  {'Total':<12} {total_calls:>5}  {_fmt_tok(total_tokens):>7}  {saved_total:>7}  avg {avg_calls} calls/day")
+
+    return lines
+
+
 def _format_cumulative_section(periods: list[tuple[str, int, int, int, float]]) -> list[str]:
     """Format daily/weekly/monthly/all-time cumulative savings table + yearly projection."""
     if not periods or all(p[1] == 0 for p in periods):
         return []
     lines = ["  Cumulative savings (vs Sonnet baseline)", ""]
+
     period_map = {label: (calls, ti, to, saved) for label, calls, ti, to, saved in periods}
+
+    # Find max for bar scaling
+    max_saved = max((p[4] for p in periods), default=1.0)
+    if max_saved <= 0:
+        max_saved = 1.0
+    bar_width = 20
+
     for label, calls, total_in, total_out, saved in periods:
         total_tok = total_in + total_out
         tok_str   = _fmt_tok(total_tok)
-        # Format savings: use $X.XX for amounts >= $1, $X.XXXX for sub-dollar
         if saved >= 1.0:
             saved_str = f"${saved:.2f}"
         else:
             saved_str = f"${saved:.4f}"
+        # Proportional bar
+        filled = max(0, min(bar_width, round(saved / max_saved * bar_width)))
+        bar = "█" * filled + "░" * (bar_width - filled)
         lines.append(
-            f"  {label:<12}  {calls:>5} calls  {tok_str:>7} tok  {saved_str} saved"
+            f"  {label:<12}  {bar}  {calls:>5} calls  {tok_str:>7} tok  {saved_str} saved"
         )
+
     # Yearly projection — prefer 30-day monthly rate, fall back to 7-day, then today
     from datetime import datetime as _dt
     days_this_month = max(1, _dt.now().day)  # days elapsed since start of month
@@ -747,6 +847,12 @@ def _format_cumulative_section(periods: list[tuple[str, int, int, int, float]]) 
             f" · ~{_fmt_tok(int(rate_tok * 365))} tok/year"
             f"  (based on {basis})"
         )
+
+    # 14-day daily usage chart
+    daily_14d = _query_daily_14d()
+    if daily_14d:
+        lines.append("")
+        lines.extend(_render_daily_chart(daily_14d))
 
     # Part 2 metrics — router efficiency, cache hits, classifier overhead, task-type breakdown
     lines.append("")
