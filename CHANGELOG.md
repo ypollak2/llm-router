@@ -2,6 +2,21 @@
 
 **For releases v6.2 and earlier, see [CHANGELOG_ARCHIVE.md](docs/CHANGELOG_ARCHIVE.md).**
 
+## v8.7.0 — Cyber-Grid Session Summary (2026-05-15)
+
+### Added
+
+- **Cyber-Grid static dashboard** — replaces plain ANSI session-end output with a Rich-rendered, two-column layout
+  - **Intelligence panel** (left): routing method breakdown with zero-cost gauge, Claude subscription quota bars with delta tracking
+  - **Financial panel** (right): period savings grid with token counts, baseline vs actual cost comparison with percentage badge, yearly projection
+  - **L14 Activity panel**: Braille Unicode chart (U+2800) for 14-day call volume with quality metrics (fallbacks, routing latency, cache hit rate)
+  - **Wildcard Insight**: auto-generated cost-saving suggestion based on routing data
+- Tokyo Night true-color hex palette (`#00ff87`, `#7dcfff`, `#7aa2f7`) with 4-tier brightness hierarchy
+- Clean-break separator rule before dashboard with session timestamp
+- Graceful fallback to legacy renderer if Rich unavailable
+
+---
+
 ## v8.6.0 — Mission Control TUI Dashboard (2026-05-15)
 
 ### Added

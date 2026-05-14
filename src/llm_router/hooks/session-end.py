@@ -1219,6 +1219,48 @@ def _should_show_star_cta(session_saved: float) -> bool:
     return False
 
 
+# ── Data collection ────────────────────────────────────────────────────────────
+
+def _collect_report_data(
+    session_start: float,
+    paid_rows: list[dict],
+    cc_rows: list[dict],
+    free_rows: list[dict],
+    tools: dict[str, dict],
+    start: dict | None,
+    current: dict | None,
+    is_live: bool,
+    cumulative: list[tuple[str, int, int, int, float]],
+) -> dict:
+    """Gather all metrics into a single data dict for the renderer."""
+    session_id = None
+    try:
+        with open(SESSION_ID_FILE) as f:
+            session_id = f.read().strip()
+    except Exception:
+        pass
+
+    return {
+        "session_id": session_id,
+        "duration_secs": time.time() - session_start,
+        "cc_start": start,
+        "cc_current": current,
+        "cc_is_live": is_live,
+        "routing_logic": _query_routing_logic(session_start),
+        "cumulative": cumulative,
+        "daily_14d": _query_daily_14d(),
+        "efficiency": _query_router_efficiency(),
+        "overhead": _query_classifier_overhead(),
+        "cache_stats": _query_cache_hit_stats(),
+        "paid_rows": paid_rows,
+        "cc_rows": cc_rows,
+        "free_rows": free_rows,
+        "tools": tools,
+        "complexity_data": _query_session_complexity_breakdown(session_start),
+        "savings_by_task": _query_savings_by_task_type(),
+    }
+
+
 # ── Entry point ────────────────────────────────────────────────────────────────
 
 def _read_session_spend() -> dict | None:
@@ -1275,7 +1317,20 @@ def main() -> None:
     if not tools and not cc_rows and not current and not free_rows and not has_cumulative:
         sys.exit(0)
 
-    summary = _format(tools, cc_rows, free_rows, paid_rows, start, current, is_live, cumulative, session_start)
+    # Try Cyber-Grid (Rich) renderer; fall back to legacy ANSI
+    summary = None
+    try:
+        from llm_router.hooks.cyber_grid import render_cyber_grid
+        report_data = _collect_report_data(
+            session_start, paid_rows, cc_rows, free_rows, tools,
+            start, current, is_live, cumulative,
+        )
+        summary = render_cyber_grid(report_data)
+    except Exception:
+        pass
+
+    if not summary:
+        summary = _format(tools, cc_rows, free_rows, paid_rows, start, current, is_live, cumulative, session_start)
 
     # Append session spend one-liner if available (v4.0)
     spend = _read_session_spend()
