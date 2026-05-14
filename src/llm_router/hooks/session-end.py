@@ -426,7 +426,7 @@ def _smart_bar(pct: float, width: int = 16) -> str:
         color = _C_ORANGE
     else:
         color = _C_RED
-    return color + "━" * filled + _RESET + _C_DARK + "╌" * (width - filled) + _RESET
+    return color + "━" * filled + _RESET + _C_DARK + "─" * (width - filled) + _RESET
 
 
 def _cc_row(label: str, start_pct: float | None, end_pct: float) -> str:
@@ -869,21 +869,15 @@ def _format_routing_logic(session_start: float | None) -> list[str]:
         return []
 
     zero_cost = 0
-    parts: list[str] = []
 
     for d in data:
-        pct = (d["hits"] / total_hits) * 100
         method = d["method"]
-
         if method in ("heuristic", "heuristic-weak", "build-fast-path",
                        "content-generation-fast-path", "context-inherit",
                        "code-context-inherit"):
             zero_cost += d["hits"]
         elif method not in ("ollama", "llm"):
             zero_cost += d["hits"]
-
-        symbol = d.get("symbol", "❓")
-        parts.append(f"{symbol} {method} {_C_WHITE}{d['hits']}{_RESET} {_C_DARK}({pct:.0f}%){_RESET}")
 
     zero_pct = round(zero_cost / total_hits * 100) if total_hits > 0 else 0
     pct_color = _C_GREEN if zero_pct >= 80 else (_C_YELLOW if zero_pct >= 50 else _C_ORANGE)
@@ -892,7 +886,17 @@ def _format_routing_logic(session_start: float | None) -> list[str]:
         f"{_C_WHITE}{total_hits}{_RESET} decisions · "
         f"{pct_color}{zero_pct}% zero-cost{_RESET}"
     ]
-    lines.append(f"    {' · '.join(parts)}")
+    # Find max method name length for alignment
+    max_name = max(len(d["method"]) for d in data)
+    for d in data:
+        pct = (d["hits"] / total_hits) * 100
+        symbol = d.get("symbol", "❓")
+        name = d["method"]
+        lines.append(
+            f"    {symbol} {_C_GRAY}{name:<{max_name}}{_RESET}"
+            f"  {_C_WHITE}{d['hits']:>3}{_RESET}"
+            f"  {_C_DARK}{pct:>3.0f}%{_RESET}"
+        )
     return lines
 
 def _sparkline(values: list[float]) -> str:
@@ -929,14 +933,16 @@ def _format_cumulative_section(periods: list[tuple[str, int, int, int, float]]) 
         "",
     ]
 
-    # Period grid — all on one line
-    period_parts: list[str] = []
+    # Period grid — vertical for readability
     for label, calls, _ti, _to, saved in periods:
         s = f"${saved:.2f}" if saved >= 1.0 else f"${saved:.4f}"
         call_str = f"{calls:,}" if calls >= 1000 else str(calls)
         short_label = {"today": "today", "this week": "week", "this month": "month", "all time": "all"}.get(label, label)
-        period_parts.append(f"{_C_GRAY}{short_label}{_RESET} {_C_WHITE}{s}{_RESET} {_C_DARK}({call_str}){_RESET}")
-    lines.append(f"    {'  '.join(period_parts)}")
+        lines.append(
+            f"    {_C_GRAY}{short_label:<6}{_RESET}"
+            f"  {_C_WHITE}{s:>8}{_RESET}"
+            f"  {_C_DARK}{call_str:>6}{_RESET}"
+        )
 
     # Yearly projection
     from datetime import datetime as _dt
@@ -965,14 +971,17 @@ def _format_cumulative_section(periods: list[tuple[str, int, int, int, float]]) 
     if daily_14d:
         total_calls = sum(d[1] for d in daily_14d)
         total_tokens = sum(d[2] for d in daily_14d)
+        total_14d_saved = sum(d[3] for d in daily_14d)
         avg_calls = total_calls // max(len(daily_14d), 1)
         spark_values = [float(d[1]) for d in daily_14d]
         spark = _sparkline(spark_values)
         lines.append("")
         lines.append(f"  {_BOLD}14 Days{_RESET}  {_C_CYAN}{spark}{_RESET}")
+        saved_14 = f"${total_14d_saved:.2f}" if total_14d_saved >= 1.0 else f"${total_14d_saved:.4f}"
         lines.append(
             f"    {_C_WHITE}{total_calls}{_RESET} calls · "
             f"{_C_WHITE}{_fmt_tok(total_tokens)}{_RESET} tok · "
+            f"{_C_GREEN}{saved_14}{_RESET} saved · "
             f"avg {_C_WHITE}{avg_calls}{_RESET}/day"
         )
 
@@ -1156,6 +1165,8 @@ def _format(tools: dict[str, dict], cc_rows: list[dict], free_rows: list[dict],
     if cumulative:
         cum_lines = _format_cumulative_section(cumulative)
         if cum_lines:
+            lines.append("")
+            lines.append(f"  {_C_DARK}{'─' * (WIDTH - 4)}{_RESET}")
             lines.append("")
             lines += cum_lines
 

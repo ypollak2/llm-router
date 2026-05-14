@@ -2,6 +2,22 @@
 
 **For releases v6.2 and earlier, see [CHANGELOG_ARCHIVE.md](docs/CHANGELOG_ARCHIVE.md).**
 
+## v8.6.0 — Mission Control TUI Dashboard (2026-05-15)
+
+### Added
+
+- **`llm-router tui`** — full-screen terminal dashboard built on Textual
+  - **Panel A: Subscription Status** — gradient progress bars for session/weekly/model quotas
+  - **Panel B: Metrics & Cost Analysis** — live KPIs, top models table, complexity routing breakdown
+  - **Panel C: Routing Engine** — heuristic/fast-path/advanced decision split with percentages
+  - **Panel D: Savings Wallet** — today/week/month/lifetime savings with trend arrows and annual projections
+  - **Panel E: L14 Activity Graph** — dense Braille-pattern (U+2800) sparkline charts for calls, tokens, and cost over 14 days
+- Tokyo Night true-color palette (hex-defined, not 16-color ANSI)
+- Auto-refresh every 10 seconds, keyboard controls (`q` quit, `r` refresh, `d` theme)
+- `textual` added as optional dependency group (`pip install llm-routing[tui]`)
+
+---
+
 ## v8.5.1 — Hook Path Validation + Python 3.14 Support (2026-05-14)
 
 ### Fixed

@@ -536,6 +536,9 @@ def main() -> None:
     elif args and args[0] == "dashboard":
         from llm_router.commands.dashboard import cmd_dashboard
         cmd_dashboard(args[1:])
+    elif args and args[0] == "tui":
+        from llm_router.dashboard.tui import run as _tui_run
+        _tui_run()
     elif args and args[0] == "share":
         from llm_router.commands.share import cmd_share
         cmd_share(args[1:])
