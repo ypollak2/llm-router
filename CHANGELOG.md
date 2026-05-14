@@ -2,6 +2,33 @@
 
 **For releases v6.2 and earlier, see [CHANGELOG_ARCHIVE.md](docs/CHANGELOG_ARCHIVE.md).**
 
+## v8.5.0 — Savings Dashboard + Audit Corrections (2026-05-14)
+
+### Added
+
+- **`llm_dashboard`** MCP tool — token-centric savings dashboard with ANSI colors
+  - Sparkline time-series of daily tokens saved (14d/30d/3m/1y/all windows)
+  - Per-provider breakdown: gross savings, classifier overhead, net savings
+  - Colored routing distribution bars
+  - Dual baseline: `--baseline sonnet` (default, honest) or `opus` (alternative)
+- **Billing-mode-aware messaging**: subscription users see "quota freed" disclaimer instead of misleading dollar savings
+- **Classifier overhead** subtracted from net savings in dashboard
+- **`docs/AUDIT_2026Q2.md`**: comprehensive engineering audit covering activation path, routing logic, metrics honesty, telemetry, and user visibility
+
+### Fixed
+
+- Sonnet baseline standardized as default across dashboard (honest vs Opus strawman)
+- Subscription mode auto-detected and labeled correctly in savings output
+
+### Audit Findings (documented in AUDIT_2026Q2.md)
+
+3 blockers identified and addressed:
+- B1: Silent hook failures (documented, fix planned for v8.6.0)
+- B2: Fake dollar savings for subscription users (fixed — shows "quota freed")
+- B3: Opus baseline inflation (fixed — Sonnet default, Opus as `--baseline opus`)
+
+---
+
 ## v8.4.0 — Semantic Cache Enhancements (2026-05-13)
 
 ### Added
