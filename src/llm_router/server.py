@@ -32,7 +32,7 @@ from llm_router.config import get_config
 from llm_router.health import get_tracker
 from llm_router.logging import configure_logging, get_logger
 from llm_router.state import _check_tier, get_active_profile  # noqa: F401  (backward compat)
-from llm_router.tools import admin, agoragentic, codex, fs, gemini_cli, media, pipeline, routing, setup, subscription, text
+from llm_router.tools import admin, agoragentic, codex, dashboard, fs, gemini_cli, media, pipeline, routing, setup, subscription, text
 from llm_router.tools.admin import llm_health, llm_set_profile, llm_usage  # noqa: F401
 from llm_router.tools.pipeline import llm_orchestrate  # noqa: F401
 from llm_router.tools.routing import llm_route  # noqa: F401
@@ -111,6 +111,7 @@ subscription.register(mcp, _gate)
 codex.register(mcp, _gate)
 gemini_cli.register(mcp, _gate)
 setup.register(mcp, _gate)
+dashboard.register(mcp, _gate)
 fs.register(mcp, _gate)
 agoragentic.register(mcp)
 
