@@ -216,10 +216,11 @@ async def _build_and_filter_chain(
             models_to_try = ollama_models + models_to_try
 
         # ── Codex injection ───────────────────────────────────────────────────
+        # Codex is free (uses OpenAI subscription) — inject for ALL profiles
+        # including BUDGET to maximize free-first routing.
         _codex_eligible_tasks = {TaskType.CODE, TaskType.ANALYZE, TaskType.GENERATE, TaskType.QUERY}
         if (
-            profile != RoutingProfile.BUDGET
-            and task_type in _codex_eligible_tasks
+            task_type in _codex_eligible_tasks
             and is_codex_available()
         ):
             codex_chain = [f"codex/{m}" for m in CODEX_MODELS[:2]]

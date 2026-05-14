@@ -67,7 +67,7 @@ ROUTING_TABLE: dict[tuple[RoutingProfile, TaskType], list[str]] = {
     # ═══════════════════════════════════════════════════════════════════
     # BUDGET chains: Free/cheap first, only Claude Haiku as last resort
     (RoutingProfile.BUDGET, TaskType.QUERY): [
-        "ollama/qwen2.5:1.5b",          # fastest free model for simple queries
+        # Ollama models injected dynamically by router.py from OLLAMA_BUDGET_MODELS
         "codex/gpt-4o-mini",            # free via OpenAI subscription (injected dynamically)
         "gemini/gemini-2.5-flash",      # $0.00076/1M — ultra-cheap
         "groq/llama-3.3-70b-versatile", # $0.0001/1M — cheapest cloud option
@@ -79,10 +79,10 @@ ROUTING_TABLE: dict[tuple[RoutingProfile, TaskType], list[str]] = {
         "anthropic/claude-haiku-4-5-20251001",
         "gemini/gemini-2.5-flash",
         "openai/gpt-4o-mini",
-        "ollama/qwen3.5:latest",            # last resort: no web search, but won't fail
+        # Ollama injected dynamically as last-resort fallback
     ],
     (RoutingProfile.BUDGET, TaskType.GENERATE): [
-        "ollama/qwen2.5:1.5b",          # fast local inference
+        # Ollama models injected dynamically by router.py from OLLAMA_BUDGET_MODELS
         "codex/gpt-4o-mini",            # free via OpenAI subscription
         "gemini/gemini-2.5-flash",      # $0.00076/1M
         "deepseek/deepseek-chat",       # $0.0007/1M
@@ -91,7 +91,7 @@ ROUTING_TABLE: dict[tuple[RoutingProfile, TaskType], list[str]] = {
         "anthropic/claude-haiku-4-5-20251001",  # last resort only
     ],
     (RoutingProfile.BUDGET, TaskType.ANALYZE): [
-        "ollama/qwen3.5:latest",        # free local
+        # Ollama models injected dynamically by router.py from OLLAMA_BUDGET_MODELS
         "codex/gpt-4o-mini",            # free via OpenAI subscription
         "gemini/gemini-2.5-flash",      # $0.00076/1M
         "deepseek/deepseek-reasoner",   # $0.0014/1M — best reasoning at budget tier
@@ -100,7 +100,7 @@ ROUTING_TABLE: dict[tuple[RoutingProfile, TaskType], list[str]] = {
         "anthropic/claude-haiku-4-5-20251001",  # last resort only
     ],
     (RoutingProfile.BUDGET, TaskType.CODE): [
-        "ollama/qwen3.5:latest",        # free local
+        # Ollama models injected dynamically by router.py from OLLAMA_BUDGET_MODELS
         "codex/gpt-4o-mini",            # free via OpenAI subscription
         "deepseek/deepseek-chat",       # $0.0007/1M — decent code
         "gemini/gemini-2.5-flash",      # $0.00076/1M
@@ -137,7 +137,7 @@ ROUTING_TABLE: dict[tuple[RoutingProfile, TaskType], list[str]] = {
     # is_codex_available() — it cannot be in the static table since it routes
     # through codex_agent.run_codex(), not LiteLLM.
     (RoutingProfile.BALANCED, TaskType.QUERY): [
-        "ollama/qwen3.5:latest",        # free local inference — try first
+        # Ollama models injected dynamically by router.py from OLLAMA_BUDGET_MODELS
         "codex/gpt-4o",                 # free via OpenAI subscription (injected dynamically)
         "gemini/gemini-2.5-pro",        # $0.015/1M — cheap, high quality
         "deepseek/deepseek-chat",       # $0.0007/1M — ultra-cheap fallback
@@ -149,10 +149,10 @@ ROUTING_TABLE: dict[tuple[RoutingProfile, TaskType], list[str]] = {
         "anthropic/claude-sonnet-4-6",
         "gemini/gemini-2.5-pro",
         "openai/gpt-4o",
-        "ollama/qwen3.5:latest",            # last resort: no web search, but won't fail
+        # Ollama injected dynamically as last-resort fallback
     ],
     (RoutingProfile.BALANCED, TaskType.GENERATE): [
-        "ollama/qwen3.5:latest",        # free local inference — try first
+        # Ollama models injected dynamically by router.py from OLLAMA_BUDGET_MODELS
         "codex/gpt-4o",                 # free via OpenAI subscription (injected dynamically)
         "gemini/gemini-2.5-pro",        # $0.015/1M — good quality for generation
         "deepseek/deepseek-chat",       # $0.0007/1M — ultra-cheap fallback
@@ -162,7 +162,7 @@ ROUTING_TABLE: dict[tuple[RoutingProfile, TaskType], list[str]] = {
         "anthropic/claude-haiku-4-5-20251001",
     ],
     (RoutingProfile.BALANCED, TaskType.ANALYZE): [
-        "ollama/qwen3.5:latest",        # free local inference — try first
+        # Ollama models injected dynamically by router.py from OLLAMA_BUDGET_MODELS
         "codex/gpt-4o",                 # free via OpenAI subscription (injected dynamically)
         "gemini/gemini-2.5-pro",        # $0.015/1M — good for analysis
         "deepseek/deepseek-reasoner",   # reasoning model, $0.0014 — excellent analysis, cheap
@@ -171,7 +171,7 @@ ROUTING_TABLE: dict[tuple[RoutingProfile, TaskType], list[str]] = {
         "anthropic/claude-haiku-4-5-20251001",
     ],
     (RoutingProfile.BALANCED, TaskType.CODE): [
-        "ollama/qwen3.5:latest",        # free local inference — try first
+        # Ollama models injected dynamically by router.py from OLLAMA_BUDGET_MODELS
         "codex/gpt-4o",                 # free via OpenAI subscription (injected dynamically)
         "gemini/gemini-2.5-pro",        # $0.015/1M — capable for code generation
         "deepseek/deepseek-chat",       # $0.0007/1M — ultra-cheap, decent code quality
@@ -213,7 +213,7 @@ ROUTING_TABLE: dict[tuple[RoutingProfile, TaskType], list[str]] = {
         "anthropic/claude-opus-4-6",
         "gemini/gemini-2.5-pro",        # $0.01/1M — cheaper than OpenAI/o3
         "openai/o3",                    # expensive last resort
-        "ollama/qwen3.5:latest",        # safety net: no web search, but won't fail
+        # Ollama injected dynamically as safety-net fallback
     ],
     (RoutingProfile.PREMIUM, TaskType.GENERATE): [
         "anthropic/claude-opus-4-6",

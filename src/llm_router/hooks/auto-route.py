@@ -85,7 +85,7 @@ _load_dotenv()
 
 OLLAMA_MODEL = os.environ.get("LLM_ROUTER_OLLAMA_MODEL", "gemma4:latest")
 OLLAMA_URL = os.environ.get("LLM_ROUTER_OLLAMA_URL", "http://localhost:11434")
-OLLAMA_TIMEOUT = int(os.environ.get("LLM_ROUTER_OLLAMA_TIMEOUT", "5"))
+OLLAMA_TIMEOUT = int(os.environ.get("LLM_ROUTER_OLLAMA_TIMEOUT", "15"))
 CONFIDENCE_THRESHOLD = int(os.environ.get("LLM_ROUTER_CONFIDENCE_THRESHOLD", "2"))  # v7.5.0: Aggressive routing — route more with lower threshold
 DISABLE_LLM_CLASSIFIERS = os.environ.get("LLM_ROUTER_DISABLE_LLM_CLASSIFIERS", "").lower() in (
     "1",

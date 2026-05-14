@@ -359,7 +359,7 @@ class RouterConfig(BaseSettings):
         for backward compatibility when cache is empty or missing.
 
         Returns:
-            List of LiteLLM model IDs like ``["ollama/llama3.2", "ollama/qwen2.5-coder:7b"]``,
+            List of LiteLLM model IDs like ``["ollama/qwen3.5:latest", "ollama/qwen3.6:27b"]``,
             or an empty list when Ollama is not configured.
         """
         if not self.ollama_base_url:

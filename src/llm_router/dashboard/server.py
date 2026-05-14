@@ -157,7 +157,7 @@ async def _get_stats() -> dict:
 
     try:
         from importlib.metadata import version as _pkg_version
-        _pkg_ver = _pkg_version("claude-code-llm-router")
+        _pkg_ver = _pkg_version("llm-routing")
     except Exception:
         _pkg_ver = "?"
     stats["config"] = {

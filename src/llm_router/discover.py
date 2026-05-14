@@ -48,19 +48,57 @@ def is_ollama_available() -> bool:
         if (now - cached_time) < _OLLAMA_CACHE_TTL:
             return cached_result
     
-    # Probe Ollama
+    # Probe Ollama and cache discovered models
     try:
+        import json
         import urllib.request
         with urllib.request.urlopen(
             f"{config.ollama_base_url}/api/tags",
-            timeout=1
-        ):
+            timeout=2
+        ) as resp:
+            data = json.loads(resp.read())
             result = True
+            # Write discovery cache with actual model names
+            _update_discovery_cache(data.get("models", []))
     except Exception:
         result = False
-    
+
     _ollama_cache[config.ollama_base_url] = (result, now)
     return result
+
+
+def _update_discovery_cache(ollama_models: list[dict]) -> None:
+    """Write discovered Ollama models to ~/.llm-router/discovery.json.
+
+    Called on successful Ollama probe so the cache stays fresh.
+    """
+    import json
+    import time
+
+    models = {}
+    for m in ollama_models:
+        name = m.get("name", "")
+        if not name:
+            continue
+        model_id = f"ollama/{name}"
+        models[model_id] = {
+            "model_id": model_id,
+            "provider": "ollama",
+            "provider_tier": "free",
+            "task_types": ["query", "generate", "analyze", "code"],
+        }
+
+    cache_data = {
+        "cached_at": time.time(),
+        "models": models,
+    }
+
+    try:
+        os.makedirs(os.path.dirname(_DISCOVERY_CACHE), exist_ok=True)
+        with open(_DISCOVERY_CACHE, "w") as f:
+            json.dump(cache_data, f, indent=2)
+    except Exception as e:
+        log.debug("Failed to write discovery cache: %s", e)
 
 
 def get_available_providers() -> set[str]:
