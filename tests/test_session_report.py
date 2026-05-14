@@ -103,7 +103,7 @@ class TestSubscriptionDeltas:
         """When start == end, show 'no change' instead of +0.0pp."""
         result = se._cc_row("session (5h)", 35.0, 35.0)
         assert "+0.0pp" not in result
-        assert "no change this session" in result
+        assert "no change" in result
 
     def test_tiny_delta_shows_precision(self):
         """When delta is 0.01-0.09pp, show 2 decimal places."""
@@ -133,7 +133,7 @@ class TestSubscriptionDeltas:
         result = se._cc_row("session (5h)", None, 35.0)
         assert "→" not in result
         assert "pp" not in result
-        assert "35.0%" in result
+        assert "35%" in result
 
 
 # ── Issue 2: Mock/test model filtering ────────────────────────────────────────

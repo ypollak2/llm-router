@@ -38,7 +38,7 @@ STAR_CTA_THRESHOLD_USD = 0.50
 
 SONNET_INPUT_PER_M  = 3.0
 SONNET_OUTPUT_PER_M = 15.0
-WIDTH = 80
+WIDTH = 50
 
 # Model names that indicate test/mock data — never show in production reports.
 _TEST_MODEL_PATTERNS = {"mock-model", "test-model", "fake-model", "mock", "test"}
@@ -416,37 +416,21 @@ def _bar(pct: float, bar_width: int = 20) -> str:
 
 
 def _cc_row(label: str, start_pct: float | None, end_pct: float) -> str:
-    """Format one CC subscription row.
-
-    start_pct=None means no snapshot available (first session or missing file).
-    """
-    bar = _bar(end_pct)
+    """Format one CC subscription row — compact."""
+    bar = _bar(end_pct, bar_width=12)
     if start_pct is not None:
         delta = end_pct - start_pct
-        # When raw delta is non-zero but rounds to 0.0, show higher precision
-        # When delta truly is 0.0 (or negligible <0.01), say so clearly
         if abs(delta) < 0.01:
-            return f"  {label:<16}  {bar}  {end_pct:>4.1f}%  (no change this session)"
-        elif abs(delta) < 0.1:
-            # Sub-0.1pp delta: show 2 decimal places to avoid misleading +0.0pp
-            sign = "+" if delta >= 0 else ""
-            return (
-                f"  {label:<16}  {bar}  "
-                f"{start_pct:>4.1f}% → {end_pct:>4.1f}%  ({sign}{delta:.2f}pp this session)"
-            )
-        else:
-            sign = "+" if delta >= 0 else ""
-            return (
-                f"  {label:<16}  {bar}  "
-                f"{start_pct:>4.1f}% → {end_pct:>4.1f}%  ({sign}{delta:.1f}pp this session)"
-            )
-    return f"  {label:<16}  {bar}  {end_pct:>4.1f}%"
+            return f"  {label:<14}{bar}  {end_pct:>3.0f}%  {_DIM}(no change){_RESET}"
+        sign = "+" if delta >= 0 else ""
+        fmt = f"{sign}{delta:.2f}pp" if abs(delta) < 0.1 else f"{sign}{delta:.1f}pp"
+        return f"  {label:<14}{bar}  {start_pct:.0f}% → {end_pct:.0f}%  {fmt}"
+    return f"  {label:<14}{bar}  {end_pct:>3.0f}%"
 
 
 def _format_cc_section(start: dict | None, current: dict, is_live: bool) -> list[str]:
-    src   = "live" if is_live else "cached ⚠"
-    lines = [f"  Claude Code subscription  ({src})"]
-    lines.append("")
+    src = "live" if is_live else "cached"
+    lines = [f"  {_BOLD}Claude Subscription{_RESET}  ({src})"]
 
     s_end = current.get("session_pct", 0.0)
     w_end = current.get("weekly_pct",  0.0)
@@ -457,9 +441,9 @@ def _format_cc_section(start: dict | None, current: dict, is_live: bool) -> list
     n_start = start.get("sonnet_pct")  if start else None
 
     lines.append(_cc_row("session (5h)",  s_start, s_end))
-    lines.append(_cc_row("weekly (all)",  w_start, w_end))
+    lines.append(_cc_row("weekly",        w_start, w_end))
     if n_end > 0 or (n_start is not None and n_start > 0):
-        lines.append(_cc_row("weekly sonnet", n_start, n_end))
+        lines.append(_cc_row("sonnet",    n_start, n_end))
 
     return lines
 
@@ -829,111 +813,12 @@ def _query_daily_14d() -> list[tuple[str, int, int, float]]:
         return []
 
 
-def _render_braille_chart(daily_data: list[tuple[str, int, int, float]]) -> list[str]:
-    """Render a Braille-pattern bar chart for 14-day daily usage."""
-    if not daily_data:
-        return []
 
-    from datetime import datetime as _dt
-
-    _BRAILLE_BARS = [" ", "\u28e0", "\u28f4", "\u28f6", "\u28ff"]
-
-    chart_rows = 6
-    levels = chart_rows * 4
-
-    calls_list = [d[1] for d in daily_data]
-    max_calls = max(calls_list) if calls_list else 1
-    if max_calls == 0:
-        max_calls = 1
-
-    heights = []
-    for calls in calls_list:
-        h = round((calls / max_calls) * levels)
-        if calls > 0 and h == 0:
-            h = 1
-        heights.append(h)
-
-    lines = []
-    pipe = "\u2502"
-
-    for row_idx in range(chart_rows):
-        row_bottom = (chart_rows - 1 - row_idx) * 4
-
-        if row_idx == 0:
-            y_label = f"{_GREEN}{max_calls:>5}{_RESET} "
-        elif row_idx == chart_rows // 2:
-            y_label = f"{_DIM}{max_calls // 2:>5}{_RESET} "
-        else:
-            y_label = "      "
-
-        bar_chars = ""
-        for h in heights:
-            fill = max(0, min(4, h - row_bottom))
-            bar_chars += f" {_GREEN}{_BRAILLE_BARS[fill]}{_RESET} "
-
-        lines.append(f"  {y_label}{pipe}{bar_chars}")
-
-    n = len(daily_data)
-    corner = "\u2570"
-    dash = "\u2500"
-    axis = dash * (n * 3 + 1)
-    pad = " " * 6
-    lines.append(f"  {pad}{corner}{axis}")
-
-    day_labels = ""
-    weekday_labels = ""
-    for day_str, *_ in daily_data:
-        try:
-            dt = _dt.strptime(day_str, "%Y-%m-%d")
-            day_labels += f" {dt.day:>2d}"
-            wk = dt.strftime("%a")[:2]
-            weekday_labels += f" {_DIM}{wk}{_RESET}"
-        except Exception:
-            day_labels += f" {day_str[-2:]}"
-            weekday_labels += "   "
-
-    lines.append(f"  {pad} {day_labels}")
-    lines.append(f"  {pad} {weekday_labels}")
-
-    total_calls = sum(d[1] for d in daily_data)
-    total_tokens = sum(d[2] for d in daily_data)
-    total_saved = sum(d[3] for d in daily_data)
-    avg_calls = total_calls // max(len(daily_data), 1)
-    saved_str = f"${total_saved:.2f}" if total_saved >= 1.0 else f"${total_saved:.4f}"
-    dot = "\u00b7"
-    lines.append("")
-    lines.append(
-        f"  {_DIM}Total{_RESET}  {_BOLD}{total_calls}{_RESET} {_DIM}calls{_RESET}  {dot}  "
-        f"{_BOLD}{_fmt_tok(total_tokens)}{_RESET} {_DIM}tok{_RESET}  {dot}  "
-        f"{_GREEN}{saved_str}{_RESET} {_DIM}saved{_RESET}  {dot}  "
-        f"{_DIM}avg{_RESET} {avg_calls}{_DIM}/day{_RESET}"
-    )
-
-    return lines
-
-
-def _box_top(title: str, width: int = 76) -> str:
-    # Strip ANSI codes for width calculation
-    import re as _re
-    plain = _re.sub(r'\033\[[0-9;]*m', '', title)
-    inner = width - 4 - len(plain)
-    return f"  {_DIM}╭─{_RESET} {_BOLD}{title}{_RESET} {_DIM}{'─' * max(0, inner)}╮{_RESET}"
-
-
-def _box_mid(text: str, width: int = 62) -> str:
-    import re as _re
-    plain = _re.sub(r'\033\[[0-9;]*m', '', text)
-    padding = width - 4 - len(plain)
-    return f"  {_DIM}│{_RESET} {text}{' ' * max(0, padding)} {_DIM}│{_RESET}"
-
-
-def _box_bot(width: int = 76) -> str:
-    return f"  {_DIM}╰{'─' * (width - 2)}╯{_RESET}"
 
 
 
 def _format_routing_logic(session_start: float | None) -> list[str]:
-    """Format routing decision method breakdown table."""
+    """Format routing decision method breakdown — compact inline."""
     data = _query_routing_logic(session_start)
     if not data:
         return []
@@ -942,57 +827,29 @@ def _format_routing_logic(session_start: float | None) -> list[str]:
     if total_hits == 0:
         return []
 
-    lines = []
-    lines.append(_box_top(f"{_CYAN}Routing Logic{_RESET}"))
-    lines.append(_box_mid(""))
-    lines.append(_box_mid(f"  {_DIM}Method                  Hits    Pct   Reason{_RESET}"))
-    lines.append(_box_mid(f"  {_DIM}" + "─" * 54 + f"{_RESET}"))
-
-    # Compute zero-cost (heuristic + fast-path + inherit) vs classifier
     zero_cost = 0
-    classifier_cost = 0
+    parts: list[str] = []
 
     for d in data:
         pct = (d["hits"] / total_hits) * 100
-        method_display = d["method"][:20]
-        symbol = d["symbol"]
-        reason = d["reason"][:34]
+        method = d["method"]
 
-        # Color code: green for zero-cost, yellow for LLM-based
-        if d["method"] in ("heuristic", "heuristic-weak", "build-fast-path",
-                           "content-generation-fast-path", "context-inherit",
-                           "code-context-inherit"):
-            color = _GREEN
+        if method in ("heuristic", "heuristic-weak", "build-fast-path",
+                       "content-generation-fast-path", "context-inherit",
+                       "code-context-inherit"):
             zero_cost += d["hits"]
-        elif d["method"] in ("ollama", "llm"):
-            color = _YELLOW
-            classifier_cost += d["hits"]
-        else:
-            color = _DIM
+        elif method not in ("ollama", "llm"):
             zero_cost += d["hits"]
 
-        lines.append(_box_mid(
-            f"  {symbol} {color}{method_display:<20}{_RESET} {d['hits']:>4}  {pct:>4.0f}%   {_DIM}{reason}{_RESET}"
-        ))
-
-    lines.append(_box_mid(f"  {_DIM}" + "─" * 54 + f"{_RESET}"))
+        parts.append(f"{method} {d['hits']} ({pct:.0f}%)")
 
     zero_pct = round(zero_cost / total_hits * 100) if total_hits > 0 else 0
-    lines.append(_box_mid(
-        f"  {_GREEN}⚡ Zero-cost decisions: {zero_cost}/{total_hits} ({zero_pct}%){_RESET}"
-    ))
-    if classifier_cost > 0:
-        cls_pct = round(classifier_cost / total_hits * 100)
-        lines.append(_box_mid(
-            f"  {_YELLOW}🧠 Classifier overhead: {classifier_cost}/{total_hits} ({cls_pct}%){_RESET}"
-        ))
-
-    lines.append(_box_mid(""))
-    lines.append(_box_bot())
+    lines = [f"  {_BOLD}Routing{_RESET}: {total_hits} decisions · {_GREEN}{zero_pct}% zero-cost{_RESET}"]
+    lines.append(f"  {' · '.join(parts)}")
     return lines
 
 def _format_cumulative_section(periods: list[tuple[str, int, int, int, float]]) -> list[str]:
-    """Format cumulative savings with box frames, bars, vertical chart, and hero metrics."""
+    """Format cumulative savings — minimal, no boxes."""
     if not periods or all(p[1] == 0 for p in periods):
         return []
 
@@ -1001,51 +858,25 @@ def _format_cumulative_section(periods: list[tuple[str, int, int, int, float]]) 
     today_d = period_map.get("today", (0, 0, 0, 0.0))
     month_d = period_map.get("this month", (0, 0, 0, 0.0))
 
-    lines: list[str] = []
-
-    # ── Hero metrics ─────────────────────────────────────────────
     lifetime_saved = all_time[3]
-    lifetime_tok = all_time[1] + all_time[2]
-    lifetime_calls = all_time[0]
     saved_hero = f"${lifetime_saved:.2f}" if lifetime_saved >= 1.0 else f"${lifetime_saved:.4f}"
-
-    lines.append(_box_top("Lifetime Savings"))
-    lines.append(_box_mid(""))
-    lines.append(_box_mid(
-        f"  💰 {_GREEN}{_BOLD}{saved_hero}{_RESET} {_DIM}saved{_RESET}    {_fmt_tok(lifetime_tok)} tokens    {lifetime_calls:,} calls"
-    ))
-
-    # Delta line: today + month
     today_s = f"${today_d[3]:.2f}" if today_d[3] >= 1.0 else f"${today_d[3]:.4f}"
-    month_s = f"${month_d[3]:.2f}" if month_d[3] >= 1.0 else f"${month_d[3]:.4f}"
-    lines.append(_box_mid(
-        f"     ▲ {today_s} today  ·  ▲ {month_s} this month"
-    ))
-    lines.append(_box_mid(""))
-    lines.append(_box_bot())
 
-    # ── Savings by period ────────────────────────────────────────
-    lines.append("")
-    lines.append(_box_top("Savings by Period"))
-    lines.append(_box_mid(""))
+    lines: list[str] = [
+        f"  {_BOLD}Savings{_RESET}: {_GREEN}{saved_hero}{_RESET} lifetime · {today_s} today"
+    ]
 
-    max_saved = max((p[4] for p in periods), default=1.0)
-    if max_saved <= 0:
-        max_saved = 1.0
-    bar_width = 24
+    # Period rows — compact pairs per line
+    period_parts: list[str] = []
+    for label, calls, _ti, _to, saved in periods:
+        s = f"${saved:.2f}" if saved >= 1.0 else f"${saved:.4f}"
+        call_str = f"{calls:,}" if calls >= 1000 else str(calls)
+        period_parts.append(f"{label} {s} ({call_str})")
 
-    for label, calls, total_in, total_out, saved in periods:
-        if saved >= 1.0:
-            saved_str = f"${saved:>6.2f}"
-        else:
-            saved_str = f"${saved:>6.4f}"
-        filled = max(0, min(bar_width, round(saved / max_saved * bar_width)))
-        bar = "█" * filled + "░" * (bar_width - filled)
-        lines.append(_box_mid(
-            f"  {label:<12} {saved_str}  {bar}  {calls:>5,}"
-        ))
-
-    lines.append(_box_mid(""))
+    # 2 per line
+    for i in range(0, len(period_parts), 2):
+        chunk = period_parts[i:i + 2]
+        lines.append(f"  {' · '.join(chunk)}")
 
     # Yearly projection
     from datetime import datetime as _dt
@@ -1065,68 +896,42 @@ def _format_cumulative_section(periods: list[tuple[str, int, int, int, float]]) 
     elif today_saved > 0:
         rate_usd, rate_tok, basis = today_saved, today_tok, "today"
     if rate_usd > 0:
-        lines.append(_box_mid(
-            f"  📈 ~${rate_usd * 365:.0f}/year  ·  ~{_fmt_tok(int(rate_tok * 365))} tok/year  ({basis})"
-        ))
-        lines.append(_box_mid(""))
-
-    lines.append(_box_bot())
-
-    # ── 14-day vertical chart ────────────────────────────────────
-    daily_14d = _query_daily_14d()
-    if daily_14d:
-        lines.append("")
-        lines.append(_box_top("14-Day Usage"))
-        lines.append(_box_mid(""))
-        chart_lines = _render_braille_chart(daily_14d)
-        for cl in chart_lines:
-            # Strip the leading 2 spaces since _box_mid adds its own padding
-            lines.append(_box_mid(cl.lstrip()))
-        lines.append(_box_mid(""))
-        lines.append(_box_bot())
-
-    # Part 2 metrics — router efficiency, cache hits, classifier overhead, task-type breakdown
-    lines.append("")
-    lines.append("  ⚙️  Quality & Performance")
-
-    # Router efficiency — measures how often the final model matched the classifier's
-    # recommendation (i.e. no fallback was needed). This is NOT a quality metric.
-    efficiency = _query_router_efficiency()
-    if efficiency:
-        total = efficiency["total"]
-        on_target = efficiency["on_target"]
-        fallbacks = total - on_target
-        pct = efficiency["efficiency_pct"]
-        if fallbacks == 0:
-            lines.append(f"  No fallbacks today ({total} routing decisions)")
-        else:
-            lines.append(
-                f"  Fallback rate: {fallbacks}/{total} decisions ({100 - pct:.0f}% needed fallback)"
-            )
-
-    # Cache hit ratio
-    cache_stats = _query_cache_hit_stats()
-    if cache_stats:
         lines.append(
-            f"  ⚡ {cache_stats['hit_rate_pct']:.1f}% cache hit rate "
-            f"({cache_stats['cache_hits']} hits, ${cache_stats['estimated_saved_usd']:.4f} saved)"
+            f"  ~${rate_usd * 365:.0f}/yr · ~{_fmt_tok(int(rate_tok * 365))} tok/yr  {_DIM}({basis}){_RESET}"
         )
 
-    # Classifier overhead
+    # 14-day summary
+    daily_14d = _query_daily_14d()
+    if daily_14d:
+        total_calls = sum(d[1] for d in daily_14d)
+        total_tokens = sum(d[2] for d in daily_14d)
+        avg_calls = total_calls // max(len(daily_14d), 1)
+        lines.append("")
+        lines.append(
+            f"  {_BOLD}14-Day{_RESET}: {total_calls} calls · {_fmt_tok(total_tokens)} tok · avg {avg_calls}/day"
+        )
+
+    # Quality metrics — compact
+    quality_parts: list[str] = []
+
+    efficiency = _query_router_efficiency()
+    if efficiency:
+        fallbacks = efficiency["total"] - efficiency["on_target"]
+        if fallbacks == 0:
+            quality_parts.append(f"no fallbacks ({efficiency['total']} decisions)")
+        else:
+            quality_parts.append(f"{fallbacks}/{efficiency['total']} fallbacks")
+
     overhead = _query_classifier_overhead()
     if overhead and overhead['count'] > 0:
-        lines.append(f"  Routing overhead: ~{overhead['avg_ms']:.1f}ms avg (classifier)")
+        quality_parts.append(f"{overhead['avg_ms']:.0f}ms avg routing")
 
-    # Task-type breakdown
-    task_breakdown = _query_savings_by_task_type()
-    if task_breakdown:
-        lines.append("")
-        lines.append("  Top task categories (today):")
-        for item in task_breakdown[:5]:  # Show top 5
-            task_type = item['task_type']
-            calls = item['calls']
-            saved = item['saved']
-            lines.append(f"    {task_type:<12} {calls:>3} calls  ${saved:.4f} saved")
+    cache_stats = _query_cache_hit_stats()
+    if cache_stats:
+        quality_parts.append(f"{cache_stats['hit_rate_pct']:.0f}% cache hit")
+
+    if quality_parts:
+        lines.append(f"  {_DIM}{' · '.join(quality_parts)}{_RESET}")
 
     return lines
 
@@ -1247,22 +1052,17 @@ def _format(tools: dict[str, dict], cc_rows: list[dict], free_rows: list[dict],
             start: dict | None, current: dict | None, is_live: bool,
             cumulative: list[tuple[str, int, int, int, float]] | None = None,
             session_start: float | None = None) -> str:
-    lines = [f"{_BOLD}╔" + "═" * (WIDTH - 2) + f"╗{_RESET}"]
-    lines.append(f"{_BOLD}║  {_CYAN}LLM Router · Session Summary{_RESET}{_BOLD}" + " " * (WIDTH - 32) + f"║{_RESET}")
-    lines.append(f"{_BOLD}╚" + "═" * (WIDTH - 2) + f"╝{_RESET}")
+    div = "═" * (WIDTH - 2)
+    lines = ["", f"  {_BOLD}LLM Router · Session Summary{_RESET}", f"  {div}"]
 
     if current:
         lines.append("")
-        lines.append(_box_top("Claude Subscription"))
-        for cl in _format_cc_section(start, current, is_live):
-            lines.append(_box_mid(cl.lstrip()))
-        lines.append(_box_bot())
+        lines += _format_cc_section(start, current, is_live)
 
     if cc_rows:
         lines.append("")
         lines += _format_cc_model_section(cc_rows)
 
-    # Session routing in a box
     session_lines: list[str] = []
     if free_rows:
         session_lines += _format_free_section(free_rows, paid_rows)
@@ -1279,14 +1079,9 @@ def _format(tools: dict[str, dict], cc_rows: list[dict], free_rows: list[dict],
 
     if session_lines:
         lines.append("")
-        lines.append(_box_top("This Session"))
-        lines.append(_box_mid(""))
-        for sl in session_lines:
-            lines.append(_box_mid(sl.lstrip()))
-        lines.append(_box_mid(""))
-        lines.append(_box_bot())
+        lines.append(f"  {_BOLD}This Session{_RESET}")
+        lines += session_lines
 
-    # Routing logic table
     if session_start is not None:
         routing_lines = _format_routing_logic(session_start)
         if routing_lines:
@@ -1300,7 +1095,7 @@ def _format(tools: dict[str, dict], cc_rows: list[dict], free_rows: list[dict],
             lines += cum_lines
 
     lines.append("")
-    lines.append("─" * WIDTH)
+    lines.append(f"  {div}")
     return "\n".join(lines)
 
 
@@ -1360,28 +1155,6 @@ def _read_session_spend() -> dict | None:
 
 
 
-def _get_session_routing_analysis(session_start: float) -> str:
-    """Get routing analysis summary for the session using model_tracking.
-    
-    Returns formatted string with routing statistics, or empty string if no data.
-    Also logs routing patterns to chronicle for future reference.
-    """
-    try:
-        import sys
-        sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
-        from llm_router.model_tracking import (
-            get_session_routing_summary,
-            format_session_summary,
-            log_routing_patterns_to_chronicle,
-        )
-        summary = get_session_routing_summary(since_timestamp=session_start)
-        if summary.get("total_decisions", 0) > 0:
-            # Log routing patterns to chronicle for architectural insights
-            log_routing_patterns_to_chronicle(summary)
-            return format_session_summary(summary)
-    except Exception:
-        pass  # Graceful failure — never break session-end
-    return ""
 
 
 def _build_and_save_learned_profile() -> None:
@@ -1420,18 +1193,13 @@ def main() -> None:
     _sync_import_savings_log()          # flush JSONL before cumulative query
     cumulative                  = _query_cumulative_savings()
     _build_and_save_learned_profile()   # v6.1: build profile from corrections
-    routing_analysis            = _get_session_routing_analysis(session_start)
 
     has_cumulative = any(calls > 0 for _, calls, *_ in cumulative)
 
-    if not tools and not cc_rows and not current and not free_rows and not has_cumulative and not routing_analysis:
+    if not tools and not cc_rows and not current and not free_rows and not has_cumulative:
         sys.exit(0)
 
     summary = _format(tools, cc_rows, free_rows, paid_rows, start, current, is_live, cumulative, session_start)
-    
-    # Append session routing analysis if available
-    if routing_analysis:
-        summary = summary.rstrip("─" * WIDTH) + "\n" + routing_analysis + "─" * WIDTH
 
     # Append session spend one-liner if available (v4.0)
     spend = _read_session_spend()
@@ -1445,7 +1213,7 @@ def main() -> None:
             spend_line += f" · top model: {top_short}"
         if spend.get("anomaly_flag"):
             spend_line = "  ⚠️  ANOMALY DETECTED: " + spend_line.lstrip()
-        summary = summary.rstrip("─" * WIDTH) + "\n" + spend_line + "\n" + "─" * WIDTH
+        summary = summary.rstrip("  " + "═" * (WIDTH - 2)) + "\n" + spend_line + "\n" + "  " + "═" * (WIDTH - 2)
 
     # Retrospective output removed per user preference
 
@@ -1458,7 +1226,7 @@ def main() -> None:
             if trends.get("snapshot_count", 0) > 0:
                 trend_output = format_trend_summary(trends)
                 if trend_output and "No snapshots" not in trend_output:
-                    summary = summary.rstrip("─" * WIDTH) + "\n【TRENDS】\n" + trend_output + "\n" + "─" * WIDTH
+                    summary = summary.rstrip("  " + "═" * (WIDTH - 2)) + "\n【TRENDS】\n" + trend_output + "\n" + "  " + "═" * (WIDTH - 2)
     except Exception:
         pass  # Graceful failure — never break session-end
 
@@ -1470,7 +1238,7 @@ def main() -> None:
             if updated and changes:
                 changes_str = ", ".join(changes)
                 config_note = f"\n  🔄 Profile updated: {changes_str}"
-                summary = summary.rstrip("─" * WIDTH) + config_note + "\n" + "─" * WIDTH
+                summary = summary.rstrip("  " + "═" * (WIDTH - 2)) + config_note + "\n" + "  " + "═" * (WIDTH - 2)
     except Exception:
         pass  # Graceful failure — never break session-end
 
@@ -1492,7 +1260,7 @@ def main() -> None:
                 loop.run_until_complete(evaluate_available_models(task_types=["reasoning"]))
                 loop.close()
                 eval_note = "\n  📊 Model benchmarks updated (next: 7 days)"
-                summary = summary.rstrip("─" * WIDTH) + eval_note + "\n" + "─" * WIDTH
+                summary = summary.rstrip("  " + "═" * (WIDTH - 2)) + eval_note + "\n" + "  " + "═" * (WIDTH - 2)
             except Exception:
                 pass  # Don't fail session if eval fails
     except Exception:
@@ -1511,7 +1279,7 @@ def main() -> None:
         if session_id:
             quota_timeline = _render_quota_timeline(session_id, DB_PATH)
             if quota_timeline:
-                summary = summary.rstrip("─" * WIDTH) + quota_timeline + "\n" + "─" * WIDTH
+                summary = summary.rstrip("  " + "═" * (WIDTH - 2)) + quota_timeline + "\n" + "  " + "═" * (WIDTH - 2)
     except Exception:
         pass  # Graceful failure — never break session-end
 
