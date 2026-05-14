@@ -361,7 +361,7 @@ def _render_dashboard(
     return "\n".join(lines)
 
 
-async def llm_dashboard(
+async def llm_savings_dashboard(
     ctx: Context,
     window: str = "14d",
     baseline: str = "sonnet",
@@ -398,5 +398,5 @@ async def llm_dashboard(
 def register(mcp, should_register=None) -> None:
     """Register dashboard tools with the FastMCP instance."""
     gate = should_register or (lambda _: True)
-    if gate("llm_dashboard"):
-        mcp.tool()(llm_dashboard)
+    if gate("llm_savings_dashboard"):
+        mcp.tool()(llm_savings_dashboard)
