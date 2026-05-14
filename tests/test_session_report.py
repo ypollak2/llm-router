@@ -293,8 +293,8 @@ class TestCallReconciliation:
         with patch.object(se, "DB_PATH", str(temp_db)):
             lines = se._format_complexity_breakdown(session_start - 120)
         text = "\n".join(lines)
-        assert "Total:" in text
-        assert "local/prepaid" in text
+        assert "routed" in text
+        assert "local" in text
         assert "external" in text
 
 
@@ -358,18 +358,18 @@ class TestFreeModelClassification:
         ]
         lines = se._format_free_section(rows, [])
         text = "\n".join(lines)
-        assert "Local models (Ollama)" in text
+        assert "Local (Ollama)" in text
         assert "Free models" not in text
 
     def test_codex_only_label(self):
-        """When only Codex, label should say 'Prepaid models'."""
+        """When only Codex, label should say 'Prepaid'."""
         rows = [
             {"provider": "codex", "input_tokens": 0, "output_tokens": 0,
              "model": "gpt-5.4", "task_type": "code", "cost_usd": 0.0},
         ]
         lines = se._format_free_section(rows, [])
         text = "\n".join(lines)
-        assert "Prepaid models (Codex)" in text
+        assert "Prepaid (Codex)" in text
         assert "Free models" not in text
 
     def test_mixed_label(self):
@@ -382,7 +382,7 @@ class TestFreeModelClassification:
         ]
         lines = se._format_free_section(rows, [])
         text = "\n".join(lines)
-        assert "Local / prepaid models" in text
+        assert "Local / prepaid" in text
 
 
 # ── Issue 7: Router efficiency wording ────────────────────────────────────────
@@ -512,4 +512,4 @@ class TestProductionPolish:
         with patch.object(se, "DB_PATH", str(temp_db)):
             lines = se._format_complexity_breakdown(session_start - 120)
         text = "\n".join(lines)
-        assert "local/prepaid" in text
+        assert "local" in text

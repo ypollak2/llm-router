@@ -415,22 +415,43 @@ def _bar(pct: float, bar_width: int = 20) -> str:
     return "█" * filled + "░" * (bar_width - filled)
 
 
+def _smart_bar(pct: float, width: int = 16) -> str:
+    """Color-coded progress bar: green < 30%, yellow < 60%, orange < 80%, red >= 80%."""
+    filled = max(0, min(width, round(pct / 100 * width)))
+    if pct < 30:
+        color = _C_GREEN
+    elif pct < 60:
+        color = _C_YELLOW
+    elif pct < 80:
+        color = _C_ORANGE
+    else:
+        color = _C_RED
+    return color + "━" * filled + _RESET + _C_DARK + "╌" * (width - filled) + _RESET
+
+
 def _cc_row(label: str, start_pct: float | None, end_pct: float) -> str:
-    """Format one CC subscription row — compact."""
-    bar = _bar(end_pct, bar_width=12)
+    """Format one CC subscription row with color-coded bar."""
+    bar = _smart_bar(end_pct, width=16)
+    pct_str = f"{_C_WHITE}{end_pct:>3.0f}%{_RESET}"
     if start_pct is not None:
         delta = end_pct - start_pct
         if abs(delta) < 0.01:
-            return f"  {label:<14}{bar}  {end_pct:>3.0f}%  {_DIM}(no change){_RESET}"
-        sign = "+" if delta >= 0 else ""
-        fmt = f"{sign}{delta:.2f}pp" if abs(delta) < 0.1 else f"{sign}{delta:.1f}pp"
-        return f"  {label:<14}{bar}  {start_pct:.0f}% → {end_pct:.0f}%  {fmt}"
-    return f"  {label:<14}{bar}  {end_pct:>3.0f}%"
+            delta_str = f"{_C_GRAY}no change{_RESET}"
+        else:
+            sign = "+" if delta >= 0 else ""
+            if abs(delta) < 0.1:
+                fmt = f"{sign}{delta:.2f}pp"
+            else:
+                fmt = f"{sign}{delta:.1f}pp"
+            delta_color = _C_ORANGE if abs(delta) > 5 else _C_GRAY
+            delta_str = f"{delta_color}{fmt}{_RESET}"
+        return f"    {_C_GRAY}{label:<12}{_RESET} {bar}  {pct_str}  {delta_str}"
+    return f"    {_C_GRAY}{label:<12}{_RESET} {bar}  {pct_str}"
 
 
 def _format_cc_section(start: dict | None, current: dict, is_live: bool) -> list[str]:
-    src = "live" if is_live else "cached"
-    lines = [f"  {_BOLD}Claude Subscription{_RESET}  ({src})"]
+    src = f"{_DIM}live{_RESET}" if is_live else f"{_DIM}cached{_RESET}"
+    lines = [f"  {_BOLD}Claude Subscription{_RESET}  {src}", ""]
 
     s_end = current.get("session_pct", 0.0)
     w_end = current.get("weekly_pct",  0.0)
@@ -440,16 +461,16 @@ def _format_cc_section(start: dict | None, current: dict, is_live: bool) -> list
     w_start = start.get("weekly_pct")  if start else None
     n_start = start.get("sonnet_pct")  if start else None
 
-    lines.append(_cc_row("session (5h)",  s_start, s_end))
-    lines.append(_cc_row("weekly",        w_start, w_end))
+    lines.append(_cc_row("5h session",  s_start, s_end))
+    lines.append(_cc_row("weekly",      w_start, w_end))
     if n_end > 0 or (n_start is not None and n_start > 0):
-        lines.append(_cc_row("sonnet",    n_start, n_end))
+        lines.append(_cc_row("sonnet",  n_start, n_end))
 
     return lines
 
 
 def _format_cc_model_section(cc_rows: list[dict]) -> list[str]:
-    """Format per-model CC call counts — same table style as external routing."""
+    """Format per-model CC call counts."""
     models: dict[str, dict] = {}
     for r in cc_rows:
         model = r.get("model", "?")
@@ -462,15 +483,15 @@ def _format_cc_model_section(cc_rows: list[dict]) -> list[str]:
         models[model]["tasks"][task] = models[model]["tasks"].get(task, 0) + 1
 
     total = sum(m["count"] for m in models.values())
-    lines = [f"  Claude Code models  {total} calls  (subscription, $0.00)"]
-    lines.append("")
+    lines = [f"    {_C_WHITE}{total}{_RESET} calls  {_C_GRAY}(subscription, $0.00){_RESET}"]
     for model, d in sorted(models.items(), key=lambda x: -x[1]["count"]):
-        # Short model name: haiku / sonnet / opus
         short = model.split("/", 1)[-1] if "/" in model else model
         if len(short) > 30:
             short = short[:28] + "…"
         top_task = max(d["tasks"], key=d["tasks"].get) if d["tasks"] else "?"
-        lines.append(f"  {top_task:<12}  {d['count']:>3}×  {short:<32}  (sub)")
+        lines.append(
+            f"    {_C_GRAY}{top_task:<12}{_RESET}  {d['count']:>3}×  {short:<32}  {_C_DARK}sub{_RESET}"
+        )
     return lines
 
 
@@ -483,13 +504,14 @@ def _format_routing_section(tools: dict[str, dict]) -> list[str]:
     total_saved = max(0.0, total_base - total_cost)
     savings_pct = round(total_saved / total_base * 100) if total_base > 0 else 0
 
+    pct_color = _C_GREEN if savings_pct >= 80 else (_C_YELLOW if savings_pct >= 50 else _C_ORANGE)
     lines = [
-        f"  External  {total_calls} calls  ${total_cost:.4f} actual  "
-        f"${total_base:.4f} baseline  {savings_pct}% saved",
-        "",
+        f"    {_C_WHITE}{total_calls}{_RESET} calls  "
+        f"${total_cost:.4f} actual  "
+        f"${total_base:.4f} baseline  "
+        f"{pct_color}{savings_pct}% saved{_RESET}",
     ]
     for tool, d in sorted(tools.items(), key=lambda x: -x[1]["count"]):
-        # Filter test/mock models from display
         clean_models = {m: c for m, c in d["models"].items() if not _is_test_model(m)}
         if not clean_models:
             continue
@@ -497,8 +519,10 @@ def _format_routing_section(tools: dict[str, dict]) -> list[str]:
         model_short = top_model.split("/", 1)[-1] if "/" in top_model else top_model
         if len(model_short) > 22:
             model_short = model_short[:20] + "…"
+        cost_color = _C_GREEN if d["cost"] == 0 else _C_GRAY
         lines.append(
-            f"  {tool:<12}  {d['count']:>3}×  {model_short:<24}  ${d['cost']:.4f}"
+            f"    {_C_GRAY}{tool:<12}{_RESET}  {d['count']:>3}×  "
+            f"{model_short:<24}  {cost_color}${d['cost']:.4f}{_RESET}"
         )
     return lines
 
@@ -550,23 +574,27 @@ def _format_free_section(free_rows: list[dict], paid_rows: list[dict]) -> list[s
         baseline = _sonnet_baseline(in_t, out_t)
         saved    = max(0.0, baseline)
         total_saved += saved
-        est_tag  = " ~est" if est else ""
+        est_tag  = f" {_C_DARK}~est{_RESET}" if est else ""
         in_k  = f"{in_t  // 1000}k" if in_t  >= 1000 else str(in_t)
         out_k = f"{out_t // 1000}k" if out_t >= 1000 else str(out_t)
         body.append(
-            f"  {provider:<10}  {d['calls']:>3}×  "
-            f"{in_k}↑ {out_k}↓{est_tag:<5}  ${saved:.4f} saved"
+            f"    {_C_GRAY}{provider:<10}{_RESET}  {d['calls']:>3}×  "
+            f"{in_k}↑ {out_k}↓{est_tag}  {_C_GREEN}${saved:.4f}{_RESET}"
         )
 
     # Label based on actual providers present
     providers_present = list(by_provider.keys())
     if providers_present == ["ollama"]:
-        label = "Local models (Ollama)"
+        label = "Local (Ollama)"
     elif providers_present == ["codex"]:
-        label = "Prepaid models (Codex)"
+        label = "Prepaid (Codex)"
     else:
-        label = "Local / prepaid models"
-    lines = [f"  {label}  {total_calls} calls  ·  ${total_saved:.4f} saved vs Sonnet", ""]
+        label = "Local / prepaid"
+    saved_color = _C_GREEN if total_saved > 0 else _C_GRAY
+    lines = [
+        f"    {_C_WHITE}{total_calls}{_RESET} calls  ·  "
+        f"{saved_color}${total_saved:.4f} saved{_RESET} vs Sonnet  {_C_DARK}{label}{_RESET}"
+    ]
     lines += body
     return lines
 
@@ -640,6 +668,19 @@ _MAGENTA = "\033[35m"
 _BOLD = "\033[1m"
 _DIM = "\033[2m"
 _RESET = "\033[0m"
+
+# 256-color palette for rich dashboard
+def _fg(n: int) -> str: return f"\033[38;5;{n}m"
+
+_C_CYAN    = _fg(45)
+_C_GREEN   = _fg(40)
+_C_YELLOW  = _fg(220)
+_C_ORANGE  = _fg(208)
+_C_RED     = _fg(196)
+_C_MAGENTA = _fg(171)
+_C_WHITE   = _fg(255)
+_C_GRAY    = _fg(242)
+_C_DARK    = _fg(238)
 
 # ── Routing method symbols ────────────────────────────────────────────────────
 _METHOD_SYMBOLS = {
@@ -818,7 +859,7 @@ def _query_daily_14d() -> list[tuple[str, int, int, float]]:
 
 
 def _format_routing_logic(session_start: float | None) -> list[str]:
-    """Format routing decision method breakdown — compact inline."""
+    """Format routing decision method breakdown."""
     data = _query_routing_logic(session_start)
     if not data:
         return []
@@ -841,15 +882,33 @@ def _format_routing_logic(session_start: float | None) -> list[str]:
         elif method not in ("ollama", "llm"):
             zero_cost += d["hits"]
 
-        parts.append(f"{method} {d['hits']} ({pct:.0f}%)")
+        symbol = d.get("symbol", "❓")
+        parts.append(f"{symbol} {method} {_C_WHITE}{d['hits']}{_RESET} {_C_DARK}({pct:.0f}%){_RESET}")
 
     zero_pct = round(zero_cost / total_hits * 100) if total_hits > 0 else 0
-    lines = [f"  {_BOLD}Routing{_RESET}: {total_hits} decisions · {_GREEN}{zero_pct}% zero-cost{_RESET}"]
-    lines.append(f"  {' · '.join(parts)}")
+    pct_color = _C_GREEN if zero_pct >= 80 else (_C_YELLOW if zero_pct >= 50 else _C_ORANGE)
+    lines = [
+        f"  {_BOLD}Routing{_RESET}  {_C_GREEN}●{_RESET} "
+        f"{_C_WHITE}{total_hits}{_RESET} decisions · "
+        f"{pct_color}{zero_pct}% zero-cost{_RESET}"
+    ]
+    lines.append(f"    {' · '.join(parts)}")
     return lines
 
+def _sparkline(values: list[float]) -> str:
+    """Render a sparkline using Unicode block characters."""
+    if not values:
+        return ""
+    chars = " ▁▂▃▄▅▆▇█"
+    max_val = max(values) if max(values) > 0 else 1
+    return "".join(
+        chars[min(len(chars) - 1, round(v / max_val * (len(chars) - 1)))]
+        for v in values
+    )
+
+
 def _format_cumulative_section(periods: list[tuple[str, int, int, int, float]]) -> list[str]:
-    """Format cumulative savings — minimal, no boxes."""
+    """Format cumulative savings with sparkline and rich colors."""
     if not periods or all(p[1] == 0 for p in periods):
         return []
 
@@ -863,20 +922,21 @@ def _format_cumulative_section(periods: list[tuple[str, int, int, int, float]]) 
     today_s = f"${today_d[3]:.2f}" if today_d[3] >= 1.0 else f"${today_d[3]:.4f}"
 
     lines: list[str] = [
-        f"  {_BOLD}Savings{_RESET}: {_GREEN}{saved_hero}{_RESET} lifetime · {today_s} today"
+        f"  {_BOLD}Savings{_RESET}",
+        "",
+        f"    {_C_GREEN}{_BOLD}{saved_hero}{_RESET}  {_C_GRAY}lifetime{_RESET}"
+        f"    {_C_WHITE}{today_s}{_RESET}  {_C_GRAY}today{_RESET}",
+        "",
     ]
 
-    # Period rows — compact pairs per line
+    # Period grid — all on one line
     period_parts: list[str] = []
     for label, calls, _ti, _to, saved in periods:
         s = f"${saved:.2f}" if saved >= 1.0 else f"${saved:.4f}"
         call_str = f"{calls:,}" if calls >= 1000 else str(calls)
-        period_parts.append(f"{label} {s} ({call_str})")
-
-    # 2 per line
-    for i in range(0, len(period_parts), 2):
-        chunk = period_parts[i:i + 2]
-        lines.append(f"  {' · '.join(chunk)}")
+        short_label = {"today": "today", "this week": "week", "this month": "month", "all time": "all"}.get(label, label)
+        period_parts.append(f"{_C_GRAY}{short_label}{_RESET} {_C_WHITE}{s}{_RESET} {_C_DARK}({call_str}){_RESET}")
+    lines.append(f"    {'  '.join(period_parts)}")
 
     # Yearly projection
     from datetime import datetime as _dt
@@ -897,41 +957,50 @@ def _format_cumulative_section(periods: list[tuple[str, int, int, int, float]]) 
         rate_usd, rate_tok, basis = today_saved, today_tok, "today"
     if rate_usd > 0:
         lines.append(
-            f"  ~${rate_usd * 365:.0f}/yr · ~{_fmt_tok(int(rate_tok * 365))} tok/yr  {_DIM}({basis}){_RESET}"
+            f"    {_C_DARK}≈ ${rate_usd * 365:.0f}/yr · {_fmt_tok(int(rate_tok * 365))} tok/yr{_RESET}  {_DIM}({basis}){_RESET}"
         )
 
-    # 14-day summary
+    # 14-day sparkline
     daily_14d = _query_daily_14d()
     if daily_14d:
         total_calls = sum(d[1] for d in daily_14d)
         total_tokens = sum(d[2] for d in daily_14d)
         avg_calls = total_calls // max(len(daily_14d), 1)
+        spark_values = [float(d[1]) for d in daily_14d]
+        spark = _sparkline(spark_values)
         lines.append("")
+        lines.append(f"  {_BOLD}14 Days{_RESET}  {_C_CYAN}{spark}{_RESET}")
         lines.append(
-            f"  {_BOLD}14-Day{_RESET}: {total_calls} calls · {_fmt_tok(total_tokens)} tok · avg {avg_calls}/day"
+            f"    {_C_WHITE}{total_calls}{_RESET} calls · "
+            f"{_C_WHITE}{_fmt_tok(total_tokens)}{_RESET} tok · "
+            f"avg {_C_WHITE}{avg_calls}{_RESET}/day"
         )
 
-    # Quality metrics — compact
+    # Quality metrics
     quality_parts: list[str] = []
 
     efficiency = _query_router_efficiency()
     if efficiency:
         fallbacks = efficiency["total"] - efficiency["on_target"]
         if fallbacks == 0:
-            quality_parts.append(f"no fallbacks ({efficiency['total']} decisions)")
+            quality_parts.append(f"{_C_GREEN}0{_RESET} fallbacks ({efficiency['total']})")
         else:
-            quality_parts.append(f"{fallbacks}/{efficiency['total']} fallbacks")
+            quality_parts.append(f"{_C_ORANGE}{fallbacks}{_RESET}/{efficiency['total']} fallbacks")
 
     overhead = _query_classifier_overhead()
     if overhead and overhead['count'] > 0:
-        quality_parts.append(f"{overhead['avg_ms']:.0f}ms avg routing")
+        ms = overhead['avg_ms']
+        ms_color = _C_GREEN if ms < 50 else (_C_YELLOW if ms < 200 else _C_ORANGE)
+        quality_parts.append(f"{ms_color}{ms:.0f}ms{_RESET} avg routing")
 
     cache_stats = _query_cache_hit_stats()
     if cache_stats:
-        quality_parts.append(f"{cache_stats['hit_rate_pct']:.0f}% cache hit")
+        hr = cache_stats['hit_rate_pct']
+        hr_color = _C_GREEN if hr >= 50 else _C_GRAY
+        quality_parts.append(f"{hr_color}{hr:.0f}%{_RESET} cache hit")
 
     if quality_parts:
-        lines.append(f"  {_DIM}{' · '.join(quality_parts)}{_RESET}")
+        lines.append(f"    {_C_DARK}{' · '.join(quality_parts)}{_RESET}")
 
     return lines
 
@@ -997,52 +1066,48 @@ def _format_complexity_breakdown(session_start: float) -> list[str]:
     if not complexity_data:
         return []
     
-    lines = ["  Model selection by task complexity (this session)", ""]
-    
+    _COMPLEXITY_COLORS = {"simple": _C_GREEN, "moderate": _C_YELLOW, "complex": _C_ORANGE}
+    lines = [f"    {_C_GRAY}Model selection by complexity{_RESET}"]
+
     total_calls = sum(
-        cnt for models in complexity_data.values() 
+        cnt for models in complexity_data.values()
         for _, cnt, _, _ in models
     )
     free_calls = 0
     total_cost = 0.0
-    
-    # Process in order: simple, moderate, complex
+
     for complexity in ["simple", "moderate", "complex"]:
         if complexity not in complexity_data:
             continue
-        
+
         models_list = complexity_data[complexity]
         cnt_sum = sum(cnt for _, cnt, _, _ in models_list)
         cost_sum = sum(cost for _, _, cost, _ in models_list)
         total_cost += cost_sum
-        
-        # Format model list
+
         model_str_parts = []
         for model, cnt, cost, provider in models_list:
             if provider in ("ollama", "codex"):
                 free_calls += cnt
             model_str_parts.append(f"{model} ({cnt}×)")
-        
+
         model_str = " · ".join(model_str_parts)
-        cost_tag = f"  [${ cost_sum:.4f}]" if cost_sum > 0 else "  [free]"
-        
+        c_color = _COMPLEXITY_COLORS.get(complexity, _C_GRAY)
+        cost_tag = f"{_C_GRAY}${cost_sum:.4f}{_RESET}" if cost_sum > 0 else f"{_C_GREEN}free{_RESET}"
+
         lines.append(
-            f"  {complexity:<10} {cnt_sum:>2}×    {model_str:<45} {cost_tag}"
+            f"    {c_color}{complexity:<10}{_RESET} {cnt_sum:>2}×  {model_str}  {cost_tag}"
         )
-    
-    # Reconciliation and insight
+
     if total_calls > 0:
         paid_calls = total_calls - free_calls
-        free_pct = round(free_calls / total_calls * 100)
         avg_cost = total_cost / total_calls if total_calls else 0
-        lines.append("")
         lines.append(
-            f"  Total: {total_calls} routed = "
-            f"{free_calls} local/prepaid + {paid_calls} external"
-            + (f" + {filtered_test_calls} excluded (test)" if filtered_test_calls > 0 else "")
-        )
-        lines.append(
-            f"  {free_pct}% zero-cost · avg ${avg_cost:.4f}/call"
+            f"    {_C_WHITE}{total_calls}{_RESET} routed = "
+            f"{_C_GREEN}{free_calls}{_RESET} local + "
+            f"{paid_calls} external"
+            + (f" + {_C_DARK}{filtered_test_calls} excluded{_RESET}" if filtered_test_calls > 0 else "")
+            + f"  {_C_DARK}·{_RESET} avg ${avg_cost:.4f}/call"
         )
 
     return lines
@@ -1052,8 +1117,8 @@ def _format(tools: dict[str, dict], cc_rows: list[dict], free_rows: list[dict],
             start: dict | None, current: dict | None, is_live: bool,
             cumulative: list[tuple[str, int, int, int, float]] | None = None,
             session_start: float | None = None) -> str:
-    div = "═" * (WIDTH - 2)
-    lines = ["", f"  {_BOLD}LLM Router · Session Summary{_RESET}", f"  {div}"]
+    div = f"{_C_DARK}{'─' * (WIDTH - 4)}{_RESET}"
+    lines = ["", f"  {_C_CYAN}{_BOLD}⚡ LLM Router{_RESET}  {_C_GRAY}session summary{_RESET}", f"  {div}"]
 
     if current:
         lines.append("")
