@@ -649,6 +649,90 @@ def _query_classifier_overhead() -> dict:
         return {}
 
 
+# ── ANSI color codes ──────────────────────────────────────────────────────────
+_GREEN = "\033[32m"
+_CYAN = "\033[36m"
+_YELLOW = "\033[33m"
+_MAGENTA = "\033[35m"
+_BOLD = "\033[1m"
+_DIM = "\033[2m"
+_RESET = "\033[0m"
+
+# ── Routing method symbols ────────────────────────────────────────────────────
+_METHOD_SYMBOLS = {
+    "heuristic": "⚡",
+    "heuristic-weak": "⚡",
+    "build-fast-path": "🔨",
+    "content-generation-fast-path": "📝",
+    "ollama": "🧠",
+    "llm": "🧠",
+    "context-inherit": "🔗",
+    "code-context-inherit": "🔗",
+    "override": "📌",
+    "fallback": "🔄",
+    "unknown": "❓",
+}
+
+
+def _query_routing_logic(session_start: float | None = None) -> list[dict]:
+    """Query routing decision breakdown by classification method."""
+    if not os.path.exists(DB_PATH):
+        return []
+    try:
+        import json as _json
+        tracking_path = os.path.join(STATE_DIR, "model_tracking.jsonl")
+        if not os.path.exists(tracking_path):
+            return []
+
+        methods: dict[str, dict] = {}
+        cutoff = session_start or 0
+
+        with open(tracking_path) as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    r = _json.loads(line)
+                    ts = r.get("timestamp", 0)
+                    if ts < cutoff:
+                        continue
+                    method = r.get("classification_method", "unknown")
+                    if method not in methods:
+                        methods[method] = {"hits": 0, "total_confidence": 0.0}
+                    methods[method]["hits"] += 1
+                    methods[method]["total_confidence"] += r.get("classification_confidence", 0.0)
+                except Exception:
+                    continue
+
+        result = []
+        for method, d in sorted(methods.items(), key=lambda x: -x[1]["hits"]):
+            avg_conf = d["total_confidence"] / d["hits"] if d["hits"] > 0 else 0.0
+            symbol = _METHOD_SYMBOLS.get(method, "❓")
+            # Group display name
+            if method in ("heuristic", "heuristic-weak"):
+                reason = "Cached patterns / Static rules"
+            elif method in ("build-fast-path", "content-generation-fast-path"):
+                reason = "Fast-path pattern match"
+            elif method in ("ollama", "llm"):
+                reason = "LLM complexity classification"
+            elif method in ("context-inherit", "code-context-inherit"):
+                reason = "Session context inherited"
+            elif method == "override":
+                reason = "Manual override / policy"
+            elif method == "fallback":
+                reason = "No classifier matched"
+            else:
+                reason = "Unknown"
+            result.append({
+                "method": method, "symbol": symbol, "hits": d["hits"],
+                "avg_confidence": avg_conf, "reason": reason,
+            })
+        return result
+    except Exception:
+        return []
+
+
 def _query_cache_hit_stats() -> dict:
     """Query semantic_cache: return {total_requests, cache_hits, hit_rate_pct, estimated_saved_usd}."""
     if not os.path.exists(DB_PATH):
@@ -746,92 +830,167 @@ def _query_daily_14d() -> list[tuple[str, int, int, float]]:
         return []
 
 
-def _render_vertical_chart(daily_data: list[tuple[str, int, int, float]]) -> list[str]:
-    """Render a vertical bar chart for 14-day daily usage — one column per day."""
+def _render_braille_chart(daily_data: list[tuple[str, int, int, float]]) -> list[str]:
+    """Render a Braille-pattern bar chart for 14-day daily usage."""
     if not daily_data:
         return []
 
     from datetime import datetime as _dt
 
-    chart_height = 8  # rows of bars
+    _BRAILLE_BARS = [" ", "\u28e0", "\u28f4", "\u28f6", "\u28ff"]
+
+    chart_rows = 6
+    levels = chart_rows * 4
+
     calls_list = [d[1] for d in daily_data]
     max_calls = max(calls_list) if calls_list else 1
     if max_calls == 0:
         max_calls = 1
 
-    # Build columns: each day gets a 4-char wide column
-    n = len(daily_data)
-    col_w = 4
+    heights = []
+    for calls in calls_list:
+        h = round((calls / max_calls) * levels)
+        if calls > 0 and h == 0:
+            h = 1
+        heights.append(h)
 
     lines = []
+    pipe = "\u2502"
 
-    # Build the chart rows from top to bottom
-    for row in range(chart_height, 0, -1):
-        # Y-axis label
-        if row == chart_height:
-            y_label = f"{max_calls:>5} "
-        elif row == chart_height // 2:
-            y_label = f"{max_calls // 2:>5} "
+    for row_idx in range(chart_rows):
+        row_bottom = (chart_rows - 1 - row_idx) * 4
+
+        if row_idx == 0:
+            y_label = f"{_GREEN}{max_calls:>5}{_RESET} "
+        elif row_idx == chart_rows // 2:
+            y_label = f"{_DIM}{max_calls // 2:>5}{_RESET} "
         else:
             y_label = "      "
 
-        bar_line = ""
-        for i, (day_str, calls, tokens, saved) in enumerate(daily_data):
-            # Use >= for top rows, > 0 check ensures minimum 1-row bar for any day with data
-            bar_height = (calls / max_calls) * chart_height
-            # Show at least 1 row for any day with data
-            if bar_height >= row or (row == 1 and calls > 0):
-                bar_line += " ██ "
-            else:
-                bar_line += "    "
+        bar_chars = ""
+        for h in heights:
+            fill = max(0, min(4, h - row_bottom))
+            bar_chars += f" {_GREEN}{_BRAILLE_BARS[fill]}{_RESET} "
 
-        lines.append(f"  {y_label}│{bar_line}")
+        lines.append(f"  {y_label}{pipe}{bar_chars}")
 
-    # X-axis line
-    axis = "─" * (n * col_w + 1)
-    lines.append(f"  {'':>5} ╰{axis}")
+    n = len(daily_data)
+    corner = "\u2570"
+    dash = "\u2500"
+    axis = dash * (n * 3 + 1)
+    pad = " " * 6
+    lines.append(f"  {pad}{corner}{axis}")
 
-    # Day labels (DD)
     day_labels = ""
     weekday_labels = ""
     for day_str, *_ in daily_data:
         try:
             dt = _dt.strptime(day_str, "%Y-%m-%d")
-            day_labels += f" {dt.strftime('%d')} "
-            weekday_labels += f" {dt.strftime('%a')[:2]} "
+            day_labels += f" {dt.day:>2d}"
+            wk = dt.strftime("%a")[:2]
+            weekday_labels += f" {_DIM}{wk}{_RESET}"
         except Exception:
-            day_labels += f" {day_str[-2:]} "
-            weekday_labels += "    "
+            day_labels += f" {day_str[-2:]}"
+            weekday_labels += "   "
 
-    lines.append(f"  {'':>5}  {day_labels}")
-    lines.append(f"  {'':>5}  {weekday_labels}")
+    lines.append(f"  {pad} {day_labels}")
+    lines.append(f"  {pad} {weekday_labels}")
 
-    # Summary below chart
     total_calls = sum(d[1] for d in daily_data)
     total_tokens = sum(d[2] for d in daily_data)
     total_saved = sum(d[3] for d in daily_data)
     avg_calls = total_calls // max(len(daily_data), 1)
     saved_str = f"${total_saved:.2f}" if total_saved >= 1.0 else f"${total_saved:.4f}"
-
+    dot = "\u00b7"
     lines.append("")
-    lines.append(f"  Total  {total_calls} calls  ·  {_fmt_tok(total_tokens)} tokens  ·  {saved_str} saved  ·  avg {avg_calls}/day")
+    lines.append(
+        f"  {_DIM}Total{_RESET}  {_BOLD}{total_calls}{_RESET} {_DIM}calls{_RESET}  {dot}  "
+        f"{_BOLD}{_fmt_tok(total_tokens)}{_RESET} {_DIM}tok{_RESET}  {dot}  "
+        f"{_GREEN}{saved_str}{_RESET} {_DIM}saved{_RESET}  {dot}  "
+        f"{_DIM}avg{_RESET} {avg_calls}{_DIM}/day{_RESET}"
+    )
 
     return lines
 
 
 def _box_top(title: str, width: int = 62) -> str:
-    inner = width - 4 - len(title)
-    return f"  ╭─ {title} {'─' * max(0, inner)}╮"
+    # Strip ANSI codes for width calculation
+    import re as _re
+    plain = _re.sub(r'\033\[[0-9;]*m', '', title)
+    inner = width - 4 - len(plain)
+    return f"  {_DIM}╭─{_RESET} {_BOLD}{title}{_RESET} {_DIM}{'─' * max(0, inner)}╮{_RESET}"
 
 
 def _box_mid(text: str, width: int = 62) -> str:
-    padding = width - 4 - len(text)
-    return f"  │ {text}{' ' * max(0, padding)} │"
+    import re as _re
+    plain = _re.sub(r'\033\[[0-9;]*m', '', text)
+    padding = width - 4 - len(plain)
+    return f"  {_DIM}│{_RESET} {text}{' ' * max(0, padding)} {_DIM}│{_RESET}"
 
 
 def _box_bot(width: int = 62) -> str:
-    return f"  ╰{'─' * (width - 2)}╯"
+    return f"  {_DIM}╰{'─' * (width - 2)}╯{_RESET}"
 
+
+
+def _format_routing_logic(session_start: float | None) -> list[str]:
+    """Format routing decision method breakdown table."""
+    data = _query_routing_logic(session_start)
+    if not data:
+        return []
+
+    total_hits = sum(d["hits"] for d in data)
+    if total_hits == 0:
+        return []
+
+    lines = []
+    lines.append(_box_top(f"{_CYAN}Routing Logic{_RESET}"))
+    lines.append(_box_mid(""))
+    lines.append(_box_mid(f"  {_DIM}Method                  Hits    Pct   Reason{_RESET}"))
+    lines.append(_box_mid(f"  {_DIM}" + "─" * 54 + f"{_RESET}"))
+
+    # Compute zero-cost (heuristic + fast-path + inherit) vs classifier
+    zero_cost = 0
+    classifier_cost = 0
+
+    for d in data:
+        pct = (d["hits"] / total_hits) * 100
+        method_display = d["method"][:20]
+        symbol = d["symbol"]
+        reason = d["reason"][:28]
+
+        # Color code: green for zero-cost, yellow for LLM-based
+        if d["method"] in ("heuristic", "heuristic-weak", "build-fast-path",
+                           "content-generation-fast-path", "context-inherit",
+                           "code-context-inherit"):
+            color = _GREEN
+            zero_cost += d["hits"]
+        elif d["method"] in ("ollama", "llm"):
+            color = _YELLOW
+            classifier_cost += d["hits"]
+        else:
+            color = _DIM
+            zero_cost += d["hits"]
+
+        lines.append(_box_mid(
+            f"  {symbol} {color}{method_display:<20}{_RESET} {d['hits']:>4}  {pct:>4.0f}%   {_DIM}{reason}{_RESET}"
+        ))
+
+    lines.append(_box_mid(f"  {_DIM}" + "─" * 54 + f"{_RESET}"))
+
+    zero_pct = round(zero_cost / total_hits * 100) if total_hits > 0 else 0
+    lines.append(_box_mid(
+        f"  {_GREEN}⚡ Zero-cost decisions: {zero_cost}/{total_hits} ({zero_pct}%){_RESET}"
+    ))
+    if classifier_cost > 0:
+        cls_pct = round(classifier_cost / total_hits * 100)
+        lines.append(_box_mid(
+            f"  {_YELLOW}🧠 Classifier overhead: {classifier_cost}/{total_hits} ({cls_pct}%){_RESET}"
+        ))
+
+    lines.append(_box_mid(""))
+    lines.append(_box_bot())
+    return lines
 
 def _format_cumulative_section(periods: list[tuple[str, int, int, int, float]]) -> list[str]:
     """Format cumulative savings with box frames, bars, vertical chart, and hero metrics."""
@@ -854,7 +1013,7 @@ def _format_cumulative_section(periods: list[tuple[str, int, int, int, float]]) 
     lines.append(_box_top("Lifetime Savings"))
     lines.append(_box_mid(""))
     lines.append(_box_mid(
-        f"  💰 {saved_hero} saved    {_fmt_tok(lifetime_tok)} tokens    {lifetime_calls:,} calls"
+        f"  💰 {_GREEN}{_BOLD}{saved_hero}{_RESET} {_DIM}saved{_RESET}    {_fmt_tok(lifetime_tok)} tokens    {lifetime_calls:,} calls"
     ))
 
     # Delta line: today + month
@@ -920,7 +1079,7 @@ def _format_cumulative_section(periods: list[tuple[str, int, int, int, float]]) 
         lines.append("")
         lines.append(_box_top("14-Day Usage"))
         lines.append(_box_mid(""))
-        chart_lines = _render_vertical_chart(daily_14d)
+        chart_lines = _render_braille_chart(daily_14d)
         for cl in chart_lines:
             # Strip the leading 2 spaces since _box_mid adds its own padding
             lines.append(f"  │ {cl.lstrip():<60}│")
@@ -1089,9 +1248,9 @@ def _format(tools: dict[str, dict], cc_rows: list[dict], free_rows: list[dict],
             start: dict | None, current: dict | None, is_live: bool,
             cumulative: list[tuple[str, int, int, int, float]] | None = None,
             session_start: float | None = None) -> str:
-    lines = ["╔" + "═" * (WIDTH - 2) + "╗"]
-    lines.append("║" + "  LLM Router · Session Summary".ljust(WIDTH - 2) + "║")
-    lines.append("╚" + "═" * (WIDTH - 2) + "╝")
+    lines = [f"{_BOLD}╔" + "═" * (WIDTH - 2) + f"╗{_RESET}"]
+    lines.append(f"{_BOLD}║  {_CYAN}LLM Router · Session Summary{_RESET}{_BOLD}" + " " * (WIDTH - 32) + f"║{_RESET}")
+    lines.append(f"{_BOLD}╚" + "═" * (WIDTH - 2) + f"╝{_RESET}")
 
     if current:
         lines.append("")
@@ -1127,6 +1286,13 @@ def _format(tools: dict[str, dict], cc_rows: list[dict], free_rows: list[dict],
             lines.append(f"  │ {sl.lstrip():<60}│")
         lines.append(_box_mid(""))
         lines.append(_box_bot())
+
+    # Routing logic table
+    if session_start is not None:
+        routing_lines = _format_routing_logic(session_start)
+        if routing_lines:
+            lines.append("")
+            lines += routing_lines
 
     if cumulative:
         cum_lines = _format_cumulative_section(cumulative)
