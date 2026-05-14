@@ -2,6 +2,16 @@
 
 **For releases v6.2 and earlier, see [CHANGELOG_ARCHIVE.md](docs/CHANGELOG_ARCHIVE.md).**
 
+## v8.5.1 — Hook Path Validation + Python 3.14 Support (2026-05-14)
+
+### Fixed
+
+- **`llm_doctor`** now validates hook Python interpreter paths exist — detects the #1 silent failure mode (venv moved/deleted)
+- **`llm_doctor`** detects duplicate hook entries in `settings.json` and warns with cleanup guidance
+- Python version constraint widened to `>=3.10` (removes `<3.14` cap) — fixes pipx install on Python 3.14
+
+---
+
 ## v8.5.0 — Savings Dashboard + Audit Corrections (2026-05-14)
 
 ### Added
