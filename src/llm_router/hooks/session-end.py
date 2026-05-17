@@ -669,13 +669,12 @@ _CYAN = "\033[36m"
 _YELLOW = "\033[33m"
 _MAGENTA = "\033[35m"
 _BOLD = "\033[1m"
-_DIM = "\033[2m"
+_DIM = "\033[90m"  # Use bright-black instead of dim (dim vanishes on white bg)
 _RESET = "\033[0m"
 
 # Semantic color palette — standard ANSI that adapts to terminal theme.
-# Bright variants (90-97) are visible on dark backgrounds.
-# Normal variants (30-37) are visible on light backgrounds.
-# Using bold+normal gives best cross-theme visibility.
+# All colors chosen to be readable on BOTH white and black backgrounds.
+# Key rule: never use \033[2m (dim) alone — it's invisible on white bg.
 _C_CYAN    = "\033[36m"       # Teal — works on both
 _C_GREEN   = "\033[32m"       # Green — works on both
 _C_YELLOW  = "\033[33m"       # Yellow/brown — works on both
@@ -683,8 +682,8 @@ _C_ORANGE  = "\033[33;1m"     # Bold yellow = orange on most terminals
 _C_RED     = "\033[31m"       # Red — works on both
 _C_MAGENTA = "\033[35m"       # Magenta — works on both
 _C_WHITE   = "\033[1m"        # Bold (inherits fg) — always visible
-_C_GRAY    = "\033[2m"        # Dim — adapts to terminal fg
-_C_DARK    = "\033[2m"        # Dim — same as gray, visible on both
+_C_GRAY    = "\033[90m"       # Bright black — visible gray on both bg
+_C_DARK    = "\033[90m"       # Same — never use \033[2m, it vanishes on white
 
 # ── Routing method symbols ────────────────────────────────────────────────────
 _METHOD_SYMBOLS = {
