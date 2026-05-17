@@ -661,6 +661,9 @@ def _query_classifier_overhead() -> dict:
 
 
 # ── ANSI color codes ──────────────────────────────────────────────────────────
+# Uses standard 16-color ANSI (bold variants) for universal light/dark support.
+# These colors are readable on both white and black terminal backgrounds because
+# they use the terminal's own color scheme rather than fixed 256-color values.
 _GREEN = "\033[32m"
 _CYAN = "\033[36m"
 _YELLOW = "\033[33m"
@@ -669,18 +672,19 @@ _BOLD = "\033[1m"
 _DIM = "\033[2m"
 _RESET = "\033[0m"
 
-# 256-color palette for rich dashboard
-def _fg(n: int) -> str: return f"\033[38;5;{n}m"
-
-_C_CYAN    = _fg(45)
-_C_GREEN   = _fg(40)
-_C_YELLOW  = _fg(220)
-_C_ORANGE  = _fg(208)
-_C_RED     = _fg(196)
-_C_MAGENTA = _fg(171)
-_C_WHITE   = _fg(255)
-_C_GRAY    = _fg(242)
-_C_DARK    = _fg(238)
+# Semantic color palette — standard ANSI that adapts to terminal theme.
+# Bright variants (90-97) are visible on dark backgrounds.
+# Normal variants (30-37) are visible on light backgrounds.
+# Using bold+normal gives best cross-theme visibility.
+_C_CYAN    = "\033[36m"       # Teal — works on both
+_C_GREEN   = "\033[32m"       # Green — works on both
+_C_YELLOW  = "\033[33m"       # Yellow/brown — works on both
+_C_ORANGE  = "\033[33;1m"     # Bold yellow = orange on most terminals
+_C_RED     = "\033[31m"       # Red — works on both
+_C_MAGENTA = "\033[35m"       # Magenta — works on both
+_C_WHITE   = "\033[1m"        # Bold (inherits fg) — always visible
+_C_GRAY    = "\033[2m"        # Dim — adapts to terminal fg
+_C_DARK    = "\033[2m"        # Dim — same as gray, visible on both
 
 # ── Routing method symbols ────────────────────────────────────────────────────
 _METHOD_SYMBOLS = {
@@ -1352,14 +1356,14 @@ def main() -> None:
             # Progress bar showing how much was preserved
             bar_len = 20
             filled = int(pct_saved / 100 * bar_len)
-            bar = "\033[32m" + "━" * filled + "\033[90m" + "━" * (bar_len - filled) + "\033[0m"
+            bar = _C_GREEN + "━" * filled + _C_GRAY + "─" * (bar_len - filled) + _RESET
             lines.append(f"  Quota Preserved  {bar} {pct_saved:.0f}%")
             if tokens_reclaimed > 0:
                 tok_k = tokens_reclaimed / 1000
                 lines.append(f"  {tok_k:.0f}K tokens reclaimed" + (f" · +{ext_min:.0f}min runway" if ext_min >= 1 else ""))
             lines.append(f"  Opus would cost:  ${opus_equiv:.4f}")
             lines.append(f"  Actually spent:   ${total:.4f}")
-            lines.append(f"  Net preserved:    \033[32m${net_savings:.4f}\033[0m")
+            lines.append(f"  Net preserved:    {_C_GREEN}${net_savings:.4f}{_RESET}")
         else:
             lines.append(f"  Session spend: ${total:.4f} across {calls} call(s)")
 
@@ -1368,7 +1372,7 @@ def main() -> None:
             lines.append(f"  Quality gates: {gates_p}/{gates_p + gates_f} passed ({gate_rate:.0f}%)")
 
         if spend.get("anomaly_flag"):
-            lines.insert(0, "  \033[31m⚠  ANOMALY: spend rate exceeded threshold\033[0m")
+            lines.insert(0, f"  {_C_RED}⚠  ANOMALY: spend rate exceeded threshold{_RESET}")
 
         spend_block = "\n".join(lines)
         summary = summary.rstrip("  " + "═" * (WIDTH - 2)) + "\n" + spend_block + "\n" + "  " + "═" * (WIDTH - 2)
