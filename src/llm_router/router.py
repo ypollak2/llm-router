@@ -20,6 +20,8 @@ from llm_router import cost, media, providers
 from llm_router.budget import get_budget_state, reserve_tokens, release_tokens
 from llm_router.state import get_active_agent
 from llm_router.codex_agent import CODEX_MODELS, is_codex_available, run_codex
+from llm_router.contract import build_contract
+from llm_router.gates import run_gates
 from llm_router.gemini_cli_agent import GEMINI_MODELS, is_gemini_cli_available, run_gemini_cli
 from llm_router.logging import get_logger
 from llm_router.compaction import compact_structural
@@ -28,6 +30,7 @@ from llm_router.repo_config import effective_config as get_repo_config
 from llm_router.context import build_context_messages, get_session_buffer
 from llm_router.health import get_tracker
 from llm_router.profiles import get_model_chain, provider_from_model
+from llm_router.receipt_store import compute_receipt, store_receipt
 from llm_router.tracing import set_span_attributes, traced_span
 from llm_router.types import BudgetExceededError, Complexity, LLMResponse, RoutingProfile, TaskType
 
@@ -836,11 +839,52 @@ async def _dispatch_model_loop(
                     latency_ms=response.latency_ms,
                 )
 
+            # ── Contract verification gates (v8.8.0) ────────────────────────
+            # Build implicit contract and verify response passes gates.
+            # On gate failure, skip to next model (same as provider error).
+            _contract = build_contract(
+                contract_id=correlation_id,
+                task_type=task_type,
+                complexity=c,
+                model=model,
+            )
+            if _contract.gates and task_type not in MEDIA_TASK_TYPES:
+                _gates_passed, _gate_results = run_gates(_contract, response.content)
+                if not _gates_passed:
+                    _failed = [r for r in _gate_results if not r.passed]
+                    _fail_summary = "; ".join(f"{r.gate.value}: {r.reason}" for r in _failed)
+                    log.info(
+                        "Gate verification failed on %s: %s — trying next model",
+                        model, _fail_summary,
+                    )
+                    route_log.info(
+                        "gate_verification_failed",
+                        correlation_id=correlation_id,
+                        model=model,
+                        gates_failed=_fail_summary,
+                    )
+                    chain_errors.append((model, f"gate_failed: {_fail_summary}"))
+                    continue
+            else:
+                _gate_results = []
+
             tracker.record_success(provider)
             await cost.log_usage(response, task_type, profile, correlation_id=correlation_id)
             release_tokens("anthropic", 500)
             # Release the quota reservation as it is now reflected in the actual usage logs
             release_tokens("anthropic", 500)
+
+            # ── Store receipt + track reclaimed tokens (v8.8.0) ────────────
+            _receipt = compute_receipt(
+                contract=_contract,
+                gate_results=_gate_results,
+                latency_ms=response.latency_ms,
+                input_tokens=response.input_tokens,
+                output_tokens=response.output_tokens,
+                cost_usd=response.cost_usd,
+            )
+            # Fire-and-forget receipt storage (never blocks response)
+            asyncio.create_task(store_receipt(_receipt))
 
             # Record Codex/Gemini CLI requests for quota tracking (v7.1.0)
             if provider == "codex":
@@ -859,12 +903,19 @@ async def _dispatch_model_loop(
             # Record spend for real-time session spend meter (v4.0)
             try:
                 from llm_router.session_spend import get_session_spend
-                get_session_spend().record(
+                _spend = get_session_spend()
+                _spend.record(
                     model=model,
                     tool=task_type.value,
                     input_tokens=response.input_tokens,
                     output_tokens=response.output_tokens,
                     cost_usd=response.cost_usd,
+                )
+                # v8.8.0: Track reclaimed tokens from contract verification
+                _spend.record_reclaimed(
+                    tokens_reclaimed=_receipt.tokens_reclaimed,
+                    opus_equivalent_usd=_receipt.opus_equivalent_cost,
+                    gates_passed=_receipt.all_passed,
                 )
             except Exception:
                 pass

@@ -70,7 +70,11 @@ def _estimate_cost(model: str, input_tokens: int, output_tokens: int) -> float:
 
 @dataclass
 class SessionSpend:
-    """Tracks per-session LLM spend with anomaly detection."""
+    """Tracks per-session LLM spend with anomaly detection and savings.
+
+    v8.8.0: Added reclaimed tokens tracking — tokens that would have been
+    consumed by Opus but were handled by cheaper models instead.
+    """
 
     total_usd: float = 0.0
     session_start: float = field(default_factory=time.time)
@@ -78,6 +82,11 @@ class SessionSpend:
     anomaly_flag: bool = False
     per_model: dict[str, dict] = field(default_factory=dict)
     per_tool: dict[str, int] = field(default_factory=dict)
+    # v8.8.0: Token reclamation tracking
+    tokens_reclaimed: int = 0
+    opus_equivalent_usd: float = 0.0
+    gates_passed: int = 0
+    gates_failed: int = 0
 
     def record(
         self,
@@ -113,6 +122,55 @@ class SessionSpend:
 
         self._persist()
 
+    def record_reclaimed(
+        self,
+        tokens_reclaimed: int,
+        opus_equivalent_usd: float,
+        gates_passed: bool,
+    ) -> None:
+        """Record tokens reclaimed by routing to a cheaper model.
+
+        Args:
+            tokens_reclaimed: Tokens that Opus would have consumed.
+            opus_equivalent_usd: What Opus would have charged for this call.
+            gates_passed: Whether verification gates passed on this call.
+        """
+        self.tokens_reclaimed += tokens_reclaimed
+        self.opus_equivalent_usd += opus_equivalent_usd
+        if gates_passed:
+            self.gates_passed += 1
+        else:
+            self.gates_failed += 1
+        self._persist()
+
+    @property
+    def net_savings_usd(self) -> float:
+        """Real money preserved: what Opus would have cost minus actual spend."""
+        return max(0.0, self.opus_equivalent_usd - self.total_usd)
+
+    @property
+    def extension_minutes(self) -> float:
+        """Estimated minutes of extra work the savings bought.
+
+        Based on average token consumption rate this session.
+        """
+        elapsed = max(1.0, time.time() - self.session_start)
+        elapsed_min = elapsed / 60.0
+        if self.call_count == 0 or elapsed_min < 0.5:
+            return 0.0
+        # Average total tokens consumed per minute across all routed calls
+        total_tokens = sum(m.get("tokens", 0) for m in self.per_model.values())
+        tokens_per_min = total_tokens / elapsed_min if elapsed_min > 0 else 0
+        if tokens_per_min == 0:
+            return 0.0
+        return self.tokens_reclaimed / tokens_per_min
+
+    @property
+    def gate_pass_rate(self) -> float:
+        """Percentage of routed calls that passed all verification gates."""
+        total = self.gates_passed + self.gates_failed
+        return (self.gates_passed / total * 100) if total > 0 else 100.0
+
     def get_summary(self) -> dict:
         """Return a JSON-serialisable summary dict."""
         top_model = (
@@ -127,6 +185,14 @@ class SessionSpend:
             "top_model": top_model,
             "per_model": self.per_model,
             "per_tool": self.per_tool,
+            # v8.8.0: Real savings data
+            "tokens_reclaimed": self.tokens_reclaimed,
+            "opus_equivalent_usd": round(self.opus_equivalent_usd, 6),
+            "net_savings_usd": round(self.net_savings_usd, 6),
+            "extension_minutes": round(self.extension_minutes, 1),
+            "gate_pass_rate": round(self.gate_pass_rate, 1),
+            "gates_passed": self.gates_passed,
+            "gates_failed": self.gates_failed,
         }
 
     def _persist(self) -> None:
@@ -147,6 +213,10 @@ class SessionSpend:
         self.anomaly_flag = False
         self.per_model = {}
         self.per_tool = {}
+        self.tokens_reclaimed = 0
+        self.opus_equivalent_usd = 0.0
+        self.gates_passed = 0
+        self.gates_failed = 0
         self._persist()
 
     @classmethod
@@ -161,6 +231,11 @@ class SessionSpend:
             obj.anomaly_flag = bool(data.get("anomaly_flag", False))
             obj.per_model = data.get("per_model", {})
             obj.per_tool = data.get("per_tool", {})
+            # v8.8.0 fields — gracefully handle missing keys from older data
+            obj.tokens_reclaimed = int(data.get("tokens_reclaimed", 0))
+            obj.opus_equivalent_usd = float(data.get("opus_equivalent_usd", 0.0))
+            obj.gates_passed = int(data.get("gates_passed", 0))
+            obj.gates_failed = int(data.get("gates_failed", 0))
             return obj
         except (OSError, json.JSONDecodeError, KeyError, ValueError):
             return cls()

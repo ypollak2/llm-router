@@ -1332,19 +1332,46 @@ def main() -> None:
     if not summary:
         summary = _format(tools, cc_rows, free_rows, paid_rows, start, current, is_live, cumulative, session_start)
 
-    # Append session spend one-liner if available (v4.0)
+    # Append session spend + real savings panel (v8.8.0)
     spend = _read_session_spend()
     if spend and spend.get("call_count", 0) > 0:
         total = spend.get("total_usd", 0.0)
         calls = spend.get("call_count", 0)
-        top   = spend.get("top_model", "")
-        top_short = top.split("/", 1)[-1] if top and "/" in top else top
-        spend_line = f"  💰 Session API spend: ${total:.4f} across {calls} call(s)"
-        if top_short:
-            spend_line += f" · top model: {top_short}"
+        tokens_reclaimed = spend.get("tokens_reclaimed", 0)
+        net_savings = spend.get("net_savings_usd", 0.0)
+        opus_equiv = spend.get("opus_equivalent_usd", 0.0)
+        ext_min = spend.get("extension_minutes", 0.0)
+        gate_rate = spend.get("gate_pass_rate", 100.0)
+        gates_p = spend.get("gates_passed", 0)
+        gates_f = spend.get("gates_failed", 0)
+
+        # Build savings panel
+        lines = []
+        if opus_equiv > 0:
+            pct_saved = (net_savings / opus_equiv * 100) if opus_equiv > 0 else 0
+            # Progress bar showing how much was preserved
+            bar_len = 20
+            filled = int(pct_saved / 100 * bar_len)
+            bar = "\033[32m" + "━" * filled + "\033[90m" + "━" * (bar_len - filled) + "\033[0m"
+            lines.append(f"  Quota Preserved  {bar} {pct_saved:.0f}%")
+            if tokens_reclaimed > 0:
+                tok_k = tokens_reclaimed / 1000
+                lines.append(f"  {tok_k:.0f}K tokens reclaimed" + (f" · +{ext_min:.0f}min runway" if ext_min >= 1 else ""))
+            lines.append(f"  Opus would cost:  ${opus_equiv:.4f}")
+            lines.append(f"  Actually spent:   ${total:.4f}")
+            lines.append(f"  Net preserved:    \033[32m${net_savings:.4f}\033[0m")
+        else:
+            lines.append(f"  Session spend: ${total:.4f} across {calls} call(s)")
+
+        # Gate quality line
+        if gates_p + gates_f > 0:
+            lines.append(f"  Quality gates: {gates_p}/{gates_p + gates_f} passed ({gate_rate:.0f}%)")
+
         if spend.get("anomaly_flag"):
-            spend_line = "  ⚠️  ANOMALY DETECTED: " + spend_line.lstrip()
-        summary = summary.rstrip("  " + "═" * (WIDTH - 2)) + "\n" + spend_line + "\n" + "  " + "═" * (WIDTH - 2)
+            lines.insert(0, "  \033[31m⚠  ANOMALY: spend rate exceeded threshold\033[0m")
+
+        spend_block = "\n".join(lines)
+        summary = summary.rstrip("  " + "═" * (WIDTH - 2)) + "\n" + spend_block + "\n" + "  " + "═" * (WIDTH - 2)
 
     # Retrospective output removed per user preference
 
