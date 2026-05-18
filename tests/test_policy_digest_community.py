@@ -402,10 +402,14 @@ class TestLlmBenchmarkTool:
 
 
 class TestNewToolsRegistered:
-    def test_policy_digest_benchmark_registered(self):
-        from llm_router.server import mcp
-
-        tools = {t.name for t in mcp._tool_manager.list_tools()}
+    def test_policy_digest_benchmark_registered(self, monkeypatch):
+        # These tools are only registered when slim=off (not in routing tier)
+        monkeypatch.setenv("LLM_ROUTER_SLIM", "off")
+        # Re-import to pick up slim=off
+        import importlib
+        from llm_router import server as _srv
+        importlib.reload(_srv)
+        tools = {t.name for t in _srv.mcp._tool_manager.list_tools()}
         assert "llm_policy"    in tools
         assert "llm_digest"    in tools
         assert "llm_benchmark" in tools

@@ -165,7 +165,7 @@ class RouterConfig(BaseSettings):
     # Reduce the number of registered MCP tools to save context tokens.
     # Values: "off" (all 41 tools), "routing" (12 tools), "core" (4 tools).
     # Set LLM_ROUTER_SLIM=routing in the MCP server env to activate.
-    llm_router_slim: str = "off"         # LLM_ROUTER_SLIM
+    llm_router_slim: str = "routing"     # LLM_ROUTER_SLIM (routing=12 core, off=all)
 
     # ── Cost-threshold escalation (v4.0) ──
     # Block any single call estimated above this cost until approved via

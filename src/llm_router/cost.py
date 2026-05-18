@@ -1851,14 +1851,12 @@ async def get_model_latency_stats(window_days: int = 7) -> dict[str, dict]:
 # These constants define the reference models used to calculate cost savings.
 # All savings are calculated relative to these baseline costs.
 
-BASELINE_MODEL_FOR_SAVINGS = "opus"  # Quality ceiling — savings are always vs Opus
-"""The premium reference model used for savings calculations. All savings computed
-as the cost difference between the baseline (Opus) and the actually-used model."""
+BASELINE_MODEL_FOR_SAVINGS = "sonnet"  # Baseline: Sonnet 4.6 ($3/$15 per M tokens)
+"""Reference model for savings calculations. All savings = Sonnet cost - actual cost.
+Sonnet is the honest baseline: it's what Claude Code subscription users actually consume."""
 
-# Sonnet 4.6 pricing used as the secondary baseline for historical calculations
-# when per-call saved_usd is not populated (pre-v2.1 rows)
-_SONNET_INPUT_PER_M = 3.0      # $3 per million input tokens
-_SONNET_OUTPUT_PER_M = 15.0    # $15 per million output tokens
+_SONNET_INPUT_PER_M = 3.0      # $3 per million input tokens (Sonnet 4.6)
+_SONNET_OUTPUT_PER_M = 15.0    # $15 per million output tokens (Sonnet 4.6)
 _FREE_PROVIDERS = {"ollama", "codex"}
 """Providers that incur zero cost (local or included in subscription)."""
 
@@ -2089,9 +2087,8 @@ async def get_team_savings(
     }
 
 
-# Sonnet 4.6 pricing used as baseline for savings calculations
-_SONNET_INPUT_PER_M = 3.0    # $3 per million input tokens
-_SONNET_OUTPUT_PER_M = 15.0  # $15 per million output tokens
+# Re-use module-level baseline constants (defined once near line 1860)
+# _SONNET_INPUT_PER_M and _SONNET_OUTPUT_PER_M are already defined above
 
 
 async def get_routing_savings_vs_sonnet(days: int = 0) -> dict:

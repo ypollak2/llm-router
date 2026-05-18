@@ -369,11 +369,11 @@ class TestDoctorHost:
 
 
 class TestV4Config:
-    def test_slim_field_defaults_to_off(self):
+    def test_slim_field_defaults_to_routing(self):
         from llm_router.config import RouterConfig
 
         cfg = RouterConfig()
-        assert cfg.llm_router_slim == "off"
+        assert cfg.llm_router_slim == "routing"
 
     def test_escalate_above_defaults_to_zero(self):
         from llm_router.config import RouterConfig

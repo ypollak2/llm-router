@@ -16,26 +16,29 @@ from rich.style import Style
 from rich.table import Table
 from rich.text import Text
 
-# ── Cyber-Dark palette (hex) ─────────────────────────────────────────────────
+# ── Adaptive palette ─────────────────────────────────────────────────────────
+# Uses Rich named colors (from terminal's 256-color palette) so text is
+# readable on BOTH light and dark terminal backgrounds.
+# Key rule: never use fixed RGB for labels/data — it won't adapt to bg color.
 
-_NEON_GREEN = Style(color="#00ff87")
-_NEON_GREEN_BOLD = Style(color="#00ff87", bold=True)
-_INFO_BLUE = Style(color="#7dcfff")
-_INFO_BLUE_BOLD = Style(color="#7dcfff", bold=True)
-_ACCENT = Style(color="#7aa2f7")
-_ACCENT_DIM = Style(color="#3d59a1", dim=True)
-_WARN_YELLOW = Style(color="#e0af68", bold=True)
-_WARN_ORANGE = Style(color="#ff9e64", bold=True)
-_DANGER_RED = Style(color="#f7768e", bold=True)
-_LABEL = Style(color="#a9b1d6")           # readable label text
-_MUTED = Style(color="#737aa2")           # secondary info (brighter than before)
-_DIM_GRAY = Style(color="#545c7e")        # structural elements
-_WHITE = Style(color="#c0caf5")
-_WHITE_BOLD = Style(color="#c0caf5", bold=True)
-_BRIGHT = Style(color="#ffffff", bold=True)
-_HEADER_BG = Style(color="#c0caf5", bgcolor="#1a1b26")
-_MAGENTA = Style(color="#bb9af7", bold=True)
-_CYAN_BRIGHT = Style(color="#2ac3de", bold=True)
+_NEON_GREEN = Style(color="green")
+_NEON_GREEN_BOLD = Style(color="green", bold=True)
+_INFO_BLUE = Style(color="cyan")
+_INFO_BLUE_BOLD = Style(color="cyan", bold=True)
+_ACCENT = Style(color="blue")
+_ACCENT_DIM = Style(color="blue", dim=True)
+_WARN_YELLOW = Style(color="yellow", bold=True)
+_WARN_ORANGE = Style(color="yellow", bold=True)
+_DANGER_RED = Style(color="red", bold=True)
+_LABEL = Style()                          # default fg — always readable
+_MUTED = Style(dim=True)                  # dimmed default fg
+_DIM_GRAY = Style(dim=True)               # structural elements
+_WHITE = Style(bold=True)                 # bold fg — always visible
+_WHITE_BOLD = Style(bold=True)
+_BRIGHT = Style(bold=True)
+_HEADER_BG = Style(bold=True)
+_MAGENTA = Style(color="magenta", bold=True)
+_CYAN_BRIGHT = Style(color="cyan", bold=True)
 
 GRID_WIDTH = 70
 
@@ -473,7 +476,7 @@ def render_cyber_grid(data: dict[str, Any]) -> str:
     console = Console(
         file=buf,
         force_terminal=True,
-        color_system="truecolor",
+        color_system="256",
         width=GRID_WIDTH,
     )
 

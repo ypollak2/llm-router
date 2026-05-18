@@ -437,11 +437,12 @@ def main() -> None:
         sys.exit(0)
 
     # ── Early file-operation detection ────────────────────────────────────────
-    # Mark session as coding on first file-operation tool (Read/Edit/Write/etc).
-    # This prevents stuck patterns where investigation tools keep failing.
-    # Soft-fail: allow the operation, mark session as coding, clear pending state.
-    # All subsequent tool calls in this session will bypass enforcement.
-    if tool_name in {"Edit", "Write", "MultiEdit", "Read", "Glob", "Grep", "LS"}:
+    # Read-only tools (Read/Glob/Grep/LS) are ALWAYS allowed without marking
+    # the session as coding — this preserves routing enforcement for Q&A turns.
+    # Only WRITE operations (Edit/Write/MultiEdit) mark the session as coding.
+    if tool_name in {"Read", "Glob", "Grep", "LS"}:
+        sys.exit(0)  # Allow read-only tools, don't change session type
+    if tool_name in {"Edit", "Write", "MultiEdit"}:
         _mark_session_coding(session_id)
         _clear_pending(session_id)
         _clear_violation_count(session_id)

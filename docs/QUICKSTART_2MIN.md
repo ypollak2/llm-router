@@ -18,28 +18,28 @@ Pick **one** command based on your setup:
 
 ### Claude Code (Recommended)
 ```bash
-pip install llm-router
+pip install llm-routing
 llm-router install
 ```
 ✅ Done. Hooks installed automatically.
 
 ### Codex CLI
 ```bash
-pip install llm-router
+pip install llm-routing
 llm-router install --host codex
 ```
 ✅ Done. Hooks installed for Codex.
 
 ### Gemini CLI
 ```bash
-pip install llm-router
+pip install llm-routing
 llm-router install --host gemini-cli
 ```
 ✅ Done. Hooks installed for Gemini.
 
 ### VS Code / Cursor
 ```bash
-pip install llm-router
+pip install llm-routing
 llm-router install --host vscode  # or cursor
 ```
 ✅ Done. MCP server configured.
@@ -170,7 +170,7 @@ llm-router setup           # Configure advanced options
 
 ### "Command not found: llm-router"
 ```bash
-pip install llm-router  # Make sure it's installed
+pip install llm-routing  # Make sure it's installed
 which llm-router        # Verify it's in PATH
 ```
 

@@ -36,8 +36,8 @@ SESSION_SPEND_FILE   = os.path.join(STATE_DIR, "session_spend.json")
 # Show star CTA once the user has saved at least this much (lifetime)
 STAR_CTA_THRESHOLD_USD = 0.50
 
-SONNET_INPUT_PER_M  = 3.0
-SONNET_OUTPUT_PER_M = 15.0
+SONNET_INPUT_PER_M  = 3.0   # Baseline: Sonnet 4.6 ($3/$15 per M tokens)
+SONNET_OUTPUT_PER_M = 15.0  # All savings = Sonnet cost - actual cost
 WIDTH = 50
 
 # Model names that indicate test/mock data — never show in production reports.
@@ -360,18 +360,23 @@ def _query_cumulative_savings() -> list[tuple[str, int, int, int, float]]:
                 total_out += out_tok
                 baseline = _sonnet_baseline(in_tok, out_tok)
                 if provider in _FREE_PROVIDERS:
-                    saved += baseline          # free = full Sonnet cost avoided
+                    # Only count savings when tokens > 0 (evidence of actual work)
+                    saved += baseline if (in_tok + out_tok) > 0 else 0.0
                 elif provider != "subscription":
                     saved += max(0.0, baseline - cost)
 
-            # Also include pre-computed savings from savings_stats (Codex/Ollama JSONL records
-            # that bypass the MCP server and are never in the usage table)
+            # Include pre-computed savings from savings_stats (Codex/Ollama JSONL records
+            # that bypass the MCP server and are never in the usage table).
+            # DEDUP: only count providers NOT already present in the usage table.
             if has_savings_stats:
+                usage_providers = {r[0] for r in rows}  # providers already counted
+                placeholders = ",".join(f"'{p}'" for p in usage_providers) if usage_providers else "''"
                 ss_rows = conn.execute(
                     f"SELECT COUNT(*), COALESCE(SUM(estimated_claude_cost_saved),0) "
-                    f"FROM savings_stats WHERE {where}"
+                    f"FROM savings_stats WHERE {where} "
+                    f"AND LOWER(provider) NOT IN ({placeholders})"
                 ).fetchone()
-                if ss_rows:
+                if ss_rows and ss_rows[0] > 0:
                     calls += ss_rows[0]
                     saved += ss_rows[1]
 
@@ -426,7 +431,7 @@ def _smart_bar(pct: float, width: int = 16) -> str:
         color = _C_ORANGE
     else:
         color = _C_RED
-    return color + "━" * filled + _RESET + _C_DARK + "─" * (width - filled) + _RESET
+    return color + "━" * filled + _RESET + "\033[90m" + "─" * (width - filled) + _RESET
 
 
 def _cc_row(label: str, start_pct: float | None, end_pct: float) -> str:
@@ -436,21 +441,21 @@ def _cc_row(label: str, start_pct: float | None, end_pct: float) -> str:
     if start_pct is not None:
         delta = end_pct - start_pct
         if abs(delta) < 0.01:
-            delta_str = f"{_C_GRAY}no change{_RESET}"
+            delta_str = f"{_C_MUTED}no change{_RESET}"
         else:
             sign = "+" if delta >= 0 else ""
             if abs(delta) < 0.1:
                 fmt = f"{sign}{delta:.2f}pp"
             else:
                 fmt = f"{sign}{delta:.1f}pp"
-            delta_color = _C_ORANGE if abs(delta) > 5 else _C_GRAY
+            delta_color = _C_ORANGE if abs(delta) > 5 else _C_LABEL
             delta_str = f"{delta_color}{fmt}{_RESET}"
-        return f"    {_C_GRAY}{label:<12}{_RESET} {bar}  {pct_str}  {delta_str}"
-    return f"    {_C_GRAY}{label:<12}{_RESET} {bar}  {pct_str}"
+        return f"    {_C_LABEL}{label:<12}{_RESET} {bar}  {pct_str}  {delta_str}"
+    return f"    {_C_LABEL}{label:<12}{_RESET} {bar}  {pct_str}"
 
 
 def _format_cc_section(start: dict | None, current: dict, is_live: bool) -> list[str]:
-    src = f"{_DIM}live{_RESET}" if is_live else f"{_DIM}cached{_RESET}"
+    src = f"{_C_MUTED}live{_RESET}" if is_live else f"{_C_MUTED}cached{_RESET}"
     lines = [f"  {_BOLD}Claude Subscription{_RESET}  {src}", ""]
 
     s_end = current.get("session_pct", 0.0)
@@ -483,14 +488,14 @@ def _format_cc_model_section(cc_rows: list[dict]) -> list[str]:
         models[model]["tasks"][task] = models[model]["tasks"].get(task, 0) + 1
 
     total = sum(m["count"] for m in models.values())
-    lines = [f"    {_C_WHITE}{total}{_RESET} calls  {_C_GRAY}(subscription, $0.00){_RESET}"]
+    lines = [f"    {_C_WHITE}{total}{_RESET} calls  {_C_MUTED}(subscription, $0.00){_RESET}"]
     for model, d in sorted(models.items(), key=lambda x: -x[1]["count"]):
         short = model.split("/", 1)[-1] if "/" in model else model
         if len(short) > 30:
             short = short[:28] + "…"
         top_task = max(d["tasks"], key=d["tasks"].get) if d["tasks"] else "?"
         lines.append(
-            f"    {_C_GRAY}{top_task:<12}{_RESET}  {d['count']:>3}×  {short:<32}  {_C_DARK}sub{_RESET}"
+            f"    {_C_LABEL}{top_task:<12}{_RESET}  {d['count']:>3}×  {short:<32}  {_C_MUTED}sub{_RESET}"
         )
     return lines
 
@@ -519,9 +524,9 @@ def _format_routing_section(tools: dict[str, dict]) -> list[str]:
         model_short = top_model.split("/", 1)[-1] if "/" in top_model else top_model
         if len(model_short) > 22:
             model_short = model_short[:20] + "…"
-        cost_color = _C_GREEN if d["cost"] == 0 else _C_GRAY
+        cost_color = _C_GREEN if d["cost"] == 0 else _C_LABEL
         lines.append(
-            f"    {_C_GRAY}{tool:<12}{_RESET}  {d['count']:>3}×  "
+            f"    {_C_LABEL}{tool:<12}{_RESET}  {d['count']:>3}×  "
             f"{model_short:<24}  {cost_color}${d['cost']:.4f}{_RESET}"
         )
     return lines
@@ -568,17 +573,22 @@ def _format_free_section(free_rows: list[dict], paid_rows: list[dict]) -> list[s
         in_t, out_t = d["in"], d["out"]
         est = False
         if in_t == 0 and out_t == 0:
-            in_t  = int(avg_in  * d["calls"])
-            out_t = int(avg_out * d["calls"])
-            est   = True
+            if paid_with_tokens:
+                # Estimate from paid call averages (Codex doesn't report tokens)
+                in_t  = int(avg_in  * d["calls"])
+                out_t = int(avg_out * d["calls"])
+                est   = True
+            else:
+                # No evidence of work done — don't claim savings
+                est = True
         baseline = _sonnet_baseline(in_t, out_t)
-        saved    = max(0.0, baseline)
+        saved    = max(0.0, baseline) if (in_t + out_t) > 0 else 0.0
         total_saved += saved
-        est_tag  = f" {_C_DARK}~est{_RESET}" if est else ""
+        est_tag  = f" {_C_MUTED}~est{_RESET}" if est else ""
         in_k  = f"{in_t  // 1000}k" if in_t  >= 1000 else str(in_t)
         out_k = f"{out_t // 1000}k" if out_t >= 1000 else str(out_t)
         body.append(
-            f"    {_C_GRAY}{provider:<10}{_RESET}  {d['calls']:>3}×  "
+            f"    {_C_LABEL}{provider:<10}{_RESET}  {d['calls']:>3}×  "
             f"{in_k}↑ {out_k}↓{est_tag}  {_C_GREEN}${saved:.4f}{_RESET}"
         )
 
@@ -590,10 +600,10 @@ def _format_free_section(free_rows: list[dict], paid_rows: list[dict]) -> list[s
         label = "Prepaid (Codex)"
     else:
         label = "Local / prepaid"
-    saved_color = _C_GREEN if total_saved > 0 else _C_GRAY
+    saved_color = _C_GREEN if total_saved > 0 else _C_LABEL
     lines = [
         f"    {_C_WHITE}{total_calls}{_RESET} calls  ·  "
-        f"{saved_color}${total_saved:.4f} saved{_RESET} vs Sonnet  {_C_DARK}{label}{_RESET}"
+        f"{saved_color}${total_saved:.4f} saved{_RESET} vs Sonnet  {_C_MUTED}{label}{_RESET}"
     ]
     lines += body
     return lines
@@ -674,7 +684,11 @@ _RESET = "\033[0m"
 
 # Semantic color palette — standard ANSI that adapts to terminal theme.
 # All colors chosen to be readable on BOTH white and black backgrounds.
-# Key rule: never use \033[2m (dim) alone — it's invisible on white bg.
+# Key rules:
+#   - never use \033[2m (dim) alone — invisible on white bg
+#   - never use \033[90m for labels/data — too faint on white bg
+#   - use _C_LABEL (default fg) for secondary text that must be readable
+#   - use _C_MUTED (\033[90m) ONLY for truly optional annotations (live, ~est, sub)
 _C_CYAN    = "\033[36m"       # Teal — works on both
 _C_GREEN   = "\033[32m"       # Green — works on both
 _C_YELLOW  = "\033[33m"       # Yellow/brown — works on both
@@ -682,8 +696,10 @@ _C_ORANGE  = "\033[33;1m"     # Bold yellow = orange on most terminals
 _C_RED     = "\033[31m"       # Red — works on both
 _C_MAGENTA = "\033[35m"       # Magenta — works on both
 _C_WHITE   = "\033[1m"        # Bold (inherits fg) — always visible
-_C_GRAY    = "\033[90m"       # Bright black — visible gray on both bg
-_C_DARK    = "\033[90m"       # Same — never use \033[2m, it vanishes on white
+_C_LABEL   = ""               # Default foreground — always readable on any bg
+_C_MUTED   = "\033[90m"       # Bright black — ONLY for optional annotations
+_C_GRAY    = ""               # Alias: default fg (was \033[90m, too faint on white)
+_C_DARK    = "\033[90m"       # Dividers and bar unfilled segments only
 
 # ── Routing method symbols ────────────────────────────────────────────────────
 _METHOD_SYMBOLS = {
@@ -896,9 +912,9 @@ def _format_routing_logic(session_start: float | None) -> list[str]:
         symbol = d.get("symbol", "❓")
         name = d["method"]
         lines.append(
-            f"    {symbol} {_C_GRAY}{name:<{max_name}}{_RESET}"
+            f"    {symbol} {_C_LABEL}{name:<{max_name}}{_RESET}"
             f"  {_C_WHITE}{d['hits']:>3}{_RESET}"
-            f"  {_C_DARK}{pct:>3.0f}%{_RESET}"
+            f"  {pct:>3.0f}%"
         )
     return lines
 
@@ -931,8 +947,8 @@ def _format_cumulative_section(periods: list[tuple[str, int, int, int, float]]) 
     lines: list[str] = [
         f"  {_BOLD}Savings{_RESET}",
         "",
-        f"    {_C_GREEN}{_BOLD}{saved_hero}{_RESET}  {_C_GRAY}lifetime{_RESET}"
-        f"    {_C_WHITE}{today_s}{_RESET}  {_C_GRAY}today{_RESET}",
+        f"    {_C_GREEN}{_BOLD}{saved_hero}{_RESET}  lifetime"
+        f"    {_C_WHITE}{today_s}{_RESET}  today",
         "",
     ]
 
@@ -942,9 +958,9 @@ def _format_cumulative_section(periods: list[tuple[str, int, int, int, float]]) 
         call_str = f"{calls:,}" if calls >= 1000 else str(calls)
         short_label = {"today": "today", "this week": "week", "this month": "month", "all time": "all"}.get(label, label)
         lines.append(
-            f"    {_C_GRAY}{short_label:<6}{_RESET}"
+            f"    {short_label:<6}"
             f"  {_C_WHITE}{s:>8}{_RESET}"
-            f"  {_C_DARK}{call_str:>6}{_RESET}"
+            f"  {call_str:>6}"
         )
 
     # Yearly projection
@@ -966,7 +982,7 @@ def _format_cumulative_section(periods: list[tuple[str, int, int, int, float]]) 
         rate_usd, rate_tok, basis = today_saved, today_tok, "today"
     if rate_usd > 0:
         lines.append(
-            f"    {_C_DARK}≈ ${rate_usd * 365:.0f}/yr · {_fmt_tok(int(rate_tok * 365))} tok/yr{_RESET}  {_DIM}({basis}){_RESET}"
+            f"    ≈ ${rate_usd * 365:.0f}/yr · {_fmt_tok(int(rate_tok * 365))} tok/yr  {_C_MUTED}({basis}){_RESET}"
         )
 
     # 14-day sparkline
@@ -1008,11 +1024,11 @@ def _format_cumulative_section(periods: list[tuple[str, int, int, int, float]]) 
     cache_stats = _query_cache_hit_stats()
     if cache_stats:
         hr = cache_stats['hit_rate_pct']
-        hr_color = _C_GREEN if hr >= 50 else _C_GRAY
+        hr_color = _C_GREEN if hr >= 50 else _C_LABEL
         quality_parts.append(f"{hr_color}{hr:.0f}%{_RESET} cache hit")
 
     if quality_parts:
-        lines.append(f"    {_C_DARK}{' · '.join(quality_parts)}{_RESET}")
+        lines.append(f"    {' · '.join(quality_parts)}")
 
     return lines
 
@@ -1079,7 +1095,7 @@ def _format_complexity_breakdown(session_start: float) -> list[str]:
         return []
     
     _COMPLEXITY_COLORS = {"simple": _C_GREEN, "moderate": _C_YELLOW, "complex": _C_ORANGE}
-    lines = [f"    {_C_GRAY}Model selection by complexity{_RESET}"]
+    lines = ["    Model selection by complexity"]
 
     total_calls = sum(
         cnt for models in complexity_data.values()
@@ -1104,8 +1120,8 @@ def _format_complexity_breakdown(session_start: float) -> list[str]:
             model_str_parts.append(f"{model} ({cnt}×)")
 
         model_str = " · ".join(model_str_parts)
-        c_color = _COMPLEXITY_COLORS.get(complexity, _C_GRAY)
-        cost_tag = f"{_C_GRAY}${cost_sum:.4f}{_RESET}" if cost_sum > 0 else f"{_C_GREEN}free{_RESET}"
+        c_color = _COMPLEXITY_COLORS.get(complexity, _C_LABEL)
+        cost_tag = f"${cost_sum:.4f}" if cost_sum > 0 else f"{_C_GREEN}free{_RESET}"
 
         lines.append(
             f"    {c_color}{complexity:<10}{_RESET} {cnt_sum:>2}×  {model_str}  {cost_tag}"
@@ -1118,8 +1134,8 @@ def _format_complexity_breakdown(session_start: float) -> list[str]:
             f"    {_C_WHITE}{total_calls}{_RESET} routed = "
             f"{_C_GREEN}{free_calls}{_RESET} local + "
             f"{paid_calls} external"
-            + (f" + {_C_DARK}{filtered_test_calls} excluded{_RESET}" if filtered_test_calls > 0 else "")
-            + f"  {_C_DARK}·{_RESET} avg ${avg_cost:.4f}/call"
+            + (f" + {_C_MUTED}{filtered_test_calls} excluded{_RESET}" if filtered_test_calls > 0 else "")
+            + f"  · avg ${avg_cost:.4f}/call"
         )
 
     return lines
@@ -1129,8 +1145,8 @@ def _format(tools: dict[str, dict], cc_rows: list[dict], free_rows: list[dict],
             start: dict | None, current: dict | None, is_live: bool,
             cumulative: list[tuple[str, int, int, int, float]] | None = None,
             session_start: float | None = None) -> str:
-    div = f"{_C_DARK}{'─' * (WIDTH - 4)}{_RESET}"
-    lines = ["", f"  {_C_CYAN}{_BOLD}⚡ LLM Router{_RESET}  {_C_GRAY}session summary{_RESET}", f"  {div}"]
+    div = f"{'─' * (WIDTH - 4)}"
+    lines = ["", f"  {_C_CYAN}{_BOLD}⚡ LLM Router{_RESET}  session summary", f"  {div}"]
 
     if current:
         lines.append("")
@@ -1169,7 +1185,7 @@ def _format(tools: dict[str, dict], cc_rows: list[dict], free_rows: list[dict],
         cum_lines = _format_cumulative_section(cumulative)
         if cum_lines:
             lines.append("")
-            lines.append(f"  {_C_DARK}{'─' * (WIDTH - 4)}{_RESET}")
+            lines.append(f"  {'─' * (WIDTH - 4)}")
             lines.append("")
             lines += cum_lines
 
@@ -1355,7 +1371,7 @@ def main() -> None:
             # Progress bar showing how much was preserved
             bar_len = 20
             filled = int(pct_saved / 100 * bar_len)
-            bar = _C_GREEN + "━" * filled + _C_GRAY + "─" * (bar_len - filled) + _RESET
+            bar = _C_GREEN + "━" * filled + "\033[90m" + "─" * (bar_len - filled) + _RESET
             lines.append(f"  Quota Preserved  {bar} {pct_saved:.0f}%")
             if tokens_reclaimed > 0:
                 tok_k = tokens_reclaimed / 1000

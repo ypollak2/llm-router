@@ -51,12 +51,19 @@ def test_all_tools_registered():
         "agoragentic_task", "agoragentic_browse", "agoragentic_wallet", "agoragentic_status",
     }
     
-    # Registered tools should include all known tools
-    assert known_tools.issubset(registered_names), f"Missing tools: {known_tools - registered_names}"
-    
-    # All registered tools should be in the known set
-    assert registered_names.issubset(known_tools | expected_names), \
-        f"Unexpected tools: {registered_names - (known_tools | expected_names)}"
+    # With slim=routing (default), only routing-tier tools are registered.
+    # Check that registered tools are a known subset, not that ALL tools are present.
+    from llm_router.config import get_config
+    slim = get_config().llm_router_slim
+    if slim == "off":
+        assert known_tools.issubset(registered_names), f"Missing tools: {known_tools - registered_names}"
+    else:
+        # In slim mode, registered tools should be a subset of known tools
+        assert registered_names.issubset(known_tools | expected_names), \
+            f"Unexpected tools: {registered_names - (known_tools | expected_names)}"
+        # At minimum, core routing tools must be present
+        core_tools = {"llm_query", "llm_code", "llm_research", "llm_usage"}
+        assert core_tools.issubset(registered_names), f"Missing core tools: {core_tools - registered_names}"
 
 
 def test_resource_registered():

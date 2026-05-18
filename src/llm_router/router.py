@@ -631,8 +631,8 @@ async def _notify(ctx: Any | None, level: str, message: str) -> None:
         return
     try:
         await getattr(ctx, level)(message)
-    except Exception:
-        pass
+    except Exception as e:
+        log.debug("notify_failed", level=level, error=str(e))
 
 
 def _enrich_response(
@@ -744,8 +744,8 @@ async def _dispatch_model_loop(
                     complexity=c.value,
                 )
                 continue
-        except Exception:
-            pass  # Quality feedback unavailable — don't block routing
+        except Exception as e:
+            log.warning("quality_feedback_failed", error=str(e))
 
         # Refresh provider budget state for each attempt so long fallback walks
         # do not keep routing to providers that exhausted their budget mid-chain.
@@ -779,6 +779,7 @@ async def _dispatch_model_loop(
             )
 
         chain_attempts.append(model)
+        await _notify(ctx, "info", f"Routing to: {model}")
         try:
             with traced_span(
                 "provider_call",
@@ -917,8 +918,8 @@ async def _dispatch_model_loop(
                     opus_equivalent_usd=_receipt.opus_equivalent_cost,
                     gates_passed=_receipt.all_passed,
                 )
-            except Exception:
-                pass
+            except Exception as e:
+                log.warning("session_spend_tracking_failed", error=str(e))
 
             # Record exchange in session buffer for future context injection
             buf = get_session_buffer()
@@ -1346,7 +1347,8 @@ async def route_and_call(
             try:
                 from llm_router.session_spend import _estimate_cost as _est_fn
                 _reservation = _est_fn("gpt-4o", len(prompt) // 4, 500)
-            except Exception:
+            except Exception as e:
+                log.debug("cost_estimation_failed", error=str(e))
                 _reservation = 0.0
             _pending_spend += _reservation
             reserve_tokens("anthropic", 500)
@@ -1501,8 +1503,8 @@ async def route_and_call(
                 async with _budget_lock:
                     _pending_spend = max(0.0, _pending_spend - _reservation)
                 raise
-            except Exception:
-                pass  # Never block routing due to escalation check errors
+            except Exception as e:
+                log.warning("budget_escalation_check_failed", error=str(e))
 
         # ── Context preparation (v7.7) ──────────────────────────────────────────
         # Enrich the system prompt with task-specific behavioral rules when the

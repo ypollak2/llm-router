@@ -15,7 +15,7 @@ Welcome! This guide will help you get **smart LLM routing** running in your envi
 ### 1. Install the package
 
 ```bash
-pip install llm-router
+pip install llm-routing
 ```
 
 ### 2. Install for your host
