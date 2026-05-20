@@ -1,0 +1,40 @@
+#*********** Powered by backslash security - Start ******
+
+#Database Files & Backups
+*.sqlite
+*.db
+*.sql
+*.rdb # Catches dump.rdb and other Redis dump files
+data/ # if it contains embedded databases or sensitive data files
+
+#================================================
+#AI Ignore Patterns for Sensitive Information in Repositories
+#This file specifies patterns for files and directories that AI coding agents
+#should ignore during indexing to prevent data leaks and security breaches.
+#================================================
+
+#Configuration Files (Credentials & API Keys)
+.env* # Catches .env, .env.local, .env.development, etc.
+aws/credentials
+~/.aws/credentials
+gcloud/credentials
+azure/credentials
+config.json # if it contains secrets
+settings.json # if it contains secrets
+appsettings.json
+appsettings.Development.json
+secrets.json
+credentials.json
+api_keys.py
+database.yml # if it contains credentials directly
+application.properties # if it contains secrets
+*.pem
+*.key
+*.crt
+*.pfx
+*.jks
+kubeconfig
+*.yaml # if directly embedding secrets
+*.yml # if directly embedding secrets
+
+#*********** Powered by backslash security - End *****
