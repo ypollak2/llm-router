@@ -23,6 +23,8 @@ Usage:
     llm-router setup            — interactive wizard: configure providers and API keys
     llm-router init-policy      — interactive wizard: choose or create a routing policy (v7.5.0)
     llm-router status           — show routing status, today's savings, subscription pressure
+    llm-router savings-report   — detailed token/cost breakdown (all-time, by model/provider)
+    llm-router savings-report --period week  — weekly savings report
     llm-router doctor           — check that everything is wired up correctly
     llm-router demo             — show routing decisions for sample prompts
     llm-router dashboard        — start the web dashboard at localhost:7337
@@ -581,6 +583,9 @@ def main() -> None:
     elif args and args[0] == "stats":
         from llm_router.commands.stats import cmd_stats
         sys.exit(cmd_stats(args[1:]))
+    elif args and args[0] == "savings-report":
+        from llm_router.commands.savings_report import main as _savings_report_main
+        sys.exit(_savings_report_main(args[1:]))
     else:
         # Default: start the MCP server (original behavior)
         from llm_router.server import main as _mcp_main
