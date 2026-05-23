@@ -1203,8 +1203,7 @@ def _format(tools: dict[str, dict], cc_rows: list[dict], free_rows: list[dict],
     try:
         from llm_router.hooks.dashboard_enhanced import (
             render_enhanced_sparkline,
-            render_models_section,
-            query_session_models,
+            query_last_prompt_model,
         )
         daily_14d = _query_daily_14d()
         if daily_14d:
@@ -1215,12 +1214,11 @@ def _format(tools: dict[str, dict], cc_rows: list[dict], free_rows: list[dict],
                 lines.append("")
                 lines += sparkline_block.split("\n")
 
-        # Models used this session
-        models = query_session_models(session_start, db_path=DB_PATH)
-        if models:
+        # Last routed model
+        last_model = query_last_prompt_model(db_path=DB_PATH)
+        if last_model:
             lines.append("")
-            models_block = render_models_section(models)
-            lines += models_block.split("\n")
+            lines.append(f"  {_BOLD}Last Routed Model{_RESET}  {last_model}")
     except Exception:
         # Fallback: use old cumulative section if enhanced dashboard fails
         if cumulative:
@@ -1404,9 +1402,6 @@ def main() -> None:
         net_savings = spend.get("net_savings_usd", 0.0)
         opus_equiv = spend.get("opus_equivalent_usd", 0.0)
         ext_min = spend.get("extension_minutes", 0.0)
-        gate_rate = spend.get("gate_pass_rate", 100.0)
-        gates_p = spend.get("gates_passed", 0)
-        gates_f = spend.get("gates_failed", 0)
 
         # Build savings panel
         lines = []
@@ -1425,10 +1420,6 @@ def main() -> None:
             lines.append(f"  Net preserved:    {_C_GREEN}${net_savings:.4f}{_RESET}")
         else:
             lines.append(f"  Session spend: ${total:.4f} across {calls} call(s)")
-
-        # Gate quality line
-        if gates_p + gates_f > 0:
-            lines.append(f"  Quality gates: {gates_p}/{gates_p + gates_f} passed ({gate_rate:.0f}%)")
 
         if spend.get("anomaly_flag"):
             lines.insert(0, f"  {_C_RED}⚠  ANOMALY: spend rate exceeded threshold{_RESET}")

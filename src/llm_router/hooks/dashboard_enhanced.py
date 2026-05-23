@@ -77,6 +77,29 @@ def query_session_models(session_start: float | None, db_path: str | Path | None
         return {}
 
 
+def query_last_prompt_model(db_path: str | Path | None = None) -> str | None:
+    """Return the model used in the most recent successful routing call.
+
+    Returns: model name string, or None if no recent call found.
+    """
+    resolved = Path(db_path) if db_path else DB_PATH
+    if not resolved.exists():
+        return None
+    try:
+        conn = sqlite3.connect(str(resolved))
+        row = conn.execute(
+            "SELECT model FROM usage "
+            "WHERE success=1 AND model IS NOT NULL AND model != '?' "
+            "ORDER BY timestamp DESC LIMIT 1",
+        ).fetchone()
+        conn.close()
+        if row and row[0] and not _is_test_model(row[0]):
+            return row[0]
+        return None
+    except Exception:
+        return None
+
+
 def render_enhanced_sparkline(
     daily_data: list[tuple[str, int, int, float]],  # (date, calls, tokens, saved)
     max_height: int = 8,

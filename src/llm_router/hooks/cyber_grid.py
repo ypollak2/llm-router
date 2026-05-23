@@ -308,52 +308,6 @@ def _build_financial(data: dict) -> Table:
             row.append(f" {tok_str:>6}", style=_MUTED)
         tbl.add_row(row)
 
-    # Baseline vs actual comparison
-    tools = data.get("tools", {})
-    if tools:
-        total_in = sum(t["in"] for t in tools.values())
-        total_out = sum(t["out"] for t in tools.values())
-        total_cost = sum(t["cost"] for t in tools.values())
-        baseline = (total_in * 3.0 + total_out * 15.0) / 1_000_000
-        if baseline > 0:
-            pct_saved = round((baseline - total_cost) / baseline * 100)
-            tbl.add_row(Text())
-            bl = Text()
-            bl.append(" Baseline ", style=_LABEL)
-            bl.append(f"${baseline:.4f}", style=_DIM_GRAY)
-            tbl.add_row(bl)
-            al = Text()
-            al.append(" Actual   ", style=_LABEL)
-            al.append(f"${total_cost:.4f}", style=_WHITE)
-            badge_style = _NEON_GREEN if pct_saved >= 80 else (
-                _WARN_YELLOW if pct_saved >= 50 else _WARN_ORANGE)
-            al.append(f"  [{pct_saved}%]", style=badge_style)
-            tbl.add_row(al)
-
-    # Yearly projection
-    month_d = period_map.get("this month", (0, 0, 0, 0.0))
-    week_d = period_map.get("this week", (0, 0, 0, 0.0))
-    rate = 0.0
-    basis = ""
-    if month_d[3] > 0:
-        from datetime import datetime
-        days = max(1, datetime.now().day)
-        rate = month_d[3] / days
-        basis = "30d avg"
-    elif week_d[3] > 0:
-        rate = week_d[3] / 7
-        basis = "7d avg"
-    elif today_d[3] > 0:
-        rate = today_d[3]
-        basis = "today"
-
-    if rate > 0:
-        tbl.add_row(Text())
-        proj = Text()
-        proj.append(f" ~${rate * 365:.0f}/yr", style=_ACCENT)
-        proj.append(f"  ({basis})", style=_DIM_GRAY)
-        tbl.add_row(proj)
-
     return tbl
 
 
@@ -463,40 +417,23 @@ def _build_l14_panel(data: dict) -> Panel | None:
 
 
 def _build_models_panel(data: dict) -> Panel | None:
-    """Panel showing which models were routed to during this session."""
-    session_start = data.get("session_start")
-    if session_start is None:
-        return None
-
+    """Panel showing which model was used for the last routed prompt."""
     try:
-        from llm_router.hooks.dashboard_enhanced import query_session_models
+        from llm_router.hooks.dashboard_enhanced import query_last_prompt_model
         import os
         db_path = data.get("db_path") or os.path.expanduser("~/.llm-router/usage.db")
-        models = query_session_models(session_start, db_path=db_path)
+        model = query_last_prompt_model(db_path=db_path)
     except Exception:
         return None
 
-    if not models:
+    if not model:
         return None
 
     content = Text()
-    sorted_models = sorted(models.items(), key=lambda x: x[1], reverse=True)
-    total = sum(c for _, c in sorted_models)
+    style = _model_style(model)
+    content.append(f"  {model}", style=style)
 
-    for model_name, count in sorted_models:
-        pct = (count / total * 100) if total > 0 else 0
-        style = _model_style(model_name)
-
-        # Progress bar
-        bar_width = 20
-        filled = int(pct / 100 * bar_width)
-        content.append(f"  {model_name:<24}", style=style)
-        content.append("━" * filled, style=_NEON_GREEN)
-        content.append("─" * (bar_width - filled), style=_DIM_GRAY)
-        content.append(f" {pct:>3.0f}%", style=_WHITE)
-        content.append(f" ({count})\n", style=_LABEL)
-
-    return Panel(content, title="MODELS ROUTED", title_align="left",
+    return Panel(content, title="LAST ROUTED MODEL", title_align="left",
                  border_style=_ACCENT, padding=(0, 1))
 
 
