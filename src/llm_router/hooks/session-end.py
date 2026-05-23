@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm-router-hook-version: 14
+# llm-router-hook-version: 15
 """Stop hook — unified session summary: CC subscription delta + external routing costs."""
 
 from __future__ import annotations
@@ -374,7 +374,7 @@ def _query_cumulative_savings() -> list[tuple[str, int, int, int, float]]:
                 ss_rows = conn.execute(
                     f"SELECT COUNT(*), COALESCE(SUM(estimated_claude_cost_saved),0) "
                     f"FROM savings_stats WHERE {where} "
-                    f"AND LOWER(provider) NOT IN ({placeholders})"
+                    f"AND LOWER(model_used) NOT IN ({placeholders})"
                 ).fetchone()
                 if ss_rows and ss_rows[0] > 0:
                     calls += ss_rows[0]
@@ -508,10 +508,20 @@ def _format_routing_section(tools: dict[str, dict]) -> list[str]:
     total_base  = _sonnet_baseline(total_in, total_out)
     total_saved = max(0.0, total_base - total_cost)
     savings_pct = round(total_saved / total_base * 100) if total_base > 0 else 0
+    total_tokens = total_in + total_out
+
+    # Format token count (human-readable)
+    if total_tokens >= 1_000_000:
+        tokens_str = f"{total_tokens / 1_000_000:.1f}M"
+    elif total_tokens >= 1_000:
+        tokens_str = f"{total_tokens / 1_000:.1f}k"
+    else:
+        tokens_str = str(total_tokens)
 
     pct_color = _C_GREEN if savings_pct >= 80 else (_C_YELLOW if savings_pct >= 50 else _C_ORANGE)
     lines = [
         f"    {_C_WHITE}{total_calls}{_RESET} calls  "
+        f"{tokens_str} tokens  "
         f"${total_cost:.4f} actual  "
         f"${total_base:.4f} baseline  "
         f"{pct_color}{savings_pct}% saved{_RESET}",
@@ -524,10 +534,18 @@ def _format_routing_section(tools: dict[str, dict]) -> list[str]:
         model_short = top_model.split("/", 1)[-1] if "/" in top_model else top_model
         if len(model_short) > 22:
             model_short = model_short[:20] + "…"
+
+        # Format tool's token count
+        tool_tokens = d["in"] + d["out"]
+        if tool_tokens >= 1_000:
+            tool_tokens_str = f"{tool_tokens / 1_000:.1f}k"
+        else:
+            tool_tokens_str = str(tool_tokens)
+
         cost_color = _C_GREEN if d["cost"] == 0 else _C_LABEL
         lines.append(
             f"    {_C_LABEL}{tool:<12}{_RESET}  {d['count']:>3}×  "
-            f"{model_short:<24}  {cost_color}${d['cost']:.4f}{_RESET}"
+            f"{tool_tokens_str:>6}  {model_short:<20}  {cost_color}${d['cost']:.4f}{_RESET}"
         )
     return lines
 
@@ -1181,13 +1199,37 @@ def _format(tools: dict[str, dict], cc_rows: list[dict], free_rows: list[dict],
             lines.append("")
             lines += routing_lines
 
-    if cumulative:
-        cum_lines = _format_cumulative_section(cumulative)
-        if cum_lines:
+    # Enhanced 14-day sparkline + models section (replaces old cumulative savings)
+    try:
+        from llm_router.hooks.dashboard_enhanced import (
+            render_enhanced_sparkline,
+            render_models_section,
+            query_session_models,
+        )
+        daily_14d = _query_daily_14d()
+        if daily_14d:
             lines.append("")
             lines.append(f"  {'─' * (WIDTH - 4)}")
+            sparkline_block = render_enhanced_sparkline(daily_14d, max_height=8)
+            if sparkline_block:
+                lines.append("")
+                lines += sparkline_block.split("\n")
+
+        # Models used this session
+        models = query_session_models(session_start, db_path=DB_PATH)
+        if models:
             lines.append("")
-            lines += cum_lines
+            models_block = render_models_section(models)
+            lines += models_block.split("\n")
+    except Exception:
+        # Fallback: use old cumulative section if enhanced dashboard fails
+        if cumulative:
+            cum_lines = _format_cumulative_section(cumulative)
+            if cum_lines:
+                lines.append("")
+                lines.append(f"  {'─' * (WIDTH - 4)}")
+                lines.append("")
+                lines += cum_lines
 
     lines.append("")
     lines.append(f"  {div}")
@@ -1261,6 +1303,8 @@ def _collect_report_data(
 
     return {
         "session_id": session_id,
+        "session_start": session_start,
+        "db_path": DB_PATH,
         "duration_secs": time.time() - session_start,
         "cc_start": start,
         "cc_current": current,

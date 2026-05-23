@@ -2,6 +2,16 @@
 
 **For releases v6.2 and earlier, see [CHANGELOG_ARCHIVE.md](docs/CHANGELOG_ARCHIVE.md).**
 
+## v9.0.0 — Compaction-Resilient Routing Enforcement (2026-05-23)
+
+### Fixed
+
+- **Session type path mismatch** — `auto-route.py` reset `session_type_{id}.json` but `enforce-route.py` read `session_{id}.json`, so once a session was marked "coding", enforcement stayed soft permanently. Now both hooks use the same path.
+- **Pending route TTL too short** — extended from 5 minutes to 1 hour. Routing state now survives context compaction delays without expiring between prompts.
+- **Silent env var override** — `LLM_ROUTER_ENFORCE` set in `.zshrc`/`.bashrc` silently overrode `routing.yaml` with no warning. `enforce-route.py` now logs a conflict warning to `enforcement.log`, and `set-enforce` warns users when a shell env var will override the written config.
+
+---
+
 ## v8.7.0 — Cyber-Grid Session Summary (2026-05-15)
 
 ### Added

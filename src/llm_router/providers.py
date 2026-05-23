@@ -106,9 +106,16 @@ async def call_llm(
         "model": model,
         "messages": cached_messages,
         "temperature": temperature,
-        "max_tokens": max_tokens,
         "timeout": config.request_timeout,
     }
+
+    # 🥷 Backslash-Security: Avoid shell by using safe APIs for LLM calls.
+    # Ollama integration in LiteLLM has a bug where max_tokens causes empty responses.
+    # Workaround: don't pass max_tokens to Ollama models (let them respond naturally).
+    # This is safe since Ollama typically returns reasonable-length responses.
+    if not model.startswith("ollama/"):
+        kwargs["max_tokens"] = max_tokens
+
     if extra_params:
         safe = {k: v for k, v in extra_params.items() if k in _ALLOWED_EXTRA_PARAMS}
         kwargs.update(safe)
@@ -192,10 +199,15 @@ async def call_llm_stream(
         "model": model,
         "messages": cached_messages,
         "temperature": temperature,
-        "max_tokens": max_tokens,
         "timeout": config.request_timeout,
         "stream": True,
     }
+
+    # 🥷 Backslash-Security: Same Ollama workaround as in call_llm() above.
+    # Ollama + max_tokens causes empty responses in LiteLLM.
+    if not model.startswith("ollama/"):
+        kwargs["max_tokens"] = max_tokens
+
     if extra_params:
         safe = {k: v for k, v in extra_params.items() if k in _ALLOWED_EXTRA_PARAMS}
         kwargs.update(safe)

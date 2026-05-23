@@ -10,7 +10,7 @@ from llm_router.classifier import classify_complexity
 from llm_router.config import get_config
 from llm_router.cost import (
     get_correction_count, get_daily_claude_breakdown, get_daily_claude_tokens,
-    get_savings_summary, log_claude_usage, log_correction,
+    get_savings_summary, log_claude_usage, log_correction, log_usage,
 )
 from llm_router.input_validation import (
     ValidationError, validate_routing_parameters,
@@ -395,6 +395,18 @@ async def llm_route(
         cost=resp.cost_usd,
         reason=classification.reasoning,
     )
+
+    # Log routing decision to database for savings tracking
+    try:
+        await log_usage(
+            response=resp,
+            task_type=resolved_task_type,
+            profile=profile,
+            success=True,
+            complexity=classification.complexity.value,
+        )
+    except Exception as e:
+        await ctx.warning(f"Failed to log routing usage: {e}")
 
     # Step 5: Build response with visible routing indicator
     total_cost = classification.classifier_cost_usd + resp.cost_usd

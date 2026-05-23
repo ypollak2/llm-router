@@ -513,3 +513,81 @@ class TestProductionPolish:
             lines = se._format_complexity_breakdown(session_start - 120)
         text = "\n".join(lines)
         assert "local" in text
+
+
+# ── Enhanced Dashboard Tests ──────────────────────────────────────────────────
+
+class TestEnhancedDashboard:
+    """Tests for the enhanced sparkline and models dashboard."""
+
+    def test_sparkline_renders_with_valid_data(self):
+        """Sparkline produces multi-line output with axes."""
+        from llm_router.hooks.dashboard_enhanced import render_enhanced_sparkline
+
+        data = [
+            ("2026-05-10", 10, 500, 0.01),
+            ("2026-05-11", 20, 1000, 0.02),
+            ("2026-05-12", 30, 1500, 0.03),
+        ]
+        output = render_enhanced_sparkline(data, max_height=4)
+        assert "14-Day Routing Activity" in output
+        assert "┤" in output  # Y-axis
+        assert "└" in output  # X-axis
+        assert "calls" in output
+
+    def test_sparkline_empty_data(self):
+        """Empty data returns empty string."""
+        from llm_router.hooks.dashboard_enhanced import render_enhanced_sparkline
+
+        assert render_enhanced_sparkline([]) == ""
+        assert render_enhanced_sparkline([("2026-05-10", 0, 0, 0.0)]) == ""
+
+    def test_models_section_renders(self):
+        """Models section shows model names and percentages."""
+        from llm_router.hooks.dashboard_enhanced import render_models_section
+
+        models = {"ollama:gemma4": 10, "gpt-4o-mini": 5}
+        output = render_models_section(models)
+        assert "Models Routed This Session" in output
+        assert "gemma4" in output
+        assert "gpt-4o-mini" in output
+        assert "67%" in output  # 10/15
+
+    def test_models_section_empty(self):
+        """Empty models returns empty string."""
+        from llm_router.hooks.dashboard_enhanced import render_models_section
+
+        assert render_models_section({}) == ""
+
+    def test_query_session_models_filters_test_models(self, temp_db, session_start):
+        """Mock/test models are filtered from query results."""
+        from llm_router.hooks.dashboard_enhanced import query_session_models
+
+        ts = se._session_start_iso(session_start - 60)
+        _insert_usage(temp_db, [
+            {"timestamp": ts, "model": "gpt-4o-mini", "provider": "openai",
+             "complexity": "simple", "cost_usd": 0.001},
+            {"timestamp": ts, "model": "mock-model", "provider": "openai",
+             "complexity": "simple", "cost_usd": 0.0},
+        ])
+        models = query_session_models(session_start - 120, db_path=str(temp_db))
+        assert "gpt-4o-mini" in models
+        assert "mock-model" not in models
+
+    def test_format_includes_enhanced_sparkline(self, temp_db, session_start):
+        """Full _format output includes enhanced sparkline when data exists."""
+        ts = se._session_start_iso(session_start - 60)
+        _insert_usage(temp_db, [
+            {"timestamp": ts, "model": "gpt-4o-mini", "provider": "openai",
+             "complexity": "moderate", "cost_usd": 0.001},
+        ])
+        with patch.object(se, "DB_PATH", str(temp_db)):
+            paid, cc, free = se._query_session_data(session_start - 120)
+            tools = se._aggregate(paid)
+            output = se._format(
+                tools, [], free, paid,
+                None, None, False,
+                session_start=session_start - 120,
+            )
+        # Should contain either enhanced sparkline or fallback
+        assert "LLM Router" in output
