@@ -56,7 +56,7 @@ from pathlib import Path
 
 _ROUTER_DIR = Path.home() / ".llm-router"
 _LOG_PATH = _ROUTER_DIR / "enforcement.log"
-_PENDING_TTL = 60  # seconds — matches auto-route.py _PENDING_ROUTE_TTL_SEC
+_PENDING_TTL = 3600  # seconds — 1h TTL; survives context compaction; auto-route resets on each new prompt
 
 # Base blocklist: always blocked before routing is satisfied (all task types).
 _BASE_BLOCK_TOOLS = frozenset({
@@ -337,21 +337,34 @@ def main() -> None:
         sys.exit(0)
 
     enforce = os.environ.get("LLM_ROUTER_ENFORCE", "").lower()
+    yaml_enforce = ""
+    try:
+        _yaml = _ROUTER_DIR / "routing.yaml"
+        if _yaml.exists():
+            for _line in _yaml.read_text().splitlines():
+                if _line.strip().startswith("enforce:"):
+                    yaml_enforce = _line.split(":", 1)[1].strip().lower()
+                    break
+    except Exception:
+        pass
     if not enforce:
         # Fall back to ~/.llm-router/routing.yaml so users who set
         # `enforce: hard` there get the expected behaviour without
         # needing a separate env-var export.
+        enforce = yaml_enforce or "smart"
+    elif yaml_enforce and enforce != yaml_enforce:
+        # Env var overrides routing.yaml — log a warning so users
+        # can discover silent overrides from .zshrc / .bashrc.
         try:
-            _yaml = _ROUTER_DIR / "routing.yaml"
-            if _yaml.exists():
-                for _line in _yaml.read_text().splitlines():
-                    if _line.strip().startswith("enforce:"):
-                        enforce = _line.split(":", 1)[1].strip().lower()
-                        break
-        except Exception:
+            _log_msg = (
+                f"[{time.strftime('%H:%M:%S')}] WARNING: LLM_ROUTER_ENFORCE={enforce} "
+                f"(env var) overrides routing.yaml enforce={yaml_enforce}. "
+                f"Remove from ~/.zshrc or unset LLM_ROUTER_ENFORCE to use routing.yaml value.\n"
+            )
+            with open(_LOG_PATH, "a", encoding="utf-8") as _lf:
+                _lf.write(_log_msg)
+        except OSError:
             pass
-    if not enforce:
-        enforce = "smart"
     # shadow / off = pure observation (treat as off)
     if enforce in ("off", "shadow"):
         sys.exit(0)
@@ -467,13 +480,12 @@ def main() -> None:
     if enforce == "soft":
         sys.exit(0)  # soft mode: logged, allowed
 
-    # ── Stuck-pattern detection: auto-pivot after 2 violations ───────────────────
-    # If Claude has already violated the routing directive twice in this session,
-    # auto-downgrade to soft enforcement to prevent deadlocks and allow routing.
-    # This avoids the stuck pattern where investigation tools keep failing.
-    if violation_count >= 2:
-        _mark_session_coding(session_id)  # Downgrade enforcement for rest of session
-        sys.exit(0)  # Allow this tool call; soft-fail it
+    # ── Stuck-pattern detection: auto-pivot after 4 violations per turn ──────────
+    # auto-route.py resets violation count on each new user prompt, so this counter
+    # is per-turn. After 4 blocked attempts in one turn, allow through to prevent
+    # deadlocks — but only for THIS turn (next prompt resets).
+    if violation_count >= 4:
+        sys.exit(0)  # Allow this tool call to prevent deadlock
 
     if enforce == "smart":
         # In smart mode, NEVER block Read/Glob/Grep/LS.

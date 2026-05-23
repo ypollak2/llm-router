@@ -1203,7 +1203,7 @@ TOOL_MAP = {
 
 _ROUTER_DIR = Path.home() / ".llm-router"
 _ENFORCEMENT_LOG_PATH = _ROUTER_DIR / "enforcement.log"
-_PENDING_ROUTE_TTL_SEC = 60  # 60s per-turn TTL — old directives don't poison new turns
+_PENDING_ROUTE_TTL_SEC = 3600  # 1h TTL — survives context compaction; auto-route resets on each new prompt
 
 # ── Context-Aware Routing (v2.5) ─────────────────────────────────────────────
 # Short continuation prompts inherit the prior turn's classification so the
@@ -1769,6 +1769,16 @@ def main() -> None:
         write_pending = True
 
     directive = _prior_violation_notice(previous_unrouted) + directive
+
+    # ── Reset per-turn enforcement state ─────────────────────────────────────────
+    # Each new user prompt resets violation count and session type so that
+    # enforcement is fresh per-turn (not permanently degraded by earlier turns).
+    if session_id:
+        try:
+            (_ROUTER_DIR / f"violations_{session_id}.json").unlink(missing_ok=True)
+            (_ROUTER_DIR / f"session_{session_id}.json").unlink(missing_ok=True)
+        except OSError:
+            pass
 
     # ── Write enforcement state for enforce-route.py (PreToolUse hook) ──────────
     if write_pending and session_id:

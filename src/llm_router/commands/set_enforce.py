@@ -94,6 +94,14 @@ def _run_set_enforce(mode: str) -> None:
     print(f"  {_dim(_ENFORCE_DESCRIPTIONS[mode])}")
     print(f"\n  Written to: {routing_yaml}")
     print(f"  Written to: {env_path}")
+
+    # Warn if shell env var will override the files we just wrote
+    current_env = os.environ.get("LLM_ROUTER_ENFORCE", "")
+    if current_env and current_env.lower() != mode:
+        print(f"\n  {_bold('⚠ WARNING')}: LLM_ROUTER_ENFORCE={current_env} is set in your shell.")
+        print(f"  This overrides routing.yaml. Run: {_bold('unset LLM_ROUTER_ENFORCE')}")
+        print("  Or remove it from ~/.zshrc / ~/.bashrc")
+
     print(f"\n  {_dim('Restart Claude Code for the change to take effect.')}\n")
 
 
