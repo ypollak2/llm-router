@@ -113,15 +113,17 @@ def _format_reset_time(iso_ts: str) -> str:
         from datetime import datetime, timezone
         dt = datetime.fromisoformat(iso_ts.replace("Z", "+00:00"))
         now = datetime.now(timezone.utc)
-        local_time = dt.astimezone().strftime("%H:%M")
+        local_dt = dt.astimezone()
+        local_time = local_dt.strftime("%-I:%M%p").lower()
+        tz_name = local_dt.strftime("%Z")
         diff = dt - now
         total_min = int(diff.total_seconds() / 60)
         if total_min <= 0:
-            return f"reset pending ({local_time})"
+            return f"reset pending ({local_time} {tz_name})"
         hours, mins = divmod(total_min, 60)
         if hours > 0:
-            return f"resets in {hours}h {mins}m ({local_time})"
-        return f"resets in {mins}m ({local_time})"
+            return f"resets in {hours}h {mins}m ({local_time} {tz_name})"
+        return f"resets in {mins}m ({local_time} {tz_name})"
     except Exception:
         return ""
 
