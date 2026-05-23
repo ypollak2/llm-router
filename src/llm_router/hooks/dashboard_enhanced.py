@@ -100,6 +100,49 @@ def query_last_prompt_model(db_path: str | Path | None = None) -> str | None:
         return None
 
 
+def query_last_prompt_calls(db_path: str | Path | None = None,
+                            window_sec: int = 30) -> list[dict]:
+    """Return all routing calls from the most recent prompt.
+
+    Groups calls within `window_sec` seconds of the latest call,
+    which captures all routing activity from a single user prompt.
+
+    Returns: list of {model, provider, task_type, cost, in_tokens, out_tokens}
+    """
+    resolved = Path(db_path) if db_path else DB_PATH
+    if not resolved.exists():
+        return []
+    try:
+        conn = sqlite3.connect(str(resolved))
+        # Find the timestamp of the most recent call
+        latest = conn.execute(
+            "SELECT timestamp FROM usage "
+            "WHERE success=1 AND model IS NOT NULL AND model != '?' "
+            "ORDER BY timestamp DESC LIMIT 1",
+        ).fetchone()
+        if not latest:
+            conn.close()
+            return []
+        # Get all calls within window_sec of the latest
+        rows = conn.execute(
+            "SELECT model, provider, task_type, cost_usd, input_tokens, output_tokens "
+            "FROM usage "
+            "WHERE success=1 AND model IS NOT NULL AND model != '?' "
+            "AND timestamp >= datetime(?, '-' || ? || ' seconds') "
+            "ORDER BY timestamp DESC",
+            (latest[0], window_sec),
+        ).fetchall()
+        conn.close()
+        return [
+            {"model": r[0], "provider": r[1], "task_type": r[2],
+             "cost": r[3], "in_tokens": r[4], "out_tokens": r[5]}
+            for r in rows
+            if r[0] and not _is_test_model(r[0])
+        ]
+    except Exception:
+        return []
+
+
 def render_enhanced_sparkline(
     daily_data: list[tuple[str, int, int, float]],  # (date, calls, tokens, saved)
     max_height: int = 8,

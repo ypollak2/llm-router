@@ -446,24 +446,79 @@ def _build_l14_panel(data: dict) -> Panel | None:
                  border_style=_ACCENT, padding=(0, 1))
 
 
+_MODEL_TIERS = {
+    "ollama": "local",
+    "codex": "local",
+    "anthropic": "subscription",
+    "claude": "subscription",
+}
+
+_PAID_PROVIDERS = {"openai", "gemini", "google", "perplexity", "deepseek", "groq", "mistral"}
+
+
+def _classify_tier(model: str, provider: str) -> str:
+    """Classify a model call as local / subscription / paid."""
+    low_model = model.lower()
+    low_prov = provider.lower() if provider else ""
+    if any(k in low_model or k in low_prov for k in ("ollama", "codex")):
+        return "local"
+    if any(k in low_model or k in low_prov for k in ("claude", "anthropic")):
+        return "subscription"
+    return "paid"
+
+
+_TIER_STYLES = {
+    "local": (_NEON_GREEN, "FREE"),
+    "subscription": (_CYAN_BRIGHT, "SUB"),
+    "paid": (_WARN_YELLOW, "API"),
+}
+
+
 def _build_models_panel(data: dict) -> Panel | None:
-    """Panel showing which model was used for the last routed prompt."""
+    """Panel showing all models used during the last prompt with tier breakdown."""
     try:
-        from llm_router.hooks.dashboard_enhanced import query_last_prompt_model
+        from llm_router.hooks.dashboard_enhanced import query_last_prompt_calls
         import os
         db_path = data.get("db_path") or os.path.expanduser("~/.llm-router/usage.db")
-        model = query_last_prompt_model(db_path=db_path)
+        calls = query_last_prompt_calls(db_path=db_path)
     except Exception:
         return None
 
-    if not model:
+    if not calls:
         return None
 
     content = Text()
-    style = _model_style(model)
-    content.append(f"  {model}", style=style)
+    total_cost = sum(c["cost"] for c in calls)
+    total_tokens = sum(c["in_tokens"] + c["out_tokens"] for c in calls)
 
-    return Panel(content, title="LAST ROUTED MODEL", title_align="left",
+    for c in calls:
+        tier = _classify_tier(c["model"], c["provider"])
+        tier_style, tier_label = _TIER_STYLES[tier]
+        model_style = _model_style(c["model"])
+
+        content.append(f"  [{tier_label}] ", style=tier_style)
+        content.append(f"{c['model']:<24}", style=model_style)
+        content.append(f" {c['task_type']:<10}", style=_LABEL)
+        tok = c["in_tokens"] + c["out_tokens"]
+        if tok >= 1000:
+            content.append(f" {tok / 1000:.1f}K", style=_DIM_GRAY)
+        else:
+            content.append(f" {tok}", style=_DIM_GRAY)
+        if c["cost"] > 0:
+            content.append(f"  ${c['cost']:.4f}", style=_MUTED)
+        content.append("\n")
+
+    # Summary line
+    if len(calls) > 1:
+        content.append(f"  {'─' * 50}\n", style=_DIM_GRAY)
+        content.append(f"  {len(calls)} calls", style=_WHITE)
+        if total_tokens >= 1000:
+            content.append(f"  {total_tokens / 1000:.1f}K tok", style=_DIM_GRAY)
+        if total_cost > 0:
+            content.append(f"  ${total_cost:.4f}", style=_MUTED)
+        content.append("\n")
+
+    return Panel(content, title="LAST PROMPT ROUTING", title_align="left",
                  border_style=_ACCENT, padding=(0, 1))
 
 
