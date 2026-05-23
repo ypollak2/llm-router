@@ -2,14 +2,25 @@
 
 **For releases v6.2 and earlier, see [CHANGELOG_ARCHIVE.md](docs/CHANGELOG_ARCHIVE.md).**
 
-## v9.0.1 — Dashboard Cleanup (2026-05-23)
+## v9.0.1 — Dashboard Cleanup & Free-First Routing (2026-05-23)
+
+### Added
+
+- **LAST PROMPT ROUTING** panel — shows all models used in the last prompt with `[FREE]`/`[SUB]`/`[API]` tier labels, task type, token count, and cost
+- **Claude host model tracking** — `[SUB] claude/opus-4.6` row shows subscription quota delta so the panel reflects 100% of LLM usage
+- **5h quota reset time** — displays "resets in Xh Ym (5:15pm BST)" with local timezone next to session quota bar
+
+### Fixed
+
+- **Free-first routing chain** — subscription mode now uses `Ollama → Codex → Gemini CLI → paid APIs` for all complexity levels. Claude (host) reserved for complex tasks only. Previously Codex was placed last in Claude Code sessions.
+- **Ollama re-enabled** — was silently disabled in config files; now active as first in the routing chain
 
 ### Removed
 
 - Quality gates counter from session-end dashboard (confusing metric)
 - Baseline vs Actual cost comparison (misleading for subscription users)
 - Yearly savings projection (~$X/yr)
-- Full-session MODELS ROUTED panel — replaced with single "Last Routed Model" line
+- Full-session MODELS ROUTED panel — replaced with per-prompt breakdown
 
 ---
 
