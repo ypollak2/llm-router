@@ -437,20 +437,29 @@ def _reorder_for_agent_context(
     gemini_cli = [m for m in models if provider_from_model(m) == "gemini_cli"]
     claude     = [m for m in models if provider_from_model(m) == "anthropic"]
     rest       = [m for m in models if m not in set(ollama + codex + gemini_cli + claude)]
+    # When Claude models are absent (subscription mode), all agents use
+    # the same free-first ordering: Ollama → Codex → Gemini CLI → paid.
+    # Claude is only used for complex work when available.
+    if not claude:
+        if complexity in (Complexity.SIMPLE, Complexity.MODERATE):
+            return ollama + codex + gemini_cli + rest
+        else:  # COMPLEX — paid APIs may produce better results
+            return ollama + codex + gemini_cli + rest
+
     if complexity in (Complexity.SIMPLE, Complexity.MODERATE):
         if agent == "codex":
             return ollama + codex + gemini_cli + rest + claude
         elif agent == "gemini_cli":
             return ollama + gemini_cli + codex + rest + claude
         else:  # claude_code
-            return ollama + claude + gemini_cli + rest + codex
+            return ollama + codex + gemini_cli + rest + claude
     else:  # COMPLEX / DEEP_REASONING
         if agent == "codex":
             return codex + gemini_cli + claude + rest + ollama
         elif agent == "gemini_cli":
             return gemini_cli + codex + claude + rest + ollama
-        else:  # claude_code
-            return claude + gemini_cli + rest + codex + ollama
+        else:  # claude_code — Claude preferred for complex
+            return claude + ollama + codex + gemini_cli + rest
 
 # Guards the check-then-spend budget sequence so concurrent calls cannot
 # both slip through the limit before either has recorded its spend.

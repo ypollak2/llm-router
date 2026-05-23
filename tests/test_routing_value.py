@@ -105,16 +105,16 @@ class TestAgentContextReordering:
         assert result[0] == "ollama/llama3.2"
 
     def test_claude_code_simple_puts_claude_before_openai(self):
-        """For claude_code, Claude subscription covers Haiku — it's cheaper than GPT-4o."""
+        """For claude_code, free models come first — save subscription quota."""
         models = [
             "openai/gpt-4o",
             "anthropic/claude-haiku-4-5-20251001",
             "ollama/llama3.2",
         ]
         result = _reorder_for_agent_context(models, "claude_code", Complexity.SIMPLE)
-        claude_idx = result.index("anthropic/claude-haiku-4-5-20251001")
-        openai_idx = result.index("openai/gpt-4o")
-        assert claude_idx < openai_idx
+        # Ollama first, Claude last (save subscription for complex tasks)
+        assert result[0] == "ollama/llama3.2"
+        assert result[-1] == "anthropic/claude-haiku-4-5-20251001"
 
     def test_codex_simple_puts_ollama_first(self):
         """For codex sessions, Ollama is still free and goes first."""
