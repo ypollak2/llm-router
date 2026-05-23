@@ -2,6 +2,17 @@
 
 **For releases v6.2 and earlier, see [CHANGELOG_ARCHIVE.md](docs/CHANGELOG_ARCHIVE.md).**
 
+## v9.0.1 — Dashboard Cleanup (2026-05-23)
+
+### Removed
+
+- Quality gates counter from session-end dashboard (confusing metric)
+- Baseline vs Actual cost comparison (misleading for subscription users)
+- Yearly savings projection (~$X/yr)
+- Full-session MODELS ROUTED panel — replaced with single "Last Routed Model" line
+
+---
+
 ## v9.0.0 — Compaction-Resilient Routing Enforcement (2026-05-23)
 
 ### Fixed
