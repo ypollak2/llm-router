@@ -105,6 +105,26 @@ def _sparkline_blocks(values: list[float]) -> str:
 
 # ── Progress bars ────────────────────────────────────────────────────────────
 
+def _format_reset_time(iso_ts: str) -> str:
+    """Convert ISO reset timestamp to a compact 'resets HH:MM' string."""
+    if not iso_ts:
+        return ""
+    try:
+        from datetime import datetime, timezone
+        dt = datetime.fromisoformat(iso_ts.replace("Z", "+00:00"))
+        now = datetime.now(timezone.utc)
+        diff = dt - now
+        total_min = int(diff.total_seconds() / 60)
+        if total_min <= 0:
+            return "reset pending"
+        hours, mins = divmod(total_min, 60)
+        if hours > 0:
+            return f"resets in {hours}h {mins}m"
+        return f"resets in {mins}m"
+    except Exception:
+        return ""
+
+
 def _quota_bar(pct: float, width: int = 14) -> Text:
     """Color-coded quota progress bar."""
     filled = max(0, min(width, round(pct / 100 * width)))
@@ -256,6 +276,13 @@ def _build_intelligence(data: dict) -> Table:
             row.append_text(_quota_bar(end_val, width=12))
             row.append(" ", style=_WHITE)
             row.append_text(_pct_delta(start_val, end_val))
+            # Show reset time for 5h window
+            if key == "session_pct":
+                resets_at = cc.get("session_resets_at", "")
+                if resets_at:
+                    reset_str = _format_reset_time(resets_at)
+                    if reset_str:
+                        row.append(f"  {reset_str}", style=_DIM_GRAY)
             tbl.add_row(row)
 
     return tbl

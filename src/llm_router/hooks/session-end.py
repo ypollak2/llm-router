@@ -108,8 +108,10 @@ def _fetch_live_usage() -> dict | None:
         s = float(data.get("five_hour",       {}).get("utilization", 0.0))
         w = float(data.get("seven_day",        {}).get("utilization", 0.0))
         n = float(data.get("seven_day_sonnet", {}).get("utilization", 0.0))
+        s_resets = data.get("five_hour", {}).get("resets_at", "")
         result = {"session_pct": round(s, 1), "weekly_pct": round(w, 1),
-                  "sonnet_pct": round(n, 1), "updated_at": time.time()}
+                  "sonnet_pct": round(n, 1), "session_resets_at": s_resets,
+                  "updated_at": time.time()}
         # Persist for routing pressure only — do NOT write SESSION_CC_SNAP_FILE here.
         # Writing the snapshot from _fetch_live_usage() causes mid-session usage-refresh
         # calls to clobber the session-start baseline, making start == end (delta = 0).
