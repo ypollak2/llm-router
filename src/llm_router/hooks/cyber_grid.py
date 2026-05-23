@@ -357,8 +357,24 @@ def _build_financial(data: dict) -> Table:
     return tbl
 
 
+def _model_style(model_name: str) -> Style:
+    """Return Rich style for a model based on its provider."""
+    low = model_name.lower()
+    if any(p in low for p in ("gpt-", "o1", "o3", "o4", "chatgpt", "codex")):
+        return _WARN_ORANGE   # OpenAI
+    if "claude" in low:
+        return _MAGENTA       # Anthropic
+    if any(p in low for p in ("gemini", "gemma")):
+        return _WARN_YELLOW   # Google
+    if any(p in low for p in ("ollama", ":", "llama", "qwen", "phi", "mistral")):
+        return _NEON_GREEN    # Local
+    if "deepseek" in low:
+        return _INFO_BLUE     # DeepSeek
+    return _WHITE
+
+
 def _build_l14_panel(data: dict) -> Panel | None:
-    """Bottom panel: 14-day activity Braille chart."""
+    """Bottom panel: 14-day activity block chart with axes + models used."""
     daily = data.get("daily_14d", [])
     if not daily:
         return None
@@ -366,34 +382,50 @@ def _build_l14_panel(data: dict) -> Panel | None:
     call_values = [float(d[1]) for d in daily]
     total_calls = sum(d[1] for d in daily)
     total_tokens = sum(d[2] for d in daily)
-    total_saved = sum(d[3] for d in daily)
     avg_calls = total_calls // max(len(daily), 1)
-
-    # Braille chart
-    chart_lines = _braille_chart(call_values, width=28, height=2)
+    max_calls = max(call_values) if call_values else 0
 
     content = Text()
 
-    # Y-axis label + chart
-    max_calls = max(call_values) if call_values else 0
-    content.append(f"{int(max_calls):>4} ", style=_DIM_GRAY)
-    for i, line in enumerate(chart_lines):
-        if i > 0:
-            content.append("\n     ")
-        content.append(line, style=_INFO_BLUE)
-    content.append("\n   0 ", style=_DIM_GRAY)
+    # Title
+    content.append("calls/day\n", style=_DIM_GRAY)
+
+    # Block chart with Y-axis (8 rows)
+    chart_height = 8
+    chars = " ▁▂▃▄▅▆▇█"
+
+    grid = [[" " for _ in range(len(call_values))] for _ in range(chart_height)]
+    for day_idx, cv in enumerate(call_values):
+        if max_calls > 0:
+            normalized = (cv / max_calls) * chart_height
+            full_rows = int(normalized)
+            frac = normalized - full_rows
+            for row_idx in range(chart_height):
+                bottom_up = chart_height - 1 - row_idx
+                if bottom_up < full_rows:
+                    grid[row_idx][day_idx] = "█"
+                elif bottom_up == full_rows and frac > 0:
+                    ci = min(len(chars) - 1, int(frac * (len(chars) - 1)))
+                    grid[row_idx][day_idx] = chars[ci]
+
+    for row_idx in range(chart_height):
+        label_val = int((chart_height - 1 - row_idx) / (chart_height - 1) * max_calls) if chart_height > 1 else int(max_calls)
+        content.append(f"{label_val:>4} ┤ ", style=_DIM_GRAY)
+        content.append("".join(grid[row_idx]), style=_INFO_BLUE)
+        content.append("\n")
 
     # X-axis
-    n = len(daily)
-    if n > 1:
-        x_labels = f"D1{'':>{max(0, len(chart_lines[0]) - 4)}}D{n}"
-        content.append(x_labels, style=_DIM_GRAY)
+    content.append(f"     └─{'─' * len(call_values)}\n", style=_DIM_GRAY)
+    x_labels = "      "
+    for i in range(0, len(call_values), 2):
+        day_num = i + 1
+        if day_num <= 14:
+            x_labels += f"D{day_num:<3}"
+    content.append(x_labels + "\n", style=_DIM_GRAY)
 
-    # Summary line
-    saved_str = f"${total_saved:.2f}" if total_saved >= 1.0 else f"${total_saved:.4f}"
+    # Stats line (no savings)
     content.append(f"\n {total_calls} calls", style=_WHITE)
     content.append(f" · {_fmt_tok(total_tokens)} tok", style=_LABEL)
-    content.append(f" · {saved_str} saved", style=_NEON_GREEN_BOLD)
     content.append(f" · avg {avg_calls}/day", style=_LABEL)
 
     # Quality metrics
@@ -426,7 +458,45 @@ def _build_l14_panel(data: dict) -> Panel | None:
                 content.append(" · ", style=_DIM_GRAY)
             content.append(text, style=style)
 
-    return Panel(content, title="L14 ACTIVITY", title_align="left",
+    return Panel(content, title="14-DAY ACTIVITY", title_align="left",
+                 border_style=_ACCENT, padding=(0, 1))
+
+
+def _build_models_panel(data: dict) -> Panel | None:
+    """Panel showing which models were routed to during this session."""
+    session_start = data.get("session_start")
+    if session_start is None:
+        return None
+
+    try:
+        from llm_router.hooks.dashboard_enhanced import query_session_models
+        import os
+        db_path = data.get("db_path") or os.path.expanduser("~/.llm-router/usage.db")
+        models = query_session_models(session_start, db_path=db_path)
+    except Exception:
+        return None
+
+    if not models:
+        return None
+
+    content = Text()
+    sorted_models = sorted(models.items(), key=lambda x: x[1], reverse=True)
+    total = sum(c for _, c in sorted_models)
+
+    for model_name, count in sorted_models:
+        pct = (count / total * 100) if total > 0 else 0
+        style = _model_style(model_name)
+
+        # Progress bar
+        bar_width = 20
+        filled = int(pct / 100 * bar_width)
+        content.append(f"  {model_name:<24}", style=style)
+        content.append("━" * filled, style=_NEON_GREEN)
+        content.append("─" * (bar_width - filled), style=_DIM_GRAY)
+        content.append(f" {pct:>3.0f}%", style=_WHITE)
+        content.append(f" ({count})\n", style=_LABEL)
+
+    return Panel(content, title="MODELS ROUTED", title_align="left",
                  border_style=_ACCENT, padding=(0, 1))
 
 
@@ -490,22 +560,32 @@ def render_cyber_grid(data: dict[str, Any]) -> str:
     # Header
     console.print(_build_header(data))
 
-    # Two-column grid: Intelligence | Financial
-    grid = Table(show_header=False, box=None, padding=(0, 1), expand=True)
-    grid.add_column(ratio=1)
-    grid.add_column(ratio=1)
-    grid.add_row(_build_intelligence(data), _build_financial(data))
+    # Two-column: Intelligence (left) + Savings (right)
+    cumulative = data.get("cumulative", [])
+    has_savings = any(saved > 0 for _, _, _, _, saved in cumulative) if cumulative else False
 
-    console.print(Panel(
-        grid,
-        border_style=_ACCENT,
-        padding=(1, 1),
-    ))
+    if has_savings:
+        grid = Table(show_header=False, box=None, padding=(0, 1), expand=True)
+        grid.add_column(ratio=1)
+        grid.add_column(ratio=1)
+        grid.add_row(_build_intelligence(data), _build_financial(data))
+        console.print(Panel(grid, border_style=_ACCENT, padding=(1, 1)))
+    else:
+        console.print(Panel(
+            _build_intelligence(data),
+            border_style=_ACCENT,
+            padding=(1, 1),
+        ))
 
-    # L14 Activity panel
+    # 14-Day Activity panel (enhanced block chart)
     l14 = _build_l14_panel(data)
     if l14:
         console.print(l14)
+
+    # Models routed this session
+    models_panel = _build_models_panel(data)
+    if models_panel:
+        console.print(models_panel)
 
     # Wildcard insight
     insight = _build_insight(data)

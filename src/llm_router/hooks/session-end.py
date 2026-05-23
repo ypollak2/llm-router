@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm-router-hook-version: 14
+# llm-router-hook-version: 15
 """Stop hook — unified session summary: CC subscription delta + external routing costs."""
 
 from __future__ import annotations
@@ -374,7 +374,7 @@ def _query_cumulative_savings() -> list[tuple[str, int, int, int, float]]:
                 ss_rows = conn.execute(
                     f"SELECT COUNT(*), COALESCE(SUM(estimated_claude_cost_saved),0) "
                     f"FROM savings_stats WHERE {where} "
-                    f"AND LOWER(provider) NOT IN ({placeholders})"
+                    f"AND LOWER(model_used) NOT IN ({placeholders})"
                 ).fetchone()
                 if ss_rows and ss_rows[0] > 0:
                     calls += ss_rows[0]
@@ -1199,13 +1199,37 @@ def _format(tools: dict[str, dict], cc_rows: list[dict], free_rows: list[dict],
             lines.append("")
             lines += routing_lines
 
-    if cumulative:
-        cum_lines = _format_cumulative_section(cumulative)
-        if cum_lines:
+    # Enhanced 14-day sparkline + models section (replaces old cumulative savings)
+    try:
+        from llm_router.hooks.dashboard_enhanced import (
+            render_enhanced_sparkline,
+            render_models_section,
+            query_session_models,
+        )
+        daily_14d = _query_daily_14d()
+        if daily_14d:
             lines.append("")
             lines.append(f"  {'─' * (WIDTH - 4)}")
+            sparkline_block = render_enhanced_sparkline(daily_14d, max_height=8)
+            if sparkline_block:
+                lines.append("")
+                lines += sparkline_block.split("\n")
+
+        # Models used this session
+        models = query_session_models(session_start, db_path=DB_PATH)
+        if models:
             lines.append("")
-            lines += cum_lines
+            models_block = render_models_section(models)
+            lines += models_block.split("\n")
+    except Exception:
+        # Fallback: use old cumulative section if enhanced dashboard fails
+        if cumulative:
+            cum_lines = _format_cumulative_section(cumulative)
+            if cum_lines:
+                lines.append("")
+                lines.append(f"  {'─' * (WIDTH - 4)}")
+                lines.append("")
+                lines += cum_lines
 
     lines.append("")
     lines.append(f"  {div}")
@@ -1279,6 +1303,8 @@ def _collect_report_data(
 
     return {
         "session_id": session_id,
+        "session_start": session_start,
+        "db_path": DB_PATH,
         "duration_secs": time.time() - session_start,
         "cc_start": start,
         "cc_current": current,
