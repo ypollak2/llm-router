@@ -484,10 +484,28 @@ def _build_models_panel(data: dict) -> Panel | None:
     except Exception:
         return None
 
-    if not calls:
+    # Add Claude host model row from subscription delta
+    cc_current = data.get("cc_current")
+    cc_start = data.get("cc_start")
+    host_delta = 0.0
+    if cc_current and cc_start:
+        end_pct = cc_current.get("session_pct", 0.0)
+        start_pct = cc_start.get("session_pct", 0.0)
+        host_delta = max(0.0, end_pct - start_pct)
+
+    if not calls and host_delta == 0:
         return None
 
     content = Text()
+
+    # Host model row (Claude subscription)
+    if host_delta > 0:
+        content.append("  [SUB] ", style=_CYAN_BRIGHT)
+        content.append(f"{'claude/opus-4.6':<24}", style=Style(color="magenta"))
+        content.append(f" {'host':<10}", style=_LABEL)
+        content.append(f" {host_delta:+.1f}% quota", style=_DIM_GRAY)
+        content.append("\n")
+
     total_cost = sum(c["cost"] for c in calls)
     total_tokens = sum(c["in_tokens"] + c["out_tokens"] for c in calls)
 
@@ -509,13 +527,16 @@ def _build_models_panel(data: dict) -> Panel | None:
         content.append("\n")
 
     # Summary line
-    if len(calls) > 1:
+    total_rows = len(calls) + (1 if host_delta > 0 else 0)
+    if total_rows > 1:
         content.append(f"  {'─' * 50}\n", style=_DIM_GRAY)
-        content.append(f"  {len(calls)} calls", style=_WHITE)
+        content.append(f"  {total_rows} calls", style=_WHITE)
         if total_tokens >= 1000:
             content.append(f"  {total_tokens / 1000:.1f}K tok", style=_DIM_GRAY)
         if total_cost > 0:
             content.append(f"  ${total_cost:.4f}", style=_MUTED)
+        if host_delta > 0:
+            content.append(f"  +{host_delta:.1f}% sub", style=_CYAN_BRIGHT)
         content.append("\n")
 
     return Panel(content, title="LAST PROMPT ROUTING", title_align="left",
