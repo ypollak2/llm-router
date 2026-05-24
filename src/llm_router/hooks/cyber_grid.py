@@ -597,7 +597,7 @@ def render_cyber_grid(data: dict[str, Any]) -> str:
     from datetime import datetime
     ts = datetime.now().strftime("%H:%M:%S")
     console.print()
-    console.rule(f"Session Concluded · {ts}", style=_DIM_GRAY)
+    console.rule(f"Session Summary Dashboard · {ts}", style=_DIM_GRAY)
     console.print()
 
     # Header

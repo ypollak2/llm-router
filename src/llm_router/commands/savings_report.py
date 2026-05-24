@@ -182,13 +182,13 @@ def _query_free_stats(db_path: Path, period: str = "all") -> dict:
 
 
 def _calculate_baseline_cost(tokens: int) -> float:
-    """Calculate Sonnet baseline cost for tokens."""
-    SONNET_INPUT_PER_M = 3.0
-    SONNET_OUTPUT_PER_M = 15.0
+    """Calculate host (Opus) baseline cost for tokens."""
+    HOST_INPUT_PER_M = 15.0
+    HOST_OUTPUT_PER_M = 75.0
     # Conservative estimate: 40% input, 60% output
     input_tokens = int(tokens * 0.4)
     output_tokens = int(tokens * 0.6)
-    return (input_tokens * SONNET_INPUT_PER_M + output_tokens * SONNET_OUTPUT_PER_M) / 1_000_000
+    return (input_tokens * HOST_INPUT_PER_M + output_tokens * HOST_OUTPUT_PER_M) / 1_000_000
 
 
 def render_savings_report(period: str = "all") -> str:

@@ -265,7 +265,7 @@ def _install_gemini_cli_files() -> list[str]:
 
     manifest_data = {
         "name": "llm-router",
-        "version": "7.6.0",
+        "version": "9.0.1",
         "description": "Multi-LLM routing MCP server",
     }
     actions.append(_write_json_idempotent(manifest, manifest_data))
@@ -501,6 +501,15 @@ def _install_host(host: str) -> None:
 def main() -> None:
     """Unified CLI: dispatches to MCP server or subcommands."""
     args = sys.argv[1:]
+
+    if args and args[0] in ("-h", "--help"):
+        print(__doc__)
+        return
+
+    if args and args[0] in ("-v", "--version"):
+        from llm_router import __version__
+        print(f"llm-router v{__version__}")
+        return
 
     if args and args[0] == "install":
         from llm_router.commands.install import cmd_install

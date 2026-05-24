@@ -60,7 +60,7 @@ class TestAvailableProviders:
     def test_multiple_keys_all_visible(self, monkeypatch):
         # Clear env first to prevent .env leakage; then explicitly configure
         for var in ["OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY", "GROQ_API_KEY",
-                    "OLLAMA_BASE_URL", "LLM_ROUTER_CLAUDE_SUBSCRIPTION"]:
+                    "OLLAMA_BASE_URL", "LLM_ROUTER_CLAUDE_SUBSCRIPTION", "LLM_ROUTER_GEMINI_SUBSCRIPTION"]:
             monkeypatch.delenv(var, raising=False)
         cfg = RouterConfig(
             openai_api_key="sk-openai",
@@ -69,6 +69,7 @@ class TestAvailableProviders:
             groq_api_key="gsk-groq",
             ollama_base_url="",
             llm_router_claude_subscription=False,
+            llm_router_gemini_subscription=False,
         )
         providers = cfg.available_providers
         assert {"openai", "anthropic", "gemini", "groq"}.issubset(providers)
@@ -135,6 +136,7 @@ class TestClaudeSubscriptionMode:
             gemini_api_key="AIz-gemini",
             anthropic_api_key="sk-anthropic",
             llm_router_claude_subscription=True,
+            llm_router_gemini_subscription=False,
         )
         providers = cfg.available_providers
         assert "openai" in providers

@@ -67,8 +67,8 @@ def _query_routing_period(db_path: str, since_iso: str) -> tuple[int, float, flo
         conn = sqlite3.connect(db_path)
         conn.row_factory = sqlite3.Row
         rows = conn.execute(
-            "SELECT input_tokens, output_tokens, cost_usd FROM usage "
-            "WHERE timestamp >= ? AND success = 1 AND provider != 'subscription'",
+            "SELECT provider, input_tokens, output_tokens, cost_usd FROM usage "
+            "WHERE timestamp >= ? AND success = 1",
             (since_iso,),
         ).fetchall()
         conn.close()
@@ -76,10 +76,16 @@ def _query_routing_period(db_path: str, since_iso: str) -> tuple[int, float, flo
         for r in rows:
             calls += 1
             cost += r["cost_usd"] or 0.0
-            baseline += (
-                (r["input_tokens"] or 0) * SONNET_IN
-                + (r["output_tokens"] or 0) * SONNET_OUT
-            ) / 1_000_000
+            
+            # Use tracked tokens if available, else use a conservative average for subscription
+            in_t = r["input_tokens"] or 0
+            out_t = r["output_tokens"] or 0
+            
+            if in_t == 0 and out_t == 0 and r["provider"] in ("subscription", "gemini_cli", "codex"):
+                # Fallback for untracked subscription calls
+                in_t, out_t = 1000, 500
+                
+            baseline += (in_t * SONNET_IN + out_t * SONNET_OUT) / 1_000_000
         return calls, cost, baseline
     except Exception:
         return 0, 0.0, 0.0
@@ -190,6 +196,23 @@ def cmd_status(args: list[str]) -> int:
     else:
         print()
         print(_warn("no data — run: llm_check_usage"))
+
+    # Gemini CLI subscription
+    try:
+        from llm_router.gemini_cli_quota import get_gemini_quota_status_sync
+        gemini_status = get_gemini_quota_status_sync()
+        if gemini_status.get("daily_limit", 0) > 0:
+            print(f"\n  {_bold('Gemini CLI subscription')}")
+            count = gemini_status.get("count", 0)
+            limit = gemini_status.get("daily_limit", 1500)
+            pressure = (count / limit) * 100
+            
+            filled = max(0, min(20, round(pressure / 5)))
+            bar = _green("█" * filled) + "░" * (20 - filled)
+            color = _green if pressure < 70 else (_yellow if pressure < 90 else _red)
+            print(f"    {'daily quota':<16} {bar}  {color(f'{pressure:.1f}%')} ({count}/{limit})")
+    except Exception:
+        pass
 
     # ── Savings summary ────────────────────────────────────────────────
     print(f"\n  {_bold('Routing savings')}")

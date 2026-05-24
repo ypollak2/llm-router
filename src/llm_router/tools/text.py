@@ -86,7 +86,7 @@ _COST_PER_1K = {
     "mistral/mistral-large-latest":      0.008,
     "xai/grok-3":                        0.009,
 }
-_SONNET_COST = _COST_PER_1K["anthropic/claude-sonnet-4-6"]
+_HOST_COST = _COST_PER_1K["anthropic/claude-opus-4-6"]
 
 
 def _get_explain_mode() -> str:
@@ -105,7 +105,7 @@ def _get_explain_mode() -> str:
 
 
 def _savings_info(resp: LLMResponse) -> tuple[str, float]:
-    """Calculate savings vs Sonnet baseline. Returns (display_str, saved_usd)."""
+    """Calculate savings vs host (Opus) baseline. Returns (display_str, saved_usd)."""
     model_key = resp.model if resp.model in _COST_PER_1K else None
     if model_key is None:
         # Try without provider prefix
@@ -113,9 +113,9 @@ def _savings_info(resp: LLMResponse) -> tuple[str, float]:
             if k.endswith("/" + resp.model) or k == resp.model:
                 model_key = k
                 break
-    actual_cost = _COST_PER_1K.get(model_key, _SONNET_COST) if model_key else _SONNET_COST
-    if actual_cost < _SONNET_COST and actual_cost > 0:
-        ratio = _SONNET_COST / actual_cost
+    actual_cost = _COST_PER_1K.get(model_key, _HOST_COST) if model_key else _HOST_COST
+    if actual_cost < _HOST_COST and actual_cost > 0:
+        ratio = _HOST_COST / actual_cost
         saved = resp.cost_usd * (ratio - 1) / ratio if resp.cost_usd else 0.0
         return f"{ratio:.0f}x cheaper", saved
     return "", 0.0

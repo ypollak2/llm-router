@@ -67,8 +67,11 @@ def _run_setup() -> None:
     print("Keys are saved to ~/.llm-router/.env and loaded automatically by the router.\n")
 
     # ── Step 1: Claude Code subscription ──────────────────────────────────────
-    print(_bold("Step 1: Claude Code subscription"))
+    print(_bold("Step 1: Subscription mode"))
     cc_mode = os.getenv("LLM_ROUTER_CLAUDE_SUBSCRIPTION", "")
+    gemini_mode = os.getenv("LLM_ROUTER_GEMINI_SUBSCRIPTION", "")
+    
+    enable_cc = False
     if cc_mode.lower() in ("true", "1", "yes"):
         print(_ok("LLM_ROUTER_CLAUDE_SUBSCRIPTION is already set — Claude models routed via subscription."))
         enable_cc = True
@@ -76,9 +79,17 @@ def _run_setup() -> None:
         ans = input("  Do you have a Claude Code subscription (Pro/Max)? [Y/n]: ").strip().lower()
         enable_cc = ans in ("", "y", "yes")
         if enable_cc:
-            print(_green("  ✓ Claude subscription mode enabled — Claude models used for free via subscription."))
-        else:
-            print("  Skipping — Claude models will be used via API (requires ANTHROPIC_API_KEY).")
+            print(_green("  ✓ Claude subscription mode enabled."))
+    
+    enable_gemini = False
+    if gemini_mode.lower() in ("true", "1", "yes"):
+        print(_ok("LLM_ROUTER_GEMINI_SUBSCRIPTION is already set — Gemini models routed via local CLI."))
+        enable_gemini = True
+    else:
+        ans = input("  Do you have a Gemini subscription (Google One AI Pro)? [Y/n]: ").strip().lower()
+        enable_gemini = ans in ("", "y", "yes")
+        if enable_gemini:
+            print(_green("  ✓ Gemini subscription mode enabled."))
 
     # ── Step 2: External providers ─────────────────────────────────────────────
     print(f"\n{_bold('Step 2: External providers')}  (all optional — skip with Enter)\n")
@@ -86,6 +97,9 @@ def _run_setup() -> None:
     new_keys: dict[str, str] = {}
     if enable_cc:
         new_keys["LLM_ROUTER_CLAUDE_SUBSCRIPTION"] = "true"
+    if enable_gemini:
+        new_keys["LLM_ROUTER_GEMINI_SUBSCRIPTION"] = "true"
+        new_keys["LLM_ROUTER_PROFILE"] = "quota_balanced"
 
     for env_var, name, description, url in _PROVIDERS_WIZARD:
         existing = os.getenv(env_var, "")

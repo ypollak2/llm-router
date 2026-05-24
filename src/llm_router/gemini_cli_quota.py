@@ -198,6 +198,47 @@ async def get_gemini_pressure() -> float:
     return 0.0
 
 
+def get_gemini_quota_status_sync() -> dict:
+    """Synchronous version of get_gemini_quota_status.
+    
+    Uses cached or local quota data only (does not run `gemini /stats`).
+    """
+    # Try cache first
+    cached = _load_quota_cache()
+    if cached:
+        count = cached.get("count", 0)
+        limit = cached.get("daily_limit", 1500)
+        return {
+            "count": count,
+            "daily_limit": limit,
+            "tier": cached.get("tier", "unknown"),
+            "auth_method": cached.get("auth_method", "unknown"),
+            "pressure": min(1.0, max(0.0, count / limit if limit > 0 else 0.0)),
+        }
+
+    # Fall back to local
+    local = _get_local_quota()
+    if local:
+        count = local.get("count", 0)
+        limit = local.get("daily_limit", 1500)
+        return {
+            "count": count,
+            "daily_limit": limit,
+            "tier": local.get("tier", "unknown"),
+            "auth_method": local.get("auth_method", "unknown"),
+            "pressure": min(1.0, max(0.0, count / limit if limit > 0 else 0.0)),
+        }
+
+    # Unknown state
+    return {
+        "count": 0,
+        "daily_limit": 1500,
+        "tier": "unknown",
+        "auth_method": "unknown",
+        "pressure": 0.0,
+    }
+
+
 async def get_gemini_quota_status() -> dict:
     """Get detailed Gemini CLI quota status.
 

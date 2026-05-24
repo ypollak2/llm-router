@@ -97,19 +97,26 @@ async def _build_and_filter_chain(
                 "Run llm_providers() to see all available models."
             )
         if (
-            config.llm_router_claude_subscription
-            and model_override.startswith("anthropic/")
+            (config.llm_router_claude_subscription and model_override.startswith("anthropic/"))
+            or (config.llm_router_gemini_subscription and model_override.startswith("gemini/"))
         ):
             log.warning(
                 "model_override %r blocked in subscription mode — "
                 "routing to balanced chain instead",
                 model_override,
             )
+            blocked_provider = "anthropic/" if model_override.startswith("anthropic/") else "gemini/"
             fallback_chain = [
-                m for m in get_model_chain(RoutingProfile.BALANCED, task_type)
-                if not m.startswith("anthropic/")
+                m for m in get_model_chain(
+                    RoutingProfile.BALANCED, task_type,
+                    is_subscription_mode=True,
+                )
+                if not m.startswith(blocked_provider)
             ]
-            return fallback_chain or get_model_chain(RoutingProfile.BALANCED, task_type)
+            return fallback_chain or get_model_chain(
+                RoutingProfile.BALANCED, task_type,
+                is_subscription_mode=True,
+            )
         return [model_override]
 
     # ── Pre-fetch penalty data ────────────────────────────────────────────────
@@ -162,6 +169,7 @@ async def _build_and_filter_chain(
             failure_rates=_failure_rates,
             latency_stats=_latency_stats,
             acceptance_scores=_acceptance_scores,
+            is_subscription_mode=config.llm_router_claude_subscription or config.llm_router_gemini_subscription,
         )
 
     if task_type not in MEDIA_TASK_TYPES:
@@ -216,7 +224,12 @@ async def _build_and_filter_chain(
         # ── Ollama injection ──────────────────────────────────────────────────
         ollama_models = config.all_ollama_models()
         if ollama_models:
-            models_to_try = ollama_models + models_to_try
+            # If claw-code is enabled, Ollama moves to the absolute front
+            # (before pins, before everything else).
+            if config.llm_router_claw_code:
+                models_to_try = ollama_models + [m for m in models_to_try if m not in ollama_models]
+            else:
+                models_to_try = ollama_models + models_to_try
 
         # ── Codex injection ───────────────────────────────────────────────────
         # Codex is free (uses OpenAI subscription) — inject for ALL profiles
@@ -308,8 +321,17 @@ async def _build_and_filter_chain(
                 models_to_try = models_to_try[:first_paid] + gemini_chain + models_to_try[first_paid:]
 
         # ── Agent-context chain reordering ────────────────────────────────────
+        active_agent = get_active_agent()
+        # Fallback: if in subscription mode but agent unknown, assume home agent
+        # (v11.1.0: Ensures Sonnet/Flash is pushed to the end for simple/moderate tasks)
+        if active_agent is None:
+            if config.llm_router_claude_subscription:
+                active_agent = "claude_code"
+            elif config.llm_router_gemini_subscription:
+                active_agent = "gemini_cli"
+
         models_to_try = _reorder_for_agent_context(
-            models_to_try, get_active_agent(), c,
+            models_to_try, active_agent, c,
         )
 
         # ── Quality-based reordering (v6.2) ───────────────────────────────────

@@ -116,6 +116,8 @@ def mock_env(monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "test-key")
     monkeypatch.setenv("GEMINI_API_KEY", "test-key")
     monkeypatch.setenv("LLM_ROUTER_PROFILE", "balanced")
+    monkeypatch.setenv("LLM_ROUTER_CLAUDE_SUBSCRIPTION", "false")
+    monkeypatch.setenv("LLM_ROUTER_GEMINI_SUBSCRIPTION", "false")
     
     # Reset singleton so config reads fresh env vars
     import llm_router.config as config_module

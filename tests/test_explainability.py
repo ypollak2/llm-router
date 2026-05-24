@@ -72,11 +72,12 @@ class TestSavingsInfo:
         assert "cheaper" in label
         assert saved > 0
 
-    def test_sonnet_baseline_no_savings(self):
+    def test_sonnet_cheaper_than_opus(self):
         resp = _make_response(model="anthropic/claude-sonnet-4-6", cost_usd=0.015)
         label, saved = _savings_info(resp)
-        assert label == ""
-        assert saved == 0.0
+        # Sonnet is 5x cheaper than Opus baseline
+        assert "cheaper" in label
+        assert saved > 0
 
     def test_unknown_model_no_savings(self):
         resp = _make_response(model="unknown/mystery-model", cost_usd=0.001)

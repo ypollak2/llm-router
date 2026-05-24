@@ -1852,11 +1852,11 @@ async def get_model_latency_stats(window_days: int = 7) -> dict[str, dict]:
 # All savings are calculated relative to these baseline costs.
 
 BASELINE_MODEL_FOR_SAVINGS = "sonnet"  # Baseline: Sonnet 4.6 ($3/$15 per M tokens)
-"""Reference model for savings calculations. All savings = Sonnet cost - actual cost.
-Sonnet is the honest baseline: it's what Claude Code subscription users actually consume."""
+"""Reference model for savings calculations. All savings = Opus cost - actual cost.
+Opus is the baseline: it's the host model on Claude Code subscription."""
 
-_SONNET_INPUT_PER_M = 3.0      # $3 per million input tokens (Sonnet 4.6)
-_SONNET_OUTPUT_PER_M = 15.0    # $15 per million output tokens (Sonnet 4.6)
+_HOST_INPUT_PER_M = 15.0      # $15 per million input tokens (Opus 4.6)
+_HOST_OUTPUT_PER_M = 75.0     # $75 per million output tokens (Opus 4.6)
 _FREE_PROVIDERS = {"ollama", "codex"}
 """Providers that incur zero cost (local or included in subscription)."""
 
@@ -1866,14 +1866,14 @@ async def get_savings_by_period() -> dict[str, dict]:
 
     Queries the usage table for four periods: today, this week (Mon–Sun),
     this calendar month, and all-time. For each period returns:
-        saved_usd:    total dollars saved vs Sonnet baseline
+        saved_usd:    total dollars saved vs Opus baseline
         actual_usd:   total dollars actually spent on paid API calls
-        baseline_usd: what Sonnet would have cost for the same tokens
+        baseline_usd: what Opus would have cost for the same tokens
         calls:        total routed calls in the period
         efficiency:   baseline_usd / actual_usd multiplier (0 if no paid calls)
 
     Rows with saved_usd populated (v2.1+) use that directly. Pre-v2.1 rows
-    fall back to estimating the Sonnet baseline from token counts.
+    fall back to estimating the Opus baseline from token counts.
     """
     db = await _get_db()
     try:
@@ -1902,13 +1902,13 @@ async def get_savings_by_period() -> dict[str, dict]:
                 calls += 1
                 if provider == "subscription":
                     continue  # CC subscription rows have no token cost data
-                sonnet_est = (in_tok * _SONNET_INPUT_PER_M + out_tok * _SONNET_OUTPUT_PER_M) / 1_000_000
-                baseline += sonnet_est
+                host_est = (in_tok * _HOST_INPUT_PER_M + out_tok * _HOST_OUTPUT_PER_M) / 1_000_000
+                baseline += host_est
                 if provider in _FREE_PROVIDERS:
-                    saved_total += saved_col if saved_col else sonnet_est
+                    saved_total += saved_col if saved_col else host_est
                 else:
                     actual += cost
-                    saved_total += saved_col if saved_col else max(0.0, sonnet_est - cost)
+                    saved_total += saved_col if saved_col else max(0.0, host_est - cost)
 
             efficiency = baseline / actual if actual > 0.001 else 0.0
             result[name] = {
@@ -2068,10 +2068,10 @@ async def get_team_savings(
     free_calls = sum(r[2] for r in rows if r[1] in _free)
     free_pct = free_calls / total_calls if total_calls else 0.0
 
-    # Estimate savings vs Sonnet baseline using token counts
+    # Estimate savings vs Opus baseline using token counts
     total_tokens = sum(r[4] for r in rows)
-    sonnet_baseline = total_tokens / 1000 * ((_SONNET_INPUT_PER_M + _SONNET_OUTPUT_PER_M) / 2 / 1000)
-    saved_usd = max(0.0, sonnet_baseline - actual_usd)
+    host_baseline = total_tokens / 1000 * ((_HOST_INPUT_PER_M + _HOST_OUTPUT_PER_M) / 2 / 1000)
+    saved_usd = max(0.0, host_baseline - actual_usd)
 
     top_models = [
         {"model": r[0], "provider": r[1], "calls": r[2], "cost": r[3]}
@@ -2088,11 +2088,11 @@ async def get_team_savings(
 
 
 # Re-use module-level baseline constants (defined once near line 1860)
-# _SONNET_INPUT_PER_M and _SONNET_OUTPUT_PER_M are already defined above
+# _HOST_INPUT_PER_M and _HOST_OUTPUT_PER_M are already defined above
 
 
 async def get_routing_savings_vs_sonnet(days: int = 0) -> dict:
-    """Compute savings by comparing actual cost vs Sonnet 4.6 baseline.
+    """Compute savings by comparing actual cost vs Opus 4.6 baseline.
 
     Uses the routing_decisions table (populated by the router on every call).
     Savings = what Sonnet would have cost − what we actually paid.
@@ -2132,7 +2132,7 @@ async def get_routing_savings_vs_sonnet(days: int = 0) -> dict:
             return empty
 
         total, actual_cost, in_tok, out_tok = row
-        baseline = (in_tok * _SONNET_INPUT_PER_M + out_tok * _SONNET_OUTPUT_PER_M) / 1_000_000
+        baseline = (in_tok * _HOST_INPUT_PER_M + out_tok * _HOST_OUTPUT_PER_M) / 1_000_000
         saved = max(0.0, baseline - actual_cost)
 
         cursor = await db.execute(
@@ -2146,7 +2146,7 @@ async def get_routing_savings_vs_sonnet(days: int = 0) -> dict:
         by_model = {}
         for m_row in await cursor.fetchall():
             m, cnt, m_cost, m_in, m_out = m_row
-            m_baseline = (m_in * _SONNET_INPUT_PER_M + m_out * _SONNET_OUTPUT_PER_M) / 1_000_000
+            m_baseline = (m_in * _HOST_INPUT_PER_M + m_out * _HOST_OUTPUT_PER_M) / 1_000_000
             by_model[m or "unknown"] = {
                 "calls": int(cnt),
                 "actual_cost": float(m_cost),

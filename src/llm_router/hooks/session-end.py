@@ -36,8 +36,8 @@ SESSION_SPEND_FILE   = os.path.join(STATE_DIR, "session_spend.json")
 # Show star CTA once the user has saved at least this much (lifetime)
 STAR_CTA_THRESHOLD_USD = 0.50
 
-SONNET_INPUT_PER_M  = 3.0   # Baseline: Sonnet 4.6 ($3/$15 per M tokens)
-SONNET_OUTPUT_PER_M = 15.0  # All savings = Sonnet cost - actual cost
+HOST_INPUT_PER_M  = 15.0   # Baseline: Opus 4.6 ($15/$75 per M tokens)
+HOST_OUTPUT_PER_M = 75.0   # Matches receipt_store.py opus_equivalent calculation
 WIDTH = 50
 
 # Model names that indicate test/mock data — never show in production reports.
@@ -360,7 +360,7 @@ def _query_cumulative_savings() -> list[tuple[str, int, int, int, float]]:
                 calls   += cnt
                 total_in  += in_tok
                 total_out += out_tok
-                baseline = _sonnet_baseline(in_tok, out_tok)
+                baseline = _host_baseline(in_tok, out_tok)
                 if provider in _FREE_PROVIDERS:
                     # Only count savings when tokens > 0 (evidence of actual work)
                     saved += baseline if (in_tok + out_tok) > 0 else 0.0
@@ -411,8 +411,9 @@ def _aggregate(rows: list[dict]) -> dict[str, dict]:
     return tools
 
 
-def _sonnet_baseline(in_tok: int, out_tok: int) -> float:
-    return (in_tok * SONNET_INPUT_PER_M + out_tok * SONNET_OUTPUT_PER_M) / 1_000_000
+def _host_baseline(in_tok: int, out_tok: int) -> float:
+    """What Opus would charge for the same token volume (matches receipt_store)."""
+    return (in_tok * HOST_INPUT_PER_M + out_tok * HOST_OUTPUT_PER_M) / 1_000_000
 
 
 # ── Formatting ─────────────────────────────────────────────────────────────────
@@ -507,7 +508,7 @@ def _format_routing_section(tools: dict[str, dict]) -> list[str]:
     total_in    = sum(t["in"]    for t in tools.values())
     total_out   = sum(t["out"]   for t in tools.values())
     total_cost  = sum(t["cost"]  for t in tools.values())
-    total_base  = _sonnet_baseline(total_in, total_out)
+    total_base  = _host_baseline(total_in, total_out)
     total_saved = max(0.0, total_base - total_cost)
     savings_pct = round(total_saved / total_base * 100) if total_base > 0 else 0
     total_tokens = total_in + total_out
@@ -556,7 +557,7 @@ def _total_saved(tools: dict[str, dict]) -> float:
     total_in   = sum(t["in"]   for t in tools.values())
     total_out  = sum(t["out"]  for t in tools.values())
     total_cost = sum(t["cost"] for t in tools.values())
-    baseline   = _sonnet_baseline(total_in, total_out)
+    baseline   = _host_baseline(total_in, total_out)
     return max(0.0, baseline - total_cost)
 
 
@@ -601,7 +602,7 @@ def _format_free_section(free_rows: list[dict], paid_rows: list[dict]) -> list[s
             else:
                 # No evidence of work done — don't claim savings
                 est = True
-        baseline = _sonnet_baseline(in_t, out_t)
+        baseline = _host_baseline(in_t, out_t)
         saved    = max(0.0, baseline) if (in_t + out_t) > 0 else 0.0
         total_saved += saved
         est_tag  = f" {_C_MUTED}~est{_RESET}" if est else ""
@@ -879,7 +880,7 @@ def _query_daily_14d() -> list[tuple[str, int, int, float]]:
                 daily[day] = {"calls": 0, "tokens": 0, "saved": 0.0}
             daily[day]["calls"] += calls
             daily[day]["tokens"] += in_tok + out_tok
-            baseline = _sonnet_baseline(in_tok, out_tok)
+            baseline = _host_baseline(in_tok, out_tok)
             if provider in _FREE_PROVIDERS:
                 daily[day]["saved"] += baseline
             elif provider != "subscription":
@@ -1251,8 +1252,8 @@ def _lifetime_saved() -> float:
         conn.close()
         saved = 0.0
         for provider, in_tok, out_tok, cost in rows:
-            base = ((in_tok or 0) * SONNET_INPUT_PER_M
-                    + (out_tok or 0) * SONNET_OUTPUT_PER_M) / 1_000_000
+            base = ((in_tok or 0) * HOST_INPUT_PER_M
+                    + (out_tok or 0) * HOST_OUTPUT_PER_M) / 1_000_000
             if provider in _FREE_PROVIDERS:
                 saved += base
             elif provider != "subscription":
@@ -1377,9 +1378,6 @@ def main() -> None:
 
     has_cumulative = any(calls > 0 for _, calls, *_ in cumulative)
 
-    if not tools and not cc_rows and not current and not free_rows and not has_cumulative:
-        sys.exit(0)
-
     # Try Cyber-Grid (Rich) renderer; fall back to legacy ANSI
     summary = None
     try:
@@ -1393,7 +1391,23 @@ def main() -> None:
         pass
 
     if not summary:
-        summary = _format(tools, cc_rows, free_rows, paid_rows, start, current, is_live, cumulative, session_start)
+        if not tools and not cc_rows and not current and not free_rows and not has_cumulative:
+            # Minimal summary for inactive sessions
+            try:
+                from llm_router.dashboard.server import _get_or_create_token, DEFAULT_PORT
+                token = _get_or_create_token()
+                url = f"http://localhost:{DEFAULT_PORT}/?token={token}"
+                summary = (
+                    f"\n\033[2m{'─'*WIDTH}\033[0m\n"
+                    f"  \033[1m\ud83d\udcca LLM Router Session Summary Dashboard\033[0m\n"
+                    f"  No session activity detected\n"
+                    f"  \033[1mDashboard:\033[0m \033[4;34m{url}\033[0m\n"
+                    f"\033[2m{'─'*WIDTH}\033[0m\n"
+                )
+            except Exception:
+                sys.exit(0)
+        else:
+            summary = _format(tools, cc_rows, free_rows, paid_rows, start, current, is_live, cumulative, session_start)
 
     # Append session spend + real savings panel (v8.8.0)
     spend = _read_session_spend()

@@ -2,6 +2,23 @@
 
 **For releases v6.2 and earlier, see [CHANGELOG_ARCHIVE.md](docs/CHANGELOG_ARCHIVE.md).**
 
+## v9.0.3 — Zero-Claude Direct Execution & Mini-Agent Loop (2026-05-24)
+
+### Added
+
+- **Direct Execution** — `UserPromptSubmit` hook can now route queries directly to Ollama/Gemini/OpenAI.
+- **Zero-Token Routing** — simple prompts return `{"decision": "block"}` to Claude, consuming 0 subscription tokens.
+- **Ollama Agent Loop** — Ollama now has access to basic file tools (read, write, edit, search) via a local agent loop for simple file-op tasks.
+- **Pressure-Aware Chains** — new 5-zone pressure monitoring (green to critical) for more granular downshifting.
+
+### Fixed
+
+- **Gemini Subscription Mode** — fixed Gemini models being hidden even when available via CLI.
+- **Test Isolation** — tests now explicitly clear subscription flags and use `sys.executable` for subprocess calls, improving reliability across different developer environments.
+- **Codex Priority** — ensured Codex is tried at the absolute front of the chain during extreme quota pressure.
+
+---
+
 ## v9.0.1 — Dashboard Cleanup & Free-First Routing (2026-05-23)
 
 ### Added

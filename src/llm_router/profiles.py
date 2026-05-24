@@ -398,6 +398,7 @@ def reorder_for_pressure(
     chain: list[str],
     pressure: float,
     profile: "RoutingProfile",
+    is_subscription_mode: bool = False,
 ) -> list[str]:
     """Reorder the model chain based on Claude subscription pressure.
 
@@ -407,7 +408,9 @@ def reorder_for_pressure(
 
     Strategy:
     - **Below 85%**: Claude models move to the front — they're effectively
-      free under a Pro/Max subscription.
+      free under a Pro/Max subscription. EXCEPTION: In is_subscription_mode=True,
+      we leave the chain in its natural order (Ollama/Codex first) to preserve
+      quota even when pressure is low.
     - **85–98%**: Claude moves to the end; free models (Codex) first, then
       cheap, then paid externals. Claude stays as a last-resort fallback.
     - **≥ 99% (hard cap)**: Claude is removed entirely from the chain to
@@ -422,6 +425,7 @@ def reorder_for_pressure(
             0.0–1.0). Use the raw value, not ``effective_pressure``, so the
             99% hard cap is enforced regardless of imminent resets.
         profile: Routing profile — BUDGET is a no-op (pass-through).
+        is_subscription_mode: If True, do not prepend Claude models at low pressure.
 
     Returns:
         Reordered list, possibly with Claude models removed at ≥ 99%.
@@ -450,6 +454,12 @@ def reorder_for_pressure(
         return non_claude_models
 
     if pressure < 0.85:
+        # If in subscription mode, we DON'T want to push Claude to the front.
+        # we want to save the quota for later. Leave the chain in its natural
+        # order (usually favors Ollama/Codex/External).
+        if is_subscription_mode:
+            return chain
+
         # Quota available: cheap Claude models (Haiku/Sonnet) first, then external, then expensive
         return claude_cheap_models + other_models
 
@@ -499,6 +509,7 @@ def get_model_chain(
     failure_rates: dict[str, float] | None = None,
     latency_stats: "dict[str, dict] | None" = None,
     acceptance_scores: "dict[str, float] | None" = None,
+    is_subscription_mode: bool = False,
 ) -> list[str]:
     """Get the ordered model preference chain for a profile + task type.
 
@@ -528,6 +539,7 @@ def get_model_chain(
         acceptance_scores: Pre-fetched dict of ``{model: acceptance_rate}``
             from ``cost.get_model_acceptance_scores()``. Models with low user
             acceptance are penalised in benchmark ordering.
+        is_subscription_mode: If True, do not prepend Claude models at low pressure.
 
     Returns:
         Ordered list of model IDs to try, best-fit first.
@@ -550,7 +562,7 @@ def get_model_chain(
     if task_type == TaskType.RESEARCH:
         # Use standard pressure reordering for research tasks
         try:
-            chain = reorder_for_pressure(static_chain, pressure, profile)
+            chain = reorder_for_pressure(static_chain, pressure, profile, is_subscription_mode)
         except Exception as _e:
             log.warning("Pressure reordering failed for RESEARCH — using static order: %s", _e)
             chain = static_chain
@@ -573,7 +585,7 @@ def get_model_chain(
             log.warning("Benchmark ordering failed — using static chain: %s", _e)
 
     try:
-        chain = reorder_for_pressure(chain, pressure, profile)
+        chain = reorder_for_pressure(chain, pressure, profile, is_subscription_mode)
     except Exception as _e:
         log.warning("Pressure reordering failed — using static chain order: %s", _e)
 

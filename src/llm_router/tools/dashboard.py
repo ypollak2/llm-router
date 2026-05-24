@@ -38,13 +38,9 @@ _BG_MAGENTA = "\033[45m"
 _FULL_BLOCK = "█"
 _HALF_BLOCK = "▌"
 
-# Sonnet 4.6 baseline rates (per million tokens)
-SONNET_INPUT_PER_M = 3.0
-SONNET_OUTPUT_PER_M = 15.0
-
-# Opus baseline rates (per million tokens) — alternative view
-OPUS_INPUT_PER_M = 15.0
-OPUS_OUTPUT_PER_M = 75.0
+# Host model baseline rates (per million tokens) — Opus 4.6
+HOST_INPUT_PER_M = 15.0
+HOST_OUTPUT_PER_M = 75.0
 
 # Provider colors for distribution bars
 _PROVIDER_COLORS = {
@@ -91,12 +87,9 @@ def _window_label(window: str) -> str:
     return labels.get(w, "LAST 14 DAYS")
 
 
-def _sonnet_baseline(input_tokens: int, output_tokens: int) -> float:
-    return (input_tokens * SONNET_INPUT_PER_M + output_tokens * SONNET_OUTPUT_PER_M) / 1_000_000
-
-
-def _opus_baseline(input_tokens: int, output_tokens: int) -> float:
-    return (input_tokens * OPUS_INPUT_PER_M + output_tokens * OPUS_OUTPUT_PER_M) / 1_000_000
+def _host_baseline(input_tokens: int, output_tokens: int) -> float:
+    """What the host model (Opus) would charge for the same token volume."""
+    return (input_tokens * HOST_INPUT_PER_M + output_tokens * HOST_OUTPUT_PER_M) / 1_000_000
 
 
 def _format_tokens(n: int) -> str:
@@ -130,7 +123,7 @@ def _render_sparkline(values: list[float], width: int = 40) -> str:
     return line
 
 
-async def _query_daily_savings(since_sql: str, baseline: str = "sonnet") -> list[dict]:
+async def _query_daily_savings(since_sql: str, baseline: str = "opus") -> list[dict]:
     """Query daily token savings from usage table."""
     db = await _get_db()
     try:
@@ -154,7 +147,7 @@ async def _query_daily_savings(since_sql: str, baseline: str = "sonnet") -> list
     finally:
         await db.close()
 
-    baseline_fn = _sonnet_baseline if baseline == "sonnet" else _opus_baseline
+    baseline_fn = _host_baseline
     results = []
     for row in rows:
         day, total_tok, in_tok, out_tok, actual, calls = row
@@ -173,7 +166,7 @@ async def _query_daily_savings(since_sql: str, baseline: str = "sonnet") -> list
     return results
 
 
-async def _query_provider_breakdown(since_sql: str, baseline: str = "sonnet") -> list[dict]:
+async def _query_provider_breakdown(since_sql: str, baseline: str = "opus") -> list[dict]:
     """Query per-provider savings breakdown."""
     db = await _get_db()
     try:
@@ -197,7 +190,7 @@ async def _query_provider_breakdown(since_sql: str, baseline: str = "sonnet") ->
     finally:
         await db.close()
 
-    baseline_fn = _sonnet_baseline if baseline == "sonnet" else _opus_baseline
+    baseline_fn = _host_baseline
     results = []
     for row in rows:
         prov, total_tok, in_tok, out_tok, actual, calls = row
@@ -250,12 +243,9 @@ def _render_dashboard(
     lines: list[str] = []
 
     # ── Header ──────────────────────────────────────────────────────────
-    baseline_label = "Sonnet 4.6" if baseline == "sonnet" else "Opus 4.6"
-    alt = "opus" if baseline == "sonnet" else "sonnet"
-
     lines.append(f"{_BOLD}╔══════════════════════════════════════════════════════════════╗{_RESET}")
     lines.append(f"{_BOLD}║  {_CYAN}LLM Router — Savings Dashboard{_RESET}{_BOLD}                              ║{_RESET}")
-    lines.append(f"{_BOLD}║  {_DIM}Baseline: {baseline_label} [alt: --baseline {alt}]{_RESET}{_BOLD}                  ║{_RESET}")
+    lines.append(f"{_BOLD}║  {_DIM}Baseline: Opus 4.6 ($15/$75 per 1M tokens){_RESET}{_BOLD}                   ║{_RESET}")
     lines.append(f"{_BOLD}╠══════════════════════════════════════════════════════════════╣{_RESET}")
 
     # ── Totals ──────────────────────────────────────────────────────────
@@ -336,7 +326,7 @@ def _render_dashboard(
         lines.append("")
         lines.append(f"  {_YELLOW}┌─ SUBSCRIPTION MODE ────────────────────────────────┐{_RESET}")
         lines.append(f"  {_YELLOW}│{_RESET} You're on a flat-rate Claude plan.                 {_YELLOW}│{_RESET}")
-        lines.append(f"  {_YELLOW}│{_RESET} Dollar savings = vs {baseline_label} baseline (reference).  {_YELLOW}│{_RESET}")
+        lines.append(f"  {_YELLOW}│{_RESET} Dollar savings = vs Opus 4.6 baseline (reference).  {_YELLOW}│{_RESET}")
         lines.append(f"  {_YELLOW}│{_RESET} Real value = {_BOLD}quota freed{_RESET} for complex tasks.          {_YELLOW}│{_RESET}")
         lines.append(f"  {_YELLOW}│{_RESET} {_format_tokens(total_tokens)} tokens handled by cheaper models      {_YELLOW}│{_RESET}")
         lines.append(f"  {_YELLOW}│{_RESET} = quota preserved for Opus-class work.              {_YELLOW}│{_RESET}")
@@ -364,7 +354,7 @@ def _render_dashboard(
 async def llm_savings_dashboard(
     ctx: Context,
     window: str = "14d",
-    baseline: str = "sonnet",
+    baseline: str = "opus",
 ) -> str:
     """Savings dashboard with time-series, token metrics, and colored bars.
 
@@ -373,7 +363,7 @@ async def llm_savings_dashboard(
 
     Args:
         window: Time window — "14d" (default), "30d", "3m", "1y", "all".
-        baseline: Cost baseline for savings — "sonnet" (default, honest) or "opus".
+        baseline: Cost baseline — "opus" (default, matches host model).
     """
     since_sql = _window_to_sql(window)
     label = _window_label(window)

@@ -572,7 +572,7 @@ def _install_gemini_cli_files() -> list[str]:
     if not ext_manifest.exists():
         manifest = {
             "name": "llm-router",
-            "version": "3.5.0",
+            "version": "9.0.1",
             "description": "Route tasks to cheapest capable model — 20+ providers",
             "mcpServers": {"llm-router": server_entry},
         }
@@ -581,9 +581,29 @@ def _install_gemini_cli_files() -> list[str]:
     else:
         actions.append(f"  Extension manifest already exists at {ext_manifest} (skipped)")
 
-    # 3. Hook script
-    hook_dest, hook_actions = _copy_hook_script(
+    # 3. Hook scripts
+    post_hook_dest, hook_actions = _copy_hook_script(
         "gemini-cli-post-tool.py", home / ".llm-router" / "hooks"
+    )
+    actions += hook_actions
+
+    auto_hook_dest, hook_actions = _copy_hook_script(
+        "gemini-cli-auto-route.py", home / ".llm-router" / "hooks"
+    )
+    actions += hook_actions
+
+    status_hook_dest, hook_actions = _copy_hook_script(
+        "status-bar.py", home / ".llm-router" / "hooks"
+    )
+    actions += hook_actions
+
+    end_hook_dest, hook_actions = _copy_hook_script(
+        "gemini-cli-session-end.py", home / ".llm-router" / "hooks"
+    )
+    actions += hook_actions
+
+    start_hook_dest, hook_actions = _copy_hook_script(
+        "session-start.py", home / ".llm-router" / "hooks"
     )
     actions += hook_actions
 
@@ -593,8 +613,18 @@ def _install_gemini_cli_files() -> list[str]:
     hooks_json = hooks_dir / "hooks.json"
     hook_entry = {
         "hooks": {
+            "SessionStart": [
+                {"matcher": "*", "command": start_hook_dest}
+            ],
             "PostToolUse": [
-                {"matcher": "*", "command": hook_dest}
+                {"matcher": "*", "command": post_hook_dest}
+            ],
+            "UserPromptSubmit": [
+                {"matcher": "*", "command": auto_hook_dest},
+                {"matcher": "*", "command": status_hook_dest}
+            ],
+            "SessionEnd": [
+                {"matcher": "*", "command": end_hook_dest}
             ]
         }
     }
@@ -602,7 +632,42 @@ def _install_gemini_cli_files() -> list[str]:
         hooks_json.write_text(_json.dumps(hook_entry, indent=2))
         actions.append(f"✓ Created Gemini CLI hooks.json at {hooks_json}")
     else:
-        actions.append(f"  hooks.json already exists at {hooks_json} (skipped)")
+        # Merge if missing
+        try:
+            current = _json.loads(hooks_json.read_text())
+            hooks = current.setdefault("hooks", {})
+            
+            # SessionStart
+            start_hooks = hooks.setdefault("SessionStart", [])
+            if not any(start_hook_dest in str(h) for h in start_hooks):
+                start_hooks.append({"matcher": "*", "command": start_hook_dest})
+                actions.append("✓ Added SessionStart hook to Gemini CLI")
+            
+            # PostToolUse
+            post_hooks = hooks.setdefault("PostToolUse", [])
+            if not any(post_hook_dest in str(h) for h in post_hooks):
+                post_hooks.append({"matcher": "*", "command": post_hook_dest})
+                actions.append("✓ Added PostToolUse hook to Gemini CLI")
+            
+            # UserPromptSubmit
+            auto_hooks = hooks.setdefault("UserPromptSubmit", [])
+            if not any(auto_hook_dest in str(h) for h in auto_hooks):
+                auto_hooks.append({"matcher": "*", "command": auto_hook_dest})
+                actions.append("✓ Added UserPromptSubmit hook to Gemini CLI")
+            
+            if not any(status_hook_dest in str(h) for h in auto_hooks):
+                auto_hooks.append({"matcher": "*", "command": status_hook_dest})
+                actions.append("✓ Added status-bar hook to Gemini CLI")
+
+            # SessionEnd
+            end_hooks = hooks.setdefault("SessionEnd", [])
+            if not any(end_hook_dest in str(h) for h in end_hooks):
+                end_hooks.append({"matcher": "*", "command": end_hook_dest})
+                actions.append("✓ Added SessionEnd hook to Gemini CLI")
+            
+            hooks_json.write_text(_json.dumps(current, indent=2))
+        except Exception as e:
+            actions.append(f"  Could not update {hooks_json}: {e}")
 
     # 5. Routing rules
     actions += _append_routing_rules(ext_dir / "INSTRUCTIONS.md", "gemini-cli-rules.md")

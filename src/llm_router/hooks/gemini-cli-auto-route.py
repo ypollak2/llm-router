@@ -83,8 +83,23 @@ async def get_routing_hint(prompt: str) -> Optional[str]:
     """
     try:
         complexity, _confidence = await classify_complexity(prompt)
+        prompt_lower = prompt.lower()
 
-        # Map complexity to recommended tool
+        # Heuristic for task type
+        is_code = any(kw in prompt_lower for kw in ["code", "script", "function", "refactor", "bug", "implement"])
+        is_generate = any(kw in prompt_lower for kw in ["write", "draft", "compose", "blog", "article"])
+        is_research = any(kw in prompt_lower for kw in ["latest", "recent", "news", "current events", "research"])
+
+        # Map complexity + task type to recommended tool
+        if is_research:
+            return f"⚡ MANDATORY ROUTE: research/{complexity} → call llm_research(complexity='{complexity}')"
+        
+        if is_code:
+            return f"⚡ MANDATORY ROUTE: code/{complexity} → call llm_code(complexity='{complexity}')"
+            
+        if is_generate:
+            return f"⚡ MANDATORY ROUTE: generate/{complexity} → call llm_generate(complexity='{complexity}')"
+
         if complexity == "simple":
             return "⚡ MANDATORY ROUTE: query/simple → call llm_query(complexity='simple')"
         elif complexity == "complex":

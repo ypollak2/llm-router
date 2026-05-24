@@ -218,6 +218,7 @@ async def test_codex_at_front_when_pressure_very_high(
     preserve any remaining subscription capacity.
     """
     monkeypatch.setattr("llm_router.router.is_codex_available", lambda: True)
+    monkeypatch.setattr("llm_router.router.is_gemini_cli_available", lambda: False)
     monkeypatch.setattr("llm_router.claude_usage.get_claude_pressure", lambda: 0.97)
 
     codex_result = _mock_codex_result("Codex at high pressure")

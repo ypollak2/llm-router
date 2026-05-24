@@ -6,8 +6,7 @@ from llm_router.tools.dashboard import (
     _format_tokens,
     _render_bar,
     _render_sparkline,
-    _sonnet_baseline,
-    _opus_baseline,
+    _host_baseline,
     _window_label,
     _window_to_sql,
     _render_dashboard,
@@ -29,19 +28,13 @@ class TestFormatTokens:
 
 
 class TestBaselines:
-    def test_sonnet_baseline(self):
-        # 1M input tokens at $3/M + 1M output at $15/M = $18
-        result = _sonnet_baseline(1_000_000, 1_000_000)
-        assert abs(result - 18.0) < 0.001
-
-    def test_opus_baseline(self):
+    def test_host_baseline(self):
         # 1M input at $15/M + 1M output at $75/M = $90
-        result = _opus_baseline(1_000_000, 1_000_000)
+        result = _host_baseline(1_000_000, 1_000_000)
         assert abs(result - 90.0) < 0.001
 
     def test_zero_tokens(self):
-        assert _sonnet_baseline(0, 0) == 0.0
-        assert _opus_baseline(0, 0) == 0.0
+        assert _host_baseline(0, 0) == 0.0
 
 
 class TestWindowConversion:

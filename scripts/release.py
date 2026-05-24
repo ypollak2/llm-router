@@ -21,7 +21,7 @@ CHANGELOG_PATH = ROOT / "CHANGELOG.md"
 PLUGIN_DIRS = (".claude-plugin", ".codex-plugin", ".factory-plugin")
 
 _PYPROJECT_VERSION_RE = re.compile(r'(?m)^version = "([^"]+)"$')
-_INIT_VERSION_RE = re.compile(r'(?m)^__version__ = "([^"]+)"$')
+_INIT_VERSION_RE = re.compile(r'(?m)^__version__ = "([^"]+)"(.*)$')
 
 
 def run(
@@ -50,7 +50,7 @@ def update_pyproject_text(text: str, version: str) -> str:
 
 
 def update_init_version_text(text: str, version: str) -> str:
-    return _replace_single(_INIT_VERSION_RE, text, f'__version__ = "{version}"')
+    return _replace_single(_INIT_VERSION_RE, text, f'__version__ = "{version}"\\2')
 
 
 def update_plugin_data(data: dict, version: str) -> dict:
@@ -212,7 +212,6 @@ def perform_release(
             ".factory-plugin/marketplace.json",
             "CHANGELOG.md",
             "README.md",
-            "CLAUDE.md",
             "uv.lock",
         ],
         dry_run=dry_run,

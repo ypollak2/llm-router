@@ -79,8 +79,8 @@ def detect_services() -> ServiceDetection:
     if is_gemini_cli_available():
         detected["gemini_cli_available"] = True
         try:
-            from llm_router.gemini_cli_quota import get_gemini_quota_status
-            quota = get_gemini_quota_status()
+            from llm_router.gemini_cli_quota import get_gemini_quota_status_sync
+            quota = get_gemini_quota_status_sync()
             detected["gemini_cli_quota"] = quota
         except Exception:
             pass

@@ -21,12 +21,13 @@ from llm_router.cost import _get_db
 
 log = logging.getLogger("llm_router.digest")
 
-_SONNET_IN_PER_M  = 3.0
-_SONNET_OUT_PER_M = 15.0
+_HOST_IN_PER_M  = 15.0    # Opus 4.6 ($15 per M input tokens)
+_HOST_OUT_PER_M = 75.0    # Opus 4.6 ($75 per M output tokens)
 
 
-def _sonnet_baseline(in_tok: int, out_tok: int) -> float:
-    return (in_tok * _SONNET_IN_PER_M + out_tok * _SONNET_OUT_PER_M) / 1_000_000
+def _host_baseline(in_tok: int, out_tok: int) -> float:
+    """What the host model (Opus) would charge for the same token volume."""
+    return (in_tok * _HOST_IN_PER_M + out_tok * _HOST_OUT_PER_M) / 1_000_000
 
 
 _PERIOD_SQL: dict[str, str] = {
@@ -64,7 +65,7 @@ async def _fetch_period_data(period: str) -> dict[str, Any]:
     by_provider: dict[str, dict] = {}
 
     for provider, calls, in_tok, out_tok, cost in rows:
-        baseline = _sonnet_baseline(in_tok, out_tok)
+        baseline = _host_baseline(in_tok, out_tok)
         if provider in _FREE_PROVIDERS:
             saved = baseline
         elif provider == "subscription":
@@ -131,7 +132,7 @@ async def simulate_without_routing(period: str = "week") -> tuple[float, float, 
     """
     data = await _fetch_period_data(period)
     actual   = data["cost"]
-    baseline = _sonnet_baseline(data["total_in"], data["total_out"])
+    baseline = _host_baseline(data["total_in"], data["total_out"])
     savings_pct = (baseline - actual) / baseline * 100 if baseline > 0 else 0.0
     return actual, baseline, savings_pct
 

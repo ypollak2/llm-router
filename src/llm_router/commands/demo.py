@@ -98,6 +98,7 @@ def _run_demo() -> None:
 
     # Fallback static examples — 3 focused cases showing cost savings
     cc_mode = os.getenv("LLM_ROUTER_CLAUDE_SUBSCRIPTION", "").lower() in ("true", "1", "yes")
+    gemini_mode = os.getenv("LLM_ROUTER_GEMINI_SUBSCRIPTION", "").lower() in ("true", "1", "yes")
     has_perplexity = bool(os.getenv("PERPLEXITY_API_KEY"))
     has_openai     = bool(os.getenv("OPENAI_API_KEY"))
     has_gemini     = bool(os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY"))
@@ -105,8 +106,8 @@ def _run_demo() -> None:
     # 3 core examples: simple → moderate → complex cost story
     EXAMPLE_CASES = [
         ('"what does os.path.join do?"',          "query",    "simple",     "Claude Haiku",    "$0.00001"),
-        ('"why is my async code slow?"',           "analyze",  "moderate",   "Claude Sonnet",   "$0.003"),
-        ('"implement a Redis-backed rate limiter"',"code",     "complex",    "Claude Opus",     "$0.015"),
+        ('"why is my async code slow?"',           "analyze",  "moderate",   "Claude Sonnet",   "$0.015"),
+        ('"implement a Redis-backed rate limiter"',"code",     "complex",    "Claude Opus",     "$0.075"),
     ]
 
     cases = real_rows if using_real else EXAMPLE_CASES
@@ -120,6 +121,8 @@ def _run_demo() -> None:
         config_parts = []
         if cc_mode:
             config_parts.append("Claude Code subscription")
+        if gemini_mode:
+            config_parts.append("Gemini subscription")
         if has_perplexity:
             config_parts.append("Perplexity")
         if has_openai:

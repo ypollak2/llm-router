@@ -22,8 +22,8 @@ STAR_CTA_FILE        = os.path.join(STATE_DIR, "star_cta_shown.txt")
 
 STAR_CTA_THRESHOLD_USD = 0.50
 
-SONNET_INPUT_PER_M  = 3.0
-SONNET_OUTPUT_PER_M = 15.0
+HOST_INPUT_PER_M  = 15.0   # Opus 4.6 ($15/$75 per M tokens)
+HOST_OUTPUT_PER_M = 75.0
 WIDTH = 64
 
 
@@ -88,8 +88,8 @@ def _aggregate(rows: list[dict]) -> dict[str, dict]:
     return tools
 
 
-def _sonnet_baseline(in_tok: int, out_tok: int) -> float:
-    return (in_tok * SONNET_INPUT_PER_M + out_tok * SONNET_OUTPUT_PER_M) / 1_000_000
+def _host_baseline(in_tok: int, out_tok: int) -> float:
+    return (in_tok * HOST_INPUT_PER_M + out_tok * HOST_OUTPUT_PER_M) / 1_000_000
 
 
 # ── Formatting ─────────────────────────────────────────────────────────────────
@@ -104,7 +104,7 @@ def _format_routing_section(tools: dict[str, dict]) -> list[str]:
     total_in    = sum(t["in"]    for t in tools.values())
     total_out   = sum(t["out"]   for t in tools.values())
     total_cost  = sum(t["cost"]  for t in tools.values())
-    total_base  = _sonnet_baseline(total_in, total_out)
+    total_base  = _host_baseline(total_in, total_out)
     total_saved = max(0.0, total_base - total_cost)
     savings_pct = round(total_saved / total_base * 100) if total_base > 0 else 0
 
@@ -128,7 +128,7 @@ def _total_saved(tools: dict[str, dict]) -> float:
     total_in   = sum(t["in"]   for t in tools.values())
     total_out  = sum(t["out"]  for t in tools.values())
     total_cost = sum(t["cost"] for t in tools.values())
-    baseline   = _sonnet_baseline(total_in, total_out)
+    baseline   = _host_baseline(total_in, total_out)
     return max(0.0, baseline - total_cost)
 
 
@@ -162,7 +162,7 @@ def _format_free_section(free_rows: list[dict], paid_rows: list[dict]) -> list[s
             in_t  = int(avg_in  * d["calls"])
             out_t = int(avg_out * d["calls"])
             est   = True
-        baseline = _sonnet_baseline(in_t, out_t)
+        baseline = _host_baseline(in_t, out_t)
         saved    = max(0.0, baseline)
         total_saved += saved
         est_tag  = " ~est" if est else ""
@@ -208,8 +208,8 @@ def _lifetime_saved() -> float:
         conn.close()
         saved = 0.0
         for provider, in_tok, out_tok, cost in rows:
-            base = ((in_tok or 0) * SONNET_INPUT_PER_M
-                    + (out_tok or 0) * SONNET_OUTPUT_PER_M) / 1_000_000
+            base = ((in_tok or 0) * HOST_INPUT_PER_M
+                    + (out_tok or 0) * HOST_OUTPUT_PER_M) / 1_000_000
             if provider in _FREE_PROVIDERS:
                 saved += base
             elif provider != "subscription":

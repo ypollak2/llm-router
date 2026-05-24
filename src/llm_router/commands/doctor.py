@@ -502,12 +502,15 @@ def _run_doctor(host: Optional[str] = None) -> tuple[int, list[str]]:
     # ── 9. Version ────────────────────────────────────────────────────────
     print(f"\n{_bold('  Version')}")
     try:
-        from importlib.metadata import version
-
-        v = version("llm-router")
-        print(_ok(f"llm-router {v}"))
+        from llm_router import __version__ as project_version
+        print(_ok(f"llm-router {project_version}"))
     except Exception:
-        print(_warn("could not determine installed version"))
+        try:
+            from importlib.metadata import version
+            v = version("llm-router")
+            print(_ok(f"llm-router {v}"))
+        except Exception:
+            print(_warn("could not determine installed version"))
 
     # ── Summary ────────────────────────────────────────────────────────────
     print()

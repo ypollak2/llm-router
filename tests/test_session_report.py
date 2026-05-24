@@ -304,22 +304,22 @@ class TestCallReconciliation:
 class TestSavingsMath:
     """Verify savings calculations are correct and transparent."""
 
-    def test_sonnet_baseline_math(self):
-        """Sonnet baseline: $3/M input + $15/M output."""
-        # 1000 input + 500 output = 3*1000/1M + 15*500/1M = 0.003 + 0.0075 = 0.0105
-        result = se._sonnet_baseline(1000, 500)
-        assert abs(result - 0.0105) < 1e-6
+    def test_host_baseline_math(self):
+        """Host baseline (Opus): $15/M input + $75/M output."""
+        # 1000 input + 500 output = 15*1000/1M + 75*500/1M = 0.015 + 0.0375 = 0.0525
+        result = se._host_baseline(1000, 500)
+        assert abs(result - 0.0525) < 1e-6
 
     def test_free_model_saves_full_baseline(self):
-        """Free models should report full Sonnet baseline as savings."""
+        """Free models should report full host baseline as savings."""
         rows = [
             {"provider": "ollama", "input_tokens": 1000, "output_tokens": 500,
              "model": "gemma4:latest", "task_type": "query", "cost_usd": 0.0},
         ]
         lines = se._format_free_section(rows, [])
         text = "\n".join(lines)
-        # Should show $0.0105 saved (Sonnet baseline for 1000/500 tokens)
-        assert "$0.0105" in text
+        # Should show $0.0525 saved (Opus baseline for 1000/500 tokens)
+        assert "$0.0525" in text
 
     def test_external_routing_shows_baseline(self):
         """External routing section should show both actual and baseline cost."""

@@ -618,7 +618,10 @@ async def llm_stream(
     if model:
         target_model = model
     else:
-        chain = get_model_chain(resolved_task, profile)
+        chain = get_model_chain(
+            profile, resolved_task,
+            is_subscription_mode=config.llm_router_claude_subscription,
+        )
         target_model = chain[0] if chain else "gemini/gemini-2.5-flash"
 
     messages: list[dict[str, str]] = []

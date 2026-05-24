@@ -23,8 +23,8 @@ PROMPT_COUNT_FILE = os.path.join(STATE_DIR, "prompt_count.txt")
 
 STATUS_EVERY = os.environ.get("LLM_ROUTER_STATUS_EVERY", "0")
 
-SONNET_INPUT_PER_M = 3.0
-SONNET_OUTPUT_PER_M = 15.0
+HOST_INPUT_PER_M = 15.0   # Opus 4.6 ($15/$75 per M tokens)
+HOST_OUTPUT_PER_M = 75.0
 
 _FREE_PROVIDERS = {"ollama", "codex"}
 
@@ -52,11 +52,11 @@ def _read_session_stats() -> tuple[int, int, int, float, int]:
                 sub_calls += 1
             elif provider in _FREE_PROVIDERS:
                 free_calls += 1
-                baseline += (in_tok * SONNET_INPUT_PER_M + out_tok * SONNET_OUTPUT_PER_M) / 1_000_000
+                baseline += (in_tok * HOST_INPUT_PER_M + out_tok * HOST_OUTPUT_PER_M) / 1_000_000
             else:
                 paid_calls += 1
                 actual += cost
-                baseline += (in_tok * SONNET_INPUT_PER_M + out_tok * SONNET_OUTPUT_PER_M) / 1_000_000
+                baseline += (in_tok * HOST_INPUT_PER_M + out_tok * HOST_OUTPUT_PER_M) / 1_000_000
 
         saved = max(0.0, baseline - actual)
         pct = round(saved / baseline * 100) if baseline > 0 else 0

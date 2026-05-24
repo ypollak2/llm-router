@@ -16,6 +16,7 @@ from dataclasses import dataclass
 
 GEMINI_PATHS = [
     os.path.expanduser("~/.local/bin/gemini"),
+    os.path.expanduser("~/.npm-global/bin/gemini"),
     "/usr/local/bin/gemini",
     "/opt/homebrew/bin/gemini",
     "/Applications/Gemini.app/Contents/MacOS/gemini",

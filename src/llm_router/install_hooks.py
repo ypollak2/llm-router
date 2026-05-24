@@ -195,6 +195,7 @@ def check_and_update_rules() -> str | None:
 _HOOK_DEFS = [
     ("session-start.py", "llm-router-session-start.py", "SessionStart", ""),
     ("auto-route.py", "llm-router-auto-route.py", "UserPromptSubmit", ""),
+    ("status-bar.py", "llm-router-status-bar.py", "UserPromptSubmit", ""),
     ("enforce-route.py", "llm-router-enforce-route.py", "PreToolUse", ""),
     ("agent-route.py", "llm-router-agent-route.py", "PreToolUse", "Agent"),
     ("subagent-start.py", "llm-router-subagent-start.py", "SubagentStart", ""),
@@ -527,6 +528,7 @@ def check_api_keys() -> list[str]:
     """
     lines: list[str] = []
     subscription_on = os.environ.get(_SUBSCRIPTION_VAR, "").lower() in ("1", "true", "yes")
+    gemini_subscription_on = os.environ.get("LLM_ROUTER_GEMINI_SUBSCRIPTION", "").lower() in ("1", "true", "yes")
 
     found: list[str] = []
     missing: list[str] = []
@@ -538,7 +540,10 @@ def check_api_keys() -> list[str]:
 
     if subscription_on:
         lines.append(f"  ✓  Claude subscription mode active ({_SUBSCRIPTION_VAR}=true)")
-    else:
+    if gemini_subscription_on:
+        lines.append("  ✓  Gemini subscription mode active (LLM_ROUTER_GEMINI_SUBSCRIPTION=true)")
+
+    if not subscription_on and not gemini_subscription_on:
         lines.append(f"  ⬜  Claude subscription mode off (set {_SUBSCRIPTION_VAR}=true to enable)")
 
     if found:
@@ -546,10 +551,10 @@ def check_api_keys() -> list[str]:
     else:
         lines.append("  ⬜  No external provider API keys found in environment")
 
-    if not subscription_on and not found:
+    if not subscription_on and not gemini_subscription_on and not found:
         lines.append(
             "  ⚠️   No providers configured — set at least one API key or"
-            f" {_SUBSCRIPTION_VAR}=true"
+            " subscription mode"
         )
 
     return lines

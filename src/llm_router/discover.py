@@ -279,6 +279,14 @@ async def discover_and_build_chain(
     filtered = filter_chain_by_availability(static_chain, available)
     
     if not filtered and static_chain:
+        # If in subscription mode, exclude anthropic models from the fallback too
+        # so that we don't accidentally call the paid API.
+        config = get_config()
+        if config.llm_router_claude_subscription:
+            filtered = [m for m in static_chain if not m.startswith("anthropic/")]
+            if filtered:
+                return filtered
+
         log.warning(
             "All models filtered out by availability — no providers configured. "
             "Static chain: %s | Available: %s",

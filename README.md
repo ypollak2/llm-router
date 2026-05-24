@@ -2,57 +2,43 @@
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="docs/readme/hero-dark.svg">
     <source media="(prefers-color-scheme: light)" srcset="docs/readme/hero-light.svg">
-    <img src="docs/readme/hero-light.svg" alt="LLM Router animated hero — route every AI call through a moving complexity pipeline into free, budget, and premium model tiers across 20+ providers, 60 MCP tools, and 60-80% savings." width="100%"/>
+    <img src="docs/readme/hero-light.svg" alt="llm-router routes AI coding prompts across free, budget, and premium model tiers." width="100%"/>
   </picture>
 </p>
 
-<h1 align="center">LLM Router</h1>
+<h1 align="center">llm-router</h1>
 
 <p align="center">
-  <strong>A local control plane for AI coding tools.</strong><br/>
-  Routes tasks to the cheapest model that can do the job well.<br/>
-  Protects quota. Enforces policy. Tracks spend. Falls back on failure.
+  <strong>Make Claude Code, Codex, and Gemini CLI use the cheapest model that can still do the job well.</strong><br/>
+  Save 35-80% on routine prompts, protect premium quota, and fall back automatically when providers fail.
 </p>
 
 <p align="center">
   <a href="https://pypi.org/project/llm-routing/"><img src="https://img.shields.io/pypi/v/llm-routing?style=flat-square&color=4F46E5" alt="PyPI"></a>
   <a href="https://github.com/ypollak2/llm-router/actions"><img src="https://img.shields.io/github/actions/workflow/status/ypollak2/llm-router/ci.yml?style=flat-square&label=tests" alt="Tests"></a>
-  <a href="https://github.com/ypollak2/llm-router/stargazers"><img src="https://img.shields.io/github/stars/ypollak2/llm-router?style=flat-square&color=F59E0B&v=2" alt="Stars"></a>
-  <a href="https://pepy.tech/projects/claude-code-llm-router"><img src="https://static.pepy.tech/personalized-badge/claude-code-llm-router?period=total&units=INTERNATIONAL_SYSTEM&left_color=BLACK&right_color=GREEN&left_text=downloads" alt="Downloads (claude-code-llm-router)"></a>
-  <a href="https://pepy.tech/projects/llm-routing"><img src="https://static.pepy.tech/personalized-badge/llm-routing?period=total&units=INTERNATIONAL_SYSTEM&left_color=BLUE&right_color=YELLOW&left_text=downloads" alt="Downloads (llm-routing)"></a>
-  <a href="https://pypi.org/project/llm-routing/"><img src="https://img.shields.io/badge/python-3.10–3.13-3572A5?style=flat-square" alt="Python"></a>
-  <a href="https://modelcontextprotocol.io"><img src="https://img.shields.io/badge/MCP-1.0+-8B5CF6?style=flat-square" alt="MCP"></a>
+  <a href="https://pypi.org/project/llm-routing/"><img src="https://img.shields.io/badge/python-3.10+-3572A5?style=flat-square" alt="Python"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-10B981?style=flat-square" alt="License"></a>
 </p>
 
 <p align="center">
-  <a href="https://github.com/ypollak2/llm-router/stargazers">
-    <picture>
-      <source media="(prefers-color-scheme: dark)" srcset="docs/readme/star-cta-dark.svg">
-      <source media="(prefers-color-scheme: light)" srcset="docs/readme/star-cta-light.svg">
-      <img src="docs/readme/star-cta-light.svg" alt="Star llm-router on GitHub" width="420"/>
-    </picture>
-  </a>
+  <strong>Local-first.</strong> No hosted proxy. No account required.
 </p>
 
 ---
 
-## Why This Exists
+## Why People Install This
 
-AI coding assistants route every task — simple questions, complex architecture — to the same expensive model. You pay full price for work that a cheaper model handles equally well.
+AI coding tools send too many prompts to premium models by default.
 
-llm-router sits between your AI tool and the LLM providers. It classifies each task by complexity, picks the cheapest capable model, and falls back through a provider chain on failure. You don't change your workflow. The router handles model selection automatically.
+That means:
 
-**Use this if:**
-- You use Claude Code, Codex CLI, Gemini CLI, or Pi and want to reduce spend
-- You want automatic fallback when a provider is down or rate-limited
-- You want local Ollama models tried first (free) before paid APIs
-- You want visibility into token spend across providers
+- You waste paid tokens on simple questions
+- You burn through Claude, Gemini, or OpenAI quota faster than necessary
+- You stop working when one provider is rate-limited or down
 
-**Don't use this if:**
-- You always want the best possible model regardless of cost
-- You don't use MCP-compatible tools
-- You need guaranteed latency (routing adds classification overhead)
+`llm-router` sits between your coding tool and your model providers. It classifies each prompt, tries the cheapest capable model first, and falls back automatically when needed.
+
+You keep the same workflow. The router changes the model choice underneath.
 
 <p align="center">
   <picture>
@@ -61,6 +47,16 @@ llm-router sits between your AI tool and the LLM providers. It classifies each t
     <img src="docs/readme/why-route-light.svg" alt="Animated benefits panel for llm-router showing cheaper routing, preserved quality, quota protection, and low-config setup." width="100%"/>
   </picture>
 </p>
+
+---
+
+## What You Get
+
+- Route trivial prompts to free or cheap models first
+- Keep premium models for the prompts that actually need them
+- Fall back across providers automatically
+- Track usage and estimated savings locally
+- Run everything on your own machine
 
 ---
 
@@ -73,7 +69,7 @@ pip install llm-routing
 llm-router install
 ```
 
-> **Package name**: `llm-routing` on PyPI. CLI command: `llm-router`.
+> Package name: `llm-routing` on PyPI. CLI command: `llm-router`.
 
 ### 2. Add providers (optional)
 
@@ -88,11 +84,55 @@ Works with **zero API keys** on Claude Code Pro/Max subscriptions — routing us
 ### 3. Verify
 
 ```bash
-llm-router install --check   # Preview what will be installed
 llm-router health            # Check provider connectivity
 ```
 
-In Claude Code, ask a simple question. The session-end summary shows routing decisions and savings.
+If you already use Claude Code, Codex, or Gemini CLI, keep your existing workflow and let `llm-router` choose models underneath it.
+
+---
+
+## Example Routing
+
+| Prompt | Routed to |
+|--------|-----------|
+| "What does this Python error mean?" | Ollama / Gemini Flash / Codex |
+| "Refactor this endpoint" | GPT-4o / Gemini Pro |
+| "Design a distributed tracing strategy" | o3 / Claude Opus |
+
+The exact chain depends on your configured providers, budget profile, and routing policy.
+
+---
+
+## Works With
+
+| Tool | Mode | Typical Savings |
+|------|------|-----------------|
+| **Claude Code** | Full auto-routing via hooks | 60–80% |
+| **Codex CLI** | Full auto-routing via hooks | 60–80% |
+| **Gemini CLI** | Full auto-routing via hooks | 50–70% |
+| **VS Code / Cursor** | Manual MCP tools | 30–50% |
+| **Any MCP client** | Manual MCP tools | Varies |
+
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/readme/editors-dark.svg">
+    <source media="(prefers-color-scheme: light)" srcset="docs/readme/editors-light.svg">
+    <img src="docs/readme/editors-light.svg" alt="Animated host support cards for Claude Code, Codex CLI, Gemini CLI, Pi, VS Code, Cursor, and any MCP client." width="100%"/>
+  </picture>
+</p>
+
+- **Full auto-routing** means hooks intercept prompts and route automatically with no workflow change.
+- **Manual MCP tools** means routing is available on demand through tools such as `llm_query`.
+
+```bash
+llm-router install                    # Claude Code (default)
+llm-router install --host codex       # Codex CLI
+llm-router install --host gemini-cli  # Gemini CLI
+llm-router install --host vscode      # VS Code
+llm-router install --host cursor      # Cursor
+```
+
+See [docs/HOST_SUPPORT_MATRIX.md](docs/HOST_SUPPORT_MATRIX.md) for full details on each host.
 
 ---
 
@@ -125,48 +165,7 @@ User prompt
       Response + cost logged to local SQLite
 ```
 
-### Routing examples
-
-| Task | Complexity | Chain |
-|------|-----------|-------|
-| "What does this error mean?" | Simple | Ollama → Codex → Gemini Flash → Groq |
-| "Implement OAuth" | Moderate | Ollama → Codex → GPT-4o → Gemini Pro |
-| "Design distributed tracing" | Complex | Ollama → Codex → o3 → Claude Opus |
-
-Classification is free (regex heuristics catch ~70% of tasks) or near-free (local Ollama / Gemini Flash for ambiguous cases).
-
----
-
-## Host Support
-
-| Host | Auto-Routing | MCP Tools | Savings Potential |
-|------|:------------:|:---------:|:-----------------:|
-| **Claude Code** | Full (hooks) | 60 tools | 60–80% |
-| **Codex CLI** | Full (hooks) | 60 tools | 60–80% |
-| **Gemini CLI** | Full (hooks) | 60 tools | 50–70% |
-| **VS Code / Cursor** | Manual | 60 tools | 30–50% |
-| **Any MCP client** | Manual | 60 tools | Varies |
-
-<p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="docs/readme/editors-dark.svg">
-    <source media="(prefers-color-scheme: light)" srcset="docs/readme/editors-light.svg">
-    <img src="docs/readme/editors-light.svg" alt="Animated host support cards for Claude Code, Codex CLI, Gemini CLI, Pi, VS Code, Cursor, and any MCP client." width="100%"/>
-  </picture>
-</p>
-
-**Full** = hooks intercept prompts and route automatically. No workflow change needed.
-**Manual** = MCP tools are available; you invoke them explicitly (e.g., call `llm_query`).
-
-```bash
-llm-router install                    # Claude Code (default)
-llm-router install --host codex       # Codex CLI
-llm-router install --host gemini-cli  # Gemini CLI
-llm-router install --host vscode      # VS Code
-llm-router install --host cursor      # Cursor
-```
-
-See [docs/HOST_SUPPORT_MATRIX.md](docs/HOST_SUPPORT_MATRIX.md) for full details on each host.
+Classification is free for many tasks (regex heuristics catch ~70%) or near-free for ambiguous prompts when using local Ollama or Gemini Flash.
 
 ---
 

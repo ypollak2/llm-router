@@ -90,6 +90,13 @@ class RouterConfig(BaseSettings):
     # (Codex, Ollama, Gemini, GPT-4o, Perplexity, etc.) to save your Claude quota.
     llm_router_claude_subscription: bool = False
 
+    # ── Gemini Subscription (Google One AI Pro) (v9.0.1) ──
+    # Set to True when using llm-router inside Gemini CLI with a subscription.
+    # When enabled, all gemini/* models (API) are EXCLUDED from routing chains.
+    # Instead, the router uses gemini_cli/* to route tasks back to Gemini via
+    # the local binary (free via subscription).
+    llm_router_gemini_subscription: bool = False
+
     # ── claw-code mode ──
     # Set to True when running inside claw-code (open-source Claude alternative).
     # In claw-code every API call is paid — there is no subscription quota.
@@ -304,12 +311,14 @@ class RouterConfig(BaseSettings):
                 providers.add(provider_name)
         if self.ollama_base_url and probe_ollama(self.ollama_base_url):
             providers.add("ollama")
-        # In Claude subscription mode, anthropic is intentionally excluded:
-        # we never route back to Claude via API when already inside Claude Code.
-        # Routing to anthropic/* would require a separate API key AND add duplicate
-        # billing on top of the Pro/Max subscription — wrong in every scenario.
+        # In subscription mode, home providers are intentionally excluded:
+        # we never route back via API when already inside the subscription agent.
+        # Routing back would require a separate API key AND add duplicate
+        # billing — wrong in every scenario.
         if self.llm_router_claude_subscription:
             providers.discard("anthropic")
+        if self.llm_router_gemini_subscription:
+            providers.discard("gemini")
         return providers
 
     @property

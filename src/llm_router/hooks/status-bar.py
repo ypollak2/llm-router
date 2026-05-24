@@ -33,9 +33,9 @@ STATUS_EVERY = os.environ.get("LLM_ROUTER_STATUS_EVERY", "0")
 STATUS_MODE = os.environ.get("LLM_ROUTER_STATUS_MODE", "compact")  # compact | full
 ENFORCE_MODE = os.environ.get("LLM_ROUTER_ENFORCE", "hard").lower()
 
-# Baseline cost for "what would Sonnet have cost?" comparison
-SONNET_INPUT_PER_M = 3.0
-SONNET_OUTPUT_PER_M = 15.0
+# Baseline cost for "what would Opus have cost?" comparison
+HOST_INPUT_PER_M = 15.0
+HOST_OUTPUT_PER_M = 75.0
 
 # ── ANSI colours ───────────────────────────────────────────────────────────
 G = "\033[92m"   # green  — savings, provider OK, enforce
@@ -138,7 +138,7 @@ def _savings_for_period(conn: sqlite3.Connection, since: str) -> tuple[float, fl
         in_tok = in_tok or 0
         out_tok = out_tok or 0
         cost = cost or 0.0
-        sonnet_cost = (in_tok * SONNET_INPUT_PER_M + out_tok * SONNET_OUTPUT_PER_M) / 1_000_000
+        sonnet_cost = (in_tok * HOST_INPUT_PER_M + out_tok * HOST_OUTPUT_PER_M) / 1_000_000
         if provider == "subscription":
             continue  # no token data for subscription calls
         elif provider in _FREE_PROVIDERS:
@@ -278,10 +278,23 @@ def _provider_health_full(health: dict[str, str]) -> str:
     )
 
 
+def _read_gemini_credits() -> tuple[int | None, int | None, float | None]:
+    """Return (count, limit, pressure)."""
+    try:
+        from llm_router.gemini_cli_quota import get_gemini_quota_status_sync
+        status = get_gemini_quota_status_sync()
+        if status.get("daily_limit", 0) > 0:
+            return status.get("count"), status.get("daily_limit"), status.get("pressure")
+    except Exception:
+        pass
+    return None, None, None
+
+
 # ── Main format ────────────────────────────────────────────────────────────
 
 def _format_status() -> str:
     session_pct, weekly_pct, sonnet_pct, stale = _read_claude_credits()
+    g_count, g_limit, g_pressure = _read_gemini_credits()
     savings = _read_savings()
     health = _read_provider_health()
     sub, free, paid = _read_session_calls()
@@ -296,6 +309,13 @@ def _format_status() -> str:
             cc = f"CC {session_pct:.0f}%s·{weekly_pct:.0f}%w·{sonnet_pct:.0f}%♪{stale_mark}"
     else:
         cc = f"{DIM}CC — run llm_check_usage{RST}"
+
+    # ── Gemini subscription segment ──
+    g_seg = ""
+    if g_count is not None:
+        g_pct = int((g_pressure or 0) * 100)
+        col = G if g_pct < 70 else (Y if g_pct < 90 else R)
+        g_seg = f"{SEP}♊ {col}{g_pct}%{RST}"
 
     # ── Provider health segment (only when health.json is active and fresh) ──
     health_seg = None
@@ -323,16 +343,16 @@ def _format_status() -> str:
 
     # ── Assemble ──
     if compact:
-        # 📊 CC 45%s·28%w │ [🦙✔ ⚙️✔ ☁️✔ │] 💰 D:$1.42 W:$9.88 │ 🛡️ │ 14.2x
-        parts = ["📊 ", cc]
+        # 📊 CC 45%s·28%w │ ♊ 2% │ [🦙✔ ⚙️✔ ☁️✔ │] 💰 D:$1.42 W:$9.88 │ 🛡️ │ 14.2x
+        parts = ["📊 ", cc, g_seg]
         if health_seg:
             parts += [SEP, health_seg]
         parts += [SEP, savings_seg, SEP, enforce_seg]
         if eff:
             parts += [SEP, eff]
     else:
-        # 📊 CC 45%s·28%w·61%♪ │ [Ollama✔ Codex✔ APIs✔ │] 💰 D:$1.42 W:$9.88 M:$41.15 │ enforce🛡️ │ eff 14.2x
-        parts = ["📊 ", cc]
+        # 📊 CC 45%s·28%w·61%♪ │ ♊ 2% │ [Ollama✔ Codex✔ APIs✔ │] 💰 D:$1.42 W:$9.88 M:$41.15 │ enforce🛡️ │ eff 14.2x
+        parts = ["📊 ", cc, g_seg]
         if health_seg:
             parts += [SEP, health_seg]
         parts += [SEP, savings_seg, SEP, enforce_seg]
