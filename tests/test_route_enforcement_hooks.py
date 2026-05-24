@@ -334,7 +334,7 @@ def test_auto_route_logs_unrouted_previous_turn_on_next_prompt(tmp_path):
     if "hookSpecificOutput" in out:
         ctx = out["hookSpecificOutput"]["contextForAgent"]
     elif "decision" in out:
-        ctx = out.get("message", "")
+        ctx = out.get("reason", "")
     else:
         pytest.fail(f"Unexpected hook output format: {out}")
     assert "PREVIOUS TURN VIOLATED ROUTING" in ctx

@@ -2,6 +2,15 @@
 
 **For releases v6.2 and earlier, see [CHANGELOG_ARCHIVE.md](docs/CHANGELOG_ARCHIVE.md).**
 
+## v9.0.6 — Fix: Test Stability & Enforcement Logic (2026-05-24)
+
+### Fixed
+
+- **Test Suite** — updated `tests/commands/test_update.py` and `tests/test_route_enforcement_hooks.py` to match the new `install()` signature and hook response format, ensuring 100% test pass rate.
+- **Enforcement Logic** — ensured consistency in how routing violations are reported across different execution paths.
+
+---
+
 ## v9.0.5 — Fix: update Command Error (2026-05-24)
 
 ### Fixed

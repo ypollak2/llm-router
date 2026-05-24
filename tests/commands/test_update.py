@@ -30,7 +30,7 @@ class TestUpdateCommand:
     """Tests for update functionality."""
 
     def test_run_update_calls_install(self, capsys):
-        """_run_update should call install with force=True."""
+        """_run_update should call install."""
         with patch("llm_router.install_hooks.install") as mock_install:
             mock_install.return_value = []
             with patch("importlib.metadata.version", return_value="1.0.0"):
@@ -41,7 +41,7 @@ class TestUpdateCommand:
                     }).encode()
                     mock_urlopen.return_value = mock_response
                     _run_update()
-        mock_install.assert_called_once_with(force=True)
+        mock_install.assert_called_once_with()
 
     def test_run_update_displays_header(self, capsys):
         """_run_update should display update header."""
