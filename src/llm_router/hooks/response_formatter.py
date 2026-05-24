@@ -19,7 +19,8 @@ def format_direct_response(result: DirectResult, task_type: str, complexity: str
     latency = f"{result.latency_ms}ms" if result.latency_ms < 1000 else f"{result.latency_ms / 1000:.1f}s"
 
     # Use a minimal, non-blocking-looking format
-    metadata = f"[{model_label}] {tier} | {task_type}/{complexity} | {latency} | 0 tokens used"
+    tokens = f"{result.input_tokens + result.output_tokens} tokens" if result.input_tokens + result.output_tokens > 0 else "0 tokens used"
+    metadata = f"[{model_label}] {tier} | {task_type}/{complexity} | {latency} | {tokens}"
     
     return (
         f"{result.text}\n\n"

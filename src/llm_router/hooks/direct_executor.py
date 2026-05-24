@@ -85,16 +85,22 @@ def call_ollama(prompt: str, model: str, timeout: int = 15) -> str | None:
             # Some models (qwen3.5) put response in thinking field when content is empty
             if not content.strip() and msg.get("thinking"):
                 content = msg["thinking"]
-            return content
+            
+            # Capture usage metrics if available
+            usage = {
+                "input_tokens": result.get("prompt_eval_count", 0),
+                "output_tokens": result.get("eval_count", 0),
+            }
+            return content, usage
     except Exception:
-        return None
+        return None, {}
 
 
-def call_gemini(prompt: str, model: str = "gemini-2.5-flash", timeout: int = 15) -> str | None:
-    """Call Gemini API. Returns response text or None."""
+def call_gemini(prompt: str, model: str = "gemini-2.5-flash", timeout: int = 15) -> tuple[str | None, dict]:
+    """Call Gemini API. Returns (response text, usage dict) or (None, {})."""
     api_key = os.environ.get("GEMINI_API_KEY", "")
     if not api_key:
-        return None
+        return None, {}
     # Gemini 1.5+ supports system_instruction
     body = json.dumps({
         "system_instruction": {"parts": [{"text": DIRECT_SYSTEM_PROMPT}]},
@@ -109,16 +115,21 @@ def call_gemini(prompt: str, model: str = "gemini-2.5-flash", timeout: int = 15)
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             result = json.loads(resp.read())
-            return result["candidates"][0]["content"]["parts"][0]["text"]
+            content = result["candidates"][0]["content"]["parts"][0]["text"]
+            usage = result.get("usageMetadata", {})
+            return content, {
+                "input_tokens": usage.get("promptTokenCount", 0),
+                "output_tokens": usage.get("candidatesTokenCount", 0),
+            }
     except Exception:
-        return None
+        return None, {}
 
 
-def call_openai(prompt: str, model: str = "gpt-4o-mini", timeout: int = 15) -> str | None:
-    """Call OpenAI chat completions API. Returns response text or None."""
+def call_openai(prompt: str, model: str = "gpt-4o-mini", timeout: int = 15) -> tuple[str | None, dict]:
+    """Call OpenAI chat completions API. Returns (response text, usage dict) or (None, {})."""
     api_key = os.environ.get("OPENAI_API_KEY", "")
     if not api_key:
-        return None
+        return None, {}
     body = json.dumps({
         "model": model,
         "messages": [
@@ -139,9 +150,14 @@ def call_openai(prompt: str, model: str = "gpt-4o-mini", timeout: int = 15) -> s
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             result = json.loads(resp.read())
-            return result["choices"][0]["message"]["content"]
+            content = result["choices"][0]["message"]["content"]
+            usage = result.get("usage", {})
+            return content, {
+                "input_tokens": usage.get("prompt_tokens", 0),
+                "output_tokens": usage.get("completion_tokens", 0),
+            }
     except Exception:
-        return None
+        return None, {}
 
 
 # ── Quality Gate ─────────────────────────────────────────────────────────────
@@ -190,7 +206,7 @@ def execute_chain(
 
         t0 = time.monotonic()
         try:
-            response = call_fn(prompt, model.model, timeout)
+            response, usage = call_fn(prompt, model.model, timeout)
         except Exception:
             continue
 
@@ -200,6 +216,8 @@ def execute_chain(
                 text=response,
                 model=model,
                 latency_ms=latency_ms,
+                input_tokens=usage.get("input_tokens", 0),
+                output_tokens=usage.get("output_tokens", 0),
             )
 
     return None  # All non-Claude models failed → fall through
@@ -240,6 +258,8 @@ def execute_agent(
             continue  # Only Ollama supports tool calling from the hook (for now)
 
         t0 = time.monotonic()
+        # run_agent_loop might need to return usage as well
+        # For now, we'll just capture the response
         response = run_agent_loop(
             prompt=prompt,
             model=model.model,

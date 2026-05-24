@@ -1518,6 +1518,14 @@ def main() -> None:
     # ── v6.0 Visibility: Initialize HUD session state ─────────────────────────
     initialize_hud()
 
+    # ── Continuation Bypass (v2.6) ───────────────────────────────────────────
+    # Short continuation prompts (yes/ok/do it/...) should always go to Claude.
+    # If a directive is pending, this allows Claude to fulfill it.
+    # If no directive is pending, this prevents routing noise for conversation.
+    if session_id and _is_continuation(prompt):
+        _debug_log(f"[INVOCATION {invocation_id:.3f}] CONTINUATION: bypass to host agent")
+        sys.exit(0)
+
     previous_unrouted = _consume_unresolved_pending(session_id) if session_id else None
 
     # ── MCP capability check — runs before LLM classification ────────────────
@@ -1732,6 +1740,13 @@ def main() -> None:
     #   - All direct models failed
     #   - Only Claude remains in the chain
     _direct_enabled = os.environ.get("LLM_ROUTER_DIRECT_EXECUTION", "true").lower() in ("1", "true", "yes", "on")
+    
+    # v2.6.1: Disable direct execution for context inheritance
+    # These tasks are inherently conversational and the direct hook is stateless
+    if method in ("context-inherit", "code-context-inherit"):
+        _direct_enabled = False
+        _debug_log(f"[INVOCATION {invocation_id:.3f}] DIRECT SKIP: conversational context")
+
     if _direct_enabled and _enforce_mode not in ("shadow", "off"):
         try:
             from llm_router.hooks.chain_builder import (
