@@ -2,6 +2,20 @@
 
 **For releases v6.2 and earlier, see [CHANGELOG_ARCHIVE.md](docs/CHANGELOG_ARCHIVE.md).**
 
+## v9.0.9 — Fix: Routing Continuity & CLI Errors (2026-05-25)
+
+### Fixed
+
+- **Routing Continuity** — added a bypass for continuation prompts (e.g., "yes", "ok", "do it") and conversational follow-ups (e.g., "and what about now?") to prevent them from being routed to stateless models without context.
+- **Update Command** — resolved a `TypeError` in `llm-router update` by adding the missing `force` parameter to the internal installation function.
+- **Direct Execution Usage** — fixed token usage reporting in direct execution mode; it now correctly captures and displays actual metrics from Ollama, Gemini, and OpenAI.
+
+### Added
+
+- **Project Badges** — added PyPI download count and GitHub stars badges to the README header.
+
+---
+
 ## v9.0.8 — Fix: update Command Package Name (2026-05-24)
 
 ### Fixed
