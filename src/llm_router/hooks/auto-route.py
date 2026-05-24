@@ -1725,6 +1725,65 @@ def main() -> None:
         except Exception:
             pass  # Silent failure — quota snapshot is optional enhancement
 
+    # ── Phase 1: Direct Execution (0 subscription tokens) ──────────────────────
+    # Try to handle the prompt directly from the hook by calling models via HTTP.
+    # If successful, return {"decision": "block"} so Claude never sees the prompt.
+    # Falls through to the existing contextForAgent path if:
+    #   - Task needs Claude's file tools (Read/Edit/Write)
+    #   - All direct models failed
+    #   - Only Claude remains in the chain
+    _direct_enabled = os.environ.get("LLM_ROUTER_DIRECT_EXECUTION", "true").lower() in ("1", "true", "yes", "on")
+    if _direct_enabled and _enforce_mode not in ("shadow", "off"):
+        try:
+            from llm_router.hooks.chain_builder import (
+                build_chain as _build_direct_chain,
+                get_current_pressure as _get_direct_pressure,
+                needs_claude_tools as _needs_claude_tools,
+            )
+            from llm_router.hooks.direct_executor import execute_chain as _execute_chain
+            from llm_router.hooks.response_formatter import format_direct_response as _format_direct
+
+            _zone, _raw_pct = _get_direct_pressure()
+            _direct_chain = _build_direct_chain(complexity, _zone, task_type)
+
+            _debug_log(
+                f"[INVOCATION {invocation_id:.3f}] DIRECT: zone={_zone} "
+                f"pressure={_raw_pct:.0f}% needs_tools={_needs_claude_tools(prompt, task_type)} "
+                f"chain={[f'{m.provider}/{m.model}' for m in _direct_chain]}"
+            )
+
+            _direct_result = None
+
+            if _needs_claude_tools(prompt, task_type):
+                # File-op task — use agent loop (Ollama with tool calling)
+                from llm_router.hooks.direct_executor import execute_agent as _execute_agent
+                _direct_result = _execute_agent(prompt, _direct_chain, timeout=60)
+                if _direct_result:
+                    _debug_log(f"[INVOCATION {invocation_id:.3f}] AGENT LOOP SUCCESS")
+            else:
+                # Q&A task — simple text-in/text-out call
+                _direct_result = _execute_chain(prompt, _direct_chain, task_type, timeout=15)
+
+            if _direct_result:
+                _formatted = _format_direct(_direct_result, task_type, complexity)
+                # Prepend prior violation notice if any
+                _violation_notice = _prior_violation_notice(previous_unrouted)
+                if _violation_notice:
+                    _formatted = _violation_notice + "\n" + _formatted
+                _debug_log(
+                    f"[INVOCATION {invocation_id:.3f}] DIRECT SUCCESS: "
+                    f"model={_direct_result.model.provider}/{_direct_result.model.model} "
+                    f"latency={_direct_result.latency_ms}ms"
+                )
+                json.dump({"decision": "block", "message": _formatted}, sys.stdout)
+                sys.exit(0)
+            else:
+                _debug_log(f"[INVOCATION {invocation_id:.3f}] DIRECT FAILED: falling through to Claude")
+        except ImportError:
+            _debug_log(f"[INVOCATION {invocation_id:.3f}] DIRECT SKIP: modules not available")
+        except Exception as _direct_err:
+            _debug_log(f"[INVOCATION {invocation_id:.3f}] DIRECT ERROR: {_direct_err}")
+
     if _enforce_mode == "shadow":
         # Passive observation — no pending state, no blocking
         directive = (

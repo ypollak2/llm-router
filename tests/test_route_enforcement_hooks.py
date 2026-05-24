@@ -9,6 +9,8 @@ import sys
 import time
 from pathlib import Path
 
+import pytest
+
 
 ROOT = Path(__file__).resolve().parents[1]
 AUTO_ROUTE_HOOK = ROOT / "src" / "llm_router" / "hooks" / "auto-route.py"
@@ -328,12 +330,22 @@ def test_auto_route_logs_unrouted_previous_turn_on_next_prompt(tmp_path):
 
     assert result.returncode == 0
     out = json.loads(result.stdout)
-    ctx = out["hookSpecificOutput"]["contextForAgent"]
+    # Hook may return contextForAgent (Claude path) or decision:block (direct execution)
+    if "hookSpecificOutput" in out:
+        ctx = out["hookSpecificOutput"]["contextForAgent"]
+    elif "decision" in out:
+        ctx = out.get("message", "")
+    else:
+        pytest.fail(f"Unexpected hook output format: {out}")
     assert "PREVIOUS TURN VIOLATED ROUTING" in ctx
     assert "expected llm_query for query/simple" in ctx
-    new_pending = json.loads(pending_path.read_text(encoding="utf-8"))
-    assert new_pending["issued_at"] > old_pending["issued_at"]
-    assert new_pending["task_type"] != old_pending["task_type"]
+
+    # With direct execution, no new pending state is written (prompt was handled directly).
+    # With Claude path, pending state is updated.
+    if "hookSpecificOutput" in out:
+        new_pending = json.loads(pending_path.read_text(encoding="utf-8"))
+        assert new_pending["issued_at"] > old_pending["issued_at"]
+        assert new_pending["task_type"] != old_pending["task_type"]
 
     log_text = (tmp_path / ".llm-router" / "enforcement.log").read_text(encoding="utf-8")
     assert "NO_ROUTE" in log_text

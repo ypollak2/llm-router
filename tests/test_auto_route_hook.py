@@ -18,6 +18,7 @@ def _hook_env(home_dir: Path) -> dict[str, str]:
     env = os.environ.copy()
     env["HOME"] = str(home_dir)
     env["LLM_ROUTER_DISABLE_LLM_CLASSIFIERS"] = "1"
+    env["LLM_ROUTER_DIRECT_EXECUTION"] = "0"  # Disable direct execution — test classification only
     env["OPENAI_API_KEY"] = ""
     env["GEMINI_API_KEY"] = ""
     env["GOOGLE_API_KEY"] = ""
@@ -67,7 +68,16 @@ def run_hook_with_last_route(
 
 
 def _extract_hint(output: dict) -> str:
-    return output["hookSpecificOutput"]["contextForAgent"]
+    """Extract routing hint from hook output.
+
+    With LLM_ROUTER_DIRECT_EXECUTION=0, always returns hookSpecificOutput format.
+    Falls back to decision:block format if direct execution is somehow active.
+    """
+    if "hookSpecificOutput" in output:
+        return output["hookSpecificOutput"]["contextForAgent"]
+    if output.get("decision") == "block":
+        return output.get("message", "")
+    raise KeyError(f"Unexpected output format: {list(output.keys())}")
 
 
 GOLDEN_ROUTE_CASES = [
