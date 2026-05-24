@@ -6,6 +6,9 @@ on:
   pull_request:
     branches: [main]
 
+env:
+  UV_HTTP_TIMEOUT: 30
+
 jobs:
   lint:
     runs-on: ubuntu-latest
@@ -14,6 +17,13 @@ jobs:
       - uses: astral-sh/setup-uv@v4
         with:
           enable-cache: true
+        continue-on-error: true
+        id: uv-setup
+      - name: Retry uv setup
+        if: steps.uv-setup.outcome == 'failure'
+        uses: astral-sh/setup-uv@v4
+        with:
+          enable-cache: false
       - run: uv python install 3.11
       - run: uvx ruff check src/ tests/
 
@@ -24,6 +34,13 @@ jobs:
       - uses: astral-sh/setup-uv@v4
         with:
           enable-cache: true
+        continue-on-error: true
+        id: uv-setup
+      - name: Retry uv setup
+        if: steps.uv-setup.outcome == 'failure'
+        uses: astral-sh/setup-uv@v4
+        with:
+          enable-cache: false
       - run: uv python install 3.11
       - name: Verify version sync
         run: uv run python scripts/verify-version-sync.py
@@ -35,6 +52,13 @@ jobs:
       - uses: astral-sh/setup-uv@v4
         with:
           enable-cache: true
+        continue-on-error: true
+        id: uv-setup
+      - name: Retry uv setup
+        if: steps.uv-setup.outcome == 'failure'
+        uses: astral-sh/setup-uv@v4
+        with:
+          enable-cache: false
       - run: uv python install 3.11
       - name: Verify plugin distribution sync
         run: python scripts/verify-plugin-sync.py
@@ -54,6 +78,13 @@ jobs:
         uses: astral-sh/setup-uv@v4
         with:
           enable-cache: true
+        continue-on-error: true
+        id: uv-setup
+      - name: Retry uv setup
+        if: steps.uv-setup.outcome == 'failure'
+        uses: astral-sh/setup-uv@v4
+        with:
+          enable-cache: false
 
       - name: Set up Python
         run: uv python install ${{ matrix.python-version }}
