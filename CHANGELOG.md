@@ -2,6 +2,14 @@
 
 **For releases v6.2 and earlier, see [CHANGELOG_ARCHIVE.md](docs/CHANGELOG_ARCHIVE.md).**
 
+## v9.0.5 — Fix: update Command Error (2026-05-24)
+
+### Fixed
+
+- **Update Command** — fixed a `TypeError` in `llm-router update` that prevented successful hook re-installation.
+
+---
+
 ## v9.0.4 — Critical Fix: Claude Code Hook Blocking (2026-05-24)
 
 ### Fixed

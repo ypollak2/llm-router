@@ -51,7 +51,7 @@ def _run_update() -> None:
 
     # ── 1. Re-copy hooks & rules ──────────────────────────────────────
     print(_bold("  Hooks & rules"))
-    actions = install(force=True)
+    actions = install()
     updated = [a for a in actions if "→" in a or "Updated" in a or "Registered" in a]
     if updated:
         for a in updated:
