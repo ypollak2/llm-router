@@ -41,7 +41,7 @@ class TestUpdateCommand:
                     }).encode()
                     mock_urlopen.return_value = mock_response
                     _run_update()
-        mock_install.assert_called_once_with()
+        mock_install.assert_called_once_with(force=True)
 
     def test_run_update_displays_header(self, capsys):
         """_run_update should display update header."""
