@@ -210,16 +210,21 @@ def needs_claude_tools(prompt: str, task_type: str) -> bool:
     """
     import re
 
+    # Project structure or local context references (applicable to any task type)
+    if re.search(
+        r'\b(src/|tests/|hooks/|in the codebase|this file|this repo|this project|current project|current version|what version|package\.json|pyproject\.toml|llm-router)\b',
+        prompt,
+        re.IGNORECASE,
+    ):
+        return True
+
     if task_type not in ("code", "analyze"):
-        return False  # Q&A, research, generate never need file tools
+        return False  # General Q&A, research, generate never need file tools
 
     # Explicit file references
     if re.search(r'[\w/]+\.\w{1,4}\b', prompt) and re.search(
         r'\.(py|ts|js|go|rs|java|cpp|yaml|json|md|toml|cfg|sh|sql)\b', prompt
     ):
-        return True
-    # Project structure references
-    if re.search(r'\b(src/|tests/|hooks/|in the codebase|this file|this repo|this project)\b', prompt, re.IGNORECASE):
         return True
     # Edit/fix/debug intent with location
     if re.search(r'\b(fix|debug|investigate|refactor|update|modify)\b', prompt, re.IGNORECASE) and \
