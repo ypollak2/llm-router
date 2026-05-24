@@ -2,6 +2,14 @@
 
 **For releases v6.2 and earlier, see [CHANGELOG_ARCHIVE.md](docs/CHANGELOG_ARCHIVE.md).**
 
+## v9.0.8 — Fix: update Command Package Name (2026-05-24)
+
+### Fixed
+
+- **Update Command** — fixed the update command to correctly use the `llm-routing` package name when checking for newer versions on PyPI.
+
+---
+
 ## v9.0.7 — Polished Direct Execution & System Context (2026-05-24)
 
 ### Added
