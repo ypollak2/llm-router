@@ -1314,11 +1314,21 @@ def _is_continuation(prompt: str) -> bool:
     stripped = prompt.strip()
     if _CONTINUATION_RE.match(stripped):
         return True
-    # Also treat very short prompts (≤5 words) with zero heuristic signal as continuations
+    
+    # v2.6.2: Catch conversational starters that imply context
+    lower = stripped.lower()
+    if lower.startswith(("and ", "then ", "so ", "but ", "actually ", "what about ")):
+        words = stripped.split()
+        if len(words) <= 10:
+            return True
+
+    # Also treat very short prompts (≤6 words) with minimal heuristic signal as continuations.
+    # A single signal point (like a question mark) on a very short prompt usually
+    # indicates a contextual follow-up ("How?", "Why not?").
     words = stripped.split()
-    if 1 <= len(words) <= 5:
+    if 1 <= len(words) <= 6:
         scores = score_categories(stripped)
-        if max(scores.values(), default=0) == 0:
+        if max(scores.values(), default=0) <= 1:
             return True
     return False
 
