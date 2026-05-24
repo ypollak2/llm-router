@@ -1326,7 +1326,7 @@ def _is_continuation(prompt: str) -> bool:
     ).strip()
 
     # If it starts with a continuation word, or asks a meta-conversation question
-    if clean_lower.startswith(("and ", "then ", "so ", "but ", "actually ", "what about ", "why did ", "why was ", "why am i ", "what does this ")):
+    if clean_lower.startswith(("and ", "then ", "so ", "but ", "actually ", "what about ", "why did ", "why was ", "why am i ", "what does this ", "now ", "also ", "well ")):
         words = stripped.split()
         if len(words) <= 20:
             return True
