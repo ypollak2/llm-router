@@ -2,6 +2,15 @@
 
 **For releases v6.2 and earlier, see [CHANGELOG_ARCHIVE.md](docs/CHANGELOG_ARCHIVE.md).**
 
+## v9.0.4 — Critical Fix: Claude Code Hook Blocking (2026-05-24)
+
+### Fixed
+
+- **Hook Block Message** — fixed `UserPromptSubmit` hook returning a generic "Blocked by hook" error in Claude Code. It now correctly uses the `reason` field to display direct execution responses.
+- **Subscription Overrides** — ensured critical pressure overrides also use the correct response field for user visibility.
+
+---
+
 ## v9.0.3 — Zero-Claude Direct Execution & Mini-Agent Loop (2026-05-24)
 
 ### Added
