@@ -1612,8 +1612,7 @@ def main() -> None:
                     f"| Handle directly (subscription included). Do NOT call llm_* tools."
                 )
                 _debug_log(f"[INVOCATION {invocation_id:.3f}] CRITICAL PRESSURE: routing to Opus")
-                json.dump({"hookSpecificOutput": {"hookEventName": "UserPromptSubmit",
-                                                   "contextForAgent": _prior_violation_notice(previous_unrouted) + directive}}, sys.stdout)
+                json.dump({"decision": "block", "reason": _prior_violation_notice(previous_unrouted) + directive}, sys.stdout)
                 sys.exit(0)
 
     # ── Activation mode (shadow / suggest / enforce) ──────────────────────────
@@ -1775,7 +1774,7 @@ def main() -> None:
                     f"model={_direct_result.model.provider}/{_direct_result.model.model} "
                     f"latency={_direct_result.latency_ms}ms"
                 )
-                json.dump({"decision": "block", "message": _formatted}, sys.stdout)
+                json.dump({"decision": "block", "reason": _formatted}, sys.stdout)
                 sys.exit(0)
             else:
                 _debug_log(f"[INVOCATION {invocation_id:.3f}] DIRECT FAILED: falling through to Claude")

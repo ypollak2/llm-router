@@ -1,7 +1,7 @@
 """Format direct model responses for hook output.
 
 When the hook executes a model directly (bypassing Claude), this module
-formats the response for display via {"decision": "block", "message": "..."}.
+formats the response for display via {"decision": "block", "reason": "..."}.
 """
 
 from __future__ import annotations
