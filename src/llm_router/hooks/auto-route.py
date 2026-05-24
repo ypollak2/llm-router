@@ -1317,10 +1317,23 @@ def _is_continuation(prompt: str) -> bool:
     
     # v2.6.2: Catch conversational starters that imply context
     lower = stripped.lower()
-    if lower.startswith(("and ", "then ", "so ", "but ", "actually ", "what about ")):
+    
+    # Strip common conversational acknowledgments to find the "real" start
+    clean_lower = re.sub(
+        r'^(?:ok|okay|yes|no|sure|right|great|perfect|agreed|yep|nope|thanks|thank you|awesome)[,\.\s]+', 
+        '', 
+        lower
+    ).strip()
+
+    # If it starts with a continuation word, or asks a meta-conversation question
+    if clean_lower.startswith(("and ", "then ", "so ", "but ", "actually ", "what about ", "why did ", "why was ")):
         words = stripped.split()
-        if len(words) <= 10:
+        if len(words) <= 20:
             return True
+
+    # Catch explicit references to the chat history
+    if re.search(r'\b(last prompt|previous prompt|earlier|you just|we just|you used|why there was)\b', lower):
+        return True
 
     # Also treat very short prompts (≤6 words) with minimal heuristic signal as continuations.
     # A single signal point (like a question mark) on a very short prompt usually
