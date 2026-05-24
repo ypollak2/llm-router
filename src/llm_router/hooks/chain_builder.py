@@ -212,7 +212,7 @@ def needs_claude_tools(prompt: str, task_type: str) -> bool:
 
     # Project structure or local context references (applicable to any task type)
     if re.search(
-        r'\b(src/|tests/|hooks/|in the codebase|this file|this repo|this project|current project|current version|what version|package\.json|pyproject\.toml|llm-router)\b',
+        r'\b(src/|tests/|hooks/|in the codebase|this file|this repo|this project|current project|current version|what version|package\.json|pyproject\.toml|llm-router|blocked by hook|error message)\b',
         prompt,
         re.IGNORECASE,
     ):
