@@ -202,14 +202,12 @@ def perform_release(
         [
             "git",
             "add",
+            "src/",
+            "tests/",
             "pyproject.toml",
-            "src/llm_router/__init__.py",
-            ".claude-plugin/plugin.json",
-            ".claude-plugin/marketplace.json",
-            ".codex-plugin/plugin.json",
-            ".codex-plugin/marketplace.json",
-            ".factory-plugin/plugin.json",
-            ".factory-plugin/marketplace.json",
+            ".claude-plugin/",
+            ".codex-plugin/",
+            ".factory-plugin/",
             "CHANGELOG.md",
             "README.md",
             "uv.lock",
@@ -251,7 +249,8 @@ def perform_release(
 
     if not skip_plugin_reinstall:
         print("9. Reinstalling Codex plugin...")
-        run(["Codex", "plugin", "reinstall", "llm-router"], dry_run=dry_run)
+        run(["Codex", "plugin", "remove", "llm-router"], dry_run=dry_run)
+        run(["Codex", "plugin", "add", "llm-router"], dry_run=dry_run)
         run(["Codex", "plugin", "list"], dry_run=dry_run)
 
     print(f"\nRelease flow for v{version} completed.")
