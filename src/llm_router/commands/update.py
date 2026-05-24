@@ -62,21 +62,21 @@ def _run_update() -> None:
     # ── 2. Check PyPI for newer version ──────────────────────────────
     print(f"\n{_bold('  Version')}")
     try:
-        current = importlib.metadata.version("claude-code-llm-router")
+        current = importlib.metadata.version("llm-routing")
     except importlib.metadata.PackageNotFoundError:
         current = "unknown"
 
     try:
         with urllib.request.urlopen(
-            "https://pypi.org/pypi/claude-code-llm-router/json", timeout=4
+            "https://pypi.org/pypi/llm-routing/json", timeout=4
         ) as resp:
             data = json.loads(resp.read())
         latest = data["info"]["version"]
         if latest == current:
-            print(_ok(f"  claude-code-llm-router {current} is up to date"))
+            print(_ok(f"  llm-routing {current} is up to date"))
         else:
             print(_warn(f"  {current} installed, {latest} available"))
-            print(f"  {_yellow('→')} Run: {_bold('pip install --upgrade claude-code-llm-router')}")
+            print(f"  {_yellow('→')} Run: {_bold('pip install --upgrade llm-routing')}")
     except Exception:
         print(_warn(f"  {current} installed (could not check PyPI)"))
 
