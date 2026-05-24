@@ -2,6 +2,19 @@
 
 **For releases v6.2 and earlier, see [CHANGELOG_ARCHIVE.md](docs/CHANGELOG_ARCHIVE.md).**
 
+## v9.0.7 — Polished Direct Execution & System Context (2026-05-24)
+
+### Added
+
+- **System Context for Direct Exec** — added a specialized system prompt for Ollama, Gemini, and OpenAI direct calls so they know they are providing responses for a Claude Code user within `llm-router`.
+- **Cleaner Response Format** — simplified the Direct Execution output in the terminal. Removed verbose headers and separators in favor of a clean message with a minimal, dimmed metadata footer.
+
+### Fixed
+
+- **Response Rendering** — improved ANSI styling for direct responses to feel more integrated into the conversation.
+
+---
+
 ## v9.0.6 — Fix: Test Stability & Enforcement Logic (2026-05-24)
 
 ### Fixed
