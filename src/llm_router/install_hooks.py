@@ -560,8 +560,12 @@ def check_api_keys() -> list[str]:
     return lines
 
 
-def install() -> list[str]:
-    """Install hooks and rules globally. Returns list of actions taken."""
+def install(force: bool = False) -> list[str]:
+    """Install hooks and rules globally. Returns list of actions taken.
+    
+    Args:
+        force: If True, overwrite existing hooks even if they appear up to date.
+    """
     actions: list[str] = []
 
     # ── Copy hook scripts ────────────────────────────────────────────────
@@ -575,6 +579,24 @@ def install() -> list[str]:
         if not src.exists():
             actions.append(f"SKIP {src_name}: source not found at {src}")
             continue
+
+        # Check if we should skip based on same-content (unless forced)
+        if not force and dst.exists():
+            try:
+                if src.read_bytes() == dst.read_bytes():
+                    # Check if registration is also correct
+                    command = f"{_python_exe()} {dst}"
+                    existing_hooks = settings.get("hooks", [])
+                    already_registered = any(
+                        h.get("event") == event and 
+                        h.get("pattern") == matcher and 
+                        h.get("command") == command 
+                        for h in existing_hooks
+                    )
+                    if already_registered:
+                        continue
+            except OSError:
+                pass
 
         shutil.copy2(src, dst)
         if sys.platform != "win32":
