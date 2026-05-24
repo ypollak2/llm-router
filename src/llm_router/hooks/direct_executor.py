@@ -35,6 +35,20 @@ class DirectResult:
     output_tokens: int = 0
 
 
+# ── System Prompts ────────────────────────────────────────────────────────────
+
+DIRECT_SYSTEM_PROMPT = """\
+You are an AI assistant operating within the llm-router system, providing a direct response to a user of Claude Code.
+Your primary goal is to provide a helpful, accurate, and concise response to the user's request.
+
+Guidelines:
+1. Be concise and get straight to the point.
+2. Use standard Markdown for formatting (code blocks, bold, lists).
+3. Do not include unnecessary conversational filler or meta-commentary about being an AI.
+4. Your response will be displayed directly in the user's terminal.
+"""
+
+
 # ── Provider HTTP calls ──────────────────────────────────────────────────────
 
 def _get_ollama_url() -> str:
@@ -49,7 +63,10 @@ def call_ollama(prompt: str, model: str, timeout: int = 15) -> str | None:
     """Call Ollama's /api/chat endpoint. Returns response text or None."""
     body = json.dumps({
         "model": model,
-        "messages": [{"role": "user", "content": prompt}],
+        "messages": [
+            {"role": "system", "content": DIRECT_SYSTEM_PROMPT},
+            {"role": "user", "content": prompt},
+        ],
         "stream": False,
         "think": False,
         "options": {"temperature": 0.3, "num_predict": 2048},
@@ -78,7 +95,9 @@ def call_gemini(prompt: str, model: str = "gemini-2.5-flash", timeout: int = 15)
     api_key = os.environ.get("GEMINI_API_KEY", "")
     if not api_key:
         return None
+    # Gemini 1.5+ supports system_instruction
     body = json.dumps({
+        "system_instruction": {"parts": [{"text": DIRECT_SYSTEM_PROMPT}]},
         "contents": [{"parts": [{"text": prompt}]}],
         "generationConfig": {"temperature": 0.3, "maxOutputTokens": 2048},
     }).encode()
@@ -102,7 +121,10 @@ def call_openai(prompt: str, model: str = "gpt-4o-mini", timeout: int = 15) -> s
         return None
     body = json.dumps({
         "model": model,
-        "messages": [{"role": "user", "content": prompt}],
+        "messages": [
+            {"role": "system", "content": DIRECT_SYSTEM_PROMPT},
+            {"role": "user", "content": prompt},
+        ],
         "temperature": 0.3,
         "max_tokens": 2048,
     }).encode()
