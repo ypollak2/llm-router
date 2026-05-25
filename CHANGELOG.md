@@ -2,6 +2,12 @@
 
 **For releases v6.2 and earlier, see [CHANGELOG_ARCHIVE.md](docs/CHANGELOG_ARCHIVE.md).**
 
+## v9.1.2 - Fix extra env var rejection in RouterConfig (2026-05-25)
+
+### Fixed
+
+- **RouterConfig extra fields** - added `extra="ignore"` to `model_config` so unrelated env vars (e.g. `NOTION_API_TOKEN`) in `.env` no longer cause a pydantic `extra_forbidden` validation error that breaks dynamic routing initialization.
+
 ## v9.1.1 - Claude Code Live-Path Fixes (2026-05-25)
 
 ### Fixed

@@ -264,7 +264,7 @@ class RouterConfig(BaseSettings):
     # timeout prevents premature cancellation of long-running generation jobs.
     media_request_timeout: int = 600
 
-    model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
+    model_config = {"env_file": ".env", "env_file_encoding": "utf-8", "extra": "ignore"}
 
     # Maps each Pydantic field name to (provider_name, litellm_env_var).
     # This dual mapping serves two purposes:
