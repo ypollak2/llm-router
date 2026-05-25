@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm-router-hook-version: 16
+# llm-router-hook-version: 17
 """SessionStart hook — inject routing banner, start Ollama, refresh Claude usage.
 
 Fires once when a new Claude Code session begins. Four jobs:
@@ -25,6 +25,7 @@ import time
 import urllib.request
 import uuid
 from datetime import datetime
+from pathlib import Path
 
 # Import timeout config from llm_router package if available
 try:
@@ -80,6 +81,16 @@ _load_dotenv()
 
 _CC_MODE = os.environ.get("LLM_ROUTER_CLAUDE_SUBSCRIPTION", "").lower() in ("true", "1", "yes")
 
+BANNER_ZERO_CLAUDE = """
+╔════════════════════════════════════════════════════════════════╗
+║  ⚡ llm-router ACTIVE — strict zero-Claude routing             ║
+╠════════════════════════════════════════════════════════════════╣
+║  Prompts execute through external routes before Claude runs.  ║
+║  If no external route completes, the prompt is blocked.       ║
+║  Prefix a prompt with `claude:` for intentional native use.   ║
+╚════════════════════════════════════════════════════════════════╝
+""".strip()
+
 BANNER_SUBSCRIPTION = """
 ╔════════════════════════════════════════════════════════════════╗
 ║  ⚡ llm-router ACTIVE — subscription mode (MCP-tool routing)  ║
@@ -117,6 +128,32 @@ BANNER_API_KEYS = """
 """.strip()
 
 BANNER = BANNER_SUBSCRIPTION if _CC_MODE else BANNER_API_KEYS
+
+
+def _zero_claude_enabled() -> bool:
+    """Return True when prompt hooks are configured to block native turns."""
+    env_value = os.environ.get("LLM_ROUTER_ZERO_CLAUDE", "").strip().lower()
+    if env_value:
+        return env_value in ("1", "true", "yes", "on", "zero_claude", "strict_zero")
+
+    config_path = Path(STATE_DIR) / "routing.yaml"
+    try:
+        content = config_path.read_text(encoding="utf-8")
+    except OSError:
+        return False
+
+    import re
+    mode_match = re.search(r"^\s*mode\s*:\s*(\S+)\s*$", content, re.MULTILINE | re.IGNORECASE)
+    if mode_match and mode_match.group(1).lower() in ("zero_claude", "strict_zero"):
+        return True
+    bool_match = re.search(r"^\s*zero_claude\s*:\s*(\S+)\s*$", content, re.MULTILINE | re.IGNORECASE)
+    return bool(bool_match and bool_match.group(1).lower() in ("1", "true", "yes", "on"))
+
+
+def _select_banner(is_subscription: bool) -> str:
+    if _zero_claude_enabled():
+        return BANNER_ZERO_CLAUDE
+    return BANNER_SUBSCRIPTION if is_subscription or _CC_MODE else BANNER_API_KEYS
 
 
 def _reset_session_stats() -> None:
@@ -606,11 +643,9 @@ def main() -> None:
     usage_hint = _refresh_claude_usage()
     is_subscription = not usage_hint.startswith("\n⚠️")
 
-    # Pick the right banner based on detected mode
-    if is_subscription or _CC_MODE:
-        banner = BANNER_SUBSCRIPTION
-    else:
-        banner = BANNER_API_KEYS
+    # Strict zero-Claude routing takes priority over a usable OAuth session:
+    # OAuth usage may still be shown, but it is not the execution mode.
+    banner = _select_banner(is_subscription)
 
     hints += usage_hint
     hints += _format_learned_memory()

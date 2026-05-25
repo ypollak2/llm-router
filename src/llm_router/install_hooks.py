@@ -331,6 +331,20 @@ def _normalize_command(command: str) -> str:
     return command
 
 
+def _hook_is_registered(settings: dict, event: str, matcher: str, command: str) -> bool:
+    """Return True when the nested Claude Code hook settings contain a command."""
+    normalized_cmd = _normalize_command(command)
+    hooks = settings.get("hooks", {})
+    event_hooks = hooks.get(event, []) if isinstance(hooks, dict) else []
+    for entry in event_hooks:
+        if not isinstance(entry, dict) or entry.get("matcher", "") != matcher:
+            continue
+        for hook in entry.get("hooks", []):
+            if isinstance(hook, dict) and _normalize_command(hook.get("command", "")) == normalized_cmd:
+                return True
+    return False
+
+
 def _register_hook(settings: dict, event: str, matcher: str, command: str) -> str:
     """Add or normalize a hook registration.
 
@@ -586,13 +600,7 @@ def install(force: bool = False) -> list[str]:
                 if src.read_bytes() == dst.read_bytes():
                     # Check if registration is also correct
                     command = f"{_python_exe()} {dst}"
-                    existing_hooks = settings.get("hooks", [])
-                    already_registered = any(
-                        h.get("event") == event and 
-                        h.get("pattern") == matcher and 
-                        h.get("command") == command 
-                        for h in existing_hooks
-                    )
+                    already_registered = _hook_is_registered(settings, event, matcher, command)
                     if already_registered:
                         continue
             except OSError:

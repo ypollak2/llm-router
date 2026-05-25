@@ -2,6 +2,21 @@
 
 **For releases v6.2 and earlier, see [CHANGELOG_ARCHIVE.md](docs/CHANGELOG_ARCHIVE.md).**
 
+## v9.1.1 - Claude Code Live-Path Fixes (2026-05-25)
+
+### Fixed
+
+- **Read-only tool routing** - prompts such as `"Read notes.txt..."` now use the external agent path even when initially classified as a simple query, instead of allowing a stateless model to answer without file access.
+- **Strict-mode status banner** - Claude Code session startup now reports `strict zero-Claude routing` when enabled, instead of misleadingly displaying subscription/MCP-tool mode.
+- **Hook installer compatibility** - global hook installation now recognizes Claude Code's nested hook settings schema and no longer crashes while reinstalling an already-registered hook.
+- **Quota pressure boundary** - a stored session usage value of `1.0%` is no longer incorrectly expanded to `100%` pressure.
+
+### Verified
+
+- **Live Claude Code tests** - validated external direct execution, fail-closed quota protection, continuation routing, and read-only file-agent execution through the installed Claude Code hook path.
+
+---
+
 ## v9.1.0 - Strict Zero-Claude Routing (2026-05-25)
 
 ### Added

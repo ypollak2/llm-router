@@ -107,10 +107,6 @@ def get_current_pressure() -> tuple[str, float]:
     try:
         data = json.loads(usage_path.read_text())
         session_pct = float(data.get("session_pct", 0.0))
-        if session_pct > 1.0 and session_pct <= 100:
-            pass  # Already percentage
-        elif session_pct <= 1.0:
-            session_pct *= 100  # Convert fraction to percentage
         resets_at = data.get("session_resets_at", "")
         zone = pressure_zone(session_pct, resets_at)
         return zone, session_pct
@@ -214,6 +210,16 @@ def needs_claude_tools(prompt: str, task_type: str) -> bool:
     # Project structure or local context references (applicable to any task type)
     if re.search(
         r'\b(src/|tests/|hooks/|in the codebase|this file|this repo|this project|current project|current version|what version|package\.json|pyproject\.toml|llm-router|blocked by hook|error message)\b',
+        prompt,
+        re.IGNORECASE,
+    ):
+        return True
+
+    # Reading an explicit local file requires tool access even when the
+    # classifier labels the request as a simple query.
+    if re.search(
+        r'\b(?:read|open|inspect|show|cat|summari[sz]e)\s+'
+        r'(?:the\s+)?(?:file\s+)?[\w./-]+\.[A-Za-z0-9]{1,8}\b',
         prompt,
         re.IGNORECASE,
     ):

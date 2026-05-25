@@ -3,6 +3,7 @@
 import os
 
 from llm_router.install_hooks import (
+    _hook_is_registered,
     _register_hook,
     _rules_version,
     check_and_update_hooks,
@@ -218,6 +219,30 @@ class TestCheckAndUpdateHooks:
 
 
 class TestRegisterHook:
+    def test_detects_existing_hook_in_nested_settings_schema(self):
+        settings = {
+            "hooks": {
+                "UserPromptSubmit": [
+                    {
+                        "matcher": "",
+                        "hooks": [
+                            {
+                                "type": "command",
+                                "command": "python3 /tmp/llm-router-auto-route.py",
+                            }
+                        ],
+                    }
+                ]
+            }
+        }
+
+        assert _hook_is_registered(
+            settings,
+            "UserPromptSubmit",
+            "",
+            "/tmp/venv/bin/python /tmp/llm-router-auto-route.py",
+        )
+
     def test_dedupes_same_script_with_different_python_paths(self):
         settings = {
             "hooks": {
