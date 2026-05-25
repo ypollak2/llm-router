@@ -118,3 +118,4 @@ Procfile
 .claude/projects/
 .claude/settings.json
 .claude/mcp.json
+tests/hook_rendering/

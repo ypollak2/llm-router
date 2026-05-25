@@ -52,6 +52,7 @@ _FREE_PROVIDERS   = {"ollama", "codex"}
 # Hooks run outside the MCP server process and don't inherit its env.
 # Load .env so LLM_ROUTER_CLAUDE_SUBSCRIPTION and other settings are available.
 _ENV_PATHS = [
+    os.path.join(os.getcwd(), ".env"),  # CWD .env (hook runs from project root)
     os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__)))), ".env"),
     os.path.expanduser("~/.env"),
     os.path.join(STATE_DIR, ".env"),

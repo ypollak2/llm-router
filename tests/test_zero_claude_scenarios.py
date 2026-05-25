@@ -108,9 +108,17 @@ def test_simple_prompt_completes_via_external_direct_execution(
     )
 
     assert out is not None
-    assert out["decision"] == "block"
-    assert "An external provider completed this answer without Claude." in out["reason"]
-    assert "ZERO_CLAUDE BLOCKED" not in out["reason"]
+    # In echo mode: decision=approve with contextForAgent or additionalContext
+    # In block mode: decision=block with reason containing the response
+    if out.get("decision") == "approve":
+        hook_out = out.get("hookSpecificOutput", {})
+        ctx = hook_out.get("contextForAgent", "") or hook_out.get("additionalContext", "")
+        assert "An external provider completed this answer without Claude." in ctx
+        assert "ZERO_CLAUDE BLOCKED" not in ctx
+    else:
+        assert out["decision"] == "block"
+        assert "An external provider completed this answer without Claude." in out["reason"]
+        assert "ZERO_CLAUDE BLOCKED" not in out["reason"]
     assert requests
 
 

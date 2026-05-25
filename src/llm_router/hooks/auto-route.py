@@ -55,7 +55,9 @@ except ImportError:
 # ── .env loader (reads llm-router's .env for API keys) ──────────────────────
 
 _ENV_PATHS = [
-    Path(__file__).resolve().parent.parent.parent / ".env",  # project root .env
+    Path.cwd() / ".env",  # CWD .env (hook runs from project root)
+    Path(__file__).resolve().parent.parent.parent.parent / ".env",  # dev: src/llm_router/hooks → project root
+    Path.home() / ".llm-router" / ".env",  # user-level config
     Path.home() / ".env",
 ]
 
@@ -1832,7 +1834,6 @@ def main() -> None:
                 needs_claude_tools as _needs_claude_tools,
             )
             from llm_router.hooks.direct_executor import execute_chain as _execute_chain
-            from llm_router.hooks.response_formatter import format_direct_response as _format_direct
 
             _zone, _raw_pct = _get_direct_pressure()
             _direct_chain = _build_direct_chain(complexity, _zone, task_type)
@@ -1856,17 +1857,33 @@ def main() -> None:
                 _direct_result = _execute_chain(prompt, _direct_chain, task_type, timeout=15)
 
             if _direct_result:
-                _formatted = _format_direct(_direct_result, task_type, complexity)
-                # Prepend prior violation notice if any
-                _violation_notice = _prior_violation_notice(previous_unrouted)
-                if _violation_notice:
-                    _formatted = _violation_notice + "\n" + _formatted
                 _debug_log(
                     f"[INVOCATION {invocation_id:.3f}] DIRECT SUCCESS: "
                     f"model={_direct_result.model.provider}/{_direct_result.model.model} "
                     f"latency={_direct_result.latency_ms}ms"
                 )
-                json.dump({"decision": "block", "reason": _formatted}, sys.stdout)
+                # Choose render mode: "echo" passes through Claude for natural display,
+                # "block" uses zero-cost warning-styled display
+                from llm_router.hooks.response_formatter import (
+                    RENDER_MODE as _render_mode,
+                    build_echo_output as _build_echo,
+                    build_block_output as _build_block,
+                )
+                _violation_notice = _prior_violation_notice(previous_unrouted)
+                if _render_mode == "echo":
+                    _output = _build_echo(_direct_result, task_type, complexity)
+                    # Include violation notice in contextForAgent for echo mode
+                    if _violation_notice:
+                        _ctx_key = "contextForAgent" if "contextForAgent" in _output.get("hookSpecificOutput", {}) else "additionalContext"
+                        _output["hookSpecificOutput"][_ctx_key] = (
+                            _violation_notice + "\n\n" +
+                            _output["hookSpecificOutput"][_ctx_key]
+                        )
+                else:
+                    _output = _build_block(_direct_result, task_type, complexity)
+                    if _violation_notice:
+                        _output["reason"] = _violation_notice + "\n" + _output["reason"]
+                json.dump(_output, sys.stdout)
                 sys.exit(0)
             else:
                 if zero_claude:
