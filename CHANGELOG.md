@@ -2,6 +2,20 @@
 
 **For releases v6.2 and earlier, see [CHANGELOG_ARCHIVE.md](docs/CHANGELOG_ARCHIVE.md).**
 
+## v9.1.3 - Fix .env loading and echo rendering (2026-05-25)
+
+### Fixed
+
+- **Critical: .env path resolution** - auto-route hook used 3 parent directories (resolving to `src/.env` instead of project root). Now uses `Path.cwd()` as primary lookup + 4 parents as fallback. Without this fix, `OLLAMA_BUDGET_MODELS`, `LLM_ROUTER_CLAUDE_SUBSCRIPTION`, and API keys were invisible to the hook.
+- **Echo rendering** - routed responses now render as normal black text in Claude Code CLI instead of warning-styled orange text. Uses `contextForAgent` (same priority as MANDATORY ROUTE) instead of `additionalContext` (which Claude ignores when CLAUDE.md is loaded).
+- **session-start.py** - added `os.getcwd()` as first `.env` search path for consistency with auto-route fix.
+
+### Changed
+
+- Default render mode changed from `block` to `echo`. Configurable via `LLM_ROUTER_RENDER_MODE=block` env var for zero-cost (warning-styled) display.
+
+---
+
 ## v9.1.2 - Fix extra env var rejection in RouterConfig (2026-05-25)
 
 ### Fixed

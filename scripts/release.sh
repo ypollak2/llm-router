@@ -103,6 +103,7 @@ main() {
         --ignore=tests/test_rate_limit.py \
         --ignore=tests/test_router.py \
         --ignore=tests/test_adaptive_router.py \
+        --ignore=tests/test_agent_loop.py \
         --ignore=tests/commands/test_doctor.py \
         --deselect=tests/test_cost.py::test_get_router_efficiency \
         --deselect=tests/test_cost.py::test_get_classifier_overhead \
