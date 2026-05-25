@@ -2,6 +2,15 @@
 
 **For releases v6.2 and earlier, see [CHANGELOG_ARCHIVE.md](docs/CHANGELOG_ARCHIVE.md).**
 
+## v9.0.10 — Fix: Expanded Routing Continuity (2026-05-25)
+
+### Fixed
+
+- **Meta-Conversation Routing** — expanded the `_is_continuation` logic to catch phrases like "last prompt", "what does this", "why am I getting", and "blocked by hook" so that questions about system errors and previous chat context correctly bypass the stateless router.
+- **Conversational Transitions** — added "now", "also", and "well" to the list of conversational starters that inherit context.
+
+---
+
 ## v9.0.9 — Fix: Routing Continuity & CLI Errors (2026-05-25)
 
 ### Fixed
