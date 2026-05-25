@@ -136,7 +136,7 @@ class TestImportWiringInAdminTools:
         assert log_path.read_text() == ""
 
     @pytest.mark.asyncio
-    async def test_llm_usage_flushes_jsonl(self, savings_db):
+    async def test_llm_usage_flushes_jsonl(self, savings_db, monkeypatch):
         """llm_usage() should auto-import pending JSONL before the savings section."""
         _, log_path = savings_db
         entry = {
@@ -146,8 +146,9 @@ class TestImportWiringInAdminTools:
         }
         log_path.write_text(json.dumps(entry) + "\n")
 
-        from llm_router.tools.admin import llm_usage
-        result = await llm_usage("all")
+        import llm_router.tools.admin as admin
+        monkeypatch.setattr(admin, "is_codex_available", lambda: True)
+        result = await admin.llm_usage("all")
 
         assert "Usage Dashboard" in result
         assert "native turns not metered" in result
