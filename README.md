@@ -16,6 +16,8 @@
 <p align="center">
   <a href="https://pypi.org/project/llm-routing/"><img src="https://img.shields.io/pypi/v/llm-routing?style=flat-square&color=4F46E5" alt="PyPI"></a>
   <a href="https://pypi.org/project/llm-routing/"><img src="https://img.shields.io/pypi/dm/llm-routing?style=flat-square&color=4F46E5" alt="Downloads"></a>
+  <a href="https://pepy.tech/projects/llm-routing"><img src="https://static.pepy.tech/personalized-badge/llm-routing?period=total&units=INTERNATIONAL_SYSTEM&left_color=BLACK&right_color=GREEN&left_text=downloads" alt="PyPI Downloads"></a>
+  <a href="https://pepy.tech/projects/claude-code-llm-router"><img src="https://static.pepy.tech/personalized-badge/claude-code-llm-router?period=total&units=INTERNATIONAL_SYSTEM&left_color=GREY&right_color=BLACK&left_text=downloads" alt="PyPI Downloads"></a>
   <a href="https://github.com/ypollak2/llm-router/actions"><img src="https://img.shields.io/github/actions/workflow/status/ypollak2/llm-router/ci.yml?style=flat-square&label=tests" alt="Tests"></a>
   <a href="https://github.com/ypollak2/llm-router/stargazers"><img src="https://img.shields.io/github/stars/ypollak2/llm-router?style=flat-square&color=FBBF24" alt="Stars"></a>
   <a href="https://pypi.org/project/llm-routing/"><img src="https://img.shields.io/badge/python-3.10+-3572A5?style=flat-square" alt="Python"></a>
