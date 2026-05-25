@@ -191,8 +191,8 @@ def execute_chain(
 ) -> DirectResult | None:
     """Try each model in the chain until one returns a quality response.
 
-    Skips models whose provider is 'claude' — those can't be called directly
-    from the hook (Claude IS the host). They fall through to the contextForAgent path.
+    Skips models whose provider is 'claude' - those cannot be called directly
+    from the hook. The caller decides whether failure falls through or blocks.
 
     Returns DirectResult on success, None if all models failed or only Claude remains.
     """
@@ -220,7 +220,7 @@ def execute_chain(
                 output_tokens=usage.get("output_tokens", 0),
             )
 
-    return None  # All non-Claude models failed → fall through
+    return None  # All non-Claude models failed; the caller selects failover policy.
 
 
 # ── Agent Loop Execution (for file-op tasks) ─────────────────────────────────

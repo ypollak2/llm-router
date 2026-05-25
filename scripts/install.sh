@@ -69,7 +69,7 @@ print('Added llm-router to', config_path)
 
 # Install auto-routing hook
 HOOKS_DIR="$HOME/.claude/hooks"
-HOOK_SRC="$PROJECT_DIR/.claude/hooks/auto-route.py"
+HOOK_SRC="$PROJECT_DIR/src/llm_router/hooks/auto-route.py"
 HOOK_DST="$HOOKS_DIR/llm-router-auto-route.py"
 
 if [ -f "$HOOK_SRC" ]; then

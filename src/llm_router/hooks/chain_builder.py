@@ -9,8 +9,8 @@ The 80/20 rule: ~80% of prompts are simple/moderate and always go to
 cheap/free models. ~20% are complex and MAY use Claude when pressure allows.
 
 Claude models appear in the chain but are skipped by direct_executor
-(they can't be called from the hook). When they're the only option left,
-the hook falls through to the contextForAgent path instead of blocking.
+(they can't be called from the hook). Standard mode falls through when
+they are the only option left; zero-Claude mode blocks the submission.
 """
 
 from __future__ import annotations
@@ -133,8 +133,8 @@ def build_chain(complexity: str, zone: str, task_type: str) -> list[ModelSpec]:
     """Build an ordered model chain based on complexity and pressure zone.
 
     The chain is ordered cheapest-first. Claude models are included when
-    pressure allows — direct_executor skips them (can't call from hook)
-    and they signal that the hook should fall through to Claude.
+    pressure allows - direct_executor skips them (can't call from hook).
+    A caller outside zero-Claude mode can then fall through to Claude.
 
     Args:
         complexity: simple / moderate / complex / deep_reasoning
@@ -204,9 +204,10 @@ def chain_has_claude(chain: list[ModelSpec]) -> bool:
 
 
 def needs_claude_tools(prompt: str, task_type: str) -> bool:
-    """Does this prompt require Claude's Read/Edit/Write tools?
+    """Does this prompt require file and command tools?
 
-    If yes, skip direct execution — Claude must handle the full agent loop.
+    If yes, direct execution must use the external tool-capable agent path.
+    Native Claude is only available as a non-strict fallback.
     """
     import re
 

@@ -210,6 +210,8 @@ def perform_release(
             ".factory-plugin/",
             "CHANGELOG.md",
             "README.md",
+            "docs/",
+            "scripts/",
             "uv.lock",
         ],
         dry_run=dry_run,

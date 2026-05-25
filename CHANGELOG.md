@@ -2,6 +2,23 @@
 
 **For releases v6.2 and earlier, see [CHANGELOG_ARCHIVE.md](docs/CHANGELOG_ARCHIVE.md).**
 
+## v9.1.0 - Strict Zero-Claude Routing (2026-05-25)
+
+### Added
+
+- **Strict quota guard** - set `mode: zero_claude` in `~/.llm-router/routing.yaml`, or set `LLM_ROUTER_ZERO_CLAUDE=true`, to ensure automatic routes either execute externally or block before native Claude can process the prompt.
+- **Explicit native escalation** - prefix a prompt with `claude:`, `native:`, or `opus:` to intentionally permit a native Claude Code turn while strict mode is enabled.
+
+### Fixed
+
+- **Continuation quota leakage** - substantive requests beginning with transitions such as `"great, now I want..."` no longer bypass routing as continuations.
+- **Fail-open execution** - failed direct execution, unavailable external tool-agent execution, and MCP-only handoffs now block in strict mode instead of exposing the prompt to native Claude.
+- **Blank prompt handling** - whitespace-only submissions are ignored in strict mode instead of producing a misleading block message.
+- **Legacy shell install path** - `scripts/install.sh` now installs the canonical packaged auto-route hook rather than the stale project hook copy.
+- **Release staging** - `scripts/release.py` now includes documentation and installer script changes in its release commit staging set.
+
+---
+
 ## v9.0.10 — Fix: Expanded Routing Continuity (2026-05-25)
 
 ### Fixed

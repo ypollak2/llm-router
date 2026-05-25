@@ -136,6 +136,18 @@ llm-router install --host cursor      # Cursor
 
 See [docs/HOST_SUPPORT_MATRIX.md](docs/HOST_SUPPORT_MATRIX.md) for full details on each host.
 
+### Protect Claude Code 5-hour quota
+
+For a strict boundary that never automatically falls through to native Claude, configure:
+
+```yaml
+# ~/.llm-router/routing.yaml
+enforce: smart
+mode: zero_claude
+```
+
+In `zero_claude` mode, prompts either complete through direct external execution or are blocked before Claude Code invokes its model. Prefix a prompt with `claude:` when you intentionally want a native Claude turn.
+
 ---
 
 ## How It Works

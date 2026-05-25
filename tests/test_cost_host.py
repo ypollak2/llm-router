@@ -150,6 +150,8 @@ class TestImportWiringInAdminTools:
         result = await llm_usage("all")
 
         assert "Usage Dashboard" in result
+        assert "native turns not metered" in result
+        assert "Session spend counts llm-router tool calls only" in result
         assert log_path.read_text() == ""
 
 

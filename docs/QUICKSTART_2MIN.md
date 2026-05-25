@@ -28,7 +28,7 @@ llm-router install
 pip install llm-routing
 llm-router install --host codex
 ```
-✅ Done. Hooks installed for Codex.
+✅ Done. MCP routing tools installed for Codex.
 
 ### Gemini CLI
 ```bash
@@ -91,19 +91,22 @@ llm-router install --force  # Reinstall hooks
 
 ## 🚀 Step 4: Start Routing (30 seconds)
 
-### Claude Code / Codex / Gemini
+### Claude Code / Gemini
 Routing starts **automatically**. No action needed.
 - Your prompts are analyzed automatically
 - Cheap models handle simple tasks
 - Expensive models only for complex work
 - Savings tracked in real-time
 
-### VS Code / Cursor
+### Codex / VS Code / Cursor
 Use MCP tools manually:
 ```bash
 # In your editor, invoke:
 /llm_route <prompt>
 ```
+
+In Codex, `llm_session_spend` reports only routed MCP calls. Native Codex
+turns are not observable by llm-router.
 
 ### Check Your Savings (Anytime)
 ```bash
@@ -188,7 +191,7 @@ llm-router gain             # View cumulative savings
 
 ### "Which host should I use?"
 → See [HOST_SUPPORT_MATRIX.md](HOST_SUPPORT_MATRIX.md)
-→ TL;DR: Claude Code (best) > Codex (excellent) > Gemini (good) > VS Code (manual)
+→ TL;DR: Claude Code (best automatic path) > Gemini > Codex / VS Code (manual routing)
 
 ---
 
@@ -205,10 +208,11 @@ llm-router gain             # View cumulative savings
 ## ✨ That's Genuinely It
 
 You now have:
-- ✅ Automatic model routing
+- ✅ Automatic or explicit model routing, depending on host
 - ✅ Cost optimization (60–80% savings)
 - ✅ Usage analytics
-- ✅ Hook-based automation (Claude Code / Codex / Gemini)
+- ✅ Hook-based automation (Claude Code / Gemini)
+- ✅ Explicit MCP routing (Codex / VS Code)
 
 **Total time: 2 minutes**
 **Start saving: immediately**

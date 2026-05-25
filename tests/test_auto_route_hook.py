@@ -14,7 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 HOOK_PATH = ROOT / "src" / "llm_router" / "hooks" / "auto-route.py"
 
 
-def _hook_env(home_dir: Path) -> dict[str, str]:
+def _hook_env(home_dir: Path, extra_env: dict[str, str] | None = None) -> dict[str, str]:
     env = os.environ.copy()
     env["HOME"] = str(home_dir)
     env["LLM_ROUTER_DISABLE_LLM_CLASSIFIERS"] = "1"
@@ -22,10 +22,17 @@ def _hook_env(home_dir: Path) -> dict[str, str]:
     env["OPENAI_API_KEY"] = ""
     env["GEMINI_API_KEY"] = ""
     env["GOOGLE_API_KEY"] = ""
+    if extra_env:
+        env.update(extra_env)
     return env
 
 
-def run_hook(prompt: str, session_id: str | None = None, home_dir: Path | None = None) -> dict | None:
+def run_hook(
+    prompt: str,
+    session_id: str | None = None,
+    home_dir: Path | None = None,
+    extra_env: dict[str, str] | None = None,
+) -> dict | None:
     """Run the hook script with a prompt and return parsed output."""
     with tempfile.TemporaryDirectory(prefix="llm-router-hook-test-") as tmp_home:
         effective_home = home_dir or Path(tmp_home)
@@ -35,7 +42,7 @@ def run_hook(prompt: str, session_id: str | None = None, home_dir: Path | None =
             input=payload,
             capture_output=True,
             text=True,
-            env=_hook_env(effective_home),
+            env=_hook_env(effective_home, extra_env),
         )
         if result.returncode != 0 or not result.stdout.strip():
             return None
@@ -282,6 +289,78 @@ class TestAutoRouteNowRoutes:
         hint = _extract_hint(out)
         # Could be code or analyze — both valid for "improve performance"
         assert "code/" in hint or "analyze/" in hint
+
+    def test_substantive_now_question_is_not_a_continuation_bypass(self):
+        out = run_hook(
+            "great, now I want to understand what kind of routings can I get?",
+            session_id="continuation-regression",
+        )
+        assert out is not None
+        assert "llm_" in _extract_hint(out)
+
+
+class TestZeroClaudeMode:
+    """Strict mode must never ask native Claude to execute a routed prompt."""
+
+    def test_failed_external_execution_blocks_instead_of_injecting_route(self):
+        out = run_hook(
+            "What kinds of routings can I get?",
+            session_id="zero-claude",
+            extra_env={"LLM_ROUTER_ZERO_CLAUDE": "true"},
+        )
+        assert out is not None
+        assert out["decision"] == "block"
+        assert "ZERO_CLAUDE BLOCKED" in out["reason"]
+        assert "Claude was not invoked" in out["reason"]
+        assert "hookSpecificOutput" not in out
+
+    def test_continuation_does_not_bypass_to_native_claude(self):
+        out = run_hook(
+            "great, now explain what kind of routings can I get?",
+            session_id="zero-continuation",
+            extra_env={"LLM_ROUTER_ZERO_CLAUDE": "true"},
+        )
+        assert out is not None
+        assert out["decision"] == "block"
+        assert "Claude was not invoked" in out["reason"]
+
+    def test_explicit_native_prefix_allows_claude_execution(self):
+        out = run_hook(
+            "claude: review this using the native host agent",
+            session_id="zero-explicit",
+            extra_env={"LLM_ROUTER_ZERO_CLAUDE": "true"},
+        )
+        assert out is None
+
+    def test_unprefixed_slash_prompt_does_not_escape_strict_mode(self):
+        out = run_hook(
+            "/help",
+            session_id="zero-slash",
+            extra_env={"LLM_ROUTER_ZERO_CLAUDE": "true"},
+        )
+        assert out is not None
+        assert out["decision"] == "block"
+
+    def test_whitespace_prompt_is_ignored_in_strict_mode(self):
+        out = run_hook(
+            "  \n\t  ",
+            session_id="zero-whitespace",
+            extra_env={"LLM_ROUTER_ZERO_CLAUDE": "true"},
+        )
+        assert out is None
+
+    def test_routing_yaml_enables_strict_mode(self, tmp_path):
+        router_dir = tmp_path / ".llm-router"
+        router_dir.mkdir()
+        (router_dir / "routing.yaml").write_text("enforce: smart\nmode: zero_claude\n")
+        out = run_hook(
+            "What kinds of routings can I get?",
+            session_id="zero-config",
+            home_dir=tmp_path,
+        )
+        assert out is not None
+        assert out["decision"] == "block"
+        assert "Claude was not invoked" in out["reason"]
 
 
 class TestShortCodeFollowup:

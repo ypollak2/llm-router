@@ -29,6 +29,8 @@ llm-router install
 ```bash
 llm-router install --host codex
 ```
+Codex uses explicit MCP routing calls. Native Codex turns are not automatically
+routed or included in `llm_session_spend`.
 
 **Gemini CLI**
 ```bash
@@ -47,6 +49,18 @@ llm-router doctor
 ```
 
 You should see ✅ checks for hooks, MCP registration, and provider availability.
+
+### Optional: prevent automatic Claude quota use
+
+For Claude Code users protecting the 5-hour subscription quota, enable strict mode:
+
+```yaml
+# ~/.llm-router/routing.yaml
+enforce: smart
+mode: zero_claude
+```
+
+With this setting, a prompt is either completed by direct external execution or blocked before native Claude runs. Use a `claude:` prefix only when you intentionally want a native Claude turn.
 
 ---
 
@@ -116,7 +130,7 @@ chmod 600 ~/.llm-router/config.yaml
 | Host | Cost Savings | Setup Friction | Best For |
 |------|:------------:|:--------------:|----------|
 | **Claude Code** | 60–80% | Low | Maximum savings (recommended) |
-| **Codex CLI** | 60–80% | Medium | OpenAI users |
+| **Codex CLI** | Opt-in | Medium | OpenAI users using explicit MCP routing |
 | **Gemini CLI** | 50–70% | Medium | Gemini free tier users |
 | **VS Code** | 30–50% | Low | Lightweight editors |
 
@@ -215,10 +229,10 @@ llm-router verify     # Full system health check
 ## You're Ready!
 
 You now have:
-- ✅ Automatic model routing for every task
+- ✅ Automatic or explicit model routing, depending on host
 - ✅ 60–80% cost reduction
 - ✅ Usage analytics and cost tracking
-- ✅ Hook-based automation (Claude Code / Codex / Gemini)
+- ✅ Hook-based automation (Claude Code / Gemini)
+- ✅ Explicit MCP routing (Codex / VS Code)
 
 **Start saving immediately.** 🚀
-

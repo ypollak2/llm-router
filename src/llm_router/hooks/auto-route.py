@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm-router-hook-version: 21
+# llm-router-hook-version: 23
 """UserPromptSubmit hook — scoring classifier with Ollama + API fallback chain.
 
 Classification chain (stops at first success):
@@ -1205,6 +1205,40 @@ _ROUTER_DIR = Path.home() / ".llm-router"
 _ENFORCEMENT_LOG_PATH = _ROUTER_DIR / "enforcement.log"
 _PENDING_ROUTE_TTL_SEC = 3600  # 1h TTL — survives context compaction; auto-route resets on each new prompt
 
+# A strict mode for users protecting Claude Code subscription quota. In this
+# mode the hook is the routing boundary: native Claude execution is opt-in.
+_EXPLICIT_CLAUDE_PREFIX_RE = re.compile(r"^\s*(?:claude|native|opus)\s*:\s*", re.IGNORECASE)
+
+
+def _zero_claude_enabled() -> bool:
+    """Return True when automatic native Claude turns must be prevented."""
+    env_value = os.environ.get("LLM_ROUTER_ZERO_CLAUDE", "").strip().lower()
+    if env_value:
+        return env_value in ("1", "true", "yes", "on", "zero_claude", "strict_zero")
+
+    config_path = _ROUTER_DIR / "routing.yaml"
+    try:
+        content = config_path.read_text(encoding="utf-8")
+    except OSError:
+        return False
+
+    mode_match = re.search(r"^\s*mode\s*:\s*(\S+)\s*$", content, re.MULTILINE | re.IGNORECASE)
+    if mode_match and mode_match.group(1).lower() in ("zero_claude", "strict_zero"):
+        return True
+    bool_match = re.search(r"^\s*zero_claude\s*:\s*(\S+)\s*$", content, re.MULTILINE | re.IGNORECASE)
+    return bool(bool_match and bool_match.group(1).lower() in ("1", "true", "yes", "on"))
+
+
+def _block_zero_claude(reason: str, task_type: str = "unknown", complexity: str = "unknown") -> None:
+    """Fail closed rather than letting a routed prompt invoke Claude."""
+    message = (
+        f"ZERO_CLAUDE BLOCKED ({task_type}/{complexity}): {reason}\n\n"
+        "Claude was not invoked, so this turn does not consume Claude Code model quota. "
+        "To intentionally use Claude, resubmit the prompt prefixed with `claude:`."
+    )
+    json.dump({"decision": "block", "reason": message}, sys.stdout)
+    sys.exit(0)
+
 # ── Context-Aware Routing (v2.5) ─────────────────────────────────────────────
 # Short continuation prompts inherit the prior turn's classification so the
 # full Ollama/API classifier chain isn't re-invoked for "ok do it" / "yes" etc.
@@ -1315,7 +1349,8 @@ def _is_continuation(prompt: str) -> bool:
     if _CONTINUATION_RE.match(stripped):
         return True
     
-    # v2.6.2: Catch conversational starters that imply context
+    # Catch only short, context-dependent conversational starters. Words such
+    # as "now" and "also" frequently introduce a new substantive request.
     lower = stripped.lower()
     
     # Strip common conversational acknowledgments to find the "real" start
@@ -1325,8 +1360,8 @@ def _is_continuation(prompt: str) -> bool:
         lower
     ).strip()
 
-    # If it starts with a continuation word, or asks a meta-conversation question
-    if clean_lower.startswith(("and ", "then ", "so ", "but ", "actually ", "what about ", "why did ", "why was ", "why am i ", "what does this ", "now ", "also ", "well ")):
+    # If it starts with a contextual follow-up, keep it on the prior route.
+    if clean_lower.startswith(("and ", "then ", "so ", "but ", "actually ", "what about ", "why did ", "why was ", "why am i ", "what does this ", "well ")):
         words = stripped.split()
         if len(words) <= 20:
             return True
@@ -1533,19 +1568,27 @@ def main() -> None:
 
     prompt = hook_input.get("prompt", "")
     _debug_log(f"[INVOCATION {invocation_id:.3f}] prompt_len={len(prompt)} session_id={hook_input.get('session_id', 'unknown')[:8]}")
-    if not prompt:
+    if not prompt.strip():
         sys.exit(0)
 
     session_id = hook_input.get("session_id", "")
+    zero_claude = _zero_claude_enabled()
+
+    # Native use is always explicit in zero-Claude mode. The prefix remains in
+    # the prompt as a visible record that the user chose quota-consuming work.
+    if zero_claude and _EXPLICIT_CLAUDE_PREFIX_RE.match(prompt):
+        _debug_log(f"[INVOCATION {invocation_id:.3f}] ZERO_CLAUDE EXPLICIT_NATIVE")
+        sys.exit(0)
 
     # ── v6.0 Visibility: Initialize HUD session state ─────────────────────────
     initialize_hud()
 
     # ── Continuation Bypass (v2.6) ───────────────────────────────────────────
-    # Short continuation prompts (yes/ok/do it/...) should always go to Claude.
+    # Short continuation prompts (yes/ok/do it/...) may go to Claude only in
+    # normal mode. Strict mode routes them externally or blocks fail-closed.
     # If a directive is pending, this allows Claude to fulfill it.
     # If no directive is pending, this prevents routing noise for conversation.
-    if session_id and _is_continuation(prompt):
+    if not zero_claude and session_id and _is_continuation(prompt):
         _debug_log(f"[INVOCATION {invocation_id:.3f}] CONTINUATION: bypass to host agent")
         sys.exit(0)
 
@@ -1559,6 +1602,12 @@ def main() -> None:
     capability_map = _build_mcp_capability_map(raw_tools)
     matched_server = _match_mcp_server(prompt, capability_map)
     if matched_server:
+        if zero_claude:
+            _block_zero_claude(
+                f"the request targets MCP server `{matched_server}`, which requires native host tool execution",
+                "mcp",
+                "external-tool",
+            )
         # Emit an informational hint (not mandatory) so Claude knows why no directive
         server_tools = capability_map.get(matched_server, [])
         tool_hint = f"mcp__{matched_server}__{server_tools[0]}" if server_tools else f"mcp__{matched_server}__*"
@@ -1599,22 +1648,29 @@ def main() -> None:
     else:
         result = classify_prompt(prompt)
         if result is None:
-            sys.exit(0)
-        task_type  = result["task_type"]
-        complexity = result["complexity"]
-        method     = result["method"]
-        tool       = TOOL_MAP.get(task_type, "llm_route")
+            if zero_claude:
+                task_type = "query"
+                complexity = "simple"
+                method = "zero-claude-default"
+                tool = "llm_query"
+            else:
+                sys.exit(0)
+        else:
+            task_type  = result["task_type"]
+            complexity = result["complexity"]
+            method     = result["method"]
+            tool       = TOOL_MAP.get(task_type, "llm_route")
 
-        # ── v6.1: Check for learned routing overrides ─────────────────────────────
-        learned_routes = _load_learned_routes()
-        learned_override = _check_learned_override(task_type, learned_routes)
-        if learned_override:
-            tool, method_suffix = learned_override
-            method = f"learned{method_suffix}"
-        # ────────────────────────────────────────────────────────────────────────
+            # ── v6.1: Check for learned routing overrides ─────────────────────────────
+            learned_routes = _load_learned_routes()
+            learned_override = _check_learned_override(task_type, learned_routes)
+            if learned_override:
+                tool, method_suffix = learned_override
+                method = f"learned{method_suffix}"
+            # ────────────────────────────────────────────────────────────────────────
 
-        # Save classification so the next turn can inherit if it's a continuation
-        _save_last_route(session_id, task_type, complexity, tool)
+            # Save classification so the next turn can inherit if it's a continuation
+            _save_last_route(session_id, task_type, complexity, tool)
 
     # ── Claude Code routing: Always use MCP tools (free-first chain) ──────────
     # v6.11.1: Prioritize Ollama → Codex → OpenAI → Gemini over subscription Sonnet
@@ -1626,7 +1682,7 @@ def main() -> None:
     requested_complexity = None
     _pressure_suffix = ""
     
-    if _CC_MODE:
+    if _CC_MODE and not zero_claude:
         pressure = _get_pressure()
         requested_complexity = complexity  # Save original before pressure downgrade
         complexity, _pressure_suffix = _apply_pressure_downgrade(complexity, pressure)
@@ -1758,15 +1814,13 @@ def main() -> None:
     # ── Phase 1: Direct Execution (0 subscription tokens) ──────────────────────
     # Try to handle the prompt directly from the hook by calling models via HTTP.
     # If successful, return {"decision": "block"} so Claude never sees the prompt.
-    # Falls through to the existing contextForAgent path if:
-    #   - Task needs Claude's file tools (Read/Edit/Write)
-    #   - All direct models failed
-    #   - Only Claude remains in the chain
+    # Standard mode falls through to contextForAgent if external execution
+    # cannot complete. Strict zero-Claude mode blocks instead.
     _direct_enabled = os.environ.get("LLM_ROUTER_DIRECT_EXECUTION", "true").lower() in ("1", "true", "yes", "on")
     
     # v2.6.1: Disable direct execution for context inheritance
     # These tasks are inherently conversational and the direct hook is stateless
-    if method in ("context-inherit", "code-context-inherit"):
+    if method in ("context-inherit", "code-context-inherit") and not zero_claude:
         _direct_enabled = False
         _debug_log(f"[INVOCATION {invocation_id:.3f}] DIRECT SKIP: conversational context")
 
@@ -1815,11 +1869,24 @@ def main() -> None:
                 json.dump({"decision": "block", "reason": _formatted}, sys.stdout)
                 sys.exit(0)
             else:
-                _debug_log(f"[INVOCATION {invocation_id:.3f}] DIRECT FAILED: falling through to Claude")
+                if zero_claude:
+                    _debug_log(f"[INVOCATION {invocation_id:.3f}] ZERO_CLAUDE DIRECT_FAILED")
+                else:
+                    _debug_log(f"[INVOCATION {invocation_id:.3f}] DIRECT FAILED: falling through to Claude")
         except ImportError:
             _debug_log(f"[INVOCATION {invocation_id:.3f}] DIRECT SKIP: modules not available")
         except Exception as _direct_err:
             _debug_log(f"[INVOCATION {invocation_id:.3f}] DIRECT ERROR: {_direct_err}")
+
+    if zero_claude:
+        _debug_log(f"[INVOCATION {invocation_id:.3f}] ZERO_CLAUDE BLOCKED_EXTERNAL_FAILURE")
+        if not _direct_enabled:
+            failure_reason = "direct external execution is disabled"
+        elif _enforce_mode in ("shadow", "off"):
+            failure_reason = f"enforcement mode `{_enforce_mode}` does not execute external responses directly"
+        else:
+            failure_reason = "no configured external direct-execution route completed successfully"
+        _block_zero_claude(failure_reason, task_type, complexity)
 
     if _enforce_mode == "shadow":
         # Passive observation — no pending state, no blocking

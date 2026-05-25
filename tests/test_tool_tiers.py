@@ -455,6 +455,7 @@ class TestLlmSessionSpend:
             result = await llm_session_spend()
 
         assert "Session spend" in result
+        assert "routed llm-router calls only" in result
         assert "$" in result
 
     @pytest.mark.asyncio

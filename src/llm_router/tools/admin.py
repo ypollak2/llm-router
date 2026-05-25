@@ -119,7 +119,8 @@ async def llm_usage(period: str = "today") -> str:
     # ── Section 2: Codex ──
     lines.append(section("CODEX (LOCAL)"))
     if is_codex_available():
-        lines.append(row("  Status:  READY    Model: gpt-5.4    Cost: FREE"))
+        lines.append(row("  Available for routed calls; native turns not metered"))
+        lines.append(row("  Session spend counts llm-router tool calls only"))
     else:
         lines.append(row("  Status:  NOT INSTALLED"))
     lines.append(HR)
@@ -890,6 +891,8 @@ async def llm_session_spend() -> str:
         f"**Session spend** ({elapsed_min}m elapsed)",
         "",
         f"Total: **${summary['total_usd']:.4f}** across {summary['call_count']} calls",
+        "",
+        "Scope: routed llm-router calls only; native host turns are not visible.",
     ]
 
     if summary.get("anomaly_flag"):
