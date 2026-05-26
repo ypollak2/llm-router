@@ -400,7 +400,7 @@ Contributions welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for full guideline
 git clone https://github.com/ypollak2/llm-router.git
 cd llm-router
 uv sync --extra dev
-uv run pytest tests/ -q         # Run tests (1700+)
+uv run pytest tests/ -q         # Run tests (1900+)
 uv run ruff check src/ tests/   # Lint
 ```
 
