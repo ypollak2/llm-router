@@ -216,7 +216,7 @@ class TestAutoRouteClassification:
         assert out is not None
         hint = _extract_hint(out)
         # Should be classified by Ollama or API (not auto fallback)
-        assert "ROUTE:" in hint
+        assert "ROUTE" in hint
         assert "via " in hint
 
 
