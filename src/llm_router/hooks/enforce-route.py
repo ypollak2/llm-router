@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm-router-hook-version: 12
+# llm-router-hook-version: 13
 """PreToolUse[*] hook — enforce routing compliance.
 
 When auto-route.py issues a ⚡ MANDATORY ROUTE directive, it writes a
@@ -414,10 +414,14 @@ def main() -> None:
     except (OSError, ValueError):
         pass  # If spend tracking file doesn't exist or is invalid, allow the call
 
-    # Session-type check: if Claude has called Edit/Write in this session already,
-    # it's confirmed coding work — downgrade enforcement to soft for the whole session.
-    if _is_coding_session(session_id) and enforce in ("smart", "hard"):
-        enforce = "soft"
+    # v13: Session-type coding bypass is DISABLED while a pending route exists.
+    # Previous behavior (Option 1 fallback): coding sessions downgraded enforcement
+    # to soft, letting all tools through. This allowed the model to skip routing
+    # entirely on action prompts. Now: routing must be satisfied per-turn first.
+    # After routing clears (llm_* called), coding session allows free tool use.
+    #
+    # if _is_coding_session(session_id) and enforce in ("smart", "hard"):
+    #     enforce = "soft"  # OLD: disabled in v13
 
     expected_tool = pending.get("expected_tool", "llm_route")
     expected_server = pending.get("expected_server", "")  # for MCP server routing
@@ -449,25 +453,41 @@ def main() -> None:
         _clear_violation_count(session_id)  # Reset violations on successful routing
         sys.exit(0)
 
-    # ── Early file-operation detection ────────────────────────────────────────
-    # Read-only tools (Read/Glob/Grep/LS) are ALWAYS allowed without marking
-    # the session as coding — this preserves routing enforcement for Q&A turns.
-    # Only WRITE operations (Edit/Write/MultiEdit) mark the session as coding.
-    if tool_name in {"Read", "Glob", "Grep", "LS"}:
-        sys.exit(0)  # Allow read-only tools, don't change session type
-    if tool_name in {"Edit", "Write", "MultiEdit"}:
-        _mark_session_coding(session_id)
-        _clear_pending(session_id)
-        _clear_violation_count(session_id)
-        sys.exit(0)
+    # ── v13: Strict routing-first enforcement ────────────────────────────────
+    # ALL native tools (Read/Glob/Grep/Edit/Write/Bash) are blocked until
+    # an llm_* tool is called. This prevents the model from bypassing routing
+    # by jumping straight to file operations on action-oriented prompts.
+    #
+    # Previous behavior (preserved as Option 1 fallback):
+    #   Read/Glob/Grep/LS were unconditionally allowed.
+    #   Edit/Write/MultiEdit marked session as "coding" and cleared routing.
+    #   This let the model bypass routing entirely for file-editing prompts.
+    #
+    # ToolSearch and mcp__* tools are still allowed (handled earlier via
+    # _block_tools_for check). Only native file/shell tools are blocked.
 
-    # ── Blocklist check ───────────────────────────────────────────────────────
-    # For code tasks: only Bash/Edit/Write are blocked (file reads are needed).
-    # For Q&A tasks: also block Read/Glob/Grep/LS — Claude reading files and
-    # reasoning about them is equivalent to answering directly; the file
-    # contents should be passed to llm_analyze/llm_query instead.
-    if tool_name not in _block_tools_for(task_type):
-        sys.exit(0)
+    # In hard mode, block ALL native tools including read-only ones
+    if enforce == "hard":
+        if tool_name in (_BASE_BLOCK_TOOLS | _QA_ONLY_BLOCK_TOOLS | {"Edit", "Write", "MultiEdit"}):
+            # Fall through to violation handling below
+            pass
+        elif tool_name not in _block_tools_for(task_type):
+            sys.exit(0)  # Allow non-blocked tools (ToolSearch, mcp__*, etc.)
+        else:
+            pass  # Fall through to violation handling
+    else:
+        # smart mode: block write tools for all tasks, block read tools for Q&A only
+        if tool_name in {"Edit", "Write", "MultiEdit"}:
+            # Write tools are blocked until routing is satisfied (all task types)
+            pass  # Fall through to violation handling
+        elif tool_name in {"Read", "Glob", "Grep", "LS"}:
+            if task_type in _QA_TASK_TYPES:
+                pass  # Block reads for Q&A tasks — fall through to violation handling
+            else:
+                sys.exit(0)  # Allow reads for code tasks (needed for implementation)
+        elif tool_name not in _block_tools_for(task_type):
+            sys.exit(0)  # Allow non-blocked tools
+        # else: fall through to violation handling
 
     # ── Work tool used before routing ─────────────────────────────────────────
     _record_tool_call(session_id, tool_name)  # Track for loop detection
@@ -488,17 +508,11 @@ def main() -> None:
         sys.exit(0)  # Allow this tool call to prevent deadlock
 
     if enforce == "smart":
-        # In smart mode, NEVER block Read/Glob/Grep/LS.
-        # Blocking file-read tools caused irrecoverable deadlocks where Claude
-        # couldn't read the hook source to fix it. The cost saving from blocking
-        # reads is low; the deadlock risk is too high.
-        # Only Bash/Edit/Write are blocked in smart mode (prevents direct answers
-        # and code execution, but keeps investigation tools available).
-        if tool_name not in _BASE_BLOCK_TOOLS:
-            sys.exit(0)
-        if task_type not in _QA_TASK_TYPES:
-            sys.exit(0)  # code task in smart mode — allow file tools
-        # Fall through to hard block for Q&A tasks (Bash/Edit/Write only)
+        # v13: Smart mode blocks write tools for ALL task types until routing
+        # is satisfied. Read tools are only blocked for Q&A tasks.
+        # This was already handled in the routing-first enforcement block above,
+        # so if we reach here, the tool IS in the blocklist — proceed to hard block.
+        pass  # Fall through to hard block
 
     # Hard mode: block with clear remediation instructions
     is_file_reader = tool_name in _QA_ONLY_BLOCK_TOOLS

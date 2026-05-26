@@ -48,7 +48,7 @@ RST = "\033[0m"  # reset
 
 SEP = f"{DIM} │ {RST}"
 
-_FREE_PROVIDERS = {"ollama", "codex"}
+_FREE_PROVIDERS = {"ollama", "codex", "gemini_cli"}
 
 
 # ── Claude subscription credits ────────────────────────────────────────────

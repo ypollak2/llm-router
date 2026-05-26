@@ -222,7 +222,7 @@ def _session_start_iso(ts: float) -> str:
     return datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
 
-_FREE_PROVIDERS = {"ollama", "codex"}
+_FREE_PROVIDERS = {"ollama", "codex", "gemini_cli"}
 
 
 def _query_session_data(session_start: float) -> tuple[list[dict], list[dict], list[dict]]:
@@ -1136,7 +1136,7 @@ def _format_complexity_breakdown(session_start: float) -> list[str]:
 
         model_str_parts = []
         for model, cnt, cost, provider in models_list:
-            if provider in ("ollama", "codex"):
+            if provider in ("ollama", "codex", "gemini_cli"):
                 free_calls += cnt
             model_str_parts.append(f"{model} ({cnt}×)")
 

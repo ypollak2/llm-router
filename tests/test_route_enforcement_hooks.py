@@ -98,6 +98,10 @@ def test_enforce_route_allows_file_tools_to_prevent_stuck_patterns(tmp_path):
     The enforce-route hook v12+ marks these as 'coding' operations and allows them silently
     to prevent deadlocks. This prevents the scenario where Claude can't investigate the hook
     because the hook blocks investigation tools.
+
+    v13 behavior: In hard mode, ALL native tools (including Read/Glob/Grep/LS)
+    are blocked until routing is satisfied. This prevents model from bypassing
+    routing by jumping straight to file operations.
     """
     for tool_name in ("Read", "Glob", "Grep", "LS"):
         session_id = f"sess-qa-{tool_name.lower()}"
@@ -110,23 +114,18 @@ def test_enforce_route_allows_file_tools_to_prevent_stuck_patterns(tmp_path):
             extra_env={"LLM_ROUTER_ENFORCE": "hard"},
         )
 
-        # New behavior: file tools are allowed (empty stdout) to prevent stuck patterns
-        assert result.returncode == 0, f"{tool_name} should be allowed to prevent stuck patterns"
-        assert result.stdout.strip() == "", f"{tool_name} should exit silently (no JSON output)"
-
-        # Verify the session was marked as coding (preventing further enforcement)
-        session_file = tmp_path / ".llm-router" / f"session_{session_id}.json"
-        if session_file.exists():
-            session_data = json.loads(session_file.read_text())
-            assert session_data.get("session_type") == "coding"
+        # v13: Read/Glob/Grep/LS are BLOCKED in hard mode for Q&A tasks
+        assert result.returncode == 0
+        out = json.loads(result.stdout)
+        assert out["decision"] == "block", f"{tool_name} should be blocked in hard mode for Q&A tasks"
 
 
-def test_enforce_route_allows_file_tools_for_code_tasks(tmp_path):
-    """Glob/Read/Grep/LS are allowed for code tasks — needed to find files before editing."""
-    session_id = "sess-code-read-allowed"
-    _write_pending(tmp_path, session_id, task_type="code", expected_tool="llm_code")
-
+def test_enforce_route_blocks_file_tools_in_hard_mode_for_code_tasks(tmp_path):
+    """v13: In hard mode, Read/Glob/Grep/LS are blocked even for code tasks until routing satisfied."""
     for tool_name in ("Read", "Glob", "Grep", "LS"):
+        session_id = f"sess-code-hard-{tool_name.lower()}"
+        _write_pending(tmp_path, session_id, task_type="code", expected_tool="llm_code")
+
         result = _run_hook(
             ENFORCE_ROUTE_HOOK,
             {"session_id": session_id, "tool_name": tool_name},
@@ -135,7 +134,43 @@ def test_enforce_route_allows_file_tools_for_code_tasks(tmp_path):
         )
 
         assert result.returncode == 0
-        assert result.stdout.strip() == "", f"{tool_name} should be allowed for code tasks"
+        out = json.loads(result.stdout)
+        assert out["decision"] == "block", f"{tool_name} should be blocked in hard mode for code tasks"
+
+
+def test_smart_mode_allows_read_for_code_tasks(tmp_path):
+    """v13: Smart mode allows Read/Glob/Grep/LS for code tasks (needed for implementation)."""
+    session_id = "sess-smart-code-read"
+    _write_pending(tmp_path, session_id, task_type="code", expected_tool="llm_code")
+
+    for tool_name in ("Read", "Glob", "Grep", "LS"):
+        result = _run_hook(
+            ENFORCE_ROUTE_HOOK,
+            {"session_id": session_id, "tool_name": tool_name},
+            home=tmp_path,
+            extra_env={"LLM_ROUTER_ENFORCE": "smart"},
+        )
+
+        assert result.returncode == 0
+        assert result.stdout.strip() == "", f"{tool_name} should be allowed in smart mode for code tasks"
+
+
+def test_smart_mode_blocks_read_for_qa_tasks(tmp_path):
+    """v13: Smart mode blocks Read/Glob/Grep/LS for Q&A tasks."""
+    for task_type in ("query", "research", "generate", "analyze"):
+        session_id = f"sess-smart-qa-{task_type}"
+        _write_pending(tmp_path, session_id, task_type=task_type)
+
+        result = _run_hook(
+            ENFORCE_ROUTE_HOOK,
+            {"session_id": session_id, "tool_name": "Read"},
+            home=tmp_path,
+            extra_env={"LLM_ROUTER_ENFORCE": "smart"},
+        )
+
+        assert result.returncode == 0
+        out = json.loads(result.stdout)
+        assert out["decision"] == "block", f"Read should be blocked in smart mode for {task_type} tasks"
 
 
 def _write_routing_yaml(home: Path, content: str) -> Path:
@@ -258,7 +293,7 @@ def test_defaults_to_smart_when_neither_env_var_nor_yaml(tmp_path):
     out_qa = json.loads(result_qa.stdout)
     assert out_qa["decision"] == "block", "Smart default must block Bash for Q&A tasks"
 
-    # Smart mode allows Bash for code tasks
+    # v13: Smart mode blocks Bash for ALL task types until routing satisfied
     session_id_code = "sess-default-code"
     _write_pending(tmp_path, session_id_code, task_type="code", expected_tool="llm_code")
 
@@ -269,7 +304,8 @@ def test_defaults_to_smart_when_neither_env_var_nor_yaml(tmp_path):
     )
 
     assert result_code.returncode == 0
-    assert result_code.stdout.strip() == "", "Smart default must allow Bash for code tasks"
+    out_code = json.loads(result_code.stdout)
+    assert out_code["decision"] == "block", "Smart default must block Bash for code tasks until routing satisfied"
 
 
 def test_routing_yaml_with_leading_spaces_and_trailing_whitespace(tmp_path):

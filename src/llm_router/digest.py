@@ -37,7 +37,7 @@ _PERIOD_SQL: dict[str, str] = {
     "all time":  "1=1",
 }
 
-_FREE_PROVIDERS = {"ollama", "codex"}
+_FREE_PROVIDERS = {"ollama", "codex", "gemini_cli"}
 
 
 async def _fetch_period_data(period: str) -> dict[str, Any]:

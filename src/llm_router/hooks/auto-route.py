@@ -1926,24 +1926,30 @@ def main() -> None:
         # Calculate estimated savings for this task
         _cost_estimate = _estimate_cost(task_type, complexity)
         _savings = _cost_estimate.get("savings", "$0.001") if isinstance(_cost_estimate, dict) else "$0.001"
-        
-        # New box-drawing format — harder to miss in long context
+
+        # v13: Strengthened directive — previous version was ignored by model
+        # on action-oriented prompts (model jumped to file editing).
+        # New text is framed as a HARD CONSTRAINT, not advice.
         task_complexity = f"{task_type}/{complexity}"
         directive = (
             f"╔══════════════════════════════════════════════════╗\n"
-            f"║  ⚡ MANDATORY ROUTE — DO NOT SKIP                ║\n"
+            f"║  ⚡ MANDATORY ROUTE — HARD CONSTRAINT            ║\n"
             f"║  task  : {task_complexity:35} ║\n"
             f"║  action: call {tool:32} ║\n"
             f"║  via   : {method:39} ║\n"
             f"║  saves : {_savings:39} ║\n"
             f"╚══════════════════════════════════════════════════╝\n"
             f"\n"
-            f"⚠️  IMPORTANT ROUTE: Call the tool above as your FIRST action.\n"
-            f"   • Do NOT use Bash, Read, Edit, or Write to self-answer\n"
-            f"   • Do NOT spawn Agent subagents — they cost $0.10+\n"
-            f"   • Do NOT use WebSearch or WebFetch — route via llm_research\n"
-            f"   • Violations are logged per-session and count toward escalation\n"
-            f"   • See ~/.llm-router/enforcement.log for your session history"
+            f"🚫 BLOCKED TOOLS: Read, Edit, Write, Bash, Glob, Grep, Agent\n"
+            f"   are ALL BLOCKED until you call {tool} first.\n"
+            f"   The PreToolUse hook will reject any native tool call.\n"
+            f"\n"
+            f"✅ REQUIRED SEQUENCE:\n"
+            f"   1. Call {tool}(prompt=<user's request>) — FIRST and ONLY action\n"
+            f"   2. Return the result to the user\n"
+            f"   3. THEN (and only then) use native tools if needed for implementation\n"
+            f"\n"
+            f"   Violations are logged and escalated. See ~/.llm-router/enforcement.log"
         )
         indicator = f"✨ {task_type}/{complexity} ✨ {tool} → 🧠 {selected_model}"
         write_pending = True

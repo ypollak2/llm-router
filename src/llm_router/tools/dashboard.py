@@ -301,7 +301,7 @@ def _render_dashboard(
         prov = b["provider"]
         color = _PROVIDER_COLORS.get(prov, _DIM)
         bar = _render_bar(b["tokens"], max_tokens, width=10, color=color)
-        is_free = prov in ("ollama", "codex", "cache")
+        is_free = prov in ("ollama", "codex", "gemini_cli", "cache")
         free_tag = f" {_GREEN}FREE{_RESET}" if is_free else ""
 
         lines.append(

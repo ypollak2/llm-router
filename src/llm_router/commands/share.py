@@ -65,7 +65,7 @@ def _run_share() -> None:
     db_path   = os.path.join(state_dir, "usage.db")
 
     SONNET_IN, SONNET_OUT = 3.0, 15.0
-    FREE_PROVIDERS = {"ollama", "codex"}
+    FREE_PROVIDERS = {"ollama", "codex", "gemini_cli"}
 
     # ── Query all-time stats ──────────────────────────────────────────
     total_calls = paid_calls = free_calls = 0

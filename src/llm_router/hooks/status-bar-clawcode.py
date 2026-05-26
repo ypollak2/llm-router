@@ -26,7 +26,7 @@ STATUS_EVERY = os.environ.get("LLM_ROUTER_STATUS_EVERY", "0")
 HOST_INPUT_PER_M = 15.0   # Opus 4.6 ($15/$75 per M tokens)
 HOST_OUTPUT_PER_M = 75.0
 
-_FREE_PROVIDERS = {"ollama", "codex"}
+_FREE_PROVIDERS = {"ollama", "codex", "gemini_cli"}
 
 
 def _read_session_stats() -> tuple[int, int, int, float, int]:

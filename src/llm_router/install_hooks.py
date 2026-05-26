@@ -662,6 +662,29 @@ def install(force: bool = False) -> list[str]:
     else:
         actions.append(f"SKIP rules: source not found at {rules_src}")
 
+    # ── Install statusLine command ──────────────────────────────────────
+    statusline_src = _HOOKS_SRC / "statusline-command.sh"
+    statusline_dst = _HOOKS_DST / "llm-router-statusline.sh"
+    if statusline_src.exists():
+        shutil.copy2(statusline_src, statusline_dst)
+        if sys.platform != "win32":
+            statusline_dst.chmod(0o755)
+        actions.append(f"Installed statusline → {statusline_dst}")
+
+        # Register statusLine in settings.json
+        settings3 = _load_settings()
+        statusline_cmd = f"bash {statusline_dst}"
+        current_sl = settings3.get("statusLine")
+        if not current_sl or current_sl.get("command") != statusline_cmd:
+            settings3["statusLine"] = {
+                "type": "command",
+                "command": statusline_cmd,
+            }
+            _save_settings(settings3)
+            actions.append("Registered statusLine command in settings.json")
+        else:
+            actions.append("statusLine already configured")
+
     # ── Register in Claude Desktop ────────────────────────────────────────
     actions.extend(_install_claude_desktop())
 

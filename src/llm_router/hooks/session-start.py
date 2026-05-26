@@ -46,7 +46,7 @@ WEEKLY_DIGEST_FILE     = os.path.join(STATE_DIR, "last_weekly_digest.txt")
 
 _SONNET_IN_PER_M  = 3.0
 _SONNET_OUT_PER_M = 15.0
-_FREE_PROVIDERS   = {"ollama", "codex"}
+_FREE_PROVIDERS   = {"ollama", "codex", "gemini_cli"}
 
 # ── .env loader ───────────────────────────────────────────────────────────────
 # Hooks run outside the MCP server process and don't inherit its env.

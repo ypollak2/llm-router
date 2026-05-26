@@ -2,6 +2,27 @@
 
 **For releases v6.2 and earlier, see [CHANGELOG_ARCHIVE.md](docs/CHANGELOG_ARCHIVE.md).**
 
+## v9.2.0 - Enforcement v13, statusline, Gemini CLI savings (2026-05-26)
+
+### Added
+
+- **Statusline for Claude Code** — new `statusline-command.sh` hook shows CC usage %, daily savings, and enforce mode directly in the Claude Code status bar. Installed automatically via `llm-router install`.
+- **Smart enforcement mode (v13)** — enforce-route.py v13 blocks ALL native tools until an `llm_*` routing tool is called. Smart mode allows reads for code tasks but blocks them for Q&A. Hard mode blocks everything.
+- **4-violation auto-pivot** — safety valve prevents permanent deadlocks: after 4 blocked tool calls in one turn, enforcement allows all tools through.
+
+### Fixed
+
+- **Gemini CLI savings tracking** — `gemini_cli` provider was missing from `_FREE_PROVIDERS` across 12+ files, causing $0.00 savings for all Gemini CLI routed calls. Now correctly tracked as a free provider.
+- **Statusline stdin hang** — Claude Code pipes session JSON to statusline commands via stdin. Script now consumes stdin to prevent pipe blocking and timeout.
+- **Coding session bypass removed (v13)** — v12 permanently downgraded enforcement after the first Edit/Write. v13 requires routing per-turn regardless of session type.
+
+### Changed
+
+- **Auto-route directive** — changed from advisory "DO NOT SKIP" to "HARD CONSTRAINT" with explicit blocked tools list and required call sequence.
+- **Enforcement test suite** — updated for v13 behavior: unique session IDs per tool iteration, tests expect blocking in hard/smart modes.
+
+---
+
 ## v9.1.3 - Fix .env loading and echo rendering (2026-05-25)
 
 ### Fixed

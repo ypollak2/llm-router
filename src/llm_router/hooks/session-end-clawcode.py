@@ -41,7 +41,7 @@ def _session_start_iso(ts: float) -> str:
     return datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
 
-_FREE_PROVIDERS = {"ollama", "codex"}
+_FREE_PROVIDERS = {"ollama", "codex", "gemini_cli"}
 
 
 def _query_session_data(session_start: float) -> tuple[list[dict], list[dict]]:

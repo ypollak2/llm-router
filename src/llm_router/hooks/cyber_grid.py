@@ -460,7 +460,7 @@ def _classify_tier(model: str, provider: str) -> str:
     """Classify a model call as local / subscription / paid."""
     low_model = model.lower()
     low_prov = provider.lower() if provider else ""
-    if any(k in low_model or k in low_prov for k in ("ollama", "codex")):
+    if any(k in low_model or k in low_prov for k in ("ollama", "codex", "gemini_cli")):
         return "local"
     if any(k in low_model or k in low_prov for k in ("claude", "anthropic")):
         return "subscription"

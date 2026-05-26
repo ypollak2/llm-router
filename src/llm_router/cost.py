@@ -532,7 +532,7 @@ async def log_usage(
     db = await _get_db()
     try:
         # Local providers (ollama, codex) are free — override any calculated cost
-        cost_usd = 0.0 if response.provider in {"ollama", "codex"} else response.cost_usd
+        cost_usd = 0.0 if response.provider in {"ollama", "codex", "gemini_cli"} else response.cost_usd
         
         await db.execute(
             """INSERT INTO usage (model, provider, task_type, profile,
@@ -1857,7 +1857,7 @@ Opus is the baseline: it's the host model on Claude Code subscription."""
 
 _HOST_INPUT_PER_M = 15.0      # $15 per million input tokens (Opus 4.6)
 _HOST_OUTPUT_PER_M = 75.0     # $75 per million output tokens (Opus 4.6)
-_FREE_PROVIDERS = {"ollama", "codex"}
+_FREE_PROVIDERS = {"ollama", "codex", "gemini_cli"}
 """Providers that incur zero cost (local or included in subscription)."""
 
 
@@ -2040,7 +2040,7 @@ async def get_team_savings(
         params.append(project_id)
     where = " AND ".join(where_parts)
 
-    _free = {"ollama", "codex", "subscription"}
+    _free = {"ollama", "codex", "gemini_cli", "subscription"}
 
     db = await _get_db()
     try:
