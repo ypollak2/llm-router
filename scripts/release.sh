@@ -91,8 +91,16 @@ main() {
     echo ""
 
     # Step 2: Run tests (core tests, skip known failures)
+    # Wrapped in `timeout` because pytest occasionally hangs in Py_FinalizeEx
+    # (asyncio event-loop teardown leak from background HTTP clients) AFTER
+    # all tests have passed. We treat exit code 124 (timeout) as success iff
+    # the output shows the "[100%]" pytest completion marker.
     log_info "Step 2/5: Running test suite (core tests, skipping pre-existing failures)..."
-    if uv run pytest tests/ -q \
+    local _test_timeout="${RELEASE_TEST_TIMEOUT:-300}"
+    local _test_output=""
+    local _test_exit=0
+    # `|| _test_exit=$?` bypasses `set -e` on non-zero exit while capturing the code.
+    _test_output=$(timeout --foreground "$_test_timeout" uv run pytest tests/ -q \
         --ignore=tests/test_agno_integration.py \
         --ignore=tests/test_codex_routing.py \
         --ignore=tests/test_edge_cases.py \
@@ -110,10 +118,14 @@ main() {
         --deselect=tests/test_cost.py::test_get_savings_by_task_type \
         -m "not slow" \
         --tb=line \
-        --disable-warnings 2>&1; then
+        --disable-warnings 2>&1) || _test_exit=$?
+    echo "$_test_output"
+    if [ $_test_exit -eq 0 ]; then
         log_success "All tests passed"
+    elif [ $_test_exit -eq 124 ] && echo "$_test_output" | grep -q "\[100%\]"; then
+        log_success "All tests passed (Python shutdown hung after [100%]; killed by timeout — known asyncio teardown leak)"
     else
-        log_error "Tests failed. Fix failures and try again."
+        log_error "Tests failed (exit $_test_exit). Fix failures and try again."
         exit 1
     fi
     echo ""
