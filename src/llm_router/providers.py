@@ -136,6 +136,12 @@ async def call_llm(
 
     from llm_router.profiles import provider_from_model
 
+    # Anthropic prompt-caching tokens — LiteLLM exposes these on the usage
+    # block when the provider response includes them. Safe defaults for
+    # non-Anthropic providers (which return 0). v9.2.2.
+    cache_creation = int(getattr(usage, "cache_creation_input_tokens", 0) or 0)
+    cache_read = int(getattr(usage, "cache_read_input_tokens", 0) or 0)
+
     return LLMResponse(
         content=content,
         model=model,
@@ -145,6 +151,8 @@ async def call_llm(
         latency_ms=elapsed_ms,
         provider=provider_from_model(model),
         citations=citations,
+        cache_creation_input_tokens=cache_creation,
+        cache_read_input_tokens=cache_read,
     )
 
 

@@ -2,6 +2,29 @@
 
 **For releases v6.2 and earlier, see [CHANGELOG_ARCHIVE.md](docs/CHANGELOG_ARCHIVE.md).**
 
+## v9.2.2 - Cache-aware 4-component savings + task-aware baseline + honest floor (2026-05-27)
+
+### Fixed
+
+- **Savings calculation now uses the 4-component Anthropic billing formula** — `_claude_cost(model, input_t, output_t, cache_write_t=0, cache_read_t=0)` matches what Claude Code does upstream. Previously every token was multiplied by a single blended per-1K rate from `MODEL_COST_PER_1K`, which over- or under-stated cost depending on cache hit ratio. Cache-read tokens cost ~10× less than input; cache-write tokens cost ~25% more. Both are now tracked separately on every Claude call. New `CLAUDE_RATES_PER_M` table holds per-Mtok rates for haiku / sonnet / opus split across all four components.
+- **Per-task-type baseline replaces universal-Opus baseline** — new `_get_baseline_for_task(task_type, complexity)` picks the realistic counterfactual model (Haiku for simple queries, Sonnet for code, Opus only for genuinely complex work or research). Previously every routed call was credited against Opus rates, overstating savings by 5–10× on prompts that would never have hit Opus anyway. `LLM_ROUTER_SAVINGS_BASELINE` env var still wins as an override for back-compat.
+- **Removed `max(0.0, ...)` clamp on savings** — `calc_savings()` may now return negative numbers when routing overhead (classifier latency + Ollama call cost) exceeds gross savings. Previously the floor silently hid the routing tax, making the reported savings number a strict upper bound rather than a realized one. New `routing_overhead_usd` column on `claude_usage` + `usage` tables captures the tax explicitly.
+- **Anthropic cache tokens now flow end-to-end** — `providers.py` extracts `cache_creation_input_tokens` and `cache_read_input_tokens` from the LiteLLM `usage` block via `getattr` (safe default of 0 for non-Anthropic providers). `LLMResponse` extended with the two fields. `router.py:999` auto-log path forwards them to `log_claude_usage` alongside `task_type` so the new cache-aware + task-aware logic actually fires on real calls (previously this call site silently swallowed an unknown-kwarg `TypeError`).
+
+### Added
+
+- **`get_realized_savings(period)`** — returns `{gross_saved_usd, routing_overhead_usd, realized_saved_usd}` so dashboards can show the honest number alongside the gross one.
+- **`MIGRATE_CLAUDE_USAGE_CACHE_TOKENS`** — adds `input_tokens`, `output_tokens`, `cache_creation_input_tokens`, `cache_read_input_tokens` columns to `claude_usage`. Idempotent — safe to re-run on existing DBs.
+- **`MIGRATE_USAGE_ROUTING_OVERHEAD`** — adds `routing_overhead_usd` to both `usage` and `claude_usage` tables.
+- **17 new regression tests in `tests/test_savings.py`** — `TestCacheAwareCost`, `TestTaskAwareBaseline`, `TestNegativeSavingsAndRoutingOverhead`, `TestAnthropicResponseFieldsExist`. All pass.
+
+### Backward compatibility
+
+- Old `calc_savings("haiku", 10000)` two-positional-arg signature still works and still uses Opus baseline (legacy default). Task-aware baseline only kicks in when `task_type=` kwarg is provided.
+- Old `claude_usage` rows have the new columns defaulted to 0 — existing dashboards keep working.
+- `LLM_ROUTER_SAVINGS_BASELINE` env override preserved.
+- The `cost_saved_usd` kwarg on `log_claude_usage` (used by `router.py:999`) is now silently ignored — the value is recomputed authoritatively from sub-component tokens. This fixes a latent bug where the kwarg used to raise `TypeError` that was swallowed by the surrounding `try/except`.
+
 ## v9.2.1 - CONTINUATION heuristic + cooperative DIRECT template (2026-05-27)
 
 ### Fixed

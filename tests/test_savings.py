@@ -216,3 +216,186 @@ class TestImportSavingsLog:
         _, log_path = temp_savings_db
         log_path.write_text("")
         assert await cost.import_savings_log() == 0
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# v9.2.2 — cache-aware 4-component cost, per-task baseline, honest floor
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestCacheAwareCost:
+    """Fix #1 — cost.py should track input/output/cache_write/cache_read separately
+    and price each at its own published Anthropic rate."""
+
+    def test_claude_cost_input_output_only(self):
+        from llm_router.cost import _claude_cost
+        # Sonnet: 1000 input × $3/Mtok + 500 output × $15/Mtok
+        #       = (3000 + 7500) / 1_000_000 = $0.0105
+        cost_usd = _claude_cost("sonnet", input_t=1000, output_t=500)
+        assert abs(cost_usd - 0.0105) < 1e-6
+
+    def test_claude_cost_with_cache_read_is_much_cheaper(self):
+        from llm_router.cost import _claude_cost
+        # 10_000 cache_read tokens at Sonnet's $0.30/Mtok = $0.003
+        # vs 10_000 raw input tokens at $3/Mtok = $0.030 — 10× cheaper
+        cached = _claude_cost("sonnet", input_t=0, output_t=0, cache_read_t=10_000)
+        uncached = _claude_cost("sonnet", input_t=10_000, output_t=0)
+        assert cached < uncached / 5  # at least 5× cheaper
+
+    def test_claude_cost_with_cache_write_is_more_expensive(self):
+        from llm_router.cost import _claude_cost
+        # Cache write is ~25% more expensive than input
+        write = _claude_cost("sonnet", input_t=0, output_t=0, cache_write_t=10_000)
+        regular = _claude_cost("sonnet", input_t=10_000, output_t=0)
+        assert write > regular
+
+    def test_claude_cost_full_4_component(self):
+        from llm_router.cost import _claude_cost
+        # Opus: 1000 in × 15 + 500 out × 75 + 200 cw × 18.75 + 5000 cr × 1.50
+        # = 15_000 + 37_500 + 3750 + 7500 = 63_750 / 1_000_000 = $0.06375
+        cost_usd = _claude_cost(
+            "opus", input_t=1000, output_t=500,
+            cache_write_t=200, cache_read_t=5000,
+        )
+        assert abs(cost_usd - 0.06375) < 1e-6
+
+    def test_claude_cost_unknown_model_returns_zero(self):
+        from llm_router.cost import _claude_cost
+        assert _claude_cost("nonexistent-model", input_t=1000, output_t=500) == 0.0
+
+    @pytest.mark.asyncio
+    async def test_log_claude_usage_persists_cache_token_columns(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("LLM_ROUTER_DB_PATH", str(tmp_path / "test.db"))
+        await log_claude_usage(
+            model="sonnet",
+            tokens_used=0,  # forces computation from sub-components
+            complexity="moderate",
+            input_tokens=100,
+            output_tokens=200,
+            cache_creation_input_tokens=5_000,
+            cache_read_input_tokens=10_000,
+        )
+        # Read it back via aiosqlite
+        import aiosqlite
+        async with aiosqlite.connect(tmp_path / "test.db") as db:
+            cursor = await db.execute(
+                "SELECT input_tokens, output_tokens, cache_creation_input_tokens, "
+                "cache_read_input_tokens FROM claude_usage ORDER BY id DESC LIMIT 1"
+            )
+            row = await cursor.fetchone()
+        assert row == (100, 200, 5_000, 10_000)
+
+
+class TestTaskAwareBaseline:
+    """Fix #2 — picking the *realistic* baseline (what would have been used
+    without routing) rather than always crediting Opus-vs-cheap delta."""
+
+    def test_simple_query_baseline_is_haiku(self):
+        from llm_router.cost import _get_baseline_for_task
+        assert _get_baseline_for_task("query", "simple") == "haiku"
+
+    def test_moderate_query_baseline_is_haiku(self):
+        from llm_router.cost import _get_baseline_for_task
+        assert _get_baseline_for_task("query", "moderate") == "haiku"
+
+    def test_code_moderate_baseline_is_sonnet(self):
+        from llm_router.cost import _get_baseline_for_task
+        assert _get_baseline_for_task("code", "moderate") == "sonnet"
+
+    def test_complex_anything_baseline_is_opus(self):
+        from llm_router.cost import _get_baseline_for_task
+        assert _get_baseline_for_task("code", "complex") == "opus"
+        assert _get_baseline_for_task("analyze", "complex") == "opus"
+        assert _get_baseline_for_task("query", "complex") == "opus"
+
+    def test_research_baseline_is_opus(self):
+        from llm_router.cost import _get_baseline_for_task
+        assert _get_baseline_for_task("research", "simple") == "opus"
+
+    def test_haiku_in_baseline_pricing(self):
+        """Haiku must be in the BASELINE_PRICING table for task-aware logic to work."""
+        from llm_router.cost import BASELINE_PRICING
+        assert "haiku" in BASELINE_PRICING
+        assert "input" in BASELINE_PRICING["haiku"]
+        assert "output" in BASELINE_PRICING["haiku"]
+
+
+class TestNegativeSavingsAndRoutingOverhead:
+    """Fix #3 — drop max(0.0, ...) clamp; track routing overhead so the realized
+    savings number is honest about when routing cost more than it saved."""
+
+    def test_savings_can_be_negative_when_routing_cost_money(self):
+        """Use the new signature that accepts routing_overhead_usd."""
+        from llm_router.cost import calc_savings
+        # 100 tokens on Haiku vs Sonnet baseline saves very little.
+        # If routing_overhead is large, realized is negative.
+        cost_saved, _time = calc_savings(
+            "haiku", tokens_used=100,
+            task_type="query", complexity="simple",
+            routing_overhead_usd=0.01,
+        )
+        # cost_saved is now the NET (gross - overhead), can be negative
+        # Haiku 100 tokens vs Haiku baseline = $0 saved gross.
+        # Net = 0 - 0.01 = -0.01.
+        assert cost_saved < 0
+
+    def test_savings_positive_when_overhead_small(self):
+        from llm_router.cost import calc_savings
+        # Haiku-handling Opus-baseline task → big gross savings, small overhead
+        cost_saved, _ = calc_savings(
+            "haiku", tokens_used=10_000,
+            task_type="code", complexity="complex",
+            routing_overhead_usd=0.0001,
+        )
+        assert cost_saved > 0
+
+    @pytest.mark.asyncio
+    async def test_get_realized_savings_returns_gross_overhead_net(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("LLM_ROUTER_DB_PATH", str(tmp_path / "test.db"))
+        # Log a call with overhead
+        await log_claude_usage(
+            model="haiku", tokens_used=1000, complexity="simple",
+            input_tokens=500, output_tokens=500,
+            routing_overhead_usd=0.002,
+        )
+        from llm_router.cost import get_realized_savings
+        result = await get_realized_savings(period="all")
+        assert "gross_saved_usd" in result
+        assert "routing_overhead_usd" in result
+        assert "realized_saved_usd" in result
+        # realized = gross - overhead
+        assert result["realized_saved_usd"] == pytest.approx(
+            result["gross_saved_usd"] - result["routing_overhead_usd"]
+        )
+
+
+class TestAnthropicResponseFieldsExist:
+    """Fix #4 — LLMResponse needs cache token fields so the Anthropic API parser
+    has somewhere to put them. Caller in router.py then forwards to log_claude_usage."""
+
+    def test_llm_response_has_cache_token_fields(self):
+        from llm_router.types import LLMResponse
+        # Construct a response with cache fields — must not raise
+        r = LLMResponse(
+            model="sonnet",
+            provider="anthropic",
+            content="hi",
+            input_tokens=100,
+            output_tokens=50,
+            cost_usd=0.001,
+            latency_ms=500,
+            cache_creation_input_tokens=200,
+            cache_read_input_tokens=1000,
+        )
+        assert r.cache_creation_input_tokens == 200
+        assert r.cache_read_input_tokens == 1000
+
+    def test_llm_response_cache_fields_default_to_zero(self):
+        """Backward compat — old code creating LLMResponse without cache args still works."""
+        from llm_router.types import LLMResponse
+        r = LLMResponse(
+            model="haiku", provider="anthropic", content="x",
+            input_tokens=10, output_tokens=5, cost_usd=0.0001, latency_ms=100,
+        )
+        assert r.cache_creation_input_tokens == 0
+        assert r.cache_read_input_tokens == 0

@@ -352,9 +352,15 @@ class LLMResponse:
     complexity: str = ""
     task_type_str: str = ""
     chain_attempts: list[str] = field(default_factory=list)
-    # Semantic cache fields (v8.4.0)
+    # Semantic cache fields (v8.4.0) — llm-router's own LRU prompt cache
     cache_hit: bool = False
     cache_similarity: float = 0.0
+    # Anthropic prompt-caching token counts (v9.2.2) — populated when the
+    # provider response includes a usage block with these fields. Used by
+    # cost.py:_claude_cost for the 4-component billing formula matching
+    # Claude Code's upstream cost calculation.
+    cache_creation_input_tokens: int = 0
+    cache_read_input_tokens: int = 0
 
     def summary(self) -> str:
         """Format a compact one-line summary for logging and CLI display.

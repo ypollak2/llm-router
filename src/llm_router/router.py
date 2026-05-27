@@ -987,20 +987,21 @@ async def _dispatch_model_loop(
                         requested_complexity=classification_data.get("requested_complexity"),
                     )
                     
-                    # Auto-log Claude usage when router selects Claude model
+                    # Auto-log Claude usage when router selects Claude model.
+                    # v9.2.2 — forward sub-component token counts (including cache
+                    # tokens from Anthropic prompt caching) and task_type so
+                    # log_claude_usage can compute cache-aware, task-baselined savings.
                     if response.provider in {"claude_subscription", "subscription", "anthropic", "claude"}:
                         try:
-                            # Estimate Opus cost as baseline for savings calculation
-                            estimated_opus_cost = _estimate_opus_cost(
-                                response.input_tokens, response.output_tokens
-                            )
-                            cost_saved = estimated_opus_cost - response.cost_usd
-                            
                             await cost.log_claude_usage(
                                 model=response.model,
-                                tokens_used=response.input_tokens + response.output_tokens,
+                                tokens_used=0,  # compute from sub-components
                                 complexity=classification_data.get("complexity", "moderate"),
-                                cost_saved_usd=cost_saved,
+                                task_type=classification_data.get("task_type"),
+                                input_tokens=response.input_tokens,
+                                output_tokens=response.output_tokens,
+                                cache_creation_input_tokens=response.cache_creation_input_tokens,
+                                cache_read_input_tokens=response.cache_read_input_tokens,
                             )
                         except Exception as e:
                             log.debug("Failed to log claude_usage: %s", e)

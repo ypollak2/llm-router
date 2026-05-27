@@ -127,6 +127,24 @@ CREATE INDEX IF NOT EXISTS idx_semantic_cache_type_time
 ON semantic_cache(task_type, created_at DESC)
 """
 
+MIGRATE_CLAUDE_USAGE_CACHE_TOKENS = [
+    "ALTER TABLE claude_usage ADD COLUMN input_tokens INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE claude_usage ADD COLUMN output_tokens INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE claude_usage ADD COLUMN cache_creation_input_tokens INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE claude_usage ADD COLUMN cache_read_input_tokens INTEGER NOT NULL DEFAULT 0",
+]
+"""v9.2.2 — separate token counts so calc_savings can use the 4-component
+Anthropic billing formula instead of a single lumped tokens_used."""
+
+
+MIGRATE_USAGE_ROUTING_OVERHEAD = [
+    "ALTER TABLE claude_usage ADD COLUMN routing_overhead_usd REAL NOT NULL DEFAULT 0.0",
+    "ALTER TABLE usage ADD COLUMN routing_overhead_usd REAL NOT NULL DEFAULT 0.0",
+]
+"""v9.2.2 — capture the classifier + Ollama call cost so realized savings
+(gross_saved - routing_overhead) can be reported alongside the gross number."""
+
+
 MIGRATE_CLAUDE_USAGE_ADD_SAVINGS = [
     "ALTER TABLE claude_usage ADD COLUMN cost_saved_usd REAL NOT NULL DEFAULT 0",
     "ALTER TABLE claude_usage ADD COLUMN time_saved_sec REAL NOT NULL DEFAULT 0",
@@ -455,7 +473,9 @@ async def _get_db() -> aiosqlite.Connection:
     # Run all migrations idempotently — _safe_migrate checks column existence
     # before executing, so re-running on an existing DB is always safe.
     all_migrations = (
-        MIGRATE_CLAUDE_USAGE_ADD_SAVINGS
+        MIGRATE_CLAUDE_USAGE_CACHE_TOKENS
+        + MIGRATE_USAGE_ROUTING_OVERHEAD
+        + MIGRATE_CLAUDE_USAGE_ADD_SAVINGS
         + MIGRATE_ROUTING_DECISIONS_ADD_FEEDBACK
         + MIGRATE_ROUTING_DECISIONS_ADD_REASON
         + MIGRATE_USAGE_ADD_SAVINGS
@@ -1110,52 +1130,145 @@ async def get_quality_report(days: int = 7) -> dict:
 # ── Claude Code token tracking ───────────────────────────────────────────────
 
 
-def calc_savings(model: str, tokens_used: int) -> tuple[float, float]:
-    """Calculate cost and time savings compared to always using Opus.
+# v9.2.2 — Anthropic public per-million-token rates split by token component.
+# Matches Claude Code's upstream 4-component billing formula:
+#   cost = input_t × input_$/M + output_t × output_$/M
+#        + cache_write_t × cache_write_$/M + cache_read_t × cache_read_$/M
+# Keep in sync with https://www.anthropic.com/pricing. All values $/Mtok.
+CLAUDE_RATES_PER_M: dict[str, dict[str, float]] = {
+    "haiku":  {"input": 0.80,  "output": 4.00,  "cache_read": 0.08, "cache_write": 1.00},
+    "sonnet": {"input": 3.00,  "output": 15.00, "cache_read": 0.30, "cache_write": 3.75},
+    "opus":   {"input": 15.00, "output": 75.00, "cache_read": 1.50, "cache_write": 18.75},
+}
 
-    The Opus model serves as the quality ceiling baseline. Any cheaper/faster
-    model that was used instead yields savings. If the model IS Opus, savings
-    are zero by definition.
 
-    Args:
-        model: The model that was actually used (e.g. "haiku", "sonnet").
-        tokens_used: Total tokens consumed by this call.
+def _claude_cost(
+    model: str,
+    input_t: int,
+    output_t: int,
+    *,
+    cache_write_t: int = 0,
+    cache_read_t: int = 0,
+) -> float:
+    """Compute the actual $ cost of a Claude API call using the 4-component formula.
 
-    Returns:
-        A tuple of (cost_saved_usd, time_saved_sec), both clamped to >= 0.
-        Cost savings use per-1K-token rates from ``MODEL_COST_PER_1K``.
-        Time savings use tokens-per-second rates from ``MODEL_SPEED_TPS``.
+    Unknown models return 0.0 (graceful — non-Claude routes don't trip this).
     """
-    baseline = "opus"
-    if model == baseline:
-        return 0.0, 0.0
-
-    tokens_k = tokens_used / 1000
-    actual_cost = tokens_k * MODEL_COST_PER_1K.get(model, 0)
-    opus_cost = tokens_k * MODEL_COST_PER_1K[baseline]
-    cost_saved = opus_cost - actual_cost
-
-    actual_time = tokens_used / MODEL_SPEED_TPS.get(model, 120)
-    opus_time = tokens_used / MODEL_SPEED_TPS[baseline]
-    time_saved = opus_time - actual_time
-
-    return max(0.0, cost_saved), max(0.0, time_saved)
+    rates = CLAUDE_RATES_PER_M.get(model)
+    if rates is None:
+        return 0.0
+    return (
+        input_t       * rates["input"]       +
+        output_t      * rates["output"]      +
+        cache_write_t * rates["cache_write"] +
+        cache_read_t  * rates["cache_read"]
+    ) / 1_000_000
 
 
-async def log_claude_usage(model: str, tokens_used: int, complexity: str) -> dict:
-    """Log a Claude Code model invocation and its savings vs. Opus.
+def calc_savings(
+    model: str,
+    tokens_used: int,
+    *,
+    task_type: str | None = None,
+    complexity: str | None = None,
+    input_tokens: int = 0,
+    output_tokens: int = 0,
+    cache_creation_input_tokens: int = 0,
+    cache_read_input_tokens: int = 0,
+    routing_overhead_usd: float = 0.0,
+) -> tuple[float, float]:
+    """Calculate net cost and time savings vs. the counterfactual baseline model.
 
-    Calculates cost and time savings, persists the record to the
-    ``claude_usage`` table, and returns the savings for immediate display.
+    v9.2.2 — Three changes from the legacy behaviour:
+
+    1. **Cache-aware**: when sub-component token counts are provided,
+       cost is computed via the 4-component formula (input + output +
+       cache_write + cache_read at separate rates) rather than a single
+       lumped per-1K rate. The lumped path is kept for back-compat.
+    2. **Task-aware baseline**: if `task_type` and `complexity` are
+       provided, the counterfactual model is picked via
+       `_get_baseline_for_task()` (Haiku for simple Q&A, Sonnet for code,
+       Opus only for genuinely complex work). Without task context, the
+       baseline defaults to Opus (matching legacy behaviour).
+    3. **No floor**: returned savings are NOT clamped to >= 0. Routing
+       overhead can exceed gross savings on small prompts; that should
+       surface as a negative number, not be hidden.
 
     Args:
-        model: The Claude model used (e.g. "haiku", "sonnet", "opus").
-        tokens_used: Total tokens consumed.
-        complexity: Classified complexity level (e.g. "simple", "moderate",
-            "complex") for analytics grouping.
+        model: The model that was actually used.
+        tokens_used: Total tokens (used when sub-components are all 0).
+        task_type: Routing task type — when given, drives baseline selection.
+        complexity: Complexity tier — used with task_type for baseline.
+        input_tokens, output_tokens, cache_creation_input_tokens,
+        cache_read_input_tokens: Sub-component token counts for the
+            4-component cost formula. Pass when known from the API response.
+        routing_overhead_usd: Estimated classifier + Ollama cost for this
+            call. Subtracted from gross savings to give the realized number.
 
     Returns:
-        Dict with ``cost_saved_usd`` and ``time_saved_sec`` for this call.
+        (net_cost_saved_usd, net_time_saved_sec). May be negative.
+    """
+    baseline = _get_baseline_for_task(task_type, complexity) if task_type else "opus"
+
+    # Cache-aware path: when any sub-component count is provided, use the
+    # 4-component formula. Otherwise fall back to the lumped per-1K rate.
+    sub_total = input_tokens + output_tokens + cache_creation_input_tokens + cache_read_input_tokens
+    if sub_total > 0:
+        actual_cost = _claude_cost(
+            model, input_tokens, output_tokens,
+            cache_write_t=cache_creation_input_tokens,
+            cache_read_t=cache_read_input_tokens,
+        )
+        baseline_cost = _claude_cost(
+            baseline, input_tokens, output_tokens,
+            cache_write_t=cache_creation_input_tokens,
+            cache_read_t=cache_read_input_tokens,
+        )
+        # Time savings still use lumped tokens — granularity not worth the noise here.
+        effective_tokens = sub_total
+    else:
+        tokens_k = tokens_used / 1000
+        actual_cost = tokens_k * MODEL_COST_PER_1K.get(model, 0)
+        baseline_cost = tokens_k * MODEL_COST_PER_1K.get(baseline, MODEL_COST_PER_1K["opus"])
+        effective_tokens = tokens_used
+
+    gross_cost_saved = baseline_cost - actual_cost
+    cost_saved = gross_cost_saved - routing_overhead_usd
+
+    if effective_tokens > 0:
+        actual_time = effective_tokens / MODEL_SPEED_TPS.get(model, 120)
+        baseline_time = effective_tokens / MODEL_SPEED_TPS.get(baseline, MODEL_SPEED_TPS["opus"])
+        time_saved = baseline_time - actual_time
+    else:
+        time_saved = 0.0
+
+    # No floor — let negative savings surface honestly.
+    return cost_saved, time_saved
+
+
+async def log_claude_usage(
+    model: str,
+    tokens_used: int,
+    complexity: str,
+    *,
+    task_type: str | None = None,
+    input_tokens: int = 0,
+    output_tokens: int = 0,
+    cache_creation_input_tokens: int = 0,
+    cache_read_input_tokens: int = 0,
+    routing_overhead_usd: float = 0.0,
+    cost_saved_usd: float | None = None,
+) -> dict:
+    """Log a Claude Code model invocation and its savings vs. the task-aware baseline.
+
+    v9.2.2 — Extended signature accepts the 4 sub-component token counts plus
+    routing overhead. `tokens_used` is computed from sub-components when 0
+    (so callers with structured API responses can pass only the new kwargs).
+    `cost_saved_usd` kwarg is accepted for backward compat with the router.py
+    caller but is recomputed authoritatively from calc_savings.
+
+    Returns:
+        Dict with ``cost_saved_usd`` (net) and ``time_saved_sec`` (net).
     """
     # Safeguard: detect if running in test context and validate isolation
     import sys
@@ -1170,21 +1283,88 @@ async def log_claude_usage(model: str, tokens_used: int, complexity: str) -> dic
                 f"Config path: {config.llm_router_db_path}\n"
                 "Fix: Add temp_db fixture to your test method parameters."
             )
-    
-    cost_saved, time_saved = calc_savings(model, tokens_used)
+
+    if tokens_used == 0:
+        tokens_used = (input_tokens + output_tokens
+                       + cache_creation_input_tokens + cache_read_input_tokens)
+
+    cost_saved, time_saved = calc_savings(
+        model, tokens_used,
+        task_type=task_type, complexity=complexity,
+        input_tokens=input_tokens, output_tokens=output_tokens,
+        cache_creation_input_tokens=cache_creation_input_tokens,
+        cache_read_input_tokens=cache_read_input_tokens,
+        routing_overhead_usd=routing_overhead_usd,
+    )
+
+    # cost_saved_usd kwarg (back-compat with router.py:999) is ignored —
+    # the authoritative value comes from calc_savings above.
+    _ = cost_saved_usd
 
     db = await _get_db()
     try:
         await db.execute(
-            "INSERT INTO claude_usage (model, tokens_used, complexity, cost_saved_usd, time_saved_sec) "
-            "VALUES (?, ?, ?, ?, ?)",
-            (model, tokens_used, complexity, cost_saved, time_saved),
+            "INSERT INTO claude_usage ("
+            "  model, tokens_used, complexity,"
+            "  cost_saved_usd, time_saved_sec,"
+            "  input_tokens, output_tokens,"
+            "  cache_creation_input_tokens, cache_read_input_tokens,"
+            "  routing_overhead_usd"
+            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                model, tokens_used, complexity,
+                cost_saved, time_saved,
+                input_tokens, output_tokens,
+                cache_creation_input_tokens, cache_read_input_tokens,
+                routing_overhead_usd,
+            ),
         )
         await db.commit()
     finally:
         await db.close()
 
     return {"cost_saved_usd": cost_saved, "time_saved_sec": time_saved}
+
+
+async def get_realized_savings(period: str = "today") -> dict:
+    """Honest savings number: gross_saved - routing_overhead.
+
+    Unlike `get_savings_summary`, this surfaces the case where routing
+    cost more money than it saved (small prompts where classifier
+    latency exceeds the model-cost delta). v9.2.2.
+
+    Args:
+        period: "today", "week", "month", or "all".
+
+    Returns:
+        Dict with keys: gross_saved_usd, routing_overhead_usd, realized_saved_usd.
+    """
+    where_map = {
+        "today": "WHERE date(timestamp, 'localtime') = date('now', 'localtime')",
+        "week":  "WHERE timestamp >= datetime('now', '-7 days')",
+        "month": "WHERE timestamp >= datetime('now', '-30 days')",
+        "all":   "",
+    }
+    where = where_map.get(period, "")
+
+    db = await _get_db()
+    try:
+        cursor = await db.execute(
+            f"""SELECT
+                COALESCE(SUM(cost_saved_usd), 0),
+                COALESCE(SUM(routing_overhead_usd), 0)
+            FROM claude_usage {where}"""
+        )
+        row = await cursor.fetchone()
+        gross = float(row[0] if row else 0.0)
+        overhead = float(row[1] if row else 0.0)
+        return {
+            "gross_saved_usd": gross,
+            "routing_overhead_usd": overhead,
+            "realized_saved_usd": gross - overhead,
+        }
+    finally:
+        await db.close()
 
 
 async def log_quota_snapshot(
@@ -1390,14 +1570,45 @@ async def get_savings_summary(period: str = "today") -> dict:
 # Configurable baseline pricing for savings calculations
 # Users can override via LLM_ROUTER_SAVINGS_BASELINE env var (default: "sonnet")
 BASELINE_PRICING = {
-    "sonnet": {"input": 3.0,  "output": 15.0},   # $ per 1M tokens
+    "haiku":  {"input": 0.80, "output": 4.0},    # $ per 1M tokens (v9.2.2)
+    "sonnet": {"input": 3.0,  "output": 15.0},
     "opus":   {"input": 15.0, "output": 75.0},
 }
 
 def _get_baseline_model() -> str:
-    """Get the configured baseline model for savings calculations."""
+    """Legacy: returns the env-configured global baseline (default: sonnet).
+
+    Prefer `_get_baseline_for_task()` when task_type / complexity are known —
+    that picks a *realistic* counterfactual model per call instead of crediting
+    every routed call against a single fixed baseline.
+    """
     import os
     return os.environ.get("LLM_ROUTER_SAVINGS_BASELINE", "sonnet")
+
+
+def _get_baseline_for_task(task_type: str | None, complexity: str | None) -> str:
+    """Pick the *realistic* baseline model — what would have been used without routing.
+
+    Without this, every cheap-model call gets credited against the full Opus rate,
+    overstating savings. The heuristic mirrors COMPLEXITY_BASE_MODEL but accounts
+    for task_type since the same complexity can imply different default models
+    (e.g., a "moderate" query task realistically goes to Haiku, not Sonnet).
+
+    v9.2.2.
+    """
+    import os
+    # Env override still wins (back-compat with LLM_ROUTER_SAVINGS_BASELINE).
+    override = os.environ.get("LLM_ROUTER_SAVINGS_BASELINE", "").strip().lower()
+    if override in CLAUDE_RATES_PER_M:
+        return override
+
+    if task_type == "research":
+        return "opus"
+    if complexity == "complex":
+        return "opus"
+    if task_type in ("query",):
+        return "haiku"
+    return "sonnet"
 
 def _get_baseline_cost(in_tokens: int, out_tokens: int, baseline_model: str = None) -> float:
     """Calculate cost using specified baseline model (default: sonnet)."""
