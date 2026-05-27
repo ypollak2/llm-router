@@ -2,6 +2,50 @@
 
 **For releases v6.2 and earlier, see [CHANGELOG_ARCHIVE.md](docs/CHANGELOG_ARCHIVE.md).**
 
+## v9.3.0 - Codex CLI full parity: routing + cost + dashboard (2026-05-27)
+
+### Added
+
+- **Codex CLI now gets the same routing treatment as Claude Code.** Every `userPromptSubmit` event in a Codex session runs through the same classifier + DIRECT-mode answer-caching pipeline. Codex hook events are: `UserPromptSubmit`, `PreToolUse`, `SessionStart`, `Stop` (= SessionEnd equivalent). All four registered in `~/.codex/hooks.json` and pointing to the same scripts Claude Code uses.
+- **Platform auto-detection in `auto-route.py`** — `_is_codex_session(hook_input)` reads `hook_input["model"]` and matches OpenAI prefixes (`gpt-`, `o3`, `o4`, `o5`, `codex-`). On Codex sessions the hook emits `additionalContext` (the only key Codex's `hookSpecificOutput` schema accepts) instead of Claude Code's `contextForAgent`. Schema-compatible: same JSON payload, the difference is just the field name.
+- **`OPENAI_RATES_PER_M`** — per-million-token rates split by input/output/cache_read/cache_write for gpt-5.5, gpt-5.4, gpt-5-mini, o3, o3-mini, gpt-4o, gpt-4o-mini. Parallel to `CLAUDE_RATES_PER_M`. Rates pulled from OpenAI public pricing; verify before each release.
+- **`_codex_cost()`** — 4-component cost formula for OpenAI/Codex calls. Same shape as `_claude_cost()`.
+- **`_get_codex_baseline_for_task(task_type, complexity)`** — picks the realistic Codex baseline (`gpt-5-mini` for simple queries, `gpt-5.4` for code, `o3` for complex/research). Env override: `LLM_ROUTER_CODEX_BASELINE`.
+- **`codex_usage` table** + idempotent migration `MIGRATE_ADD_CODEX_USAGE_TABLE`. Symmetric schema with `claude_usage` so dashboard queries can UNION cleanly. Tracks the same 4 token components + routing_overhead_usd.
+- **`log_codex_usage()`** — async function parallel to `log_claude_usage`. Computes baseline cost via `_codex_cost(baseline, ...)` and writes one row per OpenAI/Codex call.
+- **`router.py` auto-log path** — auto-detects `response.provider in {"openai", "openai_subscription", "codex", "codex_subscription"}` and calls `log_codex_usage` with the same sub-component token kwargs the v9.2.2 path uses for Claude.
+- **Dual-platform `get_realized_savings(period, platform=...)`** — `platform="all"` (default) sums both tables AND returns a `by_platform` breakdown dict. `platform="claude"` / `"codex"` returns single-platform totals.
+- **Compact Codex section in the session-end dashboard** — `_format_codex_section()` renders a per-model table for today's Codex calls (calls / tokens / gross saved). Stays invisible if `codex_usage` has no rows today (Claude-Code-only users see no change).
+- **9 new tests in `tests/test_savings.py`** — `TestCodexCost` (6 cases), `TestDualPlatformRealizedSavings` (2 cases for cross-platform aggregation), plus 1 cost-table-existence test. All pass.
+
+### Fixed
+
+- **Tightened Codex detection in `_is_codex_session`** — removed the over-aggressive env-var fallback (`CODEX_COMPANION_SESSION_ID`, `CODEX_CLI`). Those env vars were getting set by Claude Code shell snapshots, causing the hook to think Claude Code sessions were Codex sessions. Detection is now model-field-only.
+- **Test helper `_extract_hint`** in `tests/test_auto_route_hook.py` now tolerates both `contextForAgent` and `additionalContext` so tests pass regardless of which platform branch the hook took.
+
+### Migration notes
+
+Existing Codex users who had stale `~/.codex/hooks/` scripts from April (v21) and a broken `hooks.json` registration pointing to a non-existent `codex-post-tool.py`: re-install or manually:
+
+```bash
+# Symlink to the canonical Claude Code copies (auto-stays-fresh on upgrades)
+for h in auto-route enforce-route session-end session-start; do
+  ln -sf ~/.claude/hooks/llm-router-${h}.py ~/.codex/hooks/llm-router-${h}.py
+done
+
+# Then replace ~/.codex/hooks.json with the full 4-event registry
+# (see .codex-plugin/.mcp.json in the repo for the canonical version, or
+# regenerate via `llm-router install --codex`).
+```
+
+Codex CLI will prompt to re-trust the new hook hashes on next invocation.
+
+### Known limitations
+
+- `install_hooks.py` doesn't yet install to `~/.codex/` automatically. Manual setup required for now (see migration notes above). Will be addressed in v9.3.1.
+- OpenAI pricing rates in `OPENAI_RATES_PER_M` are placeholder estimates. Verify against current `https://openai.com/api/pricing` before relying on Codex savings numbers in dollar terms.
+- Codex's `userPromptSubmit` `hookSpecificOutput` schema doesn't support `contextForAgent`, so MANDATORY ROUTE directives carry only `additionalContext`'s priority in Codex — slightly weaker enforcement than Claude Code. This is a Codex platform limitation, not an llm-router bug.
+
 ## v9.2.2 - Cache-aware 4-component savings + task-aware baseline + honest floor (2026-05-27)
 
 ### Fixed

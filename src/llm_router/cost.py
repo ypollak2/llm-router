@@ -137,6 +137,27 @@ MIGRATE_CLAUDE_USAGE_CACHE_TOKENS = [
 Anthropic billing formula instead of a single lumped tokens_used."""
 
 
+MIGRATE_ADD_CODEX_USAGE_TABLE = [
+    """CREATE TABLE IF NOT EXISTS codex_usage (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        timestamp TEXT DEFAULT (datetime('now')),
+        model TEXT NOT NULL,
+        tokens_used INTEGER NOT NULL,
+        complexity TEXT NOT NULL,
+        cost_saved_usd REAL NOT NULL DEFAULT 0,
+        time_saved_sec REAL NOT NULL DEFAULT 0,
+        input_tokens INTEGER NOT NULL DEFAULT 0,
+        output_tokens INTEGER NOT NULL DEFAULT 0,
+        cache_creation_input_tokens INTEGER NOT NULL DEFAULT 0,
+        cache_read_input_tokens INTEGER NOT NULL DEFAULT 0,
+        routing_overhead_usd REAL NOT NULL DEFAULT 0.0
+    )""",
+    "CREATE INDEX IF NOT EXISTS idx_codex_usage_ts ON codex_usage(timestamp)",
+]
+"""v9.3.0 — Codex CLI session token consumption + savings, parallel to claude_usage.
+Schema kept symmetric with claude_usage so dashboard queries can UNION cleanly."""
+
+
 MIGRATE_USAGE_ROUTING_OVERHEAD = [
     "ALTER TABLE claude_usage ADD COLUMN routing_overhead_usd REAL NOT NULL DEFAULT 0.0",
     "ALTER TABLE usage ADD COLUMN routing_overhead_usd REAL NOT NULL DEFAULT 0.0",
@@ -474,6 +495,7 @@ async def _get_db() -> aiosqlite.Connection:
     # before executing, so re-running on an existing DB is always safe.
     all_migrations = (
         MIGRATE_CLAUDE_USAGE_CACHE_TOKENS
+        + MIGRATE_ADD_CODEX_USAGE_TABLE
         + MIGRATE_USAGE_ROUTING_OVERHEAD
         + MIGRATE_CLAUDE_USAGE_ADD_SAVINGS
         + MIGRATE_ROUTING_DECISIONS_ADD_FEEDBACK
@@ -1141,6 +1163,66 @@ CLAUDE_RATES_PER_M: dict[str, dict[str, float]] = {
     "opus":   {"input": 15.00, "output": 75.00, "cache_read": 1.50, "cache_write": 18.75},
 }
 
+# v9.3.0 — OpenAI public per-million-token rates for models commonly invoked
+# from Codex CLI. Keep in sync with https://openai.com/api/pricing.
+# Cache rates use OpenAI's documented prompt-caching discount where applicable.
+# All values $/Mtok. NOTE: verify against current pricing before each release.
+OPENAI_RATES_PER_M: dict[str, dict[str, float]] = {
+    "gpt-5.5":       {"input": 3.00,  "output": 12.00, "cache_read": 0.30, "cache_write": 3.75},
+    "gpt-5.4":       {"input": 5.00,  "output": 20.00, "cache_read": 1.25, "cache_write": 6.25},
+    "gpt-5-mini":    {"input": 0.40,  "output": 2.00,  "cache_read": 0.10, "cache_write": 0.50},
+    "o3":            {"input": 15.00, "output": 60.00, "cache_read": 3.75, "cache_write": 18.75},
+    "o3-mini":       {"input": 1.10,  "output": 4.40,  "cache_read": 0.275, "cache_write": 1.375},
+    "gpt-4o":        {"input": 2.50,  "output": 10.00, "cache_read": 1.25, "cache_write": 3.125},
+    "gpt-4o-mini":   {"input": 0.15,  "output": 0.60,  "cache_read": 0.075, "cache_write": 0.1875},
+}
+
+
+def _codex_cost(
+    model: str,
+    input_t: int,
+    output_t: int,
+    *,
+    cache_write_t: int = 0,
+    cache_read_t: int = 0,
+) -> float:
+    """Compute the $ cost of an OpenAI/Codex API call using the 4-component formula.
+
+    Same shape as _claude_cost but uses OPENAI_RATES_PER_M. Unknown models
+    return 0.0 (graceful — non-OpenAI routes don't trip this). v9.3.0.
+    """
+    rates = OPENAI_RATES_PER_M.get(model)
+    if rates is None:
+        return 0.0
+    return (
+        input_t       * rates["input"]       +
+        output_t      * rates["output"]      +
+        cache_write_t * rates["cache_write"] +
+        cache_read_t  * rates["cache_read"]
+    ) / 1_000_000
+
+
+def _get_codex_baseline_for_task(task_type: str | None, complexity: str | None) -> str:
+    """Pick the realistic Codex baseline — what would have been used without routing.
+
+    Codex CLI defaults to gpt-5.4 / gpt-5.5 depending on availability. We use
+    gpt-5.4 as the conservative middle baseline; complex tasks would have
+    escalated to o3; simple queries would have used gpt-5-mini.
+
+    Env override: LLM_ROUTER_CODEX_BASELINE (default: gpt-5.4). v9.3.0.
+    """
+    import os
+    override = os.environ.get("LLM_ROUTER_CODEX_BASELINE", "").strip().lower()
+    if override in OPENAI_RATES_PER_M:
+        return override
+    if task_type == "research":
+        return "o3"
+    if complexity == "complex":
+        return "o3"
+    if task_type in ("query",):
+        return "gpt-5-mini"
+    return "gpt-5.4"
+
 
 def _claude_cost(
     model: str,
@@ -1326,18 +1408,126 @@ async def log_claude_usage(
     return {"cost_saved_usd": cost_saved, "time_saved_sec": time_saved}
 
 
-async def get_realized_savings(period: str = "today") -> dict:
+async def log_codex_usage(
+    model: str,
+    tokens_used: int,
+    complexity: str,
+    *,
+    task_type: str | None = None,
+    input_tokens: int = 0,
+    output_tokens: int = 0,
+    cache_creation_input_tokens: int = 0,
+    cache_read_input_tokens: int = 0,
+    routing_overhead_usd: float = 0.0,
+) -> dict:
+    """Log an OpenAI/Codex model invocation and its savings vs. the realistic baseline.
+
+    Parallel to log_claude_usage but writes to codex_usage and uses
+    OPENAI_RATES_PER_M / _get_codex_baseline_for_task. v9.3.0.
+
+    Returns:
+        Dict with cost_saved_usd (net) and time_saved_sec (net).
+    """
+    import sys as _sys
+    if "pytest" in _sys.modules:
+        config = get_config()
+        prod_path = Path.home() / ".llm-router" / "usage.db"
+        if str(config.llm_router_db_path) == str(prod_path):
+            raise RuntimeError(
+                "CRITICAL: log_codex_usage is writing to production database in test context!\n"
+                "Tests must use the temp_db fixture to isolate the database."
+            )
+
+    if tokens_used == 0:
+        tokens_used = (input_tokens + output_tokens
+                       + cache_creation_input_tokens + cache_read_input_tokens)
+
+    baseline = _get_codex_baseline_for_task(task_type, complexity)
+
+    # 4-component cost when sub-component tokens are provided.
+    sub_total = input_tokens + output_tokens + cache_creation_input_tokens + cache_read_input_tokens
+    if sub_total > 0:
+        actual_cost = _codex_cost(
+            model, input_tokens, output_tokens,
+            cache_write_t=cache_creation_input_tokens,
+            cache_read_t=cache_read_input_tokens,
+        )
+        baseline_cost = _codex_cost(
+            baseline, input_tokens, output_tokens,
+            cache_write_t=cache_creation_input_tokens,
+            cache_read_t=cache_read_input_tokens,
+        )
+        effective_tokens = sub_total
+    else:
+        # Lumped fallback — average input+output rate as a coarse approximation.
+        rates_actual = OPENAI_RATES_PER_M.get(model, {})
+        rates_base = OPENAI_RATES_PER_M.get(baseline, OPENAI_RATES_PER_M["gpt-5.4"])
+        actual_rate_avg = (rates_actual.get("input", 0) + rates_actual.get("output", 0)) / 2
+        base_rate_avg = (rates_base["input"] + rates_base["output"]) / 2
+        actual_cost = tokens_used * actual_rate_avg / 1_000_000
+        baseline_cost = tokens_used * base_rate_avg / 1_000_000
+        effective_tokens = tokens_used
+
+    gross_cost_saved = baseline_cost - actual_cost
+    cost_saved = gross_cost_saved - routing_overhead_usd
+
+    # Time savings: OpenAI doesn't publish standard TPS; rough heuristic
+    # treats gpt-5-mini as fastest, o3 as slowest. Numbers calibrate against
+    # MODEL_SPEED_TPS shape (~100-200 range).
+    tps_map = {
+        "gpt-5-mini": 200.0, "gpt-4o-mini": 200.0,
+        "gpt-5.4": 100.0, "gpt-5.5": 100.0, "gpt-4o": 110.0,
+        "o3": 50.0, "o3-mini": 80.0,
+    }
+    if effective_tokens > 0:
+        actual_time = effective_tokens / tps_map.get(model, 100.0)
+        baseline_time = effective_tokens / tps_map.get(baseline, 100.0)
+        time_saved = baseline_time - actual_time
+    else:
+        time_saved = 0.0
+
+    db = await _get_db()
+    try:
+        await db.execute(
+            "INSERT INTO codex_usage ("
+            "  model, tokens_used, complexity,"
+            "  cost_saved_usd, time_saved_sec,"
+            "  input_tokens, output_tokens,"
+            "  cache_creation_input_tokens, cache_read_input_tokens,"
+            "  routing_overhead_usd"
+            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                model, tokens_used, complexity,
+                cost_saved, time_saved,
+                input_tokens, output_tokens,
+                cache_creation_input_tokens, cache_read_input_tokens,
+                routing_overhead_usd,
+            ),
+        )
+        await db.commit()
+    finally:
+        await db.close()
+
+    return {"cost_saved_usd": cost_saved, "time_saved_sec": time_saved}
+
+
+async def get_realized_savings(period: str = "today", *, platform: str = "all") -> dict:
     """Honest savings number: gross_saved - routing_overhead.
 
     Unlike `get_savings_summary`, this surfaces the case where routing
     cost more money than it saved (small prompts where classifier
-    latency exceeds the model-cost delta). v9.2.2.
+    latency exceeds the model-cost delta).
+
+    v9.3.0 — Added `platform` kwarg: "claude", "codex", or "all" (default).
+    "all" sums across both claude_usage and codex_usage tables.
 
     Args:
         period: "today", "week", "month", or "all".
+        platform: "claude", "codex", or "all".
 
     Returns:
         Dict with keys: gross_saved_usd, routing_overhead_usd, realized_saved_usd.
+        When platform="all", also includes `by_platform` breakdown dict.
     """
     where_map = {
         "today": "WHERE date(timestamp, 'localtime') = date('now', 'localtime')",
@@ -1347,21 +1537,57 @@ async def get_realized_savings(period: str = "today") -> dict:
     }
     where = where_map.get(period, "")
 
+    async def _query_table(table: str) -> tuple[float, float]:
+        try:
+            cursor = await db.execute(
+                f"""SELECT
+                    COALESCE(SUM(cost_saved_usd), 0),
+                    COALESCE(SUM(routing_overhead_usd), 0)
+                FROM {table} {where}"""
+            )
+            row = await cursor.fetchone()
+            return float(row[0] if row else 0.0), float(row[1] if row else 0.0)
+        except Exception:
+            # Table may not exist on older DBs — treat as zero.
+            return 0.0, 0.0
+
     db = await _get_db()
     try:
-        cursor = await db.execute(
-            f"""SELECT
-                COALESCE(SUM(cost_saved_usd), 0),
-                COALESCE(SUM(routing_overhead_usd), 0)
-            FROM claude_usage {where}"""
-        )
-        row = await cursor.fetchone()
-        gross = float(row[0] if row else 0.0)
-        overhead = float(row[1] if row else 0.0)
+        if platform == "claude":
+            gross, overhead = await _query_table("claude_usage")
+            return {
+                "gross_saved_usd": gross,
+                "routing_overhead_usd": overhead,
+                "realized_saved_usd": gross - overhead,
+            }
+        if platform == "codex":
+            gross, overhead = await _query_table("codex_usage")
+            return {
+                "gross_saved_usd": gross,
+                "routing_overhead_usd": overhead,
+                "realized_saved_usd": gross - overhead,
+            }
+        # all
+        claude_gross, claude_overhead = await _query_table("claude_usage")
+        codex_gross, codex_overhead = await _query_table("codex_usage")
+        gross = claude_gross + codex_gross
+        overhead = claude_overhead + codex_overhead
         return {
             "gross_saved_usd": gross,
             "routing_overhead_usd": overhead,
             "realized_saved_usd": gross - overhead,
+            "by_platform": {
+                "claude": {
+                    "gross_saved_usd": claude_gross,
+                    "routing_overhead_usd": claude_overhead,
+                    "realized_saved_usd": claude_gross - claude_overhead,
+                },
+                "codex": {
+                    "gross_saved_usd": codex_gross,
+                    "routing_overhead_usd": codex_overhead,
+                    "realized_saved_usd": codex_gross - codex_overhead,
+                },
+            },
         }
     finally:
         await db.close()

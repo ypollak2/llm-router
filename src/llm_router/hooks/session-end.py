@@ -1161,6 +1161,65 @@ def _format_complexity_breakdown(session_start: float) -> list[str]:
 
     return lines
 
+def _format_codex_section() -> list[str]:
+    """Render a compact Codex CLI session summary if codex_usage has rows.
+
+    v9.3.0 — Parallel surface for Codex CLI sessions. Reads from codex_usage
+    table populated by log_codex_usage. Always reads "today" window since the
+    dashboard always shows today by default; bigger reports come from other tools.
+    """
+    if not os.path.exists(DB_PATH):
+        return []
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        # Confirm the table exists before SELECTing
+        if not conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='codex_usage'"
+        ).fetchone():
+            conn.close()
+            return []
+        cursor = conn.execute(
+            "SELECT model, COUNT(*) as cnt, "
+            "       COALESCE(SUM(input_tokens + output_tokens "
+            "                    + cache_creation_input_tokens "
+            "                    + cache_read_input_tokens), 0) AS tokens, "
+            "       COALESCE(SUM(cost_saved_usd), 0) AS gross_saved, "
+            "       COALESCE(SUM(routing_overhead_usd), 0) AS overhead "
+            "FROM codex_usage "
+            "WHERE date(timestamp, 'localtime') = date('now', 'localtime') "
+            "GROUP BY model "
+            "ORDER BY cnt DESC"
+        )
+        rows = cursor.fetchall()
+        conn.close()
+    except Exception:
+        return []
+    if not rows:
+        return []
+
+    lines: list[str] = []
+    lines.append(f"  {_BOLD}🔷 Codex CLI (today){_RESET}")
+    total_calls = 0
+    total_tokens = 0
+    total_gross = 0.0
+    total_overhead = 0.0
+    for model, cnt, toks, gross, overhead in rows:
+        total_calls += cnt
+        total_tokens += toks
+        total_gross += gross or 0.0
+        total_overhead += overhead or 0.0
+        gross_tag = f"+${gross:.4f}" if gross > 0 else (f"-${-gross:.4f}" if gross < 0 else "$0.0000")
+        lines.append(f"    {model:<14} {cnt:>3}×  {toks:>6} tok  saved {gross_tag}")
+    realized = total_gross - total_overhead
+    summary = (
+        f"    {total_calls} routed · {total_tokens} tok · "
+        f"gross ${total_gross:.4f} · overhead ${total_overhead:.4f} · "
+        f"realized ${realized:.4f}"
+    )
+    lines.append(summary)
+    return lines
+
+
 def _format(tools: dict[str, dict], cc_rows: list[dict], free_rows: list[dict],
             paid_rows: list[dict],
             start: dict | None, current: dict | None, is_live: bool,
@@ -1195,6 +1254,14 @@ def _format(tools: dict[str, dict], cc_rows: list[dict], free_rows: list[dict],
         lines.append("")
         lines.append(f"  {_BOLD}This Session{_RESET}")
         lines += session_lines
+
+    # v9.3.0 — Codex CLI parallel section. Only renders if codex_usage has
+    # rows for today (otherwise stays invisible — Claude Code-only users see
+    # no change).
+    codex_lines = _format_codex_section()
+    if codex_lines:
+        lines.append("")
+        lines += codex_lines
 
     if session_start is not None:
         routing_lines = _format_routing_logic(session_start)

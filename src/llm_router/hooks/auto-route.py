@@ -1580,6 +1580,42 @@ def _debug_log(msg: str) -> None:
         pass  # Silently fail if logging doesn't work
 
 
+# ─── v9.3.0: Platform detection for Codex CLI vs Claude Code ─────────────────
+# Codex CLI's UserPromptSubmit hook output schema ONLY supports
+# `additionalContext` — emitting `contextForAgent` is rejected (schema is
+# additionalProperties: false). Claude Code prefers `contextForAgent` for
+# higher-priority directives but accepts both. So we detect platform from
+# hook_input["model"] and normalize the output key just-in-time.
+
+_OPENAI_MODEL_PREFIXES = ("gpt-", "o3", "o4", "o5", "codex-")
+
+
+def _is_codex_session(hook_input: dict) -> bool:
+    """Detect Codex CLI sessions from the model field passed in hook input.
+
+    Claude Code passes `claude-*` model names; Codex passes `gpt-*` / `o3*` etc.
+    Model-field-only detection — env-var fallbacks were too aggressive
+    (e.g. CODEX_COMPANION_SESSION_ID is set by Claude Code shell snapshots).
+    """
+    model = (hook_input.get("model") or "").lower()
+    return bool(model) and any(model.startswith(p) for p in _OPENAI_MODEL_PREFIXES)
+
+
+def _normalize_output_for_platform(output: dict, hook_input: dict) -> dict:
+    """In-place rename `contextForAgent` → `additionalContext` for Codex sessions.
+
+    Codex's hookSpecificOutput schema rejects unknown fields. This must be
+    called just before json.dump so any high-priority context still reaches
+    the agent, just as the lower-priority additionalContext key Codex accepts.
+    """
+    if not _is_codex_session(hook_input):
+        return output
+    hso = output.get("hookSpecificOutput")
+    if isinstance(hso, dict) and "contextForAgent" in hso:
+        hso["additionalContext"] = hso.pop("contextForAgent")
+    return output
+
+
 def main() -> None:
     invocation_id = time.time()
     _debug_log(f"[INVOCATION START] ID={invocation_id:.3f}")
@@ -1651,7 +1687,7 @@ def main() -> None:
             }
         }
         _debug_log(f"[INVOCATION {invocation_id:.3f}] EARLY EXIT: direct MCP route to {matched_server}")
-        json.dump(output, sys.stdout)
+        json.dump(_normalize_output_for_platform(output, hook_input), sys.stdout)
         sys.exit(0)
 
     # ── Context-Aware Routing (v2.5) ─────────────────────────────────────────
@@ -1910,7 +1946,7 @@ def main() -> None:
                     _output = _build_block(_direct_result, task_type, complexity)
                     if _violation_notice:
                         _output["reason"] = _violation_notice + "\n" + _output["reason"]
-                json.dump(_output, sys.stdout)
+                json.dump(_normalize_output_for_platform(_output, hook_input), sys.stdout)
                 sys.exit(0)
             else:
                 if zero_claude:
@@ -2048,7 +2084,7 @@ def main() -> None:
         }
     }
     _debug_log(f"[INVOCATION {invocation_id:.3f}] OUTPUTTING: tool={tool} task={task_type}/{complexity} method={method}")
-    json.dump(output, sys.stdout)
+    json.dump(_normalize_output_for_platform(output, hook_input), sys.stdout)
     _debug_log(f"[INVOCATION {invocation_id:.3f}] OUTPUT COMPLETE")
 
 

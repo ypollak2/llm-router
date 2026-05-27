@@ -79,9 +79,14 @@ def _extract_hint(output: dict) -> str:
 
     With LLM_ROUTER_DIRECT_EXECUTION=0, always returns hookSpecificOutput format.
     Falls back to decision:block format if direct execution is somehow active.
+
+    v9.3.0 — Tolerates both contextForAgent (Claude Code, high priority) and
+    additionalContext (Codex CLI, only supported field). The hook now emits
+    the right one based on the `model` field in hook_input.
     """
     if "hookSpecificOutput" in output:
-        return output["hookSpecificOutput"]["contextForAgent"]
+        hso = output["hookSpecificOutput"]
+        return hso.get("contextForAgent") or hso.get("additionalContext", "")
     if output.get("decision") == "block":
         return output.get("message", "")
     raise KeyError(f"Unexpected output format: {list(output.keys())}")

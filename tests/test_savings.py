@@ -399,3 +399,114 @@ class TestAnthropicResponseFieldsExist:
         )
         assert r.cache_creation_input_tokens == 0
         assert r.cache_read_input_tokens == 0
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# v9.3.0 — Codex CLI parallel cost tracking
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestCodexCost:
+    def test_codex_cost_input_output_only(self):
+        from llm_router.cost import _codex_cost
+        # gpt-5.4: 1000 input × $5/Mtok + 500 output × $20/Mtok
+        # = (5000 + 10000) / 1_000_000 = $0.015
+        cost = _codex_cost("gpt-5.4", input_t=1000, output_t=500)
+        assert abs(cost - 0.015) < 1e-6
+
+    def test_codex_cost_with_cache_read(self):
+        from llm_router.cost import _codex_cost
+        # 10_000 cache_read on gpt-5.4 = 10_000 × $1.25/Mtok = $0.0125
+        cost = _codex_cost("gpt-5.4", input_t=0, output_t=0, cache_read_t=10_000)
+        assert abs(cost - 0.0125) < 1e-6
+
+    def test_codex_cost_unknown_model_zero(self):
+        from llm_router.cost import _codex_cost
+        assert _codex_cost("nonexistent-gpt", input_t=1000, output_t=500) == 0.0
+
+    def test_codex_baseline_simple_query_is_gpt5_mini(self):
+        from llm_router.cost import _get_codex_baseline_for_task
+        assert _get_codex_baseline_for_task("query", "simple") == "gpt-5-mini"
+
+    def test_codex_baseline_code_moderate_is_gpt5_4(self):
+        from llm_router.cost import _get_codex_baseline_for_task
+        assert _get_codex_baseline_for_task("code", "moderate") == "gpt-5.4"
+
+    def test_codex_baseline_complex_is_o3(self):
+        from llm_router.cost import _get_codex_baseline_for_task
+        assert _get_codex_baseline_for_task("code", "complex") == "o3"
+        assert _get_codex_baseline_for_task("research", "simple") == "o3"
+
+    @pytest.mark.asyncio
+    async def test_log_codex_usage_persists_4_components(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("LLM_ROUTER_DB_PATH", str(tmp_path / "test.db"))
+        from llm_router.cost import log_codex_usage
+        await log_codex_usage(
+            model="gpt-5-mini",
+            tokens_used=0,
+            complexity="simple",
+            task_type="query",
+            input_tokens=100,
+            output_tokens=200,
+            cache_creation_input_tokens=0,
+            cache_read_input_tokens=5000,
+        )
+        import aiosqlite
+        async with aiosqlite.connect(tmp_path / "test.db") as db:
+            cursor = await db.execute(
+                "SELECT model, input_tokens, output_tokens, cache_read_input_tokens "
+                "FROM codex_usage ORDER BY id DESC LIMIT 1"
+            )
+            row = await cursor.fetchone()
+        assert row == ("gpt-5-mini", 100, 200, 5000)
+
+    @pytest.mark.asyncio
+    async def test_log_codex_usage_returns_savings_dict(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("LLM_ROUTER_DB_PATH", str(tmp_path / "test.db"))
+        from llm_router.cost import log_codex_usage
+        # gpt-5-mini for a query task (baseline=gpt-5-mini per task-aware) → 0 savings
+        # Use o3 baseline (complex) for actual savings demonstration
+        result = await log_codex_usage(
+            "gpt-5-mini", tokens_used=0, complexity="complex",
+            task_type="code", input_tokens=1000, output_tokens=500,
+        )
+        assert "cost_saved_usd" in result
+        assert "time_saved_sec" in result
+        # o3 baseline ($15/$60) vs gpt-5-mini ($0.40/$2) → big positive savings
+        assert result["cost_saved_usd"] > 0
+
+
+class TestDualPlatformRealizedSavings:
+    @pytest.mark.asyncio
+    async def test_realized_savings_all_sums_both_tables(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("LLM_ROUTER_DB_PATH", str(tmp_path / "test.db"))
+        from llm_router.cost import log_claude_usage, log_codex_usage, get_realized_savings
+        await log_claude_usage(
+            "haiku", tokens_used=1000, complexity="complex",
+            task_type="code", input_tokens=500, output_tokens=500,
+        )
+        await log_codex_usage(
+            "gpt-5-mini", tokens_used=1000, complexity="complex",
+            task_type="code", input_tokens=500, output_tokens=500,
+        )
+        result = await get_realized_savings(period="all", platform="all")
+        assert "by_platform" in result
+        assert result["by_platform"]["claude"]["gross_saved_usd"] > 0
+        assert result["by_platform"]["codex"]["gross_saved_usd"] > 0
+        # Combined ≈ sum
+        assert result["gross_saved_usd"] == pytest.approx(
+            result["by_platform"]["claude"]["gross_saved_usd"]
+            + result["by_platform"]["codex"]["gross_saved_usd"]
+        )
+
+    @pytest.mark.asyncio
+    async def test_realized_savings_codex_only(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("LLM_ROUTER_DB_PATH", str(tmp_path / "test.db"))
+        from llm_router.cost import log_codex_usage, get_realized_savings
+        await log_codex_usage(
+            "gpt-5-mini", tokens_used=1000, complexity="complex",
+            task_type="code", input_tokens=500, output_tokens=500,
+        )
+        result = await get_realized_savings(period="all", platform="codex")
+        assert "by_platform" not in result  # single-platform doesn't include breakdown
+        assert result["gross_saved_usd"] > 0
