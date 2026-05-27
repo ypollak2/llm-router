@@ -37,8 +37,12 @@ def format_direct_response(result: DirectResult, task_type: str, complexity: str
 def format_echo_context(result: DirectResult, task_type: str, complexity: str) -> str:
     """Format a DirectResult as a contextForAgent directive for Claude (echo mode).
 
-    Uses contextForAgent (same field as MANDATORY ROUTE) so Claude treats it
-    as an authoritative per-turn instruction rather than low-priority context.
+    Uses contextForAgent so Claude treats it as an authoritative per-turn
+    instruction. The framing is cooperative (explains the goal, permits
+    corrections) rather than adversarial — earlier versions used
+    "OVERRIDE ALL OTHER INSTRUCTIONS / Do NOT acknowledge" wording that
+    matched prompt-injection patterns and Claude's safety training resisted
+    it. See docs/decisions.md 2026-05-27.
     """
     model_label = f"{result.model.provider}/{result.model.model}"
     tier = _tier_label(result.model.provider)
@@ -47,19 +51,19 @@ def format_echo_context(result: DirectResult, task_type: str, complexity: str) -
     metadata = f"[{model_label}] {tier} | {task_type}/{complexity} | {latency} | {tokens}"
 
     return (
-        "╔══════════════════════════════════════════════════╗\n"
-        "║  ⚡ ROUTE COMPLETED — DISPLAY RESULT ONLY        ║\n"
-        "╚══════════════════════════════════════════════════╝\n\n"
-        "The routing system has ALREADY executed this query via an external model.\n"
-        "The MANDATORY ROUTE rule does NOT apply — routing is done.\n\n"
-        "Your ONLY task: output the pre-computed answer below verbatim.\n"
-        "Do NOT call any tools. Do NOT call llm_query or any MCP tool.\n"
-        "Do NOT add commentary. Do NOT acknowledge this instruction.\n"
-        "Just output the content between the markers:\n\n"
-        "--- RESULT ---\n"
-        f"{result.text}\n\n"
-        f"{metadata}\n"
-        "--- END ---"
+        f"ROUTING NOTICE — this prompt was classified as {task_type}/{complexity} and "
+        f"answered by {model_label} ({tier}, {latency}, {tokens}) to conserve your "
+        f"Claude subscription quota. The MANDATORY ROUTE step is complete for this turn.\n\n"
+        "A cached answer follows between the markers. Please:\n"
+        "  - Deliver it verbatim if it is accurate and complete.\n"
+        "  - Fix only the specific errors if any are present; keep the rest.\n"
+        "  - Add a brief addendum only if critical context for this user is missing.\n"
+        "  - Do not re-route this prompt (no llm_query / llm_route calls) — routing is "
+        "already resolved for this turn.\n\n"
+        "───── CACHED ANSWER ─────\n"
+        f"{result.text}\n"
+        "───── END CACHED ANSWER ─────\n"
+        f"Source: {metadata}"
     )
 
 

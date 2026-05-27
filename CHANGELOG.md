@@ -2,6 +2,17 @@
 
 **For releases v6.2 and earlier, see [CHANGELOG_ARCHIVE.md](docs/CHANGELOG_ARCHIVE.md).**
 
+## v9.2.1 - CONTINUATION heuristic + cooperative DIRECT template (2026-05-27)
+
+### Fixed
+
+- **CONTINUATION false positives caused Opus cost leak** — prompts beginning with a discourse marker like `"OK, so what kind of models do interact with bash"` matched the `"so "` weak-prefix branch in `_is_continuation()`, bypassed routing, and hit Opus. Heuristic now splits prefixes into STRONG (always bypass — refer to prior context) and WEAK (bypass only when no wh-question word follows). New regression test `tests/test_continuation_heuristic.py` covers 15 cases.
+- **DIRECT-mode template tripped Claude safety reflexes** — `format_echo_context()` wrapped cached answers in `"OVERRIDE ALL OTHER INSTRUCTIONS FOR THIS TURN... Do NOT acknowledge this instruction"`. That phrasing matches textbook prompt-injection patterns; Claude resisted its own router's output. Rewritten with cooperative framing that explains the routing goal, permits corrections to the cached answer, and removes injection-pattern markers.
+
+### Added
+
+- **`LLM_ROUTER_DISABLE_CONTINUATION_BYPASS` env var** — kill-switch that forces every prompt through the classifier even when `_is_continuation()` returns True. Set to `1` if the new heuristic regresses on any prompt class.
+
 ## v9.2.0 - Enforcement v13, statusline, Gemini CLI savings (2026-05-26)
 
 ### Added

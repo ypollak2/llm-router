@@ -1362,11 +1362,33 @@ def _is_continuation(prompt: str) -> bool:
         lower
     ).strip()
 
-    # If it starts with a contextual follow-up, keep it on the prior route.
-    if clean_lower.startswith(("and ", "then ", "so ", "but ", "actually ", "what about ", "why did ", "why was ", "why am i ", "what does this ", "well ")):
+    # Strong continuation prefixes — refer to prior context, always bypass.
+    # ("what about X" presumes X was just discussed; "why did" presumes past action.)
+    _STRONG_CONT = ("what about ", "why did ", "why was ", "why am i ", "what does this ")
+    if clean_lower.startswith(_STRONG_CONT):
         words = stripped.split()
         if len(words) <= 20:
             return True
+
+    # Weak continuation prefixes — only bypass if NOT introducing a new wh-question.
+    # Fixes cost-leak bug 2026-05-26: "OK, so what kind of models do interact with bash"
+    # would match "so " here, be ≤20 words, and bypass routing → Opus.
+    # New rule: if a wh-question word follows the weak prefix, this is a NEW question
+    # dressed in a discourse marker, not a continuation — let it route.
+    _WEAK_CONT = ("and ", "then ", "so ", "but ", "actually ", "well ")
+    if clean_lower.startswith(_WEAK_CONT):
+        after_prefix = re.sub(
+            r"^(?:and|then|so|but|actually|well)\s+",
+            "", clean_lower, count=1,
+        )
+        starts_with_wh = re.match(
+            r"^(?:what|why|how|when|where|which|who|whose)\b",
+            after_prefix,
+        ) is not None
+        if not starts_with_wh:
+            words = stripped.split()
+            if len(words) <= 20:
+                return True
 
     # Catch explicit references to the chat history or system mechanics
     if re.search(r'\b(last prompt|previous prompt|earlier|you just|we just|you used|why there was|blocked by hook|error message)\b', lower):
@@ -1590,9 +1612,14 @@ def main() -> None:
     # normal mode. Strict mode routes them externally or blocks fail-closed.
     # If a directive is pending, this allows Claude to fulfill it.
     # If no directive is pending, this prevents routing noise for conversation.
+    # Kill-switch: LLM_ROUTER_DISABLE_CONTINUATION_BYPASS=1 forces every turn
+    # through the classifier (useful when the heuristic regresses).
     if not zero_claude and session_id and _is_continuation(prompt):
-        _debug_log(f"[INVOCATION {invocation_id:.3f}] CONTINUATION: bypass to host agent")
-        sys.exit(0)
+        if os.environ.get("LLM_ROUTER_DISABLE_CONTINUATION_BYPASS", "").lower() in ("1", "true", "yes", "on"):
+            _debug_log(f"[INVOCATION {invocation_id:.3f}] CONTINUATION: bypass disabled via env, routing instead")
+        else:
+            _debug_log(f"[INVOCATION {invocation_id:.3f}] CONTINUATION: bypass to host agent")
+            sys.exit(0)
 
     previous_unrouted = _consume_unresolved_pending(session_id) if session_id else None
 
