@@ -869,6 +869,49 @@ async def llm_benchmark() -> str:
     return report
 
 
+async def llm_session_dashboard() -> str:
+    """Show today's per-platform routing dashboard.
+
+    v9.3.2 — Equivalent of Claude Code's SessionEnd dashboard, callable on-demand
+    from any MCP client (Cursor, Claude Code, Codex, Gemini, etc.). Returns
+    today's gross/realized savings for each platform (Claude, Codex, Gemini)
+    plus a routing overhead column.
+
+    Returns a markdown table with per-platform metrics.
+    """
+    from llm_router.cost import get_realized_savings
+
+    result = await get_realized_savings(period="today", platform="all")
+    bp = result.get("by_platform", {})
+
+    lines = ["**LLM Router — today's dashboard**", ""]
+    lines.append("| Platform | Gross saved | Routing overhead | Realized (net) |")
+    lines.append("|---|---:|---:|---:|")
+    for name in ("claude", "codex", "gemini"):
+        p = bp.get(name, {"gross_saved_usd": 0.0, "routing_overhead_usd": 0.0, "realized_saved_usd": 0.0})
+        gross = p["gross_saved_usd"]
+        overhead = p["routing_overhead_usd"]
+        realized = p["realized_saved_usd"]
+        lines.append(
+            f"| {name.title()} | ${gross:.4f} | ${overhead:.4f} | ${realized:.4f} |"
+        )
+    lines.append(
+        f"| **Total** | **${result['gross_saved_usd']:.4f}** | "
+        f"**${result['routing_overhead_usd']:.4f}** | "
+        f"**${result['realized_saved_usd']:.4f}** |"
+    )
+
+    if result["realized_saved_usd"] < 0:
+        lines.append("")
+        lines.append(
+            "⚠️ Realized savings are negative today — routing overhead exceeded "
+            "gross savings. Common when prompts are short (classifier cost > "
+            "cheap-model-vs-flagship delta)."
+        )
+
+    return "\n".join(lines)
+
+
 async def llm_session_spend() -> str:
     """Show real-time session cost breakdown.
 
@@ -1520,6 +1563,9 @@ def register(mcp, should_register=None) -> None:
         mcp.tool()(llm_model_export)
     if gate("llm_session_spend"):
         mcp.tool()(llm_session_spend)
+
+    if gate("llm_session_dashboard"):
+        mcp.tool()(llm_session_dashboard)
     if gate("llm_approve_route"):
         mcp.tool()(llm_approve_route)
     if gate("llm_quota_status"):

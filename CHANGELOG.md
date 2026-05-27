@@ -2,6 +2,19 @@
 
 **For releases v6.2 and earlier, see [CHANGELOG_ARCHIVE.md](docs/CHANGELOG_ARCHIVE.md).**
 
+## v9.3.2 - Cursor IDE integration (MCP + rules + dashboard tool) (2026-05-27)
+
+### Added
+
+- **Cursor IDE support** — Cursor doesn't expose lifecycle hooks (no UserPromptSubmit/BeforeAgent equivalent), so full hook-based parity isn't possible. What v9.3.2 delivers instead:
+  - **Rewritten `~/.cursor/rules/llm-router.md`** with strict routing directives matching Claude Code's tone. The Cursor agent is told to proactively route every substantive prompt through `llm_*` MCP tools rather than waiting for a directive (since none can be injected pre-prompt). Includes Task-Type → Tool mapping, forbidden-actions table, and token-efficiency rules.
+  - **New MCP tool `llm_session_dashboard`** — returns today's per-platform breakdown (Claude / Codex / Gemini) with gross saved, routing overhead, realized (net). Callable from any MCP client; Cursor users invoke via `@llm-router show today's dashboard`. Reuses the same `get_realized_savings` aggregation that powers the session-end render.
+
+### Known limitations
+
+- Cursor enforcement is **soft**: the rules file is loaded as system context, but the Cursor agent decides whether to obey. Compare to Claude Code / Codex / Gemini where the UserPromptSubmit hook can BLOCK and force-route. No way around this in Cursor 0.50 — its agent lifecycle isn't extensible by external scripts.
+- `llm_session_dashboard` is "today only" for now. Multi-day reports are still in `llm_savings`.
+
 ## v9.3.1 - Gemini CLI full parity + release pipeline fix (2026-05-27)
 
 ### Added
