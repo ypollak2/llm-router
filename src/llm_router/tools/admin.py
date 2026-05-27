@@ -887,7 +887,7 @@ async def llm_session_dashboard() -> str:
     lines = ["**LLM Router — today's dashboard**", ""]
     lines.append("| Platform | Gross saved | Routing overhead | Realized (net) |")
     lines.append("|---|---:|---:|---:|")
-    for name in ("claude", "codex", "gemini"):
+    for name in ("claude", "codex", "gemini", "aider"):
         p = bp.get(name, {"gross_saved_usd": 0.0, "routing_overhead_usd": 0.0, "realized_saved_usd": 0.0})
         gross = p["gross_saved_usd"]
         overhead = p["routing_overhead_usd"]

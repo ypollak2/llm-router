@@ -118,3 +118,8 @@ Procfile
 .claude/settings.json
 .claude/mcp.json
 tests/hook_rendering/
+
+# Aider session artifacts (v9.4.0)
+.aider.chat.history.md
+.aider.input.history
+.aider.tags.cache.v*

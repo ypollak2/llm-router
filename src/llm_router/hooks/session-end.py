@@ -1325,6 +1325,13 @@ def _format(tools: dict[str, dict], cc_rows: list[dict], free_rows: list[dict],
         lines.append("")
         lines += gemini_lines
 
+    # v9.4.0 — Aider parallel section. Visible only when aider_usage has rows
+    # for today (i.e., user routed Aider through llm-router-proxy).
+    aider_lines = _format_provider_section("aider_usage", "Aider", "🔵")
+    if aider_lines:
+        lines.append("")
+        lines += aider_lines
+
     if session_start is not None:
         routing_lines = _format_routing_logic(session_start)
         if routing_lines:

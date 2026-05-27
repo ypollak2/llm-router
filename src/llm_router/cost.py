@@ -179,6 +179,28 @@ MIGRATE_ADD_GEMINI_USAGE_TABLE = [
 claude_usage and codex_usage. Same symmetric schema."""
 
 
+MIGRATE_ADD_AIDER_USAGE_TABLE = [
+    """CREATE TABLE IF NOT EXISTS aider_usage (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        timestamp TEXT DEFAULT (datetime('now')),
+        model TEXT NOT NULL,
+        tokens_used INTEGER NOT NULL,
+        complexity TEXT NOT NULL,
+        cost_saved_usd REAL NOT NULL DEFAULT 0,
+        time_saved_sec REAL NOT NULL DEFAULT 0,
+        input_tokens INTEGER NOT NULL DEFAULT 0,
+        output_tokens INTEGER NOT NULL DEFAULT 0,
+        cache_creation_input_tokens INTEGER NOT NULL DEFAULT 0,
+        cache_read_input_tokens INTEGER NOT NULL DEFAULT 0,
+        routing_overhead_usd REAL NOT NULL DEFAULT 0.0
+    )""",
+    "CREATE INDEX IF NOT EXISTS idx_aider_usage_ts ON aider_usage(timestamp)",
+]
+"""v9.4.0 — Aider CLI calls flow through llm-router-proxy (litellm proxy
+with our classifier as the router strategy). The proxy registers a litellm
+success_callback that invokes log_aider_usage() to populate this table."""
+
+
 MIGRATE_USAGE_ROUTING_OVERHEAD = [
     "ALTER TABLE claude_usage ADD COLUMN routing_overhead_usd REAL NOT NULL DEFAULT 0.0",
     "ALTER TABLE usage ADD COLUMN routing_overhead_usd REAL NOT NULL DEFAULT 0.0",
@@ -518,6 +540,7 @@ async def _get_db() -> aiosqlite.Connection:
         MIGRATE_CLAUDE_USAGE_CACHE_TOKENS
         + MIGRATE_ADD_CODEX_USAGE_TABLE
         + MIGRATE_ADD_GEMINI_USAGE_TABLE
+        + MIGRATE_ADD_AIDER_USAGE_TABLE
         + MIGRATE_USAGE_ROUTING_OVERHEAD
         + MIGRATE_CLAUDE_USAGE_ADD_SAVINGS
         + MIGRATE_ROUTING_DECISIONS_ADD_FEEDBACK
@@ -1691,6 +1714,135 @@ async def log_gemini_usage(
     return {"cost_saved_usd": cost_saved, "time_saved_sec": time_saved}
 
 
+def _cost_for_any_model(
+    model: str, input_t: int, output_t: int,
+    *, cache_write_t: int = 0, cache_read_t: int = 0,
+) -> float:
+    """Compute 4-component cost for a model from any provider family.
+
+    Dispatches on model prefix to the right RATES_PER_M table. v9.4.0.
+    Used by log_aider_usage since Aider can call any model.
+    """
+    m = (model or "").lower()
+    if m.startswith(("gpt-", "o3", "o4", "o5", "codex-")):
+        return _codex_cost(model, input_t, output_t,
+                           cache_write_t=cache_write_t, cache_read_t=cache_read_t)
+    if m.startswith(("gemini-", "google/")):
+        return _gemini_cost(model, input_t, output_t,
+                            cache_write_t=cache_write_t, cache_read_t=cache_read_t)
+    if m.startswith(("claude-", "anthropic/")) or m in CLAUDE_RATES_PER_M:
+        # Map "claude-3-opus" → "opus" for the Claude table
+        for key in ("haiku", "sonnet", "opus"):
+            if key in m:
+                return _claude_cost(key, input_t, output_t,
+                                    cache_write_t=cache_write_t, cache_read_t=cache_read_t)
+    return 0.0
+
+
+async def log_aider_usage(
+    model: str,
+    tokens_used: int,
+    complexity: str,
+    *,
+    task_type: str | None = None,
+    input_tokens: int = 0,
+    output_tokens: int = 0,
+    cache_creation_input_tokens: int = 0,
+    cache_read_input_tokens: int = 0,
+    routing_overhead_usd: float = 0.0,
+    baseline_model: str | None = None,
+) -> dict:
+    """Log an Aider call routed through llm-router-proxy.
+
+    Aider can use any model family (OpenAI / Anthropic / Gemini), so this
+    function dispatches via _cost_for_any_model. Baseline defaults to gpt-4o
+    (Aider's most common flagship) unless overridden by AIDER_BASELINE env or
+    `baseline_model` arg. v9.4.0.
+
+    Returns:
+        Dict with cost_saved_usd (net) and time_saved_sec (net).
+    """
+    import os
+    import sys as _sys
+    if "pytest" in _sys.modules:
+        config = get_config()
+        prod_path = Path.home() / ".llm-router" / "usage.db"
+        if str(config.llm_router_db_path) == str(prod_path):
+            raise RuntimeError(
+                "CRITICAL: log_aider_usage is writing to production database in test context!"
+            )
+
+    if tokens_used == 0:
+        tokens_used = (input_tokens + output_tokens
+                       + cache_creation_input_tokens + cache_read_input_tokens)
+
+    if baseline_model is None:
+        baseline_model = os.environ.get("AIDER_BASELINE", "gpt-4o")
+
+    sub_total = input_tokens + output_tokens + cache_creation_input_tokens + cache_read_input_tokens
+    if sub_total > 0:
+        actual_cost = _cost_for_any_model(
+            model, input_tokens, output_tokens,
+            cache_write_t=cache_creation_input_tokens,
+            cache_read_t=cache_read_input_tokens,
+        )
+        baseline_cost = _cost_for_any_model(
+            baseline_model, input_tokens, output_tokens,
+            cache_write_t=cache_creation_input_tokens,
+            cache_read_t=cache_read_input_tokens,
+        )
+        effective_tokens = sub_total
+    else:
+        # Lumped estimate fallback — assume 50/50 input/output split.
+        half = tokens_used // 2
+        actual_cost = _cost_for_any_model(model, half, tokens_used - half)
+        baseline_cost = _cost_for_any_model(baseline_model, half, tokens_used - half)
+        effective_tokens = tokens_used
+
+    gross_cost_saved = baseline_cost - actual_cost
+    cost_saved = gross_cost_saved - routing_overhead_usd
+
+    # Time savings: heuristic by model family (re-use existing tables)
+    if effective_tokens > 0:
+        # Use codex tps for OpenAI-family, gemini tps for Gemini-family, claude SPEED for Claude.
+        # Crude approximation; can be refined.
+        if model.lower().startswith(("gpt-", "o3")):
+            actual_tps = {"gpt-5-mini": 200, "gpt-4o-mini": 200}.get(model.lower(), 100)
+        elif model.lower().startswith("gemini-"):
+            actual_tps = 250 if "flash" in model.lower() else 80
+        else:
+            actual_tps = MODEL_SPEED_TPS.get(model.split("-")[-1] if "-" in model else model, 120)
+        actual_time = effective_tokens / actual_tps
+        baseline_time = effective_tokens / 100.0  # rough baseline TPS
+        time_saved = baseline_time - actual_time
+    else:
+        time_saved = 0.0
+
+    db = await _get_db()
+    try:
+        await db.execute(
+            "INSERT INTO aider_usage ("
+            "  model, tokens_used, complexity,"
+            "  cost_saved_usd, time_saved_sec,"
+            "  input_tokens, output_tokens,"
+            "  cache_creation_input_tokens, cache_read_input_tokens,"
+            "  routing_overhead_usd"
+            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                model, tokens_used, complexity,
+                cost_saved, time_saved,
+                input_tokens, output_tokens,
+                cache_creation_input_tokens, cache_read_input_tokens,
+                routing_overhead_usd,
+            ),
+        )
+        await db.commit()
+    finally:
+        await db.close()
+
+    return {"cost_saved_usd": cost_saved, "time_saved_sec": time_saved}
+
+
 async def get_realized_savings(period: str = "today", *, platform: str = "all") -> dict:
     """Honest savings number: gross_saved - routing_overhead.
 
@@ -1754,12 +1906,20 @@ async def get_realized_savings(period: str = "today", *, platform: str = "all") 
                 "routing_overhead_usd": overhead,
                 "realized_saved_usd": gross - overhead,
             }
+        if platform == "aider":
+            gross, overhead = await _query_table("aider_usage")
+            return {
+                "gross_saved_usd": gross,
+                "routing_overhead_usd": overhead,
+                "realized_saved_usd": gross - overhead,
+            }
         # all
         claude_gross, claude_overhead = await _query_table("claude_usage")
         codex_gross, codex_overhead = await _query_table("codex_usage")
         gemini_gross, gemini_overhead = await _query_table("gemini_usage")
-        gross = claude_gross + codex_gross + gemini_gross
-        overhead = claude_overhead + codex_overhead + gemini_overhead
+        aider_gross, aider_overhead = await _query_table("aider_usage")
+        gross = claude_gross + codex_gross + gemini_gross + aider_gross
+        overhead = claude_overhead + codex_overhead + gemini_overhead + aider_overhead
         return {
             "gross_saved_usd": gross,
             "routing_overhead_usd": overhead,
@@ -1779,6 +1939,11 @@ async def get_realized_savings(period: str = "today", *, platform: str = "all") 
                     "gross_saved_usd": gemini_gross,
                     "routing_overhead_usd": gemini_overhead,
                     "realized_saved_usd": gemini_gross - gemini_overhead,
+                },
+                "aider": {
+                    "gross_saved_usd": aider_gross,
+                    "routing_overhead_usd": aider_overhead,
+                    "realized_saved_usd": aider_gross - aider_overhead,
                 },
             },
         }
