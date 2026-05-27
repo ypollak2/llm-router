@@ -2,6 +2,44 @@
 
 **For releases v6.2 and earlier, see [CHANGELOG_ARCHIVE.md](docs/CHANGELOG_ARCHIVE.md).**
 
+## v9.3.1 - Gemini CLI full parity + release pipeline fix (2026-05-27)
+
+### Added
+
+- **Gemini CLI parity** — third routing surface alongside Claude Code (v9.2.x) and Codex (v9.3.0). Every `BeforeAgent` event (Gemini's name for UserPromptSubmit) runs through the same classifier + DIRECT-mode pipeline. Gemini's native event names are used in `~/.gemini/settings.json`: `BeforeAgent` (= UserPromptSubmit), `BeforeTool` (= PreToolUse), `AfterAgent` (= Stop/SessionEnd), `SessionStart`. Mapping per Gemini's official `gemini hooks migrate` translator.
+- **`_is_gemini_session(hook_input)`** — model-prefix detection (`gemini-`, `gemini/`, `google/gemini`). The existing `_normalize_output_for_platform` now handles both Codex AND Gemini in one branch since both reject `contextForAgent` and accept `additionalContext`.
+- **`GEMINI_RATES_PER_M`** — 4-component rates for `gemini-2.5-flash`, `gemini-2.5-pro`, `gemini-2.0-flash`, `gemini-2.0-pro`, `gemini-1.5-flash`, `gemini-1.5-pro`. Pulled from Google AI public pricing.
+- **`_gemini_cost()`, `_get_gemini_baseline_for_task()`, `log_gemini_usage()`** — parallel surface to `_codex_cost`/`_claude_cost`. Baseline tree: `gemini-2.0-flash` for query, `gemini-2.5-flash` default, `gemini-2.5-pro` for complex/research. Env override: `LLM_ROUTER_GEMINI_BASELINE`.
+- **`gemini_usage` table** — same symmetric schema as `claude_usage` / `codex_usage`. Migration `MIGRATE_ADD_GEMINI_USAGE_TABLE` is idempotent.
+- **Generic `_format_provider_section(table, title, emoji)`** in session-end.py — used by both Codex (🔷) and Gemini (🔶) dashboard sections. New code shares the renderer.
+- **`get_realized_savings(platform="gemini" | "all")`** — `"all"` now sums across all three tables and returns `by_platform.gemini` alongside Claude/Codex breakdowns.
+- **`router.py` auto-log path** dispatches `response.provider in {"gemini", "google", "google_subscription", "gemini_cli", "gemini_subscription"}` → `log_gemini_usage`.
+- **10 new tests in `tests/test_savings.py`** — `TestGeminiCost` (7 cases), `TestTriPlatformRealizedSavings` (2 cases), `TestGeminiPlatformDetection` (1 case). All pass. 57 total tests in test_savings.py now.
+
+### Fixed
+
+- **`scripts/verify-release.py` post-release verification** — was running pytest with only one `--ignore` (`test_agno_integration`), so it failed on tests `scripts/release.sh`'s gate deliberately excludes (`test_agent_loop`, `test_router`, `test_codex_routing`, etc.). Every release since v9.2.0 hit the same auto-rollback because of this divergence. Verify-release now uses the same exclude list as release.sh.
+
+### Migration notes
+
+Existing Gemini users with stale `~/.gemini/settings.json` hooks pointing to nonexistent `~/.llm-router/hooks/gemini-cli-*.py` scripts: re-run install, or manually:
+
+```bash
+mkdir -p ~/.gemini/hooks
+for h in auto-route enforce-route session-end session-start; do
+  ln -sf ~/.claude/hooks/llm-router-${h}.py ~/.gemini/hooks/llm-router-${h}.py
+done
+# Then update ~/.gemini/settings.json to use Gemini-native event names
+# (BeforeAgent, BeforeTool, AfterAgent, SessionStart) — see the v9.3.1
+# .gemini-plugin/ template for the canonical version.
+```
+
+### Known limitations
+
+- `install_hooks.py` doesn't yet auto-install to `~/.gemini/`. Manual setup required (or use `gemini hooks migrate` to import from `~/.claude/`).
+- Gemini pricing rates in `GEMINI_RATES_PER_M` use placeholder values from Google's public docs; verify before relying on dollar values.
+- Tri-platform aggregation in `get_realized_savings` doesn't yet include Perplexity, Groq, or other API providers — those still go through the legacy `usage` table.
+
 ## v9.3.0 - Codex CLI full parity: routing + cost + dashboard (2026-05-27)
 
 ### Added

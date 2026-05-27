@@ -158,6 +158,27 @@ MIGRATE_ADD_CODEX_USAGE_TABLE = [
 Schema kept symmetric with claude_usage so dashboard queries can UNION cleanly."""
 
 
+MIGRATE_ADD_GEMINI_USAGE_TABLE = [
+    """CREATE TABLE IF NOT EXISTS gemini_usage (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        timestamp TEXT DEFAULT (datetime('now')),
+        model TEXT NOT NULL,
+        tokens_used INTEGER NOT NULL,
+        complexity TEXT NOT NULL,
+        cost_saved_usd REAL NOT NULL DEFAULT 0,
+        time_saved_sec REAL NOT NULL DEFAULT 0,
+        input_tokens INTEGER NOT NULL DEFAULT 0,
+        output_tokens INTEGER NOT NULL DEFAULT 0,
+        cache_creation_input_tokens INTEGER NOT NULL DEFAULT 0,
+        cache_read_input_tokens INTEGER NOT NULL DEFAULT 0,
+        routing_overhead_usd REAL NOT NULL DEFAULT 0.0
+    )""",
+    "CREATE INDEX IF NOT EXISTS idx_gemini_usage_ts ON gemini_usage(timestamp)",
+]
+"""v9.3.1 — Gemini CLI session token consumption + savings, parallel to
+claude_usage and codex_usage. Same symmetric schema."""
+
+
 MIGRATE_USAGE_ROUTING_OVERHEAD = [
     "ALTER TABLE claude_usage ADD COLUMN routing_overhead_usd REAL NOT NULL DEFAULT 0.0",
     "ALTER TABLE usage ADD COLUMN routing_overhead_usd REAL NOT NULL DEFAULT 0.0",
@@ -496,6 +517,7 @@ async def _get_db() -> aiosqlite.Connection:
     all_migrations = (
         MIGRATE_CLAUDE_USAGE_CACHE_TOKENS
         + MIGRATE_ADD_CODEX_USAGE_TABLE
+        + MIGRATE_ADD_GEMINI_USAGE_TABLE
         + MIGRATE_USAGE_ROUTING_OVERHEAD
         + MIGRATE_CLAUDE_USAGE_ADD_SAVINGS
         + MIGRATE_ROUTING_DECISIONS_ADD_FEEDBACK
@@ -1224,6 +1246,66 @@ def _get_codex_baseline_for_task(task_type: str | None, complexity: str | None) 
     return "gpt-5.4"
 
 
+# v9.3.1 — Google AI public per-million-token rates for Gemini models commonly
+# invoked from Gemini CLI. Keep in sync with https://ai.google.dev/pricing.
+# Cache rates use Google's documented context-caching discount where applicable.
+# All values $/Mtok. NOTE: verify against current pricing before each release.
+GEMINI_RATES_PER_M: dict[str, dict[str, float]] = {
+    "gemini-2.5-flash": {"input": 0.30, "output": 2.50, "cache_read": 0.075, "cache_write": 0.375},
+    "gemini-2.5-pro":   {"input": 1.25, "output": 10.0, "cache_read": 0.31,  "cache_write": 1.5625},
+    "gemini-2.0-flash": {"input": 0.10, "output": 0.40, "cache_read": 0.025, "cache_write": 0.125},
+    "gemini-2.0-pro":   {"input": 1.25, "output": 5.00, "cache_read": 0.31,  "cache_write": 1.5625},
+    "gemini-1.5-flash": {"input": 0.075, "output": 0.30, "cache_read": 0.019, "cache_write": 0.0938},
+    "gemini-1.5-pro":   {"input": 1.25, "output": 5.00, "cache_read": 0.31, "cache_write": 1.5625},
+}
+
+
+def _gemini_cost(
+    model: str,
+    input_t: int,
+    output_t: int,
+    *,
+    cache_write_t: int = 0,
+    cache_read_t: int = 0,
+) -> float:
+    """Compute the $ cost of a Gemini API call using the 4-component formula.
+
+    Same shape as _claude_cost / _codex_cost but uses GEMINI_RATES_PER_M.
+    Unknown models return 0.0. v9.3.1.
+    """
+    rates = GEMINI_RATES_PER_M.get(model)
+    if rates is None:
+        return 0.0
+    return (
+        input_t       * rates["input"]       +
+        output_t      * rates["output"]      +
+        cache_write_t * rates["cache_write"] +
+        cache_read_t  * rates["cache_read"]
+    ) / 1_000_000
+
+
+def _get_gemini_baseline_for_task(task_type: str | None, complexity: str | None) -> str:
+    """Pick the realistic Gemini baseline — what would have been used without routing.
+
+    Gemini CLI defaults to gemini-2.5-pro for complex tasks, gemini-2.5-flash
+    for everything else. Simple queries could have gone to gemini-2.0-flash
+    if user explicitly picked the cheap path.
+
+    Env override: LLM_ROUTER_GEMINI_BASELINE (default: gemini-2.5-pro). v9.3.1.
+    """
+    import os
+    override = os.environ.get("LLM_ROUTER_GEMINI_BASELINE", "").strip().lower()
+    if override in GEMINI_RATES_PER_M:
+        return override
+    if task_type == "research":
+        return "gemini-2.5-pro"
+    if complexity == "complex":
+        return "gemini-2.5-pro"
+    if task_type in ("query",):
+        return "gemini-2.0-flash"
+    return "gemini-2.5-flash"
+
+
 def _claude_cost(
     model: str,
     input_t: int,
@@ -1511,6 +1593,104 @@ async def log_codex_usage(
     return {"cost_saved_usd": cost_saved, "time_saved_sec": time_saved}
 
 
+async def log_gemini_usage(
+    model: str,
+    tokens_used: int,
+    complexity: str,
+    *,
+    task_type: str | None = None,
+    input_tokens: int = 0,
+    output_tokens: int = 0,
+    cache_creation_input_tokens: int = 0,
+    cache_read_input_tokens: int = 0,
+    routing_overhead_usd: float = 0.0,
+) -> dict:
+    """Log a Gemini CLI model invocation and its savings vs. the realistic baseline.
+
+    Parallel to log_claude_usage / log_codex_usage. Writes to gemini_usage
+    table, uses GEMINI_RATES_PER_M / _get_gemini_baseline_for_task. v9.3.1.
+
+    Returns:
+        Dict with cost_saved_usd (net) and time_saved_sec (net).
+    """
+    import sys as _sys
+    if "pytest" in _sys.modules:
+        config = get_config()
+        prod_path = Path.home() / ".llm-router" / "usage.db"
+        if str(config.llm_router_db_path) == str(prod_path):
+            raise RuntimeError(
+                "CRITICAL: log_gemini_usage is writing to production database in test context!"
+            )
+
+    if tokens_used == 0:
+        tokens_used = (input_tokens + output_tokens
+                       + cache_creation_input_tokens + cache_read_input_tokens)
+
+    baseline = _get_gemini_baseline_for_task(task_type, complexity)
+
+    sub_total = input_tokens + output_tokens + cache_creation_input_tokens + cache_read_input_tokens
+    if sub_total > 0:
+        actual_cost = _gemini_cost(
+            model, input_tokens, output_tokens,
+            cache_write_t=cache_creation_input_tokens,
+            cache_read_t=cache_read_input_tokens,
+        )
+        baseline_cost = _gemini_cost(
+            baseline, input_tokens, output_tokens,
+            cache_write_t=cache_creation_input_tokens,
+            cache_read_t=cache_read_input_tokens,
+        )
+        effective_tokens = sub_total
+    else:
+        rates_actual = GEMINI_RATES_PER_M.get(model, {})
+        rates_base = GEMINI_RATES_PER_M.get(baseline, GEMINI_RATES_PER_M["gemini-2.5-pro"])
+        actual_rate_avg = (rates_actual.get("input", 0) + rates_actual.get("output", 0)) / 2
+        base_rate_avg = (rates_base["input"] + rates_base["output"]) / 2
+        actual_cost = tokens_used * actual_rate_avg / 1_000_000
+        baseline_cost = tokens_used * base_rate_avg / 1_000_000
+        effective_tokens = tokens_used
+
+    gross_cost_saved = baseline_cost - actual_cost
+    cost_saved = gross_cost_saved - routing_overhead_usd
+
+    # Time savings: Gemini Flash ~250 tps, Pro ~80 tps based on rough latency reports
+    tps_map = {
+        "gemini-2.5-flash": 250.0, "gemini-2.0-flash": 280.0,
+        "gemini-1.5-flash": 280.0,
+        "gemini-2.5-pro": 80.0, "gemini-2.0-pro": 90.0, "gemini-1.5-pro": 90.0,
+    }
+    if effective_tokens > 0:
+        actual_time = effective_tokens / tps_map.get(model, 150.0)
+        baseline_time = effective_tokens / tps_map.get(baseline, 150.0)
+        time_saved = baseline_time - actual_time
+    else:
+        time_saved = 0.0
+
+    db = await _get_db()
+    try:
+        await db.execute(
+            "INSERT INTO gemini_usage ("
+            "  model, tokens_used, complexity,"
+            "  cost_saved_usd, time_saved_sec,"
+            "  input_tokens, output_tokens,"
+            "  cache_creation_input_tokens, cache_read_input_tokens,"
+            "  routing_overhead_usd"
+            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                model, tokens_used, complexity,
+                cost_saved, time_saved,
+                input_tokens, output_tokens,
+                cache_creation_input_tokens, cache_read_input_tokens,
+                routing_overhead_usd,
+            ),
+        )
+        await db.commit()
+    finally:
+        await db.close()
+
+    return {"cost_saved_usd": cost_saved, "time_saved_sec": time_saved}
+
+
 async def get_realized_savings(period: str = "today", *, platform: str = "all") -> dict:
     """Honest savings number: gross_saved - routing_overhead.
 
@@ -1518,12 +1698,12 @@ async def get_realized_savings(period: str = "today", *, platform: str = "all") 
     cost more money than it saved (small prompts where classifier
     latency exceeds the model-cost delta).
 
-    v9.3.0 — Added `platform` kwarg: "claude", "codex", or "all" (default).
-    "all" sums across both claude_usage and codex_usage tables.
+    v9.3.0/v9.3.1 — Added `platform` kwarg: "claude", "codex", "gemini",
+    or "all" (default). "all" sums across all three usage tables.
 
     Args:
         period: "today", "week", "month", or "all".
-        platform: "claude", "codex", or "all".
+        platform: "claude", "codex", "gemini", or "all".
 
     Returns:
         Dict with keys: gross_saved_usd, routing_overhead_usd, realized_saved_usd.
@@ -1567,11 +1747,19 @@ async def get_realized_savings(period: str = "today", *, platform: str = "all") 
                 "routing_overhead_usd": overhead,
                 "realized_saved_usd": gross - overhead,
             }
+        if platform == "gemini":
+            gross, overhead = await _query_table("gemini_usage")
+            return {
+                "gross_saved_usd": gross,
+                "routing_overhead_usd": overhead,
+                "realized_saved_usd": gross - overhead,
+            }
         # all
         claude_gross, claude_overhead = await _query_table("claude_usage")
         codex_gross, codex_overhead = await _query_table("codex_usage")
-        gross = claude_gross + codex_gross
-        overhead = claude_overhead + codex_overhead
+        gemini_gross, gemini_overhead = await _query_table("gemini_usage")
+        gross = claude_gross + codex_gross + gemini_gross
+        overhead = claude_overhead + codex_overhead + gemini_overhead
         return {
             "gross_saved_usd": gross,
             "routing_overhead_usd": overhead,
@@ -1586,6 +1774,11 @@ async def get_realized_savings(period: str = "today", *, platform: str = "all") 
                     "gross_saved_usd": codex_gross,
                     "routing_overhead_usd": codex_overhead,
                     "realized_saved_usd": codex_gross - codex_overhead,
+                },
+                "gemini": {
+                    "gross_saved_usd": gemini_gross,
+                    "routing_overhead_usd": gemini_overhead,
+                    "realized_saved_usd": gemini_gross - gemini_overhead,
                 },
             },
         }

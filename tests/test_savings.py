@@ -510,3 +510,119 @@ class TestDualPlatformRealizedSavings:
         result = await get_realized_savings(period="all", platform="codex")
         assert "by_platform" not in result  # single-platform doesn't include breakdown
         assert result["gross_saved_usd"] > 0
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# v9.3.1 — Gemini CLI parallel cost tracking
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestGeminiCost:
+    def test_gemini_cost_input_output_only(self):
+        from llm_router.cost import _gemini_cost
+        # gemini-2.5-flash: 1000 input × $0.30/Mtok + 500 output × $2.50/Mtok
+        # = (300 + 1250) / 1_000_000 = $0.00155
+        cost = _gemini_cost("gemini-2.5-flash", input_t=1000, output_t=500)
+        assert abs(cost - 0.00155) < 1e-7
+
+    def test_gemini_cost_with_cache_read(self):
+        from llm_router.cost import _gemini_cost
+        # 10_000 cache_read on gemini-2.5-pro = 10_000 × $0.31/Mtok = $0.0031
+        cost = _gemini_cost("gemini-2.5-pro", input_t=0, output_t=0, cache_read_t=10_000)
+        assert abs(cost - 0.0031) < 1e-6
+
+    def test_gemini_cost_unknown_model_zero(self):
+        from llm_router.cost import _gemini_cost
+        assert _gemini_cost("nonexistent-gemini", input_t=1000, output_t=500) == 0.0
+
+    def test_gemini_baseline_simple_query_is_flash(self):
+        from llm_router.cost import _get_gemini_baseline_for_task
+        assert _get_gemini_baseline_for_task("query", "simple") == "gemini-2.0-flash"
+
+    def test_gemini_baseline_moderate_code_is_25_flash(self):
+        from llm_router.cost import _get_gemini_baseline_for_task
+        assert _get_gemini_baseline_for_task("code", "moderate") == "gemini-2.5-flash"
+
+    def test_gemini_baseline_complex_is_pro(self):
+        from llm_router.cost import _get_gemini_baseline_for_task
+        assert _get_gemini_baseline_for_task("code", "complex") == "gemini-2.5-pro"
+
+    @pytest.mark.asyncio
+    async def test_log_gemini_usage_persists(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("LLM_ROUTER_DB_PATH", str(tmp_path / "test.db"))
+        from llm_router.cost import log_gemini_usage
+        await log_gemini_usage(
+            model="gemini-2.5-flash", tokens_used=0, complexity="moderate",
+            task_type="code", input_tokens=100, output_tokens=200,
+            cache_read_input_tokens=5000,
+        )
+        import aiosqlite
+        async with aiosqlite.connect(tmp_path / "test.db") as db:
+            cursor = await db.execute(
+                "SELECT model, input_tokens, output_tokens, cache_read_input_tokens "
+                "FROM gemini_usage ORDER BY id DESC LIMIT 1"
+            )
+            row = await cursor.fetchone()
+        assert row == ("gemini-2.5-flash", 100, 200, 5000)
+
+
+class TestTriPlatformRealizedSavings:
+    @pytest.mark.asyncio
+    async def test_realized_savings_all_sums_three_tables(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("LLM_ROUTER_DB_PATH", str(tmp_path / "test.db"))
+        from llm_router.cost import (
+            log_claude_usage, log_codex_usage, log_gemini_usage, get_realized_savings,
+        )
+        # Use complex task so each platform's cheap-model-vs-flagship-baseline has savings
+        await log_claude_usage(
+            "haiku", tokens_used=0, complexity="complex",
+            task_type="code", input_tokens=500, output_tokens=500,
+        )
+        await log_codex_usage(
+            "gpt-5-mini", tokens_used=0, complexity="complex",
+            task_type="code", input_tokens=500, output_tokens=500,
+        )
+        await log_gemini_usage(
+            "gemini-2.0-flash", tokens_used=0, complexity="complex",
+            task_type="code", input_tokens=500, output_tokens=500,
+        )
+        result = await get_realized_savings(period="all", platform="all")
+        assert "by_platform" in result
+        bp = result["by_platform"]
+        assert set(bp.keys()) == {"claude", "codex", "gemini"}
+        assert bp["claude"]["gross_saved_usd"] > 0
+        assert bp["codex"]["gross_saved_usd"] > 0
+        assert bp["gemini"]["gross_saved_usd"] > 0
+        assert result["gross_saved_usd"] == pytest.approx(
+            bp["claude"]["gross_saved_usd"]
+            + bp["codex"]["gross_saved_usd"]
+            + bp["gemini"]["gross_saved_usd"]
+        )
+
+    @pytest.mark.asyncio
+    async def test_realized_savings_gemini_only(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("LLM_ROUTER_DB_PATH", str(tmp_path / "test.db"))
+        from llm_router.cost import log_gemini_usage, get_realized_savings
+        await log_gemini_usage(
+            "gemini-2.0-flash", tokens_used=0, complexity="complex",
+            task_type="code", input_tokens=500, output_tokens=500,
+        )
+        result = await get_realized_savings(period="all", platform="gemini")
+        assert "by_platform" not in result
+        assert result["gross_saved_usd"] > 0
+
+
+class TestGeminiPlatformDetection:
+    """Sanity check that _is_gemini_session catches Gemini model prefixes."""
+    def test_gemini_25_pro_detected(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "_ar", "/Users/yali.pollak/Projects/llm-router/src/llm_router/hooks/auto-route.py"
+        )
+        m = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(m)
+        assert m._is_gemini_session({"model": "gemini-2.5-pro"})
+        assert m._is_gemini_session({"model": "gemini-2.0-flash"})
+        assert not m._is_gemini_session({"model": "claude-sonnet-4-6"})
+        assert not m._is_gemini_session({"model": "gpt-5.5"})
+        assert not m._is_gemini_session({"model": ""})

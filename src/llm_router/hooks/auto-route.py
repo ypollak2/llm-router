@@ -1588,6 +1588,7 @@ def _debug_log(msg: str) -> None:
 # hook_input["model"] and normalize the output key just-in-time.
 
 _OPENAI_MODEL_PREFIXES = ("gpt-", "o3", "o4", "o5", "codex-")
+_GEMINI_MODEL_PREFIXES = ("gemini-", "gemini/", "google/gemini")
 
 
 def _is_codex_session(hook_input: dict) -> bool:
@@ -1601,14 +1602,24 @@ def _is_codex_session(hook_input: dict) -> bool:
     return bool(model) and any(model.startswith(p) for p in _OPENAI_MODEL_PREFIXES)
 
 
-def _normalize_output_for_platform(output: dict, hook_input: dict) -> dict:
-    """In-place rename `contextForAgent` → `additionalContext` for Codex sessions.
+def _is_gemini_session(hook_input: dict) -> bool:
+    """Detect Gemini CLI sessions from the model field passed in hook input.
 
-    Codex's hookSpecificOutput schema rejects unknown fields. This must be
-    called just before json.dump so any high-priority context still reaches
-    the agent, just as the lower-priority additionalContext key Codex accepts.
+    Gemini CLI passes `gemini-*` model names (e.g. gemini-2.5-pro). v9.3.1.
     """
-    if not _is_codex_session(hook_input):
+    model = (hook_input.get("model") or "").lower()
+    return bool(model) and any(model.startswith(p) for p in _GEMINI_MODEL_PREFIXES)
+
+
+def _normalize_output_for_platform(output: dict, hook_input: dict) -> dict:
+    """In-place rename `contextForAgent` → `additionalContext` for non-Claude platforms.
+
+    Codex's hookSpecificOutput schema rejects unknown fields. Gemini accepts
+    `additionalContext` via its hookTranslator. Only Claude Code prefers
+    `contextForAgent` (higher priority). Single rename covers both Codex and
+    Gemini cases.
+    """
+    if not (_is_codex_session(hook_input) or _is_gemini_session(hook_input)):
         return output
     hso = output.get("hookSpecificOutput")
     if isinstance(hso, dict) and "contextForAgent" in hso:

@@ -1022,6 +1022,22 @@ async def _dispatch_model_loop(
                             )
                         except Exception as e:
                             log.debug("Failed to log codex_usage: %s", e)
+
+                    # v9.3.1 — Auto-log Gemini usage. Same shape, writes to gemini_usage.
+                    elif response.provider in {"gemini", "google", "google_subscription", "gemini_cli", "gemini_subscription"}:
+                        try:
+                            await cost.log_gemini_usage(
+                                model=response.model,
+                                tokens_used=0,
+                                complexity=classification_data.get("complexity", "moderate"),
+                                task_type=classification_data.get("task_type"),
+                                input_tokens=response.input_tokens,
+                                output_tokens=response.output_tokens,
+                                cache_creation_input_tokens=response.cache_creation_input_tokens,
+                                cache_read_input_tokens=response.cache_read_input_tokens,
+                            )
+                        except Exception as e:
+                            log.debug("Failed to log gemini_usage: %s", e)
                 except Exception as e:
                     log.warning("Failed to log routing decision: %s", e)
 

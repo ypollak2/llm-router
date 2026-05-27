@@ -1161,6 +1161,62 @@ def _format_complexity_breakdown(session_start: float) -> list[str]:
 
     return lines
 
+def _format_provider_section(table: str, title: str, emoji: str) -> list[str]:
+    """Generic renderer for a per-provider dashboard section.
+
+    Used by _format_codex_section (codex_usage) and _format_gemini_section
+    (gemini_usage). Stays invisible if the table has no rows for today.
+    v9.3.1.
+    """
+    if not os.path.exists(DB_PATH):
+        return []
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        if not conn.execute(
+            f"SELECT name FROM sqlite_master WHERE type='table' AND name='{table}'"
+        ).fetchone():
+            conn.close()
+            return []
+        cursor = conn.execute(
+            f"SELECT model, COUNT(*) as cnt, "
+            f"       COALESCE(SUM(input_tokens + output_tokens "
+            f"                    + cache_creation_input_tokens "
+            f"                    + cache_read_input_tokens), 0) AS tokens, "
+            f"       COALESCE(SUM(cost_saved_usd), 0) AS gross_saved, "
+            f"       COALESCE(SUM(routing_overhead_usd), 0) AS overhead "
+            f"FROM {table} "
+            f"WHERE date(timestamp, 'localtime') = date('now', 'localtime') "
+            f"GROUP BY model "
+            f"ORDER BY cnt DESC"
+        )
+        rows = cursor.fetchall()
+        conn.close()
+    except Exception:
+        return []
+    if not rows:
+        return []
+
+    lines: list[str] = [f"  {_BOLD}{emoji} {title} (today){_RESET}"]
+    total_calls = 0
+    total_tokens = 0
+    total_gross = 0.0
+    total_overhead = 0.0
+    for model, cnt, toks, gross, overhead in rows:
+        total_calls += cnt
+        total_tokens += toks
+        total_gross += gross or 0.0
+        total_overhead += overhead or 0.0
+        gross_tag = f"+${gross:.4f}" if gross > 0 else (f"-${-gross:.4f}" if gross < 0 else "$0.0000")
+        lines.append(f"    {model:<22} {cnt:>3}×  {toks:>6} tok  saved {gross_tag}")
+    realized = total_gross - total_overhead
+    lines.append(
+        f"    {total_calls} routed · {total_tokens} tok · "
+        f"gross ${total_gross:.4f} · overhead ${total_overhead:.4f} · "
+        f"realized ${realized:.4f}"
+    )
+    return lines
+
+
 def _format_codex_section() -> list[str]:
     """Render a compact Codex CLI session summary if codex_usage has rows.
 
@@ -1262,6 +1318,12 @@ def _format(tools: dict[str, dict], cc_rows: list[dict], free_rows: list[dict],
     if codex_lines:
         lines.append("")
         lines += codex_lines
+
+    # v9.3.1 — Gemini CLI parallel section. Same visibility rule.
+    gemini_lines = _format_provider_section("gemini_usage", "Gemini CLI", "🔶")
+    if gemini_lines:
+        lines.append("")
+        lines += gemini_lines
 
     if session_start is not None:
         routing_lines = _format_routing_logic(session_start)
