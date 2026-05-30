@@ -2,6 +2,35 @@
 
 **For releases v6.2 and earlier, see [CHANGELOG_ARCHIVE.md](docs/CHANGELOG_ARCHIVE.md).**
 
+## v9.4.0 - Savings persistence + statusline accuracy + README discoverability (2026-05-30)
+
+### Fixed
+
+- **DIRECT routing savings now persist live** — `auto-route.py` was answering prompts via `direct_executor` (Ollama / Gemini / OpenAI) without writing any record. `session-end.py`'s `_sync_import_savings_log()` had nothing to flush, so any session that relied entirely on DIRECT routing showed `$0.00 saved` in the dashboard. New `llm_router.hooks.savings_logger` module appends one JSONL record per successful DIRECT execution; `auto-route.py` calls it fire-and-forget after `DIRECT SUCCESS`.
+- **`usage` table now records `baseline_model` / `potential_cost_usd` / `saved_usd`** — these columns existed since v9.2.2 but `log_usage`'s INSERT never populated them. Every routed call appeared to save nothing. The savings math (`_claude_cost`, `_get_baseline_for_task`) was already in `cost.py` — this release wires it into the write path with the cache-aware 4-component formula.
+- **`cc-usage-track.py` redirected from orphan `llm_usage.db` to canonical `usage.db`** — this hook was the only remaining writer of a stub DB that nothing else read. Every Agent subagent call landed in the orphan, invisible to the dashboard. Now writes to the full schema with baseline + savings columns populated. Baseline picker: Explore / general-purpose → Haiku, everything else → Sonnet.
+- **Claude Code statusline shows live savings instead of `$0.00`** — `statusline-command.sh` only read the `usage` table with a hardcoded Opus baseline, so sessions driven by DIRECT routing showed nothing (DIRECT writes land in `savings_log.jsonl` and don't reach `usage` until session END). Now prefers the new `saved_usd` column when populated, falls back to the legacy Opus math for upgrader rows, and adds today's un-flushed `savings_log.jsonl` records to the live total.
+
+### Added
+
+- README: install CTA hoisted above the fold (`pip install llm-routing` block + "Works with Claude Code, Codex, Gemini CLI — no API keys required on Claude Pro/Max" tagline), collapsible Table of Contents covering 17 sections, Star History chart, **Activity** section embedding the Repobeats weekly contribution heatmap, GitHub Discussions badge in the header and footer.
+- `.github/FUNDING.yml` so the GitHub sponsor button shows on the repo page (sponsor: `ypollak2`).
+
+### Migration
+
+- Users with an existing `~/.llm-router/llm_usage.db` file can safely delete it manually — nothing reads or writes to it anymore:
+
+  ```bash
+  rm ~/.llm-router/llm_usage.db
+  ```
+
+- Historical `usage` table rows keep `potential_cost_usd = saved_usd = 0.0` (no retroactive backfill). Only INSERTs after upgrading benefit from the new accurate baseline math.
+
+### Tests
+
+- +24 tests across `tests/test_savings_logger.py`, `tests/test_cost.py`, `tests/test_cc_usage_track.py`, `tests/test_statusline_savings.py`.
+- Full suite: **1977 passed, 0 failed**.
+
 ## v9.3.2 - Cursor IDE integration (MCP + rules + dashboard tool) (2026-05-27)
 
 ### Added
