@@ -597,12 +597,27 @@ async def log_usage(
     try:
         # Local providers (ollama, codex) are free — override any calculated cost
         cost_usd = 0.0 if response.provider in {"ollama", "codex", "gemini_cli"} else response.cost_usd
-        
+
+        # v9.4.0: compute counterfactual baseline so the dashboard's
+        # realized-savings metric has data. Previously baseline_model was
+        # NULL and potential_cost_usd/saved_usd defaulted to 0.0, so every
+        # routed call appeared to save nothing.
+        baseline_model = _get_baseline_for_task(task_type.value, complexity)
+        potential_cost_usd = _claude_cost(
+            baseline_model,
+            response.input_tokens,
+            response.output_tokens,
+            cache_write_t=response.cache_creation_input_tokens,
+            cache_read_t=response.cache_read_input_tokens,
+        )
+        saved_usd = potential_cost_usd - cost_usd
+
         await db.execute(
             """INSERT INTO usage (model, provider, task_type, profile,
                input_tokens, output_tokens, cost_usd, latency_ms, success,
-               user_id, project_id, correlation_id, complexity)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               user_id, project_id, correlation_id, complexity,
+               baseline_model, potential_cost_usd, saved_usd)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 response.model,
                 response.provider,
@@ -617,6 +632,9 @@ async def log_usage(
                 project_id or None,
                 correlation_id,
                 complexity,
+                baseline_model,
+                potential_cost_usd,
+                saved_usd,
             ),
         )
         await db.commit()

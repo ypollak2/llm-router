@@ -364,3 +364,130 @@ async def test_get_savings_by_task_type(temp_db):
     task_types = {r["task_type"] for r in result[:2]}
     assert "code" in task_types
     assert "analyze" in task_types
+
+
+# ── v9.4.0: log_usage must populate baseline_model / potential_cost_usd / saved_usd ──
+
+async def _last_usage_row(temp_db) -> dict:
+    """Read the most recent row from the usage table as a dict."""
+    import aiosqlite
+
+    async with aiosqlite.connect(temp_db) as conn:
+        conn.row_factory = aiosqlite.Row
+        cur = await conn.execute(
+            "SELECT baseline_model, potential_cost_usd, saved_usd, cost_usd, "
+            "input_tokens, output_tokens FROM usage ORDER BY id DESC LIMIT 1"
+        )
+        row = await cur.fetchone()
+    return dict(row) if row else {}
+
+
+@pytest.mark.asyncio
+async def test_log_usage_populates_baseline_columns_for_paid_provider(temp_db):
+    """A paid Gemini call must record baseline_model, potential_cost_usd, saved_usd.
+
+    Pre-v9.4.0 these columns were always 0.0 / NULL because log_usage's INSERT
+    only wrote cost_usd. The dashboard's realized-savings metric needs them
+    populated to compare actual vs counterfactual baseline.
+    """
+    resp = LLMResponse(
+        content="x",
+        model="gemini/gemini-2.5-flash",
+        input_tokens=1000,
+        output_tokens=500,
+        cost_usd=0.000225,
+        latency_ms=400.0,
+        provider="gemini",
+    )
+    await cost.log_usage(
+        resp, TaskType.CODE, RoutingProfile.BALANCED, complexity="moderate"
+    )
+
+    row = await _last_usage_row(temp_db)
+    assert row["baseline_model"], "baseline_model must not be NULL/empty"
+    assert row["potential_cost_usd"] > 0.0, "Sonnet baseline cost must be positive"
+    # saved = potential − actual (allow tiny float tolerance)
+    expected = row["potential_cost_usd"] - row["cost_usd"]
+    assert abs(row["saved_usd"] - expected) < 1e-9
+
+
+@pytest.mark.asyncio
+async def test_log_usage_ollama_zero_cost_full_baseline_savings(temp_db):
+    """Local Ollama (cost_usd=0) credits the FULL baseline cost as savings."""
+    resp = LLMResponse(
+        content="x",
+        model="ollama/qwen3.5:latest",
+        input_tokens=2000,
+        output_tokens=400,
+        cost_usd=0.0,
+        latency_ms=6500.0,
+        provider="ollama",
+    )
+    await cost.log_usage(
+        resp, TaskType.CODE, RoutingProfile.BUDGET, complexity="moderate"
+    )
+
+    row = await _last_usage_row(temp_db)
+    assert row["cost_usd"] == 0.0
+    assert row["potential_cost_usd"] > 0.0
+    assert row["saved_usd"] == row["potential_cost_usd"]
+
+
+@pytest.mark.asyncio
+async def test_log_usage_baseline_picker_haiku_for_simple_query(temp_db):
+    """Simple query tasks should use haiku as baseline, not Sonnet/Opus."""
+    resp = LLMResponse(
+        content="x",
+        model="ollama/qwen3.5:latest",
+        input_tokens=100,
+        output_tokens=50,
+        cost_usd=0.0,
+        latency_ms=500.0,
+        provider="ollama",
+    )
+    await cost.log_usage(
+        resp, TaskType.QUERY, RoutingProfile.BUDGET, complexity="simple"
+    )
+
+    row = await _last_usage_row(temp_db)
+    assert row["baseline_model"] == "haiku"
+
+
+@pytest.mark.asyncio
+async def test_log_usage_baseline_picker_opus_for_complex(temp_db):
+    """Complex tasks should use opus as baseline."""
+    resp = LLMResponse(
+        content="x",
+        model="openai/o3",
+        input_tokens=1000,
+        output_tokens=2000,
+        cost_usd=0.5,
+        latency_ms=20000.0,
+        provider="openai",
+    )
+    await cost.log_usage(
+        resp, TaskType.CODE, RoutingProfile.PREMIUM, complexity="complex"
+    )
+
+    row = await _last_usage_row(temp_db)
+    assert row["baseline_model"] == "opus"
+
+
+@pytest.mark.asyncio
+async def test_log_usage_unknown_baseline_still_writes_row(temp_db):
+    """Unknown / missing complexity must not crash the INSERT — defaults apply."""
+    resp = LLMResponse(
+        content="x",
+        model="gemini/gemini-2.5-flash",
+        input_tokens=100,
+        output_tokens=50,
+        cost_usd=0.00001,
+        latency_ms=200.0,
+        provider="gemini",
+    )
+    # No complexity kwarg → defaults to "moderate" in log_usage signature
+    await cost.log_usage(resp, TaskType.GENERATE, RoutingProfile.BALANCED)
+
+    row = await _last_usage_row(temp_db)
+    assert row, "row must exist"
+    assert row["baseline_model"]
