@@ -21,6 +21,27 @@
   <a href="https://github.com/ypollak2/llm-router/stargazers"><img src="https://img.shields.io/github/stars/ypollak2/llm-router?style=flat-square&color=F59E0B&v=2" alt="Stars"></a>
   <a href="https://pypi.org/project/llm-routing/"><img src="https://img.shields.io/badge/python-3.10+-3572A5?style=flat-square" alt="Python"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-10B981?style=flat-square" alt="License"></a>
+  <a href="https://github.com/ypollak2/llm-router/discussions"><img src="https://img.shields.io/github/discussions/ypollak2/llm-router?style=flat-square&color=8B5CF6&label=discussions" alt="Discussions"></a>
+</p>
+
+<p align="center">
+  <strong>Install in 30 seconds</strong>
+</p>
+
+<p align="center">
+
+```bash
+pip install llm-routing
+```
+
+</p>
+
+<p align="center">
+  <sub>Works with Claude Code, Codex, and Gemini CLI · No API keys required on Claude Pro/Max</sub>
+</p>
+
+<p align="center">
+  <strong>Local-first.</strong> No hosted proxy. No account required.
 </p>
 
 <p align="center">
@@ -33,9 +54,29 @@
   </a>
 </p>
 
-<p align="center">
-  <strong>Local-first.</strong> No hosted proxy. No account required.
-</p>
+<details>
+<summary><b>📑 Table of Contents</b></summary>
+
+- [Why People Install This](#why-people-install-this)
+- [What You Get](#what-you-get)
+- [Quick Start](#quick-start)
+- [Example Routing](#example-routing)
+- [Works With](#works-with)
+- [How It Works](#how-it-works)
+- [What You Can Do](#what-you-can-do)
+- [Providers](#providers)
+- [Routing Policies](#routing-policies)
+- [MCP Tools (60)](#mcp-tools-60)
+- [Savings: How It Works](#savings-how-it-works)
+- [Trust, Privacy, and Local-First Design](#trust-privacy-and-local-first-design)
+- [Configuration](#configuration)
+- [Documentation](#documentation)
+- [Contributing](#contributing)
+- [Package Names](#package-names)
+- [Star History](#star-history)
+- [Activity](#activity)
+
+</details>
 
 ---
 
@@ -416,8 +457,34 @@ uv run ruff check src/ tests/   # Lint
 
 ---
 
+## Star History
+
 <p align="center">
-  <a href="https://github.com/ypollak2/llm-router/issues">Issues</a> · <a href="https://pypi.org/project/llm-routing/">PyPI</a> · <a href="CHANGELOG.md">Changelog</a>
+  <a href="https://star-history.com/#ypollak2/llm-router&Date">
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=ypollak2/llm-router&type=Date&theme=dark" />
+      <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=ypollak2/llm-router&type=Date" />
+      <img alt="Star history of ypollak2/llm-router" src="https://api.star-history.com/svg?repos=ypollak2/llm-router&type=Date" width="720" />
+    </picture>
+  </a>
+</p>
+
+<p align="center">
+  <sub>⭐ If llm-router saved you money, star the repo — it helps other developers discover it.</sub>
+</p>
+
+---
+
+## Activity
+
+<p align="center">
+  <img src="https://repobeats.axiom.co/api/embed/e44e82dd02f91546ec217fd8a5f98c97f2afd931.svg" alt="Repobeats analytics image" />
+</p>
+
+---
+
+<p align="center">
+  <a href="https://github.com/ypollak2/llm-router/issues">Issues</a> · <a href="https://github.com/ypollak2/llm-router/discussions">Discussions</a> · <a href="https://pypi.org/project/llm-routing/">PyPI</a> · <a href="CHANGELOG.md">Changelog</a>
 </p>
 
 <p align="center"><sub>MIT License</sub></p>
