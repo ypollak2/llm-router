@@ -616,8 +616,11 @@ class TestGeminiPlatformDetection:
     """Sanity check that _is_gemini_session catches Gemini model prefixes."""
     def test_gemini_25_pro_detected(self):
         import importlib.util
+
+        from tests.conftest import get_hook_path
+
         spec = importlib.util.spec_from_file_location(
-            "_ar", "/Users/yali.pollak/Projects/llm-router/src/llm_router/hooks/auto-route.py"
+            "_ar", str(get_hook_path("auto-route.py"))
         )
         m = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(m)
