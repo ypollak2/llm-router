@@ -1936,6 +1936,21 @@ def main() -> None:
                     f"model={_direct_result.model.provider}/{_direct_result.model.model} "
                     f"latency={_direct_result.latency_ms}ms"
                 )
+                # Persist savings — fire-and-forget; helper swallows all errors.
+                # Without this call, sessions that route exclusively to DIRECT
+                # providers (Ollama, Gemini, OpenAI) show $0.00 saved in the
+                # session-end summary because savings_log.jsonl never gets
+                # appended to.
+                try:
+                    from llm_router.hooks.savings_logger import log_direct_savings
+                    log_direct_savings(
+                        result=_direct_result,
+                        task_type=task_type,
+                        complexity=complexity,
+                        session_id=session_id,
+                    )
+                except Exception:
+                    pass
                 # Choose render mode: "echo" passes through Claude for natural display,
                 # "block" uses zero-cost warning-styled display
                 from llm_router.hooks.response_formatter import (
