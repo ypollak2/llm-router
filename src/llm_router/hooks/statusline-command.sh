@@ -24,12 +24,69 @@ if [ -f "$USAGE_JSON" ]; then
     fi
 fi
 
-# -- Today's savings from DB --
+# -- Today's savings (persisted in usage.db + pending in savings_log.jsonl) --
+#
+# v9.4.0: Two changes from prior behaviour.
+#   1. Prefer the saved_usd column (populated by cost.py v9.4.0+ with the
+#      complexity-aware baseline). Fall back to the legacy Opus-token math
+#      for older rows where saved_usd is still 0.0.
+#   2. Add un-flushed savings from savings_log.jsonl. auto-route's DIRECT
+#      execution appends a JSONL record per successful routing; those records
+#      only land in the usage/savings_stats tables when the session ends.
+#      Without this, a session driven entirely by DIRECT routing displayed
+#      $0.00 saved live, even with real savings accumulating.
+today_saved=0
 if [ -f "$USAGE_DB" ]; then
     today_start=$(date -u +"%Y-%m-%d 00:00:00")
-    saved=$(sqlite3 "$USAGE_DB" "SELECT COALESCE(SUM(CASE WHEN provider IN ('ollama','codex','gemini_cli') THEN (COALESCE(input_tokens,0)*15.0 + COALESCE(output_tokens,0)*75.0)/1000000.0 ELSE 0 END), 0) FROM usage WHERE timestamp >= '$today_start' AND success=1;" 2>/dev/null)
-    if [ -n "$saved" ] && [ "$saved" != "0" ] && [ "$saved" != "0.0" ]; then
-        parts+=("\$$(printf '%.2f' "$saved") saved")
+    persisted=$(sqlite3 "$USAGE_DB" "
+        SELECT COALESCE(SUM(
+            CASE
+                WHEN COALESCE(saved_usd, 0) > 0 THEN saved_usd
+                WHEN provider IN ('ollama','codex','gemini_cli')
+                    THEN (COALESCE(input_tokens,0)*15.0 + COALESCE(output_tokens,0)*75.0)/1000000.0
+                ELSE 0
+            END
+        ), 0)
+        FROM usage
+        WHERE timestamp >= '$today_start' AND success=1;
+    " 2>/dev/null)
+    if [ -n "$persisted" ]; then
+        today_saved=$persisted
+    fi
+fi
+
+SAVINGS_LOG="$STATE_DIR/savings_log.jsonl"
+if [ -f "$SAVINGS_LOG" ]; then
+    pending=$(python3 -c "
+import json, datetime
+today = datetime.datetime.utcnow().strftime('%Y-%m-%d')
+total = 0.0
+try:
+    with open('$SAVINGS_LOG') as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+                ts = rec.get('timestamp', '')
+                if ts.startswith(today):
+                    total += float(rec.get('estimated_saved', 0))
+            except Exception:
+                pass
+except OSError:
+    pass
+print(f'{total:.6f}')
+" 2>/dev/null)
+    if [ -n "$pending" ]; then
+        today_saved=$(python3 -c "print(float('$today_saved') + float('$pending'))" 2>/dev/null)
+    fi
+fi
+
+if [ -n "$today_saved" ] && [ "$today_saved" != "0" ] && [ "$today_saved" != "0.0" ]; then
+    formatted=$(printf '%.2f' "$today_saved" 2>/dev/null)
+    if [ "$formatted" != "0.00" ]; then
+        parts+=("\$${formatted} saved")
     fi
 fi
 
