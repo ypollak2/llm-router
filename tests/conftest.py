@@ -56,6 +56,10 @@ def temp_db(tmp_path, monkeypatch):
     monkeypatch.setenv("LLM_ROUTER_DB_PATH", str(db_path))
     monkeypatch.setenv("GEMINI_API_KEY", "test-key")
     monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    # Allow stub LLMResponse shapes (100/50/$0.003, 100/100/$0.001) to be
+    # written. The stub guard in cost.log_usage blocks these shapes by default
+    # to stop unisolated tests from polluting ~/.llm-router/usage.db.
+    monkeypatch.setenv("LLM_ROUTER_ALLOW_STUBS", "1")
     
     # Reset singleton so config reads the new env vars
     import llm_router.config as config_module

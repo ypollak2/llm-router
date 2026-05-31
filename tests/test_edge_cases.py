@@ -274,6 +274,9 @@ class TestHealthEdgeCases:
 @pytest.mark.requires_api_keys
 class TestRouterEdgeCases:
     async def test_empty_model_chain_raises(self):
+        # Intentionally NOT using temp_db: this test relies on the absence of
+        # test API keys to keep available_providers empty. The stub guard in
+        # cost.log_usage prevents the leak that temp_db would otherwise block.
         """No available models should raise ValueError, not crash."""
         with (
             patch("llm_router.router.get_config") as mock_config,
@@ -293,6 +296,7 @@ class TestRouterEdgeCases:
                     await route_and_call(TaskType.QUERY, "test")
 
     async def test_all_providers_unhealthy_skips_to_error(self):
+        # Intentionally NOT using temp_db: see note on test_empty_model_chain_raises.
         """When all providers are unhealthy, router should raise RuntimeError."""
         tracker = HealthTracker()
         # Make the only provider unhealthy

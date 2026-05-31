@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from pathlib import Path
 
 import aiosqlite
@@ -592,6 +593,20 @@ async def log_usage(
             trace for the same routing call (first 8 chars of UUID4).
         complexity: Task complexity level (simple, moderate, complex).
     """
+    # Stub-detection guard: reject the exact synthetic shapes used in test
+    # LLMResponse fixtures (input_tokens=100, output_tokens∈{50,100},
+    # cost_usd∈{0.001,0.003}) so unisolated tests can never pollute the real
+    # ~/.llm-router/usage.db. Tests that legitimately need to write stub rows
+    # must set LLM_ROUTER_ALLOW_STUBS=1 or use the temp_db fixture (which
+    # repoints LLM_ROUTER_DB_PATH and is unaffected by this guard).
+    if (
+        os.environ.get("LLM_ROUTER_ALLOW_STUBS") != "1"
+        and response.input_tokens == 100
+        and response.output_tokens in (50, 100)
+        and response.cost_usd in (0.001, 0.003)
+    ):
+        return
+
     user_id, project_id = _get_team_identity()
     db = await _get_db()
     try:

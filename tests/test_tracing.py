@@ -105,7 +105,7 @@ async def test_classify_complexity_emits_span(mock_env):
 
 
 @pytest.mark.asyncio
-async def test_route_and_call_emits_route_and_provider_spans(mock_env, mock_acompletion):
+async def test_route_and_call_emits_route_and_provider_spans(temp_db, mock_env, mock_acompletion):
     tracer = FakeTracer()
 
     with patch("llm_router.tracing.get_tracer", return_value=tracer):

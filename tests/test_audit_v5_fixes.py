@@ -20,7 +20,7 @@ class TestBudgetEnforcement:
     """v5.3.0: Budget enforcement with _pending_spend tracking."""
 
     @pytest.mark.asyncio
-    async def test_monthly_budget_exceeded_raises_immediately(self):
+    async def test_monthly_budget_exceeded_raises_immediately(self, temp_db):
         """Exceeding monthly budget should raise BudgetExceededError immediately."""
         with patch('llm_router.cost.get_monthly_spend', new_callable=AsyncMock) as mock_spend:
             with patch('llm_router.cost.get_daily_spend', new_callable=AsyncMock) as mock_daily:
@@ -39,7 +39,7 @@ class TestBudgetEnforcement:
                         await route_and_call(TaskType.QUERY, "test")
 
     @pytest.mark.asyncio
-    async def test_daily_budget_exceeded_raises_immediately(self):
+    async def test_daily_budget_exceeded_raises_immediately(self, temp_db):
         """Exceeding daily budget should raise BudgetExceededError immediately."""
         with patch('llm_router.cost.get_monthly_spend', new_callable=AsyncMock) as mock_spend:
             with patch('llm_router.cost.get_daily_spend', new_callable=AsyncMock) as mock_daily:
@@ -58,7 +58,7 @@ class TestBudgetEnforcement:
                         await route_and_call(TaskType.QUERY, "test")
 
     @pytest.mark.asyncio
-    async def test_budget_exceeded_cleanup_releases_reservation(self):
+    async def test_budget_exceeded_cleanup_releases_reservation(self, temp_db):
         """When budget is exceeded, the reserved spend should be cleaned up."""
         with patch('llm_router.cost.get_monthly_spend', new_callable=AsyncMock) as mock_spend:
             with patch('llm_router.cost.get_daily_spend', new_callable=AsyncMock) as mock_daily:
@@ -86,7 +86,7 @@ class TestEmergencyFallbackChain:
     """v5.3.0: Emergency BUDGET fallback when primary chain exhausts."""
 
     @pytest.mark.asyncio
-    async def test_all_models_fail_returns_error_with_context(self):
+    async def test_all_models_fail_returns_error_with_context(self, temp_db):
         """When all models fail, error should include helpful context."""
         with patch('llm_router.cost.get_monthly_spend', new_callable=AsyncMock):
             with patch('llm_router.cost.get_daily_spend', new_callable=AsyncMock):
@@ -112,7 +112,7 @@ class TestEmergencyFallbackChain:
                                     await route_and_call(TaskType.QUERY, "test")
 
     @pytest.mark.asyncio
-    async def test_media_task_types_skip_fallback(self):
+    async def test_media_task_types_skip_fallback(self, temp_db):
         """Media tasks should not attempt emergency fallback (not text-based)."""
         with patch('llm_router.cost.get_monthly_spend', new_callable=AsyncMock):
             with patch('llm_router.cost.get_daily_spend', new_callable=AsyncMock):
@@ -147,7 +147,7 @@ class TestCorrelationIDTracking:
     """v5.3.0: Correlation ID tracking for request tracing."""
 
     @pytest.mark.asyncio
-    async def test_correlation_id_passed_to_call_text(self):
+    async def test_correlation_id_passed_to_call_text(self, temp_db):
         """Correlation ID should be passed through to _call_text."""
         with patch('llm_router.cost.get_monthly_spend', new_callable=AsyncMock):
             with patch('llm_router.cost.get_daily_spend', new_callable=AsyncMock):
@@ -187,7 +187,7 @@ class TestCorrelationIDTracking:
                                 assert len(correlation_id) == 8  # UUID4 hex[:8]
 
     @pytest.mark.asyncio
-    async def test_correlation_id_logged_on_success(self):
+    async def test_correlation_id_logged_on_success(self, temp_db):
         """Correlation ID should be in routing_decision logs."""
         with patch('llm_router.cost.get_monthly_spend', new_callable=AsyncMock):
             with patch('llm_router.cost.get_daily_spend', new_callable=AsyncMock):
@@ -225,7 +225,7 @@ class TestInvalidComplexityHandling:
     """v5.3.0: Error handling for invalid complexity hints."""
 
     @pytest.mark.asyncio
-    async def test_invalid_complexity_hint_falls_back_to_default(self):
+    async def test_invalid_complexity_hint_falls_back_to_default(self, temp_db):
         """Invalid complexity_hint should be handled gracefully."""
         with patch('llm_router.cost.get_monthly_spend', new_callable=AsyncMock):
             with patch('llm_router.cost.get_daily_spend', new_callable=AsyncMock):
@@ -267,7 +267,7 @@ class TestInvalidComplexityHandling:
                                 mock_chain.assert_called()
 
     @pytest.mark.asyncio
-    async def test_none_complexity_hint_uses_heuristic(self):
+    async def test_none_complexity_hint_uses_heuristic(self, temp_db):
         """None complexity_hint should use prompt length heuristic."""
         with patch('llm_router.cost.get_monthly_spend', new_callable=AsyncMock):
             with patch('llm_router.cost.get_daily_spend', new_callable=AsyncMock):

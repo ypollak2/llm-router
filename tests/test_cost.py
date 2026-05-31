@@ -33,6 +33,73 @@ async def test_empty_usage(temp_db):
 
 
 @pytest.mark.asyncio
+async def test_log_usage_rejects_stub_shapes_when_not_allowed(temp_db, monkeypatch):
+    """Regression: unisolated tests must not pollute ~/.llm-router/usage.db.
+
+    The guard in log_usage rejects LLMResponse instances matching the exact
+    synthetic shape used in test fixtures (100/50/$0.003, 100/100/$0.001)
+    unless LLM_ROUTER_ALLOW_STUBS=1. The temp_db fixture sets that env var,
+    so we must explicitly unset it here to exercise the guard.
+    """
+    monkeypatch.delenv("LLM_ROUTER_ALLOW_STUBS", raising=False)
+
+    for in_t, out_t, cost_v in [(100, 50, 0.003), (100, 100, 0.001), (100, 50, 0.001), (100, 100, 0.003)]:
+        resp = LLMResponse(
+            content="stub",
+            model="openai/gpt-4o-mini",
+            input_tokens=in_t,
+            output_tokens=out_t,
+            cost_usd=cost_v,
+            latency_ms=50.0,
+            provider="openai",
+        )
+        await cost.log_usage(resp, TaskType.QUERY, RoutingProfile.BUDGET)
+
+    summary = await cost.get_usage_summary("all")
+    assert "No usage data" in summary, "Stub shapes leaked into the DB despite guard"
+
+
+@pytest.mark.asyncio
+async def test_log_usage_allows_stub_shapes_in_temp_db(temp_db):
+    """Stub shapes are allowed when LLM_ROUTER_ALLOW_STUBS=1 (set by temp_db)."""
+    resp = LLMResponse(
+        content="ok",
+        model="openai/gpt-4o-mini",
+        input_tokens=100,
+        output_tokens=50,
+        cost_usd=0.003,
+        latency_ms=50.0,
+        provider="openai",
+    )
+    await cost.log_usage(resp, TaskType.QUERY, RoutingProfile.BUDGET)
+
+    summary = await cost.get_usage_summary("all")
+    assert "1" in summary
+    assert "gpt-4o-mini" in summary
+
+
+@pytest.mark.asyncio
+async def test_log_usage_allows_real_shapes_when_guard_active(temp_db, monkeypatch):
+    """Real (non-stub) token shapes pass the guard even without the override."""
+    monkeypatch.delenv("LLM_ROUTER_ALLOW_STUBS", raising=False)
+
+    resp = LLMResponse(
+        content="real response",
+        model="openai/gpt-4o",
+        input_tokens=347,  # not 100
+        output_tokens=89,  # not 50/100
+        cost_usd=0.00412,  # not 0.001/0.003
+        latency_ms=500.0,
+        provider="openai",
+    )
+    await cost.log_usage(resp, TaskType.QUERY, RoutingProfile.BALANCED)
+
+    summary = await cost.get_usage_summary("all")
+    assert "1" in summary
+    assert "gpt-4o" in summary
+
+
+@pytest.mark.asyncio
 async def test_multiple_entries(temp_db):
     for i in range(3):
         resp = LLMResponse(

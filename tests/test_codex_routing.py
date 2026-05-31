@@ -38,7 +38,7 @@ def _captured_chain(mock_acompletion) -> list[str]:
 @pytest.mark.asyncio
 @pytest.mark.slow
 async def test_code_task_codex_before_paid_externals_subscription_mode(
-    mock_env, monkeypatch
+    temp_db, mock_env, monkeypatch
 ):
     """In subscription mode (no Claude API key), CODE task must try Codex before
     paid external models like GPT-4o and Gemini Pro.
@@ -79,7 +79,7 @@ async def test_code_task_codex_before_paid_externals_subscription_mode(
 @pytest.mark.asyncio
 @pytest.mark.requires_codex
 async def test_code_task_codex_after_first_claude_not_last(
-    mock_env, monkeypatch
+    temp_db, mock_env, monkeypatch
 ):
     """When Claude IS available, CODE task should inject Codex after FIRST Claude
     model, not after the last one. This ensures Codex beats paid externals
@@ -139,7 +139,7 @@ async def test_code_task_codex_after_first_claude_not_last(
 @pytest.mark.asyncio
 @pytest.mark.slow
 async def test_analyze_task_codex_before_paid_externals_subscription_mode(
-    mock_env, monkeypatch
+    temp_db, mock_env, monkeypatch
 ):
     """In subscription mode, ANALYZE task tries Codex BEFORE paid externals.
 
@@ -178,7 +178,7 @@ async def test_analyze_task_codex_before_paid_externals_subscription_mode(
 @pytest.mark.asyncio
 @pytest.mark.slow
 async def test_query_task_codex_before_paid_externals_subscription_mode(
-    mock_env, monkeypatch
+    temp_db, mock_env, monkeypatch
 ):
     """QUERY tasks now use the same prepaid-first ordering as CODE/ANALYZE.
 
@@ -212,7 +212,7 @@ async def test_query_task_codex_before_paid_externals_subscription_mode(
 
 @pytest.mark.asyncio
 async def test_codex_at_front_when_pressure_very_high(
-    mock_env, monkeypatch
+    temp_db, mock_env, monkeypatch
 ):
     """At pressure ≥ 0.95, Codex should be tried first (before Claude) to
     preserve any remaining subscription capacity.
