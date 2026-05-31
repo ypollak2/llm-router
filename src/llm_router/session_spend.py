@@ -97,6 +97,17 @@ class SessionSpend:
         cost_usd: float | None = None,
     ) -> None:
         """Record one routed call. If cost_usd is unknown, it is estimated."""
+        # Stub-detection guard: mirrors cost.log_usage. Reject the exact
+        # synthetic shapes used in test LLMResponse fixtures so unisolated
+        # tests can never pollute ~/.llm-router/session_spend.json.
+        if (
+            os.environ.get("LLM_ROUTER_ALLOW_STUBS") != "1"
+            and input_tokens == 100
+            and output_tokens in (50, 100)
+            and cost_usd in (0.001, 0.003)
+        ):
+            return
+
         if cost_usd is None:
             cost_usd = _estimate_cost(model, input_tokens, output_tokens)
 
