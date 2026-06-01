@@ -101,11 +101,17 @@ def query_last_prompt_model(db_path: str | Path | None = None) -> str | None:
 
 
 def query_last_prompt_calls(db_path: str | Path | None = None,
-                            window_sec: int = 30) -> list[dict]:
+                            window_sec: int = 30,
+                            max_age_sec: int = 120) -> list[dict]:
     """Return all routing calls from the most recent prompt.
 
-    Groups calls within `window_sec` seconds of the latest call,
-    which captures all routing activity from a single user prompt.
+    Anchors the window on NOW, not on the latest row's timestamp. If the
+    latest row is older than `max_age_sec`, returns an empty list — the
+    panel must not present stale data as "current prompt activity."
+
+    `window_sec` controls how far back from NOW to collect rows. A single
+    user prompt typically fans out within a few seconds, so 30s is the
+    upper bound on plausible per-prompt activity.
 
     Returns: list of {model, provider, task_type, cost, in_tokens, out_tokens}
     """
@@ -114,23 +120,25 @@ def query_last_prompt_calls(db_path: str | Path | None = None,
         return []
     try:
         conn = sqlite3.connect(str(resolved))
-        # Find the timestamp of the most recent call
+        # Recency gate — anchored on NOW.
         latest = conn.execute(
-            "SELECT timestamp FROM usage "
+            "SELECT timestamp, "
+            "CAST((strftime('%s','now') - strftime('%s',timestamp)) AS INTEGER) AS age_sec "
+            "FROM usage "
             "WHERE success=1 AND model IS NOT NULL AND model != '?' "
             "ORDER BY timestamp DESC LIMIT 1",
         ).fetchone()
-        if not latest:
+        if not latest or latest[1] is None or latest[1] > max_age_sec:
             conn.close()
             return []
-        # Get all calls within window_sec of the latest
+        # Collect rows within the recent window from NOW.
         rows = conn.execute(
             "SELECT model, provider, task_type, cost_usd, input_tokens, output_tokens "
             "FROM usage "
             "WHERE success=1 AND model IS NOT NULL AND model != '?' "
-            "AND timestamp >= datetime(?, '-' || ? || ' seconds') "
+            "AND timestamp >= datetime('now', '-' || ? || ' seconds') "
             "ORDER BY timestamp DESC",
-            (latest[0], window_sec),
+            (window_sec,),
         ).fetchall()
         conn.close()
         return [

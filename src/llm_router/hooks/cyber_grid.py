@@ -506,6 +506,16 @@ def _build_models_panel(data: dict) -> Panel | None:
         content.append(f" {host_delta:+.1f}% quota", style=_DIM_GRAY)
         content.append("\n")
 
+    # Honesty: no recent routed calls. Show the host row plus a clear note
+    # rather than backfilling with stale rows from hours/days ago.
+    if not calls:
+        content.append(
+            "  no MCP routing this prompt — subscription handled it directly\n",
+            style=_DIM_GRAY,
+        )
+        return Panel(content, title="LAST PROMPT ROUTING", title_align="left",
+                     border_style=_ACCENT, padding=(0, 1))
+
     total_cost = sum(c["cost"] for c in calls)
     total_tokens = sum(c["in_tokens"] + c["out_tokens"] for c in calls)
 
