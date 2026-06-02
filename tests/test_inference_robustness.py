@@ -226,3 +226,81 @@ def test_safe_max_tokens_matrix(requested: int, model: str, expected: int) -> No
     from llm_router.inference_robustness import safe_max_tokens
 
     assert safe_max_tokens(requested, model) == expected
+
+
+class TestEmptyResponseError:
+    """EmptyResponseError signals a degenerate model output so the router's
+    existing exception handler falls through to the next model in the chain."""
+
+    def test_is_runtime_error_subclass(self) -> None:
+        from llm_router.inference_robustness import EmptyResponseError
+
+        assert issubclass(EmptyResponseError, RuntimeError)
+
+    def test_message_names_the_model(self) -> None:
+        from llm_router.inference_robustness import EmptyResponseError
+
+        try:
+            raise EmptyResponseError("model 'openai/gpt-4o' returned nothing")
+        except EmptyResponseError as exc:
+            assert "openai/gpt-4o" in str(exc)
+
+
+class TestEnsureNonEmptyContent:
+    """Helper used by providers.py after extract_content to surface a clear
+    failure signal when the model genuinely returned nothing useful."""
+
+    def test_non_empty_content_returns_unchanged(self) -> None:
+        from llm_router.inference_robustness import ensure_non_empty_content
+
+        out = ensure_non_empty_content("real answer", "openai/gpt-4o")
+        assert out == "real answer"
+
+    def test_empty_string_raises(self) -> None:
+        from llm_router.inference_robustness import (
+            EmptyResponseError,
+            ensure_non_empty_content,
+        )
+
+        with pytest.raises(EmptyResponseError) as exc_info:
+            ensure_non_empty_content("", "openai/gpt-4o")
+        assert "openai/gpt-4o" in str(exc_info.value)
+
+    def test_whitespace_only_raises(self) -> None:
+        from llm_router.inference_robustness import (
+            EmptyResponseError,
+            ensure_non_empty_content,
+        )
+
+        with pytest.raises(EmptyResponseError):
+            ensure_non_empty_content("   \n  \t  ", "anthropic/claude-sonnet-4-6")
+
+    def test_none_raises(self) -> None:
+        from llm_router.inference_robustness import (
+            EmptyResponseError,
+            ensure_non_empty_content,
+        )
+
+        with pytest.raises(EmptyResponseError):
+            ensure_non_empty_content(None, "gemini/gemini-2.5-flash")  # type: ignore[arg-type]
+
+    def test_error_message_mentions_router_fallback(self) -> None:
+        """Operators reading the error should understand routing semantics."""
+        from llm_router.inference_robustness import (
+            EmptyResponseError,
+            ensure_non_empty_content,
+        )
+
+        try:
+            ensure_non_empty_content("", "x/y")
+        except EmptyResponseError as exc:
+            msg = str(exc).lower()
+            assert "empty" in msg or "next" in msg or "fall" in msg, (
+                f"Error message should hint at routing fallback: {exc}"
+            )
+
+    def test_single_character_content_passes(self) -> None:
+        """A single non-whitespace character is a valid response."""
+        from llm_router.inference_robustness import ensure_non_empty_content
+
+        assert ensure_non_empty_content("a", "openai/gpt-4o") == "a"

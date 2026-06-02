@@ -8,13 +8,16 @@ introducing new failure modes.
 Currently in scope:
 - D.1 `extract_content` — fall back to `message.reasoning` when a thinking
   model leaves `message.content` empty (DeepSeek R1, qwen3 reasoning,
-  o1-family). See Plan 07 §D.1 and tests/test_inference_robustness.py.
+  o1-family). See Plan 07 §D.1.
 - D.2 `safe_max_tokens` — cap requested max_tokens at the model's known
   output limit. Prevents OpenAI silent truncation and Anthropic 400-errors
   when callers pass oversized values. See Plan 07 §D.2.
+- D.3 `ensure_non_empty_content` + ``EmptyResponseError`` — raise a clear
+  error when a model returns empty / whitespace-only content so the
+  router falls through to the next model in the chain instead of
+  silently returning an empty ``LLMResponse``. See Plan 07 §D.3.
 
 Deferred until a concrete need surfaces:
-- D.3 empty-response → success-flag coherence (lives in response_validation.py)
 - D.4 provider-quirk registry (Protocol)
 """
 
@@ -119,3 +122,37 @@ def safe_max_tokens(requested: int | None, model: str) -> int:
     if cap is None:
         return requested
     return min(requested, cap)
+
+
+class EmptyResponseError(RuntimeError):
+    """Raised when an LLM call yields no usable content.
+
+    Subclassing ``RuntimeError`` means the router's existing model-dispatch
+    loop catches it and falls through to the next model in the chain —
+    exactly the right semantics for a degenerate model output.
+
+    Plan 07 §D.3: silent empty responses used to surface as
+    ``LLMResponse(content="")`` and confused validators / downstream
+    consumers. Raising at the provider layer surfaces the failure
+    explicitly and routes around it.
+    """
+
+
+def ensure_non_empty_content(content: object, model: str) -> str:
+    """Validate that ``content`` is a non-whitespace string.
+
+    Returns ``content`` unchanged on success. Raises ``EmptyResponseError``
+    when the value is missing, not a string, or whitespace-only. The error
+    message names the model so operators can correlate with provider logs.
+
+    Designed to be called immediately after :func:`extract_content` in the
+    provider hot path — anything that gets past ``extract_content`` but is
+    still empty has genuinely no usable answer in either the ``content``
+    or ``reasoning`` channel.
+    """
+    if isinstance(content, str) and content.strip():
+        return content
+    raise EmptyResponseError(
+        f"Model {model!r} returned empty content. "
+        "Router will try the next model in the fallback chain."
+    )

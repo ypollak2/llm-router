@@ -18,7 +18,11 @@ from collections.abc import AsyncIterator
 import litellm
 
 from llm_router.config import get_config
-from llm_router.inference_robustness import extract_content, safe_max_tokens
+from llm_router.inference_robustness import (
+    ensure_non_empty_content,
+    extract_content,
+    safe_max_tokens,
+)
 from llm_router.prompt_cache import inject_cache_control
 from llm_router.types import LLMResponse
 
@@ -129,6 +133,10 @@ async def call_llm(
     elapsed_ms = (time.monotonic() - start) * 1000
 
     content = extract_content(response.choices[0].message)
+    # Plan 07 D.3: surface empty-content responses as a routing failure
+    # so the router falls through to the next model in the chain instead
+    # of silently returning an empty LLMResponse.
+    content = ensure_non_empty_content(content, model)
     usage = response.usage
 
     # LiteLLM provides cost calculation based on its internal pricing tables
