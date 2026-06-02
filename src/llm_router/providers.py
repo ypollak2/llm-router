@@ -18,6 +18,7 @@ from collections.abc import AsyncIterator
 import litellm
 
 from llm_router.config import get_config
+from llm_router.inference_robustness import extract_content
 from llm_router.prompt_cache import inject_cache_control
 from llm_router.types import LLMResponse
 
@@ -123,7 +124,7 @@ async def call_llm(
     response = await litellm.acompletion(**kwargs)
     elapsed_ms = (time.monotonic() - start) * 1000
 
-    content = response.choices[0].message.content or ""
+    content = extract_content(response.choices[0].message)
     usage = response.usage
 
     # LiteLLM provides cost calculation based on its internal pricing tables
