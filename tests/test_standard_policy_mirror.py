@@ -70,6 +70,29 @@ class TestRoutingTableEquivalence:
         )
 
 
+class TestPhase1b2LoaderInvariant:
+    """Plan 07 Phase 1b.2: ROUTING_TABLE is hydrated from standard.yaml at import.
+
+    Documents the architectural relationship for future contributors. If anyone
+    re-introduces a hardcoded literal in profiles.py, this test catches the
+    structural change (the loader stops being the source) even if the data
+    happens to remain in sync.
+    """
+
+    def test_loader_function_exists_and_is_callable(self) -> None:
+        from llm_router.profiles import _load_routing_table_from_policy
+
+        assert callable(_load_routing_table_from_policy)
+
+    def test_routing_table_equals_loader_output(self) -> None:
+        from llm_router.profiles import (
+            ROUTING_TABLE,
+            _load_routing_table_from_policy,
+        )
+
+        assert _load_routing_table_from_policy() == ROUTING_TABLE
+
+
 class TestDerivedConvenienceFields:
     """workhorses + fallback_chain_complex are declared explicitly, not auto-derived.
 

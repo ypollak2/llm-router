@@ -54,206 +54,66 @@ _CHEAP_MODELS: frozenset[str] = frozenset({
     "openai/gpt-4o-mini",
 })
 
+def _load_routing_table_from_policy() -> dict[tuple[RoutingProfile, TaskType], list[str]]:
+    """Build the runtime ROUTING_TABLE by loading policies/standard.yaml.
+
+    Plan 07 Phase 1b.2: standard.yaml is the canonical source of routing
+    chains; this function transforms its nested chains structure (profile
+    string -> task string -> ordered model list) into the dict-keyed-by-enum
+    shape that the rest of the codebase already consumes.
+
+    Raises:
+        RuntimeError if standard.yaml is missing, malformed, or omits a
+        (profile, task_type) combination that the runtime needs.
+    """
+    from llm_router.policy import PolicyManager
+
+    try:
+        policy = PolicyManager().load_policy("standard")
+    except (FileNotFoundError, ValueError) as exc:
+        raise RuntimeError(
+            "Failed to load policies/standard.yaml — packaging error?"
+        ) from exc
+
+    if not policy.chains:
+        raise RuntimeError(
+            "policies/standard.yaml has no `chains` entries; ROUTING_TABLE would be empty."
+        )
+
+    table: dict[tuple[RoutingProfile, TaskType], list[str]] = {}
+    for profile_key, tasks in policy.chains.items():
+        try:
+            profile_enum = RoutingProfile(profile_key)
+        except ValueError as exc:
+            raise RuntimeError(
+                f"standard.yaml: unknown profile {profile_key!r}"
+            ) from exc
+        for task_key, chain in tasks.items():
+            try:
+                task_enum = TaskType(task_key)
+            except ValueError as exc:
+                raise RuntimeError(
+                    f"standard.yaml: unknown task type {task_key!r} under profile {profile_key!r}"
+                ) from exc
+            table[(profile_enum, task_enum)] = list(chain)
+    return table
+
+
 # Master routing table: maps (profile, task_type) -> ordered model chain.
 # Each entry is a list of model IDs in LiteLLM's "provider/model" format.
 # The router tries models in order, falling back to the next on failure or
-# rate-limiting. Models are ordered by preference within each tier (best
-# fit first, broadest fallback last).
+# rate-limiting.
+#
+# Source of truth: src/llm_router/policies/standard.yaml. This dict is
+# hydrated at module-import time (Plan 07 Phase 1b.2). Drift between the
+# YAML and the in-memory dict is impossible because there is only the YAML.
+# tests/test_standard_policy_mirror.py is the canonical guardrail.
 
-ROUTING_TABLE: dict[tuple[RoutingProfile, TaskType], list[str]] = {
-    # ═══════════════════════════════════════════════════════════════════
-    # BUDGET — cheapest models, good enough for most tasks
-    # FREE-FIRST: Ollama → Codex → cheap APIs (never Claude for budget)
-    # ═══════════════════════════════════════════════════════════════════
-    # BUDGET chains: Free/cheap first, only Claude Haiku as last resort
-    (RoutingProfile.BUDGET, TaskType.QUERY): [
-        # Ollama models injected dynamically by router.py from OLLAMA_BUDGET_MODELS
-        "codex/gpt-4o-mini",            # free via OpenAI subscription (injected dynamically)
-        "gemini/gemini-2.5-flash",      # $0.00076/1M — ultra-cheap
-        "groq/llama-3.3-70b-versatile", # $0.0001/1M — cheapest cloud option
-        "deepseek/deepseek-chat",       # $0.0007/1M
-        "openai/gpt-4o-mini",           # $0.00015/1M
-        "anthropic/claude-haiku-4-5-20251001",  # last resort only
-    ],
-    (RoutingProfile.BUDGET, TaskType.RESEARCH): [
-        "anthropic/claude-haiku-4-5-20251001",
-        "gemini/gemini-2.5-flash",
-        "openai/gpt-4o-mini",
-        # Ollama injected dynamically as last-resort fallback
-    ],
-    (RoutingProfile.BUDGET, TaskType.GENERATE): [
-        # Ollama models injected dynamically by router.py from OLLAMA_BUDGET_MODELS
-        "codex/gpt-4o-mini",            # free via OpenAI subscription
-        "gemini/gemini-2.5-flash",      # $0.00076/1M
-        "deepseek/deepseek-chat",       # $0.0007/1M
-        "mistral/mistral-small-latest",
-        "openai/gpt-4o-mini",           # $0.00015/1M
-        "anthropic/claude-haiku-4-5-20251001",  # last resort only
-    ],
-    (RoutingProfile.BUDGET, TaskType.ANALYZE): [
-        # Ollama models injected dynamically by router.py from OLLAMA_BUDGET_MODELS
-        "codex/gpt-4o-mini",            # free via OpenAI subscription
-        "gemini/gemini-2.5-flash",      # $0.00076/1M
-        "deepseek/deepseek-reasoner",   # $0.0014/1M — best reasoning at budget tier
-        "groq/llama-3.3-70b-versatile", # $0.0001/1M
-        "openai/gpt-4o-mini",           # $0.00015/1M
-        "anthropic/claude-haiku-4-5-20251001",  # last resort only
-    ],
-    (RoutingProfile.BUDGET, TaskType.CODE): [
-        # Ollama models injected dynamically by router.py from OLLAMA_BUDGET_MODELS
-        "codex/gpt-4o-mini",            # free via OpenAI subscription
-        "deepseek/deepseek-chat",       # $0.0007/1M — decent code
-        "gemini/gemini-2.5-flash",      # $0.00076/1M
-        "groq/llama-3.3-70b-versatile", # $0.0001/1M
-        "openai/gpt-4o-mini",           # $0.00015/1M
-        "anthropic/claude-haiku-4-5-20251001",  # last resort only
-    ],
-    (RoutingProfile.BUDGET, TaskType.IMAGE): [
-        "fal/flux-dev",
-        "gemini/imagen-3-fast",
-        "stability/stable-diffusion-3",
-        "openai/dall-e-2",
-    ],
-    (RoutingProfile.BUDGET, TaskType.VIDEO): [
-        "fal/minimax-video",
-        "gemini/veo-2",
-        "replicate/minimax-video",
-    ],
-    (RoutingProfile.BUDGET, TaskType.AUDIO): [
-        "openai/tts-1",
-        "elevenlabs/eleven_multilingual_v2",
-    ],
+ROUTING_TABLE: dict[tuple[RoutingProfile, TaskType], list[str]] = _load_routing_table_from_policy()
 
-    # ═══════════════════════════════════════════════════════════════════
-    # BALANCED — quality/cost sweet spot
-    # FREE-FIRST CHAIN: Protect Claude subscription by default
-    # Ollama (free local) → Codex (free via OpenAI sub) → Gemini Pro → Claude
-    # RESEARCH is the exception: Claude can't browse the web, so
-    # Perplexity (web-grounded) stays first regardless.
-    # ═══════════════════════════════════════════════════════════════════
-    # BALANCED chains: Ollama (free) → Codex (free) → Gemini Pro → Claude (fallback)
-    # This protects your Claude subscription limits by using free/cheap alternatives first.
-    # Codex (free via OpenAI sub) is injected dynamically by router.py when
-    # is_codex_available() — it cannot be in the static table since it routes
-    # through codex_agent.run_codex(), not LiteLLM.
-    (RoutingProfile.BALANCED, TaskType.QUERY): [
-        # Ollama models injected dynamically by router.py from OLLAMA_BUDGET_MODELS
-        "codex/gpt-4o",                 # free via OpenAI subscription (injected dynamically)
-        "gemini/gemini-2.5-pro",        # $0.015/1M — cheap, high quality
-        "deepseek/deepseek-chat",       # $0.0007/1M — ultra-cheap fallback
-        "openai/gpt-4o",                # $0.03/1M — more expensive
-        "anthropic/claude-sonnet-4-6",  # fallback only — protects subscription
-        "anthropic/claude-haiku-4-5-20251001",
-    ],
-    (RoutingProfile.BALANCED, TaskType.RESEARCH): [
-        "anthropic/claude-sonnet-4-6",
-        "gemini/gemini-2.5-pro",
-        "openai/gpt-4o",
-        # Ollama injected dynamically as last-resort fallback
-    ],
-    (RoutingProfile.BALANCED, TaskType.GENERATE): [
-        # Ollama models injected dynamically by router.py from OLLAMA_BUDGET_MODELS
-        "codex/gpt-4o",                 # free via OpenAI subscription (injected dynamically)
-        "gemini/gemini-2.5-pro",        # $0.015/1M — good quality for generation
-        "deepseek/deepseek-chat",       # $0.0007/1M — ultra-cheap fallback
-        "openai/gpt-4o",                # $0.03/1M — more expensive
-        "cohere/command-r-plus",
-        "anthropic/claude-sonnet-4-6",  # fallback only — protects subscription
-        "anthropic/claude-haiku-4-5-20251001",
-    ],
-    (RoutingProfile.BALANCED, TaskType.ANALYZE): [
-        # Ollama models injected dynamically by router.py from OLLAMA_BUDGET_MODELS
-        "codex/gpt-4o",                 # free via OpenAI subscription (injected dynamically)
-        "gemini/gemini-2.5-pro",        # $0.015/1M — good for analysis
-        "deepseek/deepseek-reasoner",   # reasoning model, $0.0014 — excellent analysis, cheap
-        "openai/gpt-4o",                # $0.03/1M — more expensive
-        "anthropic/claude-sonnet-4-6",  # fallback only — protects subscription
-        "anthropic/claude-haiku-4-5-20251001",
-    ],
-    (RoutingProfile.BALANCED, TaskType.CODE): [
-        # Ollama models injected dynamically by router.py from OLLAMA_BUDGET_MODELS
-        "codex/gpt-4o",                 # free via OpenAI subscription (injected dynamically)
-        "gemini/gemini-2.5-pro",        # $0.015/1M — capable for code generation
-        "deepseek/deepseek-chat",       # $0.0007/1M — ultra-cheap, decent code quality
-        "openai/gpt-4o",                # $0.03/1M — more expensive
-        "anthropic/claude-sonnet-4-6",  # fallback only — protects subscription
-        "anthropic/claude-haiku-4-5-20251001",
-    ],
-    (RoutingProfile.BALANCED, TaskType.IMAGE): [
-        "fal/flux-pro",
-        "gemini/imagen-3",
-        "openai/dall-e-3",
-        "stability/stable-diffusion-3",
-    ],
-    (RoutingProfile.BALANCED, TaskType.VIDEO): [
-        "fal/kling-video",
-        "gemini/veo-2",
-        "runway/gen3a_turbo",
-        "replicate/minimax-video",
-    ],
-    (RoutingProfile.BALANCED, TaskType.AUDIO): [
-        "elevenlabs/eleven_multilingual_v2",
-        "openai/tts-1-hd",
-    ],
-
-    # ═══════════════════════════════════════════════════════════════════
-    # PREMIUM — best available per task, cost secondary
-    # Claude Opus leads (strongest model, free under subscription).
-    # ═══════════════════════════════════════════════════════════════════
-    (RoutingProfile.PREMIUM, TaskType.QUERY): [
-        "anthropic/claude-opus-4-6",
-        "anthropic/claude-sonnet-4-6",
-        "deepseek/deepseek-chat",       # quality 1.0, $0.0007 — leads at >85% pressure
-        "gemini/gemini-2.5-pro",        # $0.01/1M — cheaper than OpenAI
-        "openai/gpt-4o",                # $0.03/1M — more expensive
-        "openai/o3",                    # expensive last resort ($0.025)
-        "xai/grok-3",
-    ],
-    (RoutingProfile.PREMIUM, TaskType.RESEARCH): [
-        "anthropic/claude-opus-4-6",
-        "gemini/gemini-2.5-pro",        # $0.01/1M — cheaper than OpenAI/o3
-        "openai/o3",                    # expensive last resort
-        # Ollama injected dynamically as safety-net fallback
-    ],
-    (RoutingProfile.PREMIUM, TaskType.GENERATE): [
-        "anthropic/claude-opus-4-6",
-        "anthropic/claude-sonnet-4-6",
-        "deepseek/deepseek-chat",       # quality 1.0 for generation, cheap fallback
-        "gemini/gemini-2.5-pro",        # $0.01/1M — cheaper than OpenAI
-        "openai/gpt-4o",                # $0.03/1M — more expensive
-        "openai/o3",                    # expensive last resort
-    ],
-    (RoutingProfile.PREMIUM, TaskType.ANALYZE): [
-        "anthropic/claude-opus-4-6",
-        "anthropic/claude-sonnet-4-6",
-        "deepseek/deepseek-reasoner",
-        "gemini/gemini-2.5-pro",        # $0.01/1M — cheaper than OpenAI/o3
-        "openai/o3",                    # expensive last resort
-    ],
-    (RoutingProfile.PREMIUM, TaskType.CODE): [
-        "anthropic/claude-opus-4-6",
-        "anthropic/claude-sonnet-4-6",
-        "deepseek/deepseek-reasoner",   # quality 1.0, $0.0014 — leads at >85% pressure
-        "gemini/gemini-2.5-pro",        # $0.01/1M — cheaper than OpenAI
-        "openai/gpt-4o",                # $0.03/1M — more expensive
-        "openai/o3",                    # expensive last resort
-    ],
-    (RoutingProfile.PREMIUM, TaskType.IMAGE): [
-        "gemini/imagen-3",
-        "openai/dall-e-3",
-        "fal/flux-pro",
-        "stability/stable-diffusion-3-ultra",
-    ],
-    (RoutingProfile.PREMIUM, TaskType.VIDEO): [
-        "gemini/veo-2",
-        "runway/gen3a",
-        "fal/kling-video",
-    ],
-    (RoutingProfile.PREMIUM, TaskType.AUDIO): [
-        "elevenlabs/eleven_multilingual_v2",
-        "openai/tts-1-hd",
-    ],
-}
+# Historical literal removed — see git history (commit 2faaa08) for the
+# previous hardcoded chains. To inspect or edit chains, modify
+# src/llm_router/policies/standard.yaml.
 
 
 # ── Classifier model preferences (cheapest/fastest first) ────────────────────
