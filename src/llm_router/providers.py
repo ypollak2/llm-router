@@ -18,7 +18,7 @@ from collections.abc import AsyncIterator
 import litellm
 
 from llm_router.config import get_config
-from llm_router.inference_robustness import extract_content
+from llm_router.inference_robustness import extract_content, safe_max_tokens
 from llm_router.prompt_cache import inject_cache_control
 from llm_router.types import LLMResponse
 
@@ -91,6 +91,10 @@ async def call_llm(
     config = get_config()
     temperature = temperature if temperature is not None else config.default_temperature
     max_tokens = max_tokens or config.default_max_tokens
+    # Cap max_tokens at the model's known output limit (Plan 07 D.2) —
+    # prevents OpenAI silent truncation and Anthropic 400-errors when
+    # callers pass oversized values. Unknown models bypass the cap.
+    max_tokens = safe_max_tokens(max_tokens, model)
 
     # O-series reasoning models only accept temperature=1
     model_name = model.split("/", 1)[-1] if "/" in model else model
@@ -193,6 +197,10 @@ async def call_llm_stream(
     config = get_config()
     temperature = temperature if temperature is not None else config.default_temperature
     max_tokens = max_tokens or config.default_max_tokens
+    # Cap max_tokens at the model's known output limit (Plan 07 D.2) —
+    # prevents OpenAI silent truncation and Anthropic 400-errors when
+    # callers pass oversized values. Unknown models bypass the cap.
+    max_tokens = safe_max_tokens(max_tokens, model)
 
     model_name = model.split("/", 1)[-1] if "/" in model else model
     is_reasoning = model_name.startswith(("o1", "o3", "o4"))
