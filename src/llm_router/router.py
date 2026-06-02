@@ -1455,6 +1455,29 @@ async def route_and_call(
             task_type, profile, model_override, complexity_hint, c, config
         )
 
+        # Subject specialist override (Plan 07 Phase 3 B.2b).
+        # If the active routing policy declares a specialist for the
+        # classifier's subject (e.g. {"code": "openrouter/qwen-coder"}),
+        # surface that specialist as the first model tried. Pure
+        # transformation; degrades to no-op on any error so routing always
+        # makes forward progress.
+        if models_to_try and not model_override:
+            try:
+                from llm_router.policy import (
+                    apply_subject_specialist_by_subject,
+                    get_active_policy,
+                )
+                subject_str = (classification_data or {}).get("subject")
+                if subject_str:
+                    models_to_try = apply_subject_specialist_by_subject(
+                        models_to_try, subject_str, get_active_policy()
+                    )
+            except Exception as _spec_err:
+                log.debug(
+                    "Subject specialist override skipped (continuing): %s",
+                    _spec_err,
+                )
+
         # Quality-based reordering: demote models with low avg judge scores
         if models_to_try and not model_override:  # Only reorder if no manual override
             try:

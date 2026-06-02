@@ -153,6 +153,52 @@ class TestImmutability:
         assert original == snapshot, "apply_subject_specialist must not mutate input"
 
 
+class TestByeSubjectPrimitive:
+    """apply_subject_specialist_by_subject is the subject-direct primitive used
+    by router.py (which works from classification_data dicts, not full
+    ClassificationResult objects)."""
+
+    def test_subject_enum_works(self) -> None:
+        from llm_router.policy import apply_subject_specialist_by_subject
+
+        policy = RoutingPolicy(
+            name="t", description="", specialists={"code": "openai/gpt-4o"}
+        )
+        out = apply_subject_specialist_by_subject(
+            ["a", "b"], Subject.CODE, policy
+        )
+        assert out == ["openai/gpt-4o", "a", "b"]
+
+    def test_raw_string_subject_works(self) -> None:
+        """Router.py reads subject from a dict — passes a string, not an enum."""
+        from llm_router.policy import apply_subject_specialist_by_subject
+
+        policy = RoutingPolicy(
+            name="t", description="", specialists={"medical": "openai/o3"}
+        )
+        out = apply_subject_specialist_by_subject(["a", "b"], "medical", policy)
+        assert out == ["openai/o3", "a", "b"]
+
+    def test_none_subject_returns_chain_copy(self) -> None:
+        from llm_router.policy import apply_subject_specialist_by_subject
+
+        policy = RoutingPolicy(
+            name="t", description="", specialists={"code": "openai/gpt-4o"}
+        )
+        out = apply_subject_specialist_by_subject(["a", "b"], None, policy)
+        assert out == ["a", "b"]
+        assert out is not None  # always a new list
+
+    def test_unknown_string_subject_is_noop(self) -> None:
+        from llm_router.policy import apply_subject_specialist_by_subject
+
+        policy = RoutingPolicy(
+            name="t", description="", specialists={"code": "openai/gpt-4o"}
+        )
+        out = apply_subject_specialist_by_subject(["a", "b"], "not-a-subject", policy)
+        assert out == ["a", "b"]
+
+
 @pytest.mark.parametrize(
     ("subject", "specialists", "chain", "expected"),
     [

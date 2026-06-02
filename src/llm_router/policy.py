@@ -341,17 +341,22 @@ def get_active_policy() -> RoutingPolicy:
 # ── Subject specialist override (Plan 07 Phase 3 B.2a) ───────────────────────
 
 
-def apply_subject_specialist(
+def apply_subject_specialist_by_subject(
     chain: List[str],
-    classification: ClassificationResult,
+    subject: "object",
     policy: RoutingPolicy,
 ) -> List[str]:
     """Rewrite a candidate chain so the policy's subject specialist (if any)
     is the first model tried.
 
+    This is the subject-direct primitive — callers without a full
+    ``ClassificationResult`` in scope (e.g. ``router.py`` working from a
+    ``classification_data`` dict) use this directly. The CR-taking
+    ``apply_subject_specialist`` is a thin convenience wrapper around it.
+
     Behavior:
-      - If ``policy.specialists`` has no entry for the classification's subject,
-        return a copy of ``chain`` unchanged.
+      - If ``policy.specialists`` has no entry for ``subject``, return a copy
+        of ``chain`` unchanged.
       - If a specialist is declared and is already first in the chain, return
         a copy of ``chain`` unchanged.
       - Otherwise, prepend the specialist and dedupe it out of the rest of
@@ -360,17 +365,37 @@ def apply_subject_specialist(
 
     Pure function: never mutates the input chain. Always returns a new list.
 
-    Wiring note (Plan 07 B.2b): This helper is intentionally not yet called
-    from ``router.py`` or ``profiles.get_model_chain``. The chain-construction
-    pipeline today consults ``OrgPolicy`` but not ``RoutingPolicy``;
-    threading the active routing policy through to the selection site is a
-    separate, focused change.
+    Args:
+        chain: Candidate model chain (ordered, best-first).
+        subject: Subject enum value, raw subject string, or anything that
+            stringifies to a valid subject key. ``None`` is treated as no
+            override.
+        policy: Active routing policy carrying the specialists map.
     """
-    specialist = policy.specialists.get(classification.subject.value)
+    if subject is None:
+        return list(chain)
+    key = subject.value if hasattr(subject, "value") else str(subject)
+    specialist = policy.specialists.get(key)
     if specialist is None:
         return list(chain)
-
     return [specialist] + [m for m in chain if m != specialist]
+
+
+def apply_subject_specialist(
+    chain: List[str],
+    classification: ClassificationResult,
+    policy: RoutingPolicy,
+) -> List[str]:
+    """Convenience wrapper around ``apply_subject_specialist_by_subject``
+    that pulls the subject from a ``ClassificationResult``.
+
+    Prefer this when you have a full classification in scope; prefer
+    ``apply_subject_specialist_by_subject`` when you only have a subject
+    string (e.g. from a serialized classification_data dict).
+    """
+    return apply_subject_specialist_by_subject(
+        chain, classification.subject, policy
+    )
 
 
 # ── Organization Policy (for org-level budget enforcement) ─────────────────────
