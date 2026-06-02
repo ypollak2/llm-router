@@ -1566,9 +1566,16 @@ async def route_and_call(
         _escalate_above = getattr(config_for_escalation, "llm_router_escalate_above", 0.0)
         if isinstance(_escalate_above, (int, float)) and _escalate_above > 0 and task_type not in MEDIA_TASK_TYPES:
             try:
-                from llm_router.session_spend import get_session_spend, _estimate_cost
+                from llm_router.calibration import predict_cost
+                from llm_router.session_spend import get_session_spend
                 _top_model = models_to_try[0] if models_to_try else ""
-                _estimated = _estimate_cost(_top_model, len(prompt) // 4, 500)
+                # Plan 07 Cat F: use empirical p95 output distribution instead of
+                # hardcoded 500. Budget gates want worst-case projection — under-
+                # projecting silently busts budget; over-projecting just adds an
+                # approval prompt (asymmetric cost ⇒ pick p95).
+                _estimated = predict_cost(
+                    _top_model, task_type, len(prompt) // 4, quantile=0.95,
+                )
                 _session_total = get_session_spend().total_usd
                 if _estimated > config_for_escalation.llm_router_escalate_above:
                     from llm_router.tools.admin import _set_pending_approval
