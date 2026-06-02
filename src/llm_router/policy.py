@@ -18,6 +18,8 @@ from typing import Dict, List, Optional
 
 import yaml
 
+from llm_router.types import ClassificationResult
+
 
 @dataclass(frozen=True)
 class RoutingPolicy:
@@ -334,6 +336,41 @@ def get_policy_manager() -> PolicyManager:
 def get_active_policy() -> RoutingPolicy:
     """Get the currently active routing policy."""
     return _policy_manager.get_active_policy()
+
+
+# ── Subject specialist override (Plan 07 Phase 3 B.2a) ───────────────────────
+
+
+def apply_subject_specialist(
+    chain: List[str],
+    classification: ClassificationResult,
+    policy: RoutingPolicy,
+) -> List[str]:
+    """Rewrite a candidate chain so the policy's subject specialist (if any)
+    is the first model tried.
+
+    Behavior:
+      - If ``policy.specialists`` has no entry for the classification's subject,
+        return a copy of ``chain`` unchanged.
+      - If a specialist is declared and is already first in the chain, return
+        a copy of ``chain`` unchanged.
+      - Otherwise, prepend the specialist and dedupe it out of the rest of
+        the chain (never duplicates an entry, but preserves the relative
+        order of every non-specialist model).
+
+    Pure function: never mutates the input chain. Always returns a new list.
+
+    Wiring note (Plan 07 B.2b): This helper is intentionally not yet called
+    from ``router.py`` or ``profiles.get_model_chain``. The chain-construction
+    pipeline today consults ``OrgPolicy`` but not ``RoutingPolicy``;
+    threading the active routing policy through to the selection site is a
+    separate, focused change.
+    """
+    specialist = policy.specialists.get(classification.subject.value)
+    if specialist is None:
+        return list(chain)
+
+    return [specialist] + [m for m in chain if m != specialist]
 
 
 # ── Organization Policy (for org-level budget enforcement) ─────────────────────
