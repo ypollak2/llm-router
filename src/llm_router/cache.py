@@ -98,23 +98,38 @@ class ClassificationCache:
         self._stats = CacheStats()
 
     @staticmethod
-    def _hash_key(prompt: str, quality_mode: str = "balanced", min_model: str = "haiku") -> str:
+    def _hash_key(
+        prompt: str,
+        quality_mode: str = "balanced",
+        min_model: str = "haiku",
+        classifier_version: str | None = None,
+    ) -> str:
         """Produce a deterministic cache key from routing inputs.
 
-        Concatenates prompt, quality_mode, and min_model with pipe separators,
-        then SHA-256 hashes the result. SHA-256 is used (rather than a simpler
-        hash) to avoid collisions across the large prompt space and to produce
-        a fixed-length key regardless of prompt size.
+        Concatenates prompt, quality_mode, min_model, and the live
+        classifier-prompt version with pipe separators, then SHA-256 hashes
+        the result. The classifier version is folded in so a prompt-template
+        change (e.g. v1→v2 adding the subject dimension) invalidates any
+        in-memory entries that were classified under the older prompt and
+        therefore lack the new field.
 
         Args:
             prompt: The full user prompt text.
             quality_mode: The quality routing mode (e.g. "balanced", "quality").
             min_model: The minimum model tier (e.g. "haiku", "sonnet").
+            classifier_version: Active classifier prompt version. Defaults to
+                whatever ``llm_router.classifier.CLASSIFIER_PROMPT_VERSION`` is
+                at call time; passing an explicit value (e.g. in tests) lets
+                callers verify version-driven key separation.
 
         Returns:
             A 64-character hex digest suitable as a dict key.
         """
-        raw = f"{prompt}|{quality_mode}|{min_model}"
+        if classifier_version is None:
+            # Lazy import to avoid a top-level cycle with classifier.py.
+            from llm_router.classifier import CLASSIFIER_PROMPT_VERSION
+            classifier_version = CLASSIFIER_PROMPT_VERSION
+        raw = f"{prompt}|{quality_mode}|{min_model}|{classifier_version}"
         return hashlib.sha256(raw.encode()).hexdigest()
 
     async def get(

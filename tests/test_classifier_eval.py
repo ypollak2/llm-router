@@ -29,8 +29,8 @@ def _load_eval_script():
 
 
 def test_classifier_prompt_is_loaded_from_versioned_file():
-    assert CLASSIFIER_PROMPT_VERSION == "v1"
-    assert CLASSIFIER_PROMPT_PATH.name == "classifier_v1.txt"
+    assert CLASSIFIER_PROMPT_VERSION == "v2"
+    assert CLASSIFIER_PROMPT_PATH.name == "classifier_v2.txt"
     assert CLASSIFIER_SYSTEM_PROMPT == CLASSIFIER_PROMPT_PATH.read_text(encoding="utf-8").strip()
 
 
@@ -71,7 +71,7 @@ async def test_eval_script_reports_accuracy():
         return results[prompt]
 
     report = await module.evaluate_examples(fake_classify, examples)
-    assert report["prompt_version"] == "v1"
+    assert report["prompt_version"] == "v2"
     assert report["accuracy"] == 1.0
     assert report["total"] == 2
     assert report["failures"] == []

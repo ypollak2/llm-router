@@ -146,6 +146,34 @@ COMPLEXITY_ICONS: dict[str, str] = {
 }
 
 
+class Subject(str, Enum):
+    """Topical axis orthogonal to (complexity, task_type).
+
+    Subject lets policies route the same task_type differently based on what
+    the prompt is *about*. Example: a CODE task in BALANCED might normally
+    use gpt-4o, but a policy could declare `specialists.code = qwen-coder`
+    to route code tasks to a specialist model regardless of complexity.
+
+    Added in Plan 07 Phase 3 (Category B). Default subject is GENERAL.
+    """
+
+    GENERAL = "general"          # Catchall when no specific subject detected
+    CODE = "code"                # Programming, refactoring, debugging
+    MEDICAL = "medical"          # Clinical, pharmacology, diagnosis
+    MATH = "math"                # Equations, proofs, calculations
+    PHYSICS = "physics"          # Mechanics, EM, quantum
+    HISTORY = "history"          # Historical periodization, events
+    LAW = "law"                  # Statute, jurisprudence
+    BUSINESS = "business"        # Finance, ops, strategy
+    NARRATIVE = "narrative"      # Reading comprehension, summarization
+    REASONING = "reasoning"      # Logic puzzles, multi-step inference
+    CLOZE = "cloze"              # Fill-blank, sense disambiguation
+    TRIVIA = "trivia"            # Factoids, lookups
+    SCIENTIFIC = "scientific"    # Chemistry, biology, research methods
+    CREATIVE = "creative"        # Writing, brainstorming, poetry
+    META = "meta"                # Questions about LLM behaviour itself
+
+
 @dataclass(frozen=True)
 class ClassificationResult:
     """Result of a complexity classification from the classifier module.
@@ -169,6 +197,7 @@ class ClassificationResult:
     classifier_model: str
     classifier_cost_usd: float
     classifier_latency_ms: float
+    subject: Subject = Subject.GENERAL
 
     def header(self) -> str:
         """Format a one-line summary for CLI/MCP display.

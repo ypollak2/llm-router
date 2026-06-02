@@ -99,7 +99,7 @@ async def test_classify_complexity_emits_span(mock_env):
 
     span = next(span for span in tracer.spans if span.name == "classify_complexity")
     assert result.complexity == Complexity.SIMPLE
-    assert span.attributes["prompt_version"] == "v1"
+    assert span.attributes["prompt_version"] == "v2"
     assert span.attributes["complexity"] == "simple"
     assert span.attributes["classifier_model"] == result.classifier_model
 

@@ -24,11 +24,11 @@ from llm_router.logging import get_logger
 from llm_router.profiles import CLASSIFIER_MODELS, provider_from_model
 from llm_router.sanitization import sanitize_prompt
 from llm_router.tracing import set_span_attributes, traced_span
-from llm_router.types import ClassificationResult, Complexity, TaskType
+from llm_router.types import ClassificationResult, Complexity, Subject, TaskType
 
 log = get_logger("llm_router.classifier")
 
-CLASSIFIER_PROMPT_VERSION = "v1"
+CLASSIFIER_PROMPT_VERSION = "v2"
 CLASSIFIER_PROMPT_PATH = Path(__file__).parent / "prompts" / f"classifier_{CLASSIFIER_PROMPT_VERSION}.txt"
 CLASSIFIER_SYSTEM_PROMPT = CLASSIFIER_PROMPT_PATH.read_text(encoding="utf-8").strip()
 
@@ -239,6 +239,12 @@ async def classify_complexity(
                 confidence = min(1.0, max(0.0, float(parsed.get("confidence", 0.5))))
                 reasoning = parsed.get("reasoning", "")
 
+                subject_val = parsed.get("subject", "general")
+                try:
+                    subject = Subject(subject_val)
+                except (ValueError, TypeError):
+                    subject = Subject.GENERAL
+
                 result = ClassificationResult(
                     complexity=complexity,
                     confidence=confidence,
@@ -247,6 +253,7 @@ async def classify_complexity(
                     classifier_model=model,
                     classifier_cost_usd=resp.cost_usd,
                     classifier_latency_ms=resp.latency_ms,
+                    subject=subject,
                 )
                 # Cache successful classification
                 await cache.put(sanitized_prompt, result, quality_mode, min_model)
