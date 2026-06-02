@@ -463,6 +463,71 @@ def _is_content_generation_task(prompt: str) -> bool:
     return False
 
 
+# ── Benchmark prompt fast-paths (Plan 07 Phase 3 C) ───────────────────────────
+#
+# Templated benchmark prompts (RouterArena, MMLU, HELM, etc.) have stable
+# prefixes. Pattern-matching them is O(constant) and free — skips the LLM
+# classifier chain entirely. The fast-path emits the same classification
+# dict shape as other fast-paths plus a `subject` field for forward-
+# compatibility with the Phase 3 B classifier output.
+#
+# Each entry is a (compiled regex, classification dict) pair. The regex is
+# anchored at start-of-string (case-sensitive) — templated prompts use
+# consistent casing; lowercase variants are likely user-written and should
+# fall through to the heuristic / Ollama classifier.
+
+_BENCHMARK_PREFIXES: list[tuple[re.Pattern, dict]] = [
+    (re.compile(r"^Generate an executable Python function"),
+     {"task_type": "code", "subject": "code",
+      "complexity": "moderate", "method": "benchmark-fp"}),
+
+    (re.compile(r"^Please read the following context and answer the question"),
+     {"task_type": "query", "subject": "narrative",
+      "complexity": "moderate", "method": "benchmark-fp"}),
+
+    (re.compile(r"^Please read the following multiple-choice questions"),
+     {"task_type": "query", "subject": "general",
+      "complexity": "moderate", "method": "benchmark-fp"}),
+
+    (re.compile(r"^Translate the following sentence"),
+     {"task_type": "generate", "subject": "general",
+      "complexity": "simple", "method": "benchmark-fp"}),
+
+    (re.compile(r"^Read the following passage and answer the question by choosing"),
+     {"task_type": "query", "subject": "cloze",
+      "complexity": "moderate", "method": "benchmark-fp"}),
+
+    (re.compile(r'^Consider the word "'),
+     {"task_type": "query", "subject": "cloze",
+      "complexity": "simple", "method": "benchmark-fp"}),
+
+    (re.compile(r"^You are given a question about chess moves"),
+     {"task_type": "analyze", "subject": "reasoning",
+      "complexity": "moderate", "method": "benchmark-fp"}),
+]
+
+
+def benchmark_fast_path(prompt: str) -> dict | None:
+    """Return a classification dict if the prompt matches a known benchmark
+    template, else None.
+
+    Strips leading whitespace before matching so prompts with embedded
+    newlines / indentation still trigger. The patterns are case-sensitive
+    on purpose — templated harnesses use consistent casing, and lowercase
+    matches are likely user-written prose.
+    """
+    if not prompt:
+        return None
+    stripped = prompt.lstrip()
+    if not stripped:
+        return None
+    for pattern, classification in _BENCHMARK_PREFIXES:
+        if pattern.match(stripped):
+            # Return a copy so callers can mutate without poisoning the table.
+            return dict(classification)
+    return None
+
+
 #
 # Criteria: must have BOTH a build verb AND a build object to avoid false positives.
 # "implement" alone might be "how do I implement X?" → still route to query.
@@ -1017,6 +1082,13 @@ def classify_prompt(text: str) -> dict | None:
             "method": "content-generation-fast-path",
             "suggestion": "content-generation-decomposition",
         }
+
+    # Benchmark prompt fast-path (Plan 07 Phase 3 C): RouterArena / MMLU /
+    # HELM templates have stable prefixes — match them O(constant) instead
+    # of paying for the heuristic/Ollama/API classifier chain.
+    bench = benchmark_fast_path(stripped)
+    if bench is not None:
+        return bench
 
     # Layer 1: Heuristic scoring (instant, free)
     scores = score_categories(text)
