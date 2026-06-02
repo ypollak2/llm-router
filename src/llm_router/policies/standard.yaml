@@ -1,0 +1,178 @@
+name: standard
+description: |
+  Plan 07 Phase 1b.1 — data-file mirror of profiles.py ROUTING_TABLE.
+  Every chain below is byte-identical to the hardcoded dict in profiles.py.
+  Wiring callers (router.py, auto-route.py, dynamic_routing.py, etc.) to
+  consult this file is deferred to Phase 1b.2; for now it is the canonical
+  *target* the runtime will migrate to, validated by tests/test_standard_policy_mirror.py.
+
+# ── Behavior knobs (defaults; not overridden today) ───────────────────────────
+confidence_threshold: 4
+skip_acknowledgements: true
+route_coordination: false
+prefer_ollama: true
+
+# ── Plan 07 model-strategy fields ─────────────────────────────────────────────
+# Convenience pointers — explicit (no auto-derive) so the YAML is the
+# single source of truth at read time. Test enforces these match the
+# corresponding chains entries.
+workhorses:
+  - codex/gpt-4o
+  - gemini/gemini-2.5-pro
+  - deepseek/deepseek-chat
+  - openai/gpt-4o
+  - anthropic/claude-sonnet-4-6
+  - anthropic/claude-haiku-4-5-20251001
+
+fallback_chain_complex:
+  - anthropic/claude-opus-4-6
+  - anthropic/claude-sonnet-4-6
+  - deepseek/deepseek-chat
+  - gemini/gemini-2.5-pro
+  - openai/gpt-4o
+  - openai/o3
+  - xai/grok-3
+
+specialists: {}
+
+# ── Full chain mirror — byte-for-byte equal to profiles.ROUTING_TABLE ─────────
+chains:
+  budget:
+    query:
+      - codex/gpt-4o-mini
+      - gemini/gemini-2.5-flash
+      - groq/llama-3.3-70b-versatile
+      - deepseek/deepseek-chat
+      - openai/gpt-4o-mini
+      - anthropic/claude-haiku-4-5-20251001
+    research:
+      - anthropic/claude-haiku-4-5-20251001
+      - gemini/gemini-2.5-flash
+      - openai/gpt-4o-mini
+    generate:
+      - codex/gpt-4o-mini
+      - gemini/gemini-2.5-flash
+      - deepseek/deepseek-chat
+      - mistral/mistral-small-latest
+      - openai/gpt-4o-mini
+      - anthropic/claude-haiku-4-5-20251001
+    analyze:
+      - codex/gpt-4o-mini
+      - gemini/gemini-2.5-flash
+      - deepseek/deepseek-reasoner
+      - groq/llama-3.3-70b-versatile
+      - openai/gpt-4o-mini
+      - anthropic/claude-haiku-4-5-20251001
+    code:
+      - codex/gpt-4o-mini
+      - deepseek/deepseek-chat
+      - gemini/gemini-2.5-flash
+      - groq/llama-3.3-70b-versatile
+      - openai/gpt-4o-mini
+      - anthropic/claude-haiku-4-5-20251001
+    image:
+      - fal/flux-dev
+      - gemini/imagen-3-fast
+      - stability/stable-diffusion-3
+      - openai/dall-e-2
+    video:
+      - fal/minimax-video
+      - gemini/veo-2
+      - replicate/minimax-video
+    audio:
+      - openai/tts-1
+      - elevenlabs/eleven_multilingual_v2
+
+  balanced:
+    query:
+      - codex/gpt-4o
+      - gemini/gemini-2.5-pro
+      - deepseek/deepseek-chat
+      - openai/gpt-4o
+      - anthropic/claude-sonnet-4-6
+      - anthropic/claude-haiku-4-5-20251001
+    research:
+      - anthropic/claude-sonnet-4-6
+      - gemini/gemini-2.5-pro
+      - openai/gpt-4o
+    generate:
+      - codex/gpt-4o
+      - gemini/gemini-2.5-pro
+      - deepseek/deepseek-chat
+      - openai/gpt-4o
+      - cohere/command-r-plus
+      - anthropic/claude-sonnet-4-6
+      - anthropic/claude-haiku-4-5-20251001
+    analyze:
+      - codex/gpt-4o
+      - gemini/gemini-2.5-pro
+      - deepseek/deepseek-reasoner
+      - openai/gpt-4o
+      - anthropic/claude-sonnet-4-6
+      - anthropic/claude-haiku-4-5-20251001
+    code:
+      - codex/gpt-4o
+      - gemini/gemini-2.5-pro
+      - deepseek/deepseek-chat
+      - openai/gpt-4o
+      - anthropic/claude-sonnet-4-6
+      - anthropic/claude-haiku-4-5-20251001
+    image:
+      - fal/flux-pro
+      - gemini/imagen-3
+      - openai/dall-e-3
+      - stability/stable-diffusion-3
+    video:
+      - fal/kling-video
+      - gemini/veo-2
+      - runway/gen3a_turbo
+      - replicate/minimax-video
+    audio:
+      - elevenlabs/eleven_multilingual_v2
+      - openai/tts-1-hd
+
+  premium:
+    query:
+      - anthropic/claude-opus-4-6
+      - anthropic/claude-sonnet-4-6
+      - deepseek/deepseek-chat
+      - gemini/gemini-2.5-pro
+      - openai/gpt-4o
+      - openai/o3
+      - xai/grok-3
+    research:
+      - anthropic/claude-opus-4-6
+      - gemini/gemini-2.5-pro
+      - openai/o3
+    generate:
+      - anthropic/claude-opus-4-6
+      - anthropic/claude-sonnet-4-6
+      - deepseek/deepseek-chat
+      - gemini/gemini-2.5-pro
+      - openai/gpt-4o
+      - openai/o3
+    analyze:
+      - anthropic/claude-opus-4-6
+      - anthropic/claude-sonnet-4-6
+      - deepseek/deepseek-reasoner
+      - gemini/gemini-2.5-pro
+      - openai/o3
+    code:
+      - anthropic/claude-opus-4-6
+      - anthropic/claude-sonnet-4-6
+      - deepseek/deepseek-reasoner
+      - gemini/gemini-2.5-pro
+      - openai/gpt-4o
+      - openai/o3
+    image:
+      - gemini/imagen-3
+      - openai/dall-e-3
+      - fal/flux-pro
+      - stability/stable-diffusion-3-ultra
+    video:
+      - gemini/veo-2
+      - runway/gen3a
+      - fal/kling-video
+    audio:
+      - elevenlabs/eleven_multilingual_v2
+      - openai/tts-1-hd

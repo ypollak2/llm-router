@@ -23,6 +23,11 @@ import yaml
 class RoutingPolicy:
     """A routing policy defines how prompts are classified and routed.
 
+    Two concerns live on this object:
+    1. Behavior knobs — when/whether to route (confidence_threshold, skip_*).
+    2. Model strategy — which models to route to (workhorses, specialists,
+       fallback_chain_complex, cost_cap_per_query). Added in Plan 07 Phase 1.
+
     Attributes:
         name: Policy name (e.g., 'aggressive', 'balanced')
         description: Human-readable description
@@ -31,6 +36,12 @@ class RoutingPolicy:
         skip_acknowledgements: Skip routing for "yes", "ok", "thanks", etc.
         route_coordination: Route git/deploy/test/execution tasks
         prefer_ollama: Always try Ollama first before Claude (budget mode)
+        workhorses: Ordered model chain that handles 80% of routes (Plan 07).
+        specialists: Subject -> model overrides (e.g. {"code": "openai/gpt-4o"}).
+            Keys are subject strings; will accept Subject enum when introduced
+            in Plan 07 Phase 3.
+        fallback_chain_complex: Ordered chain for complex/deep-reasoning tasks.
+        cost_cap_per_query: Safety net; None disables.
     """
 
     name: str
@@ -40,6 +51,11 @@ class RoutingPolicy:
     skip_acknowledgements: bool = False
     route_coordination: bool = False
     prefer_ollama: bool = True
+    workhorses: List[str] = field(default_factory=list)
+    specialists: Dict[str, str] = field(default_factory=dict)
+    fallback_chain_complex: List[str] = field(default_factory=list)
+    cost_cap_per_query: Optional[float] = None
+    chains: Dict[str, Dict[str, List[str]]] = field(default_factory=dict)
 
     def __post_init__(self):
         """Validate policy after creation."""
@@ -75,6 +91,32 @@ class RoutingPolicy:
                 return True
 
         return False
+
+
+def _parse_chains(raw: object) -> Dict[str, Dict[str, List[str]]]:
+    """Coerce YAML-loaded chains data into the strict shape used by RoutingPolicy.
+
+    Tolerates None and missing inner dicts so the loader stays forgiving for
+    policies that don't declare chains at all (e.g. behavior-only policies
+    like the existing aggressive/balanced/conservative presets).
+    """
+    if not raw:
+        return {}
+    if not isinstance(raw, dict):
+        raise ValueError(f"`chains` must be a dict, got {type(raw).__name__}")
+    out: Dict[str, Dict[str, List[str]]] = {}
+    for profile_key, tasks in raw.items():
+        if tasks is None:
+            out[str(profile_key)] = {}
+            continue
+        if not isinstance(tasks, dict):
+            raise ValueError(
+                f"`chains.{profile_key}` must be a dict, got {type(tasks).__name__}"
+            )
+        out[str(profile_key)] = {
+            str(task_key): list(chain or []) for task_key, chain in tasks.items()
+        }
+    return out
 
 
 class PolicyManager:
@@ -161,6 +203,9 @@ class PolicyManager:
             missing = required - set(data.keys())
             raise ValueError(f"Missing required fields: {missing}")
 
+        cost_cap_raw = data.get("cost_cap_per_query")
+        cost_cap = float(cost_cap_raw) if cost_cap_raw is not None else None
+
         # Build policy with defaults
         return RoutingPolicy(
             name=data["name"],
@@ -170,6 +215,11 @@ class PolicyManager:
             skip_acknowledgements=bool(data.get("skip_acknowledgements", False)),
             route_coordination=bool(data.get("route_coordination", False)),
             prefer_ollama=bool(data.get("prefer_ollama", True)),
+            workhorses=list(data.get("workhorses", [])),
+            specialists=dict(data.get("specialists", {})),
+            fallback_chain_complex=list(data.get("fallback_chain_complex", [])),
+            cost_cap_per_query=cost_cap,
+            chains=_parse_chains(data.get("chains", {})),
         )
 
     def set_active_policy(self, name: str) -> RoutingPolicy:
@@ -226,6 +276,14 @@ class PolicyManager:
             "skip_acknowledgements": policy.skip_acknowledgements,
             "route_coordination": policy.route_coordination,
             "prefer_ollama": policy.prefer_ollama,
+            "workhorses": list(policy.workhorses),
+            "specialists": dict(policy.specialists),
+            "fallback_chain_complex": list(policy.fallback_chain_complex),
+            "cost_cap_per_query": policy.cost_cap_per_query,
+            "chains": {
+                profile: {task: list(chain) for task, chain in tasks.items()}
+                for profile, tasks in policy.chains.items()
+            },
         }
 
         with open(path, "w") as f:

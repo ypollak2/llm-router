@@ -228,5 +228,97 @@ class TestCustomPolicies:
         (pm.DEFAULT_POLICY_DIR / "balanced_override.yaml").unlink()
 
 
+class TestModelStrategyFields:
+    """Plan 07 Phase 1: RoutingPolicy carries model-strategy fields.
+
+    Why: the abstraction must hold *what* models a policy selects (workhorses,
+    specialists, fallback chain, cost cap) in addition to *whether/when* to route.
+    """
+
+    def test_construct_with_workhorses(self):
+        policy = RoutingPolicy(
+            name="with_workhorses",
+            description="Test",
+            workhorses=["ollama/qwen3.5", "openai/gpt-4o-mini"],
+        )
+        assert policy.workhorses == ["ollama/qwen3.5", "openai/gpt-4o-mini"]
+
+    def test_construct_with_specialists(self):
+        policy = RoutingPolicy(
+            name="with_specialists",
+            description="Test",
+            specialists={"code": "openai/gpt-4o", "medical": "openai/o3"},
+        )
+        assert policy.specialists == {"code": "openai/gpt-4o", "medical": "openai/o3"}
+
+    def test_construct_with_fallback_chain_complex(self):
+        policy = RoutingPolicy(
+            name="with_fallback",
+            description="Test",
+            fallback_chain_complex=["ollama/qwen3.5", "openai/o3"],
+        )
+        assert policy.fallback_chain_complex == ["ollama/qwen3.5", "openai/o3"]
+
+    def test_construct_with_cost_cap(self):
+        policy = RoutingPolicy(
+            name="with_cap",
+            description="Test",
+            cost_cap_per_query=0.05,
+        )
+        assert policy.cost_cap_per_query == 0.05
+
+    def test_new_fields_default_to_empty(self):
+        """A policy built without specifying new fields has empty/None defaults."""
+        policy = RoutingPolicy(name="defaults", description="Test")
+        assert policy.workhorses == []
+        assert policy.specialists == {}
+        assert policy.fallback_chain_complex == []
+        assert policy.cost_cap_per_query is None
+
+    def test_existing_yaml_loads_without_new_keys(self):
+        """Pre-Plan-07 YAMLs (balanced/aggressive/conservative) must still load."""
+        pm = PolicyManager()
+        balanced = pm.load_policy("balanced")
+        # New fields silently default to empty — no error
+        assert balanced.workhorses == []
+        assert balanced.specialists == {}
+        assert balanced.fallback_chain_complex == []
+        assert balanced.cost_cap_per_query is None
+
+    def test_yaml_round_trip_with_new_fields(self, tmp_path, monkeypatch):
+        """Save a policy with new fields, load back, verify equality."""
+        # Redirect user policy dir to a tmp location so we don't pollute ~
+        monkeypatch.setattr(
+            PolicyManager, "DEFAULT_POLICY_DIR", tmp_path
+        )
+        pm = PolicyManager()
+        original = RoutingPolicy(
+            name="round_trip_test",
+            description="Round-trip new fields",
+            confidence_threshold=3,
+            workhorses=["ollama/qwen3.5", "codex/gpt-5.4"],
+            specialists={"code": "openai/gpt-4o", "narrative": "openai/gpt-4o-mini"},
+            fallback_chain_complex=["ollama/qwen3.5", "openai/o3"],
+            cost_cap_per_query=0.02,
+        )
+        path = pm.save_custom_policy(original)
+        assert path.exists()
+        loaded = pm.load_policy("round_trip_test")
+        assert loaded.workhorses == original.workhorses
+        assert loaded.specialists == original.specialists
+        assert loaded.fallback_chain_complex == original.fallback_chain_complex
+        assert loaded.cost_cap_per_query == original.cost_cap_per_query
+
+    def test_policy_still_frozen_with_new_fields(self):
+        """Adding fields must not break frozen-dataclass immutability."""
+        policy = RoutingPolicy(
+            name="still_frozen",
+            description="Test",
+            workhorses=["ollama/qwen3.5"],
+        )
+        with pytest.raises(AttributeError):
+            policy.workhorses = ["openai/gpt-4o"]
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
