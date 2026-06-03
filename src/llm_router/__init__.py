@@ -14,7 +14,7 @@ See README.md for full documentation.
 import tomllib
 from pathlib import Path
 
-__version__ = "9.1.3"  # SYNCED FROM pyproject.toml — DO NOT EDIT MANUALLY
+__version__ = "10.0.0"  # SYNCED FROM pyproject.toml — DO NOT EDIT MANUALLY
 
 try:
     _pyproject_path = Path(__file__).parent.parent.parent / "pyproject.toml"
