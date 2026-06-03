@@ -12,6 +12,7 @@ generation APIs directly, because LiteLLM has no media generation support.
 from __future__ import annotations
 
 import asyncio
+import os
 from dataclasses import replace
 from typing import Any
 from uuid import uuid4
@@ -1484,7 +1485,13 @@ async def route_and_call(
         # telemetry. Cold-starts to the static order until each candidate
         # has telemetry.MIN_SAMPLES_FOR_SIGNAL samples, so the first weeks of
         # routing behave identically to today.
-        if models_to_try and not model_override:
+        #
+        # v10.0.0 migration knob: ``LLM_ROUTER_BANDIT=off`` skips the reorder
+        # entirely so users who need byte-identical pre-v10 routing (e.g. for
+        # reproducible A/B comparisons against a v9 baseline) can opt out.
+        # Disabling forgoes the self-improvement gains the bandit provides.
+        _bandit_off = os.environ.get("LLM_ROUTER_BANDIT", "on").lower() in {"off", "0", "false", "no"}
+        if models_to_try and not model_override and not _bandit_off:
             try:
                 from llm_router.bandit import EpsilonGreedyBandit
                 _bandit = EpsilonGreedyBandit()

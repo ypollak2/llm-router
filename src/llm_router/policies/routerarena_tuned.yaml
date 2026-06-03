@@ -1,35 +1,21 @@
 name: routerarena_tuned
 description: |
-  Plan 06 Step 1 — Sqwish-style open-weight workhorse pool tuned for
-  RouterArena placement.
+  DEPRECATED ALIAS — renamed to ``cost_aggressive`` in v10.0.0 to drop
+  the leaderboard-specific branding. The strategy is generic: cheap
+  open-weight workhorses + per-subject specialists, useful to any
+  cost-conscious production user.
 
-  The pre-Plan-07 standard policy lands at Arena Score 0.7081 (#8).
-  Sqwish leads at 0.7527 by using cheap open-weight models as workhorses
-  (Qwen3-235B + DeepSeek-V4-Flash + Gemini-3.1-Flash-Lite handle ~99% of
-  routes) and reserving premium tiers for subject specialists where
-  measured accuracy gains justify the cost.
+  This shim ships through v10.x so existing
+  ``LLM_ROUTER_POLICY=routerarena_tuned`` configs keep working. Migrate
+  to ``LLM_ROUTER_POLICY=cost_aggressive`` — the YAML below is a
+  byte-identical copy of policies/cost_aggressive.yaml and will be
+  removed in v11.
 
-  This policy mirrors that strategy verbatim. Production users who set
-  LLM_ROUTER_POLICY=routerarena_tuned + OPENROUTER_API_KEY get
-  RouterArena-tier routing on every call.
-
-  Activation:
-    export LLM_ROUTER_POLICY=routerarena_tuned
-    export OPENROUTER_API_KEY=...
-
-# ── Behaviour knobs ──────────────────────────────────────────────────────────
-# Lower confidence_threshold (3) — RouterArena rewards aggressive routing
-# (sending more prompts to the cheap workhorse). The bandit + telemetry
-# (Plan 07 Cat E) catches misroutes within ~30 samples and self-corrects.
 confidence_threshold: 3
 skip_acknowledgements: true
 route_coordination: false
 prefer_ollama: true
 
-# ── Model strategy (Plan 07 Cat A) ────────────────────────────────────────────
-# Workhorses handle ~80% of routes. Ordering is free-first then by
-# accuracy/cost ratio (Qwen3-235B beats DeepSeek-V4-Flash on knowledge
-# subjects per Plan 06 RouterArena submission data).
 workhorses:
   - ollama/qwen3.5:latest
   - openrouter/qwen/qwen3-235b-a22b-2507
@@ -37,9 +23,6 @@ workhorses:
   - openrouter/google/gemini-3.1-flash-lite
   - codex/gpt-5.4
 
-# Subject specialists — measured Arena lift per subject vs the workhorse
-# pool (see docs/plans/06-routerarena-leaderboard.md and Plan 07 Cat B).
-# Keys match the Subject enum in src/llm_router/types.py.
 specialists:
   code: openrouter/qwen/qwen3-coder-next
   cloze: openrouter/qwen/qwen3-next-80b-a3b-instruct
@@ -49,26 +32,14 @@ specialists:
   physics: openrouter/deepseek/deepseek-v4-flash
   reasoning: openrouter/x-ai/grok-4.3
 
-# Complex / deep-reasoning fallback chain. Only fires when complexity
-# escalation triggers (LLM_ROUTER_ESCALATE_ABOVE) and the workhorses
-# can't handle it. Cap at 2048 max_tokens applied automatically by
-# OpenRouterQuirks (Plan 07 Cat D.4).
 fallback_chain_complex:
   - openrouter/qwen/qwen3-235b-a22b-2507
   - openrouter/deepseek/deepseek-v4-flash
   - openrouter/anthropic/claude-sonnet-4
   - openai/o3
 
-# Per-call cost cap. Trips on prompts the cheap workhorses can't handle
-# at acceptable max_tokens. The 2048 OpenRouter cap means worst case is
-# ~$0.013 per call (2048 tokens × $6/M output on Sonnet via OpenRouter).
 cost_cap_per_query: 0.05
 
-# ── Full chain mirror — used by router._build_and_filter_chain ───────────────
-# Same task_type schema as standard.yaml. Chains for media tasks are
-# absent because RouterArena is text-only and we don't want this policy
-# to silently degrade media routes on production users — they'll hit the
-# "no chain configured" error and know to switch policies.
 chains:
   budget:
     query:

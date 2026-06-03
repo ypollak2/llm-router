@@ -104,6 +104,12 @@ exclude = [
     "deprecation/",
     "scripts/",
     "skills/",
+    "submissions/",
+    "awesome-readme/",
+    # ── Backup / temp files — never publish (CLAUDE.md sdist safety rule) ─
+    ".env.backup.*",
+    "*.bak",
+    "*.bak.*",
     # Private / internal docs — never publish
     "CLAUDE.md",
     "MONETIZATION.md",

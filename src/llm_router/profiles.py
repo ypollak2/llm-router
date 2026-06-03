@@ -408,7 +408,7 @@ def get_model_chain(
     profile_for_lookup = RoutingProfile.BALANCED if profile == RoutingProfile.QUOTA_BALANCED else profile
 
     # Plan 06 Step 1 — consult the active policy's chains first so non-standard
-    # policies (routerarena-tuned, custom) actually take effect at the routing
+    # policies (cost_aggressive, user-defined custom) actually take effect at the routing
     # layer. ROUTING_TABLE remains the policy-of-last-resort and matches
     # standard.yaml byte-for-byte, so the standard case is unchanged.
     static_chain: list[str] | None = None

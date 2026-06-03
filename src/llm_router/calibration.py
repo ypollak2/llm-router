@@ -104,7 +104,7 @@ _PRICING_PER_M: dict[str, dict[str, float]] = {
     "gemini-2.5-pro": {"input": 1.25, "output": 7.00},
     # OpenRouter open-weight workhorse pool (Plan 06 Step 2).
     # Per-million USD pricing approximated from public OpenRouter listings
-    # at the time of writing. The routerarena-tuned policy references these
+    # at the time of writing. The cost_aggressive policy references these
     # models and the bandit / policy-diff need pricing to compute expected
     # value, so the entries must exist; the *exact* numbers can drift up to
     # ~20% before the policy diff materially misranks. Update alongside
