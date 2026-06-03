@@ -1,0 +1,19 @@
+{
+  "pipeline_params": {
+    "router_name": "llm-router",
+    "router_cls_name": "ExampleRouter",
+    "models": [
+      "qwen/qwen3-235b-a22b-2507",
+      "deepseek/deepseek-v4-flash",
+      "google/gemini-3.1-flash-lite",
+      "qwen/qwen3-coder-next",
+      "qwen/qwen3-next-80b-a3b-instruct",
+      "x-ai/grok-4.3"
+    ],
+    "description": "llm-router routerarena_tuned policy: subject-specialist routing over an OpenRouter open-weight workhorse pool. Plan 06 Steps 1+2 layered on Plan 07 routing infrastructure (bandit telemetry, calibration, provider-quirk registry).",
+    "lambda": 500.0
+  },
+  "router": "llm-router",
+  "router_name": "llm-router",
+  "description": "llm-router by Yali Pollak — Plan 06 + Plan 07 production routing strategy with subject-aware specialists."
+}
