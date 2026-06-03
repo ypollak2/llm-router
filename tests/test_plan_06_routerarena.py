@@ -7,7 +7,7 @@ Three surfaces covered:
 * :mod:`llm_router.provider_quirks` — OpenRouterQuirks ``max_tokens`` cap added
   on top of the Plan 07 D.4 prefix rename.
 * :mod:`llm_router.calibration` — OpenRouter open-weight workhorse pricing.
-* :mod:`llm_router.policies.routerarena-tuned` — the new policy YAML.
+* :mod:`llm_router.policies.routerarena_tuned` — the new policy YAML.
 
 We don't run live OpenRouter calls here (that needs network + a real API
 key); the test surface pins the static contracts so the policy and pricing
@@ -40,12 +40,21 @@ class TestOpenRouterConfig:
         assert "openrouter" in cfg.text_providers
 
     def test_no_key_excludes_openrouter(self, monkeypatch):
-        """Unset key → openrouter must not appear (no silent fallback)."""
+        """Unset key → openrouter must not appear (no silent fallback).
+
+        Patches the field directly because pydantic-settings reads ``.env``
+        at construction time and the test runner's .env may legitimately have
+        ``OPENROUTER_API_KEY`` set for live integration runs. The contract
+        we're pinning is "empty key string excludes openrouter from
+        available_providers", which is what monkeypatching the attribute
+        actually tests.
+        """
         monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
         import llm_router.config as config_module
         config_module._config = None
         from llm_router.config import get_config
         cfg = get_config()
+        monkeypatch.setattr(cfg, "openrouter_api_key", "")
         assert "openrouter" not in cfg.available_providers
 
 
@@ -93,15 +102,15 @@ class TestOpenRouterMaxTokensCap:
 
 
 class TestOpenRouterPricing:
-    """The routerarena-tuned workhorses + specialists must be priced."""
+    """The routerarena_tuned workhorses + specialists must be priced."""
 
     @pytest.mark.parametrize("model", [
         "openrouter/qwen/qwen3-235b-a22b-2507",
         "openrouter/deepseek/deepseek-v4-flash",
         "openrouter/google/gemini-3.1-flash-lite",
-        "openrouter/Qwen/Qwen3-Coder-Next",
+        "openrouter/qwen/qwen3-coder-next",
         "openrouter/qwen/qwen3-next-80b-a3b-instruct",
-        "openrouter/x-ai/grok-4.1-fast",
+        "openrouter/x-ai/grok-4.3",
     ])
     def test_model_has_pricing(self, model):
         """Each policy-referenced model resolves to a non-zero cost."""
@@ -129,11 +138,11 @@ class TestOpenRouterPricing:
             assert cost < gpt4o, (
                 f"workhorse {model!r} (${cost:.5f}) is not cheaper "
                 f"than gpt-4o (${gpt4o:.5f}) on typical RouterArena prompt — "
-                f"routerarena-tuned will not save money vs standard"
+                f"routerarena_tuned will not save money vs standard"
             )
 
 
-# ── routerarena-tuned policy ────────────────────────────────────────────────
+# ── routerarena_tuned policy ────────────────────────────────────────────────
 
 
 class TestRouterArenaTunedPolicy:
@@ -141,7 +150,7 @@ class TestRouterArenaTunedPolicy:
 
     @pytest.fixture
     def policy(self):
-        return PolicyManager().load_policy("routerarena-tuned")
+        return PolicyManager().load_policy("routerarena_tuned")
 
     def test_loads_and_names_match(self, policy):
         # YAML name has underscore (must be a valid Python identifier per
@@ -184,7 +193,7 @@ class TestRouterArenaTunedPolicy:
         for profile in ("budget", "balanced", "premium"):
             for task in ("query", "research", "generate", "analyze", "code"):
                 chain = policy.chains.get(profile, {}).get(task)
-                assert chain, f"{profile}/{task} chain is empty in routerarena-tuned"
+                assert chain, f"{profile}/{task} chain is empty in routerarena_tuned"
 
     def test_cost_cap_set(self, policy):
         """The cap is the production safety net — must be set, must be sane."""

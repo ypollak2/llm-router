@@ -110,8 +110,20 @@ async def _run_async(runner, dataset, opts) -> int:
     cost/latency numbers in :class:`Prediction` accurately reflect the route
     that actually happened, instead of being skewed by concurrent provider
     rate-limiting.
+
+    Activates the policy named by ``--policy`` so the chains/specialists from
+    its YAML file actually drive routing. Without this the run silently uses
+    whichever policy was active at process start (typically ``standard``),
+    making the policy comparison meaningless.
     """
+    from llm_router.policy import get_policy_manager
     from llm_router.router import route_and_call
+
+    try:
+        get_policy_manager().set_active_policy(opts.policy)
+    except FileNotFoundError as err:
+        print(f"Policy {opts.policy!r} not found: {err}", file=sys.stderr)
+        return 2
 
     predictions: list[Prediction] = []
     for prompt in dataset:

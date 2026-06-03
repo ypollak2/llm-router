@@ -41,13 +41,13 @@ workhorses:
 # pool (see docs/plans/06-routerarena-leaderboard.md and Plan 07 Cat B).
 # Keys match the Subject enum in src/llm_router/types.py.
 specialists:
-  code: openrouter/Qwen/Qwen3-Coder-Next
+  code: openrouter/qwen/qwen3-coder-next
   cloze: openrouter/qwen/qwen3-next-80b-a3b-instruct
   narrative: openrouter/deepseek/deepseek-v4-flash
   history: openrouter/google/gemini-3.1-flash-lite
   medical: openrouter/google/gemini-3.1-flash-lite
   physics: openrouter/deepseek/deepseek-v4-flash
-  reasoning: openrouter/x-ai/grok-4.1-fast
+  reasoning: openrouter/x-ai/grok-4.3
 
 # Complex / deep-reasoning fallback chain. Only fires when complexity
 # escalation triggers (LLM_ROUTER_ESCALATE_ABOVE) and the workhorses
@@ -91,7 +91,7 @@ chains:
       - openrouter/deepseek/deepseek-v4-flash
       - codex/gpt-5.4
     code:
-      - openrouter/Qwen/Qwen3-Coder-Next
+      - openrouter/qwen/qwen3-coder-next
       - openrouter/qwen/qwen3-235b-a22b-2507
       - openrouter/deepseek/deepseek-v4-flash
       - codex/gpt-5.4
@@ -114,15 +114,15 @@ chains:
     analyze:
       - openrouter/qwen/qwen3-235b-a22b-2507
       - openrouter/deepseek/deepseek-v4-flash
-      - openrouter/x-ai/grok-4.1-fast
+      - openrouter/x-ai/grok-4.3
       - codex/gpt-5.4
     code:
-      - openrouter/Qwen/Qwen3-Coder-Next
+      - openrouter/qwen/qwen3-coder-next
       - openrouter/qwen/qwen3-235b-a22b-2507
       - codex/gpt-5.4
   premium:
     query:
-      - openrouter/x-ai/grok-4.1-fast
+      - openrouter/x-ai/grok-4.3
       - openrouter/qwen/qwen3-235b-a22b-2507
       - openrouter/anthropic/claude-sonnet-4
       - openai/o3
@@ -135,10 +135,10 @@ chains:
       - openrouter/deepseek/deepseek-v4-flash
       - openai/o3
     analyze:
-      - openrouter/x-ai/grok-4.1-fast
+      - openrouter/x-ai/grok-4.3
       - openrouter/anthropic/claude-sonnet-4
       - openai/o3
     code:
-      - openrouter/Qwen/Qwen3-Coder-Next
+      - openrouter/qwen/qwen3-coder-next
       - openrouter/anthropic/claude-sonnet-4
       - openai/o3

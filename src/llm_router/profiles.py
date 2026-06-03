@@ -406,7 +406,29 @@ def get_model_chain(
     """
     # QUOTA_BALANCED uses BALANCED as base chain — reordering happens in router.py
     profile_for_lookup = RoutingProfile.BALANCED if profile == RoutingProfile.QUOTA_BALANCED else profile
-    static_chain = ROUTING_TABLE.get((profile_for_lookup, task_type), ["anthropic/claude-sonnet-4-6"])
+
+    # Plan 06 Step 1 — consult the active policy's chains first so non-standard
+    # policies (routerarena-tuned, custom) actually take effect at the routing
+    # layer. ROUTING_TABLE remains the policy-of-last-resort and matches
+    # standard.yaml byte-for-byte, so the standard case is unchanged.
+    static_chain: list[str] | None = None
+    try:
+        from llm_router.policy import get_active_policy
+        active = get_active_policy()
+        chains = getattr(active, "chains", None) or {}
+        profile_chains = chains.get(profile_for_lookup.value, {})
+        active_chain = profile_chains.get(task_type.value)
+        if active_chain:
+            static_chain = list(active_chain)
+    except Exception:
+        # Defensive — never let a policy mishap break routing. Fall through
+        # to ROUTING_TABLE which is always valid.
+        static_chain = None
+
+    if static_chain is None:
+        static_chain = ROUTING_TABLE.get(
+            (profile_for_lookup, task_type), ["anthropic/claude-sonnet-4-6"],
+        )
 
     # Media tasks: no benchmark data, no pressure reordering — use static order.
     if task_type in {TaskType.IMAGE, TaskType.VIDEO, TaskType.AUDIO}:

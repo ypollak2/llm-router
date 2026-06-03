@@ -23,12 +23,22 @@ class TestAvailableProviders:
     """
 
     def test_empty_env_returns_empty_set(self):
-        # ollama_base_url="" ensures .env OLLAMA_BASE_URL doesn't leak in
+        # All known api_key fields explicitly emptied so the developer's .env
+        # file (which may legitimately have OPENROUTER_API_KEY, GEMINI_API_KEY,
+        # etc. set for live runs) doesn't leak providers into this test.
         cfg = RouterConfig(
             openai_api_key="",
             anthropic_api_key="",
             gemini_api_key="",
             ollama_base_url="",
+            perplexity_api_key="",
+            mistral_api_key="",
+            deepseek_api_key="",
+            groq_api_key="",
+            together_api_key="",
+            xai_api_key="",
+            cohere_api_key="",
+            openrouter_api_key="",
         )
         assert cfg.available_providers == set()
 

@@ -112,9 +112,9 @@ _PRICING_PER_M: dict[str, dict[str, float]] = {
     "qwen/qwen3-235b-a22b-2507": {"input": 0.15, "output": 0.55},
     "deepseek/deepseek-v4-flash": {"input": 0.07, "output": 0.50},
     "google/gemini-3.1-flash-lite": {"input": 0.10, "output": 0.40},
-    "Qwen/Qwen3-Coder-Next": {"input": 0.25, "output": 0.90},
+    "qwen/qwen3-coder-next": {"input": 0.25, "output": 0.90},
     "qwen/qwen3-next-80b-a3b-instruct": {"input": 0.10, "output": 0.40},
-    "x-ai/grok-4.1-fast": {"input": 0.50, "output": 1.50},
+    "x-ai/grok-4.3": {"input": 0.50, "output": 1.50},
     "anthropic/claude-sonnet-4": {"input": 3.00, "output": 15.00},
 }
 

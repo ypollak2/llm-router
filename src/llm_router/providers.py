@@ -149,8 +149,19 @@ async def call_llm(
     content = ensure_non_empty_content(content, model)
     usage = response.usage
 
-    # LiteLLM provides cost calculation based on its internal pricing tables
-    cost = litellm.completion_cost(completion_response=response)
+    # LiteLLM provides cost calculation based on its internal pricing tables;
+    # falls back to calibration.cost_for_tokens for models LiteLLM hasn't
+    # catalogued (notably the OpenRouter open-weight pool, which lives in our
+    # _PRICING_PER_M dict via Plan 06 Step 2 but not in LiteLLM's snapshot).
+    try:
+        cost = litellm.completion_cost(completion_response=response)
+    except Exception:
+        from llm_router.calibration import cost_for_tokens
+        cost = cost_for_tokens(
+            model,
+            int(getattr(response.usage, "prompt_tokens", 0) or 0),
+            int(getattr(response.usage, "completion_tokens", 0) or 0),
+        )
 
     # Perplexity models return source citations alongside the response
     citations: list[str] = []
