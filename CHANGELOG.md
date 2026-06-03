@@ -2,6 +2,13 @@
 
 **For releases v6.2 and earlier, see [CHANGELOG_ARCHIVE.md](docs/CHANGELOG_ARCHIVE.md).**
 
+## v10.1.1 — Expose `llm_session_savings` under the default slim mode (2026-06-03)
+
+### Fixed
+
+- **`llm_session_savings` now visible under the default `LLM_ROUTER_SLIM=routing` mode.** v10.1.0 registered the tool but the routing-tier allowlist in `tool_tiers.ROUTING_TOOLS` didn't include it, so the gate filtered it out at server startup. Users on the default mode saw the OLD 20-tool list with no way to invoke the new dashboard. Adding `"llm_session_savings"` to `ROUTING_TOOLS` lifts the count to 21. Off-mode (`LLM_ROUTER_SLIM=off`) was unaffected — that path always registered everything.
+- **No code path change**, just the allowlist entry — the tool, the render logic, and the session-end hook integration all shipped in v10.1.0 and work unchanged once the gate lets the tool through.
+
 ## v10.1.0 — Tier-grouped routing dashboard + unknown-paid-model cost fallback (2026-06-03)
 
 The session dashboard now answers the question users actually ask: "where did my savings come from?". Every routed call is grouped into one of three tiers — **free local** (Ollama), **free subscription** (Codex / Gemini CLI), **paid API** (OpenAI, Anthropic, OpenRouter, Perplexity, …) — and the per-tier table shows calls, tokens, actual $ paid, the Claude Sonnet counterfactual baseline, and the savings vs that baseline.

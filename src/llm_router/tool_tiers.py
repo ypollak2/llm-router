@@ -37,6 +37,7 @@ ROUTING_TOOLS: frozenset[str] = CORE_TOOLS | frozenset({
     "llm_set_profile",
     "llm_health",
     "llm_session_spend",
+    "llm_session_savings",  # v10.1.0 — tier-grouped savings dashboard
     "llm_savings",
     "llm_reroute",
     "llm_select_agent",
