@@ -2,6 +2,32 @@
 
 **For releases v6.2 and earlier, see [CHANGELOG_ARCHIVE.md](docs/CHANGELOG_ARCHIVE.md).**
 
+## v10.1.0 — Tier-grouped routing dashboard + unknown-paid-model cost fallback (2026-06-03)
+
+The session dashboard now answers the question users actually ask: "where did my savings come from?". Every routed call is grouped into one of three tiers — **free local** (Ollama), **free subscription** (Codex / Gemini CLI), **paid API** (OpenAI, Anthropic, OpenRouter, Perplexity, …) — and the per-tier table shows calls, tokens, actual $ paid, the Claude Sonnet counterfactual baseline, and the savings vs that baseline.
+
+### Added
+
+- **`llm_router.tiers` module** — new tier classification + savings roll-up. `tier_of(model)` returns one of `free_local | free_subscription | paid_api`; `summarize_tiers(per_model)` rolls a session's per-model dict into `TierRollup` records; `render_tier_table(rollups)` produces the fixed-width dashboard table.
+- **`llm_session_savings` MCP tool** — returns the tier-grouped routing summary as a formatted string. Use this when you want to see *where the savings came from* — `llm_session_spend` shows what you paid, `llm_session_savings` shows what you saved.
+- **Tier-grouped section in the session-end hook** — every Claude Code session ends with the table so the savings story is the last thing you see, not just the spend number.
+
+### Fixed
+
+- **Unknown-paid-model cost fallback in `providers.call_llm`.** When LiteLLM raises "model not mapped yet" *and* our calibration pricing dict also lacks the model (e.g. a new OpenRouter slug we haven't priced), the fallback path was returning `cost=0` — which made the call look free in the dashboard. Now applies a conservative `$0.01/1K output tokens` rate when both pricing sources come up empty *and* the model isn't a recognised free provider (Ollama / Codex / Gemini CLI). Mirrors the logic already in `session_spend._estimate_cost` so both surfaces agree.
+- **Free-tier cost enforcement in the tier roll-up.** If a row in `session_spend.json` has a non-zero `cost_usd` for an Ollama or Codex model (legacy data contaminated by the pre-v10.0 `_COST_PER_1K_OUT` bug), the tier roll-up pins `actual_cost = 0` for that row — tier classification is the source of truth for "should this cost money?". No retroactive disk-rewrite; the correction is applied at render time so historical data stays inspectable.
+- **Total-savings arithmetic.** The session-summary "total saved" is now `sum(per-tier saved)` (each clamped to >= 0), not `baseline - actual`. Prevents an over-spending paid tier (e.g. GPT-4o on simple prompts that's pricier than Sonnet) from eroding the savings reported on free tiers. The dashboard also renders an "effective savings ratio" line (`baseline / actual`) only when paid spend is non-zero — avoids `inf×` copy on free-only sessions.
+
+### Tests
+
+- `tests/test_tiers.py` (17 tests) — tier classification (every prefix + unknown-provider default + the gemini-vs-gemini_cli billing distinction), aggregation correctness, free-tier cost enforcement, saved-clamp-at-zero, total-savings arithmetic, render contract (header emoji, ratio line only when applicable).
+- Full suite: **2238 / 2238 pass** (+17 over the v10.0.0 2221 baseline).
+
+### Migration
+
+- **MCP server restart required** to pick up the `llm_session_savings` tool. Run `claude mcp restart llm-router` (or restart your host CLI).
+- **No data migration needed.** The pre-v10.0 cost contamination in `session_spend.json` is now invisible in the tier roll-up (free tiers always show $0) but stays untouched on disk for inspection.
+
 ## v10.0.0 - Self-improving router: subject classifier, bandit telemetry, OpenRouter, custom YAML policies (2026-06-03)
 
 **The routing engine is now self-improving.** v10 replaces the static

@@ -153,15 +153,25 @@ async def call_llm(
     # falls back to calibration.cost_for_tokens for models LiteLLM hasn't
     # catalogued (notably the OpenRouter open-weight pool, which lives in our
     # _PRICING_PER_M dict via Plan 06 Step 2 but not in LiteLLM's snapshot).
+    #
+    # v10.1 — Unknown-paid-model fallback. If both LiteLLM AND our pricing dict
+    # come up empty for a paid model (e.g. a recently-added OpenRouter model
+    # we haven't priced yet), fall back to a conservative rate so the dashboard
+    # doesn't report $0 for a call that genuinely cost money. Mirrors the
+    # logic in session_spend._estimate_cost so both surfaces agree.
+    _prompt_tokens = int(getattr(response.usage, "prompt_tokens", 0) or 0)
+    _completion_tokens = int(getattr(response.usage, "completion_tokens", 0) or 0)
     try:
         cost = litellm.completion_cost(completion_response=response)
     except Exception:
         from llm_router.calibration import cost_for_tokens
-        cost = cost_for_tokens(
-            model,
-            int(getattr(response.usage, "prompt_tokens", 0) or 0),
-            int(getattr(response.usage, "completion_tokens", 0) or 0),
-        )
+        cost = cost_for_tokens(model, _prompt_tokens, _completion_tokens)
+    if cost == 0 and not any(
+        model.startswith(p) for p in ("ollama", "codex", "gemini_cli")
+    ):
+        # Unknown paid model. Bias high so anomaly detection has a signal.
+        # 0.01 USD per 1K output tokens matches session_spend's legacy rate.
+        cost = _completion_tokens * 0.01 / 1000
 
     # Perplexity models return source citations alongside the response
     citations: list[str] = []

@@ -1569,6 +1569,23 @@ def main() -> None:
         if spend.get("anomaly_flag"):
             lines.insert(0, f"  {_C_RED}⚠  ANOMALY: spend rate exceeded threshold{_RESET}")
 
+        # v10.1.0 — Tier-grouped savings rollup. Surfaces "how many calls
+        # went to free local / free subscription / paid API" + the savings
+        # vs Sonnet baseline. Critical for users who route heavily to
+        # Ollama/Codex but currently see only the paid-API spend number.
+        try:
+            from llm_router.tiers import render_tier_table, summarize_tiers
+            per_model = spend.get("per_model", {}) or {}
+            if per_model:
+                rollups = summarize_tiers(per_model)
+                tier_lines = render_tier_table(rollups).split("\n")
+                lines.append("")
+                for tl in tier_lines:
+                    lines.append("  " + tl)
+        except Exception:
+            # Defensive — never let a render bug nuke the session-end summary.
+            pass
+
         spend_block = "\n".join(lines)
         summary = summary.rstrip("  " + "═" * (WIDTH - 2)) + "\n" + spend_block + "\n" + "  " + "═" * (WIDTH - 2)
 

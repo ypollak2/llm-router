@@ -978,6 +978,33 @@ async def llm_session_spend() -> str:
     return "\n".join(lines)
 
 
+async def llm_session_savings() -> str:
+    """Show tier-grouped routing summary with savings vs Sonnet baseline.
+
+    Returns a fixed-width table breaking the current session into three tiers:
+
+    * **Free local** — Ollama and other localhost-served models (always $0).
+    * **Free subscription** — Codex / Gemini CLI / Claude subscription mode.
+    * **Paid API** — OpenAI, Anthropic, OpenRouter, Perplexity, etc.
+
+    Each row shows ``calls / tokens / actual cost / Sonnet-baseline cost /
+    saved``. The totals row sums per-tier savings (not ``baseline - actual``)
+    so an over-spending paid-API tier doesn't erode the savings reported on
+    free tiers.
+
+    Use this when you want to know *where the savings actually came from*
+    — ``llm_session_spend`` shows what you paid; this tool shows what you
+    saved by routing.
+    """
+    from llm_router.session_spend import get_session_spend
+    from llm_router.tiers import render_tier_table, summarize_tiers
+
+    spend = get_session_spend()
+    summary = spend.get_summary()
+    rollups = summarize_tiers(summary.get("per_model", {}) or {})
+    return render_tier_table(rollups)
+
+
 # ── Pending approval state for cost-threshold escalation ─────────────────────
 
 _pending_approval: dict | None = None
@@ -1563,6 +1590,8 @@ def register(mcp, should_register=None) -> None:
         mcp.tool()(llm_model_export)
     if gate("llm_session_spend"):
         mcp.tool()(llm_session_spend)
+    if gate("llm_session_savings"):
+        mcp.tool()(llm_session_savings)
 
     if gate("llm_session_dashboard"):
         mcp.tool()(llm_session_dashboard)
