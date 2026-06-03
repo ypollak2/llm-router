@@ -595,6 +595,12 @@ def main() -> None:
     elif args and args[0] == "savings-report":
         from llm_router.commands.savings_report import main as _savings_report_main
         sys.exit(_savings_report_main(args[1:]))
+    elif args and args[0] == "benchmark":
+        from llm_router.commands.benchmark import cmd_benchmark
+        sys.exit(cmd_benchmark(args[1:]))
+    elif args and args[0] == "policy":
+        from llm_router.commands.policy import cmd_policy
+        sys.exit(cmd_policy(args[1:]))
     else:
         # Default: start the MCP server (original behavior)
         from llm_router.server import main as _mcp_main

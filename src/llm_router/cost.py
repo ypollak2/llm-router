@@ -259,6 +259,23 @@ MIGRATE_ROUTING_DECISIONS_ADD_SUBJECT = [
     "ALTER TABLE routing_decisions ADD COLUMN subject TEXT",
 ]
 """Plan 07 Cat E — enables (policy, subject, model) outcome aggregation for bandit selection."""
+
+CREATE_BENCHMARK_RESULTS_TABLE = """
+CREATE TABLE IF NOT EXISTS benchmark_results (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp TEXT DEFAULT (datetime('now')),
+    version TEXT NOT NULL,
+    policy TEXT NOT NULL,
+    benchmark TEXT NOT NULL,
+    split TEXT NOT NULL,
+    score REAL NOT NULL,
+    n_samples INTEGER NOT NULL,
+    per_subject_json TEXT
+)
+"""
+"""Plan 07 Cat G.3 — append-only record of benchmark runs keyed by version+policy.
+The regression detector reads ordered rows from here to surface release-over-release
+score drops."""
 """Idempotent migration to add policy audit column to routing_decisions (v3.2).
 
 policy_applied: JSON string of policy actions, e.g.
@@ -503,6 +520,7 @@ async def _get_db() -> aiosqlite.Connection:
     await db.execute(CREATE_SEMANTIC_CACHE_INDEX)
     await db.execute(CREATE_CORRECTIONS_TABLE)
     await db.execute(CREATE_MODEL_QUALITY_TRENDS_TABLE)
+    await db.execute(CREATE_BENCHMARK_RESULTS_TABLE)
     # Performance indices — `IF NOT EXISTS` makes these idempotent.
     # These prevent full-table scans on the monthly-spend queries that fire
     # on every routing decision once the tables grow beyond ~10k rows.
@@ -561,6 +579,13 @@ async def _get_db() -> aiosqlite.Connection:
         "CREATE INDEX IF NOT EXISTS idx_routing_bandit "
         "ON routing_decisions(profile, subject, final_model) "
         "WHERE subject IS NOT NULL"
+    )
+
+    # Plan 07 Cat G.3 — index for chronological regression-detector scans:
+    # `SELECT … FROM benchmark_results WHERE policy = ? AND benchmark = ? ORDER BY timestamp`.
+    await db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_benchmark_results_lookup "
+        "ON benchmark_results(policy, benchmark, timestamp)"
     )
 
     await db.commit()
