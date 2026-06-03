@@ -92,6 +92,41 @@ Complex and moderate tasks always go to cloud models — local models don't have
 
 **Models**: Claude Opus, Sonnet, Haiku
 
+### OpenRouter — one key, 343 models
+
+OpenRouter aggregates models from 50+ providers behind a single API key.
+Recommended for the `cost_aggressive` policy, which routes via the open-weight
+workhorse pool (Qwen3-235B, DeepSeek-V4-Flash, Gemini-Flash-Lite) and uses
+subject specialists for code (Qwen3-Coder-Next), reasoning (Grok-4.3), etc.
+
+1. Go to [OpenRouter Keys](https://openrouter.ai/keys)
+2. Create an API key
+3. Add to `.env`: `OPENROUTER_API_KEY=sk-or-v1-...`
+
+**Models**: anything in [OpenRouter's catalog](https://openrouter.ai/models),
+routed by ID: `openrouter/qwen/qwen3-235b-a22b-2507`,
+`openrouter/x-ai/grok-4.3`, `openrouter/anthropic/claude-sonnet-4`, etc.
+
+**Quirks the router handles automatically** (v10 `OpenRouterQuirks`):
+
+* **`max_tokens` cap at 2048.** OpenRouter rejects values above this on
+  several open-weight models with a 402 error; the router caps client-side.
+  If you need a higher cap, fork the policy and override.
+* **`anthropic/` prefix re-prepended.** When a universal name like
+  `claude-sonnet-4-6` is resolved for OpenRouter, the router auto-prepends
+  `anthropic/` since OpenRouter requires the full vendor path.
+
+**Cost projection**: pricing for the open-weight workhorses ships in
+`calibration._PRICING_PER_M`. The bandit + policy-diff use it to compute
+expected value; update against [OpenRouter pricing](https://openrouter.ai/models)
+when rates shift.
+
+**Activation:**
+```bash
+export OPENROUTER_API_KEY=sk-or-v1-...
+export LLM_ROUTER_POLICY=cost_aggressive   # use the OpenRouter workhorse pool
+```
+
 ### Groq (Free Tier)
 
 1. Go to [Groq Console](https://console.groq.com/keys)

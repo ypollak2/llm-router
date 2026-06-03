@@ -128,12 +128,13 @@ llm-router install
 ### 2. Add providers (optional)
 
 ```bash
-export OPENAI_API_KEY="sk-..."      # GPT-4o, o3
-export GEMINI_API_KEY="AIza..."     # Gemini Flash/Pro (free tier available)
+export OPENAI_API_KEY="sk-..."          # GPT-4o, o3
+export GEMINI_API_KEY="AIza..."         # Gemini Flash/Pro (free tier available)
 export OLLAMA_BASE_URL="http://localhost:11434"  # Local models (free)
+export OPENROUTER_API_KEY="sk-or-v1-…"  # 343 OpenRouter models (qwen, deepseek, grok, …)
 ```
 
-Works with **zero API keys** on Claude Code Pro/Max subscriptions — routing uses MCP tools that call external models only when beneficial.
+Works with **zero API keys** on Claude Code Pro/Max subscriptions — routing uses MCP tools that call external models only when beneficial. Add `OPENROUTER_API_KEY` to unlock the open-weight workhorse pool used by the `cost_aggressive` policy.
 
 ### 3. Verify
 
@@ -247,6 +248,23 @@ Classification is free for many tasks (regex heuristics catch ~70%) or near-free
 | Generate images/video/audio | `llm_image`, `llm_video`, `llm_audio` |
 | Run multi-step research pipelines | `llm_orchestrate` with templates |
 | Bulk-edit files with cheap models | `llm_fs_edit_many` |
+| Compare two routing policies | `llm-router policy diff <a> <b>` (v10) |
+| Benchmark + track Arena score | `llm-router benchmark run` / `regress` (v10) |
+
+---
+
+## CLI (operational commands)
+
+Beyond the install + auth flow, `llm-router` ships several operational subcommands:
+
+```bash
+llm-router benchmark list                              # list registered benchmark runners
+llm-router benchmark run routerarena --split sub_10    # route a dataset and score it
+llm-router benchmark regress --policy <p> --benchmark <b>  # detect score regressions
+llm-router policy diff balanced cost_aggressive        # per-prompt model + cost delta
+```
+
+These power the routing self-improvement loop: routing decisions get persisted to a SQLite outcomes table; benchmark runs against a reference dataset establish baseline scores; `regress` flags drops > 0.005 in release-over-release comparisons. See [docs/CLI.md](docs/CLI.md) for the full subcommand reference.
 
 ---
 
@@ -270,6 +288,7 @@ Routing chains are built from your configured providers. You only need one.
 | **Groq** | Fast inference (Llama, Mixtral) | Free tier | `GROQ_API_KEY` |
 | **Together** | Open-source models | Paid API | `TOGETHER_API_KEY` |
 | **HuggingFace** | Open-source models | Free tier + paid | `HF_TOKEN` |
+| **OpenRouter** | 343 models (qwen3-235b, deepseek-v4-flash, grok-4.3, gemini-flash-lite, claude, gpt, …) | Paid API (one key, all providers) | `OPENROUTER_API_KEY` |
 | **Codex** | GPT-5.4, o3 (prepaid desktop) | Included with Codex CLI | Auto-detected |
 
 ### Media Providers
@@ -288,19 +307,30 @@ See [docs/PROVIDERS.md](docs/PROVIDERS.md) for setup instructions and model reco
 
 ## Routing Policies
 
-Control how aggressively the router offloads to cheap models.
+Control how aggressively the router offloads to cheap models. Policies ship as YAML files in `src/llm_router/policies/` — write your own to override workhorses, subject specialists, and per-task chains.
 
 | Policy | Confidence Threshold | Typical Savings | Best For |
 |--------|:-------------------:|:---------------:|----------|
 | **Aggressive** | 2 | 60–75% | Maximum cost reduction |
 | **Balanced** (default) | 4 | 35–45% | Cost/quality tradeoff |
 | **Conservative** | 6 | 10–15% | Quality over cost |
+| **`cost_aggressive`** | 3 | 70–85% | OpenRouter open-weight workhorses + subject specialists. Activate with `OPENROUTER_API_KEY`. New in v10. |
 
 ```bash
-export LLM_ROUTER_POLICY=aggressive     # Or: balanced, conservative
+export LLM_ROUTER_POLICY=aggressive     # Or: balanced, conservative, cost_aggressive
 export LLM_ROUTER_ENFORCE=smart          # smart | hard | soft | off
 export LLM_ROUTER_PROFILE=balanced       # budget | balanced | premium
+export LLM_ROUTER_BANDIT=on              # on (default) | off — opt out of telemetry-driven chain reorder
 ```
+
+The `cost_aggressive` policy routes via OpenRouter:
+```bash
+export OPENROUTER_API_KEY=sk-or-v1-...
+export LLM_ROUTER_POLICY=cost_aggressive
+# Now: code → qwen3-coder-next, medical → gemini-flash-lite, reasoning → grok-4.3, …
+```
+
+See [docs/POLICIES.md](docs/POLICIES.md) for the YAML schema and how to author your own policy.
 
 `LLM_ROUTER_ENFORCE` controls how strictly the auto-route hook blocks direct model use:
 - `smart` — route when confident, pass through when uncertain

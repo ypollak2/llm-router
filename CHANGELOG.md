@@ -2,6 +2,88 @@
 
 **For releases v6.2 and earlier, see [CHANGELOG_ARCHIVE.md](docs/CHANGELOG_ARCHIVE.md).**
 
+## v10.0.0 - Self-improving router: subject classifier, bandit telemetry, OpenRouter, custom YAML policies (2026-06-03)
+
+**The routing engine is now self-improving.** v10 replaces the static
+chain-from-config model with telemetry-driven model selection: every routed
+call writes (policy, subject, model, success, cost, latency) to SQLite,
+and an epsilon-greedy bandit consults that history to reorder the
+candidate chain before each route. Cold-start safe — fresh installs
+behave exactly like v9.4.0 until enough samples accumulate.
+
+Also lands OpenRouter as a first-class provider (343 models, one env
+var) and ships custom YAML policies as the canonical way to override
+routing strategy (replaces the prior in-Python config edits).
+
+### Added
+
+- **Subject as a third classification dimension** alongside complexity and task_type. New `Subject` enum (`code`, `medical`, `math`, `physics`, `history`, `law`, `business`, `narrative`, `reasoning`, `cloze`, `trivia`, `general`, …) emitted by the classifier and used for per-subject specialist selection. Policy authors declare `specialists: {code: <model>, medical: <model>, …}` — at routing time the policy's specialist for the classified subject is surfaced as the first attempt.
+- **Benchmark-prompt fast-paths** in `auto-route.py`. Anchored prefix matches against templated benchmark prompts (`"Generate an executable Python function"`, `"Please read the following multiple-choice questions"`, etc.) skip the full classifier pipeline and emit `Subject + Complexity` in microseconds.
+- **Provider-quirk registry** (`llm_router.provider_quirks`): a `ProviderQuirk` Protocol with three identity-by-default hooks (`transform_model_name`, `transform_request`, `transform_response`) and a name-keyed registry. Bundled with `OpenAIReasoningQuirks` (forces `temperature=1` for o-series), `OllamaQuirks` (strips `max_tokens` to dodge the LiteLLM Ollama empty-response bug), `OpenRouterQuirks` (re-prepends `anthropic/` for bare claude names + caps `max_tokens` at 2048). Adding a new provider quirk is now a `register_quirk()` call, not a `providers.py` edit.
+- **Outcome telemetry + epsilon-greedy bandit** (`llm_router.telemetry`, `llm_router.bandit`). The `routing_decisions` table gains a `subject` column + `idx_routing_bandit` partial index. The bandit's `reorder()` computes per-candidate `expected_value = success_rate / avg_cost` from the last 30 days of routes and surfaces the empirical winner as the first attempt (90% exploit, 10% explore). Stateless — the DB is the state. Replaces `judge.reorder_by_quality`'s hard `<0.7` threshold with proper exploit/explore math.
+- **Empirical token-shape calibration** (`llm_router.calibration`). New `TokenShapeProfile` records the empirical p50/p95 output token distribution per (model, task_type). `predict_cost(model, task_type, input_tokens)` uses the empirical distribution when available, falls back to the legacy 80-token assumption otherwise. New public `cost_for_tokens(model, in, out)` consolidates the pricing dictionary into one place — `session_spend.py`, `cost.py` receipts, and any future cost-accounting site can share it.
+- **`llm-router benchmark` CLI** (`list`, `run`, `regress`). Pluggable runner Protocol — `BenchmarkRunner` with `load_dataset`, `format_prediction`, `evaluate`, `submit` methods + a static registry. First concrete plugin is `RouterArenaRunner` (loads JSONL from `~/.llm-router/data/routerarena/<split>.jsonl`, normalized exact-match evaluator with per-subject breakdown). `regress` walks pairwise history from a new `benchmark_results` table and surfaces score drops > 0.005.
+- **`llm-router policy diff` CLI**. Compare two policies over a sample set; surface per-prompt model differences + projected cost delta via the empirical calibration. Sample format: JSONL with `{id, subject, task_type?, input_tokens?}` per row.
+- **OpenRouter as a first-class provider**. Set `OPENROUTER_API_KEY` and 343 OpenRouter models become routable via `openrouter/<model>` IDs. Surfaced in `config.available_providers` + `text_providers`. `OpenRouterQuirks` handles the `anthropic/` prefix re-prepend + `max_tokens` cap automatically. Pricing entries added for the open-weight workhorses (qwen3-235b, deepseek-v4-flash, gemini-3.1-flash-lite, qwen3-coder-next, grok-4.3, etc.) so the bandit + policy-diff can compute expected value without an external pricing call.
+- **`policies/cost_aggressive.yaml`** — new starter policy: cheap OpenRouter open-weight workhorses for everything, escalate to subject specialists where measured accuracy gains justify the cost. Recommended activation for cost-conscious production users: `LLM_ROUTER_POLICY=cost_aggressive` + `OPENROUTER_API_KEY`.
+- **Custom YAML policies actually drive routing**. `LLM_ROUTER_POLICY=<name>` now changes the chain at runtime. Previously the env var was read but `get_model_chain` still consulted the static `ROUTING_TABLE` (hydrated from `standard.yaml` at import time). v10 layers `get_active_policy().chains` lookup ahead of `ROUTING_TABLE` so user policies actually take effect.
+- **`LLM_ROUTER_BANDIT` env knob** (default: `on`). Setting `off`, `0`, `false`, or `no` skips the bandit reorder entirely so users who need byte-identical pre-v10 routing (reproducible A/B comparisons against v9 baselines, deterministic CI fixtures) can opt out. Disabling forgoes the self-improvement gains.
+
+### Changed
+
+- `providers.call_llm` cost calculation now wraps `litellm.completion_cost` in try/except and falls back to `calibration.cost_for_tokens` on failure. LiteLLM's pricing dict doesn't cover the OpenRouter open-weight pool, so every OpenRouter call was raising under the unconditional cost lookup. The streaming variant already had this guard; bringing the synchronous path in line.
+- `commands/benchmark.py` activates `--policy` via `get_policy_manager().set_active_policy(opts.policy)` before iterating prompts. Previously `--policy` only tagged `store_result` rows — the actual routing used whichever policy was active at process start.
+- `session_spend.py` and `hooks/auto-route.py` cost calculations consolidated on `calibration.cost_for_tokens`. The parallel `_COST_PER_1K_OUT` dict that lived in `session_spend.py` is removed; one pricing dict for the whole package.
+
+### Fixed
+
+- **D.1 — Thinking-model `content=null` fallback.** Anthropic Sonnet/Opus reasoning models can emit `message.reasoning` with `message.content` set to `null`. `providers.extract_content` now falls back to `message.reasoning` so the router sees a non-empty response instead of treating it as a silent failure.
+- **D.2 — `max_tokens` capped at per-model output limit.** Anthropic raises a 400 BadRequestError when `max_tokens` exceeds the model's published limit; OpenAI silently truncates. `inference_robustness.safe_max_tokens` caps the requested value at the model's known limit before dispatch.
+- **D.3 — Empty-response → routing failure.** When a provider returns an empty content string (cached request, content filter, broken local model), the router now raises `EmptyResponseError` and falls through to the next model in the chain instead of returning an empty `LLMResponse`. Was previously surfaced as "success" with 0 output tokens.
+- **`policies/<name>.yaml` filename must match the YAML `name:` field.** `PolicyManager.load_policy(name)` looks up `{name}.yaml` on disk; mismatched filenames silently fall back to the default policy. Pinned via a test guard so this can't drift.
+- **Benchmark runner stamps `split` onto Prompt metadata** so `BenchmarkResult.split` is populated and `store_result` / `load_history` find each other's rows. Without it, regression history was unreachable by split.
+- **`docs/decisions.md` gitignore quirk** — the file is intentionally local-only; restored its inline comment so the next contributor doesn't try to commit it.
+
+### Deprecated
+
+- `policies/routerarena_tuned.yaml` is now a backward-compat alias for `policies/cost_aggressive.yaml` (byte-identical content, same `name:` field preserved for introspection). Slated for removal in v11. Existing user configs setting `LLM_ROUTER_POLICY=routerarena_tuned` keep working through v10.x without change.
+
+### Migration
+
+- **Bandit may reorder routing chains.** v10 surfaces the empirical winner per (profile, subject) as the first attempt. Cold-start safe: fresh installs and users with < 30 samples per candidate route exactly like v9.4.0. Need byte-identical pre-v10 routing? Set `LLM_ROUTER_BANDIT=off`.
+- **Cost projections shifted to empirical p50/p95 shapes.** If `LLM_ROUTER_ESCALATE_ABOVE=<threshold>` is set, the budget gate now uses worst-case p95 output projection for calibrated (model, task) pairs. For Claude Sonnet 4-6 on QUERY with a 2000-token input, the projection went from $0.0135 (legacy 500 output tokens × $15/M + 2000 × $3/M) to $0.0367 (p95 = 2048 × $15/M + 2000 × $3/M). Users at thresholds near these values may see new approval prompts.
+- **Custom Python pricing dicts are gone.** If your code imported `session_spend._COST_PER_1K_OUT`, switch to `calibration.cost_for_tokens(model, input_tokens, output_tokens)`. Public, single source of truth, covers all models the package ships pricing for.
+- **OpenRouter activation:**
+  ```bash
+  export OPENROUTER_API_KEY=sk-or-v1-...
+  export LLM_ROUTER_POLICY=cost_aggressive  # use OpenRouter workhorses for everything
+  ```
+- **Policy rename — backward-compat alias preserved.** Migrate at your leisure:
+  ```bash
+  # Old (still works through v10.x)
+  export LLM_ROUTER_POLICY=routerarena_tuned
+
+  # New (recommended)
+  export LLM_ROUTER_POLICY=cost_aggressive
+  ```
+
+### Packaging
+
+- `pyproject.toml [tool.hatch.build.targets.sdist].exclude` extended: `submissions/`, `awesome-readme/`, `.env.backup.*`, `*.bak`, `*.bak.*`. The `.env.backup.*` exclusion fixed a critical pre-release leak — a backup `.env` file containing real API keys would have shipped to PyPI without this audit.
+
+### Tests
+
+- +30 new tests (~2221 total, +9 over the v9.4.0 baseline plus the renamed Plan 06 test file). New coverage:
+  - `tests/test_v10_migration.py` (7) — cold-start invariant, `LLM_ROUTER_BANDIT=off` env opt-out, default-on guarantee, default-epsilon pin, exploit-mode reorder.
+  - `tests/test_cost_aggressive_policy.py` (renamed + 2 new alias-equivalence tests).
+  - `tests/test_bandit_telemetry.py` (14) — bandit Protocol + telemetry round-trip.
+  - `tests/test_benchmark_cat_g.py` (24) — runner Protocol + RouterArenaRunner + regression detector + policy diff.
+  - `tests/test_calibration.py` (15) — empirical projection + legacy fallback.
+  - `tests/test_provider_quirks.py` (21) — quirk Protocol + concrete quirks.
+  - `tests/test_cat_f_deferred_sites.py` (15) — `cost_for_tokens` + session_spend/auto-route rewires.
+  - `tests/test_plan_06_routerarena.py` (20) — OpenRouter config + max_tokens cap + pricing + policy YAML.
+- Full suite: **2221 / 2221 pass** (+244 over the v9.4.0 1977 baseline). Ruff clean.
+
 ## v9.4.0 - Savings persistence + statusline accuracy + README discoverability (2026-05-30)
 
 ### Fixed
