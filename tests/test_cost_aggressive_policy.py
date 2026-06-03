@@ -1,4 +1,4 @@
-"""Plan 06 Steps 1+2 — RouterArena-tuned policy + OpenRouter provider.
+"""Plan 06 Steps 1+2 — cost_aggressive policy + OpenRouter provider.
 
 Three surfaces covered:
 
@@ -7,7 +7,7 @@ Three surfaces covered:
 * :mod:`llm_router.provider_quirks` — OpenRouterQuirks ``max_tokens`` cap added
   on top of the Plan 07 D.4 prefix rename.
 * :mod:`llm_router.calibration` — OpenRouter open-weight workhorse pricing.
-* :mod:`llm_router.policies.routerarena_tuned` — the new policy YAML.
+* :mod:`llm_router.policies.cost_aggressive` — the new policy YAML.
 
 We don't run live OpenRouter calls here (that needs network + a real API
 key); the test surface pins the static contracts so the policy and pricing
@@ -102,7 +102,7 @@ class TestOpenRouterMaxTokensCap:
 
 
 class TestOpenRouterPricing:
-    """The routerarena_tuned workhorses + specialists must be priced."""
+    """The cost_aggressive workhorses + specialists must be priced."""
 
     @pytest.mark.parametrize("model", [
         "openrouter/qwen/qwen3-235b-a22b-2507",
@@ -138,11 +138,11 @@ class TestOpenRouterPricing:
             assert cost < gpt4o, (
                 f"workhorse {model!r} (${cost:.5f}) is not cheaper "
                 f"than gpt-4o (${gpt4o:.5f}) on typical RouterArena prompt — "
-                f"routerarena_tuned will not save money vs standard"
+                f"cost_aggressive will not save money vs standard"
             )
 
 
-# ── routerarena_tuned policy ────────────────────────────────────────────────
+# ── cost_aggressive policy ────────────────────────────────────────────────
 
 
 class TestRouterArenaTunedPolicy:
@@ -150,13 +150,13 @@ class TestRouterArenaTunedPolicy:
 
     @pytest.fixture
     def policy(self):
-        return PolicyManager().load_policy("routerarena_tuned")
+        return PolicyManager().load_policy("cost_aggressive")
 
     def test_loads_and_names_match(self, policy):
         # YAML name has underscore (must be a valid Python identifier per
         # RoutingPolicy.__post_init__); user activates via the hyphenated
         # filename, the loader normalises.
-        assert policy.name == "routerarena_tuned"
+        assert policy.name == "cost_aggressive"
 
     def test_workhorses_are_free_or_cheap(self, policy):
         """First workhorse must be free (Ollama) — free-first is the policy thesis."""
@@ -193,9 +193,43 @@ class TestRouterArenaTunedPolicy:
         for profile in ("budget", "balanced", "premium"):
             for task in ("query", "research", "generate", "analyze", "code"):
                 chain = policy.chains.get(profile, {}).get(task)
-                assert chain, f"{profile}/{task} chain is empty in routerarena_tuned"
+                assert chain, f"{profile}/{task} chain is empty in cost_aggressive"
 
     def test_cost_cap_set(self, policy):
         """The cap is the production safety net — must be set, must be sane."""
         assert policy.cost_cap_per_query is not None
         assert 0 < policy.cost_cap_per_query < 1.0
+
+
+class TestRouterArenaTunedAlias:
+    """v10.0.0 deprecation — ``routerarena_tuned`` is a backward-compat alias.
+
+    Existing user configs setting ``LLM_ROUTER_POLICY=routerarena_tuned`` must
+    continue to load a policy with byte-identical workhorses / specialists /
+    chains as the new ``cost_aggressive``. Slated for removal in v11.
+    """
+
+    def test_alias_loads(self):
+        from llm_router.policy import PolicyManager
+        # Clear cache between loads so we test the on-disk content, not the
+        # cached object from a prior test.
+        mgr = PolicyManager()
+        new = mgr.load_policy("cost_aggressive")
+        mgr._policy_cache.clear()
+        old = mgr.load_policy("routerarena_tuned")
+        assert old.workhorses == new.workhorses
+        assert old.specialists == new.specialists
+        assert old.chains == new.chains
+        assert old.fallback_chain_complex == new.fallback_chain_complex
+
+    def test_alias_keeps_old_name_for_identity(self):
+        """The alias keeps ``name: routerarena_tuned`` so users can
+        introspect ``get_active_policy().name`` and see what they set."""
+        from llm_router.policy import PolicyManager
+        mgr = PolicyManager()
+        old = mgr.load_policy("routerarena_tuned")
+        assert old.name == "routerarena_tuned"
+        # And cost_aggressive identifies as itself
+        mgr._policy_cache.clear()
+        new = mgr.load_policy("cost_aggressive")
+        assert new.name == "cost_aggressive"

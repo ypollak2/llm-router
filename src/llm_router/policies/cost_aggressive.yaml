@@ -1,0 +1,149 @@
+name: cost_aggressive
+description: |
+  Cost-aggressive routing strategy: route the cheap open-weight workhorses
+  for everything, escalate to subject specialists only where measured
+  accuracy gains justify the cost.
+
+  This is a useful default for production users who care more about $/call
+  than about premium-model affinity. The workhorse pool (Qwen3-235B,
+  DeepSeek-V4-Flash, Gemini-3.1-Flash-Lite) is genuinely competitive with
+  GPT-4o-mini on knowledge subjects per public benchmarks, at roughly 3x
+  lower per-token cost. Per-subject specialists (code → Qwen3-Coder-Next,
+  reasoning → Grok-4.3, etc.) cover the cases where the workhorses
+  underperform.
+
+  Activation:
+    export LLM_ROUTER_POLICY=cost_aggressive
+    export OPENROUTER_API_KEY=...
+
+  The bandit + telemetry layer (telemetry.py, bandit.py) automatically
+  self-corrects misroutes within ~30 samples — so the policy author's
+  initial specialist picks aren't a one-shot decision, they're a starting
+  point the router improves over time.
+
+# ── Behaviour knobs ──────────────────────────────────────────────────────────
+# Lower confidence_threshold (3) — this policy is aggressive: routes more
+# prompts to the cheap workhorse rather than escalating to premium tiers.
+# The bandit + telemetry catches misroutes within ~30 samples and
+# self-corrects.
+confidence_threshold: 3
+skip_acknowledgements: true
+route_coordination: false
+prefer_ollama: true
+
+# ── Model strategy (Plan 07 Cat A) ────────────────────────────────────────────
+# Workhorses handle ~80% of routes. Ordering is free-first then by
+# accuracy/cost ratio (Qwen3-235B beats DeepSeek-V4-Flash on knowledge
+# subjects per Plan 06 RouterArena submission data).
+workhorses:
+  - ollama/qwen3.5:latest
+  - openrouter/qwen/qwen3-235b-a22b-2507
+  - openrouter/deepseek/deepseek-v4-flash
+  - openrouter/google/gemini-3.1-flash-lite
+  - codex/gpt-5.4
+
+# Subject specialists — measured Arena lift per subject vs the workhorse
+# pool (see docs/plans/06-routerarena-leaderboard.md and Plan 07 Cat B).
+# Keys match the Subject enum in src/llm_router/types.py.
+specialists:
+  code: openrouter/qwen/qwen3-coder-next
+  cloze: openrouter/qwen/qwen3-next-80b-a3b-instruct
+  narrative: openrouter/deepseek/deepseek-v4-flash
+  history: openrouter/google/gemini-3.1-flash-lite
+  medical: openrouter/google/gemini-3.1-flash-lite
+  physics: openrouter/deepseek/deepseek-v4-flash
+  reasoning: openrouter/x-ai/grok-4.3
+
+# Complex / deep-reasoning fallback chain. Only fires when complexity
+# escalation triggers (LLM_ROUTER_ESCALATE_ABOVE) and the workhorses
+# can't handle it. Cap at 2048 max_tokens applied automatically by
+# OpenRouterQuirks (Plan 07 Cat D.4).
+fallback_chain_complex:
+  - openrouter/qwen/qwen3-235b-a22b-2507
+  - openrouter/deepseek/deepseek-v4-flash
+  - openrouter/anthropic/claude-sonnet-4
+  - openai/o3
+
+# Per-call cost cap. Trips on prompts the cheap workhorses can't handle
+# at acceptable max_tokens. The 2048 OpenRouter cap means worst case is
+# ~$0.013 per call (2048 tokens × $6/M output on Sonnet via OpenRouter).
+cost_cap_per_query: 0.05
+
+# ── Full chain mirror — used by router._build_and_filter_chain ───────────────
+# Same task_type schema as standard.yaml. Chains for media tasks are
+# absent because RouterArena is text-only and we don't want this policy
+# to silently degrade media routes on production users — they'll hit the
+# "no chain configured" error and know to switch policies.
+chains:
+  budget:
+    query:
+      - ollama/qwen3.5:latest
+      - openrouter/google/gemini-3.1-flash-lite
+      - openrouter/qwen/qwen3-235b-a22b-2507
+      - openrouter/deepseek/deepseek-v4-flash
+      - codex/gpt-5.4
+    research:
+      - openrouter/qwen/qwen3-235b-a22b-2507
+      - openrouter/google/gemini-3.1-flash-lite
+      - codex/gpt-5.4
+    generate:
+      - ollama/qwen3.5:latest
+      - openrouter/google/gemini-3.1-flash-lite
+      - openrouter/deepseek/deepseek-v4-flash
+      - openrouter/qwen/qwen3-235b-a22b-2507
+    analyze:
+      - openrouter/qwen/qwen3-235b-a22b-2507
+      - openrouter/deepseek/deepseek-v4-flash
+      - codex/gpt-5.4
+    code:
+      - openrouter/qwen/qwen3-coder-next
+      - openrouter/qwen/qwen3-235b-a22b-2507
+      - openrouter/deepseek/deepseek-v4-flash
+      - codex/gpt-5.4
+  balanced:
+    query:
+      - ollama/qwen3.5:latest
+      - openrouter/qwen/qwen3-235b-a22b-2507
+      - openrouter/deepseek/deepseek-v4-flash
+      - openrouter/google/gemini-3.1-flash-lite
+      - codex/gpt-5.4
+    research:
+      - openrouter/qwen/qwen3-235b-a22b-2507
+      - openrouter/deepseek/deepseek-v4-flash
+      - codex/gpt-5.4
+    generate:
+      - openrouter/deepseek/deepseek-v4-flash
+      - openrouter/qwen/qwen3-235b-a22b-2507
+      - openrouter/google/gemini-3.1-flash-lite
+      - codex/gpt-5.4
+    analyze:
+      - openrouter/qwen/qwen3-235b-a22b-2507
+      - openrouter/deepseek/deepseek-v4-flash
+      - openrouter/x-ai/grok-4.3
+      - codex/gpt-5.4
+    code:
+      - openrouter/qwen/qwen3-coder-next
+      - openrouter/qwen/qwen3-235b-a22b-2507
+      - codex/gpt-5.4
+  premium:
+    query:
+      - openrouter/x-ai/grok-4.3
+      - openrouter/qwen/qwen3-235b-a22b-2507
+      - openrouter/anthropic/claude-sonnet-4
+      - openai/o3
+    research:
+      - openrouter/anthropic/claude-sonnet-4
+      - openrouter/qwen/qwen3-235b-a22b-2507
+      - openai/o3
+    generate:
+      - openrouter/anthropic/claude-sonnet-4
+      - openrouter/deepseek/deepseek-v4-flash
+      - openai/o3
+    analyze:
+      - openrouter/x-ai/grok-4.3
+      - openrouter/anthropic/claude-sonnet-4
+      - openai/o3
+    code:
+      - openrouter/qwen/qwen3-coder-next
+      - openrouter/anthropic/claude-sonnet-4
+      - openai/o3
