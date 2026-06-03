@@ -85,6 +85,17 @@ class RouterArenaRunner:
                     # A regression detector run is more useful with N-1 prompts
                     # than zero, and the CLI logs a count for visibility.
                     continue
+                metadata = {
+                    k: v
+                    for k, v in row.items()
+                    if k not in {"id", "text", "prompt", "reference", "answer", "subject", "task_type"}
+                }
+                # Stamp the split onto each prompt's metadata so ``evaluate``
+                # can produce a fully-populated ``BenchmarkResult`` without an
+                # extra parameter. The regression detector keys on ``split``,
+                # so omitting this caused ``store_result`` + ``load_history``
+                # to disagree on the bucket and lose persisted rows.
+                metadata.setdefault("split", split)
                 prompts.append(
                     Prompt(
                         id=str(row.get("id", f"{split}:{line_no}")),
@@ -92,11 +103,7 @@ class RouterArenaRunner:
                         reference=row.get("reference") or row.get("answer"),
                         subject=row.get("subject"),
                         task_type=row.get("task_type"),
-                        metadata={
-                            k: v
-                            for k, v in row.items()
-                            if k not in {"id", "text", "prompt", "reference", "answer", "subject", "task_type"}
-                        },
+                        metadata=metadata,
                     )
                 )
         return prompts

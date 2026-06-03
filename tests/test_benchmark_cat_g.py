@@ -101,6 +101,27 @@ class TestRouterArenaRunner:
         runner = RouterArenaRunner(dataset_root=tmp_path / "absent")
         assert runner.load_dataset("sub_10") == []
 
+    def test_load_dataset_stamps_split_on_metadata(self, tmp_path):
+        """``evaluate``'s ``result.split`` relies on the loader stamping the
+        active split into each prompt's metadata; without it, ``store_result``
+        persists ``"unknown"`` and the regression detector can never re-find
+        the row by split. Regression guard for the smoke-run bug fix."""
+        data = tmp_path / "sub_10.jsonl"
+        data.write_text(
+            '{"id": "p1", "text": "q", "reference": "a"}\n'
+        )
+        runner = RouterArenaRunner(dataset_root=tmp_path)
+        prompts = runner.load_dataset("sub_10")
+        assert prompts[0].metadata["split"] == "sub_10"
+        # Evaluation surfaces it onto the result so callers don't have to thread
+        # the split through manually.
+        result = runner.evaluate(
+            [Prediction(prompt_id="p1", model="x", response="a",
+                        cost_usd=0, latency_ms=0)],
+            prompts,
+        )
+        assert result.split == "sub_10"
+
     def test_load_dataset_parses_jsonl(self, tmp_path):
         """Per-line JSON object → Prompt with id/text/reference/subject."""
         data = tmp_path / "sub_10.jsonl"
