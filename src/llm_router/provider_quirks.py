@@ -146,17 +146,25 @@ class OllamaQuirks:
 
 
 class OpenRouterQuirks:
-    """OpenRouter universal-name resolution.
+    """OpenRouter universal-name resolution + max_tokens cap.
 
-    Plan 07 D.4 calls this out specifically: when we resolve a universal
-    name like ``"claude-sonnet-4-6"`` for OpenRouter, the leading
-    ``"anthropic/"`` provider prefix is stripped during normalization but
-    OpenRouter requires it to be present in the model field. Re-prepend
-    it here so the universal-name resolution upstream doesn't need to
-    know which downstream provider it's routing to.
+    Two well-trodden gotchas surfaced during the Plan 06 RouterArena
+    submission:
+
+    1. When we resolve a universal name like ``"claude-sonnet-4-6"`` for
+       OpenRouter, the leading ``"anthropic/"`` provider prefix is stripped
+       during normalization but OpenRouter requires it in the model field.
+       Re-prepend it here.
+
+    2. OpenRouter rejects ``max_tokens`` values above ~2048 with a 402
+       "requires fewer max_tokens" error on several of the open-weight
+       workhorse models (qwen, deepseek, etc.). Capping client-side avoids
+       a per-model lookup and matches the value the submission settled on
+       (Plan 06 line 103).
     """
 
     _CLAUDE_PREFIX_NEEDED = ("anthropic/",)
+    _MAX_TOKENS_CAP = 2048
 
     def transform_model_name(self, name: str) -> str:
         if name.startswith("claude-") and "/" not in name:
@@ -164,13 +172,28 @@ class OpenRouterQuirks:
         return name
 
     def transform_request(self, payload: dict[str, Any]) -> dict[str, Any]:
-        if "model" in payload:
-            transformed = self.transform_model_name(payload["model"])
-            if transformed != payload["model"]:
-                out = dict(payload)
-                out["model"] = transformed
-                return out
-        return payload
+        new_model = payload.get("model")
+        if new_model is not None:
+            transformed = self.transform_model_name(new_model)
+            if transformed != new_model:
+                new_model = transformed
+            else:
+                new_model = None  # signal: no model change
+
+        current_max = payload.get("max_tokens")
+        needs_cap = (
+            isinstance(current_max, int) and current_max > self._MAX_TOKENS_CAP
+        )
+
+        if new_model is None and not needs_cap:
+            return payload  # nothing to change — preserve caller's dict identity
+
+        out = dict(payload)
+        if new_model is not None:
+            out["model"] = new_model
+        if needs_cap:
+            out["max_tokens"] = self._MAX_TOKENS_CAP
+        return out
 
     def transform_response(self, raw: dict[str, Any]) -> dict[str, Any]:
         return raw

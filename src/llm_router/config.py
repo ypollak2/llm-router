@@ -80,6 +80,11 @@ class RouterConfig(BaseSettings):
     together_api_key: str = ""
     xai_api_key: str = ""
     cohere_api_key: str = ""
+    # Plan 06 Step 2 — OpenRouter aggregator (qwen/deepseek/gemini-flash-lite/etc).
+    # LiteLLM reads OPENROUTER_API_KEY directly so no explicit env propagation needed;
+    # we surface it here only to gate `available_providers` and to enable the
+    # `~/.llm-router/config.yaml` fallback path used by enterprise installs.
+    openrouter_api_key: str = ""
 
     # ── Claude Pro/Max subscription ──
     # Set to True when using llm-router inside Claude Code (Pro/Max subscription).
@@ -284,6 +289,7 @@ class RouterConfig(BaseSettings):
         "together_api_key": ("together", "TOGETHER_API_KEY"),
         "xai_api_key": ("xai", "XAI_API_KEY"),
         "cohere_api_key": ("cohere", "COHERE_API_KEY"),
+        "openrouter_api_key": ("openrouter", "OPENROUTER_API_KEY"),
         "fal_key": ("fal", "FAL_KEY"),
         "stability_api_key": ("stability", "STABILITY_API_KEY"),
         "elevenlabs_api_key": ("elevenlabs", "ELEVENLABS_API_KEY"),
@@ -334,7 +340,7 @@ class RouterConfig(BaseSettings):
         return self.available_providers & {
             "openai", "gemini", "perplexity", "anthropic",
             "mistral", "deepseek", "groq", "together", "xai", "cohere", "ollama",
-            "huggingface",
+            "huggingface", "openrouter",
         }
 
     @property

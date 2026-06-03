@@ -102,6 +102,20 @@ _PRICING_PER_M: dict[str, dict[str, float]] = {
     "gemini-2.0-flash": {"input": 0.075, "output": 0.30},
     "gemini-2.5-flash": {"input": 0.075, "output": 0.30},
     "gemini-2.5-pro": {"input": 1.25, "output": 7.00},
+    # OpenRouter open-weight workhorse pool (Plan 06 Step 2).
+    # Per-million USD pricing approximated from public OpenRouter listings
+    # at the time of writing. The routerarena-tuned policy references these
+    # models and the bandit / policy-diff need pricing to compute expected
+    # value, so the entries must exist; the *exact* numbers can drift up to
+    # ~20% before the policy diff materially misranks. Update alongside
+    # OpenRouter's pricing page when rates shift.
+    "qwen/qwen3-235b-a22b-2507": {"input": 0.15, "output": 0.55},
+    "deepseek/deepseek-v4-flash": {"input": 0.07, "output": 0.50},
+    "google/gemini-3.1-flash-lite": {"input": 0.10, "output": 0.40},
+    "Qwen/Qwen3-Coder-Next": {"input": 0.25, "output": 0.90},
+    "qwen/qwen3-next-80b-a3b-instruct": {"input": 0.10, "output": 0.40},
+    "x-ai/grok-4.1-fast": {"input": 0.50, "output": 1.50},
+    "anthropic/claude-sonnet-4": {"input": 3.00, "output": 15.00},
 }
 
 _FREE_MODEL_PREFIXES = ("ollama", "codex", "gemini_cli")
