@@ -334,14 +334,13 @@ async def _build_and_filter_chain(
             models_to_try, active_agent, c,
         )
 
-        # ── Quality-based reordering (v6.2) ───────────────────────────────────
-        # Demote models with low quality scores to the end of the chain.
-        # This allows the router to learn from historical quality feedback.
-        try:
-            from llm_router.judge import reorder_by_quality
-            models_to_try = await reorder_by_quality(models_to_try, days=7)
-        except Exception as _quality_err:
-            log.debug("Quality reordering skipped: %s", _quality_err)
+        # ── Quality-based reordering removed (Plan 07 Cat E) ──────────────────
+        # The judge.reorder_by_quality call was a hard-threshold demotion
+        # (judge_score < 0.7 → end of chain). It is superseded by the
+        # epsilon-greedy bandit consulted from route_and_call(), which uses
+        # routing_decisions success-rate / cost telemetry directly with proper
+        # exploit/explore math. Doing the reorder there (instead of here) lets
+        # the bandit see the post-specialist chain and use the active subject.
 
         # Dedup: preserve free-first order, remove injected duplicates
         _seen: set[str] = set()
@@ -985,6 +984,7 @@ async def _dispatch_model_loop(
                         correlation_id=correlation_id,
                         response=response.content,
                         requested_complexity=classification_data.get("requested_complexity"),
+                        subject=classification_data.get("subject"),
                     )
                     
                     # Auto-log Claude usage when router selects Claude model.
@@ -1478,13 +1478,24 @@ async def route_and_call(
                     _spec_err,
                 )
 
-        # Quality-based reordering: demote models with low avg judge scores
-        if models_to_try and not model_override:  # Only reorder if no manual override
+        # Plan 07 Cat E — epsilon-greedy bandit reorder.
+        # Replaces judge.reorder_by_quality's hard < 0.7 threshold with a
+        # proper exploit/explore split over (profile, subject, model) outcome
+        # telemetry. Cold-starts to the static order until each candidate
+        # has telemetry.MIN_SAMPLES_FOR_SIGNAL samples, so the first weeks of
+        # routing behave identically to today.
+        if models_to_try and not model_override:
             try:
-                from llm_router.judge import reorder_by_quality
-                models_to_try = await reorder_by_quality(models_to_try, days=7)
-            except Exception as _judge_err:
-                log.debug("Quality reordering failed (continuing): %s", _judge_err)
+                from llm_router.bandit import EpsilonGreedyBandit
+                _bandit = EpsilonGreedyBandit()
+                _subject = (classification_data or {}).get("subject") or "general"
+                models_to_try = await _bandit.reorder(
+                    models_to_try,
+                    profile=profile.value,
+                    subject=_subject,
+                )
+            except Exception as _bandit_err:
+                log.debug("Bandit reorder skipped (continuing): %s", _bandit_err)
 
         if not models_to_try:
             set_span_attributes(

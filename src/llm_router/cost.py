@@ -254,6 +254,11 @@ MIGRATE_ROUTING_DECISIONS_ADD_COMPLEXITY_TRACKING = [
     "ALTER TABLE routing_decisions ADD COLUMN complexity_downgraded INTEGER DEFAULT 0",
 ]
 """Idempotent migration to track pressure-based complexity downgrades (v5.9)."""
+
+MIGRATE_ROUTING_DECISIONS_ADD_SUBJECT = [
+    "ALTER TABLE routing_decisions ADD COLUMN subject TEXT",
+]
+"""Plan 07 Cat E — enables (policy, subject, model) outcome aggregation for bandit selection."""
 """Idempotent migration to add policy audit column to routing_decisions (v3.2).
 
 policy_applied: JSON string of policy actions, e.g.
@@ -536,6 +541,7 @@ async def _get_db() -> aiosqlite.Connection:
         + MIGRATE_ROUTING_DECISIONS_ADD_REAL_FLAG
         + MIGRATE_ROUTING_DECISIONS_MARK_CONTAMINATED
         + MIGRATE_ADD_QUOTA_SNAPSHOTS_TABLE
+        + MIGRATE_ROUTING_DECISIONS_ADD_SUBJECT
     )
     for stmt in all_migrations:
         await _safe_migrate(db, stmt)
@@ -546,6 +552,15 @@ async def _get_db() -> aiosqlite.Connection:
     )
     await db.execute(
         "CREATE INDEX IF NOT EXISTS idx_model_quality_trends ON model_quality_trends(model, window_start DESC)"
+    )
+
+    # Plan 07 Cat E — bandit aggregation index. The bandit groups outcomes by
+    # (profile, subject, final_model) on every selection; without this index the
+    # query degenerates into a full scan once routing_decisions exceeds ~10k rows.
+    await db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_routing_bandit "
+        "ON routing_decisions(profile, subject, final_model) "
+        "WHERE subject IS NOT NULL"
     )
 
     await db.commit()
@@ -1019,6 +1034,7 @@ async def log_routing_decision(
     correlation_id: str | None = None,
     response: str | None = None,
     requested_complexity: str | None = None,
+    subject: str | None = None,
 ) -> None:
     """Persist a complete routing decision to the routing_decisions table.
 
@@ -1065,8 +1081,8 @@ async def log_routing_decision(
                 recommended_model, base_model, was_downshifted, budget_pct_used,
                 quality_mode, final_model, final_provider, success,
                 input_tokens, output_tokens, cost_usd, latency_ms, reason_code,
-                correlation_id, requested_complexity, complexity_downgraded)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                correlation_id, requested_complexity, complexity_downgraded, subject)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 _prompt_hash(prompt),
                 task_type,
@@ -1092,6 +1108,7 @@ async def log_routing_decision(
                 correlation_id,
                 requested_complexity,
                 complexity_downgraded,
+                subject,
             ),
         )
         await db.commit()
