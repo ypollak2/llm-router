@@ -1494,12 +1494,59 @@ def _is_short_code_followup(prompt: str, last_route: dict | None) -> bool:
 
 
 def _estimate_cost(task_type: str, complexity: str) -> dict:
-    """Estimate cost savings for this task routing.
-    
-    Returns: Dict with 'savings' string for display (e.g., "$0.003")
+    """Estimate baseline cost a user avoids by routing this task.
+
+    Returns: Dict with 'savings' string for display (e.g., "$0.003").
+
+    Plan 07 Cat F (deferred site): replaces the previous static cost_map
+    with a calibration-based projection. The cost shown is what one call to
+    a Claude Sonnet 4-6 baseline would cost given empirical p50 output
+    token shape for ``task_type`` plus a complexity-scaled input estimate.
+    Lands the routing display on the same pricing table as
+    session_spend.record() and cost.log_routing_decision().
+
+    Falls back to the legacy static map only when calibration isn't
+    importable (early-boot hook environments don't always have the package
+    installed) so a partial install can still produce a routing directive.
     """
-    # Rough estimates based on task type and complexity
-    # These are relative differences, not absolute costs
+    try:
+        from llm_router.calibration import predict_cost
+        from llm_router.types import TaskType
+    except Exception:
+        return _legacy_static_savings(task_type, complexity)
+
+    # Input-token estimate scales with complexity. These mirror the
+    # token-bucket assumptions in calibration's RouterArena seed data so the
+    # projected baseline tracks the same workload shape the bandit sees.
+    _input_by_complexity = {"simple": 80, "moderate": 200, "complex": 600}
+    input_tokens = _input_by_complexity.get(complexity, 200)
+
+    try:
+        tt = TaskType(task_type)
+    except ValueError:
+        tt = TaskType.QUERY
+
+    baseline = predict_cost("claude-sonnet-4-6", tt, input_tokens, quantile=0.5)
+    if baseline <= 0:
+        # predict_cost returns 0 when the model isn't priced — fall back so
+        # the display never reads "$0.0000".
+        return _legacy_static_savings(task_type, complexity)
+    return {"savings": _format_usd(baseline)}
+
+
+def _format_usd(amount: float) -> str:
+    """Render a USD figure with enough precision for sub-cent routing costs."""
+    if amount >= 0.01:
+        return f"${amount:.3f}"
+    return f"${amount:.4f}"
+
+
+def _legacy_static_savings(task_type: str, complexity: str) -> dict:
+    """Static cost_map used when calibration is unavailable.
+
+    Kept verbatim from pre-Cat-F so import-time failures don't change the
+    user-visible string.
+    """
     cost_map = {
         "query": {"simple": "$0.0001", "moderate": "$0.0005", "complex": "$0.001"},
         "research": {"simple": "$0.0002", "moderate": "$0.001", "complex": "$0.003"},
@@ -1507,8 +1554,6 @@ def _estimate_cost(task_type: str, complexity: str) -> dict:
         "analyze": {"simple": "$0.0005", "moderate": "$0.002", "complex": "$0.005"},
         "code": {"simple": "$0.001", "moderate": "$0.003", "complex": "$0.010"},
     }
-    
-    # Default to moderate savings if task type not found
     task_costs = cost_map.get(task_type, {"simple": "$0.001", "moderate": "$0.002", "complex": "$0.005"})
     return {"savings": task_costs.get(complexity, "$0.002")}
 

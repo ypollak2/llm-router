@@ -41,31 +41,36 @@ SESSION_SPEND_FILE = Path.home() / ".llm-router" / "session_spend.json"
 # Override via LLM_ROUTER_ANOMALY_THRESHOLD env var.
 _DEFAULT_ANOMALY_THRESHOLD_USD = 0.50
 
-# Model cost table (per 1K output tokens, USD) — used for live estimation
-# when the router hasn't logged the exact cost yet.
-_COST_PER_1K_OUT: dict[str, float] = {
-    "gpt-4o":                0.010,
-    "gpt-4o-mini":           0.00060,
-    "gpt-4.1":               0.008,
-    "gpt-4.1-mini":          0.00040,
-    "o3":                    0.060,
-    "o3-mini":               0.004,
-    "claude-opus-4-6":       0.075,
-    "claude-sonnet-4-6":     0.015,
-    "claude-haiku-4-5":      0.00125,
-    "gemini-2.5-pro":        0.007,
-    "gemini-2.5-flash":      0.00030,
-    "gemini-2.0-flash":      0.00030,
-    "gemini-1.5-pro":        0.007,
-}
+# Conservative fallback when the model is unknown to the calibration pricing
+# table. The router writes cost_usd on every real call, so this only fires for
+# providers we haven't priced yet — keeping it high biases the unknown case
+# toward over- (not under-) estimation, which is the safer side for an
+# anomaly-detection signal.
+_UNKNOWN_MODEL_FALLBACK_USD = 0.01
 
 
 def _estimate_cost(model: str, input_tokens: int, output_tokens: int) -> float:
-    """Rough cost estimate based on output tokens (input is ~3x cheaper, often negligible)."""
-    # Strip provider prefix (e.g. "openai/gpt-4o" → "gpt-4o")
-    short = model.split("/", 1)[-1] if "/" in model else model
-    rate = _COST_PER_1K_OUT.get(short, 0.01)  # conservative fallback
-    return (output_tokens * rate + input_tokens * rate * 0.3) / 1000
+    """USD cost for a (model, input_tokens, output_tokens) tuple.
+
+    Delegates to :func:`llm_router.calibration.cost_for_tokens` so the
+    pricing table lives in exactly one place. Plan 07 Cat F deferred site:
+    eliminates the duplicate per-model rate dict that lived here, which
+    silently drifted from the calibration table over time.
+
+    Returns the unknown-model fallback when calibration prices the model at
+    zero (free providers genuinely cost zero; unknown providers return zero
+    because the table has no entry). Disambiguating those two cases without
+    a sentinel is impossible, so the fallback only fires when output cost is
+    zero AND the model isn't one of the known free providers.
+    """
+    from llm_router.calibration import cost_for_tokens
+
+    cost = cost_for_tokens(model, input_tokens, output_tokens)
+    if cost == 0 and not any(model.startswith(p) for p in ("ollama", "codex", "gemini_cli")):
+        # Unknown model and not a recognised free provider — bias high so
+        # anomaly detection still has something to chew on.
+        return output_tokens * _UNKNOWN_MODEL_FALLBACK_USD / 1000
+    return cost
 
 
 @dataclass

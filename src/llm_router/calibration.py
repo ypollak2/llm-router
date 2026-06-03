@@ -30,6 +30,7 @@ __all__ = [
     "TokenShapeProfile",
     "INITIAL_CALIBRATION",
     "predict_cost",
+    "cost_for_tokens",
     "projection_check",
 ]
 
@@ -85,15 +86,22 @@ _PRICING_PER_M: dict[str, dict[str, float]] = {
     # Anthropic — keys match the names in src/llm_router/profiles.py chain entries
     # after stripping the "anthropic/" prefix.
     "claude-sonnet-4-6": {"input": 3.0, "output": 15.0},
+    "claude-haiku-4-5": {"input": 0.25, "output": 1.25},
     "claude-haiku-4-5-20251001": {"input": 0.80, "output": 4.0},
     "claude-opus-4-6": {"input": 15.0, "output": 75.0},
     # OpenAI
     "gpt-4o-mini": {"input": 0.15, "output": 0.60},
     "gpt-4o": {"input": 2.50, "output": 10.0},
+    "gpt-4.1": {"input": 2.00, "output": 8.00},
+    "gpt-4.1-mini": {"input": 0.10, "output": 0.40},
     "o3": {"input": 15.0, "output": 60.0},
+    "o3-mini": {"input": 1.10, "output": 4.40},
     # Google
     "gemini-1.5-flash": {"input": 0.075, "output": 0.30},
     "gemini-1.5-pro": {"input": 1.25, "output": 5.00},
+    "gemini-2.0-flash": {"input": 0.075, "output": 0.30},
+    "gemini-2.5-flash": {"input": 0.075, "output": 0.30},
+    "gemini-2.5-pro": {"input": 1.25, "output": 7.00},
 }
 
 _FREE_MODEL_PREFIXES = ("ollama", "codex", "gemini_cli")
@@ -118,6 +126,27 @@ def _lookup_pricing(model: str) -> dict[str, float]:
     if any(model.startswith(prefix) for prefix in _FREE_MODEL_PREFIXES):
         return {"input": 0.0, "output": 0.0}
     return _PRICING_PER_M.get(_normalize_model_name(model), {"input": 0.0, "output": 0.0})
+
+
+def cost_for_tokens(
+    model: str,
+    input_tokens: int,
+    output_tokens: int,
+) -> float:
+    """Compute USD cost for a call whose input/output token counts are known.
+
+    Use this when both token counts are already in hand (post-call accounting,
+    receipt logging). For *projection* — when output is unknown and must be
+    estimated from the empirical distribution — call :func:`predict_cost`
+    instead.
+
+    Centralising the pricing dictionary here means session_spend, cost.py
+    receipts, and any future cost-accounting callsite can share one source of
+    truth. Unknown models return ``0.0`` (consistent with predict_cost) rather
+    than a conservative fallback — the caller decides whether to floor.
+    """
+    pricing = _lookup_pricing(model)
+    return (input_tokens * pricing["input"] + output_tokens * pricing["output"]) / 1_000_000
 
 
 def predict_cost(
