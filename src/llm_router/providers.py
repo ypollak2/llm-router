@@ -129,6 +129,16 @@ async def call_llm(
         safe = {k: v for k, v in extra_params.items() if k in _ALLOWED_EXTRA_PARAMS}
         kwargs.update(safe)
 
+    # Plan 07 Cat D.4 — apply registered per-provider quirks so future
+    # provider-specific behaviour (OpenRouter prefix re-prepending, new
+    # reasoning-model temperature constraints, etc.) lands as a registry
+    # entry rather than another inline branch here.
+    from llm_router.profiles import provider_from_model
+    from llm_router.provider_quirks import get_quirk
+    _quirk = get_quirk(provider_from_model(model))
+    kwargs["model"] = _quirk.transform_model_name(kwargs["model"])
+    kwargs = _quirk.transform_request(kwargs)
+
     response = await litellm.acompletion(**kwargs)
     elapsed_ms = (time.monotonic() - start) * 1000
 
@@ -236,6 +246,13 @@ async def call_llm_stream(
     if extra_params:
         safe = {k: v for k, v in extra_params.items() if k in _ALLOWED_EXTRA_PARAMS}
         kwargs.update(safe)
+
+    # Plan 07 Cat D.4 — same quirk-application as non-streaming call_llm.
+    from llm_router.profiles import provider_from_model
+    from llm_router.provider_quirks import get_quirk
+    _quirk = get_quirk(provider_from_model(model))
+    kwargs["model"] = _quirk.transform_model_name(kwargs["model"])
+    kwargs = _quirk.transform_request(kwargs)
 
     response = await litellm.acompletion(**kwargs)
 
