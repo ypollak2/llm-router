@@ -382,6 +382,23 @@ def _query_cumulative_savings() -> list[tuple[str, int, int, int, float]]:
                     calls += ss_rows[0]
                     saved += ss_rows[1]
 
+            # Include Claude Code subscription savings (Haiku/Sonnet vs Opus baseline).
+            # session_spend.record_reclaimed() writes one row per routed call into
+            # claude_usage with the Opus-equivalent USD saved. Without this query
+            # branch, those savings only appear in the per-session "Net preserved"
+            # panel and never roll up into today/week/month/lifetime totals.
+            has_claude_usage = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='claude_usage'"
+            ).fetchone() is not None
+            if has_claude_usage:
+                cu_rows = conn.execute(
+                    f"SELECT COUNT(*), COALESCE(SUM(cost_saved_usd),0) "
+                    f"FROM claude_usage WHERE {where}"
+                ).fetchone()
+                if cu_rows and cu_rows[0] > 0:
+                    calls += cu_rows[0]
+                    saved += cu_rows[1]
+
             results.append((label, calls, total_in, total_out, saved))
         conn.close()
     except Exception:

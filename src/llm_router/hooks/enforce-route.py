@@ -49,6 +49,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import tempfile
 import time
@@ -75,6 +76,77 @@ def _block_tools_for(task_type: str) -> frozenset:
     if task_type in _QA_TASK_TYPES:
         return _BASE_BLOCK_TOOLS | _QA_ONLY_BLOCK_TOOLS
     return _BASE_BLOCK_TOOLS
+
+
+# ── Read-only Bash allowlist ──────────────────────────────────────────────────
+# In smart mode for code tasks, allow read-only shell commands (find, ls,
+# git status, git log, gh pr view, etc.) so investigation work isn't blocked.
+# Routing intent is preserved: write tools (Edit/Write) and unknown Bash
+# commands still require an llm_* call first.
+
+_BASH_READONLY_PREFIX_RE = re.compile(
+    r"""^\s*(?:
+        ls|find|cat|head|tail|wc|file|stat|du|tree|pwd|whoami|hostname|date|uname|env|
+        grep|rg|ag|fd|
+        git\s+(?:log|status|diff|show|branch|remote|ls-files|check-ignore|
+                rev-parse|describe|tag|blame|worktree\s+list|config\s+--get|
+                config\s+--list|stash\s+list|reflog|shortlog|fsck|count-objects)|
+        gh\s+(?:pr|run|repo|issue|search|api|workflow|release)\s+
+              (?:view|list|checks|status|diff)|
+        gh\s+auth\s+status|gh\s+--help|
+        python3?\s+--version|node\s+--version|uv\s+--version|
+        echo|printf|true|false|test
+    )(?:\s|$|;|\|)""",
+    re.VERBOSE | re.IGNORECASE,
+)
+
+_BASH_FORBIDDEN_RE = re.compile(
+    r"""(?:
+        \brm\b|\brmdir\b|\bmv\b|\bcp\b|\bchmod\b|\bchown\b|\bchgrp\b|\bln\b|\btouch\b|\bmkdir\b|
+        \bgit\s+(?:commit|push|pull|fetch|checkout|reset|rebase|merge|stash\s+(?:push|pop|drop|apply|clear)|
+                  cherry-pick|revert|tag\s+-[df]|clean|remote\s+(?:add|remove|set-url|rename)|
+                  config\s+(?:--global|--system|--unset)|
+                  am|apply|switch|restore|mv|update-ref|symbolic-ref|filter-branch)\b|
+        \bgh\s+(?:pr|issue|release)\s+(?:comment|merge|close|edit|delete|create|reopen|review|ready|update)\b|
+        \bgh\s+auth\s+(?:login|logout|refresh|setup-git|token)\b|
+        \bgh\s+repo\s+(?:create|fork|delete|edit|archive|sync|clone)\b|
+        \bgh\s+secret\b|\bgh\s+variable\b|\bgh\s+run\s+(?:cancel|delete|rerun)\b|
+        \b(?:npm|pnpm|yarn|pip|uv)\s+(?:install|add|remove|sync|build|publish|run|exec|init|create|update|uninstall)\b|
+        \bdocker\b|\bkubectl\b|\bhelm\b|\bterraform\b|\bansible\b|
+        \bsudo\b|\bsu\s+|\bsource\s+|\.\s+/|
+        \bcurl\s+-X\s*(?:POST|PUT|DELETE|PATCH)|\bwget\s+
+    )""",
+    re.VERBOSE | re.IGNORECASE,
+)
+
+
+# Output redirects (>, >>, &>, etc) make any command a write op.
+# Conservative: match the redirect operator anywhere outside quotes.
+# False positives on quoted ">" are acceptable — those are rare in read-only work.
+_BASH_REDIRECT_RE = re.compile(r"(?<![<>])(?:>>|&>|>)(?![=>])")
+
+
+def _is_readonly_bash(command: str) -> bool:
+    """Return True if a Bash command is conservatively read-only.
+
+    Read-only means: inspects state but doesn't modify the filesystem,
+    repository, remote services, or installed packages. Used to let
+    investigation work through without satisfying routing first.
+
+    Conservative: unknown prefixes return False (fail-closed). Redirects,
+    forbidden subcommands, and command substitution (`$(...)`, backticks)
+    block the allowance.
+    """
+    if not command or not command.strip():
+        return False
+    if _BASH_FORBIDDEN_RE.search(command):
+        return False
+    if _BASH_REDIRECT_RE.search(command):
+        return False
+    # Command substitution can hide writes inside otherwise-read-only commands.
+    if "$(" in command or "`" in command:
+        return False
+    return bool(_BASH_READONLY_PREFIX_RE.match(command))
 
 
 # ── Session-Type Tracking ─────────────────────────────────────────────────────
@@ -485,6 +557,14 @@ def main() -> None:
                 pass  # Block reads for Q&A tasks — fall through to violation handling
             else:
                 sys.exit(0)  # Allow reads for code tasks (needed for implementation)
+        elif tool_name == "Bash" and task_type not in _QA_TASK_TYPES:
+            # Code/non-Q&A tasks: allow read-only Bash (find, ls, git log, gh pr view, ...).
+            # Investigation often needs shell; routing intent is preserved because
+            # writes (rm, git push, npm install, etc.) still hit the violation path.
+            bash_command = hook_input.get("tool_input", {}).get("command", "")
+            if _is_readonly_bash(bash_command):
+                sys.exit(0)
+            # else: fall through to violation handling (write/unknown Bash)
         elif tool_name not in _block_tools_for(task_type):
             sys.exit(0)  # Allow non-blocked tools
         # else: fall through to violation handling
@@ -500,11 +580,43 @@ def main() -> None:
     if enforce == "soft":
         sys.exit(0)  # soft mode: logged, allowed
 
+    # ── Deadlock unblock: loop detection → immediate auto-pivot ──────────────
+    # If the same tool has been blocked 3+ times in 2 minutes, Claude is stuck
+    # retrying the same approach. The routed model can't help (otherwise we'd
+    # have made progress by now), so release the lock and let work continue.
+    # This is the primary escape valve for investigation deadlocks where the
+    # routed model can't access local files/shell.
+    if loop_detected:
+        try:
+            _ROUTER_DIR.mkdir(parents=True, exist_ok=True)
+            ts = time.strftime("%Y-%m-%d %H:%M:%S")
+            with _LOG_PATH.open("a", encoding="utf-8") as f:
+                f.write(
+                    f"[{ts}] AUTO-PIVOT (loop) session={session_id[:12]} "
+                    f"tool={tool_name} count={loop_detected['count']}\n"
+                )
+        except OSError:
+            pass
+        _clear_pending(session_id)  # Clear pending so subsequent tools also pass
+        _clear_violation_count(session_id)
+        sys.exit(0)
+
     # ── Stuck-pattern detection: auto-pivot after 4 violations per turn ──────────
     # auto-route.py resets violation count on each new user prompt, so this counter
     # is per-turn. After 4 blocked attempts in one turn, allow through to prevent
     # deadlocks — but only for THIS turn (next prompt resets).
     if violation_count >= 4:
+        try:
+            _ROUTER_DIR.mkdir(parents=True, exist_ok=True)
+            ts = time.strftime("%Y-%m-%d %H:%M:%S")
+            with _LOG_PATH.open("a", encoding="utf-8") as f:
+                f.write(
+                    f"[{ts}] AUTO-PIVOT (count) session={session_id[:12]} "
+                    f"violations={violation_count}\n"
+                )
+        except OSError:
+            pass
+        _clear_pending(session_id)  # Persist the pivot for the rest of the turn
         sys.exit(0)  # Allow this tool call to prevent deadlock
 
     if enforce == "smart":
@@ -550,13 +662,32 @@ def main() -> None:
             f"  3. Reason: {task_type} tasks are routed for cost efficiency."
         )
 
-    # Show violation count and escalation path
+    # Show violation count and escalation path. Two unblock mechanisms exist:
+    #   1) Loop detection: same tool blocked 3+ times in 2 min → instant release
+    #   2) Count-based: 4 total violations this turn → release
     escalation = ""
+    remaining_until_pivot = max(0, 4 - violation_count)
     if violation_count == 1:
-        escalation = "\n⚠️  Violation 1/2 — One more blocked tool will auto-downgrade enforcement & allow routing."
-    elif violation_count >= 2:
-        escalation = f"\n🔴 Violation {violation_count}/2+ — This session will auto-downgrade to soft enforcement after this turn.\n" \
-                     f"    CALL {expected_tool} NOW to avoid being soft-blocked."
+        escalation = (
+            "\n⚠️  Violation 1/4 — Auto-pivot at violation 4 OR if you retry the "
+            "same tool 3 times (loop detection)."
+        )
+    elif violation_count == 2:
+        escalation = (
+            f"\n⚠️  Violation 2/4 — {remaining_until_pivot} more violations before "
+            f"auto-pivot releases the lock."
+        )
+    elif violation_count == 3:
+        escalation = (
+            "\n🔴 Violation 3/4 — Next violation triggers auto-pivot. "
+            "If the routed model genuinely can't help (e.g. needs local files), "
+            "hit it once more and routing will release."
+        )
+    else:  # violation_count >= 4 — handled above but defensive
+        escalation = (
+            f"\n🔴 Violation {violation_count}/4 — Auto-pivot already engaged; "
+            f"this block is unexpected."
+        )
 
     # Detect investigation loops (same tool called 3+ times in 2 minutes)
     loop_warning = ""
@@ -585,6 +716,10 @@ def main() -> None:
         f"  burns full model cost with no savings. For {complexity} tasks, that's expensive.\n\n"
         f"NEXT STEP (required):\n"
         f"{action}\n\n"
+        f"Escape valves (if the routed model truly can't help):\n"
+        f"  • Call ANY llm_* tool (even a trivial llm_query) — clears the lock for this turn\n"
+        f"  • Loop detection: retry the same tool 3 times → auto-pivot\n"
+        f"  • Or hit violation 4 → auto-pivot\n\n"
         f"Debug options:\n"
         f"  • View compliance log: {_LOG_PATH}\n"
         f"  • Soft-fail for testing: export LLM_ROUTER_ENFORCE=soft\n"
