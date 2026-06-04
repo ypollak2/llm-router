@@ -2,6 +2,29 @@
 
 **For releases v6.2 and earlier, see [CHANGELOG_ARCHIVE.md](docs/CHANGELOG_ARCHIVE.md).**
 
+## v10.1.2 — Dashboard persistence + enforce-route deadlock recovery + coordination length-gate (2026-06-05)
+
+Three correctness fixes in the routing/enforcement pipeline. None change shipping APIs; all are surgical hook + session_spend edits.
+
+### Fixed
+
+- **Dashboard cumulative savings now persist across sessions.** `SessionSpend.record_reclaimed()` previously only updated the in-memory `session_spend.json`, so subscription-funded savings (Claude Code Haiku/Sonnet routed via the `subscription` provider) showed up in the per-session "Net preserved" panel and vanished the moment the session ended. The fix appends one row per routed call to the `claude_usage` SQLite table (`~/.llm-router/usage.db`), and `_query_cumulative_savings` in `session-end.py` now UNIONs that table alongside `usage` and `savings_stats` for the today/week/month/lifetime rollup. The query uses `date(timestamp, 'localtime')` on both sides of the WHERE clause so the rollup is correct in the midnight-local-but-not-yet-midnight-UTC window. Write is best-effort: if `usage.db` doesn't exist yet (first run before `cost.py` initializes it) the write is silently skipped — tracking never crashes the router.
+- **`enforce-route.py` deadlock recovery — auto-pivot + corrected threshold messaging.** When the same MCP tool was blocked 3+ times within 2 minutes the hook now releases the route-lock and clears the pending tool, breaking would-be infinite loops where the model retried the same blocked call. The block message previously said `/2` while the actual auto-pivot threshold was `/4`; both are now consistent at `/4`, and the message documents the escape valves (`LLM_ROUTER_ENFORCE=off`, the auto-pivot itself). In smart mode, read-only Bash patterns (`ls`, `find`, `git log`, `gh pr view`, …) now pass through for code tasks so the model can investigate before routing, matching the existing Read/Glob/Grep/LS pass-through.
+- **Coordination scoring no longer hijacks long substantive prompts.** The heuristic classifier was scoring `coordination` for multi-sentence prompts that happened to contain common English words like "continue", "run", "test", "verify", "check" — a real-world misfire routed a RouterArena optimization prompt to `qwen2.5:7b` which hallucinated a numpy/cProfile answer unrelated to the input. Two surgical changes: (1) `COORDINATION_MAX_LEN = 150` forces the coordination score to zero for any prompt over 150 characters in `score_categories` — coordination prompts are short by nature (`"y"`, `"yes proceed"`, `"push to main"`); long prompts cannot be coordination regardless of which short coordination words they contain. (2) The coordination/intent regex was trimmed to strong git/deploy verbs (`push`, `pull`, `deploy`, `release`, `publish`, `commit`, `merge`, `sync`, `fetch`, `rebase`) plus short ack tokens (`yes`, `ok`, `y`, `n`, `go ahead`), removing the false-firing common words. The cache layer was cleared as a suspect during diagnosis — it already SHA-256s the full prompt and is keyed correctly; the misfire was fresh Ollama inference, not stale cache.
+- **Lint cleanup.** Removed extraneous f-string prefixes in escalation messages that had no interpolation.
+
+### Tests
+
+- `tests/test_auto_route_signals.py` (19 tests, all passing) — length-gate behavior, previously-misfired prompts no longer score coordination, legitimate short git prompts still win coordination, substantive prompts still classify as code/analyze/generate, end-to-end `classify_prompt` with LLM classifiers disabled.
+- 35 cost tests pass; 52 enforce-route tests pass.
+- Full suite: **2287 / 2287 pass**.
+
+### Verification
+
+- Dashboard end-to-end verified by direct INSERT into `claude_usage` then re-querying `_query_cumulative_savings` — the new row surfaces in today/week/month/lifetime totals with correct localtime handling.
+- Enforce-route deadlock recovery verified against 3-blocks-in-2-min trace (auto-pivot fires, lock releases, pending cleared).
+- Coordination misfire verified against the original RouterArena prompt: pre-fix `coordination: 13` (winner) → post-fix `coordination: 0` (length gate) → `code: 2` wins.
+
 ## v10.1.1 — Expose `llm_session_savings` under the default slim mode (2026-06-03)
 
 ### Fixed
