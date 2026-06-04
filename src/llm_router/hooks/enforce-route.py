@@ -669,8 +669,8 @@ def main() -> None:
     remaining_until_pivot = max(0, 4 - violation_count)
     if violation_count == 1:
         escalation = (
-            f"\n⚠️  Violation 1/4 — Auto-pivot at violation 4 OR if you retry the "
-            f"same tool 3 times (loop detection)."
+            "\n⚠️  Violation 1/4 — Auto-pivot at violation 4 OR if you retry the "
+            "same tool 3 times (loop detection)."
         )
     elif violation_count == 2:
         escalation = (
@@ -679,9 +679,9 @@ def main() -> None:
         )
     elif violation_count == 3:
         escalation = (
-            f"\n🔴 Violation 3/4 — Next violation triggers auto-pivot. "
-            f"If the routed model genuinely can't help (e.g. needs local files), "
-            f"hit it once more and routing will release."
+            "\n🔴 Violation 3/4 — Next violation triggers auto-pivot. "
+            "If the routed model genuinely can't help (e.g. needs local files), "
+            "hit it once more and routing will release."
         )
     else:  # violation_count >= 4 — handled above but defensive
         escalation = (
