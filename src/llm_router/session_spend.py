@@ -158,6 +158,40 @@ class SessionSpend:
         else:
             self.gates_failed += 1
         self._persist()
+        # Also persist a SQLite row so the session-end dashboard's cumulative
+        # "today/this week/lifetime" savings rollup reflects subscription-funded
+        # routing (Claude Code Haiku/Sonnet vs Opus). Without this, only the
+        # current-session "Net preserved" panel sees these savings — they vanish
+        # the moment the session ends. The dashboard query joins this table
+        # via _query_cumulative_savings to surface them.
+        try:
+            self._persist_to_claude_usage(tokens_reclaimed, opus_equivalent_usd)
+        except Exception:
+            pass  # Tracking is best-effort — never crash the router.
+
+    def _persist_to_claude_usage(
+        self, tokens_reclaimed: int, opus_equivalent_usd: float
+    ) -> None:
+        """Append a row to ~/.llm-router/usage.db claude_usage table."""
+        import sqlite3
+        db_path = SESSION_SPEND_FILE.parent / "usage.db"
+        if not db_path.exists():
+            return  # No DB → no cumulative tracking yet; cost.py creates on first use.
+        # Pick the model that took most cost this session as the attribution model
+        # (rough but cheap — the alternative is per-call attribution which would
+        # require threading the model name through record_reclaimed).
+        attribution_model = (
+            max(self.per_model, key=lambda m: self.per_model[m]["cost_usd"])
+            if self.per_model else "subscription"
+        )
+        with sqlite3.connect(str(db_path), timeout=2.0) as conn:
+            conn.execute(
+                "INSERT INTO claude_usage "
+                "(model, tokens_used, complexity, cost_saved_usd) "
+                "VALUES (?, ?, ?, ?)",
+                (attribution_model, tokens_reclaimed, "auto", opus_equivalent_usd),
+            )
+            conn.commit()
 
     @property
     def net_savings_usd(self) -> float:

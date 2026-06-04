@@ -396,3 +396,239 @@ def test_auto_route_logs_unrouted_previous_turn_on_next_prompt(tmp_path):
     assert "task=query/simple" in log_text
     # Prior unrouted turn context is now in contextForAgent, not systemMessage
     assert "PREVIOUS TURN VIOLATED ROUTING" in ctx or "prior unrouted turn" in ctx
+
+
+# ── Read-only Bash allowlist (smart mode, code tasks) ─────────────────────────
+
+
+READONLY_BASH_CASES = [
+    "ls /tmp",
+    "find . -name '*.py'",
+    "cat README.md",
+    "git status",
+    "git log --oneline -5",
+    "git diff HEAD",
+    "git show HEAD:path/to/file.py",
+    "gh pr view 132",
+    "gh run list --limit 5",
+    "git log --oneline | head -10",
+    "grep -r foo src/",
+    "wc -l file.txt",
+]
+
+WRITE_BASH_CASES = [
+    "rm -rf /tmp/data",
+    "git push origin main",
+    "git commit -m msg",
+    "git checkout main",
+    "git reset --hard HEAD",
+    "gh pr comment 132 --body /evaluate",
+    "gh pr merge 132",
+    "npm install",
+    "uv sync",
+    "pip install requests",
+    "sudo apt-get update",
+    "curl -X POST https://example.com",
+    "echo hi > file.txt",
+    "mv a b",
+]
+
+
+@pytest.mark.parametrize("command", READONLY_BASH_CASES)
+def test_readonly_bash_allowed_for_code_tasks(tmp_path, command):
+    """Smart mode: investigation-style Bash passes through for code tasks."""
+    session_id = "sess-bash-readonly"
+    _write_pending(tmp_path, session_id, task_type="code", complexity="moderate",
+                   expected_tool="llm_code")
+
+    result = _run_hook(
+        ENFORCE_ROUTE_HOOK,
+        {
+            "session_id": session_id,
+            "tool_name": "Bash",
+            "tool_input": {"command": command},
+        },
+        home=tmp_path,
+    )
+
+    assert result.returncode == 0, f"hook failed: {result.stderr}"
+    # Empty stdout = allow (no block decision emitted)
+    assert result.stdout.strip() == "", (
+        f"expected allow for read-only Bash {command!r}, got: {result.stdout}"
+    )
+
+
+@pytest.mark.parametrize("command", WRITE_BASH_CASES)
+def test_write_bash_still_blocked_for_code_tasks(tmp_path, command):
+    """Smart mode: write/destructive Bash still requires routing."""
+    session_id = "sess-bash-write"
+    _write_pending(tmp_path, session_id, task_type="code", complexity="moderate",
+                   expected_tool="llm_code")
+
+    result = _run_hook(
+        ENFORCE_ROUTE_HOOK,
+        {
+            "session_id": session_id,
+            "tool_name": "Bash",
+            "tool_input": {"command": command},
+        },
+        home=tmp_path,
+    )
+
+    assert result.returncode == 0
+    out = json.loads(result.stdout)
+    assert out["decision"] == "block", (
+        f"expected block for write Bash {command!r}, got: {out}"
+    )
+
+
+def test_readonly_bash_blocked_for_qa_tasks(tmp_path):
+    """Q&A tasks must route — even read-only Bash bypasses the cheap model."""
+    session_id = "sess-bash-qa"
+    _write_pending(tmp_path, session_id, task_type="query", complexity="simple",
+                   expected_tool="llm_query")
+
+    result = _run_hook(
+        ENFORCE_ROUTE_HOOK,
+        {
+            "session_id": session_id,
+            "tool_name": "Bash",
+            "tool_input": {"command": "git status"},
+        },
+        home=tmp_path,
+    )
+
+    assert result.returncode == 0
+    out = json.loads(result.stdout)
+    assert out["decision"] == "block"
+
+
+# ── Loop detection → auto-pivot ───────────────────────────────────────────────
+
+
+def test_loop_detection_triggers_auto_pivot(tmp_path):
+    """3+ blocked same-tool calls in 2 min should release the lock."""
+    session_id = "sess-loop"
+    _write_pending(tmp_path, session_id, task_type="query", complexity="simple",
+                   expected_tool="llm_query")
+
+    # Seed tool history with 3 prior Bash calls in the last 2 minutes.
+    router_dir = tmp_path / ".llm-router"
+    history_path = router_dir / f"tool_history_{session_id}.json"
+    now = time.time()
+    history_path.write_text(
+        json.dumps({
+            "calls": [
+                {"tool": "Bash", "timestamp": now - 30},
+                {"tool": "Bash", "timestamp": now - 20},
+                {"tool": "Bash", "timestamp": now - 10},
+            ]
+        }),
+        encoding="utf-8",
+    )
+
+    result = _run_hook(
+        ENFORCE_ROUTE_HOOK,
+        {
+            "session_id": session_id,
+            "tool_name": "Bash",
+            "tool_input": {"command": "echo hi > /tmp/out"},  # write op, normally blocked
+        },
+        home=tmp_path,
+    )
+
+    assert result.returncode == 0
+    assert result.stdout.strip() == "", (
+        f"loop should have released lock; got block: {result.stdout}"
+    )
+
+    # Pending state should be cleared so subsequent tools also pass.
+    pending_path = router_dir / f"pending_route_{session_id}.json"
+    assert not pending_path.exists(), "loop pivot should clear pending state"
+
+    # Log entry should be present.
+    log_text = (router_dir / "enforcement.log").read_text(encoding="utf-8")
+    assert "AUTO-PIVOT (loop)" in log_text
+
+
+def test_violation_count_pivot_at_4(tmp_path):
+    """Auto-pivot triggers at violation 4 (matches the updated UX messaging)."""
+    session_id = "sess-count-pivot"
+    _write_pending(tmp_path, session_id, task_type="query", complexity="simple",
+                   expected_tool="llm_query")
+
+    # Seed violation counter at 3 — next blocked call hits 4 and triggers pivot.
+    router_dir = tmp_path / ".llm-router"
+    counter_path = router_dir / f"violations_{session_id}.json"
+    counter_path.write_text(
+        json.dumps({"count": 3, "last_violation_at": time.time()}),
+        encoding="utf-8",
+    )
+
+    result = _run_hook(
+        ENFORCE_ROUTE_HOOK,
+        {
+            "session_id": session_id,
+            "tool_name": "Edit",
+            "tool_input": {"file_path": "/tmp/x", "old_string": "a", "new_string": "b"},
+        },
+        home=tmp_path,
+    )
+
+    assert result.returncode == 0
+    assert result.stdout.strip() == "", (
+        f"4th violation should pivot; got block: {result.stdout}"
+    )
+    log_text = (router_dir / "enforcement.log").read_text(encoding="utf-8")
+    assert "AUTO-PIVOT (count)" in log_text
+
+
+# ── Messaging consistency ─────────────────────────────────────────────────────
+
+
+def test_block_message_shows_correct_threshold(tmp_path):
+    """Block message should reference /4 (matches actual threshold), not /2."""
+    session_id = "sess-msg-threshold"
+    _write_pending(tmp_path, session_id, task_type="query", complexity="simple",
+                   expected_tool="llm_query")
+
+    result = _run_hook(
+        ENFORCE_ROUTE_HOOK,
+        {
+            "session_id": session_id,
+            "tool_name": "Bash",
+            "tool_input": {"command": "rm -rf /"},
+        },
+        home=tmp_path,
+    )
+
+    assert result.returncode == 0
+    out = json.loads(result.stdout)
+    reason = out["reason"]
+    assert "1/4" in reason or "/4" in reason, (
+        f"block message should mention /4 threshold, got: {reason[:300]}"
+    )
+    # Old misleading text must not reappear.
+    assert "1/2" not in reason
+    assert "2/2+" not in reason
+
+
+def test_block_message_documents_escape_valve(tmp_path):
+    """Block message must mention the llm_* clear-lock escape."""
+    session_id = "sess-escape"
+    _write_pending(tmp_path, session_id)
+
+    result = _run_hook(
+        ENFORCE_ROUTE_HOOK,
+        {
+            "session_id": session_id,
+            "tool_name": "Bash",
+            "tool_input": {"command": "rm -rf /"},
+        },
+        home=tmp_path,
+    )
+
+    out = json.loads(result.stdout)
+    assert "Escape valves" in out["reason"]
+    assert "llm_" in out["reason"]
+    assert "loop" in out["reason"].lower() or "retry the same tool" in out["reason"].lower()
