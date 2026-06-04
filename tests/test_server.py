@@ -45,7 +45,7 @@ def test_all_tools_registered():
         "llm_fs_find", "llm_fs_rename", "llm_fs_edit_many", "llm_fs_analyze_context",
         "llm_team_report", "llm_team_push",
         "llm_policy", "llm_digest", "llm_benchmark",
-        "llm_reroute", "llm_session_spend", "llm_approve_route",
+        "llm_reroute", "llm_session_spend", "llm_session_savings", "llm_approve_route",
         "llm_budget", "llm_quota_status", "llm_share_profile", "llm_import_profile",
         "llm_model_eval", "llm_model_usage", "llm_model_export", "llm_savings_dashboard",
         "agoragentic_task", "agoragentic_browse", "agoragentic_wallet", "agoragentic_status",
