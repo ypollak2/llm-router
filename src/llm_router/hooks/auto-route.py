@@ -807,11 +807,16 @@ SIGNALS: dict[str, dict[str, re.Pattern]] = {
         ),
     },
     "coordination": {
+        # Intent: only words that are *strongly* coordination-signal in
+        # isolation. Removed `continue`, `proceed`, `verify`, `check`,
+        # `test`, `update`, `execute`, `run`, `build`, `compile`, `is`,
+        # `are`, `does`, `please`, `thanks` — they fire false positives
+        # on substantive prompts. The remaining set is git/deploy verbs
+        # plus short single-token acknowledgements.
         "intent": re.compile(
-            r"\b(?:push|pull|deploy|release|publish|execute|run|go ahead|"
-            r"proceed|continue|confirm|verify|check|test|build|compile|"
-            r"check if|is|are|does|can you|please|thanks|yes|ok|y|n|"
-            r"commit|merge|sync|update|fetch|rebase)\b",
+            r"\b(?:push|pull|deploy|release|publish|go ahead|"
+            r"yes|ok|y|n|"
+            r"commit|merge|sync|fetch|rebase)\b",
             re.IGNORECASE,
         ),
         "topic": re.compile(
@@ -827,6 +832,14 @@ SIGNALS: dict[str, dict[str, re.Pattern]] = {
         ),
     },
 }
+
+# Coordination prompts are short by nature — "y", "proceed", "push to
+# main", "yes go ahead". Substantive work prompts that *contain*
+# coordination words ("Continue refactor of X", "please update the
+# parser to handle Y") are typically much longer. Above this threshold,
+# the coordination score is forced to zero so the substantive
+# classifier wins.
+COORDINATION_MAX_LEN = 150
 
 # ── Complexity Patterns ──────────────────────────────────────────────────────
 
@@ -885,6 +898,10 @@ def score_categories(text: str) -> dict[str, int]:
                 unique = len({m.lower() if isinstance(m, str) else m[0].lower() for m in matches})
                 total += unique * weight
         scores[category] = total
+    # Length gate: long prompts cannot be coordination, regardless of
+    # which short coordination words happen to appear in them.
+    if len(text) > COORDINATION_MAX_LEN:
+        scores["coordination"] = 0
     return scores
 
 
