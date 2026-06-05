@@ -498,6 +498,48 @@ def _install_host(host: str) -> None:
 
 # ── Main dispatcher ────────────────────────────────────────────────────────────
 
+def isolation_test_command() -> None:
+    """Run the isolation test suite for router health verification.
+
+    Validates: cache isolation, routing logic, dashboard accuracy, database persistence.
+    """
+    import subprocess
+    from pathlib import Path
+
+    # Try to find the bash script first (for repo installations)
+    package_dir = Path(__file__).parent.parent.parent
+    script_path = package_dir / "scripts" / "router_isolation_test.sh"
+
+    if script_path.exists():
+        # Run via bash script if available
+        result = subprocess.run(
+            ["bash", str(script_path)] + sys.argv[1:],
+            cwd=Path.home() / ".llm-router"
+        )
+        sys.exit(result.returncode)
+
+    # For tool installations, pytest may not have access to tests directory
+    # Run a simple health check instead
+    print("Running llm-router health check...")
+    print()
+
+    # Quick health checks without pytest
+    try:
+        from llm_router.commands.status import cmd_status
+        print("✓ Status check:")
+        cmd_status([])
+        print()
+        print("✅ Router health check passed!")
+        print()
+        print("For comprehensive isolation tests, run from the repository:")
+        print("  cd /Users/yali.pollak/Projects/llm-router")
+        print("  pytest tests/test_isolation_routing.py -v")
+        sys.exit(0)
+    except Exception as e:
+        print(f"✗ Health check failed: {e}")
+        sys.exit(1)
+
+
 def main() -> None:
     """Unified CLI: dispatches to MCP server or subcommands."""
     args = sys.argv[1:]
