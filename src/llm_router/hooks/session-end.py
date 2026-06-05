@@ -914,43 +914,104 @@ def _query_savings_by_task_type() -> list[dict]:
 
 
 def _query_daily_14d() -> list[tuple[str, int, int, float]]:
-    """Return last 14 days of daily usage: [(date_label, calls, tokens, saved), ...]."""
+    """Return last 14 days of daily usage: [(date_label, calls, tokens, saved), ...].
+
+    v10.1.5: UNION with v9.3 per-platform tables (claude_usage, codex_usage,
+    gemini_usage) and savings_stats so the 14-day chart matches the SAVINGS
+    panel's lifetime/all column. Pre-v10.1.5 the chart only saw the legacy
+    `usage` table and underreported by 50%+ on days where work went to the
+    per-platform tables only.
+    """
     if not os.path.exists(DB_PATH):
         return []
     try:
         conn = sqlite3.connect(DB_PATH)
-        rows = conn.execute("""
-            SELECT date(timestamp, 'localtime') as day,
-                   COUNT(*) as calls,
-                   COALESCE(SUM(input_tokens),0) as in_tok,
-                   COALESCE(SUM(output_tokens),0) as out_tok,
-                   COALESCE(SUM(cost_usd),0) as cost,
-                   provider
-            FROM usage
-            WHERE success=1
-              AND timestamp >= datetime('now', '-14 days')
-            GROUP BY day, provider
-            ORDER BY day
-        """).fetchall()
-        conn.close()
-
-        # Aggregate per day with savings calculation
         from collections import OrderedDict
         daily: OrderedDict[str, dict] = OrderedDict()
-        for day, calls, in_tok, out_tok, cost, provider in rows:
+
+        def _bucket(day: str) -> dict:
             if day not in daily:
                 daily[day] = {"calls": 0, "tokens": 0, "saved": 0.0}
-            daily[day]["calls"] += calls
-            daily[day]["tokens"] += in_tok + out_tok
-            baseline = _host_baseline(in_tok, out_tok)
-            if provider in _FREE_PROVIDERS:
-                daily[day]["saved"] += baseline
-            elif provider != "subscription":
-                daily[day]["saved"] += max(0.0, baseline - cost)
+            return daily[day]
 
+        # Legacy `usage` table — kept for back-compat.
+        has_usage = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='usage'"
+        ).fetchone() is not None
+        if has_usage:
+            rows = conn.execute("""
+                SELECT date(timestamp, 'localtime') as day,
+                       COUNT(*) as calls,
+                       COALESCE(SUM(input_tokens),0) as in_tok,
+                       COALESCE(SUM(output_tokens),0) as out_tok,
+                       COALESCE(SUM(cost_usd),0) as cost,
+                       provider
+                FROM usage
+                WHERE success=1
+                  AND timestamp >= datetime('now', '-14 days')
+                GROUP BY day, provider
+                ORDER BY day
+            """).fetchall()
+            for day, calls, in_tok, out_tok, cost, provider in rows:
+                b = _bucket(day)
+                b["calls"] += calls
+                b["tokens"] += in_tok + out_tok
+                baseline = _host_baseline(in_tok, out_tok)
+                if provider in _FREE_PROVIDERS:
+                    b["saved"] += baseline
+                elif provider != "subscription":
+                    b["saved"] += max(0.0, baseline - cost)
+
+        # v9.3 per-platform tables — fold tokens_used into the daily total.
+        # Schema for all three: timestamp, model, tokens_used, cost_saved_usd.
+        for table in ("claude_usage", "codex_usage", "gemini_usage"):
+            has_sibling = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+                (table,),
+            ).fetchone() is not None
+            if not has_sibling:
+                continue
+            rows = conn.execute(f"""
+                SELECT date(timestamp, 'localtime') as day,
+                       COUNT(*) as calls,
+                       COALESCE(SUM(tokens_used),0) as tokens,
+                       COALESCE(SUM(cost_saved_usd),0) as saved
+                FROM {table}
+                WHERE timestamp >= datetime('now', '-14 days')
+                GROUP BY day
+                ORDER BY day
+            """).fetchall()
+            for day, calls, tokens, saved in rows:
+                b = _bucket(day)
+                b["calls"] += calls
+                b["tokens"] += tokens
+                b["saved"] += saved
+
+        # savings_stats — count rows + sum estimated_claude_cost_saved.
+        # No token column; calls and saved still roll up.
+        has_savings_stats = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='savings_stats'"
+        ).fetchone() is not None
+        if has_savings_stats:
+            rows = conn.execute("""
+                SELECT date(timestamp, 'localtime') as day,
+                       COUNT(*) as calls,
+                       COALESCE(SUM(estimated_claude_cost_saved),0) as saved
+                FROM savings_stats
+                WHERE timestamp >= datetime('now', '-14 days')
+                GROUP BY day
+                ORDER BY day
+            """).fetchall()
+            for day, calls, saved in rows:
+                b = _bucket(day)
+                b["calls"] += calls
+                b["saved"] += saved
+
+        conn.close()
+        # Return sorted by date so chart x-axis stays chronological.
         return [
             (day, d["calls"], d["tokens"], d["saved"])
-            for day, d in daily.items()
+            for day, d in sorted(daily.items())
         ]
     except Exception:
         return []

@@ -198,6 +198,62 @@ def test_routing_logic_uses_today_cutoff(fake_state_dir, monkeypatch):
 # ── 3. explain-dashboard prints the per-panel breakdown ──────────────────────
 
 
+def test_daily_14d_includes_v93_tables(fake_state_dir, monkeypatch):
+    """14-DAY ACTIVITY chart must include per-platform tables, not just `usage`.
+
+    Pre-v10.1.5 the chart only queried `usage` so days that routed entirely
+    through claude_usage / codex_usage / gemini_usage / savings_stats were
+    invisible. Today's row is the most affected (subscription routing →
+    claude_usage), and the chart underreported by 50%+ in practice.
+    """
+    state, db, _ = fake_state_dir
+
+    # Seed a `usage` row for today so the table exists (also tests the
+    # legacy path doesn't double-count).
+    conn = sqlite3.connect(str(db))
+    conn.execute("""CREATE TABLE IF NOT EXISTS usage (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        timestamp TEXT DEFAULT (datetime('now')),
+        model TEXT NOT NULL,
+        provider TEXT NOT NULL,
+        input_tokens INTEGER DEFAULT 0,
+        output_tokens INTEGER DEFAULT 0,
+        cost_usd REAL DEFAULT 0.0,
+        success INTEGER DEFAULT 1
+    )""")
+    conn.execute(
+        "INSERT INTO usage (model, provider, input_tokens, output_tokens, cost_usd, success) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        ("ollama/qwen2.5:7b", "ollama", 100, 50, 0.0, 1),
+    )
+    conn.commit()
+    conn.close()
+
+    # Also seed claude_usage with 1500 tokens_used for today.
+    _seed_claude_usage(db, tokens=1500, saved=0.42)
+
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "se_daily14d_test",
+        PROJECT_ROOT / "src" / "llm_router" / "hooks" / "session-end.py",
+    )
+    se_mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(se_mod)
+    monkeypatch.setattr(se_mod, "DB_PATH", str(db))
+
+    rows = se_mod._query_daily_14d()
+    assert rows, "expected at least one day of activity"
+
+    total_calls = sum(r[1] for r in rows)
+    total_tokens = sum(r[2] for r in rows)
+    # usage row contributes 1 call + 150 tokens; claude_usage contributes
+    # 1 call + 1500 tokens. Total = 2 calls, 1650 tokens.
+    assert total_calls == 2, f"expected 2 calls (1 usage + 1 claude_usage), got {total_calls}"
+    assert total_tokens == 1650, (
+        f"expected 1650 tokens (150 usage + 1500 claude_usage), got {total_tokens}"
+    )
+
+
 def test_explain_dashboard_prints_sources(fake_state_dir, monkeypatch, capsys):
     """explain-dashboard must print panel sources and the today totals."""
     state, db, tracking = fake_state_dir

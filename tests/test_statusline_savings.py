@@ -104,15 +104,26 @@ def _seed_savings_log(home: Path, records: list[dict]) -> None:
             f.write(json.dumps(r) + "\n")
 
 
-def _run_statusline(home: Path) -> str:
+def _run_statusline(home: Path, stdin_json: dict | None = None) -> str:
     """Run the statusline shell script with HOME pointed at the temp dir.
 
-    The script consumes stdin (Claude Code pipes session JSON) so we send {}.
+    The script consumes stdin (Claude Code pipes session JSON). Tests can
+    pass a real-looking payload via ``stdin_json`` to exercise cwd /
+    transcript_path extraction; default is ``{}`` for back-compat.
+
+    NO_COLOR=1 is set so tests can assert on plain text without ANSI
+    escape codes leaking into the assertion strings.
     """
-    env = {**os.environ, "HOME": str(home), "LLM_ROUTER_ENFORCE": "soft"}
+    env = {
+        **os.environ,
+        "HOME": str(home),
+        "LLM_ROUTER_ENFORCE": "soft",
+        "NO_COLOR": "1",
+    }
+    payload = json.dumps(stdin_json) if stdin_json is not None else "{}"
     result = subprocess.run(
         ["bash", str(SCRIPT)],
-        input="{}",
+        input=payload,
         capture_output=True,
         text=True,
         env=env,
@@ -150,7 +161,8 @@ def test_uses_saved_usd_column_when_populated(fake_home):
         ],
     )
     out = _run_statusline(fake_home)
-    assert "$0.01 saved" in out, f"expected $0.01 saved, got: {out!r}"
+    # v10.1.5: format is "💰 $X.XX" with emoji prefix, no "saved" suffix.
+    assert "$0.01" in out, f"expected $0.01 in savings segment, got: {out!r}"
 
 
 def test_includes_pending_savings_log_jsonl(fake_home):
@@ -170,8 +182,8 @@ def test_includes_pending_savings_log_jsonl(fake_home):
         ],
     )
     out = _run_statusline(fake_home)
-    assert "saved" in out
-    assert "$0.01 saved" in out
+    assert "💰" in out
+    assert "$0.01" in out
 
 
 def test_combines_db_and_jsonl(fake_home):
@@ -208,15 +220,15 @@ def test_combines_db_and_jsonl(fake_home):
         ],
     )
     out = _run_statusline(fake_home)
-    # 0.010275 + 0.020 = 0.030275 → "$0.03 saved"
-    assert "$0.03 saved" in out, f"expected $0.03 saved, got: {out!r}"
+    # 0.010275 + 0.020 = 0.030275 → "💰 $0.03"
+    assert "$0.03" in out, f"expected $0.03 in savings segment, got: {out!r}"
 
 
 def test_zero_savings_omits_segment(fake_home):
-    """No savings anywhere → no '$ saved' segment in the statusline output."""
+    """No savings anywhere → no money emoji segment in the statusline."""
     # No DB, no JSONL — just run
     out = _run_statusline(fake_home)
-    assert "saved" not in out
+    assert "💰" not in out
 
 
 def _seed_platform_tables(home: Path, rows: dict[str, list[dict]]) -> None:
@@ -293,8 +305,8 @@ def test_reads_v93_per_platform_tables(fake_home):
         },
     )
     out = _run_statusline(fake_home)
-    # 0.50 + 0.15 + 0.05 = 0.70 → "$0.70 saved"
-    assert "$0.70 saved" in out, f"expected $0.70 saved, got: {out!r}"
+    # 0.50 + 0.15 + 0.05 = 0.70 → "💰 $0.70"
+    assert "$0.70" in out, f"expected $0.70 in savings segment, got: {out!r}"
 
 
 def test_last_route_uses_per_session_glob(fake_home):
@@ -318,6 +330,113 @@ def test_last_route_uses_per_session_glob(fake_home):
     }))
 
     out = _run_statusline(fake_home)
-    assert "code>code" in out or "code" in out.split("|")[-1], (
-        f"expected last route segment, got: {out!r}"
+    # v10.1.5 separator is `·` not `|`; the last route segment renders as
+    # "🔀 code" because tool=="code" after stripping the "llm_" prefix.
+    assert "🔀" in out, f"expected route arrow emoji, got: {out!r}"
+    last_segment = out.strip().split("·")[-1]
+    assert "code" in last_segment, (
+        f"expected 'code' in last segment, got: {last_segment!r}"
     )
+
+
+# ── v10.1.5: new segments (reset / cwd / context) ────────────────────────────
+
+
+def _seed_usage_json(home: Path, **overrides) -> None:
+    """Write ~/.llm-router/usage.json with sensible defaults plus overrides."""
+    data = {
+        "session_pct": 8.0,
+        "weekly_pct": 20.0,
+        "sonnet_pct": 0.0,
+        "session_resets_at": None,
+        "updated_at": _today_utc_iso(),
+        "highest_pressure": 0.2,
+    }
+    data.update(overrides)
+    # Drop None-valued keys so the script's `if not raw: raise` branch fires.
+    data = {k: v for k, v in data.items() if v is not None}
+    (home / ".llm-router" / "usage.json").write_text(json.dumps(data))
+
+
+def test_reset_segment_renders_future_time(fake_home):
+    """v10.1.5: session_resets_at in the future → '⏰ HH:MMpm' segment."""
+    from datetime import timedelta
+    future = datetime.now(timezone.utc) + timedelta(hours=2, minutes=30)
+    _seed_usage_json(
+        fake_home,
+        session_resets_at=future.isoformat().replace("+00:00", "Z"),
+    )
+    out = _run_statusline(fake_home)
+    assert "⏰" in out, f"expected reset clock emoji, got: {out!r}"
+
+
+def test_reset_segment_skipped_if_in_past(fake_home):
+    """A past session_resets_at must NOT render."""
+    from datetime import timedelta
+    past = datetime.now(timezone.utc) - timedelta(hours=1)
+    _seed_usage_json(
+        fake_home,
+        session_resets_at=past.isoformat().replace("+00:00", "Z"),
+    )
+    out = _run_statusline(fake_home)
+    assert "⏰" not in out, f"reset segment leaked for past time: {out!r}"
+
+
+def test_cwd_segment_renders_basename(fake_home):
+    """v10.1.5: cwd from stdin JSON → '📂 <basename>' segment."""
+    out = _run_statusline(
+        fake_home,
+        stdin_json={"cwd": "/Users/anyone/Projects/cool-app", "session_id": "x"},
+    )
+    assert "📂" in out, f"expected folder emoji, got: {out!r}"
+    assert "cool-app" in out, f"expected basename, got: {out!r}"
+    assert "/Users/anyone/Projects" not in out, (
+        f"full path leaked into segment: {out!r}"
+    )
+
+
+def test_context_segment_renders_bar_and_size(fake_home, tmp_path):
+    """v10.1.5: transcript with usage → '🧠 Nk ██░░░░ N%' segment."""
+    transcript = tmp_path / "session.jsonl"
+    # Three messages — the LAST one with usage is the one shown.
+    transcript.write_text("\n".join([
+        json.dumps({"type": "user", "message": {"role": "user", "content": "hi"}}),
+        json.dumps({"type": "assistant", "message": {"role": "assistant",
+                    "usage": {"input_tokens": 100,
+                              "cache_creation_input_tokens": 5000,
+                              "cache_read_input_tokens": 45000,
+                              "output_tokens": 200}}}),
+    ]) + "\n")
+    out = _run_statusline(
+        fake_home,
+        stdin_json={"transcript_path": str(transcript), "session_id": "x"},
+    )
+    assert "🧠" in out, f"expected brain emoji, got: {out!r}"
+    # 100 + 5000 + 45000 = 50100 tokens → "50.1k"
+    assert "50.1k" in out, f"expected 50.1k, got: {out!r}"
+    # 50100 / 200000 = 25% (default cap)
+    assert "25%" in out, f"expected 25% context bar, got: {out!r}"
+
+
+def test_context_segment_detects_1m_model(fake_home, tmp_path):
+    """Model id containing '1m' should raise context cap to 1,000,000."""
+    transcript = tmp_path / "session.jsonl"
+    transcript.write_text(json.dumps({
+        "type": "assistant",
+        "message": {"role": "assistant",
+                    "usage": {"input_tokens": 0,
+                              "cache_creation_input_tokens": 0,
+                              "cache_read_input_tokens": 250000,
+                              "output_tokens": 0}},
+    }) + "\n")
+    out = _run_statusline(
+        fake_home,
+        stdin_json={
+            "transcript_path": str(transcript),
+            "session_id": "x",
+            "model": {"id": "claude-opus-4-7[1m]"},
+        },
+    )
+    # 250k tokens / 1M cap = 25%
+    assert "250.0k" in out, f"expected 250.0k tokens, got: {out!r}"
+    assert "25%" in out, f"expected 25% (1M cap detected), got: {out!r}"
