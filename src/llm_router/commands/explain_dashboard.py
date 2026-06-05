@@ -279,16 +279,63 @@ def _print_header() -> list[str]:
     ]
 
 
+def _check_mode_canary() -> int:
+    """Exit-non-zero canary for CI: detect v9.3-style schema drift.
+
+    Returns 0 when ``dashboard_data.query_window`` and the legacy
+    ``_table_count_and_sum`` view agree, ``1`` when any source has rows
+    for the window but didn't contribute to the totals. Useful as a CI
+    gate after schema changes — a new table that nobody reads will fail
+    this check the first time anything writes to it.
+    """
+    try:
+        from llm_router.dashboard_data import (
+            audit_sources,
+            query_window,
+        )
+    except Exception as e:
+        print(f"explain-dashboard --check: cannot import dashboard_data ({e})")
+        return 1
+
+    failures: list[str] = []
+    for window in ("today", "week", "lifetime"):
+        try:
+            audit = audit_sources(window)
+            totals = query_window(window)
+        except Exception as e:
+            failures.append(f"{window}: query failure ({e})")
+            continue
+        # Each audit row should also appear in totals.by_source. If a
+        # source has rows but no contribution, that's a drift bug.
+        for a in audit:
+            in_totals = a.table in totals.by_source
+            if a.rows_for_window > 0 and not in_totals:
+                failures.append(
+                    f"{window}: source `{a.table}` has {a.rows_for_window} "
+                    "rows but query_window dropped it"
+                )
+
+    if failures:
+        print("explain-dashboard --check: FAILED")
+        for f in failures:
+            print(f"  · {f}")
+        return 1
+    print("explain-dashboard --check: OK")
+    return 0
+
+
 def cmd_explain_dashboard(args: list[str] | None = None) -> int:
     """Print per-panel diagnostics for the session-end dashboard.
 
     Args:
-        args: Unused (kept for CLI dispatch signature compat).
+        args: ``--check`` runs the v9.3 drift canary (exit 0/1, no
+            visualization). Otherwise prints the per-panel breakdown.
 
     Returns:
-        0 always (this is a read-only diagnostic).
+        0 on success, 1 if ``--check`` detected drift.
     """
-    del args  # diagnostic command — no flags yet
+    if args and "--check" in args:
+        return _check_mode_canary()
     lines: list[str] = []
     lines += _print_header()
     lines += _routing_panel_block()
