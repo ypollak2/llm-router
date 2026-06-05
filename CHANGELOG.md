@@ -2,6 +2,46 @@
 
 **For releases v6.2 and earlier, see [CHANGELOG_ARCHIVE.md](docs/CHANGELOG_ARCHIVE.md).**
 
+## v10.1.4 — Statusline redesign + dashboard accuracy + v9.3 schema-drift prevention layer (2026-06-05)
+
+Dashboard accuracy session: five distinct surfaces were silently under-counting after the v9.3 schema split (legacy `usage` → per-platform `claude_usage` / `codex_usage` / `gemini_usage` tables). This release fixes the four broken consumers, introduces a central data-access module so the next consumer can't drift in the same way, and adds a CI canary that fires on the first row of any unread source table. Also redesigns the Claude Code statusline with Catppuccin palette + emoji + three new segments (quota reset time, working directory, context-usage bar).
+
+### Fixed
+
+- **Statusline read v9.3 per-platform tables.** Pre-v10.1.4 the statusline only queried the legacy `usage` table and reported `$0 saved` on days where work landed in `claude_usage`. Per-session `last_route_*.json` glob also wired up so the route-arrow segment renders when there's recent activity.
+- **`_query_cumulative_savings` and `_query_daily_14d`** now include `claude_usage` / `codex_usage` / `gemini_usage` / `savings_stats` rather than just `usage`. The 14-day chart's totals went from `82 calls / 15.8k tok` to `266 calls / 25.5k tok` against the same DB — the missing ~3.2x was subscription-routed work that bypassed the legacy table.
+- **ROUTING panel scope unified with SAVINGS.** `_query_routing_logic` previously filtered by `session_start`; SAVINGS used `today`. Both now use start-of-day local cutoff so the panel counts are comparable rather than measuring different windows under the same label.
+- **Today's tokens column.** Subscription routings (`claude_usage.tokens_used`) now fold into the cumulative-savings total so the today row shows a token count rather than blank.
+
+### Added
+
+- **`src/llm_router/dashboard_data.py`** — single source of truth for dashboard queries. Exposes `query_window(window)`, `query_daily(days)`, `query_by_platform(window)`, `audit_sources(window)`. UNIONs all v9.3-relevant tables. Defensive against missing tables (older DBs) AND missing columns (`_sum_if_present` via `PRAGMA table_info`). All future panels should call into this module rather than executing SQL directly.
+- **`llm-router explain-dashboard --check`** — schema-drift canary. Exits non-zero when any source table has rows for a window but `query_window` dropped it. Wired into `tests/test_isolation_routing.py` so the existing cron-scheduled `scripts/router_isolation_test.sh` catches drift overnight.
+- **Statusline visual redesign** — Catppuccin Mocha palette + emoji icons + context-usage progress bar, inspired by AwesomeJun/CC-statusline. Three new data segments:
+  - `⏰` 5-hour quota reset time (parsed from `usage.json:session_resets_at`)
+  - `📂` current working directory basename (from Claude Code's stdin JSON `cwd`)
+  - `🧠` context-window utilization (sums `input + cache_creation + cache_read` from the latest assistant turn in the transcript JSONL; bar gradient green→yellow→red; auto-detects 1M-context model via `[1m]` suffix)
+- **Scope labels on dashboard panels.** `ROUTING · today · N decisions` and `SAVINGS · all sessions` so the time window each panel measures is visible rather than silent.
+
+### Migrated
+
+- `session-end.py:_query_cumulative_savings` and `_query_daily_14d` now delegate to `dashboard_data`. ~140 lines of hand-rolled UNION SQL removed; legacy tuple shapes preserved so renderers and tests need no changes.
+
+### Tests
+
+- `tests/test_dashboard_data.py` (7 tests) — internal consistency of the module (`totals == sum(by_source)`), cross-consumer agreement (`session-end ≡ dashboard_data`), and the `--check` canary returning 0 on clean DBs.
+- `tests/test_dashboard_scope.py` (4 tests) — token rollup from per-platform tables, today-cutoff for ROUTING, explain-dashboard output, 14-day chart fold.
+- `tests/test_statusline_savings.py` — extended to 11 tests covering the three new segments.
+- `tests/test_isolation_routing.py` — added a 10th test running the canary against `~/.llm-router/usage.db` so cron picks it up.
+- Negative-path verification: phantom-table simulation confirms the canary fires when a source has rows but isn't read.
+- Full suite: **2315 / 2315 pass**.
+
+### Verification
+
+- Statusline live render: `🤖 8%/5h 20%/wk · ⏰ 6:29pm · 📂 llm-router · 🧠 279.4k ██░░░░░░ 27% · 💰 $0.64 · 🛡 smart`
+- `explain-dashboard --check: OK` against real DB.
+- Audit: 9 lower-impact consumers (budget/forecast/digest/share/install/etc.) still use direct SQL — deferred to follow-up; canary will surface any drift.
+
 ## v10.1.2 — Dashboard persistence + enforce-route deadlock recovery + coordination length-gate (2026-06-05)
 
 Three correctness fixes in the routing/enforcement pipeline. None change shipping APIs; all are surgical hook + session_spend edits.
