@@ -312,6 +312,37 @@ def test_database_persistence():
             ) from e
 
 
+# ── Schema-drift Canary ──────────────────────────────────────────────────
+
+
+def test_dashboard_data_canary_against_real_db():
+    """Schema-drift canary: every table with rows must be read by query_window.
+
+    Catches the v9.3-style bug class where a new source table accumulates
+    rows but the dashboard's UNION query was never updated to include it.
+    The canary runs against the real ~/.llm-router/usage.db, so the cron
+    runner notices drift the moment a new schema starts producing data —
+    long before a user notices the dashboard under-counting.
+
+    Skipped if the DB doesn't exist yet (fresh install / CI without state).
+    """
+    from pathlib import Path
+
+    db = Path.home() / ".llm-router" / "usage.db"
+    if not db.exists():
+        pytest.skip(f"no usage.db at {db} — fresh install or CI without state")
+
+    from llm_router.commands.explain_dashboard import _check_mode_canary
+
+    rc = _check_mode_canary()
+    assert rc == 0, (
+        "dashboard-data canary detected schema drift. "
+        "Run `llm-router explain-dashboard --check` for details. "
+        "A new source table likely has rows but isn't being read by "
+        "dashboard_data.query_window — see src/llm_router/dashboard_data.py."
+    )
+
+
 # ── Helper Functions ──────────────────────────────────────────────────────
 
 def _run_router_isolated(prompt: str, isolation_dir: Path, run_id: str = "test") -> dict[str, Any] | None:
