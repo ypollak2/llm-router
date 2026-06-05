@@ -104,10 +104,13 @@ exclude = [
     # Directories not needed in package
     "agents/",
     "demo/",
+    "docs/",
     "research/",
     "deprecation/",
+    "scripts/",
     "skills/",
     "submissions/",
+    "tests/",
     "awesome-readme/",
     # ── Backup / temp files — never publish (CLAUDE.md sdist safety rule) ─
     ".env.backup.*",
