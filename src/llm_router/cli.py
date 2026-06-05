@@ -643,6 +643,9 @@ def main() -> None:
     elif args and args[0] == "policy":
         from llm_router.commands.policy import cmd_policy
         sys.exit(cmd_policy(args[1:]))
+    elif args and args[0] == "explain-dashboard":
+        from llm_router.commands.explain_dashboard import cmd_explain_dashboard
+        sys.exit(cmd_explain_dashboard(args[1:]))
     else:
         # Default: start the MCP server (original behavior)
         from llm_router.server import main as _mcp_main

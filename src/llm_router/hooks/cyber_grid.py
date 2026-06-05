@@ -219,8 +219,12 @@ def _build_intelligence(data: dict) -> Table:
         )
         zero_pct = round(zero_cost / total_hits * 100) if total_hits > 0 else 0
 
+        # v10.1.4: scope label after the panel title so the reader knows
+        # which window these counts cover. Unified with SAVINGS panel scope
+        # via _query_routing_logic's today-cutoff (was session_start).
         header = Text()
         header.append("ROUTING", style=_INFO_BLUE_BOLD)
+        header.append("  today", style=_DIM_GRAY)
         header.append(f"  {total_hits} decisions", style=_LABEL)
         tbl.add_row(header)
         tbl.add_row(Text())
@@ -297,8 +301,11 @@ def _build_financial(data: dict) -> Table:
                 expand=True)
     tbl.add_column()
 
+    # v10.1.4: scope label so the reader knows the totals cumulate across
+    # ALL sessions (not just this one). Unified with ROUTING panel's scope.
     header = Text()
     header.append("SAVINGS", style=_NEON_GREEN_BOLD)
+    header.append("  all sessions", style=_DIM_GRAY)
     tbl.add_row(header)
     tbl.add_row(Text())
 

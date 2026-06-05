@@ -343,17 +343,25 @@ def _query_cumulative_savings() -> list[tuple[str, int, int, int, float]]:
         has_savings_stats = conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND name='savings_stats'"
         ).fetchone() is not None
+        # v10.1.4: handle missing usage table gracefully — newer DBs that only
+        # have claude_usage/codex_usage/gemini_usage shouldn't return empty.
+        has_usage = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='usage'"
+        ).fetchone() is not None
 
         for label, where in _PERIODS:
-            rows = conn.execute(
-                f"""
-                SELECT provider, COUNT(*), COALESCE(SUM(input_tokens),0),
-                       COALESCE(SUM(output_tokens),0), COALESCE(SUM(cost_usd),0)
-                FROM usage
-                WHERE success=1 AND {where}
-                GROUP BY provider
-                """
-            ).fetchall()
+            if has_usage:
+                rows = conn.execute(
+                    f"""
+                    SELECT provider, COUNT(*), COALESCE(SUM(input_tokens),0),
+                           COALESCE(SUM(output_tokens),0), COALESCE(SUM(cost_usd),0)
+                    FROM usage
+                    WHERE success=1 AND {where}
+                    GROUP BY provider
+                    """
+                ).fetchall()
+            else:
+                rows = []
             calls = total_in = total_out = 0
             saved = 0.0
             for provider, cnt, in_tok, out_tok, cost in rows:
@@ -387,17 +395,44 @@ def _query_cumulative_savings() -> list[tuple[str, int, int, int, float]]:
             # claude_usage with the Opus-equivalent USD saved. Without this query
             # branch, those savings only appear in the per-session "Net preserved"
             # panel and never roll up into today/week/month/lifetime totals.
+            #
+            # v10.1.4: also sum tokens_used so today's token column isn't blank
+            # when claude_usage is the only source with data. tokens_used is the
+            # single-column total (subscription has no input/output split), so
+            # we fold it into total_in — the renderer only cares about ti+to.
             has_claude_usage = conn.execute(
                 "SELECT name FROM sqlite_master WHERE type='table' AND name='claude_usage'"
             ).fetchone() is not None
             if has_claude_usage:
                 cu_rows = conn.execute(
-                    f"SELECT COUNT(*), COALESCE(SUM(cost_saved_usd),0) "
+                    f"SELECT COUNT(*), COALESCE(SUM(cost_saved_usd),0), "
+                    f"COALESCE(SUM(tokens_used),0) "
                     f"FROM claude_usage WHERE {where}"
                 ).fetchone()
                 if cu_rows and cu_rows[0] > 0:
                     calls += cu_rows[0]
                     saved += cu_rows[1]
+                    total_in += cu_rows[2]
+
+            # v10.1.4: also include codex_usage and gemini_usage tokens.
+            # Same rationale as claude_usage — these tables track external
+            # provider usage that doesn't write to the `usage` table.
+            for sibling in ("codex_usage", "gemini_usage"):
+                has_sibling = conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+                    (sibling,),
+                ).fetchone() is not None
+                if not has_sibling:
+                    continue
+                s_rows = conn.execute(
+                    f"SELECT COUNT(*), COALESCE(SUM(cost_saved_usd),0), "
+                    f"COALESCE(SUM(tokens_used),0) "
+                    f"FROM {sibling} WHERE {where}"
+                ).fetchone()
+                if s_rows and s_rows[0] > 0:
+                    calls += s_rows[0]
+                    saved += s_rows[1]
+                    total_in += s_rows[2]
 
             results.append((label, calls, total_in, total_out, saved))
         conn.close()
@@ -756,17 +791,27 @@ _METHOD_SYMBOLS = {
 
 
 def _query_routing_logic(session_start: float | None = None) -> list[dict]:
-    """Query routing decision breakdown by classification method."""
+    """Query routing decision breakdown by classification method.
+
+    v10.1.4: cutoff unified to start-of-day so this panel matches the
+    SAVINGS panel's "today" scope. Prior behaviour filtered to the current
+    session, causing the ROUTING and SAVINGS counts to measure different
+    windows (session vs day) without any label saying so. `session_start`
+    arg kept for back-compat but no longer used.
+    """
     if not os.path.exists(DB_PATH):
         return []
     try:
         import json as _json
+        import datetime as _dt
         tracking_path = os.path.join(STATE_DIR, "model_tracking.jsonl")
         if not os.path.exists(tracking_path):
             return []
 
         methods: dict[str, dict] = {}
-        cutoff = session_start or 0
+        # Start-of-day in local time, as a unix timestamp.
+        _today = _dt.datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+        cutoff = _today.timestamp()
 
         with open(tracking_path) as f:
             for line in f:
