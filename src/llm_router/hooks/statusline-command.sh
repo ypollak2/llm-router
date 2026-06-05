@@ -11,7 +11,6 @@ input=$(cat)
 STATE_DIR="$HOME/.llm-router"
 USAGE_JSON="$STATE_DIR/usage.json"
 USAGE_DB="$STATE_DIR/usage.db"
-LAST_ROUTE_FILE="$STATE_DIR/last_route.json"
 
 parts=()
 
@@ -24,21 +23,23 @@ if [ -f "$USAGE_JSON" ]; then
     fi
 fi
 
-# -- Today's savings (persisted in usage.db + pending in savings_log.jsonl) --
+# -- Today's gross savings --
 #
-# v9.4.0: Two changes from prior behaviour.
-#   1. Prefer the saved_usd column (populated by cost.py v9.4.0+ with the
-#      complexity-aware baseline). Fall back to the legacy Opus-token math
-#      for older rows where saved_usd is still 0.0.
-#   2. Add un-flushed savings from savings_log.jsonl. auto-route's DIRECT
-#      execution appends a JSONL record per successful routing; those records
-#      only land in the usage/savings_stats tables when the session ends.
-#      Without this, a session driven entirely by DIRECT routing displayed
-#      $0.00 saved live, even with real savings accumulating.
+# v10.1.3: Read from v9.3 per-platform tables (claude_usage, codex_usage,
+# gemini_usage) in addition to the legacy `usage` table. Newer routing
+# decisions persist to the per-platform tables, not `usage`. Pre-v10.1.3 the
+# statusline missed them and reported $0 on days with real savings.
+#
+# Schema notes:
+#   - legacy `usage` table:  saved_usd column, success=1 filter
+#   - per-platform tables:   cost_saved_usd column, no success filter
+#   - savings_log.jsonl:     un-flushed DIRECT routings (live session)
 today_saved=0
 if [ -f "$USAGE_DB" ]; then
     today_start=$(date -u +"%Y-%m-%d 00:00:00")
-    persisted=$(sqlite3 "$USAGE_DB" "
+
+    # Legacy `usage` table (kept for backward compat with older sessions).
+    legacy=$(sqlite3 "$USAGE_DB" "
         SELECT COALESCE(SUM(
             CASE
                 WHEN COALESCE(saved_usd, 0) > 0 THEN saved_usd
@@ -50,9 +51,22 @@ if [ -f "$USAGE_DB" ]; then
         FROM usage
         WHERE timestamp >= '$today_start' AND success=1;
     " 2>/dev/null)
-    if [ -n "$persisted" ]; then
-        today_saved=$persisted
-    fi
+
+    # v9.3 per-platform tables. Each query is guarded so a missing table
+    # (older DBs) produces 0 without aborting the others.
+    platform_sum=0
+    for table in claude_usage codex_usage gemini_usage; do
+        val=$(sqlite3 "$USAGE_DB" "
+            SELECT COALESCE(SUM(cost_saved_usd), 0)
+            FROM $table
+            WHERE date(timestamp,'localtime')=date('now','localtime');
+        " 2>/dev/null)
+        if [ -n "$val" ]; then
+            platform_sum=$(python3 -c "print(float('$platform_sum') + float('$val'))" 2>/dev/null)
+        fi
+    done
+
+    today_saved=$(python3 -c "print(float('${legacy:-0}') + float('${platform_sum:-0}'))" 2>/dev/null)
 fi
 
 SAVINGS_LOG="$STATE_DIR/savings_log.jsonl"
@@ -100,19 +114,27 @@ case "$enforce" in
 esac
 
 # -- Last route (if recent) --
-if [ -f "$LAST_ROUTE_FILE" ]; then
-    last=$(python3 -c "
-import json, time
-d = json.load(open('$LAST_ROUTE_FILE'))
-age = time.time() - d.get('timestamp', 0)
-if age < 300:
-    model = d.get('model', '?')
-    task = d.get('task_type', '?')
-    print(f'{task}>{model}')
+#
+# v10.1.3: Routes are persisted per-session as `last_route_<session_id>.json`
+# with keys `tool`, `task_type`, `complexity`, `saved_at` (unix timestamp).
+# Find the newest by mtime and show it if within 5 minutes.
+last=$(python3 -c "
+import json, glob, os, time
+files = glob.glob(os.path.expanduser('$STATE_DIR/last_route_*.json'))
+if files:
+    newest = max(files, key=os.path.getmtime)
+    try:
+        d = json.load(open(newest))
+        age = time.time() - d.get('saved_at', 0)
+        if age < 300:
+            tool = d.get('tool', '?').replace('llm_', '')
+            task = d.get('task_type', tool)
+            print(f'{task}>{tool}' if task != tool else tool)
+    except Exception:
+        pass
 " 2>/dev/null)
-    if [ -n "$last" ]; then
-        parts+=("$last")
-    fi
+if [ -n "$last" ]; then
+    parts+=("$last")
 fi
 
 # -- Assemble with separators --

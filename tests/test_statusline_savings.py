@@ -217,3 +217,107 @@ def test_zero_savings_omits_segment(fake_home):
     # No DB, no JSONL — just run
     out = _run_statusline(fake_home)
     assert "saved" not in out
+
+
+def _seed_platform_tables(home: Path, rows: dict[str, list[dict]]) -> None:
+    """Seed v9.3 per-platform tables with the given rows.
+
+    Schema mirrors what cost.py creates: claude_usage / codex_usage /
+    gemini_usage each have `timestamp`, `model`, `tokens_used`, `complexity`,
+    `cost_saved_usd`, `routing_overhead_usd`.
+    """
+    db = home / ".llm-router" / "usage.db"
+    conn = sqlite3.connect(str(db))
+    for table, table_rows in rows.items():
+        conn.execute(
+            f"""CREATE TABLE IF NOT EXISTS {table} (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT DEFAULT (datetime('now')),
+                model TEXT NOT NULL,
+                tokens_used INTEGER NOT NULL DEFAULT 0,
+                complexity TEXT NOT NULL DEFAULT 'moderate',
+                cost_saved_usd REAL NOT NULL DEFAULT 0,
+                routing_overhead_usd REAL NOT NULL DEFAULT 0
+            )"""
+        )
+        for r in table_rows:
+            conn.execute(
+                f"INSERT INTO {table} (timestamp, model, tokens_used, "
+                f"cost_saved_usd, routing_overhead_usd) VALUES (?, ?, ?, ?, ?)",
+                (
+                    r["timestamp"],
+                    r["model"],
+                    r.get("tokens_used", 0),
+                    r.get("cost_saved_usd", 0.0),
+                    r.get("routing_overhead_usd", 0.0),
+                ),
+            )
+    conn.commit()
+    conn.close()
+
+
+def test_reads_v93_per_platform_tables(fake_home):
+    """v10.1.3+: per-platform tables (claude_usage etc.) must contribute.
+
+    Regression for a real bug where the statusline only queried the legacy
+    `usage` table and reported $0 on days with v9.3+ routing decisions.
+    """
+    _seed_platform_tables(
+        fake_home,
+        {
+            "claude_usage": [
+                {
+                    "timestamp": _today_utc_iso(),
+                    "model": "claude-haiku-4-5",
+                    "tokens_used": 1500,
+                    "cost_saved_usd": 0.50,
+                    "routing_overhead_usd": 0.01,
+                }
+            ],
+            "codex_usage": [
+                {
+                    "timestamp": _today_utc_iso(),
+                    "model": "gpt-5.4",
+                    "tokens_used": 800,
+                    "cost_saved_usd": 0.15,
+                }
+            ],
+            "gemini_usage": [
+                {
+                    "timestamp": _today_utc_iso(),
+                    "model": "gemini-2.5-flash",
+                    "tokens_used": 600,
+                    "cost_saved_usd": 0.05,
+                }
+            ],
+        },
+    )
+    out = _run_statusline(fake_home)
+    # 0.50 + 0.15 + 0.05 = 0.70 → "$0.70 saved"
+    assert "$0.70 saved" in out, f"expected $0.70 saved, got: {out!r}"
+
+
+def test_last_route_uses_per_session_glob(fake_home):
+    """v10.1.3+: last_route_<session>.json files, newest by mtime."""
+    import time as _time
+
+    # Old route (>5min ago) — must be ignored
+    old = fake_home / ".llm-router" / "last_route_old.json"
+    old.write_text(json.dumps({
+        "task_type": "query",
+        "tool": "llm_query",
+        "saved_at": _time.time() - 600,
+    }))
+
+    # Recent route — must be shown
+    recent = fake_home / ".llm-router" / "last_route_new.json"
+    recent.write_text(json.dumps({
+        "task_type": "code",
+        "tool": "llm_code",
+        "saved_at": _time.time() - 30,
+    }))
+
+    out = _run_statusline(fake_home)
+    assert "code>code" in out or "code" in out.split("|")[-1], (
+        f"expected last route segment, got: {out!r}"
+    )
