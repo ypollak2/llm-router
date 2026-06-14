@@ -541,6 +541,7 @@ _PROVIDER_KEY_ENV: dict[str, str] = {
     "groq": "GROQ_API_KEY",
     "mistral": "MISTRAL_API_KEY",
     "deepseek": "DEEPSEEK_API_KEY",
+    "evolink": "EVOLINK_API_KEY",
     "fal": "FAL_KEY",
     "replicate": "REPLICATE_API_TOKEN",
     "elevenlabs": "ELEVENLABS_API_KEY",

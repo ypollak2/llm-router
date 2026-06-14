@@ -10,6 +10,7 @@ here.
 from __future__ import annotations
 
 from llm_router.provider_quirks import (
+    EvoLinkQuirks,
     IdentityQuirk,
     OllamaQuirks,
     OpenAIReasoningQuirks,
@@ -145,6 +146,24 @@ class TestOpenRouterQuirks:
         assert q.transform_request(payload) is payload
 
 
+class TestEvoLinkQuirks:
+    """EvoLink uses an OpenAI-compatible endpoint while keeping its provider prefix."""
+
+    def test_translates_model_to_openai_compatible_dispatch(self, monkeypatch):
+        monkeypatch.setenv("EVOLINK_API_KEY", "evl-secret")
+        q = EvoLinkQuirks()
+
+        out = q.transform_request({"model": "evolink/gpt-5.2", "temperature": 0.5})
+
+        assert out["model"] == "gpt-5.2"
+        assert out["api_base"] == "https://direct.evolink.ai/v1"
+        assert out["api_key"] == "evl-secret"
+        assert out["temperature"] == 0.5
+
+    def test_transform_model_name_accepts_bare_model(self):
+        assert EvoLinkQuirks().transform_model_name("gpt-5.2") == "gpt-5.2"
+
+
 # ── Registry ────────────────────────────────────────────────────────────────
 
 
@@ -155,6 +174,7 @@ class TestRegistry:
         """openai/ollama/openrouter come pre-wired."""
         names = registered_providers()
         assert "openai" in names
+        assert "evolink" in names
         assert "ollama" in names
         assert "openrouter" in names
 

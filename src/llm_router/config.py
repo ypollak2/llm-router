@@ -85,6 +85,7 @@ class RouterConfig(BaseSettings):
     # we surface it here only to gate `available_providers` and to enable the
     # `~/.llm-router/config.yaml` fallback path used by enterprise installs.
     openrouter_api_key: str = ""
+    evolink_api_key: str = ""
 
     # ── Claude Pro/Max subscription ──
     # Set to True when using llm-router inside Claude Code (Pro/Max subscription).
@@ -290,6 +291,7 @@ class RouterConfig(BaseSettings):
         "xai_api_key": ("xai", "XAI_API_KEY"),
         "cohere_api_key": ("cohere", "COHERE_API_KEY"),
         "openrouter_api_key": ("openrouter", "OPENROUTER_API_KEY"),
+        "evolink_api_key": ("evolink", "EVOLINK_API_KEY"),
         "fal_key": ("fal", "FAL_KEY"),
         "stability_api_key": ("stability", "STABILITY_API_KEY"),
         "elevenlabs_api_key": ("elevenlabs", "ELEVENLABS_API_KEY"),
@@ -340,7 +342,7 @@ class RouterConfig(BaseSettings):
         return self.available_providers & {
             "openai", "gemini", "perplexity", "anthropic",
             "mistral", "deepseek", "groq", "together", "xai", "cohere", "ollama",
-            "huggingface", "openrouter",
+            "huggingface", "openrouter", "evolink",
         }
 
     @property

@@ -21,6 +21,7 @@ workhorses:
   - gemini/gemini-2.5-pro
   - deepseek/deepseek-chat
   - openai/gpt-4o
+  - evolink/gpt-5.2
   - anthropic/claude-sonnet-4-6
   - anthropic/claude-haiku-4-5-20251001
 
@@ -31,6 +32,7 @@ fallback_chain_complex:
   - gemini/gemini-2.5-pro
   - openai/gpt-4o
   - openai/o3
+  - evolink/gpt-5.2
   - xai/grok-3
 
 specialists: {}
@@ -44,17 +46,20 @@ chains:
       - groq/llama-3.3-70b-versatile
       - deepseek/deepseek-chat
       - openai/gpt-4o-mini
+      - evolink/gpt-5.2
       - anthropic/claude-haiku-4-5-20251001
     research:
       - anthropic/claude-haiku-4-5-20251001
       - gemini/gemini-2.5-flash
       - openai/gpt-4o-mini
+      - evolink/gpt-5.2
     generate:
       - codex/gpt-4o-mini
       - gemini/gemini-2.5-flash
       - deepseek/deepseek-chat
       - mistral/mistral-small-latest
       - openai/gpt-4o-mini
+      - evolink/gpt-5.2
       - anthropic/claude-haiku-4-5-20251001
     analyze:
       - codex/gpt-4o-mini
@@ -62,6 +67,7 @@ chains:
       - deepseek/deepseek-reasoner
       - groq/llama-3.3-70b-versatile
       - openai/gpt-4o-mini
+      - evolink/gpt-5.2
       - anthropic/claude-haiku-4-5-20251001
     code:
       - codex/gpt-4o-mini
@@ -69,6 +75,7 @@ chains:
       - gemini/gemini-2.5-flash
       - groq/llama-3.3-70b-versatile
       - openai/gpt-4o-mini
+      - evolink/gpt-5.2
       - anthropic/claude-haiku-4-5-20251001
     image:
       - fal/flux-dev
@@ -89,18 +96,21 @@ chains:
       - gemini/gemini-2.5-pro
       - deepseek/deepseek-chat
       - openai/gpt-4o
+      - evolink/gpt-5.2
       - anthropic/claude-sonnet-4-6
       - anthropic/claude-haiku-4-5-20251001
     research:
       - anthropic/claude-sonnet-4-6
       - gemini/gemini-2.5-pro
       - openai/gpt-4o
+      - evolink/gpt-5.2
     generate:
       - codex/gpt-4o
       - gemini/gemini-2.5-pro
       - deepseek/deepseek-chat
       - openai/gpt-4o
       - cohere/command-r-plus
+      - evolink/gpt-5.2
       - anthropic/claude-sonnet-4-6
       - anthropic/claude-haiku-4-5-20251001
     analyze:
@@ -108,6 +118,7 @@ chains:
       - gemini/gemini-2.5-pro
       - deepseek/deepseek-reasoner
       - openai/gpt-4o
+      - evolink/gpt-5.2
       - anthropic/claude-sonnet-4-6
       - anthropic/claude-haiku-4-5-20251001
     code:
@@ -115,6 +126,7 @@ chains:
       - gemini/gemini-2.5-pro
       - deepseek/deepseek-chat
       - openai/gpt-4o
+      - evolink/gpt-5.2
       - anthropic/claude-sonnet-4-6
       - anthropic/claude-haiku-4-5-20251001
     image:
@@ -139,11 +151,13 @@ chains:
       - gemini/gemini-2.5-pro
       - openai/gpt-4o
       - openai/o3
+      - evolink/gpt-5.2
       - xai/grok-3
     research:
       - anthropic/claude-opus-4-6
       - gemini/gemini-2.5-pro
       - openai/o3
+      - evolink/gpt-5.2
     generate:
       - anthropic/claude-opus-4-6
       - anthropic/claude-sonnet-4-6
@@ -151,12 +165,14 @@ chains:
       - gemini/gemini-2.5-pro
       - openai/gpt-4o
       - openai/o3
+      - evolink/gpt-5.2
     analyze:
       - anthropic/claude-opus-4-6
       - anthropic/claude-sonnet-4-6
       - deepseek/deepseek-reasoner
       - gemini/gemini-2.5-pro
       - openai/o3
+      - evolink/gpt-5.2
     code:
       - anthropic/claude-opus-4-6
       - anthropic/claude-sonnet-4-6
@@ -164,6 +180,7 @@ chains:
       - gemini/gemini-2.5-pro
       - openai/gpt-4o
       - openai/o3
+      - evolink/gpt-5.2
     image:
       - gemini/imagen-3
       - openai/dall-e-3

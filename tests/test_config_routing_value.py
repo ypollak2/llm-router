@@ -39,6 +39,7 @@ class TestAvailableProviders:
             xai_api_key="",
             cohere_api_key="",
             openrouter_api_key="",
+            evolink_api_key="",
         )
         assert cfg.available_providers == set()
 
@@ -115,6 +116,26 @@ class TestAvailableProviders:
         cfg = RouterConfig(openai_api_key="sk-openai", ollama_base_url="")
         assert "openai" in cfg.text_providers
         assert "openai" in cfg.media_providers
+
+    def test_evolink_key_exposes_text_provider(self):
+        cfg = RouterConfig(evolink_api_key="evl-test", ollama_base_url="")
+
+        assert "evolink" in cfg.available_providers
+        assert "evolink" in cfg.text_providers
+        assert "evolink" not in cfg.media_providers
+
+    def test_apply_keys_to_env_exports_evolink_key(self):
+        original_key = os.environ.get("EVOLINK_API_KEY")
+        try:
+            os.environ.pop("EVOLINK_API_KEY", None)
+            cfg = RouterConfig(evolink_api_key="evl-secret", ollama_base_url="")
+            cfg.apply_keys_to_env()
+            assert os.environ.get("EVOLINK_API_KEY") == "evl-secret"
+        finally:
+            if original_key is not None:
+                os.environ["EVOLINK_API_KEY"] = original_key
+            else:
+                os.environ.pop("EVOLINK_API_KEY", None)
 
 
 class TestClaudeSubscriptionMode:

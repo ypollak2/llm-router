@@ -34,6 +34,7 @@ from typing import Any, Protocol, runtime_checkable
 __all__ = [
     "ProviderQuirk",
     "IdentityQuirk",
+    "EvoLinkQuirks",
     "OpenAIReasoningQuirks",
     "OllamaQuirks",
     "OpenRouterQuirks",
@@ -199,12 +200,43 @@ class OpenRouterQuirks:
         return raw
 
 
+class EvoLinkQuirks:
+    """EvoLink OpenAI-compatible gateway.
+
+    Runtime chains use ``evolink/<model>`` so routing, spend attribution, and
+    provider availability remain distinct from direct OpenAI. LiteLLM already
+    knows how to speak OpenAI-compatible chat completions, so the request is
+    translated just before dispatch by setting the OpenAI provider model,
+    EvoLink API base, and EvoLink key.
+    """
+
+    _API_BASE = "https://direct.evolink.ai/v1"
+
+    def transform_model_name(self, name: str) -> str:
+        return name.split("/", 1)[1] if name.startswith("evolink/") else name
+
+    def transform_request(self, payload: dict[str, Any]) -> dict[str, Any]:
+        import os
+
+        out = dict(payload)
+        out["model"] = self.transform_model_name(str(out.get("model", "")))
+        out["api_base"] = self._API_BASE
+        api_key = os.environ.get("EVOLINK_API_KEY")
+        if api_key:
+            out["api_key"] = api_key
+        return out
+
+    def transform_response(self, raw: dict[str, Any]) -> dict[str, Any]:
+        return raw
+
+
 # ── Registry ────────────────────────────────────────────────────────────────
 
 
 _IDENTITY = IdentityQuirk()
 _REGISTRY: dict[str, ProviderQuirk] = {
     "openai": OpenAIReasoningQuirks(),
+    "evolink": EvoLinkQuirks(),
     "ollama": OllamaQuirks(),
     "openrouter": OpenRouterQuirks(),
 }
