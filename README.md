@@ -22,6 +22,7 @@
   <a href="https://pypi.org/project/llm-routing/"><img src="https://img.shields.io/badge/python-3.10+-3572A5?style=flat-square" alt="Python"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-10B981?style=flat-square" alt="License"></a>
   <a href="https://github.com/ypollak2/llm-router/discussions"><img src="https://img.shields.io/github/discussions/ypollak2/llm-router?style=flat-square&color=8B5CF6&label=discussions" alt="Discussions"></a>
+  <a href="https://github.com/Chuzom/Chuzom"><img src="https://img.shields.io/badge/RouterArena-%238-F59E0B?style=flat-square&logo=data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCI+PHBhdGggZmlsbD0id2hpdGUiIGQ9Ik0xMiAyTDMgN2w5IDUgOS01LTktNXpNMyAxN2w5IDUgOS01TTMgMTJsOSA1IDktNSIvPjwvc3ZnPg==" alt="RouterArena #8"></a>
 </p>
 
 <p align="center">
@@ -59,6 +60,8 @@ pip install llm-routing
 
 - [Why People Install This](#why-people-install-this)
 - [What You Get](#what-you-get)
+- [Ranked #8 on RouterArena](#ranked-8-on-routerarena)
+- [Need Enterprise-Grade Routing? Meet Chuzom](#need-enterprise-grade-routing-meet-chuzom)
 - [Quick Start](#quick-start)
 - [Example Routing](#example-routing)
 - [Works With](#works-with)
@@ -111,6 +114,33 @@ You keep the same workflow. The router changes the model choice underneath.
 - Fall back across providers automatically
 - Track usage and estimated savings locally
 - Run everything on your own machine
+
+---
+
+## Ranked #8 on RouterArena
+
+`llm-router` was independently benchmarked and ranked **#8** on [RouterArena](https://github.com/Chuzom/Chuzom) — a community leaderboard that evaluates model routers on routing accuracy, latency, cost efficiency, and fallback reliability.
+
+---
+
+## Need Enterprise-Grade Routing? Meet Chuzom
+
+**[Chuzom](https://github.com/Chuzom/Chuzom)** is the enterprise-ready evolution of the ideas in `llm-router`. If you're deploying at team or org scale, Chuzom adds the layer of control, governance, and integration that individual-developer tools don't need but enterprises do.
+
+| Capability | `llm-router` | [Chuzom](https://github.com/Chuzom/Chuzom) |
+|---|:---:|:---:|
+| Free-first routing chain | ✅ | ✅ |
+| Claude / Codex / Gemini CLI hooks | ✅ | ✅ |
+| MCP tool interface | ✅ | ✅ |
+| Local-only, no proxy | ✅ | ✅ |
+| Team-wide policy enforcement | — | ✅ |
+| Audit log & compliance export | — | ✅ |
+| SSO / SAML / OIDC integration | — | ✅ |
+| Role-based provider access controls | — | ✅ |
+| Multi-workspace / org model budgets | — | ✅ |
+| SLA-backed support | — | ✅ |
+
+`llm-router` is the right choice for individual developers and small teams who want local cost savings with zero ops overhead. For organizations that need governance, auditability, and enterprise integrations, **[Chuzom](https://github.com/Chuzom/Chuzom)** is built for that.
 
 ---
 
