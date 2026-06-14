@@ -22,7 +22,7 @@
   <a href="https://pypi.org/project/llm-routing/"><img src="https://img.shields.io/badge/python-3.10+-3572A5?style=flat-square" alt="Python"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-10B981?style=flat-square" alt="License"></a>
   <a href="https://github.com/ypollak2/llm-router/discussions"><img src="https://img.shields.io/github/discussions/ypollak2/llm-router?style=flat-square&color=8B5CF6&label=discussions" alt="Discussions"></a>
-  <a href="https://github.com/Chuzom/Chuzom"><img src="https://img.shields.io/badge/RouterArena-%238-F59E0B?style=flat-square&logo=data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCI+PHBhdGggZmlsbD0id2hpdGUiIGQ9Ik0xMiAyTDMgN2w5IDUgOS01LTktNXpNMyAxN2w5IDUgOS01TTMgMTJsOSA1IDktNSIvPjwvc3ZnPg==" alt="RouterArena #8"></a>
+  <a href="https://github.com/RouteWorks/RouterArena"><img src="https://img.shields.io/badge/RouterArena-%238-F59E0B?style=flat-square&logo=data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCI+PHBhdGggZmlsbD0id2hpdGUiIGQ9Ik0xMiAyTDMgN2w5IDUgOS01LTktNXpNMyAxN2w5IDUgOS01TTMgMTJsOSA1IDktNSIvPjwvc3ZnPg==" alt="RouterArena #8"></a>
 </p>
 
 <p align="center">
@@ -119,7 +119,7 @@ You keep the same workflow. The router changes the model choice underneath.
 
 ## Ranked #8 on RouterArena
 
-`llm-router` was independently benchmarked and ranked **#8** on [RouterArena](https://github.com/Chuzom/Chuzom) — a community leaderboard that evaluates model routers on routing accuracy, latency, cost efficiency, and fallback reliability.
+`llm-router` was independently benchmarked and ranked **#8** on [RouterArena](https://github.com/RouteWorks/RouterArena) — a community leaderboard that evaluates model routers on routing accuracy, latency, cost efficiency, and fallback reliability.
 
 ---
 
