@@ -1,5 +1,7 @@
 """Tests for context_prep module — the prompt preparation pipeline."""
 
+from unittest.mock import patch
+
 from llm_router.context_prep import PreparedPrompt, prepare_prompt
 from llm_router.types import Complexity, TaskType
 
@@ -91,12 +93,14 @@ class TestPreparedPromptProperties:
     """Test PreparedPrompt computed properties."""
 
     def test_estimated_total_tokens_reasonable(self):
-        result = prepare_prompt(
-            "Short question",
-            TaskType.QUERY, Complexity.SIMPLE, "openai/gpt-4o-mini",
-        )
+        # Patch cache retrieval so context is deterministically empty
+        with patch("llm_router.result_cache.search_results", return_value=[]):
+            result = prepare_prompt(
+                "Short question",
+                TaskType.QUERY, Complexity.SIMPLE, "openai/gpt-4o-mini",
+            )
         total = result.estimated_total_tokens
-        # System prompt + empty context + short question
+        # System prompt + empty context + short question — no cache hits
         assert 5 < total < 200
 
     def test_full_system_without_context(self):
