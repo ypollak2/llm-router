@@ -87,6 +87,10 @@ def extract_content(message: Any) -> str:
     reasoning = getattr(message, "reasoning", None)
     if isinstance(reasoning, str) and reasoning.strip():
         return reasoning
+    # DeepSeek V4 reasoning models pack the answer into reasoning_content
+    reasoning_content = getattr(message, "reasoning_content", None)
+    if isinstance(reasoning_content, str) and reasoning_content.strip():
+        return reasoning_content
     return ""
 
 

@@ -42,6 +42,7 @@ class RepoConfig:
     """
     profile: str | None = None                            # budget | balanced | premium
     enforce: str | None = None                            # shadow | suggest | enforce
+    policy: str | None = None                             # custom policy name (e.g. "my_strategy")
     block_providers: list[str] = field(default_factory=list)
     block_models: list[str] = field(default_factory=list)   # model-level deny (v3.2)
     allow_models: list[str] = field(default_factory=list)   # model-level allow-list (v3.2)
@@ -84,6 +85,13 @@ class RepoConfig:
             return env
         return self.profile
 
+    def effective_policy(self) -> str | None:
+        """Return policy name: env var wins, then repo config, then None (PolicyManager default)."""
+        env = os.environ.get("LLM_ROUTER_POLICY", "")
+        if env:
+            return env
+        return self.policy
+
 
 # ── Loaders ───────────────────────────────────────────────────────────────────
 
@@ -101,6 +109,9 @@ def _dict_to_config(data: dict[str, Any], source: str) -> RepoConfig:
 
     if "profile" in data and str(data["profile"]).lower() in VALID_PROFILES:
         cfg.profile = str(data["profile"]).lower()
+
+    if "policy" in data and isinstance(data["policy"], str) and data["policy"].strip():
+        cfg.policy = data["policy"].strip()
 
     if "enforce" in data and str(data["enforce"]).lower() in VALID_ENFORCE:
         cfg.enforce = str(data["enforce"]).lower()
@@ -139,6 +150,7 @@ def _merge(base: RepoConfig, override: RepoConfig) -> RepoConfig:
     merged = RepoConfig(
         profile        = override.profile        or base.profile,
         enforce        = override.enforce        or base.enforce,
+        policy         = override.policy         or base.policy,
         block_providers= list({*base.block_providers, *override.block_providers}),
         block_models   = list({*base.block_models,    *override.block_models}),
         allow_models   = list({*base.allow_models,    *override.allow_models}),

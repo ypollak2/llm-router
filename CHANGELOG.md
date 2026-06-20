@@ -2,6 +2,13 @@
 
 **For releases v6.2 and earlier, see [CHANGELOG_ARCHIVE.md](docs/CHANGELOG_ARCHIVE.md).**
 
+## v10.1.5 — DeepSeek V4 extract_content fix + routing.yaml policy field support (2026-06-20)
+
+### Fixed
+
+- **DeepSeek V4 infinite fallback loop** (`inference_robustness.py`). `extract_content()` now checks `message.reasoning_content` as a third fallback after `message.content` and `message.reasoning`. DeepSeek V4 reasoning models (v4-flash, v4-pro) pack their answer into `reasoning_content`, leaving `content=None`. Without this fix, every call raised `EmptyResponseError`, the router exhausted all fallback models, and the MCP call hung indefinitely. Closes #25.
+- **`routing.yaml` `policy` field silently ignored** (`repo_config.py`). `_dict_to_config()` now reads `policy` from YAML. Added `policy: str | None` field to `RepoConfig`, propagated it through `_merge()`, and added `effective_policy()` helper (env var `LLM_ROUTER_POLICY` wins, then YAML value, then `None`). Users can now set `policy: my_strategy` in `~/.llm-router/routing.yaml` and have it respected. Closes #26.
+
 ## v10.1.4 — Statusline redesign + dashboard accuracy + v9.3 schema-drift prevention layer (2026-06-05)
 
 Dashboard accuracy session: five distinct surfaces were silently under-counting after the v9.3 schema split (legacy `usage` → per-platform `claude_usage` / `codex_usage` / `gemini_usage` tables). This release fixes the four broken consumers, introduces a central data-access module so the next consumer can't drift in the same way, and adds a CI canary that fires on the first row of any unread source table. Also redesigns the Claude Code statusline with Catppuccin palette + emoji + three new segments (quota reset time, working directory, context-usage bar).
