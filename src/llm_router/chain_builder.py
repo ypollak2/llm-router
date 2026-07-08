@@ -77,7 +77,7 @@ async def build_chain(
             chain = await _build_dynamic_chain(task_type, complexity, profile)
             top = chain[0] if chain else None
             set_span_attributes(span, chain_length=len(chain), top_model=top)
-            return chain
+            return await _apply_subscription_local(chain, complexity, profile)
         except Exception as e:
             log.debug("dynamic chain builder failed, using static: %s", e)
             chain = _static_chain(task_type, profile)
@@ -87,7 +87,27 @@ async def build_chain(
                 chain_length=len(chain),
                 top_model=chain[0] if chain else None,
             )
-            return chain
+            return await _apply_subscription_local(chain, complexity, profile)
+
+
+async def _apply_subscription_local(
+    chain: list[str], complexity: str, profile: "RoutingProfile"
+) -> list[str]:
+    """Cost-inverted SUBSCRIPTION_LOCAL reorder. No-op unless a subscription
+    provider is configured (LLM_ROUTER_SUBSCRIPTION_PROVIDER), so this is safe to
+    apply unconditionally — default behaviour is unchanged."""
+    from llm_router.subscription_local_routing import (
+        get_subscription_pressure,
+        is_subscription_local_active,
+        reorder_for_subscription_local,
+    )
+
+    if not is_subscription_local_active(profile):
+        return chain
+    pressure = await get_subscription_pressure()
+    return reorder_for_subscription_local(
+        chain, complexity=complexity, profile=profile, subscription_pressure=pressure
+    )
 
 
 async def _build_dynamic_chain(
