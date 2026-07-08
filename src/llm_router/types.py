@@ -95,6 +95,8 @@ class RoutingProfile(str, Enum):
     BALANCED = "balanced"   # Quality/cost sweet spot (default)
     PREMIUM = "premium"     # Best available, cost secondary
     QUOTA_BALANCED = "quota_balanced"  # Balance usage across Claude/Gemini CLI/Codex
+    SUBSCRIPTION_LOCAL = "subscription_local"  # Cost-inverted: free bucket + one paid seat;
+    # free-first for simple/moderate, seat-first for complex (see subscription_local_routing)
 
 
 class Tier(str, Enum):
