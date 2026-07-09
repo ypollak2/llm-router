@@ -95,7 +95,7 @@ uv run ruff check src/
 3. Add the provider to `_PROVIDER_REGISTRY` in `src/llm_router/server.py` (for `llm_setup`)
 4. Update the onboarding wizard in `src/llm_router/onboard.py`
 5. Add integration tests in `tests/test_integration.py`
-6. Update `docs/PROVIDERS.md` with setup instructions
+6. Update `guide/PROVIDERS.md` with setup instructions
 
 Most providers work through LiteLLM with zero custom code — just add the model string and key.
 

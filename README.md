@@ -1,8 +1,8 @@
 <p align="center">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="docs/readme/hero-dark.svg">
-    <source media="(prefers-color-scheme: light)" srcset="docs/readme/hero-light.svg">
-    <img src="docs/readme/hero-light.svg" alt="llm-router routes AI coding prompts across free, budget, and premium model tiers." width="100%"/>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/readme/hero-dark.svg">
+    <source media="(prefers-color-scheme: light)" srcset="assets/readme/hero-light.svg">
+    <img src="assets/readme/hero-light.svg" alt="llm-router routes AI coding prompts across free, budget, and premium model tiers." width="100%"/>
   </picture>
 </p>
 
@@ -48,9 +48,9 @@ pip install llm-routing
 <p align="center">
   <a href="https://github.com/ypollak2/llm-router/stargazers">
     <picture>
-      <source media="(prefers-color-scheme: dark)" srcset="docs/readme/star-cta-dark.svg">
-      <source media="(prefers-color-scheme: light)" srcset="docs/readme/star-cta-light.svg">
-      <img src="docs/readme/star-cta-light.svg" alt="Star llm-router on GitHub" width="420"/>
+      <source media="(prefers-color-scheme: dark)" srcset="assets/readme/star-cta-dark.svg">
+      <source media="(prefers-color-scheme: light)" srcset="assets/readme/star-cta-light.svg">
+      <img src="assets/readme/star-cta-light.svg" alt="Star llm-router on GitHub" width="420"/>
     </picture>
   </a>
 </p>
@@ -99,9 +99,9 @@ You keep the same workflow. The router changes the model choice underneath.
 
 <p align="center">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="docs/readme/why-route-dark.svg">
-    <source media="(prefers-color-scheme: light)" srcset="docs/readme/why-route-light.svg">
-    <img src="docs/readme/why-route-light.svg" alt="Animated benefits panel for llm-router showing cheaper routing, preserved quality, quota protection, and low-config setup." width="100%"/>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/readme/why-route-dark.svg">
+    <source media="(prefers-color-scheme: light)" srcset="assets/readme/why-route-light.svg">
+    <img src="assets/readme/why-route-light.svg" alt="Animated benefits panel for llm-router showing cheaper routing, preserved quality, quota protection, and low-config setup." width="100%"/>
   </picture>
 </p>
 
@@ -114,6 +114,10 @@ You keep the same workflow. The router changes the model choice underneath.
 - Fall back across providers automatically
 - Track usage and estimated savings locally
 - Run everything on your own machine
+- **Cost-inverted `SUBSCRIPTION_LOCAL` routing** — free/local first for simple & moderate prompts, your one paid seat first for complex ones, with the seat demoted when its quota is strained (opt-in via `LLM_ROUTER_SUBSCRIPTION_PROVIDER`)
+- **Keep secrets local** — a prompt containing an API key/token/private key routes to local models only, fail-closed so it never reaches an external API
+- **See it working** — a `surface_status` line / terminal title / OS notification showing the last model routed, savings, and health, for hosts without a native statusline
+- **Session-end summary** — savings vs baseline, tier mix, per-provider cost, latency p50/p95/p99, and top routes, in Markdown or a rich panel
 
 ---
 
@@ -200,9 +204,9 @@ The exact chain depends on your configured providers, budget profile, and routin
 
 <p align="center">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="docs/readme/editors-dark.svg">
-    <source media="(prefers-color-scheme: light)" srcset="docs/readme/editors-light.svg">
-    <img src="docs/readme/editors-light.svg" alt="Animated host support cards for Claude Code, Codex CLI, Gemini CLI, Pi, VS Code, Cursor, and any MCP client." width="100%"/>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/readme/editors-dark.svg">
+    <source media="(prefers-color-scheme: light)" srcset="assets/readme/editors-light.svg">
+    <img src="assets/readme/editors-light.svg" alt="Animated host support cards for Claude Code, Codex CLI, Gemini CLI, Pi, VS Code, Cursor, and any MCP client." width="100%"/>
   </picture>
 </p>
 
@@ -217,7 +221,7 @@ llm-router install --host vscode      # VS Code
 llm-router install --host cursor      # Cursor
 ```
 
-See [docs/HOST_SUPPORT_MATRIX.md](docs/HOST_SUPPORT_MATRIX.md) for full details on each host.
+See [guide/HOST_SUPPORT_MATRIX.md](guide/HOST_SUPPORT_MATRIX.md) for full details on each host.
 
 ### Protect Claude Code 5-hour quota
 
@@ -294,7 +298,7 @@ llm-router benchmark regress --policy <p> --benchmark <b>  # detect score regres
 llm-router policy diff balanced cost_aggressive        # per-prompt model + cost delta
 ```
 
-These power the routing self-improvement loop: routing decisions get persisted to a SQLite outcomes table; benchmark runs against a reference dataset establish baseline scores; `regress` flags drops > 0.005 in release-over-release comparisons. See [docs/CLI.md](docs/CLI.md) for the full subcommand reference.
+These power the routing self-improvement loop: routing decisions get persisted to a SQLite outcomes table; benchmark runs against a reference dataset establish baseline scores; `regress` flags drops > 0.005 in release-over-release comparisons.
 
 ---
 
@@ -331,7 +335,7 @@ Routing chains are built from your configured providers. You only need one.
 | **Runway** | Video (Gen-3) | `RUNWAY_API_KEY` |
 | **Replicate** | Various open-source models | `REPLICATE_API_TOKEN` |
 
-See [docs/PROVIDERS.md](docs/PROVIDERS.md) for setup instructions and model recommendations.
+See [guide/PROVIDERS.md](guide/PROVIDERS.md) for setup instructions and model recommendations.
 
 ---
 
@@ -349,7 +353,7 @@ Control how aggressively the router offloads to cheap models. Policies ship as Y
 ```bash
 export LLM_ROUTER_POLICY=aggressive     # Or: balanced, conservative, cost_aggressive
 export LLM_ROUTER_ENFORCE=smart          # smart | hard | soft | off
-export LLM_ROUTER_PROFILE=balanced       # budget | balanced | premium
+export LLM_ROUTER_PROFILE=balanced       # budget | balanced | premium | subscription_local
 export LLM_ROUTER_BANDIT=on              # on (default) | off — opt out of telemetry-driven chain reorder
 ```
 
@@ -360,7 +364,7 @@ export LLM_ROUTER_POLICY=cost_aggressive
 # Now: code → qwen3-coder-next, medical → gemini-flash-lite, reasoning → grok-4.3, …
 ```
 
-See [docs/POLICIES.md](docs/POLICIES.md) for the YAML schema and how to author your own policy.
+See [guide/POLICIES.md](guide/POLICIES.md) for the YAML schema and how to author your own policy.
 
 `LLM_ROUTER_ENFORCE` controls how strictly the auto-route hook blocks direct model use:
 - `smart` — route when confident, pass through when uncertain
@@ -386,7 +390,7 @@ llm-router exposes 60 MCP tools organized by function:
 
 **Slim mode** (`LLM_ROUTER_SLIM=routing` or `core`) reduces registered tools to save context tokens in constrained environments.
 
-[Full Tool Reference](docs/TOOLS.md)
+[Full Tool Reference](guide/TOOLS.md)
 
 ---
 
@@ -394,9 +398,9 @@ llm-router exposes 60 MCP tools organized by function:
 
 <p align="center">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="docs/readme/savings-dark.svg">
-    <source media="(prefers-color-scheme: light)" srcset="docs/readme/savings-light.svg">
-    <img src="docs/readme/savings-light.svg" alt="Animated savings breakdown showing 60-80% typical cost reduction with token distribution across free, budget, and premium tiers." width="100%"/>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/readme/savings-dark.svg">
+    <source media="(prefers-color-scheme: light)" srcset="assets/readme/savings-light.svg">
+    <img src="assets/readme/savings-light.svg" alt="Animated savings breakdown showing 60-80% typical cost reduction with token distribution across free, budget, and premium tiers." width="100%"/>
   </picture>
 </p>
 
@@ -441,7 +445,7 @@ llm-router runs entirely on your machine. There is no hosted proxy, no telemetry
 - Usage logs (SQLite) are not encrypted at rest — use full-disk encryption if needed
 - The router cannot prevent model jailbreaks or prompt injection at the provider level
 
-See [SECURITY.md](SECURITY.md) for responsible disclosure policy and [docs/SECURITY_DESIGN.md](docs/SECURITY_DESIGN.md) for the full threat model.
+See [SECURITY.md](SECURITY.md) for responsible disclosure policy.
 
 ---
 
@@ -457,7 +461,7 @@ export OLLAMA_BASE_URL="http://localhost:11434"
 export OLLAMA_BUDGET_MODELS="gemma4:latest,qwen3.5:latest"
 
 # Routing behavior
-export LLM_ROUTER_PROFILE="balanced"       # budget | balanced | premium
+export LLM_ROUTER_PROFILE="balanced"       # budget | balanced | premium | subscription_local
 export LLM_ROUTER_POLICY="balanced"        # aggressive | balanced | conservative
 export LLM_ROUTER_ENFORCE="smart"          # smart | hard | soft | off
 ```
@@ -482,14 +486,13 @@ chmod 600 ~/.llm-router/config.yaml
 
 | Document | Purpose |
 |----------|---------|
-| [Quick Start (2 min)](docs/QUICKSTART_2MIN.md) | Fastest path to working routing |
-| [Getting Started](docs/GETTING_STARTED.md) | Full setup walkthrough |
-| [Host Support Matrix](docs/HOST_SUPPORT_MATRIX.md) | Per-host feature comparison |
-| [Providers](docs/PROVIDERS.md) | Provider setup and model recommendations |
-| [Tool Reference](docs/TOOLS.md) | All 60 MCP tools with examples |
-| [Architecture](docs/ARCHITECTURE.md) | Internal design and module structure |
-| [Troubleshooting](docs/TROUBLESHOOTING.md) | Common issues and fixes |
-| [Security Design](docs/SECURITY_DESIGN.md) | Threat model and data handling |
+| [Quick Start (2 min)](guide/QUICKSTART_2MIN.md) | Fastest path to working routing |
+| [Getting Started](guide/GETTING_STARTED.md) | Full setup walkthrough |
+| [Host Support Matrix](guide/HOST_SUPPORT_MATRIX.md) | Per-host feature comparison |
+| [Providers](guide/PROVIDERS.md) | Provider setup and model recommendations |
+| [Tool Reference](guide/TOOLS.md) | All 60 MCP tools with examples |
+| [Architecture](guide/ARCHITECTURE.md) | Internal design and module structure |
+| [Troubleshooting](guide/TROUBLESHOOTING.md) | Common issues and fixes |
 
 ---
 

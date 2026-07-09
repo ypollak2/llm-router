@@ -77,7 +77,7 @@ async def build_chain(
             chain = await _build_dynamic_chain(task_type, complexity, profile)
             top = chain[0] if chain else None
             set_span_attributes(span, chain_length=len(chain), top_model=top)
-            return chain
+            return await _apply_subscription_local(chain, complexity, profile)
         except Exception as e:
             log.debug("dynamic chain builder failed, using static: %s", e)
             chain = _static_chain(task_type, profile)
@@ -87,7 +87,27 @@ async def build_chain(
                 chain_length=len(chain),
                 top_model=chain[0] if chain else None,
             )
-            return chain
+            return await _apply_subscription_local(chain, complexity, profile)
+
+
+async def _apply_subscription_local(
+    chain: list[str], complexity: str, profile: "RoutingProfile"
+) -> list[str]:
+    """Cost-inverted SUBSCRIPTION_LOCAL reorder. No-op unless a subscription
+    provider is configured (LLM_ROUTER_SUBSCRIPTION_PROVIDER), so this is safe to
+    apply unconditionally — default behaviour is unchanged."""
+    from llm_router.subscription_local_routing import (
+        get_subscription_pressure,
+        is_subscription_local_active,
+        reorder_for_subscription_local,
+    )
+
+    if not is_subscription_local_active(profile):
+        return chain
+    pressure = await get_subscription_pressure()
+    return reorder_for_subscription_local(
+        chain, complexity=complexity, profile=profile, subscription_pressure=pressure
+    )
 
 
 async def _build_dynamic_chain(
@@ -156,7 +176,16 @@ def _static_chain(task_type: "TaskType", profile: "RoutingProfile") -> list[str]
     """Return the static chain from profiles.py for the given (task_type, profile)."""
     try:
         from llm_router.profiles import ROUTING_TABLE
+        from llm_router.types import RoutingProfile
+        # QUOTA_BALANCED and SUBSCRIPTION_LOCAL have no base table of their own —
+        # they REORDER the BALANCED chain (via router.py / subscription_local_routing),
+        # so look up BALANCED here or they'd resolve to an empty chain.
+        lookup = (
+            RoutingProfile.BALANCED
+            if profile in (RoutingProfile.QUOTA_BALANCED, RoutingProfile.SUBSCRIPTION_LOCAL)
+            else profile
+        )
         # ROUTING_TABLE keys are (RoutingProfile, TaskType) tuples.
-        return list(ROUTING_TABLE.get((profile, task_type), []))
+        return list(ROUTING_TABLE.get((lookup, task_type), []))
     except Exception:
         return []

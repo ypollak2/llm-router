@@ -118,9 +118,21 @@ python -c "from llm_router.policy import PolicyManager; \
 llm-router policy diff balanced my_strategy
 ```
 
+### SUBSCRIPTION_LOCAL profile
+
+`SUBSCRIPTION_LOCAL` is for setups with one paid seat plus a free local bucket. Set
+`LLM_ROUTER_SUBSCRIPTION_PROVIDER` to the paid provider (e.g. `anthropic`) — the profile is a
+complete no-op unless this is set. Simple/moderate prompts route to local/free providers first;
+complex prompts prefer the paid seat. Add extra self-hosted free providers with
+`LLM_ROUTER_INTERNAL_PROVIDERS`. When the seat's quota pressure reaches
+`LLM_ROUTER_SUBSCRIPTION_PRESSURE_THRESHOLD` (`0.80` by default), the seat is demoted to last and
+more traffic shifts to local providers. Enable with `LLM_ROUTER_PROFILE=subscription_local`, or
+leave it on under any profile once a subscription is set (turn that off with
+`LLM_ROUTER_SUBSCRIPTION_REORDER_ALL_PROFILES=off`).
+
 ## See also
 
 * `src/llm_router/policies/cost_aggressive.yaml` — a complete production-ready example
 * `src/llm_router/policies/standard.yaml` — the historical default, mirrors the in-code `ROUTING_TABLE`
-* [docs/PROVIDERS.md](PROVIDERS.md) — provider env vars + setup
+* [PROVIDERS.md](PROVIDERS.md) — provider env vars + setup
 * [CHANGELOG.md v10.0.0](../CHANGELOG.md) — the policy YAML system, bandit, and OpenRouter all landed in v10
