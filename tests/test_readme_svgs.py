@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-DOCS_README = Path(__file__).parent.parent / "docs" / "readme"
+DOCS_README = Path(__file__).parent.parent / "assets" / "readme"
 
 
 @pytest.fixture
