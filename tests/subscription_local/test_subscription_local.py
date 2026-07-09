@@ -112,3 +112,27 @@ async def test_chain_builder_wiring_reorders_when_configured(monkeypatch):
     monkeypatch.setenv("LLM_ROUTER_SUBSCRIPTION_PROVIDER", "anthropic")
     out = await _apply_subscription_local(CHAIN, "simple", RoutingProfile.SUBSCRIPTION_LOCAL)
     assert _providers(out)[0] == "ollama"  # free-first for simple
+
+
+def test_explicit_profile_has_nonempty_base_chain():
+    """Regression: SUBSCRIPTION_LOCAL must resolve to BALANCED's base chain (not empty).
+    Caught in the v11 audit — an empty chain means nothing to route to."""
+    from llm_router.chain_builder import _static_chain
+    from llm_router.profiles import get_model_chain
+    from llm_router.types import TaskType
+    assert _static_chain(TaskType.CODE, RoutingProfile.SUBSCRIPTION_LOCAL), "static chain empty"
+    assert get_model_chain(RoutingProfile.SUBSCRIPTION_LOCAL, TaskType.CODE), "get_model_chain empty"
+    # equals BALANCED's base (reorder happens on top, no-op when unconfigured)
+    assert _static_chain(TaskType.CODE, RoutingProfile.SUBSCRIPTION_LOCAL) == \
+           _static_chain(TaskType.CODE, RoutingProfile.BALANCED)
+
+
+def test_overlap_seat_role_wins(monkeypatch):
+    """Audit (Chuzom review): if the subscription provider is also a local/free
+    provider, the seat ROLE wins so tiering is unambiguous."""
+    monkeypatch.setenv("LLM_ROUTER_SUBSCRIPTION_PROVIDER", "ollama")  # seat == a local provider
+    chain = ["ollama/hermes3:8b", "vllm/mixtral", "openai/gpt-4o"]
+    # complex: seat first → ollama(seat) before vllm(free) before openai(other)
+    out = sl.reorder_for_subscription_local(
+        chain, complexity="complex", profile=RoutingProfile.SUBSCRIPTION_LOCAL)
+    assert _providers(out) == ["ollama", "vllm", "openai"]

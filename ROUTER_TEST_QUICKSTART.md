@@ -52,4 +52,4 @@ export LLM_ROUTER_ALERT_WEBHOOK="https://hooks.slack.com/services/YOUR/WEBHOOK"
 
 **Cache issues?** Clear with `rm -rf ~/.llm-router/cache`.
 
-For details, see [`docs/ISOLATION_TEST.md`](docs/ISOLATION_TEST.md).
+See the isolation tests under `tests/` for details.

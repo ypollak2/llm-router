@@ -174,7 +174,10 @@ def reorder_for_subscription_local(
         return chain
 
     sub = get_subscription_provider()
-    free = get_free_bucket()
+    # Classify by ROLE: if an operator points the subscription seat at a provider
+    # that's also in the free bucket, the seat role wins (excluded from `free`) so
+    # tiering stays unambiguous regardless of check order.
+    free = get_free_bucket() - ({sub} if sub else set())
     strained = is_subscription_strained(subscription_pressure)
     free_first = complexity in _FREE_FIRST_COMPLEXITIES
 

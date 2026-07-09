@@ -114,6 +114,10 @@ You keep the same workflow. The router changes the model choice underneath.
 - Fall back across providers automatically
 - Track usage and estimated savings locally
 - Run everything on your own machine
+- **Cost-inverted `SUBSCRIPTION_LOCAL` routing** — free/local first for simple & moderate prompts, your one paid seat first for complex ones, with the seat demoted when its quota is strained (opt-in via `LLM_ROUTER_SUBSCRIPTION_PROVIDER`)
+- **Keep secrets local** — a prompt containing an API key/token/private key routes to local models only, fail-closed so it never reaches an external API
+- **See it working** — a `surface_status` line / terminal title / OS notification showing the last model routed, savings, and health, for hosts without a native statusline
+- **Session-end summary** — savings vs baseline, tier mix, per-provider cost, latency p50/p95/p99, and top routes, in Markdown or a rich panel
 
 ---
 
@@ -349,7 +353,7 @@ Control how aggressively the router offloads to cheap models. Policies ship as Y
 ```bash
 export LLM_ROUTER_POLICY=aggressive     # Or: balanced, conservative, cost_aggressive
 export LLM_ROUTER_ENFORCE=smart          # smart | hard | soft | off
-export LLM_ROUTER_PROFILE=balanced       # budget | balanced | premium
+export LLM_ROUTER_PROFILE=balanced       # budget | balanced | premium | subscription_local
 export LLM_ROUTER_BANDIT=on              # on (default) | off — opt out of telemetry-driven chain reorder
 ```
 
@@ -457,7 +461,7 @@ export OLLAMA_BASE_URL="http://localhost:11434"
 export OLLAMA_BUDGET_MODELS="gemma4:latest,qwen3.5:latest"
 
 # Routing behavior
-export LLM_ROUTER_PROFILE="balanced"       # budget | balanced | premium
+export LLM_ROUTER_PROFILE="balanced"       # budget | balanced | premium | subscription_local
 export LLM_ROUTER_POLICY="balanced"        # aggressive | balanced | conservative
 export LLM_ROUTER_ENFORCE="smart"          # smart | hard | soft | off
 ```

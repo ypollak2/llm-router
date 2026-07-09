@@ -218,6 +218,19 @@ exists = await asyncio.to_thread(Path(db_path).exists)  # Free event loop ✅
 
 **Solution**: Generate unique 8-char correlation ID per request, pass through entire routing chain, log on every decision point.
 
+## Adaptive Modules (v11)
+
+Self-contained modules added in v11.0.0. Each is additive and (where it touches routing)
+off-by-default.
+
+| Module | Role |
+|---|---|
+| `llm_router.classify` | Deterministic signal classifier (`classify_signals`), importable by the router/gateway/tools — 0-cost/0-latency, byte-identical to the hook's scorer (drift-guarded). |
+| `llm_router.subscription_local_routing` | `SUBSCRIPTION_LOCAL` cost-inverted reorder, wired into `chain_builder.build_chain`. No-op unless `LLM_ROUTER_SUBSCRIPTION_PROVIDER` is set. |
+| `llm_router.signals` | `PiiSignal` + `force_local_for_pii` — secrets route local-only, fail-closed. |
+| `llm_router.observability.surface_status` | Cross-surface "router is working" status line / terminal title / OS notification. |
+| `llm_router.observability.summary` | Session-end summary model + `render_markdown()` / rich `render()` over `usage.db`. |
+
 ## Testing Strategy
 
 - **Unit Tests** (`tests/test_router.py`): Budget enforcement, model selection, fallback

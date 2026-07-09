@@ -404,8 +404,13 @@ def get_model_chain(
     Returns:
         Ordered list of model IDs to try, best-fit first.
     """
-    # QUOTA_BALANCED uses BALANCED as base chain — reordering happens in router.py
-    profile_for_lookup = RoutingProfile.BALANCED if profile == RoutingProfile.QUOTA_BALANCED else profile
+    # QUOTA_BALANCED and SUBSCRIPTION_LOCAL use BALANCED as their base chain —
+    # the reordering happens in router.py / subscription_local_routing.
+    profile_for_lookup = (
+        RoutingProfile.BALANCED
+        if profile in (RoutingProfile.QUOTA_BALANCED, RoutingProfile.SUBSCRIPTION_LOCAL)
+        else profile
+    )
 
     # Plan 06 Step 1 — consult the active policy's chains first so non-standard
     # policies (cost_aggressive, user-defined custom) actually take effect at the routing

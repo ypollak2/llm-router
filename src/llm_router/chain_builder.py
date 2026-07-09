@@ -176,7 +176,16 @@ def _static_chain(task_type: "TaskType", profile: "RoutingProfile") -> list[str]
     """Return the static chain from profiles.py for the given (task_type, profile)."""
     try:
         from llm_router.profiles import ROUTING_TABLE
+        from llm_router.types import RoutingProfile
+        # QUOTA_BALANCED and SUBSCRIPTION_LOCAL have no base table of their own —
+        # they REORDER the BALANCED chain (via router.py / subscription_local_routing),
+        # so look up BALANCED here or they'd resolve to an empty chain.
+        lookup = (
+            RoutingProfile.BALANCED
+            if profile in (RoutingProfile.QUOTA_BALANCED, RoutingProfile.SUBSCRIPTION_LOCAL)
+            else profile
+        )
         # ROUTING_TABLE keys are (RoutingProfile, TaskType) tuples.
-        return list(ROUTING_TABLE.get((profile, task_type), []))
+        return list(ROUTING_TABLE.get((lookup, task_type), []))
     except Exception:
         return []
