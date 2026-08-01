@@ -204,37 +204,50 @@ def needs_claude_tools(prompt: str, task_type: str) -> bool:
 
     If yes, direct execution must use the external tool-capable agent path.
     Native Claude is only available as a non-strict fallback.
+
+    Delegates to ``llm_router.capabilities.detect_capabilities(...).legacy_match``
+    (WS4), which reproduces this function's original inline regex logic exactly --
+    this refactor is behavior-preserving by construction (see the deviation note
+    in ``capabilities.py`` about why ``legacy_match`` intentionally omits the
+    richer ``_LEGACY_LOCAL_FS`` pattern that only the new capability vector uses).
+    FAIL-OPEN: any import/lookup failure falls back to the original inline logic
+    so a capabilities-module issue can never silently disable tool routing.
     """
-    import re
+    try:
+        from llm_router.capabilities import detect_capabilities
 
-    # Project structure or local context references (applicable to any task type)
-    if re.search(
-        r'\b(src/|tests/|hooks/|in the codebase|this file|this repo|this project|current project|current version|what version|package\.json|pyproject\.toml|llm-router|blocked by hook|error message)\b',
-        prompt,
-        re.IGNORECASE,
-    ):
-        return True
+        return detect_capabilities(prompt, task_type).legacy_match
+    except Exception:  # noqa: BLE001 -- must never break routing
+        import re
 
-    # Reading an explicit local file requires tool access even when the
-    # classifier labels the request as a simple query.
-    if re.search(
-        r'\b(?:read|open|inspect|show|cat|summari[sz]e)\s+'
-        r'(?:the\s+)?(?:file\s+)?[\w./-]+\.[A-Za-z0-9]{1,8}\b',
-        prompt,
-        re.IGNORECASE,
-    ):
-        return True
+        # Project structure or local context references (applicable to any task type)
+        if re.search(
+            r'\b(src/|tests/|hooks/|in the codebase|this file|this repo|this project|current project|current version|what version|package\.json|pyproject\.toml|llm-router|blocked by hook|error message)\b',
+            prompt,
+            re.IGNORECASE,
+        ):
+            return True
 
-    if task_type not in ("code", "analyze"):
-        return False  # General Q&A, research, generate never need file tools
+        # Reading an explicit local file requires tool access even when the
+        # classifier labels the request as a simple query.
+        if re.search(
+            r'\b(?:read|open|inspect|show|cat|summari[sz]e)\s+'
+            r'(?:the\s+)?(?:file\s+)?[\w./-]+\.[A-Za-z0-9]{1,8}\b',
+            prompt,
+            re.IGNORECASE,
+        ):
+            return True
 
-    # Explicit file references
-    if re.search(r'[\w/]+\.\w{1,4}\b', prompt) and re.search(
-        r'\.(py|ts|js|go|rs|java|cpp|yaml|json|md|toml|cfg|sh|sql)\b', prompt
-    ):
-        return True
-    # Edit/fix/debug intent with location
-    if re.search(r'\b(fix|debug|investigate|refactor|update|modify)\b', prompt, re.IGNORECASE) and \
-       re.search(r'\b(in|at|from|the)\s+(src|tests|hooks|module|class|function)\b', prompt, re.IGNORECASE):
-        return True
-    return False
+        if task_type not in ("code", "analyze"):
+            return False  # General Q&A, research, generate never need file tools
+
+        # Explicit file references
+        if re.search(r'[\w/]+\.\w{1,4}\b', prompt) and re.search(
+            r'\.(py|ts|js|go|rs|java|cpp|yaml|json|md|toml|cfg|sh|sql)\b', prompt
+        ):
+            return True
+        # Edit/fix/debug intent with location
+        if re.search(r'\b(fix|debug|investigate|refactor|update|modify)\b', prompt, re.IGNORECASE) and \
+           re.search(r'\b(in|at|from|the)\s+(src|tests|hooks|module|class|function)\b', prompt, re.IGNORECASE):
+            return True
+        return False

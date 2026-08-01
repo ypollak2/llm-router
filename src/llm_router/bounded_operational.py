@@ -92,12 +92,10 @@ def should_route_bounded(prompt: str, complexity: str) -> bool:
       * the prompt needs at least one of write_files / run_commands /
         objective_verification.
 
-    FAIL-OPEN: llm-router does not yet ship a capability-detection module
-    (``llm_router.capabilities``) -- this is a documented gap, not an oversight; a
-    later workstream is expected to add it following the frozen
-    ``CapabilityRequirement`` contract in ``llm_router.contracts``. Until then, any
-    import/lookup failure here conservatively returns ``False`` (never bounded),
-    so the route degrades safely to full delegation rather than guessing.
+    Uses ``llm_router.capabilities.detect_capabilities`` (WS4) to obtain the
+    capability vector. FAIL-OPEN: any import/lookup failure here conservatively
+    returns ``False`` (never bounded), so the route degrades safely to full
+    delegation rather than guessing.
     """
     if not bounded_operational_enabled():
         return False
@@ -106,7 +104,8 @@ def should_route_bounded(prompt: str, complexity: str) -> bool:
     try:
         from llm_router.capabilities import detect_capabilities
 
-        req = detect_capabilities(prompt)
+        decision = detect_capabilities(prompt)
+        req = decision.required
         return bool(req.write_files or req.run_commands or req.objective_verification)
     except Exception:  # noqa: BLE001 -- undetected capability must never crash routing
         return False

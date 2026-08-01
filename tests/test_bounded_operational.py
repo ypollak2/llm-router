@@ -63,30 +63,42 @@ def test_should_route_bounded_matrix(
     else:
         monkeypatch.delenv("LLM_ROUTER_BOUNDED_OPERATIONAL", raising=False)
 
-    # llm_router.capabilities does not exist yet (documented gap in
-    # bounded_operational.py); should_route_bounded() lazy-imports it and fails
-    # open to False on ImportError. To exercise the "capability detected"
-    # branches of the matrix without that module existing, we inject a stub
-    # module into sys.modules for the duration of this test.
+    # llm_router.capabilities now exists (WS4); should_route_bounded() calls
+    # detect_capabilities(prompt).required. To exercise the "capability
+    # detected" branches of the matrix in isolation from the real regex
+    # detector, we inject a stub module returning a CapabilityDecision wrapping
+    # exactly the flags under test (matching the frozen contracts.py shape,
+    # not a bare CapabilityRequirement).
     import sys
     import types
 
-    from llm_router.contracts import CapabilityRequirement
+    from llm_router.contracts import CapabilityDecision, CapabilityRequirement
 
     stub = types.ModuleType("llm_router.capabilities")
-    stub.detect_capabilities = lambda _prompt: CapabilityRequirement(**req_flags)
+    stub.detect_capabilities = lambda _prompt: CapabilityDecision(
+        required=CapabilityRequirement(**req_flags), evidence=(), confidence=0.5
+    )
     monkeypatch.setitem(sys.modules, "llm_router.capabilities", stub)
 
     assert should_route_bounded("some prompt", complexity) is expected
 
 
-def test_should_route_bounded_fails_open_without_capabilities_module(monkeypatch):
-    """Documented gap: llm_router.capabilities doesn't exist in this repo yet.
-    should_route_bounded() must fail open to False rather than raise."""
+def test_should_route_bounded_fails_open_on_detection_error(monkeypatch):
+    """WS4 landed llm_router.capabilities for real, but should_route_bounded()
+    must still fail open to False (never raise) if detect_capabilities() itself
+    blows up for any reason -- a capability-detection bug must never crash
+    routing."""
     import sys
+    import types
+
+    def _boom(_prompt):
+        raise RuntimeError("simulated capability-detection failure")
+
+    stub = types.ModuleType("llm_router.capabilities")
+    stub.detect_capabilities = _boom
 
     monkeypatch.setenv("LLM_ROUTER_BOUNDED_OPERATIONAL", "1")
-    monkeypatch.delitem(sys.modules, "llm_router.capabilities", raising=False)
+    monkeypatch.setitem(sys.modules, "llm_router.capabilities", stub)
     assert should_route_bounded("write a file", "simple") is False
 
 

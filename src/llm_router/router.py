@@ -959,6 +959,27 @@ async def _dispatch_model_loop(
 
             # Log routing decision for quality analytics
             if classification_data:
+                # WS4 (ported from Chuzom's capability-aware routing, shadow mode):
+                # compute what capability-aware routing WOULD have chosen and record
+                # it alongside the decision, WITHOUT changing the live routing result
+                # above. Gated by LLM_ROUTER_CAPABILITY_ROUTING (default off). Never
+                # allowed to affect `model`/`response` or raise -- fail-open to None.
+                _capabilities_json = None
+                try:
+                    from llm_router.capabilities import (
+                        capability_routing_enabled,
+                        detect_capabilities,
+                        serialize_capability_decision,
+                    )
+
+                    if capability_routing_enabled():
+                        _decision = detect_capabilities(
+                            prompt, classification_data.get("task_type", task_type.value)
+                        )
+                        _capabilities_json = serialize_capability_decision(_decision)
+                except Exception as _cap_err:
+                    log.debug("capability_shadow_detection_failed: %s", _cap_err)
+
                 try:
                     await cost.log_routing_decision(
                         prompt=prompt,
@@ -986,6 +1007,7 @@ async def _dispatch_model_loop(
                         response=response.content,
                         requested_complexity=classification_data.get("requested_complexity"),
                         subject=classification_data.get("subject"),
+                        capabilities_json=_capabilities_json,
                     )
                     
                     # Auto-log Claude usage when router selects Claude model.
