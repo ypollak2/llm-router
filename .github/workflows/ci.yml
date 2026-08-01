@@ -27,6 +27,24 @@ jobs:
       - run: uv python install 3.11
       - run: uvx ruff check src/ tests/
 
+  identity-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v4
+        with:
+          enable-cache: true
+        continue-on-error: true
+        id: uv-setup
+      - name: Retry uv setup
+        if: steps.uv-setup.outcome == 'failure'
+        uses: astral-sh/setup-uv@v4
+        with:
+          enable-cache: false
+      - run: uv python install 3.11
+      - name: Check brand identity (no upstream-name leakage)
+        run: python scripts/check_identity.py
+
   version-check:
     runs-on: ubuntu-latest
     steps:
