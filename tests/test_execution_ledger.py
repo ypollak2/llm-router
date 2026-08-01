@@ -336,6 +336,53 @@ class TestRealizedSavingsGating:
         assert acc.potential_savings_usd == pytest.approx(0.09)
         assert acc.realized_savings_usd == 0.0
 
+    def test_late_route_realized_update_supersedes_earlier_status(self, tmp_path):
+        """A route_realized event that arrives after an earlier, weaker one
+        (e.g. an initial `unknown` recorded before adoption evidence exists)
+        must have its LATER status win deterministically, per `_load_rows`'s
+        `ORDER BY ts ASC, event_id ASC` — mirroring a real host that reports
+        realization asynchronously and sometimes revises its verdict."""
+        path = _db(tmp_path)
+        route_id = "r8"
+        el.record_event(
+            el.LedgerEvent(
+                event_id=f"{route_id}-attempt",
+                route_id=route_id,
+                event_type="attempt_completed",
+                measured_cost_usd=0.01,
+                baseline_equivalent_cost_usd=0.10,
+            ),
+            path=path,
+        )
+        el.record_event(
+            el.LedgerEvent(
+                event_id=f"{route_id}-realized-1",
+                route_id=route_id,
+                event_type="route_realized",
+                realization_status="unknown",
+            ),
+            path=path,
+        )
+        acc_before = el.get_route_accounting(route_id, path=path)
+        assert acc_before.realized_savings_usd == 0.0
+        assert acc_before.realization_unknown_routes == 1
+
+        # A later event confirms the route actually was adopted.
+        el.record_event(
+            el.LedgerEvent(
+                event_id=f"{route_id}-realized-2",
+                route_id=route_id,
+                event_type="route_realized",
+                realization_status="verified_used",
+                adoption_method="door_call",
+            ),
+            path=path,
+        )
+        acc_after = el.get_route_accounting(route_id, path=path)
+        assert acc_after.realized_savings_usd == pytest.approx(0.09)
+        assert acc_after.realized_routes == 1
+        assert acc_after.realization_unknown_routes == 0
+
 
 class TestReconciliation:
     def test_reconcile_session_matches_canonical(self, tmp_path):

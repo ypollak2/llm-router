@@ -15,6 +15,7 @@ Start via CLI:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import secrets
@@ -55,6 +56,17 @@ async def _get_stats() -> dict:
         "savings": {"total_saved_usd": 0.0, "total_external_usd": 0.0},
         "usage": {},
         "semantic_cache": {"hits": 0},
+        "realized_savings": {
+            "window": "month",
+            "potential_savings_usd": 0.0,
+            "realized_savings_usd": 0.0,
+            "net_realized_savings_usd": 0.0,
+            "realized_routes": 0,
+            "overridden_routes": 0,
+            "realization_unknown_routes": 0,
+            "likely_used_routes": 0,
+            "cost_unknown_attempts": 0,
+        },
     }
 
     try:
@@ -148,6 +160,28 @@ async def _get_stats() -> dict:
             await db.close()
     except Exception as exc:
         log.warning("Dashboard DB read failed: %s", exc)
+
+    # Additive Gate-18 realized-savings split (WS3/C6) — a stricter,
+    # independently-computed figure alongside "savings" above. Never
+    # overwrites/reconciles against it; isolated in its own try/except so a
+    # failure here can never break the rest of /api/stats.
+    try:
+        from llm_router.dashboard_data import query_realized_savings
+
+        realized = await asyncio.to_thread(query_realized_savings, "month")
+        stats["realized_savings"] = {
+            "window": realized.window,
+            "potential_savings_usd": round(realized.potential_savings_usd, 4),
+            "realized_savings_usd": round(realized.realized_savings_usd, 4),
+            "net_realized_savings_usd": round(realized.net_realized_savings_usd, 4),
+            "realized_routes": realized.realized_routes,
+            "overridden_routes": realized.overridden_routes,
+            "realization_unknown_routes": realized.realization_unknown_routes,
+            "likely_used_routes": realized.likely_used_routes,
+            "cost_unknown_attempts": realized.cost_unknown_attempts,
+        }
+    except Exception as exc:  # noqa: BLE001 -- realized-savings read must never break /api/stats
+        log.warning("Dashboard realized-savings read failed: %s", exc)
 
     usage_path = Path.home() / ".llm-router" / "usage.json"
     try:
