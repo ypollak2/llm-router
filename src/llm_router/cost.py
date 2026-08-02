@@ -268,6 +268,21 @@ recording the CapabilityDecision computed for this prompt (JSON-serialized), for
 offline analysis of what capability-aware routing would have chosen. NULL unless
 LLM_ROUTER_CAPABILITY_ROUTING is enabled; never read by the live routing path."""
 
+MIGRATE_ROUTING_DECISIONS_ADD_AUDIT = [
+    "ALTER TABLE routing_decisions ADD COLUMN audit_verdict TEXT",
+    "ALTER TABLE routing_decisions ADD COLUMN audit_checked_at TEXT",
+]
+"""WS6 (ported from Chuzom's audit_routing.py; adapted from a live per-turn enterprise
+AuditLog append into a post-hoc, offline misroute audit — see audit_routing.py's module
+docstring for why) — additive columns recording the offline audit's verdict for a
+routing decision. Deliberately separate from `was_good` (community-shared human
+feedback, see community.py's acceptance-rate metric) and `reason_code` (decision-time
+classifier reasoning, see router.py): overwriting either with a machine guess would
+silently corrupt an existing, narrower signal. `audit_verdict` is only ever written
+when NULL (see audit_routing._write_verdict's WHERE guard), so re-running the audit is
+idempotent and cannot flip-flop or double count. Still lands in the SAME table as
+additive columns, not a new store — satisfies the plan's "no parallel accuracy store"."""
+
 CREATE_BENCHMARK_RESULTS_TABLE = """
 CREATE TABLE IF NOT EXISTS benchmark_results (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -569,6 +584,7 @@ async def _get_db() -> aiosqlite.Connection:
         + MIGRATE_ADD_QUOTA_SNAPSHOTS_TABLE
         + MIGRATE_ROUTING_DECISIONS_ADD_SUBJECT
         + MIGRATE_ROUTING_DECISIONS_ADD_CAPABILITIES
+        + MIGRATE_ROUTING_DECISIONS_ADD_AUDIT
     )
     for stmt in all_migrations:
         await _safe_migrate(db, stmt)
