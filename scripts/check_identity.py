@@ -71,6 +71,15 @@ _CHUZOM_RE = re.compile(r"chuzom", re.IGNORECASE)
 #   evidence/provenance doc for this exact migration (WS1-WS9) — like
 #   CHANGELOG.md, it legitimately discusses "chuzom" by name throughout as
 #   its entire subject matter, not as a runtime/public-facing surface.
+# - tests/commands/test_audit.py: `TestBrandLeak` (WS9) is a brand-leak
+#   regression test guarding the misroute-audit CLI subcommand (`audit.py`)
+#   and its output against ever leaking the "chuzom" string — the test's
+#   name, docstring, and assertions necessarily name the string they forbid
+#   in order to check for its absence. `audit.py`/`audit_routing.py` are not
+#   documented as a literal Chuzom port (no "ported from chuzom" header
+#   applies — the audit tooling is new CLI wiring, not ported code), so the
+#   same rationale as the WS7/WS8 entries above governs: this is
+#   provenance-of-a-guard, not brand leakage.
 ALLOW_FILES: frozenset[str] = frozenset(
     {
         "loophole.json",
@@ -86,6 +95,7 @@ ALLOW_FILES: frozenset[str] = frozenset(
         "tests/test_team.py",
         "tests/commands/test_team.py",
         "tests/test_contracts.py",
+        "tests/commands/test_audit.py",
     }
 )
 

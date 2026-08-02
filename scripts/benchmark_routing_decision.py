@@ -3,8 +3,8 @@
 Benchmarks the hot, synchronous routing-decision function(s) that run on
 every ``route_and_call`` invocation, with all feature flags left at their
 default (unset/off) state -- this is the "default path" the release-audit
-blocker asks us to compare between ``main`` and
-``feature/chuzom-capabilities``.
+blocker asks us to compare between ``main`` and this migration's feature
+branch.
 
 ``pytest-benchmark`` is not installed in this project, so this is a plain
 ``timeit``-style harness (allowed by the task as the documented fallback).
