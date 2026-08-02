@@ -1,4 +1,4 @@
-# Router Isolation Test — Quick Start
+# Testing the Router
 
 Tests that llm-router is working correctly: routing is sensible, no cache contamination, dashboard is accurate.
 
@@ -6,23 +6,23 @@ Tests that llm-router is working correctly: routing is sensible, no cache contam
 
 ```bash
 # Manual run
-./scripts/router_isolation_test.sh
+./scripts/dev/router_isolation_test.sh
 
 # Check results
-./scripts/router_isolation_test.sh status
+./scripts/dev/router_isolation_test.sh status
 
 # View logs
-./scripts/router_isolation_test.sh logs
+./scripts/dev/router_isolation_test.sh logs
 ```
 
 ## Automate with Cron
 
 ```bash
 # Show examples
-./scripts/router_isolation_test.sh cron-example
+./scripts/dev/router_isolation_test.sh cron-example
 
 # Add to crontab (every 6 hours)
-(crontab -l 2>/dev/null; echo "0 */6 * * * $(pwd)/scripts/router_isolation_test.sh") | crontab -
+(crontab -l 2>/dev/null; echo "0 */6 * * * $(pwd)/scripts/dev/router_isolation_test.sh") | crontab -
 
 # Enable Slack alerts (optional)
 export LLM_ROUTER_ALERT_WEBHOOK="https://hooks.slack.com/services/YOUR/WEBHOOK"

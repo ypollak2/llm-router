@@ -45,14 +45,15 @@ _CHUZOM_RE = re.compile(r"chuzom", re.IGNORECASE)
 # - CHANGELOG.md: historical release notes describing past porting work.
 # - scripts/ci/check_identity.py, tests/test_identity_gate.py: this gate and
 #   its test, which necessarily discuss "chuzom" as a string to detect.
-# - run_port_tests.sh: pre-existing sandbox runner for the Chuzom->llm-router
-#   port itself (tooling comment, not a runtime/public surface). Extended
-#   into the allowlist during WS0 after `git grep -il chuzom` turned it up
-#   as a pre-existing legitimate hit.
+# - scripts/dev/run_port_tests.sh: pre-existing sandbox runner for the
+#   Chuzom->llm-router port itself (tooling comment, not a runtime/public
+#   surface). Extended into the allowlist during WS0 after `git grep -il
+#   chuzom` turned it up as a pre-existing legitimate hit. Relocated from the
+#   repo root into scripts/dev/ during the v12 repo cleanup.
 # - tests/subscription_local/test_subscription_local.py: pre-existing test
 #   docstring citing "Audit (Chuzom review)" as the provenance of a specific
 #   regression case. Extended into the allowlist during WS0 for the same
-#   reason as run_port_tests.sh.
+#   reason as scripts/dev/run_port_tests.sh.
 # - tests/test_retrospective.py, tests/test_team.py,
 #   tests/commands/test_team.py: WS7 brand-leak regression tests for the
 #   retrospective loop (C7) and team-report enrichment (C8) — neither module
@@ -88,7 +89,7 @@ ALLOW_FILES: frozenset[str] = frozenset(
         "CHANGELOG.md",
         "scripts/ci/check_identity.py",
         "tests/test_identity_gate.py",
-        "run_port_tests.sh",
+        "scripts/dev/run_port_tests.sh",
         "tests/subscription_local/test_subscription_local.py",
         "docs/releases/v11.1.0-chuzom-migration-evidence.md",
         "tests/test_retrospective.py",
