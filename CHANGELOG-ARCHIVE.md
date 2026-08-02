@@ -1,7 +1,10 @@
 # Changelog Archive
 
 Released versions **v10.1.5 and older**, kept out of the main changelog so it
-stays scannable. Entries are unmodified apart from heading normalization.
+stays scannable. Entries are unmodified apart from heading normalization — in
+particular, `scripts/…` paths describe the layout at the time of each release
+and are intentionally left unrewritten. See [`scripts/README.md`](scripts/README.md)
+for where those scripts live today.
 
 For the current major line see [CHANGELOG.md](CHANGELOG.md); for v6.2 and
 earlier see the [GitHub Releases](https://github.com/ypollak2/llm-router/releases) history.
