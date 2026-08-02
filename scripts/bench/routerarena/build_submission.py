@@ -10,9 +10,9 @@ expects.
 
 Usage::
 
-    OPENROUTER_API_KEY=sk-... uv run python scripts/routerarena/build_submission.py \\
+    OPENROUTER_API_KEY=sk-... uv run python scripts/bench/routerarena/build_submission.py \\
         --split sub_10  --out submissions/routerarena/llm-router-sub_10.json
-    OPENROUTER_API_KEY=sk-... uv run python scripts/routerarena/build_submission.py \\
+    OPENROUTER_API_KEY=sk-... uv run python scripts/bench/routerarena/build_submission.py \\
         --split full   --out submissions/routerarena/llm-router.json
 
 Cost estimate (sub_10, ~810 prompts at $0.31/1K with our workhorse pool):

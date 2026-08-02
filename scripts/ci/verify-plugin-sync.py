@@ -16,7 +16,7 @@ from pathlib import Path
 
 def load_plugin_files() -> dict[str, dict]:
     """Load plugin.json and marketplace.json from all plugin directories."""
-    root = Path(__file__).parent.parent
+    root = Path(__file__).parent.parent.parent
     plugin_dirs = [".claude-plugin", ".codex-plugin", ".factory-plugin"]
 
     data = {}

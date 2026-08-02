@@ -9,7 +9,7 @@ set -euo pipefail
 # ── Configuration ────────────────────────────────────────────────────────
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
+PROJECT_ROOT="$(dirname "$(dirname "$SCRIPT_DIR")")"
 RESULTS_DIR="${PROJECT_ROOT}/.router-test-results"
 REPORT_FILE="${RESULTS_DIR}/latest.json"
 LOG_FILE="${RESULTS_DIR}/test.log"
@@ -120,13 +120,13 @@ show_cron_example() {
 To run this test automatically on a schedule, add to crontab:
 
 # Run every 6 hours
-0 */6 * * * /Users/yali.pollak/Projects/llm-router/scripts/router_isolation_test.sh >> /tmp/router_test.log 2>&1
+0 */6 * * * /Users/yali.pollak/Projects/llm-router/scripts/dev/router_isolation_test.sh >> /tmp/router_test.log 2>&1
 
 # Run daily at 2 AM
-0 2 * * * /Users/yali.pollak/Projects/llm-router/scripts/router_isolation_test.sh
+0 2 * * * /Users/yali.pollak/Projects/llm-router/scripts/dev/router_isolation_test.sh
 
 # Run every hour (aggressive)
-0 * * * * /Users/yali.pollak/Projects/llm-router/scripts/router_isolation_test.sh
+0 * * * * /Users/yali.pollak/Projects/llm-router/scripts/dev/router_isolation_test.sh
 
 Enable alerts with:
   export LLM_ROUTER_ALERT_WEBHOOK="https://hooks.slack.com/services/..."
@@ -171,16 +171,16 @@ Commands:
 
 Examples:
   # Run tests manually
-  ./scripts/router_isolation_test.sh
+  ./scripts/dev/router_isolation_test.sh
 
   # Check status
-  ./scripts/router_isolation_test.sh status
+  ./scripts/dev/router_isolation_test.sh status
 
   # View logs
-  ./scripts/router_isolation_test.sh logs
+  ./scripts/dev/router_isolation_test.sh logs
 
   # Set up cron
-  ./scripts/router_isolation_test.sh cron-example | crontab -e
+  ./scripts/dev/router_isolation_test.sh cron-example | crontab -e
 
 Results:
   - Report: $REPORT_FILE

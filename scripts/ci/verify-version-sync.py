@@ -71,7 +71,7 @@ def read_marketplace_json_versions(project_root: Path, plugin_dir: str) -> tuple
 
 def main():
     """Verify all versions are in sync."""
-    project_root = Path(__file__).parent.parent
+    project_root = Path(__file__).parent.parent.parent
 
     try:
         # Read all versions
@@ -104,7 +104,7 @@ def main():
         else:
             print(f"❌ Version mismatch detected!")
             print(f"   Expected (from pyproject.toml): {pyproject_version}")
-            print(f"\n   Run 'python scripts/sync-versions.py' to fix automatically")
+            print(f"\n   Run 'python scripts/release/sync-versions.py' to fix automatically")
             return 1
 
     except Exception as e:

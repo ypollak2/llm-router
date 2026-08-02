@@ -1,4 +1,4 @@
-"""Tests for the WS0 identity gate (scripts/check_identity.py).
+"""Tests for the WS0 identity gate (scripts/ci/check_identity.py).
 
 Asserts the gate itself passes against the current repo state, and that two
 key runtime/public surfaces never leak the "chuzom" brand name: the CLI
@@ -16,7 +16,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 
 def test_check_identity_script_passes():
     result = subprocess.run(
-        [sys.executable, str(REPO_ROOT / "scripts" / "check_identity.py")],
+        [sys.executable, str(REPO_ROOT / "scripts" / "ci" / "check_identity.py")],
         cwd=REPO_ROOT,
         capture_output=True,
         text=True,

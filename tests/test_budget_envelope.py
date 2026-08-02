@@ -568,7 +568,7 @@ def test_manager_exposes_exactly_the_frozen_api_surface():
 
 def test_no_chuzom_string_in_runtime_module_source_outside_provenance_header():
     """The provenance header/docstring are the only allowed "chuzom" mentions
-    (per scripts/check_identity.py's whole-file exemption for files matching
+    (per scripts/ci/check_identity.py's whole-file exemption for files matching
     'ported from chuzom'). This test independently asserts that no *runtime
     string value* (log messages, exception messages, dict/enum values) that
     the module could emit at runtime contains "chuzom" -- a stricter check

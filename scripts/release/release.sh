@@ -82,7 +82,7 @@ main() {
 
     # Step 1: Verify version sync
     log_info "Step 1/5: Verifying version files are synchronized..."
-    if python3 scripts/verify-version-sync.py && python3 scripts/verify-plugin-sync.py; then
+    if python3 scripts/ci/verify-version-sync.py && python3 scripts/ci/verify-plugin-sync.py; then
         log_success "All versions and plugin distributions synchronized: v${current_version}"
     else
         log_error "Version mismatch detected. Fix version files and try again."
@@ -194,7 +194,7 @@ main() {
 
     # Verification
     log_info "Verifying release was successful..."
-    if python3 scripts/verify-release.py; then
+    if python3 scripts/release/verify-release.py; then
         echo ""
         echo "╔════════════════════════════════════════════════════════╗"
         echo "║           🎉 Release v${current_version} Complete!          ║"

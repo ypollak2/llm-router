@@ -148,7 +148,7 @@ def main() -> None:
         print("\n   ⚠ No API keys configured! Run this again when you have keys.")
         sys.exit(1)
 
-    print("\n   Next: Add to Claude Code with `scripts/install.sh`")
+    print("\n   Next: Add to Claude Code with `scripts/dev/install.sh`")
     print("   Or manually add to ~/.claude.json mcpServers.\n")
 
 

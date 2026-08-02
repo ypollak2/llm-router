@@ -25,7 +25,7 @@ Benchmarked targets:
    relevant question for "does the default path regress".
 
 Usage:
-    uv run --frozen python scripts/benchmark_routing_decision.py --label <name>
+    uv run --frozen python scripts/bench/benchmark_routing_decision.py --label <name>
 
 Prints a JSON report to stdout with median/p95 wall-clock time (microseconds)
 per call, over >=1000 iterations for each benchmarked function.
@@ -42,7 +42,7 @@ from pathlib import Path
 
 # Make ``src/`` importable regardless of cwd (works from a plain checkout and
 # from a `git worktree add` checkout that has no editable install of its own).
-_REPO_ROOT = Path(__file__).resolve().parent.parent
+_REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 _SRC = _REPO_ROOT / "src"
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))

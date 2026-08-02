@@ -92,7 +92,7 @@ def sync_marketplace_json(project_root: Path, version: str, plugin_dir: str) -> 
 
 def main():
     """Sync versions across all files."""
-    project_root = Path(__file__).parent.parent
+    project_root = Path(__file__).parent.parent.parent
 
     try:
         # Read authoritative version

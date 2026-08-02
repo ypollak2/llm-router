@@ -509,7 +509,7 @@ def isolation_test_command() -> None:
 
     # Try to find the bash script first (for repo installations)
     package_dir = Path(__file__).parent.parent.parent
-    script_path = package_dir / "scripts" / "router_isolation_test.sh"
+    script_path = package_dir / "scripts" / "dev" / "router_isolation_test.sh"
 
     if script_path.exists():
         # Run via bash script if available

@@ -25,14 +25,14 @@ echo ""
 
 # 2. Verify version sync across all files
 echo "2️⃣  Verifying version synchronization..."
-if ! python3 scripts/verify-version-sync.py; then
+if ! python3 scripts/ci/verify-version-sync.py; then
     exit 1
 fi
 echo ""
 
 # 3. Verify plugin distributions are aligned
 echo "3️⃣  Verifying plugin distribution synchronization..."
-if ! python3 scripts/verify-plugin-sync.py; then
+if ! python3 scripts/ci/verify-plugin-sync.py; then
     exit 1
 fi
 echo ""
@@ -93,5 +93,5 @@ echo ""
 
 echo -e "${GREEN}========================================${NC}"
 echo -e "${GREEN}✅ All pre-release checks passed!${NC}"
-echo -e "${GREEN}Ready to run: bash scripts/release.sh${NC}"
+echo -e "${GREEN}Ready to run: bash scripts/release/release.sh${NC}"
 echo -e "${GREEN}========================================${NC}"

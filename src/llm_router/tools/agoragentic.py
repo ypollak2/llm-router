@@ -68,7 +68,7 @@ async def agoragentic_execute(
     if not api_key:
         raise ValueError(
             "Agoragentic not configured. Register first: "
-            "python3 scripts/agoragentic_register.py"
+            "python3 scripts/release/agoragentic_register.py"
         )
     
     async with httpx.AsyncClient() as client:

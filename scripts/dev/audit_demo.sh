@@ -2,11 +2,11 @@
 # audit_demo.sh — v5.3 Audit Verification
 #
 # Runs linting, demo tests, and prints a chronicle-ready summary.
-# Usage: bash scripts/audit_demo.sh
+# Usage: bash scripts/dev/audit_demo.sh
 
 set -e
 
-PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$PROJECT_ROOT"
 
 echo "═══════════════════════════════════════════════════════════════"

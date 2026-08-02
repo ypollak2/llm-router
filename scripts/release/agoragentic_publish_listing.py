@@ -14,7 +14,7 @@ async def publish_listing():
     # Load credentials
     creds_file = Path.home() / ".llm-router" / "agoragentic.json"
     if not creds_file.exists():
-        print("❌ Agoragentic not configured. Run: python3 scripts/agoragentic_register.py")
+        print("❌ Agoragentic not configured. Run: python3 scripts/release/agoragentic_register.py")
         return
     
     creds = json.loads(creds_file.read_text())

@@ -5,7 +5,7 @@ Measures routing performance, model selection accuracy, and cost savings
 across different task complexities and configurations.
 
 Usage:
-    uv run python scripts/benchmark.py [--iterations 10] [--profile balanced]
+    uv run python scripts/bench/benchmark.py [--iterations 10] [--profile balanced]
 
 Output:
     - Routing decision accuracy (% correctly classified)

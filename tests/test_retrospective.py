@@ -501,7 +501,7 @@ def test_format_full_report_includes_ws2_ws3_context_lines(sample_decisions, sam
 def test_retrospective_module_has_no_unallowed_brand_leak():
     """No public/private name in the retrospective module may contain
     'chuzom' — the only allowed occurrence anywhere in the codebase is the
-    provenance-header pattern accepted by scripts/check_identity.py, which
+    provenance-header pattern accepted by scripts/ci/check_identity.py, which
     this module does not use (it predates the migration and is native code,
     not a literal port)."""
     import llm_router.retrospective as retrospective

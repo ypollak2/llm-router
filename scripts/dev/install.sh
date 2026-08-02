@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # Install LLM Router as an MCP server in Claude Code.
-# Usage: ./scripts/install.sh
+# Usage: ./scripts/dev/install.sh
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
+PROJECT_DIR="$(dirname "$(dirname "$SCRIPT_DIR")")"
 CLAUDE_CONFIG="$HOME/.claude.json"
 
 echo "╔══════════════════════════════════════════╗"

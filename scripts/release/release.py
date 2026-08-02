@@ -14,7 +14,7 @@ import tomllib
 from pathlib import Path
 from typing import Sequence
 
-ROOT = Path(__file__).resolve().parent.parent
+ROOT = Path(__file__).resolve().parent.parent.parent
 PYPROJECT_PATH = ROOT / "pyproject.toml"
 INIT_PATH = ROOT / "src" / "llm_router" / "__init__.py"
 CHANGELOG_PATH = ROOT / "CHANGELOG.md"

@@ -23,7 +23,7 @@ jobs:
         run: uv sync --extra scripts
 
       - name: Run benchmark fetcher
-        run: uv run python scripts/update_benchmarks.py
+        run: uv run python scripts/bench/update_benchmarks.py
         timeout-minutes: 10
 
       - name: Check for changes

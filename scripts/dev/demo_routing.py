@@ -6,7 +6,7 @@ import asyncio
 import sys
 import os
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "src"))
 
 from llm_router.classifier import classify_complexity
 from llm_router.cost import calc_savings, log_claude_usage, get_savings_summary

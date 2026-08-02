@@ -16,7 +16,7 @@ hits are never allowlistable — if one is found, it must be fixed, not
 excused.
 
 Usage:
-    python scripts/check_identity.py
+    python scripts/ci/check_identity.py
 """
 
 from __future__ import annotations
@@ -26,7 +26,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
+REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 
 _CHUZOM_RE = re.compile(r"chuzom", re.IGNORECASE)
 
@@ -43,7 +43,7 @@ _CHUZOM_RE = re.compile(r"chuzom", re.IGNORECASE)
 #   tests/observability/test_summary.py: brand-leak regression tests that
 #   must literally assert `"chuzom" not in ...` somewhere in their body.
 # - CHANGELOG.md: historical release notes describing past porting work.
-# - scripts/check_identity.py, tests/test_identity_gate.py: this gate and
+# - scripts/ci/check_identity.py, tests/test_identity_gate.py: this gate and
 #   its test, which necessarily discuss "chuzom" as a string to detect.
 # - run_port_tests.sh: pre-existing sandbox runner for the Chuzom->llm-router
 #   port itself (tooling comment, not a runtime/public surface). Extended
@@ -86,7 +86,7 @@ ALLOW_FILES: frozenset[str] = frozenset(
         "tests/observability/test_surface_status.py",
         "tests/observability/test_summary.py",
         "CHANGELOG.md",
-        "scripts/check_identity.py",
+        "scripts/ci/check_identity.py",
         "tests/test_identity_gate.py",
         "run_port_tests.sh",
         "tests/subscription_local/test_subscription_local.py",
@@ -199,7 +199,7 @@ def main() -> int:
         print(f"  {path}:{line_no}: {text.strip()}")
     print(
         "\nIf this is genuinely a pre-existing, legitimate provenance/docs "
-        "reference, extend the allowlist in scripts/check_identity.py. "
+        "reference, extend the allowlist in scripts/ci/check_identity.py. "
         "Runtime-code hits must be fixed, not allowlisted."
     )
     return 1

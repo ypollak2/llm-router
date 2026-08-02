@@ -2,8 +2,8 @@
 # Publish llm-router to PyPI with automatic credential extraction from ~/.pypirc
 #
 # Usage:
-#   ./scripts/publish-pypi.sh              # Build and publish
-#   ./scripts/publish-pypi.sh --dry-run    # Dry run (don't actually upload)
+#   ./scripts/release/publish-pypi.sh              # Build and publish
+#   ./scripts/release/publish-pypi.sh --dry-run    # Dry run (don't actually upload)
 #
 # Requirements:
 #   - .pypirc configured in home directory with [pypi] section

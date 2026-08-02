@@ -4,7 +4,7 @@
 from __future__ import annotations
 from pathlib import Path
 
-OUT = Path(__file__).parent.parent / "docs" / "readme"
+OUT = Path(__file__).parent.parent.parent / "docs" / "readme"
 OUT.mkdir(parents=True, exist_ok=True)
 
 # ── Color palettes ─────────────────────────────────────────────────────────

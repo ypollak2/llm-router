@@ -2,7 +2,7 @@
 """GitHub Actions entrypoint: fetch benchmark data and update benchmarks.json.
 
 Usage:
-    uv run python scripts/update_benchmarks.py
+    uv run python scripts/bench/update_benchmarks.py
 
 Requires the 'scripts' optional dependency group:
     uv sync --extra scripts
@@ -13,7 +13,7 @@ import sys
 from pathlib import Path
 
 # Add src/ to path so we can import llm_router without installing.
-sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
+sys.path.insert(0, str(Path(__file__).parent.parent.parent / "src"))
 
 logging.basicConfig(
     level=logging.INFO,

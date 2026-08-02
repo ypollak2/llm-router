@@ -82,7 +82,7 @@ def run_tests() -> bool:
     print("🔍 Running test suite...")
     timeout_seconds = int(os.environ.get("VERIFY_TEST_TIMEOUT", "600"))
 
-    # v9.3.1 — align excludes with scripts/release.sh's pytest gate so verify
+    # v9.3.1 — align excludes with scripts/release/release.sh's pytest gate so verify
     # doesn't fail on tests release.sh deliberately skips (flaky integration
     # tests, network-dependent suites, etc.). Single source of truth would
     # be ideal — for now both lists must be kept in sync manually.

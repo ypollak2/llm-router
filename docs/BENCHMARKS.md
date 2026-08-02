@@ -1,5 +1,5 @@
 <!-- AUTO-GENERATED — do not edit by hand. Updated weekly by GitHub Actions. -->
-<!-- Source: src/llm_router/data/benchmarks.json · Generator: scripts/update_benchmarks.py -->
+<!-- Source: src/llm_router/data/benchmarks.json · Generator: scripts/bench/update_benchmarks.py -->
 
 # Model Benchmarks
 
@@ -185,7 +185,7 @@ Each task type uses a different weighting formula to compute composite scores:
 
 ```
 Every Monday 06:00 UTC
-    GitHub Actions runs scripts/update_benchmarks.py
+    GitHub Actions runs scripts/bench/update_benchmarks.py
         ├── Fetches Arena Hard CSV
         ├── Fetches Aider YAML
         ├── Fetches HuggingFace JSON (5×100 rows)

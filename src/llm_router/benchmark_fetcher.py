@@ -2,7 +2,7 @@
 
 Fetches model rankings from four authoritative sources, computes weighted
 per-task-type scores, assigns tier lists, and writes an updated
-``data/benchmarks.json``. Run via ``scripts/update_benchmarks.py``.
+``data/benchmarks.json``. Run via ``scripts/bench/update_benchmarks.py``.
 
 Sources:
   - Arena Hard Auto (lm-sys/arena-hard-auto CSV — general quality, public)
@@ -491,7 +491,7 @@ def generate_benchmarks_md(data: dict[str, Any], output_path: Path) -> None:
 
     lines: list[str] = [
         "<!-- AUTO-GENERATED — do not edit by hand. Updated weekly by GitHub Actions. -->",
-        "<!-- Source: src/llm_router/data/benchmarks.json · Generator: scripts/update_benchmarks.py -->",
+        "<!-- Source: src/llm_router/data/benchmarks.json · Generator: scripts/bench/update_benchmarks.py -->",
         "",
         "# Model Benchmarks",
         "",
@@ -606,7 +606,7 @@ def generate_benchmarks_md(data: dict[str, Any], output_path: Path) -> None:
         "",
         "```",
         "Every Monday 06:00 UTC",
-        "    GitHub Actions runs scripts/update_benchmarks.py",
+        "    GitHub Actions runs scripts/bench/update_benchmarks.py",
         "        ├── Fetches Arena Hard CSV",
         "        ├── Fetches Aider YAML",
         "        ├── Fetches HuggingFace JSON (5×100 rows)",

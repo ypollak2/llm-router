@@ -343,7 +343,7 @@ async def test_run_audit_fails_open_on_db_error(monkeypatch):
 
 def test_audit_routing_module_has_no_unallowed_brand_leak():
     """ "chuzom" may appear in audit_routing.py's provenance header and
-    docstring commentary (allowlisted by scripts/check_identity.py for
+    docstring commentary (allowlisted by scripts/ci/check_identity.py for
     src/llm_router/ and tests/ files carrying a "ported from chuzom" header
     line) but must never leak into a runtime-facing identifier, env var
     name, or value the module actually produces."""
