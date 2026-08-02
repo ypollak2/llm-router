@@ -170,6 +170,57 @@ def test_analyze_facts_accuracy():
     assert facts["classification_accuracy"] == pytest.approx(0.5, abs=0.01)
 
 
+# ── WS2/WS3 Context Enrichment Tests (WS7) ─────────────────────────────────
+
+def test_analyze_facts_includes_ws2_ws3_context_keys(sample_decisions, sample_corrections):
+    """analyze_facts()'s main-case return is additively wrapped with WS2/WS3
+    population-level context — both keys must always be present, even if the
+    underlying data source is empty/unavailable (fail-open -> None)."""
+    facts = analyze_facts(sample_decisions, sample_corrections)
+
+    assert "mis_route_rate_inferred_baseline" in facts
+    assert "realized_savings_today_usd" in facts
+
+
+def test_analyze_facts_empty_session_includes_ws2_ws3_context_keys():
+    """The empty-decisions early-return path is also wrapped, not just the
+    main case — both WS7 context keys must be present here too."""
+    facts = analyze_facts([], [])
+
+    assert "mis_route_rate_inferred_baseline" in facts
+    assert "realized_savings_today_usd" in facts
+
+
+def test_analyze_facts_ws2_context_fails_open(monkeypatch):
+    """A broken/missing WS2 routing_quality module must never raise into
+    analyze_facts() — the field falls back to None."""
+    import llm_router.routing_quality as routing_quality
+
+    def _boom():
+        raise RuntimeError("ledger unavailable")
+
+    monkeypatch.setattr(routing_quality, "summarize", _boom)
+
+    facts = analyze_facts([], [])
+
+    assert facts["mis_route_rate_inferred_baseline"] is None
+
+
+def test_analyze_facts_ws3_context_fails_open(monkeypatch):
+    """A broken/missing WS3 dashboard_data module must never raise into
+    analyze_facts() — the field falls back to None."""
+    import llm_router.dashboard_data as dashboard_data
+
+    def _boom(window, *, db_path=None):
+        raise RuntimeError("db unavailable")
+
+    monkeypatch.setattr(dashboard_data, "query_realized_savings", _boom)
+
+    facts = analyze_facts([], [])
+
+    assert facts["realized_savings_today_usd"] is None
+
+
 # ── Gaps Analysis Tests ────────────────────────────────────────────────────
 
 def test_analyze_gaps_low_confidence(sample_decisions, sample_corrections):
@@ -204,6 +255,63 @@ def test_analyze_gaps_empty_session():
     """Test gap analysis with empty session."""
     gaps = analyze_gaps([], [])
     assert gaps == []
+
+
+def test_analyze_gaps_audited_misroute():
+    """WS6's offline audit_verdict column, when 'likely_misroute', must raise
+    the AUDITED_MISROUTE flag — read directly, not re-derived from
+    judge_score."""
+    decisions = [
+        {
+            "id": 6,
+            "timestamp": "2026-04-17T14:40:00+00:00",
+            "task_type": "code",
+            "classifier_confidence": 0.95,
+            "recommended_model": "haiku",
+            "final_model": "haiku",
+            "success": 1,
+            "cost_usd": 0.0001,
+            "saved_usd": 0.0002,
+            "audit_verdict": "likely_misroute",
+        },
+    ]
+
+    gaps = analyze_gaps(decisions, [])
+
+    audited = [g for g in gaps if "AUDITED_MISROUTE" in g["flags"]]
+    assert len(audited) == 1
+    assert audited[0]["decision_id"] == 6
+
+
+def test_analyze_gaps_audit_verdict_other_values_no_flag():
+    """Only 'likely_misroute' should raise the flag — 'likely_correct' and
+    'insufficient_data' must not."""
+    decisions = [
+        {
+            "id": 7,
+            "timestamp": "2026-04-17T14:41:00+00:00",
+            "task_type": "code",
+            "classifier_confidence": 0.95,
+            "recommended_model": "haiku",
+            "final_model": "haiku",
+            "success": 1,
+            "audit_verdict": "likely_correct",
+        },
+        {
+            "id": 8,
+            "timestamp": "2026-04-17T14:42:00+00:00",
+            "task_type": "code",
+            "classifier_confidence": 0.95,
+            "recommended_model": "haiku",
+            "final_model": "haiku",
+            "success": 1,
+            "audit_verdict": "insufficient_data",
+        },
+    ]
+
+    gaps = analyze_gaps(decisions, [])
+
+    assert not any("AUDITED_MISROUTE" in g["flags"] for g in gaps)
 
 
 # ── Root Cause Classification Tests ────────────────────────────────────────
@@ -248,6 +356,32 @@ def test_classify_root_causes_profile_stale(sample_decisions, sample_corrections
         if c["root_cause"] == "PROFILE_STALE" and c["task_type"] == "security_review"
     ]
     assert len(stale_causes) >= 1
+
+
+def test_classify_root_causes_audited_misroute():
+    """A gap carrying the AUDITED_MISROUTE flag must classify to the
+    AUDITED_MISROUTE root cause at confidence=2 (high — independent offline
+    audit signal), and must not be shadowed by other root causes."""
+    decisions = [
+        {
+            "id": 6,
+            "timestamp": "2026-04-17T14:40:00+00:00",
+            "task_type": "code",
+            "classifier_confidence": 0.95,
+            "recommended_model": "haiku",
+            "final_model": "haiku",
+            "success": 1,
+            "audit_verdict": "likely_misroute",
+        },
+    ]
+
+    gaps = analyze_gaps(decisions, [])
+    causes = classify_root_causes(gaps)
+
+    audited_causes = [c for c in causes if c["root_cause"] == "AUDITED_MISROUTE"]
+    assert len(audited_causes) == 1
+    assert audited_causes[0]["confidence"] == 2
+    assert audited_causes[0]["gap_id"] == 6
 
 
 # ── Action Generation Tests ────────────────────────────────────────────────
@@ -345,3 +479,55 @@ def test_format_full_report_empty():
 
     assert "SESSION RETROSPECTIVE" in output
     assert "0 calls" in output
+
+
+def test_format_full_report_includes_ws2_ws3_context_lines(sample_decisions, sample_corrections):
+    """The Facts section of the full report must surface the WS2/WS3
+    population-level context fields, defensively formatted."""
+    start = datetime(2026, 4, 17, 14, 30, tzinfo=timezone.utc)
+    end = datetime(2026, 4, 17, 14, 33, tzinfo=timezone.utc)
+    retro = build_retrospective(start, end, sample_decisions, sample_corrections)
+
+    output = format_full_report(retro)
+
+    # Values are population-level and environment-dependent (may be a number
+    # or "N/A" in a clean test DB) — assert the labels are present, not a
+    # specific figure.
+    assert "misroute rate" in output.lower() or "mis_route_rate" in output.lower() or "baseline" in output.lower()
+
+
+# ── Brand Leak Tests (WS7) ──────────────────────────────────────────────────
+
+def test_retrospective_module_has_no_unallowed_brand_leak():
+    """No public/private name in the retrospective module may contain
+    'chuzom' — the only allowed occurrence anywhere in the codebase is the
+    provenance-header pattern accepted by scripts/check_identity.py, which
+    this module does not use (it predates the migration and is native code,
+    not a literal port)."""
+    import llm_router.retrospective as retrospective
+
+    for name in dir(retrospective):
+        assert "chuzom" not in name.lower(), f"brand leak in name: {name}"
+
+
+def test_retrospective_output_never_leaks_brand(sample_decisions, sample_corrections):
+    """Every string value anywhere in a built retrospective, and in both
+    rendered report formats, must be free of 'chuzom' — output identity is
+    llm-router only."""
+    start = datetime(2026, 4, 17, 14, 30, tzinfo=timezone.utc)
+    end = datetime(2026, 4, 17, 14, 33, tzinfo=timezone.utc)
+    retro = build_retrospective(start, end, sample_decisions, sample_corrections)
+
+    def _walk(obj):
+        if isinstance(obj, str):
+            assert "chuzom" not in obj.lower(), f"brand leak in value: {obj!r}"
+        elif isinstance(obj, dict):
+            for v in obj.values():
+                _walk(v)
+        elif isinstance(obj, (list, tuple)):
+            for v in obj:
+                _walk(v)
+
+    _walk(retro)
+    assert "chuzom" not in format_full_report(retro).lower()
+    assert "chuzom" not in format_compact_summary(retro).lower()

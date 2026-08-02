@@ -296,6 +296,7 @@ llm-router benchmark list                              # list registered benchma
 llm-router benchmark run routerarena --split sub_10    # route a dataset and score it
 llm-router benchmark regress --policy <p> --benchmark <b>  # detect score regressions
 llm-router policy diff balanced cost_aggressive        # per-prompt model + cost delta
+llm-router audit --limit 100                           # offline misroute audit over routing_decisions
 ```
 
 These power the routing self-improvement loop: routing decisions get persisted to a SQLite outcomes table; benchmark runs against a reference dataset establish baseline scores; `regress` flags drops > 0.005 in release-over-release comparisons.
@@ -465,6 +466,18 @@ export LLM_ROUTER_PROFILE="balanced"       # budget | balanced | premium | subsc
 export LLM_ROUTER_POLICY="balanced"        # aggressive | balanced | conservative
 export LLM_ROUTER_ENFORCE="smart"          # smart | hard | soft | off
 ```
+
+### Opt-in capabilities
+
+These are all off by default; existing setups are unaffected until you set them.
+
+| Env var | Default | Effect when enabled |
+|---|---|---|
+| `LLM_ROUTER_CAPABILITY_ROUTING` | off | Records what capability-aware routing *would* choose into `routing_decisions.capabilities_json` for later analysis. Shadow-only — never changes the live routing decision. |
+| `LLM_ROUTER_BUDGET_ENVELOPE` | off | Enables `budget_envelope.py`'s hierarchical reserve/commit/settle accounting primitive. Ships standalone; no routing or spend behavior changes until you wire it into your own workflow. |
+| `LLM_ROUTER_BOUNDED_OPERATIONAL` | off | Enables the bounded-operational route predicate and pricing-derived budget check in `bounded_operational.py`. |
+| `LLM_ROUTER_AUDIT_DISABLED` | unset (audits run) | Set to disable the offline misroute audit (`audit_routing.py`). Invoke it via `llm-router audit` (read-only reporting; `--json` supported) or programmatically via `run_audit()`. |
+| `LLM_ROUTER_LOOPHOLE_JSONL` | `~/.llm-router/quality_feedback.jsonl` | Overrides the path `quality_feedback.ingest_loophole_jsonl()` reads LoopHole verifier verdicts from. |
 
 For teams or environments where `.env` is restricted:
 

@@ -959,6 +959,64 @@ async def _dispatch_model_loop(
 
             # Log routing decision for quality analytics
             if classification_data:
+                # WS4 (ported from Chuzom's capability-aware routing, shadow mode):
+                # compute what capability-aware routing WOULD have chosen and record
+                # it alongside the decision, WITHOUT changing the live routing result
+                # above. Gated by LLM_ROUTER_CAPABILITY_ROUTING (default off). Never
+                # allowed to affect `model`/`response` or raise -- fail-open to None.
+                _capabilities_json = None
+                try:
+                    from llm_router.capabilities import (
+                        capability_routing_enabled,
+                        detect_capabilities,
+                        serialize_capability_decision,
+                    )
+
+                    if capability_routing_enabled():
+                        _decision = detect_capabilities(
+                            prompt, classification_data.get("task_type", task_type.value)
+                        )
+                        _capabilities_json = serialize_capability_decision(_decision)
+                except Exception as _cap_err:
+                    log.debug("capability_shadow_detection_failed: %s", _cap_err)
+
+                # WS9 (wires Chuzom-ported bounded_operational.py into the live
+                # routing decision path, shadow mode): compute what
+                # should_route_bounded() WOULD have decided for this prompt and
+                # record it alongside the decision, WITHOUT changing the live
+                # routing result above. Gated by LLM_ROUTER_BOUNDED_OPERATIONAL
+                # (default off). should_route_bounded() itself already returns
+                # False unconditionally when the flag is unset, so this block is
+                # a no-op (yields None) whenever the flag is off -- byte-identical
+                # to the pre-WS9 live path. Never allowed to affect `model`/
+                # `response` or raise -- fail-open to None.
+                _bounded_operational_json = None
+                try:
+                    import json
+
+                    from llm_router.bounded_operational import (
+                        bounded_operational_enabled,
+                        bounded_op_budget_usd,
+                        should_route_bounded,
+                    )
+
+                    if bounded_operational_enabled():
+                        _bo_complexity = classification_data.get("complexity", "moderate")
+                        _would_route_bounded = should_route_bounded(prompt, _bo_complexity)
+                        _bounded_operational_json = json.dumps(
+                            {
+                                "would_route_bounded": _would_route_bounded,
+                                "complexity": _bo_complexity,
+                                "budget_usd": (
+                                    bounded_op_budget_usd(task_type=classification_data.get("task_type", task_type.value))
+                                    if _would_route_bounded
+                                    else None
+                                ),
+                            }
+                        )
+                except Exception as _bo_err:
+                    log.debug("bounded_operational_shadow_detection_failed: %s", _bo_err)
+
                 try:
                     await cost.log_routing_decision(
                         prompt=prompt,
@@ -986,6 +1044,8 @@ async def _dispatch_model_loop(
                         response=response.content,
                         requested_complexity=classification_data.get("requested_complexity"),
                         subject=classification_data.get("subject"),
+                        capabilities_json=_capabilities_json,
+                        bounded_operational_json=_bounded_operational_json,
                     )
                     
                     # Auto-log Claude usage when router selects Claude model.

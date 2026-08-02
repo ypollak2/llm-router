@@ -42,6 +42,7 @@ Usage:
     llm-router retrospect [--weekly] — IAF-style session debrief with routing directives
     llm-router stats [--period recent] — show combined download stats (llm-routing + claude-code-llm-router)
     llm-router verify                — end-to-end health check (30 seconds)
+    llm-router audit [--limit N] [--json] — post-hoc misroute audit report (read-only)
 """
 
 from __future__ import annotations
@@ -646,6 +647,9 @@ def main() -> None:
     elif args and args[0] == "explain-dashboard":
         from llm_router.commands.explain_dashboard import cmd_explain_dashboard
         sys.exit(cmd_explain_dashboard(args[1:]))
+    elif args and args[0] == "audit":
+        from llm_router.commands.audit import cmd_audit
+        cmd_audit(args[1:])
     else:
         # Default: start the MCP server (original behavior)
         from llm_router.server import main as _mcp_main

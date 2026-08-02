@@ -89,6 +89,9 @@ Procfile
 .claude/mcp.json
 tests/hook_rendering/
 
-# Docs are local working notes — never commit (except the CI-generated benchmark page)
+# Docs are local working notes — never commit (except the CI-generated benchmark page
+# and versioned release-evidence packs, which are permanent records, not working notes)
 /docs/*
 !/docs/BENCHMARKS.md
+!/docs/releases/
+!/docs/releases/**

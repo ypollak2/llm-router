@@ -260,6 +260,40 @@ MIGRATE_ROUTING_DECISIONS_ADD_SUBJECT = [
 ]
 """Plan 07 Cat E — enables (policy, subject, model) outcome aggregation for bandit selection."""
 
+MIGRATE_ROUTING_DECISIONS_ADD_CAPABILITIES = [
+    "ALTER TABLE routing_decisions ADD COLUMN capabilities_json TEXT",
+]
+"""WS4 (ported from Chuzom's capability-aware routing, shadow mode) — additive column
+recording the CapabilityDecision computed for this prompt (JSON-serialized), for later
+offline analysis of what capability-aware routing would have chosen. NULL unless
+LLM_ROUTER_CAPABILITY_ROUTING is enabled; never read by the live routing path."""
+
+MIGRATE_ROUTING_DECISIONS_ADD_AUDIT = [
+    "ALTER TABLE routing_decisions ADD COLUMN audit_verdict TEXT",
+    "ALTER TABLE routing_decisions ADD COLUMN audit_checked_at TEXT",
+]
+"""WS6 (ported from Chuzom's audit_routing.py; adapted from a live per-turn enterprise
+AuditLog append into a post-hoc, offline misroute audit — see audit_routing.py's module
+docstring for why) — additive columns recording the offline audit's verdict for a
+routing decision. Deliberately separate from `was_good` (community-shared human
+feedback, see community.py's acceptance-rate metric) and `reason_code` (decision-time
+classifier reasoning, see router.py): overwriting either with a machine guess would
+silently corrupt an existing, narrower signal. `audit_verdict` is only ever written
+when NULL (see audit_routing._write_verdict's WHERE guard), so re-running the audit is
+idempotent and cannot flip-flop or double count. Still lands in the SAME table as
+additive columns, not a new store — satisfies the plan's "no parallel accuracy store"."""
+
+MIGRATE_ROUTING_DECISIONS_ADD_BOUNDED_OPERATIONAL = [
+    "ALTER TABLE routing_decisions ADD COLUMN bounded_operational_json TEXT",
+]
+"""WS9 (wires Chuzom-ported bounded_operational.py into the live routing decision
+path, shadow mode) — additive column recording what should_route_bounded() /
+bounded_op_budget_usd() WOULD have decided for this prompt (JSON-serialized), for
+later offline analysis. NULL unless LLM_ROUTER_BOUNDED_OPERATIONAL is enabled;
+never read by the live routing path, and never used to select `final_model` or
+alter the response — see router.py's shadow-mode computation block. Mirrors the
+capabilities_json precedent above."""
+
 CREATE_BENCHMARK_RESULTS_TABLE = """
 CREATE TABLE IF NOT EXISTS benchmark_results (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -560,6 +594,9 @@ async def _get_db() -> aiosqlite.Connection:
         + MIGRATE_ROUTING_DECISIONS_MARK_CONTAMINATED
         + MIGRATE_ADD_QUOTA_SNAPSHOTS_TABLE
         + MIGRATE_ROUTING_DECISIONS_ADD_SUBJECT
+        + MIGRATE_ROUTING_DECISIONS_ADD_CAPABILITIES
+        + MIGRATE_ROUTING_DECISIONS_ADD_AUDIT
+        + MIGRATE_ROUTING_DECISIONS_ADD_BOUNDED_OPERATIONAL
     )
     for stmt in all_migrations:
         await _safe_migrate(db, stmt)
@@ -1060,6 +1097,8 @@ async def log_routing_decision(
     response: str | None = None,
     requested_complexity: str | None = None,
     subject: str | None = None,
+    capabilities_json: str | None = None,
+    bounded_operational_json: str | None = None,
 ) -> None:
     """Persist a complete routing decision to the routing_decisions table.
 
@@ -1090,6 +1129,17 @@ async def log_routing_decision(
         output_tokens: Output tokens generated.
         cost_usd: Total cost of the LLM call.
         latency_ms: Total latency of the LLM call.
+        capabilities_json: WS4 (ported from Chuzom's capability-aware routing,
+            shadow mode) -- JSON-serialized ``CapabilityDecision`` computed for
+            this prompt, or None. Purely additive/advisory: never read by the
+            live routing path, only by offline shadow-mode analysis. Populated
+            by the caller only when ``LLM_ROUTER_CAPABILITY_ROUTING`` is enabled.
+        bounded_operational_json: WS9 (wires Chuzom-ported bounded_operational.py,
+            shadow mode) -- JSON-serialized dict recording what
+            ``should_route_bounded()`` / ``bounded_op_budget_usd()`` would have
+            decided for this prompt, or None. Purely additive/advisory: never
+            read by the live routing path. Populated by the caller only when
+            ``LLM_ROUTER_BOUNDED_OPERATIONAL`` is enabled.
     """
     # Validate inputs before database insert
     _validate_routing_insert(final_model, final_provider, cost_usd)
@@ -1106,8 +1156,9 @@ async def log_routing_decision(
                 recommended_model, base_model, was_downshifted, budget_pct_used,
                 quality_mode, final_model, final_provider, success,
                 input_tokens, output_tokens, cost_usd, latency_ms, reason_code,
-                correlation_id, requested_complexity, complexity_downgraded, subject)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                correlation_id, requested_complexity, complexity_downgraded, subject,
+                capabilities_json, bounded_operational_json)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 _prompt_hash(prompt),
                 task_type,
@@ -1134,6 +1185,8 @@ async def log_routing_decision(
                 requested_complexity,
                 complexity_downgraded,
                 subject,
+                capabilities_json,
+                bounded_operational_json,
             ),
         )
         await db.commit()

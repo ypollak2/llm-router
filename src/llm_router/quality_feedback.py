@@ -1,9 +1,13 @@
+# The LoopHole-verdict-ingestion section below is ported from Chuzom's
+# quality_feedback.py; the "chuzom:<tier>" router-alias label prefix is renamed to
+# "llm-router:<tier>", and the default ledger path moved under ~/.llm-router/.
 """Post-route quality feedback — automatic response scoring and model quality tracking.
 
 Sprint 4 of the context preparation pipeline. This module:
 1. Auto-scores every routed response using heuristics (no LLM call needed)
 2. Tracks per-model quality scores by task type and complexity
 3. Exposes quality data for routing decisions (skip underperforming models)
+4. Folds ground-truth LoopHole verifier verdicts into the same quality store
 
 The key insight: quality scoring doesn't need an LLM — simple content heuristics
 (code blocks present? Non-empty? No refusal phrases?) produce a reliable 0–1 signal.
@@ -12,6 +16,8 @@ Over many calls, this signal reliably identifies models that fail at specific ta
 
 from __future__ import annotations
 
+import json
+import os
 import re
 import time
 from dataclasses import dataclass, field
@@ -280,3 +286,105 @@ def get_quality_summary() -> dict[str, dict]:
 def reset_quality_store() -> None:
     """Reset all quality tracking data. Useful for testing."""
     _quality_store.clear()
+
+
+# ── LoopHole verdicts: ground-truth quality ──────────────────────────────────
+# The heuristic scorer above guesses quality from response shape. LoopHole gives
+# us the real thing: it routes a coding task through llm-router, then a falsifiable
+# verifier (tests pass / build succeeds / curl 200) decides whether the work was
+# actually done. We fold that verdict straight into the same store, so
+# ``should_skip_model`` orders chains on ground truth, not shape heuristics.
+#
+# A verdict is a hard signal → map to the score extremes. A "paused" run is
+# "not proven", a soft negative rather than a hard failure.
+_VERDICT_SCORE = {"done": 1.0, "failed": 0.0, "paused": 0.25}
+
+# LoopHole tasks are code; task complexity travels in a ``llm-router:<tier>`` label.
+_TIER_TO_COMPLEXITY = {
+    "simple": "simple", "moderate": "moderate", "complex": "complex",
+    "auto": "moderate", "reasoning": "complex",
+}
+
+
+def _normalize_loophole_model(label: str) -> str | None:
+    """LoopHole labels look like ``ollama:qwen3-coder:30b`` or ``llm-router:complex``.
+
+    Return a concrete ``provider/model`` id, or None for a router alias
+    (``llm-router:<tier>``) — LoopHole didn't observe which model the alias resolved
+    to, so there's no concrete model to credit or penalize.
+    """
+    if not label or label.startswith("llm-router:") or label == "unknown":
+        return None
+    provider, sep, rest = label.partition(":")
+    return f"{provider}/{rest}" if sep else None
+
+
+def _loophole_complexity(record: dict) -> str:
+    for key in ("executor_model", "planner_model"):
+        label = record.get(key, "") or ""
+        if label.startswith("llm-router:"):
+            return _TIER_TO_COMPLEXITY.get(label.split(":", 1)[1], "moderate")
+    return "moderate"
+
+
+def record_loophole_verdict(record: dict) -> bool:
+    """Fold one LoopHole feedback record into the quality store.
+
+    Returns True if a concrete model's quality was updated; False if the record
+    carried only a router alias (nothing concrete to score) or was malformed.
+    """
+    if not isinstance(record, dict):
+        return False
+    status = record.get("status")
+    if status not in _VERDICT_SCORE:
+        status = "done" if record.get("verified_done") else "failed"
+    model = _normalize_loophole_model(record.get("executor_model", ""))
+    if model is None:
+        return False
+    record_quality(
+        model=model,
+        task_type="code",
+        complexity=_loophole_complexity(record),
+        score=_VERDICT_SCORE[status],
+    )
+    log.info(
+        "loophole_verdict_recorded",
+        model=model,
+        status=status,
+        goal_id=record.get("goal_id"),
+    )
+    return True
+
+
+def _loophole_jsonl_path() -> str:
+    """Default LoopHole verdict JSONL path, overridable via LLM_ROUTER_LOOPHOLE_JSONL
+    for consistency with the other ``LLM_ROUTER_*``-overridable state paths."""
+    override = os.environ.get("LLM_ROUTER_LOOPHOLE_JSONL")
+    if override:
+        return override
+    return os.path.join(os.path.expanduser("~"), ".llm-router", "quality_feedback.jsonl")
+
+
+def ingest_loophole_jsonl(path: str | None = None, since_offset: int = 0) -> tuple[int, int]:
+    """Drain LoopHole's verdict JSONL (its offline fallback) into the store.
+
+    Reads from ``since_offset`` bytes so a caller can poll incrementally.
+    Returns ``(records_applied, new_offset)``. A missing file is not an error.
+    """
+    path = path or _loophole_jsonl_path()
+    if not os.path.exists(path):
+        return (0, since_offset)
+    applied = 0
+    with open(path, encoding="utf-8") as f:
+        f.seek(since_offset)
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                if record_loophole_verdict(json.loads(line)):
+                    applied += 1
+            except (ValueError, json.JSONDecodeError):
+                continue
+        new_offset = f.tell()
+    return (applied, new_offset)
