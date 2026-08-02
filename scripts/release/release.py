@@ -139,8 +139,11 @@ def verify_versions(version: str, *, root: Path = ROOT) -> dict[str, str]:
 
 def extract_changelog_entry(version: str, *, changelog_path: Path = CHANGELOG_PATH) -> str:
     changelog = changelog_path.read_text(encoding="utf-8")
+    # Headings are Keep-a-Changelog form: `## [12.0.0] — Subtitle (date)`.
+    # The legacy `## v12.0.0 — …` form is still accepted so the extractor keeps
+    # working against CHANGELOG-ARCHIVE.md and older checkouts.
     pattern = re.compile(
-        rf"(?ms)^## v{re.escape(version)}\b.*?(?=^## v|\Z)"
+        rf"(?ms)^## (?:\[{re.escape(version)}\]|v{re.escape(version)}\b).*?(?=^## (?:\[|v)|\Z)"
     )
     match = pattern.search(changelog)
     if match is None:

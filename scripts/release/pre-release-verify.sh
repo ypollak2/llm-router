@@ -41,7 +41,7 @@ V_PYPROJECT=$(python3 -c "import tomllib; print(tomllib.load(open('pyproject.tom
 
 # 4. Check CHANGELOG updated
 echo "4️⃣  Checking CHANGELOG.md updated..."
-if ! grep -q "## v$V_PYPROJECT" CHANGELOG.md; then
+if ! grep -qE "^## (\[$V_PYPROJECT\]|v$V_PYPROJECT)" CHANGELOG.md; then
     echo -e "${YELLOW}⚠️  CHANGELOG.md may not include v$V_PYPROJECT entry${NC}"
     echo "   (Optional: add manually or use release.sh to extract from git)"
 else

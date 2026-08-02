@@ -180,7 +180,8 @@ main() {
     log_info "Step 5/5: Creating GitHub release..."
 
     # Get changelog entry for this version
-    changelog_entry=$(sed -n "/^## v${current_version}/,/^## /p" CHANGELOG.md | head -n -1 | tail -n +2)
+    # Headings are Keep-a-Changelog form: `## [12.0.0] — Subtitle (date)`.
+    changelog_entry=$(sed -n "/^## \[${current_version}\]/,/^## /p" CHANGELOG.md | head -n -1 | tail -n +2)
 
     if git tag "v${current_version}" && \
        git push origin --tags && \

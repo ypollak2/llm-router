@@ -87,7 +87,8 @@ build-backend = "hatchling.build"
 packages = ["src/llm_router"]
 
 [tool.hatch.build.targets.sdist]
-# Only ship: src/, pyproject.toml, LICENSE, README.md, CHANGELOG.md, CONTRIBUTING.md
+# Only ship: src/, pyproject.toml, LICENSE, README.md, CHANGELOG.md,
+# CHANGELOG-ARCHIVE.md (kept so CHANGELOG.md's link to it resolves), CONTRIBUTING.md
 # Exclude everything else — internal docs, tools, test infra, plugin configs
 exclude = [
     # Plugin / IDE configs
