@@ -563,5 +563,5 @@ A: Yes — use explicit `model=` parameter in any `llm_*` tool: `Use llm_code mo
 
 - [PROVIDERS.md](./PROVIDERS.md) — Setup guide for 20+ providers
 - [ARCHITECTURE.md](./ARCHITECTURE.md) — System design and data flow
-- [BENCHMARKS.md](./BENCHMARKS.md) — Cost and latency metrics
+- [BENCHMARKS.md](../docs/BENCHMARKS.md) — Cost and latency metrics
 - GitHub Issues: https://github.com/ypollak2/llm-router/issues

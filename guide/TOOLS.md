@@ -690,5 +690,5 @@ llm_orchestrate(
 ## See Also
 
 - [README.md](../README.md) — Overview and quick start
-- [CLAUDE.md](../CLAUDE.md) — Project configuration
-- [Router Architecture](./architecture.md) — How routing works internally
+- [Documentation index](./README.md) — Every guide page
+- [Router Architecture](./ARCHITECTURE.md) — How routing works internally
