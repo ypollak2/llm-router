@@ -47,6 +47,7 @@ def _run_team(subcmd: str, flags: list[str]) -> None:
     import asyncio
     from llm_router.team import (
         build_team_report, detect_channel, get_project_id, get_user_id, push_report,
+        _fmt_pct_or_na, _fmt_usd_or_na,
     )
     from llm_router.config import get_config
 
@@ -83,6 +84,13 @@ def _run_team(subcmd: str, flags: list[str]) -> None:
     print(f"  Calls:     {_bold(str(calls))}")
     print(f"  Saved:     {_green(f'~${saved:.4f}')}  (paid ${actual:.4f})")
     print(f"  Free tier: {free_pct:.0%}  {bar}")
+
+    realized_savings = _fmt_usd_or_na(report.get("realized_savings_usd"))
+    misroute_rate = _fmt_pct_or_na(report.get("mis_route_rate_inferred"))
+    print(
+        f"  {_dim(f'Fleet-wide realized savings ({period}): {realized_savings}')}"
+    )
+    print(f"  {_dim(f'Fleet-wide inferred misroute rate (baseline): {misroute_rate}')}")
 
     top = report.get("top_models", [])
     if top:

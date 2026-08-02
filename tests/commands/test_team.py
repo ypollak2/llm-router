@@ -137,6 +137,67 @@ class TestTeamReport:
         assert "$2.5" in captured.out or "2.5000" in captured.out
         assert "80%" in captured.out
 
+    def test_team_report_displays_ws23_context_when_present(self, capsys):
+        """The CLI must surface the WS7/C8 fleet-wide context lines when the
+        report carries them."""
+        with patch("llm_router.team.build_team_report") as mock_report:
+            with patch("llm_router.team.get_user_id") as mock_user:
+                with patch("llm_router.team.get_project_id") as mock_proj:
+                    with patch("llm_router.config.get_config") as mock_cfg:
+                        report = {
+                            "total_calls": 100,
+                            "saved_usd": 2.5,
+                            "actual_usd": 0.5,
+                            "free_pct": 0.8,
+                            "top_models": [],
+                            "realized_savings_usd": 12.3456,
+                            "mis_route_rate_inferred": 0.042,
+                        }
+                        mock_report.return_value = report
+                        mock_user.return_value = "user@example.com"
+                        mock_proj.return_value = "my-project"
+                        mock_cfg.return_value = MagicMock(
+                            llm_router_user_id=None,
+                            llm_router_team_endpoint=None,
+                            llm_router_team_chat_id=None,
+                        )
+                        _run_team("report", [])
+
+        captured = capsys.readouterr()
+        assert "Fleet-wide realized savings" in captured.out
+        assert "$12.3456" in captured.out
+        assert "Fleet-wide inferred misroute rate" in captured.out
+        assert "4.2%" in captured.out
+
+    def test_team_report_ws23_context_falls_back_to_na_when_absent(self, capsys):
+        """Old-shape report dicts (built before WS7's enrichment landed, or
+        with a context source that failed open to None) must render 'N/A'
+        rather than raising or printing 'None'."""
+        with patch("llm_router.team.build_team_report") as mock_report:
+            with patch("llm_router.team.get_user_id") as mock_user:
+                with patch("llm_router.team.get_project_id") as mock_proj:
+                    with patch("llm_router.config.get_config") as mock_cfg:
+                        report = {
+                            "total_calls": 100,
+                            "saved_usd": 2.5,
+                            "actual_usd": 0.5,
+                            "free_pct": 0.8,
+                            "top_models": [],
+                        }
+                        mock_report.return_value = report
+                        mock_user.return_value = "user@example.com"
+                        mock_proj.return_value = "my-project"
+                        mock_cfg.return_value = MagicMock(
+                            llm_router_user_id=None,
+                            llm_router_team_endpoint=None,
+                            llm_router_team_chat_id=None,
+                        )
+                        _run_team("report", [])
+
+        captured = capsys.readouterr()
+        assert "Fleet-wide realized savings" in captured.out
+        assert "N/A" in captured.out
+
 
 class TestTeamSetup:
     """Tests for team setup functionality."""
@@ -229,3 +290,40 @@ class TestTeamIntegration:
         with patch("llm_router.commands.team._run_team"):
             result = cmd_team(["report"])
         assert result == 0
+
+
+class TestBrandLeak:
+    """No 'chuzom' substring anywhere in the team CLI module or its output."""
+
+    def test_commands_team_module_has_no_unallowed_brand_leak(self):
+        import llm_router.commands.team as commands_team
+
+        for name in dir(commands_team):
+            assert "chuzom" not in name.lower(), f"brand leak in name: {name}"
+
+    def test_team_report_output_never_leaks_brand(self, capsys):
+        with patch("llm_router.team.build_team_report") as mock_report:
+            with patch("llm_router.team.get_user_id") as mock_user:
+                with patch("llm_router.team.get_project_id") as mock_proj:
+                    with patch("llm_router.config.get_config") as mock_cfg:
+                        report = {
+                            "total_calls": 100,
+                            "saved_usd": 2.5,
+                            "actual_usd": 0.5,
+                            "free_pct": 0.8,
+                            "top_models": [{"model": "openai/gpt-4o", "calls": 5, "cost": 0.1}],
+                            "realized_savings_usd": 12.3456,
+                            "mis_route_rate_inferred": 0.042,
+                        }
+                        mock_report.return_value = report
+                        mock_user.return_value = "user@example.com"
+                        mock_proj.return_value = "my-project"
+                        mock_cfg.return_value = MagicMock(
+                            llm_router_user_id=None,
+                            llm_router_team_endpoint=None,
+                            llm_router_team_chat_id=None,
+                        )
+                        _run_team("report", [])
+
+        captured = capsys.readouterr()
+        assert "chuzom" not in captured.out.lower()

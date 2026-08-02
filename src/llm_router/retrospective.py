@@ -7,16 +7,34 @@ Performs 5-step debrief analysis:
 4. ACTIONS — Concrete directives to improve next session
 5. MEMORY — Binding directives written to files
 
-All analysis data comes from existing usage.db — no new data collection needed.
+Most analysis data comes from usage.db (routing_decisions/corrections). WS7
+additively enriches FACTS/GAPS/ROOT CAUSES with population-level context from
+sibling workstreams, each via a deferred import + fail-open try/except that
+mirrors audit_routing.run_audit()'s precedent — a missing/stale data source
+never raises and never blocks the debrief:
+
+* WS2 (``routing_quality.summarize()``): an inferred misroute-rate baseline
+  over the full JSONL ledger — population-level context, not session-scoped.
+* WS3 (``dashboard_data.query_realized_savings()``): realized savings for a
+  coarse ``"today"`` window (the function only accepts a WindowLiteral, not
+  an arbitrary range, so this is a same-day approximation, not this
+  session's exact (start, end) window — named accordingly, e.g.
+  ``realized_savings_today_usd``, to avoid implying exact session scope).
+* WS6 (``routing_decisions.audit_verdict``, already present on every
+  decision dict via this module's own ``SELECT *`` once WS6's migration has
+  run): a new AUDITED_MISROUTE gap flag/root cause reads the offline audit's
+  verdict rather than re-deriving misroutes from judge_score itself.
 """
 
 from __future__ import annotations
 
+import logging
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
+log = logging.getLogger("llm_router.retrospective")
 
 
 # ── Constants ──────────────────────────────────────────────────────────────
@@ -137,6 +155,37 @@ def fetch_session_corrections(
 
 # ── IAF Debrief Steps ──────────────────────────────────────────────────────
 
+def _add_ws267_context(facts: dict) -> dict:
+    """Additively enrich `facts` with WS2/WS3 population-level context.
+
+    Both fields are best-effort and fail-open, mirroring
+    audit_routing.run_audit()'s precedent: a missing or errored data source
+    leaves the field as None and never raises or blocks the retrospective.
+    Neither figure is session-scoped — see the module docstring for why.
+    """
+    try:
+        from llm_router.routing_quality import summarize as _summarize_quality
+
+        facts["mis_route_rate_inferred_baseline"] = _summarize_quality().get(
+            "mis_route_rate_inferred"
+        )
+    except Exception as exc:  # noqa: BLE001 - fail-open, context-only field
+        log.warning("retrospective_quality_baseline_failed error=%s", exc)
+        facts["mis_route_rate_inferred_baseline"] = None
+
+    try:
+        from llm_router.dashboard_data import query_realized_savings
+
+        facts["realized_savings_today_usd"] = query_realized_savings(
+            "today"
+        ).realized_savings_usd
+    except Exception as exc:  # noqa: BLE001 - fail-open, context-only field
+        log.warning("retrospective_realized_savings_failed error=%s", exc)
+        facts["realized_savings_today_usd"] = None
+
+    return facts
+
+
 def analyze_facts(decisions: list[dict], corrections: list[dict]) -> dict:
     """Step 1: Collect neutral, data-driven facts about the session.
 
@@ -147,10 +196,13 @@ def analyze_facts(decisions: list[dict], corrections: list[dict]) -> dict:
     Returns:
         Dict with: total_calls, total_cost, total_saved, duration_min,
                    correction_count, task_distribution, model_distribution,
-                   avg_confidence, classification_accuracy
+                   avg_confidence, classification_accuracy,
+                   mis_route_rate_inferred_baseline (WS2, additive, may be
+                   None), realized_savings_today_usd (WS3, additive, may be
+                   None)
     """
     if not decisions:
-        return {
+        return _add_ws267_context({
             "total_calls": 0,
             "total_cost": 0.0,
             "total_saved": 0.0,
@@ -160,7 +212,7 @@ def analyze_facts(decisions: list[dict], corrections: list[dict]) -> dict:
             "model_distribution": {},
             "avg_confidence": 0.0,
             "classification_accuracy": 1.0,
-        }
+        })
 
     # Duration
     start_ts = datetime.fromisoformat(decisions[0]["timestamp"])
@@ -188,7 +240,7 @@ def analyze_facts(decisions: list[dict], corrections: list[dict]) -> dict:
     accuracy = 1.0 - (len(corrections) / len(decisions)) if decisions else 1.0
     accuracy = max(0.0, min(1.0, accuracy))
 
-    return {
+    return _add_ws267_context({
         "total_calls": len(decisions),
         "total_cost": total_cost,
         "total_saved": total_saved,
@@ -198,7 +250,7 @@ def analyze_facts(decisions: list[dict], corrections: list[dict]) -> dict:
         "model_distribution": models,
         "avg_confidence": avg_conf,
         "classification_accuracy": accuracy,
-    }
+    })
 
 
 def analyze_gaps(decisions: list[dict], corrections: list[dict]) -> list[dict]:
@@ -210,6 +262,9 @@ def analyze_gaps(decisions: list[dict], corrections: list[dict]) -> list[dict]:
     - MANUAL_OVERRIDE: decision in corrections list
     - BUDGET_DOWNGRADE: final_model != recommended_model
     - PROVIDER_FAILURE: success = 0
+    - AUDITED_MISROUTE: WS6's offline audit (audit_routing.run_audit()) judged
+      this decision's audit_verdict column "likely_misroute" — additive, reads
+      an existing column rather than re-deriving misroutes from judge_score
 
     Args:
         decisions: Routing decisions
@@ -252,6 +307,12 @@ def analyze_gaps(decisions: list[dict], corrections: list[dict]) -> list[dict]:
             gap_flags.append("PROVIDER_FAILURE")
             reason = "provider call failed"
 
+        # Check WS6's offline audit verdict (additive; reads an existing
+        # column rather than re-deriving misroutes from judge_score here).
+        if d.get("audit_verdict") == "likely_misroute":
+            gap_flags.append("AUDITED_MISROUTE")
+            reason = "WS6 offline audit judged this route a likely misroute"
+
         if gap_flags:
             gaps.append({
                 "decision_id": d.get("id"),
@@ -276,6 +337,9 @@ def classify_root_causes(gaps: list[dict]) -> list[dict]:
     - NEW_TASK_TYPE: task_type has no prior directives
     - PROVIDER_FAILURE: external provider unavailable
     - BUDGET_PRESSURE: real-time subscription/API limits forced downgrade
+    - AUDITED_MISROUTE: WS6's offline post-hoc audit (audit_routing.run_audit())
+      independently judged the decision a likely misroute — additive, sourced
+      from the AUDITED_MISROUTE gap flag rather than re-scored here
 
     Args:
         gaps: List of gaps from analyze_gaps()
@@ -325,6 +389,14 @@ def classify_root_causes(gaps: list[dict]) -> list[dict]:
                     "confidence": 1,  # Medium (unclear)
                     "evidence": "Single override — possibly new task type",
                 })
+        elif "AUDITED_MISROUTE" in flags:
+            causes.append({
+                "gap_id": gap["decision_id"],
+                "task_type": task,
+                "root_cause": "AUDITED_MISROUTE",
+                "confidence": 2,  # High — independent offline audit signal
+                "evidence": "WS6 offline audit (audit_routing.run_audit) verdict=likely_misroute",
+            })
         elif "BUDGET_DOWNGRADE" in flags:
             causes.append({
                 "gap_id": gap["decision_id"],
@@ -468,6 +540,18 @@ def build_retrospective(
 
 # ── File I/O ───────────────────────────────────────────────────────────────
 
+
+def _fmt_usd_or_na(value: Optional[float]) -> str:
+    """Format a nullable USD figure, defensively — WS3's context field may be None."""
+    return f"${value:.4f}" if value is not None else "N/A"
+
+
+def _fmt_pct_or_na(value: Optional[float]) -> str:
+    """Format a nullable 0.0-1.0 fraction as a percent, defensively — WS2's
+    context field may be None."""
+    return f"{value*100:.1f}%" if value is not None else "N/A"
+
+
 def write_retrospective_file(retro: dict, session_id: str = "") -> Path:
     """Write retrospective to a dated markdown file.
 
@@ -510,6 +594,8 @@ type: feedback
 - **Manual corrections**: {facts.get('correction_count', 0)}
 - **Avg confidence**: {facts.get('avg_confidence', 0)*100:.0f}%
 - **Accuracy**: {facts.get('classification_accuracy', 0)*100:.0f}%
+- **Realized savings (today, WS3 context)**: {_fmt_usd_or_na(facts.get('realized_savings_today_usd'))}
+- **Inferred misroute rate (population baseline, WS2 context)**: {_fmt_pct_or_na(facts.get('mis_route_rate_inferred_baseline'))}
 
 ### Task Distribution
 
@@ -839,6 +925,10 @@ def format_full_report(retro: dict) -> str:
         f"  Accuracy: {facts.get('classification_accuracy', 1.0)*100:.0f}%  |  "
         f"Corrections: {facts.get('correction_count', 0)}  |  "
         f"Duration: {facts.get('duration_min', 0)}min"
+    )
+    lines.append(
+        f"  Realized savings (today): {_fmt_usd_or_na(facts.get('realized_savings_today_usd'))}  |  "
+        f"Inferred misroute rate (baseline): {_fmt_pct_or_na(facts.get('mis_route_rate_inferred_baseline'))}"
     )
     lines.append("")
 

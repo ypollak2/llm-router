@@ -53,6 +53,13 @@ _CHUZOM_RE = re.compile(r"chuzom", re.IGNORECASE)
 #   docstring citing "Audit (Chuzom review)" as the provenance of a specific
 #   regression case. Extended into the allowlist during WS0 for the same
 #   reason as run_port_tests.sh.
+# - tests/test_retrospective.py, tests/test_team.py,
+#   tests/commands/test_team.py: WS7 brand-leak regression tests for the
+#   retrospective loop (C7) and team-report enrichment (C8) — neither module
+#   is a literal Chuzom port (retrospective.py predates the migration
+#   program; team.py's WS2/WS3 enrichment is new design), so no "ported from
+#   chuzom" header applies. Each file must literally assert
+#   `"chuzom" not in ...` to guard against future brand leakage.
 ALLOW_FILES: frozenset[str] = frozenset(
     {
         "loophole.json",
@@ -63,6 +70,9 @@ ALLOW_FILES: frozenset[str] = frozenset(
         "tests/test_identity_gate.py",
         "run_port_tests.sh",
         "tests/subscription_local/test_subscription_local.py",
+        "tests/test_retrospective.py",
+        "tests/test_team.py",
+        "tests/commands/test_team.py",
     }
 )
 
