@@ -60,6 +60,13 @@ _CHUZOM_RE = re.compile(r"chuzom", re.IGNORECASE)
 #   program; team.py's WS2/WS3 enrichment is new design), so no "ported from
 #   chuzom" header applies. Each file must literally assert
 #   `"chuzom" not in ...` to guard against future brand leakage.
+# - tests/test_contracts.py: `TestModuleHygiene.test_no_chuzom_imports`
+#   (WS8) is a brand-leak regression test guarding `contracts.py` against
+#   ever importing a chuzom module — the test's name, comment, and
+#   assertion necessarily name the string it forbids in order to check for
+#   it. `contracts.py` itself is not a documented Chuzom port (no "ported
+#   from chuzom" header applies), so the same rationale as the WS7 entries
+#   above governs: this is provenance-of-a-guard, not brand leakage.
 ALLOW_FILES: frozenset[str] = frozenset(
     {
         "loophole.json",
@@ -73,6 +80,7 @@ ALLOW_FILES: frozenset[str] = frozenset(
         "tests/test_retrospective.py",
         "tests/test_team.py",
         "tests/commands/test_team.py",
+        "tests/test_contracts.py",
     }
 )
 

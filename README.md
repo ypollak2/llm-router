@@ -466,6 +466,18 @@ export LLM_ROUTER_POLICY="balanced"        # aggressive | balanced | conservativ
 export LLM_ROUTER_ENFORCE="smart"          # smart | hard | soft | off
 ```
 
+### Opt-in capabilities
+
+These are all off by default; existing setups are unaffected until you set them.
+
+| Env var | Default | Effect when enabled |
+|---|---|---|
+| `LLM_ROUTER_CAPABILITY_ROUTING` | off | Records what capability-aware routing *would* choose into `routing_decisions.capabilities_json` for later analysis. Shadow-only — never changes the live routing decision. |
+| `LLM_ROUTER_BUDGET_ENVELOPE` | off | Enables `budget_envelope.py`'s hierarchical reserve/commit/settle accounting primitive. Ships standalone; no routing or spend behavior changes until you wire it into your own workflow. |
+| `LLM_ROUTER_BOUNDED_OPERATIONAL` | off | Enables the bounded-operational route predicate and pricing-derived budget check in `bounded_operational.py`. |
+| `LLM_ROUTER_AUDIT_DISABLED` | unset (audits run) | Set to disable the offline misroute audit (`audit_routing.py`) when explicitly invoked. The audit has no CLI/scheduler wiring yet — it must be called programmatically. |
+| `LLM_ROUTER_LOOPHOLE_JSONL` | `~/.llm-router/quality_feedback.jsonl` | Overrides the path `quality_feedback.ingest_loophole_jsonl()` reads LoopHole verifier verdicts from. |
+
 For teams or environments where `.env` is restricted:
 
 ```bash
