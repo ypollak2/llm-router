@@ -16,15 +16,16 @@ Ports eight capabilities adapted from an internal reference implementation ("Chu
 - **Misroute audit** (`audit_routing.py`). A fully offline, post-hoc scorer over existing `routing_decisions` rows (heuristic over judge score / complexity downgrades / downshifts), writing back new `audit_verdict`/`audit_checked_at` columns idempotently. Gated by `LLM_ROUTER_AUDIT_DISABLED`; inert until `run_audit()` is explicitly invoked — no CLI/scheduler entry point ships in this release (see Follow-ups).
 - **Retrospective loop + team report enrichment**. Verified the existing retrospective debrief (`retrospective.py`, native since v6.x) reads the new `audit_verdict` directly rather than re-deriving misroutes, and fails open on the context fields it reads from the items above. `commands/team.py`'s report/push surfaces gain fleet-wide realized-savings and inferred misroute-rate columns, sourced from the realized-savings query and quality-ledger summary via a fail-open helper.
 
+- **`llm-router audit` CLI command** (`commands/audit.py`). Wires `audit_routing.py::run_audit()` to a CLI entry point (mirrors the `team` command's structure): renders sampled/audited counts, verdict breakdown, and the inferred misroute-rate baseline, with a `--json` mode and a `--limit N` flag (default 100). Respects `LLM_ROUTER_AUDIT_DISABLED`. Strictly read-only/reporting — never mutates routing state.
+- **Bounded-operational routing wired into the live path** (`router.py`), strictly behind `LLM_ROUTER_BOUNDED_OPERATIONAL` (default off). When the flag is unset/false, the routing decision path is byte-identical to before, proved by an invariance test comparing route decisions with the module absent vs. present-but-disabled.
+
 ### Config
 
 New env vars (all optional, all default off / non-disabling): `LLM_ROUTER_BOUNDED_OPERATIONAL`, `LLM_ROUTER_LOOPHOLE_JSONL`, `LLM_ROUTER_CAPABILITY_ROUTING`, `LLM_ROUTER_BUDGET_ENVELOPE`, `LLM_ROUTER_AUDIT_DISABLED` (opt-*out* — unset means audits run when explicitly invoked).
 
-### Follow-ups (not yet wired)
+### Notes
 
-- `audit_routing.py`'s `run_audit()` has no CLI command, MCP tool, or scheduler wiring yet — it must be invoked programmatically today.
-- No `LLM_ROUTER_QUALITY_FEEDBACK` flag exists. The heuristic quality scorer's `should_skip_model()` check in the router's fallback-chain path is unconditional (pre-dates this release; unrelated to the LoopHole-verdict additions above) and is not gated to avoid double-penalizing a model already down-weighted elsewhere. Flagged here as a known gap, not fixed in this release.
-- `bounded_operational.py`'s `should_route_bounded()` is fully implemented and tested but not called from any live routing path yet.
+- There is no `LLM_ROUTER_QUALITY_FEEDBACK` flag, and none is planned. The heuristic quality scorer's `should_skip_model()` check in the router's fallback-chain path is unconditional — it pre-dates this release, is unrelated to the LoopHole-verdict additions above, and is already always-on in production. Gating it now would change existing behavior, so it intentionally stays ungated; this note exists only to correct an earlier reference to a flag that was never implemented.
 
 ## v11.0.0 — Adaptive routing wave: observability, importable classifier, subscription-local profile, PII→local (2026-07-09)
 
