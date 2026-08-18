@@ -124,7 +124,11 @@ rm ~/.env  # If used
 
 **Hooks are shell scripts installed in ~/.claude/hooks/:**
 - ✅ Hooks are subject to deadlock detection before installation
-- ✅ Hooks cannot block core tools (Read, Edit, Bash) — would create deadlock
+- ⚠️ Hooks **can** block core tools (Read, Edit, Bash, Write). PreToolUse enforcement
+  does this routinely in `smart` and `hard` modes — it is the mechanism those modes are
+  built on, not an edge case. What is guaranteed is **no permanent lockout**: every block
+  carries an escape valve (call any `llm_*` tool), and repeated attempts auto-pivot to
+  release the lock. True deadlock, in the CS sense, is what is prevented — not blocking.
 - ✅ Hooks are local (don't phone home)
 
 **Risks:**
@@ -165,7 +169,7 @@ This section describes threats llm-router is designed to protect against and kno
 | **API Key Exposure** | Keys in git or plaintext | `.env` in `.gitignore`; keys in `config.yaml` with 600 perms |
 | **Routing Injection** | Malicious prompt tries to override routing | Routing rules in code, not parsed from prompts |
 | **Token Theft** | OAuth token copied from memory | OAuth tokens stored in OS keyring (macOS/Linux) |
-| **Untrusted Hooks** | Malicious auto-route hook | Hooks reviewed at install; deadlock detection prevents tool blocking |
+| **Untrusted Hooks** | Malicious auto-route hook | Hooks reviewed at install. NOTE: hooks can and do block core tools by design; the guarantee is escape-valve + auto-pivot, so no permanent lockout — see Hook Security above |
 | **Provider Man-in-the-Middle** | Network attack on API calls | All provider calls use TLS 1.2+; provider auth via keys |
 | **Unauthorized Access** | Unauthorized user runs routing | Routed prompts respect system user permissions |
 | **Rate Limit Bypass** | User overrides rate limits | Rate limits enforced by providers, not bypassed |
