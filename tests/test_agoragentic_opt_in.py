@@ -20,11 +20,10 @@ arriving switched on for every install.
 THE FINDING IS THE GAP, NOT THE FIX
 ===================================
 
-Chuzom already had this gate — ``src/chuzom/tools/agoragentic.py``, SEC-003, off
-unless ``CHUZOM_AGORAGENTIC=on``, with the reasoning written out. The mitigation
-existed, was correct, and never reached this repository.
+This gate already existed upstream, as SEC-003, with the reasoning written out.
+The mitigation existed, was correct, and never reached this repository.
 
-That makes it the pattern from Chuzom's doc 32 §5 one level up: not "a helper
+That makes it a known pattern one level up: not "a helper
 exists and a sibling call site skipped it", but "a mitigation exists and the
 DOWNSTREAM REPOSITORY never received it". Anywhere two repositories share a
 lineage, a security fix landing in one is not a security fix landing in both,

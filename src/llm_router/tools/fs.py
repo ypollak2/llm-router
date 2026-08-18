@@ -274,8 +274,47 @@ Return ONLY the JSON object."""
         return f"{resp.header()}\n\n{resp.content}"
 
 
+# ── SEC-002: opt-in gate ──────────────────────────────────────────────────────
+# Ported from upstream SEC-002, where this landed and never
+# reached this repository. Its reasoning applies here verbatim:
+#
+#   "The llm_fs_* tools read user files into model prompts. Without a sandbox an
+#    agent could exfiltrate ~/.ssh/** or any other readable path in one call."
+#
+# Upstream uses DEFENCE IN DEPTH — two layers:
+#   1. tools are not registered unless the operator opts in   <-- ported here
+#   2. file-reading tools require `project_root` and reject any path resolving
+#      outside it (`_assert_under_root`)                       <-- NOT ported yet
+#
+# Layer 2 is absent from this repository entirely: `_assert_under_root`,
+# `project_root` and `FsSandboxError` have zero occurrences here, and two of
+# these four tools (`llm_fs_rename`, `llm_fs_edit_many`) WRITE. Adding it changes
+# tool signatures, so it is a breaking change needing its own design and its own
+# control — see tests/test_fs_tools_opt_in.py. Shipping layer 1 first is not a
+# substitute for it; it bounds who is exposed, not what an opted-in agent can
+# reach.
+_FS_TOOLS_ENV = "LLM_ROUTER_FS_TOOLS"
+
+
+def _fs_tools_enabled() -> bool:
+    """True if the operator has opted in to filesystem tools via env."""
+    import os as _os
+
+    return _os.environ.get(_FS_TOOLS_ENV, "").strip().lower() in {
+        "1", "on", "true", "yes",
+    }
+
+
 def register(mcp, should_register=None) -> None:
-    """Register filesystem tools with the MCPServer instance."""
+    """Register filesystem tools with the MCPServer instance.
+
+    SEC-002: OFF by default. Set ``LLM_ROUTER_FS_TOOLS=on`` to register them.
+    Without the opt-in, ``mcp.list_tools()`` exposes zero ``llm_fs_*`` entries.
+    See the module-level SEC-002 note for what this does and does not cover.
+    """
+    if not _fs_tools_enabled():
+        return  # SEC-002: tools intentionally absent unless opted in.
+
     gate = should_register or (lambda _: True)
     if gate("llm_fs_find"):
         mcp.tool()(llm_fs_find)

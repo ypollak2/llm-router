@@ -227,8 +227,8 @@ def register(mcp):
     Treat the opt-in as a deliberate "I want to expose payment-signing
     capability to the LLM agent" decision.
 
-    Ported from Chuzom's SEC-003 (src/chuzom/tools/agoragentic.py), where this
-    was fixed and never reached this repository — see
+    Ported from upstream SEC-003, where this was fixed and never reached this
+    repository — see
     tests/test_agoragentic_opt_in.py for why that gap is the finding rather than
     the fix.
     """
