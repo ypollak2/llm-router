@@ -190,8 +190,50 @@ async def agoragentic_get_agent_status() -> dict[str, Any]:
         return response.json()
 
 
+_AGORAGENTIC_ENV = "LLM_ROUTER_AGORAGENTIC"
+
+
+def _agoragentic_enabled() -> bool:
+    """True if the operator has opted in to the Agoragentic marketplace tools.
+
+    Affirmative values: ``1``, ``on``, ``true``, ``yes`` (case-insensitive).
+    Anything else — including unset and empty string — is opt-out.
+    """
+    import os as _os
+
+    return _os.environ.get(_AGORAGENTIC_ENV, "").strip().lower() in {
+        "1", "on", "true", "yes",
+    }
+
+
 def register(mcp):
-    """Register Agoragentic tools with MCP server."""
+    """Register Agoragentic tools with MCP server.
+
+    SEC-003: tools are OFF by default. Set ``LLM_ROUTER_AGORAGENTIC=on`` in the
+    environment to register them. Without the opt-in, ``mcp.list_tools()``
+    exposes zero ``agoragentic_*`` entries — eliminating the wallet/marketplace
+    surface for any operator who did not explicitly enable it.
+
+    WHY THIS IS NOT LIKE THE OTHER TOOL GROUPS
+
+    Every other routing destination is a known, named vendor the operator
+    configured themselves — they pulled an Ollama model, or added an API key.
+    Cost is either zero (local) or their own metered account. These four tools
+    are different on both axes: they match a task to a DYNAMICALLY SELECTED,
+    unvetted counterparty at request time, and they settle real USDC on Base L2
+    automatically. That is a downstream outsourcing flow, not model routing, and
+    it should not arrive switched on with the rest of the package.
+
+    Treat the opt-in as a deliberate "I want to expose payment-signing
+    capability to the LLM agent" decision.
+
+    Ported from Chuzom's SEC-003 (src/chuzom/tools/agoragentic.py), where this
+    was fixed and never reached this repository — see
+    tests/test_agoragentic_opt_in.py for why that gap is the finding rather than
+    the fix.
+    """
+    if not _agoragentic_enabled():
+        return  # SEC-003: tools intentionally absent unless opted in.
     
     @mcp.tool()
     async def agoragentic_task(
