@@ -22,7 +22,17 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 dependencies = [
-    "mcp>=1.0.0",
+    # UPPER BOUND IS LOAD-BEARING. mcp 2.0.0 removed `mcp.server.fastmcp`
+    # entirely (verified against the published wheel: its server submodules are
+    # auth/lowlevel/mcpserver, with FastMCP's closest analogue now
+    # mcp.server.mcpserver.MCPServer). Seven modules here import
+    # `from mcp.server.fastmcp import ...`, so an unbounded pin meant every
+    # fresh install resolved 2.0.0 — the latest release — and died at import
+    # before registering a single tool. The MCP client sees CONNECTION_CLOSED,
+    # which reads like a provider problem and is not.
+    # Guarded by tests/test_mcp_dependency_pin.py; raise this only together with
+    # porting the imports.
+    "mcp>=1.0.0,<2.0.0",
     "litellm>=1.50.0",
     "pydantic>=2.0",
     "pydantic-settings>=2.0",
