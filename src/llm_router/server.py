@@ -1,4 +1,4 @@
-"""FastMCP server — MCP entry point for llm-router.
+"""MCPServer server — MCP entry point for llm-router.
 
 All 60 tools are registered by modules in llm_router/tools/:
 - routing.py  — llm_classify, llm_track_usage, llm_route, llm_auto, llm_stream,
@@ -26,7 +26,7 @@ responses are displayed directly to the user in the Claude Code UI.
 
 from __future__ import annotations
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 
 from llm_router.config import get_config
 from llm_router.health import get_tracker
@@ -41,7 +41,7 @@ from llm_router.tools.setup import _mask_key, llm_setup  # noqa: F401
 configure_logging()
 log = get_logger("llm_router.server")
 
-mcp = FastMCP("llm-router")
+mcp = MCPServer("llm-router")
 
 # Auto-update routing rules and hooks on startup if a newer version was installed via pip
 try:

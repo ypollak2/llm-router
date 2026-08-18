@@ -613,7 +613,7 @@ def _setup_uninstall_hooks() -> str:
 
 
 def register(mcp, should_register=None) -> None:
-    """Register setup and feedback tools with the FastMCP instance."""
+    """Register setup and feedback tools with the MCPServer instance."""
     gate = should_register or (lambda _: True)
     if gate("llm_setup"):
         mcp.tool()(llm_setup)

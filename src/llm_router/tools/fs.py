@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import glob as _glob
 
-from mcp.server.fastmcp import Context
+from mcp.server.mcpserver import Context
 
 from llm_router.edit import build_edit_prompt, format_edit_result, parse_edit_response, read_file_for_edit
 from llm_router.router import route_and_call
@@ -275,7 +275,7 @@ Return ONLY the JSON object."""
 
 
 def register(mcp, should_register=None) -> None:
-    """Register filesystem tools with the FastMCP instance."""
+    """Register filesystem tools with the MCPServer instance."""
     gate = should_register or (lambda _: True)
     if gate("llm_fs_find"):
         mcp.tool()(llm_fs_find)

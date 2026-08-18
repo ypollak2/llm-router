@@ -52,7 +52,7 @@ _SRC = _ROOT / "src"
 _PYPROJECT = _ROOT / "pyproject.toml"
 
 #: The major version whose API this source tree is written against.
-_SUPPORTED_MAJOR = 1
+_SUPPORTED_MAJOR = 2
 
 
 def _mcp_requirement() -> str:
@@ -72,7 +72,7 @@ def test_pin_has_an_upper_bound():
         f"mcp 2.0.0 removed mcp.server.fastmcp, which this code imports in "
         f"{len(_mcp_import_sites())} modules, so an unbounded pin means a fresh "
         f"install resolves a version that cannot start. Pin "
-        f"`mcp>=1.0.0,<{_SUPPORTED_MAJOR + 1}.0.0`, or port the imports and "
+        f"`mcp>={_SUPPORTED_MAJOR}.0.0,<{_SUPPORTED_MAJOR + 1}.0.0`, or port the imports and "
         f"raise both this bound and _SUPPORTED_MAJOR together."
     )
     assert f"<{_SUPPORTED_MAJOR + 1}" in req, (

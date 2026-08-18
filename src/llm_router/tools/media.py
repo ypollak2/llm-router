@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from mcp.server.fastmcp import Context
+from mcp.server.mcpserver import Context
 
 from llm_router.router import route_and_call
 from llm_router.types import TaskType
@@ -83,7 +83,7 @@ async def llm_audio(
 
 
 def register(mcp, should_register=None) -> None:
-    """Register media tools with the FastMCP instance."""
+    """Register media tools with the MCPServer instance."""
     gate = should_register or (lambda _: True)
     if gate("llm_image"):
         mcp.tool()(llm_image)

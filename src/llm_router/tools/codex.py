@@ -63,7 +63,7 @@ async def llm_codex(
 
 
 def register(mcp, should_register=None) -> None:
-    """Register Codex tool with the FastMCP instance."""
+    """Register Codex tool with the MCPServer instance."""
     gate = should_register or (lambda _: True)
     if gate("llm_codex"):
         mcp.tool()(llm_codex)
