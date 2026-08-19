@@ -25,19 +25,23 @@ echo ""
 
 # 2. Verify version sync across all files
 echo "2️⃣  Verifying version synchronization..."
-if ! python3 scripts/ci/verify-version-sync.py; then
+if ! uv run python scripts/ci/verify-version-sync.py; then
     exit 1
 fi
 echo ""
 
 # 3. Verify plugin distributions are aligned
 echo "3️⃣  Verifying plugin distribution synchronization..."
-if ! python3 scripts/ci/verify-plugin-sync.py; then
+if ! uv run python scripts/ci/verify-plugin-sync.py; then
     exit 1
 fi
 echo ""
 
-V_PYPROJECT=$(python3 -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")
+# `uv run python`, not bare `python3`: this repo requires >=3.11 and tomllib is
+# stdlib only from 3.11. On macOS `python3` is the system 3.9, so the bare form
+# died with ModuleNotFoundError *after* steps 1-3 had already printed green --
+# a release script that fails halfway through reads like a release problem.
+V_PYPROJECT=$(uv run python -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")
 
 # 4. Check CHANGELOG updated
 echo "4️⃣  Checking CHANGELOG.md updated..."
