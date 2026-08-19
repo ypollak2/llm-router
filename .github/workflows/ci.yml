@@ -83,7 +83,7 @@ jobs:
 
   test:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -121,8 +121,19 @@ jobs:
             --junit-xml=/tmp/pytest-results.xml &
           PYTEST_PID=$!
 
-          # Wait up to 150s for pytest to exit normally.
-          for i in $(seq 1 150); do
+          # Wait up to 900s for pytest to exit normally.
+          #
+          # Was 150s, sized for a ~2,700-test suite. The upstream-core sync took
+          # it to ~6,900, so the wait expired at 31% progress, the hang-handler
+          # fired on a pytest that was working perfectly, found no junit xml
+          # (not written yet) and reported failure. Nothing was broken; the
+          # watchdog was simply shorter than the work.
+          #
+          # 900s is the ceiling, not the expectation: a healthy run finishes in
+          # ~4 minutes and exits the loop immediately. This only bounds the
+          # aiosqlite exit-hang the handler below exists for. timeout-minutes
+          # on the job is raised to match, or the job dies before the loop can.
+          for i in $(seq 1 900); do
             if ! kill -0 $PYTEST_PID 2>/dev/null; then
               wait $PYTEST_PID
               exit $?
@@ -130,7 +141,7 @@ jobs:
             sleep 1
           done
 
-          # Still running after 150s — pytest is hanging on exit (aiosqlite thread).
+          # Still running after 900s — pytest is hanging on exit (aiosqlite thread).
           # Read the junit xml written before the hang to determine true pass/fail.
           echo "pytest is hanging on exit — reading junit results..."
           python3 - <<'PY'
