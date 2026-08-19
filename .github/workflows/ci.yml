@@ -112,6 +112,16 @@ jobs:
 
       - name: Run tests
         shell: bash
+        env:
+          # A routing-audit fix means several test modules need SOME candidate
+          # in the provider chain. They patch the dispatch layer and make no
+          # network call, but a bare runner has no keys and no Ollama, so the
+          # chain builds empty and they die with "No providers available".
+          #
+          # Kept identical to the value in scripts/release/pre-release-verify.sh:
+          # two runners of one suite that disagree about its environment is how
+          # a release gate ends up contradicting CI.
+          OPENAI_API_KEY: sk-test-dummy-key-for-ci-only-no-real-calls-made
         run: |
           # Run pytest in the background so we can detect the aiosqlite thread hang.
           # pytest writes junit xml before the hang; we read that to determine pass/fail.
