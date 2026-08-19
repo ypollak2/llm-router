@@ -51,14 +51,17 @@ class TestInstallVsCodeFiles:
         # VS Code uses "servers", NOT "mcpServers"
         assert "servers" in data, "VS Code mcp.json must use 'servers' root key"
         assert "mcpServers" not in data, "VS Code mcp.json must NOT use 'mcpServers'"
-        assert "llm-router" in data["servers"]
-        assert data["servers"]["llm-router"]["command"] == "uvx"
+        assert "llm_router" in data["servers"]
+        # P0-6: canonical stdio entry is `llm_router` (the console script), not the
+        # deprecated `uvx claude-code-llm_router` package.
+        assert data["servers"]["llm_router"]["command"] == "llm_router"
+        assert data["servers"]["llm_router"]["args"] == []
 
     def test_action_confirms_file_written(self, fake_home):
         from llm_router.cli import _install_vscode_files
 
         actions = _install_vscode_files()
-        file_actions = [a for a in actions if "llm-router" in a or "mcp.json" in a.lower()]
+        file_actions = [a for a in actions if "llm_router" in a or "mcp.json" in a.lower()]
         assert file_actions, f"Expected confirmation action, got: {actions}"
 
     def test_idempotent_no_duplicate_server(self, fake_home):
@@ -89,7 +92,7 @@ class TestInstallVsCodeFiles:
         _install_vscode_files()
 
         content = instructions.read_text()
-        assert "llm-router" in content
+        assert "llm_router" in content
 
     def test_copilot_instructions_not_duplicated(self, fake_home, fake_cwd):
         from llm_router.cli import _install_vscode_files
@@ -97,11 +100,11 @@ class TestInstallVsCodeFiles:
         github_dir = fake_cwd / ".github"
         github_dir.mkdir()
         instructions = github_dir / "copilot-instructions.md"
-        instructions.write_text("# llm-router already here\n")
+        instructions.write_text("# llm_router already here\n")
 
         actions = _install_vscode_files()
         skip_actions = [a for a in actions if "skipped" in a]
-        assert skip_actions, "Should skip copilot-instructions.md if llm-router already present"
+        assert skip_actions, "Should skip copilot-instructions.md if llm_router already present"
 
     def test_merges_with_existing_servers(self, fake_home):
         from llm_router.cli import _install_vscode_files
@@ -120,7 +123,7 @@ class TestInstallVsCodeFiles:
 
         data = json.loads(mcp_json.read_text())
         assert "other-tool" in data["servers"]
-        assert "llm-router" in data["servers"]
+        assert "llm_router" in data["servers"]
 
 
 # ── Cursor install ────────────────────────────────────────────────────────────
@@ -139,13 +142,13 @@ class TestInstallCursorFiles:
         # Cursor uses "mcpServers"
         assert "mcpServers" in data, "Cursor mcp.json must use 'mcpServers' root key"
         assert "servers" not in data, "Cursor mcp.json must NOT use 'servers'"
-        assert "llm-router" in data["mcpServers"]
+        assert "llm_router" in data["mcpServers"]
 
     def test_action_confirms_file_written(self, fake_home):
         from llm_router.cli import _install_cursor_files
 
         actions = _install_cursor_files()
-        assert any("llm-router" in a or ".cursor" in a for a in actions)
+        assert any("llm_router" in a or ".cursor" in a for a in actions)
 
     def test_idempotent_no_duplicate_server(self, fake_home):
         from llm_router.cli import _install_cursor_files
@@ -162,10 +165,10 @@ class TestInstallCursorFiles:
 
         _install_cursor_files()
 
-        cursor_rules = fake_home / ".cursor" / "rules" / "llm-router.md"
+        cursor_rules = fake_home / ".cursor" / "rules" / "llm_router.md"
         assert cursor_rules.exists(), f"Cursor rules not written to {cursor_rules}"
         content = cursor_rules.read_text()
-        assert "llm-router" in content.lower()
+        assert "llm_router" in content.lower()
 
     def test_cursor_rules_not_duplicated(self, fake_home):
         from llm_router.cli import _install_cursor_files
@@ -187,7 +190,7 @@ class TestInstallCursorFiles:
 
         data = json.loads(mcp_json.read_text())
         assert "existing" in data["mcpServers"]
-        assert "llm-router" in data["mcpServers"]
+        assert "llm_router" in data["mcpServers"]
 
 
 # ── _install_host dispatch ────────────────────────────────────────────────────
@@ -275,8 +278,8 @@ class TestMergeJsonMcpBlockRootKey:
 
         path = tmp_path / "test.json"
         path.write_text(json.dumps({"version": 1, "servers": {"existing": {}}}))
-        _merge_json_mcp_block(path, "llm-router", {"command": "uvx"}, root_key="servers")
+        _merge_json_mcp_block(path, "llm_router", {"command": "uvx"}, root_key="servers")
         data = json.loads(path.read_text())
         assert data["version"] == 1
         assert "existing" in data["servers"]
-        assert "llm-router" in data["servers"]
+        assert "llm_router" in data["servers"]

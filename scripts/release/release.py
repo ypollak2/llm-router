@@ -50,6 +50,20 @@ def update_pyproject_text(text: str, version: str) -> str:
 
 
 def update_init_version_text(text: str, version: str) -> str:
+    """Rewrite a LITERAL `__version__` if there is one; otherwise leave it.
+
+    `__init__.py` now DERIVES the version — from installed package metadata,
+    falling back to reading pyproject.toml. There is no literal to bump, and
+    that is an improvement: the version had to be copied into `__init__.py` by
+    hand and a comment there said "SYNCED FROM pyproject.toml — DO NOT EDIT
+    MANUALLY", which is a duty a human has to remember. Derived, pyproject is
+    the single source and nothing can drift from it.
+
+    Kept tolerant rather than deleted, so this still works against an older
+    checkout that has the literal.
+    """
+    if not _INIT_VERSION_RE.search(text):
+        return text
     return _replace_single(_INIT_VERSION_RE, text, f'__version__ = "{version}"\\2')
 
 
@@ -101,13 +115,27 @@ def read_versions(*, root: Path = ROOT) -> dict[str, str]:
     init_path = root / "src" / "llm_router" / "__init__.py"
     pyproject_version = tomllib.loads(pyproject_path.read_text(encoding="utf-8"))["project"]["version"]
     init_match = _INIT_VERSION_RE.search(init_path.read_text(encoding="utf-8"))
-    if init_match is None:
-        raise ValueError(f"Could not find __version__ in {init_path}")
 
-    versions = {
-        "pyproject": pyproject_version,
-        "__init__": init_match.group(1),
-    }
+    versions = {"pyproject": pyproject_version}
+    if init_match is not None:
+        versions["__init__"] = init_match.group(1)
+    else:
+        # Derived, not literal — see update_init_version_text. Report the value
+        # the package actually RESOLVES to, which is the thing that matters:
+        # a literal that agrees with pyproject proves nothing if the import
+        # path resolves elsewhere.
+        try:
+            import subprocess
+
+            resolved = subprocess.run(
+                [sys.executable, "-c",
+                 "import llm_router; print(llm_router.__version__)"],
+                capture_output=True, text=True, cwd=root, timeout=60,
+            ).stdout.strip()
+            if resolved:
+                versions["__init__ (derived)"] = resolved
+        except Exception:  # noqa: BLE001 - reporting only
+            pass
     for plugin_dir in PLUGIN_DIRS:
         plugin_path = root / plugin_dir / "plugin.json"
         marketplace_path = root / plugin_dir / "marketplace.json"

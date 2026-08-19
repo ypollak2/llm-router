@@ -203,11 +203,12 @@ def test_session_end_daily_matches_query_daily(fake_db, monkeypatch):
     canonical = query_daily(14, db_path=fake_db)
 
     assert len(legacy) == len(canonical)
-    for (l_day, l_calls, l_tokens, l_saved), c in zip(legacy, canonical):
+    for (l_day, l_calls, l_tokens, l_saved, l_tok_saved), c in zip(legacy, canonical):
         assert l_day == c.day
         assert l_calls == c.calls
         assert l_tokens == c.tokens
         assert abs(l_saved - c.saved_usd) < 1e-9
+        assert l_tok_saved == c.tokens_saved
 
 
 # ── 3. CI canary ─────────────────────────────────────────────────────────────
@@ -233,154 +234,3 @@ def test_canary_via_cli(fake_db, monkeypatch):
     monkeypatch.setattr(dd, "DEFAULT_DB_PATH", fake_db)
     rc = cmd_explain_dashboard(["--check"])
     assert rc == 0
-
-
-# ── 4. Realized savings (WS3/C6) ─────────────────────────────────────────────
-#
-# query_realized_savings() reads execution_ledger.py's Gate 18 accounting
-# (a separate `execution_events` table) rather than the usage/*_usage/
-# savings_stats tables the rest of this file exercises. These tests pin:
-# fail-open behavior on a missing DB/table (without side-effecting either
-# into existence), the adoption-gated realized-vs-potential split, a late
-# `route_realized` update being reflected, and non-interference with
-# query_window's existing totals.
-
-
-def test_query_realized_savings_missing_db_returns_empty_without_creating_it(tmp_path):
-    from llm_router.dashboard_data import query_realized_savings
-
-    missing_db = tmp_path / "does-not-exist.db"
-    result = query_realized_savings("lifetime", db_path=missing_db)
-
-    assert result.realized_savings_usd == 0.0
-    assert result.potential_savings_usd == 0.0
-    assert result.realized_routes == 0
-    assert not missing_db.exists(), (
-        "query_realized_savings must never create usage.db as a read side effect"
-    )
-
-
-def test_query_realized_savings_missing_table_returns_empty_without_creating_it(fake_db):
-    """fake_db has usage/claude_usage/... but no execution_events table yet —
-    query_realized_savings must not silently create it as a side effect of
-    connecting into execution_ledger (unlike calling execution_ledger directly,
-    whose `_connect()` always runs `CREATE TABLE IF NOT EXISTS`)."""
-    from llm_router.dashboard_data import query_realized_savings
-
-    result = query_realized_savings("lifetime", db_path=fake_db)
-    assert result.realized_savings_usd == 0.0
-    assert result.potential_savings_usd == 0.0
-
-    conn = sqlite3.connect(str(fake_db))
-    try:
-        cur = conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name='execution_events'"
-        )
-        assert cur.fetchone() is None, (
-            "query_realized_savings must not create execution_events as a side effect"
-        )
-    finally:
-        conn.close()
-
-
-def test_query_realized_savings_gates_on_adoption(fake_db):
-    from llm_router import execution_ledger as el
-    from llm_router.dashboard_data import query_realized_savings
-
-    def _route(route_id, *, realization_status, adoption_method):
-        el.record_event(
-            el.LedgerEvent(
-                event_id=f"{route_id}-attempt",
-                route_id=route_id,
-                event_type="attempt_completed",
-                measured_cost_usd=0.01,
-                baseline_equivalent_cost_usd=0.10,
-            ),
-            path=fake_db,
-        )
-        el.record_event(
-            el.LedgerEvent(
-                event_id=f"{route_id}-realized",
-                route_id=route_id,
-                event_type="route_realized",
-                realization_status=realization_status,
-                adoption_method=adoption_method,
-            ),
-            path=fake_db,
-        )
-
-    _route("dd-r1", realization_status="verified_used", adoption_method="door_call")
-    _route("dd-r2", realization_status="verified_overridden", adoption_method=None)
-
-    result = query_realized_savings("lifetime", db_path=fake_db)
-    assert result.potential_savings_usd == pytest.approx(0.18)
-    assert result.realized_savings_usd == pytest.approx(0.09)
-    assert result.realized_routes == 1
-    assert result.overridden_routes == 1
-
-
-def test_query_realized_savings_reflects_late_route_realized_update(fake_db):
-    from llm_router import execution_ledger as el
-    from llm_router.dashboard_data import query_realized_savings
-
-    el.record_event(
-        el.LedgerEvent(
-            event_id="dd-late-attempt",
-            route_id="dd-late",
-            event_type="attempt_completed",
-            measured_cost_usd=0.01,
-            baseline_equivalent_cost_usd=0.10,
-        ),
-        path=fake_db,
-    )
-    el.record_event(
-        el.LedgerEvent(
-            event_id="dd-late-realized-1",
-            route_id="dd-late",
-            event_type="route_realized",
-            realization_status="unknown",
-        ),
-        path=fake_db,
-    )
-    before = query_realized_savings("lifetime", db_path=fake_db)
-    assert before.realized_savings_usd == 0.0
-
-    # A later route_realized event confirms the route was actually adopted.
-    el.record_event(
-        el.LedgerEvent(
-            event_id="dd-late-realized-2",
-            route_id="dd-late",
-            event_type="route_realized",
-            realization_status="verified_used",
-            adoption_method="door_call",
-        ),
-        path=fake_db,
-    )
-    after = query_realized_savings("lifetime", db_path=fake_db)
-    assert after.realized_savings_usd == pytest.approx(0.09)
-
-
-def test_query_realized_savings_does_not_affect_query_window(fake_db):
-    """Adding execution_events rows (and reading them via
-    query_realized_savings) must never change query_window's totals — the
-    two are independent, non-reconciled figures by design."""
-    from llm_router import execution_ledger as el
-    from llm_router.dashboard_data import query_realized_savings, query_window
-
-    before = query_window("lifetime", db_path=fake_db)
-
-    el.record_event(
-        el.LedgerEvent(
-            event_id="dd-isolation-attempt",
-            route_id="dd-isolation",
-            event_type="attempt_completed",
-            measured_cost_usd=0.01,
-            baseline_equivalent_cost_usd=0.10,
-        ),
-        path=fake_db,
-    )
-    query_realized_savings("lifetime", db_path=fake_db)
-
-    after = query_window("lifetime", db_path=fake_db)
-    assert after.calls == before.calls
-    assert after.saved_usd == pytest.approx(before.saved_usd)

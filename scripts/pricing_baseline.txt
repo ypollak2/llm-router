@@ -1,0 +1,26 @@
+# INV-COST-004 accepted debt — price tables not yet migrated to llm_router.pricing.
+# This list may SHRINK, never grow. A new entry means a new price table
+# was introduced, which is the defect this lint exists to prevent.
+# Regenerate ONLY after migrating a table, never to silence a new one.
+#
+# 26 -> 2 (WP-03). The 24 that went away were real: thirteen price tables and
+# seven retired-rate sites now derive from llm_router.pricing.
+#
+# The two below are CONFIRMED FALSE POSITIVES, kept because the fix belongs in
+# the lint and the lint is a pre-registered immutable test asset that this work
+# package is not permitted to edit (remediation plan, Part 0 rule 3).
+#
+# Both come from _numeric_literals() calling float() on integer constants, so a
+# literal `4` anywhere in a function reads as the `4.0` half of the retired
+# $0.80/$4.00 Haiku pair. Verified by walking each function's AST:
+#
+#   router.py::_dispatch_model_loop  -> 0.8 is a budget-pressure threshold
+#                                       (line 2359); every 4 is an int
+#   enforce-route.py::main           -> 0.8 is a pressure threshold
+#                                       (line 1161); every 4 and 15 is an int
+#
+# Neither function contains a price. FOLLOW-UP, needs owner sign-off since it
+# edits an immutable asset: require both halves of a retired pair to be genuine
+# float literals in _check_file(). Real tables always write 4.00, not 4.
+llm_router/hooks/enforce-route.py	retired-rate	function `main` contains 0.8/4.0
+llm_router/router.py	retired-rate	function `_dispatch_model_loop` contains 0.8/4.0

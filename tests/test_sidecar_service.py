@@ -1,4 +1,4 @@
-"""Tests for llm-router sidecar service."""
+"""Tests for llm_router sidecar service."""
 
 
 
@@ -39,7 +39,7 @@ def test_infrastructure_detection():
     
     # Should skip routing
     assert _is_infrastructure("mcp__plugin_serena_serena__read_file")
-    assert _is_infrastructure("mcp__llm-router__llm_query")
+    assert _is_infrastructure("mcp__llm_router__llm_query")
     assert _is_infrastructure("Read")
     assert _is_infrastructure("Bash")
     

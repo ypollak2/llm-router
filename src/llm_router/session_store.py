@@ -1,136 +1,74 @@
-# Ported from Chuzom's session_store.py (+ file_lock.py inlined); env vars
-# renamed to LLM_ROUTER_*; state directory moved to LLM_ROUTER_STATE_DIR
-# (new env var — llm-router has no prior STATE_DIR pattern); sentinel strings
-# rebranded; secret scrubbing replaced with a private, self-contained helper
-# since llm-router's own secret_scrubber.py operates on structured events,
-# not plain text (no config/persist_redact layering — chuzom's enterprise
-# redaction module and CHUZOM_PERSIST_RAW/TTL knobs have no llm-router
-# equivalent yet).
 """Session Context Accumulator — durable, cross-process session event store.
 
-llm-router builds up session context (user prompts, tool calls, routed Q&A) in
-a durable per-session JSONL log so that cheap routed models can answer with
-real context instead of fabricating it. Events are written by hooks/callers as
-routed calls complete, then re-assembled into a compact context block that
-gets injected into routed model calls.
+LLM Router builds up session context (user prompts, tool calls, routed Q&A) in a
+durable per-session JSONL log so that cheap routed models can answer with
+real context instead of fabricating it. Events are written by hooks
+(``session-start.py``, ``auto-route.py``, ``context-capture.py``,
+``session-end.py``) and by the router (``router.py``) as routed calls
+complete, then re-assembled into a compact context block that gets injected
+into every routed model call — both the MCP server path
+(``context.build_context_messages``) and the hook draft path
+(``hooks/direct_executor.execute_chain``/``execute_agent``).
 
 Storage: one JSONL file per session at
-``~/.llm-router/state/projects/<project_id>/session_context_{sanitized_session_id}.jsonl``.
-Appends are plain ``open(path, "a")`` writes (POSIX near-atomic for small
-writes); readers tolerate a torn/unparseable trailing line. Compaction and the
-current-session pointer file use an atomic same-directory-temp-file +
-``os.replace()`` write.
+``~/.llm-router/session_context_{sanitized_session_id}.jsonl``. Appends are plain
+``open(path, "a")`` writes (POSIX near-atomic for small writes); readers
+tolerate a torn/unparseable trailing line. Compaction and the current-session
+pointer file use an atomic same-directory-temp-file + ``os.replace()`` write
+(the ``_write_json_atomic`` pattern already used by ``enforce-route.py`` and
+``auto-route.py``).
 
 Every public function in this module is fail-open: any error is caught and
 the function degrades to a no-op / empty result rather than raising, so a
-storage problem here can never block routing or the caller.
+storage problem here can never block routing, hooks, or Claude Code itself.
 """
 
 from __future__ import annotations
 
-import contextlib
 import hashlib
 import json
+import logging
 import os
 import re
-import sys
 import tempfile
 import time
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any
 
 from llm_router.compaction import collapse_whitespace, dedup_sections
+from llm_router.file_lock import exclusive_lock
+from llm_router.paths import llm_router_home
 from llm_router.token_budget import truncate_to_budget
 
-# ── Cross-platform advisory exclusive file lock ─────────────────────────────
-# Inlined from Chuzom's file_lock.py (CHZ-AUD-C-01 fix): a tiny,
-# dependency-free lock backed by a sibling ``.lock`` file (POSIX
-# ``fcntl.flock`` / Windows ``msvcrt.locking``). Locking the JSONL file itself
-# would interact awkwardly with the temp-file-then-``os.replace()`` swap used
-# by compaction (the replaced file would carry a stale lock state), so
-# callers lock a *sibling* file instead — the data file's inode can be freely
-# swapped while the lock file's identity stays stable for the duration of the
-# critical section.
-_IS_WINDOWS = sys.platform.startswith("win")
+_log = logging.getLogger("llm_router.session_store")
 
-if not _IS_WINDOWS:  # pragma: no cover - platform-specific import
-    import fcntl
-else:  # pragma: no cover - platform-specific import
-    import msvcrt
-
-_LOCK_DEFAULT_TIMEOUT_SECONDS = 30.0
-_LOCK_POLL_INTERVAL_SECONDS = 0.02
+#: RED5-03: lock acquisitions that timed out and were therefore declined.
+#: Counted rather than merely logged, so "did we lose writes under load?" has an
+#: answer that does not require grepping logs nobody kept.
+_lock_timeouts = 0
 
 
-@contextlib.contextmanager
-def exclusive_lock(
-    lock_path: Path, timeout: float = _LOCK_DEFAULT_TIMEOUT_SECONDS
-) -> Iterator[bool]:
-    """Hold an exclusive advisory lock on *lock_path* for the block body.
+def lock_timeout_count() -> int:
+    return _lock_timeouts
 
-    Blocks (polling, bounded by *timeout*) until the lock is acquired, and
-    always releases it on exit (including exceptions raised inside the
-    ``with`` body). Yields ``True`` if the lock was actually acquired,
-    ``False`` if acquisition timed out — callers that need to fail rather
-    than silently proceed unlocked should check the yielded value; callers
-    that only want best-effort serialization (mirroring this module's
-    fail-open philosophy elsewhere) can ignore it.
 
-    Never raises for lock-acquisition failures (permissions, missing
-    platform module, etc.) — degrades to "unlocked" so a locking problem can
-    never turn into a hard outage for a caller that was previously unlocked
-    entirely.
-    """
-    locked = False
-    fh = None
-    try:
-        lock_path.parent.mkdir(parents=True, exist_ok=True)
-        fh = open(lock_path, "a+")
-        deadline = time.monotonic() + max(0.0, timeout)
-        while True:
-            try:
-                if _IS_WINDOWS:
-                    msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
-                else:
-                    fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-                locked = True
-                break
-            except OSError:
-                if time.monotonic() >= deadline:
-                    break
-                time.sleep(_LOCK_POLL_INTERVAL_SECONDS)
-            except Exception:
-                # Locking primitive unavailable/unsupported: degrade to
-                # unlocked rather than raising.
-                break
-    except Exception:
-        locked = False
-    try:
-        yield locked
-    finally:
-        if fh is not None:
-            if locked:
-                try:
-                    if _IS_WINDOWS:
-                        fh.seek(0)
-                        msvcrt.locking(fh.fileno(), msvcrt.LK_UNLCK, 1)
-                    else:
-                        fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
-                except Exception:
-                    pass
-            try:
-                fh.close()
-            except Exception:
-                pass
-
+def _note_lock_timeout(what: str) -> None:
+    global _lock_timeouts
+    _lock_timeouts += 1
+    _log.warning(
+        "SESSION_LOCK_TIMEOUT (%s): declined rather than proceeding unlocked "
+        "(timeouts this process: %d)",
+        what,
+        _lock_timeouts,
+    )
 
 # ── Self-injection guard ─────────────────────────────────────────────────────
 # Context blocks we inject are wrapped in this sentinel. When recording new
 # events (e.g. a routed model's own reply, or a tool result that happens to
 # echo back a prior context block) we strip anything sentinel-wrapped first,
 # so injected context never gets re-captured and re-injected into itself.
-SENTINEL_OPEN = "[llm-router-session-context]"
-SENTINEL_CLOSE = "[/llm-router-session-context]"
+SENTINEL_OPEN = "[llm_router-session-context]"
+SENTINEL_CLOSE = "[/llm_router-session-context]"
 _INJECTED_CTX_RE = re.compile(
     re.escape(SENTINEL_OPEN) + r".*?" + re.escape(SENTINEL_CLOSE),
     re.DOTALL,
@@ -143,7 +81,6 @@ _MAX_RECORDS = 300             # ...or once it holds more than this many lines
 _COMPACT_TO = 150              # ...keep only the newest N records
 _TTL_DAYS = 7                  # cleanup_old_sessions() default max age
 _POINTER_MAX_AGE_SECONDS = 6 * 3600  # ignore current_session.json if stale
-_PERSIST_TTL_DAYS_DEFAULT = 30.0     # per-record physical-retention default
 
 _STOPWORDS = {
     "the", "a", "an", "is", "are", "was", "were", "be", "been", "to", "of",
@@ -158,9 +95,7 @@ _WORD_RE = re.compile(r"[a-z0-9]+")
 # Credential patterns scrubbed from event content before it is persisted or
 # later injected into routed (incl. external) model calls. Inline substitution
 # preserves the surrounding prompt/response for context while stripping
-# secrets. This is a private, self-contained list — llm-router's own
-# secret_scrubber.py operates on structured dict events (scrub_event), not
-# plain text, so it is not directly reusable here.
+# secrets. Mirrors llm_router.library.store.scrub_secrets.
 _SECRET_PATTERNS = [
     re.compile(r"\b[A-Z][A-Z0-9_]*_(?:API_)?KEY\s*[=:]\s*\S+"),
     re.compile(r"\b(?:sk|pk|rk)-[A-Za-z0-9_\-]{16,}"),
@@ -176,39 +111,72 @@ _SECRET_PATTERNS = [
 def _scrub_secrets(text: str) -> str:
     """Redact credential patterns from event content before persistence.
 
-    Private, self-contained scrubber (no config/persist_redact layering —
-    llm-router has no equivalent of Chuzom's enterprise redaction module or
-    CHUZOM_PERSIST_RAW opt-in escape hatch yet). Always applied.
+    D-01/B-03: routes through the shared ``persist_redact()`` (layers the
+    structured PII patterns, the canonical ``secret_scrubber.scrub_text``,
+    and a broadened unanchored "prose secret" pass, e.g. "the launch code is
+    ORANGE-742"), gated by ``LLM_ROUTER_PERSIST_RAW`` / ``LLM_ROUTER_PERSIST_REDACTION``.
+    Falls back to calling ``secret_scrubber.scrub_text`` directly if the
+    redaction module can't be imported (config unavailable, etc).
+
+    The local ``_SECRET_PATTERNS`` belt-and-suspenders pass still runs
+    afterward — UNLESS ``LLM_ROUTER_PERSIST_RAW=1``, in which case skipping it is
+    required for the raw opt-in escape hatch to actually mean raw.
     """
-    for pat in _SECRET_PATTERNS:
-        text = pat.sub("[REDACTED]", text)
+    try:
+        from llm_router.persist_redaction import persist_redact
+        text = persist_redact(text)
+    except Exception:
+        try:
+            from llm_router.secret_scrubber import scrub_text
+            text = scrub_text(text)
+        except Exception:
+            pass
+
+    try:
+        from llm_router.config import get_config
+        persist_raw = bool(getattr(get_config(), "llm_router_persist_raw", False))
+    except Exception:
+        persist_raw = False
+
+    if not persist_raw:
+        # Belt-and-suspenders: local patterns (PEM etc.) as a fallback / extra pass.
+        for pat in _SECRET_PATTERNS:
+            text = pat.sub("[REDACTED]", text)
     return text
 
 
 # ── Paths ─────────────────────────────────────────────────────────────────
 
 def _state_dir() -> Path:
-    """Resolve the session-store state dir at call time (so monkeypatched
-    HOME/env vars work).
+    """The llm_router state directory, resolved at call time.
 
-    ``$LLM_ROUTER_STATE_DIR`` (explicit override) wins; otherwise
-    ``~/.llm-router/state``.
+    Delegates to :func:`llm_router.paths.llm_router_home` so there is ONE answer to "where
+    does state live". This used to be ``os.path.expanduser("~") / ".llm-router"``, which
+    honoured only the ``HOME`` environment variable — and therefore neither of the two
+    sandbox mechanisms actually in use:
+
+    * ``LLM_ROUTER_HOME`` (the canonical one, which :func:`llm_router.paths.is_isolated`
+      reports on) was ignored outright, so ``is_isolated()`` returned True while
+      session events were written to and read from the real home;
+    * replacing the ``pathlib.Path.home`` METHOD — what this repo's conftest does, and
+      88 test files rely on — does not change ``os.path.expanduser``, so that was
+      ignored too.
+
+    The consequence was not theoretical: a full-suite run read the developer's live
+    ``session_context_*.jsonl`` and injected real prompt and model-output text into a
+    test's messages. See ``tests/test_p0_session_store_isolation.py``.
     """
-    override = os.environ.get("LLM_ROUTER_STATE_DIR", "").strip()
-    if override:
-        return Path(override)
-    return Path(os.path.expanduser("~")) / ".llm-router" / "state"
+    return llm_router_home()
 
 
 def _project_id() -> str:
     """Stable identifier for the current project scope.
 
-    Precedence: ``$LLM_ROUTER_PROJECT_ID`` (explicit override) → a short hash
-    of the current working directory. Cross-project isolation depends on
-    this: session-context files for one project live under a different
-    subdirectory than another's, so Project B cannot enumerate or load
-    Project A's context without knowing the exact session id *and* sharing
-    its project scope.
+    Precedence: ``$LLM_ROUTER_PROJECT_ID`` (explicit override) → a short hash of
+    the current working directory. Cross-project isolation depends on this:
+    session-context files for one project live under a different subdirectory
+    than another's, so Project B cannot enumerate or load Project A's context
+    without knowing the exact session id *and* sharing its project scope.
     """
     try:
         explicit = os.environ.get("LLM_ROUTER_PROJECT_ID", "").strip()
@@ -227,7 +195,7 @@ def _project_id() -> str:
 
 
 def _project_dir() -> Path:
-    """Project-scoped state dir: ``<state_dir>/projects/<project_id>``."""
+    """Project-scoped state dir: ``~/.llm-router/projects/<project_id>``."""
     return _state_dir() / "projects" / _project_id()
 
 
@@ -256,7 +224,7 @@ def _pointer_path() -> Path:
     return _project_dir() / "current_session.json"
 
 
-# ── Atomic JSON write ────────────────────────────────────────────────────────
+# ── Atomic JSON write (same pattern as enforce-route.py / auto-route.py) ───
 
 def _write_json_atomic(path: Path, data: dict) -> None:
     """Write JSON to *path* via a same-directory temp file + atomic rename."""
@@ -282,12 +250,12 @@ def _write_json_atomic(path: Path, data: dict) -> None:
 # ── Session id resolution ───────────────────────────────────────────────────
 
 def resolve_session_id(explicit: str | None = None) -> str | None:
-    """Resolve the current session id.
+    """Resolve the current Claude Code session id.
 
     Precedence: explicit param → ``$CLAUDE_SESSION_ID`` env →
     ``$CLAUDE_CODE_SESSION_ID`` env → pointer file
-    ``<state_dir>/projects/<project_id>/current_session.json`` (ignored if
-    written more than 6h ago) → ``None``.
+    ``~/.llm-router/current_session.json`` (ignored if written more than 6h ago)
+    → ``None``.
     """
     try:
         if explicit:
@@ -312,7 +280,12 @@ def resolve_session_id(explicit: str | None = None) -> str | None:
 
 
 def write_pointer(session_id: str | None) -> None:
-    """Write the ``current_session.json`` pointer file (best-effort)."""
+    """Write the ``current_session.json`` pointer file (best-effort).
+
+    A defensive fallback only — distinct from and independent of LLM Router's
+    legacy ``session_id.txt`` quota-bookkeeping marker, which this module
+    never touches.
+    """
     try:
         if not session_id:
             return
@@ -329,7 +302,9 @@ def get_mode() -> str:
     """Resolve the session-context privacy mode: 'all' | 'local' | 'off'.
 
     ``LLM_ROUTER_SESSION_CONTEXT`` env var wins if set (``on``/``all`` → all,
-    ``local`` → local, ``off`` → off). Fails open to ``"all"``.
+    ``local`` → local, ``off`` → off). Otherwise falls back to
+    ``RouterConfig.session_context_enabled`` /
+    ``session_context_share_external``. Fails open to ``"all"``.
     """
     try:
         env = os.environ.get("LLM_ROUTER_SESSION_CONTEXT", "").strip().lower()
@@ -341,7 +316,15 @@ def get_mode() -> str:
             return "off"
     except Exception:
         pass
-    return "all"
+    try:
+        from llm_router.config import get_config
+        config = get_config()
+        if not getattr(config, "session_context_enabled", True):
+            return "off"
+        share_external = getattr(config, "session_context_share_external", True)
+        return "all" if share_external else "local"
+    except Exception:
+        return "all"
 
 
 # ── Recording ────────────────────────────────────────────────────────────────
@@ -400,22 +383,19 @@ def _first_record(path: Path) -> dict[str, Any] | None:
 
 
 def _persist_ttl_seconds() -> float:
-    """Global physical-retention TTL (``LLM_ROUTER_PERSIST_TTL_DAYS``), in
-    seconds.
+    """Global physical-retention TTL (``LLM_ROUTER_PERSIST_TTL_DAYS``), in seconds.
 
-    Independent of ``cleanup_old_sessions()``'s whole-FILE mtime-based
+    B-02: independent of ``cleanup_old_sessions()``'s whole-FILE mtime-based
     ``_TTL_DAYS`` sweep below — this governs per-RECORD physical deletion
     during compaction, so a long-lived session file can't accumulate records
     well past the retention window just because the session itself stays
     active. 0 (or lower) disables purging.
     """
     try:
-        days = float(
-            os.environ.get("LLM_ROUTER_PERSIST_TTL_DAYS", "")
-            or _PERSIST_TTL_DAYS_DEFAULT
-        )
+        from llm_router.config import get_config
+        days = float(getattr(get_config(), "llm_router_persist_ttl_days", 30))
     except Exception:
-        days = _PERSIST_TTL_DAYS_DEFAULT
+        days = 30.0
     return max(days, 0.0) * 86_400
 
 
@@ -433,7 +413,13 @@ def purge_expired(session_id: str | None) -> None:
         path = _session_path(session_id)
         if not path.exists():
             return
-        with exclusive_lock(_lock_path(path)):
+        # RED5-03: see the note at the append site. Compaction rewrites the file
+        # from a snapshot; doing that without the lock is how a concurrent
+        # append gets os.replace()'d out of existence.
+        with exclusive_lock(_lock_path(path)) as locked:
+            if not locked:
+                _note_lock_timeout("session compaction")
+                return
             _maybe_compact(path)
     except Exception:
         pass
@@ -459,8 +445,8 @@ def record_event(
     try:
         if not session_id or not content:
             return
-        # Privacy kill-switch: with LLM_ROUTER_SESSION_CONTEXT=off nothing is
-        # persisted to disk.
+        # Privacy kill-switch: with LLM_ROUTER_SESSION_CONTEXT=off (or config
+        # session_context_enabled=false) nothing is persisted to disk.
         if get_mode() == "off":
             return
         text = _INJECTED_CTX_RE.sub("", content).strip()
@@ -489,7 +475,16 @@ def record_event(
         # compaction it triggers; a sibling `.lock` file is used rather than
         # locking the JSONL itself, so compaction's os.replace() swap of the
         # data file's inode never disturbs the lock's identity.
-        with exclusive_lock(_lock_path(path)):
+        # RED5-03: the yielded boolean is BOUND, not discarded. exclusive_lock
+        # yields False when acquisition times out and degrades to "unlocked"
+        # rather than raising — a sane default for best-effort callers, and the
+        # wrong one here. Running this block unlocked is precisely the race the
+        # comment above describes, so an unlocked run does not silently do the
+        # dangerous thing: it declines, counts, and says so.
+        with exclusive_lock(_lock_path(path)) as locked:
+            if not locked:
+                _note_lock_timeout("session append")
+                return
             prev = _last_record(path)
             if prev and prev.get("h") == content_hash:
                 return  # consecutive-duplicate dedupe
@@ -505,10 +500,13 @@ def record_event(
                 "h": content_hash,
             }
             with path.open("a", encoding="utf-8") as fh:
-                # NB: `text` is secret-scrubbed by _scrub_secrets() above and
-                # the file is chmod 0600 / local-only. Storing scrubbed
-                # session context in clear text is the accumulator's purpose
-                # (routed models read it back).
+                # NB: `text` is secret-scrubbed by _scrub_secrets() above
+                # (~L309) and the file is chmod 0600 / local-only. Storing
+                # scrubbed session context in clear text is the
+                # accumulator's purpose (routed models read it back). The
+                # CodeQL py/clear-text-storage-sensitive-data alert here is
+                # a reviewed false positive (dismissed) — the regex
+                # scrubber just isn't modelled as a sanitizer by CodeQL.
                 fh.write(json.dumps(record) + "\n")
             try:
                 os.chmod(path, 0o600)
@@ -525,10 +523,10 @@ def _maybe_compact(path: Path) -> None:
     exceeds ``_MAX_FILE_BYTES`` or ``_MAX_RECORDS`` lines, or once its oldest
     record exceeds the persistence TTL.
 
-    TTL enforcement here is a PHYSICAL delete — expired lines are dropped
-    from the rewrite and are gone from the on-disk bytes, not just filtered
-    at read time. Survives a fresh process/store instance because it
-    operates on the file itself, not in-memory state.
+    B-02: TTL enforcement here is a PHYSICAL delete — expired lines are
+    dropped from the rewrite and are gone from the on-disk bytes, not just
+    filtered at read time. Survives a fresh process/store instance because
+    it operates on the file itself, not in-memory state.
     """
     try:
         try:
@@ -568,7 +566,7 @@ def _maybe_compact(path: Path) -> None:
                 if ttl_cutoff is not None:
                     try:
                         if float(parsed.get("ts", 0)) < ttl_cutoff:
-                            continue  # physically drop expired record
+                            continue  # B-02: physically drop expired record
                     except Exception:
                         pass
                 records.append(line)
@@ -666,7 +664,8 @@ def build_session_context(
         mode = get_mode()
         if mode == "off":
             return ""
-        # Block context egress to any non-free-local provider under `local`.
+        # RED2-04: block context egress to ANY non-free-local provider under
+        # `local` (was a two-provider allowlist that let Perplexity through).
         if mode == "local" and target_provider not in ("ollama", "codex", "gemini_cli"):
             return ""
 

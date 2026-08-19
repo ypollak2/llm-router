@@ -56,8 +56,8 @@ def _run_profile(subcmd: str = "show") -> None:
             print(PROFILE_PATH.read_text())
         else:
             print(f"\n{_bold('No profile found.')}")
-            print(f"Run: {_dim('llm-router profile auto')} to generate one.\n")
+            print(f"Run: {_dim('llm_router profile auto')} to generate one.\n")
 
     else:
         print(f"Unknown profile command: {subcmd}")
-        print("Try: llm-router profile {auto|show}")
+        print("Try: llm_router profile {auto|show}")

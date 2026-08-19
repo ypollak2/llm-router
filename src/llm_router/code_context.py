@@ -23,6 +23,7 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from llm_router.capabilities import is_safe_path
 from llm_router.token_budget import estimate_tokens
 
 log = logging.getLogger("llm_router.code_context")
@@ -61,7 +62,23 @@ _BACKTICK_RE = re.compile(r"`([a-zA-Z_]\w*(?:\(\))?)`")
 _SNAKE_CASE_RE = re.compile(r"\b([a-z][a-z0-9]*(?:_[a-z0-9]+)+)\b")
 _CAMEL_CASE_RE = re.compile(r"\b([A-Z][a-z]+(?:[A-Z][a-z]+)+)\b")
 _FUNCTION_CALL_RE = re.compile(r"\b([a-zA-Z_]\w*)\s*\(")
-_FILE_PATH_RE = re.compile(r"([a-zA-Z_][\w/.-]*\.(?:py|ts|js|go|rs|java|rb))")
+# BOUNDED, and lazy, on purpose. `[\w/.-]` includes `.`, so it competes with the
+# following `\.` for every dot in the input — classic ambiguity, and the engine
+# backtracks over it quadratically. Measured on one unbroken token (no
+# whitespace, since whitespace resets the scan):
+#
+#     token chars   unbounded    bounded
+#         16,000      0.340s     0.017s
+#         64,000      7.364s     0.089s
+#        200,000     68.976s     0.251s
+#
+# Ordinary pasted content -- tracebacks, pip freeze, logs -- is unaffected either
+# way (~0.001s at 100KB) because it is full of whitespace. This needs a crafted
+# unbroken run, so it is a deliberate-input DoS and not the cause of everyday
+# hook slowness. It still runs inside the prompt hook on text that routinely
+# arrives from elsewhere, and the bound costs nothing: 255 is far beyond any real
+# path, and behaviour is identical on every non-pathological input.
+_FILE_PATH_RE = re.compile(r"([a-zA-Z_][\w/.-]{0,255}?\.(?:py|ts|js|go|rs|java|rb))")
 
 
 @dataclass(frozen=True)
@@ -241,11 +258,27 @@ def extract_code_context(
     # Step 2: Find relevant files
     files = find_relevant_files(symbols, project_dir)
 
-    # Also add explicitly mentioned files
+    # Also add explicitly mentioned files.
+    #
+    # CONFINED, because `file_paths` comes from the PROMPT. `detect_file_paths`
+    # requires a code extension but places no constraint on what precedes it, so
+    # `src/../../../../etc/shadow.py` matches and `project / fp` resolves outside
+    # the project entirely. Whatever lands here is read and shipped to an
+    # external provider, which makes an unconfined join an exfiltration
+    # primitive rather than merely a path bug — forwarding context is llm_router's
+    # whole job.
+    #
+    # Prompt text is not "user input" in the trusted sense either: it routinely
+    # carries pasted logs, web content, and tool output the user never authored.
+    #
+    # `is_safe_path` is the existing hardened check from capabilities.py, which
+    # already solved this for the OTHER context-collection path. It also excludes
+    # secrets (*.pem, .env, id_rsa) and .ssh/.aws directories, and resolves
+    # symlinks so a link pointing out of the project is caught too.
     project = Path(project_dir)
     for fp in file_paths:
         full = project / fp
-        if full.exists():
+        if full.exists() and is_safe_path(full, project):
             files.append(full)
 
     # If no files found by name, try all Python/TS/Go files in project root

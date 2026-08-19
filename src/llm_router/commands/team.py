@@ -43,11 +43,10 @@ def _dim(s: str) -> str:
 # ── Team report ────────────────────────────────────────────────────────────
 
 def _run_team(subcmd: str, flags: list[str]) -> None:
-    """llm-router team report|push|setup [period]."""
+    """llm_router team report|push|setup [period]."""
     import asyncio
     from llm_router.team import (
         build_team_report, detect_channel, get_project_id, get_user_id, push_report,
-        _fmt_pct_or_na, _fmt_usd_or_na,
     )
     from llm_router.config import get_config
 
@@ -61,7 +60,7 @@ def _run_team(subcmd: str, flags: list[str]) -> None:
     user_id = get_user_id(override=config.llm_router_user_id)
     project_id = get_project_id()
 
-    print(f"\n{_bold('[llm-router] Team Report')}\n")
+    print(f"\n{_bold('[llm_router] Team Report')}\n")
     print(f"  User:    {user_id}")
     print(f"  Project: {project_id}")
     print(f"  Period:  {period}\n")
@@ -71,7 +70,7 @@ def _run_team(subcmd: str, flags: list[str]) -> None:
     calls = report["total_calls"]
     if calls == 0:
         print(_yellow("  No routing data found for this period."))
-        print(f"  Try: {_bold('llm-router team report all')}\n")
+        print(f"  Try: {_bold('llm_router team report all')}\n")
         return
 
     saved = report["saved_usd"]
@@ -84,13 +83,6 @@ def _run_team(subcmd: str, flags: list[str]) -> None:
     print(f"  Calls:     {_bold(str(calls))}")
     print(f"  Saved:     {_green(f'~${saved:.4f}')}  (paid ${actual:.4f})")
     print(f"  Free tier: {free_pct:.0%}  {bar}")
-
-    realized_savings = _fmt_usd_or_na(report.get("realized_savings_usd"))
-    misroute_rate = _fmt_pct_or_na(report.get("mis_route_rate_inferred"))
-    print(
-        f"  {_dim(f'Fleet-wide realized savings ({period}): {realized_savings}')}"
-    )
-    print(f"  {_dim(f'Fleet-wide inferred misroute rate (baseline): {misroute_rate}')}")
 
     top = report.get("top_models", [])
     if top:
@@ -105,7 +97,7 @@ def _run_team(subcmd: str, flags: list[str]) -> None:
     if subcmd == "push":
         if not endpoint:
             print(f"\n{_red('✗')} No endpoint configured.")
-            print(f"  Run {_bold('llm-router team setup')} to configure Slack/Discord/Telegram.\n")
+            print(f"  Run {_bold('llm_router team setup')} to configure Slack/Discord/Telegram.\n")
             return
         channel = detect_channel(endpoint)
         print(f"\n  Pushing to {_bold(channel)}...")
@@ -118,15 +110,15 @@ def _run_team(subcmd: str, flags: list[str]) -> None:
             print(_red(f"  {msg}"))
     elif endpoint:
         channel = detect_channel(endpoint)
-        print(f"\n  {_dim(f'Endpoint: {channel} configured — run llm-router team push to send.')}")
+        print(f"\n  {_dim(f'Endpoint: {channel} configured — run llm_router team push to send.')}")
     else:
-        print(f"\n  {_dim('Tip: run llm-router team setup to configure Slack/Discord/Telegram push.')}")
+        print(f"\n  {_dim('Tip: run llm_router team setup to configure Slack/Discord/Telegram push.')}")
     print()
 
 
 def _run_team_setup(config) -> None:
     """Interactive wizard to configure the team notification endpoint."""
-    print(f"\n{_bold('[llm-router] Team Notification Setup')}\n")
+    print(f"\n{_bold('[llm_router] Team Notification Setup')}\n")
     print("Choose a notification channel:\n")
     print("  1. Slack    (paste your Incoming Webhook URL)")
     print("  2. Discord  (paste your Webhook URL)")
@@ -181,13 +173,13 @@ def _run_team_setup(config) -> None:
     from llm_router.team import detect_channel
     channel = detect_channel(url)
     print(f"\n{_green('✓')} Team endpoint configured: {_bold(channel)}")
-    print(f"  Run {_bold('llm-router team push')} to send your first report.\n")
+    print(f"  Run {_bold('llm_router team push')} to send your first report.\n")
 
 
 # ── Entry point ─────────────────────────────────────────────────────────────
 
 def cmd_team(args: list[str]) -> int:
-    """Execute: llm-router team [report|push|setup] [period]
+    """Execute: llm_router team [report|push|setup] [period]
 
     Manage team reports and notifications.
     """

@@ -1,7 +1,7 @@
-"""Agno integration for llm-router — RouteredModel and RouteredTeam.
+"""Agno integration for llm_router — RouteredModel and RouteredTeam.
 
 Install:
-    pip install "claude-code-llm-router[agno]"
+    pip install "llm-routing[agno]"
 
 Usage::
 
@@ -45,7 +45,7 @@ try:
 except ImportError as e:
     raise ImportError(
         "agno is required for RouteredModel. "
-        "Install it with: pip install 'claude-code-llm-router[agno]'"
+        "Install it with: pip install 'llm-routing[agno]'"
     ) from e
 
 
@@ -70,6 +70,7 @@ _PROFILE_MAP: dict[str, RoutingProfile] = {
     "budget": RoutingProfile.BUDGET,
     "balanced": RoutingProfile.BALANCED,
     "premium": RoutingProfile.PREMIUM,
+    "reasoning": RoutingProfile.REASONING,
 }
 
 
@@ -137,7 +138,7 @@ def _messages_to_prompt_and_system(
 
 
 def _llm_response_to_model_response(resp: LLMResponse) -> ModelResponse:
-    """Convert llm-router LLMResponse to an Agno ModelResponse."""
+    """Convert llm_router LLMResponse to an Agno ModelResponse."""
     model_resp = ModelResponse()
     model_resp.role = "assistant"
     model_resp.content = resp.content
@@ -158,7 +159,7 @@ def _llm_response_to_model_response(resp: LLMResponse) -> ModelResponse:
 # ---------------------------------------------------------------------------
 
 class RouteredModel(Model):
-    """Drop-in Agno Model that routes each call through llm-router.
+    """Drop-in Agno Model that routes each call through llm_router.
 
     Every invocation is classified by complexity and routed to the cheapest
     capable provider — Ollama (free) → Codex (free) → paid APIs.
@@ -169,7 +170,7 @@ class RouteredModel(Model):
         Hint for the classifier.  One of: query, research, generate, analyze,
         code, image, video, audio.  Default: ``"query"`` (auto-classified).
     profile:
-        Routing profile.  One of: budget, balanced, premium.
+        Routing profile.  One of: budget, balanced, premium, reasoning.
         Default: ``"balanced"``.
     model_override:
         Pin a specific model (e.g. ``"openai/gpt-4o"``).  Bypasses routing.
@@ -185,7 +186,7 @@ class RouteredModel(Model):
         task_type_str = task_type.value if isinstance(task_type, TaskType) else str(task_type)
         profile_str = profile.value if isinstance(profile, RoutingProfile) else str(profile)
         # Pass only base Model fields to super(); extra kwargs (e.g. instructions) are forwarded
-        super().__init__(id="llm-router", provider="llm-router", name="RouteredModel", **kwargs)
+        super().__init__(id="llm_router", provider="llm_router", name="RouteredModel", **kwargs)
         # Plain Python class, set instance attributes directly
         self.task_type = task_type_str
         self.profile = profile_str
@@ -249,7 +250,7 @@ class RouteredModel(Model):
         run_response: Optional[Union[RunOutput, TeamRunOutput]] = None,
         compress_tool_results: bool = False,
     ) -> Iterator[ModelResponse]:
-        # llm-router doesn't stream natively — return full response as one chunk
+        # llm_router doesn't stream natively — return full response as one chunk
         assistant_message.metrics.start_timer()
         llm_resp = _run_coroutine_sync(self._aroute(messages))
         assistant_message.metrics.stop_timer()

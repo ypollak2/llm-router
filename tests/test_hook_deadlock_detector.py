@@ -11,7 +11,7 @@ class TestHookAnalysis:
 
     def test_analyze_simple_hook(self, tmp_path):
         """Test analyzing a basic hook with no issues."""
-        hook_file = tmp_path / "llm-router-simple.py"
+        hook_file = tmp_path / "llm_router-simple.py"
         hook_file.write_text("import subprocess\nresult = subprocess.run(['ls'], timeout=10)")
         
         detector = HookDeadlockDetector(tmp_path)
@@ -23,7 +23,7 @@ class TestHookAnalysis:
 
     def test_extract_subprocess_calls(self, tmp_path):
         """Test extraction of subprocess patterns."""
-        hook_file = tmp_path / "llm-router-test.py"
+        hook_file = tmp_path / "llm_router-test.py"
         hook_file.write_text("import subprocess\nsubprocess.run(['cmd'])\nsubprocess.Popen(['cmd2'])")
         
         detector = HookDeadlockDetector(tmp_path)
@@ -34,7 +34,7 @@ class TestHookAnalysis:
 
     def test_extract_timeout_config(self, tmp_path):
         """Test extraction of timeout values."""
-        hook_file = tmp_path / "llm-router-timeout-test.py"
+        hook_file = tmp_path / "llm_router-timeout-test.py"
         hook_file.write_text("import subprocess\nsubprocess.run(['cmd'], timeout=30)")
         
         detector = HookDeadlockDetector(tmp_path)
@@ -49,8 +49,8 @@ class TestCycleDetection:
 
     def test_no_cycles(self, tmp_path):
         """Test detection when no cycles exist."""
-        (tmp_path / "llm-router-a.py").write_text("")
-        (tmp_path / "llm-router-b.py").write_text("from llm_router.hooks.a import func")
+        (tmp_path / "llm_router-a.py").write_text("")
+        (tmp_path / "llm_router-b.py").write_text("from llm_router.hooks.a import func")
         
         detector = HookDeadlockDetector(tmp_path)
         report = detector.analyze()
@@ -59,8 +59,8 @@ class TestCycleDetection:
 
     def test_simple_cycle(self, tmp_path):
         """Test detection of simple 2-node cycle."""
-        (tmp_path / "llm-router-a.py").write_text("from llm_router.hooks.b import func")
-        (tmp_path / "llm-router-b.py").write_text("from llm_router.hooks.a import func")
+        (tmp_path / "llm_router-a.py").write_text("from llm_router.hooks.b import func")
+        (tmp_path / "llm_router-b.py").write_text("from llm_router.hooks.a import func")
         
         detector = HookDeadlockDetector(tmp_path)
         report = detector.analyze()
@@ -74,7 +74,7 @@ class TestTimeoutValidation:
 
     def test_subprocess_without_timeout(self, tmp_path):
         """Test detection of subprocess calls without timeout."""
-        (tmp_path / "llm-router-no-timeout.py").write_text("import subprocess\nsubprocess.run(['cmd'])")
+        (tmp_path / "llm_router-no-timeout.py").write_text("import subprocess\nsubprocess.run(['cmd'])")
         
         detector = HookDeadlockDetector(tmp_path)
         report = detector.analyze()
@@ -87,7 +87,7 @@ class TestReportFormatting:
 
     def test_format_clean_report(self, tmp_path):
         """Test formatting of report with no issues."""
-        (tmp_path / "llm-router-clean.py").write_text("subprocess.run(['cmd'], timeout=10)")
+        (tmp_path / "llm_router-clean.py").write_text("subprocess.run(['cmd'], timeout=10)")
         
         detector = HookDeadlockDetector(tmp_path)
         report = detector.analyze()
@@ -102,7 +102,7 @@ class TestQuickCheck:
 
     def test_quick_check_safe(self, tmp_path):
         """Test quick check returns False for safe hooks."""
-        (tmp_path / "llm-router-safe.py").write_text("subprocess.run(['cmd'], timeout=10)")
+        (tmp_path / "llm_router-safe.py").write_text("subprocess.run(['cmd'], timeout=10)")
         
         result = check_hook_deadlock(tmp_path)
         assert result is False or result is None

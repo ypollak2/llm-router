@@ -75,39 +75,58 @@ async def build_chain(
     ) as span:
         try:
             chain = await _build_dynamic_chain(task_type, complexity, profile)
+            chain = await _apply_subscription_local(chain, complexity, profile)
             top = chain[0] if chain else None
             set_span_attributes(span, chain_length=len(chain), top_model=top)
-            return await _apply_subscription_local(chain, complexity, profile)
+            return chain
         except Exception as e:
             log.debug("dynamic chain builder failed, using static: %s", e)
             chain = _static_chain(task_type, profile)
+            chain = await _apply_subscription_local(chain, complexity, profile)
             set_span_attributes(
                 span,
                 fallback_reason="dynamic_chain_builder_failed",
                 chain_length=len(chain),
                 top_model=chain[0] if chain else None,
             )
-            return await _apply_subscription_local(chain, complexity, profile)
+            return chain
 
 
 async def _apply_subscription_local(
     chain: list[str], complexity: str, profile: "RoutingProfile"
 ) -> list[str]:
-    """Cost-inverted SUBSCRIPTION_LOCAL reorder. No-op unless a subscription
-    provider is configured (LLM_ROUTER_SUBSCRIPTION_PROVIDER), so this is safe to
-    apply unconditionally — default behaviour is unchanged."""
-    from llm_router.subscription_local_routing import (
-        get_subscription_pressure,
-        is_subscription_local_active,
-        reorder_for_subscription_local,
-    )
+    """Apply the cost-inverted SUBSCRIPTION_LOCAL reorder, if it is active.
 
-    if not is_subscription_local_active(profile):
+    ``subscription_local_routing`` shipped with its own module, its own
+    ``RoutingProfile`` member, and its own test file -- and NO production
+    caller. Selecting SUBSCRIPTION_LOCAL changed nothing; the profile was
+    inert. This is the call site it was written for.
+
+    Safe to apply unconditionally: ``is_subscription_local_active`` returns
+    False unless ``LLM_ROUTER_SUBSCRIPTION_PROVIDER`` is set, so an install that
+    has not opted in gets a byte-identical chain. Fails open -- a reorder that
+    raises must not take routing down with it, since the un-reordered chain is
+    still a working chain.
+    """
+    try:
+        from llm_router.subscription_local_routing import (
+            get_subscription_pressure,
+            is_subscription_local_active,
+            reorder_for_subscription_local,
+        )
+
+        if not is_subscription_local_active(profile):
+            return chain
+        pressure = await get_subscription_pressure()
+        return reorder_for_subscription_local(
+            chain,
+            complexity=complexity,
+            profile=profile,
+            subscription_pressure=pressure,
+        )
+    except Exception as exc:  # pragma: no cover - fail-open path
+        log.debug("subscription-local reorder failed, using unreordered chain: %s", exc)
         return chain
-    pressure = await get_subscription_pressure()
-    return reorder_for_subscription_local(
-        chain, complexity=complexity, profile=profile, subscription_pressure=pressure
-    )
 
 
 async def _build_dynamic_chain(
@@ -175,17 +194,12 @@ async def _build_dynamic_chain(
 def _static_chain(task_type: "TaskType", profile: "RoutingProfile") -> list[str]:
     """Return the static chain from profiles.py for the given (task_type, profile)."""
     try:
-        from llm_router.profiles import ROUTING_TABLE
-        from llm_router.types import RoutingProfile
-        # QUOTA_BALANCED and SUBSCRIPTION_LOCAL have no base table of their own —
-        # they REORDER the BALANCED chain (via router.py / subscription_local_routing),
-        # so look up BALANCED here or they'd resolve to an empty chain.
-        lookup = (
-            RoutingProfile.BALANCED
-            if profile in (RoutingProfile.QUOTA_BALANCED, RoutingProfile.SUBSCRIPTION_LOCAL)
-            else profile
-        )
-        # ROUTING_TABLE keys are (RoutingProfile, TaskType) tuples.
-        return list(ROUTING_TABLE.get((lookup, task_type), []))
+        from llm_router.profiles import ROUTING_TABLE, base_lookup_profile
+        # ROUTING_TABLE keys are (RoutingProfile, TaskType) tuples, and the
+        # reordering profiles have no key of their own — look them up under the
+        # base they reorder or this returns [], which is how QUOTA_BALANCED and
+        # SUBSCRIPTION_LOCAL got an empty chain on exactly the two paths that
+        # exist to guarantee a non-empty one.
+        return list(ROUTING_TABLE.get((base_lookup_profile(profile), task_type), []))
     except Exception:
         return []

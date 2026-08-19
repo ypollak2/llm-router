@@ -1,4 +1,4 @@
-"""Service manager for llm-router sidecar.
+"""Service manager for llm_router sidecar.
 
 Handles start/stop, health checks, and graceful degradation.
 """
@@ -13,7 +13,7 @@ import sys
 import time
 from pathlib import Path
 
-logger = logging.getLogger("llm-router.service-manager")
+logger = logging.getLogger("llm_router.service-manager")
 
 ROUTER_DIR = Path.home() / ".llm-router"
 SERVICE_PID_FILE = ROUTER_DIR / "service.pid"

@@ -5,13 +5,16 @@ fallback chain. For every (RoutingProfile, TaskType) pair, there is an ordered
 list of models to try. The router walks this list top-to-bottom, skipping
 unhealthy providers, until one succeeds.
 
-Three profile tiers exist:
+Four profile tiers exist:
   - **BUDGET**: cheapest models that still produce usable results. Prioritizes
     free/low-cost providers (Gemini Flash, Groq, DeepSeek).
   - **BALANCED**: quality/cost sweet spot. Uses mid-tier models from major
     providers (GPT-4o, Claude Sonnet, Gemini Pro).
   - **PREMIUM**: best available quality, cost secondary. Uses frontier models
     (o3, Claude Opus, Gemini Pro).
+  - **REASONING**: dedicated extended-thinking chain for deep_reasoning
+    complexity. Prioritises native reasoning models (DeepSeek-R1, o3) and
+    activates extended-thinking flags on Claude Opus and Gemini 2.5 Pro.
 
 Model IDs use LiteLLM's ``provider/model`` format for text models and the
 same convention for media models (though media bypasses LiteLLM).
@@ -43,14 +46,14 @@ _FREE_EXTERNAL_MODELS: frozenset[str] = frozenset({
 })
 
 # Cheap-but-not-free models (< $0.002/1K tokens blended).
-# deepseek-reasoner is $0.0014 — cheaper than Gemini Pro ($0.003) and outperforms
-# it on every benchmark, so it belongs in the cheap tier for pressure reordering.
+# deepseek-v4-flash is $0.14/$0.28 per 1M — belongs in the cheap tier for
+# pressure reordering. (v4-pro, the deepseek-reasoner successor, is mid-tier
+# now at $1.74/$3.48, so it is intentionally NOT listed here.)
 _CHEAP_MODELS: frozenset[str] = frozenset({
     "gemini/gemini-2.5-flash",
     "gemini/gemini-2.5-flash-lite",
     "groq/llama-3.3-70b-versatile",
-    "deepseek/deepseek-chat",
-    "deepseek/deepseek-reasoner",
+    "deepseek/deepseek-v4-flash",   # was deepseek-chat/reasoner; aliases deprecate 2026-07-24
     "openai/gpt-4o-mini",
 })
 
@@ -116,6 +119,63 @@ ROUTING_TABLE: dict[tuple[RoutingProfile, TaskType], list[str]] = _load_routing_
 # src/llm_router/policies/standard.yaml.
 
 
+# ── Reordering profiles ──────────────────────────────────────────────────────
+#
+# Two profiles have NO chains of their own in standard.yaml. They are
+# *reorderings* of another profile's chain, applied at a later stage:
+#
+#   QUOTA_BALANCED      reordered by quota_balance.reorder_chain_by_providers()
+#                       in router._build_and_filter_chain()
+#   SUBSCRIPTION_LOCAL  reordered by
+#                       subscription_local_routing.reorder_for_subscription_local()
+#
+# A ROUTING_TABLE lookup keyed on one of them therefore misses, and every
+# caller has to know to substitute the base profile first. Three callers did
+# not, and each failed differently:
+#
+#   get_model_chain()             SUBSCRIPTION_LOCAL -> the `["anthropic/
+#                                 claude-sonnet-4-6"]` default: a ONE-model
+#                                 chain with no fallback, consisting solely of
+#                                 the paid seat. The exact inverse of what a
+#                                 "one paid seat + free local bucket" profile
+#                                 is for.
+#   chain_builder._static_chain() both profiles -> [], breaking that module's
+#                                 documented "Never empty (falls back to
+#                                 static)" guarantee on the two paths that
+#                                 exist to provide it (discovery empty, or the
+#                                 dynamic build raised).
+#   memory/profiles.py            both profiles -> the raw tool name returned
+#                                 in place of a model id.
+#
+# Measured before the fix, task_type=CODE:
+#
+#     get_model_chain    balanced 6 · quota_balanced 6 · subscription_local 1
+#     _static_chain      balanced 7 · quota_balanced 0 · subscription_local 0
+#
+# So: one table, one mapping, and every lookup goes through it. Adding a third
+# reordering profile without an entry here fails
+# tests/test_reordering_profiles_resolve.py, which enumerates the enum rather
+# than naming profiles, so it covers profiles that do not exist yet.
+_REORDERING_PROFILE_BASE: dict[RoutingProfile, RoutingProfile] = {
+    RoutingProfile.QUOTA_BALANCED: RoutingProfile.BALANCED,
+    RoutingProfile.SUBSCRIPTION_LOCAL: RoutingProfile.BALANCED,
+}
+
+
+def base_lookup_profile(profile: RoutingProfile) -> RoutingProfile:
+    """The profile whose chain table ``profile`` should be looked up under.
+
+    Identity for every profile that owns its chains. Use this before ANY
+    ``ROUTING_TABLE`` / policy-chains lookup that takes a caller-supplied
+    profile — see ``_REORDERING_PROFILE_BASE`` above for what goes wrong
+    without it.
+
+    This deliberately does not apply the reordering itself; it only resolves
+    the base chain to reorder. The reordering stays where it is.
+    """
+    return _REORDERING_PROFILE_BASE.get(profile, profile)
+
+
 # ── Classifier model preferences (cheapest/fastest first) ────────────────────
 # These models are used exclusively by the complexity classifier, NOT for
 # user-facing responses. They are ordered cheapest-first because classification
@@ -132,7 +192,7 @@ CLASSIFIER_MODELS: list[str] = [
     "gemini/gemini-2.5-flash-lite",  # non-thinking, fastest, cheapest external
     "groq/llama-3.3-70b-versatile",
     "openai/gpt-4o-mini",
-    "deepseek/deepseek-chat",
+    "deepseek/deepseek-v4-flash",   # was deepseek-chat; alias deprecates 2026-07-24
     "mistral/mistral-small-latest",
 ]
 # Ollama models (local, free) are prepended by router.py when ollama_base_url
@@ -144,9 +204,28 @@ CLASSIFIER_MODELS: list[str] = [
 # from mid-tier quality (balanced), and complex tasks warrant frontier models
 # (premium). This mapping is the bridge between the classifier and the
 # routing table.
+# ── Model family matching (version-agnostic) ─────────────────────────────────
+# A "family" is a model id with its version/date suffix removed, e.g.
+#   anthropic/claude-opus-4-8        -> anthropic/claude-opus
+#   anthropic/claude-haiku-4-5-20251001 -> anthropic/claude-haiku
+# Constraints below are written as FAMILY prefixes so a new version (Opus 4.9,
+# Opus 5, …) is governed automatically without editing this file — it can never
+# silently break a chain or slip past a guard.
+
+# Single source of truth lives in model_aliases (no llm_router deps -> no import
+# cycle). Re-exported here for backwards compatibility with existing callers.
+from llm_router.model_aliases import (  # noqa: E402, F401  (re-exported for back-compat)
+    LATEST_CLAUDE,
+    model_family,
+    model_matches,
+    resolve_model_alias,
+)
+
+
 # ── Model-Profile Constraints ───────────────────────────────────────────────
 # SAFEGUARD #3: Explicit data structures defining which models are allowed
 # per profile. Used by _validate_chain_invariants() to catch policy violations.
+# Entries are FAMILY prefixes (version-agnostic) — see model_matches().
 #
 # These constraints are the SOURCE OF TRUTH for policy enforcement:
 # - BUDGET: Never include Opus or even Sonnet (use Haiku only as last resort)
@@ -154,27 +233,36 @@ CLASSIFIER_MODELS: list[str] = [
 # - PREMIUM: Can include Opus, but it must be first (best quality)
 MODELS_PER_PROFILE: dict[RoutingProfile, dict[str, list[str]]] = {
     RoutingProfile.BUDGET: {
-        "forbidden": ["anthropic/claude-opus-4-6"],  # Opus forbidden in BUDGET
+        "forbidden": ["anthropic/claude-opus"],  # any Opus version forbidden in BUDGET
         "discouraged": [
-            "anthropic/claude-sonnet-4-6",  # Sonnet discouraged (use only Haiku)
+            "anthropic/claude-sonnet",  # Sonnet discouraged (use only Haiku)
         ],
-        "allowed_claude": ["anthropic/claude-haiku-4-5-20251001"],  # Haiku only as last resort
+        "allowed_claude": ["anthropic/claude-haiku"],  # Haiku only as last resort
     },
     RoutingProfile.BALANCED: {
-        "forbidden": ["anthropic/claude-opus-4-6"],  # Opus forbidden in BALANCED
+        "forbidden": ["anthropic/claude-opus"],  # any Opus version forbidden in BALANCED
         "discouraged": [],
         "allowed_claude": [
-            "anthropic/claude-sonnet-4-6",
-            "anthropic/claude-haiku-4-5-20251001",
+            "anthropic/claude-sonnet",
+            "anthropic/claude-haiku",
         ],
     },
     RoutingProfile.PREMIUM: {
         "forbidden": [],  # No models forbidden in PREMIUM
         "discouraged": [],
         "allowed_claude": [
-            "anthropic/claude-opus-4-6",  # Opus allowed, should be first
-            "anthropic/claude-sonnet-4-6",
-            "anthropic/claude-haiku-4-5-20251001",
+            "anthropic/claude-opus",  # any Opus version allowed, should be first
+            "anthropic/claude-sonnet",
+            "anthropic/claude-haiku",
+        ],
+    },
+    RoutingProfile.REASONING: {
+        "forbidden": [],  # Reasoning chain allows all models (reasoning specialists first)
+        "discouraged": ["anthropic/claude-haiku"],  # Haiku lacks extended thinking
+        "allowed_claude": [
+            "anthropic/claude-opus",   # Primary Claude pick — extended thinking supported
+            "anthropic/claude-sonnet",  # Fallback — extended thinking supported on Sonnet 4+
+            "anthropic/claude-fable",  # Last-resort escalation — most sophisticated / most expensive
         ],
     },
 }
@@ -210,6 +298,9 @@ def _validate_chain_invariants(
     if profile == RoutingProfile.QUOTA_BALANCED:
         # QUOTA_BALANCED uses BALANCED constraints as its base
         profile_for_check = RoutingProfile.BALANCED
+    elif profile == RoutingProfile.SUBSCRIPTION_LOCAL:
+        # SUBSCRIPTION_LOCAL has no dedicated constraints — skip validation
+        return
     else:
         profile_for_check = profile
 
@@ -220,21 +311,26 @@ def _validate_chain_invariants(
     forbidden = constraints.get("forbidden", [])
     discouraged = constraints.get("discouraged", [])
 
-    # SAFEGUARD #1: Invariant assertions — these MUST never happen
+    # SAFEGUARD #1: Invariant assertions — these MUST never happen.
+    # Matching is FAMILY-AWARE (see model_matches): a pattern like
+    # "anthropic/claude-opus" matches "anthropic/claude-opus-4-8", "...-5", etc.
+    # so a new model version never silently slips past a guard or breaks a chain.
     for forbidden_model in forbidden:
-        if forbidden_model in chain:
+        hit = next((m for m in chain if model_matches(m, forbidden_model)), None)
+        if hit:
             error_msg = (
-                f"POLICY VIOLATION: {forbidden_model} appears in {profile.name} profile chain. "
-                f"Context: {context}. Chain: {chain}"
+                f"POLICY VIOLATION: {hit} (matches forbidden family {forbidden_model!r}) "
+                f"appears in {profile.name} profile chain. Context: {context}. Chain: {chain}"
             )
             log.error(error_msg)  # SAFEGUARD #2: Log the violation
             raise AssertionError(error_msg)
 
     # SAFEGUARD #2: Logging on discouraged matches
     for discouraged_model in discouraged:
-        if discouraged_model in chain:
+        match = next((m for m in chain if model_matches(m, discouraged_model)), None)
+        if match:
             # Check if it's at the front (bad) vs. end (acceptable fallback)
-            is_first = chain[0] == discouraged_model
+            is_first = model_matches(chain[0], discouraged_model)
             if is_first:
                 log.warning(
                     "POLICY MISMATCH: %s appears first in %s chain (should be fallback). "
@@ -250,7 +346,7 @@ COMPLEXITY_TO_PROFILE: dict[Complexity, RoutingProfile] = {
     Complexity.SIMPLE: RoutingProfile.BUDGET,
     Complexity.MODERATE: RoutingProfile.BALANCED,
     Complexity.COMPLEX: RoutingProfile.PREMIUM,
-    Complexity.DEEP_REASONING: RoutingProfile.PREMIUM,  # Extended thinking — same chain as PREMIUM
+    Complexity.DEEP_REASONING: RoutingProfile.REASONING,  # Dedicated reasoning chain (R1/o3/thinking)
 }
 
 
@@ -404,13 +500,11 @@ def get_model_chain(
     Returns:
         Ordered list of model IDs to try, best-fit first.
     """
-    # QUOTA_BALANCED and SUBSCRIPTION_LOCAL use BALANCED as their base chain —
-    # the reordering happens in router.py / subscription_local_routing.
-    profile_for_lookup = (
-        RoutingProfile.BALANCED
-        if profile in (RoutingProfile.QUOTA_BALANCED, RoutingProfile.SUBSCRIPTION_LOCAL)
-        else profile
-    )
+    # Reordering profiles (QUOTA_BALANCED, SUBSCRIPTION_LOCAL) have no chains
+    # of their own; resolve to the base they reorder. The reordering itself
+    # still happens downstream — router.py for QUOTA_BALANCED,
+    # chain_builder.build_chain for SUBSCRIPTION_LOCAL.
+    profile_for_lookup = base_lookup_profile(profile)
 
     # Plan 06 Step 1 — consult the active policy's chains first so non-standard
     # policies (cost_aggressive, user-defined custom) actually take effect at the routing
@@ -484,6 +578,31 @@ def get_model_chain(
         )
     except AssertionError:
         raise  # Policy violations are critical — let them propagate
+
+    # Filter Ollama entries to only models actually installed — prevents
+    # 50-second LiteLLM hangs when the chain names a model that isn't present.
+    try:
+        from llm_router.discover import filter_ollama_by_installed
+        chain = filter_ollama_by_installed(chain)
+    except Exception:
+        pass  # Never let filter failures break routing
+
+    # Warm-path: if Ollama responded successfully within the last 60 seconds,
+    # ensure it leads the chain for simple/budget tasks (skip classifier overhead).
+    # Only applies when an Ollama model is already in the chain.
+    try:
+        from llm_router.discover import is_ollama_warm
+        if (
+            is_ollama_warm()
+            and profile == RoutingProfile.BUDGET
+            and task_type not in {TaskType.IMAGE, TaskType.VIDEO, TaskType.AUDIO}
+        ):
+            ollama_models = [m for m in chain if m.startswith("ollama/")]
+            rest = [m for m in chain if not m.startswith("ollama/")]
+            if ollama_models:
+                chain = ollama_models + rest
+    except Exception:
+        pass  # Never let warm-path failures break routing
 
     return chain
 

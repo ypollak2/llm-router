@@ -55,18 +55,18 @@ def _fail(label: str, fix: str | None = None) -> str:
 # ── Config init subcommand ────────────────────────────────────────────────
 
 def _run_config_init() -> None:
-    """Create a starter .llm-router.yml in the current directory."""
+    """Create a starter .llm_router.yml in the current directory."""
     from llm_router.repo_config import fingerprint_repo
 
-    path = ".llm-router.yml"
+    path = ".llm_router.yml"
     if os.path.exists(path):
         print(_warn(f"{path} already exists — not overwriting. Edit it directly."))
         return
 
     repo_type, suggested = fingerprint_repo()
     template = f"""\
-# .llm-router.yml — repo-level routing config
-# Docs: https://github.com/ypollak2/llm-router
+# .llm_router.yml — repo-level routing config
+# Docs: https://github.com/ypollak2/llm_router
 version: 1
 
 # Routing profile: budget | balanced | premium
@@ -94,7 +94,7 @@ enforce: enforce
     with open(path, "w") as f:
         f.write(template)
     print(_ok(f"Created {path}  (repo type: {repo_type}, suggested profile: {suggested})"))
-    print(f"  Edit it, then run {_bold('llm-router config lint')} to validate.\n")
+    print(f"  Edit it, then run {_bold('llm_router config lint')} to validate.\n")
 
 
 # ── Config show/lint subcommands ───────────────────────────────────────────
@@ -105,7 +105,7 @@ def _run_config(flags: list[str]) -> None:
     Subcommands:
     - show: Display current effective configuration
     - lint: Validate configuration files for errors
-    - init: Create a new .llm-router.yml template
+    - init: Create a new .llm_router.yml template
     """
     sub = flags[0] if flags else "show"
 
@@ -125,14 +125,14 @@ def _run_config(flags: list[str]) -> None:
 
     HR = "─" * 60
 
-    print(f"\n{_bold('llm-router config')}\n")
+    print(f"\n{_bold('llm_router config')}\n")
     print(HR)
 
     # Sources
     user_path = Path.home() / ".llm-router" / "routing.yaml"
     repo_path = find_repo_config_path()
     print(f"  {_bold('User config:')}  {user_path}  {'✓' if user_path.exists() else _dim('(not found)')}")
-    print(f"  {_bold('Repo config:')}  {repo_path or _dim('(none — no .llm-router.yml in tree)')}")
+    print(f"  {_bold('Repo config:')}  {repo_path or _dim('(none — no .llm_router.yml in tree)')}")
     print(f"  {_bold('Repo type:')}    {repo_type}  →  suggested profile: {_yellow(suggested)}")
     print()
     print(HR)
@@ -169,7 +169,7 @@ def _run_config(flags: list[str]) -> None:
     warnings: list[str] = []
     if not user_path.exists() and repo_path is None:
         warnings.append(
-            "No config files found — using defaults. Run `llm-router config init` to create one."
+            "No config files found — using defaults. Run `llm_router config init` to create one."
         )
     if merged.effective_enforce() == "shadow":
         warnings.append(
@@ -204,7 +204,7 @@ def _run_config(flags: list[str]) -> None:
 # ── Main command entry point ───────────────────────────────────────────────
 
 def cmd_config(args: list[str]) -> int:
-    """Execute: llm-router config [show|lint|init]
+    """Execute: llm_router config [show|lint|init]
     
     Manage and display routing configuration.
     """

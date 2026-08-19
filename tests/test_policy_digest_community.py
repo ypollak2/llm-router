@@ -154,7 +154,7 @@ class TestPolicySummary:
         org = OrgPolicy(
             block_providers=["openai"],
             block_models=["anthropic/claude-opus-4-6"],
-            source="/etc/llm-router/policy.yaml",
+            source="/etc/llm_router/policy.yaml",
         )
         summary = policy_summary(org)
         assert "openai" in summary

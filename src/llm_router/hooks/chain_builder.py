@@ -144,6 +144,15 @@ def build_chain(complexity: str, zone: str, task_type: str) -> list[ModelSpec]:
     has_gemini = _has_gemini()
     has_openai = _has_openai()
 
+    # ── Research: always fall through to llm_research MCP tool (Perplexity) ──
+    # Ollama has a knowledge cutoff and cannot answer current-events or
+    # time-sensitive questions accurately. Returning [] causes direct_executor
+    # to return None, so the hook falls through to inject the ⚡ MANDATORY
+    # ROUTE hint pointing to llm_research, which calls Perplexity or a
+    # web-grounded model. This applies at ALL complexity levels for research.
+    if task_type == "research":
+        return []
+
     # Externals available based on API keys
     cheap_externals: list[ModelSpec] = []
     mid_externals: list[ModelSpec] = []
@@ -173,22 +182,27 @@ def build_chain(complexity: str, zone: str, task_type: str) -> list[ModelSpec]:
             return base
 
     # ── Complex: Claude leads at low pressure, excluded at high ──────────────
+    # Ollama is excluded from complex chains for code/research tasks — Ollama
+    # on complex reasoning causes UP-inversions (qwen3.5 winning tasks it
+    # handles poorly). For these task types, let the chain fail through to
+    # Claude (subscription) rather than degrade to local.
+    high_risk = task_type in ("code", "research")
     if complexity in ("complex", "deep_reasoning"):
         if zone == "green":
             # Plenty of quota — Claude Opus leads for max quality
-            return [_CLAUDE_OPUS] + ollama + mid_externals
+            return [_CLAUDE_OPUS] + mid_externals + ([] if high_risk else ollama)
         elif zone == "yellow":
-            # Comfortable — try externals first, Claude Opus as strong option
-            return ollama + mid_externals + [_CLAUDE_OPUS]
+            # Comfortable — mid-tier externals lead, Claude Opus as premium fallback
+            return mid_externals + ([] if high_risk else ollama) + [_CLAUDE_OPUS]
         elif zone == "orange":
-            # Getting tight — externals first, Claude Sonnet (cheaper) as fallback
-            return ollama + mid_externals + [_CLAUDE_SONNET]
+            # Getting tight — mid-tier externals lead, Claude Sonnet as last resort
+            return mid_externals + ([] if high_risk else ollama) + [_CLAUDE_SONNET]
         elif zone == "red":
-            # Preserve Claude — externals only
-            return ollama + mid_externals + cheap_externals
+            # Preserve Claude — mid-tier first; skip Ollama for high-risk task types
+            return mid_externals + ([] if high_risk else ollama) + cheap_externals
         else:
-            # Critical — no Claude at all
-            return ollama + mid_externals + cheap_externals
+            # Critical — no Claude; mid-tier before Ollama, but skip Ollama for high-risk
+            return mid_externals + ([] if high_risk else ollama) + cheap_externals
 
     # Fallback for unknown complexity
     return ollama + cheap_externals
@@ -199,55 +213,19 @@ def chain_has_claude(chain: list[ModelSpec]) -> bool:
     return any(m.provider == "claude" for m in chain)
 
 
-def needs_claude_tools(prompt: str, task_type: str) -> bool:
+def needs_claude_tools(prompt: str, task_type: str = "") -> bool:
     """Does this prompt require file and command tools?
 
-    If yes, direct execution must use the external tool-capable agent path.
-    Native Claude is only available as a non-strict fallback.
+    Thin wrapper over :func:`llm_router.capabilities.detect_capabilities` — the SINGLE
+    shared predicate for exemption / routing / provisioning / permissions (CF-2). This
+    module holds no regex of its own; all detection lives in ``capabilities``.
 
-    Delegates to ``llm_router.capabilities.detect_capabilities(...).legacy_match``
-    (WS4), which reproduces this function's original inline regex logic exactly --
-    this refactor is behavior-preserving by construction (see the deviation note
-    in ``capabilities.py`` about why ``legacy_match`` intentionally omits the
-    richer ``_LEGACY_LOCAL_FS`` pattern that only the new capability vector uses).
-    FAIL-OPEN: any import/lookup failure falls back to the original inline logic
-    so a capabilities-module issue can never silently disable tool routing.
+    Default (shadow mode) returns the LEGACY boolean so routing is byte-identical to
+    the pre-CF-2 behavior. With ``LLM_ROUTER_CAPABILITY_ROUTING=1`` it returns the richer
+    8-bit vector's ``needs_tools`` (symbol/write/command aware).
     """
-    try:
-        from llm_router.capabilities import detect_capabilities
-
-        return detect_capabilities(prompt, task_type).legacy_match
-    except Exception:  # noqa: BLE001 -- must never break routing
-        import re
-
-        # Project structure or local context references (applicable to any task type)
-        if re.search(
-            r'\b(src/|tests/|hooks/|in the codebase|this file|this repo|this project|current project|current version|what version|package\.json|pyproject\.toml|llm-router|blocked by hook|error message)\b',
-            prompt,
-            re.IGNORECASE,
-        ):
-            return True
-
-        # Reading an explicit local file requires tool access even when the
-        # classifier labels the request as a simple query.
-        if re.search(
-            r'\b(?:read|open|inspect|show|cat|summari[sz]e)\s+'
-            r'(?:the\s+)?(?:file\s+)?[\w./-]+\.[A-Za-z0-9]{1,8}\b',
-            prompt,
-            re.IGNORECASE,
-        ):
-            return True
-
-        if task_type not in ("code", "analyze"):
-            return False  # General Q&A, research, generate never need file tools
-
-        # Explicit file references
-        if re.search(r'[\w/]+\.\w{1,4}\b', prompt) and re.search(
-            r'\.(py|ts|js|go|rs|java|cpp|yaml|json|md|toml|cfg|sh|sql)\b', prompt
-        ):
-            return True
-        # Edit/fix/debug intent with location
-        if re.search(r'\b(fix|debug|investigate|refactor|update|modify)\b', prompt, re.IGNORECASE) and \
-           re.search(r'\b(in|at|from|the)\s+(src|tests|hooks|module|class|function)\b', prompt, re.IGNORECASE):
-            return True
-        return False
+    from llm_router.capabilities import capability_routing_enabled, detect_capabilities
+    decision = detect_capabilities(prompt, task_type)
+    if capability_routing_enabled():
+        return decision.required.needs_tools
+    return decision.legacy_match

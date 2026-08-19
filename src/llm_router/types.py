@@ -11,6 +11,9 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import Enum
 
+from llm_router import pricing as _pricing
+from llm_router.capabilities import CapabilityRequirement, RelevantContext
+
 
 # ── Provider Indicators ───────────────────────────────────────────────────────
 # Colored emoji icons used in CLI output and MCP tool responses to make it
@@ -72,16 +75,21 @@ class TaskType(str, Enum):
 
     Text tasks (QUERY through CODE) are routed through LiteLLM.
     Media tasks (IMAGE, VIDEO, AUDIO) are routed through provider-specific APIs.
+    INTROSPECT short-circuits routing entirely — those prompts are about
+    the host's OWN local state and need read-only Bash + SQL against
+    ``~/.llm-router/*``, not an LLM call.
     """
 
-    QUERY = "query"         # Factual lookups, simple questions
-    RESEARCH = "research"   # Web-augmented research (Perplexity, etc.)
-    GENERATE = "generate"   # Content generation, writing, brainstorming
-    ANALYZE = "analyze"     # Deep analysis, comparison, evaluation
-    CODE = "code"           # Code generation, refactoring, debugging
-    IMAGE = "image"         # Image generation (DALL-E, Flux, Imagen, etc.)
-    VIDEO = "video"         # Video generation (Runway, Kling, Veo, etc.)
-    AUDIO = "audio"         # Audio/TTS generation (ElevenLabs, OpenAI TTS)
+    QUERY = "query"           # Factual lookups, simple questions
+    RESEARCH = "research"     # Web-augmented research (Perplexity, etc.)
+    GENERATE = "generate"     # Content generation, writing, brainstorming
+    ANALYZE = "analyze"       # Deep analysis, comparison, evaluation
+    CODE = "code"             # Code generation, refactoring, debugging
+    INTROSPECT = "introspect"  # Local-state queries — no LLM call, native tools only
+    COORDINATE = "coordinate"  # Multi-agent orchestration — advisory-only, never direct
+    IMAGE = "image"           # Image generation (DALL-E, Flux, Imagen, etc.)
+    VIDEO = "video"           # Video generation (Runway, Kling, Veo, etc.)
+    AUDIO = "audio"           # Audio/TTS generation (ElevenLabs, OpenAI TTS)
 
 
 class RoutingProfile(str, Enum):
@@ -94,9 +102,9 @@ class RoutingProfile(str, Enum):
     BUDGET = "budget"       # Cheapest viable models
     BALANCED = "balanced"   # Quality/cost sweet spot (default)
     PREMIUM = "premium"     # Best available, cost secondary
+    REASONING = "reasoning"  # Dedicated reasoning chain: R1 → o1 → Gemini thinking → Opus+thinking
     QUOTA_BALANCED = "quota_balanced"  # Balance usage across Claude/Gemini CLI/Codex
-    SUBSCRIPTION_LOCAL = "subscription_local"  # Cost-inverted: free bucket + one paid seat;
-    # free-first for simple/moderate, seat-first for complex (see subscription_local_routing)
+    SUBSCRIPTION_LOCAL = "subscription_local"  # One paid seat + free local/internal bucket; cost-inverted reorder (see subscription_local_routing.py)
 
 
 class Tier(str, Enum):
@@ -137,7 +145,7 @@ class Complexity(str, Enum):
     MODERATE = "moderate"           # Multi-step reasoning, code gen, writing
     COMPLEX = "complex"             # Architecture, research synthesis, novel algorithms
     DEEP_REASONING = "deep_reasoning"  # Formal proofs, philosophical analysis, first-principles
-                                        # derivation — routes to PREMIUM with extended thinking
+                                        # derivation — routes to REASONING profile (R1/o1/thinking)
 
 
 COMPLEXITY_ICONS: dict[str, str] = {
@@ -200,6 +208,10 @@ class ClassificationResult:
     classifier_cost_usd: float
     classifier_latency_ms: float
     subject: Subject = Subject.GENERAL
+    # CF-2: capability-aware classification. default_factory keeps existing callers
+    # (which don't pass these) valid.
+    capabilities: CapabilityRequirement = field(default_factory=CapabilityRequirement)
+    relevant_context: RelevantContext | None = None
 
     def header(self) -> str:
         """Format a one-line summary for CLI/MCP display.
@@ -244,13 +256,17 @@ MODEL_QUALITY: dict[str, float] = {
 }
 
 # Blended cost per 1K tokens (average of input and output pricing).
-# Based on Anthropic's API pricing. Even under a Claude Code subscription
-# (where API calls are "free"), these values let the savings calculator
-# estimate how much money the routing decisions would save at API rates.
+#
+# WP-03: derived from llm_router.pricing rather than restated. The old literals were
+# $0.045 for Opus (the retired $15/$75 tier) and $0.001 for Haiku — which did not
+# even match its own comment, since $1/$5 blends to $0.003. Two wrong numbers and
+# a comment that disagreed with one of them is what a hand-maintained copy decays
+# into; the comment is the only part anyone re-reads, and nobody re-does the
+# arithmetic.
 MODEL_COST_PER_1K: dict[str, float] = {
-    "haiku": 0.001,    # $1/M input, $5/M output -> ~$0.001/1K blended
-    "sonnet": 0.009,   # $3/M input, $15/M output -> ~$0.009/1K blended
-    "opus": 0.045,     # $15/M input, $75/M output -> ~$0.045/1K blended
+    _family: _blended
+    for _family in ("haiku", "sonnet", "opus")
+    if (_blended := _pricing.blended_per_1k(_family)) is not None
 }
 
 # Approximate generation speed (tokens per second) for each model tier.
@@ -352,6 +368,97 @@ class BudgetExceededError(RuntimeError):
     """
 
 
+class CostBudgetExceeded(BudgetExceededError):
+    """Raised when the projected per-turn cost would exceed ``max_cost_per_task``.
+
+    Tier-2 / Track-3 agent-safety: ``route_and_call(max_cost_per_task=$X)``
+    asks the router to refuse any model whose projected cost for this turn
+    would exceed ``$X``. The router walks the chain skipping over-budget
+    candidates; if no model in the chain fits the cap, this exception is
+    raised before any provider is contacted.
+
+    The ``projected_cost`` and ``cap`` attributes carry the offending
+    numbers so callers can render an actionable error (the cheapest
+    candidate the chain offered, vs. what the caller allowed).
+    """
+
+    def __init__(self, message: str, *, projected_cost: float, cap: float):
+        super().__init__(message)
+        self.projected_cost = float(projected_cost)
+        self.cap = float(cap)
+
+
+class WallClockExceeded(TimeoutError):
+    """Raised when a routed turn exceeds ``max_wall_clock_seconds``.
+
+    Track-3 agent-safety (T3-S2): an agent-driven turn must be allowed
+    to fail loudly rather than burn provider time indefinitely. When
+    ``route_and_call(max_wall_clock_seconds=$T)`` is set and the call
+    has not returned within $T seconds, the router cancels the
+    in-flight ``_dispatch_model_loop``, releases its budget
+    reservation, writes a timeout audit row, and raises this
+    exception.
+
+    Subclasses ``TimeoutError`` so callers using a generic
+    ``try/except TimeoutError`` get the right behaviour without
+    importing a llm_router-specific class. The ``cap_seconds`` and
+    ``elapsed_seconds`` attributes carry the bounds the caller needs
+    to render an actionable error.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        cap_seconds: float,
+        elapsed_seconds: float | None = None,
+    ):
+        super().__init__(message)
+        self.cap_seconds = float(cap_seconds)
+        self.elapsed_seconds = (
+            float(elapsed_seconds) if elapsed_seconds is not None else None
+        )
+
+
+class DeadlineExceeded(TimeoutError):
+    """Raised when a routed turn outlives ``deadline_monotonic``.
+
+    Track-3 agent-safety (T3-M2): the parent workflow propagates an
+    absolute ``time.monotonic()`` deadline through every nested
+    ``route_and_call``. Each turn:
+
+    * Refuses to do work if the deadline has already passed (raises
+      this exception before any provider is contacted).
+    * Caps its dispatch wall-clock at ``min(deadline_remaining,
+      max_wall_clock_seconds)`` so a slow provider can't bleed past
+      the workflow deadline.
+    * Distinguishes deadline-driven timeout (this exception) from
+      single-call wall-clock timeout (``WallClockExceeded``) so the
+      caller knows whether to retry: deadline = stop the workflow;
+      wall-clock = a different model in the chain may still succeed.
+
+    Subclasses ``TimeoutError`` so generic ``try/except TimeoutError``
+    catches both this and ``WallClockExceeded`` — operators that
+    don't need to distinguish can still write the simple form.
+
+    The ``deadline_monotonic`` and ``over_by_seconds`` attributes
+    carry the bounds the caller needs to render an actionable error.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        deadline_monotonic: float,
+        over_by_seconds: float | None = None,
+    ):
+        super().__init__(message)
+        self.deadline_monotonic = float(deadline_monotonic)
+        self.over_by_seconds = (
+            float(over_by_seconds) if over_by_seconds is not None else None
+        )
+
+
 @dataclass(frozen=True)
 class LLMResponse:
     """Unified response from any LLM or media generation call.
@@ -383,9 +490,20 @@ class LLMResponse:
     complexity: str = ""
     task_type_str: str = ""
     chain_attempts: list[str] = field(default_factory=list)
-    # Semantic cache fields (v8.4.0) — llm-router's own LRU prompt cache
+    # Semantic cache fields (v8.4.0) — llm_router's own LRU prompt cache
     cache_hit: bool = False
     cache_similarity: float = 0.0
+    # RED2-02: set when a daily spend cap forced this turn to a free-local
+    # provider (TQ-007 downgrade). Lets a caller / CLI / dashboard tell the user
+    # "you hit your cap, so this used a cheaper local model" instead of leaving
+    # an unexplained quality drop. `cap_downgrade_reason` carries the cap detail.
+    cap_downgraded: bool = False
+    cap_downgrade_reason: str = ""
+    # RED1-8-01: total already-billed cost of PRIOR attempts in this turn that a
+    # contract gate or quality-escalation rejected before this final response.
+    # `cost_usd` is only this final attempt; the budget envelope + quota tracker
+    # must settle `cost_usd + chain_attempt_cost_usd` to not under-count true spend.
+    chain_attempt_cost_usd: float = 0.0
     # Anthropic prompt-caching token counts (v9.2.2) — populated when the
     # provider response includes a usage block with these fields. Used by
     # cost.py:_claude_cost for the 4-component billing formula matching
@@ -405,6 +523,11 @@ class LLMResponse:
             parts.append(tokens)
         parts.append(f"${self.cost_usd:.6f}")
         parts.append(f"{self.latency_ms:.0f}ms")
+        # RED2-2-02 / RED2-3-01: make a daily-cap downgrade visible, and describe
+        # it HONESTLY by the actual provider — a smart-mode cap fallthrough routes
+        # to Claude (paid), not free-local, so don't claim "free-local" then.
+        if self.cap_downgraded:
+            parts.append(f"⬇ daily cap → {self._cap_downgrade_target()}")
         return " ".join(parts)
 
     def header(self) -> str:
@@ -419,7 +542,23 @@ class LLMResponse:
             parts.append(tokens)
         parts.append(f"${self.cost_usd:.6f}")
         parts.append(f"{self.latency_ms:.0f}ms")
+        if self.cap_downgraded:  # RED2-2-02 / RED2-3-01
+            parts.append(f"⬇ daily cap reached → routed to {self._cap_downgrade_target()}")
         return " · ".join(parts)
+
+    def _cap_downgrade_target(self) -> str:
+        """Honest description of where a cap downgrade actually routed (RED2-3-01).
+
+        The smart/soft cap fallthrough routes to Claude (anthropic, PAID) — not a
+        free/local model — so the message must reflect the real provider instead
+        of unconditionally claiming "free-local".
+        """
+        prov = (self.provider or "").lower()
+        if prov in ("ollama", "codex", "gemini_cli"):
+            return "a free/local model"
+        if prov == "anthropic":
+            return "Claude (subscription)"
+        return f"{prov or self.model}"
 
 
 @dataclass(frozen=True)

@@ -6,11 +6,12 @@ import os
 
 from mcp.server.mcpserver import Context
 
-from llm_router.classifier import classify_complexity
 from llm_router.config import get_config
+from llm_router.ensemble import classify_for_routing
 from llm_router.cost import (
-    get_correction_count, get_daily_claude_breakdown, get_daily_claude_tokens,
-    get_savings_summary, log_claude_usage, log_correction, log_usage,
+    _claude_cost, get_correction_count,
+    get_daily_claude_breakdown, get_daily_claude_tokens, get_savings_summary,
+    log_claude_usage, log_correction, log_usage,
 )
 from llm_router.input_validation import (
     ValidationError, validate_routing_parameters,
@@ -22,11 +23,14 @@ from llm_router.profiles import complexity_to_profile
 from llm_router.provider_budget import get_provider_budgets, rank_external_models
 from llm_router.router import route_and_call
 from llm_router.statusline_hud import record_routing_decision
+from llm_router.tools.text import _read_hook_route_directive
 from llm_router.types import (
     ClassificationResult, Complexity, QualityMode,
     RoutingProfile, RoutingRecommendation, TaskType, _budget_bar,
 )
+from llm_router import pricing as _pricing
 from llm_router import state as _state
+from llm_router.tool_surface import route_tool  # CHZ-SURF-01
 
 
 async def llm_classify(
@@ -56,7 +60,9 @@ async def llm_classify(
 
     # Classify complexity
     try:
-        classification = await classify_complexity(prompt)
+        await ctx.info("🔍 Analyzing task complexity...")
+        classification = await classify_for_routing(prompt, timeout_seconds=10.0)
+        await ctx.info(f"✓ Classified as {classification.complexity.value} ({classification.confidence:.0%} confidence)")
     except Exception as e:
         await ctx.warning(f"Classification failed: {e}")
         classification = ClassificationResult(
@@ -146,21 +152,32 @@ async def llm_classify(
 
     # Explainable routing: "why not Opus/Sonnet?" cost comparison
     # Always shown — this is the core of v2.2 explainability.
-    _COST_PER_1K_OUT = {
-        "opus":   0.075,
-        "sonnet": 0.015,
-        "haiku":  0.00125,
+    # WP-03: derived from llm_router.pricing. These were three literals here and
+    # three more on the loop below — six copies of the same three numbers in
+    # nine lines, all of them the retired Opus tier. This block is shown to the
+    # user as the justification for a routing decision, so a stale rate here
+    # does not just misreport: it argues for the wrong model.
+    from llm_router import pricing as _pricing
+    _tier_out_per_1k = {
+        _tier: _v
+        for _tier in ("opus", "sonnet", "haiku")
+        if (_v := _pricing.output_per_1k(_tier)) is not None
     }
     chosen_tier = rec.recommended_model  # "haiku" | "sonnet" | "opus"
-    chosen_cost = _COST_PER_1K_OUT.get(chosen_tier, 0.015)
+    chosen_cost = _tier_out_per_1k.get(chosen_tier) or _tier_out_per_1k.get("sonnet", 0.0)
     lines.append(HR)
     lines.append(row("  Why not a more expensive model?"))
-    for tier, cost in [("opus", 0.075), ("sonnet", 0.015), ("haiku", 0.00125)]:
+    for tier, cost in sorted(_tier_out_per_1k.items(), key=lambda kv: -kv[1]):
         if tier == chosen_tier:
             marker = "✓ chosen"
         elif cost > chosen_cost:
-            ratio = cost / chosen_cost
-            marker = f"↑ {ratio:.0f}x more expensive — unnecessary for {classification.complexity.value} task"
+            # chosen_cost is 0 for a free local tier; report the delta as a
+            # price rather than dividing by it.
+            marker = (
+                f"↑ {cost / chosen_cost:.0f}x more expensive"
+                if chosen_cost > 0
+                else f"↑ ${cost:.5f}/1k vs free"
+            ) + f" — unnecessary for {classification.complexity.value} task"
         else:
             marker = "↓ cheaper option exists"
         lines.append(row(f"    {tier:<8} ${cost:.5f}/1k  {marker}"))
@@ -304,7 +321,12 @@ async def llm_route(
         )
     else:
         try:
-            classification = await classify_complexity(prompt)
+            # Notify user that classification is starting (prevents silent hangs)
+            # Use animated spinner in interactive contexts, text feedback in MCP
+            await ctx.info("🔍 Analyzing task complexity...")
+            classification = await classify_for_routing(prompt, timeout_seconds=10.0)
+            task_type_label = classification.inferred_task_type.value if classification.inferred_task_type else "generic"
+            await ctx.info(f"✓ Classified: {classification.complexity.value}/{task_type_label} ({classification.confidence:.0%} confidence)")
         except Exception as e:
             await ctx.warning(f"Classification failed: {e} — defaulting to moderate")
             classification = ClassificationResult(
@@ -373,6 +395,7 @@ async def llm_route(
         "was_downshifted": rec.was_downshifted,
         "budget_pct_used": budget_pct,
         "quality_mode": q_mode.value if hasattr(q_mode, "value") else str(q_mode),
+        "classifier_cost_usd": classification.classifier_cost_usd,
     }
 
     # Step 4: Route and call
@@ -385,16 +408,37 @@ async def llm_route(
         caller_context=context,
         ctx=ctx,
         classification_data=_classification_data,
+        route_directive_id=_read_hook_route_directive(),
     )
 
-    # Record routing decision for HUD visibility
+    # Record routing decision for HUD visibility. Supply the task-aware Claude
+    # baseline using the SAME canonical functions log_usage persists with, so the
+    # HUD's session savings match usage.saved_usd instead of the historical
+    # permanent $0 (AC-7: baseline_cost was never supplied). Fail-open to None.
+    try:
+        _baseline_model = _pricing.savings_baseline_model()
+        _hud_baseline_cost = _claude_cost(
+            _baseline_model,
+            resp.input_tokens,
+            resp.output_tokens,
+            cache_write_t=getattr(resp, "cache_creation_input_tokens", 0),
+            cache_read_t=getattr(resp, "cache_read_input_tokens", 0),
+        )
+    except Exception:
+        _hud_baseline_cost = None
     record_routing_decision(
         model=resp.model,
         confidence=classification.confidence,
         task=f"{resolved_task_type.value}/{classification.complexity.value}",
         cost=resp.cost_usd,
         reason=classification.reasoning,
+        baseline_cost=_hud_baseline_cost,
     )
+
+    # Show routing completion with model decision
+    model_short = resp.model.split("/")[-1] if "/" in resp.model else resp.model
+    await ctx.info(f"→ Routing to {model_short}")
+    await ctx.info(f"✓ Routed to {model_short} ({profile.value} profile)")
 
     # Log routing decision to database for savings tracking
     try:
@@ -466,7 +510,7 @@ async def llm_auto(
 
     # Classify complexity (or skip if profile_override forces a specific profile)
     try:
-        classification = await classify_complexity(prompt)
+        classification = await classify_for_routing(prompt)
     except Exception as e:
         await ctx.warning(f"Classification failed: {e} — defaulting to moderate")
         classification = ClassificationResult(
@@ -536,6 +580,7 @@ async def llm_auto(
         "was_downshifted": False,
         "budget_pct_used": budget_pct,
         "quality_mode": q_mode.value if hasattr(q_mode, "value") else str(q_mode),
+        "classifier_cost_usd": classification.classifier_cost_usd,
     }
 
     resp = await route_and_call(
@@ -545,6 +590,7 @@ async def llm_auto(
         caller_context=context,
         ctx=ctx,
         classification_data=_classification_data,
+        route_directive_id=_read_hook_route_directive(),
     )
 
     total_cost = classification.classifier_cost_usd + resp.cost_usd
@@ -575,7 +621,7 @@ async def llm_auto(
         net = lifetime["net_savings"]
         lines.append(
             f"\n📊 **{tasks_routed} tasks routed** — ~${net:.2f} net saved lifetime. "
-            "Run `llm_savings` for the full breakdown."
+            f"Run `{route_tool('llm_savings')}` for the full breakdown."
         )
 
     return "\n".join(lines)
@@ -666,6 +712,28 @@ async def llm_stream(
     return f"{header}\n\n{content}"
 
 
+# Profile × complexity routing table for llm_select_agent.
+# Codex model names must stay in the ChatGPT-subscription-supported set
+# ({"gpt-5.5", "gpt-5.4"} as of Codex CLI v0.133); see
+# :func:`llm_router.codex_agent._load_codex_models`. A drift here causes the
+# Codex chain to fail with HTTP 400 and the whole chain to fall through
+# to paid providers — silent and expensive.
+_SELECT_AGENT_MAP: dict[tuple[str, str], tuple[str, str, str, str]] = {
+    ("budget",   "simple"):   ("codex",       "gpt-5.5",                "claude_code", "claude-sonnet-4-6"),
+    ("budget",   "moderate"): ("codex",       "gpt-5.5",                "claude_code", "claude-sonnet-4-6"),
+    ("budget",   "complex"):  ("codex",       "gpt-5.4",                "claude_code", "claude-sonnet-4-6"),
+    ("balanced", "simple"):   ("codex",       "gpt-5.5",                "claude_code", "claude-sonnet-4-6"),
+    ("balanced", "moderate"): ("claude_code", "claude-sonnet-4-6",      "codex",       "gpt-5.4"),
+    ("balanced", "complex"):  ("claude_code", "claude-opus-4-6",        "codex",       "gpt-5.4"),
+    ("premium",  "simple"):   ("claude_code", "claude-sonnet-4-6",      "codex",       "gpt-5.5"),
+    ("premium",  "moderate"): ("claude_code", "claude-opus-4-6",        "codex",       "gpt-5.4"),
+    ("premium",  "complex"):  ("claude_code", "claude-opus-4-6",        "codex",       "gpt-5.4"),
+}
+_SELECT_AGENT_DEFAULT: tuple[str, str, str, str] = (
+    "claude_code", "claude-sonnet-4-6", "codex", "gpt-5.4",
+)
+
+
 async def llm_select_agent(
     prompt: str,
     profile: str = "balanced",
@@ -677,12 +745,17 @@ async def llm_select_agent(
     invoke, not which model to call mid-session.
 
     Decision tree (profile × complexity):
-      budget  + simple/moderate  → codex  + gpt-4o-mini
-      budget  + complex          → codex  + gpt-4o (Codex handles most coding; escalate if needed)
-      balanced + simple          → codex  + gpt-4o-mini
+      budget  + simple/moderate  → codex  + gpt-5.5
+      budget  + complex          → codex  + gpt-5.4 (Codex handles most coding; escalate if needed)
+      balanced + simple          → codex  + gpt-5.5
       balanced + moderate        → claude_code + sonnet
       balanced + complex         → claude_code + opus
       premium + any              → claude_code + opus
+
+    Codex model names track the ChatGPT-subscription-supported set
+    (see :func:`llm_router.codex_agent._load_codex_models`). Pre-v10.1.3 the
+    table referenced ``gpt-4o`` / ``gpt-4o-mini``, which Codex CLI rejects
+    on ChatGPT auth with HTTP 400, causing the whole Codex chain to fail.
 
     Returns JSON with:
       primary          — agent binary name: "claude_code" | "codex" | "gemini_cli"
@@ -711,7 +784,7 @@ async def llm_select_agent(
         profile = "balanced"
 
     try:
-        classification = await classify_complexity(prompt)
+        classification = await classify_for_routing(prompt)
         task_type_val = classification.inferred_task_type or TaskType.CODE
         complexity_val = classification.complexity
         confidence = classification.confidence
@@ -725,28 +798,15 @@ async def llm_select_agent(
     task_type_str = task_type_val.value if hasattr(task_type_val, "value") else str(task_type_val)
     complexity_str = complexity_val.value if hasattr(complexity_val, "value") else str(complexity_val)
 
-    # Decision tree: profile × complexity → (agent, model)
-    _AGENT_MAP = {
-        ("budget",   "simple"):   ("codex",       "gpt-4o-mini",            "claude_code", "claude-sonnet-4-6"),
-        ("budget",   "moderate"): ("codex",       "gpt-4o-mini",            "claude_code", "claude-sonnet-4-6"),
-        ("budget",   "complex"):  ("codex",       "gpt-4o",                 "claude_code", "claude-sonnet-4-6"),
-        ("balanced", "simple"):   ("codex",       "gpt-4o-mini",            "claude_code", "claude-sonnet-4-6"),
-        ("balanced", "moderate"): ("claude_code", "claude-sonnet-4-6",      "codex",       "gpt-4o"),
-        ("balanced", "complex"):  ("claude_code", "claude-opus-4-6",        "codex",       "gpt-4o"),
-        ("premium",  "simple"):   ("claude_code", "claude-sonnet-4-6",      "codex",       "gpt-4o-mini"),
-        ("premium",  "moderate"): ("claude_code", "claude-opus-4-6",        "codex",       "gpt-4o"),
-        ("premium",  "complex"):  ("claude_code", "claude-opus-4-6",        "codex",       "gpt-4o"),
-    }
-
     key = (profile, complexity_str)
-    primary, primary_model, fallback, fallback_model = _AGENT_MAP.get(
-        key, ("claude_code", "claude-sonnet-4-6", "codex", "gpt-4o")
+    primary, primary_model, fallback, fallback_model = _SELECT_AGENT_MAP.get(
+        key, _SELECT_AGENT_DEFAULT,
     )
 
     # Override: research tasks → always claude_code (needs web access via Perplexity)
     if task_type_str == "research":
         primary, primary_model = "claude_code", "claude-sonnet-4-6"
-        fallback, fallback_model = "codex", "gpt-4o"
+        fallback, fallback_model = "codex", "gpt-5.4"
 
     # Environment check
     codex_ok = is_codex_available()
@@ -815,7 +875,7 @@ async def llm_reroute(
         original_model: The model that was selected (for logging purposes).
     """
     valid_tools = {
-        "llm_query", "llm_code", "llm_analyze", "llm_research",
+        "llm_query", "llm_code", "llm_analyze", "llm_reason", "llm_research",
         "llm_generate", "llm_route", "llm_auto", "llm_classify",
         "llm_stream", "llm_edit",
     }

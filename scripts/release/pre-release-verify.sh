@@ -65,6 +65,14 @@ echo ""
 
 # 6. Run tests
 echo "6️⃣  Running test suite..."
+# SAME ENVIRONMENT AS CI, or this check answers a different question.
+#
+# ci.yml sets a dummy OPENAI_API_KEY: a routing-audit fix means several test
+# modules need SOME candidate in the provider chain (they patch the dispatch
+# layer and make no network call), and a bare machine has no keys. Without it
+# this script reported four failures that CI does not see — a release gate
+# that disagrees with CI is one people learn to override.
+export OPENAI_API_KEY="${OPENAI_API_KEY:-sk-test-dummy-key-for-ci-only-no-real-calls-made}"
 if ! uv run pytest tests/ -q --tb=short > /dev/null 2>&1; then
     echo -e "${RED}❌ Tests failed${NC}"
     uv run pytest tests/ -q --tb=short

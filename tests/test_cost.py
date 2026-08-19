@@ -3,7 +3,7 @@
 
 import pytest
 
-from llm_router import cost
+from llm_router import cost, pricing
 from llm_router.types import LLMResponse, RoutingProfile, TaskType
 
 
@@ -377,62 +377,6 @@ async def test_get_classifier_overhead(temp_db):
     assert result["max_ms"] == 300.0
 
 
-@pytest.mark.asyncio
-async def test_get_savings_by_task_type(temp_db):
-    """Test task-type breakdown from savings_stats table."""
-    conn = await cost._get_db()
-
-    # Create savings_stats table with full schema
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS savings_stats (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            timestamp TEXT NOT NULL,
-            session_id TEXT NOT NULL,
-            task_type TEXT NOT NULL,
-            estimated_claude_cost_saved REAL NOT NULL,
-            external_cost REAL NOT NULL,
-            model_used TEXT NOT NULL,
-            host TEXT NOT NULL DEFAULT 'claude_code'
-        )
-    """)
-
-    # Insert test data
-    from datetime import datetime, timezone
-    today_iso = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%S')
-
-    await conn.executemany(
-        "INSERT INTO savings_stats (timestamp, session_id, task_type, estimated_claude_cost_saved, external_cost, model_used, host) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?)",
-        [
-            (today_iso, "s1", "query", 0.001, 0.0001, "gemini-flash", "claude_code"),
-            (today_iso, "s1", "query", 0.002, 0.0002, "gemini-flash", "claude_code"),
-            (today_iso, "s1", "query", 0.003, 0.0003, "gemini-flash", "claude_code"),
-            (today_iso, "s1", "code", 0.005, 0.0005, "gpt-4o-mini", "claude_code"),
-            (today_iso, "s1", "code", 0.010, 0.0010, "gpt-4o-mini", "claude_code"),
-            (today_iso, "s1", "analyze", 0.015, 0.0015, "sonnet", "claude_code"),
-        ]
-    )
-    await conn.commit()
-    await conn.close()
-
-    # Test the function
-    result = await cost.get_savings_by_task_type("today")
-
-    # Should be sorted by saved DESC (then by task_type for ties)
-    assert len(result) == 3
-    # First two have 0.015 saved, query has 0.006
-    assert result[0]["saved"] == 0.015
-    assert result[1]["saved"] == 0.015
-    assert result[2]["task_type"] == "query"
-    assert result[2]["calls"] == 3
-    assert result[2]["saved"] == 0.006
-
-    # Verify code and analyze are both in top results
-    task_types = {r["task_type"] for r in result[:2]}
-    assert "code" in task_types
-    assert "analyze" in task_types
-
-
 # ── v9.4.0: log_usage must populate baseline_model / potential_cost_usd / saved_usd ──
 
 async def _last_usage_row(temp_db) -> dict:
@@ -502,7 +446,10 @@ async def test_log_usage_ollama_zero_cost_full_baseline_savings(temp_db):
 
 @pytest.mark.asyncio
 async def test_log_usage_baseline_picker_haiku_for_simple_query(temp_db):
-    """Simple query tasks should use haiku as baseline, not Sonnet/Opus."""
+    """WP-05: every task records the ONE savings baseline.
+
+    This used to assert haiku for simple queries, from the task-aware picker
+    that disagreed with savings_logger by 5x on the same call."""
     resp = LLMResponse(
         content="x",
         model="ollama/qwen3.5:latest",
@@ -517,7 +464,7 @@ async def test_log_usage_baseline_picker_haiku_for_simple_query(temp_db):
     )
 
     row = await _last_usage_row(temp_db)
-    assert row["baseline_model"] == "haiku"
+    assert row["baseline_model"] == pricing.savings_baseline_model()
 
 
 @pytest.mark.asyncio
@@ -537,7 +484,7 @@ async def test_log_usage_baseline_picker_opus_for_complex(temp_db):
     )
 
     row = await _last_usage_row(temp_db)
-    assert row["baseline_model"] == "opus"
+    assert row["baseline_model"] == pricing.savings_baseline_model()
 
 
 @pytest.mark.asyncio

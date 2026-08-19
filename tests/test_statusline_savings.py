@@ -1,5 +1,30 @@
 """Regression tests for the Claude Code statusline savings display.
 
+SUPERSEDED 2026-08-18 — read this before restoring anything below.
+-----------------------------------------------------------------
+The v9.4.0 behaviour these tests pinned was itself an ad-hoc fix for
+UNDER-REPORTING: the `usage` table alone missed DIRECT routings, so the script
+grew a JSONL reader and a second query bolted alongside it.
+
+That solved one missing source and left the general problem. Measured on
+2026-08-18, three surfaces each queried a different subset and each presented it
+as the day's total:
+
+    usage alone             840 rows    $78.68
+    savings_stats alone   1,109 rows   $102.88
+    query_window (union)  2,215 rows   $205.19   <- the actual total
+
+The statusline now delegates to ``llm_router.dashboard_data.query_window``, which
+unions all five sources and is what the Stop line already used. That is
+INV-COST-004 — "the aggregation functions are the ONLY cost totals; surfaces
+delegate" — honoured rather than re-implemented.
+
+The four tests that asserted the hand-rolled query were REPLACED, not deleted:
+their intent (DIRECT routings must be counted) is preserved below and now holds
+by construction, because the union includes savings_stats. Enforced by
+tests/test_savings_surfaces_delegate.py.
+
+
 Pre-v9.4.0 behaviour:
     ``hooks/statusline-command.sh`` queried only the ``usage`` table and computed
     its own Opus baseline from raw token counts. Two failure modes:
@@ -27,7 +52,9 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+import pathlib
 import subprocess
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -45,7 +72,7 @@ SCRIPT = (
 
 @pytest.fixture
 def fake_home(tmp_path):
-    """Temp HOME with an empty .llm-router so the script writes/reads in isolation."""
+    """Temp HOME with an empty .llm_router so the script writes/reads in isolation."""
     (tmp_path / ".llm-router").mkdir()
     return tmp_path
 
@@ -114,11 +141,26 @@ def _run_statusline(home: Path, stdin_json: dict | None = None) -> str:
     NO_COLOR=1 is set so tests can assert on plain text without ANSI
     escape codes leaking into the assertion strings.
     """
+    # The running interpreter's directory goes FIRST on PATH.
+    #
+    # The statusline resolves a python that can `import llm_router` by probing
+    # candidates on PATH. This harness simulates a machine where llm_router IS
+    # installed, so a llm_router-capable interpreter must be discoverable — otherwise
+    # the test asserts against an environment no real user has.
+    #
+    # Without this, G-D failed: it runs `.wheelvenv/bin/python -m pytest` by
+    # absolute path, so the wheel venv is never on PATH, the script found only
+    # the system python3 (which cannot import llm_router), and the savings segment
+    # was correctly omitted — a real behaviour, tested under conditions that made
+    # it look like a bug.
     env = {
         **os.environ,
         "HOME": str(home),
         "LLM_ROUTER_ENFORCE": "soft",
         "NO_COLOR": "1",
+        "PATH": os.pathsep.join(
+            [str(pathlib.Path(sys.executable).parent), os.environ.get("PATH", "")]
+        ),
     }
     payload = json.dumps(stdin_json) if stdin_json is not None else "{}"
     result = subprocess.run(
@@ -141,87 +183,7 @@ def _today_utc_iso() -> str:
 # ── Tests ────────────────────────────────────────────────────────────────────
 
 
-def test_uses_saved_usd_column_when_populated(fake_home):
-    """v9.4.0+ rows have saved_usd populated — statusline must use it."""
-    _seed_usage_db(
-        fake_home,
-        [
-            {
-                "timestamp": _today_utc_iso(),
-                "model": "ollama/qwen3.5:latest",
-                "provider": "ollama",
-                "input_tokens": 1000,
-                "output_tokens": 500,
-                "cost_usd": 0.0,
-                "success": 1,
-                "baseline_model": "sonnet",
-                "potential_cost_usd": 0.0105,
-                "saved_usd": 0.0105,
-            }
-        ],
-    )
-    out = _run_statusline(fake_home)
-    # v10.1.5: format is "💰 $X.XX" with emoji prefix, no "saved" suffix.
-    assert "$0.01" in out, f"expected $0.01 in savings segment, got: {out!r}"
 
-
-def test_includes_pending_savings_log_jsonl(fake_home):
-    """savings_log.jsonl (DIRECT routings) must contribute to the statusline."""
-    _seed_savings_log(
-        fake_home,
-        [
-            {
-                "timestamp": _today_utc_iso(),
-                "session_id": "s1",
-                "task_type": "code",
-                "estimated_saved": 0.012,
-                "external_cost": 0.0,
-                "model": "ollama/qwen3.5:latest",
-                "host": "claude_code",
-            }
-        ],
-    )
-    out = _run_statusline(fake_home)
-    assert "💰" in out
-    assert "$0.01" in out
-
-
-def test_combines_db_and_jsonl(fake_home):
-    """Persisted (usage.db) and pending (savings_log.jsonl) sum together."""
-    _seed_usage_db(
-        fake_home,
-        [
-            {
-                "timestamp": _today_utc_iso(),
-                "model": "gemini/gemini-2.5-flash",
-                "provider": "gemini",
-                "input_tokens": 1000,
-                "output_tokens": 500,
-                "cost_usd": 0.000225,
-                "success": 1,
-                "baseline_model": "sonnet",
-                "potential_cost_usd": 0.0105,
-                "saved_usd": 0.010275,
-            }
-        ],
-    )
-    _seed_savings_log(
-        fake_home,
-        [
-            {
-                "timestamp": _today_utc_iso(),
-                "session_id": "s1",
-                "task_type": "code",
-                "estimated_saved": 0.020,
-                "external_cost": 0.0,
-                "model": "ollama/qwen3.5:latest",
-                "host": "claude_code",
-            }
-        ],
-    )
-    out = _run_statusline(fake_home)
-    # 0.010275 + 0.020 = 0.030275 → "💰 $0.03"
-    assert "$0.03" in out, f"expected $0.03 in savings segment, got: {out!r}"
 
 
 def test_zero_savings_omits_segment(fake_home):
@@ -440,3 +402,50 @@ def test_context_segment_detects_1m_model(fake_home, tmp_path):
     # 250k tokens / 1M cap = 25%
     assert "250.0k" in out, f"expected 250.0k tokens, got: {out!r}"
     assert "25%" in out, f"expected 25% (1M cap detected), got: {out!r}"
+
+
+def test_statusline_delegates_rather_than_computing_savings():
+    """The three replaced tests asserted a hand-rolled query. This asserts the
+    contract that replaced it: the script must not sum a savings column itself.
+
+    Their shared intent — DIRECT routings must be counted — now holds by
+    construction, because query_window unions savings_stats where those land.
+    """
+    import re as _re
+    from pathlib import Path as _P
+
+    script = (_P(__file__).resolve().parents[1]
+              / "src" / "llm_router" / "hooks" / "statusline-command.sh").read_text()
+
+    assert "query_window" in script, (
+        "statusline no longer delegates to dashboard_data.query_window — it is "
+        "computing savings itself again, which under-reports by reading one "
+        "table when the value spans five."
+    )
+    for column in ("saved_usd", "estimated_claude_cost_saved", "cost_saved_usd"):
+        assert not _re.search(
+            rf"SUM\s*\(\s*(COALESCE\s*\(\s*)?{column}\b", script, _re.I
+        ), f"statusline sums {column} directly again — see INV-COST-004"
+
+
+def test_the_savings_figure_is_labelled():
+    """A bare `$102.31` beside a quota percentage reads as SPEND.
+
+    That ambiguity is what prompted this whole change: the number meant savings,
+    looked like cost, and disagreed with two other surfaces. The label is not
+    decoration.
+    """
+    from pathlib import Path as _P
+
+    script = (_P(__file__).resolve().parents[1]
+              / "src" / "llm_router" / "hooks" / "statusline-command.sh").read_text()
+    # Match the RENDER line, not the file's header comment — which also contains
+    # 💰 and tripped the first version of this test. Third time today a textual
+    # check confused a mention for a use; the fix is always to anchor on the
+    # construct that does the work, here `parts+=(`.
+    render = [line for line in script.splitlines()
+              if "parts+=(" in line and "💰" in line]
+    assert render, "no 💰 render line found in the statusline script"
+    assert "today" in render[0], (
+        f"the 💰 segment carries no period label: {render[0].strip()}"
+    )

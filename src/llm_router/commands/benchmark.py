@@ -1,4 +1,4 @@
-"""``llm-router benchmark …`` — Plan 07 Cat G operational CLI.
+"""``llm_router benchmark …`` — Plan 07 Cat G operational CLI.
 
 Three subcommands:
 
@@ -65,8 +65,8 @@ def _cmd_list() -> int:
 
 
 def _cmd_run(argv: list[str]) -> int:
-    parser = argparse.ArgumentParser(prog="llm-router benchmark run")
-    parser.add_argument("name", help="Runner name (see `llm-router benchmark list`)")
+    parser = argparse.ArgumentParser(prog="llm_router benchmark run")
+    parser.add_argument("name", help="Runner name (see `llm_router benchmark list`)")
     parser.add_argument("--policy", default="standard")
     parser.add_argument("--split", default="full")
     parser.add_argument(
@@ -79,7 +79,7 @@ def _cmd_run(argv: list[str]) -> int:
     )
     parser.add_argument(
         "--version", default=__version__,
-        help="Version tag to store under (defaults to current llm-router version).",
+        help="Version tag to store under (defaults to current llm_router version).",
     )
     opts = parser.parse_args(argv)
 
@@ -191,7 +191,7 @@ def _coerce_task_type(raw: str | None):
 
 
 def _cmd_regress(argv: list[str]) -> int:
-    parser = argparse.ArgumentParser(prog="llm-router benchmark regress")
+    parser = argparse.ArgumentParser(prog="llm_router benchmark regress")
     parser.add_argument("--policy", required=True)
     parser.add_argument("--benchmark", required=True)
     parser.add_argument("--split", default=None)
@@ -226,7 +226,7 @@ def _cmd_regress(argv: list[str]) -> int:
 
 def _print_help(exit_code: int = 0) -> int:
     print(
-        "Usage: llm-router benchmark <subcommand> [options]\n"
+        "Usage: llm_router benchmark <subcommand> [options]\n"
         "\n"
         "Subcommands:\n"
         "  list                                 list registered benchmark runners\n"

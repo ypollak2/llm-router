@@ -1,0 +1,268 @@
+{"prompt": "What is a WAL? Keep it brief.", "task_type": "query", "subject": "trivia"}
+{"prompt": "Assess the security risks in the settings page.", "task_type": "analyze", "subject": "general"}
+{"prompt": "Define async I/O.", "task_type": "query", "subject": "general"}
+{"prompt": "Find current data on the newest open-weight models.", "task_type": "research", "subject": "business"}
+{"prompt": "Write a Java CLI.", "task_type": "code", "subject": "code"}
+{"prompt": "Implement a webhook handler in Python with error handling.", "task_type": "code", "subject": "code"}
+{"prompt": "Briefly, how CRISPR edits DNA?", "task_type": "query", "subject": "scientific"}
+{"prompt": "Assess the security risks in the search index.", "task_type": "analyze", "subject": "general"}
+{"prompt": "Write a blog intro.", "task_type": "generate", "subject": "creative"}
+{"prompt": "Implement a function in Swift with error handling.", "task_type": "code", "subject": "code"}
+{"prompt": "Debug why the sync daemon is slow and propose a fix.", "task_type": "analyze", "subject": "reasoning"}
+{"prompt": "What's the most recent news on grid-scale battery costs?", "task_type": "research", "subject": "general"}
+{"prompt": "Write product copy for a landing page.", "task_type": "generate", "subject": "creative"}
+{"prompt": "Assess the security risks in the sync daemon.", "task_type": "analyze", "subject": "general"}
+{"prompt": "Debug why the notification worker is slow and propose a fix.", "task_type": "analyze", "subject": "reasoning"}
+{"prompt": "Implement a class in Java with error handling.", "task_type": "code", "subject": "code"}
+{"prompt": "Debug why the auth service is slow and propose a fix.", "task_type": "analyze", "subject": "reasoning"}
+{"prompt": "Derive from first principles how mRNA vaccines work.", "task_type": "analyze", "subject": "physics"}
+{"prompt": "Implement a parser in Scala with error handling.", "task_type": "code", "subject": "code"}
+{"prompt": "Debug why the onboarding wizard is slow and propose a fix.", "task_type": "analyze", "subject": "reasoning"}
+{"prompt": "Write a C++ retry wrapper.", "task_type": "code", "subject": "code"}
+{"prompt": "Implement a queue consumer in TypeScript with error handling.", "task_type": "code", "subject": "code"}
+{"prompt": "Define a JWT.", "task_type": "query", "subject": "general"}
+{"prompt": "Write a PHP parser.", "task_type": "code", "subject": "code"}
+{"prompt": "Implement a cache layer in C++ with error handling.", "task_type": "code", "subject": "code"}
+{"prompt": "Explain a B-tree in one paragraph.", "task_type": "query", "subject": "general"}
+{"prompt": "Implement a pagination helper in Elixir with error handling.", "task_type": "code", "subject": "code"}
+{"prompt": "Implement a cache layer in Go with error handling.", "task_type": "code", "subject": "code"}
+{"prompt": "Find current data on recent airline mergers.", "task_type": "research", "subject": "business"}
+{"prompt": "Implement a serializer in Rust with error handling.", "task_type": "code", "subject": "code"}
+{"prompt": "Compute the sum of the first 20 squares. Show the number.", "task_type": "query", "subject": "math"}
+{"prompt": "Review the trade-offs of how gross margin drives valuation.", "task_type": "analyze", "subject": "general"}
+{"prompt": "Implement a connection pool in Rust with error handling.", "task_type": "code", "subject": "code"}
+{"prompt": "Draft a FAQ answer in a friendly tone.", "task_type": "generate", "subject": "creative"}
+{"prompt": "Prove that whether 91 is prime equals the claimed value, step by step.", "task_type": "analyze", "subject": "math"}
+{"prompt": "Draft a tagline in a friendly tone.", "task_type": "generate", "subject": "creative"}
+{"prompt": "Analyze when a warranty is implied.", "task_type": "analyze", "subject": "law"}
+{"prompt": "What is a REST API? Keep it brief.", "task_type": "query", "subject": "trivia"}
+{"prompt": "Derive from first principles how a heat pump moves heat.", "task_type": "analyze", "subject": "physics"}
+{"prompt": "Prove that the 10th Fibonacci number equals the claimed value, step by step.", "task_type": "analyze", "subject": "math"}
+{"prompt": "Draft an onboarding tooltip in a friendly tone.", "task_type": "generate", "subject": "creative"}
+{"prompt": "Implement a migration in TypeScript with error handling.", "task_type": "code", "subject": "code"}
+{"prompt": "Implement a rate limiter in Go with error handling.", "task_type": "code", "subject": "code"}
+{"prompt": "Rewrite a tagline to be more concise.", "task_type": "generate", "subject": "creative"}
+{"prompt": "Rewrite a launch email to be more concise.", "task_type": "generate", "subject": "creative"}
+{"prompt": "Write a Java webhook handler.", "task_type": "code", "subject": "code"}
+{"prompt": "Assess the security risks in the checkout form.", "task_type": "analyze", "subject": "general"}
+{"prompt": "What's the most recent news on the newest open-weight models?", "task_type": "research", "subject": "general"}
+{"prompt": "What's the most recent news on who acquired which robotics startup?", "task_type": "research", "subject": "general"}
+{"prompt": "Implement a rate limiter in Java with error handling.", "task_type": "code", "subject": "code"}
+{"prompt": "Write a PHP state machine.", "task_type": "code", "subject": "code"}
+{"prompt": "Write a Go pagination helper.", "task_type": "code", "subject": "code"}
+{"prompt": "Implement a parser in PHP with error handling.", "task_type": "code", "subject": "code"}
+{"prompt": "What's the most recent news on which studios greenlit sequels this year?", "task_type": "research", "subject": "general"}
+{"prompt": "Write a Swift retry wrapper.", "task_type": "code", "subject": "code"}
+{"prompt": "Write a Rust pagination helper.", "task_type": "code", "subject": "code"}
+{"prompt": "Explain content negotiation in one paragraph.", "task_type": "query", "subject": "general"}
+{"prompt": "Define eventual consistency.", "task_type": "query", "subject": "general"}
+{"prompt": "What is database indexing? Keep it brief.", "task_type": "query", "subject": "trivia"}
+{"prompt": "Research recent airline mergers and summarize the latest.", "task_type": "research", "subject": "general"}
+{"prompt": "Write a Go endpoint.", "task_type": "code", "subject": "code"}
+{"prompt": "Analyze the elements of a valid contract.", "task_type": "analyze", "subject": "law"}
+{"prompt": "Find current data on recent Series B rounds in fintech.", "task_type": "research", "subject": "business"}
+{"prompt": "Explain a semaphore in one paragraph.", "task_type": "query", "subject": "general"}
+{"prompt": "Write a PHP serializer.", "task_type": "code", "subject": "code"}
+{"prompt": "Compute the integral of x^2 from 0 to 3. Show the number.", "task_type": "query", "subject": "math"}
+{"prompt": "Derive from first principles how a transistor switches.", "task_type": "analyze", "subject": "physics"}
+{"prompt": "Write a Rust connection pool.", "task_type": "code", "subject": "code"}
+{"prompt": "Rewrite a cover letter to be more concise.", "task_type": "generate", "subject": "creative"}
+{"prompt": "Assess the security risks in the upload flow.", "task_type": "analyze", "subject": "general"}
+{"prompt": "What's the most recent news on the latest EU privacy ruling?", "task_type": "research", "subject": "general"}
+{"prompt": "Explain database indexing in one paragraph.", "task_type": "query", "subject": "general"}
+{"prompt": "Derive from first principles what makes a superconductor work.", "task_type": "analyze", "subject": "physics"}
+{"prompt": "Draft a pitch in a friendly tone.", "task_type": "generate", "subject": "creative"}
+{"prompt": "Find current data on the current state of quantum error correction.", "task_type": "research", "subject": "business"}
+{"prompt": "Implement a function in Rust with error handling.", "task_type": "code", "subject": "code"}
+{"prompt": "Write a Swift CLI.", "task_type": "code", "subject": "code"}
+{"prompt": "Explain OAuth in one paragraph.", "task_type": "query", "subject": "general"}
+{"prompt": "Implement a cache layer in Kotlin with error handling.", "task_type": "code", "subject": "code"}
+{"prompt": "Assess the security risks in the message queue.", "task_type": "analyze", "subject": "general"}
+{"prompt": "Write a Go rate limiter.", "task_type": "code", "subject": "code"}
+{"prompt": "What is a bloom filter? Keep it brief.", "task_type": "query", "subject": "trivia"}
+{"prompt": "Write a TypeScript function.", "task_type": "code", "subject": "code"}
+{"prompt": "Find current data on this month's semiconductor export rules.", "task_type": "research", "subject": "business"}
+{"prompt": "Rewrite a welcome message to be more concise.", "task_type": "generate", "subject": "creative"}
+{"prompt": "Explain async I/O in one paragraph.", "task_type": "query", "subject": "general"}
+{"prompt": "Rewrite a newsletter blurb to be more concise.", "task_type": "generate", "subject": "creative"}
+{"prompt": "Write a changelog entry.", "task_type": "generate", "subject": "creative"}
+{"prompt": "What is a semaphore? Keep it brief.", "task_type": "query", "subject": "trivia"}
+{"prompt": "Research this month's semiconductor export rules and summarize the latest.", "task_type": "research", "subject": "general"}
+{"prompt": "Review the trade-offs of how unit economics affect CAC payback.", "task_type": "analyze", "subject": "general"}
+{"prompt": "Explain a hash map in one paragraph.", "task_type": "query", "subject": "general"}
+{"prompt": "Implement a config loader in Ruby with error handling.", "task_type": "code", "subject": "code"}
+{"prompt": "Analyze how promissory estoppel applies.", "task_type": "analyze", "subject": "law"}
+{"prompt": "Prove that the gcd of 84 and 126 equals the claimed value, step by step.", "task_type": "analyze", "subject": "math"}
+{"prompt": "Research recent Series B rounds in fintech and summarize the latest.", "task_type": "research", "subject": "general"}
+{"prompt": "Define OAuth.", "task_type": "query", "subject": "general"}
+{"prompt": "Implement a config loader in Scala with error handling.", "task_type": "code", "subject": "code"}
+{"prompt": "Write a TypeScript rate limiter.", "task_type": "code", "subject": "code"}
+{"prompt": "Implement a queue consumer in Java with error handling.", "task_type": "code", "subject": "code"}
+{"prompt": "Draft product copy for a landing page in a friendly tone.", "task_type": "generate", "subject": "creative"}
+{"prompt": "Write a Kotlin migration.", "task_type": "code", "subject": "code"}
+{"prompt": "What is a B-tree? Keep it brief.", "task_type": "query", "subject": "trivia"}
+{"prompt": "Rewrite a short bio to be more concise.", "task_type": "generate", "subject": "creative"}
+{"prompt": "Define a REST API.", "task_type": "query", "subject": "general"}
+{"prompt": "Define memoization.", "task_type": "query", "subject": "general"}
+{"prompt": "Compute the limit of (1+1/n)^n. Show the number.", "task_type": "query", "subject": "math"}
+{"prompt": "Research this quarter's cloud revenue and summarize the latest.", "task_type": "research", "subject": "general"}
+{"prompt": "Draft a newsletter blurb in a friendly tone.", "task_type": "generate", "subject": "creative"}
+{"prompt": "Draft a launch email in a friendly tone.", "task_type": "generate", "subject": "creative"}
+{"prompt": "Find current data on the latest EU privacy ruling.", "task_type": "research", "subject": "business"}
+{"prompt": "What is eventual consistency? Keep it brief.", "task_type": "query", "subject": "trivia"}
+{"prompt": "Write release notes.", "task_type": "generate", "subject": "creative"}
+{"prompt": "Assess the security risks in the admin dashboard.", "task_type": "analyze", "subject": "general"}
+{"prompt": "What is memoization? Keep it brief.", "task_type": "query", "subject": "trivia"}
+{"prompt": "Implement a webhook handler in Ruby with error handling.", "task_type": "code", "subject": "code"}
+{"prompt": "Implement a pagination helper in C++ with error handling.", "task_type": "code", "subject": "code"}
+{"prompt": "Draft a changelog entry in a friendly tone.", "task_type": "generate", "subject": "creative"}
+{"prompt": "Compare memoization with an alternative and recommend one.", "task_type": "analyze", "subject": "reasoning"}
+{"prompt": "Derive from first principles how CRISPR edits DNA.", "task_type": "analyze", "subject": "physics"}
+{"prompt": "Write a Elixir webhook handler.", "task_type": "code", "subject": "code"}
+{"prompt": "Compare a REST API with an alternative and recommend one.", "task_type": "analyze", "subject": "reasoning"}
+{"prompt": "Fix the failing test in the message queue.", "task_type": "code", "subject": "code"}
+{"prompt": "Implement a endpoint in PHP with error handling.", "task_type": "code", "subject": "code"}
+{"prompt": "Implement a migration in Rust with error handling.", "task_type": "code", "subject": "code"}
+{"prompt": "Implement a webhook handler in Scala with error handling.", "task_type": "code", "subject": "code"}
+{"prompt": "Write a Swift queue consumer.", "task_type": "code", "subject": "code"}
+{"prompt": "Implement a migration in Swift with error handling.", "task_type": "code", "subject": "code"}
+{"prompt": "What is a foreign key? Keep it brief.", "task_type": "query", "subject": "trivia"}
+{"prompt": "Debug why the billing pipeline is slow and propose a fix.", "task_type": "analyze", "subject": "reasoning"}
+{"prompt": "Briefly, what makes a superconductor work?", "task_type": "query", "subject": "scientific"}
+{"prompt": "Implement a serializer in Go with error handling.", "task_type": "code", "subject": "code"}
+{"prompt": "Prove that whether 2^13 - 1 is prime equals the claimed value, step by step.", "task_type": "analyze", "subject": "math"}
+{"prompt": "Find current data on who acquired which robotics startup.", "task_type": "research", "subject": "business"}
+{"prompt": "Write a Python migration.", "task_type": "code", "subject": "code"}
+{"prompt": "Implement a retry wrapper in Swift with error handling.", "task_type": "code", "subject": "code"}
+{"prompt": "Write a Elixir rate limiter.", "task_type": "code", "subject": "code"}
+{"prompt": "Fix the failing test in the onboarding wizard.", "task_type": "code", "subject": "code"}
+{"prompt": "Implement a retry wrapper in Scala with error handling.", "task_type": "code", "subject": "code"}
+{"prompt": "Draft a welcome message in a friendly tone.", "task_type": "generate", "subject": "creative"}
+{"prompt": "Derive from first principles why the moon has phases.", "task_type": "analyze", "subject": "physics"}
+{"prompt": "What is async I/O? Keep it brief.", "task_type": "query", "subject": "trivia"}
+{"prompt": "Review the trade-offs of whether to lease or buy equipment.", "task_type": "analyze", "subject": "general"}
+{"prompt": "Prove that the integral of x^2 from 0 to 3 equals the claimed value, step by step.", "task_type": "analyze", "subject": "math"}
+{"prompt": "Briefly, why the moon has phases?", "task_type": "query", "subject": "scientific"}
+{"prompt": "Rewrite product copy for a landing page to be more concise.", "task_type": "generate", "subject": "creative"}
+{"prompt": "Define a hash map.", "task_type": "query", "subject": "general"}
+{"prompt": "Compute the gcd of 84 and 126. Show the number.", "task_type": "query", "subject": "math"}
+{"prompt": "What's the most recent news on recent Series B rounds in fintech?", "task_type": "research", "subject": "general"}
+{"prompt": "Write a Python serializer.", "task_type": "code", "subject": "code"}
+{"prompt": "Derive from first principles why the sky is blue.", "task_type": "analyze", "subject": "physics"}
+{"prompt": "Research which studios greenlit sequels this year and summarize the latest.", "task_type": "research", "subject": "general"}
+{"prompt": "Derive from first principles why ice floats.", "task_type": "analyze", "subject": "physics"}
+{"prompt": "Debug why the admin dashboard is slow and propose a fix.", "task_type": "analyze", "subject": "reasoning"}
+{"prompt": "Assess the security risks in the notification worker.", "task_type": "analyze", "subject": "general"}
+{"prompt": "Compute whether 91 is prime. Show the number.", "task_type": "query", "subject": "math"}
+{"prompt": "Review the trade-offs of whether to build or buy a feature.", "task_type": "analyze", "subject": "general"}
+{"prompt": "Implement a migration in Scala with error handling.", "task_type": "code", "subject": "code"}
+{"prompt": "Compute the roots of x^2 - 5x + 6. Show the number.", "task_type": "query", "subject": "math"}
+{"prompt": "Implement a scheduler in Swift with error handling.", "task_type": "code", "subject": "code"}
+{"prompt": "Write a Java migration.", "task_type": "code", "subject": "code"}
+{"prompt": "Prove that the roots of x^2 - 5x + 6 equals the claimed value, step by step.", "task_type": "analyze", "subject": "math"}
+{"prompt": "Write a Java endpoint.", "task_type": "code", "subject": "code"}
+{"prompt": "Write a FAQ answer.", "task_type": "generate", "subject": "creative"}
+{"prompt": "Write a Swift migration.", "task_type": "code", "subject": "code"}
+{"prompt": "What is a JWT? Keep it brief.", "task_type": "query", "subject": "trivia"}
+{"prompt": "Explain memoization in one paragraph.", "task_type": "query", "subject": "general"}
+{"prompt": "Compare OAuth with an alternative and recommend one.", "task_type": "analyze", "subject": "reasoning"}
+{"prompt": "Implement a parser in Swift with error handling.", "task_type": "code", "subject": "code"}
+{"prompt": "Implement a cache layer in Ruby with error handling.", "task_type": "code", "subject": "code"}
+{"prompt": "Write a Go function.", "task_type": "code", "subject": "code"}
+{"prompt": "Implement a class in Elixir with error handling.", "task_type": "code", "subject": "code"}
+{"prompt": "Debug why the search index is slow and propose a fix.", "task_type": "analyze", "subject": "reasoning"}
+{"prompt": "Write a PHP function.", "task_type": "code", "subject": "code"}
+{"prompt": "Assess the security risks in the export job.", "task_type": "analyze", "subject": "general"}
+{"prompt": "Rewrite a blog intro to be more concise.", "task_type": "generate", "subject": "creative"}
+{"prompt": "Compute the 10th Fibonacci number. Show the number.", "task_type": "query", "subject": "math"}
+{"prompt": "Research grid-scale battery costs and summarize the latest.", "task_type": "research", "subject": "general"}
+{"prompt": "Debug why the settings page is slow and propose a fix.", "task_type": "analyze", "subject": "reasoning"}
+{"prompt": "Compare a foreign key with an alternative and recommend one.", "task_type": "analyze", "subject": "reasoning"}
+{"prompt": "Write a press release.", "task_type": "generate", "subject": "creative"}
+{"prompt": "Explain a REST API in one paragraph.", "task_type": "query", "subject": "general"}
+{"prompt": "Define a semaphore.", "task_type": "query", "subject": "general"}
+{"prompt": "Add a unit test for the onboarding wizard.", "task_type": "code", "subject": "code"}
+{"prompt": "Write a Elixir migration.", "task_type": "code", "subject": "code"}
+{"prompt": "Debug why the checkout form is slow and propose a fix.", "task_type": "analyze", "subject": "reasoning"}
+{"prompt": "Write a TypeScript webhook handler.", "task_type": "code", "subject": "code"}
+{"prompt": "Draft a press release in a friendly tone.", "task_type": "generate", "subject": "creative"}
+{"prompt": "Find current data on current mortgage rates.", "task_type": "research", "subject": "business"}
+{"prompt": "Rewrite an onboarding tooltip to be more concise.", "task_type": "generate", "subject": "creative"}
+{"prompt": "Implement a CLI in Java with error handling.", "task_type": "code", "subject": "code"}
+{"prompt": "Compare a semaphore with an alternative and recommend one.", "task_type": "analyze", "subject": "reasoning"}
+{"prompt": "Research the AI chip market and summarize the latest.", "task_type": "research", "subject": "general"}
+{"prompt": "Compare a bloom filter with an alternative and recommend one.", "task_type": "analyze", "subject": "reasoning"}
+{"prompt": "Fix the failing test in the search index.", "task_type": "code", "subject": "code"}
+{"prompt": "Explain a JWT in one paragraph.", "task_type": "query", "subject": "general"}
+{"prompt": "What's the most recent news on current mortgage rates?", "task_type": "research", "subject": "general"}
+{"prompt": "Research the newest open-weight models and summarize the latest.", "task_type": "research", "subject": "general"}
+{"prompt": "Briefly, what causes ocean acidification?", "task_type": "query", "subject": "scientific"}
+{"prompt": "Define a circuit breaker.", "task_type": "query", "subject": "general"}
+{"prompt": "Define database indexing.", "task_type": "query", "subject": "general"}
+{"prompt": "Define content negotiation.", "task_type": "query", "subject": "general"}
+{"prompt": "What's the most recent news on this quarter's cloud revenue?", "task_type": "research", "subject": "general"}
+{"prompt": "Write a Elixir class.", "task_type": "code", "subject": "code"}
+{"prompt": "Rewrite a changelog entry to be more concise.", "task_type": "generate", "subject": "creative"}
+{"prompt": "Write a PHP config loader.", "task_type": "code", "subject": "code"}
+{"prompt": "Write a TypeScript scheduler.", "task_type": "code", "subject": "code"}
+{"prompt": "Explain a bloom filter in one paragraph.", "task_type": "query", "subject": "general"}
+{"prompt": "Derive from first principles how photosynthesis fixes carbon.", "task_type": "analyze", "subject": "physics"}
+{"prompt": "Compare a hash map with an alternative and recommend one.", "task_type": "analyze", "subject": "reasoning"}
+{"prompt": "Research current mortgage rates and summarize the latest.", "task_type": "research", "subject": "general"}
+{"prompt": "Analyze how consideration works in contract law.", "task_type": "analyze", "subject": "law"}
+{"prompt": "Write a tagline.", "task_type": "generate", "subject": "creative"}
+{"prompt": "What is content negotiation? Keep it brief.", "task_type": "query", "subject": "trivia"}
+{"prompt": "Implement a retry wrapper in Kotlin with error handling.", "task_type": "code", "subject": "code"}
+{"prompt": "Find current data on the AI chip market.", "task_type": "research", "subject": "business"}
+{"prompt": "Briefly, how a heat pump moves heat?", "task_type": "query", "subject": "scientific"}
+{"prompt": "Briefly, how a transistor switches?", "task_type": "query", "subject": "scientific"}
+{"prompt": "Implement a serializer in Elixir with error handling.", "task_type": "code", "subject": "code"}
+{"prompt": "Explain a foreign key in one paragraph.", "task_type": "query", "subject": "general"}
+{"prompt": "Compare async I/O with an alternative and recommend one.", "task_type": "analyze", "subject": "reasoning"}
+{"prompt": "Write a Ruby state machine.", "task_type": "code", "subject": "code"}
+{"prompt": "Implement a rate limiter in Rust with error handling.", "task_type": "code", "subject": "code"}
+{"prompt": "Write a C++ cache layer.", "task_type": "code", "subject": "code"}
+{"prompt": "Debug why the export job is slow and propose a fix.", "task_type": "analyze", "subject": "reasoning"}
+{"prompt": "Write a Ruby class.", "task_type": "code", "subject": "code"}
+{"prompt": "Write a Swift webhook handler.", "task_type": "code", "subject": "code"}
+{"prompt": "Implement a class in PHP with error handling.", "task_type": "code", "subject": "code"}
+{"prompt": "What's the most recent news on the current state of quantum error correction?", "task_type": "research", "subject": "general"}
+{"prompt": "Compute whether 2^13 - 1 is prime. Show the number.", "task_type": "query", "subject": "math"}
+{"prompt": "Compare a WAL with an alternative and recommend one.", "task_type": "analyze", "subject": "reasoning"}
+{"prompt": "Write a TypeScript cache layer.", "task_type": "code", "subject": "code"}
+{"prompt": "Write a Rust scheduler.", "task_type": "code", "subject": "code"}
+{"prompt": "Write a Ruby scheduler.", "task_type": "code", "subject": "code"}
+{"prompt": "Define a foreign key.", "task_type": "query", "subject": "general"}
+{"prompt": "Implement a function in Elixir with error handling.", "task_type": "code", "subject": "code"}
+{"prompt": "Write a short bio.", "task_type": "generate", "subject": "creative"}
+{"prompt": "Prove that the derivative of sin(x)cos(x) equals the claimed value, step by step.", "task_type": "analyze", "subject": "math"}
+{"prompt": "Write a PHP migration.", "task_type": "code", "subject": "code"}
+{"prompt": "Implement a queue consumer in PHP with error handling.", "task_type": "code", "subject": "code"}
+{"prompt": "Derive from first principles what causes ocean acidification.", "task_type": "analyze", "subject": "physics"}
+{"prompt": "Implement a retry wrapper in TypeScript with error handling.", "task_type": "code", "subject": "code"}
+{"prompt": "Implement a connection pool in Scala with error handling.", "task_type": "code", "subject": "code"}
+{"prompt": "Refactor the sync daemon to remove the duplicated logic.", "task_type": "code", "subject": "code"}
+{"prompt": "Implement a pagination helper in Kotlin with error handling.", "task_type": "code", "subject": "code"}
+{"prompt": "Write a Kotlin webhook handler.", "task_type": "code", "subject": "code"}
+{"prompt": "Find current data on grid-scale battery costs.", "task_type": "research", "subject": "business"}
+{"prompt": "Review the trade-offs of how to price a SaaS tier.", "task_type": "analyze", "subject": "general"}
+{"prompt": "Write a Rust webhook handler.", "task_type": "code", "subject": "code"}
+{"prompt": "Draft a short bio in a friendly tone.", "task_type": "generate", "subject": "creative"}
+{"prompt": "Rewrite release notes to be more concise.", "task_type": "generate", "subject": "creative"}
+{"prompt": "Write a launch email.", "task_type": "generate", "subject": "creative"}
+{"prompt": "Write a Elixir state machine.", "task_type": "code", "subject": "code"}
+{"prompt": "Write a TypeScript endpoint.", "task_type": "code", "subject": "code"}
+{"prompt": "Draft a cover letter in a friendly tone.", "task_type": "generate", "subject": "creative"}
+{"prompt": "Rewrite a pitch to be more concise.", "task_type": "generate", "subject": "creative"}
+{"prompt": "Implement a scheduler in Scala with error handling.", "task_type": "code", "subject": "code"}
+{"prompt": "Analyze the difference between negligence and strict liability.", "task_type": "analyze", "subject": "law"}
+{"prompt": "Compare a circuit breaker with an alternative and recommend one.", "task_type": "analyze", "subject": "reasoning"}
+{"prompt": "Implement a rate limiter in Elixir with error handling.", "task_type": "code", "subject": "code"}
+{"prompt": "Write an onboarding tooltip.", "task_type": "generate", "subject": "creative"}
+{"prompt": "Implement a rate limiter in Python with error handling.", "task_type": "code", "subject": "code"}
+{"prompt": "Explain a circuit breaker in one paragraph.", "task_type": "query", "subject": "general"}
+{"prompt": "Write a TypeScript CLI.", "task_type": "code", "subject": "code"}
+{"prompt": "Compute the derivative of sin(x)cos(x). Show the number.", "task_type": "query", "subject": "math"}
+{"prompt": "Research the latest EU privacy ruling and summarize the latest.", "task_type": "research", "subject": "general"}
+{"prompt": "Write a Kotlin pagination helper.", "task_type": "code", "subject": "code"}
+{"prompt": "Analyze what constitutes fair use.", "task_type": "analyze", "subject": "law"}

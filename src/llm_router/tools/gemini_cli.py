@@ -34,15 +34,17 @@ async def llm_gemini(
     # Log to usage table so dashboard includes direct llm_gemini calls
     try:
         from llm_router import cost
+        from llm_router.token_budget import count_tokens
         from llm_router.types import LLMResponse, RoutingProfile, TaskType
 
-        estimated_tokens = max(1, len(result.content) // 4)
+        # Gemini doesn't have a public tokenizer in tiktoken; cl100k_base
+        # under-counts by ~5–10% but beats chars/4 by a wide margin.
         await cost.log_usage(
             LLMResponse(
                 content=result.content,
                 model=f"gemini_cli/{result.model}",
-                input_tokens=max(1, len(prompt) // 4),
-                output_tokens=estimated_tokens,
+                input_tokens=count_tokens(prompt),
+                output_tokens=count_tokens(result.content),
                 cost_usd=0.0,  # free via Google One AI Pro subscription
                 latency_ms=result.duration_sec * 1000,
                 provider="gemini_cli",

@@ -1,7 +1,7 @@
 """PostToolUse[Agent] hook — track Claude Code subscription model calls.
 
 Fires after every Agent subagent completes. Writes an estimated usage record
-to the canonical llm-router SQLite database (~/.llm-router/usage.db) so the
+to the canonical llm_router SQLite database (~/.llm-router/usage.db) so the
 dashboard shows CC subscription Agent calls alongside external API calls and
 credits them against the right counterfactual baseline.
 
@@ -25,6 +25,19 @@ import sqlite3
 import sys
 from pathlib import Path
 
+try:
+    from llm_router import pricing as _pricing
+except ImportError:  # pragma: no cover — llm_router not importable from this interpreter
+    # This file is COPIED to ~/.claude/hooks/ and run standalone, so unlike the
+    # rest of the package its imports can genuinely fail — a half-removed
+    # install, or a hook still registered against a deleted venv. Before WP-03
+    # it imported nothing from llm_router, so this degradation path is new and has
+    # to be explicit: with no price source the hook records NOTHING rather than
+    # recording a zero. A zero here does not mean "no cost", it means "could not
+    # price this", and writing it to usage.db would understate every cost and
+    # inflate every savings figure derived from the row afterwards.
+    _pricing = None  # type: ignore[assignment]
+
 # subagent_type → model actually used
 _MODEL_MAP = {
     "Explore": "claude-haiku-4-5-20251001",
@@ -47,11 +60,23 @@ _BASELINE_HAIKU = "haiku"
 _BASELINE_SONNET = "sonnet"
 
 # USD per token. Used for potential_cost_usd / saved_usd estimation.
-_PRICES: dict[str, tuple[float, float]] = {
-    "claude-haiku-4-5-20251001": (0.25e-6, 1.25e-6),
-    "claude-sonnet-4-6":         (3.0e-6,  15.0e-6),
-    "claude-opus-4-6":           (15.0e-6, 75.0e-6),
-}
+#
+# WP-03: derived from llm_router.pricing. Every one of the three literals here was
+# wrong — Haiku at $0.25/$1.25 (a rate no current Haiku has had), Sonnet frozen
+# at the pre-intro tier, and Opus at the retired $15/$75. Note the units: this
+# table is per *token*, every other table is per *million*, and the 1e-6 suffix
+# is the only thing distinguishing them. Deriving both from one source removes
+# the chance of pasting a per-million rate into a per-token table.
+_PRICED_MODELS = ("claude-haiku-4-5-20251001", "claude-sonnet-4-6", "claude-opus-4-6")
+_PRICES: dict[str, tuple[float, float]] = (
+    {
+        _model: (_p.input / 1_000_000, _p.output / 1_000_000)
+        for _model in _PRICED_MODELS
+        if (_p := _pricing.price_for(_model)) is not None
+    }
+    if _pricing is not None
+    else {}
+)
 
 
 def _db_path() -> Path:
@@ -67,9 +92,18 @@ def _infer_baseline(subagent_type: str) -> str:
     return _BASELINE_HAIKU if subagent_type in _HAIKU_BASELINE_SUBAGENTS else _BASELINE_SONNET
 
 
-def _estimate_cost(model: str, input_tokens: int, output_tokens: int) -> float:
-    """Estimate counterfactual API cost — actual billing is $0 via subscription."""
-    in_p, out_p = _PRICES.get(model, _PRICES[_DEFAULT_MODEL])
+def _estimate_cost(model: str, input_tokens: int, output_tokens: int) -> float | None:
+    """Estimate counterfactual API cost — actual billing is $0 via subscription.
+
+    Returns ``None`` when no price is available, which the caller must treat as
+    "do not record", not as zero. See the guarded import at the top of the file.
+    """
+    if not _PRICES:
+        return None
+    rates = _PRICES.get(model) or _PRICES.get(_DEFAULT_MODEL)
+    if rates is None:
+        return None
+    in_p, out_p = rates
     return round(in_p * input_tokens + out_p * output_tokens, 8)
 
 
@@ -119,6 +153,10 @@ def _log_to_db(
             db.execute("PRAGMA journal_mode=WAL")
             _ensure_table(db)
             potential = _estimate_cost(model, input_tokens, output_tokens)
+            if potential is None:
+                # No price source (see the guarded import). Skip the row rather
+                # than persist a 0.00 that later reads as a measured cost.
+                return
             # cost_usd = 0 (subscription), so saved_usd = potential − 0 = potential.
             saved = potential
             db.execute(

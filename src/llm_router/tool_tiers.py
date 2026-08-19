@@ -19,30 +19,20 @@ from __future__ import annotations
 
 from typing import Callable
 
-CORE_TOOLS: frozenset[str] = frozenset({
-    "llm_query",
-    "llm_code",
-    "llm_research",
-    "llm_usage",
-})
-"""4-tool tier — essential tools only. Maximum token savings (~7,500 tokens saved)."""
-
-ROUTING_TOOLS: frozenset[str] = CORE_TOOLS | frozenset({
-    "llm_analyze",
-    "llm_generate",
-    "llm_classify",
-    "llm_route",
-    "llm_auto",
-    "llm_check_usage",
-    "llm_set_profile",
-    "llm_health",
-    "llm_session_spend",
-    "llm_session_savings",  # v10.1.0 — tier-grouped savings dashboard
-    "llm_savings",
-    "llm_reroute",
-    "llm_select_agent",
-})
-"""12-tool tier — routing + core admin tools. Recommended for most users (~5,000 tokens saved)."""
+# CHZ-SURF-01: the tier membership sets moved to `llm_router.tool_surface`, which is
+# stdlib-only and therefore loadable BY PATH from a routing hook running under an
+# interpreter that has no `llm_router` on sys.path. The hooks must be able to answer
+# "is this tool registered?" — when they could not, auto-route.py emitted legacy
+# tool names under the consolidated default and every hint 404'd.
+#
+# This module remains the documented home for the *gate*; the sets are re-exported
+# so existing imports (`from llm_router.tool_tiers import CORE_TOOLS`) keep working.
+# Do NOT redefine them here — one definition, one direction of dependency.
+from llm_router.tool_surface import (  # noqa: F401  (re-export)
+    CONSOLIDATED_TOOLS,
+    CORE_TOOLS,
+    ROUTING_TOOLS,
+)
 
 
 def make_should_register(slim: str) -> Callable[[str], bool]:
@@ -61,6 +51,8 @@ def make_should_register(slim: str) -> Callable[[str], bool]:
         return lambda name: name in CORE_TOOLS
     if slim == "routing":
         return lambda name: name in ROUTING_TOOLS
+    if slim == "consolidated":
+        return lambda name: name in CONSOLIDATED_TOOLS
     # "off" or any unknown value — register everything
     return lambda name: True
 
@@ -72,4 +64,6 @@ def tier_summary(slim: str) -> str:
         return f"core ({len(CORE_TOOLS)} tools — maximum token savings)"
     if slim == "routing":
         return f"routing ({len(ROUTING_TOOLS)} tools — recommended)"
-    return "off (all 43 tools — maximum compatibility)"
+    if slim == "consolidated":
+        return f"consolidated ({len(CONSOLIDATED_TOOLS)} front-door tools — North Star 1.0 surface)"
+    return "off (all tools — maximum compatibility)"

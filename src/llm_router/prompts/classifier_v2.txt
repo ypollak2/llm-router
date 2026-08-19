@@ -1,7 +1,25 @@
 Classify a user prompt along three dimensions. Respond with ONLY a single-line JSON object. No markdown, no explanation.
 
-Complexity: "simple" (facts, math, lookups), "moderate" (multi-step, code gen, writing), "complex" (architecture, research synthesis, novel algorithms), "deep_reasoning" (formal proofs, first-principles derivation, philosophical analysis, theorem proving, research synthesis requiring extended chain-of-thought)
-Task type: "query", "research", "generate", "analyze", "code"
-Subject: "general" (catchall — use when no other category clearly fits), "code" (programming, refactoring, debugging), "medical" (clinical, pharmacology, diagnosis), "math" (equations, proofs, calculations), "physics" (mechanics, EM, quantum), "history" (events, periodization, biography), "law" (statute, jurisprudence, contracts), "business" (finance, ops, strategy), "narrative" (reading comprehension, summarization, storytelling), "reasoning" (logic puzzles, multi-step inference), "cloze" (fill-blank, sense disambiguation), "trivia" (factoids, quick lookups), "scientific" (chemistry, biology, research methods), "creative" (writing, brainstorming, poetry), "meta" (questions about LLM behaviour itself)
+Complexity: "simple" (facts, math, lookups, brief explanations), "moderate" (multi-step tasks, code generation, writing, refactoring, implementation), "complex" (architecture design, research synthesis, novel algorithms), "deep_reasoning" (formal proofs, first-principles derivation, philosophical analysis, theorem proving, extended research synthesis)
 
-Example: {"complexity":"simple","task_type":"query","subject":"general","confidence":0.95,"reasoning":"factual lookup"}
+Task type — CRITICAL DISTINCTION:
+  * "query": Answer questions, explain concepts, describe ideas WITHOUT implementing/writing code
+    Examples: "How does X work?", "What's the difference between Y and Z?", "Analyze this design"
+  * "code": IMPLEMENT, BUILD, WRITE, REFACTOR, REDESIGN code/UI/features
+    Examples: "Build X component", "Fix the bug in Y", "Refactor Z", "Redesign the UI for...", "Implement feature X"
+  * "generate": Create content (text, creative writing, prose, non-code)
+    Examples: "Write a blog post about...", "Draft an email", "Brainstorm ideas"
+  * "research": Investigate topics, synthesize information, gather up-to-date/external data
+    Examples: "Research how X is used", "Find information about Y", "Analyze market trends"
+    IMPORTANT: "Find/look up the latest|current|recent|newest X", "current best practices for X",
+    "latest guidance/recommendations on X" → research (needs fresh external info), NOT query.
+  * "analyze": Examine/understand existing work, identify patterns, evaluate trade-offs
+    Examples: "Review this code", "Identify bottlenecks", "Compare approaches", "What are the pros/cons?"
+
+Subject: "general" (catchall), "code" (programming, refactoring, debugging), "medical" (clinical, pharmacology, diagnosis), "math" (equations, proofs, calculations), "physics" (mechanics, EM, quantum), "history" (events, periodization, biography), "law" (statute, jurisprudence, contracts), "business" (finance, ops, strategy), "narrative" (reading comprehension, summarization, storytelling), "reasoning" (logic puzzles, multi-step inference), "cloze" (fill-blank, sense disambiguation), "trivia" (factoids, quick lookups), "scientific" (chemistry, biology, research methods), "creative" (writing, brainstorming, poetry), "meta" (questions about LLM behaviour itself)
+
+Examples:
+  {"complexity":"simple","task_type":"query","subject":"general","confidence":0.95,"reasoning":"factual lookup"}
+  {"complexity":"moderate","task_type":"code","subject":"code","confidence":0.92,"reasoning":"user asks to redesign/build a UI component"}
+  {"complexity":"moderate","task_type":"analyze","subject":"general","confidence":0.88,"reasoning":"user wants evaluation/review of existing design"}
+  {"complexity":"simple","task_type":"query","subject":"general","confidence":0.9,"reasoning":"user asks how something works, needs explanation not implementation"}

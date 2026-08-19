@@ -103,15 +103,19 @@ class TestPreviouslyMisfiredPrompts:
         )
 
     def test_llm_router_fix_request_does_not_win_coordination(self, auto_route):
-        # Short prompt — length gate does NOT apply, but the trimmed
-        # intent regex no longer matches "continue", so coordination is
-        # at most tied with substantive categories rather than dominating.
-        text = "I want to continue with the fix for the llm-router and its branch"
+        """Fixed in v0.0.2 by expanding the 'fix' verb pattern in code
+        intent to match generic noun phrases with a required determiner.
+        See `(?:fix|patch|repair|resolve)\\s+(?:the\\s+|...)\\w+` in
+        SIGNALS['code']['intent']."""
+        text = "I want to continue with the fix for the llm_router and its branch"
         scores = auto_route.score_categories(text)
         winner = max(scores, key=lambda k: scores[k])
         assert winner != "coordination", (
             f"Substantive fix request still winning coordination: {scores}"
         )
+        # Specifically: code must win because "fix for the llm_router" is an
+        # implementation request, not a coordination ack.
+        assert winner == "code", f"Expected code, got {winner}: {scores}"
 
     def test_long_prompt_with_continue_and_test_does_not_score_coordination(
         self, auto_route

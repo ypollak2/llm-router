@@ -42,7 +42,7 @@ def mock_route_and_call(mock_llm_response):
 def test_routered_model_defaults():
     from llm_router.integrations.agno import RouteredModel
     m = RouteredModel()
-    assert m.id == "llm-router"
+    assert m.id == "llm_router"
     assert m.task_type == "query"
     assert m.profile == "balanced"
     assert m.model_override is None

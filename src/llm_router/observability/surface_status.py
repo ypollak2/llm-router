@@ -1,23 +1,20 @@
-"""Cross-surface "llm-router is working" status — one source of truth, many renderers.
+"""Cross-surface "LLM Router is working" status — one source of truth, many renderers.
 
-Every host (Claude Code, Codex, Gemini CLI, opencode, …) appends the same
-per-route record to ``~/.llm-router/savings_log.jsonl``, tagged with ``host``,
+Every host (Claude Code, Codex, Gemini CLI, opencode, clawcode, …) appends the
+same per-route record to ``~/.llm-router/savings_log.jsonl``, tagged with ``host``,
 ``model``, ``task_type``/``complexity`` and ``estimated_saved``. Claude Code's
 statusline already surfaces that; the other hosts flush it silently. This module
 turns the shared log into a single :class:`SurfaceStatus` and renders it the
 three ways hosts without a statusline API can show it:
 
-  * :func:`compact_line`     — an inline "⚡ llm-router · 🎯 hermes3:8b code/moderate · $0.03 · ✓" line
+  * :func:`compact_line`     — an inline "⚡ llm_router · 🎯 hermes3:8b code/moderate · $0.03 · ✓" line
   * :func:`terminal_title`   — an OSC escape that sets the terminal title bar
   * :func:`notification`     — an OS-notification payload (rate-limited), or None
 
-It answers all three indicator questions: *is llm-router active* (``active``),
+It answers all three indicator questions: *is llm_router active* (``active``),
 *what did it just route* (``last_model``/``last_task``), and *is it actually
 healthy* (``health``). Stdlib-only and fail-soft so hooks can import it on the
 critical path without slowing the host down.
-
-Ported from Chuzom's ``surface_status.py``; state dir and env vars renamed to
-llm-router's (``LLM_ROUTER_STATE_DIR`` / ``~/.llm-router``), no ``chuzom`` deps.
 """
 
 from __future__ import annotations
@@ -29,14 +26,15 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
+from llm_router.tool_surface import route_tool  # CHZ-SURF-01
 
-# ── State locations (overridable for tests via LLM_ROUTER_STATE_DIR) ─────────
+# ── State locations (overridable for tests via LLM_ROUTER_STATE_DIR) ─────────────
 def _state_dir() -> Path:
     return Path(os.environ.get("LLM_ROUTER_STATE_DIR", str(Path.home() / ".llm-router")))
 
 
 _SAVINGS_LOG = "savings_log.jsonl"
-_HEALTH_SNAPSHOT = "health.json"   # optional; written by a health check
+_HEALTH_SNAPSHOT = "health.json"   # optional; written by a future `llm_router doctor`
 
 # Routed within this many seconds → the host is considered actively routing.
 ACTIVE_WINDOW_S = 1800             # 30 min
@@ -65,7 +63,7 @@ _HOST_ALIASES: dict[str, set[str]] = {
     "codex": {"codex", "codex_cli", "codex-cli"},
     "gemini_cli": {"gemini_cli", "gemini-cli", "gemini"},
     "opencode": {"opencode", "open-code"},
-    "cursor": {"cursor"},
+    "clawcode": {"clawcode", "claw_code", "claw-code"},
     "desktop": {"desktop", "claude_desktop"},
 }
 
@@ -76,7 +74,7 @@ def _host_match_set(host: str) -> set[str]:
 
 @dataclass
 class SurfaceStatus:
-    """A host's current llm-router state, derived from the shared savings log."""
+    """A host's current LLM Router state, derived from the shared savings log."""
 
     host: str
     active: bool                      # routed within ACTIVE_WINDOW_S
@@ -132,10 +130,11 @@ def _read_tail(path: Path, max_lines: int = 500) -> list[dict]:
 def _read_stats_records(max_rows: int = 2000) -> list[dict]:
     """Durable savings records from the ``savings_stats`` SQLite table.
 
-    ``savings_log.jsonl`` is a transient buffer that an importer flushes into
-    ``savings_stats`` and truncates. Reading ``savings_stats`` gives the durable,
-    host-tagged history. Mapped to the same record shape as the jsonl. Never
-    raises — a missing table/db just yields no rows.
+    ``savings_log.jsonl`` is a transient buffer — ``import_savings_log()`` flushes
+    it into ``savings_stats`` and truncates the file. So the file alone leaves the
+    indicators blind after any import. Reading ``savings_stats`` gives the durable,
+    host-tagged history (and captures gateway/external traffic once it's imported).
+    Mapped to the same record shape as the jsonl. Never raises.
     """
     import sqlite3
 
@@ -197,8 +196,8 @@ def _parse_ts(rec: dict) -> Optional[float]:
 
 
 def _providers_available(now: float, records: list[dict]) -> bool:
-    """True if the router can reach *something* — an API key is set, or a local
-    model answered recently."""
+    """True if LLM Router can route *something* — an API key is set, a local model
+    answered recently, or any successful route exists in the log at all."""
     if any(os.environ.get(k) for k in _PROVIDER_KEYS):
         return True
     # A recent local (ollama) route proves a model is reachable without a key.
@@ -213,7 +212,7 @@ def _providers_available(now: float, records: list[dict]) -> bool:
 
 def _read_health_snapshot(now: float) -> Optional[tuple[str, str]]:
     """Optional explicit health override from ``~/.llm-router/health.json`` if a
-    healthcheck wrote one recently. Returns (health, reason) or None."""
+    doctor/healthcheck wrote one recently. Returns (health, reason) or None."""
     path = _state_dir() / _HEALTH_SNAPSHOT
     try:
         data = json.loads(path.read_text())
@@ -322,13 +321,13 @@ def _compute_health(
         return HEALTH_DOWN, "no model provider reachable (no API key / local model)"
 
     if _is_usage_stale(now):
-        return HEALTH_DEGRADED, "usage data stale (>30 min)"
+        return HEALTH_DEGRADED, f"usage data stale (>30 min) — run {route_tool('llm_check_usage')}"
 
     return HEALTH_OK, "routing normally"
 
 
 # ── Renderers ────────────────────────────────────────────────────────────────
-# Minimal 16-color ANSI (portable; truecolor is reserved for a richer statusline).
+# Minimal 16-color ANSI (portable; truecolor is reserved for the CC statusline).
 _C = {
     "dim": "\033[2m",
     "reset": "\033[0m",
@@ -363,7 +362,7 @@ def _supports_color() -> bool:
 def compact_line(status: SurfaceStatus, color: Optional[bool] = None) -> str:
     """A one-line inline indicator suitable for hosts that print hook stdout.
 
-    Example: ``⚡ llm-router · 🎯 hermes3:8b code/moderate · 💰 $0.03 saved · ✓``
+    Example: ``⚡ llm_router · 🎯 hermes3:8b code/moderate · 💰 $0.03 saved · ✓``
     When the host is down or has never routed, the line says so plainly rather
     than implying a route happened.
     """
@@ -373,7 +372,7 @@ def compact_line(status: SurfaceStatus, color: Optional[bool] = None) -> str:
     def c(text: str, name: str) -> str:
         return f"{_C[name]}{text}{_C['reset']}" if color else text
 
-    parts = [c("⚡ llm-router", "cyan")]
+    parts = [c("⚡ llm_router", "cyan")]
 
     if status.last_model:
         route = f"🎯 {status.short_model()}"
@@ -401,13 +400,13 @@ def terminal_title(status: SurfaceStatus) -> str:
     """An OSC-2 escape string that sets the terminal window/tab title.
 
     Caller writes the return value to the controlling tty (``/dev/tty``) or
-    stderr. Title stays short: ``⚡ llm-router: hermes3:8b · $0.03 ✓``.
+    stderr. Title stays short: ``⚡ llm_router: hermes3:8b · $0.03 ✓``.
     """
     model = status.short_model() if status.last_model else "idle"
     saved = f" · ${status.saved_session:.2f}" if status.saved_session > 0 else ""
     _tok = fmt_tokens(status.last_tokens)
     tok = f" · {_tok}" if _tok else ""
-    title = f"⚡ llm-router: {model}{tok}{saved} {status.health_glyph()}"
+    title = f"⚡ llm_router: {model}{tok}{saved} {status.health_glyph()}"
     # OSC 2 ; <title> BEL
     return f"\033]2;{title}\007"
 
@@ -421,8 +420,8 @@ def notification(
 ) -> Optional[dict]:
     """Build an OS-notification payload, or None when it should be suppressed.
 
-    Rate-limited per (host, event-class) via ``~/.llm-router/notify_<host>.json``
-    so routine "routed" pings fire at most once per ``min_interval_s``. Health
+    Rate-limited per (host, event-class) via ``~/.llm-router/notify_<host>.json`` so
+    routine "routed" pings fire at most once per ``min_interval_s``. Health
     transitions to ``down``/``degraded`` are de-duplicated (only fire when the
     state changes) but never throttled, so failures surface immediately.
 
@@ -443,7 +442,7 @@ def notification(
         # Fire only on a state change; not throttled.
         if last.get("health") != status.health:
             payload = {
-                "title": f"⚠ llm-router {status.health} on {status.host}",
+                "title": f"⚠ LLM Router {status.health} on {status.host}",
                 "message": status.health_reason,
                 "urgency": "critical" if status.health == HEALTH_DOWN else "normal",
             }
@@ -456,7 +455,7 @@ def notification(
                 else ""
             )
             payload = {
-                "title": f"⚡ llm-router routing on {status.host}",
+                "title": f"⚡ LLM Router routing on {status.host}",
                 "message": f"→ {status.short_model()} ({status.last_task or 'route'}){saved}",
                 "urgency": "low",
             }
@@ -483,7 +482,7 @@ def _send_os_notification(payload: dict) -> None:
     import shutil
     import subprocess
 
-    title = str(payload.get("title", "llm-router"))
+    title = str(payload.get("title", "LLM Router"))
     message = str(payload.get("message", ""))
     try:
         system = platform.system()
@@ -593,7 +592,7 @@ def emit_indicator(
     return status
 
 
-# ── CLI (used by a statusline segment and by scripts) ────────────────────────
+# ── CLI (used by the Claude Code statusline and by scripts) ──────────────────
 def _main(argv: list[str]) -> int:
     """`python -m llm_router.observability.surface_status <host> [--glyph|--line]`.
 

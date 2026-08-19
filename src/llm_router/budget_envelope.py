@@ -1,110 +1,112 @@
-# Ported from Chuzom's budget_envelope.py; env vars renamed to LLM_ROUTER_*;
-# data source rewired to llm-router's layer. `BudgetEnvelope` is reused
-# unchanged from the frozen `llm_router.contracts` (WS0) instead of being
-# redefined here. Chuzom's `BudgetKey` is a `(tenant_id, org_id, user_id,
-# agent_id, scope)` dataclass -- a multi-tenant concept that has no equivalent
-# in llm-router's single-user CLI product. `contracts.BudgetEnvelope.key` is
-# already typed as a plain `str` ("Chuzom's `BudgetKey`; documented here as
-# `str` (opaque key type)") and contracts.py's own comment licenses this
-# workstream to "port the real implementation against llm-router's own budget
-# key/store types" -- so `BudgetKey` here is simply `str`; callers are free to
-# use whatever scoping scheme they like (e.g. ``"session:<id>"``,
-# ``"daily:<date>"``, ``"monthly:<yyyy-mm>"``).
-#
-# Chuzom additionally mirrors every reservation into a second, module-level
-# ``_pending_spend_by_key`` dict in ``chuzom.budget`` (deliberately duplicated
-# there so other subsystems can see chuzom's reservations without depending on
-# the envelope manager). llm-router does not have -- and this port does not
-# introduce -- that second store: this manager's own ``_pending`` dict is the
-# single source of truth for envelope accounting, per the "no parallel spend
-# store" constraint on this port. `reset_manager_for_tests()` therefore only
-# needs to reset this module's own singleton, unlike chuzom's version, which
-# also calls out to ``chuzom.budget.reset_pending_spend_for_tests()``.
-#
-# WS5 ships this module standalone, gated by `LLM_ROUTER_BUDGET_ENVELOPE`
-# (default off): with the flag off, nothing in this module is invoked by the
-# router, so routing/spend behavior stays byte-identical to pre-WS5 llm-router.
-# Wiring this manager into the live dispatch loop's existing `_pending_spend`
-# reserve/release sites is intentionally deferred -- see the migration plan's
-# "envelope-vs-pending-spend" ADR item -- rather than risking a correctness
-# regression in that call path within an otherwise fully-independent
-# workstream.
-"""Budget envelope: atomic reserve -> commit/release/settle spend accounting.
+"""T2-M2: per-identity ``BudgetEnvelope`` with parent-child propagation.
 
-Ported from Chuzom's T2-M2/T2-M3 budget-envelope work: caps (and optional
-soft-cap alerting tiers) on a key, with parent-child cap propagation (a
-child's spend also debits every ancestor envelope in its chain) and atomic
-check-then-charge accounting guarded by a single ``asyncio.Lock`` (in-process
-only; multi-process/multi-worker accounting is out of scope here, same as
-upstream).
+Builds on T2-M1's ``BudgetKey`` (shape) and per-key reservation
+primitives (``reserve_for`` / ``release_for``) by adding:
 
-Typical protocol for a single call:
+* **Caps.** Each envelope has a ``cap_usd``; the manager refuses
+  reservations that would push consumed+pending over the cap.
+* **Parent propagation.** A child envelope declares its parents; a
+  reservation on the child is checked against every parent's cap
+  atomically. If any envelope in the chain would breach, the
+  reservation is refused and **no** envelope is changed.
+* **Atomic check-then-charge** under an in-process ``asyncio.Lock``.
+  T2-L1 will replace this with a distributed-safe backend; the
+  in-process correctness is the shape T2-L1 has to honour.
 
-    mgr = get_manager()
-    mgr.register("session:abc123", cap_usd=5.0)
-    if not await mgr.try_reserve("session:abc123", estimated_cost):
-        ...refuse / downgrade...
-    try:
-        actual_cost = await do_the_call()
-    finally:
-        await mgr.settle("session:abc123", estimated_cost, actual_cost)
+Today's accounting is in-process only. Single-process deployments
+get correct behaviour; multi-process / multi-host coordination lands
+in T2-XL1 (per-tenant single-writer or central event stream — the
+Q-P-2 hybrid A→B path explicitly defers this to Phase 3b).
 
-``settle`` is the preferred single-call finish: it atomically undoes the
-reservation and records the real spend in one lock acquisition. ``release``
-followed by ``commit(..., settle_pending=False)`` is equivalent but takes two
-lock acquisitions and is only worth using when the two steps genuinely happen
-at different times (see ``commit``'s docstring for the exact protocol).
+Contract:
+
+* ``register(key, cap_usd, parents=())`` — register or replace an
+  envelope. Re-registering a key with a different cap is allowed;
+  parent set must remain a subset of previously-known envelopes.
+* ``try_reserve(key, cost_usd)`` — async. Returns ``True`` and
+  reserves ``cost_usd`` on self + each parent. Returns ``False`` if
+  any envelope would breach; no changes made.
+* ``release(key, cost_usd)`` — async. Reverts a prior ``try_reserve``
+  on self + parents (cancel / refund path).
+* ``commit(key, cost_usd)`` — async. Moves ``cost_usd`` from
+  pending to consumed on self + parents (success path).
+* ``consumed(key)`` / ``pending(key)`` / ``remaining(key)`` —
+  introspection accessors. Non-async because they read snapshot
+  values; concurrent mutations may produce strictly-monotone-ish
+  numbers, which is the correct semantic for a metric.
+
+See: Docs/audit/post-remediation/GAP_ANALYSIS.md G-002 (parent-child
+budget propagation slice of the per-identity budget cluster).
 """
-
 from __future__ import annotations
 
 import asyncio
-import os
+from dataclasses import dataclass, field
 
-from llm_router.contracts import BudgetEnvelope
+from llm_router.budget import release_for, reserve_for
+from llm_router.budget_key import BudgetKey
 from llm_router.logging import get_logger
 
 log = get_logger("llm_router.budget_envelope")
 
-# Chuzom's `BudgetKey` is a tenant/org/user/agent dataclass; llm-router has no
-# multi-tenant concept, so the key is simply an opaque string (see the module
-# provenance header above for the full rationale).
-BudgetKey = str
 
-__all__ = [
-    "BudgetEnvelope",
-    "BudgetEnvelopeManager",
-    "BudgetKey",
-    "budget_envelope_enabled",
-    "get_manager",
-    "reset_manager_for_tests",
-]
+@dataclass(frozen=True)
+class BudgetEnvelope:
+    """Static description of one envelope.
 
+    The dynamic state (consumed_usd, pending tally) lives in the
+    manager — the envelope is just the *contract*: which key, what
+    cap, which parents to debit on every reservation.
 
-def budget_envelope_enabled() -> bool:
-    """WS5 ships flag-off: envelope accounting is only active when explicitly
-    enabled -- it never drives a live routing/spend decision by default (the
-    live dispatch loop's existing `_pending_spend` mechanism is untouched)."""
-    return os.environ.get("LLM_ROUTER_BUDGET_ENVELOPE", "").strip().lower() in (
-        "1",
-        "on",
-        "true",
-        "yes",
-    )
+    Tier semantics (T2-M3):
+
+    * ``cap_usd`` is the **hard** cap. Reservations that would push
+      consumed+pending above it are refused atomically — see
+      ``BudgetEnvelopeManager.try_reserve``.
+    * ``soft_cap_usd`` (optional) is a **soft** alerting threshold.
+      Reservations that cross it succeed but the manager records the
+      transition; operators can query ``tier_state(key)`` to surface
+      alerts (e.g. dashboards, paging) without changing the
+      enforcement contract.
+    * Forecast / predictive tiers are deferred to T2-L1 — they need
+      cross-instance burn-rate data that an in-process manager cannot
+      compute correctly under multi-instance load.
+
+    ``soft_cap_usd`` must be ``None`` or strictly less than
+    ``cap_usd``; an equal or larger soft cap would be a no-op or
+    nonsensical and is rejected at registration.
+    """
+
+    key: BudgetKey
+    cap_usd: float
+    parents: tuple[BudgetKey, ...] = field(default_factory=tuple)
+    # T2-M3: optional soft alerting threshold. None = no soft tier.
+    soft_cap_usd: float | None = None
 
 
 class BudgetEnvelopeManager:
-    """In-process, lock-guarded budget envelope accounting.
+    """In-process atomic manager for BudgetEnvelope state.
 
-    Implements the 10 instance methods documented in
-    ``llm_router.contracts.BUDGET_ENVELOPE_API`` exactly (method names,
-    parameter names/order/defaults, return types).
+    Single coarse asyncio.Lock around mutations: correct for the
+    in-process case, simple to reason about, and gives T2-L1 a
+    concrete reference behaviour to match when the distributed
+    backend lands.
     """
 
     def __init__(self) -> None:
         self._envelopes: dict[BudgetKey, BudgetEnvelope] = {}
         self._consumed: dict[BudgetKey, float] = {}
+        # Per-key pending in addition to budget._pending_spend_by_key.
+        # The duplication is deliberate: the global dict carries every
+        # reservation llm_router makes anywhere; this dict scopes to
+        # envelopes specifically so a release on the envelope manager
+        # doesn't accidentally floor a reservation that some other
+        # subsystem made on the same key.
         self._pending: dict[BudgetKey, float] = {}
+        # T2-M3: per-key soft-tier state. True once consumed+pending
+        # crosses soft_cap_usd. The value flips back to False on a
+        # release that brings the total back below the soft cap, so
+        # callers polling ``tier_state`` see consistent transitions.
         self._soft_breached: dict[BudgetKey, bool] = {}
         self._lock = asyncio.Lock()
 
@@ -116,24 +118,35 @@ class BudgetEnvelopeManager:
         parents: tuple[BudgetKey, ...] = (),
         soft_cap_usd: float | None = None,
     ) -> BudgetEnvelope:
-        """Register (or re-register) an envelope for *key*.
+        """Register or replace an envelope.
 
-        Re-registering an already-known key preserves its existing
-        consumed/pending/soft-breach accounting (only the cap/parents/soft-cap
-        shape is replaced) via ``setdefault`` below.
+        ``cap_usd`` must be positive; ``parents`` may name keys that
+        were not yet registered — they will be honoured if/when they
+        are. A re-register preserves any existing consumed/pending
+        totals so a long-lived parent re-registered with a higher cap
+        does not lose its accounting history.
+
+        T2-M3: ``soft_cap_usd`` (optional) sets a soft alerting
+        threshold. Must be strictly less than ``cap_usd`` when
+        provided — equal or larger would be a no-op or nonsensical.
         """
         if cap_usd <= 0:
             raise ValueError(f"cap_usd must be positive, got {cap_usd!r}")
-        if soft_cap_usd is not None and not (0 < soft_cap_usd < cap_usd):
-            raise ValueError(
-                f"soft_cap_usd must be > 0 and < cap_usd, got {soft_cap_usd!r} "
-                f"(cap_usd={cap_usd!r})"
-            )
+        if soft_cap_usd is not None:
+            if soft_cap_usd <= 0:
+                raise ValueError(
+                    f"soft_cap_usd must be positive, got {soft_cap_usd!r}"
+                )
+            if soft_cap_usd >= cap_usd:
+                raise ValueError(
+                    f"soft_cap_usd ({soft_cap_usd}) must be strictly less "
+                    f"than cap_usd ({cap_usd})"
+                )
         env = BudgetEnvelope(
             key=key,
-            cap_usd=cap_usd,
+            cap_usd=float(cap_usd),
             parents=tuple(parents),
-            soft_cap_usd=soft_cap_usd,
+            soft_cap_usd=float(soft_cap_usd) if soft_cap_usd is not None else None,
         )
         self._envelopes[key] = env
         self._consumed.setdefault(key, 0.0)
@@ -151,130 +164,146 @@ class BudgetEnvelopeManager:
         return self._pending.get(key, 0.0)
 
     def remaining(self, key: BudgetKey) -> float:
-        """Cap minus consumed minus pending; unbounded (``inf``) if *key* was
-        never registered -- an unregistered key means "no enforcement"."""
+        """``cap - consumed - pending`` floored at zero; ``inf`` for
+        keys without a registered envelope (no enforcement)."""
         env = self._envelopes.get(key)
         if env is None:
             return float("inf")
-        used = self._consumed.get(key, 0.0) + self._pending.get(key, 0.0)
-        return max(0.0, env.cap_usd - used)
+        return max(
+            0.0,
+            env.cap_usd - self._consumed.get(key, 0.0) - self._pending.get(key, 0.0),
+        )
 
     def _chain(self, key: BudgetKey) -> list[BudgetEnvelope]:
-        """Return ``[self_env, *ancestor_envs]`` for *key*.
+        """Return [self_env, *ancestor_envs] for the registered envelopes
+        in the parent chain. Unregistered parents are silently
+        skipped — caller knows what envelopes it registered.
 
-        Ported from Chuzom's RED1-6-01 fix: a naive walk that only visits the
-        *direct* parents misses transitive grandparents, silently under-
-        propagating a debit past the first ancestor. This does a BFS over the
-        full parent graph with a ``seen`` cycle guard (a cap graph should never
-        have cycles, but a guard costs nothing and avoids an infinite loop if
-        one is ever misconfigured). Unregistered parent keys are skipped
-        silently -- they carry no cap to enforce.
-        """
-        env = self._envelopes.get(key)
-        if env is None:
-            return []
-        chain: list[BudgetEnvelope] = [env]
-        seen: set[BudgetKey] = {key}
-        queue: list[BudgetKey] = list(env.parents)
+        RED1-6-01: walks the chain TRANSITIVELY (breadth-first with a cycle
+        guard) so a cap 2+ levels up (org → user → agent) is settled/enforced,
+        not just the leaf's immediate parents."""
+        out: list[BudgetEnvelope] = []
+        seen: set = set()
+        queue: list[BudgetKey] = [key]
         while queue:
-            pkey = queue.pop(0)
-            if pkey in seen:
+            k = queue.pop(0)
+            if k in seen:
                 continue
-            seen.add(pkey)
-            penv = self._envelopes.get(pkey)
-            if penv is None:
+            seen.add(k)
+            env = self._envelopes.get(k)
+            if env is None:
                 continue
-            chain.append(penv)
-            queue.extend(penv.parents)
-        return chain
+            out.append(env)
+            for parent_key in env.parents:
+                if parent_key not in seen:
+                    queue.append(parent_key)
+        return out
 
     async def try_reserve(self, key: BudgetKey, cost_usd: float) -> bool:
-        """Atomically reserve *cost_usd* against *key* and every ancestor.
+        """Atomic: walk self + parents; if every cap accommodates
+        ``cost_usd`` on top of (consumed + pending), commit the
+        reservation on each and return True. Otherwise return False
+        and leave every envelope unchanged.
 
-        Refuses (returns ``False``) with NO mutation at all if any envelope in
-        the chain would be pushed over its cap. An unregistered *key* always
-        succeeds (no envelope means no enforcement).
+        Non-positive ``cost_usd`` is a no-op that returns True.
         """
         if cost_usd <= 0:
             return True
         async with self._lock:
             chain = self._chain(key)
             if not chain:
+                # No envelope registered → no enforcement.
                 return True
             for env in chain:
-                used = self._consumed.get(env.key, 0.0) + self._pending.get(env.key, 0.0)
-                if used + cost_usd > env.cap_usd:
+                projected = (
+                    self._consumed.get(env.key, 0.0)
+                    + self._pending.get(env.key, 0.0)
+                    + cost_usd
+                )
+                if projected > env.cap_usd:
                     return False
+            # All checks passed; commit pending on each.
             for env in chain:
-                self._pending[env.key] = self._pending.get(env.key, 0.0) + cost_usd
+                self._pending[env.key] = (
+                    self._pending.get(env.key, 0.0) + cost_usd
+                )
+                reserve_for(env.key, cost_usd)
                 self._update_soft_state(env)
             return True
 
     async def release(self, key: BudgetKey, cost_usd: float) -> None:
-        """Undo a reservation on *key* and every ancestor (floors at 0)."""
+        """Revert a prior ``try_reserve``. Cancel / refund path."""
         if cost_usd <= 0:
             return
         async with self._lock:
-            for env in self._chain(key):
+            chain = self._chain(key)
+            for env in chain:
                 current = self._pending.get(env.key, 0.0)
                 self._pending[env.key] = max(0.0, current - cost_usd)
+                release_for(env.key, cost_usd)
                 self._update_soft_state(env)
 
-    async def commit(self, key: BudgetKey, cost_usd: float, *, settle_pending: bool = True) -> None:
-        """Move *cost_usd* into consumed spend for *key* and every ancestor.
+    async def commit(
+        self, key: BudgetKey, cost_usd: float, *, settle_pending: bool = True
+    ) -> None:
+        """Move ``cost_usd`` from pending to consumed on self + parents.
 
-        Ported from Chuzom's RED1-5-01 fix. Two valid call protocols:
+        Success path: caller called ``try_reserve(key, estimated)``,
+        the provider returned with ``actual_cost``, caller calls
+        ``release(key, estimated)`` to undo the reservation exactly and then
+        ``commit(key, actual_cost, settle_pending=False)`` to record true spend
+        without touching pending again. ``settle_pending=True`` (the default)
+        keeps the standalone "move pending→consumed" behaviour for callers that
+        do not release separately.
 
-        * Reserved via ``try_reserve`` and now committing the *same* amount in
-          one shot: call ``commit(cost_usd, settle_pending=True)`` (the
-          default) -- this both records the spend AND clears the matching
-          reservation.
-        * Already released the reservation separately (e.g. via ``release``)
-          and is now recording actual spend on its own: call
-          ``commit(cost_usd, settle_pending=False)``. Passing
-          ``settle_pending=True`` here would decrement ``pending`` a second
-          time for the same reservation.
-
-        When in doubt, prefer :meth:`settle`, which does both steps
-        atomically under a single lock acquisition.
+        RED1-5-01: when ``settle_pending`` is False, pending is NOT decremented
+        here (release already did it). Decrementing twice erased a concurrent
+        sibling's outstanding reservation on a shared key and let a third caller
+        exceed the cap.
         """
         if cost_usd <= 0:
             return
         async with self._lock:
-            for env in self._chain(key):
-                self._consumed[env.key] = self._consumed.get(env.key, 0.0) + cost_usd
+            chain = self._chain(key)
+            for env in chain:
+                self._consumed[env.key] = (
+                    self._consumed.get(env.key, 0.0) + cost_usd
+                )
                 if settle_pending:
-                    current = self._pending.get(env.key, 0.0)
-                    self._pending[env.key] = max(0.0, current - cost_usd)
+                    # Standalone callers: decrement pending to match.
+                    self._pending[env.key] = max(
+                        0.0, self._pending.get(env.key, 0.0) - cost_usd
+                    )
+                    release_for(env.key, cost_usd)
                 self._update_soft_state(env)
 
-    async def settle(self, key: BudgetKey, est_cost_usd: float, actual_cost_usd: float) -> None:
-        """Atomically undo a reservation and record real spend in one lock hold.
-
-        Ported from Chuzom's RED1-7-01 fix: doing this as two separate calls
-        (``release(est)`` then ``commit(actual, settle_pending=False)``) opens
-        a window -- between the two lock acquisitions -- where a concurrent
-        ``try_reserve`` can observe the reservation already gone but the real
-        spend not yet recorded, letting it slip past a cap it should have been
-        blocked by. ``settle`` closes that window by doing both under one
-        lock acquisition.
-        """
+    async def settle(
+        self, key: BudgetKey, est_cost_usd: float, actual_cost_usd: float
+    ) -> None:
+        """RED1-7-01: atomically undo the reservation (pending -= est) and record
+        the real spend (consumed += actual) under a SINGLE lock-hold, so a
+        concurrent try_reserve cannot observe the reservation as gone while the
+        spend has not yet landed (which allowed a shared cap to be breached)."""
         if est_cost_usd <= 0 and actual_cost_usd <= 0:
             return
+        est = float(est_cost_usd or 0.0)
+        actual = float(actual_cost_usd or 0.0)
         async with self._lock:
             for env in self._chain(key):
-                if est_cost_usd > 0:
-                    current = self._pending.get(env.key, 0.0)
-                    self._pending[env.key] = max(0.0, current - est_cost_usd)
-                if actual_cost_usd > 0:
-                    self._consumed[env.key] = self._consumed.get(env.key, 0.0) + actual_cost_usd
+                self._consumed[env.key] = self._consumed.get(env.key, 0.0) + actual
+                self._pending[env.key] = max(0.0, self._pending.get(env.key, 0.0) - est)
+                release_for(env.key, est)
                 self._update_soft_state(env)
 
-    def _update_soft_state(self, env: BudgetEnvelope) -> None:
-        """T2-M3 soft-cap bookkeeping: alerting only, never blocks a reserve.
+    # ── T2-M3 soft tier ────────────────────────────────────────────────────
 
-        Logs a warning on the rising edge (not-breached -> breached) only, so
-        a sustained breach doesn't spam the log on every subsequent call.
+    def _update_soft_state(self, env: BudgetEnvelope) -> None:
+        """Recompute and persist the soft-breached flag for ``env``.
+
+        Called from inside the manager lock after every consumed /
+        pending mutation. No-op when the envelope has no soft cap.
+        Emits a structured log on the rising edge (False → True) so
+        operators can wire it to alerting without polling tier_state.
         """
         if env.soft_cap_usd is None:
             return
@@ -284,18 +313,36 @@ class BudgetEnvelopeManager:
         self._soft_breached[env.key] = is_breached
         if is_breached and not was_breached:
             log.warning(
-                "budget_soft_cap_breached key=%s soft_cap_usd=%s cap_usd=%s "
-                "consumed_usd=%s pending_usd=%s",
-                env.key,
-                env.soft_cap_usd,
-                env.cap_usd,
-                self._consumed.get(env.key, 0.0),
-                self._pending.get(env.key, 0.0),
+                "budget_soft_cap_breached",
+                key=str(env.key),
+                soft_cap_usd=env.soft_cap_usd,
+                cap_usd=env.cap_usd,
+                consumed_usd=self._consumed.get(env.key, 0.0),
+                pending_usd=self._pending.get(env.key, 0.0),
             )
 
     def tier_state(self, key: BudgetKey) -> dict[str, float | bool | None]:
-        """Return the 7-key introspection dict documented in
-        ``llm_router.contracts.BUDGET_TIER_STATE_KEYS``."""
+        """Return introspection snapshot for ``key``.
+
+        Keys:
+
+        * ``cap_usd`` — hard cap or ``None`` if unregistered.
+        * ``soft_cap_usd`` — soft cap or ``None``.
+        * ``consumed_usd`` — committed spend so far.
+        * ``pending_usd`` — outstanding reservations.
+        * ``remaining_usd`` — ``cap - consumed - pending``, floored at 0.
+        * ``usage_pct`` — ``(consumed+pending)/cap`` in [0.0, 1.0+).
+          ``None`` if no envelope is registered (no enforcement, no
+          meaningful ratio).
+        * ``soft_breached`` — True iff consumed+pending ≥ soft_cap_usd.
+          False when no soft cap is configured.
+
+        Non-async because callers (dashboards, observability) expect a
+        snapshot, not a serialised view. Concurrent mutations can
+        produce numbers that drift mid-read; that's fine for a metric
+        and matches the contract of ``consumed`` / ``pending`` /
+        ``remaining``.
+        """
         env = self._envelopes.get(key)
         if env is None:
             return {
@@ -320,11 +367,12 @@ class BudgetEnvelopeManager:
         }
 
 
+# ── Module-level singleton ──────────────────────────────────────────────────
+
 _manager: BudgetEnvelopeManager | None = None
 
 
 def get_manager() -> BudgetEnvelopeManager:
-    """Return the process-wide :class:`BudgetEnvelopeManager` singleton."""
     global _manager
     if _manager is None:
         _manager = BudgetEnvelopeManager()
@@ -332,11 +380,19 @@ def get_manager() -> BudgetEnvelopeManager:
 
 
 def reset_manager_for_tests() -> None:
-    """Drop the singleton so the next :func:`get_manager` call starts fresh.
-
-    Unlike Chuzom's version, this does not need to reset any second,
-    module-level pending-spend store -- this port intentionally has none (see
-    the module provenance header).
-    """
+    """Drop the singleton so the next ``get_manager`` starts fresh.
+    Production code never calls this."""
     global _manager
     _manager = None
+    # Drop the global per-key reservation dict too so tests don't
+    # leak pending spend between runs.
+    from llm_router.budget import reset_pending_spend_for_tests
+    reset_pending_spend_for_tests()
+
+
+__all__ = [
+    "BudgetEnvelope",
+    "BudgetEnvelopeManager",
+    "get_manager",
+    "reset_manager_for_tests",
+]

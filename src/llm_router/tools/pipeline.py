@@ -37,7 +37,7 @@ async def llm_orchestrate(
         if config.llm_router_tier == Tier.FREE and len(steps) > 2:
             return (
                 f"Template '{template}' has {len(steps)} steps — free tier allows up to 2. "
-                "Upgrade to Pro for unlimited pipeline steps: https://llm-router.dev/pricing"
+                "Upgrade to Pro for unlimited pipeline steps: https://llm_router.dev/pricing"
             )
 
     if template and template in PIPELINE_TEMPLATES:

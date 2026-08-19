@@ -59,7 +59,7 @@ def configure_tracing() -> None:
     except Exception:
         return
 
-    service_name = os.getenv("OTEL_SERVICE_NAME", "llm-router")
+    service_name = os.getenv("OTEL_SERVICE_NAME", "llm_router")
     provider = TracerProvider(resource=Resource.create({"service.name": service_name}))
 
     exporter_kwargs: dict[str, Any] = {"endpoint": endpoint}

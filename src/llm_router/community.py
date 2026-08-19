@@ -16,6 +16,7 @@ import logging
 from pathlib import Path
 
 from llm_router.cost import _get_db
+from llm_router.tool_surface import route_tool  # CHZ-SURF-01
 
 log = logging.getLogger("llm_router.community")
 
@@ -104,7 +105,8 @@ def get_confidence_str(stats: dict, task_type: str) -> str:
 def format_benchmark_report(stats: dict[str, dict]) -> str:
     """Format a benchmark accuracy report table."""
     if not stats:
-        return "  No routing decisions found. Use llm_route or llm_query to start building data."
+        return (f"  No routing decisions found. Use {route_tool('llm_route')} or "
+                f"{route_tool('llm_query')} to start building data.")
 
     W = 64
     lines = [

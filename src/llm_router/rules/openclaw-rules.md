@@ -1,27 +1,33 @@
-# llm-router Routing Rules for OpenClaw
+<!-- llm_router-rules-version: 2 -->
+# LLM Router — OpenClaw Routing Rules
 
-Configure intelligent LLM routing for OpenClaw with the llm_auto command.
+> LLM Router routes each task to the cheapest capable model before OpenClaw generates
+> its own response. Call the appropriate tool BEFORE answering.
+>
+> **Pull routing:** OpenClaw uses pull routing — YOU must call the tool. The tool
+> returns the response; relay it verbatim. This fires in agent mode (~90% of turns).
 
-## Available MCP Tools
+## Task Type → Tool Mapping
 
-- `llm_auto` — Automatic intelligent routing (recommended)
-- `llm_research` — Research and current information
-- `llm_code` — Code generation and development
-- `llm_generate` — Content and documentation creation
-- `llm_analyze` — Analysis and problem-solving
-- `llm_query` — Simple information requests
+| Task | Tool | Notes |
+|---|---|---|
+| Simple factual question | `llm_query` | Ollama → Gemini Flash → GPT-4o-mini |
+| Research / current events | `llm_research` | Perplexity (web-grounded) |
+| Writing / content | `llm_generate` | Gemini Flash → Haiku |
+| Deep analysis / review | `llm_analyze` | Ollama → GPT-4o |
+| Code generation / refactor | `llm_code` | Ollama → Codex → o3 |
+| Deep reasoning / proofs | `llm_reason` | Extended-thinking model |
+| Unknown / auto-detect | `llm_auto` | Classifies + routes automatically |
 
-## Token-Efficient Response Format
+## Rules
 
-Responses use preamble-free formatting:
-- Answers first, reasoning second
-- Skip filler words and hedging language
-- Use fragments when appropriate for clarity
-- Focus on technical substance
+1. Call the matching tool **before** generating your own response.
+2. Return the tool's output to the user **as-is** (don't paraphrase).
+3. Only use native OpenClaw intelligence for file navigation, terminal commands,
+   or when all LLM Router MCP servers are unavailable.
+4. Use `llm_research` for anything time-sensitive — training has a cutoff.
 
-## Setup
+## Token-Efficient Responses
 
-The llm-router MCP server is configured in `~/.openclaw/mcp.json` with smart routing that:
-- Starts with free local models (Ollama)
-- Falls back to API providers when needed
-- Applies budget pressure automatically
+Skip preamble. Lead with result. Fragments fine when meaning is clear.
+No trailing summaries. ≥3 items → bullets. Never restate the user's request.

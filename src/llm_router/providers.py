@@ -4,16 +4,24 @@ Provides two entry points for calling any LLM through LiteLLM's unified API:
 - ``call_llm``: Standard request/response (returns full ``LLMResponse``).
 - ``call_llm_stream``: Streaming variant that yields content chunks, ending
   with a JSON metadata trailer for the caller to parse.
+- ``call_llm_stream_events``: Structured event streaming (Phase B v0.3.2).
 
 Both functions handle OpenAI reasoning model quirks (temperature=1 requirement),
 apply config defaults, and extract provider-specific features like Perplexity
 citations.
+
+Safety invariants (Phase B):
+  - Structured events provide unambiguous state transitions
+  - output.delta preserves message order (never buffered or throttled)
+  - usage.final delivered exactly once per stream
+  - Backward compatibility maintained: call_llm_stream() wraps call_llm_stream_events()
 """
 
 from __future__ import annotations
 
 import time
 from collections.abc import AsyncIterator
+from typing import TypedDict
 
 import litellm
 
@@ -51,6 +59,61 @@ _ALLOWED_EXTRA_PARAMS: frozenset[str] = frozenset({
     "extra_body",   # used for Perplexity search_recency_filter
     "thinking",     # used for Anthropic extended thinking
 })
+
+
+# ━━━ Phase B v0.3.2: Provider-Level Structured Event Streaming ━━━
+# These TypedDicts define the structured events yielded by call_llm_stream_events().
+# They model the low-level provider streaming contract (before router-level mapping).
+
+
+class ProviderStreamDelta(TypedDict):
+    """Chunk of response content from provider stream."""
+    text: str
+    chars: int
+    approx_tokens: int
+
+
+class ProviderUsageInfo(TypedDict):
+    """Final token usage and cost from provider."""
+    input_tokens: int
+    output_tokens: int
+    cost_usd: float
+    latency_ms: float
+
+
+class ProviderStreamEvent(TypedDict, total=False):
+    """Provider-level streaming event (base + optional payloads).
+
+    Fields:
+      - type: "delta" (content chunk) or "usage" (final metadata)
+      - delta: ProviderStreamDelta (only when type=="delta")
+      - usage: ProviderUsageInfo (only when type=="usage")
+
+    Safety: output.delta is never buffered or throttled. usage.final delivered once.
+    """
+    type: str  # "delta" or "usage"
+    delta: ProviderStreamDelta
+    usage: ProviderUsageInfo
+
+
+def _ollama_num_ctx() -> int | None:
+    """Configured Ollama context window (LLM_ROUTER_OLLAMA_NUM_CTX), or None.
+
+    Returns None when unset or invalid so callers keep Ollama's own default —
+    passing num_ctx is opt-in. A positive integer raises the context window
+    for page-sized prompts/outputs that otherwise overflow the 4096 default
+    and return empty content.
+    """
+    import os
+
+    raw = os.environ.get("LLM_ROUTER_OLLAMA_NUM_CTX", "").strip()
+    if not raw:
+        return None
+    try:
+        val = int(raw)
+    except ValueError:
+        return None
+    return val if val > 0 else None
 
 
 async def call_llm(
@@ -124,6 +187,15 @@ async def call_llm(
     # This is safe since Ollama typically returns reasonable-length responses.
     if not model.startswith("ollama/"):
         kwargs["max_tokens"] = max_tokens
+    else:
+        # Ollama defaults to a 4096-token context window, which silently
+        # overflows on page-sized prompts/outputs and returns EMPTY content
+        # (surfaced downstream as EmptyResponseError → chain failover). Let
+        # operators raise it via LLM_ROUTER_OLLAMA_NUM_CTX so large generations
+        # don't empty out. Unset = keep Ollama's own default (no change).
+        _num_ctx = _ollama_num_ctx()
+        if _num_ctx:
+            kwargs["num_ctx"] = _num_ctx
 
     if extra_params:
         safe = {k: v for k, v in extra_params.items() if k in _ALLOWED_EXTRA_PARAMS}
@@ -139,7 +211,7 @@ async def call_llm(
     kwargs["model"] = _quirk.transform_model_name(kwargs["model"])
     kwargs = _quirk.transform_request(kwargs)
 
-    response = await litellm.acompletion(**kwargs)
+    response = await litellm.acompletion(**kwargs)  # llm_router: direct-ok (router provider layer)
     elapsed_ms = (time.monotonic() - start) * 1000
 
     content = extract_content(response.choices[0].message)
@@ -167,7 +239,7 @@ async def call_llm(
         from llm_router.calibration import cost_for_tokens
         cost = cost_for_tokens(model, _prompt_tokens, _completion_tokens)
     if cost == 0 and not any(
-        model.startswith(p) for p in ("ollama", "codex", "gemini_cli")
+        model.startswith(p) for p in ("ollama", "codex", "gemini_cli", "openai_compat")
     ):
         # Unknown paid model. Bias high so anomaly detection has a signal.
         # 0.01 USD per 1K output tokens matches session_spend's legacy rate.
@@ -200,25 +272,23 @@ async def call_llm(
     )
 
 
-async def call_llm_stream(
+async def call_llm_stream_events(
     model: str,
     messages: list[dict[str, str]],
     *,
     temperature: float | None = None,
     max_tokens: int | None = None,
     extra_params: dict | None = None,
-) -> AsyncIterator[str]:
-    """Stream an LLM response via LiteLLM, yielding content chunks.
+) -> AsyncIterator[ProviderStreamEvent]:
+    """Stream an LLM response via LiteLLM, yielding structured provider events.
 
-    Yields text chunks as they arrive from the provider. After all content
-    chunks, yields a final ``\\n[META]{...}`` trailer line containing a JSON
-    object with model, provider, token counts, cost, and latency. Callers
-    should detect the ``[META]`` prefix to separate content from metadata.
+    Yields a sequence of ProviderStreamEvent objects representing the stream:
+    - Multiple delta events with content chunks as they arrive
+    - One final usage event with aggregated token counts and cost
 
-    Unlike ``call_llm``, cost is estimated from token counts rather than
-    calculated from the full response object, because LiteLLM's streaming
-    API doesn't provide a complete response for its cost calculator. Token
-    counts come from the final chunk's usage field (if the provider sends it).
+    This is the provider-level streaming API (Phase B v0.3.2). The router layer
+    (Phase C) maps these provider events to router-level RouterStreamEvent objects
+    that include routing metadata and state tracking.
 
     Args:
         model: LiteLLM model string (e.g. ``"gemini/gemini-2.5-flash"``).
@@ -228,17 +298,18 @@ async def call_llm_stream(
         extra_params: Provider-specific parameters passed through to LiteLLM.
 
     Yields:
-        Content text chunks as they arrive, followed by a single
-        ``\\n[META]{...}`` JSON metadata line as the final item.
-    """
-    import json
+        ProviderStreamEvent dicts with:
+        - "delta" events: {type: "delta", delta: {text, chars, approx_tokens}}
+        - "usage" event: {type: "usage", usage: {input_tokens, output_tokens, cost_usd, latency_ms}}
 
+    Safety:
+      - output deltas preserve message order (never buffered)
+      - usage is delivered exactly once as final event
+      - no recursion / re-entrancy risk from provider layer
+    """
     config = get_config()
     temperature = temperature if temperature is not None else config.default_temperature
     max_tokens = max_tokens or config.default_max_tokens
-    # Cap max_tokens at the model's known output limit (Plan 07 D.2) —
-    # prevents OpenAI silent truncation and Anthropic 400-errors when
-    # callers pass oversized values. Unknown models bypass the cap.
     max_tokens = safe_max_tokens(max_tokens, model)
 
     model_name = model.split("/", 1)[-1] if "/" in model else model
@@ -260,7 +331,6 @@ async def call_llm_stream(
     }
 
     # 🥷 Backslash-Security: Same Ollama workaround as in call_llm() above.
-    # Ollama + max_tokens causes empty responses in LiteLLM.
     if not model.startswith("ollama/"):
         kwargs["max_tokens"] = max_tokens
 
@@ -268,24 +338,36 @@ async def call_llm_stream(
         safe = {k: v for k, v in extra_params.items() if k in _ALLOWED_EXTRA_PARAMS}
         kwargs.update(safe)
 
-    # Plan 07 Cat D.4 — same quirk-application as non-streaming call_llm.
+    # Plan 07 Cat D.4 — apply registered per-provider quirks
     from llm_router.profiles import provider_from_model
     from llm_router.provider_quirks import get_quirk
     _quirk = get_quirk(provider_from_model(model))
     kwargs["model"] = _quirk.transform_model_name(kwargs["model"])
     kwargs = _quirk.transform_request(kwargs)
 
-    response = await litellm.acompletion(**kwargs)
+    response = await litellm.acompletion(**kwargs)  # llm_router: direct-ok (router provider layer)
 
     collected_content: list[str] = []
     input_tokens = 0
     output_tokens = 0
 
+    # Estimate token counts for deltas (before usage arrives)
     async for chunk in response:
         delta = chunk.choices[0].delta if chunk.choices else None
         if delta and delta.content:
-            collected_content.append(delta.content)
-            yield delta.content
+            text = delta.content
+            collected_content.append(text)
+            # Rough estimate: 1 token ≈ 4 chars (OpenAI standard)
+            chars = len(text)
+            approx_tokens = max(1, len(text) // 4)
+            yield {
+                "type": "delta",
+                "delta": {
+                    "text": text,
+                    "chars": chars,
+                    "approx_tokens": approx_tokens,
+                },
+            }
 
         # The final chunk from most providers carries aggregated usage info
         if hasattr(chunk, "usage") and chunk.usage:
@@ -295,8 +377,7 @@ async def call_llm_stream(
     elapsed_ms = (time.monotonic() - start) * 1000
     full_content = "".join(collected_content)
 
-    # Estimate cost from token counts — litellm.completion_cost needs a full
-    # response object which isn't available in streaming mode
+    # Estimate cost from token counts
     try:
         cost = litellm.completion_cost(
             model=model,
@@ -306,14 +387,73 @@ async def call_llm_stream(
     except Exception:
         cost = 0.0
 
+    # Yield final usage event (delivered exactly once)
+    yield {
+        "type": "usage",
+        "usage": {
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "cost_usd": round(cost, 8),
+            "latency_ms": round(elapsed_ms, 1),
+        },
+    }
+
+
+async def call_llm_stream(
+    model: str,
+    messages: list[dict[str, str]],
+    *,
+    temperature: float | None = None,
+    max_tokens: int | None = None,
+    extra_params: dict | None = None,
+) -> AsyncIterator[str]:
+    """Stream an LLM response via LiteLLM, yielding content chunks (compatibility wrapper).
+
+    This is a backward-compatibility wrapper around call_llm_stream_events().
+    It translates structured provider events back to the legacy text-based format.
+
+    Yields text chunks as they arrive from the provider. After all content
+    chunks, yields a final ``\\n[META]{...}`` trailer line containing a JSON
+    object with model, provider, token counts, cost, and latency. Callers
+    should detect the ``[META]`` prefix to separate content from metadata.
+
+    Args:
+        model: LiteLLM model string (e.g. ``"gemini/gemini-2.5-flash"``).
+        messages: Chat messages in OpenAI format.
+        temperature: Sampling temperature override. Uses config default if None.
+        max_tokens: Max output tokens override. Uses config default if None.
+        extra_params: Provider-specific parameters passed through to LiteLLM.
+
+    Yields:
+        Content text chunks as they arrive, followed by a single
+        ``\\n[META]{...}`` JSON metadata line as the final item.
+
+    Safety: Backward compatible with pre-v0.3.2 callers. All existing behavior preserved.
+    """
+    import json
+
     from llm_router.profiles import provider_from_model
 
-    meta = {
-        "model": model,
-        "provider": provider_from_model(model),
-        "input_tokens": input_tokens,
-        "output_tokens": output_tokens,
-        "cost_usd": round(cost, 8),
-        "latency_ms": round(elapsed_ms, 1),
-    }
-    yield f"\n[META]{json.dumps(meta)}"
+    # Stream from provider layer and translate to legacy format
+    async for event in call_llm_stream_events(
+        model=model,
+        messages=messages,
+        temperature=temperature,
+        max_tokens=max_tokens,
+        extra_params=extra_params,
+    ):
+        if event["type"] == "delta":
+            # Yield content chunks as-is
+            yield event["delta"]["text"]
+        elif event["type"] == "usage":
+            # Yield final metadata in legacy [META] format
+            usage = event["usage"]
+            meta = {
+                "model": model,
+                "provider": provider_from_model(model),
+                "input_tokens": usage["input_tokens"],
+                "output_tokens": usage["output_tokens"],
+                "cost_usd": usage["cost_usd"],
+                "latency_ms": usage["latency_ms"],
+            }
+            yield f"\n[META]{json.dumps(meta)}"

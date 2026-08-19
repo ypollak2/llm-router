@@ -55,7 +55,7 @@ class TestUpdateCommand:
                     mock_urlopen.return_value = mock_response
                     _run_update()
         captured = capsys.readouterr()
-        assert "llm-router update" in captured.out
+        assert "llm_router update" in captured.out
         assert "Hooks & rules" in captured.out
 
     def test_run_update_handles_empty_install_actions(self, capsys):

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""llm-router replay — Session routing transcript with full context.
+"""llm_router replay — Session routing transcript with full context.
 
-Command: uv run llm-router replay [--session SESSION_ID] [--limit N]
+Command: uv run llm_router replay [--session SESSION_ID] [--limit N]
 
 Prints a formatted transcript of all routing decisions in a session:
   - Timestamps

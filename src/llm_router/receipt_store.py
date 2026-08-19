@@ -80,9 +80,11 @@ def compute_receipt(
     Calculates tokens_reclaimed and savings_usd by comparing actual cost
     against what Opus would have charged for the same token volume.
     """
-    # Opus pricing: $15/1M input, $75/1M output
-    opus_input_cost = (input_tokens / 1_000_000) * 15.0
-    opus_output_cost = (output_tokens / 1_000_000) * 75.0
+    # Opus pricing: $5/1M input, $25/1M output (claude-opus-4-8, repriced
+    # 2026-07-10 — the old $15/$75 was stale and inflated reported savings
+    # ~3x; keep in sync with hooks/savings_logger._PRICING_PER_MTOK).
+    opus_input_cost = (input_tokens / 1_000_000) * 5.0
+    opus_output_cost = (output_tokens / 1_000_000) * 25.0
     opus_equivalent = opus_input_cost + opus_output_cost
 
     savings = opus_equivalent - cost_usd
@@ -112,7 +114,19 @@ async def store_receipt(receipt: Receipt) -> None:
     """Persist a receipt to SQLite. Silent on failure."""
     try:
         _DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-        async with aiosqlite.connect(str(_DB_PATH)) as db:
+        # Daemon thread: store_receipt runs fire-and-forget; if the loop
+        # shuts down before this task finishes, the `async with` never exits
+        # and a non-daemon aiosqlite worker thread would hang interpreter exit.
+        _conn = aiosqlite.connect(str(_DB_PATH))
+        # See cost._get_db: mark the worker thread daemon before it starts
+        # (aiosqlite >=0.22 stores it as `_thread`; older versions were a
+        # Thread subclass) so a dropped pending write can't block exit.
+        _worker = getattr(_conn, "_thread", _conn)
+        try:
+            _worker.daemon = True
+        except (AttributeError, RuntimeError):
+            pass
+        async with _conn as db:
             await db.execute(_CREATE_TABLE)
             await db.execute(
                 """INSERT INTO receipts (
@@ -148,7 +162,10 @@ async def get_session_receipts(since_timestamp: float) -> list[dict]:
     try:
         if not _DB_PATH.exists():
             return []
-        async with aiosqlite.connect(str(_DB_PATH)) as db:
+        from llm_router.aiosqlite_util import mark_worker_daemon
+        _conn = aiosqlite.connect(str(_DB_PATH))
+        mark_worker_daemon(_conn)  # CHZ-PY-004: before __aenter__ starts the worker
+        async with _conn as db:
             await db.execute(_CREATE_TABLE)
             cursor = await db.execute(
                 """SELECT contract_id, task_type, complexity, model,

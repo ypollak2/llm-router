@@ -175,7 +175,7 @@ def _build_header(data: dict) -> Table:
 
     left = Text()
     left.append("⚡ ", style=_NEON_GREEN)
-    left.append("LLM ROUTER", style=_BRIGHT)
+    left.append("LLM_ROUTER", style=_BRIGHT)
 
     sid = data.get("session_id", "")
     if sid:
@@ -237,12 +237,27 @@ def _build_intelligence(data: dict) -> Table:
             "override": "📌", "fallback": "🔄",
         }
 
+        # Compact aliases for verbose classifier names so the left column
+        # stays inside its allotted width and doesn't bleed into SAVINGS.
+        # 16-char budget — anything longer wrapped before, mangling the panel.
+        _METHOD_LABELS = {
+            "build-fast-path": "build-fast",
+            "content-generation-fast-path": "content-gen",
+            "code-context-inherit": "ctx-inherit",
+            "context-inherit": "ctx-inherit",
+            "heuristic-weak": "heuristic·w",
+        }
         for d in routing:
             pct = (d["hits"] / total_hits) * 100 if total_hits > 0 else 0
             sym = _METHOD_SYMBOLS.get(d["method"], "❓")
+            label = _METHOD_LABELS.get(d["method"], d["method"])
+            # Hard-truncate anything still over budget so a new fast-path name
+            # added later can't reintroduce the column overflow bug.
+            if len(label) > 16:
+                label = label[:15] + "…"
             row = Text()
             row.append(f" {sym} ", style=_WHITE)
-            row.append(f"{d['method']:<16}", style=_LABEL)
+            row.append(f"{label:<16}", style=_LABEL)
             row.append(f"{d['hits']:>3}", style=_WHITE)
             row.append(f"  {pct:>3.0f}%", style=_DIM_GRAY)
             tbl.add_row(row)

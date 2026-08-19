@@ -31,6 +31,7 @@ from typing import Any
 
 from llm_router.config import get_config
 from llm_router.types import BudgetState, LOCAL_PROVIDERS
+from llm_router.routing_hints import detect_spend_anomaly, log_routing_decision
 
 # ── Cache ─────────────────────────────────────────────────────────────────────
 # Per-provider cache: {provider: (BudgetState, cached_at)}
@@ -110,6 +111,62 @@ def release_tokens(provider: str, tokens: int) -> None:
         _pending_tokens[provider] = max(0, _pending_tokens[provider] - tokens)
 
 
+# ── T2-M1: per-identity (BudgetKey-scoped) cost accounting ────────────────────
+# Parallel to the provider-keyed reserve_tokens above. Tracks USD spend
+# per principal so T2-M2 (parent-child envelope) and T2-L1 (atomic
+# check-then-charge backend) can layer on top without rewriting the
+# accounting primitives.
+#
+# Today this is in-process state — single-process deployments only.
+# T2-XL1 will persist it (per-tenant single-writer or central event
+# stream). The key shape is stable across both worlds.
+
+# {BudgetKey: pending_cost_usd}
+_pending_spend_by_key: "dict[Any, float]" = {}
+
+
+def reserve_for(key: "Any", cost_usd: float) -> None:
+    """Add ``cost_usd`` to the per-key reservation.
+
+    Negative costs are clamped to zero; a buggy caller that overshoots
+    must not corrupt the accounting dict.
+    """
+    if cost_usd <= 0:
+        return
+    _pending_spend_by_key[key] = _pending_spend_by_key.get(key, 0.0) + float(cost_usd)
+
+
+def release_for(key: "Any", cost_usd: float) -> None:
+    """Subtract ``cost_usd`` from the per-key reservation.
+
+    Floor at zero so an over-release (release > reserve) doesn't push
+    the dict into negative territory. Tracks the inverse contract of
+    ``reserve_for``.
+    """
+    if cost_usd <= 0:
+        return
+    if key in _pending_spend_by_key:
+        new_value = max(0.0, _pending_spend_by_key[key] - float(cost_usd))
+        if new_value == 0.0:
+            # Garbage-collect the dict entry so per-key dicts don't
+            # grow unboundedly as identities come and go.
+            _pending_spend_by_key.pop(key, None)
+        else:
+            _pending_spend_by_key[key] = new_value
+
+
+def pending_spend_for(key: "Any") -> float:
+    """Return the in-flight cost reservation for ``key`` (or 0.0)."""
+    return _pending_spend_by_key.get(key, 0.0)
+
+
+def reset_pending_spend_for_tests() -> None:
+    """Clear the per-key reservation dict. Tests use this between
+    runs; production code never calls it.
+    """
+    _pending_spend_by_key.clear()
+
+
 def _get_pending_pressure_offset(provider: str) -> float:
     """Convert pending tokens into a pressure decimal (best-guess).
     
@@ -136,6 +193,54 @@ def invalidate_cache(provider: str | None = None) -> None:
         _cache.clear()
     else:
         _cache.pop(provider, None)
+
+
+async def check_spend_anomaly(
+    user_id: str, current_spend: float, daily_avg: float, monthly_cap: float
+) -> tuple[str, str]:
+    """Routing Point 3.4: Check if spending pattern is anomalous.
+
+    Compares current spend to historical baseline and cap to detect unusual
+    spikes. Routes semantic analysis to llm_query for intelligent alerting.
+
+    Args:
+        user_id:       User or team identifier
+        current_spend: Amount spent so far this period (USD)
+        daily_avg:     Historical daily average (USD/day)
+        monthly_cap:   Monthly budget cap (USD)
+
+    Returns:
+        (alert_level, reasoning) tuple. alert_level ∈ {normal, warning, critical}.
+    """
+    try:
+        alert_level, reasoning = await detect_spend_anomaly(
+            user_id=user_id,
+            current_spend=current_spend,
+            daily_avg=daily_avg,
+            monthly_cap=monthly_cap,
+        )
+        log_routing_decision(
+            routing_point="spend_anomaly_detection",
+            decision=alert_level,
+            reasoning=reasoning,
+            metadata={
+                "user_id": user_id,
+                "spend": current_spend,
+                "cap": monthly_cap,
+            },
+        )
+    except Exception as e:
+        # Graceful degradation: simple thresholds
+        alert_level = "critical" if (current_spend / monthly_cap) > 0.9 else "normal"
+        reasoning = f"local-fallback: {e}"
+        log_routing_decision(
+            routing_point="spend_anomaly_detection",
+            decision="degraded",
+            reasoning=reasoning,
+            metadata={"user_id": user_id},
+        )
+
+    return alert_level, reasoning
 
 
 # ── Internal ──────────────────────────────────────────────────────────────────
@@ -308,7 +413,10 @@ async def _get_provider_monthly_spend(provider: str) -> float:
         exists = await asyncio.to_thread(Path(db_path).exists)
         if not exists:
             return 0.0
-        async with aiosqlite.connect(db_path) as db:
+        from llm_router.aiosqlite_util import mark_worker_daemon
+        _conn = aiosqlite.connect(db_path)
+        mark_worker_daemon(_conn)  # CHZ-PY-004: before __aenter__ starts the worker
+        async with _conn as db:
             cursor = await db.execute(
                 "SELECT COALESCE(SUM(cost_usd), 0) FROM usage "
                 "WHERE provider = ? AND timestamp >= datetime('now', 'start of month')",

@@ -10,8 +10,10 @@ Uses asyncio.create_subprocess_exec (not shell) for safe argument passing.
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import time
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -31,17 +33,31 @@ the conventional user-local binary path used by manual/Homebrew installs.
 exists and is executable.
 """
 
-CODEX_MODELS = [
-    "gpt-5.4",       # strongest reasoning
-    "o3",             # deep reasoning
-    "o4-mini",        # fast reasoning
-    "gpt-4o",         # balanced
-    "gpt-4o-mini",   # fast/cheap
-]
-"""Available OpenAI models when routing through Codex, ordered by capability.
+def _load_codex_models() -> list[str]:
+    """Load the Codex model fallback chain, honouring an env-var override.
 
-All models run through the user's OpenAI subscription (separate from
-Claude quota), making Codex a free-from-Claude fallback.
+    Default returns the ChatGPT-subscription-supported set. As of Codex CLI
+    v0.133, ChatGPT-account auth refuses ``o3``, ``o4-mini``, ``gpt-4o``,
+    and ``gpt-4o-mini`` with HTTP 400 *"not supported when using Codex with
+    a ChatGPT account"*. Only ``gpt-5.5`` (the current Codex default) and
+    ``gpt-5.4`` are accepted on that tier, so they are the safe defaults.
+
+    API-tier users (paid OpenAI billing via ``codex login --api-key``) can
+    extend the list with ``LLM_ROUTER_CODEX_MODELS`` (comma-separated, e.g.
+    ``"gpt-5.5,gpt-5.4,o3,gpt-4o"``). Empty / whitespace-only entries are
+    dropped silently.
+    """
+    env = os.environ.get("LLM_ROUTER_CODEX_MODELS", "").strip()
+    if env:
+        return [m.strip() for m in env.split(",") if m.strip()]
+    return ["gpt-5.5", "gpt-5.4"]
+
+
+CODEX_MODELS = _load_codex_models()
+"""Codex model fallback chain in best-to-fast order.
+
+See :func:`_load_codex_models` for the env-var override and the tier-specific
+default rationale.
 """
 
 # ── BLOCKING I/O MITIGATION ──────────────────────────────────────────────
@@ -52,10 +68,20 @@ Claude quota), making Codex a free-from-Claude fallback.
 #
 # Solution: Cache results at module import time, before any async code runs.
 # Pre-compute both Codex binary and plugin availability on module load.
+#
+# SELF-HEAL (added later): a startup-only probe permanently misses Codex
+# binaries installed *after* the MCP daemon launched — a real failure mode
+# we hit in production. The cache is now positive-only-trusted: a False
+# result triggers a re-probe at most once per _PROBE_INTERVAL_SEC. Worst
+# case is one delayed call per minute on a slow filesystem; the upside is
+# the cache self-heals without requiring an MCP restart whenever Codex,
+# Codex.app, or the npm plugin land on disk.
 # ─────────────────────────────────────────────────────────────────────────
 
 _CODEX_BINARY_PATH: str | None = None
 _CODEX_PLUGIN_AVAILABLE: bool = False
+_PROBE_INTERVAL_SEC: float = 60.0
+_LAST_PROBE_TS: float = 0.0
 
 
 def _initialize_codex_cache() -> None:
@@ -126,13 +152,62 @@ def find_codex_binary() -> str | None:
 def is_codex_available() -> bool:
     """Check whether a usable Codex CLI binary exists on this system.
 
-    Returns the cached result from module import time (pre-computed to avoid
-    blocking I/O in async contexts). Calling this during async routing is safe.
+    Cache strategy:
+
+    * **Positive cache is trusted.** If a binary was found previously the
+      function returns ``True`` immediately — binaries virtually never
+      vanish at runtime and trusting the cache keeps the hot path
+      allocation-free.
+    * **Negative cache re-probes.** A ``None`` cache triggers a fresh
+      filesystem probe at most once per ``_PROBE_INTERVAL_SEC``. This
+      self-heals the failure mode where the MCP daemon launched before
+      Codex was installed (cache locked to ``False`` for the daemon's
+      lifetime, no MCP restart possible from a user perspective).
+
+    The 60-second floor keeps the worst case bounded: at most one
+    filesystem hit per minute on a slow / network-mounted home, while
+    a normal local install heals on the next routing decision.
+    Calling this from async code remains safe under those assumptions.
 
     Returns:
-        ``True`` if a Codex binary was found at module import time.
+        ``True`` if a Codex binary is currently findable on disk.
     """
+    global _CODEX_BINARY_PATH, _CODEX_PLUGIN_AVAILABLE, _LAST_PROBE_TS
+
+    # Fast path: positive cache.
+    if _CODEX_BINARY_PATH is not None:
+        return True
+
+    # Negative cache → rate-limited re-probe.
+    now = time.monotonic()
+    if now - _LAST_PROBE_TS < _PROBE_INTERVAL_SEC:
+        return False
+    _LAST_PROBE_TS = now
+
+    _CODEX_BINARY_PATH = find_codex_binary()
+    if _CODEX_BINARY_PATH is not None:
+        # Binary just appeared — plugin often lands alongside it; re-check
+        # too so the next is_codex_plugin_available() call reflects reality.
+        try:
+            _CODEX_PLUGIN_AVAILABLE = _check_codex_plugin()
+        except Exception:
+            # Plugin probe failure is non-fatal; the binary alone is enough
+            # to route through Codex.
+            pass
     return _CODEX_BINARY_PATH is not None
+
+
+def _reset_codex_cache_for_tests() -> None:
+    """Drop the cached binary path and last-probe timestamp so the next
+    ``is_codex_available()`` call performs a fresh probe.
+
+    Production code never calls this — tests use it to exercise the
+    self-heal path deterministically without ``time.sleep(60)``.
+    """
+    global _CODEX_BINARY_PATH, _CODEX_PLUGIN_AVAILABLE, _LAST_PROBE_TS
+    _CODEX_BINARY_PATH = None
+    _CODEX_PLUGIN_AVAILABLE = False
+    _LAST_PROBE_TS = 0.0
 
 
 def is_codex_plugin_available() -> bool:
@@ -175,9 +250,10 @@ class CodexResult:
 
 async def run_codex(
     prompt: str,
-    model: str = "gpt-5.4",
+    model: str = "gpt-5.5",
     working_dir: str | None = None,
     timeout: int | None = None,
+    on_event: "Callable[[str, str], Awaitable[None]] | None" = None,
 ) -> CodexResult:
     """Run a task through the Codex CLI agent as a subprocess.
 
@@ -199,7 +275,9 @@ async def run_codex(
 
     Args:
         prompt: The task or question to send to Codex.
-        model: Which OpenAI model to use (default: ``"gpt-5.4"``).
+        model: Which OpenAI model to use (default: ``"gpt-5.5"`` — the current
+            Codex CLI default; both ``gpt-5.5`` and ``gpt-5.4`` work on
+            ChatGPT-account auth, see :func:`_load_codex_models`).
         working_dir: Working directory for the Codex process.  Defaults
             to the current working directory.
         timeout: Maximum seconds to wait before killing the process.
@@ -226,27 +304,127 @@ async def run_codex(
         from llm_router.timeout_config import codex_timeout
         timeout = codex_timeout()
 
-    # All arguments passed as separate list items — no shell expansion
-    args = [binary, "exec", "-m", model, "--color", "never", "-C", cwd, prompt]
+    # All arguments passed as separate list items — no shell expansion.
+    # --skip-git-repo-check: llm_router is a pure-LLM consumer, not a code-edit
+    # client; without this flag Codex CLI v0.133+ refuses to run when ``cwd``
+    # is outside a trusted git repo ("Not inside a trusted directory and
+    # --skip-git-repo-check was not specified") and exits non-zero — which
+    # the router then logs as "Codex exited 1" and skips Codex for the
+    # entire chain. Always-on is safe because we never ask Codex to mutate
+    # the working tree.
+    # --json: emit JSONL events line-by-line for streaming progress visibility
+    #
+    # -c model_provider=openai: LLM Router's own installer (commands/install.py,
+    # _install_codex_gateway_config) sets `model_provider = "llm_router"` as the
+    # GLOBAL default in ~/.codex/config.toml, looping Codex's own calls back
+    # through LLM Router's local gateway (127.0.0.1:17900) for its own routing
+    # benefits. That gateway doesn't yet speak the exact OpenAI "responses"
+    # wire shape Codex's client expects, so every call through it fails with
+    # an undecodable-stream error. This dispatch must always reach the real
+    # ChatGPT-authenticated backend regardless of that global default, so the
+    # provider is pinned back to the built-in "openai" provider here — scoped
+    # to this one subprocess call, no edit to the user's global config.
+    args = [
+        binary, "exec",
+        "--json",
+        "-m", model,
+        "-c", "model_provider=openai",
+        "--color", "never",
+        "--skip-git-repo-check",
+        "-C", cwd,
+        prompt,
+    ]
 
     start = time.monotonic()
     try:
         # Use safe environment that excludes API keys and tokens
         safe_env = get_safe_env()
-        
+
+        # Codex CLI validates every configured model_provider at startup —
+        # including ones this call never uses — and hard-fails the whole turn
+        # if any declared `env_key` is unset. A stray [model_providers.llm_router]
+        # block (base_url http://127.0.0.1:17900/v1, env_key LLM_ROUTER_API_KEY)
+        # in ~/.codex/config.toml trips this even though we always target the
+        # ChatGPT-authenticated OpenAI provider (-m gpt-5.x), never "llm_router".
+        # Only the variable's presence is checked, not its value, so a
+        # placeholder here — scoped to this subprocess only — satisfies Codex
+        # without touching the user's global CLI config.
+        safe_env.setdefault("LLM_ROUTER_API_KEY", "unused-placeholder")
+
         proc = await asyncio.create_subprocess_exec(
             *args,
+            stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             cwd=cwd,
             env=safe_env,
         )
-        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+
+        text_chunks: list[str] = []
+        stderr_buf: list[bytes] = []
+
+        async def _drain_stderr() -> None:
+            assert proc.stderr is not None
+            async for line in proc.stderr:
+                stderr_buf.append(line)
+
+        stderr_task = asyncio.create_task(_drain_stderr())
+
+        assert proc.stdout is not None
+        loop = asyncio.get_event_loop()
+        deadline = loop.time() + timeout
+
+        async for raw in proc.stdout:
+            if loop.time() > deadline:
+                proc.kill()
+                return CodexResult(
+                    content=f"Codex timed out after {timeout}s",
+                    model=model, exit_code=124,
+                    duration_sec=time.monotonic() - start,
+                )
+            line = raw.decode("utf-8", errors="replace").strip()
+            if not line:
+                continue
+            try:
+                ev = json.loads(line)
+            except json.JSONDecodeError:
+                text_chunks.append(line)
+                continue
+
+            ev_type = ev.get("type", "")
+            if ev_type == "item.completed":
+                text = ev.get("item", {}).get("text", "")
+                if text:
+                    text_chunks.append(text)
+                    if on_event:
+                        try:
+                            await on_event("item.completed", text[:120])
+                        except Exception:
+                            pass
+            elif ev_type == "turn.completed":
+                if on_event:
+                    usage = ev.get("usage", {})
+                    try:
+                        await on_event(
+                            "turn.completed",
+                            f"done — {usage.get('output_tokens','?')} tokens",
+                        )
+                    except Exception:
+                        pass
+            elif ev_type in ("turn.started", "thread.started"):
+                if on_event:
+                    try:
+                        await on_event(ev_type, "")
+                    except Exception:
+                        pass
+
+        await proc.wait()
+        await stderr_task
         duration = time.monotonic() - start
 
-        output = stdout.decode("utf-8", errors="replace").strip()
-        if not output and stderr:
-            output = stderr.decode("utf-8", errors="replace").strip()
+        output = "\n".join(text_chunks).strip()
+        if not output and stderr_buf:
+            output = b"".join(stderr_buf).decode("utf-8", errors="replace").strip()
 
         return CodexResult(
             content=output, model=model,

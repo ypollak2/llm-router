@@ -19,7 +19,9 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import os
 import sqlite3
+import stat
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -111,16 +113,115 @@ def _get_db_path(project_dir: str | None, task_type: str) -> Path:
     return path
 
 
+def _secure_perms(path: Path) -> None:
+    """Ensure *path* is mode 0600, repairing any looser existing perms.
+
+    D-02: sensitive DB/JSONL files must never be world/group-readable, on
+    creation OR on an already-existing file opened by an older version.
+    """
+    try:
+        if stat.S_IMODE(path.stat().st_mode) != 0o600:
+            os.chmod(path, 0o600)
+    except OSError:
+        pass
+
+
 def _ensure_db(db_path: Path) -> sqlite3.Connection:
     """Open (and initialize if needed) the cache database."""
     db_path.parent.mkdir(parents=True, exist_ok=True)
+    if not db_path.exists():
+        db_path.touch(mode=0o600)
+    else:
+        _secure_perms(db_path)
     conn = sqlite3.connect(str(db_path), timeout=5)
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA busy_timeout=3000")
+    # secure_delete: overwrite freed page bytes with zeros immediately on
+    # DELETE/UPDATE, so TTL purges (below) physically remove secret bytes
+    # from the file rather than leaving them in unallocated pages. This is
+    # a per-connection pragma, must be re-set on every open.
+    conn.execute("PRAGMA secure_delete=ON")
     conn.executescript(_CREATE_TABLES)
     conn.executescript(_CREATE_FTS)
     conn.executescript(_CREATE_TRIGGERS)
+    # WAL/SHM sidecar files can carry sensitive bytes too — keep them 0600.
+    for suffix in ("-wal", "-shm"):
+        sidecar = db_path.with_name(db_path.name + suffix)
+        if sidecar.exists():
+            _secure_perms(sidecar)
     return conn
+
+
+def _persist_ttl_seconds() -> float:
+    """Global physical-retention TTL (LLM_ROUTER_PERSIST_TTL_DAYS), in seconds.
+
+    Independent of the per-task-type `_TTL` dict above, which only governs
+    read-time freshness filtering (dedup / BM25 search). This TTL governs
+    unconditional PHYSICAL deletion regardless of task type. 0 disables
+    purging.
+    """
+    try:
+        from llm_router.config import get_config
+        days = float(getattr(get_config(), "llm_router_persist_ttl_days", 30))
+    except Exception:
+        days = 30.0
+    return max(days, 0.0) * 86_400
+
+
+def _purge_expired_conn(conn: sqlite3.Connection) -> int:
+    """Physically delete rows older than the persistence TTL on *conn*.
+
+    Relies on the existing `results_ad` AFTER-DELETE trigger to keep
+    `results_fts` in sync per deleted row (fires once per affected row even
+    for a multi-row DELETE), and on `PRAGMA secure_delete=ON` (set in
+    `_ensure_db`) to zero the freed page bytes immediately. Returns the
+    number of rows purged.
+    """
+    ttl_seconds = _persist_ttl_seconds()
+    if ttl_seconds <= 0:
+        return 0
+    cutoff = time.time() - ttl_seconds
+    try:
+        row = conn.execute(
+            "SELECT COUNT(*) FROM results WHERE timestamp < ?", (cutoff,)
+        ).fetchone()
+        count = row[0] if row else 0
+        if not count:
+            return 0
+        conn.execute("DELETE FROM results WHERE timestamp < ?", (cutoff,))
+        conn.commit()
+        try:
+            # Defense-in-depth: fully rewrite the file so no freed page can
+            # retain stale bytes even if secure_delete behaves differently
+            # across SQLite builds.
+            conn.execute("VACUUM")
+        except Exception:
+            pass
+        log.debug("Purged %d expired result(s) (ttl=%.0fd)", count, ttl_seconds / 86_400)
+        return count
+    except Exception as e:
+        log.debug("TTL purge failed: %s", e)
+        return 0
+
+
+def purge_expired(db_path: Path) -> int:
+    """Public helper: physically delete TTL-expired rows from *db_path*.
+
+    Opens (or no-ops if the DB doesn't exist yet) and runs the same purge
+    `store_result` performs automatically, useful for tests and any
+    external maintenance/compaction pass.
+    """
+    if not db_path.exists():
+        return 0
+    try:
+        conn = _ensure_db(db_path)
+        try:
+            return _purge_expired_conn(conn)
+        finally:
+            conn.close()
+    except Exception as e:
+        log.debug("TTL purge failed: %s", e)
+        return 0
 
 
 def store_result(
@@ -161,6 +262,22 @@ def store_result(
                 log.debug("Skipping store — duplicate within TTL (hash=%s)", phash[:8])
                 return
 
+            # D-01/D-04: redact BEFORE the row (and its FTS shadow entry)
+            # ever touches disk. phash above is intentionally computed from
+            # the ORIGINAL prompt for dedup stability — only the persisted
+            # text is scrubbed. Safe-failure: persist_redact() never raises
+            # and never returns raw content on internal error — but wrap it
+            # anyway so an import/config failure here can't fall through to
+            # persisting the untouched raw strings.
+            try:
+                from llm_router.persist_redaction import persist_redact
+                safe_prompt = persist_redact(user_prompt)
+                safe_response = persist_redact(response)
+            except Exception as e:
+                log.debug("Redaction unavailable, withholding raw content: %s", e)
+                safe_prompt = "[REDACTION-FAILED: content withheld]"
+                safe_response = "[REDACTION-FAILED: content withheld]"
+
             conn.execute(
                 """INSERT INTO results
                    (timestamp, task_type, complexity, model_used, prompt_hash,
@@ -168,12 +285,15 @@ def store_result(
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     time.time(), task_type, complexity, model_used, phash,
-                    user_prompt, response, tokens_in, tokens_out, cost_usd,
+                    safe_prompt, safe_response, tokens_in, tokens_out, cost_usd,
                     project_dir or "",
                 ),
             )
             conn.commit()
             log.debug("Stored result (task=%s, model=%s, hash=%s)", task_type, model_used, phash[:8])
+            # B-02/B-03: physically purge TTL-expired rows on every store,
+            # reusing the already-open connection.
+            _purge_expired_conn(conn)
         finally:
             conn.close()
     except Exception as e:

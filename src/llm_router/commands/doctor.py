@@ -8,6 +8,7 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import sys
 import time
 import urllib.request
@@ -15,6 +16,7 @@ from pathlib import Path
 from typing import Optional
 
 from llm_router.terminal_style import Color
+from llm_router.tool_surface import route_call, route_tool  # CHZ-SURF-01
 
 
 # ── Formatting utilities ────────────────────────────────────────────────────
@@ -66,7 +68,7 @@ def _warn(text: str) -> str:
 
 def _hook_version_num(path: Path) -> int:
     """Read the version number embedded in a hook file header."""
-    _re = re.compile(r"#\s*llm-router-hook-version:\s*(\d+)")
+    _re = re.compile(r"#\s*llm_router-hook-version:\s*(\d+)")
     try:
         for line in path.read_text(encoding="utf-8").splitlines()[:5]:
             m = _re.search(line)
@@ -79,14 +81,32 @@ def _hook_version_num(path: Path) -> int:
 
 # ── Doctor implementation ───────────────────────────────────────────────────
 
+def _extract_toml_string(text: str, key: str) -> str | None:
+    m = re.search(rf"^{re.escape(key)}\s*=\s*['\"]([^'\"]+)['\"]", text, re.MULTILINE)
+    return m.group(1) if m else None
+
+
+def _extract_toml_section_string(text: str, section: str, key: str) -> str | None:
+    start = re.search(rf"^\[{re.escape(section)}\]\s*$", text, re.MULTILINE)
+    if not start:
+        return None
+    next_section = re.search(r"^\[", text[start.end():], re.MULTILINE)
+    section_text = (
+        text[start.end(): start.end() + next_section.start()]
+        if next_section
+        else text[start.end():]
+    )
+    return _extract_toml_string(section_text, key)
+
+
 def _run_doctor_host(host: str) -> None:
-    """Run host-specific installation checks for vscode, cursor, or claude."""
-    valid_hosts = {"claude", "vscode", "cursor", "all"}
+    """Run host-specific installation checks."""
+    valid_hosts = {"claude", "vscode", "cursor", "codex", "all"}
     if host not in valid_hosts:
         print(f"  Unknown host: {host}. Valid options: {', '.join(sorted(valid_hosts))}")
         return
 
-    hosts_to_check = list({"claude", "vscode", "cursor"}) if host == "all" else [host]
+    hosts_to_check = ["claude", "vscode", "cursor", "codex"] if host == "all" else [host]
 
     for h in hosts_to_check:
         print(f"\n{_bold(f'  Host: {h}')}")
@@ -104,7 +124,7 @@ def _run_doctor_host(host: str) -> None:
                     print(
                         _fail(
                             f"{dst_name}  — not installed",
-                            fix="llm-router install",
+                            fix="llm_router install",
                         )
                     )
                     issues.append(f"Hook {dst_name} missing")
@@ -137,23 +157,23 @@ def _run_doctor_host(host: str) -> None:
             if mcp_json.exists():
                 try:
                     data = json.loads(mcp_json.read_text())
-                    if "llm-router" in data.get("servers", {}):
-                        print(_ok(f"llm-router registered in {mcp_json}"))
+                    if "llm_router" in data.get("servers", {}):
+                        print(_ok(f"llm_router registered in {mcp_json}"))
                     else:
                         print(
                             _fail(
-                                f"llm-router not in servers ({mcp_json})",
-                                fix="llm-router install --host vscode",
+                                f"llm_router not in servers ({mcp_json})",
+                                fix="llm_router install --host vscode",
                             )
                         )
-                        issues.append("llm-router not registered in VS Code mcp.json")
+                        issues.append("llm_router not registered in VS Code mcp.json")
                 except Exception as e:
                     print(_fail(f"could not parse {mcp_json}: {e}"))
             else:
                 print(
                     _fail(
                         f"mcp.json not found at {mcp_json}",
-                        fix="llm-router install --host vscode",
+                        fix="llm_router install --host vscode",
                     )
                 )
                 issues.append("VS Code mcp.json missing")
@@ -169,28 +189,28 @@ def _run_doctor_host(host: str) -> None:
 
         elif h == "cursor":
             mcp_json = Path.home() / ".cursor" / "mcp.json"
-            cursor_rules = Path.home() / ".cursor" / "rules" / "llm-router.md"
+            cursor_rules = Path.home() / ".cursor" / "rules" / "llm_router.md"
 
             if mcp_json.exists():
                 try:
                     data = json.loads(mcp_json.read_text())
-                    if "llm-router" in data.get("mcpServers", {}):
-                        print(_ok(f"llm-router registered in {mcp_json}"))
+                    if "llm_router" in data.get("mcpServers", {}):
+                        print(_ok(f"llm_router registered in {mcp_json}"))
                     else:
                         print(
                             _fail(
-                                f"llm-router not in mcpServers ({mcp_json})",
-                                fix="llm-router install --host cursor",
+                                f"llm_router not in mcpServers ({mcp_json})",
+                                fix="llm_router install --host cursor",
                             )
                         )
-                        issues.append("llm-router not registered in Cursor mcp.json")
+                        issues.append("llm_router not registered in Cursor mcp.json")
                 except Exception as e:
                     print(_fail(f"could not parse {mcp_json}: {e}"))
             else:
                 print(
                     _fail(
                         f"mcp.json not found at {mcp_json}",
-                        fix="llm-router install --host cursor",
+                        fix="llm_router install --host cursor",
                     )
                 )
                 issues.append("Cursor mcp.json missing")
@@ -200,10 +220,396 @@ def _run_doctor_host(host: str) -> None:
             else:
                 print(_warn(f"routing rules not found at {cursor_rules}"))
 
+        elif h == "codex":
+            codex_dir = Path.home() / ".codex"
+            config_toml = codex_dir / "config.toml"
+            config_yaml = codex_dir / "config.yaml"
+            hooks_json = codex_dir / "hooks.json"
+
+            gateway_url = None
+            if config_toml.exists():
+                try:
+                    text = config_toml.read_text()
+                    model_provider = _extract_toml_string(text, "model_provider")
+                    if model_provider == "llm_router":
+                        # The LLM Router gateway doesn't yet speak Codex's exact
+                        # OpenAI "responses" wire shape — forcing it as the
+                        # global default breaks EVERY Codex call (interactive
+                        # and LLM Router's own routed dispatch alike) with an
+                        # undecodable-stream error. An older llm_router install
+                        # set this; re-running the installer self-heals it.
+                        print(_fail(
+                            "Codex model_provider is force-set to 'llm_router' — "
+                            "this breaks Codex CLI (gateway wire-format mismatch)",
+                            fix="llm_router install --host codex --mode gateway",
+                        ))
+                        issues.append("Codex model_provider forced to llm_router (breaks Codex)")
+                    else:
+                        print(_ok(f"Codex using its own default model provider ({config_toml})"))
+
+                    if "[model_providers.llm_router]" in text:
+                        print(_ok("LLM Router model provider registered (available via -c model_provider=llm_router)"))
+                        gateway_url = _extract_toml_section_string(
+                            text, "model_providers.llm_router", "base_url"
+                        )
+                    else:
+                        print(_fail(
+                            "LLM Router model provider table missing",
+                            fix="llm_router install --host codex --mode gateway",
+                        ))
+                        issues.append("Codex LLM Router provider table missing")
+                except OSError as e:
+                    print(_fail(f"could not read {config_toml}: {e}"))
+                    issues.append("Codex config.toml unreadable")
+            else:
+                print(_fail(
+                    f"config.toml not found at {config_toml}",
+                    fix="llm_router install --host codex --mode gateway",
+                ))
+                issues.append("Codex config.toml missing")
+
+            if config_yaml.exists() and "llm_router" in config_yaml.read_text(errors="ignore"):
+                print(_ok("MCP companion registered in config.yaml"))
+            else:
+                print(_warn("MCP companion not found in config.yaml"))
+
+            if hooks_json.exists() and "codex-post-tool.py" in hooks_json.read_text(errors="ignore"):
+                print(_ok("PostToolUse telemetry hook installed"))
+            else:
+                print(_warn("PostToolUse telemetry hook not found"))
+
+            if gateway_url:
+                health_url = gateway_url.rstrip("/").removesuffix("/v1") + "/healthz"
+                try:
+                    req = urllib.request.Request(health_url, method="GET")
+                    with urllib.request.urlopen(req, timeout=2) as resp:
+                        data = json.loads(resp.read())
+                    if data.get("ok"):
+                        print(_ok(f"gateway reachable ({health_url})"))
+                        print(_green("  Opt-in routing (-c model_provider=llm_router): available"))
+                    else:
+                        print(_warn(f"gateway responded without ok=true ({health_url})"))
+                        print(_yellow("  Opt-in routing: registered, gateway health uncertain"))
+                except Exception as e:
+                    print(_warn(f"gateway not reachable at {health_url}: {e}"))
+                    print(_yellow("  Opt-in routing: registered, but gateway is not running"))
+
         if not issues:
             print(_green(f"  ✓ {h} is correctly configured"))
         else:
             print(_red(f"  {len(issues)} issue(s) found for {h}"))
+
+
+def _render_host_explainer() -> str:
+    """Always-up-to-date explanation of why the host model (Claude Code,
+    Cursor, Codex CLI, ...) runs on a frontier model like Opus 4.7 and
+    not on a local one — and what that means for the savings LLM Router can
+    deliver. Surfaced via ``llm_router doctor --explain-host`` so the
+    answer lives next to the savings posture report.
+    """
+    # chz-surface-ok: explanatory prose about the cost model, not an instruction
+    # to call anything — the names here are illustrative, not a call-to-action.
+    return (
+        f"\n{_bold('  Why is my host on Opus 4.7 / Sonnet 4.6 and not on a local model?')}\n\n"
+
+        f"  {_bold('Short answer')}\n"
+        "    The host (Claude Code, Cursor, Codex CLI) is the agent loop —\n"
+        "    it reads tool results, decides the next action, generates code,\n"
+        "    and drives the conversation. LLM Router routes the LLM *calls* the\n"
+        "    host makes on your behalf (llm_query, llm_code, llm_research)\n"
+        "    but it does not replace the host itself. The host model is\n"
+        "    whatever Claude Code is configured to use; today that's Opus 4.7\n"
+        "    (1M context) by default.\n\n"
+
+        f"  {_bold('Why not just run the host on Ollama?')}\n"
+        "    Three reasons in descending order of importance:\n\n"
+        "      1. Agent-loop reasoning is the hardest LLM task. The host has\n"
+        "         to hold the conversation, plan multi-step solutions, generate\n"
+        "         working code, and recover from tool failures. Local models\n"
+        "         (qwen3.5, llama-3) drop coherence after 2-3 turns of that\n"
+        "         work — great at single-shot answers, not at multi-turn\n"
+        "         orchestration.\n\n"
+        "      2. Tool-call format conformance. The host must emit tool calls\n"
+        "         in very specific JSON every time. Frontier models get this\n"
+        "         right >99% of the time; mid-tier local models miss enough\n"
+        "         that the agent stalls. Anthropic/OpenAI tune their models\n"
+        "         specifically for this; local wrappers compound failure rate.\n\n"
+        "      3. Claude Code's UX assumes Opus-class reasoning. Plan mode,\n"
+        "         the 1M context window, the way it handles ambiguity — all\n"
+        "         designed around Opus capabilities. Swapping the model would\n"
+        "         degrade UX in subtle, hard-to-debug ways.\n\n"
+
+        f"  {_bold('What LLM Router CAN save')}\n"
+        "      * Cost of LLM calls the host makes (llm_query → Haiku/Flash\n"
+        "        instead of Opus). Visible in routing_decisions.\n"
+        "      * Tokens the host has to *process* (response_router compresses\n"
+        "        explanations in MCP responses before Claude reads them).\n"
+        "      * Wasted tool-call cycles (sidecar pre-executes deterministic\n"
+        "        prompts like 'show me my routing today').\n"
+        "      * Quota burned classifying conversational follow-ups\n"
+        "        (continuation bypass + short-followup pattern).\n\n"
+
+        f"  {_bold('What LLM Router CANT save')}\n"
+        "      * The host model's own reasoning between tool calls. That's\n"
+        "        Opus time, full price, no intercept point.\n"
+        "      * Conversation history shipped through Opus on every turn.\n"
+        "      * Tool-call decisions the host makes (Read file X, Run Bash Y) —\n"
+        "        those decisions ARE the agent loop.\n\n"
+
+        f"  {_bold('Workarounds if you need more headroom')}\n"
+        "      1. /model claude-sonnet-4-6 — drops the host to Sonnet for the\n"
+        "         rest of the conversation. Sonnet handles tool orchestration\n"
+        "         at ~5x lower cost than Opus 4.7. Best for routine work.\n"
+        "      2. /clear between unrelated tasks — drops the 1M context so\n"
+        "         each new request starts cheap. Best for topic switches.\n"
+        "      3. LLM_ROUTER_SIDECAR_PREFETCH=1 — opt into the sidecar so\n"
+        "         introspection prompts skip the host entirely.\n"
+        "      4. Pair-mode subscriptions (Codex CLI / Gemini CLI) — LLM Router\n"
+        "         injects these ahead of paid externals when available, so\n"
+        "         routed work runs on your existing subscription quota\n"
+        "         instead of API spend.\n"
+    )
+
+
+def _check_savings_posture() -> list[str]:
+    """Return rendered status lines for each quota-savings configuration check.
+
+    Each line is one of ``_ok`` / ``_warn`` / ``_fail`` with a short
+    actionable suggestion so the user knows exactly what env var or
+    setting to flip. We check seven things in order of leverage:
+
+    1. **OpenRouter key** — biggest unlock. Single key gives access to
+       deepseek-v4-flash, qwen3-235b, claude-sonnet-4 via OpenRouter,
+       which the ``cost_aggressive`` policy is wired for.
+    2. **DeepSeek key** — direct access to deepseek-v4-flash /
+       deepseek-v4-pro. Optional but unlocks the cheapest non-local
+       reasoning tier when OpenRouter isn't set.
+    3. **Sidecar pre-execution** — ``LLM_ROUTER_SIDECAR_PREFETCH=1`` lets
+       the hook answer introspection prompts without any tool calls.
+    4. **Response router** — ``LLM_ROUTER_RESPONSE_ROUTER=on`` (default on)
+       compresses explanations in MCP tool responses before Claude reads
+       them. Warn if explicitly disabled.
+    5. **Enforcement mode** — strict / hard mode actually blocks
+       bypasses; smart is the safe default. Off / shadow is a foot-gun.
+    6. **Hook hint freshness** — the auto-route hook should be writing
+       ``~/.llm-router/last_classification_<session_id>.json`` on every prompt.
+       The doctor checks the most-recently-modified shard; a stale file
+       (> 1h) means the hook isn't firing in any session.
+    7. **Today's simple-share** — if any routing happened today, what
+       fraction was classified ``simple``? Pre-fix this was 0%; healthy
+       posture is > 30% on a chat-heavy session, > 50% on info-gathering.
+
+    Failures here are advisory — they're rendered but don't append to
+    the doctor's ``issues`` list, since "LLM Router works" and "LLM Router is
+    optimally configured" are different bars.
+    """
+    import sqlite3
+    import time
+    from pathlib import Path
+
+    lines: list[str] = []
+
+    # 1. OpenRouter key — single biggest unlock.
+    if os.environ.get("OPENROUTER_API_KEY"):
+        lines.append(_ok("OPENROUTER_API_KEY set — full leaderboard pool reachable"))
+    elif (Path.home() / ".llm-router" / "openrouter-routerarena.env").exists():
+        lines.append(_warn(
+            "OPENROUTER_API_KEY stored at ~/.llm-router/openrouter-routerarena.env "
+            "but NOT loaded into env. Source the file before benchmark runs."
+        ))
+    else:
+        lines.append(_warn(
+            "OPENROUTER_API_KEY not set — deepseek-v4-flash / qwen3-235b / "
+            "qwen3-coder-next unreachable. One key unlocks the leaderboard pool."
+        ))
+
+    # 2. DeepSeek key (direct).
+    if os.environ.get("DEEPSEEK_API_KEY"):
+        lines.append(_ok("DEEPSEEK_API_KEY set — direct deepseek-v4-flash reachable"))
+    else:
+        lines.append(_warn(
+            "DEEPSEEK_API_KEY not set — direct deepseek-v4-flash unreachable "
+            "(OpenRouter can still route there if its key is set)."
+        ))
+
+    # 3. Sidecar pre-execution.
+    sidecar_value = os.environ.get("LLM_ROUTER_SIDECAR_PREFETCH", "").strip().lower()
+    if sidecar_value in {"1", "true", "yes", "on"}:
+        lines.append(_ok("LLM_ROUTER_SIDECAR_PREFETCH=on — introspection prompts pre-executed"))
+    else:
+        lines.append(_warn(
+            "LLM_ROUTER_SIDECAR_PREFETCH not set — introspection prompts ('show me "
+            f"my routing today', 'git status') still go through {route_tool('llm_query')} + tool "
+            "calls. Set =1 to let the hook pre-execute and inject the result."
+        ))
+
+    # 4. Response router.
+    rr_value = os.environ.get("LLM_ROUTER_RESPONSE_ROUTER", "on").strip().lower()
+    if rr_value == "off":
+        lines.append(_warn(
+            "LLM_ROUTER_RESPONSE_ROUTER=off — MCP responses go to Claude unchanged. "
+            "Default is on; you've explicitly disabled it."
+        ))
+    else:
+        lines.append(_ok(
+            f"LLM_ROUTER_RESPONSE_ROUTER={rr_value or 'on'} — explanations compressed "
+            "before they hit Claude's context"
+        ))
+
+    # 5. Enforcement mode. Resolve through the same single source of truth the
+    #    hooks use (env > repo .llm_router.yml > ~/.llm-router/routing.yaml > "smart"),
+    #    so doctor reports what the enforcer ACTUALLY does — not a bare-env guess.
+    #    (Reading os.environ only made doctor claim "smart/blocked" even when
+    #    routing.yaml pinned "advise", i.e. never-block.)
+    try:
+        from llm_router.enforce_config import resolve_enforce_mode
+        enforce = resolve_enforce_mode()
+    except Exception:
+        enforce = os.environ.get("LLM_ROUTER_ENFORCE", "").strip().lower() or "smart"
+    if enforce in {"advise", "advisory"}:
+        lines.append(_ok(
+            f"LLM_ROUTER_ENFORCE={enforce} — route everywhere, NEVER block a tool. "
+            "Routing is a helpful suggestion; Claude always keeps the final call."
+        ))
+    elif enforce in {"off", "shadow"}:
+        lines.append(_warn(
+            f"LLM_ROUTER_ENFORCE={enforce} — route directives are advisory only. "
+            "Claude can bypass without consequence; quota savings are best-effort."
+        ))
+    elif enforce in {"suggest", "soft"}:
+        lines.append(_ok(
+            f"LLM_ROUTER_ENFORCE={enforce} — log-only; nudges but never blocks"
+        ))
+    elif enforce in {"hard", "strict"}:
+        lines.append(_ok(
+            f"LLM_ROUTER_ENFORCE={enforce} — all work tools blocked until routed; "
+            "bypasses are blocked"
+        ))
+    else:
+        # smart is the built-in default (F01/North Star): enforce routing out of the box.
+        lines.append(_ok("LLM_ROUTER_ENFORCE=smart (default) — blocks Q&A until routed, allows code work"))
+
+    # 5b. Loophole → LLM Router routing (P5). Loophole only hits the FULL router
+    #     (policy + metering) when LLM_ROUTER_URL points at a live gateway; without
+    #     it, the swarm silently falls back to local Ollama and its spend is
+    #     neither policy-routed nor metered.
+    _loophole_installed = (
+        (Path.home() / ".claude" / "commands" / "loophole.md").exists()
+        or shutil.which("loophole") is not None
+    )
+    if _loophole_installed:
+        llm_router_url = os.environ.get("LLM_ROUTER_URL", "").strip()
+        if llm_router_url:
+            lines.append(_ok(
+                f"LLM_ROUTER_URL={llm_router_url} — loophole routes through the full "
+                "LLM Router router (policy + metering)"
+            ))
+        else:
+            lines.append(_warn(
+                "LLM_ROUTER_URL not set but loophole is installed — the swarm falls "
+                "back to local Ollama instead of the full router (no cheap-first "
+                "policy, no metering). Start the gateway and export "
+                "LLM_ROUTER_URL=http://127.0.0.1:17900 to fix."
+            ))
+
+    # 6. Hook hint freshness — per-session shards since INV-007.
+    # Find the newest last_classification_*.json across all sessions; that's
+    # the closest proxy for "is any session's hook still firing".
+    import glob as _glob
+    shard_paths = sorted(
+        _glob.glob(str(Path.home() / ".llm-router" / "last_classification_*.json")),
+        key=lambda p: Path(p).stat().st_mtime if Path(p).exists() else 0,
+        reverse=True,
+    )
+    if shard_paths:
+        newest = Path(shard_paths[0])
+        try:
+            age = time.time() - newest.stat().st_mtime
+        except OSError:
+            age = None
+        sid_suffix = newest.stem.removeprefix("last_classification_")[:8]
+        if age is None:
+            lines.append(_warn(f"last_classification_{sid_suffix}*.json unreadable"))
+        elif age < 3600:
+            lines.append(_ok(
+                f"last_classification_{sid_suffix}*.json fresh ({int(age)}s, "
+                f"{len(shard_paths)} session shard(s)) — hook hint bridge active"
+            ))
+        else:
+            mins = int(age // 60)
+            lines.append(_warn(
+                f"newest last_classification_*.json is {mins}m old — auto-route "
+                "hook may not be firing. Check ~/.llm-router/auto-route-debug.log for "
+                "INVOCATION lines."
+            ))
+    else:
+        lines.append(_warn(
+            "~/.llm-router/last_classification_*.json missing — hook hint bridge "
+            "has not run yet. Send any prompt to create it."
+        ))
+
+    # 7. Today's simple-share — the smoking-gun metric from the
+    # earlier diagnostic. Pre-fix: 0/31 simple today. Healthy: > 30%.
+    db = Path.home() / ".llm-router" / "usage.db"
+    if db.is_file():
+        try:
+            conn = sqlite3.connect(str(db))
+            row = conn.execute(
+                "SELECT "
+                "  SUM(CASE WHEN complexity='simple' THEN 1 ELSE 0 END), "
+                "  COUNT(*) "
+                "FROM routing_decisions "
+                "WHERE date(timestamp,'localtime')=date('now','localtime') "
+                "  AND COALESCE(reason_code,'') != 'sidecar_backfill'"
+            ).fetchone()
+            conn.close()
+            simple_n, total_n = (row[0] or 0), (row[1] or 0)
+        except sqlite3.Error:
+            simple_n, total_n = 0, 0
+        if total_n == 0:
+            lines.append(_warn(
+                "No routing decisions today yet — nothing to measure. "
+                "Trigger a few llm_* tool calls and re-run."
+            ))
+        else:
+            share = 100.0 * simple_n / total_n
+            if share >= 30.0:
+                lines.append(_ok(
+                    f"Today's simple-share: {simple_n}/{total_n} ({share:.1f}%) — "
+                    "boundary fix is firing"
+                ))
+            elif share > 0.0:
+                lines.append(_warn(
+                    f"Today's simple-share: {simple_n}/{total_n} ({share:.1f}%) — "
+                    "below 30% target. Most prompts still classifying as moderate; "
+                    "check classifier."
+                ))
+            else:
+                lines.append(_warn(
+                    f"Today's simple-share: 0/{total_n} — boundary fix isn't reaching "
+                    "the router. Verify auto-route hook is installed with today's source."
+                ))
+    else:
+        lines.append(_warn("~/.llm-router/usage.db missing — no telemetry to score"))
+
+    return lines
+
+
+def _tool_surface_phantoms() -> list[str]:
+    """Tier entries naming a tool nothing implements, across every tier.
+
+    Checks all tiers rather than only the active one: a defect in a tier this
+    machine does not run is still shipped to every user who does run it, and
+    doctor is the thing people paste into bug reports.
+    """
+    from llm_router.tool_surface import phantom_tools
+
+    found: list[str] = []
+    for tier in ("core", "routing", "consolidated"):
+        for name in phantom_tools(tier):
+            if name not in found:
+                found.append(name)
+    return found
 
 
 def _run_doctor(host: Optional[str] = None) -> tuple[int, list[str]]:
@@ -229,7 +635,7 @@ def _run_doctor(host: Optional[str] = None) -> tuple[int, list[str]]:
 
     issues: list[str] = []
 
-    print(f"\n{_bold('llm-router doctor')}\n")
+    print(f"\n{_bold('llm_router doctor')}\n")
 
     # ── 1. Hooks ───────────────────────────────────────────────────────────
     print(_bold("  Hooks"))
@@ -249,7 +655,7 @@ def _run_doctor(host: Optional[str] = None) -> tuple[int, list[str]]:
                         )
                     )
                     issues.append(
-                        f"Hook {dst_name} is outdated — run `llm-router install --force`"
+                        f"Hook {dst_name} is outdated — run `llm_router install --force`"
                     )
                 else:
                     print(_ok(f"{dst_name}  ({event})"))
@@ -259,7 +665,7 @@ def _run_doctor(host: Optional[str] = None) -> tuple[int, list[str]]:
             print(
                 _fail(
                     f"{dst_name}  ({event})  — not installed",
-                    fix="llm-router install",
+                    fix="llm_router install",
                 )
             )
             issues.append(f"Hook {dst_name} not installed")
@@ -276,7 +682,7 @@ def _run_doctor(host: Optional[str] = None) -> tuple[int, list[str]]:
                 for _entry in _entries:
                     for _hook in _entry.get("hooks", []):
                         _cmd = _hook.get("command", "")
-                        if "llm-router" not in _cmd:
+                        if "llm_router" not in _cmd:
                             continue
                         # Extract Python interpreter path (first token)
                         _parts = _cmd.split()
@@ -288,12 +694,12 @@ def _run_doctor(host: Optional[str] = None) -> tuple[int, list[str]]:
                                 print(
                                     _fail(
                                         f"{os.path.basename(_parts[-1])} → {_interp} NOT FOUND",
-                                        fix="llm-router install --force",
+                                        fix="llm_router install --force",
                                     )
                                 )
                                 issues.append(
                                     f"Hook interpreter missing: {_interp} — "
-                                    f"run `llm-router install --force` to fix"
+                                    f"run `llm_router install --force` to fix"
                                 )
         except Exception as _e:
             print(_warn(f"Could not parse settings.json: {_e}"))
@@ -310,7 +716,7 @@ def _run_doctor(host: Optional[str] = None) -> tuple[int, list[str]]:
                 for _entry in _entries:
                     for _hook in _entry.get("hooks", []):
                         _cmd = _hook.get("command", "")
-                        if "llm-router" not in _cmd:
+                        if "llm_router" not in _cmd:
                             continue
                         _script = _cmd.split()[-1] if _cmd.split() else _cmd
                         _seen_scripts[_script] = _seen_scripts.get(_script, 0) + 1
@@ -328,11 +734,11 @@ def _run_doctor(host: Optional[str] = None) -> tuple[int, list[str]]:
 
     # ── 2. Routing rules ───────────────────────────────────────────────────
     print(f"\n{_bold('  Routing rules')}")
-    rules_dst = _RULES_DST / "llm-router.md"
+    rules_dst = _RULES_DST / "llm_router.md"
     if rules_dst.exists():
-        print(_ok("llm-router.md"))
+        print(_ok("llm_router.md"))
     else:
-        print(_fail("llm-router.md — not installed", fix="llm-router install"))
+        print(_fail("llm_router.md — not installed", fix="llm_router install"))
         issues.append("Routing rules not installed")
 
     # ── 3. Claude Code MCP registration ────────────────────────────────────
@@ -343,14 +749,14 @@ def _run_doctor(host: Optional[str] = None) -> tuple[int, list[str]]:
             settings = json.loads(_SETTINGS_PATH.read_text())
         except Exception:
             pass
-    registered_cc = "llm-router" in settings.get("mcpServers", {})
+    registered_cc = "llm_router" in settings.get("mcpServers", {})
     if registered_cc:
         print(_ok("MCP server registered in ~/.claude/settings.json"))
     else:
         print(
             _fail(
                 "MCP server not registered",
-                fix="llm-router install",
+                fix="llm_router install",
             )
         )
         issues.append("MCP server not registered in Claude Code")
@@ -369,13 +775,13 @@ def _run_doctor(host: Optional[str] = None) -> tuple[int, list[str]]:
     else:
         try:
             cfg = json.loads(desktop_path.read_text())
-            if "llm-router" in cfg.get("mcpServers", {}):
+            if "llm_router" in cfg.get("mcpServers", {}):
                 print(_ok(f"registered ({desktop_path})"))
             else:
                 print(
                     _fail(
                         "not registered in Claude Desktop",
-                        fix="llm-router install",
+                        fix="llm_router install",
                     )
                 )
                 issues.append("MCP server not registered in Claude Desktop")
@@ -408,13 +814,93 @@ def _run_doctor(host: Optional[str] = None) -> tuple[int, list[str]]:
             )
         )
 
+    # ── 5b. Gateway daemon — interpreter drift ─────────────────────────────
+    #    If the venv is rebuilt under a different Python (e.g. uv switches
+    #    3.14 → 3.11), the running daemon keeps its in-memory modules but the
+    #    site-packages tree it imports from is deleted; the first lazy import
+    #    (e.g. anyio._backends._asyncio) then 500s. Compare the daemon's
+    #    runtime interpreter against what's on disk and demand a restart on
+    #    mismatch.
+    print(f"\n{_bold('  Gateway daemon (interpreter drift)')}")
+    _gw_base = (
+        os.environ.get("LLM_ROUTER_URL", "http://127.0.0.1:17900")
+        .rstrip("/")
+        .removesuffix("/v1")
+    )
+    _kickstart_fix = "launchctl kickstart -k gui/$UID/com.llm_router.gateway"
+    _gw_data = None
+    try:
+        _gw_req = urllib.request.Request(f"{_gw_base}/healthz", method="GET")
+        with urllib.request.urlopen(_gw_req, timeout=2) as _gw_resp:
+            _gw_data = json.loads(_gw_resp.read())
+    except Exception:
+        print(_warn(f"gateway not reachable at {_gw_base} — drift check skipped"))
+    if _gw_data is not None:
+        _daemon_py = _gw_data.get("python")
+        _daemon_exe = _gw_data.get("executable")
+        if not _daemon_py or not _daemon_exe:
+            print(
+                _warn(
+                    "daemon predates the drift check (no interpreter info in "
+                    f"/healthz) — restart to enable: {_kickstart_fix}"
+                )
+            )
+        elif not os.path.exists(_daemon_exe):
+            print(
+                _fail(
+                    f"daemon interpreter deleted: {_daemon_exe} — daemon "
+                    "running on orphaned interpreter — restart required",
+                    fix=_kickstart_fix,
+                )
+            )
+            issues.append(
+                "Gateway daemon running on a deleted interpreter — "
+                f"restart required: {_kickstart_fix}"
+            )
+        else:
+            _disk_py = ""
+            try:
+                _pv = subprocess.run(
+                    [_daemon_exe, "-V"],
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                )
+                _pv_out = (_pv.stdout or _pv.stderr or "").strip()
+                _disk_py = _pv_out.split()[-1] if _pv_out else ""
+            except Exception:
+                pass
+            if not _disk_py:
+                print(_warn(f"could not determine on-disk version of {_daemon_exe}"))
+            elif _disk_py != _daemon_py:
+                print(
+                    _fail(
+                        f"daemon runtime is Python {_daemon_py} but "
+                        f"{_daemon_exe} is now Python {_disk_py} — daemon "
+                        "running on orphaned interpreter — restart required",
+                        fix=_kickstart_fix,
+                    )
+                )
+                issues.append(
+                    f"Gateway daemon on orphaned interpreter ({_daemon_py} "
+                    f"runtime vs {_disk_py} on disk) — restart required: "
+                    f"{_kickstart_fix}"
+                )
+            else:
+                print(
+                    _ok(
+                        f"daemon Python {_daemon_py} matches on-disk venv "
+                        f"({_daemon_exe})"
+                    )
+                )
+
     # ── 6. Usage data freshness ────────────────────────────────────────────
     print(f"\n{_bold('  Usage data (Claude subscription pressure)')}")
     usage_path = Path.home() / ".llm-router" / "usage.json"
     if not usage_path.exists():
         print(
             _warn(
-                "usage.json not found — run `llm_check_usage` in Claude Code to populate"
+                f"usage.json not found — run `{route_tool('llm_check_usage')}` in Claude Code to populate"
             )
         )
     else:
@@ -426,14 +912,14 @@ def _run_doctor(host: Optional[str] = None) -> tuple[int, list[str]]:
             elif age_s < 3600:
                 print(
                     _warn(
-                        f"getting stale ({int(age_s / 60)}m old) — run `llm_check_usage`"
+                        f"getting stale ({int(age_s / 60)}m old) — run `{route_tool('llm_check_usage')}`"
                     )
                 )
             else:
                 print(
                     _fail(
                         f"stale ({int(age_s / 3600)}h old) — routing may use wrong pressure",
-                        fix="Run llm_check_usage in Claude Code",
+                        fix=f"Run {route_tool('llm_check_usage')} in Claude Code",
                     )
                 )
                 issues.append("Usage data is stale")
@@ -444,6 +930,41 @@ def _run_doctor(host: Optional[str] = None) -> tuple[int, list[str]]:
     print(f"\n{_bold('  Provider API keys')}")
     for line in check_api_keys():
         print(f"  {line}")
+
+    # ── 7b. Provider circuit breakers (INV-HEALTH-001, audit C10) ───────────
+    # doctor runs as a separate process from the MCP server, so it cannot read
+    # the router's in-memory HealthTracker directly. The router persists a
+    # wall-clock snapshot of breaker state; read it here so a tripped breaker is
+    # visible in `doctor` instead of doctor reporting "all healthy" while the
+    # router actively skips a provider on every request.
+    print(f"\n{_bold('  Provider circuit breakers')}")
+    try:
+        from llm_router.health import read_health_snapshot
+
+        snap = read_health_snapshot()
+        providers = (snap or {}).get("providers", {})
+        open_breakers = [
+            name for name, st in providers.items()
+            if st.get("circuit_state") in ("open", "rate_limited")
+        ]
+        if not providers:
+            print(_dim("  no snapshot yet (router has not recorded a failure this session)"))
+        else:
+            for name in sorted(providers):
+                st = providers[name]
+                state = st.get("circuit_state", "unknown")
+                mark = _green("✓") if state == "closed" else _yellow("⚠")
+                detail = f"failures={st.get('consecutive_failures', 0)}"
+                print(f"  {mark} {name}: circuit {state} ({detail})")
+        for name in open_breakers:
+            # Surface in the summary so doctor does NOT print "all healthy" while a
+            # breaker the router enforces is open (the exact C10 divergence).
+            issues.append(
+                f"Provider '{name}' circuit breaker is open — router is skipping it; "
+                f"run {route_call('llm_health')} for live detail"
+            )
+    except Exception as _h_err:  # fail-open: health reporting must never break doctor
+        print(_dim(f"  (health snapshot unavailable: {_h_err})"))
 
     # ── 8. claw-code ───────────────────────────────────────────────────────
     print(
@@ -479,11 +1000,11 @@ def _run_doctor(host: Optional[str] = None) -> tuple[int, list[str]]:
                     print(
                         _fail(
                             f"{dst_name}  — not installed",
-                            fix="llm-router install --claw-code",
+                            fix="llm_router install --claw-code",
                         )
                     )
                     issues.append(f"claw-code hook {dst_name} not installed")
-            if "llm-router" in cc_settings.get("mcpServers", {}):
+            if "llm_router" in cc_settings.get("mcpServers", {}):
                 print(
                     _ok("MCP server registered in claw-code settings.json")
                 )
@@ -491,7 +1012,7 @@ def _run_doctor(host: Optional[str] = None) -> tuple[int, list[str]]:
                 print(
                     _fail(
                         "MCP server not registered in claw-code",
-                        fix="llm-router install --claw-code",
+                        fix="llm_router install --claw-code",
                     )
                 )
                 issues.append("MCP server not registered in claw-code")
@@ -503,19 +1024,73 @@ def _run_doctor(host: Optional[str] = None) -> tuple[int, list[str]]:
     print(f"\n{_bold('  Version')}")
     try:
         from llm_router import __version__ as project_version
-        print(_ok(f"llm-router {project_version}"))
+        print(_ok(f"llm_router {project_version}"))
     except Exception:
         try:
             from importlib.metadata import version
-            v = version("llm-router")
-            print(_ok(f"llm-router {v}"))
+            v = version("llm_router")
+            print(_ok(f"llm_router {v}"))
         except Exception:
             print(_warn("could not determine installed version"))
 
+    # ── 10. Quota savings posture ─────────────────────────────────────────
+    # Verifies the features that drive cost-savings in a live session are
+    # actually wired up. Each finding suggests a concrete env var or
+    # config change so the operator can close the gap.
+    print(f"\n{_bold('  Quota savings posture')}")
+    _savings_warnings = _check_savings_posture()
+    for line in _savings_warnings:
+        print(line)
+    # Posture warnings are advisory — surface them in the summary but
+    # don't fail the doctor. The user wanted to *see* whether config is
+    # optimal, not be blocked by it.
+
+    # ── 11. Tool surface vs ground truth (RED4-02) ────────────────────────
+    # doctor used to exit 0 with output byte-for-byte identical to a healthy run
+    # while a bogus canonical tool name sat in the CORE tier. It checked a
+    # PARALLEL path: tool_surface.unregistered() validates the tier constants
+    # against _TIERS, which IS the tier constants, so renaming a tool inside
+    # CORE_TOOLS leaves the check reporting clean. This resolves against what is
+    # actually implemented in llm_router/tools/ instead.
+    print(f"\n{_bold('  Tool surface')}")
+    try:
+        phantoms = _tool_surface_phantoms()
+    except Exception as exc:  # noqa: BLE001 — a broken check must not mask the rest
+        phantoms = []
+        print(_warn(f"tool-surface ground-truth check could not run: {exc}"))
+    if phantoms:
+        print(_fail(
+            f"tier offers {len(phantoms)} tool(s) nothing implements: "
+            f"{', '.join(phantoms)}",
+            fix="a hint naming these fails with 'No such tool available' and the "
+                "caller silently falls back to the expensive model",
+        ))
+        issues.append(
+            f"tool surface names unimplemented tool(s): {', '.join(phantoms)}"
+        )
+    else:
+        print(_ok("every offered tool resolves to a real implementation"))
+
     # ── Summary ────────────────────────────────────────────────────────────
     print()
+    print(_bold("  NOT CHECKED by doctor"))
+    # A green doctor implies "your install is fine". doctor checks perhaps a
+    # dozen things; stating the rest is what makes a pass honest instead of
+    # merely reassuring. RED4-02's real damage was that a passing run was read
+    # as evidence of far more than it measured.
+    for _unchecked in (
+        "live routing accuracy — whether hints actually reach a cheaper model "
+        "(run scripts/trace_northstar.py for the real hook path)",
+        "quality of routed answers — no judge runs here",
+        "cost/savings correctness — figures are reported, not verified",
+        "provider availability under load, rate limits, or quota exhaustion",
+        "hook behaviour on prompts other than the synthetic probe above",
+    ):
+        print(_dim(f"    · {_unchecked}"))
+    print()
+
     if not issues:
-        print(_green(_bold("  ✓ All checks passed. LLM Router is healthy.")))
+        print(_green(_bold("  ✓ All doctor checks passed (see NOT CHECKED above).")))
         exit_code = 0
     else:
         print(_red(_bold(f"  ✗ {len(issues)} issue(s) found:")))
@@ -528,11 +1103,33 @@ def _run_doctor(host: Optional[str] = None) -> tuple[int, list[str]]:
 
 
 def cmd_doctor(args: list[str]) -> int:
-    """Execute: llm-router doctor [--host claude|vscode|cursor|all]
+    """Execute: llm_router doctor [--host H] [--posture] [--explain-host]
+
+    Flags:
+        --host H        Run host-specific checks (claude|vscode|cursor|codex|all)
+                        IN ADDITION to the general health checks.
+        --posture       Print ONLY the quota-savings posture section.
+                        Skips the long general health scan; ideal for
+                        a fast in-session "am I configured for max
+                        savings?" check.
+        --explain-host  Print the always-up-to-date explainer for why
+                        the host runs on Opus and what routing can vs
+                        can't save. Skips everything else.
 
     Returns:
-        0 if all checks passed, 1 if issues found
+        0 if all checks passed, 1 if issues found.
     """
+    if "--explain-host" in args:
+        print(_render_host_explainer())
+        return 0
+
+    if "--posture" in args:
+        print(f"\n{_bold('  Quota savings posture')}")
+        for line in _check_savings_posture():
+            print(line)
+        print()
+        return 0
+
     host_flag = None
     if "--host" in args:
         idx = args.index("--host")

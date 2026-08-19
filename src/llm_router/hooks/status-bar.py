@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm-router-hook-version: 3
+# llm_router-hook-version: 4
 """UserPromptSubmit hook — enhanced savings + routing status bar.
 
 Displays a two-mode status line:
@@ -20,6 +20,52 @@ import sys
 import time
 from datetime import datetime, timezone
 
+
+# ── Registered-tool surface (CHZ-SURF-01) ────────────────────────────────────
+# Tool names are tier-dependent (LLM_ROUTER_SLIM). NEVER put a raw tool name in
+# output: under the DEFAULT `consolidated` tier the legacy llm_query /
+# llm_analyze / llm_code / llm_research / llm_generate names are not registered,
+# so naming one hands the caller "Error: No such tool available" — after which
+# it silently does the work on the expensive model and the savings dashboard
+# cannot distinguish that from "chose not to route".
+def _load_tool_surface_fns():
+    """(route_tool, route_call, route_call_with_complexity) from llm_router.tool_surface.
+
+    Falls back to the stdlib-only copy the installer drops next to the hooks, then
+    to the in-repo source, then to identity (correct only for tier `off`).
+    """
+    try:
+        from llm_router.tool_surface import (
+            route_call,
+            route_call_with_complexity,
+            route_tool,
+        )
+        return route_tool, route_call, route_call_with_complexity
+    except ImportError:
+        pass
+    try:
+        import importlib.util as _ilu
+        from pathlib import Path as _P
+        _here = _P(__file__).resolve().parent
+        for _cand in (_here / "llm_router_tool_surface.py", _here.parent / "tool_surface.py"):
+            if not _cand.exists():
+                continue
+            _spec = _ilu.spec_from_file_location("llm_router_tool_surface", _cand)
+            _mod = _ilu.module_from_spec(_spec)
+            sys.modules["llm_router_tool_surface"] = _mod  # dataclasses needs this
+            _spec.loader.exec_module(_mod)
+            return _mod.route_tool, _mod.route_call, _mod.route_call_with_complexity
+    except Exception:  # noqa: BLE001 — a broken support module must not kill the hook
+        pass
+    return (
+        lambda n, **k: n,
+        lambda n, *a, **k: (f"{n}({', '.join(a)})" if a else n),
+        lambda n, c, *a, **k: f"{n}(complexity='{c}'" + ("".join(', ' + x for x in a)) + ")",
+    )
+
+
+route_tool, route_call, route_call_with_complexity = _load_tool_surface_fns()
+
 # ── Paths ──────────────────────────────────────────────────────────────────
 STATE_DIR = os.path.expanduser("~/.llm-router")
 USAGE_JSON = os.path.join(STATE_DIR, "usage.json")
@@ -33,9 +79,25 @@ STATUS_EVERY = os.environ.get("LLM_ROUTER_STATUS_EVERY", "0")
 STATUS_MODE = os.environ.get("LLM_ROUTER_STATUS_MODE", "compact")  # compact | full
 ENFORCE_MODE = os.environ.get("LLM_ROUTER_ENFORCE", "hard").lower()
 
-# Baseline cost for "what would Opus have cost?" comparison
-HOST_INPUT_PER_M = 15.0
-HOST_OUTPUT_PER_M = 75.0
+# Baseline cost for "what would Opus have cost?" comparison.
+#
+# WP-03: was a hardcoded 15.0/75.0 — the retired Opus 3 tier — so the savings
+# figure on the status line, the number a user sees on every prompt, was
+# overstated 3x. The pricing lint missed this: its value check wants both halves
+# of a retired pair inside ONE assignment and these are two separate scalars,
+# while its structural check only fires on dict/list/tuple containers. A bare
+# float named ..._PER_M slips through both. Recorded as a lint gap — the lint is
+# an immutable asset for this work package and cannot be edited here.
+try:
+    from llm_router import pricing as _pricing
+
+    _host_price = _pricing.price_for("opus")
+except ImportError:  # pragma: no cover — copied to ~/.claude/hooks/, runs standalone
+    _host_price = None
+
+HOST_PRICE_KNOWN = _host_price is not None
+HOST_INPUT_PER_M = _host_price.input if _host_price else 0.0
+HOST_OUTPUT_PER_M = _host_price.output if _host_price else 0.0
 
 # ── ANSI colours ───────────────────────────────────────────────────────────
 G = "\033[92m"   # green  — savings, provider OK, enforce
@@ -133,20 +195,25 @@ def _savings_for_period(conn: sqlite3.Connection, since: str) -> tuple[float, fl
         (since,),
     ).fetchall()
 
+    if not HOST_PRICE_KNOWN:
+        # No price source: report nothing rather than a baseline of $0, which
+        # would render as "saved $0.00" and read as a measurement.
+        return 0.0, 0.0
+
     actual = baseline = 0.0
     for provider, in_tok, out_tok, cost in rows:
         in_tok = in_tok or 0
         out_tok = out_tok or 0
         cost = cost or 0.0
-        sonnet_cost = (in_tok * HOST_INPUT_PER_M + out_tok * HOST_OUTPUT_PER_M) / 1_000_000
+        host_cost = (in_tok * HOST_INPUT_PER_M + out_tok * HOST_OUTPUT_PER_M) / 1_000_000
         if provider == "subscription":
             continue  # no token data for subscription calls
         elif provider in _FREE_PROVIDERS:
-            baseline += sonnet_cost
+            baseline += host_cost
             # actual cost is $0 for free providers
         else:
             actual += cost
-            baseline += sonnet_cost
+            baseline += host_cost
 
     return max(0.0, baseline - actual), baseline
 
@@ -308,7 +375,7 @@ def _format_status() -> str:
         else:
             cc = f"CC {session_pct:.0f}%s·{weekly_pct:.0f}%w·{sonnet_pct:.0f}%♪{stale_mark}"
     else:
-        cc = f"{DIM}CC — run llm_check_usage{RST}"
+        cc = f"{DIM}CC — run {route_tool('llm_check_usage')}{RST}"
 
     # ── Gemini subscription segment ──
     g_seg = ""

@@ -1,0 +1,10 @@
+{
+  "mode": "compared",
+  "clean": true,
+  "total_train_prompts": 9300,
+  "unique_train_hashes": 9029,
+  "ra_hash_count": 8318,
+  "overlap_count": 0,
+  "overlap_sample": [],
+  "normalization": "NFC|strip|collapse-ws|casefold"
+}

@@ -47,7 +47,7 @@ def _run_update() -> None:
     """Re-install hooks + rules, check for newer PyPI version."""
     from llm_router.install_hooks import install
 
-    print(f"\n{_bold('llm-router update')}\n")
+    print(f"\n{_bold('llm_router update')}\n")
 
     # ── 1. Re-copy hooks & rules ──────────────────────────────────────
     print(_bold("  Hooks & rules"))
@@ -86,7 +86,7 @@ def _run_update() -> None:
 # ── Entry point ─────────────────────────────────────────────────────────────
 
 def cmd_update(args: list[str]) -> int:
-    """Execute: llm-router update
+    """Execute: llm_router update
 
     Re-install hooks and rules, check for newer version.
     """

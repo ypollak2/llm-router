@@ -80,7 +80,7 @@ class TestOutputFormat:
     def test_context_contains_llm_router_label(self, tmp_path):
         _, out = _run("general", usage_json={"session_pct": 10.0, "sonnet_pct": 10.0, "weekly_pct": 10.0}, tmp_path=tmp_path)
         ctx = out["hookSpecificOutput"]["additionalContext"]
-        assert "llm-router" in ctx.lower() or "llm_router" in ctx.lower() or "[llm-router]" in ctx
+        assert "llm_router" in ctx.lower() or "llm_router" in ctx.lower() or "[llm_router]" in ctx
 
 
 class TestPressureStatus:
@@ -130,7 +130,7 @@ class TestMissingUsageData:
     def test_no_usage_json_exits_cleanly(self, tmp_path):
         """When usage.json is missing, hook runs with 0% pressure (LOW)."""
         import os
-        # Point HOME at empty tmp_path (no .llm-router dir)
+        # Point HOME at empty tmp_path (no .llm_router dir)
         env = {**os.environ, "HOME": str(tmp_path)}
         payload = json.dumps({"hook_event_name": "SubagentStart", "agent_id": "x", "agent_type": "general"})
         result = subprocess.run(

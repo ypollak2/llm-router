@@ -103,19 +103,43 @@ def test_all_four_tools_are_behind_the_same_gate(monkeypatch):
     assert not missing, f"not registered under the opt-in: {sorted(missing)}"
 
 
-def test_layer_two_is_still_missing_and_this_is_deliberate():
-    """Fails the day path confinement lands, as a prompt to update the record.
+def test_layer_two_has_landed():
+    """SEC-002 layer 2 — path confinement — is present. It was not, until 13.0.0.
 
-    An xfail-style reminder rather than a silent TODO: SEC-002 is two layers and
-    only one is ported. When `_assert_under_root` appears here, this test and the
-    docstrings claiming layer 2 is absent both need revising in the same change.
+    This test used to be the inverse: ``test_layer_two_is_still_missing_and_
+    this_is_deliberate``, an xfail-style tripwire asserting the gap, written so
+    that closing it could not go unrecorded. It fired on the upstream sync,
+    which is exactly what it was for. Flipped here, in the change that closed
+    the gap, rather than deleted — a gap that closes silently is how the
+    docstrings claiming it was open would have quietly become wrong.
+
+    Checks for a real DEFINITION, not a mention. An earlier version matched the
+    string anywhere in the file and tripped on the SEC-002 comment that names
+    ``_assert_under_root`` while explaining its absence — textual co-presence
+    failing the way it always does.
     """
-    # Checks for a real DEFINITION, not a mention. The first version of this
-    # test matched the string anywhere in the file and tripped on the SEC-002
-    # comment that names `_assert_under_root` while explaining its absence —
-    # textual co-presence failing exactly the way it always does.
-    assert not hasattr(fs, "_assert_under_root"), (
-        "path confinement has landed — good. Now update this test, the SEC-002 "
-        "note in fs.py, and this module's docstring, all of which currently "
-        "state that layer 2 is missing."
+    assert hasattr(fs, "_assert_under_root"), (
+        "path confinement has disappeared again. llm_fs_* tools would accept "
+        "paths outside project_root, which is SEC-002 layer 2 regressing."
     )
+    assert hasattr(fs, "FsSandboxError"), (
+        "the sandbox error type is gone, so escapes have nothing to raise"
+    )
+
+
+def test_confinement_actually_rejects_an_escape(tmp_path):
+    """The behaviour, not just the symbol. `hasattr` is not enforcement."""
+    root = tmp_path / "project"
+    (root / "src").mkdir(parents=True)
+    (root / "src" / "ok.txt").write_text("inside")
+    outside = tmp_path / "outside.txt"
+    outside.write_text("sk-live-must-not-be-readable")
+
+    resolved = fs._resolve_root(str(root))
+    fs._assert_under_root(root / "src" / "ok.txt", resolved)  # must not raise
+
+    with pytest.raises(fs.FsSandboxError):
+        fs._assert_under_root(outside, resolved)
+
+    with pytest.raises(fs.FsSandboxError):
+        fs._assert_under_root(root / "src" / ".." / ".." / "outside.txt", resolved)

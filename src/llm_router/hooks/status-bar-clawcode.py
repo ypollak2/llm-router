@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm-router-hook-version: 1
+# llm_router-hook-version: 1
 """UserPromptSubmit hook (claw-code variant) — compact routing stats status bar.
 
 Identical to status-bar.py but omits the Claude Code subscription usage prefix
@@ -23,8 +23,19 @@ PROMPT_COUNT_FILE = os.path.join(STATE_DIR, "prompt_count.txt")
 
 STATUS_EVERY = os.environ.get("LLM_ROUTER_STATUS_EVERY", "0")
 
-HOST_INPUT_PER_M = 15.0   # Opus 4.6 ($15/$75 per M tokens)
-HOST_OUTPUT_PER_M = 75.0
+# WP-03: was 15.0/75.0 — the retired Opus 3 tier, a 3x overstatement on the
+# claw-code status line. Two separate scalars, which is the shape the pricing
+# lint cannot see; see the longer note in status-bar.py.
+try:
+    from llm_router import pricing as _pricing
+
+    _host_price = _pricing.price_for("opus")
+except ImportError:  # pragma: no cover — copied to ~/.claude/hooks/, runs standalone
+    _host_price = None
+
+HOST_PRICE_KNOWN = _host_price is not None
+HOST_INPUT_PER_M = _host_price.input if _host_price else 0.0
+HOST_OUTPUT_PER_M = _host_price.output if _host_price else 0.0
 
 _FREE_PROVIDERS = {"ollama", "codex", "gemini_cli"}
 

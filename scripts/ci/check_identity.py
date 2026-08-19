@@ -81,6 +81,17 @@ _CHUZOM_RE = re.compile(r"chuzom", re.IGNORECASE)
 #   applies — the audit tooling is new CLI wiring, not ported code), so the
 #   same rationale as the WS7/WS8 entries above governs: this is
 #   provenance-of-a-guard, not brand leakage.
+#: Whole DIRECTORIES where "chuzom" may appear. Currently one, and it is not a
+#: convenience: tests/_downstream_legacy/ holds test modules quarantined by the
+#: 13.0.0 sync (see its README). Several are brand-leak regression tests whose
+#: entire job is to assert `"chuzom" not in ...`, so they must contain the
+#: string — the same category already allowlisted file-by-file below, applied to
+#: a directory because the quarantine moved them out of their listed paths.
+#:
+#: They are excluded from pytest collection (`norecursedirs`) and are not
+#: runtime code. A runtime-code hit is still never allowlistable.
+ALLOW_DIRS: tuple[str, ...] = ("_quarantined_tests/",)
+
 ALLOW_FILES: frozenset[str] = frozenset(
     {
         "loophole.json",
@@ -166,6 +177,8 @@ def find_violations() -> list[tuple[str, int, str]]:
         if not hit_lines:
             continue
 
+        if rel_path.startswith(ALLOW_DIRS):
+            continue
         if rel_path in ALLOW_FILES:
             continue
 

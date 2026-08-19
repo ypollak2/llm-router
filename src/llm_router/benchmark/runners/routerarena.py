@@ -43,7 +43,7 @@ __all__ = ["RouterArenaRunner"]
 def _default_dataset_root() -> Path:
     """Where the runner looks for cached RouterArena prompts.
 
-    Per-user (not per-project) because the same dataset serves every llm-router
+    Per-user (not per-project) because the same dataset serves every llm_router
     workspace on this machine — no need to re-download or duplicate.
     """
     return Path.home() / ".llm-router" / "data" / "routerarena"

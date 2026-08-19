@@ -1,0 +1,66 @@
+# llm_router routing expectations — committed template
+# Copy to routing_expectations.local.yaml and customize for your environment.
+# local.yaml is gitignored and takes precedence when present.
+
+routing:
+  simple:
+    profile: budget
+    expected_provider_order: [ollama, codex, gemini_cli, openai]
+    winner_when_available: ollama
+  moderate:
+    profile: balanced
+    expected_provider_order: [ollama, codex, openai]
+    winner_when_available: ollama
+  complex:
+    profile: premium
+    expected_provider_order: [codex, openai, anthropic]
+    winner_when_available: codex
+
+ollama_discovery:
+  # Precedence order for model resolution — highest wins
+  precedence:
+    - LLM_ROUTER_OLLAMA_MODEL       # env var explicit override
+    - OLLAMA_BUDGET_MODELS      # comma-separated env var list
+    - OLLAMA_MODELS             # set by Ollama or user
+    - discovery_json            # ~/.llm-router/discovery.json
+  # Values that must NEVER appear as the resolved model when running
+  # (they indicate a stale hardcoded default rather than live discovery)
+  forbidden_resolved_values:
+    - gemma4:latest
+    - kimi-k2.6:cloud
+    - qwen3-coder-next
+  # Source files where hardcoded model literals must not control resolution
+  forbid_hardcoded_defaults_in:
+    - src/llm_router/hooks/auto-route.py
+
+dashboard:
+  # ROUTING panel: method keys must be canonical IDs, not human-readable strings
+  routing_labels_canonical: true
+  canonical_method_ids:
+    - heuristic
+    - ollama
+    - fallback
+    - context-inherit
+    - code-context-inherit
+    - build-fast-path
+    - intent-override-display
+    - introspection-fast-path
+    - override
+  # weekly_pct must be in [0, 100] — NOT multiplied again
+  weekly_pct_range: [0, 100]
+  # daily_calls and daily_tokens must be populated from 14-day DB data
+  daily_series_source: daily_14d
+  # session_models must be built from tools_data, not hardcoded []
+  session_models_source: tools_data
+
+performance:
+  # initialize_dynamic_routing must complete in under this many ms
+  # even when Ollama is unreachable (OLLAMA_BASE_URL=http://10.255.255.1:11434)
+  initialize_dynamic_routing_max_ms: 3000
+
+streaming:
+  # Codex and Gemini CLI must emit progress events before final result
+  codex_emits_events: true
+  gemini_cli_emits_events: true
+  codex_event_types: [thread.started, turn.started, item.completed, turn.completed]
+  gemini_cli_event_types: [line]

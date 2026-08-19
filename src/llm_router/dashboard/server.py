@@ -9,19 +9,19 @@ Routes:
     GET /api/stats  → JSON data used by dashboard charts
 
 Start via CLI:
-    llm-router dashboard
-    llm-router dashboard --port 7338
+    llm_router dashboard
+    llm_router dashboard --port 7338
 """
 
 from __future__ import annotations
 
-import asyncio
 import json
 import os
 import secrets
 from pathlib import Path
 
 from llm_router.logging import configure_logging, get_logger
+from llm_router.paths import private_opener
 
 log = get_logger("llm_router.dashboard")
 
@@ -35,7 +35,14 @@ def _get_or_create_token() -> str:
     if _TOKEN_FILE.exists():
         return _TOKEN_FILE.read_text().strip()
     token = secrets.token_urlsafe(32)
-    _TOKEN_FILE.write_text(token)
+    # Created at 0600, not created-then-tightened. `write_text` would make the
+    # file with the umask default (0644 typically), put the AUTH TOKEN in it,
+    # and only restrict it afterwards — anything that opened it in that window
+    # keeps a readable handle, since permissions are checked at open time.
+    # The chmod stays for files written by older versions, which an opener
+    # cannot fix because it only applies on creation.
+    with open(_TOKEN_FILE, "w", encoding="utf-8", opener=private_opener) as fh:
+        fh.write(token)
     os.chmod(_TOKEN_FILE, 0o600)
     return token
 
@@ -56,17 +63,6 @@ async def _get_stats() -> dict:
         "savings": {"total_saved_usd": 0.0, "total_external_usd": 0.0},
         "usage": {},
         "semantic_cache": {"hits": 0},
-        "realized_savings": {
-            "window": "month",
-            "potential_savings_usd": 0.0,
-            "realized_savings_usd": 0.0,
-            "net_realized_savings_usd": 0.0,
-            "realized_routes": 0,
-            "overridden_routes": 0,
-            "realization_unknown_routes": 0,
-            "likely_used_routes": 0,
-            "cost_unknown_attempts": 0,
-        },
     }
 
     try:
@@ -75,7 +71,7 @@ async def _get_stats() -> dict:
             c = await db.execute(
                 "SELECT COUNT(*), COALESCE(SUM(cost_usd),0), "
                 "COALESCE(SUM(input_tokens+output_tokens),0) "
-                "FROM usage WHERE timestamp >= datetime('now','start of day')"
+                "FROM usage WHERE date(timestamp,'localtime') = date('now','localtime')"
             )
             row = await c.fetchone()
             if row:
@@ -112,7 +108,7 @@ async def _get_stats() -> dict:
             stats["task_types"] = [{"task_type": r[0], "calls": r[1]} for r in await c.fetchall()]
 
             c = await db.execute(
-                "SELECT date(timestamp) as day, COALESCE(SUM(cost_usd),0) "
+                "SELECT date(timestamp,'localtime') as day, COALESCE(SUM(cost_usd),0) "
                 "FROM usage WHERE timestamp >= datetime('now','-14 days') "
                 "GROUP BY day ORDER BY day"
             )
@@ -133,8 +129,16 @@ async def _get_stats() -> dict:
                 for r in await c.fetchall()
             ]
 
-            # Savings = baseline Sonnet cost minus actual external spend
-            SONNET_IN, SONNET_OUT = 3.0, 15.0  # $/M tokens
+            # Savings = baseline Sonnet cost minus actual external spend.
+            # WP-03: rates from llm_router.pricing. They were 3.0/15.0 inline, which
+            # does not follow Sonnet 5's introductory pricing and so overstates
+            # the dashboard's headline saving by 50% while that is live.
+            from llm_router import pricing as _pricing
+
+            _sonnet = _pricing.price_for("sonnet")
+            SONNET_IN, SONNET_OUT = (
+                (_sonnet.input, _sonnet.output) if _sonnet else (0.0, 0.0)
+            )  # $/M tokens
             c = await db.execute(
                 "SELECT COALESCE(SUM(input_tokens),0), COALESCE(SUM(output_tokens),0), "
                 "COALESCE(SUM(cost_usd),0) FROM usage "
@@ -160,28 +164,6 @@ async def _get_stats() -> dict:
             await db.close()
     except Exception as exc:
         log.warning("Dashboard DB read failed: %s", exc)
-
-    # Additive Gate-18 realized-savings split (WS3/C6) — a stricter,
-    # independently-computed figure alongside "savings" above. Never
-    # overwrites/reconciles against it; isolated in its own try/except so a
-    # failure here can never break the rest of /api/stats.
-    try:
-        from llm_router.dashboard_data import query_realized_savings
-
-        realized = await asyncio.to_thread(query_realized_savings, "month")
-        stats["realized_savings"] = {
-            "window": realized.window,
-            "potential_savings_usd": round(realized.potential_savings_usd, 4),
-            "realized_savings_usd": round(realized.realized_savings_usd, 4),
-            "net_realized_savings_usd": round(realized.net_realized_savings_usd, 4),
-            "realized_routes": realized.realized_routes,
-            "overridden_routes": realized.overridden_routes,
-            "realization_unknown_routes": realized.realization_unknown_routes,
-            "likely_used_routes": realized.likely_used_routes,
-            "cost_unknown_attempts": realized.cost_unknown_attempts,
-        }
-    except Exception as exc:  # noqa: BLE001 -- realized-savings read must never break /api/stats
-        log.warning("Dashboard realized-savings read failed: %s", exc)
 
     usage_path = Path.home() / ".llm-router" / "usage.json"
     try:
@@ -1191,10 +1173,14 @@ async def run(port: int = DEFAULT_PORT) -> None:
 
     @web.middleware
     async def auth_middleware(request: "web.Request", handler) -> "web.Response":
-        if request.path == "/":
-            return await handler(request)
+        # CHZ-SEC-05: the index ("/") must NOT be exempt from auth. It injects the
+        # dashboard token into the page (window.DASHBOARD_TOKEN), so exempting it
+        # handed the token to any unauthenticated request that reached the port,
+        # defeating the whole scheme. The launcher logs the tokenized URL
+        # (http://localhost:PORT/?token=…), so a legitimate user still gets in;
+        # an unauthenticated GET / now receives 401 and no token.
         provided = request.headers.get("X-Dashboard-Token") or request.rel_url.query.get("token")
-        if provided != token:
+        if not provided or not secrets.compare_digest(provided, token):
             raise web.HTTPUnauthorized(text="Unauthorized")
         return await handler(request)
 
@@ -1232,8 +1218,9 @@ async def run(port: int = DEFAULT_PORT) -> None:
             provider = str(body["provider"]).strip().lower()
             cap = float(body["cap"])
         except Exception as e:
+            log.warning("budget_set: bad request", exc_info=e)
             return web.Response(
-                text=json.dumps({"ok": False, "error": str(e)}),
+                text=json.dumps({"ok": False, "error": "Invalid request body"}),
                 content_type="application/json", status=400,
             )
         from llm_router.budget_store import set_cap, remove_cap

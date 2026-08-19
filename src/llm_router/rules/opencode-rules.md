@@ -1,28 +1,33 @@
-# llm-router Routing Rules for OpenCode
+<!-- llm_router-rules-version: 2 -->
+# LLM Router — OpenCode IDE Routing Rules
 
-Cost-aware LLM routing for OpenCode IDE.
+> LLM Router routes each task to the cheapest capable model before OpenCode generates
+> its own response. Call the appropriate tool BEFORE answering.
+>
+> **Pull routing:** OpenCode uses pull routing — YOU must call the tool. The tool
+> returns the response; relay it verbatim. This fires in agent mode (~90% of turns).
 
-## Routing via MCP (llm_auto)
+## Task Type → Tool Mapping
 
-Use the `llm_auto` command for intelligent automatic routing:
-- `llm_auto` — Automatic routing (recommended for most tasks)
-- `llm_research` — Web research, current information
-- `llm_code` — Code generation and implementation
-- `llm_generate` — Content and documentation
-- `llm_analyze` — Problem decomposition
-- `llm_query` — Factual lookups
+| Task | Tool | Notes |
+|---|---|---|
+| Simple factual question | `llm_query` | Ollama → Gemini Flash → GPT-4o-mini |
+| Research / current events | `llm_research` | Perplexity (web-grounded) |
+| Writing / content | `llm_generate` | Gemini Flash → Haiku |
+| Deep analysis / review | `llm_analyze` | Ollama → GPT-4o |
+| Code generation / refactor | `llm_code` | Ollama → Codex → o3 |
+| Deep reasoning / proofs | `llm_reason` | Extended-thinking model |
+| Unknown / auto-detect | `llm_auto` | Classifies + routes automatically |
 
-## Token-Efficient Response Style
+## Rules
 
-When using llm-router, responses use a token-efficient preamble style:
-- No unnecessary filler ("I think", "basically", etc.)
-- Direct answers before explanation
-- Code examples shown inline
-- Minimal preamble in context-heavy tasks
+1. Call the matching tool **before** generating your own response.
+2. Return the tool's output to the user **as-is** (don't paraphrase).
+3. Only use native OpenCode intelligence for file navigation, terminal commands,
+   or when all LLM Router MCP servers are unavailable.
+4. Use `llm_research` for anything time-sensitive — training has a cutoff.
 
-## Configuration
+## Token-Efficient Responses
 
-The llm-router MCP server is configured in `~/.config/opencode/config.json` with:
-- Free-first routing (Ollama → cloud APIs → Claude)
-- Budget pressure tracking
-- Smart complexity classification
+Skip preamble. Lead with result. Fragments fine when meaning is clear.
+No trailing summaries. ≥3 items → bullets. Never restate the user's request.

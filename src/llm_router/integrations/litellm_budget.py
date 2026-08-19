@@ -1,15 +1,15 @@
-"""LiteLLM BudgetManager integration for llm-router.
+"""LiteLLM BudgetManager integration for llm_router.
 
-When teams run a LiteLLM Proxy with budget management enabled, llm-router
+When teams run a LiteLLM Proxy with budget management enabled, llm_router
 can read per-user/per-team budget state from the proxy's SQLite database
 and incorporate it into routing pressure calculations.
 
 This allows enterprises to:
   - Set per-developer or per-team monthly spend limits in LiteLLM
-  - Have llm-router automatically route away from expensive providers
+  - Have llm_router automatically route away from expensive providers
     as those budgets approach their limits
   - Unify budget enforcement across both LiteLLM Proxy and direct
-    llm-router routing
+    llm_router routing
 
 Configuration::
 
@@ -92,7 +92,10 @@ async def get_litellm_spend(provider: str | None = None) -> dict[str, float]:
 
         query += " GROUP BY provider_key"
 
-        async with aiosqlite.connect(db_path) as db:
+        from llm_router.aiosqlite_util import mark_worker_daemon
+        _conn = aiosqlite.connect(db_path)
+        mark_worker_daemon(_conn)  # CHZ-PY-004: before __aenter__ starts the worker
+        async with _conn as db:
             cursor = await db.execute(query, params)
             rows = await cursor.fetchall()
 
@@ -138,7 +141,10 @@ async def get_litellm_budget_cap(provider: str, user: str | None = None) -> floa
 
     try:
         import aiosqlite
-        async with aiosqlite.connect(db_path) as db:
+        from llm_router.aiosqlite_util import mark_worker_daemon
+        _conn = aiosqlite.connect(db_path)
+        mark_worker_daemon(_conn)  # CHZ-PY-004: before __aenter__ starts the worker
+        async with _conn as db:
             if user:
                 cursor = await db.execute(
                     "SELECT max_budget FROM budget_limits WHERE user_id = ? LIMIT 1",

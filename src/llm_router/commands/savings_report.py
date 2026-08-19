@@ -1,11 +1,15 @@
 """Detailed savings report command.
 
-Shows comprehensive token and cost breakdown across all models, periods, and usage patterns.
+Reads the authoritative per-call ledger ``savings_stats`` (written by the
+savings_logger hook) as the SINGLE source of truth, so the report can never
+disagree with the stored stats. Paid vs free is split by ``external_cost`` (no
+double-counting), and the saved amount is the stored ``estimated_claude_cost_saved``
+(not a separately-recomputed baseline).
 
 Usage:
-    llm-router savings-report              — full report (all time)
-    llm-router savings-report --period week — weekly report
-    llm-router savings-report --period day  — today only
+    llm_router savings-report              — full report (all time)
+    llm_router savings-report --period week — weekly report
+    llm_router savings-report --period day  — today only
 """
 
 from __future__ import annotations
@@ -14,23 +18,15 @@ import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-
-def _format_tokens(count: int) -> str:
-    """Format token count as human-readable (e.g., 18.4k, 1.2M)."""
-    if count >= 1_000_000:
-        return f"{count / 1_000_000:.1f}M"
-    elif count >= 1_000:
-        return f"{count / 1_000:.1f}k"
-    return str(count)
+_FREE_PROVIDERS = {"ollama", "codex", "gemini_cli", "openai_compat"}
 
 
 def _get_db_path() -> Path:
-    """Get path to the usage database."""
     return Path.home() / ".llm-router" / "usage.db"
 
 
-def _get_time_filter(period: str = "all") -> str:
-    """Get SQL WHERE clause for time period filter."""
+def _get_time_filter(period: str = "all") -> tuple[str, tuple]:
+    """Return (sql_fragment, params) for the given period."""
     if period == "day":
         cutoff = datetime.now(timezone.utc) - timedelta(days=1)
     elif period == "week":
@@ -38,308 +34,95 @@ def _get_time_filter(period: str = "all") -> str:
     elif period == "month":
         cutoff = datetime.now(timezone.utc) - timedelta(days=30)
     else:
-        return ""  # "all" — no filter
-
-    cutoff_str = cutoff.isoformat()
-    return f"AND timestamp > '{cutoff_str}'"
+        return "", ()
+    return "AND timestamp > ?", (cutoff.isoformat(),)
 
 
-def _query_routing_stats(db_path: Path, period: str = "all") -> dict:
-    """Query routing (external API) statistics from database."""
-    time_filter = _get_time_filter(period)
+def _provider_of(model: str) -> str:
+    if "/" in model:
+        return model.split("/", 1)[0]
+    if model.startswith("claude") or model == "cc":
+        return "anthropic"
+    return model or "unknown"
 
+
+def _query(db_path: Path, period: str, *, paid: bool) -> dict:
+    """Aggregate savings_stats for paid (external_cost>0) or free (==0) routes."""
+    tf_sql, tf_params = _get_time_filter(period)
+    cond = "external_cost > 0" if paid else "(external_cost = 0 OR external_cost IS NULL)"
+    stats = {"calls": 0, "saved": 0.0, "cost": 0.0, "by_model": {}}
     try:
         conn = sqlite3.connect(db_path)
         conn.row_factory = sqlite3.Row
-        cursor = conn.cursor()
-
-        # Overall stats
-        query = f"""
-            SELECT
-                COUNT(*) as calls,
-                SUM(input_tokens) as total_in,
-                SUM(output_tokens) as total_out,
-                SUM(cost_usd) as total_cost,
-                provider,
-                model
-            FROM usage
-            WHERE 1=1 {time_filter}
-            GROUP BY provider, model
-            ORDER BY calls DESC
-        """
-        cursor.execute(query)
-        rows = cursor.fetchall()
-
-        stats = {
-            "total_calls": 0,
-            "total_tokens": 0,
-            "total_cost": 0.0,
-            "by_provider": {},
-            "by_model": {},
-        }
-
-        for row in rows:
-            calls = row["calls"]
-            in_tok = row["total_in"] or 0
-            out_tok = row["total_out"] or 0
-            cost = row["total_cost"] or 0.0
-            total_tok = in_tok + out_tok
-            provider = row["provider"] or "unknown"
-            model = row["model"] or "unknown"
-
-            stats["total_calls"] += calls
-            stats["total_tokens"] += total_tok
-            stats["total_cost"] += cost
-
-            # By provider
-            if provider not in stats["by_provider"]:
-                stats["by_provider"][provider] = {
-                    "calls": 0,
-                    "tokens": 0,
-                    "cost": 0.0,
-                }
-            stats["by_provider"][provider]["calls"] += calls
-            stats["by_provider"][provider]["tokens"] += total_tok
-            stats["by_provider"][provider]["cost"] += cost
-
-            # By model
-            if model not in stats["by_model"]:
-                stats["by_model"][model] = {
-                    "calls": 0,
-                    "tokens": 0,
-                    "cost": 0.0,
-                    "provider": provider,
-                }
-            stats["by_model"][model]["calls"] += calls
-            stats["by_model"][model]["tokens"] += total_tok
-            stats["by_model"][model]["cost"] += cost
-
+        rows = conn.execute(  # nosec B608 — cond is a hardcoded literal, not user input
+            f"""SELECT COUNT(*) AS calls,
+                       COALESCE(SUM(estimated_claude_cost_saved), 0) AS saved,
+                       COALESCE(SUM(external_cost), 0) AS cost,
+                       model_used AS model
+                FROM savings_stats
+                WHERE {cond} {tf_sql}
+                GROUP BY model_used
+                ORDER BY calls DESC""",
+            tf_params,
+        ).fetchall()
         conn.close()
-        return stats
-
-    except Exception as e:
-        print(f"Error querying database: {e}")
-        return {}
-
-
-def _query_free_stats(db_path: Path, period: str = "all") -> dict:
-    """Query free model (Ollama, Codex) statistics."""
-    time_filter = _get_time_filter(period)
-
-    try:
-        conn = sqlite3.connect(db_path)
-        conn.row_factory = sqlite3.Row
-        cursor = conn.cursor()
-
-        # Look for zero-cost or free provider entries
-        query = f"""
-            SELECT
-                COUNT(*) as calls,
-                SUM(input_tokens) as total_in,
-                SUM(output_tokens) as total_out,
-                provider,
-                model
-            FROM usage
-            WHERE (cost_usd = 0 OR cost_usd IS NULL OR provider IN ('ollama', 'codex'))
-            {time_filter}
-            GROUP BY provider, model
-            ORDER BY calls DESC
-        """
-        cursor.execute(query)
-        rows = cursor.fetchall()
-
-        stats = {"total_calls": 0, "total_tokens": 0, "by_provider": {}}
-
-        for row in rows:
-            calls = row["calls"]
-            in_tok = row["total_in"] or 0
-            out_tok = row["total_out"] or 0
-            total_tok = in_tok + out_tok
-            provider = row["provider"] or "unknown"
-            model = row["model"] or "unknown"
-
-            stats["total_calls"] += calls
-            stats["total_tokens"] += total_tok
-
-            if provider not in stats["by_provider"]:
-                stats["by_provider"][provider] = {
-                    "calls": 0,
-                    "tokens": 0,
-                    "models": {},
-                }
-            stats["by_provider"][provider]["calls"] += calls
-            stats["by_provider"][provider]["tokens"] += total_tok
-            stats["by_provider"][provider]["models"][model] = {
-                "calls": calls,
-                "tokens": total_tok,
-            }
-
-        conn.close()
-        return stats
-
     except Exception:
-        return {}
-
-
-def _calculate_baseline_cost(tokens: int) -> float:
-    """Calculate host (Opus) baseline cost for tokens."""
-    HOST_INPUT_PER_M = 15.0
-    HOST_OUTPUT_PER_M = 75.0
-    # Conservative estimate: 40% input, 60% output
-    input_tokens = int(tokens * 0.4)
-    output_tokens = int(tokens * 0.6)
-    return (input_tokens * HOST_INPUT_PER_M + output_tokens * HOST_OUTPUT_PER_M) / 1_000_000
+        return stats
+    for r in rows:
+        stats["calls"] += r["calls"]
+        stats["saved"] += r["saved"] or 0.0
+        stats["cost"] += r["cost"] or 0.0
+        stats["by_model"][r["model"] or "unknown"] = {
+            "calls": r["calls"], "saved": r["saved"] or 0.0, "cost": r["cost"] or 0.0,
+            "provider": _provider_of(r["model"] or "unknown"),
+        }
+    return stats
 
 
 def render_savings_report(period: str = "all") -> str:
-    """Generate and render detailed savings report."""
     db_path = _get_db_path()
-
     if not db_path.exists():
         return "No usage data found. Start routing prompts to generate data."
 
-    routing_stats = _query_routing_stats(db_path, period)
-    free_stats = _query_free_stats(db_path, period)
-
-    if not routing_stats.get("total_calls") and not free_stats.get("total_calls"):
+    free = _query(db_path, period, paid=False)
+    paid = _query(db_path, period, paid=True)
+    if not free["calls"] and not paid["calls"]:
         return "No routing data available for this period."
 
-    lines = []
+    label = {"day": "Last 24 Hours", "week": "Last 7 Days",
+             "month": "Last 30 Days", "all": "All Time"}.get(period, "All Time")
+    total_saved = free["saved"] + paid["saved"]
+    total_calls = free["calls"] + paid["calls"]
 
-    # Period label
-    period_label = {
-        "day": "Last 24 Hours",
-        "week": "Last 7 Days",
-        "month": "Last 30 Days",
-        "all": "All Time",
-    }.get(period, "All Time")
+    out = [f"\n╭─ SAVINGS REPORT ─ {label} " + "─" * 34 + "╮", "│"]
+    out.append(f"│  Claude quota saved:  ${total_saved:.4f}   across {total_calls} routed call(s)")
+    out.append("│")
 
-    lines.append(f"\n╭─ DETAILED SAVINGS REPORT ─ {period_label} " + "─" * 40 + "╮")
-    lines.append("│")
+    def section(title: str, s: dict, free_section: bool) -> None:
+        if not s["calls"]:
+            return
+        spent = "$0.0000" if free_section else f"${s['cost']:.4f}"
+        out.append(f"│  {title}")
+        out.append(f"│    {s['calls']:>4} calls · saved ${s['saved']:.4f} vs Claude · {spent} spent")
+        for model, d in sorted(s["by_model"].items(), key=lambda x: -x[1]["saved"])[:10]:
+            out.append(f"│      {model:<26} {d['calls']:>3}×   saved ${d['saved']:.4f}")
+        out.append("│")
 
-    # === EXTERNAL ROUTING SECTION ===
-    if routing_stats.get("total_calls"):
-        lines.append("│ EXTERNAL ROUTING (Paid APIs)")
-        lines.append("│")
+    section("FREE / LOCAL  (ollama · codex · gemini-cli)", free, True)
+    section("PAID EXTERNAL  (gemini · openai · …)", paid, False)
 
-        total_calls = routing_stats["total_calls"]
-        total_tokens = routing_stats["total_tokens"]
-        total_cost = routing_stats["total_cost"]
-        baseline_cost = _calculate_baseline_cost(total_tokens)
-        saved = max(0.0, baseline_cost - total_cost)
-        savings_pct = round(saved / baseline_cost * 100) if baseline_cost > 0 else 0
-
-        tokens_str = _format_tokens(total_tokens)
-        lines.append(
-            f"│ {total_calls:>6} calls  │  {tokens_str:>8} tokens  │  "
-            f"${total_cost:.4f} actual vs ${baseline_cost:.4f} baseline  │  "
-            f"${saved:.4f} saved ({savings_pct}%)"
-        )
-        lines.append("│")
-
-        # By provider
-        if routing_stats["by_provider"]:
-            lines.append("│ BY PROVIDER:")
-            for provider, data in sorted(
-                routing_stats["by_provider"].items(), key=lambda x: -x[1]["cost"]
-            ):
-                tokens_str = _format_tokens(data["tokens"])
-                prov_baseline = _calculate_baseline_cost(data["tokens"])
-                prov_saved = max(0.0, prov_baseline - data["cost"])
-                lines.append(
-                    f"│   {provider:<12} {data['calls']:>4}×  {tokens_str:>8}  "
-                    f"${data['cost']:.4f}  (saved: ${prov_saved:.4f})"
-                )
-            lines.append("│")
-
-        # By model (top 10)
-        if routing_stats["by_model"]:
-            lines.append("│ BY MODEL (Top 10):")
-            for model, data in sorted(
-                routing_stats["by_model"].items(), key=lambda x: -x[1]["calls"]
-            )[:10]:
-                tokens_str = _format_tokens(data["tokens"])
-                model_baseline = _calculate_baseline_cost(data["tokens"])
-                model_saved = max(0.0, model_baseline - data["cost"])
-                lines.append(
-                    f"│   {model:<24} {data['calls']:>4}×  {tokens_str:>8}  "
-                    f"${data['cost']:.4f}  (saved: ${model_saved:.4f})"
-                )
-            lines.append("│")
-
-    # === FREE ROUTING SECTION ===
-    if free_stats.get("total_calls"):
-        lines.append("│ FREE ROUTING (Local + Codex)")
-        lines.append("│")
-
-        total_calls = free_stats["total_calls"]
-        total_tokens = free_stats["total_tokens"]
-        baseline_cost = _calculate_baseline_cost(total_tokens)
-
-        tokens_str = _format_tokens(total_tokens)
-        lines.append(
-            f"│ {total_calls:>6} calls  │  {tokens_str:>8} tokens  │  "
-            f"$0.0000 actual vs ${baseline_cost:.4f} baseline  │  "
-            f"${baseline_cost:.4f} saved (100%)"
-        )
-        lines.append("│")
-
-        # By provider
-        if free_stats["by_provider"]:
-            lines.append("│ BY PROVIDER:")
-            for provider, data in sorted(
-                free_stats["by_provider"].items(), key=lambda x: -x[1]["tokens"]
-            ):
-                tokens_str = _format_tokens(data["tokens"])
-                prov_baseline = _calculate_baseline_cost(data["tokens"])
-                lines.append(
-                    f"│   {provider:<12} {data['calls']:>4}×  {tokens_str:>8}  "
-                    f"$0.0000 actual  (saved: ${prov_baseline:.4f})"
-                )
-
-                # Sub-models
-                for model, model_data in sorted(
-                    data["models"].items(), key=lambda x: -x[1]["tokens"]
-                ):
-                    model_tokens_str = _format_tokens(model_data["tokens"])
-                    model_baseline = _calculate_baseline_cost(model_data["tokens"])
-                    lines.append(
-                        f"│     • {model:<20} {model_data['calls']:>3}×  "
-                        f"{model_tokens_str:>8}  (saved: ${model_baseline:.4f})"
-                    )
-            lines.append("│")
-
-    # === SUMMARY ===
-    if routing_stats.get("total_calls") and free_stats.get("total_calls"):
-        combined_tokens = routing_stats["total_tokens"] + free_stats["total_tokens"]
-        combined_cost = routing_stats["total_cost"]
-        combined_baseline = _calculate_baseline_cost(combined_tokens)
-        combined_saved = combined_baseline - combined_cost
-        combined_pct = (
-            round(combined_saved / combined_baseline * 100) if combined_baseline > 0 else 0
-        )
-
-        lines.append("│ COMBINED TOTALS:")
-        lines.append(
-            f"│ {_format_tokens(combined_tokens):>8} tokens  │  "
-            f"${combined_cost:.4f} actual vs ${combined_baseline:.4f} baseline  │  "
-            f"${combined_saved:.4f} saved ({combined_pct}%)"
-        )
-
-    lines.append("│")
-    lines.append("╰" + "─" * 77 + "╯\n")
-
-    return "\n".join(lines)
+    out.append("│  Note: counts only prompts LLM Router ROUTED (conversation turns). Tokens")
+    out.append("│        consumed by downstream agents/tools are not metered here.")
+    out.append("╰" + "─" * 60 + "╯")
+    return "\n".join(out)
 
 
-def main(args: list[str]) -> int:
-    """Entry point for savings-report command."""
+def main(argv: list[str] | None = None) -> int:
+    argv = argv or []
     period = "all"
-
-    if "--period" in args:
-        idx = args.index("--period")
-        if idx + 1 < len(args):
-            period = args[idx + 1]
-
+    if "--period" in argv:
+        i = argv.index("--period")
+        if i + 1 < len(argv):
+            period = argv[i + 1]
     print(render_savings_report(period))
     return 0

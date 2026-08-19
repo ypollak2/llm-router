@@ -94,6 +94,15 @@ _MIN_LENGTH: dict[Complexity, int] = {
     Complexity.DEEP_REASONING: 80,
 }
 
+# CHZ-AUD-C-03: task types whose valid answers are legitimately terse regardless
+# of the classifier's complexity guess. Factual Q&A routinely returns a single
+# token ("London", "42", "Yes"); applying the 20/50/80-char complexity floor to
+# these forces a silent post-dispatch re-route of a perfectly good brief answer.
+# For these task types the length gate keeps only its empty-guard (min 1 char);
+# the cross-cutting short-valid-answer allow-list in gates._check_length handles
+# terse answers for the remaining task types.
+_TERSE_ANSWER_TASKS: set[TaskType] = {TaskType.QUERY}
+
 
 def build_contract(
     contract_id: str,
@@ -107,6 +116,9 @@ def build_contract(
     """
     gates = _TASK_GATES.get(task_type, [])
     min_len = _MIN_LENGTH.get(complexity, 20)
+    if task_type in _TERSE_ANSWER_TASKS:
+        # CHZ-AUD-C-03: cap terse-answer task types at the empty-guard only.
+        min_len = min(min_len, 1)
 
     constraints = ContractConstraints(
         min_output_length=min_len,

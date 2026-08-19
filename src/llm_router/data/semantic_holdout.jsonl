@@ -1,0 +1,66 @@
+{"prompt": "Implement a pagination helper in Rust with error handling.", "task_type": "code", "subject": "code"}
+{"prompt": "Implement a serializer in Kotlin with error handling.", "task_type": "code", "subject": "code"}
+{"prompt": "Implement a serializer in Swift with error handling.", "task_type": "code", "subject": "code"}
+{"prompt": "Rewrite a press release to be more concise.", "task_type": "generate", "subject": "creative"}
+{"prompt": "Implement a state machine in TypeScript with error handling.", "task_type": "code", "subject": "code"}
+{"prompt": "Compare eventual consistency with an alternative and recommend one.", "task_type": "analyze", "subject": "reasoning"}
+{"prompt": "What is OAuth? Keep it brief.", "task_type": "query", "subject": "trivia"}
+{"prompt": "Implement a scheduler in Python with error handling.", "task_type": "code", "subject": "code"}
+{"prompt": "Compare a B-tree with an alternative and recommend one.", "task_type": "analyze", "subject": "reasoning"}
+{"prompt": "Briefly, why ice floats?", "task_type": "query", "subject": "scientific"}
+{"prompt": "Explain a WAL in one paragraph.", "task_type": "query", "subject": "general"}
+{"prompt": "Write a C++ webhook handler.", "task_type": "code", "subject": "code"}
+{"prompt": "Assess the security risks in the billing pipeline.", "task_type": "analyze", "subject": "general"}
+{"prompt": "Prove that the sum of the first 20 squares equals the claimed value, step by step.", "task_type": "analyze", "subject": "math"}
+{"prompt": "Implement a config loader in TypeScript with error handling.", "task_type": "code", "subject": "code"}
+{"prompt": "What's the most recent news on this month's semiconductor export rules?", "task_type": "research", "subject": "general"}
+{"prompt": "Implement a class in Scala with error handling.", "task_type": "code", "subject": "code"}
+{"prompt": "Find current data on which studios greenlit sequels this year.", "task_type": "research", "subject": "business"}
+{"prompt": "Assess the security risks in the auth service.", "task_type": "analyze", "subject": "general"}
+{"prompt": "What is a hash map? Keep it brief.", "task_type": "query", "subject": "trivia"}
+{"prompt": "What is a circuit breaker? Keep it brief.", "task_type": "query", "subject": "trivia"}
+{"prompt": "Draft release notes in a friendly tone.", "task_type": "generate", "subject": "creative"}
+{"prompt": "Implement a pagination helper in TypeScript with error handling.", "task_type": "code", "subject": "code"}
+{"prompt": "Compute the area under 1/x from 1 to e. Show the number.", "task_type": "query", "subject": "math"}
+{"prompt": "Write a Scala migration.", "task_type": "code", "subject": "code"}
+{"prompt": "Briefly, why the sky is blue?", "task_type": "query", "subject": "scientific"}
+{"prompt": "Prove that the limit of (1+1/n)^n equals the claimed value, step by step.", "task_type": "analyze", "subject": "math"}
+{"prompt": "Find current data on this quarter's cloud revenue.", "task_type": "research", "subject": "business"}
+{"prompt": "Implement a state machine in Swift with error handling.", "task_type": "code", "subject": "code"}
+{"prompt": "Debug why the message queue is slow and propose a fix.", "task_type": "analyze", "subject": "reasoning"}
+{"prompt": "Write a pitch.", "task_type": "generate", "subject": "creative"}
+{"prompt": "Compare database indexing with an alternative and recommend one.", "task_type": "analyze", "subject": "reasoning"}
+{"prompt": "Assess the security risks in the onboarding wizard.", "task_type": "analyze", "subject": "general"}
+{"prompt": "Review the trade-offs of when to raise a bridge round.", "task_type": "analyze", "subject": "general"}
+{"prompt": "Research who acquired which robotics startup and summarize the latest.", "task_type": "research", "subject": "general"}
+{"prompt": "Implement a serializer in Ruby with error handling.", "task_type": "code", "subject": "code"}
+{"prompt": "Implement a cache layer in Swift with error handling.", "task_type": "code", "subject": "code"}
+{"prompt": "Draft a blog intro in a friendly tone.", "task_type": "generate", "subject": "creative"}
+{"prompt": "Briefly, how photosynthesis fixes carbon?", "task_type": "query", "subject": "scientific"}
+{"prompt": "Define a WAL.", "task_type": "query", "subject": "general"}
+{"prompt": "Implement a state machine in Elixir with error handling.", "task_type": "code", "subject": "code"}
+{"prompt": "Briefly, how mRNA vaccines work?", "task_type": "query", "subject": "scientific"}
+{"prompt": "Implement a class in Rust with error handling.", "task_type": "code", "subject": "code"}
+{"prompt": "Compare content negotiation with an alternative and recommend one.", "task_type": "analyze", "subject": "reasoning"}
+{"prompt": "Write a PHP class.", "task_type": "code", "subject": "code"}
+{"prompt": "Write a Elixir CLI.", "task_type": "code", "subject": "code"}
+{"prompt": "Write a Scala queue consumer.", "task_type": "code", "subject": "code"}
+{"prompt": "Explain eventual consistency in one paragraph.", "task_type": "query", "subject": "general"}
+{"prompt": "What's the most recent news on recent airline mergers?", "task_type": "research", "subject": "general"}
+{"prompt": "Implement a function in Go with error handling.", "task_type": "code", "subject": "code"}
+{"prompt": "Implement a connection pool in Java with error handling.", "task_type": "code", "subject": "code"}
+{"prompt": "Rewrite a FAQ answer to be more concise.", "task_type": "generate", "subject": "creative"}
+{"prompt": "Compare a JWT with an alternative and recommend one.", "task_type": "analyze", "subject": "reasoning"}
+{"prompt": "Write a C++ scheduler.", "task_type": "code", "subject": "code"}
+{"prompt": "Implement a pagination helper in Swift with error handling.", "task_type": "code", "subject": "code"}
+{"prompt": "Implement a queue consumer in Scala with error handling.", "task_type": "code", "subject": "code"}
+{"prompt": "Write a cover letter.", "task_type": "generate", "subject": "creative"}
+{"prompt": "Write a welcome message.", "task_type": "generate", "subject": "creative"}
+{"prompt": "Debug why the upload flow is slow and propose a fix.", "task_type": "analyze", "subject": "reasoning"}
+{"prompt": "Research the current state of quantum error correction and summarize the latest.", "task_type": "research", "subject": "general"}
+{"prompt": "Implement a connection pool in TypeScript with error handling.", "task_type": "code", "subject": "code"}
+{"prompt": "What's the most recent news on the AI chip market?", "task_type": "research", "subject": "general"}
+{"prompt": "Prove that the area under 1/x from 1 to e equals the claimed value, step by step.", "task_type": "analyze", "subject": "math"}
+{"prompt": "Define a bloom filter.", "task_type": "query", "subject": "general"}
+{"prompt": "Write a newsletter blurb.", "task_type": "generate", "subject": "creative"}
+{"prompt": "Define a B-tree.", "task_type": "query", "subject": "general"}

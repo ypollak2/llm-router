@@ -11,10 +11,37 @@ that are likely to fail, reducing wasted latency and API costs.
 
 from __future__ import annotations
 
+import json
+import os
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from llm_router.config import get_config
+
+
+def _snapshot_path() -> Path:
+    """Path to the cross-process provider-health snapshot (INV-HEALTH-001)."""
+    override = os.environ.get("LLM_ROUTER_HEALTH_SNAPSHOT")
+    if override:
+        return Path(override)
+    return Path.home() / ".llm-router" / "provider_health.json"
+
+
+def read_health_snapshot(path: Path | None = None) -> dict:
+    """Read the router's persisted circuit-breaker snapshot. FAIL-OPEN → {} on any error.
+
+    Lets a separate process (``llm_router doctor``) report the SAME breaker state the
+    router enforces, closing the doctor↔router divergence (audit C10). Returns
+    ``{"ts": float, "providers": {name: {...}}}`` or ``{}`` if no snapshot exists.
+    """
+    try:
+        p = path or _snapshot_path()
+        if not p.exists():
+            return {}
+        return json.loads(p.read_text())
+    except Exception:  # noqa: BLE001
+        return {}
 
 
 RATE_LIMIT_COOLDOWN_SECONDS = 15
@@ -45,6 +72,12 @@ class ProviderHealth:
 
     consecutive_failures: int = 0
     last_failure_time: float = 0.0
+    # Wall-clock (epoch) mirrors of the monotonic timestamps. INV-HEALTH-001: the
+    # monotonic clock is process-relative and cannot be shared with another process
+    # (e.g. `llm_router doctor` runs as a separate CLI process); the epoch mirrors let the
+    # circuit state be serialized and read cross-process. 0.0 = never.
+    last_failure_epoch: float = 0.0
+    rate_limit_epoch: float = 0.0
     total_calls: int = 0
     total_failures: int = 0
     rate_limited: bool = False
@@ -72,6 +105,7 @@ class ProviderHealth:
         self.total_failures += 1
         self.total_calls += 1
         self.last_failure_time = time.monotonic()
+        self.last_failure_epoch = time.time()
 
     def record_rate_limit(self, cooldown_seconds: int | None = None) -> None:
         """Record a 429/rate-limit error.
@@ -86,6 +120,7 @@ class ProviderHealth:
         """
         self.rate_limited = True
         self.rate_limit_time = time.monotonic()
+        self.rate_limit_epoch = time.time()
         self.rate_limit_count += 1
         self.total_calls += 1
         # Store custom cooldown if provided; otherwise uses class constant
@@ -141,6 +176,20 @@ class ProviderHealth:
             return "healthy"
         return f"unhealthy (failures={self.consecutive_failures})"
 
+    @property
+    def circuit_state(self) -> str:
+        """Coarse circuit-breaker state for cross-process reporting.
+
+        ``open`` = currently refusing traffic (failures over threshold within
+        cooldown, or rate-limited); ``closed`` = healthy. Note ``is_healthy()``
+        has the side effect of half-opening an expired breaker; ``circuit_state``
+        is read AFTER that, so an expired breaker reads ``closed`` (retryable).
+        """
+        healthy = self.is_healthy()
+        if self.rate_limited:
+            return "rate_limited"
+        return "closed" if healthy else "open"
+
 
 @dataclass
 class HealthTracker:
@@ -186,7 +235,10 @@ class HealthTracker:
         Args:
             provider: Provider name.
         """
+        had_failures = self._get(provider).consecutive_failures > 0
         self._get(provider).record_success()
+        if had_failures:  # a breaker just cleared — refresh the shared snapshot
+            self.write_snapshot()
 
     def record_failure(self, provider: str) -> None:
         """Record a hard failure for the given provider.
@@ -195,6 +247,7 @@ class HealthTracker:
             provider: Provider name.
         """
         self._get(provider).record_failure()
+        self.write_snapshot()  # state changed → refresh shared snapshot
 
     def record_rate_limit(self, provider: str, cooldown_seconds: int | None = None) -> None:
         """Record a rate-limit (429) error for the given provider.
@@ -205,6 +258,39 @@ class HealthTracker:
                 Useful when provider includes Retry-After header.
         """
         self._get(provider).record_rate_limit(cooldown_seconds)
+        self.write_snapshot()
+
+    def snapshot(self) -> dict[str, dict]:
+        """Serialize per-provider circuit state with WALL-CLOCK timestamps.
+
+        INV-HEALTH-001: this is the bridge that lets a separate process (``llm_router
+        doctor``) see the same breaker state the router enforces. Epoch (not
+        monotonic) timestamps make it cross-process meaningful.
+        """
+        out: dict[str, dict] = {}
+        for provider, h in self._providers.items():
+            out[provider] = {
+                "circuit_state": h.circuit_state,
+                "consecutive_failures": h.consecutive_failures,
+                "total_failures": h.total_failures,
+                "total_calls": h.total_calls,
+                "rate_limited": h.rate_limited,
+                "last_failure_epoch": h.last_failure_epoch,
+                "rate_limit_epoch": h.rate_limit_epoch,
+            }
+        return out
+
+    def write_snapshot(self, path: "Path | None" = None) -> bool:
+        """Persist :meth:`snapshot` to disk. FAIL-OPEN — never raises into routing."""
+        try:
+            p = path or _snapshot_path()
+            p.parent.mkdir(parents=True, exist_ok=True)
+            tmp = p.with_suffix(".tmp")
+            tmp.write_text(json.dumps({"ts": time.time(), "providers": self.snapshot()}))
+            tmp.replace(p)
+            return True
+        except Exception:  # noqa: BLE001
+            return False
 
     def reset_stale(self, max_age_seconds: float = 1800.0) -> list[str]:
         """Reset circuit breakers for providers whose last failure is older than max_age_seconds.
@@ -273,3 +359,17 @@ def get_tracker() -> HealthTracker:
     if _tracker is None:
         _tracker = HealthTracker()
     return _tracker
+
+
+def reset_tracker_for_tests() -> None:
+    """Reset the global HealthTracker singleton.
+
+    A test that makes a real (failing) provider call marks that provider
+    unhealthy in this process-lifetime singleton — with no reset, that
+    failure silently poisons every later test in the same pytest run that
+    expects the same provider to be healthy, even though they have nothing
+    to do with each other. Call this from an autouse fixture so each test
+    starts with a clean slate.
+    """
+    global _tracker
+    _tracker = None

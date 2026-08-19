@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""llm-router verify — End-to-end health check (30 seconds).
+"""llm_router verify — End-to-end health check (30 seconds).
 
-Command: uv run llm-router verify
+Command: uv run llm_router verify
 
 Runs a comprehensive health check:
   1. Configuration loaded (env vars, API keys)
@@ -109,13 +109,30 @@ def check_database() -> tuple[bool, str]:
         return False, f"Database error: {e}"
 
 
+
+def _validated_ollama_env_url(raw: str) -> str:
+    """CHZ-SEC-06: never hand an unvalidated env URL to urlopen.
+
+    Imported, not reimplemented — three earlier copies of this reader diverged
+    and bypassed the fix. Fails CLOSED: an unavailable validator falls back to
+    localhost rather than honouring an unchecked URL.
+    """
+    default = "http://localhost:11434"
+    try:
+        from llm_router.config import validate_ollama_url
+    except Exception:
+        return raw if raw == default else default
+    return validate_ollama_url(raw) or default
+
 def check_ollama() -> tuple[bool, str]:
     """Check if Ollama is running and list models.
 
     Returns:
         (success, message)
     """
-    url = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
+    url = _validated_ollama_env_url(
+        os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
+    )
     try:
         response = urllib.request.urlopen(f"{url}/api/tags", timeout=2)
         data = json.loads(response.read())
@@ -165,11 +182,19 @@ def check_hooks() -> tuple[bool, list[str]]:
     messages = []
     all_ok = True
 
-    hook_names = [
-        "llm-router-auto-route.py",
-        "llm-router-session-end.py",
-        "llm-router-enforce-route.py",
-    ]
+    # CHZ-AUD-C-04: derive the expected hook set from the authoritative install
+    # manifest (_HOOK_DEFS) rather than a hardcoded subset — `llm_router verify`
+    # previously checked only 3 of the 13 hooks install actually deploys, so a
+    # missing/broken hook among the other 10 was reported as "all good".
+    try:
+        from llm_router.install_hooks import _HOOK_DEFS
+        hook_names = [dst_name for (_src, dst_name, _event, _matcher) in _HOOK_DEFS]
+    except Exception:
+        hook_names = [
+            "llm_router-auto-route.py",
+            "llm_router-session-end.py",
+            "llm_router-enforce-route.py",
+        ]
 
     for hook_name in hook_names:
         hook_path = hooks_dir / hook_name
@@ -250,13 +275,13 @@ def main(args: Optional[list[str]] = None) -> int:
         Exit code (0 if all checks pass)
     """
     parser = argparse.ArgumentParser(
-        description="Health check for llm-router"
+        description="Health check for llm_router"
     )
     parser.parse_args(args or [])
 
     print()
     print(Color.ORCHESTRATE_BLUE("=" * 70))
-    print(Color.ORCHESTRATE_BLUE("              llm-router health check"))
+    print(Color.ORCHESTRATE_BLUE("              llm_router health check"))
     print(Color.ORCHESTRATE_BLUE("=" * 70))
     print()
 

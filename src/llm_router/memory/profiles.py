@@ -206,6 +206,7 @@ async def get_primary_model_for_tool(tool_name: str) -> str:
         "llm_research": TaskType.RESEARCH,
         "llm_generate": TaskType.GENERATE,
         "llm_analyze": TaskType.ANALYZE,
+        "llm_reason": TaskType.ANALYZE,  # reason uses ANALYZE task type with deep_reasoning profile
         "llm_code": TaskType.CODE,
         "llm_edit": TaskType.CODE,  # edit uses CODE routing
     }
@@ -217,8 +218,13 @@ async def get_primary_model_for_tool(tool_name: str) -> str:
     # Get current routing profile
     profile = state.get_active_profile()
     
-    # Look up the routing table
-    key = (profile, task_type)
+    # Look up the routing table. The active profile may be a *reordering*
+    # profile (QUOTA_BALANCED / SUBSCRIPTION_LOCAL) which has no chains of its
+    # own; without resolving to its base this misses and the function returns
+    # the raw tool name where a model id is expected.
+    from llm_router.profiles import base_lookup_profile
+
+    key = (base_lookup_profile(profile), task_type)
     models = ROUTING_TABLE.get(key, [])
     
     # Return the first (primary) model, or tool_name if none found

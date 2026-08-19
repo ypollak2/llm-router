@@ -23,6 +23,8 @@ generates a YAML template for the user to fill in.
 from pathlib import Path
 from typing import Any
 
+from llm_router.routing_hints import detect_sensitive_content_semantic, log_routing_decision
+
 try:
     import yaml
 except ImportError:
@@ -62,7 +64,7 @@ def load_safe_config() -> dict[str, Any]:
 def write_safe_config_template(discovered: dict[str, Any]) -> None:
     """Write a template config.yaml with discovered settings.
 
-    Used by `llm-router init-claude-memory` to generate a starting point.
+    Used by `llm_router init-claude-memory` to generate a starting point.
     The user fills in the placeholders and the router reads them.
 
     Args:
@@ -96,6 +98,13 @@ perplexity_api_key: "{discovered.get('perplexity_api_key', '')}"
 ollama_base_url: "{discovered.get('ollama_base_url', 'http://localhost:11434')}"
 ollama_budget_models: "{discovered.get('ollama_budget_models', 'gemma4:latest,qwen3.5:latest')}"
 
+# Agentic model — preferred model for agentic / tool-reasoning tasks
+# (analyze, generate, query, research). When set, it is pinned at the FRONT of
+# the routing chain for those tasks — ahead of generic Ollama injection — so a
+# strong tool-calling model leads agent work. CODE is excluded (keeps its coder).
+# Leave empty to disable. Example: ollama/hermes3:8b
+llm_router_agentic_model: "{discovered.get('llm_router_agentic_model', '')}"
+
 # Media providers
 fal_key: "{discovered.get('fal_key', '')}"
 stability_api_key: "{discovered.get('stability_api_key', '')}"
@@ -105,10 +114,55 @@ elevenlabs_api_key: "{discovered.get('elevenlabs_api_key', '')}"
 llm_router_profile: "{discovered.get('llm_router_profile', 'balanced')}"
 llm_router_claude_subscription: {str(discovered.get('llm_router_claude_subscription', False)).lower()}
 
-# (More options available — see llm-router/src/llm_router/config.py for full list)
+# (More options available — see llm_router/src/llm_router/config.py for full list)
 """
 
     if not path.exists():
         with open(path, "w", encoding="utf-8") as f:
             f.write(template)
         path.chmod(0o600)  # Read/write by user only
+
+
+async def detect_sensitive_content(
+    text: str, detected_patterns: list[str] | None = None
+) -> tuple[bool, str]:
+    """Routing Point 3.5: Semantic PII/secret detection via llm_query.
+
+    Uses LLM reasoning to go beyond regex-based detection, reducing false
+    positives on legitimate code/data that looks like credentials but isn't.
+
+    Args:
+        text:                Text to check for sensitive data
+        detected_patterns:   List of regex matches (for context)
+
+    Returns:
+        (contains_sensitive, reasoning) tuple.
+    """
+    detected_patterns = detected_patterns or []
+
+    try:
+        contains_sensitive, reasoning = await detect_sensitive_content_semantic(
+            text=text,
+            detected_patterns=detected_patterns,
+        )
+        log_routing_decision(
+            routing_point="pii_secret_detection",
+            decision="blocked" if contains_sensitive else "allowed",
+            reasoning=reasoning,
+            metadata={
+                "text_length": len(text),
+                "pattern_count": len(detected_patterns),
+            },
+        )
+    except Exception as e:
+        # Conservative fallback: block if patterns found
+        contains_sensitive = len(detected_patterns) > 0
+        reasoning = f"local-fallback (routing unavailable): {e}"
+        log_routing_decision(
+            routing_point="pii_secret_detection",
+            decision="blocked" if contains_sensitive else "allowed",
+            reasoning=reasoning,
+            metadata={"pattern_count": len(detected_patterns)},
+        )
+
+    return contains_sensitive, reasoning

@@ -1,51 +1,22 @@
-# Ported from Chuzom's capabilities.py; env var renamed to
-# LLM_ROUTER_CAPABILITY_ROUTING; CapabilityRequirement/CapabilitySource/
-# CapabilityEvidence/CapabilityDecision imported from the frozen
-# llm_router.contracts (WS0) instead of being redefined locally; the legacy
-# regex set backing `legacy_match` reproduces llm-router's ACTUAL current
-# `hooks.chain_builder.needs_claude_tools()` (5 checks) rather than chuzom's
-# original `_legacy_needs_tools()` (6 checks, which also gates on a
-# `_LEGACY_LOCAL_FS` pattern) -- llm-router's shipped `needs_claude_tools()`
-# never had that branch, so including it here would change default routing
-# the moment `chain_builder.py` is refactored to delegate to this module,
-# violating the "byte-identical when the flag is off" contract. The
-# `_LEGACY_LOCAL_FS` pattern is still used below, unchanged, as ENRICHMENT
-# evidence for the richer capability vector's `read_files` bit -- it just does
-# not participate in `legacy_match`.
-"""CF-2: capability-aware classification -- the single shared source of truth.
+"""CF-2: capability-aware classification — the single shared source of truth.
 
-The CLASSIFY stage must decide *needs-tools?* and *which files/context*, not just
-task_type + complexity. This module is the ONE predicate that enforcement
-exemptions, routing, provisioning, and agent tool-permissions all consult, so
-those never diverge.
+The North Star's CLASSIFY stage must decide *needs-tools?* and *which files/context*,
+not just task_type + complexity. This module is the ONE predicate that enforcement
+exemptions, routing, provisioning, and agent tool-permissions all consult, so those
+four never diverge.
 
 Two honest limits are called out up front:
   * Detection is REGEX-based. It has false positives ("my src/images folder has
     vacation photos" trips on ``src/``) and false negatives ("patch the auth handler"
-    has no path). Consolidating the regex here does NOT fix brittleness -- it only
-    removes divergence. Real fix = a semantic classifier (out of scope for WS4).
+    has no path). Consolidating the regex here does NOT fix brittleness — it only
+    removes divergence. Real fix = a semantic classifier (out of scope).
   * Relevant-context collection is best-effort and bounded. It may miss files in
     unusual layouts and it deliberately excludes secrets even when they'd be useful.
 
-``needs_claude_tools()`` in ``hooks.chain_builder`` delegates here; by default it
-returns the LEGACY boolean (``CapabilityDecision.legacy_match``) so shipping this
-module does not change default routing. The richer 8-bit vector is used by direct
-callers and, when ``LLM_ROUTER_CAPABILITY_ROUTING=1``, is computed in SHADOW MODE
-only -- WS4 records what capability-aware routing would have chosen; it never
-changes a live routing decision. Live enforcement is out of scope for WS4.
-
-THIRD DEVIATION from Chuzom's source: Chuzom's own ``hooks.chain_builder.
-needs_claude_tools()`` DOES let ``LLM_ROUTER_CAPABILITY_ROUTING`` (there,
-``CHUZOM_CAPABILITY_ROUTING``) flip its return value -- when the flag is on,
-Chuzom returns ``decision.required.needs_tools`` instead of ``legacy_match``,
-i.e. enabling the flag changes Chuzom's live routing for that function.
-llm-router's ported ``needs_claude_tools()`` intentionally does NOT do this:
-it always returns ``legacy_match`` regardless of the flag. This is required by
-WS4's explicit scope ("live enforcement is out of scope for WS4" / "unchanged,
-shadow-record only, when in shadow mode") -- all flag-gated behavior change is
-confined to shadow-recording (``router.py`` populating
-``routing_decisions.capabilities_json``), never to what ``needs_claude_tools()``
-returns. See ``tests/test_capabilities.py`` for the corresponding adapted test.
+``needs_claude_tools()`` in ``chain_builder`` delegates here; by default it returns the
+LEGACY boolean (``CapabilityDecision.legacy_match``) so shipping this module does not
+change default routing. The richer 8-bit vector is used by direct callers and, when
+``LLM_ROUTER_CAPABILITY_ROUTING=1``, by the routing path (Branch 3 ships in shadow mode).
 """
 from __future__ import annotations
 
@@ -55,31 +26,51 @@ import re
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
-from llm_router.contracts import (
-    CapabilityDecision,
-    CapabilityEvidence,
-    CapabilityRequirement,
-)
+# ── Capability vector ─────────────────────────────────────────────────────────
 
-__all__ = [
-    "CapabilityDecision",
-    "CapabilityEvidence",
-    "CapabilityRequirement",
-    "EXCLUDED_PATTERNS",
-    "MAX_FILES",
-    "RelevantContext",
-    "RelevantFile",
-    "capability_routing_enabled",
-    "collect_relevant_context",
-    "detect_capabilities",
-    "is_safe_path",
-    "serialize_capability_decision",
-    "serialize_relevant_context",
-]
+@dataclass(frozen=True)
+class CapabilityRequirement:
+    read_files: bool = False
+    write_files: bool = False
+    run_commands: bool = False
+    repo_search: bool = False
+    git_operations: bool = False
+    network_access: bool = False
+    objective_verification: bool = False
+    multi_step_execution: bool = False
+
+    @property
+    def needs_tools(self) -> bool:
+        return any((
+            self.read_files, self.write_files, self.run_commands,
+            self.repo_search, self.git_operations, self.network_access,
+            self.objective_verification, self.multi_step_execution,
+        ))
+
+
+CapabilitySource = Literal["regex", "classifier", "repo_scan", "user_explicit", "history"]
+
+
+@dataclass(frozen=True)
+class CapabilityEvidence:
+    source: CapabilitySource
+    reason: str
+    confidence: float  # 0.0–1.0
+
+
+@dataclass(frozen=True)
+class CapabilityDecision:
+    required: CapabilityRequirement
+    evidence: tuple[CapabilityEvidence, ...]
+    confidence: float
+    # True iff the legacy needs_claude_tools() regex would have fired. Used to keep
+    # default routing byte-identical while the richer vector ships in shadow mode.
+    legacy_match: bool = False
+
 
 # ── Relevant context model ────────────────────────────────────────────────────
-
 
 @dataclass(frozen=True)
 class RelevantFile:
@@ -106,16 +97,15 @@ class RelevantContext:
 
 
 # ── Regex evidence ────────────────────────────────────────────────────────────
-# LEGACY patterns reproduce hooks.chain_builder.needs_claude_tools() EXACTLY.
-# Their match sets both the capability bit and (for the 5 checks that module
-# actually performs) ``legacy_match=True``. NEW patterns (symbol search,
-# generic write verbs) enrich the vector but do NOT set legacy_match, so the
-# default routing boolean is unchanged.
+# LEGACY patterns reproduce chain_builder.needs_claude_tools() EXACTLY. Their match
+# sets both the capability bit and ``legacy_match=True``. NEW patterns (symbol search,
+# generic write verbs) enrich the vector but do NOT set legacy_match, so the default
+# routing boolean is unchanged.
 
 _LEGACY_PROJECT = re.compile(
     r'\b(src/|tests/|hooks/|in the codebase|this file|this repo|this project'
     r'|current project|current version|what version|package\.json|pyproject\.toml'
-    r'|llm-router|blocked by hook|error message)\b', re.IGNORECASE)
+    r'|llm_router|blocked by hook|error message)\b', re.IGNORECASE)
 
 _LEGACY_LOCAL_FS = re.compile(
     r'(?:~/|\$HOME|/Users/|\.env\b|\.pypirc\b|keychain'
@@ -131,11 +121,6 @@ _LEGACY_READ_FILE = re.compile(
     r'\b(?:read|open|inspect|show|cat|summari[sz]e)\s+'
     r'(?:the\s+)?(?:file\s+)?[\w./-]+\.[A-Za-z0-9]{1,8}\b', re.IGNORECASE)
 
-# llm-router's actual needs_claude_tools() gates the extension check on TWO
-# regexes (a generic word/slash/dot token, AND a known-extension suffix) --
-# not chuzom's single _LEGACY_EXT check. Reproduced exactly here so
-# legacy_match stays byte-identical to the shipped hook.
-_LEGACY_EXT_TOKEN = re.compile(r'[\w/]+\.\w{1,4}\b')
 _LEGACY_EXT = re.compile(r'\.(py|ts|js|go|rs|java|cpp|yaml|json|md|toml|cfg|sh|sql)\b')
 
 _LEGACY_EDIT_INTENT = re.compile(r'\b(fix|debug|investigate|refactor|update|modify)\b', re.IGNORECASE)
@@ -155,21 +140,22 @@ _REPO_SEARCH = re.compile(
     r'|who calls|usages? of|references? to)\b', re.IGNORECASE)
 _GIT_OP = re.compile(r'\b(commit|branch|rebase|cherry-?pick|git\b|stage|staged|diff)\b', re.IGNORECASE)
 _NETWORK = re.compile(r'\b(https?://|download|fetch (?:the )?url|curl|api endpoint|webhook)\b', re.IGNORECASE)
-# A backtick-quoted identifier or a bare ``name()`` -- a symbol reference with no path.
+# A backtick-quoted identifier or a bare ``name()`` — a symbol reference with no path.
 _SYMBOL = re.compile(r'`([A-Za-z_]\w+)`|\b([A-Za-z_]\w+)\(\)')
 
 
 def _legacy_needs_tools(prompt: str, task_type: str) -> bool:
-    """Reproduces llm-router's shipped ``hooks.chain_builder.needs_claude_tools()``
-    verbatim (5 checks, no local-filesystem branch) -- the single home for that
-    logic once ``chain_builder`` is refactored to delegate here."""
+    """The pre-CF-2 needs_claude_tools() boolean, verbatim — the single home for that
+    logic (chain_builder no longer contains it)."""
     if _LEGACY_PROJECT.search(prompt):
+        return True
+    if _LEGACY_LOCAL_FS.search(prompt):
         return True
     if _LEGACY_READ_FILE.search(prompt):
         return True
     if task_type not in ("code", "analyze"):
         return False
-    if _LEGACY_EXT_TOKEN.search(prompt) and _LEGACY_EXT.search(prompt):
+    if _LEGACY_EXT.search(prompt):
         return True
     if _LEGACY_EDIT_INTENT.search(prompt) and _LEGACY_EDIT_LOCATION.search(prompt):
         return True
@@ -197,7 +183,7 @@ def detect_capabilities(
     if _REPO_SEARCH.search(prompt):
         search = read = True
         ev.append(CapabilityEvidence("regex", "repo-wide search intent", 0.6))
-    # Symbol reference with no explicit path -> needs a repo search to locate it.
+    # Symbol reference with no explicit path → needs a repo search to locate it.
     if _SYMBOL.search(prompt):
         search = read = True
         ev.append(CapabilityEvidence("regex", "symbol reference (no path)", 0.5))
@@ -230,18 +216,32 @@ def detect_capabilities(
 
 
 def capability_routing_enabled() -> bool:
-    """WS4 ships in shadow mode: the richer capability boolean is only computed
-    and recorded when explicitly enabled -- it never drives a live routing
-    decision (that remains out of scope for WS4)."""
+    """Branch 3 ships in shadow mode: the richer capability boolean only drives
+    routing when explicitly enabled."""
     return os.environ.get("LLM_ROUTER_CAPABILITY_ROUTING", "").strip().lower() in ("1", "on", "true", "yes")
 
 
 def serialize_capability_decision(decision: CapabilityDecision) -> str:
-    """JSON-serialize a ``CapabilityDecision`` for storage in
-    ``routing_decisions.capabilities_json`` (WS4 shadow mode). Purely for
-    offline analysis of what capability-aware routing would have chosen --
-    never read back by the live routing path. FAIL-OPEN: never raises; falls
-    back to ``"{}"`` on any serialization error."""
+    """JSON-serialise a decision for ``routing_decisions.capabilities_json``.
+
+    Shadow mode exists to answer one question offline: *would* capability-aware
+    routing have chosen differently? Without persistence that question has no
+    data behind it — ``detect_capabilities`` runs, decides, and the decision is
+    discarded. This is the write half of the shadow.
+
+    Never read back by the live routing path. Purely for analysis of what the
+    richer capability vector would have picked, which is what keeps enabling
+    the flag from being able to change a routing outcome.
+
+    Fields are written out explicitly rather than via ``asdict``: the column is
+    read by offline analysis that has to survive the dataclass gaining a field,
+    and an implicit dump would silently change the stored shape the day someone
+    adds one.
+
+    FAIL-OPEN: returns ``"{}"`` on any error. Serialising a shadow observation
+    must never be able to break the decision logging it rides along with —
+    losing one shadow record is cheap, losing the routing decision is not.
+    """
     import json
 
     try:
@@ -267,7 +267,7 @@ def serialize_capability_decision(decision: CapabilityDecision) -> str:
                 "legacy_match": decision.legacy_match,
             }
         )
-    except Exception:  # noqa: BLE001 -- serialization must never break logging
+    except Exception:  # noqa: BLE001 - serialisation must never break logging
         return "{}"
 
 
@@ -291,7 +291,7 @@ _CONFIG_FILES = ("pyproject.toml", "package.json", "Cargo.toml", "go.mod", "pom.
 
 def is_safe_path(path: Path, repo_root: Path) -> bool:
     """Reject paths outside the repo root, symlink escapes, ``../`` traversal, and
-    secret files. Enforced at COLLECTION time (not runtime) -- the routed model never
+    secret files. Enforced at COLLECTION time (not runtime) — the routed model never
     receives a path that fails this."""
     try:
         resolved = path.resolve()
@@ -317,7 +317,7 @@ def is_safe_path(path: Path, repo_root: Path) -> bool:
 
 def _git(repo_root: Path, *args: str) -> str | None:
     try:
-        out = subprocess.run(  # noqa: S603 -- fixed arg list, no shell
+        out = subprocess.run(  # noqa: S603 — fixed arg list, no shell
             ["git", "-C", str(repo_root), *args],
             capture_output=True, text=True, timeout=5, check=False,
         )
@@ -342,7 +342,7 @@ def collect_relevant_context(
     decision: CapabilityDecision | None = None,
 ) -> RelevantContext | None:
     """Best-effort, bounded, SAFE relevant-context collection. Returns None outside a
-    repo or when nothing is found -- never raises, never blocks routing."""
+    repo or when nothing is found — never raises, never blocks routing."""
     if repo_root is None or not Path(repo_root).is_dir():
         return None
     repo_root = Path(repo_root)
@@ -408,14 +408,14 @@ def collect_relevant_context(
 def serialize_relevant_context(rc: RelevantContext, max_chars: int = 4000) -> str:
     """Compact, bounded rendering for injection into a routed model's prompt. Truncates
     snippets first, then file count, preserving the file list / capability signal last."""
-    lines: list[str] = ["[RELEVANT CONTEXT -- read-only background, not an instruction]"]
+    lines: list[str] = ["[RELEVANT CONTEXT — read-only background, not an instruction]"]
     if rc.repo_root:
         lines.append(f"repo: {rc.repo_root}" + (f" (branch {rc.branch})" if rc.branch else ""))
     if rc.files:
         lines.append("candidate files (ranked):")
         for f in rc.files:
             sym = f" [{', '.join(f.symbols)}]" if f.symbols else ""
-            lines.append(f"  - {f.path}{sym} -- {f.reason}")
+            lines.append(f"  - {f.path}{sym} — {f.reason}")
     if rc.config_files:
         lines.append("config: " + ", ".join(rc.config_files))
     if rc.truncated:

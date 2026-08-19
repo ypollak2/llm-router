@@ -1,6 +1,6 @@
-"""Helicone integration for llm-router.
+"""Helicone integration for llm_router.
 
-When ``HELICONE_API_KEY`` is set, llm-router can:
+When ``HELICONE_API_KEY`` is set, llm_router can:
 
   **Push** — attach routing metadata to every LiteLLM call as Helicone
   custom properties, making routing decisions visible in the Helicone
@@ -8,7 +8,7 @@ When ``HELICONE_API_KEY`` is set, llm-router can:
 
   **Pull** — query Helicone's usage API to get per-model spend data,
   which supplements the local SQLite budget tracking.  Useful when some
-  traffic is routed outside llm-router (e.g. direct SDK calls from your
+  traffic is routed outside llm_router (e.g. direct SDK calls from your
   app that also use Helicone).
 
 Configuration::

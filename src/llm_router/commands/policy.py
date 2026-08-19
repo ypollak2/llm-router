@@ -1,4 +1,4 @@
-"""``llm-router policy …`` — Plan 07 Cat G policy-side CLI.
+"""``llm_router policy …`` — Plan 07 Cat G policy-side CLI.
 
 Today this hosts the policy diff tool from G.2; future policy-related
 operational commands (validate, lint, freeze) will land alongside it.
@@ -51,7 +51,7 @@ def cmd_policy(args: list[str]) -> int:
 
 
 def _cmd_diff(argv: list[str]) -> int:
-    parser = argparse.ArgumentParser(prog="llm-router policy diff")
+    parser = argparse.ArgumentParser(prog="llm_router policy diff")
     parser.add_argument("policy_a")
     parser.add_argument("policy_b")
     parser.add_argument(
@@ -110,7 +110,7 @@ def _load_samples(path: Path) -> list[Sample]:
 
 def _print_help(exit_code: int = 0) -> int:
     print(
-        "Usage: llm-router policy <subcommand> [options]\n"
+        "Usage: llm_router policy <subcommand> [options]\n"
         "\n"
         "Subcommands:\n"
         "  diff <policy_a> <policy_b> [--samples path.jsonl]\n"

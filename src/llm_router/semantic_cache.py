@@ -19,12 +19,15 @@ Only active when ``ollama_base_url`` is set — zero overhead otherwise.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import math
 import os
+import stat
 import urllib.error
 import urllib.request
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -47,6 +50,7 @@ CREATE_SEMANTIC_CACHE_TABLE = """
 CREATE TABLE IF NOT EXISTS semantic_cache (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     task_type TEXT NOT NULL,
+    project_scope TEXT NOT NULL DEFAULT '',
     embedding TEXT NOT NULL,
     response_content TEXT NOT NULL,
     response_model TEXT NOT NULL,
@@ -55,10 +59,117 @@ CREATE TABLE IF NOT EXISTS semantic_cache (
 )
 """
 
+
+def _project_scope() -> str:
+    """CHZ-ST-004: isolate cache entries by the project they were produced in.
+
+    The semantic cache previously had *no* project column, so a query in
+    project B could return project A's cached response verbatim (observed at
+    similarity=1.000, leaking a secret across projects on the same machine).
+    The scope key is a hash of the project root (cwd, or LLM_ROUTER_PROJECT_DIR),
+    matching how result_cache.py derives its project hash. Entries only match
+    within the same project; the raw path is never stored.
+    """
+    root = os.environ.get("LLM_ROUTER_PROJECT_DIR") or os.getcwd()
+    return hashlib.sha256(root.encode()).hexdigest()[:16]
+
+
+async def _ensure_project_scope_column(db) -> None:
+    """Idempotently add project_scope to a pre-existing (unscoped) table.
+
+    Old DBs created before CHZ-ST-004 lack the column; ``CREATE TABLE IF NOT
+    EXISTS`` won't add it. Legacy rows keep project_scope='' and therefore never
+    match a real (non-empty) project scope — they simply age out via TTL.
+    """
+    try:
+        cur = await db.execute("PRAGMA table_info(semantic_cache)")
+        cols = {row[1] for row in await cur.fetchall()}
+        if "project_scope" not in cols:
+            await db.execute(
+                "ALTER TABLE semantic_cache ADD COLUMN project_scope TEXT NOT NULL DEFAULT ''"
+            )
+            await db.commit()
+    except Exception as exc:  # noqa: BLE001 — migration failure must not break routing
+        log.debug("semantic_cache project_scope migration skipped: %s", exc)
+
 CREATE_SEMANTIC_CACHE_INDEX = """
 CREATE INDEX IF NOT EXISTS idx_semantic_cache_type_time
 ON semantic_cache(task_type, created_at DESC)
 """
+
+
+def _repair_shared_db_perms(db_path: "Path | None") -> None:
+    """D-02: repair unsafe perms on the shared usage.db at open time.
+
+    ``cost.py``'s ``_get_db()`` (off-limits — owned by another cluster)
+    already creates the file with mode 0600 on first creation, but does
+    not repair an already-existing file with looser perms. This is the
+    local, out-of-band repair pass for semantic_cache's use of that same
+    file — safe to run repeatedly, no-ops when perms are already correct.
+
+    ``db_path`` may be ``None`` (e.g. a test double for ``get_config()``
+    that doesn't define ``llm_router_db_path``) — no-op in that case rather
+    than raising, since callers pass ``getattr(config, "llm_router_db_path",
+    None)`` precisely to stay safe against minimal config stand-ins.
+    """
+    if db_path is None:
+        return
+    try:
+        if db_path.exists() and stat.S_IMODE(db_path.stat().st_mode) != 0o600:
+            os.chmod(db_path, 0o600)
+    except OSError:
+        pass
+
+
+def _persist_ttl_seconds() -> float:
+    """Global physical-retention TTL (LLM_ROUTER_PERSIST_TTL_DAYS), in seconds.
+
+    Independent of the semantic-similarity ``_TTL_SECONDS`` above (which
+    only bounds how far back `check()` scans for a similarity match). This
+    TTL governs unconditional PHYSICAL deletion of semantic_cache rows.
+    0 disables purging.
+    """
+    try:
+        from llm_router.config import get_config
+        days = float(getattr(get_config(), "llm_router_persist_ttl_days", 30))
+    except Exception:
+        days = 30.0
+    return max(days, 0.0) * 86_400
+
+
+async def _purge_expired(db) -> int:
+    """Physically delete TTL-expired rows from the ``semantic_cache`` table.
+
+    Scoped strictly to ``semantic_cache`` — never touches other tables in
+    the shared usage.db (which also holds spend/usage rows owned by
+    ``cost.py``). Sets ``PRAGMA secure_delete=ON`` on this connection so
+    freed page bytes are zeroed immediately, satisfying raw-byte-grep
+    requirements without needing a VACUUM (which risks lock contention with
+    concurrent ``cost.py`` writers on the shared file).
+    """
+    ttl_seconds = _persist_ttl_seconds()
+    if ttl_seconds <= 0:
+        return 0
+    try:
+        await db.execute("PRAGMA secure_delete=ON")
+        cursor = await db.execute(
+            "SELECT COUNT(*) FROM semantic_cache WHERE created_at < datetime('now', ?)",
+            (f"-{int(ttl_seconds)} seconds",),
+        )
+        row = await cursor.fetchone()
+        count = row[0] if row else 0
+        if not count:
+            return 0
+        await db.execute(
+            "DELETE FROM semantic_cache WHERE created_at < datetime('now', ?)",
+            (f"-{int(ttl_seconds)} seconds",),
+        )
+        await db.commit()
+        log.debug("semantic_cache: purged %d expired row(s) (ttl=%.0fd)", count, ttl_seconds / 86_400)
+        return count
+    except Exception as exc:
+        log.debug("semantic_cache: TTL purge failed: %s", exc)
+        return 0
 
 
 def _cosine_similarity(a: list[float], b: list[float]) -> float:
@@ -141,19 +252,23 @@ async def check(
 
     try:
         from llm_router.cost import _get_db
+        _repair_shared_db_perms(getattr(config, "llm_router_db_path", None))
         db = await _get_db()
         try:
-            # Fetch the most recent entries within TTL for this task type
+            await _ensure_project_scope_column(db)
+            # Fetch the most recent entries within TTL for this task type AND
+            # this project (CHZ-ST-004: never match another project's entries).
             cursor = await db.execute(
                 """
                 SELECT embedding, response_content, response_model, response_cost_usd
                 FROM semantic_cache
                 WHERE task_type = ?
+                  AND project_scope = ?
                   AND created_at >= datetime('now', ?)
                 ORDER BY created_at DESC
                 LIMIT ?
                 """,
-                (task_type.value, f"-{_TTL_SECONDS} seconds", _MAX_SCAN),
+                (task_type.value, _project_scope(), f"-{_TTL_SECONDS} seconds", _MAX_SCAN),
             )
             rows = await cursor.fetchall()
         finally:
@@ -224,26 +339,43 @@ async def store(
     if embedding is None:
         return
 
+    # D-01/D-04: redact BEFORE the row touches the shared usage.db. Wrapped
+    # locally even though persist_redact() is already safe-failure, so an
+    # import failure here can't fall through to persisting raw content.
+    try:
+        from llm_router.persist_redaction import persist_redact
+        safe_content = persist_redact(response.content)
+    except Exception as exc:
+        log.debug("semantic_cache: redaction unavailable, withholding content: %s", exc)
+        safe_content = "[REDACTION-FAILED: content withheld]"
+
     try:
         from llm_router.cost import _get_db
+        _repair_shared_db_perms(getattr(config, "llm_router_db_path", None))
         db = await _get_db()
         try:
+            await _ensure_project_scope_column(db)
             await db.execute(
                 """
                 INSERT INTO semantic_cache
-                    (task_type, embedding, response_content, response_model, response_cost_usd)
-                VALUES (?, ?, ?, ?, ?)
+                    (task_type, project_scope, embedding, response_content,
+                     response_model, response_cost_usd)
+                VALUES (?, ?, ?, ?, ?, ?)
                 """,
                 (
                     task_type.value,
+                    _project_scope(),
                     json.dumps(embedding),
-                    response.content,
+                    safe_content,
                     response.model,
                     response.cost_usd,
                 ),
             )
             await db.commit()
             log.debug("semantic_cache: stored entry for %s", task_type.value)
+            # B-02/B-03: physically purge TTL-expired rows on every store,
+            # scoped strictly to this table.
+            await _purge_expired(db)
         finally:
             await db.close()
     except Exception as exc:

@@ -7,7 +7,7 @@ from llm_router.stats import print_stats
 
 
 def cmd_stats(args: list[str] | None = None) -> int:
-    """Display combined download statistics for llm-routing and claude-code-llm-router.
+    """Display combined download statistics for llm-routing and claude-code-llm_router.
 
     Args:
         args: Command-line arguments (defaults to sys.argv[1:])

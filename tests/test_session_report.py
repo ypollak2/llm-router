@@ -305,10 +305,15 @@ class TestSavingsMath:
     """Verify savings calculations are correct and transparent."""
 
     def test_host_baseline_math(self):
-        """Host baseline (Opus): $15/M input + $75/M output."""
-        # 1000 input + 500 output = 15*1000/1M + 75*500/1M = 0.015 + 0.0375 = 0.0525
+        """Host baseline is derived from cost.py's single source of truth (AC-3),
+        not a hardcoded rate — so it stays correct as the host price changes."""
+        from llm_router import cost
+
+        in_pm = float(cost._HOST_INPUT_PER_M)
+        out_pm = float(cost._HOST_OUTPUT_PER_M)
         result = se._host_baseline(1000, 500)
-        assert abs(result - 0.0525) < 1e-6
+        expected = (1000 * in_pm + 500 * out_pm) / 1_000_000
+        assert abs(result - expected) < 1e-9
 
     def test_free_model_saves_full_baseline(self):
         """Free models should report full host baseline as savings."""
@@ -318,8 +323,12 @@ class TestSavingsMath:
         ]
         lines = se._format_free_section(rows, [])
         text = "\n".join(lines)
-        # Should show $0.0525 saved (Opus baseline for 1000/500 tokens)
-        assert "$0.0525" in text
+        # Free-provider call saves the full host baseline (AC-3: derived from cost.py,
+        # not a hardcoded rate) for 1000 input / 500 output tokens.
+        from llm_router import cost
+        expected = (1000 * float(cost._HOST_INPUT_PER_M)
+                    + 500 * float(cost._HOST_OUTPUT_PER_M)) / 1_000_000
+        assert f"${expected:.4f}" in text
 
     def test_external_routing_shows_baseline(self):
         """External routing section should show both actual and baseline cost."""
@@ -327,21 +336,33 @@ class TestSavingsMath:
             "query": {"count": 5, "in": 5000, "out": 2500, "cost": 0.01,
                       "models": {"gpt-4o-mini": 5}},
         }
-        lines = se._format_routing_section(tools)
+        # Cash rendering — pin the mode rather than inheriting the dev's config.
+        lines = se._format_routing_section(tools, subscription=False)
         text = "\n".join(lines)
         assert "actual" in text
         assert "baseline" in text
 
-    def test_savings_never_negative_in_display(self):
-        """Savings should be clamped to 0 (never show negative savings)."""
-        # If actual cost > baseline (overspend), savings should be 0
+    def test_overspend_is_shown_not_clamped(self):
+        """INVERTED (AUD-06 / WP-04). This previously asserted "0% saved" when
+        cost exceeded baseline, pinning the clamp as the intended contract and
+        making a session that lost money render identically to one that broke
+        even. The compute layer reported the loss correctly the whole time; only
+        this display layer hid it. Owner decision 2026-08-12: show it.
+
+        Reported in dollars rather than as a negative percentage -- unclamping
+        alone yields "-571329% saved" on a small overspending session, which is
+        honest but unreadable, and a number that shape invites a future "fix"
+        that restores the clamp.
+        """
         tools = {
             "query": {"count": 1, "in": 100, "out": 50, "cost": 10.0,
                       "models": {"o3": 1}},
         }
-        lines = se._format_routing_section(tools)
+        # Cash rendering — pin the mode rather than inheriting the dev's config.
+        lines = se._format_routing_section(tools, subscription=False)
         text = "\n".join(lines)
-        assert "0% saved" in text  # clamped to 0
+        assert "0% saved" not in text, text
+        assert "overspent" in text, text
 
 
 # ── Issue 6: Free model classification ────────────────────────────────────────
@@ -589,5 +610,6 @@ class TestEnhancedDashboard:
                 None, None, False,
                 session_start=session_start - 120,
             )
-        # Should contain either enhanced sparkline or fallback
+        # Should contain either enhanced sparkline or fallback.
+        # Post-rebrand: dashboard header reads "⚡ LLM Router" (was "LLM Router").
         assert "LLM Router" in output

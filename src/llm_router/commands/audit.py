@@ -1,136 +1,156 @@
-"""Audit command — post-hoc misroute audit report (WS9).
+"""llm_router audit — operate on the tamper-evident audit log.
 
-Wires ``llm_router.audit_routing.run_audit()`` (WS6, implemented and tested
-but previously invoked from no entry point) to the CLI. This command is
-read-only / reporting with respect to the live routing decision path: it
-never touches request/response routing, and ``run_audit()`` itself only
-writes to the additive ``audit_verdict`` / ``audit_checked_at`` metadata
-columns on already-recorded ``routing_decisions`` rows (see
-``audit_routing.py``'s module docstring). Running this command can never
-change what model a future request routes to.
+Surfaces two primitives that already lived on :class:`AuditLog` but had no
+operator-facing entry point:
 
-Respects ``LLM_ROUTER_AUDIT_DISABLED`` — when set, ``run_audit()`` itself
-short-circuits and returns ``{"disabled": True, ...}``; this command simply
-renders that outcome.
+* ``llm_router audit verify [--json]`` — walk the hash chain and prove integrity.
+  Exit 0 when intact, exit 1 when tampering is detected (so it drops into a
+  cron / CI gate). ``--json`` emits a machine-readable record for a SIEM.
+* ``llm_router audit export [--format cef|json|csv] [--limit N]`` — dump the log in
+  the format a SIEM ingests (CEF by default).
+
+The audit DB path comes from ``LLM_ROUTER_AUDIT_PATH`` (default ``~/.llm-router/audit.db``),
+matching :class:`AuditLog`'s own resolution.
+
+🥷 Backslash-Security: using vibe-coding rules for Logging & Error Handling
 """
-
 from __future__ import annotations
 
-import os
+import argparse
+import json
 import sys
 
+try:
+    from llm_router.enterprise.audit import AuditLog, TamperDetected
+except ImportError:  # enterprise/ is excluded from public distributions (gated by is_enterprise())
+    AuditLog = TamperDetected = None  # type: ignore
 
-# ── Formatting utilities (mirrors commands/team.py) ─────────────────────────
-
-def _color_enabled() -> bool:
-    """Check if color output is enabled."""
-    return sys.stdout.isatty() and not os.getenv("NO_COLOR")
-
-
-def _bold(s: str) -> str:
-    """Bold text."""
-    return f"\033[1m{s}\033[0m" if _color_enabled() else s
-
-
-def _green(s: str) -> str:
-    """Green text."""
-    return f"\033[32m{s}\033[0m" if _color_enabled() else s
+_USAGE = (
+    "llm_router audit — tamper-evident audit log operations\n"
+    "\n"
+    "Commands:\n"
+    "  verify [--json]                 verify the hash chain (exit 1 on tamper)\n"
+    "  export [--format FMT] [--limit N]\n"
+    "                                  dump the log (FMT: cef|json|csv)\n"
+    "  misroute [--json] [--limit N]   re-score past routing decisions offline\n"
+)
 
 
-def _red(s: str) -> str:
-    """Red text."""
-    return f"\033[31m{s}\033[0m" if _color_enabled() else s
+def _verify(args: argparse.Namespace) -> int:
+    log = AuditLog()
+    rows = log.count()
+    try:
+        log.verify_chain()
+    except TamperDetected as exc:
+        if args.json:
+            print(json.dumps({
+                "verified": False, "rows_checked": rows,
+                "tamper_row": exc.row_index, "detail": str(exc),
+            }))
+        else:
+            print(f"❌ TAMPER DETECTED at row {exc.row_index}: {exc}", file=sys.stderr)
+            print("   The audit log was modified outside the API. Investigate "
+                  "and restore from a trusted backup.", file=sys.stderr)
+        return 1
+    if args.json:
+        print(json.dumps({"verified": True, "rows_checked": rows}))
+    else:
+        print(f"✅ Audit chain verified — {rows} events, hash chain intact.")
+    return 0
 
 
-def _yellow(s: str) -> str:
-    """Yellow text."""
-    return f"\033[33m{s}\033[0m" if _color_enabled() else s
+def _export(args: argparse.Namespace) -> int:
+    log = AuditLog()
+    fmt = args.format
+    if fmt == "cef":
+        print(log.export_cef(limit=args.limit))
+    elif fmt == "json":
+        print(log.export_json(limit=args.limit))
+    elif fmt == "csv":
+        print(log.export_csv(limit=args.limit))
+    else:  # pragma: no cover - argparse choices guard this
+        print(f"unknown format: {fmt}", file=sys.stderr)
+        return 2
+    return 0
 
 
-def _dim(s: str) -> str:
-    """Dim text."""
-    return f"\033[2m{s}\033[0m" if _color_enabled() else s
+def _misroute(args: argparse.Namespace) -> int:
+    """Run the post-hoc misroute audit and render its report.
 
+    A subcommand of ``audit`` rather than a command of its own: the downstream
+    package made it a top-level ``audit`` command, which is precisely what
+    collided with this module's existing ``main``. Nesting it composes instead.
 
-# ── Audit report ─────────────────────────────────────────────────────────────
-
-def _run_audit(flags: list[str]) -> None:
-    """llm-router audit [--limit N] [--json].
-
-    Runs the post-hoc misroute audit (a bounded, offline re-score of
-    unaudited ``routing_decisions`` rows) and prints a summary report.
+    Read-only with respect to routing — it only fills in ``audit_verdict`` on
+    rows that already exist. Always exits 0, including when the audit is
+    disabled or the database is unreadable, because this reports on history and
+    a reporting failure is not an operational failure.
     """
     import asyncio
-    import json
 
-    from llm_router.audit_routing import audit_disabled, run_audit
+    from llm_router.misroute_audit import run_audit
 
-    limit = 100
-    as_json = False
-    i = 0
-    while i < len(flags):
-        flag = flags[i]
-        if flag == "--limit" and i + 1 < len(flags):
-            try:
-                limit = int(flags[i + 1])
-            except ValueError:
-                pass
-            i += 2
-            continue
-        if flag == "--json":
-            as_json = True
-            i += 1
-            continue
-        i += 1
+    report = asyncio.run(run_audit(limit=args.limit))
 
-    report = asyncio.run(run_audit(limit=limit))
+    if args.json:
+        print(json.dumps(report, indent=2))
+        return 0
 
-    if as_json:
-        print(json.dumps(report, indent=2, sort_keys=True))
-        return
+    if report.get("disabled"):
+        print("misroute audit is disabled (LLM_ROUTER_AUDIT_DISABLED)")
+        return 0
 
-    print(f"\n{_bold('[llm-router] Misroute Audit Report')}\n")
-
-    if report.get("disabled") or audit_disabled():
-        print(_yellow("  Audit disabled (LLM_ROUTER_AUDIT_DISABLED is set)."))
-        print(f"  Unset it to re-enable: {_dim('unset LLM_ROUTER_AUDIT_DISABLED')}\n")
-        return
-
-    sampled = report.get("sampled", 0)
-    audited = report.get("audited", 0)
-
-    if sampled == 0:
-        print(_yellow("  No unaudited routing decisions found."))
-        print(f"  {_dim('Nothing to sample — either the table is empty or everything already has a verdict.')}\n")
-        return
-
-    print(f"  Sampled:  {_bold(str(sampled))}")
-    print(f"  Audited:  {_bold(str(audited))}\n")
-
-    counts = report.get("verdict_counts", {}) or {}
-    misroute = counts.get("likely_misroute", 0)
-    correct = counts.get("likely_correct", 0)
-    insufficient = counts.get("insufficient_data", 0)
-
-    print(f"  {'Verdict':<20} {'Count':>6}")
-    print(f"  {'-' * 20} {'-' * 6}")
-    print(f"  {_red('likely_misroute'):<29} {misroute:>6}")
-    print(f"  {_green('likely_correct'):<29} {correct:>6}")
-    print(f"  {_dim('insufficient_data'):<29} {insufficient:>6}")
+    counts = report.get("verdict_counts", {})
+    print(f"sampled {report['sampled']} decision(s), recorded {report['audited']} verdict(s)")
+    for verdict in ("likely_misroute", "likely_correct", "insufficient_data"):
+        print(f"  {verdict:20} {counts.get(verdict, 0)}")
 
     baseline = report.get("mis_route_rate_inferred_baseline")
-    if baseline is not None:
-        print(f"\n  {_dim(f'Fleet-wide inferred misroute rate (baseline): {baseline:.1%}')}")
-    print()
-
-
-# ── Entry point ─────────────────────────────────────────────────────────────
-
-def cmd_audit(args: list[str]) -> int:
-    """Execute: llm-router audit [--limit N] [--json]
-
-    Post-hoc misroute audit report. Read-only / reporting only — never
-    mutates live routing behavior. Respects LLM_ROUTER_AUDIT_DISABLED.
-    """
-    _run_audit(args)
+    if baseline is None:
+        # Distinguished from 0.0 on purpose: "no population baseline available"
+        # and "the population baseline is zero" are different facts, and
+        # printing 0.0 for the first would be a claim the data does not support.
+        print("  population misroute-rate baseline: unavailable")
+    else:
+        print(f"  population misroute-rate baseline: {baseline:.1%}")
     return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        prog="llm_router audit", description="Tamper-evident audit log operations",
+        usage=_USAGE,
+    )
+    sub = parser.add_subparsers(dest="command")
+
+    p_verify = sub.add_parser("verify", help="verify the hash chain")
+    p_verify.add_argument("--json", action="store_true", help="machine-readable output")
+
+    p_export = sub.add_parser("export", help="dump the log for a SIEM")
+    p_export.add_argument(
+        "--format", choices=("cef", "json", "csv"), default="cef",
+        help="output format (default: cef)",
+    )
+    p_export.add_argument("--limit", type=int, default=1000, help="max rows (default: 1000)")
+
+    p_misroute = sub.add_parser(
+        "misroute", help="re-score past routing decisions for likely misroutes"
+    )
+    p_misroute.add_argument("--json", action="store_true", help="machine-readable output")
+    p_misroute.add_argument(
+        "--limit", type=int, default=100, help="max decisions to score (default: 100)"
+    )
+
+    args = parser.parse_args(argv)
+    if args.command == "verify":
+        return _verify(args)
+    if args.command == "export":
+        return _export(args)
+    if args.command == "misroute":
+        return _misroute(args)
+    parser.print_help()
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())

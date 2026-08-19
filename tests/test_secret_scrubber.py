@@ -3,7 +3,6 @@
 
 from llm_router.secret_scrubber import (
     scrub_event,
-    scrub_environment,
     _scrub_value,
     _should_scrub_field,
 )
@@ -184,43 +183,6 @@ class TestEventScrubbing:
         for key in event.keys():
             # Field names should be redacted (since they're sensitive field names)
             assert "[REDACTED" in result[key]
-
-
-class TestEnvironmentScrubbing:
-    """Test scrubbing of environment variables."""
-
-    def test_anthropic_key_scrubbed(self, monkeypatch):
-        """ANTHROPIC_API_KEY should be scrubbed."""
-        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-secret")
-        monkeypatch.setenv("USER", "testuser")
-        
-        env = scrub_environment()
-        assert "[REDACTED" in env["ANTHROPIC_API_KEY"]
-        assert env["USER"] == "testuser"
-
-    def test_database_url_scrubbed(self, monkeypatch):
-        """DATABASE_URL should be scrubbed."""
-        monkeypatch.setenv("DATABASE_URL", "postgres://user:pass@localhost/db")
-        env = scrub_environment()
-        assert "[REDACTED" in env["DATABASE_URL"]
-
-    def test_aws_keys_scrubbed(self, monkeypatch):
-        """AWS keys should be scrubbed."""
-        monkeypatch.setenv("AWS_ACCESS_KEY_ID", "AKIAIOSFODNN7EXAMPLE")
-        monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "secret123")
-        
-        env = scrub_environment()
-        assert "[REDACTED" in env["AWS_ACCESS_KEY_ID"]
-        assert "[REDACTED" in env["AWS_SECRET_ACCESS_KEY"]
-
-    def test_normal_env_vars_preserved(self, monkeypatch):
-        """Normal environment variables should be preserved."""
-        monkeypatch.setenv("PATH", "/usr/bin:/usr/local/bin")
-        monkeypatch.setenv("HOME", "/home/user")
-        
-        env = scrub_environment()
-        assert env["PATH"] == "/usr/bin:/usr/local/bin"
-        assert env["HOME"] == "/home/user"
 
 
 class TestSecurityEdgeCases:

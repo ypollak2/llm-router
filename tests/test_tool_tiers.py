@@ -63,9 +63,10 @@ class TestToolTiers:
     def test_tier_summary_returns_string(self):
         from llm_router.tool_tiers import tier_summary
 
-        assert "41" in tier_summary("off") or "43" in tier_summary("off")
+        assert "all" in tier_summary("off").lower()   # off = all tools (count is dynamic)
         assert "routing" in tier_summary("routing")
         assert "core" in tier_summary("core")
+        assert "consolidated" in tier_summary("consolidated")
 
 
 # ── Session spend ─────────────────────────────────────────────────────────────
@@ -323,11 +324,11 @@ class TestDoctorHost:
         cursor_dir = tmp_path / ".cursor"
         cursor_dir.mkdir()
         mcp_json = cursor_dir / "mcp.json"
-        mcp_json.write_text(json.dumps({"mcpServers": {"llm-router": {"command": "uvx"}}}))
+        mcp_json.write_text(json.dumps({"mcpServers": {"llm_router": {"command": "uvx"}}}))
 
         _run_doctor_host("cursor")
         out = capsys.readouterr().out
-        assert "registered" in out.lower() or "llm-router" in out.lower()
+        assert "registered" in out.lower() or "llm_router" in out.lower()
 
     def test_doctor_host_vscode_passes_when_configured(self, tmp_path, monkeypatch, capsys):
         from llm_router.commands.doctor import _run_doctor_host
@@ -340,11 +341,11 @@ class TestDoctorHost:
             mcp_dir = tmp_path / ".config" / "Code" / "User"
         mcp_dir.mkdir(parents=True)
         mcp_json = mcp_dir / "mcp.json"
-        mcp_json.write_text(json.dumps({"servers": {"llm-router": {"command": "uvx"}}}))
+        mcp_json.write_text(json.dumps({"servers": {"llm_router": {"command": "uvx"}}}))
 
         _run_doctor_host("vscode")
         out = capsys.readouterr().out
-        assert "llm-router" in out.lower() or "registered" in out.lower()
+        assert "llm_router" in out.lower() or "registered" in out.lower()
 
     def test_doctor_host_all_checks_multiple_hosts(self, tmp_path, monkeypatch, capsys):
         from llm_router.commands.doctor import _run_doctor_host
@@ -369,11 +370,12 @@ class TestDoctorHost:
 
 
 class TestV4Config:
-    def test_slim_field_defaults_to_routing(self):
+    def test_slim_field_defaults_to_consolidated(self):
+        # 0.10.0 cutover: the 11-door consolidated surface is the default tier.
         from llm_router.config import RouterConfig
 
         cfg = RouterConfig()
-        assert cfg.llm_router_slim == "routing"
+        assert cfg.llm_router_slim == "consolidated"
 
     def test_escalate_above_defaults_to_zero(self):
         from llm_router.config import RouterConfig
@@ -404,7 +406,8 @@ class TestFsAnalyzeContext:
         from llm_router.tools.fs import llm_fs_analyze_context
 
         # Empty directory — no key files
-        result = await llm_fs_analyze_context(path=str(tmp_path))
+        # SEC-002: `path` was renamed to `project_root` (required, sandbox boundary).
+        result = await llm_fs_analyze_context(project_root=str(tmp_path))
         assert "No key project files found" in result
 
     @pytest.mark.asyncio
@@ -428,7 +431,8 @@ class TestFsAnalyzeContext:
         mock_resp.header.return_value = "> test"
 
         with patch.object(fs_module, "route_and_call", new=AsyncMock(return_value=mock_resp)):
-            result = await llm_fs_analyze_context(path=str(tmp_path))
+            # SEC-002: `path` was renamed to `project_root` (required, sandbox boundary).
+            result = await llm_fs_analyze_context(project_root=str(tmp_path))
 
         assert "Python" in result or "context_summary" in result.lower() or "saved" in result
 
@@ -455,7 +459,7 @@ class TestLlmSessionSpend:
             result = await llm_session_spend()
 
         assert "Session spend" in result
-        assert "routed llm-router calls only" in result
+        assert "routed llm_router calls only" in result
         assert "$" in result
 
     @pytest.mark.asyncio

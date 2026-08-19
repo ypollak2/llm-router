@@ -13,7 +13,7 @@ Three behaviours under test:
    without a label, which made apparent discrepancies impossible to
    reason about.
 
-3. ``llm-router explain-dashboard`` (commands.explain_dashboard) prints
+3. ``llm_router explain-dashboard`` (commands.explain_dashboard) prints
    per-panel diagnostics — source tables, windows, row counts — so any
    future drift is debuggable in seconds rather than requiring a code
    read.

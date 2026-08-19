@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import shutil
 import sys
+from llm_router.tool_surface import route_tool  # CHZ-SURF-01: never print a raw tool name
 
 
 # ── ANSI helpers (respect NO_COLOR / non-tty) ─────────────────────────────────
@@ -50,22 +51,56 @@ def _fail(label: str, fix: str | None = None) -> str:
 
 # ── Command entry point ────────────────────────────────────────────────────────
 
+_INSTALL_HELP = """\
+llm_router install — install LLM Router routing into a host
+
+Usage:
+  llm_router install                     Install for Claude Code (hooks + rules + MCP)
+  llm_router install --host <name>       Install/print config for a specific host
+                                     (claude-code, claude-desktop, cursor, copilot,
+                                     windsurf, gemini-cli, codex, …)
+  llm_router install --mode <mode>       Install mode (auto | gateway)
+  llm_router install --help, -h          Show this help and exit (no changes made)
+"""
+
+
 def cmd_install(args: list[str]) -> int:
     """Entry point for install command."""
+    # CHZ-PKG-007: `--help`/`-h` must be inert — previously it fell straight
+    # through to a real install (file modifications) instead of printing usage.
+    if any(a in ("--help", "-h", "help") for a in args):
+        print(_INSTALL_HELP)
+        return 0
     _run_install(args)
     return 0
 
 
 # ── Main install logic ──────────────────────────────────────────────────────────
 
+# README headline uses `--host claude-code` / `claude-desktop`, neither of
+# which is a distinct snippet: claude-code IS the default LLM Router install
+# target, and claude-desktop maps onto the existing `desktop` snippet.
+_HOST_ALIASES = {"claude-desktop": "desktop", "claude_desktop": "desktop"}
+
+
 def _run_install(flags: list[str]) -> None:
     # --host <name> is handled before the regular install path — it prints
     # config snippets only (no file modifications to external tools).
     if "--host" in flags:
         idx = flags.index("--host")
-        host = flags[idx + 1] if idx + 1 < len(flags) else "all"
-        _install_host(host)
-        return
+        raw_host = (flags[idx + 1] if idx + 1 < len(flags) else "all").strip().lower()
+        mode = "gateway" if raw_host == "codex" else "auto"
+        if "--mode" in flags:
+            mode_idx = flags.index("--mode")
+            mode = (flags[mode_idx + 1] if mode_idx + 1 < len(flags) else mode).strip().lower()
+        host = _HOST_ALIASES.get(raw_host, raw_host)
+        # claude-code = the default install (hooks + rules + MCP for Claude
+        # Code), so route it through the full install path below rather than
+        # the snippet printer — this makes the documented headline command work.
+        if host != "claude-code":
+            _install_host(host, mode=mode)
+            return
+        flags = [f for i, f in enumerate(flags) if i not in (idx, idx + 1)]
 
     check_only = "--check" in flags
     force = "--force" in flags
@@ -77,7 +112,7 @@ def _run_install(flags: list[str]) -> None:
     )
 
     if check_only:
-        print(f"\n{_bold('[llm-router] Install check')}  (no changes made)\n")
+        print(f"\n{_bold('[llm_router] Install check')}  (no changes made)\n")
 
         print(_bold("  Hooks & rules"))
         all_ok = True
@@ -92,16 +127,16 @@ def _run_install(flags: list[str]) -> None:
             else:
                 print(_fail(
                     f"{dst_name}  ({event})  — not installed",
-                    fix="llm-router install",
+                    fix="llm_router install",
                 ))
                 all_ok = False
 
-        rules_dst = _RULES_DST / "llm-router.md"
+        rules_dst = _RULES_DST / "llm_router.md"
         if rules_dst.exists():
-            print(_ok("llm-router.md  (routing rules)"))
+            print(_ok("llm_router.md  (routing rules)"))
         else:
-            print(_fail("llm-router.md  (routing rules)  — not installed",
-                        fix="llm-router install"))
+            print(_fail("llm_router.md  (routing rules)  — not installed",
+                        fix="llm_router install"))
             all_ok = False
 
         print(f"\n{_bold('  Claude Desktop')}")
@@ -114,7 +149,7 @@ def _run_install(flags: list[str]) -> None:
             if desktop_path.exists():
                 try:
                     cfg = _json.loads(desktop_path.read_text())
-                    registered = "llm-router" in cfg.get("mcpServers", {})
+                    registered = "llm_router" in cfg.get("mcpServers", {})
                 except Exception:
                     pass
             if registered:
@@ -122,7 +157,7 @@ def _run_install(flags: list[str]) -> None:
             elif desktop_path.exists():
                 print(_fail(
                     f"not registered  ({desktop_path})",
-                    fix="llm-router install",
+                    fix="llm_router install",
                 ))
                 all_ok = False
             else:
@@ -136,7 +171,7 @@ def _run_install(flags: list[str]) -> None:
         if all_ok:
             print(_green("  Everything looks good."))
         else:
-            print(_yellow("  Run `llm-router install` to fix the issues above."))
+            print(_yellow("  Run `llm_router install` to fix the issues above."))
         print()
         return
 
@@ -150,7 +185,7 @@ def _run_install(flags: list[str]) -> None:
     if force:
         from llm_router.install_hooks import _load_settings, _save_settings
         settings = _load_settings()
-        settings.get("mcpServers", {}).pop("llm-router", None)
+        settings.get("mcpServers", {}).pop("llm_router", None)
         _save_settings(settings)
 
     print(f"\n{_bold('╔══════════════════════════════════════════╗')}")
@@ -186,13 +221,13 @@ def _run_install(flags: list[str]) -> None:
     print("    You'll see: ⚡ ROUTE → Haiku (simple query)\n")
 
     print(_bold("  Subcommands:"))
-    print("    llm-router doctor               — verify everything is wired up")
-    print("    llm-router status               — today's cost & savings")
-    print("    llm-router dashboard            — web dashboard (localhost:7337)")
-    print("    llm-router install --check      — preview install state")
-    print("    llm-router install --force      — reinstall / update paths")
-    print("    llm-router install --claw-code  — also install into claw-code")
-    print("    llm-router uninstall            — remove\n")
+    print("    llm_router doctor               — verify everything is wired up")
+    print("    llm_router status               — today's cost & savings")
+    print("    llm_router dashboard            — web dashboard (localhost:7337)")
+    print("    llm_router install --check      — preview install state")
+    print("    llm_router install --force      — reinstall / update paths")
+    print("    llm_router install --claw-code  — also install into claw-code")
+    print("    llm_router uninstall            — remove\n")
 
 
 # ── install --headless ─────────────────────────────────────────────────────────
@@ -221,8 +256,8 @@ def _run_install_headless() -> None:
     snippet = """\
   FROM python:3.12-slim
 
-  # Install llm-router and wire in hooks
-  RUN pip install claude-code-llm-router && llm-router install
+  # Install llm_router and wire in hooks
+  RUN pip install llm-routing && llm_router install
 
   # Route to API providers — no Anthropic subscription in CI
   ENV LLM_ROUTER_CLAUDE_SUBSCRIPTION=false
@@ -237,13 +272,13 @@ def _run_install_headless() -> None:
     print(snippet)
 
     print(_bold("  .claude/settings.json — MCP + hooks merge example:"))
-    print(_dim("  (llm-router install does this automatically; shown for reference)"))
+    print(_dim("  (llm_router install does this automatically; shown for reference)"))
     import json as _json
     example = {
-        "mcpServers": {"llm-router": {"command": "llm-router", "args": []}},
+        "mcpServers": {"llm_router": {"command": "llm_router", "args": []}},
         "hooks": {
-            "UserPromptSubmit": [{"matcher": "", "hooks": [{"type": "command", "command": "python3 ~/.claude/hooks/llm-router-auto-route.py"}]}],
-            "Stop":             [{"matcher": "", "hooks": [{"type": "command", "command": "python3 ~/.claude/hooks/llm-router-session-end.py"}]}],
+            "UserPromptSubmit": [{"matcher": "", "hooks": [{"type": "command", "command": "python3 ~/.claude/hooks/llm_router-auto-route.py"}]}],
+            "Stop":             [{"matcher": "", "hooks": [{"type": "command", "command": "python3 ~/.claude/hooks/llm_router-session-end.py"}]}],
         }
     }
     print("  " + _dim(_json.dumps(example, indent=2).replace("\n", "\n  ")))
@@ -257,6 +292,14 @@ def _run_install_headless() -> None:
 
 # ── install --host (print config snippets for non-Claude Code hosts) ──────────
 
+# CHZ-SURF-01: snippets are .format() templates, so tool names are placeholders
+# resolved against the live tier rather than baked in as literals.
+_SNIPPET_TOOLS = {
+    "savings_tool": route_tool("llm_savings"),
+    "research_tool": route_tool("llm_research"),
+    "query_tool": route_tool("llm_query"),
+}
+
 _HOST_SNIPPETS: dict[str, str] = {
     "codex": """\
 {bold}Codex CLI{reset}  (capability extension — no cost-routing)
@@ -265,16 +308,16 @@ _HOST_SNIPPETS: dict[str, str] = {
 
    mcp:
      servers:
-       llm-router:
-         command: uvx
-         args: [claude-code-llm-router]
+       llm_router:
+         command: llm_router
+         args: []
 
 2. Copy routing rules so Codex knows when to call llm_auto:
 
    cp "$(python3 -c "import llm_router; import pathlib; print(pathlib.Path(llm_router.__file__).parent / 'rules' / 'codex-rules.md')")" \\
       ~/.codex/instructions.md
 
-3. Restart Codex — run llm_savings to verify the DB is shared.
+3. Restart Codex — run {savings_tool} to verify the DB is shared.
 """,
 
     "desktop": """\
@@ -287,16 +330,16 @@ Edit ~/Library/Application Support/Claude/claude_desktop_config.json
 Add inside the top-level object:
 
   "mcpServers": {{
-    "llm-router": {{
-      "command": "uvx",
-      "args": ["claude-code-llm-router"],
+    "llm_router": {{
+      "command": "llm_router",
+      "args": [],
       "env": {{
         "LLM_ROUTER_PROFILE": "balanced"
       }}
     }}
   }}
 
-Restart Claude Desktop. Run llm_savings to confirm DB is shared.
+Restart Claude Desktop. Run {savings_tool} to confirm DB is shared.
 Note: cost-routing is not available in Desktop (no hook system).
 """,
 
@@ -307,21 +350,21 @@ Note: cost-routing is not available in Desktop (no hook system).
 
    {{
      "servers": {{
-       "llm-router": {{
-         "command": "uvx",
-         "args": ["claude-code-llm-router"]
+       "llm_router": {{
+         "command": "llm_router",
+         "args": []
        }}
      }}
    }}
 
 2. Optionally add routing guidance to .github/copilot-instructions.md:
 
-   When a task requires live web search, call the llm_research MCP tool.
+   When a task requires live web search, call the {research_tool} MCP tool.
    When a task requires image generation, call the llm_image MCP tool.
    For auto-routing with savings tracking, call llm_auto.
 
 3. Enable MCP in VS Code settings (Copilot > MCP: Enable).
-   Restart VS Code. Run @llm-router llm_savings to verify.
+   Restart VS Code. Run @llm_router {savings_tool} to verify.
 Note: cost-routing is not available in Copilot (no hook system).
 """,
 
@@ -356,12 +399,130 @@ Note: cost-routing is not available in Copilot (no hook system).
     "cursor": """\
 {bold}Cursor IDE{reset}  — writing config files…
 """,
+
+    "windsurf": """\
+{bold}Windsurf (MCP native){reset}  — writing config files…
+""",
 }
 
 
 # ── Host-specific install functions ────────────────────────────────────────────
 
-def _install_codex_files() -> list[str]:
+def _replace_or_insert_toml_scalar(text: str, key: str, value: str) -> str:
+    """Replace a top-level TOML scalar, or insert it before the first table."""
+    import re
+
+    line = f'{key} = "{value}"'
+    pattern = re.compile(rf"^{re.escape(key)}\s*=.*$", re.MULTILINE)
+    if pattern.search(text):
+        return pattern.sub(line, text, count=1)
+    table_match = re.search(r"^\[", text, flags=re.MULTILINE)
+    if table_match:
+        return text[:table_match.start()] + line + "\n" + text[table_match.start():]
+    return (text.rstrip() + "\n" + line + "\n") if text.strip() else line + "\n"
+
+
+def _ensure_toml_table_block(text: str, header: str, block: str) -> str:
+    """Append a TOML table block if the table is not already present."""
+    if f"[{header}]" in text:
+        return text
+    sep = "" if text.endswith("\n") or not text else "\n"
+    return f"{text}{sep}\n[{header}]\n{block.rstrip()}\n"
+
+
+def _remove_toml_scalar_if_equals(text: str, key: str, value: str) -> str:
+    """Remove a top-level TOML scalar line, but only if it currently equals
+    `value` — used to self-heal a setting a previous llm_router install forced,
+    without touching a value the user (or another tool) set independently."""
+    import re
+
+    pattern = re.compile(
+        rf'^{re.escape(key)}\s*=\s*"{re.escape(value)}"\s*\n?', re.MULTILINE
+    )
+    return pattern.sub("", text, count=1)
+
+
+def _install_codex_gateway_config(codex_dir) -> list[str]:
+    """Register LLM Router as an available Codex model provider (opt-in).
+
+    Earlier versions of this installer also force-set `model = "auto"` and
+    `model_provider = "llm_router"` as Codex's GLOBAL defaults, silently looping
+    every Codex call — including Codex's own interactive/agentic use, and
+    LLM Router's own dispatch of Codex from its routing chain — through the local
+    LLM Router gateway. The gateway does not yet speak the exact OpenAI
+    "responses" wire shape Codex's client expects, so every such call failed
+    with an undecodable-stream error. Concretely: this broke Codex CLI itself
+    for any user who ran `llm_router install --host codex`, independent of
+    whether they ever touched LLM Router's own routing.
+    We now only REGISTER the provider (so it exists for future opt-in use,
+    e.g. `codex -c model_provider=llm_router` once wire compatibility lands) and
+    never force it as the default. If an earlier llm_router install already
+    forced it, this run reverts those two lines so Codex falls back to its
+    own built-in default — self-healing existing broken installs the next
+    time this function runs (e.g. via `llm_router install --host codex --mode
+    gateway` or `llm_router doctor --fix`).
+    """
+    import pathlib
+    import re
+    import shutil as _shutil
+
+    from llm_router import presets
+
+    actions: list[str] = []
+    config_toml = pathlib.Path(codex_dir) / "config.toml"
+    config_toml.parent.mkdir(parents=True, exist_ok=True)
+    original = config_toml.read_text() if config_toml.exists() else ""
+    updated = original
+
+    # Self-heal: undo a previous install's forced global default, if present.
+    had_forced_default = (
+        re.search(r'^model_provider\s*=\s*"llm_router"\s*$', updated, re.MULTILINE) is not None
+    )
+    updated = _remove_toml_scalar_if_equals(updated, "model", "auto")
+    updated = _remove_toml_scalar_if_equals(updated, "model_provider", "llm_router")
+
+    gateway = presets.gateway_url()
+    updated = _ensure_toml_table_block(
+        updated,
+        "model_providers.llm_router",
+        "\n".join([
+            'name = "LLM Router"',
+            f'base_url = "{gateway}"',
+            'env_key = "LLM_ROUTER_API_KEY"',
+            'wire_api = "responses"',
+        ]),
+    )
+
+    if updated != original:
+        try:
+            if config_toml.exists() and not (config_toml.parent / "config.toml.llm_router-bak").exists():
+                _shutil.copy2(config_toml, config_toml.parent / "config.toml.llm_router-bak")
+                actions.append(f"✓ Backed up Codex config to {config_toml.parent / 'config.toml.llm_router-bak'}")
+            config_toml.write_text(updated)
+            try:
+                from llm_router import install_manifest
+                install_manifest.record("toml_table", config_toml, header="model_providers.llm_router")
+            except Exception:
+                pass
+        except OSError as e:
+            actions.append(f"  Could not update Codex gateway config at {config_toml}: {e}")
+            return actions
+        if had_forced_default:
+            actions.append(
+                f"✓ Reverted Codex's default model_provider (was force-set to 'llm_router' by an "
+                f"earlier install, which broke Codex CLI — see {config_toml})"
+            )
+        actions.append(f"✓ Registered LLM Router as an available Codex model provider in {config_toml}")
+        actions.append(
+            f"  Not set as default (gateway doesn't yet support Codex's wire format) — "
+            f"opt in per-call with -c model_provider=llm_router ({gateway})"
+        )
+    else:
+        actions.append(f"  Codex gateway provider already configured in {config_toml} (skipped)")
+    return actions
+
+
+def _install_codex_files(mode: str = "gateway") -> list[str]:
     """Write Codex-specific config files and return a list of actions taken."""
     import pathlib
     import shutil as _shutil
@@ -377,17 +538,22 @@ def _install_codex_files() -> list[str]:
     mcp_block = (
         "\nmcp:\n"
         "  servers:\n"
-        "    llm-router:\n"
-        "      command: uvx\n"
-        "      args: [claude-code-llm-router]\n"
+        "    llm_router:\n"
+        "      command: llm_router\n"
+        "      args: []\n"
     )
     existing = config_yaml.read_text() if config_yaml.exists() else ""
-    if "llm-router" not in existing:
+    if "llm_router" not in existing:
         with config_yaml.open("a") as f:
             f.write(mcp_block)
-        actions.append(f"✓ Added llm-router MCP server to {config_yaml}")
+        actions.append(f"✓ Added llm_router MCP server to {config_yaml}")
+        try:
+            from llm_router import install_manifest
+            install_manifest.record("text_block", config_yaml, block=mcp_block)
+        except Exception:
+            pass
     else:
-        actions.append(f"  llm-router already in {config_yaml} (skipped)")
+        actions.append(f"  llm_router already in {config_yaml} (skipped)")
 
     # 2. PostToolUse hook in ~/.codex/hooks.json
     hooks_json = codex_dir / "hooks.json"
@@ -400,6 +566,11 @@ def _install_codex_files() -> list[str]:
         _shutil.copy2(src_hook, hook_script)
         hook_script.chmod(0o755)
         actions.append(f"✓ Installed hook script to {hook_script}")
+        try:
+            from llm_router import install_manifest
+            install_manifest.record("file", hook_script)
+        except Exception:
+            pass
 
     hook_entry = {
         "hooks": {
@@ -442,15 +613,31 @@ def _install_codex_files() -> list[str]:
         rules_text = rules_src.read_text()
         if instructions.exists():
             existing_inst = instructions.read_text()
-            if "llm-router" not in existing_inst:
+            if "llm_router" not in existing_inst:
+                block = f"\n\n{rules_text}"
                 with instructions.open("a") as f:
-                    f.write(f"\n\n{rules_text}")
+                    f.write(block)
                 actions.append(f"✓ Appended routing rules to {instructions}")
+                try:
+                    from llm_router import install_manifest
+                    install_manifest.record("text_block", instructions, block=block)
+                except Exception:
+                    pass
             else:
                 actions.append(f"  Routing rules already in {instructions} (skipped)")
         else:
             instructions.write_text(rules_text)
             actions.append(f"✓ Created {instructions} with routing rules")
+            try:
+                from llm_router import install_manifest
+                install_manifest.record("created_file", instructions, block=rules_text)
+            except Exception:
+                pass
+
+    if mode == "gateway":
+        actions += _install_codex_gateway_config(codex_dir)
+    elif mode not in {"companion", "mcp", "mcp-only", "rules", "auto"}:
+        actions.append(f"  Unknown Codex mode {mode!r}; installed MCP companion only")
 
     return actions
 
@@ -477,34 +664,235 @@ def _merge_json_mcp_block(
     if server_name not in servers:
         servers[server_name] = server_entry
         config_path.write_text(_json.dumps(existing, indent=2))
-        actions.append(f"✓ Added llm-router MCP server to {config_path}")
+        actions.append(f"✓ Added llm_router MCP server to {config_path}")
+        # RED2-9-*: record so uninstall reverses it automatically.
+        try:
+            from llm_router import install_manifest
+            install_manifest.record("json_mcp", config_path, root_key=root_key, server=server_name)
+        except Exception:
+            pass
     else:
-        actions.append(f"  llm-router already in {config_path} (skipped)")
+        actions.append(f"  llm_router already in {config_path} (skipped)")
+    return actions
+
+
+def _remove_json_mcp_block(
+    config_path, server_name: str = "llm_router", root_key: str = "mcpServers"
+) -> list[str]:
+    """RED2-8-01: inverse of _merge_json_mcp_block — surgically remove the llm_router
+    MCP entry from a host's JSON config, leaving every other server intact."""
+    import json as _json
+    import pathlib
+
+    actions: list[str] = []
+    config_path = pathlib.Path(config_path)
+    if not config_path.exists():
+        return actions
+    try:
+        existing = _json.loads(config_path.read_text())
+    except Exception:
+        return actions
+    servers = existing.get(root_key)
+    if isinstance(servers, dict) and server_name in servers:
+        del servers[server_name]
+        try:
+            config_path.write_text(_json.dumps(existing, indent=2))
+            actions.append(f"✓ Removed llm_router MCP server from {config_path}")
+        except OSError as e:
+            actions.append(f"  Could not update {config_path}: {e}")
+    return actions
+
+
+def _remove_toml_table_block(text: str, header: str) -> str:
+    """Remove a `[header]` TOML table and its body (until the next table / EOF).
+
+    RED1-9-02: the body must consume only lines that do NOT begin a new [table].
+    The prior regex used a `(?!\\n\\[)` lookahead that, once the newline was
+    consumed, no longer guarded the next line — so adjacent tables NOT separated
+    by a blank line (valid TOML) were swallowed through EOF, destroying unrelated
+    provider config. The corrected body anchors each line at ^ (MULTILINE) and
+    stops at the first line starting with '['.
+    """
+    import re
+    pattern = re.compile(
+        rf'(?m)^\[{re.escape(header)}\][^\n]*\n(?:(?!\[).*(?:\n|$))*'
+    )
+    return pattern.sub("", text, count=1)
+
+
+def uninstall_host_integrations() -> list[str]:
+    """RED2-8-01: remove the live MCP registrations that `llm_router install --host
+    <codex|cursor|gemini-cli|vscode|copilot-cli|openclaw|trae>` wrote, so a
+    `llm_router uninstall` does not leave dangling `llm_router` entries that break those
+    tools after `pip uninstall`. Each remover is home-scoped and defensive — a
+    no-op when the host was never installed, and never aborts on one host's error.
+
+    NOTE: this is the enumerated LEGACY fallback for the home-directory MCP
+    registrations. New installs are covered authoritatively by the install
+    manifest (install_manifest.apply_uninstall), which also handles the
+    project-scoped writers (.github/copilot-instructions.md, Trae .rules) via
+    their recorded created/appended entries. uninstall_ide_configs() removes the
+    project MCP/rule files it knows (.vscode/mcp.json, .windsurf/mcp.json,
+    .cursor/rules/use-llm_router.mdc) against the cwd.
+    """
+    import pathlib
+    import shutil as _shutil
+    import sys
+
+    actions: list[str] = []
+    home = pathlib.Path.home()
+
+    # JSON MCP registrations (root_key varies by host).
+    json_targets = [
+        (home / ".gemini" / "settings.json", "mcpServers"),
+        (home / ".cursor" / "mcp.json", "mcpServers"),
+        (home / ".config" / "gh" / "copilot" / "mcp.json", "mcpServers"),
+        (home / ".openclaw" / "mcp.json", "mcpServers"),
+        (home / ".config" / "opencode" / "config.json", "mcpServers"),  # RED2-9-01
+    ]
+    if sys.platform == "darwin":
+        json_targets.append((home / "Library" / "Application Support" / "Code" / "User" / "mcp.json", "servers"))
+        json_targets.append((home / "Library" / "Application Support" / "Trae" / "mcp.json", "mcpServers"))
+    elif sys.platform == "win32":
+        appdata = pathlib.Path(home / "AppData" / "Roaming")
+        json_targets.append((appdata / "Code" / "User" / "mcp.json", "servers"))
+        json_targets.append((appdata / "Trae" / "mcp.json", "mcpServers"))
+    else:
+        json_targets.append((home / ".config" / "Code" / "User" / "mcp.json", "servers"))
+        json_targets.append((home / ".config" / "Trae" / "mcp.json", "mcpServers"))
+
+    for path, root_key in json_targets:
+        try:
+            actions += _remove_json_mcp_block(path, "llm_router", root_key)
+        except Exception as e:  # noqa: BLE001 — one host must never abort the rest
+            actions.append(f"  host cleanup skipped for {path}: {e}")
+
+    # Gemini CLI extension directory (whole llm_router extension).
+    try:
+        ext_dir = home / ".gemini" / "extensions" / "llm_router"
+        if ext_dir.exists():
+            _shutil.rmtree(ext_dir, ignore_errors=True)
+            actions.append(f"✓ Removed Gemini CLI extension dir {ext_dir}")
+    except Exception as e:  # noqa: BLE001
+        actions.append(f"  gemini extension cleanup skipped: {e}")
+
+    # Cursor routing-rules file llm_router authored.
+    try:
+        cursor_rules = home / ".cursor" / "rules" / "llm_router.md"
+        if cursor_rules.exists():
+            cursor_rules.unlink()
+            actions.append(f"✓ Removed {cursor_rules}")
+    except Exception as e:  # noqa: BLE001
+        actions.append(f"  cursor rules cleanup skipped: {e}")
+
+    # Codex: remove the gateway TOML table and the appended config.yaml MCP block.
+    try:
+        codex_dir = home / ".codex"
+        config_toml = codex_dir / "config.toml"
+        if config_toml.exists():
+            original = config_toml.read_text()
+            updated = _remove_toml_table_block(original, "model_providers.llm_router")
+            if updated != original:
+                # RED2-10-05: no persistent .llm_router-bak (uninstall leaves nothing
+                # llm_router-authored); the removal regex is ^-anchored + tested.
+                config_toml.write_text(updated)
+                actions.append(f"✓ Removed [model_providers.llm_router] from {config_toml}")
+        config_yaml = codex_dir / "config.yaml"
+        if config_yaml.exists():
+            y = config_yaml.read_text()
+            mcp_block = (
+                "\nmcp:\n"
+                "  servers:\n"
+                "    llm_router:\n"
+                "      command: llm_router\n"
+                "      args: []\n"
+            )
+            if mcp_block in y:
+                config_yaml.write_text(y.replace(mcp_block, ""))
+                actions.append(f"✓ Removed llm_router MCP block from {config_yaml}")
+        # RED2-9-02: strip the LIVE llm_router PostToolUse entry from ~/.codex/hooks.json
+        # (it invokes codex-post-tool.py on every Bash call — a phantom hook after
+        # uninstall). Filter out any PostToolUse entry that references llm_router's hook.
+        import json as _json
+        hooks_json = codex_dir / "hooks.json"
+        if hooks_json.exists():
+            try:
+                cur = _json.loads(hooks_json.read_text())
+                ptu = cur.get("hooks", {}).get("PostToolUse", [])
+                kept = [
+                    entry for entry in ptu
+                    if not any(
+                        "codex-post-tool.py" in str(h.get("command", "")) or ".llm_router/hooks" in str(h.get("command", ""))
+                        for h in entry.get("hooks", [])
+                    )
+                ]
+                if len(kept) != len(ptu):
+                    cur.setdefault("hooks", {})["PostToolUse"] = kept
+                    hooks_json.write_text(_json.dumps(cur, indent=2))
+                    actions.append(f"✓ Removed llm_router PostToolUse hook from {hooks_json}")
+            except (OSError, ValueError):
+                pass
+    except Exception as e:  # noqa: BLE001
+        actions.append(f"  codex cleanup skipped: {e}")
+
     return actions
 
 
 def _append_routing_rules(dest_path, rules_filename: str) -> list[str]:
-    """Append routing rules from src/rules/ to dest_path. Returns list of action strings."""
+    """Append routing rules from src/rules/ to dest_path. Returns action strings.
+
+    RED1-20 (P0): tool names are LOCALIZED against the active surface before the
+    file is written. They were not, and this is the function serving the ten
+    NON-Claude hosts — Cursor, Windsurf, Copilot, Gemini CLI, opencode, Trae and
+    the rest. The Claude Code path had already been fixed (CHZ-SURF-01, via
+    `_localized_rules_text`); every other host still got the bundle verbatim, so
+    a rules file naming `llm_code` taught those models to make a call that 404s,
+    in every session, for the life of the file.
+
+    That asymmetry is the finding, not a detail of it. Vendor-neutrality is the
+    North Star's central claim and the vendor-neutral path was the unlocalized one.
+
+    This is now the ONLY copy. `cli.py` held a second implementation that also
+    lacked the resolver AND never recorded to the install manifest, so the rules
+    files it wrote survived `llm_router uninstall`. Two implementations of one
+    installer is the RED8-06 duplicate-source class, and is precisely why one got
+    fixed and the other did not.
+    """
     import pathlib
+
+    from llm_router.install_hooks import _localized_rules_text
 
     actions: list[str] = []
     dest_path = pathlib.Path(dest_path)
     rules_src = pathlib.Path(__file__).parent.parent / "rules" / rules_filename
     if not rules_src.exists():
         return actions
-    rules_text = rules_src.read_text()
+    rules_text = _localized_rules_text(rules_src)
     if dest_path.exists():
         existing = dest_path.read_text()
-        if "llm-router" not in existing:
+        if "llm_router" not in existing:
+            block = f"\n\n{rules_text}"
             with dest_path.open("a") as f:
-                f.write(f"\n\n{rules_text}")
+                f.write(block)
             actions.append(f"✓ Appended routing rules to {dest_path}")
+            try:
+                from llm_router import install_manifest
+                install_manifest.record("text_block", dest_path, block=block)
+            except Exception:
+                pass
         else:
             actions.append(f"  Routing rules already in {dest_path} (skipped)")
     else:
         dest_path.parent.mkdir(parents=True, exist_ok=True)
         dest_path.write_text(rules_text)
         actions.append(f"✓ Created {dest_path} with routing rules")
+        try:
+            from llm_router import install_manifest
+            # RED1-10-02: record the exact text so uninstall strips only llm_router's
+            # content and preserves anything the user appended later.
+            install_manifest.record("created_file", dest_path, block=rules_text)
+        except Exception:
+            pass
     return actions
 
 
@@ -522,6 +910,11 @@ def _copy_hook_script(hook_filename: str, dest_dir) -> tuple[str, list[str]]:
         _shutil.copy2(src, dest)
         dest.chmod(0o755)
         actions.append(f"✓ Installed hook script to {dest}")
+        try:
+            from llm_router import install_manifest
+            install_manifest.record("file", dest)
+        except Exception:
+            pass
     return str(dest), actions
 
 
@@ -535,8 +928,8 @@ def _install_opencode_files() -> list[str]:
     opencode_dir.mkdir(parents=True, exist_ok=True)
 
     # 1. MCP server entry
-    server_entry = {"command": "uvx", "args": ["claude-code-llm-router"]}
-    actions += _merge_json_mcp_block(opencode_dir / "config.json", "llm-router", server_entry)
+    server_entry = {"command": "llm_router", "args": []}
+    actions += _merge_json_mcp_block(opencode_dir / "config.json", "llm_router", server_entry)
 
     # 2. Hook script
     hook_dest, hook_actions = _copy_hook_script(
@@ -561,20 +954,27 @@ def _install_gemini_cli_files() -> list[str]:
     gemini_dir.mkdir(parents=True, exist_ok=True)
 
     # 1. MCP server entry in ~/.gemini/settings.json
-    server_entry = {"command": "uvx", "args": ["claude-code-llm-router"]}
-    actions += _merge_json_mcp_block(gemini_dir / "settings.json", "llm-router", server_entry)
+    server_entry = {"command": "llm_router", "args": []}
+    actions += _merge_json_mcp_block(gemini_dir / "settings.json", "llm_router", server_entry)
 
     # 2. Extension manifest + hooks directory
-    ext_dir = gemini_dir / "extensions" / "llm-router"
+    ext_dir = gemini_dir / "extensions" / "llm_router"
+    _ext_existed = ext_dir.exists()
     ext_dir.mkdir(parents=True, exist_ok=True)
+    if not _ext_existed:
+        try:
+            from llm_router import install_manifest
+            install_manifest.record("dir", ext_dir)
+        except Exception:
+            pass
 
     ext_manifest = ext_dir / "gemini-extension.json"
     if not ext_manifest.exists():
         manifest = {
-            "name": "llm-router",
+            "name": "llm_router",
             "version": "9.0.1",
             "description": "Route tasks to cheapest capable model — 20+ providers",
-            "mcpServers": {"llm-router": server_entry},
+            "mcpServers": {"llm_router": server_entry},
         }
         ext_manifest.write_text(_json.dumps(manifest, indent=2))
         actions.append(f"✓ Created Gemini CLI extension manifest at {ext_manifest}")
@@ -686,8 +1086,8 @@ def _install_copilot_cli_files() -> list[str]:
     copilot_dir = home / ".config" / "gh" / "copilot"
     copilot_dir.mkdir(parents=True, exist_ok=True)
 
-    server_entry = {"command": "uvx", "args": ["claude-code-llm-router"]}
-    actions += _merge_json_mcp_block(copilot_dir / "mcp.json", "llm-router", server_entry)
+    server_entry = {"command": "llm_router", "args": []}
+    actions += _merge_json_mcp_block(copilot_dir / "mcp.json", "llm_router", server_entry)
 
     # Routing rules → ~/.config/gh/copilot/instructions.md
     actions += _append_routing_rules(
@@ -706,8 +1106,8 @@ def _install_openclaw_files() -> list[str]:
     openclaw_dir = home / ".openclaw"
     openclaw_dir.mkdir(parents=True, exist_ok=True)
 
-    server_entry = {"command": "uvx", "args": ["claude-code-llm-router"]}
-    actions += _merge_json_mcp_block(openclaw_dir / "mcp.json", "llm-router", server_entry)
+    server_entry = {"command": "llm_router", "args": []}
+    actions += _merge_json_mcp_block(openclaw_dir / "mcp.json", "llm_router", server_entry)
     actions += _append_routing_rules(openclaw_dir / "instructions.md", "openclaw-rules.md")
 
     return actions
@@ -730,8 +1130,8 @@ def _install_trae_files() -> list[str]:
         trae_dir = home / ".config" / "Trae"
     trae_dir.mkdir(parents=True, exist_ok=True)
 
-    server_entry = {"command": "uvx", "args": ["claude-code-llm-router"]}
-    actions += _merge_json_mcp_block(trae_dir / "mcp.json", "llm-router", server_entry)
+    server_entry = {"command": "llm_router", "args": []}
+    actions += _merge_json_mcp_block(trae_dir / "mcp.json", "llm_router", server_entry)
 
     # .rules file in current project directory (Trae-specific pattern)
     rules_dest = pathlib.Path(".rules")
@@ -748,10 +1148,10 @@ def _install_factory_files() -> list[str]:
     plugin_dir = pathlib.Path(__file__).parent.parent.parent.parent / ".factory-plugin"
     if plugin_dir.exists():
         actions.append("✓ .factory-plugin/ manifest present — Factory Droid will auto-load it")
-        actions.append("  Install via: factory plugin install ypollak2/llm-router")
+        actions.append("  Install via: factory plugin install ypollak2/llm_router")
     else:
-        actions.append("  .factory-plugin/ not found in repo root — run from the llm-router repo dir")
-    actions.append("  Or install .claude-plugin/ directly: factory plugin install ypollak2/llm-router")
+        actions.append("  .factory-plugin/ not found in repo root — run from the llm_router repo dir")
+    actions.append("  Or install .claude-plugin/ directly: factory plugin install ypollak2/llm_router")
     return actions
 
 
@@ -772,13 +1172,26 @@ def _install_vscode_files() -> list[str]:
     else:
         mcp_json = home / ".config" / "Code" / "User" / "mcp.json"
 
-    server_entry = {"command": "uvx", "args": ["claude-code-llm-router"]}
-    actions += _merge_json_mcp_block(mcp_json, "llm-router", server_entry, root_key="servers")
+    server_entry = {"command": "llm_router", "args": []}
+    actions += _merge_json_mcp_block(mcp_json, "llm_router", server_entry, root_key="servers")
 
     # Append routing guidance to .github/copilot-instructions.md in cwd (if it exists)
     copilot_instructions = pathlib.Path.cwd() / ".github" / "copilot-instructions.md"
     actions += _append_routing_rules(copilot_instructions, "vscode-rules.md")
 
+    return actions
+
+
+def _install_windsurf_files() -> list[str]:
+    """Write Windsurf MCP config (project-scoped .windsurf/mcp.json). RED2-10-03:
+    windsurf is documented in README/--help but had no installer, so
+    `llm_router install --host windsurf` was rejected as an unknown host."""
+    import pathlib
+
+    actions: list[str] = []
+    mcp_json = pathlib.Path.cwd() / ".windsurf" / "mcp.json"
+    server_entry = {"command": "llm_router", "args": []}
+    actions += _merge_json_mcp_block(mcp_json, "llm_router", server_entry, root_key="mcpServers")
     return actions
 
 
@@ -791,17 +1204,17 @@ def _install_cursor_files() -> list[str]:
 
     # Global Cursor MCP config (applies across all projects)
     mcp_json = home / ".cursor" / "mcp.json"
-    server_entry = {"command": "uvx", "args": ["claude-code-llm-router"]}
-    actions += _merge_json_mcp_block(mcp_json, "llm-router", server_entry, root_key="mcpServers")
+    server_entry = {"command": "llm_router", "args": []}
+    actions += _merge_json_mcp_block(mcp_json, "llm_router", server_entry, root_key="mcpServers")
 
-    # Append routing rules to ~/.cursor/rules/llm-router.md
-    cursor_rules = home / ".cursor" / "rules" / "llm-router.md"
+    # Append routing rules to ~/.cursor/rules/llm_router.md
+    cursor_rules = home / ".cursor" / "rules" / "llm_router.md"
     actions += _append_routing_rules(cursor_rules, "cursor-rules.md")
 
     return actions
 
 
-def _install_host(host: str) -> None:
+def _install_host(host: str, mode: str = "auto") -> None:
     """Install config for non-Claude Code hosts (writes files for Codex; prints snippets for others)."""
     bold = "\033[1m" if _color_enabled() else ""
     reset = "\033[0m" if _color_enabled() else ""
@@ -814,26 +1227,28 @@ def _install_host(host: str) -> None:
         return
 
     w = shutil.get_terminal_size((80, 24)).columns
-    print(f"\n{bold}llm-router install --host {host}{reset}\n")
+    print(f"\n{bold}llm_router install --host {host}{reset}\n")
     print("─" * min(w, 70))
 
     # Hosts that write files; all others print snippets
     _FILE_WRITERS = {
-        "codex":      (_install_codex_files,       "Restart Codex and run llm_savings to verify."),
-        "opencode":   (_install_opencode_files,     "Restart OpenCode and run llm_savings to verify."),
-        "gemini-cli": (_install_gemini_cli_files,   "Restart Gemini CLI and run llm_savings to verify."),
-        "copilot-cli":(_install_copilot_cli_files,  "Restart Copilot CLI and run llm_savings to verify."),
-        "openclaw":   (_install_openclaw_files,     "Restart OpenClaw and run llm_savings to verify."),
-        "trae":       (_install_trae_files,         "Restart Trae IDE and run llm_savings to verify."),
-        "factory":    (_install_factory_files,      "Run: factory plugin install ypollak2/llm-router"),
+        "codex":      (lambda: _install_codex_files(mode="gateway" if mode == "auto" else mode),
+                       "Restart Codex and run `llm_router doctor --host codex` to verify automatic routing."),
+        "opencode":   (_install_opencode_files,     f"Restart OpenCode and run {route_tool('llm_savings')} to verify."),
+        "gemini-cli": (_install_gemini_cli_files,   f"Restart Gemini CLI and run {route_tool('llm_savings')} to verify."),
+        "copilot-cli":(_install_copilot_cli_files,  f"Restart Copilot CLI and run {route_tool('llm_savings')} to verify."),
+        "openclaw":   (_install_openclaw_files,     f"Restart OpenClaw and run {route_tool('llm_savings')} to verify."),
+        "trae":       (_install_trae_files,         f"Restart Trae IDE and run {route_tool('llm_savings')} to verify."),
+        "factory":    (_install_factory_files,      "Run: factory plugin install ypollak2/llm_router"),
         "vscode":     (_install_vscode_files,       "Restart VS Code and enable MCP in Copilot settings."),
-        "cursor":     (_install_cursor_files,       "Restart Cursor and run llm_savings to verify."),
+        "cursor":     (_install_cursor_files,       f"Restart Cursor and run {route_tool('llm_savings')} to verify."),
+        "windsurf":   (_install_windsurf_files,     f"Restart Windsurf and run {route_tool('llm_savings')} to verify."),
     }
 
     for h in hosts_to_show:
         if h in _FILE_WRITERS:
             install_fn, verify_hint = _FILE_WRITERS[h]
-            label = _HOST_SNIPPETS[h].format(bold=bold, reset=reset).strip()
+            label = _HOST_SNIPPETS[h].format(bold=bold, reset=reset, **_SNIPPET_TOOLS).strip()
             print(f"{label}\n")
             actions = install_fn()
             for action in actions:
@@ -841,11 +1256,11 @@ def _install_host(host: str) -> None:
             print()
             print(f"  {verify_hint}")
         else:
-            snippet = _HOST_SNIPPETS[h].format(bold=bold, reset=reset)
+            snippet = _HOST_SNIPPETS[h].format(bold=bold, reset=reset, **_SNIPPET_TOOLS)
             print(snippet)
         print("─" * min(w, 70))
 
     print(
-        f"\nFor Claude Code (hooks + full cost-routing): {bold}llm-router install{reset}\n"
+        f"\nFor Claude Code (hooks + full cost-routing): {bold}llm_router install{reset}\n"
         f"See docs/hosts/ for setup guides and trade-off explanations.\n"
     )

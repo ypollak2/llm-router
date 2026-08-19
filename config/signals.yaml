@@ -1,0 +1,95 @@
+# LLM Router v0.0.1 — signal & decision config (template)
+#
+# This YAML defines the signal layer (independent prompt detectors) and the
+# decision layer (boolean composition over signals → model pick). At runtime,
+# LLM Router evaluates all signals against every prompt, then walks decisions in
+# priority order; the first decision whose operator condition is satisfied
+# wins, and its `action` selects the model chain.
+
+version: v0
+
+signals:
+  # ─── Safety: PII / secret leak detector ────────────────────────────────
+  - name: pii_secret
+    type: pii
+    threshold: 0.5
+    # When this fires, downstream decisions force local-only routing.
+
+  # ─── Keyword-based topic signals ───────────────────────────────────────
+  - name: code_keywords
+    type: keyword
+    method: literal           # v0.0.2 will add: bm25 | ngram | fuzzy
+    case_sensitive: false
+    threshold: 0.5
+    keywords:
+      - "refactor"
+      - "implement"
+      - "debug"
+      - "fix bug"
+      - "stack trace"
+
+  - name: research_keywords
+    type: keyword
+    method: literal
+    case_sensitive: false
+    threshold: 0.5
+    keywords:
+      - "latest"
+      - "current"
+      - "what's new"
+      - "compare"
+      - "recent"
+
+  # ─── Embedding signal (v0.0.2 — sentence-transformers backend) ─────────
+  # - name: technical_support
+  #   type: embedding
+  #   model: sentence-transformers/all-MiniLM-L6-v2
+  #   threshold: 0.75
+  #   aggregation: max
+  #   candidates:
+  #     - "how to configure the system"
+  #     - "troubleshoot installation"
+  #     - "error message explanation"
+
+decisions:
+  # Highest-priority safety rule — force local on any secret leak.
+  - name: force_local_on_pii
+    operator: SINGLE
+    signal_refs: [pii_secret]
+    action: local_only_chain
+    priority: 10
+
+  # Code tasks route through the code chain.
+  - name: route_code_tasks
+    operator: SINGLE
+    signal_refs: [code_keywords]
+    action: code_chain
+    priority: 50
+
+  # Research / current-events tasks need web grounding.
+  - name: route_research_tasks
+    operator: SINGLE
+    signal_refs: [research_keywords]
+    action: research_chain
+    priority: 50
+
+# Action chains — model fallback orderings. Each chain is a free-first list
+# tried in order until one succeeds. These mirror the llm-router chains and
+# will be replaced by the empirical lookup-table selector in v0.0.3+.
+chains:
+  local_only_chain:
+    - ollama/qwen3.5:latest
+    - ollama/gemma:7b
+  code_chain:
+    - ollama/qwen3.5:latest
+    - codex/gpt-5-codex
+    - openai/gpt-4o
+    - anthropic/claude-sonnet-4.6
+  research_chain:
+    - perplexity/sonar
+    - openai/gpt-4o
+  default_chain:
+    - ollama/qwen3.5:latest
+    - codex/gpt-5-codex
+    - google/gemini-flash-lite
+    - openai/gpt-4o-mini

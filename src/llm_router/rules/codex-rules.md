@@ -1,63 +1,34 @@
-# LLM Router — Codex CLI Integration
+<!-- llm_router-rules-version: 2 -->
+# LLM Router — Codex CLI Routing Rules
 
-This document explains how to use llm-router MCP tools within the Codex CLI agent.
+> LLM Router routes each task to the cheapest capable model before Codex CLI generates
+> its own response. Call the appropriate tool BEFORE answering.
+>
+> **Pull routing:** Codex CLI uses pull routing — YOU must call the tool. The tool
+> returns the response; relay it verbatim. This fires in agent mode (~90% of turns).
 
-## Available MCP Tools
+## Task Type → Tool Mapping
 
-When Codex CLI has the llm-router plugin registered, the following MCP tools are available:
+| Task | Tool | Notes |
+|---|---|---|
+| Simple factual question | `llm_query` | Ollama → Gemini Flash → GPT-4o-mini |
+| Research / current events | `llm_research` | Perplexity (web-grounded) |
+| Writing / content | `llm_generate` | Gemini Flash → Haiku |
+| Deep analysis / review | `llm_analyze` | Ollama → GPT-4o |
+| Code generation / refactor | `llm_code` | Ollama → Codex → o3 |
+| Bulk multi-file edits | `llm_edit` | Structured file-level edits |
+| Deep reasoning / proofs | `llm_reason` | Extended-thinking model |
+| Unknown / auto-detect | `llm_auto` | Classifies + routes automatically |
 
-### Text & Analysis
-- `llm_query` - Simple questions, lookups, quick facts
-- `llm_research` - Web-grounded research, current events
-- `llm_generate` - Writing, content creation, brainstorming
-- `llm_analyze` - Deep analysis, code review, debugging
-- `llm_code` - Code generation, refactoring, algorithm design
-- `llm_edit` - Bulk code edits across multiple files
+## Rules
 
-### Media
-- `llm_image` - Image generation
-- `llm_video` - Video generation
-- `llm_audio` - Text-to-speech
+1. Call the matching tool **before** generating your own response.
+2. Return the tool's output to the user **as-is** (don't paraphrase).
+3. Only use native Codex CLI intelligence for file navigation, shell commands,
+   or when all LLM Router MCP servers are unavailable.
+4. Use `llm_research` for anything time-sensitive — training has a cutoff.
 
-### Administration
-- `llm_route` - Classify task complexity and route to best model
-- `llm_classify` - Quick complexity classification
-- `llm_usage` - Check API usage and savings
-- `llm_providers` - List configured providers and status
-- `llm_health` - Check provider health and circuit breaker status
+## Token-Efficient Responses
 
-## Usage Examples
-
-```
-# Simple question routing to Ollama or Haiku
-llm_query(prompt="What's the difference between async/await and promises?")
-
-# Web research routing to Perplexity
-llm_research(prompt="Latest developments in quantum computing in 2026")
-
-# Code generation with complexity detection
-llm_code(prompt="Generate a React component for a todo list with hooks")
-
-# Content generation
-llm_generate(prompt="Write a 500-word article about AI safety")
-
-# Deep code analysis
-llm_analyze(prompt="Analyze this function for performance bottlenecks", complexity="complex")
-```
-
-## Token-Efficient Response Style
-
-When using Codex CLI with llm-router, prefer output that:
-- **Leads with the answer** — no preamble like "I'll help", "Let me think", "Sure"
-- **Uses fragments** — "Returns mutated object" not "This returns a mutated object"
-- **Skips filler** — drop articles (a/the) when meaning is clear
-- **Preserves code** — all technical detail stays, only prose is condensed
-
-Example: Instead of "I think you should use the useCallback hook because it prevents unnecessary re-renders of child components", output: "useCallback. Prevents child re-renders."
-
-## Cost Optimization Tips
-
-- `llm_query` is cheapest for simple lookups
-- `llm_research` includes web access (use when you need current data)
-- `llm_auto` is the recommended tool — it automatically routes through the full cost-saving chain
-- Batch related tasks together to reduce overhead
+Skip preamble. Lead with result. Fragments fine when meaning is clear.
+No trailing summaries. ≥3 items → bullets. Never restate the user's request.

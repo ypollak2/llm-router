@@ -10,6 +10,23 @@ from pathlib import Path
 
 import pytest
 
+# CHZ-SURF-01: hints name the tool registered under the ACTIVE tier, and the
+# shipping default is `consolidated` (llm_code -> llm(task="code")). Asserting a
+# raw legacy literal here is what made these tests pass while the emitted hint
+# was unroutable in production.
+from llm_router.tool_surface import route_tool
+
+
+def _names_a_llm_router_tool(hint: str) -> bool:
+    """True if the hint names SOME llm_router tool the caller can call.
+
+    Checked with a regex rather than `"llm_" in hint`: under the consolidated
+    default the door is `llm(task="query")`, which contains no underscore, so the
+    old substring check silently passed on tiers where it meant nothing.
+    """
+    import re as _re
+    return bool(_re.search(r"\b(llm|llm_\w+|llm_router_\w+)\b", hint))
+
 ROOT = Path(__file__).resolve().parents[1]
 HOOK_PATH = ROOT / "src" / "llm_router" / "hooks" / "auto-route.py"
 
@@ -34,7 +51,7 @@ def run_hook(
     extra_env: dict[str, str] | None = None,
 ) -> dict | None:
     """Run the hook script with a prompt and return parsed output."""
-    with tempfile.TemporaryDirectory(prefix="llm-router-hook-test-") as tmp_home:
+    with tempfile.TemporaryDirectory(prefix="llm_router-hook-test-") as tmp_home:
         effective_home = home_dir or Path(tmp_home)
         payload = json.dumps({"prompt": prompt, "session_id": session_id or ""})
         result = subprocess.run(
@@ -56,7 +73,7 @@ def run_hook_with_last_route(
     last_tool: str = "llm_code",
 ) -> dict | None:
     """Run the hook with a pre-seeded last_route file to test context inheritance."""
-    with tempfile.TemporaryDirectory(prefix="llm-router-hook-test-") as tmp_home:
+    with tempfile.TemporaryDirectory(prefix="llm_router-hook-test-") as tmp_home:
         home_dir = Path(tmp_home)
         session_id = f"test-session-{int(time.time() * 1000)}"
         router_dir = home_dir / ".llm-router"
@@ -140,7 +157,7 @@ def test_golden_prompt_routing_matrix(
     hint = _extract_hint(out)
     # Check for the task/complexity pair (may be wrapped with sparkles ✨)
     assert f"{expected_task}/{expected_complexity}" in hint
-    assert expected_tool in hint
+    assert route_tool(expected_tool) in hint
 
 
 class TestAutoRouteClassification:
@@ -149,35 +166,35 @@ class TestAutoRouteClassification:
         assert out is not None
         hint = _extract_hint(out)
         assert "research/" in hint
-        assert "llm_research" in hint
+        assert route_tool("llm_research") in hint
 
     def test_generate_prompt(self):
         out = run_hook("Write a blog post about machine learning")
         assert out is not None
         hint = _extract_hint(out)
         assert "generate/" in hint
-        assert "llm_generate" in hint
+        assert route_tool("llm_generate") in hint
 
     def test_analyze_prompt(self):
         out = run_hook("Analyze the pros and cons of microservices vs monolith")
         assert out is not None
         hint = _extract_hint(out)
         assert "analyze/" in hint
-        assert "llm_analyze" in hint
+        assert route_tool("llm_analyze") in hint
 
     def test_code_prompt(self):
         out = run_hook("Implement a binary search tree in Python")
         assert out is not None
         hint = _extract_hint(out)
         assert "code/" in hint
-        assert "llm_code" in hint
+        assert route_tool("llm_code") in hint
 
     def test_image_prompt(self):
         out = run_hook("Generate an image of a futuristic city at night")
         assert out is not None
         hint = _extract_hint(out)
         assert "image/" in hint
-        assert "llm_image" in hint
+        assert route_tool("llm_image") in hint
 
     def test_complex_code_prompt(self):
         out = run_hook(
@@ -200,7 +217,7 @@ class TestAutoRouteClassification:
         assert out is not None
         hint = _extract_hint(out)
         assert "code/" in hint
-        assert "llm_code" in hint
+        assert route_tool("llm_code") in hint
 
     def test_code_modify_prompt(self):
         out = run_hook("modify the authentication middleware to support OAuth")
@@ -220,8 +237,10 @@ class TestAutoRouteClassification:
         out = run_hook("I need help with something interesting today")
         assert out is not None
         hint = _extract_hint(out)
-        # Should be classified by Ollama or API (not auto fallback)
-        assert "ROUTE" in hint
+        # Should be classified by Ollama or API (not auto fallback). Assert on the
+        # routing-arrow + "via" method, which appear in every enforce display mode
+        # (shadow/suggest/hard) — the old "ROUTE" proxy only matched the hard banner.
+        assert "→" in hint
         assert "via " in hint
 
 
@@ -232,7 +251,7 @@ class TestAutoRouteSkips:
         # v7.5.0: git commands are now routed as coordination tasks for cheap classification
         out = run_hook("git push origin main")
         if out is not None:
-            assert "coordination" in _extract_hint(out).lower() or "llm_" in _extract_hint(out)
+            assert "coordination" in _extract_hint(out).lower() or _names_a_llm_router_tool(_extract_hint(out))
 
     def test_short_greeting(self):
         assert run_hook("hello") is None
@@ -244,7 +263,7 @@ class TestAutoRouteSkips:
         # "read the config.py file" is now routed (query) rather than skipped
         out = run_hook("read the config.py file")
         if out is not None:
-            assert "llm_" in _extract_hint(out)
+            assert _names_a_llm_router_tool(_extract_hint(out))
 
     def test_slash_command(self):
         assert run_hook("/help") is None
@@ -253,19 +272,19 @@ class TestAutoRouteSkips:
         # v7.5.0: npm commands are now routed as coordination tasks for cheap classification
         out = run_hook("npm install express")
         if out is not None:
-            assert "llm_" in _extract_hint(out)
+            assert _names_a_llm_router_tool(_extract_hint(out))
 
     def test_pip_command(self):
         # v7.5.0: pip commands are now routed as coordination tasks for cheap classification
         out = run_hook("pip install requests")
         if out is not None:
-            assert "llm_" in _extract_hint(out)
+            assert _names_a_llm_router_tool(_extract_hint(out))
 
     def test_commit_command(self):
         # "commit these changes" is now routed (code) rather than skipped
         out = run_hook("commit these changes")
         if out is not None:
-            assert "llm_" in _extract_hint(out)
+            assert _names_a_llm_router_tool(_extract_hint(out))
 
     def test_short_ambiguous(self):
         """Short prompts (<10 chars) are skipped."""
@@ -301,7 +320,7 @@ class TestAutoRouteNowRoutes:
             session_id="continuation-regression",
         )
         assert out is not None
-        assert "llm_" in _extract_hint(out)
+        assert _names_a_llm_router_tool(_extract_hint(out))
 
 
 class TestZeroClaudeMode:
@@ -346,13 +365,16 @@ class TestZeroClaudeMode:
         assert out is not None
         assert out["decision"] == "block"
 
-    def test_whitespace_prompt_is_ignored_in_strict_mode(self):
+    def test_whitespace_prompt_blocks_in_strict_mode(self):
+        # Audit T10 (§2.3/§3.10c): a whitespace-only prompt must NOT slip through
+        # to a native Claude turn under zero-Claude — it fails closed (block).
         out = run_hook(
             "  \n\t  ",
             session_id="zero-whitespace",
             extra_env={"LLM_ROUTER_ZERO_CLAUDE": "true"},
         )
-        assert out is None
+        assert out is not None
+        assert out["decision"] == "block"
 
     def test_routing_yaml_enables_strict_mode(self, tmp_path):
         router_dir = tmp_path / ".llm-router"
@@ -380,7 +402,7 @@ class TestShortCodeFollowup:
         )
         assert out is not None
         hint = _extract_hint(out)
-        assert "llm_code" in hint
+        assert route_tool("llm_code") in hint
         assert "code-context-inherit" in hint
 
     def test_explain_why_followup_after_code_inherits_code(self):
@@ -391,7 +413,7 @@ class TestShortCodeFollowup:
         )
         assert out is not None
         hint = _extract_hint(out)
-        assert "llm_code" in hint
+        assert route_tool("llm_code") in hint
         assert "code-context-inherit" in hint
 
     def test_short_followup_after_generate_does_not_inherit_code(self):
@@ -420,7 +442,7 @@ class TestShortCodeFollowup:
 
     def test_stale_last_route_not_inherited(self):
         """Expired last_route (>30 min) is not used for context inheritance."""
-        with tempfile.TemporaryDirectory(prefix="llm-router-hook-test-") as tmp_home:
+        with tempfile.TemporaryDirectory(prefix="llm_router-hook-test-") as tmp_home:
             home_dir = Path(tmp_home)
             session_id = f"test-stale-{int(time.time() * 1000)}"
             router_dir = home_dir / ".llm-router"

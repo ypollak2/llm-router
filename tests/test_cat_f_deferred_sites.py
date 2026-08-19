@@ -108,21 +108,31 @@ class TestAutoRouteEstimateCost:
         assert out["savings"].startswith("$")
 
     def test_realistic_query_baseline(self, hook):
-        """Query/moderate must use empirical p50 output for calibrated models.
+        """Query/moderate must be priced, not served from the static map.
 
         Old code returned a static ``"$0.0005"`` regardless of pricing changes.
-        Post-Cat-F, query/moderate against Claude Sonnet 4-6 with 200 input
-        and calibrated p50_output=230 evaluates to roughly $0.00405.
+        WP-05 repointed this from a Sonnet literal to the one savings baseline;
+        the assertion is that the figure is DERIVED, not that it equals any
+        particular model's number -- pinning the latter is what let the sonnet
+        literal survive here while every other surface used Opus.
         """
         out = hook._estimate_cost("query", "moderate")
         # Parse the float back out to verify it's calibration-driven, not a string match.
         val = float(out["savings"].lstrip("$"))
-        assert 0.003 < val < 0.006, f"unexpected baseline cost {out['savings']!r}"
+        assert val != 0.0005, "fell back to the legacy static map"
+        assert 0.001 < val < 0.010, f"unexpected baseline cost {out['savings']!r}"
 
     def test_legacy_fallback_renders_when_calibration_unavailable(self, hook):
-        """If the calibration import path is broken, the static map still ships a string."""
+        """If the calibration import path is broken, the static map still ships a string.
+
+        Asserts the VALUE, not the exact dict. #12(b) added a `provenance` key —
+        this path is the least-measured in the system, a hardcoded table used
+        when calibration will not import, and it now says so. Exact-dict
+        equality was stricter than this test's own stated purpose and would
+        reject any strictly-more-informative return.
+        """
         out = hook._legacy_static_savings("code", "complex")
-        assert out == {"savings": "$0.010"}
+        assert out["savings"] == "$0.010"
 
     def test_unknown_task_type_does_not_crash(self, hook):
         """Coerced to QUERY internally; must still emit a savings string."""

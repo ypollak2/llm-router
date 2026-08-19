@@ -36,6 +36,7 @@ def test_all_tools_registered():
         "llm_query", "llm_research", "llm_generate", "llm_analyze", "llm_code",
         "llm_image", "llm_video", "llm_audio",
         "llm_orchestrate", "llm_pipeline_templates",
+        "llm_delegate",  # agentic router — milestone-gated delegation
         "llm_save_session", "llm_gain",
         "llm_set_profile", "llm_usage", "llm_savings", "llm_health", "llm_hook_health", "llm_providers",
         "llm_check_usage", "llm_update_usage", "llm_refresh_claude_usage",
@@ -49,10 +50,31 @@ def test_all_tools_registered():
         "llm_budget", "llm_quota_status", "llm_share_profile", "llm_import_profile",
         "llm_model_eval", "llm_model_usage", "llm_model_export", "llm_savings_dashboard",
         "agoragentic_task", "agoragentic_browse", "agoragentic_wallet", "agoragentic_status",
+        # v0.0.2 agent-session MCP tools — registered by tools/agents.py
+        "llm_router_agent_list", "llm_router_agent_start_session",
+        "llm_router_agent_check_budget", "llm_router_agent_route",
+        "llm_router_agent_complete_session", "llm_router_agent_lineage",
+        # 0.10.0 consolidated front doors — registered by tools/consolidated.py
+        "llm", "llm_act", "llm_router_status", "llm_router_admin", "llm_router_session",
     }
     
-    # With slim=routing (default), only routing-tier tools are registered.
-    # Check that registered tools are a known subset, not that ALL tools are present.
+    # SEC-002 + SEC-003: tools gated behind env opt-ins must be excluded
+    # from the must-be-present set when their opt-in is absent.
+    import os as _os
+    _AFFIRMATIVE = {"1", "on", "true", "yes"}
+    fs_opt_in = _os.environ.get("LLM_ROUTER_FS_TOOLS", "").strip().lower() in _AFFIRMATIVE
+    ag_opt_in = _os.environ.get("LLM_ROUTER_AGORAGENTIC", "").strip().lower() in _AFFIRMATIVE
+    if not fs_opt_in:
+        known_tools = known_tools - {
+            "llm_fs_find", "llm_fs_rename", "llm_fs_edit_many", "llm_fs_analyze_context",
+        }
+    if not ag_opt_in:
+        known_tools = known_tools - {
+            "agoragentic_task", "agoragentic_browse", "agoragentic_wallet", "agoragentic_status",
+        }
+
+    # With slim=consolidated (default since 0.10.0), only the 11 front doors are
+    # registered. Check that registered tools are a known subset, not that ALL are present.
     from llm_router.config import get_config
     slim = get_config().llm_router_slim
     if slim == "off":
@@ -61,9 +83,12 @@ def test_all_tools_registered():
         # In slim mode, registered tools should be a subset of known tools
         assert registered_names.issubset(known_tools | expected_names), \
             f"Unexpected tools: {registered_names - (known_tools | expected_names)}"
-        # At minimum, core routing tools must be present
-        core_tools = {"llm_query", "llm_code", "llm_research", "llm_usage"}
-        assert core_tools.issubset(registered_names), f"Missing core tools: {core_tools - registered_names}"
+        # At minimum, the tier's essential entry points must be present.
+        if slim == "consolidated":
+            min_tools = {"llm", "llm_act", "llm_router_status"}
+        else:
+            min_tools = {"llm_query", "llm_code", "llm_research", "llm_usage"}
+        assert min_tools.issubset(registered_names), f"Missing min tools: {min_tools - registered_names}"
 
 
 def test_resource_registered():
@@ -102,3 +127,28 @@ class TestHealth:
         from llm_router.server import llm_health
         result = await llm_health()
         assert "Provider Health" in result
+
+    @pytest.mark.asyncio
+    async def test_health_counts_reachable_ollama_as_routable(self, monkeypatch):
+        """Regression: a local-only setup (no API keys, Ollama reachable) must
+        report a non-zero routable set — not "0 providers / none reachable".
+        """
+        from types import SimpleNamespace
+
+        import llm_router.tools.admin as admin
+
+        fake_cfg = SimpleNamespace(
+            llm_router_profile=SimpleNamespace(value="budget"),
+            available_providers=set(),            # no API-key providers
+            text_providers=set(),
+            media_providers=set(),
+            ollama_base_url="http://localhost:11434",
+        )
+        monkeypatch.setattr(admin, "get_config", lambda: fake_cfg)
+        monkeypatch.setattr(admin, "get_tracker", lambda: SimpleNamespace(status_report=lambda: {}))
+        monkeypatch.setattr("llm_router.config.probe_ollama", lambda _url: True)
+
+        result = await admin.llm_health()
+        assert "Routable now: 1" in result
+        assert "ollama" in result
+        assert "No providers reachable" not in result

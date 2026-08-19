@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from llm_router.claude_usage import FETCH_USAGE_JS, parse_api_response
 from llm_router import state as _state
+from llm_router.tool_surface import route_tool  # CHZ-SURF-01
 
 
 async def llm_check_usage() -> str:
@@ -163,6 +164,45 @@ async def llm_refresh_claude_usage() -> str:
     return _last_usage.summary()
 
 
+async def llm_quota_saved() -> str:
+    """Show cumulative subscription-quota saved this week and in the
+    last 5h, expressed in percentage points of the Claude quota the
+    user sees on claude.ai.
+
+    Frames the llm_router routing benefit in the user's own mental model
+    ("you're at 89% weekly — would be 96% on Opus"), not in raw
+    dollars. The dollar figure is included as supporting context.
+
+    Calibration is via the ``LLM_ROUTER_WEEKLY_QUOTA_USD_OPUS_EQUIV`` env
+    var (default $50/week of Opus-equivalent spend = 100% weekly
+    quota). Override to match your plan.
+    """
+    from llm_router.quota_savings import compute_quota_savings
+    snap = compute_quota_savings()
+    if snap is None:
+        return (
+            f"No cached Claude subscription usage yet — run "
+            f"`{route_tool('llm_check_usage')}` (or `llm_refresh_claude_usage`) to "
+            "populate the snapshot before the quota-saved metric is "
+            "available."
+        )
+    lines = [
+        "**Quota saved by routing — cumulative this period**",
+        "",
+        f"• Weekly: {snap.weekly_current_pct:.1f}% now "
+        f"→ would be {snap.weekly_counterfactual_pct:.1f}% on Opus "
+        f"(saved {snap.weekly_pp_saved:.1f}pp · ${snap.weekly_saved_usd:.2f})",
+        f"•   5h:  {snap.session_current_pct:.1f}% now "
+        f"→ would be {snap.session_counterfactual_pct:.1f}% on Opus "
+        f"(saved {snap.session_pp_saved:.1f}pp · ${snap.session_saved_usd:.2f})",
+        "",
+        f"_Calibration: ${snap.calibration_usd_per_pp:.2f}/pp "
+        f"(source: {snap.calibration_source}; override via "
+        f"`LLM_ROUTER_WEEKLY_QUOTA_USD_OPUS_EQUIV`)._",
+    ]
+    return "\n".join(lines)
+
+
 def register(mcp, should_register=None) -> None:
     """Register subscription tools with the MCPServer instance."""
     gate = should_register or (lambda _: True)
@@ -172,3 +212,5 @@ def register(mcp, should_register=None) -> None:
         mcp.tool()(llm_update_usage)
     if gate("llm_refresh_claude_usage"):
         mcp.tool()(llm_refresh_claude_usage)
+    if gate("llm_quota_saved"):
+        mcp.tool()(llm_quota_saved)

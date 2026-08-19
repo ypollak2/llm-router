@@ -132,8 +132,9 @@ class TestImportWiringInAdminTools:
         result = await llm_savings()
 
         assert "Savings" in result  # tool returned output
-        # JSONL file should be truncated after import
-        assert log_path.read_text() == ""
+        # AC-5: the log is atomically CLAIMED (renamed away) on import, so
+        # after the flush it is empty OR absent — either way it is drained.
+        assert not log_path.exists() or log_path.read_text() == ""
 
     @pytest.mark.asyncio
     async def test_llm_usage_flushes_jsonl(self, savings_db, monkeypatch):
@@ -152,18 +153,23 @@ class TestImportWiringInAdminTools:
 
         assert "Usage Dashboard" in result
         assert "native turns not metered" in result
-        assert "Session spend counts llm-router tool calls only" in result
-        assert log_path.read_text() == ""
+        assert "Session spend counts llm_router tool calls only" in result
+        assert not log_path.exists() or log_path.read_text() == ""
 
 
 # ── Phase 2: llm_auto tool ───────────────────────────────────────────────────
 
 
 class TestLlmAutoRegistered:
-    def test_llm_auto_in_server_tools(self):
+    def test_auto_routing_door_in_server_tools(self):
+        # 0.10.0 cutover: the consolidated default exposes auto-routing via the
+        # `llm_route` door (and llm(task="auto")); the legacy `llm_auto` stays
+        # importable behind the door but is no longer a registered tool by default.
         from llm_router.server import mcp
+        from llm_router.tools.routing import llm_auto  # still importable (function intact)
         names = {t.name for t in mcp._tool_manager.list_tools()}
-        assert "llm_auto" in names
+        assert "llm_route" in names
+        assert callable(llm_auto)
 
 
 class TestLlmAutoSavingsEnvelope:
@@ -207,7 +213,7 @@ class TestInstallHost:
         out = capsys.readouterr().out
         assert "Codex CLI" in out
         # --host codex writes files; check for write confirmation or skipped marker
-        assert "llm-router" in out.lower() or "config" in out.lower()
+        assert "llm_router" in out.lower() or "config" in out.lower()
 
     def test_install_host_desktop(self, capsys):
         from llm_router.cli import _install_host

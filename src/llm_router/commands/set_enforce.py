@@ -52,7 +52,7 @@ def _dim(s: str) -> str:
 def _run_set_enforce(mode: str) -> None:
     """Switch the enforcement mode and persist to ~/.llm-router/routing.yaml."""
     if not mode or mode not in _ENFORCE_MODES:
-        print(f"\n{_bold('Usage:')} llm-router set-enforce <mode>\n")
+        print(f"\n{_bold('Usage:')} llm_router set-enforce <mode>\n")
         print("Available modes:\n")
         for m in _ENFORCE_MODES:
             marker = " (default)" if m == "smart" else ""
@@ -108,7 +108,7 @@ def _run_set_enforce(mode: str) -> None:
 # ── Entry point ─────────────────────────────────────────────────────────────
 
 def cmd_set_enforce(args: list[str]) -> int:
-    """Execute: llm-router set-enforce <mode>
+    """Execute: llm_router set-enforce <mode>
 
     Switch the routing enforcement mode.
     """

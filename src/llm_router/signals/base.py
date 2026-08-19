@@ -1,23 +1,24 @@
 """Signal protocol — the contract every detector implements.
 
-A Signal scores a prompt against a single criterion. Signals are stateless and
-pure; composition into routing decisions happens in the caller.
-
-Ported from Chuzom's signals/base.py (no chuzom deps).
+A Signal scores a prompt against a single criterion. Multiple signals are
+combined by the decision engine (AND/OR/NOT/composite) into a model pick.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional, Protocol
+from typing import Protocol
 
 
 @dataclass(frozen=True)
 class SignalScore:
     """Result of evaluating one signal against a prompt.
 
-    ``score`` is in [0, 1]; at/above ``threshold`` the signal "fires".
-    ``evidence`` is a human-readable explanation for observability — it must
-    NEVER contain sensitive matched values (e.g. a detected secret).
+    Attributes:
+        name: Signal identifier (matches config name).
+        score: Score in [0.0, 1.0]. Above the signal's threshold = "fires".
+        threshold: Configured threshold for firing.
+        evidence: Human-readable explanation (which keyword matched, which
+            exemplar was closest, etc.) — used by lineage/observability.
     """
 
     name: str
@@ -31,8 +32,14 @@ class SignalScore:
 
 
 class Signal(Protocol):
+    """Every signal implements evaluate(prompt) -> SignalScore.
+
+    Signals are stateless. Configuration is captured at __init__ time and
+    frozen via dataclass(frozen=True) in concrete subclasses.
+    """
+
     name: str
     threshold: float
 
-    def evaluate(self, prompt: str, context: Optional[dict] = None) -> SignalScore:
+    def evaluate(self, prompt: str, context: dict | None = None) -> SignalScore:
         ...

@@ -1,4 +1,4 @@
-"""Structured logging helpers for llm-router."""
+"""Structured logging helpers for llm_router."""
 
 from __future__ import annotations
 

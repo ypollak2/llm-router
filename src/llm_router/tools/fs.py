@@ -12,6 +12,8 @@ Pattern:
 from __future__ import annotations
 
 import glob as _glob
+import os as _os
+from pathlib import Path as _Path
 
 from mcp.server.mcpserver import Context
 
@@ -21,6 +23,75 @@ from llm_router.types import TaskType
 
 # Maximum files to process in a single bulk-edit call.
 _MAX_FILES = 20
+
+# ── SEC-002: opt-in sandboxing ────────────────────────────────────────────────
+# The llm_fs_* tools read user files into model prompts. Without a sandbox an
+# agent could exfiltrate ~/.ssh/** or any other readable path in one call.
+# Defence in depth:
+#   1. Tools are NOT registered unless `LLM_ROUTER_FS_TOOLS=on` (gate at register()).
+#   2. File-reading tools require `project_root` and reject any path that
+#      resolves outside it (`_assert_under_root` below).
+# See: Docs/audit/HIGH_PRIORITY_WORK_PLAN.md F-SEC-002.
+
+_FS_TOOLS_ENV = "LLM_ROUTER_FS_TOOLS"
+
+
+def _fs_tools_enabled() -> bool:
+    """True if the operator has opted in to filesystem tools via env."""
+    return _os.environ.get(_FS_TOOLS_ENV, "").strip().lower() in {"1", "on", "true", "yes"}
+
+
+class FsSandboxError(ValueError):
+    """Raised when a path escapes the configured project_root."""
+
+
+def _resolve_root(project_root: str) -> _Path:
+    """Resolve project_root to an absolute, symlink-resolved Path.
+
+    Refuses obvious foot-guns: empty string, `/`, and `~` without expansion.
+    Callers that explicitly want their whole home tree can pass the expanded
+    absolute path — but `/` is rejected unconditionally to make accidents
+    impossible.
+    """
+    if not project_root or not str(project_root).strip():
+        raise FsSandboxError("project_root is required and must be non-empty")
+    resolved = _Path(project_root).expanduser().resolve()
+    if str(resolved) == "/":
+        raise FsSandboxError("project_root='/' is not a sandbox; refusing")
+    if not resolved.exists():
+        raise FsSandboxError(f"project_root does not exist: {resolved}")
+    if not resolved.is_dir():
+        raise FsSandboxError(f"project_root is not a directory: {resolved}")
+    return resolved
+
+
+def _assert_under_root(candidate: str, root: _Path) -> _Path:
+    """Resolve `candidate` and confirm it sits inside `root` after symlink resolution.
+
+    Returns the resolved path on success. Raises FsSandboxError if the path
+    escapes the root (via `..`, absolute path, or symlink chain).
+    """
+    resolved = _Path(candidate).expanduser().resolve()
+    # Path.is_relative_to was added in 3.9; project requires 3.10+.
+    if not resolved.is_relative_to(root):
+        raise FsSandboxError(
+            f"path escapes project_root: {candidate!r} resolves to {resolved} "
+            f"which is not under {root}"
+        )
+    return resolved
+
+
+def _filter_files_under_root(paths: list[str], root: _Path) -> tuple[list[str], list[str]]:
+    """Split paths into (allowed, rejected) based on sandbox membership."""
+    allowed: list[str] = []
+    rejected: list[str] = []
+    for p in paths:
+        try:
+            _assert_under_root(p, root)
+            allowed.append(p)
+        except FsSandboxError:
+            rejected.append(p)
+    return allowed, rejected
 
 
 async def llm_fs_find(
@@ -108,6 +179,7 @@ Return ONLY the JSON object, no prose."""
 
 async def llm_fs_edit_many(
     task: str,
+    project_root: str,
     ctx: Context,
     files: list[str] | None = None,
     glob_pattern: str | None = None,
@@ -122,27 +194,54 @@ async def llm_fs_edit_many(
     Use this for cross-file refactors, bulk renames within files, or updating
     repeated patterns across a module.
 
+    SECURITY (SEC-002): every resolved path must sit inside ``project_root``
+    after symlink resolution; any path that escapes is silently dropped from
+    the candidate set, and the call errors out if nothing remains. The
+    sandbox refuses ``project_root='/'``.
+
     Args:
         task: Natural-language description of what to change, e.g.
             "replace all `import sqlite3` with `import aiosqlite as sqlite3`"
             or "update the copyright year from 2024 to 2025 in all file headers".
+        project_root: REQUIRED. Absolute path to the sandbox root; any file
+            outside this directory (after symlink resolution) is rejected.
         files: Explicit list of file paths to process.
         glob_pattern: Glob pattern to find files (e.g. "src/**/*.py"). Use
             either ``files`` or ``glob_pattern``, not both.
         max_files: Cap on files processed in one call (default 20). Raise if
             you need more — but consider splitting into batches for large refactors.
     """
-    # Resolve file list
-    resolved: list[str] = []
-    if files:
-        resolved = [str(f) for f in files[:max_files]]
-    elif glob_pattern:
-        resolved = sorted(_glob.glob(glob_pattern, recursive=True))[:max_files]
+    # SEC-002: validate sandbox root before touching the filesystem.
+    try:
+        root = _resolve_root(project_root)
+    except FsSandboxError as exc:
+        return f"**Error**: invalid project_root — {exc}"
 
-    if not resolved:
+    # Resolve file list
+    candidates: list[str] = []
+    if files:
+        candidates = [str(f) for f in files[:max_files]]
+    elif glob_pattern:
+        # Evaluate the glob with cwd set to the sandbox root so that
+        # relative patterns like "src/**/*.py" resolve under it instead of
+        # the process cwd. Absolute patterns still get filtered below.
+        candidates = sorted(_glob.glob(glob_pattern, recursive=True, root_dir=str(root)))[:max_files]
+        # _glob with root_dir returns paths relative to root_dir; rebuild
+        # absolute paths for downstream consumers.
+        candidates = [str(root / c) for c in candidates]
+
+    if not candidates:
         return (
             "**Error**: No files to process. "
             "Provide a `files` list or a `glob_pattern` (e.g. `src/**/*.py`)."
+        )
+
+    # SEC-002: filter out anything that escapes project_root.
+    resolved, rejected = _filter_files_under_root(candidates, root)
+    if not resolved:
+        return (
+            f"**Error**: every candidate file escaped project_root={root}. "
+            f"Rejected paths: {rejected[:5]}{'…' if len(rejected) > 5 else ''}"
         )
 
     # Read file contents — capped at 32 KB each (free local read)
@@ -165,7 +264,7 @@ async def llm_fs_edit_many(
 
 
 async def llm_fs_analyze_context(
-    path: str = ".",
+    project_root: str,
     max_files: int = 20,
     ctx: Context = None,
 ) -> str:
@@ -180,16 +279,22 @@ async def llm_fs_analyze_context(
     The summary is automatically used by llm_route and llm_auto — no further
     action required.
 
+    SECURITY (SEC-002): only scans files inside ``project_root``. Refuses
+    ``project_root='/'``.
+
     Args:
-        path: Workspace root to analyze (default: current directory).
+        project_root: REQUIRED. Absolute path to the workspace root to analyze.
         max_files: Maximum files to read (default: 20).
     """
     import asyncio
     import json as _json
     import time as _time
-    from pathlib import Path as _Path
 
-    workspace = _Path(path).resolve()
+    # SEC-002: validate sandbox root before touching the filesystem.
+    try:
+        workspace = _resolve_root(project_root)
+    except FsSandboxError as exc:
+        return f"**Error**: invalid project_root — {exc}"
 
     # Key files to read for project understanding
     KEY_FILES = [
@@ -197,7 +302,7 @@ async def llm_fs_analyze_context(
         "package.json", "tsconfig.json",
         "go.mod", "Cargo.toml",
         "README.md", "README.rst",
-        "CLAUDE.md", ".llm-router.yml",
+        "CLAUDE.md", ".llm_router.yml",
         "src/main.py", "src/index.ts", "main.go",
     ]
 
@@ -274,43 +379,16 @@ Return ONLY the JSON object."""
         return f"{resp.header()}\n\n{resp.content}"
 
 
-# ── SEC-002: opt-in gate ──────────────────────────────────────────────────────
-# Ported from upstream SEC-002, where this landed and never
-# reached this repository. Its reasoning applies here verbatim:
-#
-#   "The llm_fs_* tools read user files into model prompts. Without a sandbox an
-#    agent could exfiltrate ~/.ssh/** or any other readable path in one call."
-#
-# Upstream uses DEFENCE IN DEPTH — two layers:
-#   1. tools are not registered unless the operator opts in   <-- ported here
-#   2. file-reading tools require `project_root` and reject any path resolving
-#      outside it (`_assert_under_root`)                       <-- NOT ported yet
-#
-# Layer 2 is absent from this repository entirely: `_assert_under_root`,
-# `project_root` and `FsSandboxError` have zero occurrences here, and two of
-# these four tools (`llm_fs_rename`, `llm_fs_edit_many`) WRITE. Adding it changes
-# tool signatures, so it is a breaking change needing its own design and its own
-# control — see tests/test_fs_tools_opt_in.py. Shipping layer 1 first is not a
-# substitute for it; it bounds who is exposed, not what an opted-in agent can
-# reach.
-_FS_TOOLS_ENV = "LLM_ROUTER_FS_TOOLS"
-
-
-def _fs_tools_enabled() -> bool:
-    """True if the operator has opted in to filesystem tools via env."""
-    import os as _os
-
-    return _os.environ.get(_FS_TOOLS_ENV, "").strip().lower() in {
-        "1", "on", "true", "yes",
-    }
-
-
 def register(mcp, should_register=None) -> None:
     """Register filesystem tools with the MCPServer instance.
 
-    SEC-002: OFF by default. Set ``LLM_ROUTER_FS_TOOLS=on`` to register them.
-    Without the opt-in, ``mcp.list_tools()`` exposes zero ``llm_fs_*`` entries.
-    See the module-level SEC-002 note for what this does and does not cover.
+    SEC-002: tools are OFF by default. Set ``LLM_ROUTER_FS_TOOLS=on`` in the
+    environment to register them. Without the opt-in, ``mcp.list_tools()``
+    exposes zero ``llm_fs_*`` entries — eliminating the surface for any
+    operator who did not explicitly enable it.
+
+    The opt-in env check is the first defence; ``project_root`` validation
+    inside the file-reading tools is the second (defence in depth).
     """
     if not _fs_tools_enabled():
         return  # SEC-002: tools intentionally absent unless opted in.

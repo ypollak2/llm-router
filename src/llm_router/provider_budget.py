@@ -33,6 +33,8 @@ EXTERNAL_MODEL_COST: dict[str, float] = {
     # DeepSeek
     "deepseek/deepseek-chat": 0.0007,
     "deepseek/deepseek-reasoner": 0.002,
+    "deepseek/deepseek-v4-flash": 0.0002,   # $0.14/$0.28 per 1M blended (~/1k)
+    "deepseek/deepseek-v4-pro": 0.0026,      # $1.74/$3.48 per 1M blended (~/1k)
     # Mistral
     "mistral/mistral-large-latest": 0.006,
     "mistral/mistral-small-latest": 0.0006,
@@ -49,10 +51,12 @@ EXTERNAL_MODEL_QUALITY: dict[str, float] = {
     "gemini/gemini-2.5-pro": 0.95,
     "openai/gpt-4o": 0.90,
     "deepseek/deepseek-reasoner": 0.88,
+    "deepseek/deepseek-v4-pro": 0.87,       # reasoning flagship (deepseek-reasoner successor)
     "mistral/mistral-large-latest": 0.82,
     "openai/gpt-4o-mini": 0.72,
     "gemini/gemini-2.5-flash": 0.70,
     "deepseek/deepseek-chat": 0.70,
+    "deepseek/deepseek-v4-flash": 0.78,     # deepseek-chat successor
     "groq/llama-3.3-70b-versatile": 0.68,
     "perplexity/sonar-pro": 0.80,
     "perplexity/sonar": 0.65,
@@ -134,7 +138,13 @@ async def get_provider_spend() -> dict[str, float]:
     if not exists:
         return {}
 
-    db = await aiosqlite.connect(str(db_path))
+    # CHZ-PY-004: mark the worker daemon BEFORE awaiting — the thread hasn't
+    # started yet, so daemon takes effect (marking after await is a no-op:
+    # daemon can't be changed on a started thread).
+    from llm_router.aiosqlite_util import mark_worker_daemon
+    _conn = aiosqlite.connect(str(db_path))
+    mark_worker_daemon(_conn)
+    db = await _conn
     try:
         cursor = await db.execute(
             "SELECT provider, COALESCE(SUM(cost_usd), 0) FROM usage "

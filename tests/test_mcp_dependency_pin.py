@@ -3,15 +3,17 @@
 WHY THIS EXISTS
 ===============
 
-`pyproject.toml` declared `mcp>=1.0.0` with no upper bound. `mcp 2.0.0` — the
-current latest on PyPI — removed `mcp.server.fastmcp` entirely; its server
-submodules are `auth`, `lowlevel`, `mcpserver`, with `MCPServer` the closest
-analogue to `FastMCP`. Seven modules here do `from mcp.server.fastmcp import …`.
+This project was never broken by the mcp 2.0.0 release — it was correctly pinned
+`mcp>=1.0.0,<2` throughout, and the ceiling did its job. The downstream copy was
+pinned `mcp>=1.0.0` with no ceiling, and every fresh install of it resolved 2.0.0
+and died at import before registering a single tool.
 
-So every fresh `pip install` / `pipx install` resolved 2.0.0 and died on import
-before registering a single tool. The client reports `CONNECTION_CLOSED`, which
-looks like a provider or network fault and is neither — the process was already
-dead. A user has no way to tell those apart from the outside.
+That is the point of this test existing HERE, where nothing went wrong: the
+ceiling was correct by attention, not by enforcement, and nothing would have
+noticed if it had been widened. Now something does.
+
+mcp 2.0.0 removed `mcp.server.fastmcp` entirely; its server submodules are
+`auth`, `lowlevel`, `mcpserver`, with `MCPServer` the analogue of `FastMCP`.
 
 TWO CHECKS, DELIBERATELY
 ========================
@@ -28,10 +30,12 @@ a FUTURE major bump, not only this one, so there are two:
 2. `test_every_mcp_import_in_src_resolves` — discovers `from mcp…` imports by
    parsing the source tree and checks each one actually resolves. Catches the
    real failure (an API the code needs having been removed) under ANY version,
-   including a future 2.x port where the pin is legitimately raised and one
-   module is missed.
+   including a port where the pin is legitimately raised and one module is missed.
+   That is not hypothetical: in this tree 8 modules import from the removed
+   package and only ONE of them imports `FastMCP` — the other seven import
+   `Context`. Porting "the FastMCP importers" would have missed 7 of 8.
 
-Check 2 is the one that would have caught the original bug. Check 1 is what
+Check 2 is the one that catches a PARTIAL port — see below. Check 1 is what
 stops it recurring. Neither subsumes the other: (1) passes fine against a broken
 installed environment, and (2) passes fine against a dangerously loose pin that
 simply happens to resolve to a working version today.
@@ -93,8 +97,16 @@ def _mcp_import_sites() -> list[tuple[Path, str, tuple[str, ...]]]:
     for path in sorted(_SRC.rglob("*.py")):
         try:
             tree = ast.parse(path.read_text(encoding="utf-8"))
-        except (OSError, SyntaxError):
-            continue
+        except (OSError, SyntaxError) as exc:
+            # Do NOT skip. A source file this cannot parse is a file whose mcp
+            # imports go unchecked, and `continue` reports that as coverage.
+            # G4's ratchet flagged it and was right — it is the same shape as the
+            # skip removed from test_savings_surfaces_delegate.py: a guard that
+            # silently narrows is worse than one that fails, because it keeps
+            # reporting success over the part it stopped looking at.
+            #
+            # An unparseable file under src/ is also independently a problem.
+            pytest.fail(f"cannot parse {path}: {exc}")
         for node in ast.walk(tree):
             if isinstance(node, ast.ImportFrom) and node.module:
                 if node.module == "mcp" or node.module.startswith("mcp."):

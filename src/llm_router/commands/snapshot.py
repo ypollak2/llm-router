@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""llm-router snapshot — Mid-session monitoring and status check.
+"""llm_router snapshot — Mid-session monitoring and status check.
 
-Command: uv run llm-router snapshot [--date YYYY-MM-DD] [--compact]
+Command: uv run llm_router snapshot [--date YYYY-MM-DD] [--compact]
 
 Shows current session facts and hourly trends:
   - Calls, cost, savings, accuracy

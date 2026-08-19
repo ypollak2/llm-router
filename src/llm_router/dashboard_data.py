@@ -19,9 +19,6 @@ API surface
 * ``query_window(window, ...)``        — calls + tokens + savings for a window
 * ``query_daily(days=14)``             — per-day breakdown for chart rendering
 * ``query_by_platform(window)``        — per-platform attribution
-* ``query_realized_savings(window)``   — adoption-gated realized vs. potential
-  savings split (execution_ledger.py's Gate 18 accounting). A stricter,
-  additive figure — deliberately NOT reconciled against ``saved_usd`` above.
 * ``DataSourceAudit``                  — diagnostic record used by
   ``explain-dashboard --check`` to surface tables that have rows but
   aren't being read.
@@ -31,10 +28,7 @@ Window strings
 Accepted ``window`` values: ``"today"`` / ``"week"`` / ``"month"`` /
 ``"lifetime"`` / ``"14d"``. Each maps to a SQLite WHERE clause on
 ``timestamp`` columns. The mapping is identical across all source tables
-so call counts/tokens/savings stay reconcilable. ``query_realized_savings``
-reads a different table (``execution_events``) via epoch-second bounds
-rather than a SQL WHERE fragment — see ``_window_epoch_bounds`` for the
-(best-effort, not byte-identical) mapping between the two.
+so call counts/tokens/savings stay reconcilable.
 """
 
 from __future__ import annotations
@@ -45,6 +39,13 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Literal
 
+from llm_router import pricing as _pricing
+
+#: Counterfactual model these savings are computed against. WP-05: projected
+#: from the ONE policy in llm_router.pricing rather than restated here, so this
+#: surface cannot drift from the ledger writer or the session-end hook.
+_BASELINE_MODEL = _pricing.savings_baseline_model()
+
 WindowLiteral = Literal["today", "week", "month", "lifetime", "14d"]
 
 DEFAULT_DB_PATH = Path.home() / ".llm-router" / "usage.db"
@@ -54,6 +55,31 @@ DEFAULT_DB_PATH = Path.home() / ".llm-router" / "usage.db"
 _PLATFORM_TABLES = ("claude_usage", "codex_usage", "gemini_usage")
 _LEGACY_TABLE = "usage"
 _JSONL_TABLE = "savings_stats"
+
+
+def _coverage_fields() -> dict:
+    """Observed/unobserved counts for WindowTotals. Never raises.
+
+    A dashboard that cannot render because coverage telemetry is unavailable
+    would trade a known blind spot for an outage. Unreadable coverage is
+    reported AS unreadable (-> "Unknown"), not as zero traffic.
+    """
+    try:
+        from llm_router import coverage as _coverage
+
+        snap = _coverage.snapshot()
+        return {
+            "observed_n": snap.observed_n,
+            "unobserved_n": snap.unobserved_n,
+            "coverage_readable": snap.readable,
+        }
+    except Exception as exc:  # noqa: BLE001
+        # coverage_readable=False already renders "Unknown" downstream, so the
+        # user is not misled -- but nothing said WHY, and a permanently unknown
+        # coverage figure looks like a missing feature rather than a broken one.
+        from llm_router import failopen
+        failopen.record("CHZ-FO-DASHBOARD-COVERAGE", exc)
+        return {"observed_n": 0, "unobserved_n": 0, "coverage_readable": False}
 
 
 def _window_sql(window: WindowLiteral) -> str:
@@ -72,37 +98,6 @@ def _window_sql(window: WindowLiteral) -> str:
     if window not in mapping:
         raise ValueError(f"unknown window: {window!r}")
     return mapping[window]
-
-
-def _window_epoch_bounds(window: WindowLiteral) -> tuple[float, float]:
-    """Best-effort epoch-second ``(start_ts, end_ts)`` bounds for ``window``.
-
-    ``_window_sql`` above produces a SQL WHERE fragment evaluated by SQLite
-    against the ``usage``/``*_usage``/``savings_stats`` tables' ``timestamp``
-    columns. ``execution_ledger.get_period_accounting`` instead takes Python
-    float Unix-epoch bounds. This helper maps window names into that second
-    shape as faithfully as practical — it is NOT guaranteed to select the
-    exact same rows a SQL ``date(timestamp,'localtime')`` comparison would
-    for edge-of-day boundaries, since ``"today"`` uses local time (matching
-    ``_window_sql``'s explicit ``'localtime'`` modifier) while the other
-    windows use UTC-based arithmetic (matching SQLite's bare
-    ``datetime('now')``, which is UTC with no modifier).
-    """
-    now_utc = datetime.now(timezone.utc)
-    if window == "today":
-        local_now = datetime.now().astimezone()
-        local_midnight = local_now.replace(hour=0, minute=0, second=0, microsecond=0)
-        return local_midnight.timestamp(), local_now.timestamp()
-    if window == "week":
-        return (now_utc - timedelta(days=7)).timestamp(), now_utc.timestamp()
-    if window == "month":
-        start_of_month = now_utc.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-        return start_of_month.timestamp(), now_utc.timestamp()
-    if window == "14d":
-        return (now_utc - timedelta(days=14)).timestamp(), now_utc.timestamp()
-    if window == "lifetime":
-        return 0.0, now_utc.timestamp()
-    raise ValueError(f"unknown window: {window!r}")
 
 
 def _table_exists(conn: sqlite3.Connection, name: str) -> bool:
@@ -143,6 +138,38 @@ class WindowTotals:
     # Per-source breakdown so consumers can show drill-down detail.
     by_source: dict[str, dict] = field(default_factory=dict)
 
+    # WP-07 / I-1: `calls` counts traffic LLM Router OBSERVED. Without a count of
+    # what it missed, every rate derived from `calls` silently redefines its own
+    # denominator -- "100% of the calls we saw" is not "100% of the calls", and
+    # the gap is invisible exactly when routing is broken. These carry the
+    # denominator alongside the numerator so no consumer has to assume one.
+    #
+    # Rolling, not windowed: the coverage store is a capped append-only log with
+    # no per-window partition, so this describes recent routing health rather
+    # than this window specifically. Labelled that way wherever it is rendered --
+    # quietly presenting it as window-scoped would be its own false precision.
+    observed_n: int = 0
+    unobserved_n: int = 0
+    coverage_readable: bool = True
+
+    @property
+    def coverage_pct(self) -> float | None:
+        """Observed share of routed traffic, or ``None`` when unknowable."""
+        total = self.observed_n + self.unobserved_n
+        if not self.coverage_readable or total == 0:
+            return None
+        return 100.0 * self.observed_n / total
+
+    @property
+    def coverage_is_degraded(self) -> bool:
+        pct = self.coverage_pct
+        return pct is not None and pct < 90.0
+
+    def render_coverage(self) -> str:
+        """``Unknown`` when the denominator is -- never a fabricated number."""
+        pct = self.coverage_pct
+        return "Unknown" if pct is None else f"{pct:.1f}%"
+
 
 @dataclass(frozen=True)
 class DailyRow:
@@ -151,6 +178,7 @@ class DailyRow:
     calls: int
     tokens: int
     saved_usd: float
+    tokens_saved: int = 0   # tokens handled by cheap providers (not burned on premium)
 
 
 @dataclass(frozen=True)
@@ -181,25 +209,28 @@ class DataSourceAudit:
 
 @dataclass(frozen=True)
 class RealizedSavingsTotals:
-    """Adoption-gated realized-savings split for a window (WS3/C6).
+    """Adoption-gated realized-savings split for a window.
 
-    Distinct from ``WindowTotals`` above — that figure reports ``saved_usd``
-    computed per-surface (a Sonnet-baseline estimate for the legacy
-    ``usage`` table, ``cost_saved_usd`` for the per-platform tables, etc.).
-    This figure instead reads execution_ledger.py's Gate 18 accounting: a
-    route's *potential* saving (baseline-equivalent minus actual cost) only
-    counts as *realized* when the route's realization_status is
-    verified_used AND its adoption_method is in COUNTS_AS_REALIZED
-    (door_call or agent_marked). Routes whose realization is
-    verified_overridden (host went its own way) or unknown (never
-    verified) contribute to ``potential_savings_usd`` only, never to
-    ``realized_savings_usd``.
+    Deliberately NOT the same number as ``WindowTotals.saved_usd``, and
+    deliberately never reconciled against it. That figure is a per-surface
+    estimate (a Sonnet-baseline calculation for the legacy ``usage`` table,
+    ``cost_saved_usd`` for the per-platform tables). This one reads
+    ``execution_ledger``'s accounting, where a route's *potential* saving only
+    becomes *realized* when its ``realization_status`` is ``verified_used``
+    AND its ``adoption_method`` is in ``COUNTS_AS_REALIZED``.
 
-    This is a stricter, additive metric surfaced alongside the existing
-    savings figures — it is deliberately NOT reconciled against
-    ``WindowTotals.saved_usd``; the two are independent, non-additive
-    numbers by design (per the migration plan's risk note: "realized
-    metric confused with existing savings | additive fields + docs note").
+    Routes that were verified as overridden (the host went its own way) or
+    never verified at all contribute to ``potential_savings_usd`` only. Keeping
+    both numbers on the same object is the point: the gap between them is the
+    adoption gap, and collapsing them into one figure would hide exactly the
+    thing worth knowing.
+
+    This is the third savings number in the codebase, so INV-COST-004 applies
+    with force: this is a SURFACE, not an aggregation. It delegates every
+    figure to ``execution_ledger.get_period_accounting`` and computes nothing
+    itself. Three hand-rolled savings queries once reported $73.97, $102.31 and
+    $205.19 for the same day; a fourth independent implementation is how that
+    happens again.
     """
 
     window: str
@@ -238,7 +269,9 @@ def query_window(
     """
     db = Path(db_path) if db_path else DEFAULT_DB_PATH
     if not db.exists():
-        return WindowTotals(window=window, calls=0, tokens=0, saved_usd=0.0)
+        return WindowTotals(
+            window=window, calls=0, tokens=0, saved_usd=0.0, **_coverage_fields()
+        )
 
     where = _window_sql(window)
     conn = sqlite3.connect(str(db))
@@ -246,22 +279,33 @@ def query_window(
     total_calls = total_tokens = 0
     total_saved = 0.0
     try:
-        # Legacy ``usage`` table — use input/output split and Sonnet baseline.
+        # Legacy ``usage`` table — recalculate savings from in/out at Opus rates.
+        # Opus: $15/M input, $75/M output.  Stored saved_usd used a blended
+        # $0.045/1K estimate that is inaccurate for input-heavy calls.
+        # Subscription provider rows have no meaningful token cost so exclude them.
+        # RED8-01: these were hardcoded at $15/$75 — the retired Opus 3 rate,
+        # 3x the real one — and this read path feeds ~26 reporting surfaces, so
+        # every savings figure downstream was overstated by the same factor.
+        # Sourced from llm_router.pricing now; a literal here fails scripts/lint_pricing.py.
+        _OPUS_IN_PER_M = _pricing.input_rate(_BASELINE_MODEL)
+        _OPUS_OUT_PER_M = _pricing.output_rate(_BASELINE_MODEL)
         if _table_exists(conn, _LEGACY_TABLE):
             cols = _columns(conn, _LEGACY_TABLE)
-            row = conn.execute(
+            row = conn.execute(  # nosec B608 — table/where are module constants & validated enum, not user input
                 f"SELECT COUNT(*), "
                 f"{_sum_if_present(cols, 'input_tokens')}, "
                 f"{_sum_if_present(cols, 'output_tokens')}, "
-                f"{_sum_if_present(cols, 'cost_usd')}, "
-                f"{_sum_if_present(cols, 'saved_usd')} "
-                f"FROM {_LEGACY_TABLE} WHERE success=1 AND {where}"
+                f"{_sum_if_present(cols, 'cost_usd')} "
+                f"FROM {_LEGACY_TABLE} "
+                f"WHERE success=1 AND (provider IS NULL OR provider != 'subscription') AND {where}"
             ).fetchone()
             calls = int(row[0])
             in_tok = int(row[1])
             out_tok = int(row[2])
             cost = float(row[3])
-            saved = float(row[4])
+            opus_baseline = (in_tok * _OPUS_IN_PER_M + out_tok * _OPUS_OUT_PER_M) / 1_000_000
+            # AUD-06: signed. Clamping here made the aggregate a sum of wins.
+            saved = opus_baseline - cost
             by_source[_LEGACY_TABLE] = {
                 "calls": calls, "tokens": in_tok + out_tok,
                 "cost_usd": cost, "saved_usd": saved,
@@ -290,19 +334,25 @@ def query_window(
             total_tokens += tokens
             total_saved += saved
 
-        # ``savings_stats`` — no token columns.
+        # ``savings_stats`` — DIRECT-routed (free-provider) calls. Token columns
+        # added in v7.4; older DBs lack them, so sum defensively.
         if _table_exists(conn, _JSONL_TABLE):
-            row = conn.execute(
+            cols = _columns(conn, _JSONL_TABLE)
+            row = conn.execute(  # nosec B608 — table/where are module constants & validated enum, not user input
                 f"SELECT COUNT(*), "
-                f"COALESCE(SUM(estimated_claude_cost_saved),0) "
+                f"COALESCE(SUM(estimated_claude_cost_saved),0), "
+                f"{_sum_if_present(cols, 'input_tokens')}, "
+                f"{_sum_if_present(cols, 'output_tokens')} "
                 f"FROM {_JSONL_TABLE} WHERE {where}"
             ).fetchone()
             calls = int(row[0])
             saved = float(row[1])
+            tokens = int(row[2]) + int(row[3])
             by_source[_JSONL_TABLE] = {
-                "calls": calls, "tokens": 0, "saved_usd": saved,
+                "calls": calls, "tokens": tokens, "saved_usd": saved,
             }
             total_calls += calls
+            total_tokens += tokens
             total_saved += saved
     finally:
         conn.close()
@@ -313,6 +363,7 @@ def query_window(
         tokens=total_tokens,
         saved_usd=total_saved,
         by_source=by_source,
+        **_coverage_fields(),
     )
 
 
@@ -333,13 +384,21 @@ def query_daily(
     where = f"timestamp >= datetime('now', '-{int(days)} days')"
     daily: dict[str, dict] = {}
 
+    _CHEAP_PROVIDERS = frozenset({"ollama", "codex", "gemini_cli", "subscription", "gemini"})
+
     def _bucket(day: str) -> dict:
         if day not in daily:
-            daily[day] = {"calls": 0, "tokens": 0, "saved": 0.0}
+            daily[day] = {"calls": 0, "tokens": 0, "saved": 0.0, "tokens_saved": 0}
         return daily[day]
 
     conn = sqlite3.connect(str(db))
     try:
+        # RED8-01: these were hardcoded at $15/$75 — the retired Opus 3 rate,
+        # 3x the real one — and this read path feeds ~26 reporting surfaces, so
+        # every savings figure downstream was overstated by the same factor.
+        # Sourced from llm_router.pricing now; a literal here fails scripts/lint_pricing.py.
+        _OPUS_IN_PER_M = _pricing.input_rate(_BASELINE_MODEL)
+        _OPUS_OUT_PER_M = _pricing.output_rate(_BASELINE_MODEL)
         if _table_exists(conn, _LEGACY_TABLE):
             cols = _columns(conn, _LEGACY_TABLE)
             rows = conn.execute(
@@ -347,15 +406,21 @@ def query_daily(
                 f"COUNT(*), "
                 f"{_sum_if_present(cols, 'input_tokens')}, "
                 f"{_sum_if_present(cols, 'output_tokens')}, "
-                f"{_sum_if_present(cols, 'saved_usd')} "
-                f"FROM {_LEGACY_TABLE} WHERE success=1 AND {where} "
+                f"{_sum_if_present(cols, 'cost_usd')} "
+                f"FROM {_LEGACY_TABLE} "
+                f"WHERE success=1 "
+                f"AND (provider IS NULL OR provider != 'subscription') "
+                f"AND {where} "
                 f"GROUP BY date(timestamp,'localtime')"
             ).fetchall()
-            for day, calls, in_tok, out_tok, saved in rows:
+            for day, calls, in_tok, out_tok, cost in rows:
                 b = _bucket(day)
                 b["calls"] += int(calls)
                 b["tokens"] += int(in_tok) + int(out_tok)
-                b["saved"] += float(saved)
+                opus_baseline = (int(in_tok) * _OPUS_IN_PER_M + int(out_tok) * _OPUS_OUT_PER_M) / 1_000_000
+                # AUD-06: `+=` on a clamped term is the exact defect — a loss
+                # on one item could never offset a gain on another.
+                b["saved"] += opus_baseline - float(cost)
 
         for table in _PLATFORM_TABLES:
             if not _table_exists(conn, table):
@@ -386,11 +451,33 @@ def query_daily(
                 b = _bucket(day)
                 b["calls"] += int(calls)
                 b["saved"] += float(saved)
+
+        # Tokens routed to cheap providers per day (not burned on premium quota).
+        if _table_exists(conn, _LEGACY_TABLE):
+            cols = _columns(conn, _LEGACY_TABLE)
+            if "provider" in cols and "input_tokens" in cols:
+                cheap_placeholders = ",".join("?" * len(_CHEAP_PROVIDERS))
+                rows = conn.execute(  # nosec B608 — table/where are module constants & validated enum; IN uses ? placeholders
+                    f"SELECT date(timestamp,'localtime'), "
+                    f"COALESCE(SUM(input_tokens),0) + COALESCE(SUM(output_tokens),0) "
+                    f"FROM {_LEGACY_TABLE} "
+                    f"WHERE success=1 AND {where} AND provider IN ({cheap_placeholders}) "
+                    f"GROUP BY date(timestamp,'localtime')",
+                    list(_CHEAP_PROVIDERS),
+                ).fetchall()
+                for day, tok_saved in rows:
+                    _bucket(day)["tokens_saved"] += int(tok_saved)
     finally:
         conn.close()
 
     return [
-        DailyRow(day=day, calls=d["calls"], tokens=d["tokens"], saved_usd=d["saved"])
+        DailyRow(
+            day=day,
+            calls=d["calls"],
+            tokens=d["tokens"],
+            saved_usd=d["saved"],
+            tokens_saved=d["tokens_saved"],
+        )
         for day, d in sorted(daily.items())
     ]
 
@@ -427,6 +514,52 @@ def query_by_platform(
 
 
 # ── Audit / canary ───────────────────────────────────────────────────────────
+
+
+def query_model_distribution(
+    days: int = 14,
+    *,
+    db_path: Path | str | None = None,
+) -> dict[str, int]:
+    """Return model usage counts for the last ``days`` days.
+
+    Aggregates model calls across all source tables (usage, claude_usage, etc.)
+    for dashboard visualization of which models are being used most.
+
+    Returns a dict mapping model names to call counts.
+    """
+    db = Path(db_path) if db_path else DEFAULT_DB_PATH
+    if not db.exists():
+        return {}
+
+    where = f"timestamp >= datetime('now', '-{int(days)} days')"
+    model_counts: dict[str, int] = {}
+
+    conn = sqlite3.connect(str(db))
+    try:
+        # Legacy usage table — keyed by 'model'
+        if _table_exists(conn, _LEGACY_TABLE):
+            rows = conn.execute(
+                f"SELECT model, COUNT(*) FROM {_LEGACY_TABLE} "
+                f"WHERE success=1 AND {where} GROUP BY model"
+            ).fetchall()
+            for model, count in rows:
+                model_counts[model] = model_counts.get(model, 0) + int(count)
+
+        # Platform tables — keyed by 'model'
+        for table in _PLATFORM_TABLES:
+            if not _table_exists(conn, table):
+                continue
+            rows = conn.execute(
+                f"SELECT model, COUNT(*) FROM {table} "
+                f"WHERE {where} GROUP BY model"
+            ).fetchall()
+            for model, count in rows:
+                model_counts[model] = model_counts.get(model, 0) + int(count)
+    finally:
+        conn.close()
+
+    return model_counts
 
 
 def audit_sources(
@@ -469,7 +602,41 @@ def audit_sources(
     return out
 
 
-# ── Realized savings (WS3/C6) ─────────────────────────────────────────────────
+# ── Realized savings (adoption-gated) ────────────────────────────────────────
+
+
+def _window_epoch_bounds(window: WindowLiteral) -> tuple[float, float]:
+    """Epoch-second ``(start_ts, end_ts)`` bounds for ``window``.
+
+    ``_window_sql`` above emits a SQL WHERE fragment that SQLite evaluates
+    against the ``timestamp`` columns of the usage tables.
+    ``execution_ledger.get_period_accounting`` instead takes Python float
+    Unix-epoch bounds, so this maps window names into that second shape.
+
+    The two are NOT guaranteed to select an identical row set at day
+    boundaries, and that is deliberate rather than an oversight: ``"today"``
+    uses local time here because ``_window_sql`` uses an explicit
+    ``'localtime'`` modifier for the same window, while the other windows use
+    UTC arithmetic because ``_window_sql`` uses a bare ``datetime('now')``,
+    which SQLite evaluates as UTC. Making both windows agree on one timezone
+    would make this helper self-consistent and put it out of step with the SQL
+    it is meant to parallel.
+    """
+    now_utc = datetime.now(timezone.utc)
+    if window == "today":
+        local_now = datetime.now().astimezone()
+        local_midnight = local_now.replace(hour=0, minute=0, second=0, microsecond=0)
+        return local_midnight.timestamp(), local_now.timestamp()
+    if window == "week":
+        return (now_utc - timedelta(days=7)).timestamp(), now_utc.timestamp()
+    if window == "month":
+        start_of_month = now_utc.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        return start_of_month.timestamp(), now_utc.timestamp()
+    if window == "14d":
+        return (now_utc - timedelta(days=14)).timestamp(), now_utc.timestamp()
+    if window == "lifetime":
+        return 0.0, now_utc.timestamp()
+    raise ValueError(f"unknown window: {window!r}")
 
 
 def query_realized_savings(
@@ -477,26 +644,23 @@ def query_realized_savings(
     *,
     db_path: Path | str | None = None,
 ) -> RealizedSavingsTotals:
-    """Return the adoption-gated realized-savings split for ``window``.
+    """The adoption-gated realized-savings split for ``window``.
 
-    Reads the ``execution_events`` table (execution_ledger.py) rather than
-    the ``usage``/``*_usage``/``savings_stats`` tables :func:`query_window`
-    reads. This is an additive, independently-computed figure: it does not
-    modify, replace, or reconcile against ``WindowTotals.saved_usd`` — a
-    route's estimated saving only contributes to ``realized_savings_usd``
-    here once there's verified evidence a non-Claude route was actually
-    used (see ``execution_ledger.Accounting`` / the ``COUNTS_AS_REALIZED``
-    gate for the exact rule). Everything else (unverified, or verified as
-    overridden by the host) still counts toward ``potential_savings_usd``
-    so the gap between the two numbers is visible, not hidden.
+    A SURFACE over ``execution_ledger.get_period_accounting`` (INV-COST-004):
+    every figure below is copied from the accounting object, none is computed
+    here. See ``RealizedSavingsTotals`` for why this must never become a
+    fourth independent savings calculation.
 
-    Fails open: any missing DB, missing table, or import/computation error
-    yields an all-zero result rather than raising, matching this module's
-    existing ``if not db.exists(): return <empty>`` convention. In
-    particular, if the ``usage.db`` file doesn't exist yet, this function
-    returns zeros WITHOUT creating it — unlike calling into
-    ``execution_ledger`` directly, which creates the DB/table as a side
-    effect of connecting.
+    Fails open — a missing database, a missing ``execution_events`` table, or
+    any error inside the accounting yields all zeros rather than raising,
+    matching this module's existing ``if not db.exists(): return <empty>``
+    convention. A dashboard panel must not be able to take the dashboard down.
+
+    One subtlety worth keeping: the existence check runs against a plain
+    ``sqlite3`` connection FIRST, and returns before ``execution_ledger`` is
+    imported. Calling into the ledger directly would CREATE the database and
+    the table as a side effect of connecting — so reading a figure would
+    materialise the thing it was reading. Reading must not have side effects.
     """
     db = Path(db_path) if db_path else DEFAULT_DB_PATH
     empty = RealizedSavingsTotals(
@@ -525,7 +689,15 @@ def query_realized_savings(
 
         start_ts, end_ts = _window_epoch_bounds(window)
         accounting = get_period_accounting(start_ts, end_ts, path=db)
-    except Exception:  # noqa: BLE001 -- realized-savings read must never break the dashboard
+    except Exception as exc:  # noqa: BLE001 - a savings panel must never break the dashboard
+        # CHZ-FO-02: a fail-open path that returns live-looking data must say
+        # so. Zeros here are indistinguishable from "genuinely no realized
+        # savings this window", which is the more dangerous of the two —
+        # silently reporting $0 realized reads as an adoption problem rather
+        # than a broken read.
+        from llm_router import failopen
+
+        failopen.record("CHZ-FO-DASHBOARD-REALIZED", exc)
         return empty
 
     return RealizedSavingsTotals(

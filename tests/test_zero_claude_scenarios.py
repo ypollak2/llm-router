@@ -19,6 +19,15 @@ HOOK_PATH = ROOT / "src" / "llm_router" / "hooks" / "auto-route.py"
 class _OllamaHandler(BaseHTTPRequestHandler):
     requests: list[dict] = []
 
+    def do_GET(self) -> None:
+        # Respond to GET /api/tags (pre-flight health check from ollama_is_alive())
+        response = json.dumps({"models": [{"name": "scenario-model:latest"}]}).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(response)))
+        self.end_headers()
+        self.wfile.write(response)
+
     def do_POST(self) -> None:
         body_size = int(self.headers.get("Content-Length", "0"))
         self.__class__.requests.append(json.loads(self.rfile.read(body_size)))
@@ -94,6 +103,12 @@ def _run_zero_claude_hook(
     assert result.returncode == 0, result.stderr
     if not result.stdout.strip():
         return None
+    # E6 fix: debug/tracking lines may precede the JSON payload on stdout.
+    # Find the first line that looks like a JSON object and parse that.
+    for line in result.stdout.splitlines():
+        line = line.strip()
+        if line.startswith("{"):
+            return json.loads(line)
     return json.loads(result.stdout)
 
 

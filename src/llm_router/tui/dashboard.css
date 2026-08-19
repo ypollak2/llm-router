@@ -1,0 +1,83 @@
+/* LLM Router TUI Dashboard - Minimal Textual CSS */
+
+App {
+    background: $surface;
+    color: $text;
+}
+
+#main-grid {
+    grid-size: 2 3;
+    grid-columns: 1fr 1fr;
+    grid-rows: 1fr 1fr 1fr;
+}
+
+Container {
+    border: solid $accent;
+    background: $panel;
+    padding: 1;
+}
+
+.panel-title {
+    color: $accent;
+    text-style: bold;
+    padding: 0 1;
+}
+
+Button {
+    margin: 0 1;
+}
+
+Button:focus {
+    background: $accent;
+}
+
+Button.primary {
+    background: $success;
+}
+
+RichLog {
+    border: solid $primary;
+}
+
+Header {
+    background: $accent;
+    dock: top;
+}
+
+Footer {
+    background: $surface;
+    dock: bottom;
+}
+
+.status-success {
+    color: $success;
+}
+
+.status-failed {
+    color: $error;
+}
+
+.status-pending {
+    color: $warning;
+}
+
+.status-committed {
+    color: $accent;
+    text-style: bold;
+}
+
+.error {
+    color: $error;
+}
+
+.success {
+    color: $success;
+}
+
+.warning {
+    color: $warning;
+}
+
+.info {
+    color: $accent;
+}

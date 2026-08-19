@@ -19,11 +19,58 @@ from pathlib import Path
 
 import aiosqlite
 
-from llm_router.config import get_config
+from llm_router import pricing as _pricing
+from llm_router.provenance import Measured
+from llm_router.config import get_config, state_path
 from llm_router.types import (
     LLMResponse, MODEL_COST_PER_1K, MODEL_SPEED_TPS,
     RoutingProfile, TaskType, colorize_model,
 )
+from llm_router.savings import net_saved
+
+
+def _refuse_unisolated_test_write(db_path: Path) -> bool:
+    """True when a test is about to write into the user's real database.
+
+    WHY THIS EXISTS
+    ---------------
+    A "stub-detection guard" used to be the only protection, matching an exact
+    fingerprint of token/cost values. Every fixture added after it was written walked
+    straight through. Measured against the rows that actually reached production it
+    would have blocked **0 of 28,536** — while its own comment asserted that unisolated
+    tests "can never pollute the real ~/.llm-router/usage.db".
+
+    The damage was not hypothetical. Those 28,536 synthetic rows were 69.4% of
+    `routing_decisions`, all naming `openai/gpt-4o-mini`, and the dashboard reported
+    them as routing behaviour. They are exactly the rows with
+    `classifier_type='unknown'` — the classifier never ran for one of them. Excluding
+    them, the router's real preference is `hermes3:8b` (local) at 38.6%, `gpt-4o` at
+    35.6%, and gpt-4o-mini at 0.0%. The product's primary surface understated local
+    routing threefold and invented a majority share for a model it never chose.
+
+    WHAT CHANGED
+    ------------
+    "Does this row look synthetic?" is a guess that ages badly — it enumerates the
+    values its author happened to know. "Is a test writing to the production database?"
+    is directly observable and cannot drift as fixtures change.
+
+    This takes only a path, deliberately: a guard that inspects row values is the
+    fingerprint defect returning under a new name, and `tests/test_prod_db_isolation.py`
+    asserts the signature to keep it that way.
+
+    The suite's own writes are unaffected — the `temp_db` fixture repoints
+    `LLM_ROUTER_DB_PATH`, so `db_path` is a tmp file and this returns False. Only a test
+    aimed at the real database is refused, and `LLM_ROUTER_ALLOW_STUBS=1` opts out
+    deliberately for tests that mean it.
+    """
+    if os.environ.get("LLM_ROUTER_ALLOW_STUBS") == "1":
+        return False
+    if not os.environ.get("PYTEST_CURRENT_TEST"):
+        return False  # not a test — this is a real user's routing decision
+    try:
+        return Path(db_path).resolve() == state_path("usage.db").resolve()
+    except OSError:  # pragma: no cover — an unresolvable path is not the production one
+        return False
 
 CREATE_TABLE = """
 CREATE TABLE IF NOT EXISTS usage (
@@ -98,7 +145,9 @@ CREATE TABLE IF NOT EXISTS savings_stats (
     estimated_claude_cost_saved REAL NOT NULL,
     external_cost REAL NOT NULL,
     model_used TEXT NOT NULL,
-    host TEXT NOT NULL DEFAULT 'claude_code'
+    host TEXT NOT NULL DEFAULT 'claude_code',
+    input_tokens INTEGER NOT NULL DEFAULT 0,
+    output_tokens INTEGER NOT NULL DEFAULT 0
 )
 """
 """Schema for the ``savings_stats`` table tracking per-call routing savings.
@@ -229,6 +278,13 @@ MIGRATE_SAVINGS_STATS_ADD_HOST = [
 ]
 """Idempotent migration to add host attribution column to savings_stats (v3.1)."""
 
+MIGRATE_SAVINGS_STATS_ADD_TOKENS = [
+    "ALTER TABLE savings_stats ADD COLUMN input_tokens INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE savings_stats ADD COLUMN output_tokens INTEGER NOT NULL DEFAULT 0",
+]
+"""Idempotent migration: record token counts for DIRECT-routed calls so the
+dashboard's token totals include free-provider (Ollama/Codex) throughput (v7.4)."""
+
 MIGRATE_ROUTING_DECISIONS_ADD_POLICY = [
     "ALTER TABLE routing_decisions ADD COLUMN policy_applied TEXT",
 ]
@@ -255,44 +311,44 @@ MIGRATE_ROUTING_DECISIONS_ADD_COMPLEXITY_TRACKING = [
 ]
 """Idempotent migration to track pressure-based complexity downgrades (v5.9)."""
 
+MIGRATE_ROUTING_DECISIONS_ADD_CAPABILITIES = [
+    "ALTER TABLE routing_decisions ADD COLUMN capabilities_json TEXT DEFAULT NULL",
+]
+"""Shadow-mode capability vector (see capabilities.serialize_capability_decision).
+
+Written only when LLM_ROUTER_CAPABILITY_ROUTING is on, never read by live routing.
+NULL therefore means "shadow mode was off for this decision", which is the
+common case and must stay distinguishable from "was on and found nothing".
+"""
+
+MIGRATE_ROUTING_DECISIONS_ADD_AUDIT = [
+    "ALTER TABLE routing_decisions ADD COLUMN audit_verdict TEXT DEFAULT NULL",
+    "ALTER TABLE routing_decisions ADD COLUMN audit_checked_at TEXT DEFAULT NULL",
+]
+"""Post-hoc misroute audit (see misroute_audit.py).
+
+Both columns default NULL, and NULL is the "not yet audited" marker the
+sampler selects on — so an existing database needs no backfill and the audit
+picks up every pre-existing row on its first run.
+"""
+
 MIGRATE_ROUTING_DECISIONS_ADD_SUBJECT = [
     "ALTER TABLE routing_decisions ADD COLUMN subject TEXT",
 ]
 """Plan 07 Cat E — enables (policy, subject, model) outcome aggregation for bandit selection."""
 
-MIGRATE_ROUTING_DECISIONS_ADD_CAPABILITIES = [
-    "ALTER TABLE routing_decisions ADD COLUMN capabilities_json TEXT",
+MIGRATE_ROUTING_DECISIONS_ADD_PROVENANCE = [
+    "ALTER TABLE routing_decisions ADD COLUMN provenance TEXT",
 ]
-"""WS4 (ported from Chuzom's capability-aware routing, shadow mode) — additive column
-recording the CapabilityDecision computed for this prompt (JSON-serialized), for later
-offline analysis of what capability-aware routing would have chosen. NULL unless
-LLM_ROUTER_CAPABILITY_ROUTING is enabled; never read by the live routing path."""
+"""Where a row came from, written by `_write_provenance()` at insert time.
 
-MIGRATE_ROUTING_DECISIONS_ADD_AUDIT = [
-    "ALTER TABLE routing_decisions ADD COLUMN audit_verdict TEXT",
-    "ALTER TABLE routing_decisions ADD COLUMN audit_checked_at TEXT",
-]
-"""WS6 (ported from Chuzom's audit_routing.py; adapted from a live per-turn enterprise
-AuditLog append into a post-hoc, offline misroute audit — see audit_routing.py's module
-docstring for why) — additive columns recording the offline audit's verdict for a
-routing decision. Deliberately separate from `was_good` (community-shared human
-feedback, see community.py's acceptance-rate metric) and `reason_code` (decision-time
-classifier reasoning, see router.py): overwriting either with a machine guess would
-silently corrupt an existing, narrower signal. `audit_verdict` is only ever written
-when NULL (see audit_routing._write_verdict's WHERE guard), so re-running the audit is
-idempotent and cannot flip-flop or double count. Still lands in the SAME table as
-additive columns, not a new store — satisfies the plan's "no parallel accuracy store"."""
+Deliberately has NO DEFAULT. `is_real` (v7.5) tried to answer the same question with
+`INTEGER DEFAULT 1`, which means a column named "is real" reads 1 on rows that are
+demonstrably synthetic — a default that asserts the very thing it should be recording.
 
-MIGRATE_ROUTING_DECISIONS_ADD_BOUNDED_OPERATIONAL = [
-    "ALTER TABLE routing_decisions ADD COLUMN bounded_operational_json TEXT",
-]
-"""WS9 (wires Chuzom-ported bounded_operational.py into the live routing decision
-path, shadow mode) — additive column recording what should_route_bounded() /
-bounded_op_budget_usd() WOULD have decided for this prompt (JSON-serialized), for
-later offline analysis. NULL unless LLM_ROUTER_BOUNDED_OPERATIONAL is enabled;
-never read by the live routing path, and never used to select `final_model` or
-alter the response — see router.py's shadow-mode computation block. Mirrors the
-capabilities_json precedent above."""
+A NULL here means "written before this column existed" and is reported as UNKNOWN by
+`llm_router.attribution`, never promoted into attributed or unattributed. Absence of evidence
+is its own answer; the alternative is a default that manufactures one."""
 
 CREATE_BENCHMARK_RESULTS_TABLE = """
 CREATE TABLE IF NOT EXISTS benchmark_results (
@@ -394,7 +450,7 @@ MIGRATE_ADD_MODEL_QUALITY_TRENDS = [
 baseline_model:     Model that would have been used without routing (e.g. claude-sonnet)
 potential_cost_usd: Estimated cost if baseline_model had handled the call
 saved_usd:          potential_cost_usd - actual cost_usd (negative = routing cost money)
-is_simulated:       1 for dry-run test calls (llm-router test), 0 for real calls
+is_simulated:       1 for dry-run test calls (llm_router test), 0 for real calls
 """
 
 
@@ -524,8 +580,34 @@ async def _safe_migrate(db: aiosqlite.Connection, stmt: str) -> None:
             return  # already migrated — skip
     try:
         await db.execute(stmt)
-    except Exception:
-        pass  # last-resort fallback for non-standard ALTER forms
+    except Exception as exc:
+        # Non-standard ALTER forms. Benign individually; a spike means schema
+        # migration is silently not happening, and every later query then fails
+        # on a missing column somewhere far from here.
+        from llm_router import failopen
+        failopen.record("CHZ-FO-COST-MIGRATE-ALTER", exc)
+
+
+def _mark_worker_daemon(conn: "aiosqlite.Connection") -> None:
+    """Best-effort mark the aiosqlite worker thread as a daemon.
+
+    aiosqlite's ``_connection_worker_thread`` is non-daemon by default. If a
+    task holding a connection is dropped at event-loop shutdown (its
+    ``finally: await db.close()`` never runs), a non-daemon worker keeps the
+    interpreter alive forever — the CHZ-AUD-026 hang-at-exit bug.
+
+    aiosqlite >=0.22 keeps the worker in a private ``_thread``; on older
+    releases the Connection itself was a ``threading.Thread``. We only touch
+    an object that is genuinely a Thread, so an unexpected layout fails
+    loudly (via the caller) rather than silently stamping a junk ``daemon``
+    attribute on the Connection and leaving the real worker non-daemon.
+    Setting ``daemon`` on an already-started thread raises RuntimeError; that
+    is fine — a started worker was already daemon-marked pre-await.
+    """
+    # CHZ-PY-004: delegate to the single shared implementation so every
+    # aiosqlite.connect() site marks its worker identically (no per-file drift).
+    from llm_router.aiosqlite_util import mark_worker_daemon
+    mark_worker_daemon(conn)
 
 
 async def _get_db() -> aiosqlite.Connection:
@@ -543,7 +625,22 @@ async def _get_db() -> aiosqlite.Connection:
     # Secure file before creation (stores sensitive cost/token data)
     if not config.llm_router_db_path.exists():
         config.llm_router_db_path.touch(mode=0o600)
-    db = await aiosqlite.connect(str(config.llm_router_db_path))
+    # aiosqlite.Connection is a threading.Thread subclass that only starts
+    # when awaited. Mark it daemon *before* awaiting: if a task holding this
+    # connection is dropped at event-loop shutdown (its ``finally: await
+    # db.close()`` never runs), a non-daemon worker thread would keep the
+    # interpreter alive forever — this was the hang-at-exit bug. Daemon
+    # threads cannot block exit; WAL journaling keeps the DB file safe even
+    # if such a leaked thread is killed mid-write.
+    _conn = aiosqlite.connect(str(config.llm_router_db_path))
+    # Mark the worker daemon *before* awaiting (the thread hasn't started yet).
+    _mark_worker_daemon(_conn)
+    db = await _conn
+    # Defensive second pass: on some aiosqlite versions the worker Thread is
+    # only reachable after the connection is awaited. Re-mark it daemon so a
+    # leaked worker can never keep the interpreter alive at exit (the
+    # hang-at-exit bug). is_alive() daemon-setting is a no-op if already set.
+    _mark_worker_daemon(db)
     # WAL mode allows concurrent readers while a writer is active
     await db.execute("PRAGMA journal_mode=WAL")
     await db.execute(CREATE_TABLE)
@@ -584,19 +681,20 @@ async def _get_db() -> aiosqlite.Connection:
         + MIGRATE_USAGE_ADD_TEAM
         + MIGRATE_USAGE_ADD_COMPLEXITY
         + MIGRATE_SAVINGS_STATS_ADD_HOST
+        + MIGRATE_SAVINGS_STATS_ADD_TOKENS
         + MIGRATE_ROUTING_DECISIONS_ADD_POLICY
         + MIGRATE_ADD_CORRELATION_ID
         + MIGRATE_ADD_CACHE_METRICS
         + MIGRATE_ROUTING_DECISIONS_ADD_JUDGE_SCORE
         + MIGRATE_ROUTING_DECISIONS_ADD_COMPLEXITY_TRACKING
+        + MIGRATE_ROUTING_DECISIONS_ADD_AUDIT
+        + MIGRATE_ROUTING_DECISIONS_ADD_CAPABILITIES
         + MIGRATE_ADD_MODEL_QUALITY_TRENDS
         + MIGRATE_ROUTING_DECISIONS_ADD_REAL_FLAG
         + MIGRATE_ROUTING_DECISIONS_MARK_CONTAMINATED
         + MIGRATE_ADD_QUOTA_SNAPSHOTS_TABLE
         + MIGRATE_ROUTING_DECISIONS_ADD_SUBJECT
-        + MIGRATE_ROUTING_DECISIONS_ADD_CAPABILITIES
-        + MIGRATE_ROUTING_DECISIONS_ADD_AUDIT
-        + MIGRATE_ROUTING_DECISIONS_ADD_BOUNDED_OPERATIONAL
+        + MIGRATE_ROUTING_DECISIONS_ADD_PROVENANCE
     )
     for stmt in all_migrations:
         await _safe_migrate(db, stmt)
@@ -642,7 +740,11 @@ def _get_team_identity() -> tuple[str, str]:
         uid = get_user_id(override=cfg.llm_router_user_id)
         pid = get_project_id()
         return uid, pid
-    except Exception:
+    except Exception as exc:
+        # Empty identity means rows are attributed to nobody. Team reporting then
+        # shows a plausible, quietly incomplete picture.
+        from llm_router import failopen
+        failopen.record("CHZ-FO-COST-IDENTITY", exc)
         return "", ""
 
 
@@ -670,12 +772,20 @@ async def log_usage(
             trace for the same routing call (first 8 chars of UUID4).
         complexity: Task complexity level (simple, moderate, complex).
     """
-    # Stub-detection guard: reject the exact synthetic shapes used in test
+    # PRIMARY GUARD: a test must not write to the production database. See
+    # `_refuse_unisolated_test_write` for why the fingerprint below was not enough.
+    if _refuse_unisolated_test_write(get_config().llm_router_db_path):
+        return
+
+    # Secondary, retained: rejects the exact synthetic shapes used in some test
     # LLMResponse fixtures (input_tokens=100, output_tokens∈{50,100},
-    # cost_usd∈{0.001,0.003}) so unisolated tests can never pollute the real
-    # ~/.llm-router/usage.db. Tests that legitimately need to write stub rows
-    # must set LLM_ROUTER_ALLOW_STUBS=1 or use the temp_db fixture (which
-    # repoints LLM_ROUTER_DB_PATH and is unaffected by this guard).
+    # cost_usd∈{0.001,0.003}).
+    #
+    # This was ONCE THE ONLY GUARD, and its comment claimed unisolated tests "can
+    # never pollute the real ~/.llm-router/usage.db". Measured against the rows that
+    # reached production, it would have blocked 0 of 28,536 (0.0%): the fixtures in
+    # use are in=62/out=164, in=74/out=1, in=97/out=126 — none match. It is kept only
+    # because it costs nothing; it is not load-bearing and must not be treated as such.
     if (
         os.environ.get("LLM_ROUTER_ALLOW_STUBS") != "1"
         and response.input_tokens == 100
@@ -694,7 +804,7 @@ async def log_usage(
         # realized-savings metric has data. Previously baseline_model was
         # NULL and potential_cost_usd/saved_usd defaulted to 0.0, so every
         # routed call appeared to save nothing.
-        baseline_model = _get_baseline_for_task(task_type.value, complexity)
+        baseline_model = _pricing.savings_baseline_model()
         potential_cost_usd = _claude_cost(
             baseline_model,
             response.input_tokens,
@@ -796,26 +906,129 @@ async def get_correction_count(tool: str) -> int:
         await db.close()
 
 
+def format_spend_for_display(spend_usd: float) -> str:
+    """Render a spend figure for humans, or "Unknown" when it is not a number.
+
+    Spend getters return ``inf`` when a component could not be read (fail
+    closed). That sentinel is correct for a cap COMPARISON and wrong for a
+    dashboard: a user told they spent "$inf" learns less than one told
+    "Unknown", and a fabricated infinity is the same class of lie as a
+    fabricated zero.
+    """
+    import math
+
+    if spend_usd is None or not math.isfinite(spend_usd):
+        return "Unknown"
+    return f"${spend_usd:.2f}" if spend_usd >= 1.0 else f"${spend_usd:.4f}"
+
+
 async def get_monthly_spend() -> float:
     """Get total USD spent on external LLMs in the current calendar month.
+
+    RED1-07: uses a LOCAL-time month boundary to match get_daily_spend* (both
+    reference the user's local calendar), so "today" for the daily cap is always
+    a consistent subset of "this month" for the monthly cap. Previously this used
+    a UTC 'start of month' while the daily functions used 'localtime', so at
+    non-UTC offsets the two caps' reset windows disagreed by up to the offset
+    around a month boundary.
 
     Returns:
         Total spend as a float. Returns 0.0 if no usage data exists.
     """
     db = await _get_db()
     try:
+        # Mirror get_daily_spend's frame exactly: convert the stored (UTC)
+        # timestamp to LOCAL, then compare the local year-month. Using
+        # strftime(..., 'localtime') on both sides keeps the reference frame
+        # identical to the daily function (which does date(timestamp,'localtime')
+        # = date('now','localtime')), so daily-today is always inside monthly-now.
         cursor = await db.execute(
             "SELECT COALESCE(SUM(cost_usd), 0) FROM usage "
-            "WHERE timestamp >= datetime('now', 'start of month')"
+            "WHERE strftime('%Y-%m', timestamp, 'localtime') = "
+            "strftime('%Y-%m', 'now', 'localtime')"
         )
         row = await cursor.fetchone()
-        return float(row[0]) if row else 0.0
+        winning = float(row[0]) if row else 0.0
+        # RED1-2-01: include this month's billable-but-rejected attempts, so the
+        # monthly hard-block ceiling sees the same real spend the daily cap does.
+        return winning + await _rejected_attempt_spend(db, "month")
     finally:
         await db.close()
 
 
+async def _rejected_attempt_spend(db, period: str = "day", task_type: str | None = None) -> float:
+    """RED1-08/RED1-2-01: sum billable-but-REJECTED provider attempts for a period.
+
+    ``cost.log_usage`` only records the WINNING attempt to the ``usage`` table,
+    so a paid model that was tried, billed, then rejected (by a contract gate or
+    quality escalation) is invisible to the cap-checks that read ``usage``. The
+    execution ledger records every attempt with ``rejected`` + ``measured_cost_usd``,
+    and the winning attempt is separately marked ``accepted`` — so summing only
+    ``rejected=1`` rows gives exactly the extra cost missing from ``usage``, with
+    no double-count.
+
+    ``period`` is "day" (local calendar day) or "month" (local calendar month),
+    matching the frames of get_daily_spend*/get_monthly_spend respectively.
+    FAIL CLOSED (owner decision 2026-08-12). Any error returns ``inf``, not 0.0.
+
+    Returning 0.0 under-reports total spend, so the cap comparison PASSES — a
+    guard that cannot read the ledger did not reject, it silently approved. Same
+    failure direction as the budget TOCTOU race and the savings query that
+    rendered "$0.00 saved": failing where it looks harmless, which is why it
+    survived. ``inf`` makes every cap comparison deny.
+
+    Routing is not broken by this: free and local providers do not consult the
+    cap, so work continues — money is simply not spent against a total we cannot
+    account for. Display consumers must render non-finite spend as "Unknown"
+    (see :func:`format_spend_for_display`); a dashboard showing "$inf" is its own
+    fabrication.
+    """
+    try:
+        if period == "month":
+            time_pred = (
+                "strftime('%Y-%m', ts, 'unixepoch', 'localtime') = "
+                "strftime('%Y-%m', 'now', 'localtime')"
+            )
+        else:  # day
+            time_pred = "date(ts, 'unixepoch', 'localtime') = date('now','localtime')"
+        where = (
+            f"rejected = 1 AND COALESCE(measured_cost_usd, 0) > 0 AND {time_pred}"
+        )
+        params: tuple = ()
+        if task_type is not None:
+            where += " AND task_type = ?"
+            params = (task_type,)
+        cursor = await db.execute(
+            f"SELECT COALESCE(SUM(measured_cost_usd), 0) FROM execution_events WHERE {where}",
+            params,
+        )
+        row = await cursor.fetchone()
+        return float(row[0]) if row else 0.0
+    except Exception as exc:  # noqa: BLE001 — must not raise into the routing path
+        # A MISSING TABLE is not an unreadable one. On a fresh install
+        # execution_events does not exist yet, and that genuinely means "no
+        # rejected attempts" — returning inf there would deny every paid route on
+        # a new machine until the first ledger write, which is an outage dressed
+        # as prudence. Fail closed on the unknown, not on the known-empty.
+        if "no such table" in str(exc).lower():
+            return 0.0
+        from llm_router import failopen
+        failopen.record("CHZ-FO-COST-CAP-LEDGER-READ", exc)
+        # inf, not 0.0 — see the docstring. Deny rather than approve blind.
+        return float("inf")
+
+
+async def _rejected_attempt_spend_today(db, task_type: str | None = None) -> float:
+    """Back-compat shim: today's rejected-attempt spend (delegates to _rejected_attempt_spend)."""
+    return await _rejected_attempt_spend(db, "day", task_type)
+
+
 async def get_daily_spend() -> float:
-    """Get total USD spent on external LLMs today (UTC calendar day).
+    """Get total USD spent on external LLMs today (local calendar day).
+
+    Includes both winning calls (``usage`` table) and billable-but-rejected
+    provider attempts (execution ledger, RED1-08), so the cap-check sees the real
+    cumulative spend — not just the spend of calls that happened to be accepted.
 
     Returns:
         Total spend as a float. Returns 0.0 if no usage data exists.
@@ -824,10 +1037,11 @@ async def get_daily_spend() -> float:
     try:
         cursor = await db.execute(
             "SELECT COALESCE(SUM(cost_usd), 0) FROM usage "
-            "WHERE timestamp >= datetime('now', 'start of day')"
+            "WHERE date(timestamp,'localtime') = date('now','localtime')"
         )
         row = await cursor.fetchone()
-        return float(row[0]) if row else 0.0
+        winning = float(row[0]) if row else 0.0
+        return winning + await _rejected_attempt_spend_today(db)
     finally:
         await db.close()
 
@@ -845,11 +1059,13 @@ async def get_daily_spend_by_task_type(task_type: str) -> float:
     try:
         cursor = await db.execute(
             "SELECT COALESCE(SUM(cost_usd), 0) FROM usage "
-            "WHERE timestamp >= datetime('now', 'start of day') AND task_type = ?",
+            "WHERE date(timestamp,'localtime') = date('now','localtime') AND task_type = ?",
             (task_type,),
         )
         row = await cursor.fetchone()
-        return float(row[0]) if row else 0.0
+        winning = float(row[0]) if row else 0.0
+        # RED1-08: include rejected billable attempts for this task type.
+        return winning + await _rejected_attempt_spend_today(db, task_type)
     finally:
         await db.close()
 
@@ -894,8 +1110,11 @@ def fire_budget_alert(title: str, message: str) -> None:
                     "Budget alert: %s — %s (install win10toast for desktop notifications)",
                     title, message,
                 )
-    except Exception:
-        pass  # notification is best-effort — never block routing
+    except Exception as exc:
+        # Best-effort by design, but a budget alert that never fires means the
+        # user learns about an overrun from the bill.
+        from llm_router import failopen
+        failopen.record("CHZ-FO-COST-BUDGET-ALERT", exc)
 
 
 async def rate_routing_decision(decision_id: int | None, good: bool) -> int | None:
@@ -1043,7 +1262,7 @@ def _validate_routing_insert(
         'ollama', 'openai', 'gemini', 'codex',
         'claude_subscription', 'subscription', 'anthropic',
         'perplexity', 'groq', 'deepseek', 'cc',
-        'anthropic', 'claude'  # variations
+        'claude'  # variations
     })
 
     # Check provider is valid
@@ -1068,6 +1287,34 @@ def _validate_routing_insert(
             f"routing_decisions insert rejected: cost_usd={cost_usd} is implausible. "
             f"Expected 0 < cost < 100 USD. Real costs: Haiku ~$0.00002, Opus ~$0.015 per 1K tokens."
         )
+
+
+#: Written into `routing_decisions.provenance` on every new row.
+PROVENANCE_RUNTIME = "runtime"      # a real routing decision, made while serving a user
+PROVENANCE_TEST = "test"            # produced under a test harness or with stubs allowed
+PROVENANCE_UNATTRIBUTED = "unattributed"   # retroactively marked; see 0aab32f
+
+
+def _write_provenance() -> str:
+    """Where this row came from, decided by the writer at insert time.
+
+    Until now nothing wrote this column, so EVERY row — genuine or synthetic — was born
+    `NULL`. `0aab32f` then marked one known-bad population `unattributed` after the fact,
+    which made `provenance IS NULL` *look* like "real traffic" when it actually meant
+    "not yet cleaned up". A second synthetic population (2,373 rows, one prompt_hash,
+    a fixed 3.200:1 model split) sat inside that NULL set and was reported as routing.
+
+    Recording origin at the point of writing is the only version of this that cannot
+    drift: a cleanup pass can always be out of date, and a reader cannot recover a fact
+    the writer never stored.
+
+    `LLM_ROUTER_ALLOW_STUBS=1` counts as test provenance. It is the documented escape hatch
+    for writing stub data deliberately, and data written through an escape hatch is not
+    user traffic — the flag says so.
+    """
+    if os.environ.get("PYTEST_CURRENT_TEST") or os.environ.get("LLM_ROUTER_ALLOW_STUBS") == "1":
+        return PROVENANCE_TEST
+    return PROVENANCE_RUNTIME
 
 
 async def log_routing_decision(
@@ -1097,8 +1344,6 @@ async def log_routing_decision(
     response: str | None = None,
     requested_complexity: str | None = None,
     subject: str | None = None,
-    capabilities_json: str | None = None,
-    bounded_operational_json: str | None = None,
 ) -> None:
     """Persist a complete routing decision to the routing_decisions table.
 
@@ -1129,26 +1374,50 @@ async def log_routing_decision(
         output_tokens: Output tokens generated.
         cost_usd: Total cost of the LLM call.
         latency_ms: Total latency of the LLM call.
-        capabilities_json: WS4 (ported from Chuzom's capability-aware routing,
-            shadow mode) -- JSON-serialized ``CapabilityDecision`` computed for
-            this prompt, or None. Purely additive/advisory: never read by the
-            live routing path, only by offline shadow-mode analysis. Populated
-            by the caller only when ``LLM_ROUTER_CAPABILITY_ROUTING`` is enabled.
-        bounded_operational_json: WS9 (wires Chuzom-ported bounded_operational.py,
-            shadow mode) -- JSON-serialized dict recording what
-            ``should_route_bounded()`` / ``bounded_op_budget_usd()`` would have
-            decided for this prompt, or None. Purely additive/advisory: never
-            read by the live routing path. Populated by the caller only when
-            ``LLM_ROUTER_BOUNDED_OPERATIONAL`` is enabled.
     """
     # Validate inputs before database insert
     _validate_routing_insert(final_model, final_provider, cost_usd)
-    
+
+    # THIS is the path that put 28,536 synthetic rows into a user's real database and
+    # made the dashboard report a 69% gpt-4o-mini share the router never chose.
+    # `_validate_routing_insert` above rejects obviously-fake models ("test/..."), but
+    # these rows named a real model with realistic tokens and costs, so nothing stopped
+    # them. Isolation, not plausibility, is the property that matters here.
+    if _refuse_unisolated_test_write(get_config().llm_router_db_path):
+        return
+
     db = await _get_db()
     try:
         # Track complexity mismatch: if requested_complexity differs from final complexity,
         # a pressure downgrade occurred (e.g., complex→moderate when budget high)
         complexity_downgraded = 1 if requested_complexity and requested_complexity != complexity else 0
+
+        # Shadow mode: record what capability-aware routing WOULD have decided,
+        # without letting it touch the decision above. `capability_routing_enabled`
+        # gates it, so this is None on every install that has not opted in.
+        # Fail-open — a shadow observation must never cost us the real record.
+        capabilities_json: str | None = None
+        try:
+            from llm_router.capabilities import (
+                capability_routing_enabled,
+                detect_capabilities,
+                serialize_capability_decision,
+            )
+
+            if capability_routing_enabled():
+                capabilities_json = serialize_capability_decision(
+                    detect_capabilities(prompt, task_type)
+                )
+        except Exception as _cap_err:  # noqa: BLE001
+            # Module-local import: cost.py has no module-level logger, and
+            # adding one here for a shadow path would be a wider change than
+            # this warrants.
+            import logging
+
+            logging.getLogger("llm_router").debug(
+                "capability_shadow_detection_failed: %s", _cap_err
+            )
+
         await db.execute(
             """INSERT INTO routing_decisions
                (prompt_hash, task_type, profile, classifier_type, classifier_model,
@@ -1157,7 +1426,7 @@ async def log_routing_decision(
                 quality_mode, final_model, final_provider, success,
                 input_tokens, output_tokens, cost_usd, latency_ms, reason_code,
                 correlation_id, requested_complexity, complexity_downgraded, subject,
-                capabilities_json, bounded_operational_json)
+                provenance, capabilities_json)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 _prompt_hash(prompt),
@@ -1185,8 +1454,8 @@ async def log_routing_decision(
                 requested_complexity,
                 complexity_downgraded,
                 subject,
+                _write_provenance(),
                 capabilities_json,
-                bounded_operational_json,
             ),
         )
         await db.commit()
@@ -1207,8 +1476,11 @@ async def log_routing_decision(
                     task_type=task_type,
                     routing_decision_id=routing_decision_id,
                 )
-            except Exception:
-                pass  # Silent failure — judge is optional enhancement
+            except Exception as exc:
+                # The judge is optional, but a permanently failing judge means
+                # quality telemetry is empty rather than good.
+                from llm_router import failopen
+                failopen.record("CHZ-FO-COST-JUDGE-EVAL", exc)
     finally:
         await db.close()
 
@@ -1272,16 +1544,55 @@ async def get_quality_report(days: int = 7) -> dict:
         )
         by_task_type = {r[0]: r[1] for r in await cursor.fetchall()}
 
-        # By model
+        # By model — ATTRIBUTED ONLY, i.e. decisions this router actually made.
+        #
+        # A row with classifier_type='unknown' is one where the classifier never ran, so
+        # it says nothing about routing behaviour. Mixing the two made the dashboard
+        # report the opposite of the truth: 28,536 such rows (69.4% of the table, every
+        # one of them classifier_type='unknown') all named openai/gpt-4o-mini and were
+        # written by an unisolated TEST SUITE into the user's real ~/.llm-router/usage.db.
+        # The report showed a 69% gpt-4o-mini share for a model the router never chose,
+        # while the actual top destination — ollama/hermes3:8b, local, 38.6% — appeared
+        # as 11.7%. Understating local routing threefold is the exact class of dishonesty
+        # this codebase's audit exists to remove, sitting in its most-read surface.
+        #
+        # The unattributed rows are REPORTED, not dropped. Hiding them would restore a
+        # tidy number and lose the signal that something is writing rows nobody can
+        # account for — which is how this went unnoticed in the first place.
+        attributed = f"{where} AND classifier_type != 'unknown'"
         cursor = await db.execute(
             f"""SELECT final_model, COUNT(*), AVG(latency_ms), COALESCE(SUM(cost_usd), 0)
-                FROM routing_decisions {where}
+                FROM routing_decisions {attributed}
                 GROUP BY final_model ORDER BY COUNT(*) DESC"""
         )
         by_model = {
             r[0]: {"count": r[1], "avg_latency": float(r[2]), "total_cost": float(r[3])}
             for r in await cursor.fetchall()
         }
+
+        cursor = await db.execute(
+            f"""SELECT final_model, COUNT(*) FROM routing_decisions
+                {where} AND classifier_type = 'unknown'
+                GROUP BY final_model ORDER BY COUNT(*) DESC"""
+        )
+        unattributed_by_model = {r[0]: r[1] for r in await cursor.fetchall()}
+        unattributed_total = sum(unattributed_by_model.values())
+
+        # Unattributed rows carry COST, so they do not merely mis-decorate a table.
+        # `total_cost_usd` feeds RouteredTeam._apply_budget_pressure in
+        # integrations/agno.py, which downshifts every model to the budget profile once
+        # spend crosses a threshold. Measured on this database: $3.62 of the last 30
+        # days' $39.79 (9.1%) is unattributed, so a real deployment could be downshifted
+        # early by spend that never happened.
+        #
+        # `total_cost_usd` is left as-is because changing what agno reads changes runtime
+        # behaviour, which is a separate decision from reporting. This exposes the honest
+        # figure alongside it so that decision can be made on numbers rather than guesses.
+        cursor = await db.execute(
+            f"""SELECT COALESCE(SUM(cost_usd), 0) FROM routing_decisions
+                {where} AND classifier_type != 'unknown'"""
+        )
+        attributed_cost = (await cursor.fetchone())[0]
 
         return {
             "total_decisions": int(total),
@@ -1293,7 +1604,14 @@ async def get_quality_report(days: int = 7) -> dict:
             "total_cost_usd": float(total_cost),
             "total_tokens": int(total_tok),
             "success_rate": float(success_rate or 0),
+            # Decisions the classifier actually made. NOT the same as total_decisions.
             "by_model": by_model,
+            "attributed_decisions": int(total) - unattributed_total,
+            "attributed_cost_usd": float(attributed_cost),
+            # Rows where the classifier never ran. Surfaced deliberately — see above.
+            "unattributed_decisions": unattributed_total,
+            "unattributed_by_model": unattributed_by_model,
+            "unattributed_reason": "classifier did not run (classifier_type='unknown')",
         }
     finally:
         await db.close()
@@ -1302,30 +1620,32 @@ async def get_quality_report(days: int = 7) -> dict:
 # ── Claude Code token tracking ───────────────────────────────────────────────
 
 
-# v9.2.2 — Anthropic public per-million-token rates split by token component.
-# Matches Claude Code's upstream 4-component billing formula:
+# v9.2.2 — per-million-token rates split by token component, matching Claude
+# Code's upstream 4-component billing formula:
 #   cost = input_t × input_$/M + output_t × output_$/M
 #        + cache_write_t × cache_write_$/M + cache_read_t × cache_read_$/M
-# Keep in sync with https://www.anthropic.com/pricing. All values $/Mtok.
-CLAUDE_RATES_PER_M: dict[str, dict[str, float]] = {
-    "haiku":  {"input": 0.80,  "output": 4.00,  "cache_read": 0.08, "cache_write": 1.00},
-    "sonnet": {"input": 3.00,  "output": 15.00, "cache_read": 0.30, "cache_write": 3.75},
-    "opus":   {"input": 15.00, "output": 75.00, "cache_read": 1.50, "cache_write": 18.75},
-}
+#
+# The numbers no longer live here. These three tables held their own copies of
+# the Opus and Haiku rates and both were stale ($15/$75 is Opus *3*); they are
+# now projections of llm_router.pricing, so the shape callers rely on survives and
+# the drift does not. The per-provider key lists are deliberate: _claude_cost
+# must not silently price a Gemini model just because pricing.py knows it.
+def _rate_table(names: tuple[str, ...]) -> dict[str, dict[str, float]]:
+    """Project ``names`` out of llm_router.pricing into the legacy table shape."""
+    out: dict[str, dict[str, float]] = {}
+    for name in names:
+        rates = _pricing.rates_per_m(name)
+        if rates is not None:
+            out[name] = rates
+    return out
 
-# v9.3.0 — OpenAI public per-million-token rates for models commonly invoked
-# from Codex CLI. Keep in sync with https://openai.com/api/pricing.
-# Cache rates use OpenAI's documented prompt-caching discount where applicable.
-# All values $/Mtok. NOTE: verify against current pricing before each release.
-OPENAI_RATES_PER_M: dict[str, dict[str, float]] = {
-    "gpt-5.5":       {"input": 3.00,  "output": 12.00, "cache_read": 0.30, "cache_write": 3.75},
-    "gpt-5.4":       {"input": 5.00,  "output": 20.00, "cache_read": 1.25, "cache_write": 6.25},
-    "gpt-5-mini":    {"input": 0.40,  "output": 2.00,  "cache_read": 0.10, "cache_write": 0.50},
-    "o3":            {"input": 15.00, "output": 60.00, "cache_read": 3.75, "cache_write": 18.75},
-    "o3-mini":       {"input": 1.10,  "output": 4.40,  "cache_read": 0.275, "cache_write": 1.375},
-    "gpt-4o":        {"input": 2.50,  "output": 10.00, "cache_read": 1.25, "cache_write": 3.125},
-    "gpt-4o-mini":   {"input": 0.15,  "output": 0.60,  "cache_read": 0.075, "cache_write": 0.1875},
-}
+
+CLAUDE_RATES_PER_M: dict[str, dict[str, float]] = _rate_table(("haiku", "sonnet", "opus"))
+
+# v9.3.0 — OpenAI models commonly invoked from Codex CLI.
+OPENAI_RATES_PER_M: dict[str, dict[str, float]] = _rate_table(
+    ("gpt-5.5", "gpt-5.4", "gpt-5-mini", "o3", "o3-mini", "gpt-4o", "gpt-4o-mini")
+)
 
 
 def _codex_cost(
@@ -1374,18 +1694,17 @@ def _get_codex_baseline_for_task(task_type: str | None, complexity: str | None) 
     return "gpt-5.4"
 
 
-# v9.3.1 — Google AI public per-million-token rates for Gemini models commonly
-# invoked from Gemini CLI. Keep in sync with https://ai.google.dev/pricing.
-# Cache rates use Google's documented context-caching discount where applicable.
-# All values $/Mtok. NOTE: verify against current pricing before each release.
-GEMINI_RATES_PER_M: dict[str, dict[str, float]] = {
-    "gemini-2.5-flash": {"input": 0.30, "output": 2.50, "cache_read": 0.075, "cache_write": 0.375},
-    "gemini-2.5-pro":   {"input": 1.25, "output": 10.0, "cache_read": 0.31,  "cache_write": 1.5625},
-    "gemini-2.0-flash": {"input": 0.10, "output": 0.40, "cache_read": 0.025, "cache_write": 0.125},
-    "gemini-2.0-pro":   {"input": 1.25, "output": 5.00, "cache_read": 0.31,  "cache_write": 1.5625},
-    "gemini-1.5-flash": {"input": 0.075, "output": 0.30, "cache_read": 0.019, "cache_write": 0.0938},
-    "gemini-1.5-pro":   {"input": 1.25, "output": 5.00, "cache_read": 0.31, "cache_write": 1.5625},
-}
+# v9.3.1 — Gemini models commonly invoked from Gemini CLI.
+GEMINI_RATES_PER_M: dict[str, dict[str, float]] = _rate_table(
+    (
+        "gemini-2.5-flash",
+        "gemini-2.5-pro",
+        "gemini-2.0-flash",
+        "gemini-2.0-pro",
+        "gemini-1.5-flash",
+        "gemini-1.5-pro",
+    )
+)
 
 
 def _gemini_cost(
@@ -1445,8 +1764,23 @@ def _claude_cost(
     """Compute the actual $ cost of a Claude API call using the 4-component formula.
 
     Unknown models return 0.0 (graceful — non-Claude routes don't trip this).
+
+    WP-05: ``CLAUDE_RATES_PER_M`` is keyed by FAMILY ALIAS ("opus", "sonnet",
+    "haiku"), so a full model ID such as ``claude-opus-5`` missed the table and
+    priced at 0.0 — silently, because the miss is indistinguishable from a
+    legitimately-unpriced non-Claude route. Passing a baseline model ID through
+    here therefore produced a zero baseline and NEGATIVE savings. Resolve
+    through llm_router.pricing before giving up, so an ID that the price table knows
+    can never read as free.
     """
     rates = CLAUDE_RATES_PER_M.get(model)
+    if rates is None:
+        # Claude IDs only. Widening this to every priced model would change what
+        # the function means: callers rely on non-Claude routes costing 0.0 here
+        # and being priced on their own provider's path.
+        _resolved = _pricing.resolve(model)
+        if _resolved is not None and _resolved.startswith("claude-"):
+            rates = _pricing.rates_per_m(_resolved)
     if rates is None:
         return 0.0
     return (
@@ -1477,11 +1811,11 @@ def calc_savings(
        cost is computed via the 4-component formula (input + output +
        cache_write + cache_read at separate rates) rather than a single
        lumped per-1K rate. The lumped path is kept for back-compat.
-    2. **Task-aware baseline**: if `task_type` and `complexity` are
-       provided, the counterfactual model is picked via
-       `_get_baseline_for_task()` (Haiku for simple Q&A, Sonnet for code,
-       Opus only for genuinely complex work). Without task context, the
-       baseline defaults to Opus (matching legacy behaviour).
+    2. **One baseline** (WP-05): the counterfactual is always
+       `pricing.savings_baseline_model()`, regardless of task_type or
+       complexity. The former task-aware picker (Haiku for simple Q&A,
+       Sonnet for code, Opus for complex work) was a second savings policy
+       and disagreed with every other surface by up to 5x.
     3. **No floor**: returned savings are NOT clamped to >= 0. Routing
        overhead can exceed gross savings on small prompts; that should
        surface as a negative number, not be hidden.
@@ -1500,7 +1834,15 @@ def calc_savings(
     Returns:
         (net_cost_saved_usd, net_time_saved_sec). May be negative.
     """
-    baseline = _get_baseline_for_task(task_type, complexity) if task_type else "opus"
+    # WP-05: one baseline, whatever the task. This used to credit against a
+    # task-aware "realistic" model (query -> Haiku), on the reasoning that
+    # measuring a Haiku-appropriate query at Opus rates overstates savings. That
+    # reasoning priced a counterfactual nobody performs — a subscriber runs their
+    # top model, they do not hand-pick a cheaper Claude per prompt — and it put
+    # this function 5x apart from savings_logger, the dashboard and session-end
+    # on the identical call. task_type/complexity remain in the signature for
+    # callers and telemetry; they no longer select a baseline.
+    baseline = _pricing.savings_baseline_model()
 
     # Cache-aware path: when any sub-component count is provided, use the
     # 4-component formula. Otherwise fall back to the lumped per-1K rate.
@@ -1855,8 +2197,11 @@ async def get_realized_savings(period: str = "today", *, platform: str = "all") 
             )
             row = await cursor.fetchone()
             return float(row[0] if row else 0.0), float(row[1] if row else 0.0)
-        except Exception:
-            # Table may not exist on older DBs — treat as zero.
+        except Exception as exc:
+            # Table may not exist on older DBs — treat as zero. But a persistent
+            # failure here UNDERSTATES savings without any visible symptom.
+            from llm_router import failopen
+            failopen.record("CHZ-FO-COST-PLATFORM-TABLE", exc)
             return 0.0, 0.0
 
     db = await _get_db()
@@ -2075,14 +2420,41 @@ async def get_savings_summary(period: str = "today") -> dict:
                 f"COALESCE(SUM(cost_saved_usd), 0), COALESCE(SUM(time_saved_sec), 0) "
                 f"FROM claude_usage {where}"
             )
-        except Exception:
-            return {"total_calls": 0, "total_tokens": 0, "cost_saved_usd": 0.0,
-                    "time_saved_sec": 0.0, "by_model": {}}
+        except Exception as exc:
+            # Counted as well as flagged: provenance already tells the CALLER, but
+            # nothing told an operator how often this fires.
+            from llm_router import failopen
+            failopen.record("CHZ-FO-COST-SAVINGS-QUERY", exc)
+            # RED2-02 (P1): a FAILED QUERY is not a zero-saving week.
+            #
+            # This branch returned exactly the dict the genuine-zero branch
+            # below returns, so a broken telemetry path rendered as a confident
+            # "$0.00 saved" on every downstream surface. Two entirely different
+            # situations, one indistinguishable output — and it fails in the
+            # direction that looks harmless, which is why it survived.
+            #
+            # `provenance` is what callers key on. The numeric fields stay (as
+            # 0.0) so existing consumers do not KeyError, and they must not be
+            # DISPLAYED when provenance is "unknown".
+            return {
+                "total_calls": 0, "total_tokens": 0, "cost_saved_usd": 0.0,
+                "time_saved_sec": 0.0, "by_model": {},
+                "provenance": "unknown",
+                "detail": f"savings query failed: {exc}",
+                "saved": Measured.unknown(f"savings query failed: {exc}"),
+            }
 
         row = await cursor.fetchone()
         if not row or row[0] == 0:
-            return {"total_calls": 0, "total_tokens": 0, "cost_saved_usd": 0.0,
-                    "time_saved_sec": 0.0, "by_model": {}}
+            # A real, MEASURED zero: the table was readable and holds no rows
+            # for this period. Distinct from the branch above, and now says so.
+            return {
+                "total_calls": 0, "total_tokens": 0, "cost_saved_usd": 0.0,
+                "time_saved_sec": 0.0, "by_model": {},
+                "provenance": "measured",
+                "detail": "no routed calls in this period",
+                "saved": Measured.measured(0.0),
+            }
 
         total_calls, total_tokens, cost_saved, time_saved = row
 
@@ -2107,6 +2479,9 @@ async def get_savings_summary(period: str = "today") -> dict:
             "cost_saved_usd": float(cost_saved),
             "time_saved_sec": float(time_saved),
             "by_model": by_model,
+            "provenance": "measured",
+            "detail": "",
+            "saved": Measured.measured(float(cost_saved)),
         }
     finally:
         await db.close()
@@ -2116,54 +2491,66 @@ async def get_savings_summary(period: str = "today") -> dict:
 
 # Configurable baseline pricing for savings calculations
 # Users can override via LLM_ROUTER_SAVINGS_BASELINE env var (default: "sonnet")
+# RED2-01: this table held $15/$75 for Opus — the retired Opus 3 rate, 3x the
+# current one — and fed the ledger write path, so stored savings were overstated
+# by that factor. Haiku's $0.80/$4.00 was wrong too (the real rate is $1.00/$5.00).
+# Now derived from llm_router.pricing so a family alias can never carry its own
+# number again; the alias resolves to a model ID and the ID carries the price.
 BASELINE_PRICING = {
-    "haiku":  {"input": 0.80, "output": 4.0},    # $ per 1M tokens (v9.2.2)
-    "sonnet": {"input": 3.0,  "output": 15.0},
-    "opus":   {"input": 15.0, "output": 75.0},
+    family: {
+        "input": _pricing.input_rate(family),
+        "output": _pricing.output_rate(family),
+    }
+    for family in ("haiku", "sonnet", "opus")
 }
 
-def _get_baseline_model() -> str:
-    """Legacy: returns the env-configured global baseline (default: sonnet).
+# WP-05 removed `_get_baseline_model()` (env-or-sonnet) and
+# `_get_baseline_for_task()` (research/complex -> opus, query -> haiku, else
+# sonnet). Both were savings-baseline policies of their own, and the tiered one
+# contradicted the flat baseline that savings_logger, the dashboard and the
+# session-end hook already used — 5x apart on a QUERY call.
+#
+# They are deleted rather than re-pointed. A second baseline function left
+# importable is a second policy waiting for a caller, and this codebase has
+# already demonstrated that dead safety/duplicate code gets wired back up
+# (RED3-01, RED3-10). The one policy is pricing.savings_baseline_model().
 
-    Prefer `_get_baseline_for_task()` when task_type / complexity are known —
-    that picks a *realistic* counterfactual model per call instead of crediting
-    every routed call against a single fixed baseline.
-    """
-    import os
-    return os.environ.get("LLM_ROUTER_SAVINGS_BASELINE", "sonnet")
-
-
-def _get_baseline_for_task(task_type: str | None, complexity: str | None) -> str:
-    """Pick the *realistic* baseline model — what would have been used without routing.
-
-    Without this, every cheap-model call gets credited against the full Opus rate,
-    overstating savings. The heuristic mirrors COMPLEXITY_BASE_MODEL but accounts
-    for task_type since the same complexity can imply different default models
-    (e.g., a "moderate" query task realistically goes to Haiku, not Sonnet).
-
-    v9.2.2.
-    """
-    import os
-    # Env override still wins (back-compat with LLM_ROUTER_SAVINGS_BASELINE).
-    override = os.environ.get("LLM_ROUTER_SAVINGS_BASELINE", "").strip().lower()
-    if override in CLAUDE_RATES_PER_M:
-        return override
-
-    if task_type == "research":
-        return "opus"
-    if complexity == "complex":
-        return "opus"
-    if task_type in ("query",):
-        return "haiku"
-    return "sonnet"
 
 def _get_baseline_cost(in_tokens: int, out_tokens: int, baseline_model: str = None) -> float:
-    """Calculate cost using specified baseline model (default: sonnet)."""
+    """Cost of ``in_tokens``/``out_tokens`` at the savings baseline.
+
+    ``baseline_model`` is retained for callers that price against a specific
+    model, but it no longer defaults to a second policy: with no argument this
+    uses the one baseline. An unpriced model falls back to the baseline rates
+    instead of 0.0, so a bad model name can never render as "saved nothing".
+    """
     if baseline_model is None:
-        baseline_model = _get_baseline_model()
-    
-    pricing = BASELINE_PRICING.get(baseline_model, BASELINE_PRICING["sonnet"])
-    return (in_tokens * pricing["input"] + out_tokens * pricing["output"]) / 1_000_000
+        in_rate, out_rate = _pricing.savings_baseline_rates()
+    else:
+        in_rate = _pricing.input_rate(baseline_model)
+        out_rate = _pricing.output_rate(baseline_model)
+        if in_rate is None or out_rate is None:
+            in_rate, out_rate = _pricing.savings_baseline_rates()
+    return (in_tokens * in_rate + out_tokens * out_rate) / 1_000_000
+
+
+def _coverage_counts() -> dict:
+    """observed_n / unobserved_n for a rate metric. Never raises.
+
+    WP-07: a rate is a fraction of traffic LLM Router SAW. Shipping it without its
+    denominator lets it silently redefine itself when routing degrades.
+    """
+    try:
+        from llm_router import coverage as _coverage
+
+        snap = _coverage.snapshot()
+        return {"observed_n": snap.observed_n, "unobserved_n": snap.unobserved_n}
+    except Exception as exc:  # noqa: BLE001
+        # Zero denominators make every rate render Unknown downstream (correct),
+        # but nothing said the telemetry itself was broken.
+        from llm_router import failopen
+        failopen.record("CHZ-FO-COST-COVERAGE-COUNTS", exc)
+        return {"observed_n": 0, "unobserved_n": 0}
 
 
 async def get_router_efficiency(period: str = "today") -> dict:
@@ -2195,15 +2582,34 @@ async def get_router_efficiency(period: str = "today") -> dict:
             FROM routing_decisions {where}"""
         )
         row = await cursor.fetchone()
+        _cov = _coverage_counts()
         if not row or row[0] == 0:
-            return {"total": 0, "on_target": 0, "efficiency_pct": 0.0}
-        
+            # WP-07 / RED2-02: no routing decisions is NOT a 0%-effective
+            # router. The previous 0.0 was indistinguishable from a router that
+            # got every decision wrong, and it failed in the direction that
+            # looks like a real measurement. `efficiency_pct` is None and
+            # provenance says why; callers must render "Unknown", not a number.
+            return {
+                "total": 0,
+                "on_target": 0,
+                "efficiency_pct": None,
+                "provenance": "unknown",
+                "detail": "no routing decisions recorded for this period",
+                **_cov,
+            }
+
         total, on_target = row
         efficiency_pct = round(on_target / total * 100) if total > 0 else 0
         return {
             "total": int(total),
             "on_target": int(on_target),
             "efficiency_pct": float(efficiency_pct),
+            # The rate is over OBSERVED decisions. unobserved_n says how much
+            # traffic never reached the decision table at all, so a consumer can
+            # tell "90% on-target over everything" from "90% over the 3% we saw".
+            "provenance": "measured",
+            "detail": "",
+            **_cov,
         }
     finally:
         await db.close()
@@ -2248,75 +2654,6 @@ async def get_classifier_overhead(period: str = "today") -> dict:
             "min_ms": float(min_ms or 0.0),
             "max_ms": float(max_ms or 0.0),
         }
-    finally:
-        await db.close()
-
-
-async def get_savings_by_task_type(period: str = "today") -> list:
-    """Get cumulative savings broken down by task type.
-    
-    Aggregates savings from both routing_decisions (paid APIs) and 
-    savings_stats (free providers like Ollama/Codex) to show which 
-    task categories are generating the most savings.
-    
-    Args:
-        period: Time window. One of "today", "week", "month", or "all".
-    
-    Returns:
-        List of dicts sorted by saved DESC: 
-        [{"task_type": "query", "calls": N, "saved": $X.XX}, ...]
-        Empty list if no savings data exists.
-    """
-    where_map = {
-        "today": "WHERE date(timestamp, 'localtime') = date('now', 'localtime')",
-        "week": "WHERE timestamp >= datetime('now', '-7 days')",
-        "month": "WHERE timestamp >= datetime('now', '-30 days')",
-        "all": "",
-    }
-    where = where_map.get(period, "")
-    
-    db = await _get_db()
-    try:
-        # Aggregate from savings_stats (free providers)
-        cursor = await db.execute(
-            f"""SELECT task_type, COUNT(*), COALESCE(SUM(estimated_claude_cost_saved), 0)
-            FROM savings_stats {where}
-            GROUP BY task_type ORDER BY SUM(estimated_claude_cost_saved) DESC"""
-        )
-        rows_free = {row[0]: (row[1], float(row[2])) for row in await cursor.fetchall()}
-        
-        # Aggregate from usage (paid APIs)
-        cursor = await db.execute(
-            f"""SELECT task_type, COUNT(*), 
-                COALESCE(SUM(input_tokens + output_tokens), 0),
-                COALESCE(SUM(cost_usd), 0)
-            FROM usage {where} AND success = 1
-            GROUP BY task_type"""
-        )
-        
-        baseline_model = _get_baseline_model()
-        results = {}
-        for task_type, calls, tokens, cost in await cursor.fetchall():
-            baseline = _get_baseline_cost(tokens // 2, tokens // 2, baseline_model)  # rough split
-            saved = max(0.0, baseline - cost)
-            if task_type not in results:
-                results[task_type] = [0, 0.0]
-            results[task_type][0] += calls
-            results[task_type][1] += saved
-        
-        # Merge free provider stats
-        for task_type, (calls, saved) in rows_free.items():
-            if task_type not in results:
-                results[task_type] = [0, 0.0]
-            results[task_type][0] += calls
-            results[task_type][1] += saved
-        
-        # Format and sort by savings
-        output = [
-            {"task_type": k, "calls": v[0], "saved": round(v[1], 4)}
-            for k, v in results.items()
-        ]
-        return sorted(output, key=lambda x: -x["saved"])
     finally:
         await db.close()
 
@@ -2371,7 +2708,9 @@ async def get_cache_hit_stats(period: str = "today") -> dict:
             "hit_rate_pct": float(hit_rate),
             "estimated_saved_usd": round(estimated_saved, 4),
         }
-    except Exception:
+    except Exception as exc:
+        from llm_router import failopen
+        failopen.record("CHZ-FO-COST-CACHE-STATS", exc)
         return {"total_requests": 0, "cache_hits": 0, "hit_rate_pct": 0.0, "estimated_saved_usd": 0.0}
     finally:
         await db.close()
@@ -2490,36 +2829,75 @@ async def get_lifetime_savings_summary(days: int = 30) -> dict:
         await db.close()
 
 
+def _safe_unlink(p: Path) -> None:
+    try:
+        p.unlink()
+    except OSError:
+        pass
+
+
+def _restore_claim(claim: Path, live: Path) -> None:
+    """Append a failed claim's lines back to the live log, then drop the claim.
+
+    Uses append (never replace) so newly-arrived lines in ``live`` are preserved.
+    """
+    try:
+        data = claim.read_text()
+    except OSError:
+        return
+    try:
+        with open(live, "a") as f:
+            f.write(data)
+    except OSError:
+        pass
+    _safe_unlink(claim)
+
+
 async def import_savings_log() -> int:
-    """Import savings records from the JSONL file into SQLite, then truncate.
+    """Import savings records from the JSONL file into SQLite, then drop the file.
 
     The PostToolUse hook appends one JSON line per routed call to
-    ``~/.llm-router/savings_log.jsonl``.  This function reads all lines,
-    inserts them into the ``savings_stats`` table, and truncates the file.
+    ``~/.llm-router/savings_log.jsonl``.  This function reads all lines and inserts
+    them into the ``savings_stats`` table.
+
+    AC-5 (dual-writer race): the log is drained by BOTH this async importer and
+    ``session-end.py::_sync_import_savings_log``. Reading-then-truncating unlocked
+    let two concurrent drainers read the same rows and double-insert. We instead
+    **atomically claim** the log via ``os.replace`` (only one caller wins the
+    rename; the rest get ``FileNotFoundError`` and no-op), process the claimed
+    copy, and delete it — or append it back on insert failure so nothing is lost.
 
     Returns:
-        Number of records imported.
+        Number of records imported (0 if another drainer claimed the log first).
     """
     import asyncio
+    import os
+    import uuid
 
-    # Offload synchronous Path.exists() to thread pool to avoid blocking event loop
-    exists = await asyncio.to_thread(SAVINGS_LOG_PATH.exists)
-    if not exists:
-        return 0
+    claim = SAVINGS_LOG_PATH.with_name(
+        f"{SAVINGS_LOG_PATH.name}.{os.getpid()}.{uuid.uuid4().hex[:8]}.claim"
+    )
+    # Atomic claim — serializes concurrent drainers at the filesystem layer.
+    try:
+        await asyncio.to_thread(os.replace, str(SAVINGS_LOG_PATH), str(claim))
+    except OSError:
+        return 0  # no live log, or another drainer claimed it first
 
     try:
-        raw = SAVINGS_LOG_PATH.read_text()
+        raw = await asyncio.to_thread(claim.read_text)
     except OSError:
         return 0
 
     lines = [ln.strip() for ln in raw.splitlines() if ln.strip()]
     if not lines:
+        await asyncio.to_thread(_safe_unlink, claim)
         return 0
 
     from datetime import datetime, timezone
 
     db = await _get_db()
     imported = 0
+    committed = False
     try:
         for line in lines:
             try:
@@ -2529,7 +2907,8 @@ async def import_savings_log() -> int:
             await db.execute(
                 "INSERT INTO savings_stats "
                 "(timestamp, session_id, task_type, estimated_claude_cost_saved, "
-                "external_cost, model_used, host) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                "external_cost, model_used, host, input_tokens, output_tokens) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     entry.get("timestamp", datetime.now(timezone.utc).isoformat()),
                     entry.get("session_id", "unknown"),
@@ -2538,17 +2917,21 @@ async def import_savings_log() -> int:
                     float(entry.get("external_cost", 0.0)),
                     entry.get("model", "unknown"),
                     entry.get("host", "claude_code"),
+                    int(entry.get("input_tokens", 0) or 0),
+                    int(entry.get("output_tokens", 0) or 0),
                 ),
             )
             imported += 1
         await db.commit()
-        # Truncate only after successful commit — prevents data loss
-        try:
-            SAVINGS_LOG_PATH.write_text("")
-        except OSError:
-            pass
+        committed = True
     finally:
         await db.close()
+
+    if committed:
+        await asyncio.to_thread(_safe_unlink, claim)
+    else:
+        # Insert failed — return the rows to the live log for a later retry.
+        await asyncio.to_thread(_restore_claim, claim, SAVINGS_LOG_PATH)
 
     return imported
 
@@ -2582,7 +2965,9 @@ async def get_model_latency_stats(window_days: int = 7) -> dict[str, dict]:
             (f"-{window_days} days",),
         )
         rows = await cursor.fetchall()
-    except Exception:
+    except Exception as exc:
+        from llm_router import failopen
+        failopen.record("CHZ-FO-COST-LATENCY-STATS", exc)
         return {}
     finally:
         await db.close()
@@ -2606,17 +2991,110 @@ async def get_model_latency_stats(window_days: int = 7) -> dict[str, dict]:
 
 
 # ── Cost baseline models and pricing (used for savings calculations) ────────
-# These constants define the reference models used to calculate cost savings.
-# All savings are calculated relative to these baseline costs.
+# The savings baseline is the HOST model: what the user's Claude Code
+# subscription would have charged for the same tokens if the work had NOT been
+# routed. That host model is the latest Opus. Keep the model id and its price in
+# ONE place (LATEST_OPUS_MODEL + _OPUS_PRICING) so a new Opus release or price
+# change updates a single source of truth instead of drifting a hardcoded
+# literal.
+#
+# History: the previous constants were $15/$75 labelled "Opus 4.6" — wrong on
+# two axes. (1) The version was frozen and silently stale as newer Opus models
+# shipped. (2) The *price* was ~3x too high: $15/$75 was the retired
+# Opus-4.1-and-earlier tier; Opus 4.5 onward (incl. 4.6/4.7/4.8) is $5/$25 per
+# million tokens. Every historical `saved_usd` was therefore ~3x inflated.
 
-BASELINE_MODEL_FOR_SAVINGS = "sonnet"  # Baseline: Sonnet 4.6 ($3/$15 per M tokens)
-"""Reference model for savings calculations. All savings = Opus cost - actual cost.
-Opus is the baseline: it's the host model on Claude Code subscription."""
+LATEST_OPUS_MODEL = "claude-opus-5"
+"""The current host Opus model. Bump when a newer Opus ships.
 
-_HOST_INPUT_PER_M = 15.0      # $15 per million input tokens (Opus 4.6)
-_HOST_OUTPUT_PER_M = 75.0     # $75 per million output tokens (Opus 4.6)
+This lagged at claude-opus-4-8 while llm_router.pricing already priced claude-opus-5
+— the "bump when a newer Opus ships" instruction was not followed, which is the
+same failure mode WP-03 removed by deriving prices rather than restating them.
+It is no longer a savings baseline (see pricing.SAVINGS_BASELINE_MODEL); it only
+answers "which Opus is current"."""
+
+# Opus per-million-token pricing (input, output) in USD, projected out of
+# llm_router.pricing rather than restated. Extend the tuple as new Opus models
+# release; the values can also be refreshed at runtime via
+# refresh_baseline_pricing_from_api().
+_OPUS_MODELS: tuple[str, ...] = (
+    "claude-opus-5",
+    "claude-opus-4-8",
+    "claude-opus-4-7",
+    "claude-opus-4-6",
+    "claude-opus-4-5",
+)
+_OPUS_PRICING: dict[str, tuple[float, float]] = {
+    _m: (_p.input, _p.output)
+    for _m in _OPUS_MODELS
+    if (_p := _pricing.price_for(_m)) is not None
+}
+
+BASELINE_MODEL_FOR_SAVINGS = _pricing.savings_baseline_model()
+"""Reference model for savings, projected from the ONE policy in llm_router.pricing.
+
+WP-05: this used to be its own binding (``LATEST_OPUS_MODEL``), one of three
+competing baselines. It is now a view onto ``pricing.savings_baseline_model()``
+so it cannot drift from the dashboard, the session-end hook, or the ledger
+writer again. ``LATEST_OPUS_MODEL`` remains, but only as "which Opus is current"
+— it is no longer a savings policy."""
+
+_HOST_INPUT_PER_M, _HOST_OUTPUT_PER_M = _pricing.savings_baseline_rates()
+"""Baseline per-million-token rates ($/M), from the one savings policy."""
+
 _FREE_PROVIDERS = {"ollama", "codex", "gemini_cli"}
 """Providers that incur zero cost (local or included in subscription)."""
+
+
+def _host_is_metered() -> bool:
+    """True when the host (baseline) model is billed per-token — i.e. the user is
+    on the metered API rather than a flat-rate Claude Code subscription.
+
+    On a subscription the marginal cost of a host Opus call is ~$0 until the quota
+    cap is hit, so the *real dollars* avoided by routing is ~$0 even though the
+    Opus-baseline "avoided" figure is large. This env-driven flag lets the
+    savings surfaces report an honest cash number beside the baseline figure.
+    Defaults to False (subscription) — the common case and the conservative one
+    for a dollar claim (never claim cash we can't prove). Metered is returned
+    ONLY when the subscription flag is explicitly turned off. See RETROSPECTIVE
+    B-7 / M-2.
+    """
+    val = os.environ.get("LLM_ROUTER_CLAUDE_SUBSCRIPTION", "").strip().lower()
+    if val in ("0", "false", "no", "off"):
+        return True   # explicitly metered API mode
+    return False      # subscription (explicit true/on, or absent/unknown)
+
+
+def refresh_baseline_pricing_from_api() -> bool:
+    """Best-effort refresh of the latest-Opus baseline price from the Models API.
+
+    Optional and never called at import — the hardcoded ``_OPUS_PRICING`` map is
+    the offline source of truth. When credentials and network are available this
+    updates ``_HOST_INPUT_PER_M`` / ``_HOST_OUTPUT_PER_M`` for
+    ``LATEST_OPUS_MODEL`` so a mid-cycle price change is picked up without a code
+    edit. Returns True on success, False (leaving the hardcoded values intact) on
+    any failure.
+    """
+    global _HOST_INPUT_PER_M, _HOST_OUTPUT_PER_M
+    try:
+        import anthropic
+
+        # Models API metadata/pricing lookup, not a routed LLM completion.
+        model = anthropic.Anthropic().models.retrieve(LATEST_OPUS_MODEL)  # llm_router: direct-ok
+        pricing = getattr(model, "pricing", None) or {}
+        in_pm = pricing.get("input_per_mtok")
+        out_pm = pricing.get("output_per_mtok")
+        if in_pm and out_pm:
+            _HOST_INPUT_PER_M, _HOST_OUTPUT_PER_M = float(in_pm), float(out_pm)
+            _OPUS_PRICING[LATEST_OPUS_MODEL] = (_HOST_INPUT_PER_M, _HOST_OUTPUT_PER_M)
+            return True
+    except Exception as exc:
+        # Live pricing refresh failed, so the BASELINE stays at whatever the
+        # static table holds. Stale prices produce plausible wrong money — the
+        # exact RED2-01 shape, which shipped a 3x overstatement.
+        from llm_router import failopen
+        failopen.record("CHZ-FO-COST-PRICING-REFRESH", exc)
+    return False
 
 
 async def get_savings_by_period() -> dict[str, dict]:
@@ -2635,11 +3113,15 @@ async def get_savings_by_period() -> dict[str, dict]:
     """
     db = await _get_db()
     try:
-        # Build period boundaries as SQLite datetime expressions
+        # Build period boundaries as SQLite datetime expressions. timestamp is
+        # stored UTC; compare in the user's LOCAL timezone (both column and
+        # boundary get 'localtime') so "today"/"week"/"month" line up with the
+        # user's wall clock instead of UTC — otherwise savings for the last N
+        # hours before local midnight leak into the wrong period.
         periods = {
-            "today": "date('now')",
-            "week": "date('now', 'weekday 0', '-6 days')",
-            "month": "date('now', 'start of month')",
+            "today": "date('now','localtime')",
+            "week": "date('now','localtime', 'weekday 0', '-6 days')",
+            "month": "date('now','localtime', 'start of month')",
             "all_time": "'1970-01-01'",
         }
         result: dict[str, dict] = {}
@@ -2647,7 +3129,7 @@ async def get_savings_by_period() -> dict[str, dict]:
             rows = await db.execute_fetchall(
                 f"""SELECT provider, input_tokens, output_tokens, cost_usd, saved_usd
                     FROM usage
-                    WHERE date(timestamp) >= {since_expr}
+                    WHERE date(timestamp,'localtime') >= {since_expr}
                       AND success = 1
                       AND is_simulated IS NOT 1""",
             )
@@ -2660,17 +3142,29 @@ async def get_savings_by_period() -> dict[str, dict]:
                 calls += 1
                 if provider == "subscription":
                     continue  # CC subscription rows have no token cost data
+                # Always recalculate from actual in/out counts at Opus rates.
+                # Stored saved_col used a blended $0.045/1K estimate; accurate
+                # pricing requires separate input/output rates ($5/M and $25/M
+                # for the latest Opus — see _OPUS_PRICING).
                 host_est = (in_tok * _HOST_INPUT_PER_M + out_tok * _HOST_OUTPUT_PER_M) / 1_000_000
                 baseline += host_est
                 if provider in _FREE_PROVIDERS:
-                    saved_total += saved_col if saved_col else host_est
+                    saved_total += host_est
                 else:
                     actual += cost
-                    saved_total += saved_col if saved_col else max(0.0, host_est - cost)
+                    saved_total += net_saved(host_est, cost)
 
             efficiency = baseline / actual if actual > 0.001 else 0.0
+            # RETROSPECTIVE B-7: report two figures, never conflated.
+            #  - baseline_avoided_usd: Opus-baseline vs actual (== legacy saved_usd).
+            #  - real_dollars_avoided_usd: dollars the user would ACTUALLY have paid.
+            #    ~$0 on a flat-rate subscription (host call is marginal-$0); equals
+            #    the baseline figure only in metered API mode.
+            real_avoided = saved_total if _host_is_metered() else 0.0
             result[name] = {
-                "saved_usd": round(saved_total, 4),
+                "saved_usd": round(saved_total, 4),  # back-compat alias
+                "baseline_avoided_usd": round(saved_total, 4),
+                "real_dollars_avoided_usd": round(real_avoided, 4),
                 "actual_usd": round(actual, 4),
                 "baseline_usd": round(baseline, 4),
                 "calls": calls,
@@ -2718,7 +3212,11 @@ async def get_model_failure_rates(window_days: int = 30) -> dict[str, float]:
             for row in rows
             if row[1] > 0
         }
-    except Exception:
+    except Exception as exc:
+        # An empty quality map reads as "no quality signal yet", which is what a
+        # fresh install looks like. A broken query is indistinguishable from it.
+        from llm_router import failopen
+        failopen.record("CHZ-FO-COST-QUALITY-AGG", exc)
         return {}
     finally:
         await db.close()
@@ -2756,7 +3254,9 @@ async def get_model_acceptance_scores(window_days: int = 30) -> dict[str, float]
         )
         rows = await cursor.fetchall()
         return {row[0]: row[2] / row[1] for row in rows if row[1] > 0}
-    except Exception:
+    except Exception as exc:
+        from llm_router import failopen
+        failopen.record("CHZ-FO-COST-RATING-AGG", exc)
         return {}
     finally:
         await db.close()
@@ -2780,15 +3280,17 @@ async def get_team_savings(
     Returns:
         Dict with total_calls, saved_usd, actual_usd, free_pct, top_models.
     """
+    # Local-timezone period boundaries (timestamp is stored UTC) so "today"/etc.
+    # track the user's wall clock, not UTC — see get_savings_by_period above.
     period_map = {
-        "today": "date('now')",
-        "week": "date('now', 'weekday 0', '-6 days')",
-        "month": "date('now', 'start of month')",
+        "today": "date('now','localtime')",
+        "week": "date('now','localtime', 'weekday 0', '-6 days')",
+        "month": "date('now','localtime', 'start of month')",
         "all": "'1970-01-01'",
     }
     since = period_map.get(period, period_map["week"])
 
-    where_parts = [f"timestamp >= {since}"]
+    where_parts = [f"date(timestamp,'localtime') >= {since}"]
     params: list = []
     if user_id:
         where_parts.append("user_id = ?")
@@ -2800,8 +3302,14 @@ async def get_team_savings(
 
     _free = {"ollama", "codex", "gemini_cli", "subscription"}
 
-    db = await _get_db()
+    # #24: _get_db() was OUTSIDE this try, so the MOST LIKELY failure -- the
+    # ledger missing, locked, or permission-denied at OPEN time -- propagated
+    # instead of returning a provenance-marked result. The except path below
+    # then only covered query failures, which is the rarer case. An honest
+    # "unknown" beats an exception a caller may swallow into a silent broadcast.
+    db = None
     try:
+        db = await _get_db()
         cursor = await db.execute(
             f"""
             SELECT model, provider,
@@ -2816,10 +3324,22 @@ async def get_team_savings(
             params,
         )
         rows = await cursor.fetchall()
-    except Exception:
-        return {"total_calls": 0, "saved_usd": 0.0, "actual_usd": 0.0, "free_pct": 0.0, "top_models": []}
+    except Exception as exc:
+        # Zeroes here render as "you routed nothing and saved nothing" — a
+        # working install that looks idle.
+        from llm_router import failopen
+        failopen.record("CHZ-FO-COST-ROUTING-SUMMARY", exc)
+        # RED2-02 / #24: the zeros are unavoidable (callers index these keys),
+        # but they must not READ as data. provenance="unknown" is what lets
+        # team.py print "unknown" instead of "$0.0000" to a Slack channel.
+        # failopen.record above counts this internally; a counter the caller
+        # cannot see does not stop a false broadcast.
+        return {"total_calls": 0, "saved_usd": 0.0, "actual_usd": 0.0, "free_pct": 0.0,
+                "top_models": [], "provenance": "unknown",
+                "provenance_detail": "usage ledger unreadable"}
     finally:
-        await db.close()
+        if db is not None:
+            await db.close()
 
     total_calls = sum(r[2] for r in rows)
     actual_usd = sum(r[3] for r in rows)
@@ -2829,7 +3349,14 @@ async def get_team_savings(
     # Estimate savings vs Opus baseline using token counts
     total_tokens = sum(r[4] for r in rows)
     host_baseline = total_tokens / 1000 * ((_HOST_INPUT_PER_M + _HOST_OUTPUT_PER_M) / 2 / 1000)
-    saved_usd = max(0.0, host_baseline - actual_usd)
+    saved_usd = net_saved(host_baseline, actual_usd)
+    # INV-COST-006 / AC-2: split baseline-equivalent avoided (counterfactual) from
+    # real metered dollars avoided. On a flat-rate subscription host the marginal host
+    # cost is ~$0, so real dollars avoided is 0 unless the host is genuinely metered —
+    # exactly as get_savings_by_period does. Prior to this, get_team_savings emitted
+    # only baseline-avoided as `saved_usd`, which team.py broadcast to Slack/Discord as
+    # unqualified cash (audit P0-2).
+    real_avoided = saved_usd if _host_is_metered() else 0.0
 
     top_models = [
         {"model": r[0], "provider": r[1], "calls": r[2], "cost": r[3]}
@@ -2838,10 +3365,16 @@ async def get_team_savings(
 
     return {
         "total_calls": total_calls,
-        "saved_usd": saved_usd,
+        "saved_usd": saved_usd,                              # back-compat alias (baseline-equivalent)
+        "baseline_equivalent_avoided_usd": round(saved_usd, 4),
+        "real_dollars_avoided_usd": round(real_avoided, 4),
         "actual_usd": actual_usd,
         "free_pct": free_pct,
         "top_models": top_models,
+        # The tag must DISTINGUISH: if it only appeared on the error path it
+        # would carry no information, since a caller cannot tell "absent
+        # because measured" from "absent because nobody set it".
+        "provenance": "measured",
     }
 
 
@@ -2850,10 +3383,14 @@ async def get_team_savings(
 
 
 async def get_routing_savings_vs_sonnet(days: int = 0) -> dict:
-    """Compute savings by comparing actual cost vs Opus 4.6 baseline.
+    """Compute savings by comparing actual cost vs the latest-Opus host baseline.
 
     Uses the routing_decisions table (populated by the router on every call).
-    Savings = what Sonnet would have cost − what we actually paid.
+    Savings = what the host Opus model would have cost − what we actually paid.
+
+    NOTE: the ``_vs_sonnet`` name is historical and misleading — the baseline is
+    the latest Opus (``LATEST_OPUS_MODEL``), never Sonnet. Rename is deferred to
+    avoid breaking callers; see RETROSPECTIVE B-8.
 
     Args:
         days: Look-back window. 0 = all time.
@@ -2891,7 +3428,7 @@ async def get_routing_savings_vs_sonnet(days: int = 0) -> dict:
 
         total, actual_cost, in_tok, out_tok = row
         baseline = (in_tok * _HOST_INPUT_PER_M + out_tok * _HOST_OUTPUT_PER_M) / 1_000_000
-        saved = max(0.0, baseline - actual_cost)
+        saved = net_saved(baseline, actual_cost)
 
         cursor = await db.execute(
             f"""SELECT final_model, COUNT(*),
@@ -2909,7 +3446,7 @@ async def get_routing_savings_vs_sonnet(days: int = 0) -> dict:
                 "calls": int(cnt),
                 "actual_cost": float(m_cost),
                 "baseline_cost": float(m_baseline),
-                "saved": max(0.0, m_baseline - float(m_cost)),
+                "saved": net_saved(m_baseline, float(m_cost)),
             }
 
         return {
@@ -2921,7 +3458,9 @@ async def get_routing_savings_vs_sonnet(days: int = 0) -> dict:
             "output_tokens": int(out_tok),
             "by_model": by_model,
         }
-    except Exception:
+    except Exception as exc:
+        from llm_router import failopen
+        failopen.record("CHZ-FO-COST-SAVINGS-BREAKDOWN", exc)
         return empty
     finally:
         await db.close()
@@ -2942,11 +3481,16 @@ async def get_cache_savings(period: str = "today") -> dict[str, float]:
     try:
         # Determine time filter
         if period == "today":
-            time_filter = "timestamp >= datetime('now', 'start of day')"
+            time_filter = "date(timestamp,'localtime') = date('now','localtime')"
         elif period == "week":
             time_filter = "timestamp >= datetime('now', '-7 days')"
         elif period == "month":
-            time_filter = "timestamp >= datetime('now', 'start of month')"
+            # RED1-07: local-frame month boundary, consistent with the "today"
+            # filter above (was a UTC 'start of month').
+            time_filter = (
+                "strftime('%Y-%m', timestamp, 'localtime') = "
+                "strftime('%Y-%m', 'now', 'localtime')"
+            )
         else:  # all
             time_filter = "1"
 
@@ -2970,7 +3514,9 @@ async def get_cache_savings(period: str = "today") -> dict[str, float]:
             "total_savings_usd": float(cached_savings),
             "cache_hit_rate": float(cache_hit_rate),
         }
-    except Exception:
+    except Exception as exc:
+        from llm_router import failopen
+        failopen.record("CHZ-FO-COST-CACHE-SAVINGS", exc)
         return {
             "total_calls_cached": 0,
             "total_savings_usd": 0.0,
@@ -3169,7 +3715,9 @@ async def get_compression_stats(days: int = 7) -> dict:
             "by_strategy": strategies,
             "total_tokens_saved": total_saved,
         }
-    except Exception:
+    except Exception as exc:
+        from llm_router import failopen
+        failopen.record("CHZ-FO-COST-TOKEN-SAVER-STATS", exc)
         return {
             "period_days": days,
             "total_operations": 0,

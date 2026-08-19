@@ -52,7 +52,7 @@ def record_hook_error(hook_name: str, error: str, context: dict | None = None) -
     except OSError:
         # If we can't write health info, at least try stderr
         import sys
-        print(f"[llm-router] Hook {hook_name} error (couldn't log): {error}", file=sys.stderr)
+        print(f"[llm_router] Hook {hook_name} error (couldn't log): {error}", file=sys.stderr)
 
 
 def record_hook_success(hook_name: str) -> None:
@@ -180,7 +180,7 @@ def get_recent_hook_errors(hours: int = 24) -> list[dict]:
 def check_hook_permissions() -> dict[str, str]:
     """Check if all installed hook files have proper execute permissions.
 
-    Checks ~/.claude/hooks/llm-router-*.py files, which are the actual hooks
+    Checks ~/.claude/hooks/llm_router-*.py files, which are the actual hooks
     that Claude Code runs. Returns status for each hook.
 
     Returns:
@@ -189,11 +189,11 @@ def check_hook_permissions() -> dict[str, str]:
     hooks_dir = Path.home() / ".claude" / "hooks"
     status = {}
 
-    # Check for llm-router-*.py hooks
+    # Check for llm_router-*.py hooks
     if hooks_dir.exists():
-        for hook_file in hooks_dir.glob("llm-router-*.py"):
-            # Extract hook name from llm-router-NAME.py → NAME
-            hook_name = hook_file.stem.replace("llm-router-", "")
+        for hook_file in hooks_dir.glob("llm_router-*.py"):
+            # Extract hook name from llm_router-NAME.py → NAME
+            hook_name = hook_file.stem.replace("llm_router-", "")
 
             if not hook_file.exists():
                 status[hook_name] = "missing"

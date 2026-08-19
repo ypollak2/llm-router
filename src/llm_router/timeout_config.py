@@ -6,6 +6,7 @@ sensible defaults.
 
 Environment Variables:
 - LLM_ROUTER_REQUEST_TIMEOUT: HTTP request timeout in seconds (default: 120)
+- LLM_ROUTER_REASONING_TIMEOUT: Deep reasoning model timeout — R1/o3 can take 60-300s (default: 300)
 - LLM_ROUTER_MEDIA_REQUEST_TIMEOUT: Media generation timeout (default: 600)
 - LLM_ROUTER_CODEX_TIMEOUT: Codex CLI execution timeout (default: 300)
 - LLM_ROUTER_SUBPROCESS_TIMEOUT: Hook/tool subprocess timeout (default: 15)
@@ -37,6 +38,7 @@ def get_timeout_config() -> dict[str, int]:
     """
     defaults = {
         "request_timeout": 120,
+        "reasoning_timeout": 300,
         "media_request_timeout": 600,
         "codex_timeout": 300,
         "subprocess_timeout": 15,
@@ -46,6 +48,7 @@ def get_timeout_config() -> dict[str, int]:
 
     env_mapping = {
         "request_timeout": "LLM_ROUTER_REQUEST_TIMEOUT",
+        "reasoning_timeout": "LLM_ROUTER_REASONING_TIMEOUT",
         "media_request_timeout": "LLM_ROUTER_MEDIA_REQUEST_TIMEOUT",
         "codex_timeout": "LLM_ROUTER_CODEX_TIMEOUT",
         "subprocess_timeout": "LLM_ROUTER_SUBPROCESS_TIMEOUT",
@@ -73,6 +76,15 @@ def request_timeout() -> int:
     Set via LLM_ROUTER_REQUEST_TIMEOUT environment variable.
     """
     return get_timeout_config()["request_timeout"]
+
+
+def reasoning_timeout() -> int:
+    """Deep reasoning model timeout (default: 300s).
+
+    DeepSeek-R1, o3, and Gemini 2.5 Pro with thinking can take 60–300s.
+    Set via LLM_ROUTER_REASONING_TIMEOUT environment variable.
+    """
+    return get_timeout_config()["reasoning_timeout"]
 
 
 def media_request_timeout() -> int:

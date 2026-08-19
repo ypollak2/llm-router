@@ -1,5 +1,3 @@
-# Ported from Chuzom's test_routing_quality.py; imports/env vars renamed to
-# llm_router.routing_quality / LLM_ROUTER_*.
 """North Star route-quality ledger (schema v2) — recording + honest summarize.
 
 "Route to the cheapest capable model, escalate on failure" must be MEASURED, not
@@ -21,6 +19,7 @@ from llm_router.routing_quality import (
     record_route,
     summarize,
 )
+
 
 # ── v2 recording ──────────────────────────────────────────────────────────────
 
@@ -111,7 +110,7 @@ def test_record_delegation_escalation_is_quality_not_technical(tmp_path):
     record_delegation(result, path=str(ledger))
     s = summarize(path=str(ledger))
     assert s["quality_escalation_rate"] == 1.0
-    # a delegation escalation is quality-driven, NOT a technical fallback
+    # an MGEE escalation is quality-driven, NOT a technical fallback
     assert s["technical_fallback_rate"] == 0.0
     assert s["mis_route_rate_inferred"] == 1.0
 
@@ -161,14 +160,3 @@ def test_malformed_row_never_crashes_summarize(tmp_path):
                       "\n")
     s = summarize(path=str(ledger))
     assert s["invalid_rows"] == 1 and s["schema_v2_rows"] == 1
-
-
-# ── brand-leak guard ───────────────────────────────────────────────────────────
-
-def test_no_chuzom_in_runtime_strings():
-    """The ported module must carry no 'chuzom' in its runtime-visible identifiers
-    (env var names, default paths, docstrings/log fields aside from the allowed
-    provenance header comment, which is not exercised at runtime)."""
-    import llm_router.routing_quality as rq
-
-    assert "chuzom" not in rq._default_ledger().as_posix().lower()

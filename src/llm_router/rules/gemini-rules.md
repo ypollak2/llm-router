@@ -1,18 +1,33 @@
-# llm-router Routing Rules for Gemini CLI
+<!-- llm_router-rules-version: 2 -->
+# LLM Router — Gemini CLI Routing Rules
 
-Configure llm-router for Gemini CLI with smart LLM routing.
+> LLM Router routes each task to the cheapest capable model before Gemini CLI generates
+> its own response. Call the appropriate tool BEFORE answering.
+>
+> **Pull routing:** Gemini CLI uses pull routing — YOU must call the tool. The tool
+> returns the response; relay it verbatim. This fires in agent mode (~90% of turns).
 
-## Available Routing Tools
+## Task Type → Tool Mapping
 
-- `llm_research` — Web-grounded research and information
-- `llm_code` — Code generation and implementation
-- `llm_generate` — Writing and documentation
-- `llm_analyze` — Deep analysis and debugging
-- `llm_query` — Simple questions and lookups
+| Task | Tool | Notes |
+|---|---|---|
+| Simple factual question | `llm_query` | Ollama → Gemini Flash → GPT-4o-mini |
+| Research / current events | `llm_research` | Perplexity (web-grounded) |
+| Writing / content | `llm_generate` | Gemini Flash → Haiku |
+| Deep analysis / review | `llm_analyze` | Ollama → GPT-4o |
+| Code generation / refactor | `llm_code` | Ollama → Codex → o3 |
+| Deep reasoning / proofs | `llm_reason` | Extended-thinking model |
+| Unknown / auto-detect | `llm_auto` | Classifies + routes automatically |
 
-## Getting Started
+## Rules
 
-The llm-router extension is configured in `~/.gemini/extensions/llm-router/` with:
-- MCP server integration
-- Routing decision hooks
-- Budget tracking and pressure awareness
+1. Call the matching tool **before** generating your own response.
+2. Return the tool's output to the user **as-is** (don't paraphrase).
+3. Only use native Gemini CLI intelligence for file navigation, terminal commands,
+   or when all LLM Router MCP servers are unavailable.
+4. Use `llm_research` for anything time-sensitive — Gemini's training has a cutoff.
+
+## Token-Efficient Responses
+
+Skip preamble. Lead with result. Fragments fine when meaning is clear.
+No trailing summaries. ≥3 items → bullets. Never restate the user's request.

@@ -1,0 +1,351 @@
+# LLM Router Model Registry
+#
+# Sourced from https://artificialanalysis.ai/leaderboards/models
+#
+# THIS IS A MANUALLY CURATED SNAPSHOT, NOT A LIVE FEED (WP-12 / RED8-08).
+# Nothing fetches a ranking at runtime. NORTH_STAR.md previously described this
+# as a "live" and "continuously-updated" leaderboard; it is neither, and the
+# distinction matters because that clause was the load-bearing justification for
+# the whole "Claude is not axiomatically the top" position. With a hand-curated
+# ladder, vendor neutrality is a GOAL of this project, not a capability it has.
+#
+# The header used to say "Refresh periodically via scripts/refresh-model-registry.py".
+# That script does not exist and is not in the repository history. The documented
+# refresh path was a file that was never written — so "periodically" had no
+# mechanism behind it, which is how a snapshot dated 2026-07-10 went unnoticed.
+#
+# To refresh: update the entries below by hand from the leaderboard, then bump
+# `snapshot_date`. scripts/check_model_registry_freshness.py fails CI once the
+# snapshot exceeds MAX_SNAPSHOT_AGE_DAYS, so staleness surfaces as a red build
+# rather than as a quietly wrong routing decision.
+#
+# Prices are NOT read from here — llm_router.pricing owns those (INV-COST-004).
+#
+snapshot_date: 2026-07-10
+#
+# Schema (all required unless marked optional):
+#   id                       canonical "provider/model-name" string
+#   provider                 provider slug for grouping
+#   tier                     local | cheap | mid | premium | unknown
+#   quality_score            0.0–1.0, normalized from AA composite
+#   price_per_1m_input_usd   USD per 1M input tokens
+#   price_per_1m_output_usd  USD per 1M output tokens
+#   latency_p50_ms (opt)     observed median latency
+#   context_window (opt)     in tokens
+#   capabilities (opt)       list: function-calling, vision, json, web-grounded, reasoning
+#   source (opt)             provenance (defaults to artificialanalysis.ai)
+#   notes (opt)              free text
+
+version: v0
+updated: "2026-07-10"
+source: "https://artificialanalysis.ai/leaderboards/models"
+
+models:
+  # ─── LOCAL tier ──────────────────────────────────────────────────────
+  - id: ollama/qwen3.5:latest
+    provider: ollama
+    tier: local
+    quality_score: 0.68
+    price_per_1m_input_usd: 0.0
+    price_per_1m_output_usd: 0.0
+    latency_p50_ms: 1800
+    context_window: 32768
+    capabilities: [function-calling]
+    notes: "Local Ollama; free at the API boundary"
+
+  - id: ollama/qwen3-coder-next
+    provider: ollama
+    tier: local
+    quality_score: 0.71
+    price_per_1m_input_usd: 0.0
+    price_per_1m_output_usd: 0.0
+    latency_p50_ms: 2200
+    context_window: 32768
+    capabilities: [function-calling]
+    notes: "Code-specialized local"
+
+  # ─── CHEAP tier ──────────────────────────────────────────────────────
+  - id: anthropic/claude-haiku-4-5-20251001
+    provider: anthropic
+    tier: cheap
+    quality_score: 0.80
+    price_per_1m_input_usd: 1.00
+    price_per_1m_output_usd: 5.00
+    latency_p50_ms: 900
+    context_window: 200000
+    capabilities: [function-calling, vision]
+    source: "https://platform.claude.com/docs/en/about-claude/pricing"
+    notes: "Current cheap Claude (was claude-3.5-haiku $0.80/$4). id matches router (token_budget.py/auto_profile.py)."
+
+  - id: gemini/gemini-3.1-flash-lite
+    provider: gemini
+    tier: cheap
+    quality_score: 0.70
+    price_per_1m_input_usd: 0.25
+    price_per_1m_output_usd: 1.50
+    latency_p50_ms: 600
+    context_window: 1000000
+    capabilities: [function-calling, vision, json]
+    source: "https://ai.google.dev/gemini-api/docs/pricing"
+    notes: "Replaces google/gemini-1.5-flash-8b. Slug google→gemini to match router. quality_score estimated."
+
+  - id: deepseek/deepseek-v4-flash
+    provider: deepseek
+    tier: cheap
+    quality_score: 0.78
+    price_per_1m_input_usd: 0.14
+    price_per_1m_output_usd: 0.28
+    latency_p50_ms: 1200
+    context_window: 1000000
+    capabilities: [function-calling, json, reasoning]
+    source: "https://api-docs.deepseek.com/quick_start/pricing/"
+    notes: "V4 Flash. Legacy deepseek-chat/deepseek-reasoner aliases map here but DEPRECATE 2026-07-24 — migrate refs. quality_score estimated."
+
+  - id: xai/grok-4.1-fast
+    provider: xai
+    tier: cheap
+    quality_score: 0.79
+    price_per_1m_input_usd: 0.20
+    price_per_1m_output_usd: 0.50
+    latency_p50_ms: 800
+    context_window: 2000000
+    capabilities: [function-calling, vision, json, reasoning]
+    source: "https://www.aipricing.guru/xai-pricing/"
+    notes: "Cheap Grok workhorse, 2M context. quality_score estimated; confirm vs official docs.x.ai."
+
+  - id: openai/gpt-4o-mini
+    provider: openai
+    tier: cheap
+    quality_score: 0.72
+    price_per_1m_input_usd: 0.15
+    price_per_1m_output_usd: 0.60
+    latency_p50_ms: 800
+    context_window: 128000
+    capabilities: [function-calling, vision, json]
+
+  - id: openai/gpt-5.4-nano
+    provider: openai
+    tier: cheap
+    quality_score: 0.73
+    price_per_1m_input_usd: 0.20
+    price_per_1m_output_usd: 1.25
+    latency_p50_ms: 700
+    context_window: 400000
+    capabilities: [function-calling, vision, json]
+    source: "https://developers.openai.com/api/docs/pricing"
+    notes: "Cheapest GPT-5.4 tier. quality_score & context_window estimated — confirm."
+
+  - id: openai/gpt-5.4-mini
+    provider: openai
+    tier: cheap
+    quality_score: 0.80
+    price_per_1m_input_usd: 0.75
+    price_per_1m_output_usd: 4.50
+    latency_p50_ms: 900
+    context_window: 400000
+    capabilities: [function-calling, vision, json]
+    source: "https://developers.openai.com/api/docs/pricing"
+    notes: "Budget GPT-5.4. quality_score & context_window estimated — confirm."
+
+  - id: groq/llama-3.1-8b-instant
+    provider: groq
+    tier: cheap
+    quality_score: 0.61
+    price_per_1m_input_usd: 0.05
+    price_per_1m_output_usd: 0.08
+    latency_p50_ms: 250
+    context_window: 8192
+    capabilities: [function-calling]
+    notes: "Groq LPUs — very fast, modest quality"
+
+  # ─── MID tier ────────────────────────────────────────────────────────
+  - id: openai/gpt-4o
+    provider: openai
+    tier: mid
+    quality_score: 0.85
+    price_per_1m_input_usd: 2.50
+    price_per_1m_output_usd: 10.00
+    latency_p50_ms: 1500
+    context_window: 128000
+    capabilities: [function-calling, vision, json]
+
+  - id: openai/gpt-5.6-luna
+    provider: openai
+    tier: mid
+    quality_score: 0.86
+    price_per_1m_input_usd: 1.00
+    price_per_1m_output_usd: 6.00
+    latency_p50_ms: 1400
+    context_window: 400000
+    capabilities: [function-calling, vision, json, reasoning]
+    source: "https://developers.openai.com/api/docs/pricing"
+    notes: "GPT-5.6 preview, cheapest tier ($1/$6). quality_score & context_window estimated — confirm."
+
+  - id: openai/gpt-5.4
+    provider: openai
+    tier: mid
+    quality_score: 0.90
+    price_per_1m_input_usd: 2.50
+    price_per_1m_output_usd: 15.00
+    latency_p50_ms: 1600
+    context_window: 400000
+    capabilities: [function-calling, vision, json, reasoning]
+    source: "https://developers.openai.com/api/docs/pricing"
+    notes: "Production workhorse. context_window estimated (repo token_budget.py uses 200000) — reconcile."
+
+  - id: openai/gpt-5.6-terra
+    provider: openai
+    tier: mid
+    quality_score: 0.90
+    price_per_1m_input_usd: 2.50
+    price_per_1m_output_usd: 15.00
+    latency_p50_ms: 1600
+    context_window: 400000
+    capabilities: [function-calling, vision, json, reasoning]
+    source: "https://developers.openai.com/api/docs/pricing"
+    notes: "GPT-5.6 preview, mid tier (matches 5.4 pricing). quality_score & context_window estimated — confirm."
+
+  - id: anthropic/claude-sonnet-5
+    provider: anthropic
+    tier: mid
+    quality_score: 0.91
+    price_per_1m_input_usd: 2.00
+    price_per_1m_output_usd: 10.00
+    latency_p50_ms: 1700
+    context_window: 1000000
+    capabilities: [function-calling, vision, json, reasoning]
+    source: "https://platform.claude.com/docs/en/about-claude/pricing"
+    notes: "Replaces claude-3.5-sonnet. INTRO pricing $2/$10 through 2026-08-31, then STANDARD $3/$15 — update on Sept 1. quality_score estimated."
+
+  - id: gemini/gemini-3-pro
+    provider: gemini
+    tier: mid
+    quality_score: 0.90
+    price_per_1m_input_usd: 2.00
+    price_per_1m_output_usd: 12.00
+    latency_p50_ms: 1800
+    context_window: 2000000
+    capabilities: [function-calling, vision, json, reasoning]
+    source: "https://ai.google.dev/gemini-api/docs/pricing"
+    notes: "Replaces google/gemini-1.5-pro. Slug google→gemini to match router. Price is ≤200K-context tier; >200K is $4/$18. quality_score estimated."
+
+  - id: gemini/gemini-3.5-flash
+    provider: gemini
+    tier: mid
+    quality_score: 0.84
+    price_per_1m_input_usd: 1.50
+    price_per_1m_output_usd: 9.00
+    latency_p50_ms: 1000
+    context_window: 1000000
+    capabilities: [function-calling, vision, json]
+    source: "https://ai.google.dev/gemini-api/docs/pricing"
+    notes: "Newer fast Gemini (launched 2026-05-19). Global rate; non-global ~$1.65/$9.90. quality_score estimated."
+
+  - id: xai/grok-4.3
+    provider: xai
+    tier: mid
+    quality_score: 0.89
+    price_per_1m_input_usd: 1.25
+    price_per_1m_output_usd: 2.50
+    latency_p50_ms: 1600
+    context_window: 2000000
+    capabilities: [function-calling, vision, json, reasoning]
+    source: "https://www.aipricing.guru/xai-pricing/"
+    notes: "Current Grok flagship (2026-04-30). Unusually low output ratio. quality_score estimated; confirm vs docs.x.ai."
+
+  - id: mistral/mistral-large-latest
+    provider: mistral
+    tier: mid
+    quality_score: 0.83
+    price_per_1m_input_usd: 2.00
+    price_per_1m_output_usd: 6.00
+    latency_p50_ms: 1600
+    context_window: 128000
+    capabilities: [function-calling, json]
+    source: "https://mistral.ai/pricing/"
+    notes: "Mistral Large 3. Official page $2/$6; some trackers list $0.50/$1.50 — confirm. id matches auto_profile.py."
+
+  - id: deepseek/deepseek-v4-pro
+    provider: deepseek
+    tier: mid
+    quality_score: 0.87
+    price_per_1m_input_usd: 1.74
+    price_per_1m_output_usd: 3.48
+    latency_p50_ms: 2000
+    context_window: 1000000
+    capabilities: [function-calling, json, reasoning]
+    source: "https://api-docs.deepseek.com/quick_start/pricing/"
+    notes: "V4 Pro flagship reasoning. Standard $1.74/$3.48; periodic 75% promo → $0.435/$0.87. quality_score estimated."
+
+  - id: perplexity/sonar
+    provider: perplexity
+    tier: mid
+    quality_score: 0.78
+    price_per_1m_input_usd: 1.00
+    price_per_1m_output_usd: 1.00
+    latency_p50_ms: 3500
+    context_window: 128000
+    capabilities: [web-grounded, citations]
+    notes: "Web-grounded; cost includes search backend"
+
+  # ─── PREMIUM tier ────────────────────────────────────────────────────
+  - id: anthropic/claude-fable-5
+    provider: anthropic
+    tier: premium
+    quality_score: 0.98
+    price_per_1m_input_usd: 10.0
+    price_per_1m_output_usd: 50.0
+    latency_p50_ms: 12000
+    context_window: 1000000
+    capabilities: [function-calling, vision, json, reasoning]
+    notes: "Frontier deep-reasoning tier — most sophisticated, most expensive. Reserve for very deep reasoning (deep_reasoning complexity)."
+
+  - id: anthropic/claude-opus-4-8
+    provider: anthropic
+    tier: premium
+    quality_score: 0.95
+    price_per_1m_input_usd: 5.00
+    price_per_1m_output_usd: 25.00
+    latency_p50_ms: 3000
+    context_window: 1000000
+    capabilities: [function-calling, vision, json, reasoning]
+    source: "https://platform.claude.com/docs/en/about-claude/pricing"
+    notes: "Replaces claude-3-opus ($15/$75). Adaptive thinking + effort controls. quality_score estimated."
+
+  - id: openai/o3
+    provider: openai
+    tier: premium
+    quality_score: 0.94
+    price_per_1m_input_usd: 2.00
+    price_per_1m_output_usd: 8.00
+    latency_p50_ms: 8000
+    context_window: 200000
+    capabilities: [function-calling, vision, json, reasoning]
+    source: "https://developers.openai.com/api/docs/pricing"
+    notes: "Reasoning tier. Repriced 2026-07-10 from stale $60/$240 → current $2/$8. Reasoning tokens billed at output rate."
+
+  # openai/gpt-5 (base) removed 2026-07-10 — delisted by OpenAI, superseded by gpt-5.5 / gpt-5.6-sol.
+
+  - id: openai/gpt-5.5
+    provider: openai
+    tier: premium
+    quality_score: 0.96
+    price_per_1m_input_usd: 5.00
+    price_per_1m_output_usd: 30.00
+    latency_p50_ms: 6500
+    context_window: 400000
+    capabilities: [function-calling, vision, json, reasoning]
+    source: "https://developers.openai.com/api/docs/pricing"
+    notes: "Current flagship. quality_score & context_window estimated — confirm."
+
+  - id: openai/gpt-5.6-sol
+    provider: openai
+    tier: premium
+    quality_score: 0.97
+    price_per_1m_input_usd: 5.00
+    price_per_1m_output_usd: 30.00
+    latency_p50_ms: 6500
+    context_window: 400000
+    capabilities: [function-calling, vision, json, reasoning]
+    source: "https://developers.openai.com/api/docs/pricing"
+    notes: "GPT-5.6 preview, top tier (matches 5.5 pricing). quality_score & context_window estimated — confirm."

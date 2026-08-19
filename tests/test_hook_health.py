@@ -216,12 +216,12 @@ def test_check_hook_permissions(temp_hooks_dir):
     hooks_dir = temp_hooks_dir
     
     # Executable hook
-    (hooks_dir / "llm-router-auto-route.py").write_text("# hook")
-    os.chmod(hooks_dir / "llm-router-auto-route.py", 0o755)
+    (hooks_dir / "llm_router-auto-route.py").write_text("# hook")
+    os.chmod(hooks_dir / "llm_router-auto-route.py", 0o755)
     
     # Non-executable hook
-    (hooks_dir / "llm-router-enforce-route.py").write_text("# hook")
-    os.chmod(hooks_dir / "llm-router-enforce-route.py", 0o644)
+    (hooks_dir / "llm_router-enforce-route.py").write_text("# hook")
+    os.chmod(hooks_dir / "llm_router-enforce-route.py", 0o644)
     
     status = check_hook_permissions()
     
@@ -236,8 +236,8 @@ def test_check_hook_permissions_missing_hook(temp_hooks_dir):
     
     # Record a missing hook (simulate it was once registered but deleted)
     status = {}
-    for file in hooks_dir.glob("llm-router-*.py"):
-        hook_name = file.stem.replace("llm-router-", "")
+    for file in hooks_dir.glob("llm_router-*.py"):
+        hook_name = file.stem.replace("llm_router-", "")
         status[hook_name] = "ok"
     
     # All created hooks should be ok
@@ -314,7 +314,7 @@ def test_cleanup_old_logs_handles_invalid_entries(temp_router_dir):
 
 
 def test_record_hook_error_creates_directory(temp_router_dir):
-    """Test that record_hook_error creates the .llm-router directory if it doesn't exist."""
+    """Test that record_hook_error creates the .llm_router directory if it doesn't exist."""
     # Remove the directory to test creation
     import shutil
     shutil.rmtree(temp_router_dir, ignore_errors=True)
