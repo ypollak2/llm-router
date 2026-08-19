@@ -64,7 +64,7 @@ async def llm_gemini(
 
 
 def register(mcp, should_register=None) -> None:
-    """Register Gemini CLI tool with the FastMCP instance."""
+    """Register Gemini CLI tool with the MCPServer instance."""
     gate = should_register or (lambda _: True)
     if gate("llm_gemini"):
         mcp.tool()(llm_gemini)

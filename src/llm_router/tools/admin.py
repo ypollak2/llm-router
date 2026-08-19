@@ -9,7 +9,7 @@ import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
-from mcp.server.fastmcp import Context
+from mcp.server.mcpserver import Context
 
 from llm_router.commands.gain import show_gain
 
@@ -1542,7 +1542,7 @@ async def llm_model_eval(ctx: Context) -> str:
 
 
 def register(mcp, should_register=None) -> None:
-    """Register management tools with the FastMCP instance.
+    """Register management tools with the MCPServer instance.
 
     Args:
         should_register: Optional callable(tool_name) -> bool for slim mode filtering.

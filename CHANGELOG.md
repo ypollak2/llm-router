@@ -14,6 +14,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 _Nothing yet._
 
+## [12.0.1] — Fix the install breakage introduced by `mcp` 2.0.0 (2026-08-19)
+
+Patch release, shipped alone and ahead of the next feature work, because 12.0.0 cannot be
+installed fresh.
+
+### Fixed
+
+- **`mcp` was pinned `>=1.0.0` with no upper bound.** `mcp` 2.0.0 removed
+  `mcp.server.fastmcp`, which seven modules here imported, so every fresh
+  `pip install` / `pipx install` resolved 2.0.0 and died during import — before a single tool
+  was registered. The client surfaced this as `CONNECTION_CLOSED`, which is what a network or
+  provider fault also looks like, so there was no way to tell the two apart from the outside.
+  The imports are ported to the 2.x API (`MCPServer`, `mcp.server.mcpserver`) and the pin is
+  now `mcp>=2.0.0,<3.0.0`. (#37)
+- **SECURITY.md claimed "Hooks cannot block core tools."** They can, and have since v13
+  enforcement landed; the document contradicted the shipped behaviour. Rewritten to describe
+  what the hook actually does. (#35)
+- **`agoragentic_*` tools registered unconditionally at server startup.** They are now behind
+  an explicit opt-in, so a routing install no longer exposes them by default. (#34)
+- **Filesystem tools were ungated.** `llm_fs_*` now requires the same explicit opt-in.
+
+### Added
+
+- Two tests that keep this from recurring, deliberately not one:
+  `test_pin_has_an_upper_bound` reads `pyproject.toml`, so a loosened pin fails in CI on the
+  commit that loosens it; `test_every_mcp_import_in_src_resolves` parses `src/` for real
+  `from mcp…` imports and checks each resolves against the *installed* package, so a partial
+  port to a future major fails too. Neither subsumes the other — the first passes against a
+  broken environment, the second passes against a dangerously loose pin that happens to
+  resolve today.
+
 ## [12.0.0] — Chuzom capability wave: execution ledger, quality/fallback split, capability-aware shadow routing, budget envelope, misroute audit + CLI (2026-08-02)
 
 > **Version note:** released as a major bump (v11.0.0 → v12.0.0) to mark the scale of the Chuzom capability wave, even though every routing-affecting behavior ships default-off or shadow-only.

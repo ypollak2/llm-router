@@ -1,6 +1,6 @@
 [project]
 name = "llm-routing"
-version = "12.0.0"
+version = "12.0.1"
 description = "Multi-LLM router MCP server — smart complexity routing, budget-aware model selection, 20+ providers (Claude, OpenAI, Gemini, Ollama, etc.)"
 readme = "README.md"
 license = "MIT"
@@ -22,7 +22,15 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 dependencies = [
-    "mcp>=1.0.0",
+    # UPPER BOUND IS LOAD-BEARING, and the floor moved with the port.
+    # mcp 2.0.0 removed `mcp.server.fastmcp` (its server submodules are
+    # auth/lowlevel/mcpserver); this tree now imports
+    # `mcp.server.mcpserver.MCPServer`, which is NOT present in 1.x. So the
+    # range is exact in both directions — 1.x and 3.x each break the import,
+    # in opposite ways.
+    # Guarded by tests/test_mcp_dependency_pin.py, whose _SUPPORTED_MAJOR must
+    # be raised in the same commit as any change here.
+    "mcp>=2.0.0,<3.0.0",
     "litellm>=1.50.0",
     "pydantic>=2.0",
     "pydantic-settings>=2.0",
