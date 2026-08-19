@@ -14,6 +14,75 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 _Nothing yet._
 
+## [13.0.0] — Upstream core sync: the routing engine, its guards, and four security fixes (2026-08-19)
+
+The package is now built from the upstream routing core, rebranded, rather than from a
+port of selected capabilities. 358 source files and 477 test files, ~4,956 identifiers.
+`scripts/sync_downstream.py` upstream is the reviewable artifact — the sync is
+reproducible, not a one-off copy.
+
+**6,695 tests passing, 0 failing.**
+
+### ⚠️ Breaking
+
+- **`requires-python` is now `>=3.11`** (was `>=3.10`). The synced source uses 3.11-only
+  stdlib. Leaving the floor at 3.10 would let a 3.10 user install code that cannot run —
+  a silent failure rather than a resolver error.
+- **`llm_router.audit_routing` is a different module.** It is now the live per-turn
+  compliance log. The post-hoc misroute **scorer** that used to live there —
+  `run_audit`, `score_decision`, `sample_unaudited_decisions`, `AuditedDecision` — moved
+  to **`llm_router.misroute_audit`**, unchanged. Both features exist; they simply stop
+  sharing a name. Update imports.
+
+  The two shared a path across the repositories, with disjoint APIs, and a file-level
+  copy in either direction would have deleted one of them in silence: no merge conflict,
+  no import error, no failing test. Renaming is what makes that impossible.
+- **`llm_router.observability` is a package, not a module.** Its OpenTelemetry layer is
+  at `llm_router.observability.core` and re-exported from the package, so
+  `observability.is_enabled()` and friends keep working. Direct imports of
+  `llm_router.summary` and `llm_router.surface_status` are now
+  `llm_router.observability.summary` / `.surface_status`.
+
+### Security
+
+- **The persistence redactor never shipped.** `persist_redact` lived under `enterprise/`,
+  which is excluded from public distributions, and five write paths — result cache,
+  semantic cache, idempotency, context, session store — imported it inside a `try/except`
+  that fell back to a scrubber carrying none of its patterns. Measured against the
+  published upstream package: JWTs, Slack tokens, emails, SSNs, phone numbers,
+  credit-card numbers and prose secrets all reached disk verbatim, 7 of 7.
+
+  The upstream suite was green throughout, including tests asserting exactly that those
+  secrets never reach disk — they passed because the development tree *has* `enterprise/`.
+  The control was only ever exercised in its strongest configuration. Fixed upstream and
+  carried here.
+- **SEC-002 layer 2 — path confinement — has landed.** `llm_fs_*` tools now reject paths
+  resolving outside `project_root`. 12.0.1 shipped only the opt-in gate.
+- **An optional tool group was a load-bearing import of the MCP server.** A build
+  excluding `agoragentic` could not import at all — `ModuleNotFoundError` before a single
+  tool registered, surfacing as `CONNECTION_CLOSED`, indistinguishable from a network
+  fault. Same shape as the mcp 2.0 breakage in #37.
+- **Reordering profiles resolved to no chain.** `SUBSCRIPTION_LOCAL` produced a
+  one-model chain containing only the paid seat — no fallback, and the exact inverse of a
+  profile whose purpose is preferring the free local bucket. `QUOTA_BALANCED` produced an
+  empty chain on the two paths that exist to guarantee a non-empty one.
+
+### Added
+
+Whole subsystems from the upstream core, including the agentic engine, control plane,
+policy runtime, semantic classification, quota and budget envelopes, the execution
+ledger's realized-savings accounting, and the `misroute_audit` scorer with
+`llm-router audit misroute`.
+
+`config/` (model registry, agents, signals) and `scripts/` (the CI guards) are now
+synced, so the checks that keep these fixes from regressing ship with the code.
+
+### Not included, by design
+
+`enterprise/`, `admin_api`, `invoice_reconciliation`, `tenant_policy_sidecar` and the
+agoragentic marketplace/wallet tools. Tests covering them are skipped with that reason
+rather than failing, so a red suite still means something is wrong.
+
 ## [12.0.1] — Fix the install breakage introduced by `mcp` 2.0.0 (2026-08-19)
 
 Patch release, shipped alone and ahead of the next feature work, because 12.0.0 cannot be
