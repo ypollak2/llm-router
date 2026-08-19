@@ -242,9 +242,15 @@ def test_pyproject_advertises_llm_router_binary():
     ROOT = Path(__file__).resolve().parent.parent.parent
     data = tomllib.loads((ROOT / "pyproject.toml").read_text())
     scripts = data["project"].get("scripts", {})
-    assert "llm_router" in scripts, "pyproject scripts must expose `llm_router` binary"
+    # Accepts the downstream command name too. This file is SYNCED, and there
+    # the console script is `llm-router` — while the sync rewrites `llm_router` to
+    # `llm_router`, the PYTHON PACKAGE, which is not a console script anywhere.
+    # One upstream name, two downstream ones, distinguishable only by context.
+    _CANDIDATES = ("llm_router", "llm-router", "llm-routing")
+    name = next((c for c in _CANDIDATES if c in scripts), None)
+    assert name, f"pyproject scripts must expose one of {_CANDIDATES}, got {sorted(scripts)}"
     # Sanity-check the entrypoint resolves
-    target = scripts["llm_router"]
+    target = scripts[name]
     module_path, func_name = target.split(":")
     import importlib
 

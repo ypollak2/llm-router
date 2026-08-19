@@ -40,7 +40,7 @@ except Exception:
     pass
 " 2>/dev/null)
 
-STATE_DIR="$HOME/.llm_router"
+STATE_DIR="$HOME/.llm-router"
 USAGE_JSON="$STATE_DIR/usage.json"
 USAGE_DB="$STATE_DIR/usage.db"
 

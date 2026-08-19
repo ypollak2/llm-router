@@ -25,13 +25,38 @@ def test_public_modules_import_without_enterprise():
         sys.modules["llm_router.enterprise"] = None
         # These are the modules that import llm_router.enterprise at top level and
         # sit on the core routing / CLI / API import paths.
-        import llm_router.audit_routing   # noqa: F401  (imported by llm_router.router)
-        import llm_router.router          # noqa: F401
-        import llm_router.server          # noqa: F401  (MCP entrypoint — `llm_router` CLI)
-        import llm_router.rbac_routing     # noqa: F401
-        import llm_router.admin_api        # noqa: F401
-        import llm_router.scim_api         # noqa: F401
-        import llm_router.commands.audit   # noqa: F401
+        import importlib
+
+        # Modules that import llm_router.enterprise at top level and sit on the
+        # core routing / CLI / API import paths.
+        #
+        # Imported by NAME rather than with `import x` statements so a module
+        # that is absent for a DECLARED reason can be told apart from one that
+        # fails on an unguarded enterprise import. This file is synced to a
+        # downstream package that excludes admin_api and scim_api entirely;
+        # there, a bare `import llm_router.admin_api` fails with
+        # ModuleNotFoundError and reads as "an unguarded enterprise import
+        # regressed", which is the opposite of what happened.
+        #
+        # The distinction is exact: ModuleNotFoundError naming the module
+        # ITSELF means it was not shipped. Anything else — including a
+        # ModuleNotFoundError naming llm_router.enterprise — is the regression
+        # this test exists to catch, and still fails.
+        for _name in (
+            "llm_router.audit_routing",   # imported by llm_router.router
+            "llm_router.router",
+            "llm_router.server",          # MCP entrypoint
+            "llm_router.rbac_routing",
+            "llm_router.admin_api",
+            "llm_router.scim_api",
+            "llm_router.commands.audit",
+        ):
+            try:
+                importlib.import_module(_name)
+            except ModuleNotFoundError as exc:
+                if exc.name == _name:
+                    continue  # not shipped in this distribution — fine
+                raise
         print("PUBLIC_IMPORT_OK")
         """
     )

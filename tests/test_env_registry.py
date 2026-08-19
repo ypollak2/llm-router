@@ -123,12 +123,39 @@ def test_the_scanner_cannot_see_indirect_reads():
         )
 
 
+def _owner_is_shipped(entry) -> bool:
+    """True if the module that reads this variable exists in this tree.
+
+    The registry records its owning file — ``("llm_router", "enterprise/audit.py",
+    1)``. A variable read only by a module that was not shipped is not a
+    phantom: nothing reads it because nothing that reads it is here.
+
+    This matters for redistributions built from a subset of the source, where
+    ``enterprise/``, ``admin_api`` and friends are excluded by design. Without
+    this, six perfectly correct entries were reported as fiction and the only
+    "fix" the message suggests — delete them — would have removed the
+    documentation for variables that work fine in the full distribution.
+    """
+    try:
+        relative = entry[1]
+    except (IndexError, TypeError):
+        return True  # malformed entry: let the other tests judge it
+    if not isinstance(relative, str) or not relative:
+        return True
+    return (Path(env_registry.__file__).parent / relative).exists()
+
+
 def test_the_registry_has_no_phantom_entries():
     """A registry that outlives its variables rots into fiction. An entry for a
     var nothing reads is as misleading as a missing one."""
     reads = _env_reads_in_source()
-    phantom = sorted(
+    candidates = (
         env_registry.registered_names() - set(reads) - _INDIRECT_READS
+    )
+    phantom = sorted(
+        name
+        for name in candidates
+        if _owner_is_shipped(env_registry.ENV_REGISTRY[name])
     )
     assert not phantom, (
         "declared but never read (delete these, or the registry stops describing "

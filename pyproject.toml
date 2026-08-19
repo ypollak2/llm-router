@@ -4,7 +4,7 @@ version = "12.0.1"
 description = "Multi-LLM router MCP server — smart complexity routing, budget-aware model selection, 20+ providers (Claude, OpenAI, Gemini, Ollama, etc.)"
 readme = "README.md"
 license = "MIT"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 authors = [
     { name = "ypollak2", email = "ypollak2@users.noreply.github.com" },
 ]
@@ -14,7 +14,6 @@ classifiers = [
     "Intended Audience :: Developers",
     "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
@@ -155,7 +154,10 @@ exclude = [
 # Quarantined by the 13.0.0 sync — see tests/_downstream_legacy/README.md.
 # Excluded from collection rather than deleted: each still describes behaviour
 # somebody tested, and the decision to drop that coverage is a human one.
-norecursedirs = ["_downstream_legacy"]
+# The quarantine lives at the repo ROOT (_quarantined_tests/), not under
+# tests/, so nothing that scans the test tree has to know about it. It was
+# inside tests/ first and the mutation-scope generator walked straight into
+# it, deriving an exclusion set that named quarantined files.
 testpaths = ["tests"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "session"

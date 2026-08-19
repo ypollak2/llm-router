@@ -304,7 +304,14 @@ class TestFactoryDroidManifest:
         import pathlib
         manifest = pathlib.Path(__file__).parent.parent / ".factory-plugin" / "plugin.json"
         data = json.loads(manifest.read_text())
-        assert data["name"] == "llm_router"
+        # The plugin name, accepting the downstream brand. This file is synced,
+        # and the rewrite maps `llm_router` to `llm_router` (the Python package)
+        # while the shipped manifest there is named `llm-router` (the brand).
+        # One upstream name, two downstream ones; the comparison has to know
+        # which kind it is looking at, and only the accepted set can say so.
+        assert data["name"] in ("llm_router", "llm-router", "llm-routing"), (
+            f"unexpected plugin name: {data['name']!r}"
+        )
         assert "version" in data
         assert "mcpServers" in data or "skills" in data
 

@@ -90,7 +90,7 @@ _CHUZOM_RE = re.compile(r"chuzom", re.IGNORECASE)
 #:
 #: They are excluded from pytest collection (`norecursedirs`) and are not
 #: runtime code. A runtime-code hit is still never allowlistable.
-ALLOW_DIRS: tuple[str, ...] = ("tests/_downstream_legacy/",)
+ALLOW_DIRS: tuple[str, ...] = ("_quarantined_tests/",)
 
 ALLOW_FILES: frozenset[str] = frozenset(
     {

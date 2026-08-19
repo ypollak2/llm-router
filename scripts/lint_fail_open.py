@@ -27,19 +27,30 @@ Exit 0 clean, 1 on any finding.
 from __future__ import annotations
 
 import ast
-import sys
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 
 #: WP-13's protected set. A silent failure in any of these either mis-reports
 #: money or silently changes a routing decision.
+#: Each entry is a TUPLE of acceptable paths for one module; the first that
+#: exists is checked. More than one path because a redistribution may relocate
+#: a module — `summary.py` becomes `observability/summary.py` downstream, where
+#: the top-level name is already a package and a module cannot sit beside a
+#: package of the same name.
+#:
+#: The gate fails closed on a missing protected module, which is correct: a
+#: security check that quietly stops covering something is worse than one that
+#: breaks. But it meant a legitimate relocation read as "protected module
+#: cannot be checked", and the only way to make that green would have been to
+#: drop the module from the protected set — losing the coverage to satisfy the
+#: gate, which is exactly backwards.
 PROTECTED = (
-    "src/llm_router/cost.py",
-    "src/llm_router/router.py",
-    "src/llm_router/execution_ledger.py",
-    "src/llm_router/dashboard_data.py",
-    "src/llm_router/summary.py",
+    ("src/llm_router/cost.py",),
+    ("src/llm_router/router.py",),
+    ("src/llm_router/execution_ledger.py",),
+    ("src/llm_router/dashboard_data.py",),
+    ("src/llm_router/summary.py", "src/llm_router/observability/summary.py"),
 )
 
 #: A handler is "traced" if its body does any of these. Deliberately broad --
@@ -151,12 +162,25 @@ def _records_a_failopen(handler: ast.ExceptHandler) -> bool:
     )
 
 
-def scan_returns(paths: tuple[str, ...] = PROTECTED) -> list[str]:
+def _resolve(candidates: tuple[str, ...]) -> tuple[str, "Path | None"]:
+    """First candidate path that exists, or (label, None) if none do.
+
+    The label is the whole candidate set so a MISSING finding names every place
+    the module was looked for, rather than only the first.
+    """
+    for rel in candidates:
+        path = REPO / rel
+        if path.exists():
+            return rel, path
+    return " | ".join(candidates), None
+
+
+def scan_returns(paths: tuple[tuple[str, ...], ...] = PROTECTED) -> list[str]:
     """CHZ-FO-02 — broad handlers that return live data without recording it."""
     findings: list[str] = []
-    for rel in paths:
-        p = REPO / rel
-        if not p.exists():
+    for candidates in paths:
+        rel, p = _resolve(candidates)
+        if p is None:
             findings.append(f"{rel}: MISSING (protected module cannot be checked)")
             continue
         src = p.read_text()
@@ -175,11 +199,11 @@ def scan_returns(paths: tuple[str, ...] = PROTECTED) -> list[str]:
     return findings
 
 
-def scan(paths: tuple[str, ...] = PROTECTED) -> list[str]:
+def scan(paths: tuple[tuple[str, ...], ...] = PROTECTED) -> list[str]:
     findings: list[str] = []
-    for rel in paths:
-        p = REPO / rel
-        if not p.exists():
+    for candidates in paths:
+        rel, p = _resolve(candidates)
+        if p is None:
             findings.append(f"{rel}: MISSING (protected module cannot be checked)")
             continue
         src = p.read_text()

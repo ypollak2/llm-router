@@ -60,9 +60,25 @@ REWRITES: list[tuple] = [
     # `_config.llm-router_claude_subscription`, which parses as a subtraction
     # and raised AttributeError at import. The bare form is too greedy to be
     # safe; the quoted and tilde forms are unambiguous.
+    # The home directory, in every form it is actually written. NOT a bare
+    # `.llm_router` rule — that also matches ATTRIBUTE ACCESS, and did:
+    # `_config.llm_router_claude_subscription` became
+    # `_config.llm-router_claude_subscription`, which parses as a subtraction.
+    #
+    # The enumeration is the price of that. Three forms were listed at first
+    # and two more turned up later, both inside a larger string where the
+    # quoted-literal rules could not see them:
+    #   STATE_DIR="$HOME/.llm-router"                 (statusline-command.sh)
+    #   <string>{home}/.llm-router/gateway.out.log    (gateway_service.py plist)
+    # Both silently became `.llm_router` — a directory nothing reads — so the
+    # statusline rendered with no savings segment at all.
     ('".llm-router"', '".llm-router"'),
     ("'.llm-router'", "'.llm-router'"),
     ("~/.llm-router", "~/.llm-router"),
+    ("$HOME/.llm-router", "$HOME/.llm-router"),
+    ("{home}/.llm-router", "{home}/.llm-router"),
+    ("{HOME}/.llm-router", "{HOME}/.llm-router"),
+    ("/.llm-router/", "/.llm-router/"),
     ("llm_router", "llm_router"),              # python package / module paths
     # `LLM Router` appears in two contexts that need OPPOSITE treatment, and a
     # single rule cannot serve both:
@@ -90,6 +106,41 @@ EXCLUDED_PATHS = {
 }
 EXCLUDED_DIRS = {"enterprise", "invoice_reconciliation", "__pycache__"}
 
+#: Test paths that must NOT sync, because they assert something that is true of
+#: THIS repository and false of the downstream one. Distinct from the
+#: availability skip: these import fine and run fine, they are just asserting
+#: the wrong thing.
+#:
+#: Both current entries are brand/packaging gates. `test_host_integrations`
+#: asserts "every reference must be 'llm_router', never 'llm-router'" — the exact
+#: mirror of downstream's own check_identity.py. Syncing it puts two
+#: opposite-polarity brand gates in one repository, which cannot both pass.
+#:
+#: It also runs into a rewrite ambiguity that has no mechanical answer:
+#: `llm_router` maps to BOTH `llm_router` (the Python package) and `llm-router`
+#: (the CLI and user-facing brand) depending on context, and a test asserting
+#: which one appears in a generated rules file needs the distinction the single
+#: rewrite rule cannot make.
+#:
+#: `test_plugin_packaging` asserts the shape of THIS repo's plugin manifests;
+#: downstream maintains its own, with its own verify-plugin-sync.py.
+EXCLUDED_TEST_PATHS = {
+    "integration/test_host_integrations.py",
+    "qa/test_plugin_packaging.py",
+    # Load bench/routerarena/… BY PATH, not by import, so the availability
+    # check cannot see the dependency — an import-graph walk is blind to
+    # spec_from_file_location. The bench tree is upstream's benchmark
+    # submission harness and is not downstream product surface.
+    #
+    # These two are here for a second reason worth stating: quarantining a file
+    # downstream does NOT survive the next sync. Moving them into
+    # tests/_downstream_legacy/ made the suite green and the very next
+    # `--tree tests` run offered to put them straight back. An exclusion has to
+    # live in the tooling; the quarantine directory is a record, not a barrier.
+    "test_deep_reasoning_classifier.py",
+    "test_routerarena_submit.py",
+}
+
 #: Import targets that do not exist downstream, because the module they name is
 #: excluded above or lives outside the synced trees. Any test importing one of
 #: these is skipped — a test for a capability that was deliberately not shipped
@@ -101,12 +152,12 @@ EXCLUDED_DIRS = {"enterprise", "invoice_reconciliation", "__pycache__"}
 #: 27 enterprise, 20 admin_api, 3 invoice_reconciliation, 1
 #: tenant_policy_sidecar.
 UNAVAILABLE_IMPORT_ROOTS = {
-    "llm_router.enterprise",
-    "llm_router.admin_api",
-    "llm_router.commands.admin_api",
-    "llm_router.invoice_reconciliation",
-    "llm_router.tenant_policy_sidecar",
-    "llm_router.tools.agoragentic",
+    # removed by sync: llm_router.enterprise is not shipped downstream
+    # removed by sync: llm_router.admin_api is not shipped downstream
+    # removed by sync: llm_router.commands.admin_api is not shipped downstream
+    # removed by sync: llm_router.invoice_reconciliation is not shipped downstream
+    # removed by sync: llm_router.tenant_policy_sidecar is not shipped downstream
+    # removed by sync: llm_router.tools.agoragentic is not shipped downstream
     # Repo-root dev helpers that live outside src/ and tests/, so the sync never
     # carries them. Their tests are upstream-development tooling, not downstream
     # product surface.
@@ -162,6 +213,8 @@ PATH_MAP_BY_TREE["src"] = {
 
 PATH_MAP_BY_TREE["tests"] = {}
 
+PATH_MAP_BY_TREE["config"] = {}
+
 PATH_MAP_BY_TREE["scripts"] = {
     # Upstream `scripts/release.py` collides with downstream's `scripts/release/`
     # PACKAGE — caught by the structural check on the very first scripts run,
@@ -215,6 +268,9 @@ def _check_rewrite_order() -> list[str]:
     return problems
 
 
+_unavailable_cache: set[str] = set()
+
+
 def _imports_unavailable_module(text: str) -> str | None:
     """The import root that makes this file unshippable, or None.
 
@@ -226,40 +282,242 @@ def _imports_unavailable_module(text: str) -> str | None:
         tree = ast.parse(text)
     except SyntaxError:
         return None
-    for node in ast.walk(tree):
-        names: list[str] = []
-        if isinstance(node, ast.ImportFrom) and node.module:
-            names.append(node.module)
-        elif isinstance(node, ast.Import):
-            names.extend(a.name for a in node.names)
-        for name in names:
-            for root in UNAVAILABLE_IMPORT_ROOTS:
-                if name == root or name.startswith(root + "."):
-                    return root
+    for name in _hard_imports(tree):
+        for root in _unavailable_cache:
+            if name == root or name.startswith(root + "."):
+                return root
     return None
+
+
+def _is_type_checking(test: ast.expr) -> bool:
+    """True for `TYPE_CHECKING` / `typing.TYPE_CHECKING` guards."""
+    if isinstance(test, ast.Name):
+        return test.id == "TYPE_CHECKING"
+    if isinstance(test, ast.Attribute):
+        return test.attr == "TYPE_CHECKING"
+    return False
+
+
+def _hard_imports(tree: ast.AST) -> set[str]:
+    """Imports that are NOT optional — i.e. not inside a try/except ImportError.
+
+    A guarded import is a declared optional dependency::
+
+        try:
+            from llm_router.enterprise.audit import AuditLog
+        except ImportError:      # enterprise/ is not in public distributions
+            AuditLog = None
+
+    Counting those as hard dependencies made the transitive closure absurd: 9
+    excluded roots expanded to 66 modules INCLUDING ``llm_router.__init__``, which
+    would have marked essentially the whole package unavailable and skipped
+    every test. The guard is the module telling you it copes without the thing.
+
+    MODULE SCOPE ONLY, for the same reason. ``ast.walk`` finds imports at any
+    depth, including inside function bodies — and a function-local import is
+    DEFERRED, not a load-time dependency::
+
+        def _route(...):
+            ...
+            if rbac_skipped and not chain_attempts:
+                from llm_router.enterprise.rbac import Permission   # only on this path
+
+    ``import llm_router.router`` succeeds perfectly well without ``enterprise``;
+    only that one error branch would fail. Treating it as a hard dependency was
+    what still poisoned the closure to 52 modules after the try/except fix, via
+    the chain __init__ -> sdk -> gateway -> route_server -> router ->
+    enterprise.rbac. Every link real, the conclusion wrong.
+    """
+    names: set[str] = set()
+
+    def visit(body: list, inside_try: bool) -> None:
+        for node in body:
+            if isinstance(
+                node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+            ):
+                continue  # deferred: not required to import this module
+            if isinstance(node, ast.Try):
+                # A try with handlers makes its imports optional by construction.
+                optional = inside_try or bool(node.handlers)
+                visit(node.body, optional)
+                for handler in node.handlers:
+                    visit(handler.body, optional)
+                visit(node.orelse, optional)
+                visit(node.finalbody, inside_try)
+                continue
+            if isinstance(node, ast.If) and _is_type_checking(node.test):
+                # `if TYPE_CHECKING:` never executes. identity.py declares
+                # `from llm_router.enterprise.rbac import Permission` there purely
+                # for annotations, and counting it made identity -> audit_routing
+                # -> router -> server all look unavailable while every one of
+                # them imports fine in reality. The empirical check
+                # (`import llm_router.router` succeeds) is what exposed it.
+                visit(node.orelse, inside_try)
+                continue
+            if isinstance(node, (ast.If, ast.With, ast.AsyncWith, ast.For, ast.While)):
+                visit(node.body, inside_try)
+                visit(getattr(node, "orelse", []), inside_try)
+                continue
+            if inside_try:
+                continue
+            if isinstance(node, ast.ImportFrom) and node.module:
+                names.add(node.module)
+                # `from llm_router.control_plane import audit` depends on
+                # `llm_router.control_plane.audit`, not just on the package. The
+                # module-path-only version missed exactly that form and let two
+                # tests for an excluded capability through — the same
+                # name-versus-path gap that the import REWRITER hit separately.
+                # Recording both means neither syntax hides a dependency.
+                for alias in node.names:
+                    names.add(f"{node.module}.{alias.name}")
+            elif isinstance(node, ast.Import):
+                names.update(a.name for a in node.names)
+
+    visit(getattr(tree, "body", []), False)
+    return names
+
+
+def _transitively_unavailable() -> set[str]:
+    """Upstream modules that reach an excluded capability, at any depth.
+
+    ``_imports_unavailable_module`` only sees DIRECT imports, so a test
+    importing ``llm_router.control_plane`` — which itself imports
+    ``llm_router.enterprise`` — sailed through the skip and then failed at runtime
+    with ``No module named 'llm_router.enterprise'``. 39 of the 165 remaining
+    failures were that one gap.
+
+    Closed by walking the upstream source tree's import graph to a fixed point:
+    a module is unavailable if it imports an excluded root OR imports a module
+    that is already known unavailable. Iterating to a fixed point rather than
+    one extra level, because "one level deeper" is the same mistake with a
+    larger constant.
+    """
+    src_root = UPSTREAM_ROOT / "src" / "llm_router"
+    imports: dict[str, set[str]] = {}
+    for path in src_root.rglob("*.py"):
+        if "__pycache__" in path.parts:
+            continue
+        mod = "llm_router." + str(path.relative_to(src_root)).removesuffix(".py").replace(
+            "/", "."
+        ).removesuffix(".__init__")
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+        except (OSError, SyntaxError):
+            continue
+        imports[mod] = _hard_imports(tree)
+
+    bad = set(UNAVAILABLE_IMPORT_ROOTS)
+    changed = True
+    while changed:
+        changed = False
+        for mod, names in imports.items():
+            if mod in bad:
+                continue
+            if any(n == b or n.startswith(b + ".") for n in names for b in bad):
+                bad.add(mod)
+                changed = True
+    return bad
+
+
+#: Declarative module lists that must lose their excluded entries on the way
+#: down. Value is a marker that identifies the list in the source.
+_CRITICAL_LIST_MARKERS = ("_CRITICAL_MODULES",)
+
+#: `assert "llm_router.x" in server._CRITICAL_MODULES` — the assertion that pins a
+#: list entry. Matched alongside the entry itself so the two stay consistent.
+_CRITICAL_ASSERT_RE = re.compile(
+    r"""assert\s+["'](?P<name>llm_router[\w.]*)["']\s+in\s+\w*\.?_CRITICAL_MODULES"""
+)
+
+
+def _drop_excluded_from_critical_lists(text: str) -> str:
+    """Remove excluded modules from `_CRITICAL_MODULES`-style tuples.
+
+    `server._critical_modules_or_die` refuses to boot if any listed module is
+    missing. Upstream lists `llm_router.admin_api` and
+    `llm_router.invoice_reconciliation`, and upstream SHIPS both — verified against
+    the published package — so the check is correct there.
+
+    Downstream excludes them. Copying the list verbatim therefore produces a
+    server that cannot start, with a message telling the user to reinstall,
+    which would not help.
+
+    This is a cost of the exclusion decision that 36_DOWNSTREAM_SYNC_PLAN §1
+    did not capture: it measured "five import sites to sever" and missed a
+    startup gate that hard-fails. Worth recording, because the same shape was
+    already fixed once for `enterprise/` — the comment above
+    `_ENTERPRISE_CRITICAL_MODULES` says requiring it universally "made the
+    published MCP server refuse to boot". Same defect, second cause, and the
+    existing fix did not generalise.
+
+    Line-based on purpose: these lists are one module string per line, and a
+    parse-and-rewrite would be far more machinery for a strictly smaller set of
+    inputs.
+    """
+    if not any(marker in text for marker in _CRITICAL_LIST_MARKERS):
+        return text
+    excluded = tuple(UNAVAILABLE_IMPORT_ROOTS)
+
+    def _is_excluded(name: str) -> bool:
+        return any(name == e or name.startswith(e + ".") for e in excluded)
+
+    out: list[str] = []
+    for line in text.splitlines(keepends=True):
+        stripped = line.strip()
+        indent = " " * (len(line) - len(line.lstrip()))
+
+        # The list ENTRY itself: one quoted module per line.
+        if stripped.startswith(('"llm_router.', "'llm_router.")) and stripped.endswith(","):
+            name = stripped.strip("\"',")
+            if _is_excluded(name):
+                out.append(f"{indent}# removed by sync: {name} is not shipped downstream\n")
+                continue
+
+        # And the TEST that pins it. Dropping the entry without dropping its
+        # assertion just moves the failure from the server to the suite —
+        # `assert "llm_router.admin_api" in server._CRITICAL_MODULES` fails on a
+        # list the sync itself edited, which is a self-inflicted red.
+        match = _CRITICAL_ASSERT_RE.match(stripped)
+        if match and _is_excluded(match.group("name")):
+            out.append(
+                f"{indent}# removed by sync: {match.group('name')} is not "
+                f"shipped downstream, so it is not a critical module here\n"
+            )
+            continue
+
+        out.append(line)
+    return "".join(out)
 
 
 def _import_rewrites() -> list[tuple[str, str]]:
     """Import-path rewrites implied by PATH_MAP, derived rather than restated.
 
     Moving a file is only half a relocation. ``summary.py`` ->
-    ``observability/summary.py`` also means every ``from llm_router.summary
+    ``observability/summary.py`` also means every ``from llm_router.observability.summary
     import …`` has to become ``from llm_router.observability.summary import …``,
     and the first version of this script did the move without the imports — 4
     test modules failed to collect with ``No module named
-    'llm_router.summary'``.
+    'llm_router.observability.summary'``.
 
     Derived from PATH_MAP so the two can never disagree. Restating them as a
     second hand-written list is how a later PATH_MAP entry gets a file move with
     no matching import fix.
 
     Each pattern ends in a negative lookahead so a package rename does not eat
-    its own children: ``llm_router.observability`` -> ``…observability.core``
+    its own children: ``llm_router.observability.core`` -> ``…observability.core``
     must NOT turn ``llm_router.observability.summary`` into
     ``llm_router.observability.core.summary``.
     """
+    # ALWAYS derived from the src map, whatever tree is being synced.
+    #
+    # File relocation is per-tree; IMPORT rewriting is not. A test file has no
+    # relocations of its own, but its imports name src modules — so syncing
+    # tests/ with the (empty) tests path map produced
+    # `from llm_router.observability.summary import …` untouched, and six modules failed to
+    # collect. Conflating "where does this file go" with "what does this file
+    # import" is the same mistake in two directions.
     out: list[tuple[str, str]] = []
-    for src_rel, dst_rel in PATH_MAP.items():
+    for src_rel, dst_rel in PATH_MAP_BY_TREE["src"].items():
         src_mod = "llm_router." + src_rel.removesuffix(".py").replace("/", ".")
         dst_mod = "llm_router." + dst_rel.removesuffix(".py").replace("/", ".")
         if src_mod == dst_mod:
@@ -268,8 +526,8 @@ def _import_rewrites() -> list[tuple[str, str]]:
 
         # A relocated module is also imported as a NAME from its old parent:
         #
-        #     from llm_router import surface_status        <- this form
-        #     from llm_router.surface_status import …      <- the form above
+        #     from llm_router.observability import surface_status        <- this form
+        #     from llm_router.observability.surface_status import …      <- the form above
         #
         # The path rule alone misses the first, and three test modules failed to
         # collect with `cannot import name 'surface_status' from 'llm_router'`.
@@ -300,8 +558,8 @@ def rewrite(text: str) -> str:
     # ONE pass over all import rules, via alternation.
     #
     # Applying them sequentially let each rule rewrite the previous rule's
-    # OUTPUT. `from llm_router import surface_status` correctly became
-    # `from llm_router.observability import surface_status`, and then the
+    # OUTPUT. `from llm_router.observability import surface_status` correctly became
+    # `from llm_router.observability.core import surface_status`, and then the
     # `observability -> observability.core` rule fired on that result and
     # produced `from llm_router.observability.core import surface_status`,
     # which does not exist. Every ordering fixed one pair and broke another,
@@ -370,6 +628,8 @@ def _iter_upstream_files():
         rel = str(path.relative_to(UPSTREAM_SRC))
         if rel in EXCLUDED_PATHS:
             continue
+        if UPSTREAM_SRC.name == "tests" and rel in EXCLUDED_TEST_PATHS:
+            continue
         if path.suffix in {".pyc", ".pyo", ".db", ".sqlite3"}:
             continue
         yield path, rel
@@ -382,7 +642,7 @@ def main() -> int:
     parser.add_argument("--verbose", action="store_true")
     parser.add_argument(
         "--tree",
-        choices=("src", "tests", "scripts"),
+        choices=("src", "tests", "scripts", "config"),
         default="src",
         help=(
             "which tree to sync. One at a time, deliberately: the three fail "
@@ -404,10 +664,18 @@ def main() -> int:
         "src": UPSTREAM_ROOT / "src" / "llm_router",
         "tests": UPSTREAM_ROOT / "tests",
         "scripts": UPSTREAM_ROOT / "scripts",
+        # Product DATA the package reads at runtime — the model registry
+        # (models.yaml), agent definitions (agents.yaml), signal weights.
+        # Not repo furniture: without it, model-registry freshness and agent
+        # loading fail downstream with "config/models.yaml not found".
+        # `deploy/` and `Docs/` are deliberately NOT trees here — a helm chart
+        # and a planning doc are upstream's, not this package's.
+        "config": UPSTREAM_ROOT / "config",
     }[args.tree]
 
-    global PATH_MAP
+    global PATH_MAP, _unavailable_cache
     PATH_MAP = PATH_MAP_BY_TREE[args.tree]
+    _unavailable_cache = _transitively_unavailable()
 
     order_problems = _check_rewrite_order()
     if order_problems:
@@ -420,6 +688,7 @@ def main() -> int:
         "src": args.downstream / "src" / "llm_router",
         "tests": args.downstream / "tests",
         "scripts": args.downstream / "scripts",
+        "config": args.downstream / "config",
     }[args.tree]
     if not dst_pkg.exists():
         print(f"no downstream target at {dst_pkg}", file=sys.stderr)
@@ -498,16 +767,38 @@ def main() -> int:
         # this rule to src/ dropped 19 working modules on its first run.
         # A TEST has no such fallback: it imports the thing it exists to
         # exercise, and without it the module cannot even be collected.
+        # Applies to BOTH trees, now that the closure is accurate.
+        #
+        # For tests: a test for a capability that was not shipped is not a
+        # failure, it is a test that should not have travelled.
+        # For src: a module that requires an excluded capability AT MODULE
+        # LEVEL cannot import downstream at all — control_plane/audit.py does
+        # `from llm_router.enterprise... import` unguarded on line 17, so shipping
+        # it just moves the ImportError somewhere less obvious.
+        #
+        # This was restricted to tests earlier for a good reason: the FIRST
+        # closure was wrong (it counted guarded and TYPE_CHECKING imports) and
+        # applying it to src/ dropped 19 working modules. The rule was never
+        # the problem; the closure was. With the closure down from 66 to 14 —
+        # all of them genuinely excluded capabilities — it is safe both sides.
         unavailable = (
             _imports_unavailable_module(content)
-            if args.tree == "tests" and src_path.suffix == ".py"
+            if src_path.suffix == ".py"
             else None
         )
         if unavailable:
             skipped_unavailable.append(f"{rel} (imports {unavailable})")
             continue
 
-        new_content = rewrite(content)
+        # BEFORE rewrite(): the drop matches on `llm_router.` prefixes, and after
+        # the rewrite those are `llm_router.` — the first version ran it after
+        # and matched nothing, silently.
+        pre = (
+            _drop_excluded_from_critical_lists(content)
+            if src_path.suffix == ".py"
+            else content
+        )
+        new_content = rewrite(pre)
         if target.suffix == ".py":
             problem = _still_parses(content, new_content, rel)
             if problem:

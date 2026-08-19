@@ -19,7 +19,7 @@ _REPO = Path(__file__).resolve().parent.parent
 def test_launchd_plist_uses_given_paths_not_hardcoded():
     out = render_launchd_plist("/opt/venv/bin/python", Path("/home/alice"))
     assert "/opt/venv/bin/python" in out
-    assert "/home/alice/.llm_router/gateway.out.log" in out
+    assert "/home/alice/.llm-router/gateway.out.log" in out
     assert f"<string>{LABEL}</string>" in out
     assert "<key>LLM_ROUTER_DISABLE_SUBPROCESS_BACKENDS</key><string>codex,gemini_cli</string>" in out
     # No author-specific paths leaked in.

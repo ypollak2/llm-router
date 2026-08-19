@@ -133,7 +133,10 @@ class TestTheGateIsCleanAndCanStillFail:
         bad.write_text(THE_ORIGINAL_FAIL_OPEN)
         # scan_returns resolves paths against REPO, so point REPO at tmp_path.
         g.REPO = tmp_path
-        findings = g.scan_returns(("bad.py",))
+        # Each entry is a TUPLE of candidate paths for one module — the gate
+        # accepts alternatives so a relocated module stays covered instead of
+        # reading as MISSING.
+        findings = g.scan_returns((("bad.py",),))
         assert len(findings) == 1, findings
         assert "without failopen.record" in findings[0]
 
@@ -141,5 +144,5 @@ class TestTheGateIsCleanAndCanStillFail:
         """Silently skipping an unreadable file is how a gate reports clean while blind."""
         g = _gate()
         g.REPO = tmp_path
-        findings = g.scan_returns(("does_not_exist.py",))
+        findings = g.scan_returns((("does_not_exist.py",),))
         assert findings and "MISSING" in findings[0]

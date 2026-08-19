@@ -423,18 +423,41 @@ def _parse_router_demo_output(output: str, run_id: str = "") -> dict[str, Any]:
     return result
 
 
-def _llm_router_binary() -> str:
-    """Return the path to the llm_router binary co-located with sys.executable.
+#: Console-script names this test may find, in preference order.
+#:
+#: More than one because this file is SYNCED to the downstream package, where
+#: the entry point is `llm-router` (hyphenated) — and the sync rewrites
+#: `llm_router` to `llm_router`, the PYTHON PACKAGE name, which is not a console
+#: script anywhere. The resolver then found nothing, fell back to the bare
+#: name, and every subprocess call returned None with "Failed to route".
+#:
+#: One upstream name maps to two downstream ones (`llm_router` the package,
+#: `llm-router` the command) and only context tells them apart, which is
+#: precisely what a text rewrite cannot do. Listing the candidates here is the
+#: fix that survives the sync; patching the generated file downstream would be
+#: reverted by the next one.
+_BINARY_CANDIDATES = ("llm_router", "llm-router", "llm-routing")
 
-    In a venv, sys.executable is /path/to/venv/bin/python and the llm_router
-    entry point is /path/to/venv/bin/llm_router. Falling back to the bare
-    'llm_router' name allows CI environments where the bin dir is on PATH.
+
+def _llm_router_binary() -> str:
+    """Return the path to the console script co-located with sys.executable.
+
+    In a venv, sys.executable is /path/to/venv/bin/python and the entry point
+    is /path/to/venv/bin/<name>. Falling back to a bare name allows CI
+    environments where the bin dir is on PATH.
     """
     import shutil
-    candidate = Path(sys.executable).parent / "llm_router"
-    if candidate.exists():
-        return str(candidate)
-    return shutil.which("llm_router") or "llm_router"
+
+    bindir = Path(sys.executable).parent
+    for name in _BINARY_CANDIDATES:
+        candidate = bindir / name
+        if candidate.exists():
+            return str(candidate)
+    for name in _BINARY_CANDIDATES:
+        found = shutil.which(name)
+        if found:
+            return found
+    return _BINARY_CANDIDATES[0]
 
 
 def _run_llm_router_cmd(args: list[str]) -> str:

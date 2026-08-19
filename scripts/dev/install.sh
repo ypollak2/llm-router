@@ -164,13 +164,22 @@ fi
 echo ""
 echo "Done! Restart Claude Code to load the LLM Router MCP server."
 echo ""
+# The tool list is PRINTED FROM THE SOURCE, not hardcoded.
+#
+# It used to be eight literal echo lines, which CHZ-SURF-01 flagged — rightly.
+# Which tools exist depends on LLM_ROUTER_SLIM, so a fixed list tells a user
+# on a slim tier that tools are available which were never registered, at the
+# exact moment they are deciding what to try first.
+#
+# Falls back to a pointer rather than a stale list if the package cannot be
+# imported yet: naming no tools is honest, naming the wrong ones is not.
 echo "Available tools after restart:"
-echo "  llm_query     — General questions (auto-routed)"
-echo "  llm_research  — Search-augmented (Perplexity)"
-echo "  llm_generate  — Content creation (Gemini/GPT)"
-echo "  llm_analyze   — Deep analysis (GPT/o3)"
-echo "  llm_code      — Coding tasks (GPT/Gemini)"
-echo "  llm_set_profile — Switch budget/balanced/premium"
-echo "  llm_usage     — View cost & token stats"
-echo "  llm_health    — Provider health status"
+if ! python3 -c "
+from llm_router.tool_surface import route_tool  # noqa
+import llm_router.tool_surface as ts
+names = getattr(ts, 'active_tool_names', None)
+print('\n'.join(f'  {n}' for n in names())) if callable(names) else exit(1)
+" 2>/dev/null; then
+    echo "  (run \`llm-router doctor\` after restart for the active tool list)"
+fi
 echo ""

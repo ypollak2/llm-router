@@ -237,22 +237,39 @@ def test_live_user_config_inspectable():
 # at one set; the other set is dormant.
 # ────────────────────────────────────────────────────────────────────────
 
-def test_hooks_dir_can_hold_both_llm_router_and_llm_router(tmp_path: Path):
-    """Simulate a hooks dir holding both. LLM Router's tooling must
-    discriminate by filename prefix, not by directory contents."""
+#: The two hook prefixes that must coexist in one ~/.claude/hooks/ directory.
+#:
+#: Named OURS/THEIRS rather than after the products, because this file is
+#: synced downstream and the rewrite maps `llm_router` to `llm_router`. With the
+#: products named in the VARIABLES, both `llm_router_hooks` and `llm_router_hooks`
+#: became `llm_router_hooks` — one name bound twice in one scope — and the
+#: final assertion compared a value to ITSELF and could never fail.
+#:
+#: That is the worst outcome available: not an error, not a skip, a test that
+#: still runs and asserts nothing. Neutral names make the collision impossible.
+_OURS_PREFIX = "llm_router"
+_THEIRS_PREFIX = "llm-router"
+
+
+def test_hooks_dir_can_hold_both_prefixes(tmp_path: Path):
+    """Simulate a hooks dir holding both. The tooling must discriminate by
+    filename prefix, not by directory contents."""
+    assert _OURS_PREFIX != _THEIRS_PREFIX, (
+        "the two prefixes collapsed to one name — a rewrite has merged them, "
+        "and every assertion below would compare a value to itself"
+    )
+
     hooks_dir = tmp_path / "hooks"
     hooks_dir.mkdir()
-    (hooks_dir / "llm-router-auto-route.py").write_text("# legacy hook")
-    (hooks_dir / "llm_router-auto-route.py").write_text("# llm_router hook")
+    (hooks_dir / f"{_THEIRS_PREFIX}-auto-route.py").write_text("# their hook")
+    (hooks_dir / f"{_OURS_PREFIX}-auto-route.py").write_text("# our hook")
 
-    llm_router_hooks = list(hooks_dir.glob("llm_router-*.py"))
-    llm_router_hooks = list(hooks_dir.glob("llm-router-*.py"))
+    ours = list(hooks_dir.glob(f"{_OURS_PREFIX}-*.py"))
+    theirs = list(hooks_dir.glob(f"{_THEIRS_PREFIX}-*.py"))
 
-    assert len(llm_router_hooks) == 1
-    assert len(llm_router_hooks) == 1
-    assert (
-        llm_router_hooks[0].name != llm_router_hooks[0].name
-    ), "Filename prefixes must be distinct"
+    assert len(ours) == 1
+    assert len(theirs) == 1
+    assert ours[0].name != theirs[0].name, "Filename prefixes must be distinct"
 
 
 # ────────────────────────────────────────────────────────────────────────

@@ -37,6 +37,21 @@ _RESET = "\033[0m"
 _BOLD = "\033[1m"
 
 
+#: The wordmark, SPACED FROM A CONSTANT rather than written out letter by
+#: letter.
+#:
+#: It used to be the literal `C  H  U  Z  O  M`. That form contains no
+#: substring `llm_router`, so nothing that searches for the brand can see it —
+#: not the downstream sync's rewrite, and not the identity gate that exists
+#: to catch exactly this. The banner kept printing the upstream brand in a
+#: redistribution while every automated check reported clean.
+#:
+#: Deriving it from the package name means the rewrite reaches it like any
+#: other occurrence, and the gate can find it if it ever drifts again.
+_BRAND = "llm_router"
+_WORDMARK = "  ".join(_BRAND.upper())
+
+
 def _fg(r: int, g: int, b: int) -> str:
     return f"\033[38;2;{r};{g};{b}m"
 
@@ -153,7 +168,7 @@ def _frame_painting(art: str) -> str:
         coloured.append(f"{_fg(r, g, b)}{line}{_RESET}")
 
     wordmark = (
-        f"\n           {_BOLD}{_ACCENT}⚡ C  H  U  Z  O  M  ⚡{_RESET}"
+        f"\n           {_BOLD}{_ACCENT}⚡ {_WORDMARK} ⚡{_RESET}"
         f"   {_TEXT_DIM}— meeting of rivers, routing intelligence{_RESET}\n"
         f"           {_TEXT_DIM}three stupas guard every confluence  ·  every prompt finds its current{_RESET}"
     )
@@ -252,7 +267,7 @@ def _render_procedural_painting() -> str:
     # ── Wordmark + tagline ───────────────────────────────────────────
     lines.append("")
     lines.append(
-        f"           {_BOLD}{_ACCENT}⚡ C  H  U  Z  O  M  ⚡{_RESET}"
+        f"           {_BOLD}{_ACCENT}⚡ {_WORDMARK} ⚡{_RESET}"
         f"   {_TEXT_DIM}— meeting of rivers, routing intelligence{_RESET}"
     )
     lines.append(

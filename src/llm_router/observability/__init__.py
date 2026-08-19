@@ -29,6 +29,7 @@ from llm_router.observability.core import (  # noqa: F401
     emit_budget_breach,
     emit_pii_catch,
     emit_routing_decision,
+    _record_to_attributes,
     install_in_memory_exporter_for_test,
     is_enabled,
     reset_for_test,
@@ -38,6 +39,10 @@ from llm_router.observability.core import (  # noqa: F401
 
 __all__ = [
     "surface_status",
+    # Private, but re-exported deliberately: upstream tests reach for it
+    # because upstream this is a MODULE, and a relocation that drops the
+    # private surface is still a half-relocation.
+    "_record_to_attributes",
     "emit_budget_breach",
     "emit_pii_catch",
     "emit_routing_decision",

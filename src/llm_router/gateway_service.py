@@ -44,8 +44,8 @@ def render_launchd_plist(
     </dict>
     <key>KeepAlive</key><true/>
     <key>RunAtLoad</key><true/>
-    <key>StandardOutPath</key><string>{home}/.llm_router/gateway.out.log</string>
-    <key>StandardErrorPath</key><string>{home}/.llm_router/gateway.err.log</string>
+    <key>StandardOutPath</key><string>{home}/.llm-router/gateway.out.log</string>
+    <key>StandardErrorPath</key><string>{home}/.llm-router/gateway.err.log</string>
 </dict>
 </plist>
 """
