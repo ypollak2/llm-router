@@ -377,7 +377,7 @@ async def save_session_summary(
     # Safe-failure: on any redaction error, store a placeholder rather than the
     # raw text, so a scrubber bug can never leak the original.
     try:
-        from llm_router.enterprise.redaction import persist_redact
+        from llm_router.persist_redaction import persist_redact
         safe_summary = persist_redact(summary)
     except Exception as _redact_err:  # noqa: BLE001
         log.warning("session_summary_redaction_failed", error=str(_redact_err))

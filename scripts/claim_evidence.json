@@ -1,0 +1,39 @@
+{
+  "_comment": "Claim-evidence registry (correctness-reset Phase 6, INV-CLAIM-001..004). Every numeric/absolute PUBLIC claim must have an entry here whose status is 'supported' (with reproducible evidence) or 'unsupported' (then the claim text must carry no numeric magnitude). The validator (validate_claim_evidence.py) enforces the rules and is a CI gate. A real control-group benchmark (Phase 8) is required before a savings magnitude may be marked supported.",
+  "allowed_metrics": [
+    "net_verified_token_reduction_percent",
+    "real_metered_dollars_avoided_usd",
+    "task_success_rate",
+    "quality_non_inferiority"
+  ],
+  "claims": [
+    {
+      "claim_id": "CLAIM-SAVINGS-001",
+      "claim_text": "Cost savings — routes offloadable work to cheaper models; magnitude depends on workload",
+      "numeric": false,
+      "status": "unsupported",
+      "reason": "No reproducible control-group (LLM Router-off vs on) benchmark exists yet; the prior '35-80% proven' figure was retracted. A magnitude may be asserted only once Phase 8 (control-group benchmark) produces a BENCH artifact.",
+      "benchmark_id": null,
+      "metric": "net_verified_token_reduction_percent",
+      "host_mode": null,
+      "expires_after_days": null,
+      "last_verified_at": null
+    },
+    {
+      "claim_id": "CLAIM-ZEROCLAUDE-001",
+      "claim_text": "block / zero-Claude prevents a Claude turn on a self-contained prompt",
+      "numeric": false,
+      "status": "supported",
+      "reason": "Behavioral guarantee verified by objective tests (not a savings magnitude).",
+      "benchmark_id": "TESTSUITE",
+      "evidence_tests": [
+        "tests/test_zero_claude_bypass.py",
+        "tests/test_zero_claude_sidecar_bypass.py"
+      ],
+      "metric": "task_success_rate",
+      "host_mode": null,
+      "expires_after_days": 365,
+      "last_verified_at": "2026-07-26"
+    }
+  ]
+}

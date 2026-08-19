@@ -238,7 +238,11 @@ def test_result_cache_safe_failure_never_persists_raw_on_redaction_error(tmp_pat
     def _boom(_text):
         raise RuntimeError("redactor exploded")
 
-    monkeypatch.setattr("llm_router.enterprise.redaction.persist_redact", _boom)
+    # Patch the CANONICAL module, not the enterprise back-compat shim: the
+    # persistence paths import from llm_router.persist_redaction, so patching the
+    # shim attribute leaves the real function in place and the test asserts
+    # nothing.
+    monkeypatch.setattr("llm_router.persist_redaction.persist_redact", _boom)
 
     rc.store_result(
         "prompt marker UNSAFEFAILUREMARKER000",
@@ -376,7 +380,11 @@ async def test_semantic_cache_safe_failure_never_persists_raw_on_redaction_error
     def _boom(_text):
         raise RuntimeError("redactor exploded")
 
-    monkeypatch.setattr("llm_router.enterprise.redaction.persist_redact", _boom)
+    # Patch the CANONICAL module, not the enterprise back-compat shim: the
+    # persistence paths import from llm_router.persist_redaction, so patching the
+    # shim attribute leaves the real function in place and the test asserts
+    # nothing.
+    monkeypatch.setattr("llm_router.persist_redaction.persist_redact", _boom)
 
     emb = _make_embedding()
     with patch("llm_router.semantic_cache._get_embedding", return_value=emb):
@@ -482,7 +490,11 @@ def test_session_store_safe_failure_never_persists_raw_on_redaction_error(monkey
     def _boom(_text):
         raise RuntimeError("redactor exploded")
 
-    monkeypatch.setattr("llm_router.enterprise.redaction.persist_redact", _boom)
+    # Patch the CANONICAL module, not the enterprise back-compat shim: the
+    # persistence paths import from llm_router.persist_redaction, so patching the
+    # shim attribute leaves the real function in place and the test asserts
+    # nothing.
+    monkeypatch.setattr("llm_router.persist_redaction.persist_redact", _boom)
 
     ss.record_event("s1", "user_prompt", f"secret leak check {SECRET_AWS} more padding text")
     path = ss._session_path("s1")

@@ -123,7 +123,7 @@ def _scrub_secrets(text: str) -> str:
     required for the raw opt-in escape hatch to actually mean raw.
     """
     try:
-        from llm_router.enterprise.redaction import persist_redact
+        from llm_router.persist_redaction import persist_redact
         text = persist_redact(text)
     except Exception:
         try:

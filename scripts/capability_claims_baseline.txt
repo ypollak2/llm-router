@@ -1,0 +1,18 @@
+docs/planning/MITIGATION_PLAN.md	proven	| 1.1 | Require a real follow-up marker (anaphora/deixis/reference to prior turn), not word count alone | Word-boundary harness: the audit's 15/16-word boundary must disappear. Self-contained 10-word questions after a code turn → **canary-proven routed** |
+Docs/planning/MITIGATION_PLAN.md	proven	| 1.1 | Require a real follow-up marker (anaphora/deixis/reference to prior turn), not word count alone | Word-boundary harness: the audit's 15/16-word boundary must disappear. Self-contained 10-word questions after a code turn → **canary-proven routed** |
+docs/planning/MITIGATION_PLAN.md	proven	| 1.3 | Re-run the audit soak: 5,000 prompts, 46+ sessions, incl. one 500-turn session, `[code] + [simple]×12` pattern | **Gate G2 (below):** turn-10+ canary-proven execution rate > 0 in every session; `[code]+[simple]×12` → 12/12 routed (was 0/13); whole-run rate within 10pts of turn-1 rate |
+Docs/planning/MITIGATION_PLAN.md	proven	| 1.3 | Re-run the audit soak: 5,000 prompts, 46+ sessions, incl. one 500-turn session, `[code] + [simple]×12` pattern | **Gate G2 (below):** turn-10+ canary-proven execution rate > 0 in every session; `[code]+[simple]×12` → 12/12 routed (was 0/13); whole-run rate within 10pts of turn-1 rate |
+docs/planning/MITIGATION_PLAN.md	proven	Nightly + pre-release soak: ≥1,000 prompts, ≥20 sessions, mixed `[code]→[short]` sequences, one long session (≥100 turns), canary-proven scoring. Pass criteria: (a) turn-10+ external-execution rate > 0 in every session; (b) whole-run rate within 10pts of turn-1 rate; (c) `[code]+[simple]×N` ≥ N-1 routed. *Would have caught CHZ-EXT-201. Single-turn testing is structurally blind to session-age effects.*
+Docs/planning/MITIGATION_PLAN.md	proven	Nightly + pre-release soak: ≥1,000 prompts, ≥20 sessions, mixed `[code]→[short]` sequences, one long session (≥100 turns), canary-proven scoring. Pass criteria: (a) turn-10+ external-execution rate > 0 in every session; (b) whole-run rate within 10pts of turn-1 rate; (c) `[code]+[simple]×N` ≥ N-1 routed. *Would have caught CHZ-EXT-201. Single-turn testing is structurally blind to session-age effects.*
+docs/planning/NORTH_STAR.md	guarantee	assumes a fixed "Claude is best" ranking instead of the curated ranking; or claims a guarantee
+Docs/planning/NORTH_STAR.md	guarantee	assumes a fixed "Claude is best" ranking instead of the curated ranking; or claims a guarantee
+docs/planning/NORTH_STAR.md	Guaranteed	- "Guaranteed savings" claims under a default that doesn't enforce routing.
+Docs/planning/NORTH_STAR.md	Guaranteed	- "Guaranteed savings" claims under a default that doesn't enforce routing.
+docs/planning/PLAN.md	100% 	## Part 1 — Route 100% of LLM operations
+Docs/planning/PLAN.md	100% 	## Part 1 — Route 100% of LLM operations
+docs/SCENARIO_REPORT.md	prevents	› _Stale breaker cleared. Provider is available for retry. This prevents permanently-stuck-unhealthy state from yesterday's outages._
+Docs/SCENARIO_REPORT.md	prevents	› _Stale breaker cleared. Provider is available for retry. This prevents permanently-stuck-unhealthy state from yesterday's outages._
+docs/SCENARIO_REPORT.md	prevents	**Actual outcome:** Stale breaker cleared. Provider is available for retry. This prevents permanently-stuck-unhealthy state from yesterday's outages.
+Docs/SCENARIO_REPORT.md	prevents	**Actual outcome:** Stale breaker cleared. Provider is available for retry. This prevents permanently-stuck-unhealthy state from yesterday's outages.
+docs/subagent-routing.md	never spends	never spends subscription tokens.
+Docs/subagent-routing.md	never spends	never spends subscription tokens.

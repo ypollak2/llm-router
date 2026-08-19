@@ -343,7 +343,7 @@ async def store(
     # locally even though persist_redact() is already safe-failure, so an
     # import failure here can't fall through to persisting raw content.
     try:
-        from llm_router.enterprise.redaction import persist_redact
+        from llm_router.persist_redaction import persist_redact
         safe_content = persist_redact(response.content)
     except Exception as exc:
         log.debug("semantic_cache: redaction unavailable, withholding content: %s", exc)

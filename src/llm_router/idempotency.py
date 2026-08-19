@@ -222,7 +222,7 @@ def _response_to_payload(response: LLMResponse) -> dict[str, Any]:
     is redact-on-write, consistent with result_cache/semantic_cache/session_store.
     """
     try:
-        from llm_router.enterprise.redaction import persist_redact
+        from llm_router.persist_redaction import persist_redact
         safe_content = persist_redact(response.content)
     except Exception as _redact_err:  # noqa: BLE001 — never persist raw on failure
         log.warning("idempotency_content_redaction_failed", error=str(_redact_err))

@@ -270,7 +270,7 @@ def store_result(
             # anyway so an import/config failure here can't fall through to
             # persisting the untouched raw strings.
             try:
-                from llm_router.enterprise.redaction import persist_redact
+                from llm_router.persist_redaction import persist_redact
                 safe_prompt = persist_redact(user_prompt)
                 safe_response = persist_redact(response)
             except Exception as e:
