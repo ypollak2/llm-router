@@ -14,6 +14,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 _Nothing yet._
 
+## [13.0.2] — Document what `LLM_ROUTER_DIRECT_EXECUTION` actually grants (2026-08-19)
+
+Documentation and a test. No behaviour change.
+
+### Security documentation
+
+- **SECURITY.md now covers `LLM_ROUTER_DIRECT_EXECUTION`** (#36). It is **default-on**,
+  and with it enabled the routing hook runs a tool-calling agent loop that hands a local,
+  uncurated model `write_file`, `edit_file` and `run_command` — the last as an arbitrary
+  shell string via `subprocess.run(..., shell=True)` — unsupervised, no confirmation, up
+  to 15 iterations, before Claude ever sees the prompt.
+
+  The section states what is enforced (file operations are confined to the project root)
+  and what is not, with the blocklist coverage **measured against 13.0.1**: of twelve
+  representative commands, **three** are blocked. `rm -rf ./src`,
+  `git push --force`, `cat ../../.ssh/id_rsa`, `curl -d @.env` and
+  `echo $OPENAI_API_KEY` all pass. The filter stops catastrophic *system* damage; it does
+  not stop project damage, credential disclosure, or exfiltration.
+
+  It also records that `agent_loop.py`'s docstring — *"All file operations are sandboxed
+  to the project directory"* — is true of the file tools and false in effect, because
+  `run_command` runs a shell string and `cat ../../.ssh/id_rsa` is not a "file operation"
+  the sandbox sees.
+
+  The entry documents the current state rather than changing it. Whether this should
+  default to on is a real question and the section says so, but a default change needs
+  its own decision and its own release note.
+
+### Added
+
+- A test re-derives the whole coverage table from the live regex. A table of
+  measurements in a document rots silently — nothing fails, the file still reads
+  plausibly, and the figure becomes a claim nobody re-checked. It now fails if the
+  blocklist widens (so the doc stops understating its protection) or narrows.
+
 ## [13.0.1] — 13.0.0 shipped without `llm_router.agents` (2026-08-19)
 
 **13.0.0 cannot start.** `import llm_router.server` fails with
