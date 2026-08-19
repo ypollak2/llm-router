@@ -20,7 +20,7 @@ WHAT IT DOES
 
 llm-routing deliberately does not ship ``enterprise``, ``admin_api``,
 ``invoice_reconciliation``, ``tenant_policy_sidecar`` or the agoragentic tools
-(see Chuzom's ``scripts/sync_downstream.py`` and 36_DOWNSTREAM_SYNC_PLAN.md §1).
+(see the upstream sync tooling's exclusion set, and the downstream sync plan §1).
 
 The sync skips test FILES whose module-level imports name one of those. It
 cannot skip a test whose import is DEFERRED — inside a fixture or a function
@@ -84,6 +84,6 @@ def pytest_runtest_makereport(item, call):
         __file__,
         0,
         f"Skipped: {root} is deliberately not shipped in llm-routing "
-        f"(36_DOWNSTREAM_SYNC_PLAN.md §1). This test exercises an excluded "
+        f"(the downstream sync plan §1). This test exercises an excluded "
         f"capability, so it is not applicable here rather than failing.",
     )

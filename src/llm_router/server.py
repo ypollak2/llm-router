@@ -34,7 +34,24 @@ from llm_router.config import get_config
 from llm_router.health import get_tracker
 from llm_router.logging import configure_logging, get_logger
 from llm_router.state import _check_tier, get_active_profile  # noqa: F401  (backward compat)
-from llm_router.tools import admin, agentic, agents, agoragentic, codex, consolidated, dashboard, fs, gemini_cli, media, pipeline, routing, setup, subscription, text
+from llm_router.tools import admin, agentic, agents, codex, consolidated, dashboard, fs, gemini_cli, media, pipeline, routing, setup, subscription, text
+
+# agoragentic is an OPTIONAL tool group, and the import says so.
+#
+# It is off by default (SEC-003: `register()` no-ops without LLM_ROUTER_AGORAGENTIC=on)
+# and it is excluded from redistributions that do not want marketplace/wallet
+# tools. A hard module-level import contradicted both: it made a default-off,
+# excludable tool group a load-bearing dependency of the MCP server, so a
+# distribution that dropped it got a server that could not import at all —
+# failing at startup over a feature nobody had enabled.
+#
+# Found by the downstream sync: the availability closure marked server.py
+# unreachable for exactly this reason, which meant the sync could not carry the
+# server module at all. The gate was already right; the import was not.
+try:
+    from llm_router.tools import agoragentic
+except ImportError:  # pragma: no cover - only in builds that exclude it
+    agoragentic = None
 from llm_router.tools.admin import llm_health, llm_set_profile, llm_usage  # noqa: F401
 from llm_router.tools.pipeline import llm_orchestrate  # noqa: F401
 from llm_router.tools.routing import llm_route  # noqa: F401
@@ -169,7 +186,8 @@ gemini_cli.register(mcp, _gate)
 setup.register(mcp, _gate)
 dashboard.register(mcp, _gate)
 fs.register(mcp, _gate)
-agoragentic.register(mcp)
+if agoragentic is not None:
+    agoragentic.register(mcp)  # SEC-003: no-ops unless LLM_ROUTER_AGORAGENTIC=on
 agents.register(mcp, _gate)  # v0.0.2 — agent-session tools (gated; consolidated keeps the rich two)
 agentic.register(mcp, _gate)  # agentic router — llm_delegate (gated; consolidated hides it behind llm_act)
 consolidated.register(mcp, _gate)  # North Star P4 — 1.0 front-door aliases (llm_act; non-breaking)
@@ -289,8 +307,8 @@ _STARTUP_VERIFY_OFF_VALUES = {"on", "1", "true", "yes"}
 _CRITICAL_MODULES: tuple[str, ...] = (
     "llm_router.cli",
     "llm_router.classification_allowlist",  # the canonical G-034 canary
-    "llm_router.admin_api",
-    "llm_router.invoice_reconciliation",
+    # removed by sync: llm_router.admin_api is not shipped downstream
+    # removed by sync: llm_router.invoice_reconciliation is not shipped downstream
     "llm_router.agents.session",
 )
 
@@ -300,9 +318,9 @@ _CRITICAL_MODULES: tuple[str, ...] = (
 # These are only critical under the enterprise profile, where the package IS
 # present; checked conditionally below.
 _ENTERPRISE_CRITICAL_MODULES: tuple[str, ...] = (
-    "llm_router.enterprise.identity",
-    "llm_router.enterprise.rbac",
-    "llm_router.enterprise.quotas",
+    # removed by sync: llm_router.enterprise.identity is not shipped downstream
+    # removed by sync: llm_router.enterprise.rbac is not shipped downstream
+    # removed by sync: llm_router.enterprise.quotas is not shipped downstream
 )
 
 _CRITICAL_MODULE_SKIP_ENV = "LLM_ROUTER_SKIP_CRITICAL_MODULE_CHECK"

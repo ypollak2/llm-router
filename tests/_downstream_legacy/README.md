@@ -42,3 +42,59 @@ once someone confirms nothing else in them is worth keeping.
 `test_claim_evidence.py` reads a fixture that lives outside both synced trees.
 `test_execution_ledger.py` needs `hypothesis`, which is not in the downstream
 dev dependencies — that one is a one-line fix, not a quarantine.
+
+---
+
+## Second batch — added after the server/redactor upstream fixes
+
+Five more, all **downstream-only** (no upstream counterpart) and all testing
+implementations the sync replaced:
+
+| file | tested |
+|---|---|
+| `test_hook_equivalence.py` | the pre-sync `classify` module's byte-equivalence with the hook |
+| `test_budget_envelope.py` | the pre-sync `budget_envelope` API |
+| `test_subscription_local.py` | the pre-sync subscription-local routing |
+| `test_summary.py`, `test_surface_status.py` | the `observability/` package before upstream's modules landed beside it |
+
+The same caution applies as above: **upstream having a similarly-named module
+is not the same claim as upstream asserting the same behaviour.** Diff before
+deleting.
+
+`test_hook_equivalence.py` deserves particular attention. It asserted that the
+importable classifier stays byte-identical to the routing hook's own scorer —
+a drift guard between two copies of one algorithm. If upstream has no
+equivalent, deleting this loses a real invariant rather than a stale test.
+
+### Two files deliberately NOT quarantined
+
+`test_identity_gate.py` and `test_fs_tools_opt_in.py` are downstream's own and
+still belong here. Both failed after the sync and both were **fixed rather than
+quarantined**:
+
+- the identity gate was flagging this quarantine directory, whose files contain
+  `"chuzom"` precisely because they assert its absence — the allowlist gained a
+  directory entry for that documented category;
+- `test_fs_tools_opt_in.py` carried a deliberate tripwire asserting SEC-002
+  layer 2 was *missing*. The sync brought path confinement, so the tripwire
+  fired exactly as designed. It is now flipped to assert the confinement exists,
+  plus a behavioural test that an escaping path actually raises — `hasattr` is
+  not enforcement.
+
+---
+
+## Third batch — tests of the upstream benchmark harness
+
+`test_deep_reasoning_classifier.py` (45 errors) and `test_routerarena_submit.py`
+(6) both load `bench/routerarena/submission/router/…` — a repo-root tree the
+sync does not carry, because it is upstream's benchmark-submission harness
+rather than anything this package ships.
+
+They load it by PATH, not by import, which is why the sync's import-parsing skip
+could not see the dependency: nothing in the file names a module. That is worth
+remembering — an availability check built on the import graph is blind to
+`importlib.util.spec_from_file_location`, and the only signal was the runtime
+`AttributeError` on a module the loader had cheerfully created.
+
+Delete these if llm-routing is not going to carry a RouterArena submission.
+Keep and re-point them if it is.

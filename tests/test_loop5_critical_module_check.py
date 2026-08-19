@@ -137,7 +137,7 @@ def test_failure_path_accumulates_multiple_missing_modules(
     original = importlib.import_module
     missing = {
         "llm_router.classification_allowlist",
-        "llm_router.invoice_reconciliation",
+        # removed by sync: llm_router.invoice_reconciliation is not shipped downstream
     }
 
     def stub(name: str, *args, **kwargs):
