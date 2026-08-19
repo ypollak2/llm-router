@@ -1,0 +1,61 @@
+# LLM Router v0.0.2 — agent profile definitions
+#
+# Each profile tells LLM Router HOW to route on behalf of one type of agent.
+# Profiles are pure data: tier preference, signal boosts, preferred chain,
+# budget envelope. The agent runtime (Claude Code subagents, Agno, Hermes,
+# LangGraph, CrewAI, etc.) is responsible for the loop itself.
+#
+# Schema:
+#   id                  — stable identifier; agent runtimes pass this string
+#   description         — surfaced in llm_router_agent_list
+#   routing_profile:
+#     tier_preference   — ordered list: local | cheap | mid | premium
+#     signal_boosts     — {signal_name: multiplier} applied to signal scores
+#     preferred_chain   — chain alias from signals.yaml; overrides decisions
+#   budget:
+#     default_usd       — per-session cap if caller doesn't override
+#     hard_max_usd      — absolute ceiling; caller can request lower, not higher
+
+version: v0
+
+agents:
+  # ── Code-review agent — examines diffs/files for bugs and style ────────
+  - id: code-reviewer
+    description: >
+      Reviews code changes for correctness, security, and style. Skews
+      toward strong code models because cost of a wrong review is high.
+    routing_profile:
+      tier_preference: [mid, premium]
+      signal_boosts:
+        code_keywords: 1.5
+        complexity: 1.2
+      preferred_chain: code_chain
+    budget:
+      default_usd: 0.50
+      hard_max_usd: 2.00
+
+  # ── Trend-researcher — needs web grounding ─────────────────────────────
+  - id: trend-researcher
+    description: >
+      Researches current trends, latest news, and verifies claims.
+      Forces routing through Perplexity / web-grounded models.
+    routing_profile:
+      tier_preference: [mid]
+      preferred_chain: research_chain
+    budget:
+      default_usd: 0.20
+      hard_max_usd: 1.00
+
+  # ── TDD guide — test-first development assistant ──────────────────────
+  - id: tdd-guide
+    description: >
+      Writes tests first, then minimal implementations to pass them.
+      Code-focused, mid-tier sufficient for most cases.
+    routing_profile:
+      tier_preference: [cheap, mid]
+      signal_boosts:
+        code_keywords: 1.3
+      preferred_chain: code_chain
+    budget:
+      default_usd: 0.30
+      hard_max_usd: 1.50
