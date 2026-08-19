@@ -14,6 +14,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 _Nothing yet._
 
+## [13.0.1] — 13.0.0 shipped without `llm_router.agents` (2026-08-19)
+
+**13.0.0 cannot start.** `import llm_router.server` fails with
+`No module named 'llm_router.agents'`, so the MCP server exits before registering a
+single tool and the client reports `CONNECTION_CLOSED` — indistinguishable from a network
+fault, which is the same diagnostic dead end as #37.
+
+### Fixed
+
+- **Two unanchored exclusion patterns, in two different files.** Without a leading slash,
+  both `.gitignore` and hatch's sdist `exclude` match a directory of that name at ANY
+  depth:
+
+  - `.gitignore`'s `agents/` and `Library/` also matched `src/llm_router/agents/` and
+    `src/llm_router/library/`, so 11 source files existed locally and were never
+    committed. Caught by CI, fixed before 13.0.0 was tagged.
+  - `pyproject.toml`'s sdist `exclude = ["agents/", …]` also matched
+    `src/llm_router/agents/`. **This one shipped.** `uv build` builds the wheel FROM the
+    sdist, so the published wheel was missing the package as well.
+
+  Both are now anchored, and a comment in each says nothing in that block may exclude
+  anything under `src/`.
+
+### Why every check passed
+
+A local `uv build --wheel` builds straight from source and included the files, so the
+wheel on this machine was correct while the published one was not. The pre-release suite,
+the linters, the identity gate and CI all ran against the source tree, where nothing was
+missing.
+
+The only step that distinguishes "the release workflow succeeded" from "the artifact
+works" is installing the published artifact and importing it. That is now the last step
+of the release, not an optional afterthought.
+
 ## [13.0.0] — Upstream core sync: the routing engine, its guards, and four security fixes (2026-08-19)
 
 The package is now built from the upstream routing core, rebranded, rather than from a

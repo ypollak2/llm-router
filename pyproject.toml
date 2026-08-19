@@ -1,6 +1,6 @@
 [project]
 name = "llm-routing"
-version = "13.0.0"
+version = "13.0.1"
 description = "Multi-LLM router MCP server — smart complexity routing, budget-aware model selection, 20+ providers (Claude, OpenAI, Gemini, Ollama, etc.)"
 readme = "README.md"
 license = "MIT"
@@ -110,17 +110,32 @@ exclude = [
     ".github/",
     ".lore/",
     ".internal/",
-    # Directories not needed in package
-    "agents/",
-    "demo/",
-    "docs/",
-    "research/",
-    "deprecation/",
-    "scripts/",
-    "skills/",
-    "submissions/",
-    "tests/",
-    "awesome-readme/",
+    # Directories not needed in package.
+    #
+    # ANCHORED WITH A LEADING SLASH. Unanchored, these match a directory of
+    # that name at ANY depth — "agents/" also matched src/llm_router/agents/
+    # and stripped it from the sdist. `uv build` builds the WHEEL FROM THE
+    # SDIST, so the published wheel was missing the package too, and
+    # `import llm_router.server` failed with
+    # "No module named 'llm_router.agents'".
+    #
+    # It shipped that way in 13.0.0. A local `uv build --wheel` builds straight
+    # from source and included the files, so every pre-release check passed —
+    # the only thing that would have caught it is installing the published
+    # artifact, which is why that step exists.
+    #
+    # llm_router.agents.session is also in server._CRITICAL_MODULES, so the
+    # server refuses to start rather than degrading.
+    "/agents/",
+    "/demo/",
+    "/docs/",
+    "/research/",
+    "/deprecation/",
+    "/scripts/",
+    "/skills/",
+    "/submissions/",
+    "/tests/",
+    "/awesome-readme/",
     # ── Backup / temp files — never publish (CLAUDE.md sdist safety rule) ─
     ".env.backup.*",
     "*.bak",
