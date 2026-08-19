@@ -60,16 +60,30 @@ token-savings-viz.html
 .gemini/
 .llm-router/
 .openclaw/
-Library/
+# Anchored, and for the same reason as the block below: on a case-insensitive
+# filesystem an unanchored `Library/` also matches `src/llm_router/library/`,
+# which hid six more source files.
+/Library/
 
 # Internal planning docs
 .internal/
 
-# Development-only directories — not needed by end users
-research/
-deprecation/
-agents/
-demo/
+# Development-only directories — not needed by end users.
+#
+# ANCHORED WITH A LEADING SLASH. Unanchored, `agents/` matches a directory of
+# that name at ANY depth, so it silently swallowed src/llm_router/agents/ and
+# src/llm_router/library/ — 11 source files that existed locally, were never
+# committed, and broke CI with "No module named 'llm_router.agents'".
+#
+# `llm_router.agents.session` is in server._CRITICAL_MODULES, so a published
+# build missing it would have failed its own startup check — the failure would
+# have reached users as a server that refuses to boot.
+#
+# Nothing here is meant to exclude anything under src/.
+/research/
+/deprecation/
+/agents/
+/demo/
 
 # Internal docs — dev/strategy, not user-facing
 
