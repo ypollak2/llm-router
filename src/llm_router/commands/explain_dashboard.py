@@ -12,7 +12,7 @@ This command prints, per panel:
   * row counts per source for that window
   * aggregate columns the panel displays (calls, tokens, savings)
 
-Run: ``llm-router explain-dashboard``
+Run: ``llm_router explain-dashboard``
 """
 
 from __future__ import annotations

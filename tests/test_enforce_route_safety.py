@@ -33,34 +33,32 @@ def test_base_block_tools_excludes_file_readers():
     print("✅ _BASE_BLOCK_TOOLS is safe (doesn't block file readers)")
 
 
-def test_qa_only_block_doesnt_block_all_investigations():
-    """Verify that Q&A-only blocks apply correctly without deadlock risk.
+def _load_enforce_route():
+    import importlib.util
+    hook = Path(__file__).resolve().parent.parent / "src" / "llm_router" / "hooks" / "enforce-route.py"
+    spec = importlib.util.spec_from_file_location("enforce_route_mod", hook)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
 
-    For Q&A tasks:
-    - Block all work tools (Bash/Edit/Write) to prevent direct answering
-    - Block file readers (Read/Glob/Grep/LS) to prevent self-reasoning
 
-    Investigation is prevented AFTER routing directive, but early file-op
-    detection (before directive) allows legitimate investigation to happen first.
-    """
-    QA_ONLY_BLOCK_TOOLS = frozenset({"Glob", "Read", "Grep", "LS"})
-    BASE_BLOCK_TOOLS = frozenset({
-        "Bash", "Edit", "MultiEdit", "Write", "NotebookEdit",
-    })
+def test_qa_block_excludes_read_tools_no_dead_end():
+    """P1 / INV-ROUTE-001/002: Q&A no longer blocks read-only tools (dead-end fix).
 
-    # For Q&A tasks, these tools are blocked
-    qa_block_combined = BASE_BLOCK_TOOLS | QA_ONLY_BLOCK_TOOLS
+    Reads against the REAL constant (not a hardcoded copy) so it catches drift:
+    _QA_ONLY_BLOCK_TOOLS must be empty, and _block_tools_for('query') must block
+    only the generative tools — never Read/Grep/Glob/LS."""
+    er = _load_enforce_route()
 
-    # This is correct: Q&A tasks should block both categories
-    assert "Bash" in qa_block_combined, "Base tools should be blocked"
-    assert "Read" in qa_block_combined, "File readers should be blocked for Q&A"
-
-    # But early file-op detection allows investigation BEFORE directive is issued
-    # (Location: enforce-route.py line 393 - checked BEFORE blocklist)
-    # So deadlock is prevented by architecture, not by allowing blocked tools
-
-    print(f"✅ Q&A blocklist is complete and correct: {len(qa_block_combined)} tools blocked")
-    print("   (Early detection prevents deadlock by allowing pre-directive investigation)")
+    assert er._QA_ONLY_BLOCK_TOOLS == frozenset(), (
+        "Q&A must not block read tools — blocking them behind the text-only llm "
+        "door is a capability dead-end (audit P1)."
+    )
+    qa_block = er._block_tools_for("query")
+    for reader in ("Read", "Glob", "Grep", "LS"):
+        assert reader not in qa_block, f"{reader} must NOT be blocked for Q&A"
+    # Enforcement intent preserved: generative tools still blocked.
+    assert "Bash" in qa_block and "Edit" in qa_block and "Write" in qa_block
 
 
 def test_early_file_op_detection_before_blocklist():
@@ -144,7 +142,7 @@ if __name__ == "__main__":
     print("="*70 + "\n")
 
     test_base_block_tools_excludes_file_readers()
-    test_qa_only_block_doesnt_block_all_investigations()
+    test_qa_block_excludes_read_tools_no_dead_end()
     test_early_file_op_detection_before_blocklist()
     test_violation_counter_prevents_infinite_blocking()
     test_investigation_loop_detection_provides_warning()

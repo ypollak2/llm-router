@@ -45,6 +45,7 @@ dependencies = [
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
+    "hypothesis>=6.0.0",
     "pytest-timeout>=2.3",
     "pytest-xdist>=3.5",
     "ruff>=0.4",
@@ -151,6 +152,10 @@ exclude = [
 ]
 
 [tool.pytest.ini_options]
+# Quarantined by the 13.0.0 sync — see tests/_downstream_legacy/README.md.
+# Excluded from collection rather than deleted: each still describes behaviour
+# somebody tested, and the decision to drop that coverage is a human one.
+norecursedirs = ["_downstream_legacy"]
 testpaths = ["tests"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "session"

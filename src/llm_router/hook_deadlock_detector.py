@@ -80,8 +80,8 @@ class HookDeadlockDetector:
         if not self.hooks_dir.exists():
             return
 
-        for hook_file in self.hooks_dir.glob("llm-router-*.py"):
-            hook_name = hook_file.stem.replace("llm-router-", "")
+        for hook_file in self.hooks_dir.glob("llm_router-*.py"):
+            hook_name = hook_file.stem.replace("llm_router-", "")
             self._analyses[hook_name] = self._analyze_hook(hook_name, hook_file)
 
     def _analyze_hook(self, name: str, path: Path) -> HookAnalysis:
@@ -163,7 +163,7 @@ class HookDeadlockDetector:
         """Extract which other hooks this hook depends on."""
         hook_patterns = [
             r"from llm_router\.hooks\.(\w+) import",
-            r"subprocess\.run\([^)]*llm-router-(\w+)",
+            r"subprocess\.run\([^)]*llm_router-(\w+)",
             r"hook_client\.call\([\'\"](\w+)",
         ]
 

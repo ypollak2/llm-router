@@ -1,7 +1,3 @@
-# Ported from Chuzom's routing_quality.py; env vars renamed to LLM_ROUTER_*;
-# FallbackReason/RouteKind/QUALITY_REASONS/ROUTING_QUALITY_SCHEMA_VERSION/
-# BASELINE_POLICY_VERSION reused from llm_router.contracts (frozen in WS0) instead
-# of being redefined here.
 """North Star measurement: a fail-open per-route quality ledger (schema v2).
 
 The North Star is "route to the cheapest capable model, escalate on failure" — and
@@ -12,7 +8,7 @@ reads it back into HONEST split metrics that never conflate:
   * telemetry recording   (a row exists)          vs
   * route success         (``route_succeeded``)    vs
   * verified quality      (``verification_passed``) vs
-  * technical fallback    (``fallback_reason`` in infra set, ``mis_route=None``) vs
+  * technical fallback    (``fallback_reason`` ∈ infra set, ``mis_route=None``) vs
   * quality escalation    (``quality_escalation_occurred``, ``mis_route=True``).
 
 A completion route that ran no tools records ``tool_execution_succeeded=None`` — NOT
@@ -33,21 +29,36 @@ import time
 import uuid
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
-from llm_router.contracts import (
-    BASELINE_POLICY_VERSION,
-    QUALITY_REASONS,
-    ROUTING_QUALITY_SCHEMA_VERSION,
-    FallbackReason,
-    RouteKind,
-)
+CURRENT_SCHEMA_VERSION = 2
+BASELINE_POLICY_VERSION = "north-star-v1"
 
-CURRENT_SCHEMA_VERSION = ROUTING_QUALITY_SCHEMA_VERSION
+FallbackReason = Literal[
+    "provider_failure",
+    "timeout",
+    "rate_limit",
+    "health_skip",
+    "policy_rejection",
+    "budget_exhausted",
+    "cost_cap",
+    "capability_failure",
+    "verification_failure",
+    "quality_failure",
+]
+
+RouteKind = Literal[
+    "completion",
+    "delegate",
+    "bounded_operational",
+    "delegate_substep",
+]
 
 # Fallback reasons that imply the FIRST-choice tier was actually wrong (a quality/
 # capability failure, not infrastructure). Only these permit ``mis_route=True``.
-_QUALITY_REASONS: frozenset[str] = QUALITY_REASONS
+_QUALITY_REASONS: frozenset[str] = frozenset(
+    {"capability_failure", "verification_failure", "quality_failure"}
+)
 
 
 @dataclass
@@ -83,13 +94,13 @@ class RouteLedgerRecord:
     fallback_reason: FallbackReason | None = None  # null iff fallback_occurred=False
 
     # Quality-driven escalation: cheap tier produced an answer that FAILED an
-    # objective check. NOT set for technical fallbacks (timeout, rate_limit, ...).
+    # objective check. NOT set for technical fallbacks (timeout, rate_limit, …).
     quality_escalation_occurred: bool = False
     quality_escalation_reason: str | None = None
 
     # mis_route: initial routing decision was wrong.
     #   True  = inferred from capability/verification/quality failure of first tier.
-    #   None  = UNKNOWN (technical fallback or unverified completion -- can't know).
+    #   None  = UNKNOWN (technical fallback or unverified completion — can't know).
     #   False = route was correct AND verified (first tier cleared its check).
     mis_route: bool | None = None
 
@@ -99,7 +110,7 @@ class RouteLedgerRecord:
 
     # --- Cost ---
     actual_cost_usd: float = 0.0
-    baseline_cost_usd: float = 0.0              # see baseline policy version
+    baseline_cost_usd: float = 0.0              # see §4.3 baseline policy
     saved_usd: float = 0.0
     failed_attempt_cost_usd: float = 0.0        # cost of failed-fallback attempts only
 
@@ -110,7 +121,7 @@ class RouteLedgerRecord:
     cache_write_tokens: int | None = None
     tool_cost_usd: float | None = None          # null = not separately metered
 
-    # Pricing versioning -- required for reproducibility
+    # Pricing versioning — required for reproducibility
     baseline_policy_version: str = BASELINE_POLICY_VERSION
     price_table_version: str = "unknown"
 
@@ -122,10 +133,8 @@ class RouteLedgerRecord:
 
 
 def _default_ledger() -> Path:
-    return Path(os.environ.get(
-        "LLM_ROUTER_ROUTING_LEDGER",
-        str(Path.home() / ".llm-router" / "routing_quality.jsonl"),
-    ))
+    return Path(os.environ.get("LLM_ROUTER_ROUTING_LEDGER",
+                               str(Path.home() / ".llm-router" / "routing_quality.jsonl")))
 
 
 def record_route(rec: RouteLedgerRecord, path: str | None = None) -> bool:
@@ -138,7 +147,7 @@ def record_route(rec: RouteLedgerRecord, path: str | None = None) -> bool:
         with p.open("a", encoding="utf-8") as f:
             f.write(json.dumps(asdict(rec)) + "\n")
         return True
-    except Exception:  # noqa: BLE001 -- a ledger failure must never break routing
+    except Exception:  # noqa: BLE001 — a ledger failure must never break routing
         return False
 
 
@@ -147,12 +156,12 @@ def load_records(path: str | None = None) -> list[dict[str, Any]]:
 
     - rows missing ``schema_version`` are treated as legacy v1 (``schema_version=1``)
     - malformed JSON lines are tagged ``{"_invalid": True}`` and excluded from all
-      quality denominators by :func:`summarize` -- never crash the reader.
+      quality denominators by :func:`summarize` — never crash the reader.
     """
     try:
         p = Path(path) if path else _default_ledger()
         lines = p.read_text(encoding="utf-8").splitlines()
-    except Exception:  # noqa: BLE001 -- missing/unreadable ledger reads as empty
+    except Exception:  # noqa: BLE001 — missing/unreadable ledger reads as empty
         return []
     rows: list[dict[str, Any]] = []
     for ln in lines:
@@ -165,7 +174,7 @@ def load_records(path: str | None = None) -> list[dict[str, Any]]:
                 continue
             row.setdefault("schema_version", 1)  # legacy rows lack it
             rows.append(row)
-        except Exception:  # noqa: BLE001 -- one bad line must not sink the read
+        except Exception:  # noqa: BLE001 — one bad line must not sink the read
             rows.append({"_invalid": True})
     return rows
 
@@ -175,17 +184,17 @@ def _classify_reason(reason: str) -> tuple[FallbackReason, bool | None]:
 
     Quality/verification/capability failures set ``mis_route=True`` (the first-choice
     tier was genuinely inadequate). Every technical/infra reason sets ``mis_route=None``
-    -- a timeout or rate-limit tells us NOTHING about whether the route was correct.
+    — a timeout or rate-limit tells us NOTHING about whether the route was correct.
     """
     r = reason.lower()
-    # Quality / verification / capability -- these are the ONLY mis_route=True cases.
+    # Quality / verification / capability — these are the ONLY mis_route=True cases.
     if "gate_failed" in r or "verification" in r:
         return "verification_failure", True
     if "low_quality" in r or "quality" in r:
         return "quality_failure", True
     if "capability" in r:
         return "capability_failure", True
-    # Technical / infra -- mis_route stays UNKNOWN (None).
+    # Technical / infra — mis_route stays UNKNOWN (None).
     if "budget" in r:
         return "budget_exhausted", None
     # Policy BEFORE the generic cost check: "policy:turn_cost:<n>" contains "cost"
@@ -208,13 +217,13 @@ def derive_fallback_reason(
 ) -> tuple[FallbackReason | None, bool | None]:
     """Return ``(fallback_reason, mis_route)`` for a route's fallback trail.
 
-    Empty trail -> ``(None, None)``: no fallback, and (for an unverified completion
+    Empty trail → ``(None, None)``: no fallback, and (for an unverified completion
     route) mis_route is unknown, never falsely ``False``.
 
     A quality/verification/capability failure ANYWHERE in the trail dominates: the
     first-choice tier failed on quality, so ``mis_route=True`` and that reason is
     reported. Otherwise the LAST (most recent) technical reason is reported with
-    ``mis_route=None`` -- a technical fallback never implies a wrong route.
+    ``mis_route=None`` — a technical fallback never implies a wrong route.
     """
     if not chain_errors:
         return None, None
@@ -309,22 +318,16 @@ def summarize(path: str | None = None) -> dict[str, Any]:
     }
 
 
-# -- Delegate path (aggregate-delegation-only): emit ONE v2 row per delegation --
+# ── Delegate path (aggregate-delegation-only): emit ONE v2 row per delegation ──
 
 def record_delegation(result: dict[str, Any], path: str | None = None,
                       route_kind: RouteKind = "delegate") -> bool:
-    """Build a v2 :class:`RouteLedgerRecord` from a delegation-engine result and record it.
+    """Build a v2 :class:`RouteLedgerRecord` from an MGEE delegation result and record it.
 
     Aggregate-delegation-only: this is the single parent row for the whole operation
-    (``route_kind`` is ``delegate`` or ``bounded_operational``). A delegation engine's
-    internal per-step route calls should be emitted with ``suppress_ledger=True`` so
+    (``route_kind`` is ``delegate`` or ``bounded_operational``). The MGEE engine's
+    internal ``route_and_call`` invocations are emitted with ``suppress_ledger=True`` so
     they never double-count here.
-
-    NOTE: llm-router does not yet have its own delegation engine wired to call this
-    function -- it is ported as a complete, tested, standalone entry point ready for
-    a future workstream to wire once such an engine exists. It expects a generic
-    ``result`` dict shaped like ``{"outcome": ..., "milestones": [{"achieved_by": tier}, ...],
-    "savings": {"actual_usd": ..., "baseline_usd": ..., "saved_usd": ...}}``.
 
     Escalation is quality-driven: a milestone cleared by a tier above the cheapest
     attempted means the initial routing under-shot on QUALITY (mis_route=True), which
@@ -350,7 +353,7 @@ def record_delegation(result: dict[str, Any], path: str | None = None,
             route_succeeded=succeeded,
             tool_execution_attempted=True,
             tool_execution_succeeded=succeeded,
-            verification_attempted=True,          # delegation runs objective acceptance checks
+            verification_attempted=True,          # MGEE runs objective acceptance checks
             verification_passed=completed,
             fallback_occurred=escalated,
             fallback_reason="verification_failure" if escalated else None,
@@ -364,17 +367,17 @@ def record_delegation(result: dict[str, Any], path: str | None = None,
             saved_usd=float(savings.get("saved_usd", 0.0) or 0.0),
         )
         return record_route(rec, path=path)
-    except Exception:  # noqa: BLE001 -- never break the delegation path
+    except Exception:  # noqa: BLE001 — never break the delegation path
         return False
 
 
-# -- Deprecated v1 API (kept for backward compat; writes legacy rows) ----------
+# ── Deprecated v1 API (kept for backward compat; writes legacy rows) ──────────
 
 @dataclass
 class RouteRecord:
     """DEPRECATED (schema v1). Retained only for backward compatibility; new code
     must use :class:`RouteLedgerRecord` + :func:`record_route`. Rows written via
-    :func:`record` lack ``schema_version`` and are read with legacy semantics -- they
+    :func:`record` lack ``schema_version`` and are read with legacy semantics — they
     never contribute to v2 quality metrics."""
     task_type: str
     chosen_tier: int | str
@@ -401,5 +404,5 @@ def record(rec: RouteRecord, path: str | None = None) -> bool:
         with p.open("a", encoding="utf-8") as f:
             f.write(json.dumps(asdict(rec)) + "\n")
         return True
-    except Exception:  # noqa: BLE001 -- a ledger failure must never break routing
+    except Exception:  # noqa: BLE001 — a ledger failure must never break routing
         return False

@@ -1,48 +1,34 @@
-# LLM Router — Claude Desktop Integration
+<!-- llm_router-rules-version: 2 -->
+# LLM Router — Claude Desktop Routing Rules
 
-This document explains how to use llm-router MCP tools within Claude Desktop.
+> LLM Router routes each task to the cheapest capable model before Claude Desktop generates
+> its own response. Call the appropriate tool BEFORE answering.
+>
+> **Pull routing:** Claude Desktop uses pull routing — YOU must call the tool. The tool
+> returns the response; relay it verbatim. (No UserPromptSubmit hook is available in
+> Desktop; push routing requires Claude Code CLI.)
 
-## Configuration for Claude Desktop
+## Task Type → Tool Mapping
 
-Add this to your `claude_desktop_config.json`:
+| Task | Tool | Notes |
+|---|---|---|
+| Simple factual question | `llm_query` | Ollama → Gemini Flash → GPT-4o-mini |
+| Research / current events | `llm_research` | Perplexity (web-grounded) |
+| Writing / content | `llm_generate` | Gemini Flash → Haiku |
+| Deep analysis / review | `llm_analyze` | Ollama → GPT-4o |
+| Code generation / refactor | `llm_code` | Ollama → Codex → o3 |
+| Deep reasoning / proofs | `llm_reason` | Extended-thinking model |
+| Unknown / auto-detect | `llm_auto` | Classifies + routes automatically |
 
-```json
-{
-  "mcpServers": {
-    "llm-router": {
-      "command": "uvx",
-      "args": ["claude-code-llm-router"]
-    }
-  }
-}
-```
+## Rules
 
-File location:
-- **macOS**: `~/Library/Application Support/Claude/claude_desktop_config.json`
-- **Windows**: `%APPDATA%\Claude\claude_desktop_config.json`
-- **Linux**: `~/.config/Claude/claude_desktop_config.json`
+1. Call the matching tool **before** generating your own response.
+2. Return the tool's output to the user **as-is** (don't paraphrase).
+3. Only use native Claude intelligence for tasks where all LLM Router MCP servers
+   are unavailable (`llm_health` can verify).
+4. Use `llm_research` for anything time-sensitive — training has a cutoff.
 
-## Available MCP Tools
+## Token-Efficient Responses
 
-Once configured, you'll have access to:
-
-### Smart Routing
-- `llm_auto` - Auto-route with savings tracking (recommended for all tasks)
-- `llm_route` - Full complexity classification and routing
-- `llm_classify` - Quick complexity detection
-
-### Text Tools
-- `llm_query` - Questions, lookups, Q&A
-- `llm_research` - Web-grounded research
-- `llm_generate` - Writing, content creation
-- `llm_analyze` - Deep analysis and reasoning
-- `llm_code` - Code generation and refactoring
-
-### Usage & Admin
-- `llm_usage` - Check savings and usage
-- `llm_health` - Provider status
-- `llm_budget` - Spending caps and pressure
-
-## Recommended Usage
-
-Start with `llm_auto` for all tasks — it handles cost optimization automatically and tracks your savings across sessions.
+Skip preamble. Lead with result. Fragments fine when meaning is clear.
+No trailing summaries. ≥3 items → bullets. Never restate the user's request.

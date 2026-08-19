@@ -53,6 +53,8 @@ _MODEL_OUTPUT_CAPS: dict[str, int] = {
     # ── DeepSeek V3+ chat & reasoner (8192 output) ──
     "deepseek/deepseek-chat": 8192,
     "deepseek/deepseek-reasoner": 8192,
+    "deepseek/deepseek-v4-flash": 8192,
+    "deepseek/deepseek-v4-pro": 8192,
     # ── Mistral Small Latest (8192 output) ──
     "mistral/mistral-small-latest": 8192,
     # ── Cohere Command R+ (4096 output) ──
@@ -87,10 +89,6 @@ def extract_content(message: Any) -> str:
     reasoning = getattr(message, "reasoning", None)
     if isinstance(reasoning, str) and reasoning.strip():
         return reasoning
-    # DeepSeek V4 reasoning models pack the answer into reasoning_content
-    reasoning_content = getattr(message, "reasoning_content", None)
-    if isinstance(reasoning_content, str) and reasoning_content.strip():
-        return reasoning_content
     return ""
 
 

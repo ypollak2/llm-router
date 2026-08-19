@@ -1,4 +1,4 @@
-"""Token compression system for llm-router.
+"""Token compression system for llm_router.
 
 Three-layer compression pipeline:
 1. RTK: Compress shell command outputs

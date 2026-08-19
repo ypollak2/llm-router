@@ -5,15 +5,18 @@ from log records before they're written to stdout/files. It prevents accidental
 leakage of API keys, tokens, passwords, and other credentials.
 """
 
-import os
 import re
 from typing import Any
 
 # Common secret patterns to detect and redact
 SECRET_PATTERNS = {
     # API keys (various formats) - must be before more general patterns
-    "anthropic_api_key": re.compile(r"sk-ant-[a-zA-Z0-9]{20,}"),
-    "openai_api_key": re.compile(r"sk-(?:proj-)?[a-zA-Z0-9]{20,}"),
+    # Real Anthropic keys are sk-ant-api03-<base64url>, whose credential
+    # portion contains hyphens and underscores, so those must be allowed
+    # in the character class or the key passes through unscrubbed.
+    "anthropic_api_key": re.compile(r"sk-ant-[a-zA-Z0-9_-]{20,}"),
+    # OpenAI project keys (sk-proj-...) likewise use base64url with _ and -.
+    "openai_api_key": re.compile(r"sk-(?:proj-)?[a-zA-Z0-9_-]{20,}"),
     "google_api_key": re.compile(r"AIza[a-zA-Z0-9\-_]{35,}"),
     "gemini_api_key": re.compile(r"GOOG[a-zA-Z0-9]{10,}"),
     # AWS credentials
@@ -26,6 +29,14 @@ SECRET_PATTERNS = {
     "token": re.compile(r"['\"]?token['\"]?\s*[:=]\s*['\"]?[a-zA-Z0-9._\-]{20,}['\"]?", re.IGNORECASE),
     "password": re.compile(r"password[\"']?\s*[:=]\s*[\"']?[^\"'\s:;,]+[\"']?", re.IGNORECASE),
     "secret": re.compile(r"secret[\"']?\s*[:=]\s*[\"']?[^\"'\s:;,]+[\"']?", re.IGNORECASE),
+    # Merged from session_store (CHZ-SEC-01: unify the drifted scrubbers so this
+    # module is the single superset). GitHub tokens, generic UPPER_KEY=value
+    # assignments, and PEM private-key blocks.
+    "github_token": re.compile(r"\bgh[pousr]_[A-Za-z0-9]{20,}"),
+    "env_key_assignment": re.compile(r"\b[A-Z][A-Z0-9_]*_(?:API_)?KEY\s*[=:]\s*\S+"),
+    "private_key": re.compile(
+        r"-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----"
+    ),
 }
 
 # Field names that should never be logged
@@ -95,6 +106,23 @@ def _should_scrub_field(field_name: str) -> bool:
     return False
 
 
+def scrub_text(text: str) -> str:
+    """Canonical text scrubber (CHZ-SEC-01/02/09): redact secret *substrings*.
+
+    Unlike ``_scrub_value`` (which replaces an entire field value when any
+    pattern hits — right for structured log fields), this substitutes only the
+    matched credential inside a larger body of text, so a transcript line or an
+    error string keeps its non-secret content. This is the single source of
+    truth every content store should call, replacing the three drifted
+    per-module scrubbers (secret_scrubber / session_store / error_sanitization).
+    """
+    if not text or not isinstance(text, str):
+        return text
+    for pattern_name, pattern in SECRET_PATTERNS.items():
+        text = pattern.sub(f"[REDACTED-{pattern_name.upper()}]", text)
+    return text
+
+
 def _scrub_value(value: Any) -> Any:
     """Scrub a single value for secrets."""
     if not isinstance(value, str):
@@ -156,22 +184,11 @@ def scrub_event(event: dict[str, Any]) -> dict[str, Any]:
     return scrubbed
 
 
-def scrub_environment() -> dict[str, str]:
-    """Get a scrubbed copy of the environment.
-
-    Removes API keys and secrets from environment variables before logging.
-
-    Returns:
-        A copy of os.environ with sensitive values redacted.
-    """
-    scrubbed = {}
-    for key, value in os.environ.items():
-        if key in SENSITIVE_ENV_VARS:
-            scrubbed[key] = "[REDACTED]"
-        else:
-            scrubbed[key] = _scrub_value(value) if isinstance(value, str) else value
-    return scrubbed
-
+# WP-15: scrub_environment() deleted. It had ZERO production callers and a
+# NARROWER allowlist than the one actually in use (safe_subprocess's), so it
+# read as a second, weaker layer of protection that nothing invoked. Dead
+# safety code is worse than none: it makes an auditor count a defence that
+# does not run. The live path is safe_subprocess's env allowlist (WP-01).
 
 def structlog_scrubber_processor(logger, name, event):
     """Structlog processor for scrubbing secrets from events.

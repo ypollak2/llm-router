@@ -10,6 +10,7 @@ here.
 from __future__ import annotations
 
 from llm_router.provider_quirks import (
+    AnthropicPxpipeQuirk,
     IdentityQuirk,
     OllamaQuirks,
     OpenAIReasoningQuirks,
@@ -143,6 +144,74 @@ class TestOpenRouterQuirks:
         payload = {"model": "anthropic/claude-haiku-4-5", "temperature": 0.5}
         # Same reference — no copy when no transform applies.
         assert q.transform_request(payload) is payload
+
+
+class TestAnthropicPxpipeQuirk:
+    """Route heavy-model Anthropic calls through a local pxpipe proxy."""
+
+    def _configure(self, monkeypatch, *, enabled, heavy_models="claude-fable-5",
+                    url="http://127.0.0.1:47821", reachable=True):
+        import llm_router.config as config_module
+
+        class _FakeConfig:
+            llm_router_pxpipe_enabled = enabled
+            llm_router_pxpipe_heavy_models = heavy_models
+            llm_router_pxpipe_url = url
+
+        monkeypatch.setattr(config_module, "get_config", lambda: _FakeConfig())
+        monkeypatch.setattr(config_module, "probe_pxpipe", lambda _url: reachable)
+
+    def test_disabled_by_default_is_noop(self, monkeypatch):
+        """Opt-in flag off (the default) — heavy model, no injection."""
+        self._configure(monkeypatch, enabled=False)
+        q = AnthropicPxpipeQuirk()
+        payload = {"model": "anthropic/claude-fable-5"}
+        assert q.transform_request(payload) is payload
+
+    def test_enabled_and_reachable_injects_api_base_for_heavy_model(self, monkeypatch):
+        """Enabled + proxy reachable + model on the heavy list -> api_base set."""
+        self._configure(monkeypatch, enabled=True, reachable=True)
+        q = AnthropicPxpipeQuirk()
+        payload = {"model": "anthropic/claude-fable-5", "messages": []}
+        out = q.transform_request(payload)
+        assert out["api_base"] == "http://127.0.0.1:47821"
+        assert out is not payload  # copy, not mutation
+
+    def test_non_heavy_model_unaffected(self, monkeypatch):
+        """A cheap model not on the heavy list must never take the extra hop."""
+        self._configure(monkeypatch, enabled=True, reachable=True)
+        q = AnthropicPxpipeQuirk()
+        payload = {"model": "anthropic/claude-haiku-4-5"}
+        assert q.transform_request(payload) is payload
+
+    def test_proxy_unreachable_falls_back_silently(self, monkeypatch):
+        """No pxpipe running locally -> no injection, no error."""
+        self._configure(monkeypatch, enabled=True, reachable=False)
+        q = AnthropicPxpipeQuirk()
+        payload = {"model": "anthropic/claude-fable-5"}
+        assert q.transform_request(payload) is payload
+
+    def test_respects_heavy_models_list_override(self, monkeypatch):
+        """A custom heavy-model list is honored, not just the default."""
+        self._configure(monkeypatch, enabled=True, heavy_models="gpt-5.6, claude-opus-4-8")
+        q = AnthropicPxpipeQuirk()
+        assert q.transform_request({"model": "anthropic/claude-opus-4-8"})["api_base"]
+        # claude-fable-5 is the DEFAULT list, not this custom one — must be untouched.
+        payload = {"model": "anthropic/claude-fable-5"}
+        assert q.transform_request(payload) is payload
+
+    def test_does_not_overwrite_existing_api_base(self, monkeypatch):
+        """A caller-set api_base (e.g. from a different quirk/override) always wins."""
+        self._configure(monkeypatch, enabled=True, reachable=True)
+        q = AnthropicPxpipeQuirk()
+        payload = {"model": "anthropic/claude-fable-5", "api_base": "http://custom"}
+        assert q.transform_request(payload) is payload
+
+    def test_transform_model_name_is_identity(self):
+        """pxpipe intercepts by wire format at a fixed URL — the model string
+        Anthropic itself would see must stay untouched."""
+        q = AnthropicPxpipeQuirk()
+        assert q.transform_model_name("anthropic/claude-fable-5") == "anthropic/claude-fable-5"
 
 
 # ── Registry ────────────────────────────────────────────────────────────────

@@ -225,12 +225,25 @@ def execute_tool(name: str, args: dict, project_root: Path) -> str:
             return "\n".join(results)
 
         elif name == "run_command":
+            import shlex
+
             cmd = args["command"]
             if _BLOCKED_COMMANDS.search(cmd):
                 return f"Error: Command blocked for safety: {cmd}"
+            # 🥷 Backslash-security: Avoid the shell — parse into an argv list and
+            # run without a shell so command metacharacters can't inject. The
+            # blocklist above stays as defense-in-depth. Note: this intentionally
+            # drops shell features (pipes/redirects/globs); run_command executes a
+            # single program with arguments, not a shell pipeline.
+            try:
+                argv = shlex.split(cmd)
+            except ValueError as exc:
+                return f"Error: could not parse command: {exc}"
+            if not argv:
+                return "Error: empty command"
             try:
                 result = subprocess.run(
-                    cmd, shell=True, capture_output=True, text=True,
+                    argv, capture_output=True, text=True,
                     timeout=30, cwd=str(project_root),
                 )
                 output = result.stdout
@@ -244,6 +257,8 @@ def execute_tool(name: str, args: dict, project_root: Path) -> str:
                 return output or "(no output)"
             except subprocess.TimeoutExpired:
                 return "Error: Command timed out after 30s"
+            except FileNotFoundError:
+                return f"Error: command not found: {argv[0]}"
 
         else:
             return f"Error: Unknown tool: {name}"
@@ -259,10 +274,98 @@ def execute_tool(name: str, args: dict, project_root: Path) -> str:
 _MAX_ITERATIONS = 15  # Safety cap — prevent infinite loops
 
 
+_OLLAMA_URL_DEFAULT = "http://localhost:11434"
+
+
+def _validated_ollama_url(raw: str) -> str:
+    """Apply CHZ-SEC-06's scheme/host validation, failing CLOSED to localhost.
+
+    config.py validates this exact env input -- its docstring records that
+    LLM_ROUTER_OLLAMA_URL/OLLAMA_URL "reached urlopen with no scheme or host
+    validation, so file:// was accepted (local file read) and cloud-metadata
+    addresses were attempted -- a classic SSRF sink". That fix landed in
+    config.py only, and these hook modules kept their own unvalidated readers,
+    so the protection was bypassed by whichever path ran first:
+
+        input                                validator   hook reader
+        file:///etc/passwd                   BLOCKED     allowed
+        http://169.254.169.254/latest/...    BLOCKED     allowed
+        http://some-external-host            allowed     allowed   (by design)
+
+    Reachable without any local access: `_load_dotenv` in auto-route.py reads
+    `Path.cwd()/".env"`, so a cloned repository can set this variable.
+
+    Imported rather than reimplemented -- a second copy of the rules is what
+    produced this gap. The import is guarded because hook modules must not die
+    on a package-resolution problem, and an unavailable validator falls back to
+    the localhost default rather than to an unchecked URL: refusing to reach a
+    configured Ollama is a degraded feature, while honouring an unvalidated one
+    is the defect.
+    """
+    if not raw:
+        return _OLLAMA_URL_DEFAULT
+    try:
+        from llm_router.config import validate_ollama_url
+    except Exception:
+        return raw if raw == _OLLAMA_URL_DEFAULT else _OLLAMA_URL_DEFAULT
+    return validate_ollama_url(raw) or _OLLAMA_URL_DEFAULT
+
+
 def _get_ollama_url() -> str:
-    return os.environ.get("LLM_ROUTER_OLLAMA_URL") or \
-           os.environ.get("OLLAMA_BASE_URL") or \
-           "http://localhost:11434"
+    return _validated_ollama_url(
+        os.environ.get("LLM_ROUTER_OLLAMA_URL")
+        or os.environ.get("OLLAMA_BASE_URL")
+        or _OLLAMA_URL_DEFAULT
+    )
+
+
+# Tool names the model may call — used to spot a tool call the model dumped
+# into its text `content` instead of the structured `tool_calls` field.
+_TOOL_NAMES = "|".join(t["function"]["name"] for t in TOOL_DEFINITIONS)
+_TOOLCALL_TEXT_RE = re.compile(r'\{\s*"name"\s*:\s*"(?:' + _TOOL_NAMES + r')"', re.IGNORECASE)
+
+
+def _repair_toolcalls(content: str) -> list[dict]:
+    """Recover tool calls a model emitted as TEXT instead of structured output.
+
+    Small tool-capable models (observed: qwen2.5-coder:7b) frequently return
+    ``{"name": "write_file", "arguments": {...}}`` inside the assistant
+    ``content`` string and leave ``tool_calls`` empty. Without recovery the loop
+    sees "no tool calls", treats the blob as the final answer, and silently does
+    nothing. This brace-matches each embedded object and rebuilds the tool_calls
+    shape the executor expects. Empirically flips qwen2.5-coder:7b 0/3 → 3/3 on a
+    write-then-run task; a no-op (returns ``[]``) for well-behaved models.
+    """
+    if not content or not _TOOLCALL_TEXT_RE.search(content):
+        return []
+    calls: list[dict] = []
+    for m in _TOOLCALL_TEXT_RE.finditer(content):
+        start = content.rfind("{", 0, m.start() + 1)
+        depth, i, in_str, esc = 0, start, False, False
+        while i < len(content):
+            c = content[i]
+            if esc:
+                esc = False
+            elif c == "\\":
+                esc = True
+            elif c == '"':
+                in_str = not in_str
+            elif not in_str and c == "{":
+                depth += 1
+            elif not in_str and c == "}":
+                depth -= 1
+                if depth == 0:
+                    try:
+                        obj = json.loads(content[start:i + 1])
+                        args = obj.get("arguments") or obj.get("parameters") or {}
+                        if isinstance(args, str):
+                            args = json.loads(args)
+                        calls.append({"function": {"name": obj["name"], "arguments": args}})
+                    except (ValueError, KeyError):
+                        pass
+                    break
+            i += 1
+    return calls
 
 
 def run_agent_loop(
@@ -297,6 +400,7 @@ def run_agent_loop(
     messages.append({"role": "user", "content": prompt})
 
     ollama_url = _get_ollama_url()
+    tools_used = 0  # How many tool calls actually executed across the whole loop.
 
     for iteration in range(1, _MAX_ITERATIONS + 1):
         body = json.dumps({
@@ -324,8 +428,20 @@ def run_agent_loop(
         content = msg.get("content", "")
         thinking = msg.get("thinking", "")
 
-        # If no tool calls → this is the final response
+        # Repair shim (Fix #2): recover a tool call the model dumped into text
+        # instead of the structured tool_calls field. No-op for good models.
+        if not tool_calls and content:
+            tool_calls = _repair_toolcalls(content)
+
+        # If (still) no tool calls → this is the final response.
         if not tool_calls:
+            # Loud-fallback guard (Fix #4): this loop is only entered for tasks
+            # that need file/command tools. If the model produced a final text
+            # response WITHOUT ever executing a tool, it only chatted — return
+            # None so the caller's fallback ladder tries the next model, rather
+            # than passing off a plausible-looking no-op as success.
+            if tools_used == 0:
+                return None
             return content or thinking or None
 
         # Add assistant message with tool calls to conversation
@@ -338,6 +454,7 @@ def run_agent_loop(
             tool_args = func.get("arguments", {})
 
             tool_result = execute_tool(tool_name, tool_args, project_root)
+            tools_used += 1
 
             messages.append({
                 "role": "tool",

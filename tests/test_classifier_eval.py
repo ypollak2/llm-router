@@ -16,7 +16,7 @@ from llm_router.classifier import (
 from llm_router.types import ClassificationResult, Complexity, TaskType
 
 
-SCRIPT_PATH = Path(__file__).resolve().parents[1] / "scripts" / "bench" / "eval_classifier.py"
+SCRIPT_PATH = Path(__file__).resolve().parents[1] / "scripts" / "eval_classifier.py"
 
 
 def _load_eval_script():

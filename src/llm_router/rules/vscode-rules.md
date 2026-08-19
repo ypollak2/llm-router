@@ -1,25 +1,39 @@
-# llm-router Routing Rules for VS Code
+<!-- llm_router-rules-version: 2 -->
+# LLM Router — VS Code / GitHub Copilot Routing Rules
 
-This section configures llm-router for optimal cost-aware LLM routing.
+> LLM Router routes each task to the cheapest capable model before Copilot generates
+> its own response. Call the appropriate tool BEFORE answering.
+>
+> **Pull routing:** Copilot uses pull routing — YOU must call the tool. The tool
+> returns the response; relay it verbatim. Requires VS Code ≥ 1.99 in agent mode.
 
-## Smart Routing Strategy
+## Task Type → Tool Mapping
 
-- **Research & web queries**: Route via `llm_research` for web-grounded answers
-- **Code generation**: Route via `llm_code` for implementation tasks
-- **Content creation**: Route via `llm_generate` for writing and documentation
-- **Deep analysis**: Route via `llm_analyze` for complex problem-solving
-- **Quick questions**: Route via `llm_query` for simple lookups
+| Task | Tool | Notes |
+|---|---|---|
+| Simple factual question | `llm_query` | Ollama → Gemini Flash → GPT-4o-mini |
+| Research / current events | `llm_research` | Perplexity (web-grounded) |
+| Writing / content | `llm_generate` | Gemini Flash → Haiku |
+| Deep analysis / review | `llm_analyze` | Ollama → GPT-4o |
+| Code generation / refactor | `llm_code` | Ollama → Codex → o3 |
+| Deep reasoning / proofs | `llm_reason` | Extended-thinking model |
+| Unknown / auto-detect | `llm_auto` | Classifies + routes automatically |
 
-## Usage in VS Code
+## Rules
 
-Press **Ctrl+L** to access the llm-router prompt. The MCP server automatically:
-- Classifies task complexity (simple/moderate/complex)
-- Routes to optimal LLM provider (local Ollama → cloud APIs → Claude)
-- Tracks spending and applies budget pressure
-- Caches classification results for consistency
+1. Call the matching tool **before** generating your own response.
+2. Return the tool's output to the user **as-is** (don't paraphrase).
+3. Only use native Copilot intelligence for file navigation, terminal commands,
+   or when all LLM Router MCP servers are unavailable.
+4. If `llm_code` or similar is unavailable, proceed normally and note it.
 
 ## Tips
 
-- Start with `llm_auto` for automatic intelligent routing
-- Use `llm_research` for current events and web-based information
-- Use `llm_code` with complexity hints for better model selection
+- Use `llm_research` for anything time-sensitive — Ollama has a training cutoff
+- Use `llm_auto` when unsure which tool to call
+- Run `llm_savings` to see cross-session totals
+
+## Token-Efficient Responses
+
+Skip preamble. Lead with result. Fragments fine when meaning is clear.
+No trailing summaries. ≥3 items → bullets. Never restate the user's request.

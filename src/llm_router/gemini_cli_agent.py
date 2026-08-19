@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import os
 import time
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
 GEMINI_PATHS = [
@@ -142,6 +143,7 @@ async def run_gemini_cli(
     model: str = "gemini-2.5-flash",
     working_dir: str | None = None,
     timeout: int | None = None,
+    on_event: "Callable[[str, str], Awaitable[None]] | None" = None,
 ) -> GeminiCLIResult:
     """Run a task through the Gemini CLI agent as a subprocess.
 
@@ -202,17 +204,50 @@ async def run_gemini_cli(
 
         proc = await asyncio.create_subprocess_exec(
             *args,
+            stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             cwd=cwd,
             env=safe_env,
         )
-        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+        text_chunks: list[str] = []
+        stderr_buf: list[bytes] = []
+
+        async def _drain_stderr() -> None:
+            assert proc.stderr is not None
+            async for raw in proc.stderr:
+                stderr_buf.append(raw)
+
+        stderr_task = asyncio.create_task(_drain_stderr())
+
+        assert proc.stdout is not None
+        loop = asyncio.get_event_loop()
+        deadline = loop.time() + timeout
+
+        async for raw in proc.stdout:
+            if loop.time() > deadline:
+                proc.kill()
+                return GeminiCLIResult(
+                    content=f"Gemini CLI timed out after {timeout}s",
+                    model=model, exit_code=124,
+                    duration_sec=time.monotonic() - start,
+                )
+            line = raw.decode("utf-8", errors="replace").rstrip("\n")
+            if line:
+                text_chunks.append(line)
+                if on_event:
+                    try:
+                        await on_event("line", line[:120])
+                    except Exception:
+                        pass
+
+        await proc.wait()
+        await stderr_task
         duration = time.monotonic() - start
 
-        output = stdout.decode("utf-8", errors="replace").strip()
-        if not output and stderr:
-            output = stderr.decode("utf-8", errors="replace").strip()
+        output = "\n".join(text_chunks).strip()
+        if not output and stderr_buf:
+            output = b"".join(stderr_buf).decode("utf-8", errors="replace").strip()
 
         return GeminiCLIResult(
             content=output, model=model,

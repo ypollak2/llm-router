@@ -143,6 +143,7 @@ async def _store_judge_score(routing_decision_id: int, score: float) -> None:
             "UPDATE routing_decisions SET judge_score = ? WHERE id = ?",
             (score, routing_decision_id),
         )
+        await db.commit()
     except Exception:
         pass
     finally:

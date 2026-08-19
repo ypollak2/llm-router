@@ -49,7 +49,7 @@ class TestConfigInit:
     """Tests for _run_config_init function."""
 
     def test_config_init_creates_file(self):
-        """_run_config_init should create .llm-router.yml."""
+        """_run_config_init should create .llm_router.yml."""
         with tempfile.TemporaryDirectory() as tmpdir:
             old_cwd = os.getcwd()
             try:
@@ -57,7 +57,7 @@ class TestConfigInit:
                 with patch("llm_router.repo_config.fingerprint_repo") as mock_fp:
                     mock_fp.return_value = ("python", "balanced")
                     _run_config_init()
-                assert Path(".llm-router.yml").exists()
+                assert Path(".llm_router.yml").exists()
             finally:
                 os.chdir(old_cwd)
 
@@ -70,7 +70,7 @@ class TestConfigInit:
                 with patch("llm_router.repo_config.fingerprint_repo") as mock_fp:
                     mock_fp.return_value = ("python", "balanced")
                     _run_config_init()
-                content = Path(".llm-router.yml").read_text()
+                content = Path(".llm_router.yml").read_text()
                 assert "version: 1" in content
                 assert "profile: balanced" in content
                 assert "enforce: enforce" in content
@@ -84,14 +84,14 @@ class TestConfigInit:
             try:
                 os.chdir(tmpdir)
                 # Create the file first
-                Path(".llm-router.yml").write_text("existing content")
+                Path(".llm_router.yml").write_text("existing content")
                 
                 with patch("llm_router.repo_config.fingerprint_repo") as mock_fp:
                     mock_fp.return_value = ("python", "balanced")
                     _run_config_init()
                 
                 # File should still have original content
-                content = Path(".llm-router.yml").read_text()
+                content = Path(".llm_router.yml").read_text()
                 assert content == "existing content"
                 
                 captured = capsys.readouterr()
@@ -108,7 +108,7 @@ class TestConfigInit:
                 with patch("llm_router.repo_config.fingerprint_repo") as mock_fp:
                     mock_fp.return_value = ("nodejs", "premium")
                     _run_config_init()
-                content = Path(".llm-router.yml").read_text()
+                content = Path(".llm_router.yml").read_text()
                 assert "profile: premium" in content
             finally:
                 os.chdir(old_cwd)
@@ -136,7 +136,7 @@ class TestConfigShow:
                     _run_config(["show"])
         
         captured = capsys.readouterr()
-        assert "llm-router config" in captured.out
+        assert "llm_router config" in captured.out
 
     def test_config_lint_validates_yaml(self):
         """config lint should validate YAML syntax."""
@@ -144,7 +144,7 @@ class TestConfigShow:
             old_cwd = os.getcwd()
             try:
                 os.chdir(tmpdir)
-                Path(".llm-router.yml").write_text("version: 1\nprofile: balanced")
+                Path(".llm_router.yml").write_text("version: 1\nprofile: balanced")
                 
                 with patch("llm_router.repo_config.effective_config") as mock_config:
                     with patch("llm_router.repo_config.fingerprint_repo") as mock_fp:
@@ -157,7 +157,7 @@ class TestConfigShow:
                             mock_config_obj.routing = {}
                             mock_config.return_value = mock_config_obj
                             mock_fp.return_value = ("python", "balanced")
-                            mock_find.return_value = Path.cwd() / ".llm-router.yml"
+                            mock_find.return_value = Path.cwd() / ".llm_router.yml"
                             
                             from llm_router.commands.config import _run_config
                             _run_config(["lint"])

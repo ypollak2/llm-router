@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm-router-hook-version: 2
+# llm_router-hook-version: 3
 """PostToolUse[Agent] hook — intercept agent failures and suggest fallbacks.
 
 When an Agent tool call fails (timeout, OOM, unparseable output), this hook:
@@ -22,6 +22,57 @@ import re
 import sys
 import time
 from pathlib import Path
+
+
+# ── Registered-tool surface (CHZ-SURF-01) ────────────────────────────────────
+# Tool names are tier-dependent (LLM_ROUTER_SLIM). NEVER put a raw tool name in
+# output: under the DEFAULT `consolidated` tier the legacy llm_query /
+# llm_analyze / llm_code / llm_research / llm_generate names are not registered,
+# so naming one hands the caller "Error: No such tool available" — after which
+# it silently does the work on the expensive model and the savings dashboard
+# cannot distinguish that from "chose not to route".
+def _load_tool_surface_fns():
+    """(route_tool, route_call, route_call_with_complexity) from llm_router.tool_surface.
+
+    Falls back to the stdlib-only copy the installer drops next to the hooks, then
+    to the in-repo source, then to identity (correct only for tier `off`).
+    """
+    try:
+        from llm_router.tool_surface import (
+            route_call,
+            route_call_with_complexity,
+            route_tool,
+        )
+        return route_tool, route_call, route_call_with_complexity
+    except ImportError:
+        pass
+    try:
+        import importlib.util as _ilu
+        from pathlib import Path as _P
+        _here = _P(__file__).resolve().parent
+        for _cand in (_here / "llm_router_tool_surface.py", _here.parent / "tool_surface.py"):
+            if not _cand.exists():
+                continue
+            _spec = _ilu.spec_from_file_location("llm_router_tool_surface", _cand)
+            _mod = _ilu.module_from_spec(_spec)
+            sys.modules["llm_router_tool_surface"] = _mod  # dataclasses needs this
+            _spec.loader.exec_module(_mod)
+            return _mod.route_tool, _mod.route_call, _mod.route_call_with_complexity
+    except Exception:  # noqa: BLE001 — a broken support module must not kill the hook
+        pass
+    return (
+        lambda n, **k: n,
+        lambda n, *a, **k: (f"{n}({', '.join(a)})" if a else n),
+        lambda n, c, *a, **k: f"{n}(complexity='{c}'" + ("".join(', ' + x for x in a)) + ")",
+    )
+
+
+route_tool, route_call, route_call_with_complexity = _load_tool_surface_fns()
+
+# Hoisted: an f-string expression may not contain a backslash before Python
+# 3.12, and this package supports >=3.10, so the escaped quotes in
+# prompt="..." cannot live inline inside the {route_call(...)} braces.
+_PROMPT_ARG = 'prompt="..."'
 
 
 # ── Retrieval detection ──────────────────────────────────────────────────────
@@ -165,7 +216,7 @@ def _get_fallback_suggestion(last_call: dict | None, failure_type: str) -> str |
     # instead of agents. Recommend this regardless of the failure type.
     if _is_retrieval_intent(prompt):
         return (
-            "[llm-router] Agent failed to retrieve file/code data. "
+            "[llm_router] Agent failed to retrieve file/code data. "
             "Use these file-access tools instead (faster and more reliable):\n\n"
             "  • Glob: Find files by filename pattern\n"
             "  • Grep: Search file contents\n"
@@ -181,14 +232,14 @@ def _get_fallback_suggestion(last_call: dict | None, failure_type: str) -> str |
     if failure_type == "resource_limit":
         tools_suggestion = ""
         if task_type == "code":
-            tools_suggestion = "  • llm_code: Handles code tasks efficiently\n"
+            tools_suggestion = f"  • {route_tool('llm_code')}: Handles code tasks efficiently\n"
         elif task_type == "analysis":
-            tools_suggestion = "  • llm_analyze: Better at scoped analysis\n"
+            tools_suggestion = f"  • {route_tool('llm_analyze')}: Better at scoped analysis\n"
         elif task_type == "generate":
-            tools_suggestion = "  • llm_generate: Optimized for writing\n"
+            tools_suggestion = f"  • {route_tool('llm_generate')}: Optimized for writing\n"
         
         return (
-            "[llm-router] Agent hit a resource limit (timeout, quota, etc.). "
+            "[llm_router] Agent hit a resource limit (timeout, quota, etc.). "
             "Try one of these:\n\n"
             "  1. Break the task into smaller chunks (fewer files, focused scope)\n"
             "  2. Try these MCP tools (better at resource management):\n"
@@ -199,55 +250,55 @@ def _get_fallback_suggestion(last_call: dict | None, failure_type: str) -> str |
     # UNPARSEABLE OUTPUT: agent bug, use reliable MCP tools
     if failure_type == "unparseable_output":
         return (
-            "[llm-router] Agent output couldn't be parsed (likely agent bug). "
+            "[llm_router] Agent output couldn't be parsed (likely agent bug). "
             "Try a reliable MCP tool instead:\n\n"
             f"  Based on your task ('{task_type}'), try:\n"
-            "  • llm_code: For code tasks\n"
-            "  • llm_analyze: For analysis and reasoning\n"
-            "  • llm_query: For simple questions\n\n"
+            f"  • {route_tool('llm_code')}: For code tasks\n"
+            f"  • {route_tool('llm_analyze')}: For analysis and reasoning\n"
+            f"  • {route_tool('llm_query')}: For simple questions\n\n"
             "These return well-structured, parseable output."
         )
     
     # RESOURCE CRASH: too much work for agent
     if failure_type == "resource_crash":
         return (
-            "[llm-router] Agent crashed (memory/process killed). "
+            "[llm_router] Agent crashed (memory/process killed). "
             "The task may be too large. Try:\n\n"
             "  1. Reduce scope (fewer files, simpler prompt)\n"
             "  2. Break into multiple smaller steps\n"
             "  3. Use MCP tools (better memory management):\n"
-            "     • llm_analyze: For analysis\n"
-            "     • llm_code: For code work\n"
-            "     • llm_query: For simple lookups"
+            f"     • {route_tool('llm_analyze')}: For analysis\n"
+            f"     • {route_tool('llm_code')}: For code work\n"
+            f"     • {route_tool('llm_query')}: For simple lookups"
         )
     
     # GENERIC FAILURE: pick tool based on task type
     if task_type == "code":
         return (
-            "[llm-router] Agent failed. For code tasks, try llm_code MCP tool:\n\n"
-            "  llm_code(prompt=\"...\")\n\n"
+            f"[llm_router] Agent failed. For code tasks, try {route_tool('llm_code')} MCP tool:\n\n"
+            f"  {route_call('llm_code', _PROMPT_ARG)}\n\n"
             "This routes to the best code model and handles scope better."
         )
     elif task_type == "analysis":
         return (
-            "[llm-router] Agent failed. For analysis tasks, try llm_analyze MCP tool:\n\n"
-            "  llm_analyze(prompt=\"...\")\n\n"
+            f"[llm_router] Agent failed. For analysis tasks, try {route_tool('llm_analyze')} MCP tool:\n\n"
+            f"  {route_call('llm_analyze', _PROMPT_ARG)}\n\n"
             "This provides stronger reasoning for complex tasks."
         )
     elif task_type == "generate":
         return (
-            "[llm-router] Agent failed. For writing/generation, try llm_generate MCP tool:\n\n"
-            "  llm_generate(prompt=\"...\")\n\n"
+            f"[llm_router] Agent failed. For writing/generation, try {route_tool('llm_generate')} MCP tool:\n\n"
+            f"  {route_call('llm_generate', _PROMPT_ARG)}\n\n"
             "This is optimized for content creation."
         )
     else:
         # Fallback for unknown task type
         return (
-            "[llm-router] Agent failed. Try one of these MCP tools:\n\n"
-            "  • llm_query: For simple questions\n"
-            "  • llm_analyze: For analysis\n"
-            "  • llm_code: For code work\n"
-            "  • llm_generate: For writing"
+            "[llm_router] Agent failed. Try one of these MCP tools:\n\n"
+            f"  • {route_tool('llm_query')}: For simple questions\n"
+            f"  • {route_tool('llm_analyze')}: For analysis\n"
+            f"  • {route_tool('llm_code')}: For code work\n"
+            f"  • {route_tool('llm_generate')}: For writing"
         )
 
 

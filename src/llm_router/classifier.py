@@ -12,6 +12,7 @@ always proceeds.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 from pathlib import Path
@@ -123,6 +124,7 @@ async def classify_complexity(
     prompt: str,
     quality_mode: str = "balanced",
     min_model: str = "haiku",
+    timeout_seconds: float = 10.0,
 ) -> ClassificationResult:
     """Classify a prompt's complexity using the cheapest available classifier model.
 
@@ -135,7 +137,7 @@ async def classify_complexity(
          temperature 0 for deterministic output.
       4. **Parse** — extract the JSON classification via ``_parse_classification``.
       5. **Cache store** — persist the result for future lookups.
-      6. **Fallback** — if all models fail, return a safe moderate/balanced
+      6. **Fallback** — if all models fail or timeout, return a safe moderate/balanced
          result so the routing pipeline never stalls.
 
     Args:
@@ -145,6 +147,8 @@ async def classify_complexity(
             different quality modes in future versions).
         min_model: Minimum model floor (included in the cache key for the same
             reason as quality_mode).
+        timeout_seconds: Maximum time in seconds to wait for classification.
+            If exceeded, returns moderate fallback (prevents hangs). Default 10s.
 
     Returns:
         A ``ClassificationResult`` with complexity, confidence, task type,
@@ -213,65 +217,77 @@ async def classify_complexity(
         ]
 
         last_error: Exception | None = None
-        for model in models_to_try:
-            try:
-                resp = await providers.call_llm(
-                    model=model,
-                    messages=messages,
-                    temperature=0.0,
-                    max_tokens=256,
-                )
-                parsed = _parse_classification(resp.content)
+        try:
+            async with asyncio.timeout(timeout_seconds):
+                for model in models_to_try:
+                    try:
+                        resp = await providers.call_llm(
+                            model=model,
+                            messages=messages,
+                            temperature=0.0,
+                            max_tokens=256,
+                        )
+                        parsed = _parse_classification(resp.content)
 
-                complexity_val = parsed.get("complexity", "moderate")
-                try:
-                    complexity = Complexity(complexity_val)
-                except ValueError:
-                    # Map legacy "complex" responses that might say "deep" to DEEP_REASONING
-                    if "deep" in str(complexity_val).lower():
-                        complexity = Complexity.DEEP_REASONING
-                    else:
-                        complexity = Complexity.MODERATE
+                        complexity_val = parsed.get("complexity", "moderate")
+                        try:
+                            complexity = Complexity(complexity_val)
+                        except ValueError:
+                            # Map legacy "complex" responses that might say "deep" to DEEP_REASONING
+                            if "deep" in str(complexity_val).lower():
+                                complexity = Complexity.DEEP_REASONING
+                            else:
+                                complexity = Complexity.MODERATE
 
-                task_type_val = parsed.get("task_type", "query")
-                inferred_task = TaskType(task_type_val) if task_type_val in VALID_TASK_TYPES else None
+                        task_type_val = parsed.get("task_type", "query")
+                        inferred_task = TaskType(task_type_val) if task_type_val in VALID_TASK_TYPES else None
 
-                confidence = min(1.0, max(0.0, float(parsed.get("confidence", 0.5))))
-                reasoning = parsed.get("reasoning", "")
+                        confidence = min(1.0, max(0.0, float(parsed.get("confidence", 0.5))))
+                        reasoning = parsed.get("reasoning", "")
 
-                subject_val = parsed.get("subject", "general")
-                try:
-                    subject = Subject(subject_val)
-                except (ValueError, TypeError):
-                    subject = Subject.GENERAL
+                        subject_val = parsed.get("subject", "general")
+                        try:
+                            subject = Subject(subject_val)
+                        except (ValueError, TypeError):
+                            subject = Subject.GENERAL
 
-                result = ClassificationResult(
-                    complexity=complexity,
-                    confidence=confidence,
-                    reasoning=reasoning,
-                    inferred_task_type=inferred_task,
-                    classifier_model=model,
-                    classifier_cost_usd=resp.cost_usd,
-                    classifier_latency_ms=resp.latency_ms,
-                    subject=subject,
-                )
-                # Cache successful classification
-                await cache.put(sanitized_prompt, result, quality_mode, min_model)
-                set_span_attributes(
-                    span,
-                    complexity=result.complexity,
-                    inferred_task_type=result.inferred_task_type,
-                    confidence=result.confidence,
-                    classifier_model=model,
-                    classifier_cost_usd=resp.cost_usd,
-                    classifier_latency_ms=resp.latency_ms,
-                )
-                return result
+                        result = ClassificationResult(
+                            complexity=complexity,
+                            confidence=confidence,
+                            reasoning=reasoning,
+                            inferred_task_type=inferred_task,
+                            classifier_model=model,
+                            classifier_cost_usd=resp.cost_usd,
+                            classifier_latency_ms=resp.latency_ms,
+                            subject=subject,
+                        )
+                        # Cache successful classification
+                        await cache.put(sanitized_prompt, result, quality_mode, min_model)
+                        set_span_attributes(
+                            span,
+                            complexity=result.complexity,
+                            inferred_task_type=result.inferred_task_type,
+                            confidence=result.confidence,
+                            classifier_model=model,
+                            classifier_cost_usd=resp.cost_usd,
+                            classifier_latency_ms=resp.latency_ms,
+                        )
+                        return result
 
-            except Exception as e:
-                log.warning("Classifier model %s failed: %s", model, e)
-                last_error = e
-                continue
+                    except Exception as e:
+                        log.warning("Classifier model %s failed: %s", model, e)
+                        last_error = e
+                        continue
+
+            # Timeout occurred
+            log.warning("Classification timed out after %.1f seconds", timeout_seconds)
+            set_span_attributes(span, fallback_reason="timeout", timeout_seconds=timeout_seconds)
+            return _fallback_result(f"classification timeout: {timeout_seconds}s exceeded")
+
+        except asyncio.TimeoutError:
+            log.warning("Classification timed out after %.1f seconds", timeout_seconds)
+            set_span_attributes(span, fallback_reason="timeout", timeout_seconds=timeout_seconds)
+            return _fallback_result(f"classification timeout: {timeout_seconds}s exceeded")
 
         log.warning("All classifier models failed, defaulting to moderate. Last error: %s", last_error)
         set_span_attributes(

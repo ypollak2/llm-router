@@ -95,7 +95,7 @@ def _check_tier(feature: str) -> str | None:
     if config.llm_router_tier == Tier.FREE and feature in PRO_FEATURES:
         return (
             f"'{feature}' requires Pro tier ($12/mo). "
-            f"Current tier: free. Upgrade at https://llm-router.dev/pricing"
+            f"Current tier: free. Upgrade at https://llm_router.dev/pricing"
         )
     return None
 

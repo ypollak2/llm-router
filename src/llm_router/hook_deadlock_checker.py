@@ -21,7 +21,7 @@ def check_all_hooks(verbose: bool = False) -> int:
     hooks_dir = Path.home() / ".claude" / "hooks"
     
     if not hooks_dir.exists():
-        print("[llm-router] Hooks directory not found, skipping deadlock check")
+        print("[llm_router] Hooks directory not found, skipping deadlock check")
         return 0
     
     detector = HookDeadlockDetector(hooks_dir)

@@ -15,13 +15,16 @@ async def llm_image(
     size: str = "1024x1024",
     quality: str = "standard",
 ) -> str:
-    """Generate an image — auto-routes to Gemini Imagen, DALL-E, Flux, or Stable Diffusion.
+    """Generate an image — auto-routes to Gemini, DALL-E, Flux, or Stable Diffusion.
 
     Args:
         prompt: Description of the image to generate.
-        model: Optional model override (e.g. "gemini/imagen-3", "openai/dall-e-3", "fal/flux-pro", "stability/stable-diffusion-3").
+        model: Optional model override. Gemini options: "gemini/gemini-3.1-flash-image"
+            (fast, default), "gemini/gemini-3-pro-image" (studio-quality 4K),
+            "gemini/gemini-2.5-flash-image" (original). Others: "openai/dall-e-3",
+            "fal/flux-pro", "stability/stable-diffusion-3".
         size: Image size (e.g. "1024x1024", "1792x1024").
-        quality: Image quality — "standard" or "hd" (DALL-E only).
+        quality: "standard" (1K) or "hd" (2K for Gemini, HD for DALL-E).
     """
     resp = await route_and_call(
         TaskType.IMAGE, prompt,

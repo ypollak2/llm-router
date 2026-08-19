@@ -1,4 +1,4 @@
-"""RTK-style command output compression for llm-router.
+"""RTK-style command output compression for llm_router.
 
 Compresses shell command outputs before they reach the LLM context,
 reducing context pollution by 80-90%.

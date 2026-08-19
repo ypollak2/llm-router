@@ -2,7 +2,7 @@
 
 Fetches model rankings from four authoritative sources, computes weighted
 per-task-type scores, assigns tier lists, and writes an updated
-``data/benchmarks.json``. Run via ``scripts/bench/update_benchmarks.py``.
+``data/benchmarks.json``. Run via ``scripts/update_benchmarks.py``.
 
 Sources:
   - Arena Hard Auto (lm-sys/arena-hard-auto CSV — general quality, public)
@@ -11,7 +11,7 @@ Sources:
   - LiteLLM model_cost dict (pricing — already installed as a dependency)
 
 This module requires the ``scripts`` optional dependency group:
-  ``pip install claude-code-llm-router[scripts]``
+  ``pip install llm-routing[scripts]``
 """
 
 from __future__ import annotations
@@ -49,8 +49,8 @@ _ALIASES: dict[str, str] = {
     "o3": "openai/o3",
     "Gemini 2.5 Pro": "gemini/gemini-2.5-pro",
     "Gemini 2.5 Flash": "gemini/gemini-2.5-flash",
-    "DeepSeek-V3": "deepseek/deepseek-chat",
-    "DeepSeek-R1": "deepseek/deepseek-reasoner",
+    "DeepSeek-V3": "deepseek/deepseek-v4-flash",
+    "DeepSeek-R1": "deepseek/deepseek-v4-pro",
     "Llama-3.3-70B": "groq/llama-3.3-70b-versatile",
     "Grok-3": "xai/grok-3",
     "Mistral-Large": "mistral/mistral-large-latest",
@@ -67,8 +67,8 @@ _ALIASES: dict[str, str] = {
     "gemini-1.5-pro-api-0514": "gemini/gemini-2.5-pro",
     "gemini-1.5-flash-api-0514": "gemini/gemini-2.5-flash",
     "gemini-2.0-flash-001": "gemini/gemini-2.5-flash",
-    "deepseek-v3": "deepseek/deepseek-chat",
-    "deepseek-r1": "deepseek/deepseek-reasoner",
+    "deepseek-v3": "deepseek/deepseek-v4-flash",
+    "deepseek-r1": "deepseek/deepseek-v4-pro",
     "llama-3.3-70b-instruct": "groq/llama-3.3-70b-versatile",
     "grok-3-beta": "xai/grok-3",
     "mistral-large-2411": "mistral/mistral-large-latest",
@@ -78,8 +78,8 @@ _ALIASES: dict[str, str] = {
     "gpt-4o": "openai/gpt-4o",
     "gemini-2.5-pro": "gemini/gemini-2.5-pro",
     "gemini-2.5-flash": "gemini/gemini-2.5-flash",
-    "deepseek-chat": "deepseek/deepseek-chat",
-    "deepseek-reasoner": "deepseek/deepseek-reasoner",
+    "deepseek-chat": "deepseek/deepseek-v4-flash",
+    "deepseek-reasoner": "deepseek/deepseek-v4-pro",
     # HuggingFace leaderboard names
     "claude-3-5-sonnet": "anthropic/claude-sonnet-4-6",
     "gpt-4o-mini": "openai/gpt-4o-mini",
@@ -257,7 +257,7 @@ def fetch_litellm_pricing() -> dict[str, tuple[float, float]]:
             "claude-opus-4-6", "claude-sonnet-4-6", "claude-haiku-4-5-20251001",
             "gpt-4o", "gpt-4o-mini", "o3",
             "gemini/gemini-2.5-pro", "gemini/gemini-2.5-flash",
-            "deepseek/deepseek-chat", "deepseek/deepseek-reasoner",
+            "deepseek/deepseek-v4-flash", "deepseek/deepseek-v4-pro",
         ):
             if key in pricing:
                 canonical = _resolve(key) or key
@@ -491,7 +491,7 @@ def generate_benchmarks_md(data: dict[str, Any], output_path: Path) -> None:
 
     lines: list[str] = [
         "<!-- AUTO-GENERATED — do not edit by hand. Updated weekly by GitHub Actions. -->",
-        "<!-- Source: src/llm_router/data/benchmarks.json · Generator: scripts/bench/update_benchmarks.py -->",
+        "<!-- Source: src/llm_router/data/benchmarks.json · Generator: scripts/update_benchmarks.py -->",
         "",
         "# Model Benchmarks",
         "",
@@ -501,7 +501,7 @@ def generate_benchmarks_md(data: dict[str, Any], output_path: Path) -> None:
         "",
         "The router uses these benchmarks to dynamically reorder model chains so the best-performing",
         "model for each task type is tried first. Updated data is distributed automatically to all",
-        "users on the next `pip install --upgrade claude-code-llm-router` + server restart.",
+        "users on the next `pip install --upgrade llm-routing` + server restart.",
         "",
         "---",
         "",
@@ -606,7 +606,7 @@ def generate_benchmarks_md(data: dict[str, Any], output_path: Path) -> None:
         "",
         "```",
         "Every Monday 06:00 UTC",
-        "    GitHub Actions runs scripts/bench/update_benchmarks.py",
+        "    GitHub Actions runs scripts/update_benchmarks.py",
         "        ├── Fetches Arena Hard CSV",
         "        ├── Fetches Aider YAML",
         "        ├── Fetches HuggingFace JSON (5×100 rows)",

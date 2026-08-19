@@ -27,6 +27,8 @@ import threading
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from llm_router import pricing as _pricing
+
 if TYPE_CHECKING:
     from llm_router.types import RoutingProfile, TaskType
 
@@ -35,37 +37,45 @@ log = logging.getLogger("llm_router")
 # Blended cost per 1K tokens (avg of input + output). Used by the quality-cost
 # sort to prefer cheaper models when two options are within 5% quality of each other.
 # Codex and Ollama are free ($0) — always prefer them over paid when quality allows.
+# WP-03: derived from llm_router.pricing rather than hand-listed.
+_PAID_MODELS: tuple[str, ...] = (
+    "anthropic/claude-opus-5",
+    "anthropic/claude-sonnet-5",
+    "anthropic/claude-haiku-4-5",
+    "openai/o3",
+    "openai/gpt-4o",
+    "openai/gpt-4o-mini",
+    "gemini/gemini-2.5-pro",
+    "gemini/gemini-2.5-flash",
+    "gemini/gemini-2.5-flash-lite",
+    "deepseek/deepseek-reasoner",
+    "deepseek/deepseek-chat",
+    "deepseek/deepseek-v4-pro",
+    "deepseek/deepseek-v4-flash",
+    "groq/llama-3.3-70b-versatile",
+    "perplexity/sonar-pro",
+    "perplexity/sonar",
+    "mistral/mistral-large-latest",
+    "mistral/mistral-small-latest",
+    "xai/grok-3",
+    "cohere/command-r-plus",
+)
+
+# Codex routes are $0 because the OpenAI subscription is prepaid — that is a
+# *billing arrangement*, not a price, so it is stated here rather than by
+# telling llm_router.pricing that gpt-5.4 is free. The distinction matters: the same
+# model priced through the API is not free, and one table claiming otherwise is
+# how a zero escapes into a savings figure.
+_SUBSCRIPTION_COVERED: tuple[str, ...] = ("codex/gpt-5.4", "codex/o3", "codex/gpt-4o")
+_ZERO_MARGINAL_COST = 0.0
+
 _MODEL_COST_PER_1K: dict[str, float] = {
-    # Anthropic
-    "anthropic/claude-opus-4-6":           0.045,
-    "anthropic/claude-sonnet-4-6":         0.009,
-    "anthropic/claude-haiku-4-5-20251001": 0.00075,
-    # OpenAI
-    "openai/o3":                           0.025,
-    "openai/gpt-4o":                       0.006,
-    "openai/gpt-4o-mini":                  0.00038,
-    # Google
-    "gemini/gemini-2.5-pro":               0.003,
-    "gemini/gemini-2.5-flash":             0.00019,
-    "gemini/gemini-2.5-flash-lite":        0.000025,
-    # DeepSeek
-    "deepseek/deepseek-reasoner":          0.0014,
-    "deepseek/deepseek-chat":              0.0007,
-    # Groq
-    "groq/llama-3.3-70b-versatile":        0.0007,
-    # Perplexity
-    "perplexity/sonar-pro":                0.010,
-    "perplexity/sonar":                    0.003,
-    # Mistral
-    "mistral/mistral-large-latest":        0.004,
-    "mistral/mistral-small-latest":        0.00020,
-    # xAI / Cohere
-    "xai/grok-3":                          0.009,
-    "cohere/command-r-plus":               0.006,
-    # Free models (Codex = OpenAI subscription, Ollama = local)
-    "codex/gpt-5.4":                       0.0,
-    "codex/o3":                            0.0,
-    "codex/gpt-4o":                        0.0,
+    **{
+        _mid: _v
+        for _mid in _PAID_MODELS
+        if (_v := _pricing.blended_per_1k(_mid)) is not None
+    },
+    **dict.fromkeys(_SUBSCRIPTION_COVERED, _ZERO_MARGINAL_COST),
 }
 
 # Fallback cost for unknown models — use a mid-range estimate.

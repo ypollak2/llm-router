@@ -16,6 +16,7 @@ import os
 from mcp.server.mcpserver import Context
 
 from llm_router.cost import _get_db
+from llm_router.savings import net_saved
 
 # ── ANSI color codes ────────────────────────────────────────────────────────
 
@@ -38,9 +39,12 @@ _BG_MAGENTA = "\033[45m"
 _FULL_BLOCK = "█"
 _HALF_BLOCK = "▌"
 
-# Host model baseline rates (per million tokens) — Opus 4.6
-HOST_INPUT_PER_M = 15.0
-HOST_OUTPUT_PER_M = 75.0
+# Fail-open fallback only — the authoritative host (frontier Claude) rates live
+# in cost.py's single canonical source and are read at call time in
+# _host_baseline (AC-3/AC-4: no stale, independent, drifting price copies; the
+# hardcoded 15/75 here was ~3x the current list price).
+HOST_INPUT_PER_M = 5.0
+HOST_OUTPUT_PER_M = 25.0
 
 # Provider colors for distribution bars
 _PROVIDER_COLORS = {
@@ -88,8 +92,19 @@ def _window_label(window: str) -> str:
 
 
 def _host_baseline(input_tokens: int, output_tokens: int) -> float:
-    """What the host model (Opus) would charge for the same token volume."""
-    return (input_tokens * HOST_INPUT_PER_M + output_tokens * HOST_OUTPUT_PER_M) / 1_000_000
+    """What the host (frontier Claude) model would charge for the same tokens.
+
+    Reads cost.py's canonical ``_HOST_INPUT_PER_M`` / ``_HOST_OUTPUT_PER_M`` at
+    call time so the dashboard can never drift from the rest of the accounting
+    (AC-3/AC-4 / INV-COST-004). Fails open to the module fallback list price.
+    """
+    try:
+        from llm_router import cost as _cost
+        in_pm = float(_cost._HOST_INPUT_PER_M)
+        out_pm = float(_cost._HOST_OUTPUT_PER_M)
+    except Exception:  # noqa: BLE001 — a price read must never break the dashboard
+        in_pm, out_pm = HOST_INPUT_PER_M, HOST_OUTPUT_PER_M
+    return (input_tokens * in_pm + output_tokens * out_pm) / 1_000_000
 
 
 def _format_tokens(n: int) -> str:
@@ -130,7 +145,7 @@ async def _query_daily_savings(since_sql: str, baseline: str = "opus") -> list[d
         cursor = await db.execute(
             f"""
             SELECT
-                date(timestamp) as day,
+                date(timestamp,'localtime') as day,
                 SUM(input_tokens + output_tokens) as total_tokens,
                 SUM(input_tokens) as input_tokens,
                 SUM(output_tokens) as output_tokens,
@@ -139,7 +154,7 @@ async def _query_daily_savings(since_sql: str, baseline: str = "opus") -> list[d
             FROM usage
             WHERE timestamp >= {since_sql}
               AND success = 1
-            GROUP BY date(timestamp)
+            GROUP BY date(timestamp,'localtime')
             ORDER BY day
             """,
         )
@@ -152,7 +167,7 @@ async def _query_daily_savings(since_sql: str, baseline: str = "opus") -> list[d
     for row in rows:
         day, total_tok, in_tok, out_tok, actual, calls = row
         base_cost = baseline_fn(in_tok, out_tok)
-        saved = max(0, base_cost - actual)
+        saved = net_saved(base_cost, actual)
         results.append({
             "day": day,
             "tokens": total_tok,
@@ -195,7 +210,7 @@ async def _query_provider_breakdown(since_sql: str, baseline: str = "opus") -> l
     for row in rows:
         prov, total_tok, in_tok, out_tok, actual, calls = row
         base_cost = baseline_fn(in_tok, out_tok)
-        saved = max(0, base_cost - actual)
+        saved = net_saved(base_cost, actual)
         results.append({
             "provider": prov,
             "tokens": total_tok,
@@ -245,21 +260,34 @@ def _render_dashboard(
     # ── Header ──────────────────────────────────────────────────────────
     lines.append(f"{_BOLD}╔══════════════════════════════════════════════════════════════╗{_RESET}")
     lines.append(f"{_BOLD}║  {_CYAN}LLM Router — Savings Dashboard{_RESET}{_BOLD}                              ║{_RESET}")
-    lines.append(f"{_BOLD}║  {_DIM}Baseline: Opus 4.6 ($15/$75 per 1M tokens){_RESET}{_BOLD}                   ║{_RESET}")
+    # Show the ACTUAL canonical host price used by _host_baseline, not a stale
+    # hardcoded "$15/$75" (AC-3/AC-4). Padded to the 60-col inner box width.
+    _bl_in, _bl_out = HOST_INPUT_PER_M, HOST_OUTPUT_PER_M
+    try:
+        from llm_router import cost as _cost
+        _bl_in, _bl_out = float(_cost._HOST_INPUT_PER_M), float(_cost._HOST_OUTPUT_PER_M)
+    except Exception:  # noqa: BLE001
+        pass
+    _bl_text = f"Baseline: host Claude (${_bl_in:g}/${_bl_out:g} per 1M tokens)"
+    lines.append(f"{_BOLD}║  {_DIM}{_bl_text}{_RESET}{_BOLD}{' ' * max(0, 60 - len(_bl_text))}║{_RESET}")
     lines.append(f"{_BOLD}╠══════════════════════════════════════════════════════════════╣{_RESET}")
 
     # ── Totals ──────────────────────────────────────────────────────────
     total_tokens = sum(d["tokens"] for d in daily)
     total_saved = sum(d["saved"] for d in daily) - classifier_overhead
     total_calls = sum(d["calls"] for d in daily)
-    net_saved = max(0, total_saved)
+    net_total_saved = total_saved
+    # AUD-06: net_total_saved is SIGNED. Colour by sign -- a negative
+    # rendered in green reads as a win, which is the display-layer half
+    # of the same defect the clamp caused.
+    _net_col = _GREEN if net_total_saved >= 0 else _RED
 
     lines.append("")
     lines.append(f"  {_BOLD}{window_label}{_RESET}")
     lines.append("")
     lines.append(f"  {_GREEN}{_BOLD}{_format_tokens(total_tokens)}{_RESET} tokens routed  ·  "
                  f"{_GREEN}{_BOLD}{total_calls}{_RESET} calls  ·  "
-                 f"{_GREEN}{_BOLD}${net_saved:.2f}{_RESET} net saved")
+                 f"{_net_col}{_BOLD}${net_total_saved:.2f}{_RESET} net saved")
     lines.append("")
 
     # ── Time-series sparkline ───────────────────────────────────────────
@@ -309,7 +337,7 @@ def _render_dashboard(
             f"{b['calls']:>6} "
             f"{_format_tokens(b['tokens']):>10} "
             f"{_GREEN}${b['saved']:.4f}{_RESET}{'':<6} "
-            f"{_GREEN}${max(0, b['saved'] - (classifier_overhead * b['calls'] / max(total_calls, 1))):.4f}{_RESET}"
+            f"${b['saved'] - (classifier_overhead * b['calls'] / max(total_calls, 1)):+.4f}{_RESET}"
             f"{free_tag}"
         )
         lines.append(f"  {bar}")
@@ -318,7 +346,7 @@ def _render_dashboard(
 
     # Classifier overhead
     lines.append(f"  {_YELLOW}Classifier overhead:{_RESET} {_YELLOW}-${classifier_overhead:.4f}{_RESET}")
-    lines.append(f"  {_BOLD}{_GREEN}NET SAVED:{_RESET} {_BOLD}{_GREEN}${net_saved:.4f}{_RESET} "
+    lines.append(f"  {_BOLD}{_net_col}NET SAVED:{_RESET} {_BOLD}{_net_col}${net_total_saved:.4f}{_RESET} "
                  f"({_format_tokens(total_tokens)} tokens via cheaper models)")
 
     # ── Subscription notice ─────────────────────────────────────────────
@@ -326,7 +354,7 @@ def _render_dashboard(
         lines.append("")
         lines.append(f"  {_YELLOW}┌─ SUBSCRIPTION MODE ────────────────────────────────┐{_RESET}")
         lines.append(f"  {_YELLOW}│{_RESET} You're on a flat-rate Claude plan.                 {_YELLOW}│{_RESET}")
-        lines.append(f"  {_YELLOW}│{_RESET} Dollar savings = vs Opus 4.6 baseline (reference).  {_YELLOW}│{_RESET}")
+        lines.append(f"  {_YELLOW}│{_RESET} Dollar savings = vs frontier baseline (reference).  {_YELLOW}│{_RESET}")
         lines.append(f"  {_YELLOW}│{_RESET} Real value = {_BOLD}quota freed{_RESET} for complex tasks.          {_YELLOW}│{_RESET}")
         lines.append(f"  {_YELLOW}│{_RESET} {_format_tokens(total_tokens)} tokens handled by cheaper models      {_YELLOW}│{_RESET}")
         lines.append(f"  {_YELLOW}│{_RESET} = quota preserved for Opus-class work.              {_YELLOW}│{_RESET}")

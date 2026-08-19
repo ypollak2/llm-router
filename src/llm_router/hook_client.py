@@ -11,7 +11,7 @@ import os
 import urllib.error
 import urllib.request
 
-logger = logging.getLogger("llm-router.hook-client")
+logger = logging.getLogger("llm_router.hook-client")
 
 SERVICE_PORT = int(os.environ.get("LLM_ROUTER_SERVICE_PORT", "7337"))
 SERVICE_URL = f"http://127.0.0.1:{SERVICE_PORT}"

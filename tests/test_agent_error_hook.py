@@ -17,6 +17,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from llm_router.tool_surface import route_tool
+
 HOOK_PATH = Path(__file__).parent.parent / "src" / "llm_router" / "hooks" / "agent-error.py"
 
 
@@ -202,7 +204,7 @@ class TestReasoningFallback:
         )
         assert code == 0
         assert out is not None
-        assert "chunks" in out["suggestion"].lower() or "llm_analyze" in out["suggestion"]
+        assert "chunks" in out["suggestion"].lower() or route_tool("llm_analyze") in out["suggestion"]
 
     def test_code_generation_parse_error(self, tmp_path):
         """Code generation failure with parse error suggests llm_code."""
@@ -213,7 +215,7 @@ class TestReasoningFallback:
         )
         assert code == 0
         assert out is not None
-        assert "llm_code" in out["suggestion"]
+        assert route_tool("llm_code") in out["suggestion"]
 
     def test_design_decision_memory_error(self, tmp_path):
         """Reasoning task with memory error suggests MCP tools."""
@@ -224,7 +226,7 @@ class TestReasoningFallback:
         )
         assert code == 0
         assert out is not None
-        assert "llm_analyze" in out["suggestion"] or "chunks" in out["suggestion"]
+        assert route_tool("llm_analyze") in out["suggestion"] or "chunks" in out["suggestion"]
 
 
 class TestResourceLimitFallback:
@@ -250,7 +252,9 @@ class TestResourceLimitFallback:
         )
         assert code == 0
         assert out is not None
-        assert "llm_" in out["suggestion"]
+        # CHZ-SURF-01: the door form is `llm(task="code")` — no underscore, so the
+        # old "llm_" substring check would pass or fail for the wrong reason.
+        assert route_tool("llm_code") in out["suggestion"]
 
     def test_limit_exceeded_offers_alternatives(self, tmp_path):
         """Limit exceeded offers specific alternative tools."""

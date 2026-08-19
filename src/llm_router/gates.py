@@ -15,11 +15,20 @@ v8.8.0: Contract-as-Infrastructure.
 from __future__ import annotations
 
 import ast
+import logging
 import os
 import re
 from dataclasses import dataclass
 
 from llm_router.contract import GateType, RoutingContract
+from llm_router.types import Complexity
+
+log = logging.getLogger(__name__)
+
+# Complexity tiers whose length-gate failure forces a downshift to a cheaper
+# (potentially budget/Ollama) model. When these trip, the downgrade must be
+# observable rather than silent (CHZ-AUD-014).
+_PREMIUM_COMPLEXITY = (Complexity.COMPLEX, Complexity.DEEP_REASONING)
 
 
 @dataclass(frozen=True)
@@ -97,12 +106,64 @@ def _check_syntax(contract: RoutingContract, text: str) -> GateResult:
     return GateResult(gate=GateType.SYNTAX, passed=True)
 
 
+# CHZ-AUD-C-03: bare answers that are complete despite being short. The length
+# gate exists to catch empty/truncated garbage, NOT to reject a legitimately
+# terse answer and force a silent post-dispatch re-route.
+_VALID_SHORT_ANSWERS = frozenset({
+    "yes", "no", "true", "false", "n/a", "na", "none", "null", "nil",
+    "ok", "okay", "done", "pass", "fail", "unknown",
+})
+_NUMERIC_ANSWER_RE = re.compile(r"[-+]?[\$€£]?\d[\d,]*(?:\.\d+)?\s?%?")
+
+
+def _is_valid_short_answer(text: str) -> bool:
+    """CHZ-AUD-C-03: recognise a legitimately short, complete answer (yes/no,
+    a boolean, a bare number/currency/percentage, or a single short token) so
+    the length gate passes it instead of triggering a silent re-dispatch."""
+    s = text.strip().rstrip(".!").strip()
+    if not s:
+        return False
+    if s.lower() in _VALID_SHORT_ANSWERS:
+        return True
+    if _NUMERIC_ANSWER_RE.fullmatch(s):
+        return True
+    # NOTE: a bare single WORD is intentionally NOT allow-listed here. For terse
+    # factual Q&A (TaskType.QUERY) the contract already caps the length floor to
+    # the empty-guard, so "London"/"Python" pass without this gate rejecting them;
+    # for CODE/ANALYZE/RESEARCH a one-word "answer" is almost certainly truncated
+    # or wrong, so it must still trip the gate rather than be waved through.
+    return False
+
+
 def _check_length(contract: RoutingContract, text: str) -> GateResult:
     """Verify response meets minimum length threshold."""
     min_len = contract.constraints.min_output_length
     actual = len(text.strip())
 
     if actual < min_len:
+        # CHZ-AUD-C-03: allow-list legitimately short valid answers so a terse
+        # but complete reply is not rejected and silently re-dispatched.
+        if _is_valid_short_answer(text):
+            return GateResult(gate=GateType.LENGTH, passed=True)
+        # CHZ-AUD-014: A length-gate failure on a complex/premium task is what
+        # forces the router to abandon the premium chain and (potentially)
+        # emergency-fallback to a budget Ollama model. Make that downshift
+        # observable — a brief but valid premium answer must not silently
+        # downgrade quality without a trace. (Non-premium length rejections are
+        # still surfaced by the router's `gate_verification_failed` structured
+        # log and the route-quality ledger's fallback_reason — CHZ-AUD-C-03 — so
+        # WHICH gate triggered the fallback is always recoverable; this WARNING
+        # is the extra human-visible signal reserved for premium downshifts.)
+        if contract.complexity in _PREMIUM_COMPLEXITY:
+            log.warning(
+                "Length gate failed on premium task (%s/%s): %d < %d chars — "
+                "premium response rejected, router will downshift to a cheaper "
+                "model. A brief valid answer may be forcing this downgrade.",
+                contract.task_type.value,
+                contract.complexity.value,
+                actual,
+                min_len,
+            )
         return GateResult(
             gate=GateType.LENGTH,
             passed=False,
@@ -112,24 +173,51 @@ def _check_length(contract: RoutingContract, text: str) -> GateResult:
 
 
 def _check_structure(contract: RoutingContract, text: str) -> GateResult:
-    """Verify response has structural elements (headings, sections, lists).
+    """Verify a long response is legible, not a single undifferentiated blob.
 
-    For analysis tasks, a wall of unstructured text is a quality signal.
+    This gate exists to catch **garbage** — a wall of text with no internal
+    structure — not to force Markdown onto valid answers. Prose *is* structure:
+    a multi-sentence, multi-paragraph answer is perfectly legible without a
+    single ``##`` heading or ``-`` bullet.
+
+    The original implementation required ≥2 Markdown markers and rejected
+    everything else >200 chars. That is a false-positive machine: it discarded
+    valid frontier prose (e.g. a 466-char multi-sentence answer with 0 Markdown
+    markers), forcing the router down its fallback chain and — when the chain
+    was exhausted — all the way to a failed dispatch. A model that *answered*
+    the prompt should never be rejected for lacking bullet points.
+
+    So a response counts as structured if ANY of these hold:
+    - it has ≥2 Markdown markers (headings / list items), OR
+    - it has ≥2 paragraphs (blank-line-separated blocks), OR
+    - it has ≥3 sentences (sentence-terminating punctuation).
+
+    Only a long body with none of the above — a true wall of text — fails.
     """
-    structural_markers = (
+    stripped = text.strip()
+    markers = (
         text.count("\n## ") +
         text.count("\n### ") +
         text.count("\n- ") +
         text.count("\n* ") +
         text.count("\n1. ")
     )
+    # Blank-line-separated blocks → paragraphs; sentence-terminating punctuation
+    # followed by whitespace/end → sentences. Both are structure in prose.
+    paragraphs = sum(1 for block in re.split(r"\n\s*\n", stripped) if block.strip())
+    sentences = len(re.findall(r"[.!?](?:\s|$)", stripped))
 
-    # At least 2 structural elements for moderate+ analysis
-    if structural_markers < 2 and len(text) > 200:
+    structured = markers >= 2 or paragraphs >= 2 or sentences >= 3
+
+    # Only long bodies are gated; a short answer can't be a "wall of text".
+    if not structured and len(stripped) > 200:
         return GateResult(
             gate=GateType.STRUCTURE,
             passed=False,
-            reason=f"no structure: {structural_markers} markers in {len(text)} chars",
+            reason=(
+                f"unstructured wall: {markers} markers, {paragraphs} paragraphs, "
+                f"{sentences} sentences in {len(stripped)} chars"
+            ),
         )
     return GateResult(gate=GateType.STRUCTURE, passed=True)
 

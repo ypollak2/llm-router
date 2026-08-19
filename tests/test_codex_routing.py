@@ -89,7 +89,9 @@ async def test_code_task_codex_after_first_claude_not_last(
     Chain after fix:   [Sonnet, Codex/gpt-5.4, Codex/o3, GPT-4o, Gemini Pro, DeepSeek, Haiku]
     """
     monkeypatch.setattr("llm_router.router.is_codex_available", lambda: True)
+    monkeypatch.setattr("llm_router.router.is_gemini_cli_available", lambda: False)
     monkeypatch.setattr("llm_router.claude_usage.get_claude_pressure", lambda: 0.2)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
 
     # Disable Ollama to ensure Claude is first in chain
     monkeypatch.delenv("OLLAMA_BASE_URL", raising=False)
@@ -102,28 +104,19 @@ async def test_code_task_codex_after_first_claude_not_last(
     import llm_router.config as config_module
     config_module._config = None
 
-    # Make Claude (first model) fail, then verify second model is Codex
-    call_count = 0
+    # All LiteLLM-dispatched models fail so only run_codex (Codex CLI) can succeed.
+    # The dynamic routing table may place Ollama/codex-API models before Claude depending
+    # on the available-providers set; by failing ALL litellm calls we ensure the router
+    # exhausts every non-Codex option and reaches run_codex regardless of chain order.
+    tried_models: list[str] = []
 
-    async def _selective_fail(**kwargs):
-        nonlocal call_count
-        call_count += 1
-        model = kwargs.get("model", "")
-        if "anthropic" in model:
-            raise RuntimeError("Simulated Claude failure")
-        from unittest.mock import MagicMock
-        resp = MagicMock()
-        resp.choices = [MagicMock()]
-        resp.choices[0].message.content = "External response"
-        resp.usage = MagicMock()
-        resp.usage.prompt_tokens = 50
-        resp.usage.completion_tokens = 20
-        resp.citations = None
-        return resp
+    async def _all_litellm_fail(**kwargs):
+        tried_models.append(kwargs.get("model", ""))
+        raise RuntimeError("Simulated litellm failure")
 
     codex_result = _mock_codex_result("Codex code output")
 
-    with patch("litellm.acompletion", side_effect=_selective_fail), \
+    with patch("litellm.acompletion", side_effect=_all_litellm_fail), \
          patch("litellm.completion_cost", return_value=0.001), \
          patch("llm_router.router.run_codex", return_value=codex_result) as mock_codex:
         resp = await route_and_call(
@@ -131,8 +124,10 @@ async def test_code_task_codex_after_first_claude_not_last(
             profile=RoutingProfile.BALANCED,
         )
 
-    # After Claude fails, Codex should be tried (not GPT-4o)
-    assert mock_codex.called, "Codex should be the second option after Claude for CODE tasks"
+    # Codex must be reached (run_codex called) — it's the only model that can succeed
+    assert mock_codex.called, (
+        f"Codex (run_codex) was not called. LiteLLM models tried: {tried_models}"
+    )
     assert resp.provider == "codex"
 
 

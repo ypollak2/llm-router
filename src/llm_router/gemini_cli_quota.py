@@ -54,6 +54,7 @@ async def _run_gemini_stats() -> dict | None:
         # Attempt to run `gemini /stats` (may not be supported on all versions)
         proc = await asyncio.create_subprocess_exec(
             binary, "/stats",
+            stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )

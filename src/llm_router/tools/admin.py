@@ -17,6 +17,7 @@ from llm_router.cache import get_cache
 from llm_router.codex_agent import is_codex_available
 from llm_router.config import get_config
 from llm_router.cost import (
+    _get_db,
     get_cache_savings, get_model_acceptance_scores, get_model_latency_stats,
     get_monthly_spend, get_quality_report,
     get_routing_savings_vs_sonnet, get_savings_summary,
@@ -27,6 +28,7 @@ from llm_router.health import get_tracker
 from llm_router.provider_budget import get_provider_budgets
 from llm_router.types import RoutingProfile, colorize_provider, MODEL_COST_PER_1K
 from llm_router import state as _state
+from llm_router.tool_surface import route_tool  # CHZ-SURF-01
 
 
 async def llm_save_session(ctx: Context) -> str:
@@ -75,6 +77,11 @@ async def llm_usage(period: str = "today") -> str:
     """
     from llm_router.claude_usage import _bar, _row, _time_until
 
+    # Bootstrap schema so fresh / 0-byte usage.db renders the empty-state UI
+    # instead of erroring with `no such table: usage`. Idempotent.
+    _bootstrap_db = await _get_db()
+    await _bootstrap_db.close()
+
     W = 58  # box inner width
     HR = "+" + "-" * W + "+"
 
@@ -120,7 +127,7 @@ async def llm_usage(period: str = "today") -> str:
     lines.append(section("CODEX (LOCAL)"))
     if is_codex_available():
         lines.append(row("  Available for routed calls; native turns not metered"))
-        lines.append(row("  Session spend counts llm-router tool calls only"))
+        lines.append(row("  Session spend counts llm_router tool calls only"))
     else:
         lines.append(row("  Status:  NOT INSTALLED"))
     lines.append(HR)
@@ -183,13 +190,17 @@ async def llm_usage(period: str = "today") -> str:
             pct_saved = (s["cost_saved_usd"] / opus_would_cost) * 100
             lines.append(row(""))
             lines.append(row(f"  Opus would cost: ${opus_would_cost:.4f}  ->  Actual: ${actual_cost:.4f}  ({pct_saved:.0f}% saved)"))
+        lines.append(row("  Note: estimate vs Opus baseline (equal tokens)"))
         lines.append(HR)
 
     # ── Section 6: Lifetime Savings (from routing_decisions SQLite table) ──
     real_lifetime = await get_routing_savings_vs_sonnet(days=0)
     if real_lifetime["total_calls"] > 0:
         lt = real_lifetime
-        lines.append(section("LIFETIME SAVINGS (vs Sonnet 4.6 baseline)"))
+        # get_routing_savings_vs_sonnet computes vs the latest-Opus HOST baseline
+        # (its `_vs_sonnet` name is historical/misleading, per its own docstring);
+        # label the display honestly as the Claude host baseline, not "Sonnet".
+        lines.append(section("LIFETIME SAVINGS (vs Claude host baseline)"))
         tok_str = f"{lt['input_tokens']:,} in + {lt['output_tokens']:,} out"
         lines.append(row(f"  Calls:    {lt['total_calls']}    Tokens: {tok_str}"))
         lines.append(row(f"  Actual:   ${lt['actual_cost']:.4f}    Baseline: ${lt['baseline_cost']:.4f}"))
@@ -234,6 +245,18 @@ async def llm_usage(period: str = "today") -> str:
     config = get_config()
     if config.llm_router_monthly_budget > 0:
         monthly_spend = await get_monthly_spend()
+        # WP-13: spend getters return inf when a component could not be read
+        # (fail closed). inf is right for the cap COMPARISON and wrong here --
+        # "$inf spent, 0% of budget remaining" is a fabricated number, and a
+        # NaN percentage would render as a bar of unpredictable length.
+        import math as _math
+        if not _math.isfinite(monthly_spend):
+            lines.append(section("MONTHLY BUDGET"))
+            lines.append(
+                "  Unknown — spend could not be read, so routing is denying paid "
+                "models until it can. See `llm_router doctor`."
+            )
+            return "\n".join(lines)
         budget = config.llm_router_monthly_budget
         remaining = max(0, budget - monthly_spend)
         pct = monthly_spend / budget if budget > 0 else 0
@@ -256,7 +279,12 @@ async def llm_usage(period: str = "today") -> str:
             lines.append(row(f"  Projected:   ${forecast.projected_monthly_usd:.2f} for full month"))
         lines.append(HR)
 
-    lines.append(row("  Tip: use llm_dashboard to open the visual web dashboard"))
+    # RED1-22: was a bare `llm_dashboard`, which is not registered under the
+    # consolidated default tier. Surfaced only once GUARDED became derived from
+    # DEPRECATED_TOOLS — the hand-maintained list omitted this name.
+    lines.append(
+        row(f"  Tip: use {route_tool('llm_dashboard')} to open the visual web dashboard")
+    )
     lines.append(HR)
     return "\n".join(lines)
 
@@ -346,17 +374,36 @@ async def llm_quality_report(days: int = 7) -> str:
             lines.append(row(f"  {task:<16} {count:>5}  ({pct:>5.0%})"))
         lines.append(HR)
 
-    # By model
+    # By model — attributed decisions only. Percentages are of ATTRIBUTED, not of
+    # total_decisions: dividing routing shares by a total that includes rows the
+    # classifier never touched is what produced a 69% share for a model the router
+    # never chose.
+    attributed = report.get("attributed_decisions", report["total_decisions"])
     if report["by_model"]:
-        lines.append(section("BY MODEL"))
-        lines.append(row(f"  {'Model':<24} {'Calls':>5}  {'Avg ms':>7}  {'Cost':>8}"))
+        lines.append(section("BY MODEL (routed)"))
+        lines.append(row(f"  {'Model':<20} {'Calls':>5} {'Share':>6}  {'Avg ms':>7} {'Cost':>8}"))
         lines.append(row("  " + "-" * 50))
         for model, stats in report["by_model"].items():
             short = model.split("/")[-1] if "/" in model else model
+            pct = stats["count"] / attributed if attributed else 0
             lines.append(row(
-                f"  {short:<24} {stats['count']:>5}  "
-                f"{stats['avg_latency']:>6.0f}ms  ${stats['total_cost']:>7.4f}"
+                f"  {short:<20} {stats['count']:>5} {pct:>5.0%}  "
+                f"{stats['avg_latency']:>6.0f}ms ${stats['total_cost']:>7.4f}"
             ))
+        lines.append(HR)
+
+    # Unattributed — shown, never hidden. These rows say nothing about routing, but
+    # their EXISTENCE says something: writes nobody can account for. Folding them into
+    # the table above made this dashboard report the opposite of the truth for months.
+    if report.get("unattributed_decisions"):
+        n = report["unattributed_decisions"]
+        lines.append(section("UNATTRIBUTED"))
+        lines.append(row(f"  {n} of {report['total_decisions']} decisions excluded above"))
+        lines.append(row(f"  reason: {report.get('unattributed_reason', 'unknown')}"))
+        lines.append(row("  these are NOT routing choices — the classifier never ran"))
+        for model, count in list(report.get("unattributed_by_model", {}).items())[:5]:
+            short = model.split("/")[-1] if "/" in model else model
+            lines.append(row(f"    {short:<24} {count:>6}"))
         lines.append(HR)
 
     return "\n".join(lines)
@@ -369,26 +416,43 @@ async def llm_health() -> str:
     tracker = get_tracker()
     report = tracker.status_report()
 
+    # Probe the live local fallback up front so it counts toward the routable
+    # set. Previously llm_health headlined only `available_providers` (key-based)
+    # and probed Ollama separately at the bottom — so a local-only setup reported
+    # "0 providers / No providers configured" while llm_query was happily routing
+    # to Ollama. Health must reflect what can ACTUALLY be routed to right now.
+    ollama_reachable = bool(config.ollama_base_url) and probe_ollama(config.ollama_base_url)
+
+    routable = set(config.available_providers)
+    if ollama_reachable:
+        routable.add("ollama")
+
     lines = [
         f"## Provider Health (profile: {config.llm_router_profile.value})",
-        f"Configured: {len(config.available_providers)} providers — {', '.join(sorted(config.available_providers)) or 'none'}",
+        f"Routable now: {len(routable)} — {', '.join(sorted(routable)) or 'none'}",
+        f"Configured (key-based): {len(config.available_providers)} — {', '.join(sorted(config.available_providers)) or 'none'}",
         f"Text: {', '.join(sorted(config.text_providers)) or 'none'}",
         f"Media: {', '.join(sorted(config.media_providers)) or 'none'}",
         "",
     ]
-    if not report:
-        lines.append("No providers configured. Run `llm-router-onboard` to set up API keys.")
+    if not routable:
+        lines.append("No providers reachable. Run `llm_router-onboard` to set up API keys, or `ollama serve` for a local model.")
+    elif not report:
+        # Nothing has been routed yet this session, but a provider IS reachable.
+        lines.append("Reachable, no routes yet this session.")
     else:
         for provider, status in report.items():
             lines.append(f"- **{colorize_provider(provider)}**: {status}")
 
     # Show Ollama reachability explicitly — it's config-based AND needs a live probe
     if config.ollama_base_url:
-        reachable = probe_ollama(config.ollama_base_url)
-        ollama_status = "reachable ✅" if reachable else "unreachable ❌ — run: ollama serve"
+        ollama_status = "reachable ✅" if ollama_reachable else "unreachable ❌ — run: ollama serve"
         lines.append(f"\n🦙 Ollama ({config.ollama_base_url}): {ollama_status}")
 
-    lines.append("\nTip: use llm_dashboard to open the visual web dashboard at localhost:7337")
+    lines.append(
+        f"\nTip: use {route_tool('llm_dashboard')} to open the visual web "
+        "dashboard at localhost:7337"
+    )
     return "\n".join(lines)
 
 
@@ -477,7 +541,7 @@ async def llm_providers() -> str:
         "cohere": "Command R+",
     }
     media_providers = {
-        "gemini": "Imagen 3 (images), Veo 2 (video)",
+        "gemini": "Nano Banana (gemini-3.1-flash-image / gemini-3-pro-image), Veo 2 (video)",
         "openai": "DALL-E 3, TTS, Whisper",
         "fal": "Flux Pro/Dev, Kling Video, minimax",
         "stability": "Stable Diffusion 3, SDXL",
@@ -563,11 +627,15 @@ async def llm_dashboard(port: int = 7337) -> str:
 async def llm_savings() -> str:
     """Show time-bucketed savings dashboard: today / this week / this month / all-time.
 
-    Displays actual spend vs Sonnet baseline and the efficiency multiplier (Nx)
-    for each period. Use this to understand the real dollar value routing provides.
+    Reports TWO figures per the honest-accounting fix (RETROSPECTIVE B-7):
+      - Avoided (Opus-baseline): what the latest Opus host would have cost for the
+        same tokens minus actual spend. This is a quota/token-smoothing figure.
+      - Real $ avoided: dollars the user would ACTUALLY have paid absent routing —
+        ~$0 on a flat-rate Claude Code subscription, the full baseline in metered
+        API mode (LLM_ROUTER_CLAUDE_SUBSCRIPTION).
 
     Returns:
-        Formatted savings table with efficiency multiplier.
+        Formatted savings table with both figures and the efficiency multiplier.
     """
     from llm_router.cost import get_savings_by_period
 
@@ -593,34 +661,41 @@ async def llm_savings() -> str:
         ("all_time", "All time"),
     ]
 
-    lines.append(section("SAVINGS vs SONNET BASELINE"))
-    lines.append(row(f"  {'Period':<12}  {'Saved':>8}  {'Actual':>8}  {'Baseline':>9}  {'Eff':>5}"))
+    lines.append(section("AVOIDED vs OPUS BASELINE"))
+    lines.append(row(f"  {'Period':<10}  {'Avoided':>8}  {'Real $':>7}  {'Actual':>8}  {'Eff':>5}"))
     lines.append(row("  " + "-" * 52))
 
     best_efficiency = 0.0
     for key, label in period_labels:
         d = data.get(key, {})
-        saved = d.get("saved_usd", 0.0)
+        avoided = d.get("baseline_avoided_usd", d.get("saved_usd", 0.0))
+        real = d.get("real_dollars_avoided_usd", 0.0)
         actual = d.get("actual_usd", 0.0)
-        baseline = d.get("baseline_usd", 0.0)
         eff = d.get("efficiency", 0.0)
         best_efficiency = max(best_efficiency, eff)
         eff_str = f"{eff:.1f}x" if eff >= 1.0 else "—"
         lines.append(row(
-            f"  {label:<12}  ${saved:>7.2f}  ${actual:>7.4f}  ${baseline:>8.2f}  {eff_str:>5}"
+            f"  {label:<10}  ${avoided:>7.2f}  ${real:>6.2f}  ${actual:>7.4f}  {eff_str:>5}"
         ))
 
     lines.append(HR)
 
-    # Highlight the "wow" metric
+    from llm_router.cost import _host_is_metered
+    if _host_is_metered():
+        lines.append(row("  Real $ = billed API rate avoided (metered mode)."))
+    else:
+        lines.append(row("  Real $ ≈ $0: flat-rate subscription — 'Avoided' is a"))
+        lines.append(row("  quota/token figure, not cash. See RETROSPECTIVE B-7."))
+
+    # Highlight the "wow" metric — honestly framed
     if best_efficiency >= 2.0:
-        lines.append(section(f"YOUR AI IS {best_efficiency:.1f}x MORE COST-EFFICIENT"))
-        lines.append(row("  than using Sonnet for every request."))
+        lines.append(section(f"{best_efficiency:.1f}x FEWER TOKENS BILLED AT OPUS RATES"))
+        lines.append(row("  vs sending every request to Opus."))
     elif data.get("all_time", {}).get("calls", 0) == 0:
         lines.append(row("  No routed calls yet. Run a few prompts to see savings."))
 
     lines.append(HR)
-    lines.append(row("  Tip: run `llm-router test \"<prompt>\"` to simulate routing"))
+    lines.append(row("  Tip: run `llm_router test \"<prompt>\"` to simulate routing"))
     lines.append(HR)
 
     return "\n".join(lines)
@@ -750,7 +825,7 @@ async def llm_policy() -> str:
     Displays the merged policy from all three layers:
       - Org policy   (~/.llm-router/org-policy.yaml)
       - User policy  (~/.llm-router/routing.yaml)
-      - Repo policy  (.llm-router.yml)
+      - Repo policy  (.llm_router.yml)
 
     Also shows the last 10 policy enforcement events from the audit log.
     """
@@ -935,8 +1010,26 @@ async def llm_session_spend() -> str:
         "",
         f"Total: **${summary['total_usd']:.4f}** across {summary['call_count']} calls",
         "",
-        "Scope: routed llm-router calls only; native host turns are not visible.",
+        "Scope: routed llm_router calls only; native host turns are not visible.",
     ]
+
+    # Honest-savings split: potential is the routing counterfactual; realized
+    # excludes turns the main model overrode (did the work itself). Only shown
+    # once there is at least one routed turn to talk about.
+    _pot = summary.get("potential_savings_usd", 0.0)
+    _real = summary.get("realized_savings_usd", 0.0)
+    _over = summary.get("overridden_turns", 0)
+    if summary.get("call_count", 0) > 0:
+        lines += [
+            "",
+            f"Potential saved (routing counterfactual): **${_pot:.4f}**",
+            f"Realized saved (answers actually used):   **${_real:.4f}**",
+        ]
+        if _over > 0:
+            lines.append(
+                f"⚠️  {_over} turn(s) overridden — main model did the work itself; "
+                "potential ≠ realized for those."
+            )
 
     if summary.get("anomaly_flag"):
         lines.insert(0, "⚠️  ANOMALY: Spend threshold exceeded in < 10 minutes!")
@@ -1045,7 +1138,7 @@ async def llm_approve_route(
             f"Routing cancelled.\n\n"
             f"Blocked call was: {pending.get('model', 'unknown')} "
             f"(estimated ${pending.get('estimated_cost', 0):.4f})\n"
-            f"Use a cheaper tool like `llm_query` for simple tasks."
+            f"Use a cheaper tool like `{route_tool('llm_query')}` for simple tasks."
         )
 
     model = downgrade_to or pending.get("model", "")
@@ -1112,7 +1205,7 @@ async def llm_quota_status() -> str:
 
         # Show model routing priorities
         model_map = {
-            "codex": "gpt-4o / gpt-5.4",
+            "codex": "gpt-5.5 / gpt-5.4",
             "claude": "claude-sonnet / claude-opus",
             "gemini_cli": "gemini-pro",
         }
@@ -1164,7 +1257,7 @@ async def llm_budget() -> str:
             providers_str = ", ".join(sorted(uncapped))
             nudge = (
                 f"\n\n💡 **No cap set for**: {providers_str}\n"
-                f"   Run `llm-router budget set <provider> <amount>` to protect against runaway costs."
+                f"   Run `llm_router budget set <provider> <amount>` to protect against runaway costs."
             )
 
         return f"{summary}{nudge}\n\n**Adaptive Router v5.0+**: ✅ Always-on dynamic routing (feature flag removed)"
@@ -1177,7 +1270,7 @@ async def llm_share_profile() -> str:
 
     Exports ~/.llm-router/learned_routes.json and prepares it for upload
     to a shared community repository. Useful for publishing routing patterns
-    you've learned that may benefit other llm-router users.
+    you've learned that may benefit other llm_router users.
 
     Returns:
         Path to exported profile and upload instructions
@@ -1209,7 +1302,7 @@ async def llm_share_profile() -> str:
 
         return (
             f"✅ Profile exported to: {export_path}\n\n"
-            f"Share at: https://github.com/ypollak2/llm-router-profiles\n"
+            f"Share at: https://github.com/ypollak2/llm_router-profiles\n"
             f"Your routes:\n"
             + "\n".join(
                 f"  • {task}: {route.model} (confidence={route.confidence})"
@@ -1239,7 +1332,7 @@ async def llm_import_profile(url: str = "") -> str:
         existing = load_learned_profile()
 
         # Default to latest community profile if no URL provided
-        DEFAULT_COMMUNITY_URL = "https://raw.githubusercontent.com/ypollak2/llm-router-profiles/main/community.json"
+        DEFAULT_COMMUNITY_URL = "https://raw.githubusercontent.com/ypollak2/llm_router-profiles/main/community.json"
         if not url:
             url = DEFAULT_COMMUNITY_URL
 

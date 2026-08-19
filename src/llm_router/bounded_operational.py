@@ -1,43 +1,44 @@
-# Ported from Chuzom's bounded_operational.py; env var renamed to
-# LLM_ROUTER_BOUNDED_OPERATIONAL; pricing lookup rewired to llm_router's own
-# calibration table (llm_router.calibration._lookup_pricing).
-"""CF-4: the bounded-operational route -- decision predicate and pricing-derived budget.
+"""CF-4: the bounded-operational route — capability-driven hybrid.
 
-A bounded-operational route is a capability-gated hybrid between a pure completion
-(no tools) and a full delegation (unbounded milestones/attempts): it is offered only
-for a *simple* task that still needs at least one of write/run/verify, and it is
-hard-capped (see the ``MAX_BOUNDED_*`` constants) so a wrong guess costs little.
+The North Star says a routed model must be able to do the REAL work. A *simple* task
+that nonetheless needs to write a file or run a command ("add a blank line to README")
+cannot be served by an untoolable completion route — but a full MGEE plan+run+verify
+loop is overkill for one line. The resolution (§8, Option C) is a bounded single-milestone
+tool path selected by CAPABILITY, not by complexity label alone.
 
-This module intentionally contains ONLY the pure decision + budget logic. It has no
-dependency on any delegation-execution engine -- llm-router does not yet have one to
-wire it to. ``should_route_bounded`` and ``bounded_op_budget_usd`` are complete,
-tested, and ready for a future workstream to call from wherever routing decisions are
-made.
+This module holds the two shared pieces so ``enforce-route`` (routing) and
+``llm_delegate`` (execution) agree on one predicate and one budget:
 
-The feature is OFF by default (``LLM_ROUTER_BOUNDED_OPERATIONAL`` unset/falsy):
-``should_route_bounded`` always returns ``False`` while the flag is off, no matter how
-good a candidate the prompt is.
+  * :func:`should_route_bounded` — simple + (write/run/verify) capability + flag on
+  * :func:`bounded_op_budget_usd` — a budget DERIVED from model pricing, never a
+    magic constant, with a small floor so a $0 local tier still has escalation headroom.
+
+Ships behind ``LLM_ROUTER_BOUNDED_OPERATIONAL`` (default OFF for the first release, §8.2
+rollout) — opt-in while metrics accumulate, then flip on.
 """
 from __future__ import annotations
 
 import math
 import os
 
-# Hard caps: a bounded route is intentionally small-blast-radius. These are NOT
-# tunable via config -- they are a safety property of the route, not a preference.
+# Constraints (§8.3)
 MAX_BOUNDED_MILESTONES = 1
-MAX_BOUNDED_ATTEMPTS = 2
+MAX_BOUNDED_ATTEMPTS = 2      # one cheap tier + at most one escalation
 MAX_BOUNDED_FILE_WRITES = 3
 MAX_BOUNDED_COMMANDS = 3
+_BUDGET_FLOOR_USD = 0.01      # a $0 local tier still needs headroom for one escalation
 
-# A tier priced at $0 (e.g. a free local model) still gets a nonzero budget floor so
-# there's room for at least one retry/escalation inside the bounded route.
-_BUDGET_FLOOR_USD = 0.01
-
-# Generic third-party model names used purely to look up a representative price per
-# tier; not brand-specific to any routing product.
-_TIER_PRICING_MODEL = {
-    0: "gpt-4o-mini",
+# Representative tool-capable model per tier (cheapest first). Local tiers price
+# at ~$0, so budget derivation uses a cheap EXTERNAL model to size a cap that can
+# absorb one escalation to a paid tier.
+#
+# WP-03: renamed from _TIER_PRICING_MODEL. It holds model *names* and never held
+# a rate, but the name matched the pricing lint's table heuristic, so this file
+# was carried as accepted debt despite containing no price. A false positive in
+# a baseline looks exactly like a real one, which is how a baseline stops being
+# read at all.
+_TIER_REFERENCE_MODEL = {
+    0: "gpt-4o-mini",   # local is free; size the cap off the first paid escalation tier
     1: "gpt-4o-mini",
     2: "gpt-4o",
     3: "claude-sonnet-4-6",
@@ -45,35 +46,31 @@ _TIER_PRICING_MODEL = {
 
 
 def bounded_operational_enabled() -> bool:
-    """Whether the bounded-operational route is enabled. Defaults OFF."""
-    return os.environ.get("LLM_ROUTER_BOUNDED_OPERATIONAL", "").strip().lower() in (
-        "1", "true", "yes", "on",
-    )
+    """Default OFF for the first release (opt-in). Flip the default after
+    verified_route_rate > 0 on bounded_operational rows."""
+    return os.environ.get("LLM_ROUTER_BOUNDED_OPERATIONAL", "0").strip().lower() in (
+        "1", "true", "yes", "on")
 
 
 def get_model_prices(model_tier: int) -> tuple[float, float]:
-    """Return ``(input_price_per_m, output_price_per_m)`` USD for *model_tier*.
-
-    FAIL-OPEN: if pricing lookup fails for any reason, returns a conservative
-    default (``0.15``, ``0.60``) rather than raising -- a pricing-lookup failure
-    must never block a routing decision.
-    """
+    """Return (input_price_per_mtok, output_price_per_mtok) for the representative
+    tool-capable model at *model_tier*, from the single calibration price table."""
+    model = _TIER_REFERENCE_MODEL.get(int(model_tier), "gpt-4o-mini")
     try:
         from llm_router.calibration import _lookup_pricing
-
-        model = _TIER_PRICING_MODEL.get(model_tier, _TIER_PRICING_MODEL[1])
-        prices = _lookup_pricing(model)
-        return float(prices["input"]), float(prices["output"])
-    except Exception:  # noqa: BLE001 -- pricing lookup must never break routing
-        return 0.15, 0.60
+        p = _lookup_pricing(model)
+        return float(p["input"]), float(p["output"])
+    except Exception:  # noqa: BLE001 — pricing lookup must never break routing
+        from llm_router import pricing
+        fallback = pricing.price_for("gpt-4o-mini")
+        return (fallback.input, fallback.output) if fallback else (0.0, 0.0)
 
 
 def bounded_op_budget_usd(task_type: str = "", model_tier: int = 1) -> float:
-    """A budget cap DERIVED from the tier's real pricing -- never a magic constant.
+    """Budget cap for a bounded operational route, DERIVED from model pricing.
 
-    Assumes a representative ~2000 input / ~1000 output tokens per attempt, times
-    ``MAX_BOUNDED_ATTEMPTS``, rounded up to the nearest cent, floored at
-    ``_BUDGET_FLOOR_USD`` so a free/cheap tier still has escalation headroom.
+    Sizing (§8.2): ~2000 input + ~1000 output tokens per attempt, up to 2 attempts,
+    rounded up to the cent, floored so a free local tier still has escalation headroom.
     """
     input_price, output_price = get_model_prices(model_tier)
     per_attempt = (2000 * input_price + 1000 * output_price) / 1_000_000
@@ -82,30 +79,18 @@ def bounded_op_budget_usd(task_type: str = "", model_tier: int = 1) -> float:
 
 
 def should_route_bounded(prompt: str, complexity: str) -> bool:
-    """Decide whether *prompt* (already classified as *complexity*) qualifies for
-    the bounded-operational route.
+    """Route to the bounded operational path iff: the flag is on, the task is SIMPLE,
+    and it genuinely needs tools (write_files / run_commands / objective_verification).
 
-    Requires ALL of:
-      * the feature flag is enabled (``LLM_ROUTER_BOUNDED_OPERATIONAL``);
-      * complexity is exactly ``"simple"`` (moderate/complex always go through full
-        delegation, never bounded);
-      * the prompt needs at least one of write_files / run_commands /
-        objective_verification.
-
-    Uses ``llm_router.capabilities.detect_capabilities`` (WS4) to obtain the
-    capability vector. FAIL-OPEN: any import/lookup failure here conservatively
-    returns ``False`` (never bounded), so the route degrades safely to full
-    delegation rather than guessing.
-    """
+    A pure Q&A simple task returns False (stays on completion); a moderate/complex task
+    returns False (full delegate handles it). Capability, not complexity, is the gate."""
     if not bounded_operational_enabled():
         return False
     if complexity != "simple":
         return False
     try:
         from llm_router.capabilities import detect_capabilities
-
-        decision = detect_capabilities(prompt)
-        req = decision.required
-        return bool(req.write_files or req.run_commands or req.objective_verification)
-    except Exception:  # noqa: BLE001 -- undetected capability must never crash routing
+        req = detect_capabilities(prompt).required
+    except Exception:  # noqa: BLE001 — detection failure → conservative (no bounded route)
         return False
+    return bool(req.write_files or req.run_commands or req.objective_verification)

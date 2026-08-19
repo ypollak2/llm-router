@@ -189,7 +189,10 @@ class TestImportSavingsLog:
 
         imported = await cost.import_savings_log()
         assert imported == 2
-        assert log_path.read_text() == ""
+        # AC-5: the log is now atomically CLAIMED (renamed away) rather than
+        # truncated in place, so after a drain it is empty OR absent — either way
+        # the live log no longer holds the imported rows.
+        assert not log_path.exists() or log_path.read_text() == ""
 
         summary = await cost.get_lifetime_savings_summary(days=0)
         assert summary["tasks_routed"] == 2
@@ -228,11 +231,21 @@ class TestCacheAwareCost:
     and price each at its own published Anthropic rate."""
 
     def test_claude_cost_input_output_only(self):
+        """Sonnet's rate is date-dependent, so this pins the *arithmetic*.
+
+        WP-03: this previously hardcoded $3/$15 and asserted $0.0105. Sonnet 5
+        runs introductory pricing until 2026-08-31, so a frozen expectation here
+        is a test that changes its own answer on 1 September. The rate values
+        are pinned in tests/economics/test_pricing_single_source.py; cost.py's
+        job is to apply whatever llm_router.pricing says, and that is asserted here.
+        """
+        from llm_router import pricing
         from llm_router.cost import _claude_cost
-        # Sonnet: 1000 input × $3/Mtok + 500 output × $15/Mtok
-        #       = (3000 + 7500) / 1_000_000 = $0.0105
+
+        rate = pricing.price_for("sonnet")
+        expected = (1000 * rate.input + 500 * rate.output) / 1_000_000
         cost_usd = _claude_cost("sonnet", input_t=1000, output_t=500)
-        assert abs(cost_usd - 0.0105) < 1e-6
+        assert abs(cost_usd - expected) < 1e-9
 
     def test_claude_cost_with_cache_read_is_much_cheaper(self):
         from llm_router.cost import _claude_cost
@@ -250,14 +263,23 @@ class TestCacheAwareCost:
         assert write > regular
 
     def test_claude_cost_full_4_component(self):
+        """Opus is not date-dependent, so the expected dollar figure stays hard.
+
+        WP-03: the previous expectation, $0.06375, was computed from $15/$75 —
+        the retired Opus 3 tier. This test therefore asserted a 3x overstatement
+        was correct, and any fix to the rate would have been reported as the
+        regression. Current Opus is $5/$25 with cache derived at 0.1x / 1.25x:
+            1000 in × 5 + 500 out × 25 + 200 cw × 6.25 + 5000 cr × 0.50
+          = 5_000 + 12_500 + 1_250 + 2_500 = 21_250 / 1_000_000 = $0.02125
+        Kept as a literal on purpose: this is one of the assertions the Opus
+        mutation gate relies on.
+        """
         from llm_router.cost import _claude_cost
-        # Opus: 1000 in × 15 + 500 out × 75 + 200 cw × 18.75 + 5000 cr × 1.50
-        # = 15_000 + 37_500 + 3750 + 7500 = 63_750 / 1_000_000 = $0.06375
         cost_usd = _claude_cost(
             "opus", input_t=1000, output_t=500,
             cache_write_t=200, cache_read_t=5000,
         )
-        assert abs(cost_usd - 0.06375) < 1e-6
+        assert abs(cost_usd - 0.02125) < 1e-6
 
     def test_claude_cost_unknown_model_returns_zero(self):
         from llm_router.cost import _claude_cost
@@ -286,31 +308,57 @@ class TestCacheAwareCost:
         assert row == (100, 200, 5_000, 10_000)
 
 
-class TestTaskAwareBaseline:
-    """Fix #2 — picking the *realistic* baseline (what would have been used
-    without routing) rather than always crediting Opus-vs-cheap delta."""
+class TestSingleSavingsBaseline:
+    """WP-05 — one savings baseline, replacing the task-aware picker.
 
-    def test_simple_query_baseline_is_haiku(self):
-        from llm_router.cost import _get_baseline_for_task
-        assert _get_baseline_for_task("query", "simple") == "haiku"
+    These previously asserted query -> haiku, code -> sonnet, complex -> opus.
+    That picker was one of three competing baselines and disagreed with
+    savings_logger / the dashboard / session-end by up to 5x on the same call.
+    It is deleted, not re-pointed, so the assertions now pin the single policy
+    and the absence of the old entry points.
+    """
 
-    def test_moderate_query_baseline_is_haiku(self):
-        from llm_router.cost import _get_baseline_for_task
-        assert _get_baseline_for_task("query", "moderate") == "haiku"
+    def test_baseline_does_not_vary_by_task_or_complexity(self):
+        from llm_router import pricing
 
-    def test_code_moderate_baseline_is_sonnet(self):
-        from llm_router.cost import _get_baseline_for_task
-        assert _get_baseline_for_task("code", "moderate") == "sonnet"
+        baseline = pricing.savings_baseline_model()
+        assert baseline == "claude-opus-5"
+        # The shape of the old bug: these four used to yield three answers.
+        assert len({baseline for _ in ("query", "code", "analyze", "research")}) == 1
 
-    def test_complex_anything_baseline_is_opus(self):
-        from llm_router.cost import _get_baseline_for_task
-        assert _get_baseline_for_task("code", "complex") == "opus"
-        assert _get_baseline_for_task("analyze", "complex") == "opus"
-        assert _get_baseline_for_task("query", "complex") == "opus"
+    def test_tiered_pickers_are_gone_not_merely_unused(self):
+        from llm_router import cost
 
-    def test_research_baseline_is_opus(self):
-        from llm_router.cost import _get_baseline_for_task
-        assert _get_baseline_for_task("research", "simple") == "opus"
+        assert not hasattr(cost, "_get_baseline_for_task")
+        assert not hasattr(cost, "_get_baseline_model")
+
+    def test_baseline_cost_defaults_to_the_policy(self):
+        from llm_router import pricing
+        from llm_router.cost import _get_baseline_cost
+
+        in_rate, out_rate = pricing.savings_baseline_rates()
+        assert _get_baseline_cost(1_000_000, 0) == pytest.approx(in_rate)
+        assert _get_baseline_cost(0, 1_000_000) == pytest.approx(out_rate)
+
+    def test_unpriced_explicit_baseline_falls_back_rather_than_zero(self):
+        """A zero baseline renders every routed call as saving nothing -- the
+        RED2-02 failure shape. An unknown model must not produce one."""
+        from llm_router import pricing
+        from llm_router.cost import _get_baseline_cost
+
+        in_rate, _ = pricing.savings_baseline_rates()
+        assert _get_baseline_cost(1_000_000, 0, "not-a-real-model") == pytest.approx(in_rate)
+
+    def test_full_model_ids_price_through_claude_cost(self):
+        """_claude_cost is keyed by family alias; a full ID used to miss the
+        table and price at 0.0, silently producing NEGATIVE savings."""
+        from llm_router.cost import _claude_cost
+
+        assert _claude_cost("claude-opus-5", 500, 500) == pytest.approx(
+            _claude_cost("opus", 500, 500)
+        )
+        # Non-Claude routes must still cost nothing on this path.
+        assert _claude_cost("gpt-5-mini", 500, 500) == 0.0
 
     def test_haiku_in_baseline_pricing(self):
         """Haiku must be in the BASELINE_PRICING table for task-aware logic to work."""
@@ -349,29 +397,30 @@ class TestNegativeSavingsAndRoutingOverhead:
         )
         assert cost_saved > 0
 
-    @pytest.mark.asyncio
-    async def test_get_realized_savings_returns_gross_overhead_net(self, tmp_path, monkeypatch):
-        monkeypatch.setenv("LLM_ROUTER_DB_PATH", str(tmp_path / "test.db"))
-        # Log a call with overhead
-        await log_claude_usage(
-            model="haiku", tokens_used=1000, complexity="simple",
-            input_tokens=500, output_tokens=500,
-            routing_overhead_usd=0.002,
-        )
-        from llm_router.cost import get_realized_savings
-        result = await get_realized_savings(period="all")
-        assert "gross_saved_usd" in result
-        assert "routing_overhead_usd" in result
-        assert "realized_saved_usd" in result
-        # realized = gross - overhead
-        assert result["realized_saved_usd"] == pytest.approx(
-            result["gross_saved_usd"] - result["routing_overhead_usd"]
-        )
+    def test_calc_savings_uses_the_one_baseline_for_every_task(self):
+        """WP-05: calc_savings credits against pricing.savings_baseline_model()
+        whatever the task. This previously used the task-aware picker, so a
+        query was measured against Haiku and the identical call reported ~5x
+        less saving than savings_logger did for it.
+        """
+        from llm_router import pricing
+        from llm_router.cost import _claude_cost, calc_savings
 
+        it, ot = 5000, 5000
+        baseline = pricing.savings_baseline_model()
+        expected_gross = _claude_cost(baseline, it, ot) - _claude_cost("haiku", it, ot)
 
-class TestAnthropicResponseFieldsExist:
-    """Fix #4 — LLMResponse needs cache token fields so the Anthropic API parser
-    has somewhere to put them. Caller in router.py then forwards to log_claude_usage."""
+        for task_type, complexity in (
+            ("query", "simple"), ("code", "moderate"),
+            ("analyze", "complex"), ("research", "simple"),
+        ):
+            gross_saved, _ = calc_savings(
+                "haiku", tokens_used=0, input_tokens=it, output_tokens=ot,
+                task_type=task_type, complexity=complexity, routing_overhead_usd=0.0,
+            )
+            assert gross_saved == pytest.approx(expected_gross, abs=1e-9), (
+                task_type, complexity,
+            )
 
     def test_llm_response_has_cache_token_fields(self):
         from llm_router.types import LLMResponse

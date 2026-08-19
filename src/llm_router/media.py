@@ -508,31 +508,36 @@ async def generate_audio_elevenlabs(
 async def generate_image_gemini(
     prompt: str,
     *,
-    model: str = "imagen-3",
+    model: str = "gemini-3.1-flash-image",
     size: str = "1024x1024",
     quality: str = "standard",
 ) -> LLMResponse:
-    """Generate an image via the Google Gemini Imagen 3 REST API.
+    """Generate an image via the Gemini generateContent API (Nano Banana models).
 
-    Calls the ``predict`` endpoint on the Generative Language API.  The
-    response contains a base64-encoded PNG in ``predictions[0].bytesBase64Encoded``,
-    which is returned as a data URI in ``media_url``.
+    Uses ``POST /v1/models/{model}:generateContent`` with
+    ``responseModalities: ["TEXT", "IMAGE"]``.  The response contains
+    base64-encoded image data in ``parts[].inlineData.data``.
+
+    Models:
+        - gemini-3.1-flash-image  Nano Banana 2 — fast, high-volume (default)
+        - gemini-3-pro-image      Nano Banana Pro — studio-quality, up to 4K
+        - gemini-2.5-flash-image  Nano Banana v1 — original fast creative model
 
     Pricing (per image, approximate):
-        - imagen-3:       $0.040
-        - imagen-3-fast:  $0.020
+        - gemini-3.1-flash-image: $0.020
+        - gemini-3-pro-image:     $0.060
+        - gemini-2.5-flash-image: $0.020
 
     Args:
         prompt: Text description of the desired image.
-        model: Imagen model variant (``"imagen-3"`` or ``"imagen-3-fast"``).
-        size: Output dimensions as ``"WIDTHxHEIGHT"`` (used for aspect ratio).
-        quality: ``"standard"`` or ``"hd"`` (reserved for future use).
+        model: Gemini image model name (see above).
+        size: Output dimensions as ``"WIDTHxHEIGHT"`` (mapped to aspectRatio).
+        quality: ``"standard"`` or ``"hd"`` — maps to imageSize (1K vs 2K).
     """
     config = get_config()
     client = _get_client()
     start = time.monotonic()
 
-    # Map WxH to aspect ratio string
     aspect_map = {
         "1024x1024": "1:1",
         "1792x1024": "16:9",
@@ -541,16 +546,18 @@ async def generate_image_gemini(
         "1024x1536": "2:3",
     }
     aspect_ratio = aspect_map.get(size, "1:1")
+    image_size = "2K" if quality == "hd" else "1K"
 
     resp = await client.post(
-        f"https://generativelanguage.googleapis.com/v1beta/models/{model}:predict",
+        f"https://generativelanguage.googleapis.com/v1/models/{model}:generateContent",
         params={"key": config.gemini_api_key},
         json={
-            "instances": [{"prompt": prompt}],
-            "parameters": {
-                "sampleCount": 1,
-                "aspectRatio": aspect_ratio,
-                "personGeneration": "allow_all",
+            "contents": [{"parts": [{"text": prompt}]}],
+            "generationConfig": {
+                "responseModalities": ["TEXT", "IMAGE"],
+                "responseFormat": {
+                    "image": {"aspectRatio": aspect_ratio, "imageSize": image_size},
+                },
             },
         },
     )
@@ -559,12 +566,22 @@ async def generate_image_gemini(
     elapsed = (time.monotonic() - start) * 1000
 
     image_b64 = ""
-    predictions = data.get("predictions", [])
-    if predictions:
-        image_b64 = predictions[0].get("bytesBase64Encoded", "")
+    candidates = data.get("candidates", [])
+    for part in (candidates[0].get("content", {}).get("parts", []) if candidates else []):
+        inline = part.get("inlineData", {})
+        if inline.get("mimeType", "").startswith("image/"):
+            image_b64 = inline.get("data", "")
+            break
 
-    cost = {"imagen-3": 0.04, "imagen-3-fast": 0.02}.get(model, 0.04)
+    cost = {
+        "gemini-3.1-flash-image": 0.020,
+        "gemini-3-pro-image": 0.060,
+        "gemini-2.5-flash-image": 0.020,
+    }.get(model, 0.020)
+    if quality == "hd":
+        cost *= 1.5
 
+    mime = "image/png"
     return LLMResponse(
         content=f"Image generated with Gemini {model}",
         model=f"gemini/{model}",
@@ -573,7 +590,7 @@ async def generate_image_gemini(
         cost_usd=cost,
         latency_ms=elapsed,
         provider="gemini",
-        media_url=f"data:image/png;base64,{image_b64}" if image_b64 else "",
+        media_url=f"data:{mime};base64,{image_b64}" if image_b64 else "",
     )
 
 
@@ -670,14 +687,15 @@ IMAGE_GENERATORS = {
     "openai": generate_image_openai,
     "fal": generate_image_fal,
     "stability": generate_image_stability,
-    "gemini": generate_image_gemini,
+    # "gemini" intentionally removed — Gemini API disabled to stop billing.
+    # generate_image_gemini() still exists but is not reachable via routing.
 }
 """Provider-prefix to image generation function mapping."""
 
 VIDEO_GENERATORS = {
     "fal": generate_video_fal,
     "runway": generate_video_runway,
-    "gemini": generate_video_gemini,
+    # "gemini" intentionally removed — Gemini API disabled to stop billing.
 }
 """Provider-prefix to video generation function mapping."""
 

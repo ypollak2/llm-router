@@ -1,4 +1,4 @@
-"""Tests for Gemini media generators (Imagen 3, Veo 2)."""
+"""Tests for Gemini media generators (Nano Banana image models, Veo 2)."""
 
 from __future__ import annotations
 
@@ -24,16 +24,26 @@ def _mock_response(json_data: dict) -> MagicMock:
     return resp
 
 
-# ── Imagen 3 ─────────────────────────────────────────────────────────────────
+_GENERATE_CONTENT_IMAGE_RESPONSE = {
+    "candidates": [{
+        "content": {
+            "parts": [
+                {"text": "Here is the generated image."},
+                {"inlineData": {"mimeType": "image/png", "data": "AAAA"}},
+            ]
+        }
+    }]
+}
+
+
+# ── Nano Banana image models ──────────────────────────────────────────────────
 
 
 class TestGenerateImageGemini:
     @pytest.mark.asyncio
     async def test_returns_image_data_uri(self):
         mock_client = AsyncMock()
-        mock_client.post.return_value = _mock_response(
-            {"predictions": [{"bytesBase64Encoded": "AAAA"}]}
-        )
+        mock_client.post.return_value = _mock_response(_GENERATE_CONTENT_IMAGE_RESPONSE)
 
         with (
             patch("llm_router.media.get_config", return_value=_mock_config()),
@@ -43,28 +53,40 @@ class TestGenerateImageGemini:
 
         assert result.provider == "gemini"
         assert result.media_url == "data:image/png;base64,AAAA"
-        assert result.cost_usd == 0.04
-        assert "imagen-3" in result.model
+        assert result.cost_usd == pytest.approx(0.020)
+        assert "gemini-3.1-flash-image" in result.model
 
     @pytest.mark.asyncio
-    async def test_fast_model_cheaper(self):
+    async def test_pro_model_more_expensive(self):
         mock_client = AsyncMock()
-        mock_client.post.return_value = _mock_response(
-            {"predictions": [{"bytesBase64Encoded": "BB"}]}
-        )
+        mock_client.post.return_value = _mock_response(_GENERATE_CONTENT_IMAGE_RESPONSE)
 
         with (
             patch("llm_router.media.get_config", return_value=_mock_config()),
             patch("llm_router.media._get_client", return_value=mock_client),
         ):
-            result = await generate_image_gemini("sunset", model="imagen-3-fast")
+            result = await generate_image_gemini("sunset", model="gemini-3-pro-image")
 
-        assert result.cost_usd == 0.02
+        assert result.cost_usd == pytest.approx(0.060)
+        assert "gemini-3-pro-image" in result.model
 
     @pytest.mark.asyncio
-    async def test_empty_predictions_returns_empty_url(self):
+    async def test_hd_quality_raises_cost(self):
         mock_client = AsyncMock()
-        mock_client.post.return_value = _mock_response({"predictions": []})
+        mock_client.post.return_value = _mock_response(_GENERATE_CONTENT_IMAGE_RESPONSE)
+
+        with (
+            patch("llm_router.media.get_config", return_value=_mock_config()),
+            patch("llm_router.media._get_client", return_value=mock_client),
+        ):
+            result = await generate_image_gemini("test", quality="hd")
+
+        assert result.cost_usd == pytest.approx(0.030)  # 0.020 * 1.5
+
+    @pytest.mark.asyncio
+    async def test_empty_candidates_returns_empty_url(self):
+        mock_client = AsyncMock()
+        mock_client.post.return_value = _mock_response({"candidates": []})
 
         with (
             patch("llm_router.media.get_config", return_value=_mock_config()),
@@ -75,11 +97,9 @@ class TestGenerateImageGemini:
         assert result.media_url == ""
 
     @pytest.mark.asyncio
-    async def test_aspect_ratio_mapping(self):
+    async def test_uses_generatecontent_endpoint(self):
         mock_client = AsyncMock()
-        mock_client.post.return_value = _mock_response(
-            {"predictions": [{"bytesBase64Encoded": "X"}]}
-        )
+        mock_client.post.return_value = _mock_response(_GENERATE_CONTENT_IMAGE_RESPONSE)
 
         with (
             patch("llm_router.media.get_config", return_value=_mock_config()),
@@ -87,8 +107,11 @@ class TestGenerateImageGemini:
         ):
             await generate_image_gemini("test", size="1792x1024")
 
+        url = mock_client.post.call_args.args[0]
+        assert "generateContent" in url
         call_json = mock_client.post.call_args.kwargs["json"]
-        assert call_json["parameters"]["aspectRatio"] == "16:9"
+        assert call_json["generationConfig"]["responseModalities"] == ["TEXT", "IMAGE"]
+        assert call_json["generationConfig"]["responseFormat"]["image"]["aspectRatio"] == "16:9"
 
 
 # ── Veo 2 ────────────────────────────────────────────────────────────────────

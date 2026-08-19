@@ -1,111 +1,115 @@
-"""The marketplace/wallet tools must not register unless the operator opts in.
+"""SEC-003 regression: agoragentic_* MCP tools must be opt-in.
 
-WHY THIS EXISTS (SEC-003)
-=========================
+The four ``agoragentic_*`` tools (``agoragentic_task``, ``agoragentic_browse``,
+``agoragentic_wallet``, ``agoragentic_status``) talk to an external marketplace
+API and ``agoragentic_task`` settles USDC on the Base L2 blockchain — i.e.
+it can spend real money. Pre-fix they were registered unconditionally,
+even when ``LLM_ROUTER_SLIM=routing`` was set.
 
-Four tools — ``agoragentic_task``/``_browse``/``_wallet``/``_status`` — were
-registered unconditionally at server startup, alongside every core routing tool.
-They differ from every other destination in this package on both axes that
-matter:
+After SEC-003, the four tools are gated behind ``LLM_ROUTER_AGORAGENTIC=on``.
+Without the opt-in, ``register()`` exposes ZERO ``agoragentic_*`` tools
+to MCP clients — eliminating the accidental wallet surface.
 
-  * every other routing target is a KNOWN, NAMED vendor the operator configured
-    themselves (pulled a model, added a key). These match a task to a
-    dynamically-selected, unvetted counterparty at request time;
-  * every other target costs either nothing (local) or the operator's own
-    metered account. These settle real USDC on Base L2 automatically.
-
-That is task outsourcing to a paid third party, not model routing, and it was
-arriving switched on for every install.
-
-THE FINDING IS THE GAP, NOT THE FIX
-===================================
-
-This gate already existed upstream, as SEC-003, with the reasoning written out.
-The mitigation existed, was correct, and never reached this repository.
-
-That makes it a known pattern one level up: not "a helper
-exists and a sibling call site skipped it", but "a mitigation exists and the
-DOWNSTREAM REPOSITORY never received it". Anywhere two repositories share a
-lineage, a security fix landing in one is not a security fix landing in both,
-and nothing in either repo's CI notices.
-
-So the durable question after this test passes is not "is agoragentic gated"
-but "which OTHER SEC-* mitigations are unported".
+See: Docs/audit/HIGH_PRIORITY_WORK_PLAN.md F-SEC-003
 """
-
 from __future__ import annotations
+
+from unittest.mock import MagicMock
 
 import pytest
 
 from llm_router.tools import agoragentic
 
 
-class _RecordingMCP:
-    """Minimal stand-in that records what `register()` would expose."""
+def _fake_mcp() -> MagicMock:
+    """Minimal MCP stand-in that records every @mcp.tool() registration."""
+    mcp = MagicMock()
+    mcp.registered = []
 
-    def __init__(self) -> None:
-        self.registered: list[str] = []
+    def tool_factory():
+        def decorator(func):
+            mcp.registered.append(func.__name__)
+            return func
+        return decorator
 
-    def tool(self, *_args, **_kwargs):
-        def _decorator(fn):
-            self.registered.append(fn.__name__)
-            return fn
-
-        return _decorator
+    mcp.tool = tool_factory
+    return mcp
 
 
-def _register_with(monkeypatch, value: str | None) -> list[str]:
-    if value is None:
-        monkeypatch.delenv(agoragentic._AGORAGENTIC_ENV, raising=False)
-    else:
-        monkeypatch.setenv(agoragentic._AGORAGENTIC_ENV, value)
-    mcp = _RecordingMCP()
+def test_agoragentic_tools_not_registered_without_opt_in(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """SEC-003: LLM_ROUTER_AGORAGENTIC unset → zero agoragentic_* tools registered."""
+    monkeypatch.delenv("LLM_ROUTER_AGORAGENTIC", raising=False)
+    mcp = _fake_mcp()
     agoragentic.register(mcp)
-    return mcp.registered
-
-
-def test_unset_environment_registers_nothing(monkeypatch):
-    """The default install must carry no wallet/marketplace surface at all."""
-    assert _register_with(monkeypatch, None) == [], (
-        "agoragentic tools registered without an opt-in — every install would "
-        "expose USDC settlement and dispatch to unvetted providers"
+    assert mcp.registered == [], (
+        "Agoragentic tools must NOT be registered without LLM_ROUTER_AGORAGENTIC=on. "
+        f"Got: {mcp.registered}"
     )
 
 
-@pytest.mark.parametrize("value", ["", "0", "off", "false", "no", "maybe", "ON_BUT_NOT_REALLY"])
-def test_non_affirmative_values_register_nothing(monkeypatch, value: str):
-    """Anything that is not an explicit yes is a no.
-
-    Parametrised over the near-misses rather than one negative case, because a
-    gate that accepts `"off"` as truthy is the classic way this kind of check
-    fails open.
-    """
-    assert _register_with(monkeypatch, value) == [], (
-        f"{value!r} was treated as an opt-in — the gate must fail closed"
-    )
-
-
-@pytest.mark.parametrize("value", ["1", "on", "true", "yes", "ON", "True", " yes "])
-def test_affirmative_values_do_register(monkeypatch, value: str):
-    """The opt-in must actually work, or this is a removal rather than a gate.
-
-    Without this, `register()` could unconditionally `return` and every test
-    above would still pass — the feature would be silently dead instead of
-    gated.
-    """
-    registered = _register_with(monkeypatch, value)
-    assert registered, f"{value!r} should enable the tools but registered none"
-    assert any(name.startswith("agoragentic_") for name in registered)
-
-
-def test_all_four_tools_are_behind_the_same_gate(monkeypatch):
-    """A partial gate is the shape this class of defect leaves behind."""
-    registered = _register_with(monkeypatch, "on")
-    expected = {
+@pytest.mark.parametrize("value", ["on", "1", "true", "TRUE", "Yes"])
+def test_agoragentic_tools_registered_when_opted_in(
+    monkeypatch: pytest.MonkeyPatch, value: str
+) -> None:
+    """SEC-003: with opt-in, all four agoragentic_* tools register."""
+    monkeypatch.setenv("LLM_ROUTER_AGORAGENTIC", value)
+    mcp = _fake_mcp()
+    agoragentic.register(mcp)
+    assert set(mcp.registered) == {
         "agoragentic_task",
         "agoragentic_browse",
         "agoragentic_wallet",
         "agoragentic_status",
+    }, f"Expected all four agoragentic_* tools registered; got: {mcp.registered}"
+
+
+@pytest.mark.parametrize("value", ["off", "0", "false", "no", "", "  "])
+def test_agoragentic_falsy_env_values_treated_as_opt_out(
+    monkeypatch: pytest.MonkeyPatch, value: str
+) -> None:
+    """SEC-003: non-affirmative env values must NOT opt in.
+
+    Including the empty string and whitespace — a malformed shell config
+    that sets ``export LLM_ROUTER_AGORAGENTIC=`` should not silently open the
+    wallet surface.
+    """
+    monkeypatch.setenv("LLM_ROUTER_AGORAGENTIC", value)
+    mcp = _fake_mcp()
+    agoragentic.register(mcp)
+    assert mcp.registered == [], (
+        f"LLM_ROUTER_AGORAGENTIC={value!r} must be treated as opt-out, "
+        f"got registrations: {mcp.registered}"
+    )
+
+
+def test_agoragentic_enabled_helper_matches_expected_truth_table(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """SEC-003: the internal helper that gates the registration is exposed
+    for tests so we can assert the truth table directly without booting an
+    MCP server."""
+    truth_table = {
+        "on": True,
+        "1": True,
+        "true": True,
+        "TRUE": True,
+        "Yes": True,
+        "yes": True,
+        "off": False,
+        "0": False,
+        "false": False,
+        "no": False,
+        "": False,
+        "  ": False,
+        "maybe": False,
     }
-    missing = expected - set(registered)
-    assert not missing, f"tools not registered under the opt-in: {sorted(missing)}"
+    for value, expected in truth_table.items():
+        monkeypatch.setenv("LLM_ROUTER_AGORAGENTIC", value)
+        assert agoragentic._agoragentic_enabled() is expected, (
+            f"LLM_ROUTER_AGORAGENTIC={value!r} → expected {expected}, "
+            f"got {agoragentic._agoragentic_enabled()!r}"
+        )
+    monkeypatch.delenv("LLM_ROUTER_AGORAGENTIC", raising=False)
+    assert agoragentic._agoragentic_enabled() is False

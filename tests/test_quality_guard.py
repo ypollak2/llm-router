@@ -35,6 +35,39 @@ def _get_provider_for_model(model: str) -> str:
         return "gemini"
 
 
+@pytest.fixture(autouse=True)
+def _isolated_db(temp_db):
+    """Every test in this module writes to the database — isolate all of them.
+
+    WHY AUTOUSE, AND WHY THE WHOLE FILE
+
+    `temp_db`'s own docstring says it "MUST be used by any test that writes to the
+    database (including log_claude_usage, log_routing_decision, etc.)". This module
+    called `log_routing_decision` and `log_quality_trend` throughout and used the
+    fixture **zero times**.
+
+    That is the module audit finding #30 traced as the source of 28,536 synthetic rows
+    in the operator's real `~/.llm-router/usage.db` — 69.4% of `routing_decisions`, all
+    naming `openai/gpt-4o-mini`, reported by the dashboard as genuine routing behaviour.
+
+    THE FIX FOR #30 IS WHAT EXPOSED THIS TEST
+
+    `cost.log_routing_decision` now calls `_refuse_unisolated_test_write()` and returns
+    early rather than writing. So `test_routing_decisions_are_logged` wrote nothing —
+    and still passed locally, because it counted rows matching `openai/gpt-4o` and the
+    developer's real database holds 4,440 of them from genuine traffic.
+
+    It only failed once CI ran it on a clean checkout with no such history. Verified by
+    control: the same test under a clean HOME reproduces CI's `assert 0 >= 1` exactly.
+
+    So the test had been green for a reason unrelated to the code under test, and the
+    pollution WAS the passing condition — which is why a local run could never have
+    caught it. Autouse rather than per-test, because a test added later would inherit
+    the same trap.
+    """
+    yield temp_db
+
+
 async def _create_routing_decision(
     final_model: str,
     task_type: str = "code",

@@ -45,9 +45,9 @@ class TestComplexityToProfileMapping:
     def test_complex_maps_to_premium_profile(self):
         assert COMPLEXITY_TO_PROFILE[Complexity.COMPLEX] == RoutingProfile.PREMIUM
 
-    def test_deep_reasoning_maps_to_premium_profile(self):
-        # Extended thinking requires the best model — same as COMPLEX.
-        assert COMPLEXITY_TO_PROFILE[Complexity.DEEP_REASONING] == RoutingProfile.PREMIUM
+    def test_deep_reasoning_maps_to_reasoning_profile(self):
+        # DEEP_REASONING gets its own dedicated profile (R1/o3/thinking) since v0.5.0.
+        assert COMPLEXITY_TO_PROFILE[Complexity.DEEP_REASONING] == RoutingProfile.REASONING
 
     def test_all_complexity_levels_have_mappings(self):
         """No complexity level should be unmapped (would cause a KeyError at runtime)."""

@@ -37,6 +37,8 @@ __all__ = [
     "OpenAIReasoningQuirks",
     "OllamaQuirks",
     "OpenRouterQuirks",
+    "OpenAICompatQuirks",
+    "AnthropicPxpipeQuirk",
     "register_quirk",
     "get_quirk",
     "registered_providers",
@@ -199,6 +201,93 @@ class OpenRouterQuirks:
         return raw
 
 
+class OpenAICompatQuirks:
+    """OpenAI-compatible local servers (llama.cpp, vLLM, TGI, LM Studio).
+
+    These servers speak the OpenAI ``/v1/chat/completions`` wire format but
+    run locally at a configurable base URL. Two transforms are needed:
+
+    1. ``transform_model_name``: rewrite ``openai_compat/model`` → ``openai/model``
+       so LiteLLM routes via its OpenAI transport (which honours ``api_base``).
+    2. ``transform_request``: inject ``api_base`` from config into the payload so
+       LiteLLM sends to the local server instead of api.openai.com.
+    """
+
+    def transform_model_name(self, name: str) -> str:
+        if name.startswith("openai_compat/"):
+            return "openai/" + name[len("openai_compat/"):]
+        return name
+
+    def transform_request(self, payload: dict[str, Any]) -> dict[str, Any]:
+        # This quirk is only invoked for openai_compat/ models (the provider prefix
+        # routes the lookup). By the time we're here, transform_model_name has
+        # already rewritten the model to openai/X. Just inject api_base.
+        if "api_base" in payload:
+            return payload
+        try:
+            from llm_router.config import get_config
+            base_url = get_config().openai_compat_base_url
+        except Exception:
+            return payload
+        if not base_url:
+            return payload
+        out = dict(payload)
+        out["api_base"] = base_url.rstrip("/")
+        return out
+
+    def transform_response(self, raw: dict[str, Any]) -> dict[str, Any]:
+        return raw
+
+
+class AnthropicPxpipeQuirk:
+    """Route heavy-model Anthropic calls through a local pxpipe proxy.
+
+    pxpipe (https://github.com/teamchong/pxpipe) rewrites bulky request
+    context (system prompt, tool docs, older history) into compact PNGs
+    before it reaches Claude's API — image tokens are cheaper than dense
+    text tokens at Anthropic's pricing, so this cuts the bill specifically
+    on expensive, high-token-count calls. Scoped to the configured
+    heavy-model allowlist only (``llm_router_pxpipe_heavy_models``) — routing a
+    cheap Haiku call through an extra local hop would add latency for no
+    benefit pxpipe's own per-request profitability gate wouldn't already
+    skip anyway. Opt-in (``llm_router_pxpipe_enabled``) and silently a no-op
+    when the proxy isn't actually running, so a user without pxpipe
+    installed sees zero behavior change.
+    """
+
+    def transform_model_name(self, name: str) -> str:
+        return name
+
+    def transform_request(self, payload: dict[str, Any]) -> dict[str, Any]:
+        if "api_base" in payload:
+            return payload
+        try:
+            from llm_router.config import get_config, probe_pxpipe
+            cfg = get_config()
+        except Exception:
+            return payload
+        if not cfg.llm_router_pxpipe_enabled:
+            return payload
+
+        model_str = payload.get("model", "")
+        short = model_str.split("/", 1)[-1] if "/" in model_str else model_str
+        heavy_models = {
+            m.strip() for m in cfg.llm_router_pxpipe_heavy_models.split(",") if m.strip()
+        }
+        if short not in heavy_models:
+            return payload
+
+        if not probe_pxpipe(cfg.llm_router_pxpipe_url):
+            return payload
+
+        out = dict(payload)
+        out["api_base"] = cfg.llm_router_pxpipe_url.rstrip("/")
+        return out
+
+    def transform_response(self, raw: dict[str, Any]) -> dict[str, Any]:
+        return raw
+
+
 # ── Registry ────────────────────────────────────────────────────────────────
 
 
@@ -207,6 +296,8 @@ _REGISTRY: dict[str, ProviderQuirk] = {
     "openai": OpenAIReasoningQuirks(),
     "ollama": OllamaQuirks(),
     "openrouter": OpenRouterQuirks(),
+    "openai_compat": OpenAICompatQuirks(),
+    "anthropic": AnthropicPxpipeQuirk(),
 }
 
 

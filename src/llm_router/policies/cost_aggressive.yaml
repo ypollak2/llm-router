@@ -34,7 +34,7 @@ prefer_ollama: true
 # ── Model strategy (Plan 07 Cat A) ────────────────────────────────────────────
 # Workhorses handle ~80% of routes. Ordering is free-first then by
 # accuracy/cost ratio (Qwen3-235B beats DeepSeek-V4-Flash on knowledge
-# subjects per Plan 06 RouterArena submission data).
+# subjects per public MMLU/ARC benchmarks: 89.9% vs 81.7% on 476 MMLU examples).
 workhorses:
   - ollama/qwen3.5:latest
   - openrouter/qwen/qwen3-235b-a22b-2507
@@ -42,8 +42,8 @@ workhorses:
   - openrouter/google/gemini-3.1-flash-lite
   - codex/gpt-5.4
 
-# Subject specialists — measured Arena lift per subject vs the workhorse
-# pool (see docs/plans/06-routerarena-leaderboard.md and Plan 07 Cat B).
+# Subject specialists — selected based on public benchmark performance vs the
+# workhorse pool (see Plan 07 Cat B).
 # Keys match the Subject enum in src/llm_router/types.py.
 specialists:
   code: openrouter/qwen/qwen3-coder-next

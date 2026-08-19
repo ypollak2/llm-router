@@ -22,6 +22,8 @@ break the dashboard:
 
 from __future__ import annotations
 
+import pytest
+
 from llm_router.tiers import (
     Tier,
     TierRollup,
@@ -129,21 +131,29 @@ class TestSummarizeTiers:
 class TestSavingsMath:
     """The numbers users actually read off the dashboard."""
 
-    def test_saved_is_clamped_at_zero(self):
-        """When a tier over-spends the baseline (paid model that's more
-        expensive than Sonnet for the workload), ``saved`` doesn't go
-        negative — that's a *loss* shown separately, not negative savings."""
+    def test_saved_is_signed_and_reports_a_loss(self):
+        """A tier that over-spends its baseline reports a NEGATIVE saving.
+
+        INVERTED (AUD-06). This previously asserted ``r.saved == 0.0`` and
+        documented the clamp as intended behaviour — it encoded the defect,
+        which is worse than no test at all: it actively defended the bug, and
+        any mutation restoring the clamp would have passed silently.
+        """
         r = TierRollup(
             tier="paid_api",
             calls=10, tokens=1000,
             actual_cost=0.50, baseline_cost=0.10,
         )
-        assert r.saved == 0.0
+        assert r.saved == pytest.approx(-0.40), "over-spend must surface as a loss, not zero"
 
-    def test_total_saved_is_sum_of_per_tier_savings(self):
-        """Critical: total saved is SUM(per-tier saved) — not
-        ``baseline - actual``. An over-spending paid tier must NOT erode
-        the savings reported on free tiers."""
+    def test_total_saved_is_a_net_not_a_sum_of_wins(self):
+        """Total saved nets losses against gains.
+
+        INVERTED (AUD-06). The old version asserted the opposite — that an
+        over-spending paid tier "must NOT erode" savings on free tiers — which
+        is precisely how the README's published sample shows +$0.0203 for a
+        session that actually cost $0.0807 more than the counterfactual.
+        """
         rollups = [
             TierRollup("free_local",        21, 1400,  0.0, 0.0076),
             TierRollup("free_subscription", 25, 1474,  0.0, 0.0080),
@@ -152,8 +162,27 @@ class TestSavingsMath:
         actual, baseline, saved = total_savings(rollups)
         assert actual == 0.0563
         assert baseline == round(0.0076 + 0.0080 + 0.0318, 4)
-        # Saved is 0.0076 + 0.0080 + 0 (paid is over-spent) = 0.0156
-        assert saved == round(0.0076 + 0.0080, 4)
+        # Net: 0.0076 + 0.0080 + (0.0318 - 0.0563) = -0.0089
+        assert saved == pytest.approx(round(baseline - actual, 4), abs=1e-4)
+        assert saved < 0, "paid over-spend must pull the total negative"
+
+    def test_readme_published_sample_reports_a_loss(self):
+        """The exact figures shipped in README.md.
+
+        Actual $0.1735 vs baseline $0.0928 is a real net loss of $0.0807. The
+        README rendered it as +$0.0203 — the sum of the two positive rows — and
+        that sample shipped as marketing copy without anyone noticing, which is
+        the strongest evidence that nobody was reconstructing these numbers.
+        """
+        rollups = [
+            TierRollup("free_local",        16,   240, 0.0000, 0.0013),
+            TierRollup("free_subscription",  5,  3516, 0.0000, 0.0190),
+            TierRollup("paid_api",          27, 13421, 0.1735, 0.0725),
+        ]
+        _actual, _baseline, saved = total_savings(rollups)
+        assert saved == pytest.approx(-0.0807, abs=1e-4), (
+            "the README sample is a $0.0807 LOSS; +$0.0203 is the sum of wins"
+        )
 
     def test_total_saved_includes_paid_when_paid_actually_saves(self):
         """Sanity check the inverse: when paid tier IS cheaper than Sonnet,

@@ -1,17 +1,27 @@
 #!/usr/bin/env python3
-# llm-router-hook-version: 15
+# llm_router-hook-version: 16
 """Stop hook — unified session summary: CC subscription delta + external routing costs."""
 
 from __future__ import annotations
 
 import json
 import os
+import re
 import sqlite3
 import subprocess
 import sys
 import time
 import urllib.request
+import io
+import uuid
 from datetime import datetime, timezone
+
+try:
+    from rich.console import Console
+    from llm_router.ui.session_summary import SessionSummaryDashboard
+    HAS_RICH_DASHBOARD = True
+except ImportError:
+    HAS_RICH_DASHBOARD = False
 
 # Import timeout config from llm_router package if available
 try:
@@ -36,8 +46,21 @@ SESSION_SPEND_FILE   = os.path.join(STATE_DIR, "session_spend.json")
 # Show star CTA once the user has saved at least this much (lifetime)
 STAR_CTA_THRESHOLD_USD = 0.50
 
-HOST_INPUT_PER_M  = 15.0   # Baseline: Opus 4.6 ($15/$75 per M tokens)
-HOST_OUTPUT_PER_M = 75.0   # Matches receipt_store.py opus_equivalent calculation
+# AC-3: derive the host-baseline price from cost.py's single source of truth
+# instead of hardcoding a stale copy. Before this, session-end used $15/$75 (Opus
+# 4.6) while cost.py had moved to the current Opus price — so the end-of-session
+# summary was mispriced independently of every other surface. Fail-open to the
+# prior literals if cost.py can't be imported (a hook must never crash).
+try:
+    from llm_router.cost import _HOST_INPUT_PER_M as _CI, _HOST_OUTPUT_PER_M as _CO
+    HOST_INPUT_PER_M  = float(_CI)
+    HOST_OUTPUT_PER_M = float(_CO)
+except Exception:
+    # D8: fall open to the CURRENT host list price (5/25), matching digest/dashboard.
+    # The old 15/75 fallback was ~3x inflated and diverged from every sibling surface
+    # on the rare import failure.
+    HOST_INPUT_PER_M  = 5.0
+    HOST_OUTPUT_PER_M = 25.0
 WIDTH = 50
 
 # Model names that indicate test/mock data — never show in production reports.
@@ -224,6 +247,13 @@ def _session_start_iso(ts: float) -> str:
 
 _FREE_PROVIDERS = {"ollama", "codex", "gemini_cli"}
 
+# D2: providers that have their own dedicated dashboard panel (rendered from
+# their own usage table). Codex is logged to BOTH `usage` (cost.log_usage forces
+# cost_usd=0 for free providers) AND `codex_usage`, so counting it in the
+# model_tracking-derived free split double-counts it against `_format_codex_section`.
+# Exclude these from the free split — the dedicated panel is the single owner.
+_DEDICATED_PANEL_PROVIDERS = {"codex"}
+
 
 def _query_session_data(session_start: float) -> tuple[list[dict], list[dict], list[dict]]:
     """Return (paid_rows, cc_rows, free_rows) split by provider type."""
@@ -248,7 +278,9 @@ def _query_session_data(session_start: float) -> tuple[list[dict], list[dict], l
         paid  = [r for r in clean
                  if r.get("provider") not in _FREE_PROVIDERS | {"subscription"}]
         cc    = [r for r in clean if r.get("provider") == "subscription"]
-        free  = [r for r in clean if r.get("provider") in _FREE_PROVIDERS]
+        free  = [r for r in clean
+                 if r.get("provider") in _FREE_PROVIDERS
+                 and r.get("provider") not in _DEDICATED_PANEL_PROVIDERS]  # D2
         return paid, cc, free
     except Exception:
         return [], [], []
@@ -257,6 +289,7 @@ def _query_session_data(session_start: float) -> tuple[list[dict], list[dict], l
 _PERIODS = [
     ("today",     "date(timestamp, 'localtime') = date('now', 'localtime')"),
     ("this week", "timestamp >= datetime('now', '-7 days')"),
+    ("14 days",   "timestamp >= datetime('now', '-14 days')"),
     ("this month","timestamp >= datetime('now', 'start of month')"),
     ("all time",  "1=1"),
 ]
@@ -271,15 +304,31 @@ def _sync_import_savings_log() -> None:
     the session summary are one-session behind for free-provider calls.
 
     This is a synchronous, stdlib-only version of ``cost.import_savings_log()``.
+
+    AC-5 (dual-writer race): this drainer and the async ``cost.import_savings_log``
+    both drain the shared log. Reading-then-truncating unlocked let both read the
+    same rows and double-insert into ``savings_stats``. We instead **atomically
+    claim** the log via ``os.replace`` (only one caller wins the rename; the rest
+    get ``FileNotFoundError`` and no-op), then process and delete the claimed copy
+    — or append it back on failure so nothing is lost.
     """
     if not os.path.exists(SAVINGS_LOG_PATH) or not os.path.exists(DB_PATH):
         return
+    claim = f"{SAVINGS_LOG_PATH}.{os.getpid()}.{uuid.uuid4().hex[:8]}.claim"
     try:
-        with open(SAVINGS_LOG_PATH) as f:
+        os.replace(SAVINGS_LOG_PATH, claim)  # atomic claim — serializes drainers
+    except OSError:
+        return  # no live log, or another drainer claimed it first
+    try:
+        with open(claim) as f:
             raw = f.read().strip()
     except OSError:
         return
     if not raw:
+        try:
+            os.remove(claim)
+        except OSError:
+            pass
         return
 
     records = []
@@ -297,11 +346,17 @@ def _sync_import_savings_log() -> None:
                 float(r.get("external_cost", 0.0)),
                 r.get("model", "unknown"),
                 r.get("host", "claude_code"),
+                int(r.get("input_tokens", 0) or 0),
+                int(r.get("output_tokens", 0) or 0),
             ))
         except (json.JSONDecodeError, KeyError, ValueError):
             continue
 
     if not records:
+        try:
+            os.remove(claim)
+        except OSError:
+            pass
         return
     try:
         conn = sqlite3.connect(DB_PATH)
@@ -314,22 +369,44 @@ def _sync_import_savings_log() -> None:
                 estimated_claude_cost_saved REAL NOT NULL,
                 external_cost REAL NOT NULL,
                 model_used TEXT NOT NULL,
-                host TEXT NOT NULL DEFAULT 'claude_code'
+                host TEXT NOT NULL DEFAULT 'claude_code',
+                input_tokens INTEGER NOT NULL DEFAULT 0,
+                output_tokens INTEGER NOT NULL DEFAULT 0
             )
         """)
+        # Idempotent migration for DBs created before token columns existed.
+        for _col in ("input_tokens", "output_tokens"):
+            try:
+                conn.execute(f"ALTER TABLE savings_stats ADD COLUMN {_col} INTEGER NOT NULL DEFAULT 0")
+            except sqlite3.OperationalError:
+                pass  # column already present
         conn.executemany(
             "INSERT INTO savings_stats "
-            "(timestamp, session_id, task_type, estimated_claude_cost_saved, external_cost, model_used, host) "
-            "VALUES (?,?,?,?,?,?,?)",
+            "(timestamp, session_id, task_type, estimated_claude_cost_saved, external_cost, "
+            "model_used, host, input_tokens, output_tokens) "
+            "VALUES (?,?,?,?,?,?,?,?,?)",
             records,
         )
         conn.commit()
         conn.close()
-        # Truncate only after successful commit
-        with open(SAVINGS_LOG_PATH, "w") as f:
-            f.write("")
+        # Success — drop the processed claim (the live log was already claimed
+        # away atomically, so there is nothing to truncate).
+        try:
+            os.remove(claim)
+        except OSError:
+            pass
     except Exception:
-        pass
+        # Insert failed — append the claimed rows back to the live log for a
+        # later retry (append, never clobber newly-arrived lines), then drop it.
+        try:
+            with open(claim) as _cf, open(SAVINGS_LOG_PATH, "a") as _lf:
+                _lf.write(_cf.read())
+        except OSError:
+            pass
+        try:
+            os.remove(claim)
+        except OSError:
+            pass
 
 
 def _query_cumulative_savings() -> list[tuple[str, int, int, int, float]]:
@@ -352,6 +429,7 @@ def _query_cumulative_savings() -> list[tuple[str, int, int, int, float]]:
     label_to_window = {
         "today":      "today",
         "this week":  "week",
+        "14 days":    "14d",
         "this month": "month",
         "all time":   "lifetime",
     }
@@ -381,18 +459,74 @@ def _aggregate(rows: list[dict]) -> dict[str, dict]:
         if _is_test_model(model):
             continue
         if tool not in tools:
-            tools[tool] = {"count": 0, "in": 0, "out": 0, "cost": 0.0, "models": {}}
+            tools[tool] = {"count": 0, "in": 0, "out": 0, "cost": 0.0,
+                           "models": {}, "model_totals": {}}
         tools[tool]["count"]  += 1
         tools[tool]["in"]     += in_tok
         tools[tool]["out"]    += out_tok
         tools[tool]["cost"]   += cost
         tools[tool]["models"][model] = tools[tool]["models"].get(model, 0) + 1
+        # Per-MODEL totals, accumulated from the row that actually carries them.
+        # `in`/`out`/`cost` above are the TOOL's totals. The MODELS panel used to
+        # reconstruct per-model figures as `tool_total * model_call_count`, which
+        # reports a tool that consumed T tokens as sum(counts) * T — an inflation
+        # equal to the tool's row count. Keeping the real per-model sums here means
+        # no consumer has to reconstruct what was never recoverable.
+        mt = tools[tool]["model_totals"].setdefault(
+            model, {"calls": 0, "in": 0, "out": 0, "cost": 0.0}
+        )
+        mt["calls"] += 1
+        mt["in"]    += in_tok
+        mt["out"]   += out_tok
+        mt["cost"]  += cost
     return tools
 
 
 def _host_baseline(in_tok: int, out_tok: int) -> float:
     """What Opus would charge for the same token volume (matches receipt_store)."""
     return (in_tok * HOST_INPUT_PER_M + out_tok * HOST_OUTPUT_PER_M) / 1_000_000
+
+
+def _load_config_for_subscription():
+    """Return the LLM Router config. Split out so a test can force the failure path."""
+    from llm_router.config import get_config
+
+    return get_config()
+
+
+def _is_subscription_mode() -> bool:
+    """True when Claude usage is already covered by a Pro/Max subscription.
+
+    Fails CLOSED to False. If config cannot be read we must not conclude the user
+    is a subscriber: that would suppress a cash figure a pay-per-token user is
+    entitled to see. A hook must also never crash.
+    """
+    try:
+        cfg = _load_config_for_subscription()
+        return bool(getattr(cfg, "llm_router_claude_subscription", False))
+    except Exception:
+        return False
+
+
+def _baseline_provenance() -> str:
+    """``measured`` | ``estimated`` | ``unknown`` for the baseline projection.
+
+    WP-05 requires every displayed number to state where it came from. Only
+    ``measured`` if the savings baseline actually has an empirical calibration
+    profile — and it does not: INITIAL_CALIBRATION covers claude-sonnet-4-6 alone,
+    so the baseline's output-token count comes from _LEGACY_FALLBACK_OUTPUT and
+    the figure is an estimate. Calling that "measured" is precisely the
+    claim-accuracy failure the audit scores.
+    """
+    try:
+        from llm_router.calibration import INITIAL_CALIBRATION
+        from llm_router.pricing import savings_baseline_model
+
+        model = savings_baseline_model()
+        calibrated = {key[0] for key in INITIAL_CALIBRATION}
+        return "measured" if model in calibrated else "estimated"
+    except Exception:
+        return "unknown"
 
 
 # ── Formatting ─────────────────────────────────────────────────────────────────
@@ -482,13 +616,32 @@ def _format_cc_model_section(cc_rows: list[dict]) -> list[str]:
     return lines
 
 
-def _format_routing_section(tools: dict[str, dict]) -> list[str]:
+def _format_routing_section(
+    tools: dict[str, dict], *, subscription: bool | None = None
+) -> list[str]:
+    """Render the routing panel.
+
+    ``subscription`` is an explicit parameter rather than an ambient config read
+    because the branch below changes what the panel says. Left implicit, this
+    function's output depended on the developer's own config: the cash-rendering
+    tests passed on a pay-per-token machine and failed on a subscriber's — the
+    same by-whose-laptop verdict that made the provider-matrix test useless.
+    ``None`` means "detect", which is what the hook itself passes.
+    """
+    if subscription is None:
+        subscription = _is_subscription_mode()
     total_calls = sum(t["count"] for t in tools.values())
     total_in    = sum(t["in"]    for t in tools.values())
     total_out   = sum(t["out"]   for t in tools.values())
     total_cost  = sum(t["cost"]  for t in tools.values())
     total_base  = _host_baseline(total_in, total_out)
-    total_saved = max(0.0, total_base - total_cost)
+    # AUD-06 / WP-04: NO max(0.0, ...) here. Routing can cost more than the
+    # baseline -- overhead, an escalated cheap attempt, a paid provider on a
+    # prompt the subscription covered -- and when it does the honest figure is
+    # negative. Clamping made a session that lost money render identically to one
+    # that broke even, on the one surface users actually read, while calc_savings
+    # and compute_receipt reported the loss correctly all along.
+    total_saved = total_base - total_cost
     savings_pct = round(total_saved / total_base * 100) if total_base > 0 else 0
     total_tokens = total_in + total_out
 
@@ -501,13 +654,52 @@ def _format_routing_section(tools: dict[str, dict]) -> list[str]:
         tokens_str = str(total_tokens)
 
     pct_color = _C_GREEN if savings_pct >= 80 else (_C_YELLOW if savings_pct >= 50 else _C_ORANGE)
-    lines = [
-        f"    {_C_WHITE}{total_calls}{_RESET} calls  "
-        f"{tokens_str} tokens  "
-        f"${total_cost:.4f} actual  "
-        f"${total_base:.4f} baseline  "
-        f"{pct_color}{savings_pct}% saved{_RESET}",
-    ]
+    provenance = _baseline_provenance()
+
+    if subscription:
+        # WP-05: a subscriber never had the option of spending this money —
+        # their Claude usage is already bought by the subscription, so the
+        # counterfactual is quota consumed, not cash outlaid. README already
+        # says the value is "quota runway, not cash"; this panel used to
+        # contradict it by printing dollars to everyone. The benefit is still
+        # reported, in the unit that is actually real for this user: tokens
+        # kept off the Claude quota.
+        lines = [
+            f"    {_C_WHITE}{total_calls}{_RESET} calls  "
+            f"{tokens_str} tokens  "
+            f"{pct_color}{tokens_str} quota preserved{_RESET}  "
+            f"{_C_MUTED}({savings_pct}% of baseline, {provenance}){_RESET}  "
+            f"{_C_MUTED}this session{_RESET}",
+        ]
+    else:
+        # AUD-06: a loss is reported in DOLLARS, not as a negative percentage.
+        # Unclamping alone produced "-571329% saved" on a small overspending
+        # session -- technically honest, operationally unreadable, and a number
+        # that shape invites someone to "fix" it by restoring the clamp. The
+        # magnitude of a loss is what the user can act on; the ratio is not.
+        if total_saved < 0:
+            figure = (
+                f"{_C_ORANGE}${abs(total_saved):.4f} overspent{_RESET} "
+                f"{_C_MUTED}(gross, {provenance}){_RESET}"
+            )
+        else:
+            # D9: this is baseline-avoided GROSS of routing overhead — qualify it so
+            # it's not equated with the Codex/Gemini "realized" (gross − overhead).
+            # "% saved" is kept contiguous (the savings-clamp test relies on it).
+            figure = (
+                f"{pct_color}{savings_pct}% saved{_RESET} "
+                f"{_C_MUTED}(gross, {provenance}){_RESET}"
+            )
+        lines = [
+            f"    {_C_WHITE}{total_calls}{_RESET} calls  "
+            f"{tokens_str} tokens  "
+            f"${total_cost:.4f} actual  "
+            f"${total_base:.4f} baseline  "
+            f"{figure}  "
+            # D5: explicit window so this panel isn't read as comparable to the
+            # (today) provider panels or the lifetime cumulative panel beside it.
+            f"{_C_MUTED}this session{_RESET}",
+        ]
     for tool, d in sorted(tools.items(), key=lambda x: -x[1]["count"]):
         clean_models = {m: c for m, c in d["models"].items() if not _is_test_model(m)}
         if not clean_models:
@@ -526,6 +718,8 @@ def _format_routing_section(tools: dict[str, dict]) -> list[str]:
 
         cost_color = _C_GREEN if d["cost"] == 0 else _C_LABEL
         lines.append(
+            # chz-surface-ok: HISTORICAL report of tools that were actually called;
+            # renaming them would misreport what happened.
             f"    {_C_LABEL}{tool:<12}{_RESET}  {d['count']:>3}×  "
             f"{tool_tokens_str:>6}  {model_short:<20}  {cost_color}${d['cost']:.4f}{_RESET}"
         )
@@ -537,31 +731,57 @@ def _total_saved(tools: dict[str, dict]) -> float:
     total_out  = sum(t["out"]  for t in tools.values())
     total_cost = sum(t["cost"] for t in tools.values())
     baseline   = _host_baseline(total_in, total_out)
-    return max(0.0, baseline - total_cost)
+    # Unclamped (AUD-06): other surfaces consume this, so clamping here would
+    # launder the loss before any caller could see it.
+    return baseline - total_cost
 
 
-def _format_free_section(free_rows: list[dict], paid_rows: list[dict]) -> list[str]:
-    """Format free-model (Ollama / Codex) session savings.
+def _net_session_line(free_rows: list[dict], paid_rows: list[dict]) -> str | None:
+    """A prominent, HONEST net-savings line (#6).
 
-    Codex doesn't track tokens; we estimate from the avg tokens/call across paid rows.
+    Net = baseline (what all routed work would have cost on the Opus host) −
+    actual paid-API spend across ALL tiers. Reported UNCLAMPED: when wasteful
+    paid routing (e.g. a $0.10 draft) makes the session a net loss, it says so
+    in red instead of hiding it behind a notional free-tier "saved" figure.
+    """
+    rows = list(free_rows) + list(paid_rows)
+    if not rows:
+        return None
+    total_in  = sum(int(r.get("input_tokens")  or 0) for r in rows)
+    total_out = sum(int(r.get("output_tokens") or 0) for r in rows)
+    baseline  = _host_baseline(total_in, total_out)
+    actual    = sum(float(r.get("cost_usd") or 0.0) for r in paid_rows)
+    net       = baseline - actual
+    if net >= 0:
+        return (
+            f"  {_BOLD}Net saved{_RESET}      {_C_GREEN}${net:.4f}{_RESET}  "
+            f"{_C_MUTED}(${baseline:.4f} baseline − ${actual:.4f} paid){_RESET}"
+        )
+    return (
+        f"  {_BOLD}{_C_ORANGE}⚠ NET LOSS{_RESET}     {_C_ORANGE}-${abs(net):.4f}{_RESET}  "
+        f"{_C_MUTED}(${actual:.4f} paid exceeds ${baseline:.4f} baseline — wasteful paid routing){_RESET}"
+    )
+
+
+def _format_free_section(free_rows: list[dict], paid_rows: list[dict] | None = None) -> list[str]:
+    """Format free-model (Ollama) session savings.
+
+    D3: a savings figure is only ever derived from **real** token counts. When a
+    free provider reports no token volume we cannot compute a defensible
+    baseline, so we show ``—`` and claim ``$0`` rather than inventing tokens from
+    unrelated paid-call averages. (Codex is excluded from ``free_rows`` upstream —
+    D2 — and reported by ``_format_codex_section`` from ``codex_usage``; the
+    ``paid_rows`` parameter is retained only for call-site compatibility.)
     """
     if not free_rows:
         return []
-
-    # Compute avg tokens/call from paid rows (for Codex estimation)
-    paid_with_tokens = [r for r in paid_rows if (r.get("input_tokens") or 0) > 0]
-    if paid_with_tokens:
-        avg_in  = sum(r.get("input_tokens",  0) for r in paid_with_tokens) / len(paid_with_tokens)
-        avg_out = sum(r.get("output_tokens", 0) for r in paid_with_tokens) / len(paid_with_tokens)
-    else:
-        avg_in, avg_out = 500.0, 300.0  # conservative fallback
 
     # Aggregate by provider
     by_provider: dict[str, dict] = {}
     for r in free_rows:
         p = r.get("provider", "?")
         if p not in by_provider:
-            by_provider[p] = {"calls": 0, "in": 0, "out": 0, "estimated": False}
+            by_provider[p] = {"calls": 0, "in": 0, "out": 0}
         by_provider[p]["calls"] += 1
         by_provider[p]["in"]    += r.get("input_tokens",  0) or 0
         by_provider[p]["out"]   += r.get("output_tokens", 0) or 0
@@ -571,25 +791,21 @@ def _format_free_section(free_rows: list[dict], paid_rows: list[dict]) -> list[s
     body: list[str] = []
     for provider, d in sorted(by_provider.items(), key=lambda x: -x[1]["calls"]):
         in_t, out_t = d["in"], d["out"]
-        est = False
-        if in_t == 0 and out_t == 0:
-            if paid_with_tokens:
-                # Estimate from paid call averages (Codex doesn't report tokens)
-                in_t  = int(avg_in  * d["calls"])
-                out_t = int(avg_out * d["calls"])
-                est   = True
-            else:
-                # No evidence of work done — don't claim savings
-                est = True
-        baseline = _host_baseline(in_t, out_t)
-        saved    = max(0.0, baseline) if (in_t + out_t) > 0 else 0.0
+        known = (in_t + out_t) > 0
+        saved = _host_baseline(in_t, out_t) if known else 0.0
         total_saved += saved
-        est_tag  = f" {_C_MUTED}~est{_RESET}" if est else ""
-        in_k  = f"{in_t  // 1000}k" if in_t  >= 1000 else str(in_t)
-        out_k = f"{out_t // 1000}k" if out_t >= 1000 else str(out_t)
+        if known:
+            in_k  = f"{in_t  // 1000}k" if in_t  >= 1000 else str(in_t)
+            out_k = f"{out_t // 1000}k" if out_t >= 1000 else str(out_t)
+            tok_disp   = f"{in_k}↑ {out_k}↓"
+            saved_disp = f"{_C_GREEN}${saved:.4f}{_RESET}"
+        else:
+            # Unknown token volume — no fabrication, no claimed savings.
+            tok_disp   = f"{_C_MUTED}—↑ —↓{_RESET}"
+            saved_disp = f"{_C_MUTED}${saved:.4f}{_RESET}"
         body.append(
             f"    {_C_LABEL}{provider:<10}{_RESET}  {d['calls']:>3}×  "
-            f"{in_k}↑ {out_k}↓{est_tag}  {_C_GREEN}${saved:.4f}{_RESET}"
+            f"{tok_disp}  {saved_disp}"
         )
 
     # Label based on actual providers present
@@ -603,7 +819,12 @@ def _format_free_section(free_rows: list[dict], paid_rows: list[dict]) -> list[s
     saved_color = _C_GREEN if total_saved > 0 else _C_LABEL
     lines = [
         f"    {_C_WHITE}{total_calls}{_RESET} calls  ·  "
-        f"{saved_color}${total_saved:.4f} saved{_RESET} vs Sonnet  {_C_MUTED}{label}{_RESET}"
+        # D9: gross of routing overhead (matches the Routing panel; distinct from
+        # the Codex/Gemini "realized" figure). "saved{_RESET} vs Claude host" is
+        # kept contiguous (the DASH-2 mislabel guard relies on it).
+        f"{saved_color}${total_saved:.4f} gross saved{_RESET} vs Claude host  "
+        # D5: this-session window (the {label} is a provider descriptor, not a window)
+        f"{_C_MUTED}this session · {label}{_RESET}"
     ]
     lines += body
     return lines
@@ -637,8 +858,26 @@ def _query_router_efficiency() -> dict:
             return {}
         total, on_target = row
         efficiency_pct = (on_target / total) * 100 if total > 0 else 0.0
-        return {"total": total, "on_target": on_target, "efficiency_pct": efficiency_pct}
+        # WP-07: carry the denominator. This rate is over routing decisions we
+        # RECORDED; unobserved_n is the traffic that never reached the table.
+        cov = {"observed_n": 0, "unobserved_n": 0}
+        try:
+            from llm_router.coverage import snapshot as _cov_snapshot
+
+            _s = _cov_snapshot()
+            cov = {"observed_n": _s.observed_n, "unobserved_n": _s.unobserved_n}
+        except Exception:  # noqa: BLE001
+            pass
+        return {
+            "total": total, "on_target": on_target,
+            "efficiency_pct": efficiency_pct, **cov,
+        }
     except Exception:
+        # WP-13 note: this returns the same {} as the no-rows branch above, so a
+        # broken query is indistinguishable from a quiet day. Left as-is here
+        # deliberately — it is one instance of the ~810-site fail-open triage
+        # that WP-13 sequences late, on purpose, so the whole class is fixed
+        # with one policy rather than piecemeal.
         return {}
 
 
@@ -814,6 +1053,140 @@ def _query_cache_hit_stats() -> dict:
         return {}
 
 
+def _query_session_metrics(session_start: float) -> dict:
+    """Single-pass query for burn rate, fallback rate, p95 latency, routing effectiveness.
+
+    Returns:
+        session_cost_usd, burn_rate_per_hr, fallback_count, escalation_count,
+        fallback_pct, escalation_pct, p95_latency (dict by tier in seconds),
+        routing_effectiveness_pct, session_cost_ratio, session_calls_ratio
+    """
+    if not os.path.exists(DB_PATH):
+        return {}
+    try:
+        session_iso = _session_start_iso(session_start)
+        conn = sqlite3.connect(DB_PATH)
+
+        rows = conn.execute(
+            """
+            SELECT complexity, final_provider, latency_ms, cost_usd,
+                   was_downshifted, timestamp
+            FROM routing_decisions
+            WHERE timestamp >= ? AND (is_real = 1 OR is_real IS NULL)
+            """,
+            (session_iso,),
+        ).fetchall()
+
+        # 14-day daily costs for "session vs typical" denominator
+        daily = conn.execute(
+            """
+            SELECT date(timestamp, 'localtime') as day,
+                   SUM(cost_usd) as day_cost,
+                   COUNT(*) as day_calls
+            FROM routing_decisions
+            WHERE date(timestamp, 'localtime') >= date('now', '-15 days')
+              AND (is_real = 1 OR is_real IS NULL)
+            GROUP BY day
+            ORDER BY day
+            """
+        ).fetchall()
+
+        conn.close()
+
+        if not rows:
+            return {}
+
+        from datetime import datetime as _dt, timezone as _tz
+        session_start_dt = _dt.fromtimestamp(session_start, tz=_tz.utc)
+        now_dt = _dt.now(tz=_tz.utc)
+        session_hours = max(0.017, (now_dt - session_start_dt).total_seconds() / 3600)
+
+        _CHEAP = {"ollama", "codex", "gemini_cli"}
+        _PREMIUM = {"anthropic", "openai", "deepseek"}
+
+        total = len(rows)
+        session_cost = sum(r[3] or 0.0 for r in rows)
+        burn_rate = session_cost / session_hours
+
+        fallbacks = sum(1 for r in rows if r[4] == 1)
+        # escalation: simple/moderate task routed to premium API provider
+        escalations = sum(
+            1 for r in rows
+            if (r[0] or "moderate") in ("simple", "moderate") and (r[1] or "") in _PREMIUM
+        )
+
+        # p95 latency per tier (ms → seconds)
+        tier_lat: dict[str, list[float]] = {
+            "simple": [], "moderate": [], "complex": [], "deep_reasoning": []
+        }
+        for r in rows:
+            tier = r[0] if r[0] in tier_lat else "moderate"
+            if r[2] and r[2] > 0:
+                tier_lat[tier].append(r[2])
+        p95_by_tier: dict[str, float] = {}
+        for tier, lats in tier_lat.items():
+            if lats:
+                sl = sorted(lats)
+                p95_by_tier[tier] = sl[min(len(sl) - 1, int(len(sl) * 0.95))] / 1000.0
+
+        # Routing effectiveness: % handled by cheap / subscription providers
+        cheap_count = sum(1 for r in rows if (r[1] or "") in _CHEAP | {"subscription", "gemini"})
+        effectiveness_pct = cheap_count / total * 100
+
+        # Session vs typical: compare session cost/calls to 14-day excluding today
+        today_str = now_dt.astimezone().strftime("%Y-%m-%d")
+        hist = [(dc, dca) for day, dc, dca in daily if day != today_str]
+        cost_ratio = calls_ratio = None
+        if hist:
+            avg_cost = sum(c for c, _ in hist) / len(hist)
+            avg_calls = sum(c for _, c in hist) / len(hist)
+            if avg_cost > 0:
+                cost_ratio = session_cost / avg_cost
+            if avg_calls > 0:
+                calls_ratio = total / avg_calls
+
+        return {
+            "session_cost_usd": session_cost,
+            "session_hours": session_hours,
+            "burn_rate_per_hr": burn_rate,
+            "fallback_count": fallbacks,
+            "escalation_count": escalations,
+            "total_decisions": total,
+            "fallback_pct": fallbacks / total * 100 if total else 0.0,
+            "escalation_pct": escalations / total * 100 if total else 0.0,
+            "p95_latency": p95_by_tier,
+            "routing_effectiveness_pct": effectiveness_pct,
+            "session_cost_ratio": cost_ratio,
+            "session_calls_ratio": calls_ratio,
+        }
+    except Exception:
+        return {}
+
+
+def _query_daily_cache_trend() -> list[float]:
+    """Return up to 14 days of daily cache hit rates as % [oldest→newest]."""
+    if not os.path.exists(DB_PATH):
+        return []
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        rows = conn.execute(
+            """
+            SELECT date(timestamp, 'localtime') as day,
+                   COUNT(*) as total,
+                   SUM(CASE WHEN cache_hit = 1 THEN 1 ELSE 0 END) as hits
+            FROM usage
+            WHERE date(timestamp, 'localtime') >= date('now', '-14 days')
+              AND cache_hit IS NOT NULL
+            GROUP BY day
+            ORDER BY day
+            """
+        ).fetchall()
+        conn.close()
+        return [(r[2] or 0) / max(r[1], 1) * 100 for r in rows]
+    except Exception:
+        return []
+
+
 def _query_savings_by_task_type() -> list[dict]:
     """Query savings_stats and usage: return list of {task_type, calls, saved} sorted by saved DESC."""
     if not os.path.exists(DB_PATH):
@@ -840,8 +1213,8 @@ def _query_savings_by_task_type() -> list[dict]:
         return []
 
 
-def _query_daily_14d() -> list[tuple[str, int, int, float]]:
-    """Return last 14 days of daily usage: [(date_label, calls, tokens, saved), ...].
+def _query_daily_14d() -> list[tuple[str, int, int, float, int]]:
+    """Return last 14 days of daily usage: [(date_label, calls, tokens, saved, tokens_saved), ...].
 
     v10.1.6: delegates to ``llm_router.dashboard_data.query_daily``. The
     UNION across ``usage`` + v9.3 per-platform tables + ``savings_stats``
@@ -853,9 +1226,9 @@ def _query_daily_14d() -> list[tuple[str, int, int, float]]:
     try:
         from llm_router.dashboard_data import query_daily
         rows = query_daily(14, db_path=DB_PATH)
+        return [(r.day, r.calls, r.tokens, r.saved_usd, r.tokens_saved) for r in rows]
     except Exception:
         return []
-    return [(r.day, r.calls, r.tokens, r.saved_usd) for r in rows]
 
 
 
@@ -885,10 +1258,15 @@ def _format_routing_logic(session_start: float | None) -> list[str]:
 
     zero_pct = round(zero_cost / total_hits * 100) if total_hits > 0 else 0
     pct_color = _C_GREEN if zero_pct >= 80 else (_C_YELLOW if zero_pct >= 50 else _C_ORANGE)
+    # D6: this count is the classification-method mix from the classifier log
+    # (model_tracking.jsonl), a different store from the routing_decisions table
+    # that feeds the fallback-rate below. Attribute it explicitly ("classified"
+    # + source + window) so the two counts are not misread as one denominator.
     lines = [
         f"  {_BOLD}Routing{_RESET}  {_C_GREEN}●{_RESET} "
-        f"{_C_WHITE}{total_hits}{_RESET} decisions · "
-        f"{pct_color}{zero_pct}% zero-cost{_RESET}"
+        f"{_C_WHITE}{total_hits}{_RESET} classified · "
+        f"{pct_color}{zero_pct}% zero-cost{_RESET}  "
+        f"{_C_MUTED}today · classifier log{_RESET}"
     ]
     # Find max method name length for alignment
     max_name = max(len(d["method"]) for d in data)
@@ -948,26 +1326,33 @@ def _format_cumulative_section(periods: list[tuple[str, int, int, int, float]]) 
             f"  {call_str:>6}"
         )
 
-    # Yearly projection
+    # Yearly projection — prefer 14-day rolling average for stability
     from datetime import datetime as _dt
     days_this_month = max(1, _dt.now().day)
+    data_14d = period_map.get("14 days", (0, 0, 0, 0.0))
     month_saved = month_d[3]
     weekly_data = period_map.get("this week", (0, 0, 0, 0.0))
     weekly_saved = weekly_data[3]
     today_saved = today_d[3]
+    saved_14d = data_14d[3]
+    tok_14d = data_14d[1] + data_14d[2]
     month_tok = month_d[1] + month_d[2]
     weekly_tok = weekly_data[1] + weekly_data[2]
     today_tok = today_d[1] + today_d[2]
     rate_usd = 0.0
-    if month_saved > 0:
+    if saved_14d > 0:
+        rate_usd, rate_tok, basis = saved_14d / 14, tok_14d / 14, "14-day avg"
+    elif month_saved > 0:
         rate_usd, rate_tok, basis = month_saved / days_this_month, month_tok / days_this_month, "30-day avg"
     elif weekly_saved > 0:
         rate_usd, rate_tok, basis = weekly_saved / 7, weekly_tok / 7, "7-day avg"
     elif today_saved > 0:
         rate_usd, rate_tok, basis = today_saved, today_tok, "today"
     if rate_usd > 0:
+        proj_mo = rate_usd * 30
+        proj_yr = rate_usd * 365
         lines.append(
-            f"    ≈ ${rate_usd * 365:.0f}/yr · {_fmt_tok(int(rate_tok * 365))} tok/yr  {_C_MUTED}({basis}){_RESET}"
+            f"    ≈ ${proj_mo:.2f}/mo · ${proj_yr:.0f}/yr · {_fmt_tok(int(rate_tok * 365))} tok/yr  {_C_MUTED}({basis}){_RESET}"
         )
 
     # 14-day sparkline
@@ -995,10 +1380,13 @@ def _format_cumulative_section(periods: list[tuple[str, int, int, int, float]]) 
     efficiency = _query_router_efficiency()
     if efficiency:
         fallbacks = efficiency["total"] - efficiency["on_target"]
+        # D6: this total is from the routing_decisions table — a different store
+        # from the classifier-log "classified" count above. Label it "routed" so
+        # the two denominators are not read as the same number.
         if fallbacks == 0:
-            quality_parts.append(f"{_C_GREEN}0{_RESET} fallbacks ({efficiency['total']})")
+            quality_parts.append(f"{_C_GREEN}0{_RESET} fallbacks ({efficiency['total']} routed)")
         else:
-            quality_parts.append(f"{_C_ORANGE}{fallbacks}{_RESET}/{efficiency['total']} fallbacks")
+            quality_parts.append(f"{_C_ORANGE}{fallbacks}{_RESET}/{efficiency['total']} routed fallbacks")
 
     overhead = _query_classifier_overhead()
     if overhead and overhead['count'] > 0:
@@ -1273,6 +1661,23 @@ def _format(tools: dict[str, dict], cc_rows: list[dict], free_rows: list[dict],
     if session_lines:
         lines.append("")
         lines.append(f"  {_BOLD}This Session{_RESET}")
+        # Honest net FIRST — baseline − actual paid, unclamped (#6). The
+        # per-tier sections below show notional/gross figures; this is the
+        # bottom line, and it goes red when paid routing made it a net loss.
+        _net_line = _net_session_line(free_rows, paid_rows)
+        if _net_line:
+            lines.append(_net_line)
+            # D1 (DASH-1b): the Net line above is the single canonical session
+            # bottom-line (host baseline − actual paid). Everything below — the
+            # per-tier Routing/Free panels, and the separately-scoped Codex/Gemini
+            # (today) and lifetime panels — are scope-labeled BREAKDOWNS computed on
+            # their own basis/window. They are deliberately NOT a single running
+            # total; say so, so a reader never sums across scopes.
+            lines.append(
+                f"  {_C_MUTED}Net is the session bottom line; the panels below are "
+                f"per-tier / per-scope breakdowns — not additive.{_RESET}"
+            )
+            lines.append("")
         lines += session_lines
 
     # v9.3.0 — Codex CLI parallel section. Only renders if codex_usage has
@@ -1350,7 +1755,10 @@ def _lifetime_saved() -> float:
             if provider in _FREE_PROVIDERS:
                 saved += base
             elif provider != "subscription":
-                saved += max(0.0, base - (cost or 0.0))
+                # Unclamped (AUD-06): a provider that overspent must subtract
+                # from the total, not contribute zero. Clamping per-row let a
+                # loss-making provider hide inside a profitable aggregate.
+                saved += base - (cost or 0.0)
         return saved
     except Exception:
         return 0.0
@@ -1420,8 +1828,39 @@ def _collect_report_data(
 
 # ── Entry point ────────────────────────────────────────────────────────────────
 
+def _flush_session_spend_from_mcp() -> None:
+    """Signal MCP server to flush in-memory session spend to disk.
+
+    SAVINGS fix: The MCP server holds SessionSpend in memory and updates
+    session_spend.json in real-time. But if the last routed call happens
+    just before session-end, there can be a brief window where the file
+    is stale. This function requests a flush to ensure the file reflects
+    all calls made in this session.
+
+    Implementation: Create a flag file; wait briefly for MCP to react;
+    then read the freshly-flushed file.
+    """
+    try:
+        flush_flag = os.path.join(STATE_DIR, "session_spend_flush_request.txt")
+        with open(flush_flag, "w") as f:
+            f.write(str(time.time()))
+        time.sleep(0.2)  # Brief delay for MCP server to react
+        # Remove flag (cleanup)
+        try:
+            os.remove(flush_flag)
+        except OSError:
+            pass
+    except Exception:
+        pass  # Graceful failure — session-end always continues
+
+
 def _read_session_spend() -> dict | None:
-    """Read the real-time session spend file if it exists."""
+    """Read the real-time session spend file if it exists.
+
+    SAVINGS fix: Call _flush_session_spend_from_mcp() first to ensure
+    the file contains the latest in-memory state from MCP server.
+    """
+    _flush_session_spend_from_mcp()  # Ensure file is up-to-date
     try:
         with open(SESSION_SPEND_FILE) as f:
             return json.load(f)
@@ -1455,10 +1894,127 @@ def _build_and_save_learned_profile() -> None:
         pass  # Graceful failure — never break session-end
 
 
+# ── CHZ-STOP-01: output verbosity for the Stop hook ───────────────────────────
+# THIS IS A `Stop` HOOK, AND `Stop` FIRES AFTER EVERY AGENT RESPONSE — not once
+# when a session ends, which is what the filename suggests and what the full
+# boxed summary was designed for. So the heaviest output this project produces
+# was printing after every single turn, with no way to turn it down short of
+# unregistering the hook, which loses the information entirely.
+#
+# Modes:
+#   full       the boxed summary, unchanged — for anyone who wants it every turn
+#   condensed  one line, only when something actually happened   (DEFAULT)
+#   disabled   nothing; read it on demand via `llm_router summary`
+#
+# WHY `condensed` IS THE DEFAULT, deliberately and not because it was suggested:
+# a default should match the frequency of the event that triggers it. At
+# session-end cadence the full block is proportionate; at per-turn cadence it is
+# not, and the mismatch is the defect rather than the block's size. Condensed
+# keeps the signal (spend, savings, routes) at a volume per-turn output can carry.
+# `full` remains one env var away and is unchanged for anyone who preferred it.
+# The rendered box is ANSI-coloured; strip it before matching labels, or
+# every regex here silently fails against escape codes.
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+
+_STOP_HOOK_ENV = "LLM_ROUTER_STOP_HOOK"
+_STOP_MODES = ("full", "condensed", "disabled")
+
+
+def _stop_hook_mode() -> str:
+    """Resolve the output mode. Unknown values fall back to the default.
+
+    Deliberately does NOT error on a typo: this runs after every turn, and a
+    hook that fails closed on a misspelled env var would break the session it is
+    only meant to summarise.
+    """
+    raw = os.environ.get(_STOP_HOOK_ENV, "").strip().lower()
+    return raw if raw in _STOP_MODES else "condensed"
+
+
+def _condense(summary: str) -> str:
+    """Reduce the boxed summary to one line, or "" if nothing happened.
+
+    Reports today's savings, lifetime savings, and remaining quota — the three
+    numbers worth seeing every turn.
+
+    MATCHED AGAINST THE REAL RENDER, NOT A GUESS. The first version searched for
+    `$<amount>` FOLLOWED BY a label, because that is how the fixture in
+    tests/test_stop_hook_verbosity.py was written — by hand, from memory. The
+    actual box puts the label first (`lifetime $2299.39`), so the regex matched
+    nothing and the line printed `682 routed` and no money at all, every turn,
+    while its tests passed.
+
+    That is the exact failure the old docstring warned about — "green against
+    synthetic fixtures while doing nothing in production" — and writing the
+    warning did not prevent it, because the fixture was still invented. The
+    fixture is now a captured excerpt of real output.
+
+    Figures are EXTRACTED, never recomputed, so condensed and full cannot
+    disagree about the same session.
+    """
+    plain = _ANSI_RE.sub("", summary)
+
+    def _money(label: str) -> str | None:
+        # Real render: "lifetime $2299.39" / "today    $159.74" — label, then money.
+        m = re.search(label + r"\s+(\$[0-9][0-9,]*\.[0-9]{2})", plain, re.I)
+        return m.group(1) if m else None
+
+    def _pct(label: str) -> int | None:
+        # Real render: "5h ━━────────  16%" — a progress bar, then percent USED.
+        m = re.search(label + r"[^\n%]*?(\d{1,3})%", plain, re.I)
+        return int(m.group(1)) if m else None
+
+    today = _money("today")
+    lifetime = _money("lifetime")
+    routes = re.search(r"(\d[\d,]*)\s+decisions?\b", plain, re.I) or \
+             re.search(r"(\d[\d,]*)\s+(?:routes?|calls?)\b", plain, re.I)
+
+    # CONSUMED, matching the status line. This reported REMAINING for one
+    # revision, which was correct arithmetic and a bad decision: the status line
+    # shows consumed, so the same quantity appeared as 39% in one surface and
+    # 61% in the other, and the only way to tell them apart was reading the
+    # label. The first person to see both asked whether the numbers were real.
+    # Two surfaces agreeing beats either one being individually more useful.
+    used_5h, used_wk = _pct("5h"), _pct("weekly")
+
+    bits: list[str] = []
+    if routes:
+        bits.append(f"{routes.group(1)} routed")
+    if today:
+        bits.append(f"today {today}")
+    if lifetime:
+        bits.append(f"lifetime {lifetime}")
+    if used_5h is not None or used_wk is not None:
+        used = []
+        if used_5h is not None:
+            used.append(f"5h {used_5h}%")
+        if used_wk is not None:
+            used.append(f"wk {used_wk}%")
+        bits.append("quota used " + "/".join(used))
+
+    if not bits:
+        return ""
+    return "⚡ llm_router · " + " · ".join(bits) + "  ·  `llm_router summary` for detail"
+
+
 def main() -> None:
     try:
-        json.load(sys.stdin)
+        _hook_input = json.load(sys.stdin)
     except (json.JSONDecodeError, EOFError):
+        _hook_input = {}
+
+    # Session Context Accumulator: archive (delete) this session's durable
+    # JSONL event store now that the session is ending. Fail-open, single
+    # best-effort delete — never blocks the summary below. Resolution order:
+    # the real session_id from this hook's stdin payload, else env vars,
+    # else the pointer file written by session-start.py.
+    try:
+        from llm_router import session_store as _session_store
+        _explicit_sid = _hook_input.get("session_id") if isinstance(_hook_input, dict) else None
+        _sid = _session_store.resolve_session_id(_explicit_sid)
+        if _sid:
+            _session_store.archive_session(_sid)
+    except Exception:
         pass
 
     session_start               = _read_session_start()
@@ -1469,38 +2025,234 @@ def main() -> None:
     cumulative                  = _query_cumulative_savings()
     _build_and_save_learned_profile()   # v6.1: build profile from corrections
 
-    has_cumulative = any(calls > 0 for _, calls, *_ in cumulative)
 
-    # Try Cyber-Grid (Rich) renderer; fall back to legacy ANSI
-    summary = None
-    try:
-        from llm_router.hooks.cyber_grid import render_cyber_grid
-        report_data = _collect_report_data(
-            session_start, paid_rows, cc_rows, free_rows, tools,
-            start, current, is_live, cumulative,
-        )
-        summary = render_cyber_grid(report_data)
-    except Exception:
-        pass
 
-    if not summary:
-        if not tools and not cc_rows and not current and not free_rows and not has_cumulative:
-            # Minimal summary for inactive sessions
+    # Try SessionSummaryDashboard (Rich) renderer; fall back to legacy ANSI
+    final_summary_output = ""
+
+    if HAS_RICH_DASHBOARD:
+        try:
+            report_data = _collect_report_data(
+                session_start, paid_rows, cc_rows, free_rows, tools,
+                start, current, is_live, cumulative,
+            )
+
+            # Prepare data for SessionSummaryDashboard
+            # Use canonical "method" key (e.g. "heuristic", "ollama") not the human "reason"
+            # string — the renderer's _METHOD_SYMBOLS lookup requires canonical IDs.
+            dashboard_decisions = [
+                {"method": d["method"], "count": d["hits"]}
+                for d in report_data.get("routing_logic", [])
+            ]
+
+            dashboard_savings = {}
+            for label, calls, total_tokens, _, saved_usd in cumulative:
+                if label == "today":
+                    dashboard_savings["today"] = saved_usd
+                    dashboard_savings["today_tokens"] = total_tokens
+                elif label == "this week":
+                    dashboard_savings["week"] = saved_usd
+                    dashboard_savings["week_tokens"] = total_tokens
+                elif label == "14 days":
+                    dashboard_savings["14d"] = saved_usd
+                    dashboard_savings["14d_tokens"] = total_tokens
+                elif label == "this month":
+                    dashboard_savings["month"] = saved_usd
+                    dashboard_savings["month_tokens"] = total_tokens
+                elif label == "all time":
+                    dashboard_savings["lifetime"] = saved_usd
+                    dashboard_savings["lifetime_tokens"] = total_tokens
+
+            # Redirect to StringIO so Rich doesn't pollute stdout.
+            # Console(record=True) without file= defaults to sys.stdout AND records;
+            # that mix would corrupt the JSON envelope Claude Code reads from stdout.
+            _rich_buf = io.StringIO()
+            console = Console(record=True, force_terminal=True, color_system="truecolor", file=_rich_buf)
+            dashboard = SessionSummaryDashboard(console=console)
+
+            # Gather 14-day cost data from report
+            daily_14d_data = report_data.get("daily_14d", [])
+            daily_costs = [d[3] for d in daily_14d_data] if daily_14d_data else []
+
+            # NOTE: this used to synthesise a 7-day history when the query
+            # returned nothing, by scaling today's figure by invented ratios
+            # (0.3, 0.35, 0.4, ...). That is fabricated data presented as a
+            # measurement, and it is the one thing a savings report must never
+            # do — a chart of made-up numbers is worse than an empty chart,
+            # because an empty chart is honest about what is known. When there
+            # is no daily data, show none.
+
+            total_saved = sum(daily_costs) if daily_costs else 0.0
+
+            # Gather 14-day model breakdown directly from routing_decisions.final_model.
+            # This is the authoritative source — previous code fell through to routing
+            # method names (heuristic, build-fast-path) because it never queried here.
+            # COVERAGE, NOT JUST NUMBERS (audit doc 27).
+            #
+            # `routing_decisions` is written ONLY by llm_route and llm_auto. The whole
+            # llm(task=…) family calls route_and_call() without `classification_data`,
+            # and router.py guards the write with `if classification_data:` — so the
+            # dominant traffic never appears here and nothing records the omission.
+            #
+            # This panel therefore describes ONE TOOL's routing, and was rendered as
+            # "MODELS 14-day mix" as though it described everything. Worse, when no
+            # llm_route call has happened inside the window the newest row can be weeks
+            # old and the percentages still render as current — which is exactly what was
+            # observed: 643 rows into `usage` in 24h against 0 into routing_decisions.
+            #
+            # So the panel now carries what it covers and how fresh it is. The fix is to
+            # NAME the difference, not to widen the query — adding the missing traffic
+            # would move every historical percentage silently.
+            model_breakdown: dict[str, float] = {}
+            model_breakdown_note = ""
             try:
-                from llm_router.dashboard.server import _get_or_create_token, DEFAULT_PORT
-                token = _get_or_create_token()
-                url = f"http://localhost:{DEFAULT_PORT}/?token={token}"
-                summary = (
-                    f"\n\033[2m{'─'*WIDTH}\033[0m\n"
-                    f"  \033[1m\ud83d\udcca LLM Router Session Summary Dashboard\033[0m\n"
-                    f"  No session activity detected\n"
-                    f"  \033[1mDashboard:\033[0m \033[4;34m{url}\033[0m\n"
-                    f"\033[2m{'─'*WIDTH}\033[0m\n"
-                )
+                if os.path.exists(DB_PATH):
+                    _mb_conn = sqlite3.connect(DB_PATH)
+                    _mb_rows = _mb_conn.execute(
+                        "SELECT final_model, COUNT(*) AS cnt "
+                        "FROM routing_decisions "
+                        "WHERE final_model IS NOT NULL AND final_model != '' "
+                        "  AND date(timestamp) >= date('now', '-14 days') "
+                        "GROUP BY final_model "
+                        "ORDER BY cnt DESC "
+                        "LIMIT 8"
+                    ).fetchall()
+                    _mb_newest = _mb_conn.execute(
+                        "SELECT MAX(timestamp) FROM routing_decisions"
+                    ).fetchone()[0]
+                    _mb_conn.close()
+                    _mb_total = sum(r[1] for r in _mb_rows)
+                    if _mb_total > 0:
+                        for _model, _cnt in _mb_rows:
+                            model_breakdown[_model] = (_cnt / _mb_total) * 100
+                        model_breakdown_note = "classified routes only"
+                    elif _mb_newest:
+                        # Rows exist but NONE inside the window. Say so rather than
+                        # rendering nothing, which reads as "no routing happened".
+                        model_breakdown_note = f"no classified routes since {_mb_newest[:10]}"
             except Exception:
-                sys.exit(0)
-        else:
-            summary = _format(tools, cc_rows, free_rows, paid_rows, start, current, is_live, cumulative, session_start)
+                pass
+
+            # Gather quota data from Claude subscription.
+            # Both *_pct values are stored as 0-100 (not 0-1) — do NOT multiply by 100.
+            claude_quota_pct = current.get("weekly_pct", 0.0) if current else 0.0
+            claude_session_pct = current.get("session_pct", 0.0) if current else 0.0
+            claude_session_resets_at = current.get("session_resets_at", "") if current else ""
+            gemini_quota_pct = 0.0  # Placeholder for future Gemini integration
+            claude_remaining = current.get("session_resets_at", "Unknown") if current else "Unknown"
+
+            # If the session reset time is unknown, fall back to showing weekly
+            # savings. Pull the "this week" bucket and label it truthfully.
+            # Previously this summed the "all time" row but printed "saved this
+            # week" — the mislabel that made the SessionEnd figure disagree with
+            # the llm_savings weekly bucket by the lifetime/weekly ratio
+            # (RETROSPECTIVE B-6). Value and label must name the same window.
+            if not claude_remaining or claude_remaining == "Unknown":
+                weekly_saved = sum(d[4] for d in cumulative if d[0] == "this week")
+                if weekly_saved > 0:
+                    claude_remaining = f"~{weekly_saved:.2f} USD saved this week"
+
+            gemini_remaining = "Unknown"
+
+            # Build daily_calls / daily_tokens from the 14-day data already computed above.
+            # daily_14d_data rows are (date_str, calls, tokens, cost_usd, tokens_saved).
+            daily_calls_list = [d[1] for d in daily_14d_data] if daily_14d_data else []
+            daily_tokens_list = [d[2] for d in daily_14d_data] if daily_14d_data else []
+            daily_tokens_saved_list = [d[4] for d in daily_14d_data] if daily_14d_data else []
+
+            # Gather session-level metrics: burn rate, fallback %, p95 latency, etc.
+            session_metrics = _query_session_metrics(session_start)
+            daily_cache_trend = _query_daily_cache_trend()
+
+            # Build session_models from tools_data so the MODELS panel shows "this session".
+            # Format: [{"model": str, "calls": int, "tokens": int, "cost": float, "saved": float}]
+            # The panel is titled "MODELS this session", so it aggregates EVERY model
+            # invoked this session — paid, subscription and free/local alike. It was
+            # previously built from `report_data["tools"]`, which is `_aggregate(paid_rows)`:
+            # that silently excluded `_FREE_PROVIDERS` (ollama, codex, gemini_cli), so a
+            # session routed mostly to a local model showed a panel that did not contain
+            # it. A "free" cost column already exists precisely to render those rows.
+            all_session_rows = paid_rows + cc_rows + free_rows
+            session_models_list: list[dict] = []
+            if all_session_rows:
+                model_agg: dict[str, dict] = {}
+                for data in _aggregate(all_session_rows).values():
+                    if not isinstance(data, dict):
+                        continue
+                    for model, totals in data.get("model_totals", {}).items():
+                        agg = model_agg.setdefault(
+                            model, {"calls": 0, "tokens": 0, "cost": 0.0}
+                        )
+                        # Real per-model sums — NOT tool_total * call_count, which
+                        # inflated tokens and cost by the tool's row count.
+                        agg["calls"]  += totals["calls"]
+                        agg["tokens"] += totals["in"] + totals["out"]
+                        agg["cost"]   += totals["cost"]
+                for model, agg in sorted(model_agg.items(), key=lambda x: -x[1]["calls"]):
+                    session_models_list.append({
+                        "model": model,
+                        "calls": agg["calls"],
+                        "tokens": agg["tokens"],
+                        "cost": agg["cost"],
+                        "saved": 0.0,
+                    })
+
+            dashboard.print_dashboard(
+                timestamp=f"Session · {datetime.now(timezone.utc).isoformat()}",
+                decisions=dashboard_decisions,
+                savings=dashboard_savings,
+                daily_costs=daily_costs if daily_costs else None,
+                total_saved=total_saved,
+                model_breakdown=model_breakdown if model_breakdown else None,
+                model_breakdown_note=model_breakdown_note or None,
+                session_models=session_models_list if session_models_list else None,
+                claude_quota_pct=claude_quota_pct,
+                claude_session_pct=claude_session_pct,
+                claude_session_resets_at=claude_session_resets_at,
+                gemini_quota_pct=gemini_quota_pct,
+                claude_remaining=claude_remaining,
+                gemini_remaining=gemini_remaining,
+                daily_calls=daily_calls_list,
+                daily_tokens=daily_tokens_list,
+                daily_tokens_saved=daily_tokens_saved_list,
+                # New session-level metrics
+                burn_rate_per_hr=session_metrics.get("burn_rate_per_hr", 0.0),
+                session_cost_usd=session_metrics.get("session_cost_usd", 0.0),
+                fallback_pct=session_metrics.get("fallback_pct", 0.0),
+                escalation_pct=session_metrics.get("escalation_pct", 0.0),
+                fallback_count=session_metrics.get("fallback_count", 0),
+                escalation_count=session_metrics.get("escalation_count", 0),
+                p95_latency=session_metrics.get("p95_latency", {}),
+                routing_effectiveness_pct=session_metrics.get("routing_effectiveness_pct", 0.0),
+                session_cost_ratio=session_metrics.get("session_cost_ratio"),
+                session_calls_ratio=session_metrics.get("session_calls_ratio"),
+                daily_cache_trend=daily_cache_trend if daily_cache_trend else None,
+            )
+            colored_output = console.export_text(clear=False, styles=True)
+            # Save ANSI version to disk — Claude Code UI can't render terminal
+            # colors, but the user can view it with: cat ~/.llm-router/last_summary.ansi
+            import re as _re
+            try:
+                import pathlib
+                _llm_router_dir = pathlib.Path.home() / ".llm-router"
+                _llm_router_dir.mkdir(parents=True, exist_ok=True)
+                (_llm_router_dir / "last_summary.ansi").write_text(colored_output, encoding="utf-8")
+            except Exception:
+                pass
+            # systemMessage gets plain text (ANSI codes stripped) for Claude Code UI.
+            final_summary_output = _re.sub(r"\x1b\[[0-9;]*[mGKHF]", "", colored_output)
+            # Append color hint so user knows how to view the colored version.
+            final_summary_output = final_summary_output.rstrip() + (
+                "\n\n🎨  Full colored summary: cat ~/.llm-router/last_summary.ansi  (or: llm_router summary)\n"
+            )
+        except Exception as e:
+            # 🥷 Backslash-Security: using vibe-coding rules for Logging & Error Handling
+            print(f"Error rendering SessionSummaryDashboard: {e}", file=sys.stderr)
+            # Fall back to legacy ANSI formatting
+            final_summary_output = _format(tools, cc_rows, free_rows, paid_rows, start, current, is_live, cumulative, session_start)
+    else:
+        # Rich dashboard not available, use legacy ANSI formatting
+        final_summary_output = _format(tools, cc_rows, free_rows, paid_rows, start, current, is_live, cumulative, session_start)
 
     # Append session spend + real savings panel (v8.8.0)
     spend = _read_session_spend()
@@ -1508,40 +2260,45 @@ def main() -> None:
         total = spend.get("total_usd", 0.0)
         calls = spend.get("call_count", 0)
         tokens_reclaimed = spend.get("tokens_reclaimed", 0)
-        net_savings = spend.get("net_savings_usd", 0.0)
-        opus_equiv = spend.get("opus_equivalent_usd", 0.0)
         ext_min = spend.get("extension_minutes", 0.0)
 
-        # Build savings panel
+        # Build savings panel. ONE consistent story: the headline % and the tier
+        # table below both derive from the SAME per-tier rollups (Sonnet baseline).
+        # The old "Opus would cost / Actually spent / Net preserved" trio was
+        # removed — it compared the Opus baseline of the *reclaimed* calls against
+        # *total* spend (which includes non-reclaimed paid calls), a mixed-scope
+        # figure that contradicted the tier table (e.g. "Net preserved $0.01" next
+        # to "Saved $0.05") and could green-wash a session that overspent.
         lines = []
-        if opus_equiv > 0:
-            pct_saved = (net_savings / opus_equiv * 100) if opus_equiv > 0 else 0
-            # Progress bar showing how much was preserved
+        per_model = spend.get("per_model", {}) or {}
+        rollups = []
+        try:
+            from llm_router.tiers import render_tier_table, summarize_tiers, total_savings
+            if per_model:
+                rollups = summarize_tiers(per_model)
+        except Exception:
+            rollups = []
+
+        if rollups:
+            _actual, _baseline, _saved = total_savings(rollups)
+            pct = (_saved / _baseline * 100) if _baseline > 0 else 0
             bar_len = 20
-            filled = int(pct_saved / 100 * bar_len)
+            filled = int(pct / 100 * bar_len)
             bar = _C_GREEN + "━" * filled + "\033[90m" + "─" * (bar_len - filled) + _RESET
-            lines.append(f"  Quota Preserved  {bar} {pct_saved:.0f}%")
+            lines.append(f"  Routing saved    {bar} {pct:.0f}% of baseline (${_saved:.4f})")
             if tokens_reclaimed > 0:
                 tok_k = tokens_reclaimed / 1000
                 lines.append(f"  {tok_k:.0f}K tokens reclaimed" + (f" · +{ext_min:.0f}min runway" if ext_min >= 1 else ""))
-            lines.append(f"  Opus would cost:  ${opus_equiv:.4f}")
-            lines.append(f"  Actually spent:   ${total:.4f}")
-            lines.append(f"  Net preserved:    {_C_GREEN}${net_savings:.4f}{_RESET}")
         else:
             lines.append(f"  Session spend: ${total:.4f} across {calls} call(s)")
 
         if spend.get("anomaly_flag"):
             lines.insert(0, f"  {_C_RED}⚠  ANOMALY: spend rate exceeded threshold{_RESET}")
 
-        # v10.1.0 — Tier-grouped savings rollup. Surfaces "how many calls
-        # went to free local / free subscription / paid API" + the savings
-        # vs Sonnet baseline. Critical for users who route heavily to
-        # Ollama/Codex but currently see only the paid-API spend number.
+        # Detailed per-tier breakdown (free local / free subscription / paid API)
+        # — the single source of truth for the savings figures above.
         try:
-            from llm_router.tiers import render_tier_table, summarize_tiers
-            per_model = spend.get("per_model", {}) or {}
-            if per_model:
-                rollups = summarize_tiers(per_model)
+            if rollups:
                 tier_lines = render_tier_table(rollups).split("\n")
                 lines.append("")
                 for tl in tier_lines:
@@ -1551,7 +2308,7 @@ def main() -> None:
             pass
 
         spend_block = "\n".join(lines)
-        summary = summary.rstrip("  " + "═" * (WIDTH - 2)) + "\n" + spend_block + "\n" + "  " + "═" * (WIDTH - 2)
+        final_summary_output = final_summary_output.rstrip("  " + "═" * (WIDTH - 2)) + "\n" + spend_block + "\n" + "  " + "═" * (WIDTH - 2)
 
     # Retrospective output removed per user preference
 
@@ -1564,7 +2321,7 @@ def main() -> None:
             if trends.get("snapshot_count", 0) > 0:
                 trend_output = format_trend_summary(trends)
                 if trend_output and "No snapshots" not in trend_output:
-                    summary = summary.rstrip("  " + "═" * (WIDTH - 2)) + "\n【TRENDS】\n" + trend_output + "\n" + "  " + "═" * (WIDTH - 2)
+                    final_summary_output = final_summary_output.rstrip("  " + "═" * (WIDTH - 2)) + "\n【TRENDS】\n" + trend_output + "\n" + "  " + "═" * (WIDTH - 2)
     except Exception:
         pass  # Graceful failure — never break session-end
 
@@ -1576,7 +2333,7 @@ def main() -> None:
             if updated and changes:
                 changes_str = ", ".join(changes)
                 config_note = f"\n  🔄 Profile updated: {changes_str}"
-                summary = summary.rstrip("  " + "═" * (WIDTH - 2)) + config_note + "\n" + "  " + "═" * (WIDTH - 2)
+                final_summary_output = final_summary_output.rstrip("  " + "═" * (WIDTH - 2)) + config_note + "\n" + "  " + "═" * (WIDTH - 2)
     except Exception:
         pass  # Graceful failure — never break session-end
 
@@ -1598,7 +2355,7 @@ def main() -> None:
                 loop.run_until_complete(evaluate_available_models(task_types=["reasoning"]))
                 loop.close()
                 eval_note = "\n  📊 Model benchmarks updated (next: 7 days)"
-                summary = summary.rstrip("  " + "═" * (WIDTH - 2)) + eval_note + "\n" + "  " + "═" * (WIDTH - 2)
+                final_summary_output = final_summary_output.rstrip("  " + "═" * (WIDTH - 2)) + eval_note + "\n" + "  " + "═" * (WIDTH - 2)
             except Exception:
                 pass  # Don't fail session if eval fails
     except Exception:
@@ -1613,15 +2370,35 @@ def main() -> None:
                 session_id = f.read().strip()
         except Exception:
             pass
-        
+
         if session_id:
             quota_timeline = _render_quota_timeline(session_id, DB_PATH)
             if quota_timeline:
-                summary = summary.rstrip("  " + "═" * (WIDTH - 2)) + quota_timeline + "\n" + "  " + "═" * (WIDTH - 2)
+                final_summary_output = final_summary_output.rstrip("  " + "═" * (WIDTH - 2)) + quota_timeline + "\n" + "  " + "═" * (WIDTH - 2)
     except Exception:
         pass  # Graceful failure — never break session-end
 
-    print(json.dumps({"systemMessage": summary}))
+    # ── Add routing efficiency report (v10.2.0) ──────────────────────────────────
+    # Shows model usage, token distribution, and detects wasteful routing patterns.
+    try:
+        from llm_router.hooks.lineage_integration import format_routing_section
+
+        routing_section = format_routing_section()
+        if routing_section:
+            final_summary_output = final_summary_output.rstrip("  " + "═" * (WIDTH - 2)) + routing_section + "  " + "═" * (WIDTH - 2)
+    except Exception:
+        pass  # Graceful failure — never break session-end
+
+    # CHZ-STOP-01: honour the verbosity mode before emitting.
+    _mode = _stop_hook_mode()
+    if _mode == "disabled":
+        pass  # no output at all; `llm_router summary` on demand
+    elif _mode == "condensed":
+        _line = _condense(final_summary_output)
+        if _line:
+            print(json.dumps({"systemMessage": _line}))
+    else:
+        print(json.dumps({"systemMessage": final_summary_output}))
 
     # Update the session-start snapshot AFTER the delta has been reported,
     # so the NEXT session starts from today's end-of-session baseline.

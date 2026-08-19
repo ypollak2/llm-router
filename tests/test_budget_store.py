@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import json
-from unittest.mock import patch
+import tempfile
+from pathlib import Path
 
 import pytest
 
@@ -12,17 +13,30 @@ from llm_router.budget_store import (
     get_caps,
     remove_cap,
     set_cap,
-    _write_atomic,
 )
+from llm_router.storage.service import StorageService
 
 
 @pytest.fixture(autouse=True)
-def isolated_budgets(tmp_path, monkeypatch):
-    """Redirect budgets.json to a tmp path for every test."""
-    fake_file = tmp_path / "budgets.json"
-    monkeypatch.setattr("llm_router.budget_store._BUDGETS_FILE", fake_file)
-    monkeypatch.setattr("llm_router.budget_store._ROUTER_DIR", tmp_path)
-    yield fake_file
+def isolated_budgets(monkeypatch):
+    """Isolate StorageService to a temporary directory for each test."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        temp_llm_router_dir = Path(tmpdir) / ".llm-router"
+        temp_llm_router_dir.mkdir(parents=True, exist_ok=True)
+
+        # Create isolated StorageService and patch the global singleton
+        isolated_service = StorageService(router_dir=temp_llm_router_dir)
+        monkeypatch.setattr(
+            "llm_router.storage.storage_service",
+            isolated_service,
+        )
+        monkeypatch.setattr(
+            "llm_router.budget_store.storage_service",
+            isolated_service,
+        )
+
+        budgets_file = temp_llm_router_dir / "budgets.json"
+        yield budgets_file
 
 
 # ── get_caps ──────────────────────────────────────────────────────────────────
@@ -82,17 +96,6 @@ class TestSetCap:
         set_cap("openai", 20.0)
         data = json.loads(isolated_budgets.read_text())
         assert data["openai"] == pytest.approx(20.0)
-
-    def test_atomic_write_uses_tmp_file(self, tmp_path):
-        """Verify atomic write: tmp file is cleaned up after rename."""
-        caps = {"openai": 20.0}
-        target = tmp_path / "budgets.json"
-        with patch("llm_router.budget_store._BUDGETS_FILE", target), \
-             patch("llm_router.budget_store._ROUTER_DIR", tmp_path):
-            _write_atomic(caps)
-        assert target.exists()
-        tmp = target.with_suffix(".json.tmp")
-        assert not tmp.exists(), "tmp file should be cleaned up after atomic replace"
 
 
 # ── remove_cap ────────────────────────────────────────────────────────────────

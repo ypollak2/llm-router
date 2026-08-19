@@ -24,12 +24,17 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 
+from llm_router import pricing as _pricing
+from llm_router.provenance import Measured
 from llm_router.types import TaskType
 
 __all__ = [
     "TokenShapeProfile",
     "INITIAL_CALIBRATION",
+    "CalibrationCoverage",
+    "calibration_coverage",
     "predict_cost",
+    "predict_cost_measured",
     "cost_for_tokens",
     "projection_check",
 ]
@@ -79,43 +84,52 @@ _N_SAMPLES_THRESHOLD = 30
 # referencing un-calibrated (model, task) pairs match historical projections.
 _LEGACY_FALLBACK_OUTPUT = 80
 
-# Per-million-token pricing snapshot. Kept local (vs. importing from cost.py)
-# so this module stays free of cross-module dependencies and remains pure.
-# Update alongside cost.py BASELINE_PRICING when provider rates change.
-_PRICING_PER_M: dict[str, dict[str, float]] = {
-    # Anthropic — keys match the names in src/llm_router/profiles.py chain entries
-    # after stripping the "anthropic/" prefix.
-    "claude-sonnet-4-6": {"input": 3.0, "output": 15.0},
-    "claude-haiku-4-5": {"input": 0.25, "output": 1.25},
-    "claude-haiku-4-5-20251001": {"input": 0.80, "output": 4.0},
-    "claude-opus-4-6": {"input": 15.0, "output": 75.0},
+# Per-million-token pricing, projected out of llm_router.pricing.
+#
+# WP-03: this was a local snapshot, justified in its own comment as keeping the
+# module "pure" and free of cross-module dependencies, with an instruction to
+# "update alongside cost.py BASELINE_PRICING". That instruction was not
+# followed — and could not be, reliably: it asks a human to remember a second
+# file. By the time of the audit this table held THREE separate retired rates
+# ($15/$75 Opus, and Haiku at both $0.25/$1.25 and $0.80/$4.00 under two keys
+# for the *same model*). Purity that costs correctness is not a good trade.
+_CALIBRATED_MODELS: tuple[str, ...] = (
+    # Anthropic — keys match src/llm_router/profiles.py chain entries after the
+    # "anthropic/" prefix is stripped.
+    "claude-sonnet-4-6",
+    "claude-haiku-4-5",
+    "claude-haiku-4-5-20251001",
+    "claude-opus-4-6",
     # OpenAI
-    "gpt-4o-mini": {"input": 0.15, "output": 0.60},
-    "gpt-4o": {"input": 2.50, "output": 10.0},
-    "gpt-4.1": {"input": 2.00, "output": 8.00},
-    "gpt-4.1-mini": {"input": 0.10, "output": 0.40},
-    "o3": {"input": 15.0, "output": 60.0},
-    "o3-mini": {"input": 1.10, "output": 4.40},
+    "gpt-4o-mini",
+    "gpt-4o",
+    "gpt-4.1",
+    "gpt-4.1-mini",
+    "o3",
+    "o3-mini",
     # Google
-    "gemini-1.5-flash": {"input": 0.075, "output": 0.30},
-    "gemini-1.5-pro": {"input": 1.25, "output": 5.00},
-    "gemini-2.0-flash": {"input": 0.075, "output": 0.30},
-    "gemini-2.5-flash": {"input": 0.075, "output": 0.30},
-    "gemini-2.5-pro": {"input": 1.25, "output": 7.00},
-    # OpenRouter open-weight workhorse pool (Plan 06 Step 2).
-    # Per-million USD pricing approximated from public OpenRouter listings
-    # at the time of writing. The cost_aggressive policy references these
-    # models and the bandit / policy-diff need pricing to compute expected
-    # value, so the entries must exist; the *exact* numbers can drift up to
-    # ~20% before the policy diff materially misranks. Update alongside
-    # OpenRouter's pricing page when rates shift.
-    "qwen/qwen3-235b-a22b-2507": {"input": 0.15, "output": 0.55},
-    "deepseek/deepseek-v4-flash": {"input": 0.07, "output": 0.50},
-    "google/gemini-3.1-flash-lite": {"input": 0.10, "output": 0.40},
-    "qwen/qwen3-coder-next": {"input": 0.25, "output": 0.90},
-    "qwen/qwen3-next-80b-a3b-instruct": {"input": 0.10, "output": 0.40},
-    "x-ai/grok-4.3": {"input": 0.50, "output": 1.50},
-    "anthropic/claude-sonnet-4": {"input": 3.00, "output": 15.00},
+    "gemini-1.5-flash",
+    "gemini-1.5-pro",
+    "gemini-2.0-flash",
+    "gemini-2.5-flash",
+    "gemini-2.5-pro",
+    # OpenRouter open-weight workhorse pool (Plan 06 Step 2). The cost_aggressive
+    # policy references these and the bandit / policy-diff need a price to
+    # compute expected value, so the entries must resolve; the exact numbers can
+    # drift ~20% before the policy diff materially misranks.
+    "qwen/qwen3-235b-a22b-2507",
+    "deepseek/deepseek-v4-flash",
+    "google/gemini-3.1-flash-lite",
+    "qwen/qwen3-coder-next",
+    "qwen/qwen3-next-80b-a3b-instruct",
+    "x-ai/grok-4.3",
+    "anthropic/claude-sonnet-4",
+)
+
+_PRICING_PER_M: dict[str, dict[str, float]] = {
+    _m: {"input": _r["input"], "output": _r["output"]}
+    for _m in _CALIBRATED_MODELS
+    if (_r := _pricing.rates_per_m(_m)) is not None
 }
 
 _FREE_MODEL_PREFIXES = ("ollama", "codex", "gemini_cli")
@@ -136,10 +150,30 @@ def _lookup_pricing(model: str) -> dict[str, float]:
     Unknown models return zero rates — the caller (typically ``predict_cost``)
     decides whether to emit a calibration warning. Keeping this lookup
     permissive avoids raising on every novel model name introduced upstream.
+
+    WP-05: ``_PRICING_PER_M`` is a local table that never covered Opus, so every
+    Opus model priced at 0.0 here — and a zero rate is indistinguishable from a
+    genuinely free local model. Pointing the savings baseline at Opus therefore
+    made ``predict_cost`` return 0.0 and silently dropped auto-route onto its
+    legacy static map, with no error and a plausible-looking number. Fall back
+    to llm_router.pricing (the WP-03 single source) before conceding zero, so a
+    model the price table knows can never be treated as free.
     """
     if any(model.startswith(prefix) for prefix in _FREE_MODEL_PREFIXES):
         return {"input": 0.0, "output": 0.0}
-    return _PRICING_PER_M.get(_normalize_model_name(model), {"input": 0.0, "output": 0.0})
+    normalized = _normalize_model_name(model)
+    local = _PRICING_PER_M.get(normalized)
+    if local is not None:
+        return local
+    try:
+        from llm_router import pricing as _pricing
+
+        rates = _pricing.rates_per_m(normalized)
+        if rates is not None:
+            return {"input": rates["input"], "output": rates["output"]}
+    except Exception:  # noqa: BLE001 — pricing must never break a projection
+        pass
+    return {"input": 0.0, "output": 0.0}
 
 
 def cost_for_tokens(
@@ -195,6 +229,97 @@ def predict_cost(
         output_estimate = _LEGACY_FALLBACK_OUTPUT
 
     return (input_tokens * pricing["input"] + output_estimate * pricing["output"]) / 1_000_000
+
+
+def _has_profile(model: str, task_type: TaskType) -> bool:
+    """True only for a pair with enough real observations to supersede the
+    static fallback. Keyed on (model, task) because that is how the corpus is
+    keyed — a calibrated model is NOT a calibrated task."""
+    profile = INITIAL_CALIBRATION.get((_normalize_model_name(model), task_type))
+    return profile is not None and profile.n_samples >= _N_SAMPLES_THRESHOLD
+
+
+def predict_cost_measured(
+    model: str,
+    task_type: TaskType,
+    input_tokens: int,
+    quantile: float = 0.5,
+) -> Measured:
+    """:func:`predict_cost`, carrying how the number was arrived at.
+
+    #12(b). The corpus holds ONE empirical profile — (claude-sonnet-4-6, QUERY),
+    n=1114. Every other pair, *including the savings baseline every savings
+    figure is computed against*, uses ``_LEGACY_FALLBACK_OUTPUT``: a static 80
+    tokens carried over from pre-calibration code.
+
+    ``predict_cost`` returns a bare float for both, so a projection resting on a
+    hardcoded 80 is indistinguishable from one resting on 1114 observations.
+    That is the quiet form of the defect this audit keeps finding — not a wrong
+    number, an *unmarked* one. WP-05's rule already exists in
+    :mod:`llm_router.provenance`; calibration simply never used it.
+
+    The VALUE is identical to ``predict_cost``'s, deliberately: this labels the
+    projection, it does not change it. A test pins that.
+    """
+    value = predict_cost(model, task_type, input_tokens, quantile)
+    if _has_profile(model, task_type):
+        return Measured.measured(value)
+    return Measured.estimated(
+        value,
+        f"no calibration profile for ({_normalize_model_name(model)}, "
+        f"{task_type.value}); assumed {_LEGACY_FALLBACK_OUTPUT} output tokens",
+    )
+
+
+@dataclass(frozen=True)
+class CalibrationCoverage:
+    """How much of the routable surface the corpus actually describes."""
+
+    profiled: int
+    total: int
+    #: Named, not just counted: a bare percentage does not get the corpus
+    #: extended, whereas a list of models does.
+    unprofiled_models: tuple[str, ...]
+
+    @property
+    def fraction(self) -> float:
+        return self.profiled / self.total if self.total else 0.0
+
+
+def calibration_coverage() -> CalibrationCoverage:
+    """Report the corpus's own blind spot.
+
+    WP-07's principle applied to calibration: a surface that cannot say how much
+    of its traffic it has no profile for cannot be audited for coverage.
+
+    THE DENOMINATOR IS DELIBERATELY NOT THE CORPUS. Counting profiled pairs
+    against ``INITIAL_CALIBRATION``'s own keys would report 100% coverage
+    forever — the same self-resolving trap as
+    ``tool_surface.unregistered()`` (tier constants checked against the tier
+    constants) and ``scripts/lint_tool_surface.py`` (emitters against emitters),
+    both of which reported clean while blind. It is instead the priced-model
+    list crossed with the routable task types.
+
+    The savings baseline is unioned in explicitly because it is NOT in
+    ``_CALIBRATED_MODELS`` — measured 2026-08-12: ``claude-opus-5`` resolves a
+    price only through the :mod:`llm_router.pricing` fallback added in #12(a).
+    Leaving it out would hide the single most consequential gap, since every
+    savings figure is computed against it.
+    """
+    models = set(_CALIBRATED_MODELS) | {_pricing.savings_baseline_model()}
+    tasks = tuple(TaskType)
+
+    profiled = sum(
+        1 for m in models for t in tasks if _has_profile(m, t)
+    )
+    unprofiled = tuple(
+        sorted(m for m in models if not any(_has_profile(m, t) for t in tasks))
+    )
+    return CalibrationCoverage(
+        profiled=profiled,
+        total=len(models) * len(tasks),
+        unprofiled_models=unprofiled,
+    )
 
 
 def projection_check(

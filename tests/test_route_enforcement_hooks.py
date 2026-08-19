@@ -11,6 +11,8 @@ from pathlib import Path
 
 import pytest
 
+from llm_router.tool_surface import route_tool
+
 
 ROOT = Path(__file__).resolve().parents[1]
 AUTO_ROUTE_HOOK = ROOT / "src" / "llm_router" / "hooks" / "auto-route.py"
@@ -23,11 +25,22 @@ def _run_hook(
     *,
     home: Path,
     extra_env: dict[str, str] | None = None,
+    inject_default_mode: str | None = "smart",
 ) -> subprocess.CompletedProcess[str]:
     # Strip shell-level enforcement overrides so tests are deterministic.
-    # The hook defaults to "smart"; tests that need a specific mode pass extra_env.
+    #
+    # The PRODUCT default is now "smart" (F01/North Star: enforce routing out of
+    # the box). The helper injects LLM_ROUTER_ENFORCE="smart" only when the test
+    # hasn't written its own routing.yaml and hasn't passed an explicit
+    # LLM_ROUTER_ENFORCE — keeping the routing.yaml tests reading their yaml and the
+    # blocking tests exercising smart, with no per-test churn. Tests that assert
+    # the real resolver DEFAULT (now "smart") pass inject_default_mode=None.
     env = {k: v for k, v in os.environ.items() if k != "LLM_ROUTER_ENFORCE"}
     env["HOME"] = str(home)
+    _yaml_present = (home / ".llm-router" / "routing.yaml").exists()
+    _explicit_mode = bool(extra_env and "LLM_ROUTER_ENFORCE" in extra_env)
+    if inject_default_mode is not None and not _yaml_present and not _explicit_mode:
+        env["LLM_ROUTER_ENFORCE"] = inject_default_mode
     if extra_env:
         env.update(extra_env)
     return subprocess.run(
@@ -56,14 +69,34 @@ def _write_pending(home: Path, session_id: str, **overrides) -> Path:
 
 
 def test_enforce_route_blocks_work_tools_by_default(tmp_path):
-    """Hard enforcement is the default when no env override is provided."""
-    session_id = "sess-hard-default"
+    """The product default is now 'smart' (North Star: enforce routing out of the
+    box so offloadable work goes to cheaper models). Work tools are BLOCKED until
+    routing is satisfied — no opt-in required. Relax with LLM_ROUTER_ENFORCE=soft/off."""
+    session_id = "sess-smart-default"
     _write_pending(tmp_path, session_id)
 
     result = _run_hook(
         ENFORCE_ROUTE_HOOK,
         {"session_id": session_id, "tool_name": "Bash"},
         home=tmp_path,
+        inject_default_mode=None,  # exercise the real resolver default (now smart)
+    )
+
+    assert result.returncode == 0
+    out = json.loads(result.stdout)
+    assert out["decision"] == "block", "smart default must block Bash until routed"
+
+
+def test_enforce_route_blocks_work_tools_in_smart_mode(tmp_path):
+    """Opt-in smart mode still blocks work tools until routing is satisfied."""
+    session_id = "sess-smart-explicit"
+    _write_pending(tmp_path, session_id)
+
+    result = _run_hook(
+        ENFORCE_ROUTE_HOOK,
+        {"session_id": session_id, "tool_name": "Bash"},
+        home=tmp_path,
+        extra_env={"LLM_ROUTER_ENFORCE": "smart"},
     )
 
     assert result.returncode == 0
@@ -89,20 +122,17 @@ def test_enforce_route_soft_mode_still_logs_but_allows(tmp_path):
     assert result.stdout.strip() == ""
     log_text = (tmp_path / ".llm-router" / "enforcement.log").read_text(encoding="utf-8")
     assert "VIOLATION" in log_text
-    assert "expected=llm_query" in log_text
+    assert "expected=llm" in log_text          # consolidated default → door name in the log
 
 
-def test_enforce_route_allows_file_tools_to_prevent_stuck_patterns(tmp_path):
-    """Glob/Read/Grep/LS are now allowed early to prevent stuck patterns where investigation tools keep failing.
+def test_read_tools_allowed_for_qa_in_hard_mode(tmp_path):
+    """P1 / INV-ROUTE-001/002: read-only tools are ALLOWED for Q&A even in hard mode.
 
-    The enforce-route hook v12+ marks these as 'coding' operations and allows them silently
-    to prevent deadlocks. This prevents the scenario where Claude can't investigate the hook
-    because the hook blocks investigation tools.
-
-    v13 behavior: In hard mode, ALL native tools (including Read/Glob/Grep/LS)
-    are blocked until routing is satisfied. This prevents model from bypassing
-    routing by jumping straight to file operations.
-    """
+    Blocking Read/Grep/Glob while forcing the request through the text-only `llm`
+    door (which cannot fetch a file) was a structural dead-end for any Q&A prompt
+    about an unseen file. Read-only context-gathering is now never blocked; routing
+    of the ANSWER is still enforced by the directive + stop-enforce override
+    detection. Generative tools remain blocked (see the write-tool tests)."""
     for tool_name in ("Read", "Glob", "Grep", "LS"):
         session_id = f"sess-qa-{tool_name.lower()}"
         _write_pending(tmp_path, session_id, task_type="query")
@@ -114,14 +144,13 @@ def test_enforce_route_allows_file_tools_to_prevent_stuck_patterns(tmp_path):
             extra_env={"LLM_ROUTER_ENFORCE": "hard"},
         )
 
-        # v13: Read/Glob/Grep/LS are BLOCKED in hard mode for Q&A tasks
         assert result.returncode == 0
-        out = json.loads(result.stdout)
-        assert out["decision"] == "block", f"{tool_name} should be blocked in hard mode for Q&A tasks"
+        assert result.stdout.strip() == "", f"{tool_name} should be ALLOWED for Q&A (no dead-end)"
 
 
-def test_enforce_route_blocks_file_tools_in_hard_mode_for_code_tasks(tmp_path):
-    """v13: In hard mode, Read/Glob/Grep/LS are blocked even for code tasks until routing satisfied."""
+def test_read_tools_allowed_in_hard_mode_for_code_tasks(tmp_path):
+    """Read-only tools are allowed for code tasks in hard mode too — reading files
+    to gather context is non-generative and never a routing bypass."""
     for tool_name in ("Read", "Glob", "Grep", "LS"):
         session_id = f"sess-code-hard-{tool_name.lower()}"
         _write_pending(tmp_path, session_id, task_type="code", expected_tool="llm_code")
@@ -134,12 +163,11 @@ def test_enforce_route_blocks_file_tools_in_hard_mode_for_code_tasks(tmp_path):
         )
 
         assert result.returncode == 0
-        out = json.loads(result.stdout)
-        assert out["decision"] == "block", f"{tool_name} should be blocked in hard mode for code tasks"
+        assert result.stdout.strip() == "", f"{tool_name} should be allowed for code tasks"
 
 
 def test_smart_mode_allows_read_for_code_tasks(tmp_path):
-    """v13: Smart mode allows Read/Glob/Grep/LS for code tasks (needed for implementation)."""
+    """Smart mode allows Read/Glob/Grep/LS for code tasks (needed for implementation)."""
     session_id = "sess-smart-code-read"
     _write_pending(tmp_path, session_id, task_type="code", expected_tool="llm_code")
 
@@ -155,8 +183,10 @@ def test_smart_mode_allows_read_for_code_tasks(tmp_path):
         assert result.stdout.strip() == "", f"{tool_name} should be allowed in smart mode for code tasks"
 
 
-def test_smart_mode_blocks_read_for_qa_tasks(tmp_path):
-    """v13: Smart mode blocks Read/Glob/Grep/LS for Q&A tasks."""
+def test_smart_mode_allows_read_for_qa_tasks(tmp_path):
+    """P1 / INV-ROUTE-001/002: smart mode ALLOWS Read/Glob/Grep/LS for Q&A tasks
+    (previously blocked — a capability dead-end). The answer is still routed via
+    the directive + stop-enforce override detection, not by blocking reads."""
     for task_type in ("query", "research", "generate", "analyze"):
         session_id = f"sess-smart-qa-{task_type}"
         _write_pending(tmp_path, session_id, task_type=task_type)
@@ -169,12 +199,28 @@ def test_smart_mode_blocks_read_for_qa_tasks(tmp_path):
         )
 
         assert result.returncode == 0
+        assert result.stdout.strip() == "", f"Read should be ALLOWED in smart mode for {task_type} tasks"
+
+
+def test_write_tools_still_blocked_for_qa(tmp_path):
+    """The enforcement intent is preserved: generative tools stay blocked until
+    routing is satisfied, so Q&A answers can't be produced by Bash/Edit/Write."""
+    for tool_name in ("Edit", "Write"):
+        session_id = f"sess-qa-write-{tool_name.lower()}"
+        _write_pending(tmp_path, session_id, task_type="query")
+        result = _run_hook(
+            ENFORCE_ROUTE_HOOK,
+            {"session_id": session_id, "tool_name": tool_name},
+            home=tmp_path,
+            extra_env={"LLM_ROUTER_ENFORCE": "hard"},
+        )
+        assert result.returncode == 0
         out = json.loads(result.stdout)
-        assert out["decision"] == "block", f"Read should be blocked in smart mode for {task_type} tasks"
+        assert out["decision"] == "block", f"{tool_name} must still be blocked until routed"
 
 
 def _write_routing_yaml(home: Path, content: str) -> Path:
-    """Write a routing.yaml to the fake home's .llm-router directory."""
+    """Write a routing.yaml to the fake home's .llm_router directory."""
     router_dir = home / ".llm-router"
     router_dir.mkdir(parents=True, exist_ok=True)
     yaml_path = router_dir / "routing.yaml"
@@ -278,34 +324,24 @@ def test_env_var_takes_priority_over_routing_yaml(tmp_path):
 
 
 def test_defaults_to_smart_when_neither_env_var_nor_yaml(tmp_path):
-    """No env var + no routing.yaml → smart mode: blocks Q&A Bash, allows code Bash."""
-    # Smart mode blocks Bash for Q&A tasks
-    session_id_qa = "sess-default-qa"
-    _write_pending(tmp_path, session_id_qa, task_type="query")
+    """No env var + no routing.yaml → 'smart' default (F01): blocks the work tool
+    (bare Bash) until routing is satisfied, for any task type."""
+    for task_type, expected_tool in [("query", "llm_query"), ("code", "llm_code")]:
+        session_id = f"sess-default-{task_type}"
+        _write_pending(tmp_path, session_id, task_type=task_type, expected_tool=expected_tool)
 
-    result_qa = _run_hook(
-        ENFORCE_ROUTE_HOOK,
-        {"session_id": session_id_qa, "tool_name": "Bash"},
-        home=tmp_path,
-    )
+        result = _run_hook(
+            ENFORCE_ROUTE_HOOK,
+            {"session_id": session_id, "tool_name": "Bash"},
+            home=tmp_path,
+            inject_default_mode=None,  # exercise the real resolver default (now smart)
+        )
 
-    assert result_qa.returncode == 0
-    out_qa = json.loads(result_qa.stdout)
-    assert out_qa["decision"] == "block", "Smart default must block Bash for Q&A tasks"
-
-    # v13: Smart mode blocks Bash for ALL task types until routing satisfied
-    session_id_code = "sess-default-code"
-    _write_pending(tmp_path, session_id_code, task_type="code", expected_tool="llm_code")
-
-    result_code = _run_hook(
-        ENFORCE_ROUTE_HOOK,
-        {"session_id": session_id_code, "tool_name": "Bash"},
-        home=tmp_path,
-    )
-
-    assert result_code.returncode == 0
-    out_code = json.loads(result_code.stdout)
-    assert out_code["decision"] == "block", "Smart default must block Bash for code tasks until routing satisfied"
+        assert result.returncode == 0
+        out = json.loads(result.stdout)
+        assert out["decision"] == "block", (
+            f"smart default must block bare Bash for {task_type} tasks until routed"
+        )
 
 
 def test_routing_yaml_with_leading_spaces_and_trailing_whitespace(tmp_path):
@@ -332,7 +368,7 @@ def test_routing_yaml_with_leading_spaces_and_trailing_whitespace(tmp_path):
 
 
 def test_routing_yaml_without_enforce_line_defaults_to_smart(tmp_path):
-    """routing.yaml exists but has no enforce: line → falls through to smart default."""
+    """routing.yaml exists but has no enforce: line → falls through to the 'smart' default (F01)."""
     _write_routing_yaml(tmp_path, "model_tier: auto\ndaily_budget: 5.00\n")
     session_id = "sess-yaml-no-enforce"
     _write_pending(tmp_path, session_id, task_type="query")
@@ -341,10 +377,11 @@ def test_routing_yaml_without_enforce_line_defaults_to_smart(tmp_path):
         ENFORCE_ROUTE_HOOK,
         {"session_id": session_id, "tool_name": "Bash"},
         home=tmp_path,
+        inject_default_mode=None,  # no env → read yaml (no enforce) → smart default
     )
 
     assert result.returncode == 0
-    # Smart mode for Q&A → Bash is blocked
+    # No enforce line → smart default → bare Bash is blocked until routed.
     out = json.loads(result.stdout)
     assert out["decision"] == "block"
 
@@ -362,6 +399,12 @@ def test_auto_route_logs_unrouted_previous_turn_on_next_prompt(tmp_path):
             "prompt": "Write a blog post about routing economics",
         },
         home=tmp_path,
+        # Test enforcement-logging behavior only. Without this, the hook attempts
+        # real DIRECT execution (Ollama chain) in a subprocess, which under
+        # full-suite memory pressure gets OOM-killed (returncode -9) — flaky
+        # locally and red in CI (no Ollama). Disabling direct execution makes the
+        # test hermetic and deterministic, matching test_auto_route_hook.py.
+        extra_env={"LLM_ROUTER_DIRECT_EXECUTION": "0"},
     )
 
     assert result.returncode == 0
@@ -379,8 +422,10 @@ def test_auto_route_logs_unrouted_previous_turn_on_next_prompt(tmp_path):
         ctx = out.get("reason", "")
     else:
         pytest.fail(f"Unexpected hook output format: {out}")
-    assert "PREVIOUS TURN VIOLATED ROUTING" in ctx
-    assert "expected llm_query for query/simple" in ctx
+    # Neutral framing (de-fanged): the prior-unrouted-turn notice names the task
+    # and the tool it could have used, without "violation"/"escalated" language.
+    assert "Last turn was not routed" in ctx
+    assert route_tool("llm_query") in ctx and "query/simple" in ctx
 
     # With direct execution (block or echo mode), pending state may or may not exist.
     # With Claude pass-through path (MANDATORY ROUTE directive), pending state is updated.
@@ -395,7 +440,7 @@ def test_auto_route_logs_unrouted_previous_turn_on_next_prompt(tmp_path):
     assert "expected=llm_query" in log_text
     assert "task=query/simple" in log_text
     # Prior unrouted turn context is now in contextForAgent, not systemMessage
-    assert "PREVIOUS TURN VIOLATED ROUTING" in ctx or "prior unrouted turn" in ctx
+    assert "Last turn was not routed" in ctx or "prior unrouted turn" in ctx
 
 
 # ── Read-only Bash allowlist (smart mode, code tasks) ─────────────────────────
@@ -632,3 +677,150 @@ def test_block_message_documents_escape_valve(tmp_path):
     assert "Escape valves" in out["reason"]
     assert "llm_" in out["reason"]
     assert "loop" in out["reason"].lower() or "retry the same tool" in out["reason"].lower()
+
+
+def test_hard_mode_exempts_filesystem_task(tmp_path):
+    """Fix #1: a prompt that needs local files/shell is auto-exempted even in
+    hard mode — a stateless routed model can't satisfy it, so blocking the
+    native tool would just trap the user. Reuses needs_claude_tools()."""
+    session_id = "sess-fs-exempt"
+    _write_pending(
+        tmp_path,
+        session_id,
+        task_type="query",
+        expected_tool="llm_query",
+        original_prompt="verify run_agent_loop in src/llm_router/hooks/agent_loop.py works",
+    )
+
+    result = _run_hook(
+        ENFORCE_ROUTE_HOOK,
+        {"session_id": session_id, "tool_name": "Bash",
+         "tool_input": {"command": "grep -n run_agent_loop src/llm_router/hooks/agent_loop.py"}},
+        home=tmp_path,
+        extra_env={"LLM_ROUTER_ENFORCE": "hard"},
+    )
+
+    # Downgraded to soft → allowed, no block JSON on stdout, clean exit.
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "", "filesystem task must not be blocked in hard mode"
+
+
+def test_hard_mode_still_blocks_pure_qa(tmp_path):
+    """Control: a self-contained Q&A prompt (no local-file need) is NOT exempted
+    and still blocks in hard mode, so routing still fires where it should."""
+    session_id = "sess-qa-control"
+    _write_pending(
+        tmp_path,
+        session_id,
+        task_type="query",
+        expected_tool="llm_query",
+        original_prompt="what is the capital of France",
+    )
+
+    result = _run_hook(
+        ENFORCE_ROUTE_HOOK,
+        {"session_id": session_id, "tool_name": "Bash",
+         "tool_input": {"command": "echo hello"}},
+        home=tmp_path,
+        extra_env={"LLM_ROUTER_ENFORCE": "hard"},
+    )
+
+    # Not exempt → hard mode blocks (stderr message + non-zero exit).
+    assert result.returncode != 0 or (result.stdout.strip() and json.loads(result.stdout).get("decision") == "block"), \
+        "pure Q&A should still be enforced in hard mode"
+
+
+def test_hard_mode_exempts_local_git_write(tmp_path):
+    """v0.8.3: a local git WRITE (push --delete / branch -d) is non-routable —
+    no stateless model can perform it — so it must not block, even in hard mode
+    and even on a terse follow-up prompt (the git-branch-delete drift class)."""
+    session_id = "sess-local-git"
+    _write_pending(tmp_path, session_id, task_type="coordination",
+                   expected_tool="llm_query", original_prompt="yes, delete the merged branch")
+    result = _run_hook(
+        ENFORCE_ROUTE_HOOK,
+        {"session_id": session_id, "tool_name": "Bash",
+         "tool_input": {"command": "git push origin --delete fix/foo"}},
+        home=tmp_path, extra_env={"LLM_ROUTER_ENFORCE": "hard"},
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "", "local git write must not block in hard mode"
+
+
+def test_hard_mode_exempts_local_dev_tools(tmp_path):
+    """Package managers, test runners, and fs mutations are local ops → allowed."""
+    for cmd in ("npm install", "pytest -q tests/", "mkdir -p build && touch build/x", "uv sync"):
+        session_id = f"sess-dev-{abs(hash(cmd))}"
+        _write_pending(tmp_path, session_id, task_type="coordination",
+                       expected_tool="llm_query", original_prompt="go ahead")
+        result = _run_hook(
+            ENFORCE_ROUTE_HOOK,
+            {"session_id": session_id, "tool_name": "Bash", "tool_input": {"command": cmd}},
+            home=tmp_path, extra_env={"LLM_ROUTER_ENFORCE": "hard"},
+        )
+        assert result.returncode == 0 and result.stdout.strip() == "", f"{cmd!r} should be exempt"
+
+
+def test_hard_mode_still_blocks_network_fetch_bash(tmp_path):
+    """Control: curl-to-URL is offloadable research work → stays route-blocked,
+    so the exemption doesn't become a routing bypass."""
+    session_id = "sess-curl"
+    _write_pending(tmp_path, session_id, task_type="query",
+                   expected_tool="llm_query", original_prompt="what's the latest news")
+    result = _run_hook(
+        ENFORCE_ROUTE_HOOK,
+        {"session_id": session_id, "tool_name": "Bash",
+         "tool_input": {"command": "curl https://example.com/api/news"}},
+        home=tmp_path, extra_env={"LLM_ROUTER_ENFORCE": "hard"},
+    )
+    blocked = bool(result.stdout.strip()) and json.loads(result.stdout).get("decision") == "block"
+    assert blocked, "network-fetch Bash should still route in hard mode"
+
+
+def test_hard_mode_exempts_edit_on_operational_task(tmp_path):
+    """v0.8.3 drift class #2: an Edit on an operational (non-QA, non-code) task
+    is a local file mutation — never routable — so it must not block, even in
+    hard mode on a terse follow-up ("yes, do it")."""
+    session_id = "sess-edit-op"
+    _write_pending(tmp_path, session_id, task_type="coordination",
+                   expected_tool="llm_query", original_prompt="yes, do it")
+    result = _run_hook(
+        ENFORCE_ROUTE_HOOK,
+        {"session_id": session_id, "tool_name": "Edit",
+         "tool_input": {"file_path": "/tmp/x", "old_string": "a", "new_string": "b"}},
+        home=tmp_path, extra_env={"LLM_ROUTER_ENFORCE": "hard"},
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "", "Edit on operational task must not block"
+
+
+def test_hard_mode_still_gates_write_on_code_task(tmp_path):
+    """Control: CODE tasks keep the route-first gate — Write blocks until the
+    llm_code call clears the lock. The Edit exemption must not weaken this."""
+    session_id = "sess-write-code"
+    _write_pending(tmp_path, session_id, task_type="code", complexity="moderate",
+                   expected_tool="llm_code")
+    result = _run_hook(
+        ENFORCE_ROUTE_HOOK,
+        {"session_id": session_id, "tool_name": "Write",
+         "tool_input": {"file_path": "/tmp/y", "content": "x"}},
+        home=tmp_path, extra_env={"LLM_ROUTER_ENFORCE": "hard"},
+    )
+    blocked = bool(result.stdout.strip()) and json.loads(result.stdout).get("decision") == "block"
+    assert blocked, "Write on a code task should keep the route-first gate"
+
+
+def test_hard_mode_exempts_read_on_operational_task(tmp_path):
+    """Native local inspection (Read/Grep/Glob/LS) on an operational task is
+    non-routable → allowed, same as the mutation tools."""
+    for tool in ("Read", "Grep", "Glob", "LS"):
+        session_id = f"sess-read-{tool}"
+        _write_pending(tmp_path, session_id, task_type="coordination",
+                       expected_tool="llm_query", original_prompt="show me the branches")
+        result = _run_hook(
+            ENFORCE_ROUTE_HOOK,
+            {"session_id": session_id, "tool_name": tool,
+             "tool_input": {"file_path": "/tmp/x"}},
+            home=tmp_path, extra_env={"LLM_ROUTER_ENFORCE": "hard"},
+        )
+        assert result.returncode == 0 and result.stdout.strip() == "", f"{tool} should be exempt"

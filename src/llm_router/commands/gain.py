@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Optional
 
 from llm_router.terminal_style import Color
+from llm_router.tool_surface import route_tool  # CHZ-SURF-01: never print a raw tool name
 
 
 def bold(text: str) -> str:
@@ -97,14 +98,22 @@ class SavingsAnalytics:
 
             cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
 
+            # routing_decisions has no original_tool/selected_model/estimated_cost_usd
+            # columns (see CREATE_ROUTING_DECISIONS_TABLE in cost.py) — those names
+            # belong to an unrelated table. This silently raised sqlite3.OperationalError
+            # on every call, caught below, so every caller of get_routing_decisions()
+            # (including the llm_savings MCP tool) always saw an empty list and
+            # reported zero savings regardless of real usage. Aliased to the real
+            # columns (task_type, final_model, cost_usd) so every downstream dict-key
+            # consumer in this file keeps working unchanged.
             rows = conn.execute(
                 """
                 SELECT
-                    original_tool,
-                    selected_model,
+                    task_type AS original_tool,
+                    final_model AS selected_model,
                     complexity,
                     budget_pct_used,
-                    estimated_cost_usd,
+                    cost_usd AS estimated_cost_usd,
                     session_id,
                     timestamp
                 FROM routing_decisions
@@ -444,8 +453,8 @@ class SavingsAnalytics:
 
         # Footer
         output.append(dim("💡 Tips:"))
-        output.append(dim("  • Use 'llm_usage' for detailed cost breakdown by provider"))
-        output.append(dim("  • Use 'llm_savings' for savings over different time periods"))
+        output.append(dim(f"  • Use '{route_tool('llm_usage')}' for detailed cost breakdown by provider"))
+        output.append(dim(f"  • Use '{route_tool('llm_savings')}' for savings over different time periods"))
         output.append(dim("  • Layer 1 (RTK): Enable via shell commands (git, pytest, etc)"))
         output.append(dim("  • Layer 3 (Token-Savior): Enable via LLM_ROUTER_COMPRESS_RESPONSE=true"))
         output.append("")

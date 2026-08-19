@@ -37,6 +37,53 @@ _routing_lock = threading.Lock()  # Protects _dynamic_routing_table and _discove
 PROFILE_PATH = Path.home() / ".llm-router" / "profile.yaml"
 
 
+def _get_available_providers_fast() -> set[str]:
+    """Get available providers without blocking on Ollama health checks.
+
+    This is a fast version of get_available_providers() that:
+    - Checks API keys (instant)
+    - Checks cached Ollama status (instant)
+    - DOES NOT probe Ollama (would block if Ollama is slow/down)
+
+    Used during server initialization to prevent startup hangs.
+    The full Ollama probe is deferred to a background thread.
+    """
+    from llm_router.config import get_config
+
+    config = get_config()
+    providers = set()
+
+    # Check configured API keys (instant)
+    if config.openai_api_key:
+        providers.add("openai")
+    if config.gemini_api_key:
+        providers.add("gemini")
+    if config.perplexity_api_key:
+        providers.add("perplexity")
+    if config.anthropic_api_key and not config.llm_router_claude_subscription:
+        # In subscription mode, Claude is intentionally excluded
+        providers.add("anthropic")
+    if config.mistral_api_key:
+        providers.add("mistral")
+    if config.deepseek_api_key:
+        providers.add("deepseek")
+    if config.groq_api_key:
+        providers.add("groq")
+    if config.together_api_key:
+        providers.add("together")
+    if config.xai_api_key:
+        providers.add("xai")
+    if config.cohere_api_key:
+        providers.add("cohere")
+
+    # Check Ollama without blocking: if OLLAMA_BASE_URL is set, assume it's available
+    # (fast, cached check will happen on first routing request)
+    if config.ollama_base_url:
+        providers.add("ollama")
+
+    return providers
+
+
 def _load_user_profile() -> dict | None:
     """Load the user's auto-generated profile.yaml if it exists.
     
@@ -155,81 +202,122 @@ def _reorder_by_quota_pressure(
     return normal + high_pressure
 
 
+def _dynamic_leaderboard_ordering_enabled() -> bool:
+    """#26: opt-in leaderboard ordering for the DYNAMIC routing table.
+
+    The STATIC path (``profiles.get_model_chain``) already reorders non-BUDGET
+    chains by live-leaderboard quality (cheapest-capable-first) via
+    ``apply_benchmark_ordering``; the dynamic table historically did not, so when
+    discovery is active BALANCED/PREMIUM chains fell back to raw static preference
+    order. This flag closes that gap by applying the SAME ordering here.
+
+    Default OFF so the audited/QUALIFIED default behaviour is preserved byte-for-
+    byte; enabling it aligns the dynamic path with the static path (and shipping it
+    as the default warrants a re-audit). BUDGET is never reordered in either path —
+    its cheap-first static order is the cost-saving behaviour."""
+    import os
+    return os.environ.get("LLM_ROUTER_DYNAMIC_LEADERBOARD_ORDERING", "").strip().lower() in (
+        "1", "on", "true", "yes"
+    )
+
+
 def build_dynamic_routing_table(
     available_providers: set[str] | None = None,
 ) -> dict[tuple[RoutingProfile, TaskType], list[str]]:
     """Build custom routing tables based on discovered providers and quota status.
-    
+
     Takes the static routing table from profiles.py and:
       1. Filters each chain to only include available providers
-      2. Reorders models to deprioritize quota-depleted services
-    
+      2. (opt-in, #26) reorders non-BUDGET chains by live-leaderboard quality
+         (cheapest-capable-first), matching the static path
+      3. Reorders models to deprioritize quota-depleted services
+
     The filtering and reordering preserves the preference order — high-priority
     models stay first as long as their provider is available and not depleted.
-    
+
     Args:
         available_providers: Set of available provider names. If None, discovers automatically.
-    
+
     Returns:
         Custom routing table with unavailable and quota-depleted providers deprioritized.
     """
     if available_providers is None:
         available_providers = get_available_providers()
-    
+
     # Always allow codex and ollama (they're local/special and handled separately)
     available_providers = available_providers | {"codex", "ollama", "gemini_cli"}
-    
+
     # Get quota pressure information
     quota_pressure = _get_quota_pressure()
-    
+    _leaderboard_ordering = _dynamic_leaderboard_ordering_enabled()
+
     dynamic_table: dict[tuple[RoutingProfile, TaskType], list[str]] = {}
-    
+
     for (profile, task_type), chain in ROUTING_TABLE.items():
         # Step 1: Filter chain to only available providers
         filtered_chain = [
             model for model in chain
             if provider_from_model(model) in available_providers
         ]
-        
-        # Step 2: Reorder by quota pressure (move depleted services to end)
+
+        # Step 2 (#26, opt-in): apply live-leaderboard ordering for non-BUDGET
+        # profiles, exactly as the static path does. BUDGET keeps its cheap-first
+        # static order (the cost-saving behaviour). Fails open — apply_benchmark_
+        # ordering returns the chain unchanged when no benchmark data is present.
+        if _leaderboard_ordering and profile != RoutingProfile.BUDGET:
+            try:
+                from llm_router.benchmarks import apply_benchmark_ordering
+                filtered_chain = apply_benchmark_ordering(
+                    filtered_chain, task_type, profile
+                )
+            except Exception as _e:  # noqa: BLE001 — never break table building
+                log.warning("Dynamic leaderboard ordering failed — static order: %s", _e)
+
+        # Step 3: Reorder by quota pressure (move depleted services to end)
         reordered = _reorder_by_quota_pressure(filtered_chain, quota_pressure)
-        
+
         dynamic_table[(profile, task_type)] = reordered
-    
+
     return dynamic_table
 
 
 def initialize_dynamic_routing(available_providers: set[str] | None = None) -> None:
     """Initialize dynamic routing tables at session startup.
-    
+
     Call this once when the server starts. It discovers available providers,
     loads quota information from profile.yaml, and builds custom routing tables
     that will be used for all subsequent routing decisions.
-    
+
     Args:
         available_providers: Optional set of providers. If None, discovers automatically.
+
+    NOTE: To prevent server startup hangs, this now uses a fast discovery path that
+    relies on cached data and API keys. The expensive Ollama health check is deferred
+    to a background thread that runs asynchronously after startup.
     """
+    import threading
     import time
     import traceback
-    
+
     global _dynamic_routing_table, _discovery_complete
-    
+
     with _routing_lock:
         if _discovery_complete:
             return  # Already initialized
-        
+
         try:
             if available_providers is None:
-                available_providers = get_available_providers()
-            
+                # Use fast discovery that doesn't block on Ollama checks
+                available_providers = _get_available_providers_fast()
+
             _dynamic_routing_table = build_dynamic_routing_table(available_providers)
             _discovery_complete = True
-            
+
             # Log summary
             provider_names = ", ".join(sorted(available_providers))
             total_chains = len(ROUTING_TABLE)
             dynamic_chains = sum(1 for chain in _dynamic_routing_table.values() if chain)
-            
+
             # Log quota pressure if available
             quota_pressure = _get_quota_pressure()
             if quota_pressure:
@@ -253,6 +341,22 @@ def initialize_dynamic_routing(available_providers: set[str] | None = None) -> N
                     total_chains=total_chains,
                     usable_chains=dynamic_chains,
                 )
+
+            # Start background Ollama health check (non-blocking)
+            # This allows the server to start immediately even if Ollama is slow
+            try:
+                def _background_ollama_check():
+                    try:
+                        from llm_router.discover import is_ollama_available
+                        is_ollama_available()  # Will be cached for future use
+                    except Exception as e:
+                        log.debug("Background Ollama check failed (non-blocking): %s", e)
+
+                background_thread = threading.Thread(target=_background_ollama_check, daemon=True)
+                background_thread.start()
+            except Exception as bg_err:
+                log.debug("Failed to start background Ollama check: %s", bg_err)
+
         except Exception as e:
             # Log failure with full traceback for debugging
             log.warning(
@@ -260,7 +364,7 @@ def initialize_dynamic_routing(available_providers: set[str] | None = None) -> N
                 e, traceback.format_exc()
             )
             _discovery_complete = True
-            
+
             # Schedule a retry after 10 minutes for transient failures (network, timeouts, etc.)
             # This prevents permanently disabling dynamic routing due to one-time infrastructure issues
             try:
@@ -270,7 +374,7 @@ def initialize_dynamic_routing(available_providers: set[str] | None = None) -> N
                         global _discovery_complete
                         _discovery_complete = False
                     log.info("Retrying dynamic routing discovery after 10-minute delay")
-                
+
                 retry_thread = threading.Thread(target=_retry_after_delay, daemon=True)
                 retry_thread.start()
             except Exception as retry_err:

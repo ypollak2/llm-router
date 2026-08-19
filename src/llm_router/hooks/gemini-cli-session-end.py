@@ -7,7 +7,7 @@ Shows:
 - Savings from routing to free providers (Ollama, Codex, Gemini CLI itself)
 - Recommendations for future usage
 
-Usage: Installed at ~/.llm-router/hooks/gemini-cli-session-end.py by `llm-router install`.
+Usage: Installed at ~/.llm-router/hooks/gemini-cli-session-end.py by `llm_router install`.
 Registered in Gemini CLI's hook config to fire on SessionEnd.
 """
 

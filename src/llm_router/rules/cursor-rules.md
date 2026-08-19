@@ -1,25 +1,39 @@
-# llm-router Routing Rules for Cursor IDE
+<!-- llm_router-rules-version: 2 -->
+# LLM Router — Cursor IDE Routing Rules
 
-Configure intelligent LLM routing for Cursor IDE with cost optimization.
+> LLM Router routes each task to the cheapest capable model before Cursor generates
+> its own response. Call the appropriate tool BEFORE answering.
+>
+> **Pull routing:** Cursor uses pull routing — YOU must call the tool. The tool
+> returns the response; relay it verbatim. This fires in agent mode (~90% of turns).
 
-## Routing Commands
+## Task Type → Tool Mapping
 
-- `llm_auto` — Automatic routing (recommended)
-- `llm_research` — Web-grounded research and current events
-- `llm_code` — Code generation and refactoring
-- `llm_generate` — Writing, documentation, content creation
-- `llm_analyze` — Deep analysis and problem-solving
-- `llm_query` — Quick factual questions
+| Task | Tool | Notes |
+|---|---|---|
+| Simple factual question | `llm_query` | Ollama → Gemini Flash → GPT-4o-mini |
+| Research / current events | `llm_research` | Perplexity (web-grounded) |
+| Writing / content | `llm_generate` | Gemini Flash → Haiku |
+| Deep analysis / review | `llm_analyze` | Ollama → GPT-4o |
+| Code generation / refactor | `llm_code` | Ollama → Codex → o3 |
+| Deep reasoning / proofs | `llm_reason` | Extended-thinking model |
+| Unknown / auto-detect | `llm_auto` | Classifies + routes automatically |
 
-## Best Practices
+## Rules
 
-1. Use routing commands explicitly for complex tasks
-2. Let `llm_auto` handle simple requests
-3. Specify complexity level for better model selection: `llm_code(complexity="complex")`
-4. Check the Cursor status bar for current routing mode
+1. Call the matching tool **before** generating your own response.
+2. Return the tool's output to the user **as-is** (don't paraphrase).
+3. Only use native Cursor intelligence for file navigation, terminal commands,
+   or when all LLM Router MCP servers are unavailable.
+4. If `llm_code` or similar is unavailable, proceed normally and note it.
 
 ## Tips
 
-- The router learns your preferences over time
-- Budget pressure automatically downgrades model tier when approaching limits
-- All routing decisions are logged for review
+- Use `llm_research` for anything time-sensitive — Ollama has a training cutoff
+- Use `llm_auto` when unsure which tool to call
+- Specify complexity for better model selection: `llm_code(prompt="...", complexity="complex")`
+
+## Token-Efficient Responses
+
+Skip preamble. Lead with result. Fragments fine when meaning is clear.
+No trailing summaries. ≥3 items → bullets. Never restate the user's request.

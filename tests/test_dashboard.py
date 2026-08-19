@@ -29,9 +29,22 @@ class TestFormatTokens:
 
 class TestBaselines:
     def test_host_baseline(self):
-        # 1M input at $15/M + 1M output at $75/M = $90
-        result = _host_baseline(1_000_000, 1_000_000)
-        assert abs(result - 90.0) < 0.001
+        # AC-3/AC-4: baseline uses cost.py's canonical host price, NOT a stale
+        # hardcoded $15/$75 (which was ~3x the current list price).
+        from llm_router import cost
+        it, ot = 1_000_000, 1_000_000
+        expected = (it * cost._HOST_INPUT_PER_M
+                    + ot * cost._HOST_OUTPUT_PER_M) / 1_000_000
+        assert abs(_host_baseline(it, ot) - expected) < 0.001
+
+    def test_host_baseline_tracks_canonical_price(self, monkeypatch):
+        """Fail-before: with the old hardcoded 15/75, overriding the canonical
+        constants would NOT change the dashboard baseline. Pass-after: it tracks."""
+        from llm_router import cost
+        monkeypatch.setattr(cost, "_HOST_INPUT_PER_M", 3.0, raising=False)
+        monkeypatch.setattr(cost, "_HOST_OUTPUT_PER_M", 9.0, raising=False)
+        # 1M in + 1M out at $3/$9 → $12 (was $90 under the stale hardcode).
+        assert abs(_host_baseline(1_000_000, 1_000_000) - 12.0) < 1e-9
 
     def test_zero_tokens(self):
         assert _host_baseline(0, 0) == 0.0

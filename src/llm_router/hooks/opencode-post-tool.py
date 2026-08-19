@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm-router-hook-version: 1
+# llm_router-hook-version: 1
 """OpenCode PostToolUse hook — writes a session-level savings marker.
 
 Reads pending savings records from ~/.llm-router/opencode_session.json
@@ -47,7 +47,7 @@ def _write_flush_time() -> None:
         pass
 
 
-def main() -> None:
+def _flush() -> None:
     try:
         json.load(sys.stdin)
     except (json.JSONDecodeError, EOFError):
@@ -72,6 +72,19 @@ def main() -> None:
         _write_flush_time()
     except OSError:
         pass
+
+
+def main() -> None:
+    # Flush savings, then always surface the live "LLM Router is working" indicator.
+    try:
+        _flush()
+    finally:
+        try:
+            from llm_router.observability.surface_status import emit_indicator
+
+            emit_indicator("opencode")
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":

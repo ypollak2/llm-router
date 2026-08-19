@@ -1,13 +1,9 @@
-# The LoopHole-verdict-ingestion section below is ported from Chuzom's
-# quality_feedback.py; the "chuzom:<tier>" router-alias label prefix is renamed to
-# "llm-router:<tier>", and the default ledger path moved under ~/.llm-router/.
 """Post-route quality feedback — automatic response scoring and model quality tracking.
 
 Sprint 4 of the context preparation pipeline. This module:
 1. Auto-scores every routed response using heuristics (no LLM call needed)
 2. Tracks per-model quality scores by task type and complexity
 3. Exposes quality data for routing decisions (skip underperforming models)
-4. Folds ground-truth LoopHole verifier verdicts into the same quality store
 
 The key insight: quality scoring doesn't need an LLM — simple content heuristics
 (code blocks present? Non-empty? No refusal phrases?) produce a reliable 0–1 signal.
@@ -290,7 +286,7 @@ def reset_quality_store() -> None:
 
 # ── LoopHole verdicts: ground-truth quality ──────────────────────────────────
 # The heuristic scorer above guesses quality from response shape. LoopHole gives
-# us the real thing: it routes a coding task through llm-router, then a falsifiable
+# us the real thing: it routes a coding task through LLM Router, then a falsifiable
 # verifier (tests pass / build succeeds / curl 200) decides whether the work was
 # actually done. We fold that verdict straight into the same store, so
 # ``should_skip_model`` orders chains on ground truth, not shape heuristics.
@@ -299,7 +295,7 @@ def reset_quality_store() -> None:
 # "not proven", a soft negative rather than a hard failure.
 _VERDICT_SCORE = {"done": 1.0, "failed": 0.0, "paused": 0.25}
 
-# LoopHole tasks are code; task complexity travels in a ``llm-router:<tier>`` label.
+# LoopHole tasks are code; task complexity travels in a ``llm_router:<tier>`` label.
 _TIER_TO_COMPLEXITY = {
     "simple": "simple", "moderate": "moderate", "complex": "complex",
     "auto": "moderate", "reasoning": "complex",
@@ -307,13 +303,13 @@ _TIER_TO_COMPLEXITY = {
 
 
 def _normalize_loophole_model(label: str) -> str | None:
-    """LoopHole labels look like ``ollama:qwen3-coder:30b`` or ``llm-router:complex``.
+    """LoopHole labels look like ``ollama:qwen3-coder:30b`` or ``llm_router:complex``.
 
     Return a concrete ``provider/model`` id, or None for a router alias
-    (``llm-router:<tier>``) — LoopHole didn't observe which model the alias resolved
+    (``llm_router:<tier>``) — LoopHole didn't observe which model the alias resolved
     to, so there's no concrete model to credit or penalize.
     """
-    if not label or label.startswith("llm-router:") or label == "unknown":
+    if not label or label.startswith("llm_router:") or label == "unknown":
         return None
     provider, sep, rest = label.partition(":")
     return f"{provider}/{rest}" if sep else None
@@ -322,7 +318,7 @@ def _normalize_loophole_model(label: str) -> str | None:
 def _loophole_complexity(record: dict) -> str:
     for key in ("executor_model", "planner_model"):
         label = record.get(key, "") or ""
-        if label.startswith("llm-router:"):
+        if label.startswith("llm_router:"):
             return _TIER_TO_COMPLEXITY.get(label.split(":", 1)[1], "moderate")
     return "moderate"
 
@@ -357,11 +353,6 @@ def record_loophole_verdict(record: dict) -> bool:
 
 
 def _loophole_jsonl_path() -> str:
-    """Default LoopHole verdict JSONL path, overridable via LLM_ROUTER_LOOPHOLE_JSONL
-    for consistency with the other ``LLM_ROUTER_*``-overridable state paths."""
-    override = os.environ.get("LLM_ROUTER_LOOPHOLE_JSONL")
-    if override:
-        return override
     return os.path.join(os.path.expanduser("~"), ".llm-router", "quality_feedback.jsonl")
 
 

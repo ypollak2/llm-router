@@ -2,7 +2,7 @@
 
 Loads two optional YAML files and merges them:
   1. ~/.llm-router/routing.yaml   — user-level overrides (always applied)
-  2. .llm-router.yml              — repo-level overrides (searched up from cwd)
+  2. .llm_router.yml              — repo-level overrides (searched up from cwd)
 
 Precedence (high → low):
   env vars > repo config > user config > built-in defaults
@@ -23,7 +23,7 @@ import yaml
 # ── Schema ────────────────────────────────────────────────────────────────────
 
 VALID_PROFILES  = {"budget", "balanced", "premium"}
-VALID_ENFORCE   = {"shadow", "suggest", "enforce", "hard", "soft", "off"}
+VALID_ENFORCE   = {"shadow", "suggest", "advise", "smart", "enforce", "hard", "soft", "off"}
 VALID_TASK_TYPES = {"query", "code", "analyze", "generate", "research", "image", "video", "audio"}
 
 
@@ -42,11 +42,11 @@ class RepoConfig:
     """
     profile: str | None = None                            # budget | balanced | premium
     enforce: str | None = None                            # shadow | suggest | enforce
-    policy: str | None = None                             # custom policy name (e.g. "my_strategy")
     block_providers: list[str] = field(default_factory=list)
     block_models: list[str] = field(default_factory=list)   # model-level deny (v3.2)
     allow_models: list[str] = field(default_factory=list)   # model-level allow-list (v3.2)
     routing: dict[str, TaskRouteOverride] = field(default_factory=dict)
+    agentic_model: str | None = None  # preferred model for agentic/reasoning tasks (v0.5.5)
     daily_caps: dict[str, float] = field(default_factory=dict)  # task_type → USD; "_total" key for global
     # Source info (not a user field — set by loader)
     _sources: list[str] = field(default_factory=list)
@@ -70,13 +70,19 @@ class RepoConfig:
         return self.daily_caps.get("_total") or None
 
     def effective_enforce(self) -> str:
-        """Return enforce mode: env var wins, then repo config, then 'hard'."""
+        """Return enforce mode: env var wins, then repo config, then the shared
+        built-in default ('smart') — aligned with enforce_config.DEFAULT_ENFORCE
+        so every module agrees on the out-of-box default (F01)."""
         env = os.environ.get("LLM_ROUTER_ENFORCE", "").lower()
         if env in VALID_ENFORCE:
             return env
         if self.enforce and self.enforce in VALID_ENFORCE:
             return self.enforce
-        return "hard"
+        try:
+            from llm_router.enforce_config import DEFAULT_ENFORCE
+            return DEFAULT_ENFORCE
+        except Exception:
+            return "smart"
 
     def effective_profile(self) -> str | None:
         """Return profile: env var wins, then repo config."""
@@ -84,13 +90,6 @@ class RepoConfig:
         if env in VALID_PROFILES:
             return env
         return self.profile
-
-    def effective_policy(self) -> str | None:
-        """Return policy name: env var wins, then repo config, then None (PolicyManager default)."""
-        env = os.environ.get("LLM_ROUTER_POLICY", "")
-        if env:
-            return env
-        return self.policy
 
 
 # ── Loaders ───────────────────────────────────────────────────────────────────
@@ -109,9 +108,6 @@ def _dict_to_config(data: dict[str, Any], source: str) -> RepoConfig:
 
     if "profile" in data and str(data["profile"]).lower() in VALID_PROFILES:
         cfg.profile = str(data["profile"]).lower()
-
-    if "policy" in data and isinstance(data["policy"], str) and data["policy"].strip():
-        cfg.policy = data["policy"].strip()
 
     if "enforce" in data and str(data["enforce"]).lower() in VALID_ENFORCE:
         cfg.enforce = str(data["enforce"]).lower()
@@ -135,6 +131,9 @@ def _dict_to_config(data: dict[str, Any], source: str) -> RepoConfig:
                     provider=opts.get("provider"),
                 )
 
+    if data.get("agentic_model"):
+        cfg.agentic_model = str(data["agentic_model"])
+
     if isinstance(data.get("daily_caps"), dict):
         for key, val in data["daily_caps"].items():
             try:
@@ -150,11 +149,11 @@ def _merge(base: RepoConfig, override: RepoConfig) -> RepoConfig:
     merged = RepoConfig(
         profile        = override.profile        or base.profile,
         enforce        = override.enforce        or base.enforce,
-        policy         = override.policy         or base.policy,
         block_providers= list({*base.block_providers, *override.block_providers}),
         block_models   = list({*base.block_models,    *override.block_models}),
         allow_models   = list({*base.allow_models,    *override.allow_models}),
         routing        = {**base.routing, **override.routing},
+        agentic_model  = override.agentic_model or base.agentic_model,
         daily_caps     = {**base.daily_caps, **override.daily_caps},
         _sources       = base._sources + override._sources,
     )
@@ -162,10 +161,10 @@ def _merge(base: RepoConfig, override: RepoConfig) -> RepoConfig:
 
 
 def find_repo_config_path(start: Path | None = None) -> Path | None:
-    """Search start (default cwd) and ancestors for .llm-router.yml."""
+    """Search start (default cwd) and ancestors for .llm_router.yml."""
     here = start or Path.cwd()
     for candidate in [here, *here.parents]:
-        p = candidate / ".llm-router.yml"
+        p = candidate / ".llm_router.yml"
         if p.exists():
             return p
         # Stop at filesystem root or home directory
@@ -183,7 +182,7 @@ def load_user_config() -> RepoConfig:
 
 
 def load_repo_config(start: Path | None = None) -> RepoConfig:
-    """Load .llm-router.yml from cwd or nearest ancestor (repo-level config)."""
+    """Load .llm_router.yml from cwd or nearest ancestor (repo-level config)."""
     path = find_repo_config_path(start)
     if path is None:
         return RepoConfig()

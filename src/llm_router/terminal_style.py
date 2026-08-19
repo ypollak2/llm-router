@@ -1,4 +1,4 @@
-"""Terminal styling system for llm-router v6.0+
+"""Terminal styling system for llm_router v6.0+
 
 Provides ANSI color codes, Unicode symbols, and formatting functions
 for rendering the Visibility + Memory design system across:

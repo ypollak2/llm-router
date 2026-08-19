@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""llm-router retrospect — IAF-style session debrief with routing directives.
+"""llm_router retrospect — IAF-style session debrief with routing directives.
 
-Command: uv run llm-router retrospect [--weekly] [--compact] [--no-directives]
+Command: uv run llm_router retrospect [--weekly] [--compact] [--no-directives]
 
 Performs 5-step debrief analysis:
 1. FACTS — What happened (neutral, data-driven)

@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
+# llm_router-hook-version: 1
 """Gemini CLI auto-route hook — injects MANDATORY ROUTE hint before model answers.
 
 This hook fires on UserPromptSubmit (after the user types a prompt, before Gemini
 responds). It runs a 3-layer complexity classifier to determine if the task is
 simple/moderate/complex, then injects a hint into the system message telling Gemini
-which llm-router MCP tool to call.
+which llm_router MCP tool to call.
 
-Usage: Installed at ~/.llm-router/hooks/gemini-cli-auto-route.py by `llm-router install`.
+Usage: Installed at ~/.llm-router/hooks/gemini-cli-auto-route.py by `llm_router install`.
 Registered in Gemini CLI's hook config to fire on UserPromptSubmit.
 
 Classification layers:
@@ -19,6 +20,52 @@ import json
 import sys
 import asyncio
 from typing import Optional
+
+
+# ── Registered-tool surface (CHZ-SURF-01) ────────────────────────────────────
+# Tool names are tier-dependent (LLM_ROUTER_SLIM). NEVER put a raw tool name in
+# output: under the DEFAULT `consolidated` tier the legacy llm_query /
+# llm_analyze / llm_code / llm_research / llm_generate names are not registered,
+# so naming one hands the caller "Error: No such tool available" — after which
+# it silently does the work on the expensive model and the savings dashboard
+# cannot distinguish that from "chose not to route".
+def _load_tool_surface_fns():
+    """(route_tool, route_call, route_call_with_complexity) from llm_router.tool_surface.
+
+    Falls back to the stdlib-only copy the installer drops next to the hooks, then
+    to the in-repo source, then to identity (correct only for tier `off`).
+    """
+    try:
+        from llm_router.tool_surface import (
+            route_call,
+            route_call_with_complexity,
+            route_tool,
+        )
+        return route_tool, route_call, route_call_with_complexity
+    except ImportError:
+        pass
+    try:
+        import importlib.util as _ilu
+        from pathlib import Path as _P
+        _here = _P(__file__).resolve().parent
+        for _cand in (_here / "llm_router_tool_surface.py", _here.parent / "tool_surface.py"):
+            if not _cand.exists():
+                continue
+            _spec = _ilu.spec_from_file_location("llm_router_tool_surface", _cand)
+            _mod = _ilu.module_from_spec(_spec)
+            sys.modules["llm_router_tool_surface"] = _mod  # dataclasses needs this
+            _spec.loader.exec_module(_mod)
+            return _mod.route_tool, _mod.route_call, _mod.route_call_with_complexity
+    except Exception:  # noqa: BLE001 — a broken support module must not kill the hook
+        pass
+    return (
+        lambda n, **k: n,
+        lambda n, *a, **k: (f"{n}({', '.join(a)})" if a else n),
+        lambda n, c, *a, **k: f"{n}(complexity='{c}'" + ("".join(', ' + x for x in a)) + ")",
+    )
+
+
+route_tool, route_call, route_call_with_complexity = _load_tool_surface_fns()
 
 
 async def classify_complexity(prompt: str) -> tuple[str, float]:
@@ -92,20 +139,20 @@ async def get_routing_hint(prompt: str) -> Optional[str]:
 
         # Map complexity + task type to recommended tool
         if is_research:
-            return f"⚡ MANDATORY ROUTE: research/{complexity} → call llm_research(complexity='{complexity}')"
+            return f"⚡ MANDATORY ROUTE: research/{complexity} → call {route_call_with_complexity('llm_research', complexity)}"
         
         if is_code:
-            return f"⚡ MANDATORY ROUTE: code/{complexity} → call llm_code(complexity='{complexity}')"
+            return f"⚡ MANDATORY ROUTE: code/{complexity} → call {route_call_with_complexity('llm_code', complexity)}"
             
         if is_generate:
-            return f"⚡ MANDATORY ROUTE: generate/{complexity} → call llm_generate(complexity='{complexity}')"
+            return f"⚡ MANDATORY ROUTE: generate/{complexity} → call {route_call_with_complexity('llm_generate', complexity)}"
 
         if complexity == "simple":
-            return "⚡ MANDATORY ROUTE: query/simple → call llm_query(complexity='simple')"
+            return f"⚡ MANDATORY ROUTE: query/simple → call {route_call_with_complexity('llm_query', 'simple')}"
         elif complexity == "complex":
-            return "⚡ MANDATORY ROUTE: analyze/complex → call llm_analyze(complexity='complex')"
+            return f"⚡ MANDATORY ROUTE: analyze/complex → call {route_call_with_complexity('llm_analyze', 'complex')}"
         else:
-            return "⚡ MANDATORY ROUTE: analyze/moderate → call llm_analyze(complexity='moderate')"
+            return f"⚡ MANDATORY ROUTE: analyze/moderate → call {route_call_with_complexity('llm_analyze', 'moderate')}"
     except Exception:
         return None
 

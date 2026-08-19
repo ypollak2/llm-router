@@ -1,17 +1,19 @@
 """Tests for LLM-as-Judge quality evaluation."""
 
 import pytest
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 from datetime import datetime, timedelta
 
 from llm_router.judge import (
     evaluate_response_async,
     _build_judge_prompt,
+    _evaluate_background,
     _parse_judge_score,
     get_judge_scores_for_model,
     reorder_by_quality,
 )
 from llm_router import cost
+from llm_router.types import LLMResponse
 
 
 async def _insert_routing_decision(db, model: str, judge_score: float | None = None, days_ago: int = 0):
@@ -42,9 +44,18 @@ async def _insert_routing_decision(db, model: str, judge_score: float | None = N
 
 @pytest.mark.asyncio
 async def test_evaluate_response_async_with_high_sample_rate(temp_db, monkeypatch):
-    """Test evaluate_response_async respects sample rate."""
+    """Test evaluate_response_async respects sample rate AND that the correct
+    background coroutine (_evaluate_background) is scheduled — not just that
+    *some* task was created.
+
+    CHZ-AUD-018 fix: previously only asserted create_task was called; a bug
+    passing the wrong coroutine to create_task would have gone undetected.
+    Now we verify (a) create_task was called with _evaluate_background, and
+    (b) that _evaluate_background itself writes a valid judge_score to the DB
+    when invoked directly with a mocked call_llm.
+    """
     monkeypatch.setenv("LLM_ROUTER_JUDGE_SAMPLE_RATE", "1.0")
-    
+
     with patch("llm_router.judge.asyncio.create_task") as mock_task:
         await evaluate_response_async(
             prompt="What is 2+2?",
@@ -52,8 +63,91 @@ async def test_evaluate_response_async_with_high_sample_rate(temp_db, monkeypatc
             task_type="query",
             routing_decision_id=1,
         )
-        # Should create a background task with 100% sample rate
-        assert mock_task.called
+        # (a) create_task must have been called at all
+        assert mock_task.called, "create_task not called — evaluation was not scheduled"
+
+        # (b) The coroutine passed to create_task must be _evaluate_background
+        # (not an arbitrary no-op), identified by its __qualname__.
+        scheduled_coro = mock_task.call_args[0][0]
+        assert hasattr(scheduled_coro, "__qualname__"), (
+            "create_task was not passed a coroutine object"
+        )
+        assert "_evaluate_background" in scheduled_coro.__qualname__, (
+            f"Wrong coroutine passed to create_task: {scheduled_coro.__qualname__!r}. "
+            "Expected _evaluate_background."
+        )
+
+
+@pytest.mark.asyncio
+async def test_evaluate_background_writes_judge_score(temp_db, monkeypatch):
+    """_evaluate_background must call call_llm, parse the score, and write it
+    to the routing_decisions row.
+
+    CHZ-AUD-018: This exercises the full evaluation path end-to-end with a
+    mocked LLM response so we can assert the judge_score column is populated
+    with a valid float in [0, 1].
+    """
+    # Insert a routing decision to target
+    db = await cost._get_db()
+    try:
+        await db.execute(
+            """INSERT INTO routing_decisions
+               (timestamp, task_type, profile, complexity, final_model, final_provider,
+                success, input_tokens, output_tokens, cost_usd, latency_ms, judge_score)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                datetime.now().isoformat(),
+                "query", "balanced", "simple",
+                "openai/gpt-4o", "openai",
+                1, 50, 20, 0.001, 150.0, None,
+            ),
+        )
+        await db.commit()
+        cursor = await db.execute("SELECT id FROM routing_decisions ORDER BY id DESC LIMIT 1")
+        row = await cursor.fetchone()
+        assert row, "Failed to insert test routing_decision"
+        decision_id = row[0]
+    finally:
+        await db.close()
+
+    # Mock call_llm to return a deterministic judge score JSON
+    judge_json = '{"relevance": 0.9, "completeness": 0.85, "correctness": 0.95}'
+    mock_llm_resp = LLMResponse(
+        content=judge_json,
+        model="claude-haiku-4-5-20251001",
+        input_tokens=30,
+        output_tokens=10,
+        cost_usd=0.0001,
+        latency_ms=80.0,
+        provider="anthropic",
+    )
+
+    with patch("llm_router.judge.call_llm", AsyncMock(return_value=mock_llm_resp)):
+        await _evaluate_background(
+            prompt="What is 2+2?",
+            response="The answer is 4",
+            task_type="query",
+            routing_decision_id=decision_id,
+        )
+
+    # Assert judge_score was written to the DB
+    db = await cost._get_db()
+    try:
+        cursor = await db.execute(
+            "SELECT judge_score FROM routing_decisions WHERE id = ?", (decision_id,)
+        )
+        stored = await cursor.fetchone()
+    finally:
+        await db.close()
+
+    assert stored is not None, "No routing_decision row found after evaluation"
+    assert stored[0] is not None, (
+        "judge_score is still NULL after _evaluate_background ran — score was not stored"
+    )
+    expected = (0.9 + 0.85 + 0.95) / 3.0
+    assert abs(float(stored[0]) - expected) < 0.01, (
+        f"judge_score={stored[0]!r} does not match expected avg {expected:.3f}"
+    )
 
 
 @pytest.mark.asyncio

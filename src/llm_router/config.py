@@ -22,9 +22,12 @@ import urllib.request
 from pathlib import Path
 from typing import Literal
 
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings
 
+from llm_router.paths import state_path
 from llm_router.types import QualityMode, RoutingProfile, Tier
+from llm_router.routing_hints import validate_config_upgrade, log_routing_decision
 
 # ── Ollama reachability cache ─────────────────────────────────────────────────
 # Checked at most once per TTL to avoid a network call on every routing
@@ -61,6 +64,71 @@ def probe_ollama(base_url: str) -> bool:
     return _ollama_reachable_cache
 
 
+# ── pxpipe reachability cache ──────────────────────────────────────────────
+# Same rationale as probe_ollama above — this runs from a sync quirk hook
+# on every dispatch to a heavy model, so it must not do a live network
+# probe each time.
+_pxpipe_reachable_cache: bool | None = None
+_pxpipe_cache_time: float = 0.0
+_PXPIPE_PROBE_TTL = 60.0  # seconds
+
+
+def probe_pxpipe(base_url: str) -> bool:
+    """Return True if a pxpipe proxy is reachable, with a 60-second cache.
+
+    Args:
+        base_url: pxpipe proxy base URL, e.g. ``"http://127.0.0.1:47821"``.
+
+    Returns:
+        True if the pxpipe dashboard responds within 1 second.
+    """
+    global _pxpipe_reachable_cache, _pxpipe_cache_time
+    now = time.monotonic()
+    if _pxpipe_reachable_cache is not None and (now - _pxpipe_cache_time) < _PXPIPE_PROBE_TTL:
+        return _pxpipe_reachable_cache
+    try:
+        with urllib.request.urlopen(base_url, timeout=1):
+            _pxpipe_reachable_cache = True
+    except Exception:
+        _pxpipe_reachable_cache = False
+    _pxpipe_cache_time = now
+    return _pxpipe_reachable_cache
+
+
+def validate_ollama_url(url: str) -> str:
+    """CHZ-SEC-06: reject unsafe Ollama endpoints before any urlopen.
+
+    ``LLM_ROUTER_OLLAMA_URL`` / ``OLLAMA_URL`` reached ``urlopen`` with no scheme or
+    host validation, so ``file://`` was accepted (local file read) and
+    cloud-metadata addresses (169.254.169.254, ::ffff:169.254.169.254) were
+    attempted — a classic SSRF sink. Returns the URL unchanged when safe, or ``""``
+    (Ollama disabled) when not. Only ``http``/``https`` to a non-metadata,
+    non-link-local host are allowed.
+    """
+    if not url:
+        return ""
+    try:
+        from urllib.parse import urlparse
+        p = urlparse(url)
+    except Exception:
+        return ""
+    if p.scheme not in ("http", "https"):
+        return ""
+    host = (p.hostname or "").lower()
+    if not host:
+        return ""
+    # Block cloud-metadata + link-local + unspecified addresses.
+    _BLOCKED_HOSTS = {
+        "169.254.169.254", "metadata.google.internal", "metadata",
+        "0.0.0.0", "::", "[::]",
+    }
+    if host in _BLOCKED_HOSTS:
+        return ""
+    if host.startswith("169.254.") or host.startswith("fe80:") or "169.254.169.254" in host:
+        return ""
+    return url
+
+
 class RouterConfig(BaseSettings):
     """Central configuration for the LLM Router.
 
@@ -80,6 +148,11 @@ class RouterConfig(BaseSettings):
     together_api_key: str = ""
     xai_api_key: str = ""
     cohere_api_key: str = ""
+    # ── New leaderboard providers (OpenAI-compatible) ──
+    moonshot_api_key: str = ""   # Kimi (Moonshot AI) — api.moonshot.cn/v1
+    minimax_api_key: str = ""    # MiniMax — api.minimax.chat/v1
+    zhipu_api_key: str = ""      # Z AI / Zhipu — open.bigmodel.cn/api/paas/v4
+    arcee_api_key: str = ""      # ArceeAI — conductor.arcee.ai/v1
     # Plan 06 Step 2 — OpenRouter aggregator (qwen/deepseek/gemini-flash-lite/etc).
     # LiteLLM reads OPENROUTER_API_KEY directly so no explicit env propagation needed;
     # we surface it here only to gate `available_providers` and to enable the
@@ -87,7 +160,7 @@ class RouterConfig(BaseSettings):
     openrouter_api_key: str = ""
 
     # ── Claude Pro/Max subscription ──
-    # Set to True when using llm-router inside Claude Code (Pro/Max subscription).
+    # Set to True when using llm_router inside Claude Code (Pro/Max subscription).
     # When enabled, all anthropic/* models are EXCLUDED from routing chains.
     # Rationale: you are already using Claude Code — routing back to Claude via
     # the Anthropic API would require a SEPARATE API key AND additional billing.
@@ -95,8 +168,17 @@ class RouterConfig(BaseSettings):
     # (Codex, Ollama, Gemini, GPT-4o, Perplexity, etc.) to save your Claude quota.
     llm_router_claude_subscription: bool = False
 
+    # ── Claude offload pressure cap ──
+    # Max COMBINED Claude subscription pressure (5h session + weekly, from
+    # claude_usage.get_claude_pressure(), 0.0-1.0) at which Claude may still be
+    # used for OFFLOAD (the llm_* tools, via the claude CLI). Above this, anthropic/*
+    # is dropped from offload chains so offload never starves your primary Claude Code
+    # work. 1.0 = always allow; 0.0 = disable Claude offload entirely.
+    # Env: LLM_ROUTER_CLAUDE_OFFLOAD_MAX_PRESSURE.
+    llm_router_claude_offload_max_pressure: float = 0.80
+
     # ── Gemini Subscription (Google One AI Pro) (v9.0.1) ──
-    # Set to True when using llm-router inside Gemini CLI with a subscription.
+    # Set to True when using llm_router inside Gemini CLI with a subscription.
     # When enabled, all gemini/* models (API) are EXCLUDED from routing chains.
     # Instead, the router uses gemini_cli/* to route tasks back to Gemini via
     # the local binary (free via subscription).
@@ -108,8 +190,31 @@ class RouterConfig(BaseSettings):
     # Effect: Ollama is injected at the front of ALL routing chains (not just
     # BUDGET or when Claude quota is high) so free local inference is always
     # tried first before spending money on cloud APIs.
-    # Set automatically by `llm-router install` when ~/.claw-code/ is detected.
+    # Set automatically by `llm_router install` when ~/.claw-code/ is detected.
     llm_router_claw_code: bool = False
+
+    # ── pxpipe integration (heavy-model context compression) ──
+    # pxpipe (https://github.com/teamchong/pxpipe) is a local proxy that
+    # rewrites bulky request context (system prompt, tool docs, older
+    # history) into compact PNGs before it reaches Claude's API — image
+    # tokens are cheaper than dense text tokens at Anthropic's pricing, so
+    # this cuts the bill on expensive, high-token-count calls. Opt-in and
+    # off by default: it requires `npx pxpipe-proxy` running locally, and
+    # only pays off for API-key-mode dispatch to the specific "heavy" models
+    # listed in llm_router_pxpipe_heavy_models — LLM Router never makes a real
+    # network call to Anthropic in subscription mode (see
+    # llm_router_claude_subscription above), so this has no effect there.
+    llm_router_pxpipe_enabled: bool = False
+
+    # Local pxpipe proxy endpoint. Matches pxpipe's own default port.
+    llm_router_pxpipe_url: str = "http://127.0.0.1:47821"
+
+    # Comma-separated model names (bare, no provider prefix) to route through
+    # pxpipe when llm_router_pxpipe_enabled is True. Deliberately mirrors
+    # pxpipe's own conservative default (PXPIPE_MODELS=claude-fable-5,gpt-5.6)
+    # rather than every Claude model — Opus 4.7/4.8 has a documented ~7%
+    # image-misread rate and is opt-in even within pxpipe itself.
+    llm_router_pxpipe_heavy_models: str = "claude-fable-5"
 
     # ── Ollama (local inference — no API key needed) ──
     # Set ollama_base_url to enable Ollama as a task answerer (e.g. http://localhost:11434).
@@ -124,6 +229,30 @@ class RouterConfig(BaseSettings):
     ollama_base_url: str = ""               # empty = Ollama disabled
     ollama_budget_models: str = ""          # comma-separated model names
 
+    @field_validator("ollama_base_url")
+    @classmethod
+    def _validate_ollama_base_url(cls, v: str) -> str:
+        # CHZ-SEC-06: a configured/env-injected Ollama URL is validated at the
+        # boundary, so every direct `.ollama_base_url` read (semantic_cache,
+        # discover, …) is already scheme/host-safe. Unsafe → "" (disabled).
+        return validate_ollama_url(v)
+
+    # ── OpenAI-compatible local inference (llama.cpp, vLLM, TGI, LM Studio) ──
+    # Any server that speaks /v1/chat/completions (OpenAI wire format) works here.
+    # Example: openai_compat_base_url="http://localhost:8080/v1"
+    #          openai_compat_models="llama-3.2-8b,mistral-7b"
+    openai_compat_base_url: str = ""        # empty = disabled
+    openai_compat_models: str = ""          # comma-separated model names
+
+    # ── Agentic model routing (v0.5.5) ──
+    # Preferred model for agentic / tool-reasoning tasks (analyze, generate,
+    # query, research). When set, it is pinned at the absolute FRONT of the
+    # routing chain for those task types — ahead of the generic Ollama injection
+    # and every other reorder — so a strong tool-calling model (e.g. Hermes)
+    # leads agent work while dedicated coders still win CODE tasks.
+    # Example: LLM_ROUTER_AGENTIC_MODEL=ollama/hermes3:8b
+    llm_router_agentic_model: str = ""          # LLM_ROUTER_AGENTIC_MODEL
+
     # ── Media providers ──
     fal_key: str = ""               # fal.ai — Flux, video, audio
     stability_api_key: str = ""     # Stability AI — Stable Diffusion
@@ -134,9 +263,29 @@ class RouterConfig(BaseSettings):
     # ── Router settings ──
     llm_router_profile: RoutingProfile = RoutingProfile.BALANCED
     llm_router_tier: Tier = Tier.FREE
-    llm_router_db_path: Path = Path.home() / ".llm-router" / "usage.db"
+    # RED2-07: a default_factory, not a bare default. As a bare default this
+    # expression ran at CLASS-DEFINITION time, freezing the real home directory
+    # at import — so LLM_ROUTER_HOME could not redirect it, and neither could
+    # monkeypatching Path.home() afterwards. A test that believed it was
+    # sandboxed wrote to the operator's live usage.db and destroyed real data
+    # (evidence/AUDITOR_INCIDENT.md). Resolved per instantiation through
+    # llm_router.paths, which reads LLM_ROUTER_HOME at call time.
+    llm_router_db_path: Path = Field(default_factory=lambda: state_path("usage.db"))
     llm_router_monthly_budget: float = 20.0  # $20/month default cap
     llm_router_daily_spend_limit: float = 0.0  # 0 = disabled; >0 fires alert when crossed
+
+    # ── Persistence hardening (sensitive-content lifecycle) ──
+    # Whether result_cache/semantic_cache/session_store scrub credentials,
+    # tokens, and PII from content BEFORE it is written to disk. On by
+    # default — persistence is not a safe place for raw secrets.
+    llm_router_persist_redaction: bool = True   # LLM_ROUTER_PERSIST_REDACTION
+    # Opt-in escape hatch: when true, skip redaction entirely and persist
+    # verbatim content. Off by default; only for trusted local debugging.
+    llm_router_persist_raw: bool = False        # LLM_ROUTER_PERSIST_RAW
+    # Retention window for persisted content. Rows/lines older than this are
+    # PHYSICALLY deleted (not just filtered from queries) the next time the
+    # owning store is opened or written to. 0 disables purging.
+    llm_router_persist_ttl_days: int = 30       # LLM_ROUTER_PERSIST_TTL_DAYS
 
     # ── Explainability (v8.2.0) ──
     # Controls routing explanation visibility on every response.
@@ -173,11 +322,12 @@ class RouterConfig(BaseSettings):
     # Falls back to llm_router_team_endpoint if not set.
     llm_router_webhook_url: str = ""     # LLM_ROUTER_WEBHOOK_URL
 
-    # ── Tool slim mode (v4.0) ──
+    # ── Tool slim mode (v4.0; consolidated default since 0.10.0) ──
     # Reduce the number of registered MCP tools to save context tokens.
-    # Values: "off" (all 41 tools), "routing" (12 tools), "core" (4 tools).
-    # Set LLM_ROUTER_SLIM=routing in the MCP server env to activate.
-    llm_router_slim: str = "routing"     # LLM_ROUTER_SLIM (routing=12 core, off=all)
+    # Values: "consolidated" (11 front doors — 1.0 surface, DEFAULT),
+    # "off" (all legacy tools), "routing" (12 tools), "core" (4 tools).
+    # Set LLM_ROUTER_SLIM=off to restore the full legacy surface (escape hatch).
+    llm_router_slim: str = "consolidated"   # LLM_ROUTER_SLIM (consolidated=11 doors, off=all)
 
     # ── Cost-threshold escalation (v4.0) ──
     # Block any single call estimated above this cost until approved via
@@ -193,6 +343,17 @@ class RouterConfig(BaseSettings):
     # Agent calls are blocked. Exempt: Explore agents (pure retrieval, no cost).
     # Use LLM_ROUTER_MAX_AGENT_DEPTH to override. Default: 3.
     llm_router_max_agent_depth: int = 3  # LLM_ROUTER_MAX_AGENT_DEPTH
+
+    # ── Routing policy (v0.5.0) ──
+    # Controls the model-selection strategy applied to every routing request.
+    # Set LLM_ROUTER_ROUTING_POLICY to one of:
+    #   balanced        (default) — cost/quality sweet spot; standard chain order
+    #   local-first     — Ollama → Codex → Gemini CLI → paid APIs
+    #   cost            — cheapest available model first
+    #   quality         — highest-quality model first (from benchmarks.json scores)
+    #   quota-exhaustion — route away from providers near their quota limit
+    #   dynamic         — round-robin between models within ±10% quota usage
+    llm_router_routing_policy: str = "balanced"  # LLM_ROUTER_ROUTING_POLICY
 
     # ── HuggingFace Inference API ──
     # Used by the discovery layer to access free-tier hosted models.
@@ -240,6 +401,17 @@ class RouterConfig(BaseSettings):
     context_max_previous_sessions: int = 3  # max past session summaries to include
     context_max_tokens: int = 1500        # token budget for all injected context
 
+    # ── Session Context Accumulator settings ──
+    # Durable, cross-process JSONL log of session events (user prompts, routed
+    # Q&A, tool calls) re-injected as extra context on subsequent routed calls
+    # and direct-execution draft calls. See LLM_ROUTER_SESSION_CONTEXT for the
+    # single ergonomic on/off/local/all override (checked first by
+    # session_store.get_mode(), which falls back to these two booleans).
+    session_context_enabled: bool = True          # SESSION_CONTEXT_ENABLED
+    session_context_share_external: bool = True   # SESSION_CONTEXT_SHARE_EXTERNAL — allow durable events into non-local (paid API) routed calls; default "all" per approved decision
+    session_context_max_tokens_mcp: int = 1500    # SESSION_CONTEXT_MAX_TOKENS_MCP — budget for MCP-routed call injection
+    session_context_max_tokens_draft: int = 800   # SESSION_CONTEXT_MAX_TOKENS_DRAFT — budget for hook-level direct/draft call injection
+
     # ── Compaction settings ──
     compaction_mode: str = "structural"  # off | structural | full
     compaction_threshold: int = 4000     # token threshold to trigger compaction
@@ -269,7 +441,11 @@ class RouterConfig(BaseSettings):
     # timeout prevents premature cancellation of long-running generation jobs.
     media_request_timeout: int = 600
 
-    model_config = {"env_file": ".env", "env_file_encoding": "utf-8", "extra": "ignore"}
+    model_config = {
+        "env_file": (Path.home() / ".llm-router" / ".env", ".env"),
+        "env_file_encoding": "utf-8",
+        "extra": "ignore",
+    }
 
     # Maps each Pydantic field name to (provider_name, litellm_env_var).
     # This dual mapping serves two purposes:
@@ -289,6 +465,10 @@ class RouterConfig(BaseSettings):
         "together_api_key": ("together", "TOGETHER_API_KEY"),
         "xai_api_key": ("xai", "XAI_API_KEY"),
         "cohere_api_key": ("cohere", "COHERE_API_KEY"),
+        "moonshot_api_key": ("moonshot", "MOONSHOT_API_KEY"),
+        "minimax_api_key": ("minimax", "MINIMAX_API_KEY"),
+        "zhipu_api_key": ("zhipu", "ZHIPU_API_KEY"),
+        "arcee_api_key": ("arcee", "ARCEE_API_KEY"),
         "openrouter_api_key": ("openrouter", "OPENROUTER_API_KEY"),
         "fal_key": ("fal", "FAL_KEY"),
         "stability_api_key": ("stability", "STABILITY_API_KEY"),
@@ -297,6 +477,19 @@ class RouterConfig(BaseSettings):
         "replicate_api_token": ("replicate", "REPLICATE_API_TOKEN"),
         "huggingface_api_key": ("huggingface", "HF_TOKEN"),
     }
+
+    def provider_api_key(self, provider: str) -> str | None:
+        """Resolve a provider's API key through the pluggable secrets vault.
+
+        Default backend (``LLM_ROUTER_SECRETS_BACKEND`` unset / ``env``) reads
+        the same env vars as before — zero behaviour change. Registering a
+        real vault backend (HashiCorp / AWS / GCP via
+        ``secrets_vault.register_backend``) transparently redirects key
+        resolution here without touching callers. Fail-open: a vault
+        outage degrades to env.
+        """
+        from llm_router.secrets_vault import get_provider_key
+        return get_provider_key(provider)
 
     @property
     def available_providers(self) -> set[str]:
@@ -315,8 +508,11 @@ class RouterConfig(BaseSettings):
         for field_name, (provider_name, _) in self._PROVIDER_MAP.items():
             if getattr(self, field_name, ""):
                 providers.add(provider_name)
-        if self.ollama_base_url and probe_ollama(self.ollama_base_url):
+        ollama_url = self.effective_ollama_base_url
+        if ollama_url and probe_ollama(ollama_url):
             providers.add("ollama")
+        if self.openai_compat_base_url:
+            providers.add("openai_compat")
         # In subscription mode, home providers are intentionally excluded:
         # we never route back via API when already inside the subscription agent.
         # Routing back would require a separate API key AND add duplicate
@@ -326,6 +522,24 @@ class RouterConfig(BaseSettings):
         if self.llm_router_gemini_subscription:
             providers.discard("gemini")
         return providers
+
+    @property
+    def effective_ollama_base_url(self) -> str:
+        """Return the Ollama endpoint LLM Router should probe/use.
+
+        LLM Router should work on a default Ollama install without a local preset:
+        if no URL is configured, probe the standard local daemon endpoint.
+        """
+        import os
+
+        candidate = (
+            self.ollama_base_url
+            or os.getenv("OLLAMA_BASE_URL", "")
+            or os.getenv("OLLAMA_URL", "")
+            or ("" if os.getenv("PYTEST_CURRENT_TEST") else "http://localhost:11434")
+        )
+        # CHZ-SEC-06: never hand an unvalidated URL to a network call.
+        return validate_ollama_url(candidate)
 
     @property
     def text_providers(self) -> set[str]:
@@ -340,7 +554,7 @@ class RouterConfig(BaseSettings):
         return self.available_providers & {
             "openai", "gemini", "perplexity", "anthropic",
             "mistral", "deepseek", "groq", "together", "xai", "cohere", "ollama",
-            "huggingface", "openrouter",
+            "huggingface", "openrouter", "openai_compat",
         }
 
     @property
@@ -360,7 +574,7 @@ class RouterConfig(BaseSettings):
         Kept for backward compatibility. Prefer ``all_ollama_models()`` when
         injecting Ollama under quota pressure regardless of profile.
         """
-        if not self.ollama_base_url or profile != RoutingProfile.BUDGET:
+        if not self.effective_ollama_base_url or profile != RoutingProfile.BUDGET:
             return []
         return self.all_ollama_models()
 
@@ -377,20 +591,65 @@ class RouterConfig(BaseSettings):
             List of LiteLLM model IDs like ``["ollama/qwen3.5:latest", "ollama/qwen3.6:27b"]``,
             or an empty list when Ollama is not configured.
         """
-        if not self.ollama_base_url:
+        import os
+
+        # Resolve the effective base URL: explicit config > env var > localhost default.
+        effective_url = self.effective_ollama_base_url
+
+        # Discovery cache takes priority — it represents what's actually running.
+        # Only trust the cache if Ollama is also reachable at the effective URL.
+        if not os.getenv("PYTEST_CURRENT_TEST"):
+            try:
+                from llm_router.discover import get_cached_ollama_models
+                cached_models = get_cached_ollama_models()
+                if cached_models and probe_ollama(effective_url):
+                    # Ensure OLLAMA_API_BASE is set so LiteLLM knows where to send calls.
+                    os.environ.setdefault("OLLAMA_API_BASE", effective_url)
+                    return cached_models
+            except Exception:
+                pass
+
+        # Fall back to env/configured model names for backward compatibility.
+        # If the user gave an explicit base URL, preserve historical behavior and
+        # return the configured names without requiring a live probe in this method.
+        # For auto-default localhost, require a successful probe first.
+        if not self.ollama_base_url and not probe_ollama(effective_url):
             return []
 
-        # Try live discovery cache first (Phase 1 of v5.0)
+        os.environ.setdefault("OLLAMA_API_BASE", effective_url)
+        return [f"ollama/{m.strip()}" for m in self.ollama_budget_models.split(",") if m.strip()]
+
+    def all_openai_compat_models(self) -> list[str]:
+        """Return model IDs for the configured OpenAI-compatible local server.
+
+        Returns ``["openai_compat/model-name", ...]`` so the router can inject
+        them into the chain. The quirk layer (``OpenAICompatQuirks``) rewrites
+        the prefix to ``openai/`` and injects ``api_base`` before the LiteLLM call.
+
+        When ``openai_compat_base_url`` is not set, falls back to the first
+        auto-detected local platform (LM Studio, Jan, vLLM, etc.) so users get
+        local routing without any manual config.
+        """
+        if self.openai_compat_base_url and self.openai_compat_models:
+            return [
+                f"openai_compat/{m.strip()}"
+                for m in self.openai_compat_models.split(",")
+                if m.strip()
+            ]
+        # Auto-detect: find first running non-Ollama OpenAI-compat platform
         try:
-            from llm_router.discover import get_cached_ollama_models
-            cached_models = get_cached_ollama_models()
-            if cached_models:
-                return cached_models
+            import os
+            if not os.getenv("PYTEST_CURRENT_TEST"):
+                from llm_router.local_platforms import get_first_openai_compat
+                result = get_first_openai_compat()
+                if result:
+                    _url, models = result
+                    # Temporarily set so OpenAICompatQuirks can read the base_url
+                    object.__setattr__(self, "openai_compat_base_url", _url)
+                    return [f"openai_compat/{m}" for m in models[:5] if m]
         except Exception:
             pass
-
-        # Fall back to env var for backward compatibility
-        return [f"ollama/{m.strip()}" for m in self.ollama_budget_models.split(",") if m.strip()]
+        return []
 
     def model_post_init(self, __context: dict) -> None:
         # Skip in test mode (pytest sets this env var)
@@ -465,3 +724,49 @@ def get_config() -> RouterConfig:
     if _config.llm_router_claude_subscription:
         os.environ.pop("ANTHROPIC_API_KEY", None)
     return _config
+
+
+async def validate_config_migration(
+    old_version: int, new_version: int, old_keys: set[str], new_keys: set[str]
+) -> tuple[bool, str]:
+    """Routing Point 3.3: Validate config version migration safely.
+
+    Detects breaking changes, suggests migration path, warns about data loss.
+
+    Args:
+        old_version: Current config version
+        new_version: Target config version
+        old_keys:    Keys in current config
+        new_keys:    Keys expected in new version
+
+    Returns:
+        (can_upgrade, reasoning) tuple.
+    """
+    try:
+        can_upgrade, reasoning = await validate_config_upgrade(
+            old_version=old_version,
+            new_version=new_version,
+            old_keys=old_keys,
+            new_keys=new_keys,
+        )
+        log_routing_decision(
+            routing_point="config_migration_validation",
+            decision="approved" if can_upgrade else "requires-manual-review",
+            reasoning=reasoning,
+            metadata={
+                "from_version": old_version,
+                "to_version": new_version,
+                "keys_lost": len(old_keys - new_keys),
+            },
+        )
+    except Exception as e:
+        can_upgrade = False
+        reasoning = f"manual-review-required: {e}"
+        log_routing_decision(
+            routing_point="config_migration_validation",
+            decision="degraded",
+            reasoning=reasoning,
+            metadata={"from_version": old_version, "to_version": new_version},
+        )
+
+    return can_upgrade, reasoning

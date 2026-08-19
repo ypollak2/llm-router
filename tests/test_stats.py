@@ -52,7 +52,7 @@ class TestPyPIStats:
             def side_effect(package_name, period):
                 if package_name == "llm-routing":
                     return mock_response_llm_routing
-                elif package_name == "claude-code-llm-router":
+                elif package_name == "claude-code-llm_router":
                     return mock_response_claude_code
                 return {}
 
@@ -62,7 +62,7 @@ class TestPyPIStats:
 
             assert result["total_downloads"] == 1500
             assert result["packages"]["llm-routing"]["downloads"] == 1000
-            assert result["packages"]["claude-code-llm-router"]["downloads"] == 500
+            assert result["packages"]["claude-code-llm_router"]["downloads"] == 500
             assert result["period"] == "recent"
 
     def test_format_stats_text(self):
@@ -76,7 +76,7 @@ class TestPyPIStats:
                     "downloads": 1000,
                     "description": "New package (current)",
                 },
-                "claude-code-llm-router": {
+                "claude-code-llm_router": {
                     "downloads": 500,
                     "description": "Legacy package (deprecated)",
                 },
@@ -88,7 +88,7 @@ class TestPyPIStats:
         assert "Combined Download Statistics" in result
         assert "1,500" in result
         assert "llm-routing" in result
-        assert "claude-code-llm-router" in result
+        assert "claude-code-llm_router" in result
         assert "66.7%" in result  # 1000/1500
         assert "33.3%" in result  # 500/1500
 
@@ -103,7 +103,7 @@ class TestPyPIStats:
                     "downloads": 1000,
                     "description": "New package (current)",
                 },
-                "claude-code-llm-router": {
+                "claude-code-llm_router": {
                     "downloads": 500,
                     "description": "Legacy package (deprecated)",
                 },
@@ -116,7 +116,7 @@ class TestPyPIStats:
         assert "**Total Downloads**: 1,500" in result
         assert "**Period**: recent" in result
         assert "**llm-routing**" in result
-        assert "**claude-code-llm-router**" in result
+        assert "**claude-code-llm_router**" in result
 
     def test_format_stats_json(self):
         """Test formatting stats as JSON."""
@@ -150,7 +150,7 @@ class TestPyPIStats:
                     "downloads": 0,
                     "description": "New package",
                 },
-                "claude-code-llm-router": {
+                "claude-code-llm_router": {
                     "downloads": 0,
                     "description": "Legacy package",
                 },

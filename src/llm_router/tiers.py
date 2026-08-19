@@ -72,7 +72,7 @@ def tier_of(model: str) -> Tier:
 
 # Baseline per-1K-output assumption for the savings counterfactual. Anchored
 # to Claude Sonnet 4-6 at $15/M output, which is the most realistic "what
-# this prompt would cost without llm-router" reference for code / analyze /
+# this prompt would cost without llm_router" reference for code / analyze /
 # generate flows. Update alongside ``calibration._PRICING_PER_M``.
 _SONNET_OUTPUT_PER_K = 0.015
 _SONNET_INPUT_PER_K = 0.003
@@ -108,8 +108,21 @@ class TierRollup:
 
     @property
     def saved(self) -> float:
-        """USD saved vs the baseline counterfactual. Always >= 0."""
-        return max(0.0, self.baseline_cost - self.actual_cost)
+        """USD saved vs the baseline counterfactual. SIGNED — negative is a loss.
+
+        AUD-06: this was ``max(0.0, ...)``. Clamping each tier before summing
+        made the reported total a sum of wins rather than a net, so a session
+        that cost MORE than the counterfactual still displayed a saving. The
+        README's own published sample demonstrates it: a Paid-API row worth
+        −$0.1010 rendered as $0.0000, and a true net of −$0.0807 rendered as
+        +$0.0203.
+
+        A cost optimiser whose output cannot express "this cost you more than
+        doing nothing" cannot report the one result that would change a user's
+        decision. A non-negative headline must be derived from the signed net
+        and labelled as such — never produced by dropping terms.
+        """
+        return self.baseline_cost - self.actual_cost
 
     @property
     def savings_ratio(self) -> float:
@@ -196,19 +209,32 @@ def render_tier_table(rollups: list[TierRollup]) -> str:
     if actual > 0:
         ratio = baseline / actual
         lines.append("")
-        lines.append(f"Effective savings ratio: {ratio:.2f}× (Sonnet baseline / actual paid)")
+        if ratio >= 1:
+            lines.append(f"Effective savings ratio: {ratio:.2f}× (Sonnet baseline / actual — higher is better)")
+        else:
+            # ratio < 1 means paid routes cost MORE than the baseline — don't dress
+            # an overspend up as savings; state it plainly.
+            lines.append(
+                f"Effective savings ratio: {ratio:.2f}× — ⚠ paid routes ran "
+                f"{1 / ratio:.2f}× OVER the Sonnet baseline this session"
+            )
     return "\n".join(lines)
 
 
 def total_savings(rollups: list[TierRollup]) -> tuple[float, float, float]:
     """Return ``(total_actual, total_baseline, total_saved)`` for the session.
 
-    Total saved = **sum of per-tier savings** (each clamped to >= 0), not
-    ``baseline - actual``. Rationale: when a tier *overspends* the baseline
-    (e.g. routing a simple prompt to GPT-4o instead of Sonnet), that's a
-    loss that should NOT erode the savings reported on free / cheap tiers.
-    The "total saved" line answers "how much did routing-to-cheap-models
-    save me" — separately from "did some routes overshoot".
+    Total saved is a **signed net**: the sum of per-tier savings where a tier
+    that over-spends contributes a negative term. Because ``TierRollup.saved``
+    is now signed, this sum equals ``baseline - actual`` by construction.
+
+    AUD-06: this previously summed per-tier values each clamped to >= 0, on the
+    rationale that an over-spending tier "should NOT erode" savings on cheap
+    tiers. That produces a figure which cannot go negative — so the one result
+    a cost optimiser must be able to report ("this cost you more than doing
+    nothing") was unrepresentable. If a wins-only figure is wanted for a
+    headline, derive it from this net and label it distinctly; do not obtain it
+    by discarding terms.
     """
     actual = sum(r.actual_cost for r in rollups)
     baseline = sum(r.baseline_cost for r in rollups)

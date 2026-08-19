@@ -1,70 +1,60 @@
-"""Deterministic signal classifier — the 0-cost, 0-latency routing hot path.
+# SPDX-License-Identifier: MIT
+"""Unified prompt classifier — the single source of truth for LLM Router routing.
 
-Extracted VERBATIM from ``hooks/auto-route.py`` (score_categories /
-classify_complexity + their SIGNALS/weight/complexity tables) into an importable
-module so the router core, gateway, and MCP tools can classify synchronously
-without shelling through the hook. The hook now imports from here, so there is a
-single source of truth (no drift between the hook's copy and everything else).
+Shared classification engine. ``router.py`` and ``gateway.py`` route through this
+(each via its own ``ClassifyPolicy``); ``hooks/auto-route.py`` stays the reference
+engine and keeps its own copy of these tables — Option B, since the hook routes
+live sessions and was left untouched.
 
-Weighted intent*3 + topic*2 + format*1 scoring; ``classify_signals`` returns a
-task_type + complexity + confidence in one call. When ``confident`` is False the
-caller MAY escalate to the LLM classifier (classifier.py) — model SELECTION and
-LLM escalation are intentionally NOT done here.
+Design (see llm_router-audit-roadmap):
+
+    classify_signals(prompt)  ── deterministic, 0-cost, 0-latency ──▶ ClassifySignal
+        │  weighted intent×3 + topic×2 + format×1 scoring (arena core)
+        │  + keyword/length complexity
+        ▼
+    confidence gate  (best_score >= _CONFIDENCE_THRESHOLD ?)
+        │ confident  → use the signal result as-is (the ~80% hot path)
+        │ ambiguous  → escalate:
+        ▼
+    await classify_complexity(...)   ── real LLM classifier (classifier.py) ──▶
+        merge its complexity + inferred_task_type back in
+
+Model SELECTION is intentionally NOT done here. This returns (task_type,
+complexity); callers feed that into the existing config-registry machinery
+(``COMPLEXITY_TO_PROFILE`` → ``get_model_chain`` sourced from
+``policies/standard.yaml``). No hardcoded ``provider/model`` literals live here —
+that would violate the project's no-hardcoding rule (see
+llm_router-no-hardcoding-opensource). This is the key difference from the RouterArena
+submission's ``_tier``: the arena router hardcodes its pool because the arena
+fixes the pool; production must resolve through the registry.
+
+The deterministic engine is the weighted intent×3 + topic×2 + format×1 scoring
+shared with the hook. The ``_SIGNALS`` / ``_COMPLEXITY_*`` tables below are
+backfilled VERBATIM from ``hooks/auto-route.py``'s live production tables
+(categories image/query/research/code/analyze/generate — ``coordination`` is
+skipped: no matching ``TaskType``). Keep them in sync with the hook until the two
+share a module (the full dedup deferred as higher-risk/lower-benefit). Arena-only
+benchmark fast-paths (``\\boxed{X}`` MCQ markers, harness-prefix templates) are
+deliberately excluded — they never fire on organic prompts and could misfire on
+real LaTeX.
 """
 
 from __future__ import annotations
 
-import os
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
-CONFIDENCE_THRESHOLD = int(os.environ.get("LLM_ROUTER_CONFIDENCE_THRESHOLD", "2"))
+from llm_router.capabilities import CapabilityRequirement, RelevantContext
+from llm_router.types import Complexity, TaskType
 
-COORDINATION_MAX_LEN = 150
+# ── Weighted-signal engine (arena core, benchmark fast-paths removed) ─────────
 
-INTENT_WEIGHT = 3
+_INTENT_W, _TOPIC_W, _FORMAT_W = 3, 2, 1
+_CONFIDENCE_THRESHOLD = 2  # best_score >= this → trust the heuristic; else escalate
 
-TOPIC_WEIGHT = 2
-
-FORMAT_WEIGHT = 1
-
-LAYER_WEIGHTS = {
-    "intent": INTENT_WEIGHT,
-    "topic": TOPIC_WEIGHT,
-    "format": FORMAT_WEIGHT,
-}
-
-COMPLEXITY_DEEP_REASONING = re.compile(
-    r"\b(?:prove (?:that|mathematically|formally)|"
-    r"mathematical(?:ly)? (?:prove|derive|show)|"
-    r"formal proof|theorem|lemma|axiom|corollary|"
-    r"derive from first principles?|first[- ]principles? (?:derivation|analysis|explanation)|"
-    r"from (?:the )?fundamentals?|foundational(?:ly)?|"
-    r"philosophical(?:ly)? (?:analyze|examine|argue|discuss)|"
-    r"what does it mean (?:fundamentally|philosophically|at its core)|"
-    r"synthesize (?:the )?research|comprehensive literature review|"
-    r"rigorous(?:ly)? (?:analyze|prove|derive|examine)|"
-    r"formal(?:ly)? (?:specify|verify|prove)|"
-    r"induction|deduction|proof by contradiction|reductio ad absurdum)\b",
-    re.IGNORECASE,
-)
-
-COMPLEXITY_COMPLEX = re.compile(
-    r"\b(?:architect|design system|from scratch|end-to-end|comprehensive|"
-    r"novel approach|research paper|synthesis|multi-step|workflow|pipeline|"
-    r"in-depth|thorough|detailed plan|full implementation|production|"
-    r"scalable|distributed|microservice|security audit|"
-    r"compare multiple|across all|entire|complete)\b",
-    re.IGNORECASE,
-)
-
-COMPLEXITY_SIMPLE = re.compile(
-    r"\b(?:quick|simple|short|one-liner|brief|"
-    r"summarize|tldr|eli5|just|only|small|tiny|minor)\b",
-    re.IGNORECASE,
-)
-
-SIGNALS: dict[str, dict[str, re.Pattern]] = {
+# Backfilled verbatim from hooks/auto-route.py (Option B) — the hook's live,
+# production-tuned tables. Keep in sync with the hook until they share a module.
+_SIGNALS: dict[str, dict[str, re.Pattern]] = {
     "image": {
         "intent": re.compile(
             r"\b(?:generate (?:an? )?(?:image|picture|photo|illustration|graphic|logo|"
@@ -109,6 +99,8 @@ SIGNALS: dict[str, dict[str, re.Pattern]] = {
     "research": {
         "intent": re.compile(
             r"\b(?:research|look up|look into|search for|find out|investigate|discover|"
+            r"find (?:the |current |recent )?(?:latest|current|recent|newest|"
+            r"best practices?|guidance|recommendations?)|"
             r"what(?:'s| is) (?:the )?(?:latest|newest|most recent|current)|"
             r"what happened|who (?:won|raised|acquired|launched|announced|released|founded|created)|"
             r"how (?:much|many) (?:did|has|have|does|were|are|is|was)|"
@@ -155,15 +147,40 @@ SIGNALS: dict[str, dict[str, re.Pattern]] = {
             r"endpoint|script|program|test|hook|component|service)|"
             r"build (?:a |the )?(?:app|service|tool|cli|library|package|component|feature)|"
             r"scaffold|boilerplate|port .+ to|migrate|"
-            r"fix (?:the |this |a )?(?:\w+ )*(?:bug|error|issue|crash|failing test|exception)|"
-            r"add (?:a |the )?(?:\w+ )*(?:feature|method|test|endpoint|route|handler|"
-            r"middleware|support|integration|login)|"
-            r"update (?:the |this )?(?:\w+ )*(?:code|logic|function|implementation|client|"
+            # "fix the X" / "fix for the X" / "patch the X" — broad enough
+            # to catch implementation prompts like "fix the auto-route
+            # classifier" or "continue with the fix for the branch"
+            # without requiring a trailing bug/error/issue noun. The
+            # required determiner (the/this/a/for the/...) filters out
+            # bare-noun usage like "the fix was hard" (no determiner
+            # follows "fix").
+            r"(?:fix|patch|repair|resolve)\s+"
+            r"(?:the\s+|this\s+|a\s+|an\s+|for\s+the\s+|for\s+a\s+|for\s+an\s+|"
+            r"my\s+|our\s+|these\s+|those\s+)\w+|"
+            r"fix (?:the |this |a )?(?:\w+ ){0,4}(?:bug|error|issue|crash|failing test|exception)|"
+            r"add (?:a |the )?(?:\w+ ){0,4}(?:feature|method|test|endpoint|route|handler|"
+            r"middleware|support|integration|login|validation|form|field|button|column|"
+            r"index|migration|config|option|flag|component|hook|logging|logger)|"
+            # Deletion/removal of code artefacts — anchored to a code noun so it
+            # doesn't catch "remove me from the mailing list".
+            r"(?:remove|delete|drop|strip)\s+(?:the |this |these |all |any |unused |"
+            r"deprecated |dead )?(?:\w+ ){0,3}(?:import|imports|logging|log|logger|call|"
+            r"calls|function|method|dependency|dependencies|code|line|lines|file|test|"
+            r"tests|endpoint|route|handler|variable|field|column|comment|comments)|"
+            # "wire up the X button/handler/…", "hook up the …"
+            r"(?:wire|hook)\s+up\s+(?:the |this |a )?(?:\w+ ){0,3}(?:button|handler|"
+            r"endpoint|event|listener|callback|session|form|api|service|component|route)|"
+            r"(?:rename|replace|extract|inline|move)\s+(?:the |this |a )?(?:\w+ ){0,3}"
+            r"(?:function|method|class|variable|module|file|component|import|endpoint|handler)|"
+            r"update (?:the |this )?(?:\w+ ){0,4}(?:code|logic|function|implementation|client|"
             r"api client|service|handler|middleware|endpoint)|"
             r"modify (?:the |this )|extend (?:the |this )|"
-            r"(?:optimize|improve) (?:the |this )?(?:code|query|performance|function)|"
+            # Relaxed so intervening adjectives are allowed ("optimize the slow
+            # database query").
+            r"(?:optimize|improve|speed up) (?:the |this )?(?:\w+ ){0,4}(?:code|query|"
+            r"performance|function|latency|throughput|speed|render|load time)|"
             r"set up|configure|install|bootstrap|initialize|"
-            r"create (?:(?:a |the )?\w+ )*(?:function|class|module|component|hook|test|script|program|service|tool))\b",
+            r"create (?:\w+ ){0,5}(?:function|class|module|component|hook|test|script|program|service|tool))\b",
             re.IGNORECASE,
         ),
         "topic": re.compile(
@@ -171,7 +188,13 @@ SIGNALS: dict[str, dict[str, re.Pattern]] = {
             r"module|package|library|dependency|"
             r"endpoint|route|handler|middleware|controller|resolver|client|api client|"
             r"database|schema|migration|orm|"
-            r"test|spec|coverage|assertion|mock|fixture|"
+            # Testing vocabulary — when a prompt is "build tests for X",
+            # this is implementation work, not analysis work. The 5 QA
+            # pillars and the bench harness corpus both trigger here.
+            r"tests?|spec|coverage|assertion|mock|fixture|"
+            r"qa|quality assurance|test suite|regression test|"
+            r"unit test|integration test|functional test|e2e test|"
+            r"non[- ]functional|integrity|usability|"
             r"algorithm|data structure|linked list|hash map|binary tree|"
             r"authentication|authorization|jwt|oauth|login|dashboard|"
             r"cache|queue|worker|cron|webhook|retry|rate limit|429|response(?:s)?|"
@@ -192,7 +215,7 @@ SIGNALS: dict[str, dict[str, re.Pattern]] = {
             r"\b(?:analyze|evaluate|assess|review (?:the |this |my )|"
             r"critique|debug|diagnose|"
             r"explain why|root cause|investigate|audit|"
-            r"compare (?:and contrast |.+ (?:to|with|vs|versus) |.+ and .+)|"
+            r"compare (?:and contrast|\w[^.]{0,80}? (?:to|with|vs|versus)|\w[^.]{0,60}? and [^.]{0,60})|"
             r"pros and cons|trade-?offs?|advantages|disadvantages|"
             r"deep dive|what do you think|what(?:'s| is) (?:your |the )?(?:opinion|take|assessment)|"
             r"help me understand|break down|walk me through|"
@@ -266,85 +289,280 @@ SIGNALS: dict[str, dict[str, re.Pattern]] = {
             re.IGNORECASE,
         ),
     },
-    "coordination": {
-        # Intent: only words that are *strongly* coordination-signal in
-        # isolation. Removed `continue`, `proceed`, `verify`, `check`,
-        # `test`, `update`, `execute`, `run`, `build`, `compile`, `is`,
-        # `are`, `does`, `please`, `thanks` — they fire false positives
-        # on substantive prompts. The remaining set is git/deploy verbs
-        # plus short single-token acknowledgements.
-        "intent": re.compile(
-            r"\b(?:push|pull|deploy|release|publish|go ahead|"
-            r"yes|ok|y|n|"
-            r"commit|merge|sync|fetch|rebase)\b",
-            re.IGNORECASE,
-        ),
-        "topic": re.compile(
-            r"\b(?:git|github|push|pull|commit|merge|branch|"
-            r"release|deploy|publish|pypi|pipeline|ci|test(?:s)?|"
-            r"script|build|version|setup|install|initialize|"
-            r"verification|approval|confirmation)\b",
-            re.IGNORECASE,
-        ),
-        "format": re.compile(
-            r"\b(?:quick|just|go|proceed|now|asap|ready|done|finished|complete)\b",
-            re.IGNORECASE,
-        ),
-    },
 }
 
-def score_categories(text: str) -> dict[str, int]:
-    """Score each category using three signal layers."""
+_COMPLEXITY_DEEP = re.compile(
+    # Formal academic / mathematical triggers (original)
+    r"\b(?:prove (?:that|mathematically|formally)|"
+    r"mathematical(?:ly)? (?:prove|derive|show)|"
+    r"formal proof|theorem|lemma|axiom|corollary|"
+    r"derive from first principles?|first[- ]principles?\b|"
+    r"from (?:the )?fundamentals?|foundational(?:ly)?|"
+    r"philosophical(?:ly)? (?:analyze|examine|argue|discuss|analysis)|"
+    r"what does it mean (?:fundamentally|philosophically|at its core)|"
+    r"synthesize (?:the )?research|comprehensive literature review|"
+    r"rigorous(?:ly)? (?:analyze|prove|derive|examine|analysis)|"
+    r"formal(?:ly)? (?:specify|verify|prove)|"
+    r"mathematical induction|(?:proof |by )(?:induction|deduction|contradiction)|reductio ad absurdum|"
+    # Natural-language chain-of-thought triggers (new — catches everyday deep-think requests)
+    r"step[- ]by[- ]step|think (?:this )?through|reason (?:through|about|carefully)|"
+    r"chain[- ]of[- ]thought|think (?:carefully|deeply|step[- ]by[- ]step)|"
+    r"walk me through (?:the )?(?:reasoning|logic|steps|derivation)|"
+    r"explain (?:your )?reasoning|show (?:your )?work|"
+    r"think (?:out )?loud|reason (?:out )?loud|"
+    r"let me (?:reason|think)|think aloud|"
+    # Explicit deep-dive triggers
+    r"deep[- ]dive|root[- ]cause analysis|"
+    r"understand (?:why|how exactly)|exactly (?:why|how)|"
+    r"what is (?:the )?(?:root cause|underlying reason)|"
+    r"trace (?:through|the (?:logic|reasoning|chain)))\b",
+    re.IGNORECASE,
+)
+
+_COMPLEXITY_COMPLEX = re.compile(
+    r"\b(?:architect|design system|from scratch|end-to-end|comprehensive|"
+    r"novel approach|research paper|synthesis|multi-step|workflow|pipeline|"
+    r"in-depth|thorough|detailed plan|full implementation|production|"
+    r"scalable|distributed|microservice|security audit|"
+    r"compare multiple|across all|entire|complete)\b",
+    re.IGNORECASE,
+)
+
+_COMPLEXITY_SIMPLE = re.compile(
+    r"\b(?:quick|simple|short|one-liner|brief|"
+    r"summarize|tldr|eli5|just|only|small|tiny|minor)\b",
+    re.IGNORECASE,
+)
+
+# ── Task-type complexity FLOOR (anti-under-classification policy) ──────────────
+# Under-routing is the expensive mistake: a task sent to too-cheap a tier fails
+# and bounces back to the subscription agent (double work). Each task type carries
+# a minimum routing tier — analysis/research are premium-tier work by nature,
+# codegen/writing are at least mid-tier. A classifier may raise complexity above
+# the floor, never below it. ``query`` has no floor (lookups stay cheap). Measured
+# lift: golden-set exact accuracy 48% → 76% at 0ms/$0 (scripts/eval_router_ensemble.py).
+_TASK_COMPLEXITY_FLOOR: dict[str, Complexity] = {
+    "generate": Complexity.MODERATE,
+    "code": Complexity.MODERATE,
+    "analyze": Complexity.COMPLEX,
+    "research": Complexity.COMPLEX,
+}
+_COMPLEXITY_RANK: dict[Complexity, int] = {
+    c: i
+    for i, c in enumerate(
+        [Complexity.SIMPLE, Complexity.MODERATE, Complexity.COMPLEX, Complexity.DEEP_REASONING]
+    )
+}
+
+
+def apply_complexity_floor(complexity: Complexity, task_type: str | TaskType) -> Complexity:
+    """Clamp ``complexity`` UP to the task-type floor (never down). Single source
+    of truth for the floor policy — also imported by llm_router.ensemble."""
+    key = task_type.value if isinstance(task_type, TaskType) else str(task_type)
+    floor = _TASK_COMPLEXITY_FLOOR.get(key)
+    if floor is None:
+        return complexity
+    return floor if _COMPLEXITY_RANK[floor] > _COMPLEXITY_RANK.get(complexity, 0) else complexity
+
+
+def _score_categories(text: str) -> dict[str, int]:
     scores: dict[str, int] = {}
-    for category, layers in SIGNALS.items():
+    for category, layers in _SIGNALS.items():
         total = 0
-        for layer_name, weight in LAYER_WEIGHTS.items():
-            pattern = layers.get(layer_name)
-            if pattern:
-                matches = pattern.findall(text)
+        for layer, weight in (("intent", _INTENT_W), ("topic", _TOPIC_W), ("format", _FORMAT_W)):
+            pat = layers.get(layer)
+            if pat:
+                matches = pat.findall(text)
                 unique = len({m.lower() if isinstance(m, str) else m[0].lower() for m in matches})
                 total += unique * weight
         scores[category] = total
-    # Length gate: long prompts cannot be coordination, regardless of
-    # which short coordination words happen to appear in them.
-    if len(text) > COORDINATION_MAX_LEN:
-        scores["coordination"] = 0
     return scores
 
-def classify_complexity(text: str, task_type: str) -> str:
-    """Determine task complexity from text signals."""
-    if COMPLEXITY_DEEP_REASONING.search(text):
-        return "deep_reasoning"
-    if COMPLEXITY_COMPLEX.search(text):
-        return "complex"
-    if COMPLEXITY_SIMPLE.search(text):
-        return "simple"
-    if len(text) > 500:
-        return "complex"
-    if len(text) > 150:
-        return "moderate"
-    return "simple" if task_type == "query" else "moderate"
+
+# ── Per-path policy ───────────────────────────────────────────────────────────
+#
+# The three routing paths carry deliberately-tuned, regression-locked complexity
+# curves (the router's <600/[600,2000]/>2000 partition is a documented fix for an
+# over-escalation-cost incident; the gateway defaults low-signal prompts to
+# analyze). Rather than force one policy on all of them (a real cost change), each
+# path passes its own ``ClassifyPolicy`` and shares this ONE engine — so a fix to
+# the scoring/complexity algorithm now lands in every path at once.
 
 
-@dataclass
+@dataclass(frozen=True)
+class ClassifyPolicy:
+    keyword_complexity: bool = True  # apply the DEEP/COMPLEX/SIMPLE regexes first
+    complex_min: int = 500  # len > complex_min → complex
+    simple_max: int = 0  # len <= simple_max → simple (non-query tail)
+    task_aware_query: bool = True  # queries get their own length curve
+    query_moderate_min: int = 400  # query: len > this → moderate, else simple
+    low_signal_default: str = "query"  # task_type when no category scores confidently
+    apply_floor: bool = True  # clamp complexity up to the task-type floor (anti-under-routing)
+
+
+# Reference policy (the UserPromptSubmit hook): keyword-aware, >500 → complex,
+# query-aware. This is the module default.
+HOOK_POLICY = ClassifyPolicy()
+
+# Router ``_resolve_profile`` no-hint fallback: pure length, <600 simple /
+# [600,2000] moderate / >2000 complex. Preserves the documented cost fix exactly.
+ROUTER_POLICY = ClassifyPolicy(
+    keyword_complexity=False,
+    complex_min=2000,
+    simple_max=599,
+    task_aware_query=False,
+)
+
+# Gateway (external side door): pure length, <=400 simple / (400,2000] moderate /
+# >2000 complex; low-signal prompts default to analyze (its historical default).
+GATEWAY_POLICY = ClassifyPolicy(
+    keyword_complexity=False,
+    complex_min=2000,
+    simple_max=400,
+    task_aware_query=False,
+    low_signal_default="analyze",
+    apply_floor=False,  # external side door keeps its own tuned length curve
+)
+
+
+def _base_complexity(text: str, task_type: str, policy: ClassifyPolicy) -> Complexity:
+    if policy.keyword_complexity:
+        # Calibrated reason-gate replaces the bare `_COMPLEXITY_DEEP.search`.
+        # It uses that same regex as one feature (deep-keyword hit is sufficient
+        # by default, so this is a superset of the old behaviour), plus
+        # math-density / length / code-fence signals it can be calibrated on.
+        # Imported lazily to avoid an import cycle (reason_gate pulls the
+        # compiled regexes from this module).
+        from llm_router.reason_gate import needs_reasoning
+
+        if needs_reasoning(text):
+            return Complexity.DEEP_REASONING
+        if _COMPLEXITY_COMPLEX.search(text):
+            return Complexity.COMPLEX
+        if _COMPLEXITY_SIMPLE.search(text):
+            return Complexity.SIMPLE
+    n = len(text)
+    if n > policy.complex_min:
+        return Complexity.COMPLEX
+    if policy.task_aware_query and task_type == "query":
+        return Complexity.MODERATE if n > policy.query_moderate_min else Complexity.SIMPLE
+    if n <= policy.simple_max:
+        return Complexity.SIMPLE
+    return Complexity.MODERATE
+
+
+def _complexity(text: str, task_type: str, policy: ClassifyPolicy) -> Complexity:
+    base = _base_complexity(text, task_type, policy)
+    if policy.apply_floor:
+        return apply_complexity_floor(base, task_type)
+    return base
+
+
+# ── Public API ────────────────────────────────────────────────────────────────
+
+
+@dataclass(frozen=True)
 class ClassifySignal:
-    """A deterministic classification result. ``confident`` is True when the
-    winning score cleared ``CONFIDENCE_THRESHOLD`` — the ~80% hot path."""
+    task_type: TaskType
+    complexity: Complexity
+    score: int  # winning category's weighted score
+    confident: bool  # score >= _CONFIDENCE_THRESHOLD
+    method: str = "signals"
+    # CF-2: capability-aware classification. Defaults keep every existing
+    # positional constructor call (task_type, complexity, score, confident) valid.
+    capabilities: CapabilityRequirement = field(default_factory=CapabilityRequirement)
+    relevant_context: RelevantContext | None = None
 
-    task_type: str
-    complexity: str
-    score: int
-    confident: bool
-    method: str = "heuristic"
+
+def complexity_for(
+    prompt: str, *, task_type: str = "query", policy: ClassifyPolicy = HOOK_POLICY
+) -> Complexity:
+    """Complexity only — skips category scoring. Used by the router path, which
+    already receives ``task_type`` from the caller and only needs complexity."""
+    return _complexity(prompt, task_type, policy)
 
 
-def classify_signals(text: str) -> ClassifySignal:
-    """Deterministic (task_type, complexity) in one call. Never raises, never
-    blocks — the sync fast path shared by every caller. When ``confident`` is
-    False the caller may escalate via the LLM classifier."""
-    scores = score_categories(text)
-    best = max(scores, key=scores.get) if scores else "query"
-    best_score = scores.get(best, 0)
-    confident = best_score >= CONFIDENCE_THRESHOLD
-    complexity = classify_complexity(text, best)
-    return ClassifySignal(best, complexity, best_score, confident)
+def classify_signals(prompt: str, policy: ClassifyPolicy = HOOK_POLICY) -> ClassifySignal:
+    """Deterministic task_type + complexity. Never raises, never blocks.
+
+    Sync fast path shared by every caller. When ``confident`` is False the caller
+    MAY escalate via :func:`classify` (async LLM); callers that must stay sync
+    (the gateway endpoint, the hook pre-flight) use this result directly — it is
+    always a valid routing decision.
+    """
+    scores = _score_categories(prompt)
+    best = max(scores, key=lambda k: scores.get(k, 0))
+    best_score = scores[best]
+    confident = best_score >= _CONFIDENCE_THRESHOLD
+    task = best if confident else policy.low_signal_default
+    try:
+        task_type = TaskType(task)
+    except ValueError:
+        task_type = TaskType.QUERY
+    complexity = _complexity(prompt, task_type.value, policy)
+    # CF-2: attach the capability vector (needs-tools? which kind?) from the single
+    # shared predicate. Pure/sync/fail-open — never blocks a routing decision.
+    try:
+        from llm_router.capabilities import detect_capabilities
+        capabilities = detect_capabilities(prompt, task_type.value).required
+    except Exception:  # noqa: BLE001 — capability detection must never break classify
+        capabilities = CapabilityRequirement()
+    return ClassifySignal(task_type, complexity, best_score, confident,
+                          capabilities=capabilities)
+
+
+async def classify(
+    prompt: str,
+    *,
+    allow_llm: bool = True,
+    policy: ClassifyPolicy = HOOK_POLICY,
+    quality_mode: str = "balanced",
+) -> ClassifySignal:
+    """Signal core + LLM escalation on the ambiguous tail.
+
+    Confident heuristic → returned as-is (no API call). Ambiguous prompt +
+    ``allow_llm`` → escalate to the real LLM classifier and merge its
+    ``complexity`` / ``inferred_task_type``. Any classifier failure falls back
+    to the heuristic, so this never stalls routing.
+    """
+    sig = classify_signals(prompt, policy)
+    if sig.confident or not allow_llm:
+        return sig
+
+    # Ambiguous category. Prefer the embedding classifier (calibrated softmax,
+    # no LLM call) when a Firewall-v2-clean centroid artifact is present. It
+    # abstains (returns None) with no artifact or an unreachable embedding
+    # backend, so this whole block is a no-op until such an artifact ships —
+    # behaviour is byte-identical to the LLM-only path below until then.
+    try:
+        from llm_router.semantic_classify import classify_semantic
+
+        sem = await classify_semantic(prompt)
+    except Exception:  # noqa: BLE001 — never let it stall routing
+        sem = None
+    if sem is not None:
+        # Sharper task_type without an API call. Recompute complexity for the
+        # new task_type so the query-aware length curve stays consistent.
+        complexity = complexity_for(prompt, task_type=sem.task_type.value, policy=policy)
+        return ClassifySignal(
+            sem.task_type, complexity, sig.score, confident=True, method="embedding"
+        )
+
+    # Embedding head abstained — spend one cheap classifier call instead.
+    try:
+        from llm_router.classifier import classify_complexity
+
+        result = await classify_complexity(prompt, quality_mode=quality_mode)
+    except Exception:  # noqa: BLE001 — never let classification failure stall routing
+        return sig
+
+    try:
+        complexity = Complexity(result.complexity)
+    except (ValueError, AttributeError):
+        complexity = sig.complexity
+    inferred = getattr(result, "inferred_task_type", None)
+    try:
+        task_type = TaskType(inferred) if inferred else sig.task_type
+    except ValueError:
+        task_type = sig.task_type
+    return ClassifySignal(task_type, complexity, sig.score, confident=True, method="llm")

@@ -8,8 +8,92 @@ from llm_router.router import route_and_call
 from llm_router.types import BudgetState, LLMResponse, RoutingProfile, TaskType
 
 
+# ── CHZ-AUD-013: Per-provider canary tests ───────────────────────────────────
+# These tests assert that the *correct provider* produced the response, not just
+# that some mock returned "Mock response". Each provider gets a unique canary
+# string injected as the fake response content, so any wiring bug that sends
+# traffic to the wrong provider is detected immediately.
+
 @pytest.mark.asyncio
-@pytest.mark.requires_api_keys
+async def test_provider_canary_openai(temp_db, mock_env, monkeypatch):
+    """Routing to openai/ must produce the openai-specific canary — not a fixed
+    'Mock response' constant. Validates that call_llm was actually invoked with
+    the openai model and that its return value flows through to the caller.
+    """
+    monkeypatch.delenv("OLLAMA_BASE_URL", raising=False)
+
+    canary = "PROVIDER_OPENAI_CANARY_DEADBEEF"
+
+    async def _fake_call_llm(model: str, messages, **kwargs):
+        return LLMResponse(
+            content=canary if model.startswith("openai/") else "WRONG_PROVIDER",
+            model=model,
+            input_tokens=5,
+            output_tokens=5,
+            cost_usd=0.0001,
+            latency_ms=50.0,
+            provider="openai",
+        )
+
+    mock_tracker = MagicMock()
+    mock_tracker.is_healthy.return_value = True
+
+    with patch("llm_router.providers.call_llm", side_effect=_fake_call_llm):
+        with patch("llm_router.codex_agent.is_codex_available", return_value=False):
+            with patch("llm_router.router.get_tracker", return_value=mock_tracker):
+                with patch("llm_router.router._build_and_filter_chain",
+                           new_callable=lambda: AsyncMock(return_value=["openai/gpt-4o-mini"])):
+                    resp = await route_and_call(TaskType.QUERY, "Hello")
+
+    assert resp.content == canary, (
+        f"Expected openai canary '{canary}', got '{resp.content}'. "
+        "Provider execution is not reaching call_llm correctly."
+    )
+    assert resp.model.startswith("openai/"), (
+        f"Expected openai/ model, got {resp.model!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_provider_canary_gemini(temp_db, mock_env, monkeypatch):
+    """Routing to gemini/ must produce the gemini-specific canary — verifying
+    the provider dispatch path reaches call_llm with the correct model.
+    """
+    monkeypatch.delenv("OLLAMA_BASE_URL", raising=False)
+
+    canary = "PROVIDER_GEMINI_CANARY_CAFEBABE"
+
+    async def _fake_call_llm(model: str, messages, **kwargs):
+        return LLMResponse(
+            content=canary if model.startswith("gemini/") else "WRONG_PROVIDER",
+            model=model,
+            input_tokens=5,
+            output_tokens=5,
+            cost_usd=0.0,
+            latency_ms=60.0,
+            provider="gemini",
+        )
+
+    mock_tracker = MagicMock()
+    mock_tracker.is_healthy.return_value = True
+
+    with patch("llm_router.providers.call_llm", side_effect=_fake_call_llm):
+        with patch("llm_router.codex_agent.is_codex_available", return_value=False):
+            with patch("llm_router.router.get_tracker", return_value=mock_tracker):
+                with patch("llm_router.router._build_and_filter_chain",
+                           new_callable=lambda: AsyncMock(return_value=["gemini/gemini-2.5-flash"])):
+                    resp = await route_and_call(TaskType.QUERY, "Hello")
+
+    assert resp.content == canary, (
+        f"Expected gemini canary '{canary}', got '{resp.content}'. "
+        "Provider execution is not reaching call_llm correctly."
+    )
+    assert resp.model.startswith("gemini/"), (
+        f"Expected gemini/ model, got {resp.model!r}"
+    )
+
+
+@pytest.mark.asyncio
 async def test_routes_to_first_available_model(temp_db, mock_env, mock_acompletion, monkeypatch):
     # Disable Ollama to test pure API chain
     monkeypatch.delenv("OLLAMA_BASE_URL", raising=False)
@@ -23,7 +107,6 @@ async def test_routes_to_first_available_model(temp_db, mock_env, mock_acompleti
 
 
 @pytest.mark.asyncio
-@pytest.mark.requires_api_keys
 async def test_logs_structured_routing_decision(temp_db, mock_env, mock_acompletion):
     route_log = MagicMock()
     fake_uuid = MagicMock(hex="deadbeefcafebabe")
@@ -61,7 +144,6 @@ async def test_model_override_bypasses_routing(temp_db, mock_env, mock_acompleti
 
 
 @pytest.mark.asyncio
-@pytest.mark.requires_api_keys
 async def test_system_prompt_included(temp_db, mock_env, mock_acompletion):
     await route_and_call(
         TaskType.GENERATE, "Write a poem",
@@ -74,7 +156,6 @@ async def test_system_prompt_included(temp_db, mock_env, mock_acompletion):
 
 
 @pytest.mark.asyncio
-@pytest.mark.requires_api_keys
 async def test_falls_back_on_failure(temp_db, mock_env, mock_litellm_response):
     from llm_router.types import LLMResponse
 
@@ -96,7 +177,13 @@ async def test_falls_back_on_failure(temp_db, mock_env, mock_litellm_response):
             provider="test",
         )
 
-    with patch("llm_router.providers.call_llm", new_callable=lambda: AsyncMock(side_effect=side_effect)):
+    # Pin the chain: on a bare runner (no ollama, no discovered providers) the
+    # environment-built chain can collapse to a single model, leaving nothing
+    # to fall back to. Two models makes the fallback assertion hermetic.
+    with patch("llm_router.router._build_and_filter_chain",
+               new_callable=lambda: AsyncMock(
+                   return_value=["openai/gpt-4o-mini", "gemini/gemini-2.5-flash"])), \
+         patch("llm_router.providers.call_llm", new_callable=lambda: AsyncMock(side_effect=side_effect)):
         resp = await route_and_call(
             TaskType.QUERY, "Hello",
             profile=RoutingProfile.BUDGET,
@@ -106,7 +193,6 @@ async def test_falls_back_on_failure(temp_db, mock_env, mock_litellm_response):
 
 
 @pytest.mark.asyncio
-@pytest.mark.requires_api_keys
 async def test_raises_when_all_fail(temp_db, mock_env):
     with patch("litellm.acompletion", side_effect=Exception("All down")):
         with pytest.raises(RuntimeError, match="All models failed"):
@@ -115,9 +201,21 @@ async def test_raises_when_all_fail(temp_db, mock_env):
 
 @pytest.mark.asyncio
 async def test_no_providers_configured(no_providers_env, monkeypatch):
-    """When no providers are configured, the router should raise an error."""
+    """When no providers are configured, the router should raise an error.
+
+    Before the provider-availability audit fix, codex/ollama/gemini_cli
+    candidates always survived the provider filter regardless of real
+    availability, so this scenario used to produce a non-empty chain of
+    phantom candidates that all failed at dispatch time, surfacing as
+    "All models failed" only after wasted attempts. The filter now checks
+    real availability, so a genuinely empty environment is caught upfront
+    with a clearer, more actionable message instead.
+    """
     monkeypatch.setattr("llm_router.router.is_codex_available", lambda: False)
-    with pytest.raises((ValueError, RuntimeError), match="No available models|All models failed"):
+    with pytest.raises(
+        (ValueError, RuntimeError),
+        match="No available models|All models failed|No providers available",
+    ):
         await route_and_call(TaskType.QUERY, "Hello")
 
 
@@ -142,7 +240,6 @@ async def test_research_adds_search_params_for_perplexity(temp_db, mock_env, moc
 
 
 @pytest.mark.asyncio
-@pytest.mark.requires_api_keys
 async def test_content_filter_error_is_silent_fallback(temp_db, mock_env, mock_litellm_response):
     """Content filter errors should silently skip to next model without warning."""
     from llm_router.types import LLMResponse
@@ -165,7 +262,12 @@ async def test_content_filter_error_is_silent_fallback(temp_db, mock_env, mock_l
             provider="test",
         )
 
-    with patch("llm_router.providers.call_llm", new_callable=lambda: AsyncMock(side_effect=side_effect)):
+    # Pin the chain (see test_falls_back_on_failure): bare runners can build a
+    # single-model chain, which breaks the "skip to next model" assertion.
+    with patch("llm_router.router._build_and_filter_chain",
+               new_callable=lambda: AsyncMock(
+                   return_value=["openai/gpt-4o-mini", "gemini/gemini-2.5-flash"])), \
+         patch("llm_router.providers.call_llm", new_callable=lambda: AsyncMock(side_effect=side_effect)):
         resp = await route_and_call(
             TaskType.QUERY, "Hello",
             profile=RoutingProfile.BUDGET,
@@ -265,21 +367,50 @@ async def test_claw_code_mode_injects_ollama_for_balanced_profile(
 
 
 @pytest.mark.asyncio
-async def test_claw_code_mode_injects_ollama_for_premium_profile(
+async def test_claw_code_mode_does_not_inject_ollama_for_premium_profile(
     temp_db, mock_env, mock_acompletion, monkeypatch
 ):
-    """In claw-code mode, Ollama should also be injected for PREMIUM profile."""
+    """PREMIUM keeps its capable chain; claw-code must not prepend Ollama."""
     monkeypatch.setenv("LLM_ROUTER_CLAW_CODE", "true")
     monkeypatch.setenv("OLLAMA_BASE_URL", "http://localhost:11434")
     monkeypatch.setenv("OLLAMA_BUDGET_MODELS", "llama3.2")
+    # Isolate the Ollama-injection behaviour under test: disable Codex/Gemini
+    # subprocess injection so the capable chain runs through call_llm (the mock),
+    # not run_codex. Otherwise, whether Codex is installed flips the routed path
+    # and mock_acompletion is never called. (No broker runs in tests, so the
+    # broker path is a no-op.)
+    monkeypatch.setenv("LLM_ROUTER_DISABLE_SUBPROCESS_BACKENDS", "codex,gemini_cli")
     import llm_router.config as _config
     _config._config = None
 
     await route_and_call(TaskType.QUERY, "Hello", profile=RoutingProfile.PREMIUM)
 
     call_kwargs = mock_acompletion.call_args.kwargs
-    assert "ollama" in call_kwargs["model"], (
-        f"Expected Ollama to be first in PREMIUM chain in claw-code mode, got {call_kwargs['model']}"
+    assert "ollama" not in call_kwargs["model"], (
+        f"Ollama must not be first in PREMIUM chain in claw-code mode, got {call_kwargs['model']}"
+    )
+    _config._config = None
+
+
+@pytest.mark.asyncio
+async def test_claw_code_mode_does_not_inject_ollama_for_reasoning_profile(
+    temp_db, mock_env, mock_acompletion, monkeypatch
+):
+    """REASONING keeps its dedicated chain; claw-code must not prepend Ollama."""
+    monkeypatch.setenv("LLM_ROUTER_CLAW_CODE", "true")
+    monkeypatch.setenv("OLLAMA_BASE_URL", "http://localhost:11434")
+    monkeypatch.setenv("OLLAMA_BUDGET_MODELS", "llama3.2")
+    # See premium test above: disable Codex/Gemini injection so the chain runs
+    # through call_llm (the mock), isolating the Ollama-injection behaviour.
+    monkeypatch.setenv("LLM_ROUTER_DISABLE_SUBPROCESS_BACKENDS", "codex,gemini_cli")
+    import llm_router.config as _config
+    _config._config = None
+
+    await route_and_call(TaskType.QUERY, "Hello", profile=RoutingProfile.REASONING)
+
+    call_kwargs = mock_acompletion.call_args.kwargs
+    assert "ollama" not in call_kwargs["model"], (
+        f"Ollama must not be first in REASONING chain in claw-code mode, got {call_kwargs['model']}"
     )
     _config._config = None
 
@@ -369,265 +500,3 @@ class TestMediaParamsWhitelist:
         from llm_router.types import TaskType
         assert _filter_media_params(TaskType.IMAGE, None) == {}
         assert _filter_media_params(TaskType.AUDIO, {}) == {}
-
-
-class TestBoundedOperationalShadowWiring:
-    """WS9 -- wires bounded_operational.should_route_bounded()/bounded_op_budget_usd()
-    into the live routing decision path (router.py's _dispatch_model_loop), strictly
-    behind LLM_ROUTER_BOUNDED_OPERATIONAL (default off). The shadow computation is
-    recorded into routing_decisions.bounded_operational_json purely for offline
-    analysis; it must NEVER influence `model`/`response` selection.
-
-    This class proves the required invariance property: with the flag absent vs.
-    present-but-explicitly-disabled, the live route (model + response content) is
-    byte-identical, and the shadow column is NULL in both cases. It also proves the
-    enabled path correctly populates the shadow column without altering the route.
-
-    Note on Codex/Gemini CLI injection: router.py does ``from llm_router.codex_agent
-    import is_codex_available`` (and the Gemini CLI equivalent) as direct name
-    imports, so patching ``llm_router.codex_agent.is_codex_available`` (what the
-    shared ``mock_acompletion`` fixture does) does not affect the name already bound
-    into ``llm_router.router``'s namespace. On a dev machine with a real Codex/Gemini
-    CLI binary on PATH this lets the *real* CLI agent get invoked instead of the
-    mocked ``call_llm``. These tests patch the correctly-bound names directly
-    (``llm_router.router.is_codex_available`` / ``llm_router.router.is_gemini_cli_available``)
-    so routing is fully deterministic and confined to the mocked provider call.
-
-    Note on the mocked response: the shared ``mock_acompletion`` fixture always
-    returns provider="test"/model="test/mock-model", which
-    ``cost._validate_routing_insert`` (a pre-existing production guard that keeps
-    contaminated test data out of the routing_decisions table) unconditionally
-    rejects -- so no row would ever be written and every ``bounded_operational_json``
-    assertion would spuriously see ``None`` regardless of this wiring. These tests
-    override the mock to return a *plausible* provider/model derived from the
-    model actually being tried, so `log_routing_decision` succeeds and the shadow
-    column can be observed.
-    """
-
-    @pytest.fixture(autouse=True)
-    def _no_cli_agent_injection(self, monkeypatch, mock_acompletion):
-        """Force the mocked `call_llm` chain (no real Codex/Gemini CLI subprocess),
-        with a validation-safe, per-model response so routing_decisions inserts
-        actually succeed."""
-        from llm_router.profiles import provider_from_model
-        from llm_router.types import LLMResponse
-
-        # llm_router.server's module-level `initialize_dynamic_routing()` call
-        # (run once, the first time any test in the full-suite session imports
-        # `llm_router.server` -- e.g. tests/test_route.py, which collects
-        # alphabetically before this file) permanently caches a
-        # `dynamic_routing._dynamic_routing_table` built from the REAL host
-        # machine's `available_providers` at that moment. That module-level
-        # cache is never invalidated by `mock_env`'s monkeypatched env vars,
-        # so `get_model_chain()`'s dynamic-table lookup (`_build_and_filter_
-        # chain`'s `get_dynamic_model_chain()` call) silently returns that
-        # stale, real-environment-derived chain instead of the one implied by
-        # this test's `mock_env`-configured providers -- which is why these
-        # tests only fail when run alongside the rest of the suite, and why
-        # the surviving chain collapses to whatever the real host happens to
-        # have available (e.g. just "codex/gpt-4o-mini"). Save/restore the
-        # module globals around each test so dynamic routing is forced back
-        # to its uninitialized state (falling back to the static, mock_env-
-        # driven chain) without leaking a behavior change to other tests.
-        import llm_router.dynamic_routing as _dynrouting
-
-        _saved_table = _dynrouting._dynamic_routing_table
-        _saved_complete = _dynrouting._discovery_complete
-        _dynrouting.reset_dynamic_routing()
-
-        monkeypatch.setattr("llm_router.router.is_codex_available", lambda: False)
-        monkeypatch.setattr("llm_router.router.is_gemini_cli_available", lambda: False)
-
-        async def _codex_unavailable(*_args, **_kwargs):
-            raise RuntimeError("codex unavailable (test)")
-
-        monkeypatch.setattr("llm_router.router.run_codex", _codex_unavailable)
-        monkeypatch.setattr("llm_router.router.run_gemini_cli", _codex_unavailable)
-
-        # llm_router.budget.get_budget_state() caches its result per-provider
-        # for 60 real seconds in a module-level dict that no fixture resets
-        # (temp_db/mock_env only reset the config singleton). If an earlier
-        # test in the full-suite run left a stale "budget exhausted"
-        # (pressure >= 1.0) entry for a real provider, _dispatch_model_loop
-        # would skip it here and fall through to the mocked-unavailable
-        # codex/gemini CLI path, producing a spurious "All models failed"
-        # error unrelated to this class's own assertions. Pin the budget
-        # check to an always-available state, mirroring the same isolation
-        # pattern already used in test_invariance_flag_toggle_no_route_change
-        # above (patching `llm_router.router.get_budget_state` directly) --
-        # this makes these tests deterministic regardless of run order or
-        # what other tests executed in the preceding 60 seconds.
-        async def _always_available_budget(provider: str):
-            return BudgetState(provider=provider, pressure=0.0)
-
-        monkeypatch.setattr("llm_router.router.get_budget_state", _always_available_budget)
-
-        _valid_providers = {
-            "ollama", "openai", "gemini", "codex", "claude_subscription",
-            "subscription", "anthropic", "perplexity", "groq", "deepseek",
-            "cc", "claude",
-        }
-
-        async def _valid_response(model, *_args, **_kwargs):
-            provider = provider_from_model(model)
-            if provider not in _valid_providers:
-                provider = "openai"
-            return LLMResponse(
-                content="Mock response",
-                model=model,
-                input_tokens=10,
-                output_tokens=5,
-                cost_usd=0.001,
-                latency_ms=100.0,
-                provider=provider,
-            )
-
-        mock_acompletion.side_effect = _valid_response
-
-        yield
-
-        _dynrouting._dynamic_routing_table = _saved_table
-        _dynrouting._discovery_complete = _saved_complete
-
-    async def _last_bounded_operational_json(self):
-        from llm_router import cost
-
-        db = await cost._get_db()
-        try:
-            cursor = await db.execute(
-                "SELECT bounded_operational_json FROM routing_decisions "
-                "ORDER BY id DESC LIMIT 1"
-            )
-            row = await cursor.fetchone()
-        finally:
-            await db.close()
-        return row[0] if row else None
-
-    @pytest.mark.asyncio
-    async def test_invariance_flag_absent_vs_present_but_disabled(
-        self, temp_db, mock_env, mock_acompletion, monkeypatch
-    ):
-        """Route decisions must be byte-identical whether LLM_ROUTER_BOUNDED_OPERATIONAL
-        is unset (module logically absent from the live decision) or explicitly set to
-        a falsy value (module present, flag off) -- and the shadow column must be NULL
-        in both cases."""
-        prompt = "Write a file called foo.py and run the tests to verify it"
-        cdata = {"complexity": "simple", "task_type": TaskType.CODE.value}
-
-        monkeypatch.delenv("LLM_ROUTER_BOUNDED_OPERATIONAL", raising=False)
-        resp_absent = await route_and_call(
-            TaskType.CODE, prompt, complexity_hint="simple", classification_data=dict(cdata)
-        )
-        shadow_absent = await self._last_bounded_operational_json()
-
-        monkeypatch.setenv("LLM_ROUTER_BOUNDED_OPERATIONAL", "0")
-        resp_disabled = await route_and_call(
-            TaskType.CODE, prompt, complexity_hint="simple", classification_data=dict(cdata)
-        )
-        shadow_disabled = await self._last_bounded_operational_json()
-
-        assert resp_absent.model == resp_disabled.model
-        assert resp_absent.content == resp_disabled.content
-        assert resp_absent.provider == resp_disabled.provider
-        assert shadow_absent is None
-        assert shadow_disabled is None
-
-    @pytest.mark.asyncio
-    async def test_enabled_path_populates_shadow_when_qualifying(
-        self, temp_db, mock_env, mock_acompletion, monkeypatch
-    ):
-        """Flag on + complexity 'simple' + a write/run-qualifying prompt -> the shadow
-        column records would_route_bounded=True with a positive budget_usd, while the
-        live route (model/response) is unaffected by the flag."""
-        import json
-
-        prompt = "Write a file called foo.py and run the tests to verify it"
-        cdata = {"complexity": "simple", "task_type": TaskType.CODE.value}
-
-        monkeypatch.delenv("LLM_ROUTER_BOUNDED_OPERATIONAL", raising=False)
-        resp_disabled = await route_and_call(
-            TaskType.CODE, prompt, complexity_hint="simple", classification_data=dict(cdata)
-        )
-
-        monkeypatch.setenv("LLM_ROUTER_BOUNDED_OPERATIONAL", "1")
-        resp_enabled = await route_and_call(
-            TaskType.CODE, prompt, complexity_hint="simple", classification_data=dict(cdata)
-        )
-        shadow = await self._last_bounded_operational_json()
-
-        assert resp_enabled.model == resp_disabled.model
-        assert resp_enabled.content == resp_disabled.content
-
-        assert shadow is not None
-        payload = json.loads(shadow)
-        assert payload["would_route_bounded"] is True
-        assert payload["complexity"] == "simple"
-        assert payload["budget_usd"] is not None
-        assert payload["budget_usd"] > 0
-
-    @pytest.mark.asyncio
-    async def test_enabled_path_records_false_when_not_qualifying(
-        self, temp_db, mock_env, mock_acompletion, monkeypatch
-    ):
-        """Flag on but the prompt needs no write/run/verify capability -> shadow
-        records would_route_bounded=False and budget_usd=None; live route still
-        unaffected."""
-        import json
-
-        prompt = "What is the difference between TCP and UDP?"
-        cdata = {"complexity": "simple", "task_type": TaskType.QUERY.value}
-
-        monkeypatch.delenv("LLM_ROUTER_BOUNDED_OPERATIONAL", raising=False)
-        resp_disabled = await route_and_call(
-            TaskType.QUERY, prompt, complexity_hint="simple", classification_data=dict(cdata)
-        )
-
-        monkeypatch.setenv("LLM_ROUTER_BOUNDED_OPERATIONAL", "1")
-        resp_enabled = await route_and_call(
-            TaskType.QUERY, prompt, complexity_hint="simple", classification_data=dict(cdata)
-        )
-        shadow = await self._last_bounded_operational_json()
-
-        assert resp_enabled.model == resp_disabled.model
-        assert resp_enabled.content == resp_disabled.content
-
-        assert shadow is not None
-        payload = json.loads(shadow)
-        assert payload["would_route_bounded"] is False
-        assert payload["budget_usd"] is None
-
-    @pytest.mark.asyncio
-    async def test_enabled_path_records_false_for_non_simple_complexity(
-        self, temp_db, mock_env, mock_acompletion, monkeypatch
-    ):
-        """Flag on, prompt would otherwise qualify (write/run), but complexity is
-        not 'simple' -> should_route_bounded() must say False (moderate/complex
-        always go through full delegation, never bounded)."""
-        import json
-
-        prompt = "Write a file called foo.py and run the tests to verify it"
-        cdata = {"complexity": "moderate", "task_type": TaskType.CODE.value}
-
-        monkeypatch.setenv("LLM_ROUTER_BOUNDED_OPERATIONAL", "1")
-        await route_and_call(
-            TaskType.CODE, prompt, complexity_hint="moderate", classification_data=dict(cdata)
-        )
-        shadow = await self._last_bounded_operational_json()
-
-        assert shadow is not None
-        payload = json.loads(shadow)
-        assert payload["would_route_bounded"] is False
-        assert payload["complexity"] == "moderate"
-        assert payload["budget_usd"] is None
-
-    def test_no_chuzom_in_shadow_wiring_symbols(self):
-        """Brand-leak guard for the router.py wiring block itself, scoped to
-        runtime-visible symbol names (consistent with TestBrandLeak in
-        tests/commands/test_audit.py) rather than a full-source scan -- router.py
-        legitimately carries historical 'Ported from chuzom's ...' provenance
-        comments elsewhere in the file (WS4 capability routing), which a raw
-        inspect.getsource() substring scan would incorrectly flag."""
-        import llm_router.router as router_module
-
-        for name in dir(router_module):
-            assert "chuzom" not in name.lower(), f"brand leak in name: {name}"

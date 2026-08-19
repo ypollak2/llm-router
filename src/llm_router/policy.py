@@ -116,9 +116,24 @@ def _parse_chains(raw: object) -> Dict[str, Dict[str, List[str]]]:
                 f"`chains.{profile_key}` must be a dict, got {type(tasks).__name__}"
             )
         out[str(profile_key)] = {
-            str(task_key): list(chain or []) for task_key, chain in tasks.items()
+            str(task_key): [_resolve_alias(m) for m in (chain or [])]
+            for task_key, chain in tasks.items()
         }
     return out
+
+
+def _resolve_alias(model: str) -> str:
+    """Resolve a ``family:latest`` chain entry to its concrete id.
+
+    Applied in the SINGLE shared chain-load path so both the runtime
+    ROUTING_TABLE and the mirror-test policy load see identical resolved ids.
+    Safe on non-alias entries (returned unchanged).
+    """
+    try:
+        from llm_router.model_aliases import resolve_model_alias
+        return resolve_model_alias(model)
+    except Exception:
+        return model
 
 
 class PolicyManager:
@@ -134,15 +149,25 @@ class PolicyManager:
         self._ensure_policy_dir()
 
     def _ensure_policy_dir(self) -> None:
-        """Create policy directory if it doesn't exist."""
-        self.DEFAULT_POLICY_DIR.mkdir(parents=True, exist_ok=True)
+        """Create policy directory if it doesn't exist.
+
+        CHZ-ST-003: fail OPEN. This runs at import time (a module-level
+        PolicyManager is constructed), so a read-only ``~/.llm-router`` raised
+        PermissionError here and crashed every hook — the worst failure mode for
+        code in front of every turn. A missing writable policy dir just means no
+        *user* policies; the bundled presets (PRESET_POLICY_DIR) still load.
+        """
+        try:
+            self.DEFAULT_POLICY_DIR.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            pass
 
     def load_policy(self, name: str) -> RoutingPolicy:
         """Load a policy by name.
 
         Searches in order:
         1. User custom policies (~/.llm-router/policies/)
-        2. Preset policies (bundled with llm-router)
+        2. Preset policies (bundled with llm_router)
 
         Args:
             name: Policy name (without .yaml extension)
@@ -217,9 +242,9 @@ class PolicyManager:
             skip_acknowledgements=bool(data.get("skip_acknowledgements", False)),
             route_coordination=bool(data.get("route_coordination", False)),
             prefer_ollama=bool(data.get("prefer_ollama", True)),
-            workhorses=list(data.get("workhorses", [])),
+            workhorses=[_resolve_alias(m) for m in data.get("workhorses", [])],
             specialists=dict(data.get("specialists", {})),
-            fallback_chain_complex=list(data.get("fallback_chain_complex", [])),
+            fallback_chain_complex=[_resolve_alias(m) for m in data.get("fallback_chain_complex", [])],
             cost_cap_per_query=cost_cap,
             chains=_parse_chains(data.get("chains", {})),
         )

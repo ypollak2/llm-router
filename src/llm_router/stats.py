@@ -1,4 +1,4 @@
-"""Download statistics aggregation for llm-routing and claude-code-llm-router.
+"""Download statistics aggregation for llm-routing and claude-code-llm_router.
 
 Fetches combined download stats from PyPI and format for display.
 """
@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 
 PACKAGES = {
     "llm-routing": "New package (current)",
-    "claude-code-llm-router": "Legacy package (deprecated)",
+    "claude-code-llm_router": "Legacy package (deprecated)",
 }
 
 

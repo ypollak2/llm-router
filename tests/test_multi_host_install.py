@@ -31,10 +31,10 @@ class TestMergeJsonMcpBlock:
         from llm_router.cli import _merge_json_mcp_block
 
         config = tmp_path / "config.json"
-        actions = _merge_json_mcp_block(config, "llm-router", {"command": "uvx"})
+        actions = _merge_json_mcp_block(config, "llm_router", {"command": "uvx"})
         assert config.exists()
         data = json.loads(config.read_text())
-        assert data["mcpServers"]["llm-router"] == {"command": "uvx"}
+        assert data["mcpServers"]["llm_router"] == {"command": "uvx"}
         assert any("Added" in a for a in actions)
 
     def test_merges_into_existing_file(self, tmp_path):
@@ -42,17 +42,17 @@ class TestMergeJsonMcpBlock:
 
         config = tmp_path / "config.json"
         config.write_text(json.dumps({"mcpServers": {"other": {}}}))
-        _merge_json_mcp_block(config, "llm-router", {"command": "uvx"})
+        _merge_json_mcp_block(config, "llm_router", {"command": "uvx"})
         data = json.loads(config.read_text())
         assert "other" in data["mcpServers"]
-        assert "llm-router" in data["mcpServers"]
+        assert "llm_router" in data["mcpServers"]
 
     def test_idempotent_second_call(self, tmp_path):
         from llm_router.cli import _merge_json_mcp_block
 
         config = tmp_path / "config.json"
-        _merge_json_mcp_block(config, "llm-router", {"command": "uvx"})
-        actions2 = _merge_json_mcp_block(config, "llm-router", {"command": "uvx"})
+        _merge_json_mcp_block(config, "llm_router", {"command": "uvx"})
+        actions2 = _merge_json_mcp_block(config, "llm_router", {"command": "uvx"})
         assert any("skipped" in a for a in actions2)
 
 
@@ -63,7 +63,7 @@ class TestAppendRoutingRules:
         dest = tmp_path / "instructions.md"
         actions = _append_routing_rules(dest, "opencode-rules.md")
         assert dest.exists()
-        assert "llm-router" in dest.read_text().lower()
+        assert "llm_router" in dest.read_text().lower()
         assert any("Created" in a for a in actions)
 
     def test_appends_to_existing_file(self, tmp_path):
@@ -74,7 +74,7 @@ class TestAppendRoutingRules:
         _append_routing_rules(dest, "opencode-rules.md")
         content = dest.read_text()
         assert "# Existing instructions" in content
-        assert "llm-router" in content.lower()
+        assert "llm_router" in content.lower()
 
     def test_idempotent_second_call(self, tmp_path):
         from llm_router.cli import _append_routing_rules
@@ -99,7 +99,7 @@ class TestInstallOpenCode:
         config = tmp_path / ".config" / "opencode" / "config.json"
         assert config.exists()
         data = json.loads(config.read_text())
-        assert "llm-router" in data["mcpServers"]
+        assert "llm_router" in data["mcpServers"]
 
     def test_writes_routing_rules(self, monkeypatch, tmp_path):
         from llm_router.cli import _install_opencode_files
@@ -109,7 +109,7 @@ class TestInstallOpenCode:
 
         instructions = tmp_path / ".config" / "opencode" / "instructions.md"
         assert instructions.exists()
-        assert "llm-router" in instructions.read_text().lower()
+        assert "llm_router" in instructions.read_text().lower()
 
     def test_returns_action_list(self, monkeypatch, tmp_path):
         from llm_router.cli import _install_opencode_files
@@ -143,7 +143,7 @@ class TestInstallGeminiCli:
         settings = tmp_path / ".gemini" / "settings.json"
         assert settings.exists()
         data = json.loads(settings.read_text())
-        assert "llm-router" in data["mcpServers"]
+        assert "llm_router" in data["mcpServers"]
 
     def test_creates_extension_manifest(self, monkeypatch, tmp_path):
         from llm_router.cli import _install_gemini_cli_files
@@ -151,10 +151,10 @@ class TestInstallGeminiCli:
 
         _install_gemini_cli_files()
 
-        manifest = tmp_path / ".gemini" / "extensions" / "llm-router" / "gemini-extension.json"
+        manifest = tmp_path / ".gemini" / "extensions" / "llm_router" / "gemini-extension.json"
         assert manifest.exists()
         data = json.loads(manifest.read_text())
-        assert data["name"] == "llm-router"
+        assert data["name"] == "llm_router"
 
     def test_creates_hooks_json(self, monkeypatch, tmp_path):
         from llm_router.cli import _install_gemini_cli_files
@@ -162,7 +162,7 @@ class TestInstallGeminiCli:
 
         _install_gemini_cli_files()
 
-        hooks = tmp_path / ".gemini" / "extensions" / "llm-router" / "hooks" / "hooks.json"
+        hooks = tmp_path / ".gemini" / "extensions" / "llm_router" / "hooks" / "hooks.json"
         assert hooks.exists()
         data = json.loads(hooks.read_text())
         assert "PostToolUse" in data["hooks"]
@@ -173,9 +173,9 @@ class TestInstallGeminiCli:
 
         _install_gemini_cli_files()
 
-        instructions = tmp_path / ".gemini" / "extensions" / "llm-router" / "INSTRUCTIONS.md"
+        instructions = tmp_path / ".gemini" / "extensions" / "llm_router" / "INSTRUCTIONS.md"
         assert instructions.exists()
-        assert "llm-router" in instructions.read_text().lower()
+        assert "llm_router" in instructions.read_text().lower()
 
     def test_idempotent_second_run(self, monkeypatch, tmp_path):
         from llm_router.cli import _install_gemini_cli_files
@@ -201,7 +201,7 @@ class TestInstallCopilotCli:
         mcp = tmp_path / ".config" / "gh" / "copilot" / "mcp.json"
         assert mcp.exists()
         data = json.loads(mcp.read_text())
-        assert "llm-router" in data["mcpServers"]
+        assert "llm_router" in data["mcpServers"]
 
     def test_writes_routing_rules(self, monkeypatch, tmp_path):
         from llm_router.cli import _install_copilot_cli_files
@@ -236,7 +236,7 @@ class TestInstallOpenclaw:
         mcp = tmp_path / ".openclaw" / "mcp.json"
         assert mcp.exists()
         data = json.loads(mcp.read_text())
-        assert "llm-router" in data["mcpServers"]
+        assert "llm_router" in data["mcpServers"]
 
     def test_writes_routing_rules(self, monkeypatch, tmp_path):
         from llm_router.cli import _install_openclaw_files
@@ -271,7 +271,7 @@ class TestInstallTrae:
         mcp_files = list(tmp_path.rglob("mcp.json"))
         assert len(mcp_files) >= 1
         data = json.loads(mcp_files[0].read_text())
-        assert "llm-router" in data["mcpServers"]
+        assert "llm_router" in data["mcpServers"]
 
     def test_returns_action_list(self, monkeypatch, tmp_path):
         from llm_router.cli import _install_trae_files
@@ -304,7 +304,7 @@ class TestFactoryDroidManifest:
         import pathlib
         manifest = pathlib.Path(__file__).parent.parent / ".factory-plugin" / "plugin.json"
         data = json.loads(manifest.read_text())
-        assert data["name"] == "llm-router"
+        assert data["name"] == "llm_router"
         assert "version" in data
         assert "mcpServers" in data or "skills" in data
 
@@ -359,7 +359,7 @@ class TestRulesFileContent:
         "openclaw-rules.md",
         "trae-rules.md",
         "codex-rules.md",
-        "llm-router.md",
+        "llm_router.md",
     ])
     def test_has_token_efficient_section(self, rules_file):
         import pathlib

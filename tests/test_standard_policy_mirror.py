@@ -32,6 +32,27 @@ class TestStandardPolicyExists:
         assert "budget" in standard_policy.chains
         assert "balanced" in standard_policy.chains
         assert "premium" in standard_policy.chains
+        assert "reasoning" in standard_policy.chains, (
+            "standard.yaml must declare a 'reasoning' profile chain — "
+            "Complexity.DEEP_REASONING maps to RoutingProfile.REASONING"
+        )
+
+    def test_reasoning_chain_has_r1_and_o3(self, standard_policy: RoutingPolicy) -> None:
+        reasoning_chains = standard_policy.chains.get("reasoning", {})
+        analyze_chain = reasoning_chains.get("analyze", [])
+        assert "deepseek/deepseek-reasoner" in analyze_chain, (
+            "REASONING/analyze chain must include deepseek-reasoner (R1)"
+        )
+        assert "openai/o3" in analyze_chain, (
+            "REASONING/analyze chain must include openai/o3"
+        )
+
+    def test_reasoning_chain_has_no_haiku(self, standard_policy: RoutingPolicy) -> None:
+        reasoning_chains = standard_policy.chains.get("reasoning", {})
+        for task, chain in reasoning_chains.items():
+            assert "anthropic/claude-haiku-4-5-20251001" not in chain, (
+                f"REASONING/{task} must not include Haiku (no extended thinking support)"
+            )
 
 
 class TestRoutingTableEquivalence:

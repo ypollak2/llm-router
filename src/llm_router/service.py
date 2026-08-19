@@ -1,4 +1,4 @@
-"""Async sidecar routing service for llm-router.
+"""Async sidecar routing service for llm_router.
 
 Runs as independent FastAPI process on localhost:7337 (configurable).
 Hooks communicate with service via HTTP, never blocking.
@@ -36,9 +36,9 @@ logging.basicConfig(
         ),
     ],
 )
-logger = logging.getLogger("llm-router.service")
+logger = logging.getLogger("llm_router.service")
 
-app = FastAPI(title="llm-router-service", version="5.3.0")
+app = FastAPI(title="llm_router-service", version="5.3.0")
 
 # ────────────────────────────────────────────────────────────────────────────
 # Models
@@ -82,8 +82,8 @@ class ScoreResponse(BaseModel):
 INFRASTRUCTURE_PATTERNS = {
     # MCP plugin tools (Serena, Obsidian, etc.)
     r"^mcp__plugin_\w+__",
-    # llm-router's own tools
-    r"^mcp__llm-router__",
+    # llm_router's own tools
+    r"^mcp__llm_router__",
     # System operations (never route these)
     r"^(Bash|Read|Edit|Write|MultiEdit|NotebookEdit|Glob|Grep|LS|Agent|ToolSearch)$",
 }
@@ -198,15 +198,20 @@ def _score_confidence(task_type: str, complexity: str, heuristic_score: int) -> 
 # Routing Decision
 
 def _route_for_task(task_type: str) -> str:
-    """Pick the appropriate MCP tool for the task type."""
-    task_to_tool = {
-        "query": "llm_query",
-        "code": "llm_code",
-        "research": "llm_research",
-        "generate": "llm_generate",
-        "analyze": "llm_analyze",
-    }
-    return task_to_tool.get(task_type, "llm_route")
+    """Pick the appropriate MCP tool for the task type.
+
+    RED8-06: this was the THIRD independently-maintained task->tool map. Its five
+    keys and its llm_route fallback happened to agree with auto-route.py, so it
+    looked harmless -- but a third copy is a third thing to forget when the set
+    of task types changes, and agent-route.py's copy had already drifted to an
+    llm_analyze fallback (a completion door that cannot run tools).
+
+    Kept as a function rather than deleted: service.py:239 calls it, so this is a
+    live sidecar endpoint, not dead code. Only the private map is gone.
+    """
+    from llm_router.tool_surface import tool_for_task
+
+    return tool_for_task(task_type)
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -352,7 +357,7 @@ async def startup_discovery_warmup():
 
 def start_service(host: str = "127.0.0.1", port: int = 7337, log_level: str = "warning"):
     """Start the sidecar service."""
-    logger.info(f"Starting llm-router service on {host}:{port}")
+    logger.info(f"Starting llm_router service on {host}:{port}")
 
     uvicorn.run(
         app,

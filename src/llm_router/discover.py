@@ -27,44 +27,102 @@ _OLLAMA_CACHE_TTL = 5.0
 # Discovery cache file path
 _DISCOVERY_CACHE = os.path.expanduser("~/.llm-router/discovery.json")
 
+# Warm-path tracking — path to file that records last successful Ollama call time
+_OLLAMA_LAST_OK = os.path.expanduser("~/.llm-router/ollama_last_ok.txt")
+_OLLAMA_WARM_TTL = 60  # seconds
+
 
 def is_ollama_available() -> bool:
     """Check if Ollama is configured and reachable.
-    
+
     Returns:
-        True if OLLAMA_BASE_URL is set and Ollama responds to /api/tags
+        True if Ollama responds to /api/tags (via configured URL or localhost:11434 fallback)
     """
     import time
-    
+
     config = get_config()
-    if not config.ollama_base_url:
+    # If OLLAMA_BASE_URL is not set, fall back to the default local address.
+    # Ollama's default install doesn't require setting the env var, so auto-detect.
+    # During tests, require explicit config to avoid real network calls.
+    if not config.ollama_base_url and os.getenv("PYTEST_CURRENT_TEST"):
         return False
-    
+    ollama_url = config.ollama_base_url or "http://localhost:11434"
+
     now = time.monotonic()
-    
-    # Check cache
-    if config.ollama_base_url in _ollama_cache:
-        cached_result, cached_time = _ollama_cache[config.ollama_base_url]
+
+    # Check cache keyed on the effective URL (may be localhost fallback)
+    if ollama_url in _ollama_cache:
+        cached_result, cached_time = _ollama_cache[ollama_url]
         if (now - cached_time) < _OLLAMA_CACHE_TTL:
             return cached_result
-    
-    # Probe Ollama and cache discovered models
+
+    # Probe Ollama with connection timeout to prevent indefinite hangs.
+    # On network errors or timeouts, conservatively assume Ollama is unavailable
+    # but cache the result so we don't retry on every request.
+    result = False
     try:
         import json
+        import socket
         import urllib.request
+
+        # Extract host:port from the URL to validate before attempting connection
+        from urllib.parse import urlparse
+        parsed = urlparse(ollama_url)
+        host = parsed.hostname or "localhost"
+        port = parsed.port or 11434
+
+        # Quick socket check (more reliable timeout than urlopen)
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(1)  # 1-second socket timeout
+        sock.connect((host, port))
+        sock.close()
+
+        # Socket connected, now try the actual HTTP call
         with urllib.request.urlopen(
-            f"{config.ollama_base_url}/api/tags",
+            f"{ollama_url}/api/tags",
             timeout=2
         ) as resp:
             data = json.loads(resp.read())
             result = True
             # Write discovery cache with actual model names
             _update_discovery_cache(data.get("models", []))
-    except Exception:
+    except socket.timeout:
+        log.debug("Ollama connection timeout: %s", ollama_url)
+        result = False
+    except (socket.gaierror, socket.error, ConnectionRefusedError, TimeoutError) as e:
+        log.debug("Ollama connection failed (expected if not running): %s — %s", ollama_url, type(e).__name__)
+        result = False
+    except Exception as e:
+        log.debug("Ollama probe failed: %s", e)
         result = False
 
-    _ollama_cache[config.ollama_base_url] = (result, now)
+    _ollama_cache[ollama_url] = (result, now)
     return result
+
+
+# Substrings that mark an Ollama model as embedding-only (cannot generate text).
+# Covers the common families: nomic-embed-text, mxbai-embed-large, snowflake-
+# arctic-embed, bge-*, gte-*, e5-*, all-minilm.
+_EMBEDDING_NAME_MARKERS: tuple[str, ...] = (
+    "embed", "bge-", "-bge", "gte-", "e5-", "minilm",
+)
+
+
+def _is_embedding_model(name: str, meta: dict | None = None) -> bool:
+    """True when an Ollama model is embedding-only (no text generation).
+
+    Detected by the conventional name markers above and, when the Ollama
+    ``/api/tags`` response includes it, an embedding-family hint under
+    ``details.family`` (e.g. ``bert``/``nomic-bert``). Fails safe: unknown
+    models are treated as generation-capable, never silently dropped.
+    """
+    low = name.lower()
+    if any(marker in low for marker in _EMBEDDING_NAME_MARKERS):
+        return True
+    family = ((meta or {}).get("details") or {}).get("family", "")
+    if isinstance(family, str) and ("bert" in family.lower() or "embed" in family.lower()):
+        return True
+    return False
 
 
 def _update_discovery_cache(ollama_models: list[dict]) -> None:
@@ -80,11 +138,19 @@ def _update_discovery_cache(ollama_models: list[dict]) -> None:
         name = m.get("name", "")
         if not name:
             continue
+        # Lever ②: embedding-only models (nomic-embed-text, mxbai-embed-large,
+        # bge-*, etc.) cannot generate text — Ollama rejects /api/generate for
+        # them ("does not support generate"). Tagging them generation-capable
+        # here put them into routing chains, where they always errored and, on
+        # premium/complex routes, contributed to chain exhaustion. Skip them at
+        # the source so they never enter a generation chain.
+        if _is_embedding_model(name, m):
+            continue
         model_id = f"ollama/{name}"
         models[model_id] = {
             "model_id": model_id,
             "provider": "ollama",
-            "provider_tier": "free",
+            "provider_tier": "local",
             "task_types": ["query", "generate", "analyze", "code"],
         }
 
@@ -137,7 +203,15 @@ def get_available_providers() -> set[str]:
         providers.add("xai")
     if config.cohere_api_key:
         providers.add("cohere")
-    
+    if config.moonshot_api_key:
+        providers.add("moonshot")
+    if config.minimax_api_key:
+        providers.add("minimax")
+    if config.zhipu_api_key:
+        providers.add("zhipu")
+    if config.arcee_api_key:
+        providers.add("arcee")
+
     # Check Ollama
     if is_ollama_available():
         providers.add("ollama")
@@ -352,21 +426,131 @@ def _load_cache(ttl: int = 3600) -> dict | None:
         return None
 
 
+def _probe_ollama_direct(base_url: str = "http://localhost:11434") -> list[str]:
+    """Probe Ollama /api/tags directly and return installed model IDs.
+
+    Used as a fallback when OLLAMA_BASE_URL is not set but Ollama may still
+    be running at the default address. Updates the discovery cache on success.
+    """
+    import json
+    import socket
+    import urllib.request
+    from urllib.parse import urlparse
+
+    try:
+        parsed = urlparse(base_url)
+        host = parsed.hostname or "localhost"
+        port = parsed.port or 11434
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(1)
+        sock.connect((host, port))
+        sock.close()
+        with urllib.request.urlopen(f"{base_url}/api/tags", timeout=2) as resp:
+            data = json.loads(resp.read())
+        models = data.get("models", [])
+        _update_discovery_cache(models)
+        return [
+            f"ollama/{m['name']}" for m in models
+            if m.get("name") and not _is_embedding_model(m["name"], m)
+        ]
+    except Exception:
+        return []
+
+
 def get_cached_ollama_models() -> list[str]:
     """Get cached list of Ollama models (from discovery cache file).
-    
-    Returns cached Ollama models from ~/.llm-router/discovery.json only.
-    Does NOT fall back to live Ollama discovery - that's config.all_ollama_models()'s job.
-    
+
+    Installed Ollama models change only when the user runs ``ollama pull``
+    or ``ollama rm`` — not per-session — so we use a 24-hour TTL instead of
+    the 1-hour default used by provider-API discovery.
+
     Returns:
         List of ollama/model-name strings from cache, or empty list if no cache.
     """
-    cached = _load_cache()
+    # 86400s = 24h — conservative for installed model list (changes require explicit pull/rm)
+    cached = _load_cache(ttl=86400)
     if cached:
         return [
             m_id for m_id, m_data in cached.items()
             if m_data.get("provider") == "ollama"
+            # Lever ②: exclude embedding-only models even from a STALE cache
+            # written before this filter existed (24h TTL) — they can never
+            # generate, so they must never reach a routing chain.
+            and not _is_embedding_model(m_id.split("/", 1)[-1], m_data)
         ]
-    
-    # No cache available - return empty list (config will fall back to env vars)
+
+    # Cache empty or stale — try a live probe to refresh it.
+    # First check if OLLAMA_BASE_URL is set; otherwise try localhost:11434 directly.
+    if is_ollama_available():
+        cached = _load_cache(ttl=86400)
+        if cached:
+            return [
+                m_id for m_id, m_data in cached.items()
+                if m_data.get("provider") == "ollama"
+            ]
+
+    # Fallback: probe localhost:11434 even if OLLAMA_BASE_URL is not configured.
+    # This handles the common case where Ollama is running but the env var was
+    # never explicitly set (e.g. default install, no .env configuration).
+    # Skip during tests to avoid real network calls that break isolation.
+    if not os.getenv("PYTEST_CURRENT_TEST"):
+        models = _probe_ollama_direct()
+        if models:
+            log.debug("Ollama discovered via default localhost probe: %s", models)
+            return models
+
     return []
+
+
+def is_ollama_warm() -> bool:
+    """Return True if Ollama responded successfully within the last 60 seconds.
+
+    Reads ~/.llm-router/ollama_last_ok.txt (a plain Unix timestamp written by
+    mark_ollama_ok() after each successful call). No filesystem read needed
+    during normal Ollama operation once warm — just a stat + read.
+    """
+    import time
+
+    try:
+        with open(_OLLAMA_LAST_OK) as f:
+            last_ok = float(f.read().strip())
+        return (time.time() - last_ok) < _OLLAMA_WARM_TTL
+    except (FileNotFoundError, ValueError, OSError):
+        return False
+
+
+def mark_ollama_ok() -> None:
+    """Record a successful Ollama call timestamp for warm-path routing."""
+    import time
+
+    try:
+        os.makedirs(os.path.dirname(_OLLAMA_LAST_OK), exist_ok=True)
+        with open(_OLLAMA_LAST_OK, "w") as f:
+            f.write(str(time.time()))
+    except OSError:
+        pass
+
+
+def filter_ollama_by_installed(chain: list[str]) -> list[str]:
+    """Remove Ollama model entries whose model isn't in the installed cache.
+
+    Ollama provider availability (is_ollama_available) only confirms the
+    daemon is running — it doesn't mean every model in the routing chain
+    is installed.  This function cross-checks each ``ollama/*`` entry
+    against the discovery cache and drops models that aren't installed,
+    preventing 50-second LiteLLM hangs on missing models.
+
+    Non-Ollama entries pass through unchanged.
+    """
+    installed = set(get_cached_ollama_models())
+    if not installed:
+        # Cache empty — can't validate, let the chain through unmodified.
+        return chain
+
+    result = []
+    for model in chain:
+        if model.startswith("ollama/") and model not in installed:
+            log.debug("Dropping %s — not installed in Ollama", model)
+            continue
+        result.append(model)
+    return result

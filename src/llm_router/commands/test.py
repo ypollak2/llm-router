@@ -35,17 +35,23 @@ def cmd_test(args: list[str]) -> int:
 def _run_test(prompt: str) -> None:
     """Dry-run route simulation: classify prompt + show model choice + cost estimate."""
     if not prompt:
-        print(_red("Usage: llm-router test \"<your prompt>\""))
+        print(_red("Usage: llm_router test \"<your prompt>\""))
         sys.exit(1)
 
     async def _simulate() -> None:
         from llm_router.classifier import classify_complexity
         from llm_router.types import MODEL_COST_PER_1K
 
-        # Baseline: claude-sonnet-4-5 (what a non-routing user would pay)
+        # Baseline: claude-sonnet-4-5 (what a non-routing user would pay).
+        # WP-03: rates come from llm_router.pricing; they used to be restated here
+        # as 3.0/15.0, which happened to match sonnet-4-5 but would not have
+        # followed the model if the baseline constant were ever repointed.
+        from llm_router import pricing as _pricing
+
         BASELINE = "claude-sonnet-4-5"
-        BASELINE_IN = 3.0   # $/M tokens
-        BASELINE_OUT = 15.0
+        _baseline_price = _pricing.price_for(BASELINE)
+        BASELINE_IN = _baseline_price.input if _baseline_price else 0.0
+        BASELINE_OUT = _baseline_price.output if _baseline_price else 0.0
 
         # Estimate token counts from prompt length (rough: 1 token ≈ 4 chars)
         est_in = max(50, len(prompt) // 4)

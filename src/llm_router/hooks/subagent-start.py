@@ -1,4 +1,5 @@
 """SubagentStart hook — inject routing context into every new agent's initial messages.
+# llm_router-hook-version: 1
 
 Fires once when Claude spawns an agent (Agent tool call completes the PreToolUse
 gate and runAgent() starts). The hook's additionalContext is prepended to the
@@ -28,6 +29,52 @@ import json
 import sys
 import time
 from pathlib import Path
+
+
+# ── Registered-tool surface (CHZ-SURF-01) ────────────────────────────────────
+# Tool names are tier-dependent (LLM_ROUTER_SLIM). NEVER put a raw tool name in
+# output: under the DEFAULT `consolidated` tier the legacy llm_query /
+# llm_analyze / llm_code / llm_research / llm_generate names are not registered,
+# so naming one hands the caller "Error: No such tool available" — after which
+# it silently does the work on the expensive model and the savings dashboard
+# cannot distinguish that from "chose not to route".
+def _load_tool_surface_fns():
+    """(route_tool, route_call, route_call_with_complexity) from llm_router.tool_surface.
+
+    Falls back to the stdlib-only copy the installer drops next to the hooks, then
+    to the in-repo source, then to identity (correct only for tier `off`).
+    """
+    try:
+        from llm_router.tool_surface import (
+            route_call,
+            route_call_with_complexity,
+            route_tool,
+        )
+        return route_tool, route_call, route_call_with_complexity
+    except ImportError:
+        pass
+    try:
+        import importlib.util as _ilu
+        from pathlib import Path as _P
+        _here = _P(__file__).resolve().parent
+        for _cand in (_here / "llm_router_tool_surface.py", _here.parent / "tool_surface.py"):
+            if not _cand.exists():
+                continue
+            _spec = _ilu.spec_from_file_location("llm_router_tool_surface", _cand)
+            _mod = _ilu.module_from_spec(_spec)
+            sys.modules["llm_router_tool_surface"] = _mod  # dataclasses needs this
+            _spec.loader.exec_module(_mod)
+            return _mod.route_tool, _mod.route_call, _mod.route_call_with_complexity
+    except Exception:  # noqa: BLE001 — a broken support module must not kill the hook
+        pass
+    return (
+        lambda n, **k: n,
+        lambda n, *a, **k: (f"{n}({', '.join(a)})" if a else n),
+        lambda n, c, *a, **k: f"{n}(complexity='{c}'" + ("".join(', ' + x for x in a)) + ")",
+    )
+
+
+route_tool, route_call, route_call_with_complexity = _load_tool_surface_fns()
 
 
 # ── Pressure reading ──────────────────────────────────────────────────────────
@@ -97,20 +144,23 @@ def main() -> None:
             "simple→Haiku (/model claude-haiku-4-5-20251001) | "
             "moderate→Sonnet (current) | "
             "complex→Opus (/model claude-opus-4-6) | "
-            "research→llm_research MCP tool"
+            f"research→{route_tool('llm_research')} MCP tool"
         )
     else:
         # HIGH / CRITICAL — subscription pressure exceeded, use external providers
         routing_rules = (
-            "simple→llm_query (external) | "
-            "moderate→llm_analyze (external) | "
-            "complex→llm_code (external) | "
-            "research→llm_research (external)"
+            f"simple→{route_tool('llm_query')} (external) | "
+            f"moderate→{route_tool('llm_analyze')} (external) | "
+            f"complex→{route_tool('llm_code')} (external) | "
+            f"research→{route_tool('llm_research')} (external)"
         )
 
-    stale_note = "\n⚠️  Usage data >30min old — routing thresholds may be inaccurate. Run llm_check_usage." if _is_pressure_stale() else ""
+    stale_note = (
+        f"\n⚠️  Usage data >30min old — routing thresholds may be inaccurate. "
+        f"Run {route_tool('llm_check_usage')}."
+    ) if _is_pressure_stale() else ""
     context = (
-        f"[llm-router] Routing context for this agent:\n"
+        f"[llm_router] Routing context for this agent:\n"
         f"Pressure: session={p['session']:.0%} sonnet={p['sonnet']:.0%} "
         f"weekly={p['weekly']:.0%} | {status}\n"
         f"Rules: {routing_rules}\n"

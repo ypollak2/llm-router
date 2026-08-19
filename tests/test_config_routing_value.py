@@ -213,6 +213,13 @@ class TestOllamaProviderInclusion:
         cfg = RouterConfig(ollama_base_url="")
         assert "ollama" not in cfg.available_providers
 
+    def test_ollama_included_from_default_localhost_when_reachable(self, monkeypatch):
+        monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+        with patch("llm_router.config.probe_ollama", return_value=True) as probe:
+            cfg = RouterConfig(ollama_base_url="")
+            assert "ollama" in cfg.available_providers
+            probe.assert_called_with("http://localhost:11434")
+
     def test_ollama_model_ids_have_correct_prefix(self):
         """Router needs 'ollama/modelname' format for LiteLLM dispatch."""
         cfg = RouterConfig(
@@ -223,8 +230,21 @@ class TestOllamaProviderInclusion:
         assert models == ["ollama/llama3.2", "ollama/qwen2.5-coder:7b"]
 
     def test_ollama_models_empty_when_no_base_url(self):
-        cfg = RouterConfig(ollama_base_url="")
-        assert cfg.all_ollama_models() == []
+        # Patch the probe: on dev machines with a live localhost Ollama the
+        # auto-default fallback would legitimately return budget models, and
+        # the module-level probe cache (warmed by earlier tests) makes the
+        # outcome order-dependent. No base URL + unreachable => empty.
+        with patch("llm_router.config.probe_ollama", return_value=False):
+            cfg = RouterConfig(ollama_base_url="")
+            assert cfg.all_ollama_models() == []
+
+    def test_ollama_models_discovered_without_preset(self, monkeypatch):
+        monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+        cfg = RouterConfig(ollama_base_url="", ollama_budget_models="")
+        with patch("llm_router.discover.get_cached_ollama_models",
+                   return_value=["ollama/hermes3:8b", "ollama/qwen3-coder:30b"]), \
+             patch("llm_router.config.probe_ollama", return_value=True):
+            assert cfg.all_ollama_models() == ["ollama/hermes3:8b", "ollama/qwen3-coder:30b"]
 
     def test_ollama_models_empty_when_no_model_names(self):
         cfg = RouterConfig(

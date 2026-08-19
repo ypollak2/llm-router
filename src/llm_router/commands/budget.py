@@ -41,7 +41,7 @@ def _dim(s: str) -> str:
 # ── Budget management ───────────────────────────────────────────────────────
 
 def _run_budget(subcmd: str, flags: list[str]) -> None:
-    """llm-router budget [list|set|remove] ...
+    """llm_router budget [list|set|remove] ...
 
     list                       — show all providers with spend, cap, pressure
     set <provider> <amount>    — set monthly cap (USD) for a provider
@@ -54,7 +54,7 @@ def _run_budget(subcmd: str, flags: list[str]) -> None:
 
     if subcmd == "set":
         if len(flags) < 2:
-            print(_red("Usage: llm-router budget set <provider> <amount>"))
+            print(_red("Usage: llm_router budget set <provider> <amount>"))
             sys.exit(1)
         provider, amount_str = flags[0], flags[1]
         try:
@@ -74,7 +74,7 @@ def _run_budget(subcmd: str, flags: list[str]) -> None:
 
     if subcmd == "remove":
         if not flags:
-            print(_red("Usage: llm-router budget remove <provider>"))
+            print(_red("Usage: llm_router budget remove <provider>"))
             sys.exit(1)
         provider = flags[0]
         removed = remove_cap(provider)
@@ -89,7 +89,7 @@ def _run_budget(subcmd: str, flags: list[str]) -> None:
     states = asyncio.run(get_all_budget_states())
     caps = list_caps()
 
-    print(f"\n{_bold('[llm-router] Budget Caps')}\n")
+    print(f"\n{_bold('[llm_router] Budget Caps')}\n")
     header = f"  {'Provider':<14}  {'Spend':>8}  {'Cap':>8}  {'Pressure':<14}  {'Bar'}"
     print(_dim(header))
     print(_dim("  " + "─" * 62))
@@ -120,7 +120,7 @@ def _run_budget(subcmd: str, flags: list[str]) -> None:
     if uncapped:
         print()
         print(_dim(f"  💡 No cap set for: {', '.join(sorted(uncapped))}"))
-        print(_dim("     Set one: llm-router budget set <provider> <amount>"))
+        print(_dim("     Set one: llm_router budget set <provider> <amount>"))
 
     stored = caps
     if stored:
@@ -132,7 +132,7 @@ def _run_budget(subcmd: str, flags: list[str]) -> None:
 # ── Entry point ─────────────────────────────────────────────────────────────
 
 def cmd_budget(args: list[str]) -> int:
-    """Execute: llm-router budget [list|set|remove]
+    """Execute: llm_router budget [list|set|remove]
 
     Manage provider spending caps.
     """

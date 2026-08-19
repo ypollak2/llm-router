@@ -1,283 +1,161 @@
-# Ported from Chuzom's audit_routing.py; env vars renamed to LLM_ROUTER_*; data source rewired to llm-router's layer.
-"""Post-hoc misroute audit (WS6).
+"""Tier-1 audit-on-every-turn helper.
 
-Chuzom's ``audit_routing.py`` is a *live*, per-turn compliance audit-trail
-writer: it appends one row to an enterprise ``AuditLog`` (SQLite-backed,
-tamper-evident) on every successful routed turn, gated by ``is_enterprise()``
-and ``CHUZOM_AUDIT_DISABLED``. That capability — the enterprise ``AuditLog``
-itself — is out of scope here: ``enterprise/`` is explicitly REJECTED for
-llm-router (see the migration plan's capability table; llm-router's README
-sells Chuzom's enterprise tier separately).
+Bridges the routing path to the existing
+``llm_router.enterprise.audit.AuditLog`` (which was shipped as enterprise
+scaffolding in earlier releases but had zero call sites from
+``router.route_and_call`` until Tier 1). One row per successful routed
+turn, attributed to ``TurnIdentity`` resolved from the operator's env.
 
-What *is* ported is the structural pattern, not the payload:
+Design choices:
 
-* the module name and env-disable convention (Chuzom's
-  ``CHUZOM_AUDIT_DISABLED`` -> ``LLM_ROUTER_AUDIT_DISABLED``, same
-  affirmative-value set),
-* fail-open, best-effort semantics (an audit failure must never raise into
-  a caller or interrupt anything else),
-* the "audit is a side channel, not the main path" discipline.
+* **Lazy module-level singleton.** ``AuditLog()`` opens a SQLite
+  connection in its constructor; opening on every call would dominate
+  the routing-path latency. The first call to
+  :func:`audit_routing_turn` creates the log and caches it for the
+  lifetime of the process.
+* **Best-effort, fail-open.** A failure here must never break the
+  routed turn — the user is owed an answer even if
+  ``~/.llm-router/audit.db`` is unwritable. Exceptions are logged and
+  swallowed. Tier 3 will introduce a fail-closed mode behind a config
+  flag for regulated deployments.
+* **Disable via env.** ``LLM_ROUTER_AUDIT_DISABLED=1`` (or any affirmative
+  value) skips the audit append entirely. Useful for tests that don't
+  exercise auditing and for users who explicitly opt out of local
+  audit-DB writes.
 
-The actual capability adapts the plan's C5 line: "Misroute detection /
-audit ... feeds existing routing_decisions.was_good/reason_code, no
-parallel accuracy store." Concretely, this module is a *post-hoc, offline*
-sampler over already-recorded decisions:
-
-1. Read a batch of ``routing_decisions`` rows that have not yet been
-   audited (``audit_verdict IS NULL``).
-2. Re-score each row using fields captured at decision time —
-   ``judge_score`` (LLM-as-Judge quality signal, primary), and
-   ``complexity_downgraded`` / ``was_downshifted`` (budget-pressure
-   signals, secondary) — because ``routing_decisions`` deliberately never
-   stores raw prompt text (only ``prompt_hash``), so true text
-   re-classification against the live classifier is not possible for
-   historical rows. See ``score_decision`` for the exact heuristic.
-3. Write the verdict to two new additive columns, ``audit_verdict`` and
-   ``audit_checked_at`` (see ``cost.MIGRATE_ROUTING_DECISIONS_ADD_AUDIT``),
-   rather than the community-shared ``was_good`` column or the
-   decision-time ``reason_code`` column. Those two columns already carry
-   live, narrower meaning elsewhere: ``was_good`` is genuine human
-   thumbs-up/down feedback consumed by ``community.py``'s acceptance-rate
-   metric (which filters ``WHERE was_good IS NOT NULL`` assuming pure
-   human provenance), and ``reason_code`` is the classifier's own
-   decision-time reasoning text. Auto-populating either with a
-   machine-derived audit guess would silently corrupt an existing signal.
-   Recording the verdict as new additive columns on the SAME table still
-   satisfies the plan's "no parallel accuracy store" constraint (same
-   table, not a second store) while protecting the two existing columns'
-   provenance guarantees. This is a deliberate, reasoned deviation from
-   the plan's literal column names — see the migration constant's
-   docstring in cost.py for the same rationale.
-4. Never overwrite an existing verdict: the write-back UPDATE is guarded
-   by ``WHERE audit_verdict IS NULL``, so re-running the audit on an
-   already-audited row is a no-op. Repeated runs cannot flip-flop or
-   double-count a decision's verdict.
-
-This is fully offline / post-hoc: there is no live routing-path hook to
-add here (unlike WS4's shadow-mode capability-routing hook in
-``router.py``), so there is no live-routing invariance test required for
-this workstream — the module is inert until explicitly invoked, and never
-touches the request/response path.
-
-Integration with prior workstreams:
-
-* WS2 (``routing_quality.py``): ``run_audit``'s report includes
-  ``routing_quality.summarize()["mis_route_rate_inferred"]`` as
-  population-level context alongside this module's own sample-level
-  verdict counts. There is no per-row join key between the SQL
-  ``routing_decisions`` table and the JSONL routing-quality ledger, so
-  this integrates at the aggregate level rather than inventing one.
-* WS1 (``execution_ledger.py``): WS6 operates entirely on the
-  decision-time table (``routing_decisions``, owned by ``cost.py``), never
-  on the outcome-time ``execution_events`` table or its accounting
-  functions. There is therefore no duplication risk with WS1 to satisfy —
-  WS6 simply does not re-implement anything execution_ledger.py already
-  owns.
+The shape of the event is canonical (``AuditEventType.ROUTING_DECISION``)
+so the existing CEF/JSON/CSV exporters Just Work.
 """
-
 from __future__ import annotations
 
-import logging
 import os
-from dataclasses import dataclass
-from datetime import datetime, timezone
-from typing import Any, Literal
+import threading
+from typing import Any
 
-from llm_router.cost import _get_db
+try:
+    from llm_router.enterprise.audit import AuditEvent, AuditEventType, AuditLog
+except ImportError:  # enterprise/ is excluded from public distributions (gated by is_enterprise())
+    AuditEvent = AuditEventType = AuditLog = None  # type: ignore
+from llm_router.identity import TurnIdentity, current_identity
+from llm_router.logging import get_logger
+from llm_router.profile import is_enterprise
 
-log = logging.getLogger("llm_router.audit_routing")
+log = get_logger("llm_router.audit_routing")
 
-# Ported 1:1 from Chuzom's CHUZOM_AUDIT_DISABLED env-disable convention.
+
+# Tests / opt-out env. Affirmative values match the convention used by
+# ``LLM_ROUTER_FS_TOOLS`` (SEC-002) and ``LLM_ROUTER_AGORAGENTIC`` (SEC-003).
 _AUDIT_DISABLED_ENV = "LLM_ROUTER_AUDIT_DISABLED"
 _AFFIRMATIVE = {"1", "on", "true", "yes"}
 
-AuditVerdict = Literal["likely_misroute", "likely_correct", "insufficient_data"]
 
-# Judge-score thresholds for the primary (highest-confidence) signal.
-# judge_score is a 0.0-1.0 LLM-as-Judge quality score recorded on the row.
-_MISROUTE_JUDGE_THRESHOLD = 0.5
-_CORRECT_JUDGE_THRESHOLD = 0.75
+# Module-level singleton + a lock to make first-call construction
+# thread-safe. ``threading.Lock`` is the right tool here even though
+# routing is asyncio-driven: the singleton is shared across whatever
+# concurrent tasks happen to call ``audit_routing_turn`` first.
+_audit_log: AuditLog | None = None
+_audit_log_lock = threading.Lock()
 
 
-def audit_disabled() -> bool:
-    """True when LLM_ROUTER_AUDIT_DISABLED is set to an affirmative value."""
+def _audit_disabled() -> bool:
+    # 🥷 Backslash-security: Log all security-relevant events.
+    # G-003: under the enterprise profile the audit trail is mandatory —
+    # ``LLM_ROUTER_AUDIT_DISABLED`` is refused regardless of its value so an
+    # env tweak can't silently turn off the tamper-evident log. Developer
+    # profile preserves the env-driven opt-out for local/test use.
+    if is_enterprise():
+        return False
     return (os.environ.get(_AUDIT_DISABLED_ENV) or "").strip().lower() in _AFFIRMATIVE
 
 
-@dataclass(frozen=True)
-class AuditedDecision:
-    """Result of re-scoring one routing_decisions row."""
+def _get_audit_log() -> AuditLog:
+    """Return the process-wide :class:`AuditLog`, constructing on first call."""
+    global _audit_log
+    if _audit_log is None:
+        with _audit_log_lock:
+            if _audit_log is None:  # re-check under lock
+                _audit_log = AuditLog()
+    return _audit_log
 
-    decision_id: int
-    verdict: AuditVerdict
-    reason: str
 
+def reset_audit_log_for_tests() -> None:
+    """Clear the module-level :class:`AuditLog` singleton.
 
-def score_decision(row: dict[str, Any]) -> AuditedDecision:
-    """Re-score a single routing_decisions row from decision-time fields only.
-
-    Not text re-classification — ``routing_decisions`` stores only
-    ``prompt_hash``, never raw prompt text, so this is a structured-field
-    heuristic over signals already captured when the decision was made:
-
-    * ``judge_score`` (primary, highest confidence, when present): below
-      ``_MISROUTE_JUDGE_THRESHOLD`` -> likely_misroute; at/above
-      ``_CORRECT_JUDGE_THRESHOLD`` -> likely_correct; the ambiguous middle
-      band falls through to the secondary signal.
-    * ``complexity_downgraded`` (secondary): the complexity classification
-      itself was pressured downward by budget pressure with no
-      corroborating high judge_score -> likely_misroute.
-    * ``was_downshifted`` (secondary, weaker): only the model choice (not
-      the classification) was pressured -> insufficient_data, since this
-      alone is not strong enough evidence of a bad outcome.
-    * Otherwise: insufficient_data (no informative signal recorded).
-
-    Pure function, no I/O — exhaustively unit-testable without a database.
+    Tests use this in their fixtures to force the next call to construct
+    a fresh log pointed at the test's ``tmp_path`` ``LLM_ROUTER_AUDIT_PATH``.
+    Production code never calls this.
     """
-    decision_id = int(row["id"])
-    judge_score = row.get("judge_score")
-
-    if judge_score is not None:
-        judge_score = float(judge_score)
-        if judge_score < _MISROUTE_JUDGE_THRESHOLD:
-            return AuditedDecision(
-                decision_id,
-                "likely_misroute",
-                f"judge_score={judge_score:.2f} below threshold {_MISROUTE_JUDGE_THRESHOLD}",
-            )
-        if judge_score >= _CORRECT_JUDGE_THRESHOLD:
-            return AuditedDecision(
-                decision_id,
-                "likely_correct",
-                f"judge_score={judge_score:.2f} at/above threshold {_CORRECT_JUDGE_THRESHOLD}",
-            )
-        # Ambiguous middle band — fall through to the secondary signal.
-
-    if row.get("complexity_downgraded"):
-        return AuditedDecision(
-            decision_id,
-            "likely_misroute",
-            "complexity_downgraded under budget pressure without a corroborating high judge_score",
-        )
-    if row.get("was_downshifted"):
-        return AuditedDecision(
-            decision_id,
-            "insufficient_data",
-            "was_downshifted to a cheaper model but no judge_score was recorded",
-        )
-    return AuditedDecision(
-        decision_id,
-        "insufficient_data",
-        "no judge_score, complexity_downgraded, or was_downshifted signal recorded",
-    )
+    global _audit_log
+    with _audit_log_lock:
+        _audit_log = None
 
 
-async def sample_unaudited_decisions(limit: int = 100) -> list[dict[str, Any]]:
-    """Fetch up to `limit` routing_decisions rows that have not yet been audited.
+def audit_routing_turn(
+    *,
+    identity: TurnIdentity | None,
+    task_type: str,
+    complexity: str | None,
+    model: str,
+    provider: str,
+    cost_usd: float,
+    cached: bool = False,
+    detail_extras: dict[str, Any] | None = None,
+) -> None:
+    """Append one ``routing.decision`` audit row.
 
-    Fail-open: returns an empty list (never raises) on any DB error or when
-    auditing is disabled, consistent with WS1/WS2/WS5 precedent — an audit
-    failure must never surface to callers that expect this to be a harmless
-    offline/background task.
+    Called from ``router.route_and_call`` just before every successful
+    return path (cached hit + cold-fetched). Identity is resolved from
+    env via :func:`llm_router.identity.current_identity` when ``None``.
+
+    Failure modes are swallowed and logged at WARNING — callers must not
+    catch exceptions from this function because there should not be
+    any. See module docstring for the rationale.
     """
-    if audit_disabled():
-        return []
-    try:
-        db = await _get_db()
-        try:
-            cursor = await db.execute(
-                "SELECT id, judge_score, complexity_downgraded, was_downshifted "
-                "FROM routing_decisions WHERE audit_verdict IS NULL "
-                "ORDER BY id DESC LIMIT ?",
-                (limit,),
-            )
-            rows = await cursor.fetchall()
-            columns = [d[0] for d in cursor.description]
-            return [dict(zip(columns, r, strict=True)) for r in rows]
-        finally:
-            await db.close()
-    except Exception as exc:  # noqa: BLE001 - fail-open, see module docstring
-        log.warning("audit_sample_failed error=%s", exc)
-        return []
-
-
-async def _write_verdict(decision: AuditedDecision) -> bool:
-    """Write one verdict back, only if audit_verdict is currently NULL.
-
-    Non-destructive by construction: the WHERE clause guards against
-    overwriting a verdict written by an earlier (or concurrent) audit run,
-    which is what makes re-running the audit idempotent.
-    """
-    try:
-        db = await _get_db()
-        try:
-            checked_at = datetime.now(timezone.utc).isoformat()
-            cursor = await db.execute(
-                "UPDATE routing_decisions SET audit_verdict = ?, audit_checked_at = ? "
-                "WHERE id = ? AND audit_verdict IS NULL",
-                (decision.verdict, checked_at, decision.decision_id),
-            )
-            await db.commit()
-            return cursor.rowcount > 0
-        finally:
-            await db.close()
-    except Exception as exc:  # noqa: BLE001 - fail-open, see module docstring
-        log.warning("audit_write_failed error=%s", exc)
-        return False
-
-
-async def run_audit(limit: int = 100) -> dict[str, Any]:
-    """Sample unaudited routing_decisions, score them, and write verdicts back.
-
-    Returns a report dict with per-verdict counts plus, for WS2 integration,
-    ``routing_quality.summarize()["mis_route_rate_inferred"]`` as a
-    population-level baseline (there is no per-row join key between
-    routing_decisions and the routing_quality JSONL ledger, so this
-    integrates at the aggregate level).
-
-    Fail-open throughout: never raises.
-    """
-    if audit_disabled():
-        return {"disabled": True, "sampled": 0, "audited": 0, "verdict_counts": {}}
-
-    rows = await sample_unaudited_decisions(limit=limit)
-    verdict_counts: dict[str, int] = {
-        "likely_misroute": 0,
-        "likely_correct": 0,
-        "insufficient_data": 0,
-    }
-    audited = 0
-    for row in rows:
-        decision = score_decision(row)
-        verdict_counts[decision.verdict] += 1
-        if await _write_verdict(decision):
-            audited += 1
-
-    report: dict[str, Any] = {
-        "disabled": False,
-        "sampled": len(rows),
-        "audited": audited,
-        "verdict_counts": verdict_counts,
-    }
+    if _audit_disabled():
+        return
 
     try:
-        from llm_router.routing_quality import summarize as _summarize_quality
+        actor = identity if identity is not None else current_identity()
 
-        report["mis_route_rate_inferred_baseline"] = _summarize_quality().get(
-            "mis_route_rate_inferred"
+        detail = {
+            "task_type": task_type,
+            "complexity": complexity or "unknown",
+            "model": model,
+            "provider": provider,
+            "cost_usd": float(cost_usd or 0.0),
+        }
+        # Tier 2: surface agent_id in the audit row when this turn is
+        # part of an agent run. Omitted when None so non-agent turns
+        # don't carry a meaningless null field.
+        if actor.agent_id:
+            detail["agent_id"] = actor.agent_id
+        # T1-M1 (Q-P-2 Phase 3a): always surface tenant_id when present.
+        # In Phase 3a it usually equals org_id (single-org-per-instance);
+        # in Phase 3b it differentiates per-tenant sidecars within one
+        # org. Carrying it from day 1 makes audit-row schemas
+        # forward-compat without a future migration.
+        if actor.tenant_id:
+            detail["tenant_id"] = actor.tenant_id
+        if detail_extras:
+            detail.update(detail_extras)
+
+        event = AuditEvent(
+            type=AuditEventType.ROUTING_DECISION,
+            actor_id=actor.user_id,
+            actor_email=actor.user_email,
+            org_id=actor.org_id,
+            resource=f"model:{model}",
+            action="cached" if cached else "routed",
+            detail=detail,
+            severity="info",
         )
-    except Exception as exc:  # noqa: BLE001 - fail-open, context-only field
-        log.warning("audit_quality_baseline_failed error=%s", exc)
-        report["mis_route_rate_inferred_baseline"] = None
-
-    return report
+        _get_audit_log().append(event)
+    except Exception as audit_err:  # noqa: BLE001 — see module docstring
+        # Best-effort. Never propagate; the routed turn already happened.
+        log.warning("audit_write_failed", error=str(audit_err))
 
 
 __all__ = [
-    "AuditVerdict",
-    "AuditedDecision",
-    "audit_disabled",
-    "score_decision",
-    "sample_unaudited_decisions",
-    "run_audit",
+    "audit_routing_turn",
+    "reset_audit_log_for_tests",
 ]

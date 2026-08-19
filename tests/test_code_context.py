@@ -267,3 +267,92 @@ class TestParseSymbols:
         assert sym.kind == "function"
         assert sym.start_line >= 1
         assert "return" in sym.source
+
+
+class TestPromptDerivedPathsAreConfined:
+    """CodeQL py/path-injection, src/llm_router/code_context.py.
+
+    `extract_code_context` joined `project_dir` with paths pulled out of the
+    PROMPT. `detect_file_paths` requires a code extension but constrains nothing
+    before it, so `x/../../../../etc/shadow.py` matches and the join escapes the
+    project. Whatever it yields is read and forwarded to an external provider,
+    which makes this an exfiltration primitive rather than only a path bug —
+    forwarding context is what llm_router does.
+
+    Prompt text is not trusted input: it routinely carries pasted logs, web
+    content and tool output the user never wrote.
+
+    TWO WAYS THIS TEST CAN PASS FOR THE WRONG REASON, both hit while writing it:
+
+    1. A file is only rendered into the context if one of its symbols ALSO
+       matches a symbol detected in the prompt (extract_code_context step 3).
+       A traversal prompt that names no matching symbol collects the file and
+       still returns "" — green with the confinement removed.
+    2. `Path.exists()` requires every intermediate component to exist, so a
+       traversal through a directory that is not there (`x/../../outside`) is
+       False before confinement is ever consulted. The traversal must go through
+       a REAL directory — `src/` here — to be reachable at all.
+
+    Both are versions of the defect this suite exists to catch, so the control
+    is recorded: with `is_safe_path` removed, test_traversal fails and leaks
+    `sk-live-...` into the context. Re-run that control if this test is edited.
+    """
+
+    @staticmethod
+    def _layout(tmp_path):
+        project = tmp_path / "project"
+        (project / "src").mkdir(parents=True)
+        (project / "src" / "app.py").write_text(
+            "def collect_me():\n    return 'in-project'\n"
+        )
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (outside / "secret.py").write_text(
+            "def collect_me():\n    return 'sk-live-must-never-be-collected'\n"
+        )
+        return project
+
+    def test_traversal_out_of_the_project_is_not_collected(self, tmp_path):
+        project = self._layout(tmp_path)
+        # Traversal goes through `src/`, which really exists — see note (2).
+        ctx = extract_code_context(
+            "what does collect_me in src/../../outside/secret.py return?",
+            str(project),
+        )
+        assert "sk-live-must-never-be-collected" not in ctx
+
+    def test_ordinary_in_project_paths_still_work(self, tmp_path):
+        """The confinement must not break the feature it protects."""
+        project = self._layout(tmp_path)
+        ctx = extract_code_context(
+            "what does collect_me in src/app.py return?", str(project)
+        )
+        assert "in-project" in ctx
+
+
+class TestFilePathRegexIsBounded:
+    """CodeQL py/polynomial-redos, src/llm_router/code_context.py.
+
+    `[\\w/.-]` contains `.`, so it competes with the following `\\.` for every
+    dot and the engine backtracks quadratically. This runs in the prompt hook.
+    Ordinary pasted text is unaffected (whitespace resets the scan); a crafted
+    unbroken token is not.
+    """
+
+    def test_pathological_token_stays_fast(self):
+        import time
+
+        pathological = "a" + "a." * 32_000  # one unbroken token
+        start = time.perf_counter()
+        detect_file_paths(pathological)
+        elapsed = time.perf_counter() - start
+        # Unbounded: ~7s at this size, ~69s at 200k chars.
+        assert elapsed < 2.0, f"regex took {elapsed:.2f}s — the bound is gone"
+
+    def test_real_paths_are_unchanged_by_the_bound(self):
+        found = detect_file_paths(
+            "see src/llm_router/router.py and lib/mod.rs plus a.b.c.js"
+        )
+        assert "src/llm_router/router.py" in found
+        assert "lib/mod.rs" in found
+        assert "a.b.c.js" in found

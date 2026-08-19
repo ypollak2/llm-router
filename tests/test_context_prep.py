@@ -1,9 +1,24 @@
 """Tests for context_prep module — the prompt preparation pipeline."""
 
-from unittest.mock import patch
+import pytest
 
 from llm_router.context_prep import PreparedPrompt, prepare_prompt
 from llm_router.types import Complexity, TaskType
+
+
+@pytest.fixture(autouse=True)
+def _isolate_result_cache(tmp_path, monkeypatch):
+    """Isolate the BM25 result cache to an empty tmp dir.
+
+    prepare_prompt() retrieves context from ~/.llm-router/result_cache.db via
+    result_cache._ROUTER_DIR (bound at import). Without isolation, a developer
+    with a populated cache gets real context injected, so token-estimate
+    assertions that assume "empty context" fail (283 vs <200) — while CI's empty
+    cache passes. Point _ROUTER_DIR at a fresh tmp dir so every test here is
+    hermetic regardless of the machine's cache.
+    """
+    import llm_router.result_cache as rc
+    monkeypatch.setattr(rc, "_ROUTER_DIR", tmp_path / ".llm-router")
 
 
 class TestPreparePrompt:
@@ -93,14 +108,12 @@ class TestPreparedPromptProperties:
     """Test PreparedPrompt computed properties."""
 
     def test_estimated_total_tokens_reasonable(self):
-        # Patch cache retrieval so context is deterministically empty
-        with patch("llm_router.result_cache.search_results", return_value=[]):
-            result = prepare_prompt(
-                "Short question",
-                TaskType.QUERY, Complexity.SIMPLE, "openai/gpt-4o-mini",
-            )
+        result = prepare_prompt(
+            "Short question",
+            TaskType.QUERY, Complexity.SIMPLE, "openai/gpt-4o-mini",
+        )
         total = result.estimated_total_tokens
-        # System prompt + empty context + short question — no cache hits
+        # System prompt + empty context + short question
         assert 5 < total < 200
 
     def test_full_system_without_context(self):

@@ -144,6 +144,7 @@ def record_routing_decision(
     reason: Optional[str] = None,
     escalated: bool = False,
     quality_score: Optional[float] = None,
+    baseline_cost: Optional[float] = None,
 ) -> str:
     """Record a routing decision and return formatted HUD.
 
@@ -157,6 +158,13 @@ def record_routing_decision(
         reason: Optional explanation of routing choice
         escalated: Whether this was an escalation (low confidence -> high model)
         quality_score: Optional post-call quality score 0.0-1.0
+        baseline_cost: The task-aware Claude-baseline cost for this call (what it
+            would have cost without routing). REQUIRED for the HUD's session
+            savings to be non-zero — historically this was never supplied, so the
+            statusline permanently displayed $0 saved (AC-7). Compute it with the
+            same canonical functions ``log_usage`` uses
+            (``pricing.savings_baseline_model`` + ``cost._claude_cost``) so the HUD
+            and the persisted ``usage.saved_usd`` agree.
 
     Returns:
         Formatted HUD string for statusline
@@ -181,7 +189,7 @@ def record_routing_decision(
         escalated=escalated,
     )
 
-    return render_hud(decision)
+    return render_hud(decision, baseline_cost=baseline_cost)
 
 
 def format_statusline_context(
@@ -193,7 +201,7 @@ def format_statusline_context(
     - Live routing HUD
     - Session stats (count, cost, savings)
     - Profile indicator (if personalization active)
-    - Link to `llm-router replay` for full transcript
+    - Link to `llm_router replay` for full transcript
 
     Args:
         max_width: Maximum statusline width (typically 80)
@@ -202,11 +210,11 @@ def format_statusline_context(
         Formatted statusline string
 
     Example output (with context):
-        [llm-router] → haiku [87%] (code/simple) $0.001 | 12 calls | $0.18 cost | $2.89 saved
+        [llm_router] → haiku [87%] (code/simple) $0.001 | 12 calls | $0.18 cost | $2.89 saved
     """
     global _statusline_state
 
-    parts = ["[llm-router]"]
+    parts = ["[llm_router]"]
 
     # Add current HUD
     hud = get_current_hud()
@@ -234,7 +242,7 @@ def format_statusline_context(
 
 
 def format_replay_summary() -> str:
-    """Format summary for `llm-router replay` command.
+    """Format summary for `llm_router replay` command.
 
     Shows aggregate stats from statusline state for this session.
 

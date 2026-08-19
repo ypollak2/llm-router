@@ -9,6 +9,7 @@ Claude Opus policy violation.
 
 import pytest
 from llm_router.profiles import (
+    model_matches,
     ROUTING_TABLE,
     RoutingProfile,
     TaskType,
@@ -28,7 +29,7 @@ class TestOpusNotInBudgetProfile:
             if profile != RoutingProfile.BUDGET:
                 continue
 
-            assert "anthropic/claude-opus-4-6" not in chain, (
+            assert not any(model_matches(m, "anthropic/claude-opus") for m in chain), (
                 f"POLICY VIOLATION: Opus found in BUDGET/{task_type.name} static chain. "
                 f"Chain: {chain}"
             )
@@ -40,7 +41,7 @@ class TestOpusNotInBudgetProfile:
                 continue  # Media tasks don't use pressure reordering
 
             chain = get_model_chain(RoutingProfile.BUDGET, task_type)
-            assert "anthropic/claude-opus-4-6" not in chain, (
+            assert not any(model_matches(m, "anthropic/claude-opus") for m in chain), (
                 f"POLICY VIOLATION: Opus appeared in BUDGET/{task_type.name} "
                 f"after dynamic reordering. Chain: {chain}"
             )
@@ -55,7 +56,7 @@ class TestOpusNotInBalancedProfile:
             if profile != RoutingProfile.BALANCED:
                 continue
 
-            assert "anthropic/claude-opus-4-6" not in chain, (
+            assert not any(model_matches(m, "anthropic/claude-opus") for m in chain), (
                 f"POLICY VIOLATION: Opus found in BALANCED/{task_type.name} static chain. "
                 f"Chain: {chain}"
             )
@@ -67,7 +68,7 @@ class TestOpusNotInBalancedProfile:
                 continue
 
             chain = get_model_chain(RoutingProfile.BALANCED, task_type)
-            assert "anthropic/claude-opus-4-6" not in chain, (
+            assert not any(model_matches(m, "anthropic/claude-opus") for m in chain), (
                 f"POLICY VIOLATION: Opus appeared in BALANCED/{task_type.name} "
                 f"at low pressure. Chain: {chain}"
             )
@@ -84,7 +85,7 @@ class TestOpusNotInBalancedProfile:
 
         result = reorder_for_pressure(test_chain, pressure=0.99, profile=RoutingProfile.BALANCED)
 
-        assert "anthropic/claude-opus-4-6" not in result, (
+        assert not any(model_matches(m, "anthropic/claude-opus") for m in result), (
             f"POLICY VIOLATION: Opus was not removed at 99% pressure. "
             f"Result: {result}"
         )
@@ -99,7 +100,7 @@ class TestOpusAllowedInPremiumProfile:
         for (profile, task_type), chain in ROUTING_TABLE.items():
             if profile != RoutingProfile.PREMIUM:
                 continue
-            if "anthropic/claude-opus-4-6" in chain:
+            if any(model_matches(m, "anthropic/claude-opus") for m in chain):
                 opus_found_anywhere = True
                 break
 
@@ -115,7 +116,7 @@ class TestOpusAllowedInPremiumProfile:
 
             chain = get_model_chain(RoutingProfile.PREMIUM, task_type)
             # Opus should be present (though may not be first depending on benchmarks)
-            assert "anthropic/claude-opus-4-6" in chain, (
+            assert any(model_matches(m, "anthropic/claude-opus") for m in chain), (
                 f"Opus should be in PREMIUM/{task_type.name} at low pressure. "
                 f"Chain: {chain}"
             )
@@ -187,16 +188,16 @@ class TestConstraintStructures:
 
     def test_forbidden_models_list_includes_opus(self):
         """Opus should be in forbidden list for BUDGET and BALANCED."""
-        assert "anthropic/claude-opus-4-6" in MODELS_PER_PROFILE[
+        assert "anthropic/claude-opus" in MODELS_PER_PROFILE[
             RoutingProfile.BUDGET
         ]["forbidden"]
-        assert "anthropic/claude-opus-4-6" in MODELS_PER_PROFILE[
+        assert "anthropic/claude-opus" in MODELS_PER_PROFILE[
             RoutingProfile.BALANCED
         ]["forbidden"]
 
     def test_opus_not_in_premium_forbidden(self):
         """Opus should NOT be in forbidden list for PREMIUM."""
-        assert "anthropic/claude-opus-4-6" not in MODELS_PER_PROFILE[
+        assert "anthropic/claude-opus" not in MODELS_PER_PROFILE[
             RoutingProfile.PREMIUM
         ]["forbidden"]
 
@@ -214,7 +215,7 @@ class TestReorderForPressureConstraints:
         result = reorder_for_pressure(
             test_chain, pressure=0.5, profile=RoutingProfile.BALANCED
         )
-        assert "anthropic/claude-opus-4-6" not in result
+        assert not any(model_matches(m, "anthropic/claude-opus") for m in result)
 
     def test_medium_pressure_respects_constraints(self):
         """At medium pressure (0.85-0.98), chains should respect constraints."""
@@ -225,7 +226,7 @@ class TestReorderForPressureConstraints:
         result = reorder_for_pressure(
             test_chain, pressure=0.9, profile=RoutingProfile.BALANCED
         )
-        assert "anthropic/claude-opus-4-6" not in result
+        assert not any(model_matches(m, "anthropic/claude-opus") for m in result)
 
     def test_hard_cap_removes_all_claude(self):
         """At ≥0.99 pressure (hard cap), ALL Claude should be removed."""
@@ -239,8 +240,8 @@ class TestReorderForPressureConstraints:
             test_chain, pressure=0.99, profile=RoutingProfile.BALANCED
         )
         # Hard cap should remove ALL anthropic models
-        assert "anthropic/claude-opus-4-6" not in result
-        assert "anthropic/claude-haiku-4-5-20251001" not in result
+        assert not any(model_matches(m, "anthropic/claude-opus") for m in result)
+        assert not any(model_matches(m, "anthropic/claude-haiku") for m in result)
         assert "anthropic/claude-sonnet-4-6" not in result
 
 
@@ -261,7 +262,7 @@ class TestIntegrationWithRouter:
     def test_no_opus_in_non_premium_after_full_routing(self, profile, task_type):
         """Full routing through get_model_chain should never produce Opus in non-PREMIUM."""
         chain = get_model_chain(profile, task_type)
-        assert "anthropic/claude-opus-4-6" not in chain, (
+        assert not any(model_matches(m, "anthropic/claude-opus") for m in chain), (
             f"POLICY VIOLATION: Opus appeared in {profile.name}/{task_type.name} "
             f"after full routing. Chain: {chain}"
         )

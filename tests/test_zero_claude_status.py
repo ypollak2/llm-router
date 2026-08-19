@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 from pathlib import Path
 
 from llm_router.hooks.chain_builder import get_current_pressure, needs_claude_tools
@@ -16,7 +17,16 @@ def _load_session_start():
     spec = importlib.util.spec_from_file_location("session_start_hook_for_test", SESSION_START_PATH)
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    # session-start.py calls _load_dotenv() at module-exec time, which injects
+    # keys from the real ~/.llm-router/.env into os.environ. Snapshot/restore so
+    # loading it for one test cannot contaminate later tests (provider
+    # availability, routing decisions) in the same pytest process.
+    env_snapshot = dict(os.environ)
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        os.environ.clear()
+        os.environ.update(env_snapshot)
     return module
 
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 from llm_router import providers
 from llm_router.config import get_config
 from llm_router.cost import rate_routing_decision
+from llm_router.tool_surface import localize, route_call# CHZ-SURF-01
 
 
 # ── Provider registry ──────────────────────────────────────────────────────────
@@ -159,7 +160,7 @@ _TEST_MODELS: dict[str, str] = {
     "openai": "openai/gpt-4o-mini",
     "gemini": "gemini/gemini-2.5-flash-lite",
     "groq": "groq/llama-3.3-70b-versatile",
-    "deepseek": "deepseek/deepseek-chat",
+    "deepseek": "deepseek/deepseek-v4-flash",
     "mistral": "mistral/mistral-small-latest",
     "perplexity": "perplexity/sonar",
     "anthropic": "anthropic/claude-haiku-4-5-20251001",
@@ -211,7 +212,7 @@ async def llm_setup(
                     f"To add **{reg['name']}**:\n"
                     f"1. Sign up at: {reg['signup_url']}\n"
                     f"2. Copy your API key\n"
-                    f"3. Run: `llm_setup(action='add', provider='{provider}', api_key='your-key-here')`\n\n"
+                    f"3. Run: `llm_setup(action='add', provider='{provider}', api_key=<YOUR_KEY>)`\n\n"
                     f"Free tier: {reg['free_tier']}"
                 )
             return f"Unknown provider: {provider}. Run `llm_setup(action='status')` for the list."
@@ -292,31 +293,31 @@ def _setup_status() -> str:
 
 def _setup_guide() -> str:
     """Return a static markdown quick-start guide for new users."""
-    return """# Quick Start Guide — Get Running in 5 Minutes
+    return localize("""# Quick Start Guide — Get Running in 5 Minutes
 
 ## Step 1: Gemini (FREE — best starting point)
 1. Go to https://aistudio.google.com/apikey
 2. Click "Create API Key" (Google account required)
 3. Copy the key
-4. Run: `llm_setup(action='add', provider='gemini', api_key='your-key')`
+4. Run: `llm_setup(action='add', provider='gemini', api_key=<YOUR_KEY>)`
 5. You now have: text, code, images (Imagen 3), and video (Veo 2)!
 
 ## Step 2: Groq (FREE — ultra-fast inference)
 1. Go to https://console.groq.com/keys
 2. Sign up and create an API key
-3. Run: `llm_setup(action='add', provider='groq', api_key='your-key')`
+3. Run: `llm_setup(action='add', provider='groq', api_key=<YOUR_KEY>)`
 4. Adds: blazing fast Llama 3.3 for classification and simple tasks
 
 ## Step 3: DeepSeek (CHEAP — best quality/price)
 1. Go to https://platform.deepseek.com/api_keys
 2. Sign up and add $5 credit (lasts weeks of heavy use)
-3. Run: `llm_setup(action='add', provider='deepseek', api_key='your-key')`
+3. Run: `llm_setup(action='add', provider='deepseek', api_key=<YOUR_KEY>)`
 4. Adds: excellent coding and reasoning at 1/20th the cost of GPT-4o
 
 ## Step 4 (Optional): OpenAI
 1. Go to https://platform.openai.com/api-keys
 2. Add billing ($5 minimum)
-3. Run: `llm_setup(action='add', provider='openai', api_key='your-key')`
+3. Run: `llm_setup(action='add', provider='openai', api_key=<YOUR_KEY>)`
 4. Adds: GPT-4o, o3, DALL-E 3, TTS, Whisper
 
 ## After Setup
@@ -337,7 +338,7 @@ LLM_ROUTER_MONTHLY_BUDGET=20.00
 - `.env` should be in `.gitignore` (the router checks this)
 - Keys are loaded into environment variables at runtime only
 - No keys are ever logged or sent to third parties
-"""
+""")
 
 
 async def _setup_discover() -> str:
@@ -364,7 +365,7 @@ async def _setup_discover() -> str:
     env_paths = [
         Path.home() / ".env",
         Path.cwd() / ".env",
-        Path.home() / ".config" / "llm-router" / ".env",
+        Path.home() / ".config" / "llm_router" / ".env",
     ]
     for env_path in env_paths:
         # Offload synchronous Path.exists() to thread pool to avoid blocking event loop
@@ -478,13 +479,13 @@ def _setup_add(provider: str, api_key: str) -> str:
     if _get_stored_cap(provider) <= 0:
         budget_nudge = (
             f"\n\n💰 **Set a monthly budget cap** to protect against runaway costs:\n"
-            f"   `llm-router budget set {provider} 20`\n"
+            f"   `llm_router budget set {provider} 20`\n"
             f"   (or any amount — the router will route away from this provider as you approach the cap)"
         )
 
     return (
         f"Added **{reg['name']}** (`{masked}`) to `{env_path}`\n\n"
-        f"Run `llm_health()` to verify the key works."
+        f"Run `{route_call('llm_health')}` to verify the key works."
         f"{gitignore_warning}"
         f"{budget_nudge}"
     )
@@ -559,7 +560,7 @@ def _setup_provider_detail(provider: str | None) -> str:
             "## How to Add",
             f"1. Go to {reg['signup_url']}",
             "2. Create an account and generate an API key",
-            f"3. Run: `llm_setup(action='add', provider='{provider}', api_key='your-key')`",
+            f"3. Run: `llm_setup(action='add', provider='{provider}', api_key=<YOUR_KEY>)`",
         ])
 
     return "\n".join(lines)

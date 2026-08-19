@@ -101,9 +101,43 @@ class TestGates:
 
     def test_structure_gate_fails_unstructured_wall(self):
         contract = self._make_contract(task_type=TaskType.ANALYZE)
-        text = "a " * 150  # 300 chars with no structure
+        text = "a " * 150  # 300 chars, no markers/paragraphs/sentences
         result = _check_structure(contract, text)
         assert not result.passed
+
+    def test_structure_gate_passes_valid_prose_without_markdown(self):
+        """Lever ① root-cause regression: a valid multi-sentence prose answer
+        with ZERO Markdown markers must PASS. The old gate rejected it as
+        'no structure', which forced the router down its chain to exhaustion
+        (the 466-char o3 answer → q=1 failure in the clean metered benchmark)."""
+        contract = self._make_contract(task_type=TaskType.ANALYZE)
+        # ~460 chars, several sentences, no headings/bullets — legible prose.
+        text = (
+            "The bottleneck is contention on the shared write lock, not raw CPU. "
+            "Each request grabs the lock before touching the index, so throughput "
+            "collapses once concurrency passes the number of cores. Sharding the "
+            "index by tenant removes the single lock and lets writes proceed in "
+            "parallel. Batching the fsync calls further cuts the syscall overhead "
+            "that dominates the tail latency under load."
+        )
+        assert "## " not in text and "\n- " not in text  # genuinely no markdown
+        assert len(text) > 200
+        result = _check_structure(contract, text)
+        assert result.passed, result.reason
+
+    def test_structure_gate_passes_multi_paragraph_prose(self):
+        """Two blank-line-separated paragraphs are structure even with no
+        markers and short sentences."""
+        contract = self._make_contract(task_type=TaskType.ANALYZE)
+        text = (
+            "First, the cache key omits the tenant id so entries collide across "
+            "tenants and one tenant reads another's cached answer.\n\n"
+            "Second, the ttl is measured in the wrong unit, so entries never "
+            "expire within a normal session and stale data is served for hours."
+        )
+        assert len(text) > 200
+        result = _check_structure(contract, text)
+        assert result.passed, result.reason
 
     def test_citation_gate_passes_with_url(self):
         contract = self._make_contract(task_type=TaskType.RESEARCH)

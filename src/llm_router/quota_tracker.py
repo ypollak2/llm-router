@@ -266,7 +266,10 @@ class QuotaTracker:
             return 0.0, 0.0
 
         try:
-            async with aiosqlite.connect(str(db_path), timeout=5) as db:
+            from llm_router.aiosqlite_util import mark_worker_daemon
+            _conn = aiosqlite.connect(str(db_path), timeout=5)
+            mark_worker_daemon(_conn)  # CHZ-PY-004: before __aenter__ starts the worker
+            async with _conn as db:
                 # OpenAI spend
                 cursor = await db.execute(
                     """

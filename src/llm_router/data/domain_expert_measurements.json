@@ -1,0 +1,520 @@
+{
+  "biology": [
+    {
+      "model": "qwen/qwen3-235b-a22b-2507",
+      "acc": 0.88,
+      "cost_1k": 0.0176,
+      "arena": 0.8791,
+      "errors": 0
+    },
+    {
+      "model": "deepseek/deepseek-v3.2",
+      "acc": 0.8,
+      "cost_1k": 0.0681,
+      "arena": 0.7946,
+      "errors": 0
+    },
+    {
+      "model": "deepseek/deepseek-v4-flash",
+      "acc": 0.76,
+      "cost_1k": 0.1133,
+      "arena": 0.7538,
+      "errors": 0
+    },
+    {
+      "model": "deepseek/deepseek-r1",
+      "acc": 0.68,
+      "cost_1k": 0.801,
+      "arena": 0.6607,
+      "errors": 0
+    },
+    {
+      "model": "qwen/qwen3-coder-30b-a3b-instruct",
+      "acc": 0.6,
+      "cost_1k": 0.0325,
+      "arena": 0.6147,
+      "errors": 0
+    }
+  ],
+  "business": [
+    {
+      "model": "deepseek/deepseek-v3.2",
+      "acc": 0.76,
+      "cost_1k": 0.1284,
+      "arena": 0.7526,
+      "errors": 0
+    },
+    {
+      "model": "deepseek/deepseek-v4-flash",
+      "acc": 0.64,
+      "cost_1k": 0.2025,
+      "arena": 0.6403,
+      "errors": 0
+    },
+    {
+      "model": "qwen/qwen3-235b-a22b-2507",
+      "acc": 0.56,
+      "cost_1k": 0.0141,
+      "arena": 0.5796,
+      "errors": 0
+    },
+    {
+      "model": "qwen/qwen3-coder-30b-a3b-instruct",
+      "acc": 0.44,
+      "cost_1k": 0.0672,
+      "arena": 0.457,
+      "errors": 0
+    },
+    {
+      "model": "deepseek/deepseek-r1",
+      "acc": 0.32,
+      "cost_1k": 0.8318,
+      "arena": 0.3313,
+      "errors": 0
+    }
+  ],
+  "chemistry": [
+    {
+      "model": "deepseek/deepseek-v4-flash",
+      "acc": 0.64,
+      "cost_1k": 0.2055,
+      "arena": 0.6401,
+      "errors": 0
+    },
+    {
+      "model": "deepseek/deepseek-v3.2",
+      "acc": 0.56,
+      "cost_1k": 0.115,
+      "arena": 0.5701,
+      "errors": 0
+    },
+    {
+      "model": "qwen/qwen3-coder-30b-a3b-instruct",
+      "acc": 0.48,
+      "cost_1k": 0.0858,
+      "arena": 0.4951,
+      "errors": 0
+    },
+    {
+      "model": "qwen/qwen3-235b-a22b-2507",
+      "acc": 0.44,
+      "cost_1k": 0.0162,
+      "arena": 0.4609,
+      "errors": 0
+    },
+    {
+      "model": "deepseek/deepseek-r1",
+      "acc": 0.04,
+      "cost_1k": 0.5523,
+      "arena": 0.0437,
+      "errors": 0
+    }
+  ],
+  "computer science": [
+    {
+      "model": "qwen/qwen3-235b-a22b-2507",
+      "acc": 0.667,
+      "cost_1k": 0.0138,
+      "arena": 0.6824,
+      "errors": 0
+    },
+    {
+      "model": "deepseek/deepseek-v3.2",
+      "acc": 0.611,
+      "cost_1k": 0.1064,
+      "arena": 0.6185,
+      "errors": 0
+    },
+    {
+      "model": "deepseek/deepseek-v4-flash",
+      "acc": 0.611,
+      "cost_1k": 0.4351,
+      "arena": 0.6073,
+      "errors": 0
+    },
+    {
+      "model": "qwen/qwen3-coder-30b-a3b-instruct",
+      "acc": 0.389,
+      "cost_1k": 0.0368,
+      "arena": 0.408,
+      "errors": 0
+    },
+    {
+      "model": "deepseek/deepseek-r1",
+      "acc": 0.222,
+      "cost_1k": 0.6597,
+      "arena": 0.2347,
+      "errors": 0
+    }
+  ],
+  "economics": [
+    {
+      "model": "deepseek/deepseek-v3.2",
+      "acc": 0.84,
+      "cost_1k": 0.0689,
+      "arena": 0.8302,
+      "errors": 0
+    },
+    {
+      "model": "qwen/qwen3-235b-a22b-2507",
+      "acc": 0.76,
+      "cost_1k": 0.0111,
+      "arena": 0.7718,
+      "errors": 0
+    },
+    {
+      "model": "deepseek/deepseek-v4-flash",
+      "acc": 0.72,
+      "cost_1k": 0.1068,
+      "arena": 0.7184,
+      "errors": 0
+    },
+    {
+      "model": "qwen/qwen3-coder-30b-a3b-instruct",
+      "acc": 0.6,
+      "cost_1k": 0.0371,
+      "arena": 0.614,
+      "errors": 0
+    },
+    {
+      "model": "deepseek/deepseek-r1",
+      "acc": 0.52,
+      "cost_1k": 0.5968,
+      "arena": 0.5219,
+      "errors": 0
+    }
+  ],
+  "engineering": [
+    {
+      "model": "qwen/qwen3-235b-a22b-2507",
+      "acc": 0.64,
+      "cost_1k": 0.024,
+      "arena": 0.6543,
+      "errors": 0
+    },
+    {
+      "model": "deepseek/deepseek-v3.2",
+      "acc": 0.6,
+      "cost_1k": 0.2353,
+      "arena": 0.6025,
+      "errors": 0
+    },
+    {
+      "model": "qwen/qwen3-coder-30b-a3b-instruct",
+      "acc": 0.44,
+      "cost_1k": 0.0466,
+      "arena": 0.4582,
+      "errors": 0
+    },
+    {
+      "model": "deepseek/deepseek-v4-flash",
+      "acc": 0.32,
+      "cost_1k": 0.257,
+      "arena": 0.3347,
+      "errors": 0
+    },
+    {
+      "model": "deepseek/deepseek-r1",
+      "acc": 0.32,
+      "cost_1k": 1.5457,
+      "arena": 0.3288,
+      "errors": 0
+    }
+  ],
+  "health": [
+    {
+      "model": "qwen/qwen3-235b-a22b-2507",
+      "acc": 0.76,
+      "cost_1k": 0.0127,
+      "arena": 0.771,
+      "errors": 0
+    },
+    {
+      "model": "deepseek/deepseek-v4-flash",
+      "acc": 0.68,
+      "cost_1k": 0.1368,
+      "arena": 0.68,
+      "errors": 0
+    },
+    {
+      "model": "deepseek/deepseek-v3.2",
+      "acc": 0.64,
+      "cost_1k": 0.0459,
+      "arena": 0.6507,
+      "errors": 0
+    },
+    {
+      "model": "qwen/qwen3-coder-30b-a3b-instruct",
+      "acc": 0.52,
+      "cost_1k": 0.0152,
+      "arena": 0.5402,
+      "errors": 0
+    },
+    {
+      "model": "deepseek/deepseek-r1",
+      "acc": 0.4,
+      "cost_1k": 0.5297,
+      "arena": 0.4103,
+      "errors": 0
+    }
+  ],
+  "history": [
+    {
+      "model": "deepseek/deepseek-v3.2",
+      "acc": 0.72,
+      "cost_1k": 0.0409,
+      "arena": 0.726,
+      "errors": 0
+    },
+    {
+      "model": "qwen/qwen3-235b-a22b-2507",
+      "acc": 0.68,
+      "cost_1k": 0.0111,
+      "arena": 0.6962,
+      "errors": 0
+    },
+    {
+      "model": "deepseek/deepseek-v4-flash",
+      "acc": 0.56,
+      "cost_1k": 0.1243,
+      "arena": 0.5697,
+      "errors": 0
+    },
+    {
+      "model": "deepseek/deepseek-r1",
+      "acc": 0.52,
+      "cost_1k": 0.4956,
+      "arena": 0.5234,
+      "errors": 0
+    },
+    {
+      "model": "qwen/qwen3-coder-30b-a3b-instruct",
+      "acc": 0.48,
+      "cost_1k": 0.0145,
+      "arena": 0.5009,
+      "errors": 0
+    }
+  ],
+  "law": [
+    {
+      "model": "qwen/qwen3-235b-a22b-2507",
+      "acc": 0.52,
+      "cost_1k": 0.0275,
+      "arena": 0.5382,
+      "errors": 0
+    },
+    {
+      "model": "deepseek/deepseek-v3.2",
+      "acc": 0.52,
+      "cost_1k": 0.1099,
+      "arena": 0.5324,
+      "errors": 0
+    },
+    {
+      "model": "qwen/qwen3-coder-30b-a3b-instruct",
+      "acc": 0.36,
+      "cost_1k": 0.0521,
+      "arena": 0.3783,
+      "errors": 0
+    },
+    {
+      "model": "deepseek/deepseek-v4-flash",
+      "acc": 0.36,
+      "cost_1k": 0.5602,
+      "arena": 0.3716,
+      "errors": 0
+    },
+    {
+      "model": "deepseek/deepseek-r1",
+      "acc": 0.16,
+      "cost_1k": 0.5968,
+      "arena": 0.171,
+      "errors": 0
+    }
+  ],
+  "math": [
+    {
+      "model": "deepseek/deepseek-v3.2",
+      "acc": 0.84,
+      "cost_1k": 0.1151,
+      "arena": 0.8244,
+      "errors": 0
+    },
+    {
+      "model": "qwen/qwen3-235b-a22b-2507",
+      "acc": 0.76,
+      "cost_1k": 0.0113,
+      "arena": 0.7717,
+      "errors": 0
+    },
+    {
+      "model": "deepseek/deepseek-v4-flash",
+      "acc": 0.76,
+      "cost_1k": 0.1274,
+      "arena": 0.7526,
+      "errors": 0
+    },
+    {
+      "model": "qwen/qwen3-coder-30b-a3b-instruct",
+      "acc": 0.64,
+      "cost_1k": 0.0862,
+      "arena": 0.6467,
+      "errors": 0
+    },
+    {
+      "model": "deepseek/deepseek-r1",
+      "acc": 0.28,
+      "cost_1k": 0.4724,
+      "arena": 0.2934,
+      "errors": 0
+    }
+  ],
+  "other": [
+    {
+      "model": "qwen/qwen3-235b-a22b-2507",
+      "acc": 0.68,
+      "cost_1k": 0.0126,
+      "arena": 0.6956,
+      "errors": 0
+    },
+    {
+      "model": "deepseek/deepseek-v3.2",
+      "acc": 0.68,
+      "cost_1k": 0.0525,
+      "arena": 0.6872,
+      "errors": 0
+    },
+    {
+      "model": "deepseek/deepseek-v4-flash",
+      "acc": 0.68,
+      "cost_1k": 0.0548,
+      "arena": 0.6869,
+      "errors": 0
+    },
+    {
+      "model": "qwen/qwen3-coder-30b-a3b-instruct",
+      "acc": 0.64,
+      "cost_1k": 0.02,
+      "arena": 0.6552,
+      "errors": 0
+    },
+    {
+      "model": "deepseek/deepseek-r1",
+      "acc": 0.56,
+      "cost_1k": 0.4797,
+      "arena": 0.5602,
+      "errors": 0
+    }
+  ],
+  "philosophy": [
+    {
+      "model": "qwen/qwen3-235b-a22b-2507",
+      "acc": 0.68,
+      "cost_1k": 0.0091,
+      "arena": 0.6971,
+      "errors": 0
+    },
+    {
+      "model": "deepseek/deepseek-v3.2",
+      "acc": 0.68,
+      "cost_1k": 0.035,
+      "arena": 0.6898,
+      "errors": 0
+    },
+    {
+      "model": "deepseek/deepseek-v4-flash",
+      "acc": 0.64,
+      "cost_1k": 0.0744,
+      "arena": 0.6477,
+      "errors": 0
+    },
+    {
+      "model": "deepseek/deepseek-r1",
+      "acc": 0.6,
+      "cost_1k": 0.5754,
+      "arena": 0.5946,
+      "errors": 0
+    },
+    {
+      "model": "qwen/qwen3-coder-30b-a3b-instruct",
+      "acc": 0.36,
+      "cost_1k": 0.0163,
+      "arena": 0.3804,
+      "errors": 0
+    }
+  ],
+  "physics": [
+    {
+      "model": "deepseek/deepseek-v3.2",
+      "acc": 0.64,
+      "cost_1k": 0.1877,
+      "arena": 0.6409,
+      "errors": 0
+    },
+    {
+      "model": "deepseek/deepseek-v4-flash",
+      "acc": 0.64,
+      "cost_1k": 1.1045,
+      "arena": 0.6219,
+      "errors": 0
+    },
+    {
+      "model": "qwen/qwen3-235b-a22b-2507",
+      "acc": 0.6,
+      "cost_1k": 0.016,
+      "arena": 0.6179,
+      "errors": 0
+    },
+    {
+      "model": "qwen/qwen3-coder-30b-a3b-instruct",
+      "acc": 0.56,
+      "cost_1k": 0.1317,
+      "arena": 0.5693,
+      "errors": 0
+    },
+    {
+      "model": "deepseek/deepseek-r1",
+      "acc": 0.28,
+      "cost_1k": 1.5145,
+      "arena": 0.2902,
+      "errors": 0
+    }
+  ],
+  "psychology": [
+    {
+      "model": "qwen/qwen3-235b-a22b-2507",
+      "acc": 0.88,
+      "cost_1k": 0.0126,
+      "arena": 0.8819,
+      "errors": 0
+    },
+    {
+      "model": "deepseek/deepseek-v4-flash",
+      "acc": 0.88,
+      "cost_1k": 0.0934,
+      "arena": 0.8619,
+      "errors": 0
+    },
+    {
+      "model": "qwen/qwen3-coder-30b-a3b-instruct",
+      "acc": 0.84,
+      "cost_1k": 0.014,
+      "arena": 0.8445,
+      "errors": 0
+    },
+    {
+      "model": "deepseek/deepseek-v3.2",
+      "acc": 0.84,
+      "cost_1k": 0.0525,
+      "arena": 0.833,
+      "errors": 0
+    },
+    {
+      "model": "deepseek/deepseek-r1",
+      "acc": 0.72,
+      "cost_1k": 0.4609,
+      "arena": 0.7027,
+      "errors": 0
+    }
+  ]
+}

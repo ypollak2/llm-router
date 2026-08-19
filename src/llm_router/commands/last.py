@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""llm-router last — Show the most recent routing decisions (real-time feedback).
+"""llm_router last — Show the most recent routing decisions (real-time feedback).
 
-Command: uv run llm-router last [--count N]
+Command: uv run llm_router last [--count N]
 
 Shows the last N routing decisions in reverse chronological order (newest first).
 Useful for checking what model handled your last request.
@@ -98,7 +98,7 @@ def print_recent_decisions(decisions: list[dict]) -> None:
         decisions: List of routing decisions
     """
     if not decisions:
-        print("No routing decisions yet. Use llm-router to route your first request.")
+        print("No routing decisions yet. Use llm_router to route your first request.")
         return
 
     print()

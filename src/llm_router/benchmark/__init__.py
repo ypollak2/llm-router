@@ -2,9 +2,9 @@
 
 Cat G adds operational tooling on top of the routing infrastructure built
 in Phases 1-5: a generic benchmark runner with a small plug-in protocol
-(``llm-router benchmark run <name>``), a policy diff tool
-(``llm-router policy diff a b``), and a regression detector
-(``llm-router benchmark regress --since <tag>``).
+(``llm_router benchmark run <name>``), a policy diff tool
+(``llm_router policy diff a b``), and a regression detector
+(``llm_router benchmark regress --since <tag>``).
 
 The protocol is intentionally narrow: every runner just needs to load a
 dataset, format predictions from a routing decision, evaluate accumulated
@@ -110,7 +110,7 @@ class BenchmarkRunner(Protocol):
     Implementations should be cheap to construct (no network IO in
     ``__init__``) so the CLI can list available runners without doing real
     work. All four methods may raise; the orchestrator catches and reports
-    so a broken runner can't take down ``llm-router benchmark`` for everyone.
+    so a broken runner can't take down ``llm_router benchmark`` for everyone.
     """
 
     name: str

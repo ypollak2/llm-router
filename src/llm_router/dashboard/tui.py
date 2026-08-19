@@ -6,7 +6,7 @@ savings, and historical activity patterns.
 
 Launch:
     python -m llm_router.dashboard.tui
-    # or: llm-router tui
+    # or: llm_router tui
 """
 
 from __future__ import annotations
@@ -17,11 +17,14 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
+from llm_router.claude_jsonl_usage import CCUsageSummary, read_cc_usage
+
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal
 from textual.timer import Timer
 from textual.widgets import Footer, Static
+from llm_router.tool_surface import route_tool  # CHZ-SURF-01
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
 
@@ -187,6 +190,9 @@ class DashboardData:
     l14_total_tokens: int = 0
     l14_savings: float = 0.0
 
+    # Direct Claude Code subscription usage (from ~/.claude/projects/**/*.jsonl)
+    cc_usage: CCUsageSummary = field(default_factory=CCUsageSummary)
+
 
 def _read_usage_json() -> dict:
     try:
@@ -221,7 +227,7 @@ def _fetch_data() -> DashboardData:
         row = conn.execute(
             "SELECT COUNT(*), COALESCE(SUM(cost_usd),0), "
             "COALESCE(SUM(input_tokens+output_tokens),0) "
-            "FROM usage WHERE timestamp >= datetime('now','start of day')"
+            "FROM usage WHERE date(timestamp,'localtime') = date('now','localtime')"
         ).fetchone()
         if row:
             d.today_calls, d.today_cost, d.today_tokens = row[0], row[1], row[2]
@@ -304,33 +310,31 @@ def _fetch_data() -> DashboardData:
         except Exception:
             pass
 
-        # ── Savings computation ───────────────────────────────────────
-        SONNET_IN, SONNET_OUT = 3.0, 15.0  # $/M
-
-        def _savings_for(where: str) -> tuple[float, int]:
-            row = conn.execute(
-                f"SELECT COALESCE(SUM(input_tokens),0), COALESCE(SUM(output_tokens),0), "
-                f"COALESCE(SUM(cost_usd),0), COUNT(*) FROM usage WHERE success=1 AND {where}"
-            ).fetchone()
-            if not row:
-                return 0.0, 0
-            baseline = (row[0] * SONNET_IN + row[1] * SONNET_OUT) / 1_000_000
-            return max(0.0, baseline - row[2]), row[3]
-
-        d.today_saved, d.today_saved_calls = _savings_for(
-            "timestamp >= datetime('now','start of day')"
-        )
-        d.week_saved, d.week_saved_calls = _savings_for(
-            "timestamp >= datetime('now','-7 days')"
-        )
-        d.month_saved, d.month_saved_calls = _savings_for(
-            "timestamp >= datetime('now','start of month')"
-        )
-        d.lifetime_saved, d.lifetime_saved_calls = _savings_for("1=1")
+        # ── Savings computation (unified across all sources) ─────────────
+        # Uses dashboard_data.query_window() which UNIONs usage + claude_usage
+        # + codex_usage + gemini_usage + savings_stats — fixes the v9.3 drift
+        # where this panel only queried the legacy usage table (missing 68%).
+        try:
+            from llm_router.dashboard_data import query_window as _qw
+            for _window, _saved_attr, _calls_attr in [
+                ("today",    "today_saved",    "today_saved_calls"),
+                ("week",     "week_saved",     "week_saved_calls"),
+                ("month",    "month_saved",    "month_saved_calls"),
+                ("lifetime", "lifetime_saved", "lifetime_saved_calls"),
+            ]:
+                _t = _qw(_window, db_path=DB_PATH)
+                setattr(d, _saved_attr, _t.saved_usd)
+                setattr(d, _calls_attr, _t.calls)
+            d.l14_savings = _qw("14d", db_path=DB_PATH).saved_usd
+        except Exception:
+            pass
 
         # ── L14 daily series ──────────────────────────────────────────
+        # daily_tokens / daily_cost come from the gateway usage table only
+        # (free-model throughput + actual API cost paid). daily_cost is the
+        # real cost paid to free APIs — NOT the savings figure (use l14_savings).
         rows = conn.execute(
-            "SELECT date(timestamp) as day, COUNT(*), "
+            "SELECT date(timestamp,'localtime') as day, COUNT(*), "
             "COALESCE(SUM(input_tokens+output_tokens),0), COALESCE(SUM(cost_usd),0) "
             "FROM usage WHERE timestamp >= datetime('now','-14 days') "
             "GROUP BY day ORDER BY day"
@@ -343,12 +347,18 @@ def _fetch_data() -> DashboardData:
 
         d.l14_total_calls = sum(d.daily_calls)
         d.l14_total_tokens = sum(d.daily_tokens)
-        d.l14_savings = sum(d.daily_cost)  # will subtract from baseline below
+        # l14_savings already set above via query_window("14d")
 
     except Exception:
         pass
     finally:
         conn.close()
+
+    # ── Direct Claude Code subscription usage (local JSONL) ───────────────
+    try:
+        d.cc_usage = read_cc_usage()
+    except Exception:
+        pass
 
     return d
 
@@ -696,6 +706,39 @@ class SavingsPanel(Static):
                 f"  Savings/yr:   {_tc_bold(TN.GREEN, f'${annual_saved:.2f}')}"
             )
 
+        # ── Direct Claude Subscription Usage ──────────────────────────────
+        cc = d.cc_usage
+        if cc.models:
+            def _fmt(t: int) -> str:
+                if t >= 1_000_000:
+                    return f"{t / 1_000_000:.1f}M"
+                if t >= 1_000:
+                    return f"{t / 1_000:.0f}K"
+                return str(t)
+
+            lines.append("")
+            lines.append(_tc_bold(TN.MAGENTA, " CLAUDE SUBSCRIPTION  "))
+            lines.append(_dim("  " + "─" * 36))
+            lines.append(
+                f"  {_tc(TN.FG_DIM, 'Sessions')}: {_tc(TN.CYAN, str(cc.sessions))}  "
+                f"{_tc(TN.FG_DIM, 'Total')}: "
+                f"{_tc(TN.CYAN, _fmt(cc.total_input))} in · "
+                f"{_tc(TN.CYAN, _fmt(cc.total_output))} out"
+            )
+            lines.append("")
+            for m in cc.models:
+                pct = cc.pct_output(m)
+                bar_filled = int(pct / 100 * 12)
+                bar = _tc(TN.MAGENTA, "█" * bar_filled) + _dim("░" * (12 - bar_filled))
+                lines.append(
+                    f"  {_tc(TN.FG, m.display_name):<14}"
+                    f" {bar} {pct:>5.1f}%"
+                )
+                lines.append(
+                    f"  {_tc(TN.FG_DIM, f'{_fmt(m.input_tokens)} in · {_fmt(m.output_tokens)} out'  ):<36}"
+                    f"  {_tc(TN.FG_DIM, f'{m.turns:,} turns')}"
+                )
+
         self.query_one("#savings-content").update("\n".join(lines))
 
 
@@ -734,7 +777,7 @@ class ActivityPanel(Static):
         lines.append(
             f"  {_tc(TN.CYAN, 'Calls')}: {d.l14_total_calls:<6}  "
             f"{_tc(TN.TEAL, 'Tokens')}: {_fmt_tokens(d.l14_total_tokens):<8}  "
-            f"{_tc(TN.GREEN, 'Savings')}: ${sum(d.daily_cost):.4f}  "
+            f"{_tc(TN.GREEN, 'Saved')}: ${d.l14_savings:.4f}  "
             f"{_tc(TN.FG_DIM, 'Avg')}: {avg_calls:.0f}/day"
         )
         lines.append("")
@@ -809,7 +852,8 @@ class ActivityPanel(Static):
                 )
         else:
             lines.append(_dim("  No activity data in the last 14 days."))
-            lines.append(_dim("  Route tasks via llm_query / llm_code to start tracking."))
+            lines.append(_dim(f"  Route tasks via {route_tool('llm_query')} / "
+                              f"{route_tool('llm_code')} to start tracking."))
 
         self.query_one("#activity-content").update("\n".join(lines))
 

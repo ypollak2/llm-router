@@ -39,21 +39,33 @@ class TestBudgetEnforcement:
                         await route_and_call(TaskType.QUERY, "test")
 
     @pytest.mark.asyncio
-    async def test_daily_budget_exceeded_raises_immediately(self, temp_db):
-        """Exceeding daily budget should raise BudgetExceededError immediately."""
+    async def test_daily_budget_exceeded_raises_immediately(self, temp_db, monkeypatch):
+        """Exceeding the daily budget blocks when there is no free fallback.
+
+        TQ-007: a daily spend cap (incl. env LLM_ROUTER_DAILY_SPEND_LIMIT) now
+        DOWNGRADES to free-local providers; with a paid-only provider set
+        (['openai']) and enforce=hard there is no free fallback, so it blocks
+        with BudgetExceededError (the enforcing case verified here). In smart
+        mode it would instead fall through to Claude.
+        """
+        monkeypatch.setenv("LLM_ROUTER_ENFORCE", "hard")
         with patch('llm_router.cost.get_monthly_spend', new_callable=AsyncMock) as mock_spend:
             with patch('llm_router.cost.get_daily_spend', new_callable=AsyncMock) as mock_daily:
                 mock_spend.return_value = 0.0
                 # Current daily spend exceeds limit
                 mock_daily.return_value = 0.51
-                
-                with patch('llm_router.router.get_config') as mock_config:
+
+                with patch('llm_router.router.get_config') as mock_config, patch(
+                    'llm_router.router._build_and_filter_chain',
+                    new_callable=AsyncMock,
+                    return_value=['openai/gpt-4o'],  # paid-only → no free fallback
+                ):
                     config = MagicMock()
                     config.llm_router_monthly_budget = 0.0  # No monthly limit
                     config.llm_router_daily_spend_limit = 0.50  # Daily limit
                     config.available_providers = ['openai']
                     mock_config.return_value = config
-                    
+
                     with pytest.raises(BudgetExceededError, match="Daily spend"):
                         await route_and_call(TaskType.QUERY, "test")
 

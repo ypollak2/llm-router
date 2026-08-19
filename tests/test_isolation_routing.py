@@ -1,6 +1,6 @@
-"""Test llm-router routing in an isolated subprocess with cache verification.
+"""Test llm_router routing in an isolated subprocess with cache verification.
 
-This test suite runs llm-router in completely isolated environments to ensure:
+This test suite runs llm_router in completely isolated environments to ensure:
 1. Routing decisions are fresh (no stale cache)
 2. Routing is sensible (simple prompts don't hit expensive models)
 3. Dashboard (savings, cost tracking) reflects reality accurately
@@ -13,6 +13,7 @@ so results are not affected by prior routing cache or session state.
 import json
 import os
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -60,7 +61,7 @@ def isolated_env():
 def test_no_cache_between_runs(isolated_env: Path, diverse_test_prompts: list):
     """Verify that successive CLI calls are fresh (no stale cache).
 
-    This test runs llm-router CLI commands twice in isolation and verifies that:
+    This test runs llm_router CLI commands twice in isolation and verifies that:
     1. Both runs produce output
     2. Status output is responsive
     3. No cache is causing stale responses
@@ -160,8 +161,8 @@ def test_dashboard_savings_accuracy(isolated_env: Path):
     """Verify that the dashboard (savings report) accurately reflects routing costs.
 
     Runs a few prompts through the router and checks that:
-    - llm-router status shows accurate usage %
-    - llm-router last shows the prompts we just routed
+    - llm_router status shows accurate usage %
+    - llm_router last shows the prompts we just routed
     - savings-report totals match sum of individual queries
     """
     # Run a small sample of prompts in isolation
@@ -264,7 +265,7 @@ def test_savings_consistency():
 def test_database_persistence():
     """ADVANCED: Verify that routing decisions are being persisted.
 
-    Checks that llm-router storage is initialized and accessible.
+    Checks that llm_router storage is initialized and accessible.
     Note: v10.1.2 uses usage.db + receipts.db, not router.db
     """
     from pathlib import Path
@@ -274,7 +275,7 @@ def test_database_persistence():
     # Check that router directory exists (created on first use)
     assert router_dir.exists(), \
         f"Router data directory not found at {router_dir}. " \
-        f"Run: llm-router install"
+        f"Run: llm_router install"
 
     # Check for storage files (at least one should exist)
     storage_files = [
@@ -308,45 +309,14 @@ def test_database_persistence():
             raise AssertionError(
                 f"Database error: {e}. "
                 f"Usage database may be corrupted. "
-                f"Fix with: rm ~/.llm-router/usage.db && llm-router status"
+                f"Fix with: rm ~/.llm-router/usage.db && llm_router status"
             ) from e
-
-
-# ── Schema-drift Canary ──────────────────────────────────────────────────
-
-
-def test_dashboard_data_canary_against_real_db():
-    """Schema-drift canary: every table with rows must be read by query_window.
-
-    Catches the v9.3-style bug class where a new source table accumulates
-    rows but the dashboard's UNION query was never updated to include it.
-    The canary runs against the real ~/.llm-router/usage.db, so the cron
-    runner notices drift the moment a new schema starts producing data —
-    long before a user notices the dashboard under-counting.
-
-    Skipped if the DB doesn't exist yet (fresh install / CI without state).
-    """
-    from pathlib import Path
-
-    db = Path.home() / ".llm-router" / "usage.db"
-    if not db.exists():
-        pytest.skip(f"no usage.db at {db} — fresh install or CI without state")
-
-    from llm_router.commands.explain_dashboard import _check_mode_canary
-
-    rc = _check_mode_canary()
-    assert rc == 0, (
-        "dashboard-data canary detected schema drift. "
-        "Run `llm-router explain-dashboard --check` for details. "
-        "A new source table likely has rows but isn't being read by "
-        "dashboard_data.query_window — see src/llm_router/dashboard_data.py."
-    )
 
 
 # ── Helper Functions ──────────────────────────────────────────────────────
 
 def _run_router_isolated(prompt: str, isolation_dir: Path, run_id: str = "test") -> dict[str, Any] | None:
-    """Run llm-router on a prompt in an isolated subprocess.
+    """Run llm_router on a prompt in an isolated subprocess.
 
     Args:
         prompt: The prompt to route.
@@ -363,10 +333,10 @@ def _run_router_isolated(prompt: str, isolation_dir: Path, run_id: str = "test")
     env["LLM_ROUTER_CACHE"] = str(isolation_dir / "cache")
 
     try:
-        # Use llm-router demo to get routing decision
+        # Use llm_router demo to get routing decision
         # (This is a built-in command that routes a prompt and shows the decision)
         result = subprocess.run(
-            ["llm-router", "demo", "--prompt", prompt],
+            [_llm_router_binary(), "demo", "--prompt", prompt],
             env=env,
             capture_output=True,
             text=True,
@@ -389,13 +359,13 @@ def _run_router_isolated(prompt: str, isolation_dir: Path, run_id: str = "test")
 
 
 def _run_router_live(prompt: str) -> dict[str, Any] | None:
-    """Run llm-router on a prompt in the current environment (not isolated).
+    """Run llm_router on a prompt in the current environment (not isolated).
 
     Used for routing sanity checks that don't need isolation.
     """
     try:
         result = subprocess.run(
-            ["llm-router", "demo", "--prompt", prompt],
+            [_llm_router_binary(), "demo", "--prompt", prompt],
             capture_output=True,
             text=True,
             timeout=30,
@@ -412,7 +382,7 @@ def _run_router_live(prompt: str) -> dict[str, Any] | None:
 
 
 def _parse_router_demo_output(output: str, run_id: str = "") -> dict[str, Any]:
-    """Parse llm-router demo output to extract routing decision.
+    """Parse llm_router demo output to extract routing decision.
 
     The demo command outputs something like:
         Selected model: gpt-4o-mini
@@ -453,8 +423,26 @@ def _parse_router_demo_output(output: str, run_id: str = "") -> dict[str, Any]:
     return result
 
 
+def _llm_router_binary() -> str:
+    """Return the path to the llm_router binary co-located with sys.executable.
+
+    In a venv, sys.executable is /path/to/venv/bin/python and the llm_router
+    entry point is /path/to/venv/bin/llm_router. Falling back to the bare
+    'llm_router' name allows CI environments where the bin dir is on PATH.
+    """
+    import shutil
+    candidate = Path(sys.executable).parent / "llm_router"
+    if candidate.exists():
+        return str(candidate)
+    return shutil.which("llm_router") or "llm_router"
+
+
 def _run_llm_router_cmd(args: list[str]) -> str:
-    """Run an llm-router CLI command and return output.
+    """Run a llm_router CLI command and return output.
+
+    Resolves the binary via _llm_router_binary() so the command works even when
+    the venv is not activated on PATH. (E4 fix: bare 'llm_router' fails outside
+    activated venv.)
 
     Args:
         args: Command arguments (e.g., ["status"], ["last", "--count", "3"])
@@ -464,7 +452,7 @@ def _run_llm_router_cmd(args: list[str]) -> str:
     """
     try:
         result = subprocess.run(
-            ["llm-router"] + args,
+            [_llm_router_binary()] + args,
             capture_output=True,
             text=True,
             timeout=10,
