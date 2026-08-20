@@ -21,14 +21,14 @@ host CLI) after changing it.
 
 ## Policies that ship with llm-router
 
-| Name | Confidence | Typical use |
-|---|:---:|---|
-| `standard` | 4 | The historical default — direct API tier, no policy needed for typical Pro/Max usage. |
-| `balanced` | 4 | Cost/quality tradeoff (alias for `standard` behaviour with the v10 model-strategy fields populated). |
-| `aggressive` | 2 | Route more, escalate less. Max cost reduction. |
-| `conservative` | 6 | Route only when the classifier is very confident. Quality over savings. |
-| `cost_aggressive` | 3 | **OpenRouter open-weight workhorse pool + subject specialists.** Recommended when `OPENROUTER_API_KEY` is set. New in v10. |
-| `routerarena_tuned` | 3 | **Deprecated alias** for `cost_aggressive`. Slated for removal in v11. |
+| Name | Confidence | Typical savings | Typical use |
+|---|:---:|:---:|---|
+| `standard` | 4 | 35–45% | The historical default — direct API tier, no policy needed for typical Pro/Max usage. |
+| `balanced` | 4 | 35–45% | Cost/quality tradeoff (alias for `standard` behaviour with the v10 model-strategy fields populated). |
+| `aggressive` | 2 | 60–75% | Route more, escalate less. Max cost reduction. |
+| `conservative` | 6 | 10–15% | Route only when the classifier is very confident. Quality over savings. |
+| `cost_aggressive` | 3 | 70–85% | **OpenRouter open-weight workhorse pool + subject specialists.** Recommended when `OPENROUTER_API_KEY` is set. New in v10. |
+| `routerarena_tuned` | 3 | 70–85% | **Deprecated alias** for `cost_aggressive`. Slated for removal in v11. |
 
 ## Writing a custom policy
 

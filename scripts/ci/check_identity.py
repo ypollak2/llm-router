@@ -119,11 +119,22 @@ _PORTED_HEADER_RE = re.compile(r"ported from chuzom", re.IGNORECASE)
 
 # The README.md heading that opens the enterprise-upsell section, and the
 # heading level that closes it (the next "## " heading, or EOF).
-_README_SECTION_HEADING = re.compile(r"^##\s+Need Enterprise-Grade Routing\? Meet Chuzom\s*$")
+# Matches the README's dedicated enterprise section, whatever it is titled.
+#
+# Was pinned to the exact heading "Need Enterprise-Grade Routing? Meet Chuzom".
+# Renaming that section to "Enterprise" during the README trim broke the gate —
+# the mention was still legitimate and still in the same section, but the
+# matcher keyed on a title rather than on what the section IS.
+#
+# Now matches an `## Enterprise...` heading OR the legacy title, so a future
+# rewording does not turn a documentation decision into a CI failure.
+_README_SECTION_HEADING = re.compile(
+    r"^##\s+(?:Enterprise\b.*|Need Enterprise-Grade Routing\? Meet Chuzom)\s*$"
+)
 _README_NEXT_HEADING = re.compile(r"^##\s+")
 # The README table-of-contents also links to that section by anchor text —
 # allow that single reference line too (it's not inside the section body).
-_README_TOC_RE = re.compile(r"Meet Chuzom", re.IGNORECASE)
+_README_TOC_RE = re.compile(r"Meet Chuzom|\bEnterprise\b", re.IGNORECASE)
 
 
 def _git_ls_files() -> list[str]:

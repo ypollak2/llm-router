@@ -35,7 +35,7 @@
 <p align="center">
 
 ```bash
-pip install llm-routing
+pip install llm-routing   # PyPI name is llm-routing; the CLI command is llm-router
 ```
 
 </p>
@@ -62,24 +62,22 @@ pip install llm-routing
 <summary><b>📑 Table of Contents</b></summary>
 
 - [Why People Install This](#why-people-install-this)
-- [What You Get](#what-you-get)
 - [Ranked #8 on RouterArena](#ranked-8-on-routerarena)
 - [Quick Start](#quick-start)
 - [Example Routing](#example-routing)
 - [Works With](#works-with)
 - [How It Works](#how-it-works)
-- [What You Can Do](#what-you-can-do)
-- [CLI (operational commands)](#cli-operational-commands)
+- [Features](#features)
+- [CLI](#cli)
 - [Providers](#providers)
 - [Routing Policies](#routing-policies)
-- [MCP Tools (60)](#mcp-tools-60)
+- [MCP Tools](#mcp-tools)
 - [Savings: How It Works](#savings-how-it-works)
 - [Trust, Privacy, and Local-First Design](#trust-privacy-and-local-first-design)
 - [Configuration](#configuration)
 - [Documentation](#documentation)
 - [Enterprise](#enterprise)
 - [Contributing](#contributing)
-- [Package Names](#package-names)
 
 </details>
 
@@ -106,20 +104,6 @@ You keep the same workflow. The router changes the model choice underneath.
     <img src="assets/readme/why-route-light.svg" alt="Animated benefits panel for llm-router showing cheaper routing, preserved quality, quota protection, and low-config setup." width="100%"/>
   </picture>
 </p>
-
----
-
-## What You Get
-
-- Route trivial prompts to free or cheap models first
-- Keep premium models for the prompts that actually need them
-- Fall back across providers automatically
-- Track usage and estimated savings locally
-- Run everything on your own machine
-- **Cost-inverted `SUBSCRIPTION_LOCAL` routing** — free/local first for simple & moderate prompts, your one paid seat first for complex ones, with the seat demoted when its quota is strained (opt-in via `LLM_ROUTER_SUBSCRIPTION_PROVIDER`)
-- **Keep secrets local** — a prompt containing an API key/token/private key routes to local models only, fail-closed so it never reaches an external API
-- **See it working** — a `surface_status` line / terminal title / OS notification showing the last model routed, savings, and health, for hosts without a native statusline
-- **Session-end summary** — savings vs baseline, tier mix, per-provider cost, latency p50/p95/p99, and top routes, in Markdown or a rich panel
 
 ---
 
@@ -204,17 +188,11 @@ llm-router install --host cursor      # Cursor
 
 See [guide/HOST_SUPPORT_MATRIX.md](guide/HOST_SUPPORT_MATRIX.md) for full details on each host.
 
-### Protect Claude Code 5-hour quota
+### Protect your Claude Code 5-hour quota
 
-For a strict boundary that never automatically falls through to native Claude, configure:
-
-```yaml
-# ~/.llm-router/routing.yaml
-enforce: smart
-mode: zero_claude
-```
-
-In `zero_claude` mode, prompts either complete through direct external execution or are blocked before Claude Code invokes its model. Prefix a prompt with `claude:` when you intentionally want a native Claude turn.
+`enforce: smart` + `mode: zero_claude` makes prompts either complete externally or stop
+before native Claude runs — see
+**[guide/GETTING_STARTED.md](guide/GETTING_STARTED.md)**.
 
 ---
 
@@ -251,128 +229,71 @@ Classification is free for many tasks (regex heuristics catch ~70%) or near-free
 
 ---
 
-## What You Can Do
+## Features
 
-| Use case | How |
-|----------|-----|
-| Route simple questions to free local models | Auto (hooks) or `llm_query` |
-| Protect Claude subscription quota | Budget pressure monitoring + auto-downgrade |
-| Fall back across providers on failure | Automatic chain with circuit breakers |
-| Track token spend and savings | `llm_usage`, `llm_savings`, session-end reports |
-| Enforce routing policy for your team | `LLM_ROUTER_POLICY=aggressive` |
-| Generate images/video/audio | `llm_image`, `llm_video`, `llm_audio` |
-| Run multi-step research pipelines | `llm_orchestrate` with templates |
-| Bulk-edit files with cheap models | `llm_fs_edit_many` |
-| Compare two routing policies | `llm-router policy diff <a> <b>` (v10) |
-| Benchmark + track Arena score | `llm-router benchmark run` / `regress` (v10) |
+Beyond "send cheap prompts to cheap models":
+
+- **Secrets never leave your machine.** A prompt containing an API key, token or private
+  key routes to local models only — fail-closed, so it cannot reach an external provider.
+- **Cost-inverted subscription routing.** Free/local first for simple and moderate
+  prompts, your one paid seat first for complex ones, and the seat demoted when its quota
+  is strained. Opt in with `LLM_ROUTER_SUBSCRIPTION_PROVIDER`.
+- **Automatic fallback with circuit breakers.** A provider that fails or rate-limits is
+  skipped, not retried into the ground.
+- **You can see it working.** A status line, terminal title and OS notification show the
+  last model routed, savings and health — for hosts with no native statusline.
+- **Session-end summary.** Savings vs baseline, tier mix, per-provider cost, latency
+  p50/p95/p99 and top routes.
+- **Media and pipelines too.** `llm_image` / `llm_video` / `llm_audio`, and
+  `llm_orchestrate` for multi-step research.
 
 ---
 
-## CLI (operational commands)
-
-Beyond the install + auth flow, `llm-router` ships several operational subcommands:
+## CLI
 
 ```bash
-llm-router benchmark list                              # list registered benchmark runners
-llm-router benchmark run routerarena --split sub_10    # route a dataset and score it
-llm-router benchmark regress --policy <p> --benchmark <b>  # detect score regressions
-llm-router policy diff balanced cost_aggressive        # per-prompt model + cost delta
-llm-router audit --limit 100                           # offline misroute audit over routing_decisions
+llm-router install      # wire up your host (Claude Code by default)
+llm-router health       # provider connectivity
+llm-router status       # savings + quota at a glance
+llm-router doctor       # diagnose a broken setup
 ```
 
-These power the routing self-improvement loop: routing decisions get persisted to a SQLite outcomes table; benchmark runs against a reference dataset establish baseline scores; `regress` flags drops > 0.005 in release-over-release comparisons.
+Full command reference: **[guide/GETTING_STARTED.md](guide/GETTING_STARTED.md)**
 
 ---
 
 ## Providers
 
-Routing chains are built from your configured providers. You only need one.
+20+ providers, free-first. **Ollama** (local, free) leads the chain; **OpenRouter**
+(343 models behind one key) is the biggest single unlock; **Gemini** and **Groq** have
+usable free tiers. Anthropic works via your existing Claude subscription — no API key
+needed.
 
-### Text LLM Providers
-
-| Provider | Models | Cost | Setup |
-|----------|--------|------|-------|
-| **Ollama** | gemma4, qwen3.5, llama3, etc. | Free (local) | `OLLAMA_BASE_URL` |
-| **OpenAI** | GPT-4o, o3, GPT-4o-mini | Paid API | `OPENAI_API_KEY` |
-| **Google** | Gemini Flash, Pro | Free tier + paid | `GEMINI_API_KEY` |
-| **Anthropic** | Claude Sonnet, Opus, Haiku | Paid API or subscription | `ANTHROPIC_API_KEY` or subscription |
-| **xAI** | Grok-3 | Paid API | `XAI_API_KEY` |
-| **DeepSeek** | DeepSeek Chat, Reasoner | Paid API (ultra-cheap) | `DEEPSEEK_API_KEY` |
-| **Mistral** | Mistral Large, Small | Paid API | `MISTRAL_API_KEY` |
-| **Cohere** | Command R+ | Paid API | `COHERE_API_KEY` |
-| **Perplexity** | Sonar Pro (web-grounded) | Paid API | `PERPLEXITY_API_KEY` |
-| **Groq** | Fast inference (Llama, Mixtral) | Free tier | `GROQ_API_KEY` |
-| **Together** | Open-source models | Paid API | `TOGETHER_API_KEY` |
-| **HuggingFace** | Open-source models | Free tier + paid | `HF_TOKEN` |
-| **OpenRouter** | 343 models (qwen3-235b, deepseek-v4-flash, grok-4.3, gemini-flash-lite, claude, gpt, …) | Paid API (one key, all providers) | `OPENROUTER_API_KEY` |
-| **Codex** | GPT-5.4, o3 (prepaid desktop) | Included with Codex CLI | Auto-detected |
-
-### Media Providers
-
-| Provider | Type | Setup |
-|----------|------|-------|
-| **fal** | Image (Flux), Video (Kling) | `FAL_KEY` |
-| **Stability** | Image (Stable Diffusion 3) | `STABILITY_API_KEY` |
-| **ElevenLabs** | Audio / TTS | `ELEVENLABS_API_KEY` |
-| **Runway** | Video (Gen-3) | `RUNWAY_API_KEY` |
-| **Replicate** | Various open-source models | `REPLICATE_API_TOKEN` |
-
-See [guide/PROVIDERS.md](guide/PROVIDERS.md) for setup instructions and model recommendations.
+Every provider, its models, cost tier and env var: **[guide/PROVIDERS.md](guide/PROVIDERS.md)**
 
 ---
 
 ## Routing Policies
 
-Control how aggressively the router offloads to cheap models. Policies ship as YAML files in `src/llm_router/policies/` — write your own to override workhorses, subject specialists, and per-task chains.
-
-| Policy | Confidence Threshold | Typical Savings | Best For |
-|--------|:-------------------:|:---------------:|----------|
-| **Aggressive** | 2 | 60–75% | Maximum cost reduction |
-| **Balanced** (default) | 4 | 35–45% | Cost/quality tradeoff |
-| **Conservative** | 6 | 10–15% | Quality over cost |
-| **`cost_aggressive`** | 3 | 70–85% | OpenRouter open-weight workhorses + subject specialists. Activate with `OPENROUTER_API_KEY`. New in v10. |
+A policy sets how eagerly the router routes away from your premium model —
+`conservative` (10–15% savings) through `balanced` (the default, 35–45%) to
+`cost_aggressive` (70–85%, needs `OPENROUTER_API_KEY`).
 
 ```bash
-export LLM_ROUTER_POLICY=aggressive     # Or: balanced, conservative, cost_aggressive
-export LLM_ROUTER_ENFORCE=smart          # smart | hard | soft | off
-export LLM_ROUTER_PROFILE=balanced       # budget | balanced | premium | subscription_local
-export LLM_ROUTER_BANDIT=on              # on (default) | off — opt out of telemetry-driven chain reorder
+llm-router policy set cost_aggressive
 ```
 
-The `cost_aggressive` policy routes via OpenRouter:
-```bash
-export OPENROUTER_API_KEY=sk-or-v1-...
-export LLM_ROUTER_POLICY=cost_aggressive
-# Now: code → qwen3-coder-next, medical → gemini-flash-lite, reasoning → grok-4.3, …
-```
-
-See [guide/POLICIES.md](guide/POLICIES.md) for the YAML schema and how to author your own policy.
-
-`LLM_ROUTER_ENFORCE` controls how strictly the auto-route hook blocks direct model use:
-- `smart` — route when confident, pass through when uncertain
-- `hard` — always route, block unrouted tool calls
-- `soft` — suggest routing, never block
-- `off` — disable hook enforcement
+All six policies, thresholds and the YAML schema: **[guide/POLICIES.md](guide/POLICIES.md)**
 
 ---
 
-## MCP Tools (60)
+## MCP Tools
 
-llm-router exposes 60 MCP tools organized by function:
+60 tools across routing, analysis, code, media, budget and diagnostics — exposed to any
+MCP host. The default `consolidated` surface shows 11 front-door tools; set
+`LLM_ROUTER_SLIM=full` for all 60.
 
-| Category | Tools | Examples |
-|----------|:-----:|---------|
-| Routing & classification | 7 | `llm_route`, `llm_classify`, `llm_auto`, `llm_stream` |
-| Text generation | 6 | `llm_query`, `llm_code`, `llm_analyze`, `llm_research` |
-| Media generation | 3 | `llm_image`, `llm_video`, `llm_audio` |
-| Pipeline orchestration | 2 | `llm_orchestrate`, `llm_pipeline_templates` |
-| Admin & monitoring | 20+ | `llm_usage`, `llm_budget`, `llm_health`, `llm_savings` |
-| Filesystem operations | 4 | `llm_fs_find`, `llm_fs_edit_many` |
-| Subscription tracking | 3 | `llm_check_usage`, `llm_refresh_claude_usage` |
-
-**Slim mode** (`LLM_ROUTER_SLIM=routing` or `core`) reduces registered tools to save context tokens in constrained environments.
-
-[Full Tool Reference](guide/TOOLS.md)
+Every tool with its signature: **[guide/TOOLS.md](guide/TOOLS.md)**
 
 ---
 
@@ -433,46 +354,17 @@ See [SECURITY.md](SECURITY.md) for responsible disclosure policy.
 
 ## Configuration
 
-Minimal setup — only configure what you have:
+Everything is environment variables — no config file required to start:
 
 ```bash
-# Provider keys (set any combination)
-export OPENAI_API_KEY="sk-proj-..."
-export GEMINI_API_KEY="AIza..."
-export OLLAMA_BASE_URL="http://localhost:11434"
-export OLLAMA_BUDGET_MODELS="gemma4:latest,qwen3.5:latest"
-
-# Routing behavior
-export LLM_ROUTER_PROFILE="balanced"       # budget | balanced | premium | subscription_local
-export LLM_ROUTER_POLICY="balanced"        # aggressive | balanced | conservative
-export LLM_ROUTER_ENFORCE="smart"          # smart | hard | soft | off
+export OPENROUTER_API_KEY="sk-or-v1-..."          # biggest single unlock
+export OLLAMA_BASE_URL="http://localhost:11434"   # local, free
+export LLM_ROUTER_POLICY="cost_aggressive"        # routing policy
+export LLM_ROUTER_ENFORCE="smart"                 # off | advise | smart | hard
 ```
 
-### Opt-in capabilities
-
-These are all off by default; existing setups are unaffected until you set them.
-
-| Env var | Default | Effect when enabled |
-|---|---|---|
-| `LLM_ROUTER_CAPABILITY_ROUTING` | off | Records what capability-aware routing *would* choose into `routing_decisions.capabilities_json` for later analysis. Shadow-only — never changes the live routing decision. |
-| `LLM_ROUTER_BUDGET_ENVELOPE` | off | Enables `budget_envelope.py`'s hierarchical reserve/commit/settle accounting primitive. Ships standalone; no routing or spend behavior changes until you wire it into your own workflow. |
-| `LLM_ROUTER_BOUNDED_OPERATIONAL` | off | Enables the bounded-operational route predicate and pricing-derived budget check in `bounded_operational.py`. |
-| `LLM_ROUTER_AUDIT_DISABLED` | unset (audits run) | Set to disable the offline misroute audit (`audit_routing.py`). Invoke it via `llm-router audit` (read-only reporting; `--json` supported) or programmatically via `run_audit()`. |
-| `LLM_ROUTER_LOOPHOLE_JSONL` | `~/.llm-router/quality_feedback.jsonl` | Overrides the path `quality_feedback.ingest_loophole_jsonl()` reads LoopHole verifier verdicts from. |
-
-For teams or environments where `.env` is restricted:
-
-```bash
-# User-level config (no project .env needed)
-mkdir -p ~/.llm-router && chmod 700 ~/.llm-router
-cat > ~/.llm-router/config.yaml << 'EOF'
-openai_api_key: "sk-proj-..."
-gemini_api_key: "AIza..."
-ollama_base_url: "http://localhost:11434"
-llm_router_profile: "balanced"
-EOF
-chmod 600 ~/.llm-router/config.yaml
-```
+Full reference, config file schema and per-host overrides:
+**[guide/GETTING_STARTED.md](guide/GETTING_STARTED.md)**
 
 ---
 
@@ -518,10 +410,7 @@ uv run ruff check src/ tests/   # Lint
 
 ---
 
-## Package Names
-
-| Name | What it is |
-|------|-----------|
+-|-----------|
 | `llm-routing` | Current PyPI package (`pip install llm-routing`) |
 | `llm-router` | CLI command and GitHub repo name |
 | `claude-code-llm-router` | Deprecated legacy package (redirects to `llm-routing`) |
