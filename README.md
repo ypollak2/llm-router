@@ -21,12 +21,11 @@
   <a href="https://pepy.tech/projects/claude-code-llm-router"><img src="https://static.pepy.tech/personalized-badge/claude-code-llm-router?period=total&units=INTERNATIONAL_SYSTEM&left_color=GREY&right_color=BLACK&left_text=downloads" alt="PyPI Downloads"></a>
   <a href="https://github.com/ypollak2/llm-router/actions"><img src="https://img.shields.io/github/actions/workflow/status/ypollak2/llm-router/ci.yml?style=flat-square&label=tests" alt="Tests"></a>
   <a href="https://github.com/ypollak2/llm-router/stargazers"><img src="https://img.shields.io/github/stars/ypollak2/llm-router?style=flat-square&color=F59E0B&v=2" alt="Stars"></a>
-  <a href="https://pypi.org/project/llm-routing/"><img src="https://img.shields.io/badge/python-3.10+-3572A5?style=flat-square" alt="Python"></a>
+  <a href="https://pypi.org/project/llm-routing/"><img src="https://img.shields.io/badge/python-3.11+-3572A5?style=flat-square" alt="Python"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-10B981?style=flat-square" alt="License"></a>
   <a href="https://github.com/ypollak2/llm-router/discussions"><img src="https://img.shields.io/github/discussions/ypollak2/llm-router?style=flat-square&color=8B5CF6&label=discussions" alt="Discussions"></a>
-  <a href="https://github.com/RouteWorks/RouterArena"><img src="https://img.shields.io/badge/RouterArena-%238-F59E0B?style=flat-square&logo=data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCI+PHBhdGggZmlsbD0id2hpdGUiIGQ9Ik0xMiAyTDMgN2w5IDUgOS01LTktNXpNMyAxN2w5IDUgOS01TTMgMTJsOSA1IDktNSIvPjwvc3ZnPg==" alt="RouterArena #8">
+  <a href="https://github.com/RouteWorks/RouterArena"><img src="https://img.shields.io/badge/RouterArena-%238-F59E0B?style=flat-square&logo=data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCI+PHBhdGggZmlsbD0id2hpdGUiIGQ9Ik0xMiAyTDMgN2w5IDUgOS01LTktNXpNMyAxN2w5IDUgOS01TTMgMTJsOSA1IDktNSIvPjwvc3ZnPg==" alt="RouterArena #8"></a>
   <a href="https://mcptoplist.com/server/glama%2Fypollak2%2Fllm-router"><img src="https://mcptoplist.com/badge/glama%2Fypollak2%2Fllm-router.svg" alt="MCP Toplist: Top 1% of 98,291" /></a>
-</a>
 </p>
 
 <p align="center">
@@ -78,11 +77,9 @@ pip install llm-routing
 - [Trust, Privacy, and Local-First Design](#trust-privacy-and-local-first-design)
 - [Configuration](#configuration)
 - [Documentation](#documentation)
-- [Need Enterprise-Grade Routing? Meet Chuzom](#need-enterprise-grade-routing-meet-chuzom)
+- [Enterprise](#enterprise)
 - [Contributing](#contributing)
 - [Package Names](#package-names)
-- [Star History](#star-history)
-- [Activity](#activity)
 
 </details>
 
@@ -178,7 +175,7 @@ The exact chain depends on your configured providers, budget profile, and routin
 
 ## Works With
 
-| Tool | Mode | Typical Savings |
+| Tool | Mode | Savings (this host) |
 |------|------|-----------------|
 | **Claude Code** | Full auto-routing via hooks | 60–80% |
 | **Codex CLI** | Full auto-routing via hooks | 60–80% |
@@ -385,7 +382,7 @@ llm-router exposes 60 MCP tools organized by function:
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="assets/readme/savings-dark.svg">
     <source media="(prefers-color-scheme: light)" srcset="assets/readme/savings-light.svg">
-    <img src="assets/readme/savings-light.svg" alt="Animated savings breakdown showing 60-80% typical cost reduction with token distribution across free, budget, and premium tiers." width="100%"/>
+    <img src="assets/readme/savings-light.svg" alt="Animated savings breakdown showing 35-80% observed cost reduction with token distribution across free, budget, and premium tiers." width="100%"/>
   </picture>
 </p>
 
@@ -499,24 +496,11 @@ Full index: **[guide/README.md](guide/README.md)**
 
 ---
 
-## Need Enterprise-Grade Routing? Meet Chuzom
+## Enterprise
 
-**[Chuzom](https://github.com/Chuzom/Chuzom)** is the enterprise-ready evolution of the ideas in `llm-router`. If you're deploying at team or org scale, Chuzom adds the layer of control, governance, and integration that individual-developer tools don't need but enterprises do.
-
-| Capability | `llm-router` | [Chuzom](https://github.com/Chuzom/Chuzom) |
-|---|:---:|:---:|
-| Free-first routing chain | ✅ | ✅ |
-| Claude / Codex / Gemini CLI hooks | ✅ | ✅ |
-| MCP tool interface | ✅ | ✅ |
-| Local-only, no proxy | ✅ | ✅ |
-| Team-wide policy enforcement | — | ✅ |
-| Audit log & compliance export | — | ✅ |
-| SSO / SAML / OIDC integration | — | ✅ |
-| Role-based provider access controls | — | ✅ |
-| Multi-workspace / org model budgets | — | ✅ |
-| SLA-backed support | — | ✅ |
-
-`llm-router` is the right choice for individual developers and small teams who want local cost savings with zero ops overhead. For organizations that need governance, auditability, and enterprise integrations, **[Chuzom](https://github.com/Chuzom/Chuzom)** is built for that.
+`llm-router` is built for individual developers and small teams: local cost savings, zero
+ops overhead, no hosted anything. If you need team-wide policy enforcement, audit export,
+SSO or per-org budgets, that is what **[Chuzom](https://github.com/Chuzom/Chuzom)** is for.
 
 ---
 
@@ -544,28 +528,8 @@ uv run ruff check src/ tests/   # Lint
 
 ---
 
-## Star History
-
-<p align="center">
-  <a href="https://star-history.com/#ypollak2/llm-router&Date">
-    <picture>
-      <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=ypollak2/llm-router&type=Date&theme=dark" />
-      <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=ypollak2/llm-router&type=Date" />
-      <img alt="Star history of ypollak2/llm-router" src="https://api.star-history.com/svg?repos=ypollak2/llm-router&type=Date" width="720" />
-    </picture>
-  </a>
-</p>
-
 <p align="center">
   <sub>⭐ If llm-router saved you money, star the repo — it helps other developers discover it.</sub>
-</p>
-
----
-
-## Activity
-
-<p align="center">
-  <img src="https://repobeats.axiom.co/api/embed/e44e82dd02f91546ec217fd8a5f98c97f2afd931.svg" alt="Repobeats analytics image" />
 </p>
 
 ---
