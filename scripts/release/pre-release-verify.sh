@@ -103,6 +103,49 @@ fi
 echo -e "${GREEN}✅ Local main is up-to-date${NC}"
 echo ""
 
+# 9. CI must have PASSED on the commit being released
+#
+# This gate exists because 13.0.1 was tagged and published from a commit whose
+# CI was red. The local checks above had all passed, which is exactly why they
+# were not enough: they verify the working TREE, and CI verifies the COMMIT —
+# across four Python versions, three operating systems, and the built wheel.
+# Everything above this line can be green while the thing you are about to
+# publish is not.
+#
+# The failure that time was a mutation-scope config file, harmless to the
+# artifact. That is luck, not a reason to skip the check.
+echo "9️⃣  Checking CI status for HEAD..."
+if ! command -v gh > /dev/null 2>&1 || ! gh auth status > /dev/null 2>&1; then
+    echo -e "${YELLOW}⚠️  gh unavailable or unauthenticated — cannot verify CI${NC}"
+    echo "   Check manually before tagging: gh run list --branch=main"
+else
+    HEAD_SHA=$(git rev-parse HEAD)
+    CI_CONCLUSION=$(gh run list --branch=main --limit 20 \
+        --json headSha,conclusion,status,workflowName \
+        --jq "[.[] | select(.headSha==\"$HEAD_SHA\" and .workflowName==\"CI\")] | first | .conclusion // .status // \"none\"" 2>/dev/null)
+
+    case "$CI_CONCLUSION" in
+        success)
+            echo -e "${GREEN}✅ CI passed for ${HEAD_SHA:0:8}${NC}"
+            ;;
+        none|"")
+            echo -e "${RED}❌ No CI run found for ${HEAD_SHA:0:8}${NC}"
+            echo "   Push the commit and let CI finish before tagging."
+            exit 1
+            ;;
+        in_progress|queued)
+            echo -e "${YELLOW}⚠️  CI still running for ${HEAD_SHA:0:8} — wait for it${NC}"
+            exit 1
+            ;;
+        *)
+            echo -e "${RED}❌ CI concluded '${CI_CONCLUSION}' for ${HEAD_SHA:0:8}${NC}"
+            echo "   gh run list --branch=main --limit 5"
+            exit 1
+            ;;
+    esac
+fi
+echo ""
+
 echo -e "${GREEN}========================================${NC}"
 echo -e "${GREEN}✅ All pre-release checks passed!${NC}"
 echo -e "${GREEN}Ready to run: bash scripts/release/release.sh${NC}"
