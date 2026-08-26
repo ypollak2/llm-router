@@ -43,6 +43,53 @@ def cmd_uninstall(args: list[str]) -> int:
 
 # ── Implementation ─────────────────────────────────────────────────────────────
 
+def _remove_derived_state() -> list[str]:
+    """Delete regenerable caches from ~/.llm-router/. Returns action strings.
+
+    GH#45: `agentic_models.json` is written by the background model-capability
+    probe that install kicks off. Nothing removed it, so a plain uninstall left
+    it behind; only `--purge` cleared it, and that deletes the whole state dir.
+
+    The state directory deliberately survives a plain uninstall because it holds
+    `usage.db` (cost history) and `.env` (API keys) — things a user would not
+    want silently destroyed, and which no reinstall could reconstruct. That
+    reasoning does not extend to a derived cache: the next probe regenerates it,
+    it holds nothing the user authored, and it is stale the moment the model set
+    changes. Preserving it protects nothing and leaves uninstall not quite a
+    no-op on the filesystem.
+
+    So the line this draws is user data vs regenerable cache, INSIDE a state
+    directory that still survives — not "keep everything" vs "delete everything".
+
+    The issue suggested routing this through the install manifest, the way the
+    ~/.claude.json husk fix went in 13.0.3. Deleting here instead, deliberately:
+    the probe runs in the BACKGROUND and may write the cache long after install
+    has finished and `apply_uninstall()` has already called `clear()`. A manifest
+    record would then exist only when the probe happened to finish in time,
+    which is a race, and a cleanup that works most of the time is the shape of
+    bug this file keeps finding. The path is a fixed, llm_router-owned name in an
+    llm_router-owned directory, so removing it directly needs no bookkeeping.
+    """
+    from llm_router import agentic_registry
+
+    actions: list[str] = []
+    # Each entry is read through its owning module's attribute rather than
+    # rebuilt from Path.home(), so a redirected path stays redirected.
+    targets = [agentic_registry.CACHE_PATH]
+
+    for target in targets:
+        if not target.exists():
+            continue
+        try:
+            target.unlink()
+            actions.append(f"Removed regenerable cache {target}")
+        except OSError as e:
+            # GH#42's lesson: a cleanup failure must be reported, never raised
+            # out of uninstall and never swallowed.
+            actions.append(f"WARN could not remove {target}: {e}")
+    return actions
+
+
 def _run_uninstall(flags: list[str] | None = None) -> None:
     import shutil
 
@@ -87,6 +134,12 @@ def _run_uninstall(flags: list[str] | None = None) -> None:
         actions.extend(uninstall_host_integrations())
     except Exception as e:
         actions.append(f"host-integration cleanup skipped: {e}")
+    # GH#45: regenerable caches in ~/.llm-router/ — the state dir itself and the
+    # user data in it are kept; only derived files go.
+    try:
+        actions.extend(_remove_derived_state())
+    except Exception as e:
+        actions.append(f"derived-state cleanup skipped: {e}")
     for a in actions:
         print(f"  {a}")
 
