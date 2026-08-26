@@ -987,3 +987,27 @@ def isolated_install_env(tmp_path, monkeypatch):
     monkeypatch.setenv("USERPROFILE", str(home))
     monkeypatch.chdir(work)
     return tmp_path
+
+
+@pytest.fixture(autouse=True)
+def _redirect_claude_json(tmp_path, monkeypatch):
+    """Point install_hooks._CLAUDE_JSON_PATH at a tmp file for every test.
+
+    ~/.claude.json is Claude Code's own config, and install()/uninstall() write
+    it. Tests were patching _HOOKS_DST, _SETTINGS_PATH and _RULES_DST — the
+    paths the assertions look at — and leaving this one pointed at the real
+    file, so a suite run edited the operator's actual Claude Code config. CI
+    caught two such tests that a local run masked, because ~/.claude.json
+    already exists on a developer machine and did not exist on the runner.
+
+    Redirecting by default inverts the failure mode: a test now has to opt IN
+    to touching the real path, rather than opt out. A test that patches it
+    itself still wins — monkeypatch applies in fixture-then-test order.
+
+    Only this constant is redirected. claude_desktop_config_path() is a
+    function whose own return value is under test in test_gaps_phase1.py, so
+    it is left alone and covered by the mutation guard instead.
+    """
+    import llm_router.install_hooks as ih
+
+    monkeypatch.setattr(ih, "_CLAUDE_JSON_PATH", tmp_path / "_claude_json" / ".claude.json")
