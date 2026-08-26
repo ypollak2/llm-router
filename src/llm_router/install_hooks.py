@@ -860,6 +860,22 @@ def install(force: bool = False) -> list[str]:
     """
     actions: list[str] = []
 
+    # ── Snapshot settings.json BEFORE touching it ────────────────────────
+    # This backup used to be taken from the statusLine branch far below, which
+    # runs after the hook registrations and the mcpServers entry have already
+    # been written and saved. `settings.json.bak` therefore held llm_router's
+    # own hooks and MCP server — POST-install state under a pre-install name.
+    # A user who reached for it after a bad install and copied it back would
+    # have silently reinstated every hook they were trying to remove.
+    #
+    # install() always rewrites settings.json, so the snapshot is taken
+    # unconditionally here. _backup_before_overwrite never clobbers an existing
+    # .bak, so the first capture is preserved and later runs get timestamped
+    # copies.
+    _settings_backup: Path | None = None
+    if _SETTINGS_PATH.exists():
+        _settings_backup = _backup_before_overwrite(_SETTINGS_PATH)
+
     # ── Copy hook scripts ────────────────────────────────────────────────
     _HOOKS_DST.mkdir(parents=True, exist_ok=True)
     actions.extend(_sync_hook_support_files())  # CHZ-SURF-01
@@ -1044,7 +1060,12 @@ def install(force: bool = False) -> list[str]:
                         previous=current_sl,
                     )
                     if current_sl is not None:
-                        _b = _backup_before_overwrite(_SETTINGS_PATH)
+                        # Point at the snapshot taken at the TOP of install(),
+                        # rather than capturing a fresh one here — by this line
+                        # settings.json already carries llm_router's own hooks
+                        # and MCP entry, so a backup taken now is not a backup
+                        # of anything the user would want restored.
+                        _b = _settings_backup
                         _where = f"; backup at {_b.name}" if _b else ""
                         actions.append(
                             "WARNING: replacing an existing statusLine in "

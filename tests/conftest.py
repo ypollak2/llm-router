@@ -840,3 +840,78 @@ def _restore_environ():
     yield
     os.environ.clear()
     os.environ.update(saved)
+
+
+# ── Repo mutation guard ───────────────────────────────────────────────────
+# FIFTH INSTANCE of the same defect class as the four above, one level out:
+# state mutated without isolation and never restored — except the state here is
+# the working tree, not a module global.
+#
+# Every host installer writes to Path.cwd(): .vscode/mcp.json, .windsurf/mcp.json,
+# .kimi/mcp.json, .github/, KIMI.md, .rules. Tests that call those installers
+# without chdir'ing first therefore write into whatever directory pytest was
+# started from — the developer's checkout. `git status` after a suite run showed
+# KIMI.md and .rules modified, every time.
+#
+# That is how the committed KIMI.md reached 53 copies of the same routing block:
+# suite runs appended to it (the idempotence guard was also broken — see
+# test_kimi_rules_idempotence.py), and the accumulated result was eventually
+# committed as if it were authored content.
+#
+# This guard keys on isolation rather than on which tests are known offenders,
+# for the same reason the env guard snapshots the whole environment: enumerating
+# offenders only holds until someone adds the next one. It RESTORES before
+# failing, so a violation cannot leave the checkout dirty even once.
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+
+_CWD_INSTALL_TARGETS = (
+    "KIMI.md",
+    ".rules",
+    ".vscode/mcp.json",
+    ".windsurf/mcp.json",
+    ".kimi/mcp.json",
+    ".cursor/rules/use-llm_router.mdc",
+    ".github/copilot-instructions.md",
+)
+
+
+@pytest.fixture(autouse=True)
+def _no_repo_mutation(request):
+    """Fail any test that writes an installer artifact into the real checkout."""
+    def snapshot():
+        out = {}
+        for rel in _CWD_INSTALL_TARGETS:
+            p = _REPO_ROOT / rel
+            try:
+                out[rel] = p.read_bytes() if p.is_file() else None
+            except OSError:
+                out[rel] = None
+        return out
+
+    before = snapshot()
+    yield
+    after = snapshot()
+
+    changed = [rel for rel in before if before[rel] != after[rel]]
+    if not changed:
+        return
+
+    # Restore first — a guard that reports damage but leaves it is half a guard.
+    for rel in changed:
+        p = _REPO_ROOT / rel
+        try:
+            if before[rel] is None:
+                if p.is_file():
+                    p.unlink()
+            else:
+                p.parent.mkdir(parents=True, exist_ok=True)
+                p.write_bytes(before[rel])
+        except OSError:  # pragma: no cover
+            pass
+
+    pytest.fail(
+        f"{request.node.nodeid} wrote installer artifacts into the real "
+        f"checkout: {changed}. Host installers write to Path.cwd() — use "
+        f"`monkeypatch.chdir(tmp_path)` before calling them. "
+        f"(The files have been restored.)"
+    )

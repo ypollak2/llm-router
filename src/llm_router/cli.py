@@ -477,16 +477,36 @@ Call the relevant tool BEFORE generating your own answer — relay the routed re
 
 Never skip routing for non-trivial tasks. LLM Router routes to the cheapest capable model.
 """)
+    # The guard must look for something the block ACTUALLY contains. It used to
+    # test for "llm_router", a token that appears nowhere in kimi_rules — the
+    # text says "LLM Router" with a space throughout, and localize() rewrites
+    # the tool names to llm(task="…"). So the guard was always true and every
+    # install appended another copy; the committed KIMI.md in this repo reached
+    # 53 of them. Anchor on the section heading instead, which is part of the
+    # written text and therefore cannot drift away from it.
+    _KIMI_MARKER = "## LLM Router routing"
     if kimi_md.exists():
         content = kimi_md.read_text()
-        if "llm_router" not in content.lower():
+        if _KIMI_MARKER not in content:
             kimi_md.write_text(content + kimi_rules)
             actions.append(f"Appended: LLM Router routing rules to {kimi_md}")
+            # It also recorded nothing, so uninstall had no way to strip what it
+            # wrote and every copy survived `llm_router uninstall`.
+            try:
+                from llm_router import install_manifest
+                install_manifest.record("text_block", kimi_md, block=kimi_rules)
+            except Exception:
+                pass  # a manifest write must never break install
         else:
             actions.append(f"Skipped: {kimi_md} already has LLM Router rules")
     else:
         kimi_md.write_text(f"# Project Instructions\n{kimi_rules}")
         actions.append(f"Created: {kimi_md} with LLM Router routing rules")
+        try:
+            from llm_router import install_manifest
+            install_manifest.record("created_file", kimi_md, block=kimi_rules)
+        except Exception:
+            pass
 
     actions.append(
         "NOTE (pull routing): Kimi Code has no UserPromptSubmit hook. "
