@@ -85,7 +85,7 @@ def test_opencode_install_only_registers_mcp_server(monkeypatch, tmp_path):
     _assert_json_has_no_forced_default_keys(config_json)
     data = json.loads(config_json.read_text())
     assert set(data.keys()) == {"mcpServers"}
-    assert data["mcpServers"]["llm_router"] == {"command": "llm_router", "args": []}
+    assert data["mcpServers"]["llm_router"] == {"command": "llm-router", "args": []}
     assert any("llm_router MCP server" in a for a in actions)
 
 
@@ -250,7 +250,7 @@ def test_vscode_install_only_registers_mcp_server_under_servers_key(monkeypatch,
     found = _DANGEROUS_TOP_LEVEL_KEYS & set(data.keys())
     assert not found, f"VS Code mcp.json has forced-default keys: {found}"
     assert set(data.keys()) == {"servers"}
-    assert data["servers"]["llm_router"] == {"command": "llm_router", "args": []}
+    assert data["servers"]["llm_router"] == {"command": "llm-router", "args": []}
 
 
 # ── Cursor IDE ────────────────────────────────────────────────────────────

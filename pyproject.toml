@@ -1,6 +1,6 @@
 [project]
 name = "llm-routing"
-version = "13.0.2"
+version = "13.0.3"
 description = "Multi-LLM router MCP server — smart complexity routing, budget-aware model selection, 20+ providers (Claude, OpenAI, Gemini, Ollama, etc.)"
 readme = "README.md"
 license = "MIT"
@@ -135,6 +135,11 @@ exclude = [
     "/skills/",
     "/submissions/",
     "/tests/",
+    # The quarantine lives at the repo ROOT, not under tests/, so the "/tests/"
+    # entry never covered it and 13.0.2 shipped 16 files of dead, uncollectable
+    # test code to PyPI. Same anchoring lesson as the block above, inverted:
+    # there the pattern matched too much, here it matched too little.
+    "/_quarantined_tests/",
     "/awesome-readme/",
     # ── Backup / temp files — never publish (CLAUDE.md sdist safety rule) ─
     ".env.backup.*",

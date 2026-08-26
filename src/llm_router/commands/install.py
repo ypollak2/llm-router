@@ -275,7 +275,7 @@ def _run_install_headless() -> None:
     print(_dim("  (llm_router install does this automatically; shown for reference)"))
     import json as _json
     example = {
-        "mcpServers": {"llm_router": {"command": "llm_router", "args": []}},
+        "mcpServers": {"llm_router": {"command": "llm-router", "args": []}},
         "hooks": {
             "UserPromptSubmit": [{"matcher": "", "hooks": [{"type": "command", "command": "python3 ~/.claude/hooks/llm_router-auto-route.py"}]}],
             "Stop":             [{"matcher": "", "hooks": [{"type": "command", "command": "python3 ~/.claude/hooks/llm_router-session-end.py"}]}],
@@ -309,7 +309,7 @@ _HOST_SNIPPETS: dict[str, str] = {
    mcp:
      servers:
        llm_router:
-         command: llm_router
+         command: llm-router
          args: []
 
 2. Copy routing rules so Codex knows when to call llm_auto:
@@ -331,7 +331,7 @@ Add inside the top-level object:
 
   "mcpServers": {{
     "llm_router": {{
-      "command": "llm_router",
+      "command": "llm-router",
       "args": [],
       "env": {{
         "LLM_ROUTER_PROFILE": "balanced"
@@ -351,7 +351,7 @@ Note: cost-routing is not available in Desktop (no hook system).
    {{
      "servers": {{
        "llm_router": {{
-         "command": "llm_router",
+         "command": "llm-router",
          "args": []
        }}
      }}
@@ -539,7 +539,7 @@ def _install_codex_files(mode: str = "gateway") -> list[str]:
         "\nmcp:\n"
         "  servers:\n"
         "    llm_router:\n"
-        "      command: llm_router\n"
+        "      command: llm-router\n"
         "      args: []\n"
     )
     existing = config_yaml.read_text() if config_yaml.exists() else ""
@@ -804,7 +804,7 @@ def uninstall_host_integrations() -> list[str]:
                 "\nmcp:\n"
                 "  servers:\n"
                 "    llm_router:\n"
-                "      command: llm_router\n"
+                "      command: llm-router\n"
                 "      args: []\n"
             )
             if mcp_block in y:
@@ -928,7 +928,7 @@ def _install_opencode_files() -> list[str]:
     opencode_dir.mkdir(parents=True, exist_ok=True)
 
     # 1. MCP server entry
-    server_entry = {"command": "llm_router", "args": []}
+    server_entry = {"command": "llm-router", "args": []}
     actions += _merge_json_mcp_block(opencode_dir / "config.json", "llm_router", server_entry)
 
     # 2. Hook script
@@ -954,7 +954,7 @@ def _install_gemini_cli_files() -> list[str]:
     gemini_dir.mkdir(parents=True, exist_ok=True)
 
     # 1. MCP server entry in ~/.gemini/settings.json
-    server_entry = {"command": "llm_router", "args": []}
+    server_entry = {"command": "llm-router", "args": []}
     actions += _merge_json_mcp_block(gemini_dir / "settings.json", "llm_router", server_entry)
 
     # 2. Extension manifest + hooks directory
@@ -1086,7 +1086,7 @@ def _install_copilot_cli_files() -> list[str]:
     copilot_dir = home / ".config" / "gh" / "copilot"
     copilot_dir.mkdir(parents=True, exist_ok=True)
 
-    server_entry = {"command": "llm_router", "args": []}
+    server_entry = {"command": "llm-router", "args": []}
     actions += _merge_json_mcp_block(copilot_dir / "mcp.json", "llm_router", server_entry)
 
     # Routing rules → ~/.config/gh/copilot/instructions.md
@@ -1106,7 +1106,7 @@ def _install_openclaw_files() -> list[str]:
     openclaw_dir = home / ".openclaw"
     openclaw_dir.mkdir(parents=True, exist_ok=True)
 
-    server_entry = {"command": "llm_router", "args": []}
+    server_entry = {"command": "llm-router", "args": []}
     actions += _merge_json_mcp_block(openclaw_dir / "mcp.json", "llm_router", server_entry)
     actions += _append_routing_rules(openclaw_dir / "instructions.md", "openclaw-rules.md")
 
@@ -1130,7 +1130,7 @@ def _install_trae_files() -> list[str]:
         trae_dir = home / ".config" / "Trae"
     trae_dir.mkdir(parents=True, exist_ok=True)
 
-    server_entry = {"command": "llm_router", "args": []}
+    server_entry = {"command": "llm-router", "args": []}
     actions += _merge_json_mcp_block(trae_dir / "mcp.json", "llm_router", server_entry)
 
     # .rules file in current project directory (Trae-specific pattern)
@@ -1172,7 +1172,7 @@ def _install_vscode_files() -> list[str]:
     else:
         mcp_json = home / ".config" / "Code" / "User" / "mcp.json"
 
-    server_entry = {"command": "llm_router", "args": []}
+    server_entry = {"command": "llm-router", "args": []}
     actions += _merge_json_mcp_block(mcp_json, "llm_router", server_entry, root_key="servers")
 
     # Append routing guidance to .github/copilot-instructions.md in cwd (if it exists)
@@ -1190,7 +1190,7 @@ def _install_windsurf_files() -> list[str]:
 
     actions: list[str] = []
     mcp_json = pathlib.Path.cwd() / ".windsurf" / "mcp.json"
-    server_entry = {"command": "llm_router", "args": []}
+    server_entry = {"command": "llm-router", "args": []}
     actions += _merge_json_mcp_block(mcp_json, "llm_router", server_entry, root_key="mcpServers")
     return actions
 
@@ -1204,7 +1204,7 @@ def _install_cursor_files() -> list[str]:
 
     # Global Cursor MCP config (applies across all projects)
     mcp_json = home / ".cursor" / "mcp.json"
-    server_entry = {"command": "llm_router", "args": []}
+    server_entry = {"command": "llm-router", "args": []}
     actions += _merge_json_mcp_block(mcp_json, "llm_router", server_entry, root_key="mcpServers")
 
     # Append routing rules to ~/.cursor/rules/llm_router.md

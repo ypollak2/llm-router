@@ -40,15 +40,37 @@ def sandbox(tmp_path, monkeypatch):
     settings_path = claude / "settings.json"
     manifest_path = tmp_path / ".llm-router" / "install-manifest.json"
 
+    claude_json = tmp_path / ".claude.json"
+    desktop_config = tmp_path / "claude_desktop_config.json"
+
     monkeypatch.setattr(ih, "_HOOKS_DST", hooks_dst)
     monkeypatch.setattr(ih, "_SETTINGS_PATH", settings_path)
     monkeypatch.setattr(ih, "_RULES_DST", claude / "rules")
     monkeypatch.setattr(ih, "_CLAUDE_DIR", claude)
     monkeypatch.setattr(im, "_manifest_path", lambda: manifest_path)
+    # These two were missing, and they are surfaces install() writes to: the
+    # Claude Code CLI's ~/.claude.json and Claude Desktop's config. So this
+    # fixture — whose own docstring warns that the audit's DB tests "destroyed
+    # real user data by writing to a HOME that was not as isolated as it looked"
+    # — was doing the same thing, one file over. A suite run edited the
+    # operator's real ~/.claude.json and claude_desktop_config.json.
+    monkeypatch.setattr(ih, "_CLAUDE_JSON_PATH", claude_json)
+    monkeypatch.setattr(ih, "claude_desktop_config_path", lambda: desktop_config)
+
+    # Patching _CLAUDE_JSON_PATH is not sufficient on its own. Both
+    # _install_claude_code_cli and _uninstall_claude_code_cli prefer shelling out
+    # to the real `claude mcp add/remove --scope user`, which edits the operator's
+    # actual ~/.claude.json and ignores our patched path entirely. Hiding the
+    # binary forces the direct-JSON branch, which does respect it.
+    import shutil as _shutil
+    _real_which = _shutil.which
+    monkeypatch.setattr(
+        ih.shutil, "which", lambda n: None if n == "claude" else _real_which(n)
+    )
 
     # The safety assertion the plan requires: if any of these escaped tmp_path we
     # would be editing the operator's real config.
-    for p in (hooks_dst, settings_path, manifest_path):
+    for p in (hooks_dst, settings_path, manifest_path, claude_json, desktop_config):
         assert str(p).startswith(str(tmp_path)), f"{p} escaped the tmpdir"
 
     settings_path.parent.mkdir(parents=True, exist_ok=True)

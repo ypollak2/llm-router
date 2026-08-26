@@ -2,7 +2,7 @@
   "servers": {
     "llm_router": {
       "type": "stdio",
-      "command": "llm_router",
+      "command": "llm-router",
       "args": []
     }
   }

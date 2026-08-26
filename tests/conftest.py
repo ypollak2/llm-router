@@ -840,3 +840,174 @@ def _restore_environ():
     yield
     os.environ.clear()
     os.environ.update(saved)
+
+
+# ── Repo mutation guard ───────────────────────────────────────────────────
+# FIFTH INSTANCE of the same defect class as the four above, one level out:
+# state mutated without isolation and never restored — except the state here is
+# the working tree, not a module global.
+#
+# Every host installer writes to Path.cwd(): .vscode/mcp.json, .windsurf/mcp.json,
+# .kimi/mcp.json, .github/, KIMI.md, .rules. Tests that call those installers
+# without chdir'ing first therefore write into whatever directory pytest was
+# started from — the developer's checkout. `git status` after a suite run showed
+# KIMI.md and .rules modified, every time.
+#
+# That is how the committed KIMI.md reached 53 copies of the same routing block:
+# suite runs appended to it (the idempotence guard was also broken — see
+# test_kimi_rules_idempotence.py), and the accumulated result was eventually
+# committed as if it were authored content.
+#
+# This guard keys on isolation rather than on which tests are known offenders,
+# for the same reason the env guard snapshots the whole environment: enumerating
+# offenders only holds until someone adds the next one. It RESTORES before
+# failing, so a violation cannot leave the checkout dirty even once.
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+
+_CWD_INSTALL_TARGETS = (
+    "KIMI.md",
+    ".rules",
+    ".vscode/mcp.json",
+    ".windsurf/mcp.json",
+    ".kimi/mcp.json",
+    ".cursor/rules/use-llm_router.mdc",
+    ".github/copilot-instructions.md",
+)
+
+# The same defect, one blast radius larger. `TestInstallHost` in
+# test_cost_host.py called the real `_install_host("all")` with neither HOME nor
+# cwd isolated, so a plain `pytest tests/` wrote llm_router MCP entries into the
+# DEVELOPER'S OWN machine config — ~/.codex/config.json, ~/.cursor/mcp.json,
+# ~/.gemini/settings.json, ~/.config/opencode/config.json and Claude Desktop's
+# config were all modified by suite runs. Nothing reported it, because nothing
+# was looking outside the repo.
+_HOME_INSTALL_TARGETS = (
+    ".codex/config.json",
+    ".cursor/mcp.json",
+    ".gemini/settings.json",
+    ".config/opencode/config.json",
+    ".claude/settings.json",
+    ".claude.json",
+    "Library/Application Support/Claude/claude_desktop_config.json",
+)
+
+# Files a LIVE process may be writing while the suite runs. ~/.claude.json is
+# Claude Code's own state file: if the suite runs from inside a Claude Code
+# session, that session rewrites it continuously. Restoring one of these would
+# revert a concurrent writer's work and destroy real state — the exact class of
+# damage this guard exists to prevent. So they are reported, never restored:
+# detection without a clobber risk.
+_REPORT_ONLY = frozenset({
+    "home:.claude.json",
+    "home:.claude/settings.json",
+})
+
+
+@pytest.fixture(autouse=True)
+def _no_repo_mutation(request):
+    """Fail any test that writes an installer artifact into the real checkout."""
+    real_home = Path(os.path.expanduser("~"))
+
+    def _targets():
+        for rel in _CWD_INSTALL_TARGETS:
+            yield f"repo:{rel}", _REPO_ROOT / rel
+        for rel in _HOME_INSTALL_TARGETS:
+            yield f"home:{rel}", real_home / rel
+
+    def snapshot():
+        # (bytes, mtime_ns) — NOT bytes alone. An installer that rewrites the
+        # same JSON leaves the content identical while still having written to a
+        # file it had no business touching; on another machine, or after a code
+        # change, those same bytes would differ. Byte-equality would call that
+        # clean and let the leak persist, which is exactly what it did.
+        out = {}
+        for label, p in _targets():
+            try:
+                out[label] = (p.read_bytes(), p.stat().st_mtime_ns) if p.is_file() else None
+            except OSError:
+                out[label] = None
+        return out
+
+    before = snapshot()
+    yield
+    after = snapshot()
+
+    changed = [rel for rel in before if before[rel] != after[rel]]
+    if not changed:
+        return
+
+    # Restore first — a guard that reports damage but leaves it is half a guard.
+    # Except for _REPORT_ONLY paths, where a restore is the more dangerous act.
+    _by_label = dict(_targets())
+    for rel in changed:
+        if rel in _REPORT_ONLY:
+            continue
+        p = _by_label[rel]
+        try:
+            if before[rel] is None:
+                if p.is_file():
+                    p.unlink()
+            else:
+                _body, _mtime = before[rel]
+                p.parent.mkdir(parents=True, exist_ok=True)
+                p.write_bytes(_body)
+                os.utime(p, ns=(_mtime, _mtime))
+        except OSError:  # pragma: no cover
+            pass
+
+    pytest.fail(
+        f"{request.node.nodeid} wrote installer artifacts outside its sandbox: "
+        f"{changed}. Host installers write to Path.cwd() and Path.home() — "
+        f"isolate BOTH (`monkeypatch.chdir(tmp_path)` plus a patched home) "
+        f"before calling them. Restored: "
+        f"{sorted(set(changed) - _REPORT_ONLY)}; reported but NOT restored "
+        f"(a live process may own these): {sorted(set(changed) & _REPORT_ONLY)}."
+    )
+
+
+@pytest.fixture
+def isolated_install_env(tmp_path, monkeypatch):
+    """Run real installers against a throwaway HOME and cwd.
+
+    Host installers resolve their targets with Path.home() and Path.cwd() at
+    call time, so a test that invokes one without redirecting BOTH writes to the
+    developer's actual machine. Patching pathlib.Path.home covers every module
+    regardless of how it imported Path; HOME/USERPROFILE cover anything that
+    reads the environment directly.
+    """
+    import pathlib
+
+    home = tmp_path / "home"
+    work = tmp_path / "work"
+    home.mkdir()
+    work.mkdir()
+
+    monkeypatch.setattr(pathlib.Path, "home", classmethod(lambda cls: home))
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+    monkeypatch.chdir(work)
+    return tmp_path
+
+
+@pytest.fixture(autouse=True)
+def _redirect_claude_json(tmp_path, monkeypatch):
+    """Point install_hooks._CLAUDE_JSON_PATH at a tmp file for every test.
+
+    ~/.claude.json is Claude Code's own config, and install()/uninstall() write
+    it. Tests were patching _HOOKS_DST, _SETTINGS_PATH and _RULES_DST — the
+    paths the assertions look at — and leaving this one pointed at the real
+    file, so a suite run edited the operator's actual Claude Code config. CI
+    caught two such tests that a local run masked, because ~/.claude.json
+    already exists on a developer machine and did not exist on the runner.
+
+    Redirecting by default inverts the failure mode: a test now has to opt IN
+    to touching the real path, rather than opt out. A test that patches it
+    itself still wins — monkeypatch applies in fixture-then-test order.
+
+    Only this constant is redirected. claude_desktop_config_path() is a
+    function whose own return value is under test in test_gaps_phase1.py, so
+    it is left alone and covered by the mutation guard instead.
+    """
+    import llm_router.install_hooks as ih
+
+    monkeypatch.setattr(ih, "_CLAUDE_JSON_PATH", tmp_path / "_claude_json" / ".claude.json")

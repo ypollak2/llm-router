@@ -52,7 +52,7 @@ def test_cursor_install_preserves_llm_router_entry(config_with_llm_router: Path)
     from llm_router.hosts.cursor import CursorAdapter
 
     adapter = CursorAdapter(config_path=config_with_llm_router)
-    adapter.install(server_command=["llm_router"])
+    adapter.install(server_command=["llm-router"])
 
     data = json.loads(config_with_llm_router.read_text())
     assert "llm-router" in data["mcpServers"]
@@ -65,7 +65,7 @@ def test_cursor_install_preserves_llm_router_env_block(config_with_llm_router: P
     from llm_router.hosts.cursor import CursorAdapter
 
     adapter = CursorAdapter(config_path=config_with_llm_router)
-    adapter.install(server_command=["llm_router"])
+    adapter.install(server_command=["llm-router"])
 
     data = json.loads(config_with_llm_router.read_text())
     entry = data["mcpServers"]["llm-router"]
@@ -77,7 +77,7 @@ def test_cursor_uninstall_only_removes_llm_router(config_with_llm_router: Path):
     from llm_router.hosts.cursor import CursorAdapter
 
     adapter = CursorAdapter(config_path=config_with_llm_router)
-    adapter.install(server_command=["llm_router"])
+    adapter.install(server_command=["llm-router"])
     adapter.uninstall()
 
     data = json.loads(config_with_llm_router.read_text())
@@ -109,7 +109,7 @@ def test_gemini_cli_install_preserves_llm_router_entry(
     from llm_router.hosts.gemini_cli import GeminiCliAdapter
 
     adapter = GeminiCliAdapter(config_path=config_with_llm_router)
-    adapter.install(server_command=["llm_router"])
+    adapter.install(server_command=["llm-router"])
 
     data = json.loads(config_with_llm_router.read_text())
     assert "llm-router" in data["mcpServers"]
@@ -120,7 +120,7 @@ def test_gemini_cli_uninstall_only_removes_llm_router(config_with_llm_router: Pa
     from llm_router.hosts.gemini_cli import GeminiCliAdapter
 
     adapter = GeminiCliAdapter(config_path=config_with_llm_router)
-    adapter.install(server_command=["llm_router"])
+    adapter.install(server_command=["llm-router"])
     adapter.uninstall()
 
     data = json.loads(config_with_llm_router.read_text())
@@ -139,7 +139,7 @@ def test_install_llm_router_before_llm_router_still_coexist(tmp_path: Path):
 
     cfg = tmp_path / "mcp.json"
     adapter = CursorAdapter(config_path=cfg)
-    adapter.install(server_command=["llm_router"])
+    adapter.install(server_command=["llm-router"])
 
     # User manually adds llm-router
     data = json.loads(cfg.read_text())
@@ -147,7 +147,7 @@ def test_install_llm_router_before_llm_router_still_coexist(tmp_path: Path):
     cfg.write_text(json.dumps(data))
 
     # Re-install LLM Router (e.g. version upgrade)
-    adapter.install(server_command=["llm_router", "--upgraded"])
+    adapter.install(server_command=["llm-router", "--upgraded"])
 
     final = json.loads(cfg.read_text())
     assert "llm-router" in final["mcpServers"]
@@ -196,7 +196,7 @@ def test_three_way_coexistence(tmp_path: Path):
     }))
 
     adapter = CursorAdapter(config_path=cfg)
-    adapter.install(server_command=["llm_router"])
+    adapter.install(server_command=["llm-router"])
     final = json.loads(cfg.read_text())
     assert set(final["mcpServers"].keys()) == {"llm-router", "obsidian", "llm_router"}
 
@@ -287,7 +287,7 @@ def test_repeated_llm_router_installs_dont_grow_llm_router_entry(
     original_llm_router = json.loads(config_with_llm_router.read_text())["mcpServers"]["llm-router"]
 
     for _ in range(5):
-        adapter.install(server_command=["llm_router"])
+        adapter.install(server_command=["llm-router"])
 
     final_llm_router = json.loads(config_with_llm_router.read_text())["mcpServers"]["llm-router"]
     assert original_llm_router == final_llm_router, (

@@ -24,7 +24,7 @@
   <a href="https://pypi.org/project/llm-routing/"><img src="https://img.shields.io/badge/python-3.11+-3572A5?style=flat-square" alt="Python"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-10B981?style=flat-square" alt="License"></a>
   <a href="https://github.com/ypollak2/llm-router/discussions"><img src="https://img.shields.io/github/discussions/ypollak2/llm-router?style=flat-square&color=8B5CF6&label=discussions" alt="Discussions"></a>
-  <a href="https://github.com/RouteWorks/RouterArena"><img src="https://img.shields.io/badge/RouterArena-%238-F59E0B?style=flat-square&logo=data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCI+PHBhdGggZmlsbD0id2hpdGUiIGQ9Ik0xMiAyTDMgN2w5IDUgOS01LTktNXpNMyAxN2w5IDUgOS01TTMgMTJsOSA1IDktNSIvPjwvc3ZnPg==" alt="RouterArena #8"></a>
+  <a href="https://github.com/RouteWorks/RouterArena"><img src="https://img.shields.io/badge/RouterArena-listed-F59E0B?style=flat-square&logo=data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCI+PHBhdGggZmlsbD0id2hpdGUiIGQ9Ik0xMiAyTDMgN2w5IDUgOS01LTktNXpNMyAxN2w5IDUgOS01TTMgMTJsOSA1IDktNSIvPjwvc3ZnPg==" alt="Listed on RouterArena"></a>
   <a href="https://mcptoplist.com/server/glama%2Fypollak2%2Fllm-router"><img src="https://mcptoplist.com/badge/glama%2Fypollak2%2Fllm-router.svg" alt="MCP Toplist: Top 1% of 98,291" /></a>
 </p>
 
@@ -62,7 +62,7 @@ pip install llm-routing   # PyPI name is llm-routing; the CLI command is llm-rou
 <summary><b>📑 Table of Contents</b></summary>
 
 - [Why People Install This](#why-people-install-this)
-- [Ranked #8 on RouterArena](#ranked-8-on-routerarena)
+- [On the RouterArena leaderboard](#on-the-routerarena-leaderboard)
 - [Quick Start](#quick-start)
 - [Example Routing](#example-routing)
 - [Works With](#works-with)
@@ -107,9 +107,9 @@ You keep the same workflow. The router changes the model choice underneath.
 
 ---
 
-## Ranked #8 on RouterArena
+## On the RouterArena leaderboard
 
-`llm-router` was independently benchmarked and ranked **#8** on [RouterArena](https://github.com/RouteWorks/RouterArena) — a community leaderboard that evaluates model routers on routing accuracy, latency, cost efficiency, and fallback reliability.
+`llm-router` is independently benchmarked on [RouterArena](https://github.com/RouteWorks/RouterArena), a community leaderboard that scores model routers on an accuracy-versus-cost curve, plus optimality, robustness and latency. Rank moves as new routers land — see the [live leaderboard](https://github.com/RouteWorks/RouterArena#leaderboard) for the current standing.
 
 ---
 
@@ -348,7 +348,36 @@ llm-router runs entirely on your machine. There is no hosted proxy, no telemetry
 - Usage logs (SQLite) are not encrypted at rest — use full-disk encryption if needed
 - The router cannot prevent model jailbreaks or prompt injection at the provider level
 
-See [SECURITY.md](SECURITY.md) for responsible disclosure policy.
+### `LLM_ROUTER_DIRECT_EXECUTION` — read this before your first run
+
+**This is on by default.** When enabled, `hooks/auto-route.py` tries to answer a prompt
+locally before Claude Code sees it. For prompts it classifies as needing file work, it runs
+a tool-calling agent loop that hands the local model three tools — `write_file`, `edit_file`
+and `run_command` — **unsupervised, with no confirmation step**, for up to 15 iterations.
+`run_command` executes through a shell.
+
+What is actually enforced:
+
+- `write_file` / `edit_file` are confined to the project root. This works as described.
+- `run_command` is filtered by a small regex blocklist of top-level destructive patterns.
+
+What that blocklist does **not** stop (measured, not estimated): targeted deletes inside the
+project (`rm -rf ./src`), `$HOME` deletes via shell expansion, `git push --force`,
+`git reset --hard`, arbitrary `npm`/`pip install`, reads outside the project
+(`cat ../../.ssh/id_rsa`), network exfiltration (`curl -X POST … -d @.env`), and echoing
+API keys. It stops catastrophic *system* damage — not project damage, credential
+disclosure, or exfiltration.
+
+**Turn it off:**
+
+```bash
+export LLM_ROUTER_DIRECT_EXECUTION=false
+```
+
+Routing still works with it disabled; you lose only the local pre-answer path.
+
+See [SECURITY.md](https://github.com/ypollak2/llm-router/blob/main/SECURITY.md) for the full
+analysis and the responsible disclosure policy.
 
 ---
 

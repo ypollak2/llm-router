@@ -667,7 +667,11 @@ def _install_claude_code_cli(mcp_entry: dict) -> list[str]:
     # Direct JSON merge fallback (works without the claude CLI — Docker/CI/headless)
     try:
         data: dict = {}
-        if _CLAUDE_JSON_PATH.exists():
+        # GH#42: remember whether WE created this file. Uninstall previously left
+        # behind a `{"mcpServers": {}}` husk for users who never had a
+        # ~/.claude.json — residue from a tool they had just removed.
+        _preexisting = _CLAUDE_JSON_PATH.exists()
+        if _preexisting:
             try:
                 data = json.loads(_CLAUDE_JSON_PATH.read_text(encoding="utf-8"))
             except (json.JSONDecodeError, OSError):
@@ -677,6 +681,12 @@ def _install_claude_code_cli(mcp_entry: dict) -> list[str]:
             return ["MCP server already in ~/.claude.json: llm_router"]
         servers["llm_router"] = mcp_entry
         _CLAUDE_JSON_PATH.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+        if not _preexisting:
+            try:
+                from llm_router import install_manifest as _im
+                _im.record("created_file", _CLAUDE_JSON_PATH)
+            except Exception:
+                pass  # a manifest write must never break install
         return ["Registered llm_router MCP server in ~/.claude.json (direct merge)"]
     except OSError as e:
         return [f"WARNING: could not register MCP in ~/.claude.json: {e}"]
@@ -705,10 +715,60 @@ def _uninstall_claude_code_cli() -> list[str]:
         if "llm_router" not in data.get("mcpServers", {}):
             return []
         del data["mcpServers"]["llm_router"]
+        # GH#42: prune the empty container too, and drop the file entirely when
+        # install is the only reason it exists. An empty mcpServers map holds no
+        # information; leaving it is residue, not caution.
+        if not data["mcpServers"]:
+            del data["mcpServers"]
+        if not data:
+            from llm_router import install_manifest as _im
+            if _im.find("created_file", _CLAUDE_JSON_PATH) is not None:
+                _CLAUDE_JSON_PATH.unlink()
+                return [f"Removed {_CLAUDE_JSON_PATH} (created by install)"]
         _CLAUDE_JSON_PATH.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
         return ["Removed llm_router from ~/.claude.json"]
     except OSError:
         return []
+
+
+def _router_bin() -> str | None:
+    """Locate the installed llm-router console script.
+
+    GH#41: `[project.scripts]` declares only the HYPHENATED `llm-router`, so
+    `shutil.which("llm_router")` never matched on ANY install type — pipx, pip
+    or uv. The underscore is still tried second so a dev checkout that exposes
+    a legacy alias keeps working.
+    """
+    return shutil.which("llm-router") or shutil.which("llm_router")
+
+
+def _build_mcp_entry() -> tuple[dict | None, list[str]]:
+    """Build the MCP server entry, or (None, warnings) if it cannot be resolved.
+
+    GH#41: the old code fell back to `uv run --directory <dir>` whenever the
+    binary lookup failed. Because the lookup ALWAYS failed, every packaged
+    install got a uv invocation pointed at its site-packages directory, which
+    is not a project root — hence CONNECTION_CLOSED. The uv fallback is now
+    gated on actually being a source checkout, and an unresolvable binary
+    warns instead of writing a command that cannot run.
+    """
+    router_bin = _router_bin()
+    if router_bin:
+        return {"command": router_bin, "args": []}, []
+
+    project_dir = _PACKAGE_DIR.parent.parent
+    uv_path = shutil.which("uv")
+    if uv_path and (project_dir / "pyproject.toml").exists():
+        return {
+            "command": uv_path,
+            "args": ["run", "--directory", str(project_dir), "llm-router"],
+        }, []
+
+    return None, [
+        "WARN could not locate the 'llm-router' executable; skipping MCP "
+        "registration. Ensure the install's bin directory is on PATH "
+        "(pipx: `pipx ensurepath`), then re-run `llm-router install`."
+    ]
 
 
 def _install_claude_desktop() -> list[str]:
@@ -720,8 +780,9 @@ def _install_claude_desktop() -> list[str]:
     if config_path is None:
         return ["SKIP Claude Desktop: unsupported platform"]
 
-    llm_router_bin = shutil.which("llm_router") or "llm_router"
-    entry = {"command": llm_router_bin, "args": []}
+    entry, warnings = _build_mcp_entry()
+    if entry is None:
+        return warnings
 
     config = _load_desktop_config(config_path)
     servers = config.setdefault("mcpServers", {})
@@ -799,6 +860,22 @@ def install(force: bool = False) -> list[str]:
     """
     actions: list[str] = []
 
+    # ── Snapshot settings.json BEFORE touching it ────────────────────────
+    # This backup used to be taken from the statusLine branch far below, which
+    # runs after the hook registrations and the mcpServers entry have already
+    # been written and saved. `settings.json.bak` therefore held llm_router's
+    # own hooks and MCP server — POST-install state under a pre-install name.
+    # A user who reached for it after a bad install and copied it back would
+    # have silently reinstated every hook they were trying to remove.
+    #
+    # install() always rewrites settings.json, so the snapshot is taken
+    # unconditionally here. _backup_before_overwrite never clobbers an existing
+    # .bak, so the first capture is preserved and later runs get timestamped
+    # copies.
+    _settings_backup: Path | None = None
+    if _SETTINGS_PATH.exists():
+        _settings_backup = _backup_before_overwrite(_SETTINGS_PATH)
+
     # ── Copy hook scripts ────────────────────────────────────────────────
     _HOOKS_DST.mkdir(parents=True, exist_ok=True)
     actions.extend(_sync_hook_support_files())  # CHZ-SURF-01
@@ -874,26 +951,26 @@ def install(force: bool = False) -> list[str]:
     # ── Register MCP server globally ─────────────────────────────────────
     # Build the entry using the installed llm_router binary when available
     # (pip install), falling back to uv run for development installs.
-    llm_router_bin = shutil.which("llm_router")
-    if llm_router_bin:
-        mcp_entry: dict = {"command": llm_router_bin, "args": []}
-    else:
-        uv_path = shutil.which("uv") or "uv"
-        project_dir = str(_PACKAGE_DIR.parent.parent)
-        mcp_entry = {"command": uv_path, "args": ["run", "--directory", project_dir, "llm_router"]}
+    mcp_entry, _mcp_warnings = _build_mcp_entry()
+    actions.extend(_mcp_warnings)
 
-    # ~/.claude/settings.json — Claude Desktop / interactive Claude Code
-    settings2 = _load_settings()
-    mcp_servers = settings2.setdefault("mcpServers", {})
-    if "llm_router" not in mcp_servers:
-        mcp_servers["llm_router"] = mcp_entry
-        _save_settings(settings2)
-        actions.append("Registered llm_router MCP server in ~/.claude/settings.json")
+    # GH#41: skip registration entirely rather than write a command that cannot
+    # resolve. A missing server is diagnosable; a dead one reports CONNECTION_CLOSED.
+    if mcp_entry is None:
+        actions.append("SKIP MCP registration — no runnable llm-router command")
     else:
-        actions.append("MCP server already in ~/.claude/settings.json: llm_router")
+        # ~/.claude/settings.json — Claude Desktop / interactive Claude Code
+        settings2 = _load_settings()
+        mcp_servers = settings2.setdefault("mcpServers", {})
+        if "llm_router" not in mcp_servers:
+            mcp_servers["llm_router"] = mcp_entry
+            _save_settings(settings2)
+            actions.append("Registered llm_router MCP server in ~/.claude/settings.json")
+        else:
+            actions.append("MCP server already in ~/.claude/settings.json: llm_router")
 
-    # ~/.claude.json — Claude Code CLI (`claude -p`, non-interactive, agent mode)
-    actions.extend(_install_claude_code_cli(mcp_entry))
+        # ~/.claude.json — Claude Code CLI (`claude -p`, non-interactive, agent mode)
+        actions.extend(_install_claude_code_cli(mcp_entry))
 
     # ── Copy routing rules ───────────────────────────────────────────────
     _RULES_DST.mkdir(parents=True, exist_ok=True)
@@ -983,7 +1060,12 @@ def install(force: bool = False) -> list[str]:
                         previous=current_sl,
                     )
                     if current_sl is not None:
-                        _b = _backup_before_overwrite(_SETTINGS_PATH)
+                        # Point at the snapshot taken at the TOP of install(),
+                        # rather than capturing a fresh one here — by this line
+                        # settings.json already carries llm_router's own hooks
+                        # and MCP entry, so a backup taken now is not a backup
+                        # of anything the user would want restored.
+                        _b = _settings_backup
                         _where = f"; backup at {_b.name}" if _b else ""
                         actions.append(
                             "WARNING: replacing an existing statusLine in "
@@ -1027,8 +1109,17 @@ def uninstall() -> list[str]:
         dst = _HOOKS_DST / dst_name
 
         if dst.exists():
-            dst.unlink()
-            actions.append(f"Removed {dst}")
+            # GH#42: this unlink was unguarded. A single OSError here — a
+            # permission problem, a file held open, a read-only mount — aborted
+            # uninstall() partway through, so everything AFTER this loop (the
+            # statusLine restore, the Claude Desktop deregistration, the sidecar
+            # cleanup) silently never ran. The user sees "uninstall left things
+            # behind" with no error explaining why. Report and keep going.
+            try:
+                dst.unlink()
+                actions.append(f"Removed {dst}")
+            except OSError as e:
+                actions.append(f"WARN could not remove {dst}: {e}")
 
         legacy_msg = _remove_legacy_hook_alias(_HOOKS_DST, src_name, dst_name)
         if legacy_msg:
@@ -1052,6 +1143,21 @@ def uninstall() -> list[str]:
             hooks[event] = filtered
             actions.append(f"Unregistered {event} hook: {dst_name}")
 
+    # GH#42: prune the scaffold, not just its contents. The loop above empties
+    # each event list but leaves the keys, so a user who had no "hooks" section
+    # before install was left with
+    #   "hooks": {"SessionStart": [], "UserPromptSubmit": [], ...}
+    # after uninstall — residue from a tool they just removed. An empty event
+    # list carries no information, and an empty "hooks" map carries none either;
+    # anything the user owns has entries and survives untouched.
+    _hooks = settings.get("hooks")
+    if isinstance(_hooks, dict):
+        for _event in [k for k, v in _hooks.items() if isinstance(v, list) and not v]:
+            del _hooks[_event]
+        if not _hooks:
+            del settings["hooks"]
+            actions.append("Removed empty hooks section from settings.json")
+
     _save_settings(settings)
 
     # Remove MCP server registration (settings.json + .claude.json)
@@ -1066,8 +1172,13 @@ def uninstall() -> list[str]:
     # Remove rules
     rules_dst = _RULES_DST / "llm_router.md"
     if rules_dst.exists():
-        rules_dst.unlink()
-        actions.append(f"Removed {rules_dst}")
+        # GH#42: unguarded, same as the hook unlink above — one OSError here
+        # aborted every remaining cleanup step.
+        try:
+            rules_dst.unlink()
+            actions.append(f"Removed {rules_dst}")
+        except OSError as e:
+            actions.append(f"WARN could not remove {rules_dst}: {e}")
 
     # RED2-4-01: also remove PRE-REBRAND "llm-router" artifacts that earlier
     # versions installed under the old identity. They are never referenced by the
@@ -1093,8 +1204,12 @@ def uninstall() -> list[str]:
         try:
             statusline_dst.unlink()
             actions.append(f"Removed {statusline_dst}")
-        except OSError:
-            pass
+        except OSError as e:
+            # GH#42: this was `except OSError: pass`. A failure here leaves the
+            # script on disk while uninstall reports success, which is exactly
+            # how "uninstall left things behind" stays invisible to the user
+            # and unreproducible for us.
+            actions.append(f"WARN could not remove statusline script {statusline_dst}: {e}")
     settings_sl = _load_settings()
     current_sl = settings_sl.get("statusLine")
     if isinstance(current_sl, dict) and "llm_router-statusline.sh" in str(
@@ -1231,8 +1346,10 @@ def install_claw_code() -> list[str]:
         actions.append(f"WARN could not write {env_path}: {e}")
 
     # ── Register MCP server in claw-code settings ────────────────────────
-    llm_router_bin = shutil.which("llm_router") or "llm_router"
-    mcp_entry = {"command": llm_router_bin, "args": []}
+    mcp_entry, _mcp_warnings = _build_mcp_entry()
+    if mcp_entry is None:
+        return actions + _mcp_warnings
+    actions.extend(_mcp_warnings)
     mcp_servers = settings.setdefault("mcpServers", {})
     if "llm_router" not in mcp_servers:
         mcp_servers["llm_router"] = mcp_entry
@@ -1328,30 +1445,50 @@ def uninstall_claw_code() -> list[str]:
 
 # ── IDE config installation (pull-routing: VS Code/Copilot, Windsurf, Cursor) ──
 
-_VSCODE_MCP_CONTENT = localize("""\
-{
-  "servers": {
-    "llm_router": {
-      "type": "stdio",
-      "command": "llm_router",
-      "args": [],
-      "description": "LLM Router smart LLM router — routes tasks to the cheapest capable model (Ollama → Gemini Flash → GPT-4o-mini → Claude). Call llm_code for coding tasks, llm_query for questions, llm_analyze for analysis, llm_research for web search. Each call routes to a cheaper capable model before using Claude quota."
-    }
-  }
-}
-""")
+# GH#41: the command is the HYPHENATED console script. `llm_router` is not one
+# — see _router_bin(). These files are written verbatim to a user's project, so
+# they must also be VALID JSON, and they were not: localize() rewrites the old
+# tool names to the 1.0 surface (`llm_code` → `llm(task="code")`), and running
+# that over a raw JSON document injected unescaped double quotes straight into
+# the "description" string literal. Building the document with json.dumps means
+# the description is escaped by the serializer and cannot corrupt the file,
+# whatever localize() substitutes into it.
+_MCP_DESCRIPTION = localize(
+    "LLM Router smart LLM router — routes tasks to the cheapest capable model "
+    "(Ollama → Gemini Flash → GPT-4o-mini → Claude). Call llm_code for coding "
+    "tasks, llm_query for questions, llm_analyze for analysis, llm_research for "
+    "web search. Each call routes to a cheaper capable model before using "
+    "Claude quota."
+)
 
-_WINDSURF_MCP_CONTENT = localize("""\
-{
-  "mcpServers": {
-    "llm_router": {
-      "command": "llm_router",
-      "args": [],
-      "description": "LLM Router smart LLM router — routes tasks to the cheapest capable model (Ollama → Gemini Flash → GPT-4o-mini → Claude). Call llm_code for coding tasks, llm_query for questions, llm_analyze for analysis, llm_research for web search. Each call routes to a cheaper capable model before using Claude quota."
-    }
-  }
-}
-""")
+_VSCODE_MCP_CONTENT = json.dumps(
+    {
+        "servers": {
+            "llm_router": {
+                "type": "stdio",
+                "command": "llm-router",
+                "args": [],
+                "description": _MCP_DESCRIPTION,
+            }
+        }
+    },
+    indent=2,
+    ensure_ascii=False,
+) + "\n"
+
+_WINDSURF_MCP_CONTENT = json.dumps(
+    {
+        "mcpServers": {
+            "llm_router": {
+                "command": "llm-router",
+                "args": [],
+                "description": _MCP_DESCRIPTION,
+            }
+        }
+    },
+    indent=2,
+    ensure_ascii=False,
+) + "\n"
 
 _CURSOR_RULE_CONTENT = localize("""\
 ---

@@ -13,8 +13,16 @@ import pytest
 
 
 @pytest.fixture
-def fake_home(tmp_path, monkeypatch):
-    """Redirect Path.home() and os.environ to a temp directory."""
+def fake_home(tmp_path, monkeypatch, fake_cwd):
+    """Redirect Path.home(), os.environ AND the working directory to a temp dir.
+
+    fake_cwd was a separate opt-in fixture, and most tests here took only
+    fake_home. But the VS Code and Windsurf installers write their WORKSPACE
+    config relative to Path.cwd() — .vscode/mcp.json, .github/ — so a redirected
+    home alone still let them write into whatever directory pytest ran from.
+    Depending on fake_cwd makes the isolation total by default; tests that
+    already request both get the same tmp_path and are unaffected.
+    """
     monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path))
     monkeypatch.setenv("HOME", str(tmp_path))
     if sys.platform == "win32":
@@ -54,7 +62,7 @@ class TestInstallVsCodeFiles:
         assert "llm_router" in data["servers"]
         # P0-6: canonical stdio entry is `llm_router` (the console script), not the
         # deprecated `uvx claude-code-llm_router` package.
-        assert data["servers"]["llm_router"]["command"] == "llm_router"
+        assert data["servers"]["llm_router"]["command"] == "llm-router"
         assert data["servers"]["llm_router"]["args"] == []
 
     def test_action_confirms_file_written(self, fake_home):

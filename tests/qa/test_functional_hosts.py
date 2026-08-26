@@ -91,7 +91,7 @@ def test_adapter_writes_valid_config(host: HostSpec, tmp_path: Path):
     cls = load_adapter(host)
     cfg = tmp_path / "config.json"
     adapter = cls(config_path=cfg)
-    written = adapter.install(server_command=["llm_router"])
+    written = adapter.install(server_command=["llm-router"])
 
     assert written.exists(), f"{host.id}: install did not create the config"
     data = json.loads(written.read_text())
@@ -103,11 +103,11 @@ def test_adapter_install_records_command_args(host: HostSpec, tmp_path: Path):
     cls = load_adapter(host)
     cfg = tmp_path / "config.json"
     adapter = cls(config_path=cfg)
-    adapter.install(server_command=["llm_router", "--stdio", "--verbose"])
+    adapter.install(server_command=["llm-router", "--stdio", "--verbose"])
 
     data = json.loads(cfg.read_text())
     entry = data["mcpServers"]["llm_router"]
-    assert entry["command"] == "llm_router"
+    assert entry["command"] == "llm-router"
     assert entry["args"] == ["--stdio", "--verbose"]
 
 
@@ -115,7 +115,7 @@ def test_adapter_uninstall_returns_path_when_present(host: HostSpec, tmp_path: P
     cls = load_adapter(host)
     cfg = tmp_path / "config.json"
     adapter = cls(config_path=cfg)
-    adapter.install(server_command=["llm_router"])
+    adapter.install(server_command=["llm-router"])
     result = adapter.uninstall()
     assert result is not None, f"{host.id}: uninstall should return the path it cleaned"
 
@@ -125,7 +125,7 @@ def test_adapter_is_installed_after_install(host: HostSpec, tmp_path: Path):
     cfg = tmp_path / "config.json"
     adapter = cls(config_path=cfg)
     assert not adapter.is_installed()
-    adapter.install(server_command=["llm_router"])
+    adapter.install(server_command=["llm-router"])
     assert adapter.is_installed()
 
 

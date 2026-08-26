@@ -14,6 +14,68 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 _Nothing yet._
 
+## [13.0.3] — The MCP command that could never resolve (2026-08-26)
+
+Fixes GH#41 and GH#43, and four defects found while reproducing GH#42.
+
+### The entry point (#41)
+
+- **Every MCP registration named a command that does not exist.** `[project.scripts]`
+  declares only the hyphenated `llm-router`, so `shutil.which("llm_router")` returned
+  `None` on *every* install type — pipx, pip and uv alike. Thirty call sites depended on
+  it. The Claude Desktop and claw-code paths fell back to the literal string
+  `"llm_router"`; the main registration fell back to
+  `uv run --directory <site-packages>`, which is what produced `CONNECTION_CLOSED` on a
+  clean pipx install of 13.0.2. Every pull integration — VS Code, Cursor, Windsurf, Kimi,
+  Gemini CLI, Copilot CLI, OpenCode, OpenClaw, Trae, Pi, Codex — was registered dead the
+  same way, along with three configs committed in this repo.
+
+- **`doctor` reported 0 issues while the server was dead.** Every MCP check asked only
+  whether the key `llm_router` was present in `mcpServers`; none read the command back.
+  It now verifies the registered command exists, is executable, and — for
+  `uv run --directory DIR` — that `DIR` is a real project root.
+
+- **Both IDE config templates were invalid JSON.** `localize()` rewrites tool names to the
+  1.0 surface (`llm_code` → `llm(task="code")`) and was running that substitution over a
+  raw JSON document, injecting unescaped quotes into the `"description"` string. Since the
+  templates are written verbatim, `install --ide` produced `.vscode/mcp.json` and
+  `.windsurf/mcp.json` that no IDE could parse. Both are now built with `json.dumps`.
+
+### The security disclosure (#43)
+
+- **`LLM_ROUTER_DIRECT_EXECUTION` is now documented in README.md.** #36 was closed by
+  writing it up in `SECURITY.md`, which the sdist excludes — so for anyone installing from
+  PyPI the entire disclosure was invisible: a default-on feature handing a local model
+  `write_file`/`edit_file`/`run_command` unsupervised, with no shipped text naming it or
+  its off switch. A test now asserts the disclosure survives into the built artifacts.
+
+### Install/uninstall symmetry (#42)
+
+The two behaviours reported already had fixes in the 13.0.2 tag, and the published sdist
+is byte-identical to that tag, so the report could not be reproduced as written. Asserting
+the real contract — install then uninstall is a no-op on every config file — surfaced four
+genuine defects instead:
+
+- **An unguarded `unlink()` aborted uninstall partway through.** One `OSError` in the
+  hook-removal loop (or on the rules file) raised straight out of `uninstall()`, so the
+  statusLine restore and Claude Desktop deregistration — both later in the function —
+  silently never ran. This is the most likely root cause of #42.
+- **An empty `hooks` scaffold was left behind** for users who had no `hooks` section.
+- **`~/.claude.json` was left as a `{"mcpServers": {}}` husk.** It is now recorded as
+  `created_file` and removed only when install is the sole reason the file exists.
+- **`settings.json.bak` held POST-install state**, so restoring it reinstated the very
+  hooks a user was trying to remove. The snapshot is now taken before the first mutation.
+
+### Packaging
+
+- **`_quarantined_tests/` no longer ships to PyPI.** The exclude list anchored `/tests/`;
+  the quarantine lives at the repo root, so 13.0.2 shipped 16 files of dead test code.
+
+### Fixed
+
+- **`KIMI.md` gained a duplicate routing block on every install.** The idempotence guard
+  tested for `llm_router`, a token the block it writes never contains.
+
 ## [13.0.2] — Document what `LLM_ROUTER_DIRECT_EXECUTION` actually grants (2026-08-19)
 
 Documentation and a test. No behaviour change.

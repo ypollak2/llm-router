@@ -58,7 +58,10 @@ def test_claude_code_host_routes_to_default_install_not_unknown(monkeypatch) -> 
     assert install_host_calls == []  # did NOT go down the snippet path
 
 
-def test_all_snippet_hosts_resolve() -> None:
+def test_all_snippet_hosts_resolve(isolated_install_env) -> None:
+    # Runs the REAL installer for every snippet host. Without isolation that
+    # wrote MCP entries into the developer's own ~/.codex, ~/.cursor, ~/.gemini
+    # and opencode config on every suite run.
     for host in install._HOST_SNIPPETS:
         out = _run_host(["--host", host])
         assert "Unknown host" not in out, host
@@ -77,5 +80,5 @@ def test_host_snippets_invoke_canonical_command() -> None:
     # (the stdio entry), never `uvx <pkg>`.
     for host, snippet in install._HOST_SNIPPETS.items():
         if "command" in snippet:
-            assert ("command: llm_router" in snippet) or ('"command": "llm_router"' in snippet), host
+            assert ("command: llm-router" in snippet) or ('"command": "llm-router"' in snippet), host
             assert "uvx" not in snippet, f"{host} still uses uvx"

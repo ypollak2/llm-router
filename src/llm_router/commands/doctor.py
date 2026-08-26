@@ -371,6 +371,54 @@ def _render_host_explainer() -> str:
     )
 
 
+def _mcp_command_problems(entry: object, label: str) -> list[str]:
+    """Validate a registered MCP entry can actually START. Returns problems, or [].
+
+    GH#41: every MCP check in this file asked only whether the KEY "llm_router"
+    was present in mcpServers. A pipx install of 13.0.2 had the key, a
+    `uv run --directory <site-packages>` command that could never start, and
+    `claude mcp list` reporting CONNECTION_CLOSED — while doctor printed 0
+    issues. Presence of a registration is not evidence it works; this reads the
+    command back and checks it is runnable.
+    """
+    problems: list[str] = []
+
+    if not isinstance(entry, dict):
+        return [f"{label}: mcpServers.llm_router is {type(entry).__name__}, expected an object"]
+
+    command = entry.get("command")
+    if not command or not isinstance(command, str):
+        return [f"{label}: mcpServers.llm_router has no 'command'"]
+
+    # A bare name must be on PATH; an absolute/relative path must exist and be executable.
+    if os.sep in command:
+        cmd_path = Path(command).expanduser()
+        if not cmd_path.exists():
+            problems.append(f"{label}: command does not exist: {command}")
+        elif not os.access(cmd_path, os.X_OK):
+            problems.append(f"{label}: command is not executable: {command}")
+    elif shutil.which(command) is None:
+        problems.append(f"{label}: command not found on PATH: {command}")
+
+    # `uv run --directory DIR` is only valid against a real project root. This is
+    # the specific shape that shipped broken: DIR was a site-packages path.
+    args = entry.get("args") or []
+    if isinstance(args, list) and "--directory" in args:
+        try:
+            project_dir = Path(args[args.index("--directory") + 1])
+        except IndexError:
+            problems.append(f"{label}: --directory given with no path")
+        else:
+            if not (project_dir / "pyproject.toml").exists():
+                problems.append(
+                    f"{label}: 'uv run --directory {project_dir}' has no pyproject.toml — "
+                    f"this is a packaged install, not a source checkout, so the server "
+                    f"cannot start (CONNECTION_CLOSED)"
+                )
+
+    return problems
+
+
 def _check_savings_posture() -> list[str]:
     """Return rendered status lines for each quota-savings configuration check.
 
@@ -751,7 +799,16 @@ def _run_doctor(host: Optional[str] = None) -> tuple[int, list[str]]:
             pass
     registered_cc = "llm_router" in settings.get("mcpServers", {})
     if registered_cc:
-        print(_ok("MCP server registered in ~/.claude/settings.json"))
+        # GH#41: registered is not the same as runnable.
+        _cc_problems = _mcp_command_problems(
+            settings["mcpServers"]["llm_router"], "~/.claude/settings.json"
+        )
+        if _cc_problems:
+            for _p in _cc_problems:
+                print(_fail(_p, fix="llm_router install"))
+            issues.extend(_cc_problems)
+        else:
+            print(_ok("MCP server registered in ~/.claude/settings.json"))
     else:
         print(
             _fail(
@@ -776,7 +833,15 @@ def _run_doctor(host: Optional[str] = None) -> tuple[int, list[str]]:
         try:
             cfg = json.loads(desktop_path.read_text())
             if "llm_router" in cfg.get("mcpServers", {}):
-                print(_ok(f"registered ({desktop_path})"))
+                _dt_problems = _mcp_command_problems(
+                    cfg["mcpServers"]["llm_router"], "Claude Desktop"
+                )
+                if _dt_problems:
+                    for _p in _dt_problems:
+                        print(_fail(_p, fix="llm_router install"))
+                    issues.extend(_dt_problems)
+                else:
+                    print(_ok(f"registered ({desktop_path})"))
             else:
                 print(
                     _fail(
