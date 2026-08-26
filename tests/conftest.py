@@ -874,18 +874,58 @@ _CWD_INSTALL_TARGETS = (
     ".github/copilot-instructions.md",
 )
 
+# The same defect, one blast radius larger. `TestInstallHost` in
+# test_cost_host.py called the real `_install_host("all")` with neither HOME nor
+# cwd isolated, so a plain `pytest tests/` wrote llm_router MCP entries into the
+# DEVELOPER'S OWN machine config — ~/.codex/config.json, ~/.cursor/mcp.json,
+# ~/.gemini/settings.json, ~/.config/opencode/config.json and Claude Desktop's
+# config were all modified by suite runs. Nothing reported it, because nothing
+# was looking outside the repo.
+_HOME_INSTALL_TARGETS = (
+    ".codex/config.json",
+    ".cursor/mcp.json",
+    ".gemini/settings.json",
+    ".config/opencode/config.json",
+    ".claude/settings.json",
+    ".claude.json",
+    "Library/Application Support/Claude/claude_desktop_config.json",
+)
+
+# Files a LIVE process may be writing while the suite runs. ~/.claude.json is
+# Claude Code's own state file: if the suite runs from inside a Claude Code
+# session, that session rewrites it continuously. Restoring one of these would
+# revert a concurrent writer's work and destroy real state — the exact class of
+# damage this guard exists to prevent. So they are reported, never restored:
+# detection without a clobber risk.
+_REPORT_ONLY = frozenset({
+    "home:.claude.json",
+    "home:.claude/settings.json",
+})
+
 
 @pytest.fixture(autouse=True)
 def _no_repo_mutation(request):
     """Fail any test that writes an installer artifact into the real checkout."""
-    def snapshot():
-        out = {}
+    real_home = Path(os.path.expanduser("~"))
+
+    def _targets():
         for rel in _CWD_INSTALL_TARGETS:
-            p = _REPO_ROOT / rel
+            yield f"repo:{rel}", _REPO_ROOT / rel
+        for rel in _HOME_INSTALL_TARGETS:
+            yield f"home:{rel}", real_home / rel
+
+    def snapshot():
+        # (bytes, mtime_ns) — NOT bytes alone. An installer that rewrites the
+        # same JSON leaves the content identical while still having written to a
+        # file it had no business touching; on another machine, or after a code
+        # change, those same bytes would differ. Byte-equality would call that
+        # clean and let the leak persist, which is exactly what it did.
+        out = {}
+        for label, p in _targets():
             try:
-                out[rel] = p.read_bytes() if p.is_file() else None
+                out[label] = (p.read_bytes(), p.stat().st_mtime_ns) if p.is_file() else None
             except OSError:
-                out[rel] = None
+                out[label] = None
         return out
 
     before = snapshot()
@@ -897,21 +937,53 @@ def _no_repo_mutation(request):
         return
 
     # Restore first — a guard that reports damage but leaves it is half a guard.
+    # Except for _REPORT_ONLY paths, where a restore is the more dangerous act.
+    _by_label = dict(_targets())
     for rel in changed:
-        p = _REPO_ROOT / rel
+        if rel in _REPORT_ONLY:
+            continue
+        p = _by_label[rel]
         try:
             if before[rel] is None:
                 if p.is_file():
                     p.unlink()
             else:
+                _body, _mtime = before[rel]
                 p.parent.mkdir(parents=True, exist_ok=True)
-                p.write_bytes(before[rel])
+                p.write_bytes(_body)
+                os.utime(p, ns=(_mtime, _mtime))
         except OSError:  # pragma: no cover
             pass
 
     pytest.fail(
-        f"{request.node.nodeid} wrote installer artifacts into the real "
-        f"checkout: {changed}. Host installers write to Path.cwd() — use "
-        f"`monkeypatch.chdir(tmp_path)` before calling them. "
-        f"(The files have been restored.)"
+        f"{request.node.nodeid} wrote installer artifacts outside its sandbox: "
+        f"{changed}. Host installers write to Path.cwd() and Path.home() — "
+        f"isolate BOTH (`monkeypatch.chdir(tmp_path)` plus a patched home) "
+        f"before calling them. Restored: "
+        f"{sorted(set(changed) - _REPORT_ONLY)}; reported but NOT restored "
+        f"(a live process may own these): {sorted(set(changed) & _REPORT_ONLY)}."
     )
+
+
+@pytest.fixture
+def isolated_install_env(tmp_path, monkeypatch):
+    """Run real installers against a throwaway HOME and cwd.
+
+    Host installers resolve their targets with Path.home() and Path.cwd() at
+    call time, so a test that invokes one without redirecting BOTH writes to the
+    developer's actual machine. Patching pathlib.Path.home covers every module
+    regardless of how it imported Path; HOME/USERPROFILE cover anything that
+    reads the environment directly.
+    """
+    import pathlib
+
+    home = tmp_path / "home"
+    work = tmp_path / "work"
+    home.mkdir()
+    work.mkdir()
+
+    monkeypatch.setattr(pathlib.Path, "home", classmethod(lambda cls: home))
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+    monkeypatch.chdir(work)
+    return tmp_path

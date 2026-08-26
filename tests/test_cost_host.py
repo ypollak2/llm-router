@@ -207,7 +207,7 @@ class TestLlmAutoSavingsEnvelope:
 
 
 class TestInstallHost:
-    def test_install_host_codex(self, capsys):
+    def test_install_host_codex(self, capsys, isolated_install_env):
         from llm_router.cli import _install_host
         _install_host("codex")
         out = capsys.readouterr().out
@@ -215,21 +215,21 @@ class TestInstallHost:
         # --host codex writes files; check for write confirmation or skipped marker
         assert "llm_router" in out.lower() or "config" in out.lower()
 
-    def test_install_host_desktop(self, capsys):
+    def test_install_host_desktop(self, capsys, isolated_install_env):
         from llm_router.cli import _install_host
         _install_host("desktop")
         out = capsys.readouterr().out
         assert "Claude Desktop" in out
         assert "claude_desktop_config.json" in out
 
-    def test_install_host_copilot(self, capsys):
+    def test_install_host_copilot(self, capsys, isolated_install_env):
         from llm_router.cli import _install_host
         _install_host("copilot")
         out = capsys.readouterr().out
         assert "Copilot" in out
         assert "mcp.json" in out
 
-    def test_install_host_all(self, capsys):
+    def test_install_host_all(self, capsys, isolated_install_env):
         from llm_router.cli import _install_host
         _install_host("all")
         out = capsys.readouterr().out
@@ -237,7 +237,7 @@ class TestInstallHost:
         assert "Claude Desktop" in out
         assert "Copilot" in out
 
-    def test_install_host_unknown(self, capsys):
+    def test_install_host_unknown(self, capsys, isolated_install_env):
         from llm_router.cli import _install_host
         _install_host("nonexistent")
         out = capsys.readouterr().out

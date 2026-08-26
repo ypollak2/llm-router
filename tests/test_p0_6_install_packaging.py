@@ -58,7 +58,10 @@ def test_claude_code_host_routes_to_default_install_not_unknown(monkeypatch) -> 
     assert install_host_calls == []  # did NOT go down the snippet path
 
 
-def test_all_snippet_hosts_resolve() -> None:
+def test_all_snippet_hosts_resolve(isolated_install_env) -> None:
+    # Runs the REAL installer for every snippet host. Without isolation that
+    # wrote MCP entries into the developer's own ~/.codex, ~/.cursor, ~/.gemini
+    # and opencode config on every suite run.
     for host in install._HOST_SNIPPETS:
         out = _run_host(["--host", host])
         assert "Unknown host" not in out, host
