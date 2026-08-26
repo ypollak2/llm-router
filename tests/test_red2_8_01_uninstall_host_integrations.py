@@ -15,11 +15,11 @@ def test_removes_llm_router_from_all_json_hosts(tmp_path, monkeypatch):
 
     gem = tmp_path / ".gemini" / "settings.json"
     gem.parent.mkdir(parents=True)
-    gem.write_text(json.dumps({"mcpServers": {"llm_router": {"command": "llm_router"}, "keep": {"x": 1}}}))
+    gem.write_text(json.dumps({"mcpServers": {"llm_router": {"command": "llm-router"}, "keep": {"x": 1}}}))
     (tmp_path / ".gemini" / "extensions" / "llm_router").mkdir(parents=True)
     cur = tmp_path / ".cursor" / "mcp.json"
     cur.parent.mkdir(parents=True)
-    cur.write_text(json.dumps({"mcpServers": {"llm_router": {"command": "llm_router"}}}))
+    cur.write_text(json.dumps({"mcpServers": {"llm_router": {"command": "llm-router"}}}))
     codex = tmp_path / ".codex" / "config.toml"
     codex.parent.mkdir(parents=True)
     codex.write_text('[model_providers.llm_router]\nname = "LLM Router"\nbase_url = "x"\n\n[other]\nk = 1\n')

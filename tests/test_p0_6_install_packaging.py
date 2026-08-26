@@ -77,5 +77,5 @@ def test_host_snippets_invoke_canonical_command() -> None:
     # (the stdio entry), never `uvx <pkg>`.
     for host, snippet in install._HOST_SNIPPETS.items():
         if "command" in snippet:
-            assert ("command: llm_router" in snippet) or ('"command": "llm_router"' in snippet), host
+            assert ("command: llm-router" in snippet) or ('"command": "llm-router"' in snippet), host
             assert "uvx" not in snippet, f"{host} still uses uvx"

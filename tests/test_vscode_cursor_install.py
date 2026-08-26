@@ -54,7 +54,7 @@ class TestInstallVsCodeFiles:
         assert "llm_router" in data["servers"]
         # P0-6: canonical stdio entry is `llm_router` (the console script), not the
         # deprecated `uvx claude-code-llm_router` package.
-        assert data["servers"]["llm_router"]["command"] == "llm_router"
+        assert data["servers"]["llm_router"]["command"] == "llm-router"
         assert data["servers"]["llm_router"]["args"] == []
 
     def test_action_confirms_file_written(self, fake_home):

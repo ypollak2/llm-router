@@ -36,7 +36,7 @@ def test_adapter_recovers_from_corrupt_json(host: HostSpec, tmp_path: Path):
     cfg.write_text("not valid json {{{{ ((( ")
     adapter = cls(config_path=cfg)
     # Install must overwrite — not raise
-    adapter.install(server_command=["llm_router"])
+    adapter.install(server_command=["llm-router"])
     data = json.loads(cfg.read_text())
     assert "llm_router" in data["mcpServers"]
 
@@ -45,7 +45,7 @@ def test_adapter_creates_missing_parent_dir(host: HostSpec, tmp_path: Path):
     cls = load_adapter(host)
     deep = tmp_path / "nested" / "deeper" / "config.json"
     adapter = cls(config_path=deep)
-    adapter.install(server_command=["llm_router"])
+    adapter.install(server_command=["llm-router"])
     assert deep.exists()
 
 
@@ -74,9 +74,9 @@ def test_adapter_handles_pre_existing_llm_router_entry(host: HostSpec, tmp_path:
         }
     }))
     adapter = cls(config_path=cfg)
-    adapter.install(server_command=["llm_router", "--new"])
+    adapter.install(server_command=["llm-router", "--new"])
     data = json.loads(cfg.read_text())
-    assert data["mcpServers"]["llm_router"]["command"] == "llm_router"
+    assert data["mcpServers"]["llm_router"]["command"] == "llm-router"
     assert data["mcpServers"]["llm_router"]["args"] == ["--new"]
 
 

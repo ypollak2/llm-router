@@ -87,7 +87,7 @@ def _merge_json_mcp_block(
     Args:
         config_path: Path to JSON config file
         server_name: Name of MCP server (e.g., "llm_router")
-        config_dict: Server config dict (e.g., {"command": "llm_router"})
+        config_dict: Server config dict (e.g., {"command": "llm-router"})
         root_key: Root key for servers (default "mcpServers", VS Code uses "servers")
 
     Returns:
@@ -207,7 +207,7 @@ def _install_vscode_files() -> list[str]:
         _merge_json_mcp_block(
             user_mcp,
             "llm_router",
-            {"type": "stdio", "command": "llm_router", "args": []},
+            {"type": "stdio", "command": "llm-router", "args": []},
             root_key="servers",
         )
     )
@@ -219,7 +219,7 @@ def _install_vscode_files() -> list[str]:
         _merge_json_mcp_block(
             workspace_mcp,
             "llm_router",
-            {"type": "stdio", "command": "llm_router", "args": []},
+            {"type": "stdio", "command": "llm-router", "args": []},
             root_key="servers",
         )
     )
@@ -261,7 +261,7 @@ def _install_cursor_files() -> list[str]:
         _merge_json_mcp_block(
             mcp_json,
             "llm_router",
-            {"command": "llm_router", "args": []},
+            {"command": "llm-router", "args": []},
             root_key="mcpServers",
         )
     )
@@ -284,7 +284,7 @@ def _install_opencode_files() -> list[str]:
         _merge_json_mcp_block(
             config,
             "llm_router",
-            {"command": "llm_router", "args": []},
+            {"command": "llm-router", "args": []},
         )
     )
 
@@ -306,7 +306,7 @@ def _install_gemini_cli_files() -> list[str]:
         _merge_json_mcp_block(
             settings,
             "llm_router",
-            {"command": "llm_router", "args": []},
+            {"command": "llm-router", "args": []},
         )
     )
 
@@ -351,7 +351,7 @@ def _install_copilot_cli_files() -> list[str]:
         _merge_json_mcp_block(
             mcp_json,
             "llm_router",
-            {"command": "llm_router", "args": []},
+            {"command": "llm-router", "args": []},
         )
     )
 
@@ -380,7 +380,7 @@ def _install_windsurf_files() -> list[str]:
         _merge_json_mcp_block(
             mcp_json,
             "llm_router",
-            {"command": "llm_router", "args": []},
+            {"command": "llm-router", "args": []},
             root_key="mcpServers",
         )
     )
@@ -392,7 +392,7 @@ def _install_windsurf_files() -> list[str]:
         _merge_json_mcp_block(
             workspace_mcp,
             "llm_router",
-            {"command": "llm_router", "args": []},
+            {"command": "llm-router", "args": []},
             root_key="mcpServers",
         )
     )
@@ -434,7 +434,7 @@ def _install_kimi_files() -> list[str]:
         _merge_json_mcp_block(
             global_mcp,
             "llm_router",
-            {"command": "llm_router", "args": [], "description": (
+            {"command": "llm-router", "args": [], "description": (
                 "LLM Router smart LLM router — routes tasks to the cheapest capable model. "
                 "Call before answering to route to a cheaper capable model."
             )},
@@ -449,7 +449,7 @@ def _install_kimi_files() -> list[str]:
         _merge_json_mcp_block(
             workspace_mcp,
             "llm_router",
-            {"command": "llm_router", "args": []},
+            {"command": "llm-router", "args": []},
             root_key="mcpServers",
         )
     )
@@ -508,7 +508,7 @@ def _install_openclaw_files() -> list[str]:
         _merge_json_mcp_block(
             mcp_json,
             "llm_router",
-            {"command": "llm_router", "args": []},
+            {"command": "llm-router", "args": []},
         )
     )
 
@@ -530,7 +530,7 @@ def _install_trae_files() -> list[str]:
         _merge_json_mcp_block(
             mcp_json,
             "llm_router",
-            {"command": "llm_router", "args": []},
+            {"command": "llm-router", "args": []},
         )
     )
 
@@ -553,7 +553,7 @@ def _install_pi_files() -> list[str]:
             mcp_json,
             "llm_router",
             {
-                "command": "llm_router",
+                "command": "llm-router",
                 "args": [],
                 "lifecycle": "lazy",
             },
@@ -578,7 +578,7 @@ def _install_codex_cli_files() -> list[str]:
         _merge_json_mcp_block(
             config_json,
             "llm_router",
-            {"command": "llm_router", "args": []},
+            {"command": "llm-router", "args": []},
         )
     )
 
@@ -594,7 +594,7 @@ def _print_claude_desktop_config() -> list[str]:
     config = {
         "mcpServers": {
             "llm_router": {
-                "command": "llm_router",
+                "command": "llm-router",
                 "args": []
             }
         }
@@ -609,7 +609,7 @@ def _print_vs_code_copilot_config() -> list[str]:
     config = {
         "servers": {
             "llm_router": {
-                "command": "llm_router",
+                "command": "llm-router",
                 "args": []
             }
         }

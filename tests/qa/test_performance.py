@@ -268,7 +268,7 @@ def test_perf_cursor_install_under_50ms(tmp_path: Path):
 
     def op():
         adapter = CursorAdapter(config_path=tmp_path / f"c_{time.perf_counter()}.json")
-        adapter.install(server_command=["llm_router"])
+        adapter.install(server_command=["llm-router"])
 
     results = measure(op, iterations=30)
     assert results["p95"] < 50.0, (
@@ -283,7 +283,7 @@ def test_perf_gemini_cli_install_under_50ms(tmp_path: Path):
         adapter = GeminiCliAdapter(
             config_path=tmp_path / f"g_{time.perf_counter()}.json"
         )
-        adapter.install(server_command=["llm_router"])
+        adapter.install(server_command=["llm-router"])
 
     results = measure(op, iterations=30)
     assert results["p95"] < 50.0, (

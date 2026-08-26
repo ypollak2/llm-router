@@ -1,7 +1,7 @@
 {
   "mcpServers": {
     "llm_router": {
-      "command": "llm_router",
+      "command": "llm-router",
       "args": []
     }
   }

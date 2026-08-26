@@ -1424,30 +1424,50 @@ def uninstall_claw_code() -> list[str]:
 
 # ── IDE config installation (pull-routing: VS Code/Copilot, Windsurf, Cursor) ──
 
-_VSCODE_MCP_CONTENT = localize("""\
-{
-  "servers": {
-    "llm_router": {
-      "type": "stdio",
-      "command": "llm_router",
-      "args": [],
-      "description": "LLM Router smart LLM router — routes tasks to the cheapest capable model (Ollama → Gemini Flash → GPT-4o-mini → Claude). Call llm_code for coding tasks, llm_query for questions, llm_analyze for analysis, llm_research for web search. Each call routes to a cheaper capable model before using Claude quota."
-    }
-  }
-}
-""")
+# GH#41: the command is the HYPHENATED console script. `llm_router` is not one
+# — see _router_bin(). These files are written verbatim to a user's project, so
+# they must also be VALID JSON, and they were not: localize() rewrites the old
+# tool names to the 1.0 surface (`llm_code` → `llm(task="code")`), and running
+# that over a raw JSON document injected unescaped double quotes straight into
+# the "description" string literal. Building the document with json.dumps means
+# the description is escaped by the serializer and cannot corrupt the file,
+# whatever localize() substitutes into it.
+_MCP_DESCRIPTION = localize(
+    "LLM Router smart LLM router — routes tasks to the cheapest capable model "
+    "(Ollama → Gemini Flash → GPT-4o-mini → Claude). Call llm_code for coding "
+    "tasks, llm_query for questions, llm_analyze for analysis, llm_research for "
+    "web search. Each call routes to a cheaper capable model before using "
+    "Claude quota."
+)
 
-_WINDSURF_MCP_CONTENT = localize("""\
-{
-  "mcpServers": {
-    "llm_router": {
-      "command": "llm_router",
-      "args": [],
-      "description": "LLM Router smart LLM router — routes tasks to the cheapest capable model (Ollama → Gemini Flash → GPT-4o-mini → Claude). Call llm_code for coding tasks, llm_query for questions, llm_analyze for analysis, llm_research for web search. Each call routes to a cheaper capable model before using Claude quota."
-    }
-  }
-}
-""")
+_VSCODE_MCP_CONTENT = json.dumps(
+    {
+        "servers": {
+            "llm_router": {
+                "type": "stdio",
+                "command": "llm-router",
+                "args": [],
+                "description": _MCP_DESCRIPTION,
+            }
+        }
+    },
+    indent=2,
+    ensure_ascii=False,
+) + "\n"
+
+_WINDSURF_MCP_CONTENT = json.dumps(
+    {
+        "mcpServers": {
+            "llm_router": {
+                "command": "llm-router",
+                "args": [],
+                "description": _MCP_DESCRIPTION,
+            }
+        }
+    },
+    indent=2,
+    ensure_ascii=False,
+) + "\n"
 
 _CURSOR_RULE_CONTENT = localize("""\
 ---
