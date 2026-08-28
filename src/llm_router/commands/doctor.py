@@ -1085,6 +1085,23 @@ def _run_doctor(host: Optional[str] = None) -> tuple[int, list[str]]:
         ]
         if not providers:
             print(_dim("  no snapshot yet (router has not recorded a failure this session)"))
+
+        # GH#57: DIRECT-execution timeouts never reached the breaker, so this
+        # section stayed empty while the local path failed on every prompt and
+        # said so only in a debug log. Report the observed latencies here, with
+        # advice that distinguishes "your timeout is too low" from "this machine
+        # is too slow for local routing" — telling someone with a 150s model to
+        # raise a timeout sends them in circles.
+        try:
+            from llm_router.direct_diagnostics import current_advice
+
+            _timeout = float(os.environ.get("LLM_ROUTER_OLLAMA_TIMEOUT", "4"))
+            _advice = current_advice(timeout_s=_timeout)
+            if _advice is not None:
+                print(_warn(f"DIRECT execution: {_advice.message}"))
+                issues.append(f"DIRECT execution timing out: {_advice.kind}")
+        except Exception:
+            pass
         else:
             for name in sorted(providers):
                 st = providers[name]

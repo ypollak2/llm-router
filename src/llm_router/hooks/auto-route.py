@@ -3401,6 +3401,10 @@ def main() -> None:
                     _session_ctx = None
 
             _direct_result = None
+            # GH#57: wall-clock for the DIRECT attempt, so a timeout can be
+            # reported with a real number instead of a bare 'it failed'.
+            _direct_started = time.time()
+            _direct_elapsed_s = 0.0
 
             if not _direct_chain:
                 # All providers were paid and got filtered out → no free draft to
@@ -3584,6 +3588,15 @@ def main() -> None:
                     _debug_log(f"[INVOCATION {invocation_id:.3f}] ZERO_CLAUDE DIRECT_FAILED")
                 else:
                     _debug_log(f"[INVOCATION {invocation_id:.3f}] DIRECT FAILED: falling through to Claude")
+                _direct_elapsed_s = time.time() - _direct_started
+                # GH#57: record the attempt so the failure stops being invisible.
+                # Routing still works here (it falls through to Claude), which is
+                # exactly why nobody noticed the local path never succeeded.
+                try:
+                    from llm_router.direct_diagnostics import record_sample as _rec
+                    _rec(_direct_elapsed_s, timed_out=True)
+                except Exception:
+                    pass
         except ImportError:
             _debug_log(f"[INVOCATION {invocation_id:.3f}] DIRECT SKIP: modules not available")
         except Exception as _direct_err:
