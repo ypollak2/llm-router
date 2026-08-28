@@ -64,6 +64,17 @@ def main() -> None:
         5. Print a summary of configured vs. skipped providers and next
            steps.  Exit with code 1 if no providers were configured.
     """
+    from llm_router.cli_help import handle_help
+
+    # GH#51: before ANY other work - this used to run the interactive
+    # flow and crash with EOFError on a non-TTY stdin.
+    handle_help(
+        "llm-router-onboard",
+        "Interactive wizard that configures provider API keys in ~/.llm-router/.env.",
+        notes="""Requires an interactive terminal: it prompts for keys on stdin.
+For non-interactive setup, write ~/.llm-router/.env directly.""",
+    )
+
     env_path = Path.cwd() / ".env"
     print("\n╔══════════════════════════════════════════╗")
     print("║        LLM Router — Setup Wizard         ║")

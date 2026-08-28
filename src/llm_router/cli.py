@@ -724,6 +724,16 @@ def isolation_test_command() -> None:
 
     Validates: cache isolation, routing logic, dashboard accuracy, database persistence.
     """
+    from llm_router.cli_help import handle_help
+
+    # GH#51: this ignored --help and ran the full health check instead.
+    handle_help(
+        "llm-router-isolation-test",
+        "Run the router isolation suite: cache isolation, routing logic, "
+        "dashboard accuracy and database persistence.",
+        notes="Runs real checks against ~/.llm-router/ and may take a minute.",
+    )
+
     import subprocess
     from pathlib import Path
 
