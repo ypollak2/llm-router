@@ -51,7 +51,7 @@ def maybe_launch_tui(
             err=True,
         )
         typer.echo(
-            "   Install with: pip install llm_router[tui]",
+            "   Install with: pipx inject llm-routing textual",
             err=True,
         )
         return _run_classic_mode(task_type, prompt, **routing_kwargs)
