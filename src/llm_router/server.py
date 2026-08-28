@@ -525,7 +525,18 @@ def main_sse(port: int | None = None) -> None:
         port = int(env_port) if env_port else (
             int(sys.argv[1]) if len(sys.argv) > 1 else 17891
         )
-    host = os.environ.get("HOST", "0.0.0.0")
+    # SEC-1: default to localhost and refuse a public bind unless the shared
+    # gate says so. This function previously defaulted to 0.0.0.0 and never
+    # consulted _allow_public_bind() — the gate defined a few lines below it —
+    # so the (wrongly re-added) console script published the whole MCP tool
+    # surface, unauthenticated, to every interface.
+    host = os.environ.get("HOST", "127.0.0.1")
+    if host not in ("127.0.0.1", "localhost", "::1") and not _allow_public_bind():
+        raise SystemExit(
+            f"refusing to bind {host}: main_sse has no authentication.\n"
+            f"Set {_SSE_ALLOW_PUBLIC_ENV}=1 to override, or use main_sse_secured(), "
+            f"which requires a bearer token and defaults to localhost."
+        )
 
     starlette_app = mcp.sse_app()
     config = uvicorn.Config(starlette_app, host=host, port=port, log_level="info")
