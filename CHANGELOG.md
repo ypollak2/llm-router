@@ -14,6 +14,71 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 _Nothing yet._
 
+## [13.0.4] — Security: remove the unauthenticated SSE entry point (2026-08-28)
+
+### Security
+
+- **`llm-router-sse` is removed.** `server.main_sse`'s own docstring forbids
+  exposing it as a console script — the prior entry point "bound 0.0.0.0 with no
+  auth and exposed the full 60-tool MCP surface — including filesystem tools and
+  wallet — to anyone reachable on the network" — and lists three conditions that
+  must all hold before re-adding it. It was nonetheless present in
+  `[project.scripts]` and shipped in 13.0.2 and 13.0.3 with none of them met: no
+  auth middleware (that is `main_sse_secured`, which the script did not point
+  at), and a bind of `os.environ.get("HOST", "0.0.0.0")` that never consulted
+  `_allow_public_bind()` — a gate defined a few lines below it.
+
+  Anyone who ran `llm-router-sse` published the full MCP tool surface,
+  unauthenticated, on every interface. **If you have run it, stop the process
+  and upgrade.** Nothing else invokes it, so an install that never ran the
+  command was not exposed.
+
+  Defence in depth: `main_sse` now defaults to `127.0.0.1` and refuses a
+  non-local bind unless the shared gate allows it.
+
+### Fixed
+
+- **Statusline reported "✗ no provider" for every Ollama-only setup** (#50).
+  `$SAVINGS_LOG` was read four times and never assigned, so `open("")` threw
+  into a swallowed except and the health check could never see local activity —
+  breaking the documented "route free to local Ollama with no cloud keys" path.
+- **The dashboard's access URL was redacted by its own scrubber** (#48). The
+  token pattern matched both the `token=` and `url=` log fields, so the only
+  documented way to obtain a working URL printed `[REDACTED-TOKEN]`. The URL is
+  now printed outside the logging pipeline; redaction itself is unchanged.
+- **`doctor` reported three different states as "no routing decisions"** (#55).
+  An unreadable table, an empty table on a machine that recorded activity
+  elsewhere, and a genuinely idle machine printed the same sentence — so a user
+  who had just made four calls was told to make some calls. Root cause: four
+  different functions named `log_routing_decision` write to four destinations.
+- **Session snapshots asserted zeros they had not measured** (#56). Downstream
+  of the above; `accuracy: 1.0` derived from zero samples is what made the files
+  look real. Facts now carry a `measured` flag.
+- **`--help` crashed or was ignored on three console scripts** (#51, #52).
+  `onboard` and `quickstart` ran their interactive flows and died on `EOFError`
+  under a non-TTY stdin. `--help` is now handled first, before any other work,
+  and is verified to open no socket.
+- **The Textual install hint named a package that does not exist** (#47).
+  `pip install llm_router[tui]` was wrong three ways; now
+  `pipx inject llm-routing textual`.
+- **`set-enforce` changed every running session on the machine** (#49). It is
+  now scoped to the session that ran it (`--global` restores the old
+  behaviour), and the messages describe what actually happens.
+- **"routed" could mean a hint rather than an execution** (#53). Reserved for
+  real executions; hint counts say "classified" and name their source.
+- **The enforcement block demanded an attribution the agent could not honestly
+  give** (#54). The route-indicator line is now offered only when the routed
+  answer is what the user actually receives, and the "violations are logged and
+  escalated" language is gone — nothing was escalated.
+
+### Added
+
+- **DIRECT-execution timeouts are surfaced** (#57). They previously failed
+  silently to a debug log while routing fell through to Claude, so a local path
+  that never once succeeded looked like nothing was wrong. `doctor` now
+  distinguishes "raise `LLM_ROUTER_OLLAMA_TIMEOUT` to N" from "this machine is
+  too slow for local routing".
+
 ## [13.0.3] — The MCP command that could never resolve (2026-08-26)
 
 Fixes GH#41 and GH#43, and four defects found while reproducing GH#42.

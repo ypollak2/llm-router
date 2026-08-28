@@ -160,13 +160,22 @@ def test_analyze_facts_ignores_phantom_saved_usd_column(sample_decisions):
 
 
 def test_analyze_facts_empty_session():
-    """Test facts analysis with empty session."""
+    """Test facts analysis with empty session.
+
+    GH#56: this test previously asserted ``classification_accuracy == 1.0`` for
+    a session with zero decisions — a perfect score derived from no samples.
+    That is the value that made three all-zero snapshot files look like real
+    measurements, one of them stamped a second after a live llm_query. The
+    accuracy is now None, and ``measured`` records that the zeros mean "not
+    observed" rather than "observed to be zero".
+    """
     facts = analyze_facts([], [])
 
     assert facts["total_calls"] == 0
     assert facts["total_cost"] == 0.0
     assert facts["total_saved"] == 0.0
-    assert facts["classification_accuracy"] == 1.0
+    assert facts["classification_accuracy"] is None
+    assert facts["measured"] is False
 
 
 def test_analyze_facts_accuracy():

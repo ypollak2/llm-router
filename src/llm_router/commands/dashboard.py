@@ -47,7 +47,7 @@ def _launch_tui_dashboard() -> int:
         try:
             from llm_router.tui import LLMRouterDashboard
         except ImportError:
-            print("⚠️  Textual not installed. Install with: pip install llm_router[tui]")
+            print("⚠️  Textual not installed. Install with: pipx inject llm-routing textual")
             return 1
 
         app = LLMRouterDashboard()

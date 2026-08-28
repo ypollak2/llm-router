@@ -1,6 +1,6 @@
 [project]
 name = "llm-routing"
-version = "13.0.3"
+version = "13.0.4"
 description = "Multi-LLM router MCP server — smart complexity routing, budget-aware model selection, 20+ providers (Claude, OpenAI, Gemini, Ollama, etc.)"
 readme = "README.md"
 license = "MIT"
@@ -80,8 +80,10 @@ Issues = "https://github.com/ypollak2/llm-router/issues"
 Changelog = "https://github.com/ypollak2/llm-router/blob/main/CHANGELOG.md"
 
 [project.scripts]
+# NOTE: there is deliberately NO `llm-router-sse` script. server.main_sse
+# binds the full MCP tool surface with no auth; see its docstring and
+# tests/test_sec1_no_unauthenticated_sse_script.py. Use main_sse_secured.
 llm-router = "llm_router.cli:main"
-llm-router-sse = "llm_router.server:main_sse"
 llm-router-onboard = "llm_router.onboard:main"
 llm-router-install-hooks = "llm_router.install_hooks:main"
 llm-router-quickstart = "llm_router.quickstart:main"
