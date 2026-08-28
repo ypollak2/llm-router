@@ -13,7 +13,7 @@ import sys
 import time
 import urllib.request
 from pathlib import Path
-from typing import Optional
+from typing import NamedTuple, Optional
 
 from llm_router.terminal_style import Color
 from llm_router.tool_surface import route_call, route_tool  # CHZ-SURF-01
@@ -371,6 +371,78 @@ def _render_host_explainer() -> str:
     )
 
 
+class _RoutingDecisionState(NamedTuple):
+    """What `routing_decisions` actually told us — three states, not two.
+
+    GH#55: doctor collapsed "table unreadable", "table empty but the machine is
+    busy" and "machine genuinely idle" into one message, "No routing decisions
+    today yet — trigger a few llm_* tool calls and re-run". A reporter who had
+    just made four llm() calls was told to make some calls.
+
+    The reason the three diverge at all: four different functions are named
+    `log_routing_decision` (cost, routing_hints, model_tracking,
+    lineage.decision_logger) and they write to four different destinations.
+    Only cost's writes this table, so a session that routed through another
+    path leaves it empty while usage/claude_usage fill up — which is exactly
+    what the reporter saw, and the inverse of what this machine shows.
+    """
+
+    readable: bool
+    rows: int
+    other_activity: int
+    summary: str
+
+
+def _routing_decision_state(db_path: Path) -> _RoutingDecisionState:
+    """Report the routing_decisions table honestly. Never reports 'idle' on error."""
+    import sqlite3  # imported locally, matching the rest of this module
+
+    if not Path(db_path).is_file():
+        return _RoutingDecisionState(
+            False, 0, 0,
+            f"usage database not found at {db_path} — nothing has been recorded yet",
+        )
+    try:
+        conn = sqlite3.connect(str(db_path))
+        try:
+            rows = conn.execute(
+                "SELECT COUNT(*) FROM routing_decisions "
+                "WHERE date(timestamp,'localtime')=date('now','localtime') "
+                "  AND COALESCE(reason_code,'') != 'sidecar_backfill'"
+            ).fetchone()[0]
+        except sqlite3.Error as e:
+            # NOT 0 rows. An unreadable table is a different fact from an empty
+            # one, and reporting them alike is what made GH#55 unreproducible.
+            return _RoutingDecisionState(
+                False, 0, 0,
+                f"could not read routing_decisions ({e}) — this is a storage "
+                f"problem, not an absence of activity",
+            )
+        try:
+            other = conn.execute(
+                "SELECT COUNT(*) FROM usage "
+                "WHERE date(timestamp,'localtime')=date('now','localtime')"
+            ).fetchone()[0]
+        except sqlite3.Error:
+            other = 0
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+    if rows:
+        return _RoutingDecisionState(True, rows, other, f"{rows} routing decisions today")
+    if other:
+        return _RoutingDecisionState(
+            True, 0, other,
+            f"routing_decisions is empty today, but usage has {other} row(s) — "
+            f"this session recorded through a different writer, so decision-level "
+            f"metrics are unavailable even though routing happened",
+        )
+    return _RoutingDecisionState(True, 0, 0, "no routing activity recorded today")
+
+
 def _mcp_command_problems(entry: object, label: str) -> list[str]:
     """Validate a registered MCP entry can actually START. Returns problems, or [].
 
@@ -600,6 +672,7 @@ def _check_savings_posture() -> list[str]:
     # earlier diagnostic. Pre-fix: 0/31 simple today. Healthy: > 30%.
     db = Path.home() / ".llm-router" / "usage.db"
     if db.is_file():
+        _state = _routing_decision_state(db)
         try:
             conn = sqlite3.connect(str(db))
             row = conn.execute(
@@ -615,10 +688,8 @@ def _check_savings_posture() -> list[str]:
         except sqlite3.Error:
             simple_n, total_n = 0, 0
         if total_n == 0:
-            lines.append(_warn(
-                "No routing decisions today yet — nothing to measure. "
-                "Trigger a few llm_* tool calls and re-run."
-            ))
+            # GH#55: say WHICH of the three states this is.
+            lines.append(_warn(_state.summary))
         else:
             share = 100.0 * simple_n / total_n
             if share >= 30.0:
