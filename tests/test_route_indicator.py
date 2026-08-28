@@ -57,24 +57,29 @@ def test_direct_success_directive_includes_fully_resolved_prefix() -> None:
 
 
 def test_mandatory_route_directive_uses_placeholder_for_model() -> None:
-    """The MANDATORY-ROUTE banner must instruct Claude to prepend a
-    one-line route indicator, and ask it to fill in ``<model>`` from the
-    ``llm_*`` tool's response. We can't resolve the model at hook time
-    (Claude makes the actual MCP call later), so a placeholder is
-    correct — but the placeholder must remain present so Claude
-    actually substitutes it.
+    """The route-indicator template must survive, with its ``<model>``
+    placeholder, so an agent that DOES relay a routed answer has a format to
+    follow. The model cannot be resolved at hook time — Claude makes the MCP
+    call later — so a placeholder is correct.
+
+    GH#54: this used to assert the banner said "USER-VISIBLE ROUTE INDICATOR
+    (required)". That framing asked the agent to attribute its answer to a
+    named model unconditionally, including when it had verified, rewritten or
+    replaced the routed text — crediting a model that did not produce what the
+    user reads. The template stays; the demand does not, so the assertion is
+    now that the indicator is OFFERED conditionally.
     """
     src = _AUTO_ROUTE.read_text()
-    assert "USER-VISIBLE ROUTE INDICATOR" in src, (
-        "MANDATORY-ROUTE directive removed from auto-route.py"
-    )
     assert "🎯 llm_router → <model> ·" in src or "llm_router → <model> ·" in src, (
-        "MANDATORY-ROUTE prefix template missing — Claude won't have a "
-        "format to follow"
+        "route-indicator template missing — an agent relaying a routed answer "
+        "has no format to follow"
     )
-    assert "fallback" in src.lower(), (
-        "directive should explain what to do when the tool doesn't "
-        "surface the model name (use the tool name as fallback)"
+    assert "ATTRIBUTION" in src, "the attribution block was removed entirely"
+    assert "only if you relay" in src.lower(), (
+        "the indicator must be conditioned on actually relaying the routed answer"
+    )
+    assert "(required)" not in src.split("ATTRIBUTION")[1][:400], (
+        "the attribution is marked required again — see GH#54"
     )
 
 

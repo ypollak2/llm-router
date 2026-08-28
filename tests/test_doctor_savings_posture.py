@@ -217,7 +217,12 @@ def test_zero_routings_today_says_no_data(clean_env, fake_home):
     conn.commit()
     conn.close()
     body = "\n".join(_plain(_check_savings_posture()))
-    assert "No routing decisions today" in body
+    # GH#55: the message was "No routing decisions today yet — nothing to
+    # measure. Trigger a few llm_* tool calls and re-run", which was also what
+    # an UNREADABLE table printed, and what a machine with four calls recorded
+    # elsewhere printed. Three states, one sentence. This case — table present,
+    # empty, nothing recorded anywhere else — is the genuinely idle one.
+    assert "no routing activity recorded today" in body.lower()
 
 
 def test_simple_share_ignores_sidecar_backfill(clean_env, fake_home):
