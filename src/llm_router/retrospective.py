@@ -161,6 +161,18 @@ def analyze_facts(
     """
     saved = float(total_saved or 0.0)
     if not decisions:
+        # GH#56: these zeros were written to session snapshots as measured fact.
+        # Three files on a reporter's disk, spanning two days, were identical
+        # here — one stamped a second after a real llm_query completed. The
+        # cause is GH#55 one layer down: fetch_session_decisions reads the
+        # routing_decisions table, and a session that routed through one of the
+        # other three same-named writers leaves it empty.
+        #
+        # `measured` distinguishes "I could not see your activity" from "you had
+        # no activity". The zero counts stay for existing readers (snapshot.py,
+        # share.py index them directly), but classification_accuracy is now None
+        # rather than 1.0 — a perfect score derived from zero samples is the
+        # number that made these files look real.
         return {
             "total_calls": 0,
             "total_cost": 0.0,
@@ -170,7 +182,8 @@ def analyze_facts(
             "task_distribution": {},
             "model_distribution": {},
             "avg_confidence": 0.0,
-            "classification_accuracy": 1.0,
+            "classification_accuracy": None,
+            "measured": False,
         }
 
     # Duration
@@ -209,6 +222,9 @@ def analyze_facts(
         "model_distribution": models,
         "avg_confidence": avg_conf,
         "classification_accuracy": accuracy,
+        # GH#56: the counterpart of the unmeasured flag above — these numbers
+        # came from real decisions.
+        "measured": True,
     }
 
 
