@@ -1966,8 +1966,15 @@ def _condense(summary: str) -> str:
 
     today = _money("today")
     lifetime = _money("lifetime")
+    # GH#53: "routed" means EXECUTED, so this may only match counts that come
+    # from the routing_decisions store. The old fallback matched a bare
+    # "N calls", which the classifier-log line could supply the moment its
+    # wording changed — relabelling hints as executions in a compact badge
+    # where the reader has no figures to sanity-check against. "classified" is
+    # excluded explicitly so the two can never collapse into one number.
     routes = re.search(r"(\d[\d,]*)\s+decisions?\b", plain, re.I) or \
-             re.search(r"(\d[\d,]*)\s+(?:routes?|calls?)\b", plain, re.I)
+             re.search(r"(\d[\d,]*)\s+routes?\b", plain, re.I) or \
+             re.search(r"(\d[\d,]*)\s+(?!classified)calls?\b", plain, re.I)
 
     # CONSUMED, matching the status line. This reported REMAINING for one
     # revision, which was correct arithmetic and a bad decision: the status line
@@ -1979,6 +1986,7 @@ def _condense(summary: str) -> str:
 
     bits: list[str] = []
     if routes:
+        # Sourced from the decisions/routes count above, never from "classified".
         bits.append(f"{routes.group(1)} routed")
     if today:
         bits.append(f"today {today}")
