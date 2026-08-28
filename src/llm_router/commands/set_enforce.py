@@ -49,7 +49,16 @@ def _dim(s: str) -> str:
 
 # ── Set-enforce command ─────────────────────────────────────────────────────
 
-def _run_set_enforce(mode: str) -> None:
+def _warn_if_env_overrides(mode: str) -> None:
+    """An exported LLM_ROUTER_ENFORCE outranks anything written to a file."""
+    current_env = os.environ.get("LLM_ROUTER_ENFORCE", "")
+    if current_env and current_env.lower() != mode:
+        print(f"\n  {_bold('⚠ WARNING')}: LLM_ROUTER_ENFORCE={current_env} is set in your shell.")
+        print(f"  This overrides what was just written. Run: {_bold('unset LLM_ROUTER_ENFORCE')}")
+        print("  Or remove it from ~/.zshrc / ~/.bashrc")
+
+
+def _run_set_enforce(mode: str, _global: bool = False) -> None:
     """Switch the enforcement mode and persist to ~/.llm-router/routing.yaml."""
     if not mode or mode not in _ENFORCE_MODES:
         print(f"\n{_bold('Usage:')} llm_router set-enforce <mode>\n")
@@ -59,6 +68,26 @@ def _run_set_enforce(mode: str) -> None:
             print(f"  {_bold(m):<12}{marker}")
             print(f"  {_dim(_ENFORCE_DESCRIPTIONS[m])}")
             print()
+        return
+
+    # GH#49: session-scoped by default. Writing routing.yaml changed enforcement
+    # for every already-running session on the machine — resolve_enforce_mode
+    # re-reads it on every hook call — while this command printed "Restart
+    # Claude Code for the change to take effect". Now a change governs the
+    # session that made it; `--global` asks for the old machine-wide behaviour
+    # explicitly.
+    session_id = os.environ.get("CLAUDE_SESSION_ID", "").strip()
+    if session_id and not _global:
+        sess_dir = Path.home() / ".llm-router" / "sessions" / session_id
+        sess_dir.mkdir(parents=True, exist_ok=True)
+        (sess_dir / "enforce").write_text(mode + "\n")
+        print(f"\n{_green('✓')} Enforcement mode set to {_bold(mode)} "
+              f"{_dim('(this session only)')}")
+        print(f"  {_dim(_ENFORCE_DESCRIPTIONS[mode])}")
+        print(f"\n  Written to: {sess_dir / 'enforce'}")
+        print(f"\n  {_dim('Applies to this session immediately - no restart needed.')}")
+        print(f"  {_dim('Other running sessions are unaffected. Use --global for all sessions.')}\n")
+        _warn_if_env_overrides(mode)
         return
 
     routing_yaml = Path.home() / ".llm-router" / "routing.yaml"
@@ -95,14 +124,13 @@ def _run_set_enforce(mode: str) -> None:
     print(f"\n  Written to: {routing_yaml}")
     print(f"  Written to: {env_path}")
 
-    # Warn if shell env var will override the files we just wrote
-    current_env = os.environ.get("LLM_ROUTER_ENFORCE", "")
-    if current_env and current_env.lower() != mode:
-        print(f"\n  {_bold('⚠ WARNING')}: LLM_ROUTER_ENFORCE={current_env} is set in your shell.")
-        print(f"  This overrides routing.yaml. Run: {_bold('unset LLM_ROUTER_ENFORCE')}")
-        print("  Or remove it from ~/.zshrc / ~/.bashrc")
+    _warn_if_env_overrides(mode)
 
-    print(f"\n  {_dim('Restart Claude Code for the change to take effect.')}\n")
+    # GH#49: this said "Restart Claude Code for the change to take effect".
+    # resolve_enforce_mode re-reads these files on every hook invocation, so the
+    # change is immediate — and that is precisely what surprised the reporter.
+    print(f"\n  {_dim('Applies immediately to every session on this machine that does')}")
+    print(f"  {_dim('not set LLM_ROUTER_ENFORCE in its own environment - no restart needed.')}\n")
 
 
 # ── Entry point ─────────────────────────────────────────────────────────────
@@ -112,6 +140,9 @@ def cmd_set_enforce(args: list[str]) -> int:
 
     Switch the routing enforcement mode.
     """
-    mode = args[0] if args else ""
-    _run_set_enforce(mode)
+    # GH#49: --global restores the pre-session-scoping behaviour, explicitly.
+    is_global = "--global" in args
+    positional = [a for a in args if not a.startswith("-")]
+    mode = positional[0] if positional else ""
+    _run_set_enforce(mode, _global=is_global)
     return 0
