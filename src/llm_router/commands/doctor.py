@@ -943,6 +943,44 @@ def _run_doctor(host: Optional[str] = None) -> tuple[int, list[str]]:
                         "running but no models pulled — run `ollama pull qwen2.5:0.5b`"
                     )
                 )
+
+            # ── 5a. Ensemble classifier models (GH#62) ──────────────────────
+            #    Ollama being "up" says nothing about whether the specific
+            #    model(s) the LLM-first ensemble classifier will actually
+            #    request are among what's installed. A miss here degrades
+            #    silently to the heuristic fallback (still functional), so this
+            #    is read-only and non-fatal — a warning, never a doctor failure.
+            from llm_router import ensemble as _ensemble
+
+            _primary = _ensemble.primary_model()
+            if not _ensemble.model_installed(_primary, model_names):
+                _bare_primary = _primary.removeprefix("ollama/")
+                print(
+                    _warn(
+                        f"ensemble primary model '{_bare_primary}' not installed — "
+                        "the LLM-first classifier will silently fall back to the "
+                        f"heuristic (fix: `ollama pull {_bare_primary}` or "
+                        "`export LLM_ROUTER_ENSEMBLE_PRIMARY=ollama/<an installed model>`)"
+                    )
+                )
+                issues.append(
+                    f"Ensemble primary model '{_primary}' not installed in Ollama"
+                )
+
+            _secondary = _ensemble.secondary_model()
+            if _secondary and not _ensemble.model_installed(_secondary, model_names):
+                _bare_secondary = _secondary.removeprefix("ollama/")
+                print(
+                    _warn(
+                        f"ensemble secondary (tiebreak) model '{_bare_secondary}' not "
+                        "installed — the tiebreak vote will silently be skipped "
+                        f"(fix: `ollama pull {_bare_secondary}` or "
+                        "`export LLM_ROUTER_ENSEMBLE_SECONDARY=ollama/<an installed model>`)"
+                    )
+                )
+                issues.append(
+                    f"Ensemble secondary model '{_secondary}' not installed in Ollama"
+                )
     except Exception:
         print(
             _warn(

@@ -70,9 +70,53 @@ def _ensemble_enabled() -> bool:
 # always target the same model.
 DEFAULT_PRIMARY = "ollama/qwen2.5:7b"
 
+# Secondary (tiebreak) local classifier — consulted only on a thin margin
+# (see _MARGIN_TIEBREAK). Same env-knob pattern as the primary.
+DEFAULT_SECONDARY = "ollama/qwen2.5-coder:32b"
+
 
 def _primary_model() -> str:
     return os.environ.get("LLM_ROUTER_ENSEMBLE_PRIMARY", DEFAULT_PRIMARY)
+
+
+def _secondary_model() -> str:
+    return os.environ.get("LLM_ROUTER_ENSEMBLE_SECONDARY", DEFAULT_SECONDARY)
+
+
+def primary_model() -> str:
+    """Public accessor: the ensemble's configured primary classifier model
+    (``LLM_ROUTER_ENSEMBLE_PRIMARY`` override, else ``DEFAULT_PRIMARY``).
+
+    Exists so other modules (e.g. ``commands.doctor``, ``commands.verify``) can
+    read the effective primary without reaching into the private ``_primary_model``.
+    """
+    return _primary_model()
+
+
+def secondary_model() -> str:
+    """Public accessor: the ensemble's configured secondary (tiebreak) classifier
+    model (``LLM_ROUTER_ENSEMBLE_SECONDARY`` override, else ``DEFAULT_SECONDARY``).
+    """
+    return _secondary_model()
+
+
+def model_installed(model: str, installed_names: list[str]) -> bool:
+    """True if ``model`` (e.g. ``"ollama/qwen2.5:7b"``) is present among Ollama's
+    installed model names (as returned by ``/api/tags``).
+
+    Strips the ``ollama/`` provider prefix and normalizes Ollama's implicit
+    ``:latest`` tag, so a bare name (``"qwen2.5:7b"``... already tagged, but also
+    ``"llama3"``) matches an installed ``"<name>:latest"`` entry and vice versa.
+    """
+    if not model:
+        return False
+    name = model.removeprefix("ollama/") if model.startswith("ollama/") else model
+
+    def _tagged(n: str) -> str:
+        return n if ":" in n else f"{n}:latest"
+
+    target = _tagged(name)
+    return any(_tagged(m) == target for m in installed_names)
 
 
 def warm_primary(model: str | None = None) -> None:
@@ -112,7 +156,9 @@ async def classify_for_routing(prompt: str, **_legacy_kwargs) -> "Classification
     """
     if _ensemble_enabled():
         timeout = float(os.environ.get("LLM_ROUTER_ENSEMBLE_TIMEOUT", "120"))
-        return await classify_ensemble(prompt, primary=_primary_model(), timeout_seconds=timeout)
+        return await classify_ensemble(
+            prompt, primary=_primary_model(), secondary=_secondary_model(), timeout_seconds=timeout
+        )
     from llm_router.classifier import classify_complexity
 
     return await classify_complexity(prompt, **_legacy_kwargs)
@@ -220,8 +266,8 @@ def _blend_complexity(
 async def classify_ensemble(
     prompt: str,
     *,
-    primary: str = "ollama/qwen2.5:7b",
-    secondary: str | None = "ollama/qwen2.5-coder:32b",
+    primary: str = DEFAULT_PRIMARY,
+    secondary: str | None = DEFAULT_SECONDARY,
     allow_secondary: bool = True,
     timeout_seconds: float = 120.0,
 ) -> ClassificationResult:

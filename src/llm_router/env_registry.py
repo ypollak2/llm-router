@@ -93,6 +93,7 @@ ENV_REGISTRY: dict[str, tuple[str, str, int]] = {
     "LLM_ROUTER_ENFORCE": ("llm_router", "commands/doctor.py", 9),
     "LLM_ROUTER_ENSEMBLE": ("llm_router", "ensemble.py", 1),
     "LLM_ROUTER_ENSEMBLE_PRIMARY": ("llm_router", "ensemble.py", 1),
+    "LLM_ROUTER_ENSEMBLE_SECONDARY": ("llm_router", "ensemble.py", 1),
     "LLM_ROUTER_ENSEMBLE_TIMEOUT": ("llm_router", "ensemble.py", 1),
     "LLM_ROUTER_ESCALATE_DEADLINE_S": ("llm_router", "router.py", 1),
     "LLM_ROUTER_ESCALATE_ON_QUALITY": ("llm_router", "router.py", 1),
