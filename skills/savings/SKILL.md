@@ -30,7 +30,7 @@ No config needed — it's always on.
 ## Routing Policy
 
 ```
-llm_policy           — Show active org/repo routing policy + last 10 audit decisions
+llm_router_admin(action="policy")   — Show active org/repo routing policy + last 10 audit decisions
 ```
 
 Set policy in `~/.llm-router/org-policy.yaml`:
@@ -50,5 +50,6 @@ task_caps:
 ```
 llm_benchmark        — Per-task routing accuracy from your 👍/👎 feedback
 llm_rate             — Rate the last response to improve future routing
-llm_quality_report   — Full routing stats, classifier accuracy, savings metrics
 ```
+Full routing stats / classifier accuracy: no MCP door on the consolidated surface —
+run `llm-router routing-report` from a terminal.

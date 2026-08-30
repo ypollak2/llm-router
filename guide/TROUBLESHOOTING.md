@@ -9,13 +9,15 @@ Start with these commands to understand your system state:
 python -c "from llm_router.config import get_config; print(get_config().available_providers)"
 
 # Verify provider connectivity
-# In Claude Code: Use llm_health
+# In Claude Code: Use llm_router_status(view="health")
 
 # Check budget status
-# In Claude Code: Use llm_usage
+# In Claude Code: Use llm_router_status(view="usage")
 
 # See recent routing decisions and costs
-# In Claude Code: Use llm_quality_report
+# In Claude Code: no direct MCP tool for this on the consolidated surface —
+# run `llm-router routing-report` (writes ~/.llm-router/routing_report.md)
+# or `llm-router summary` for a live terminal dashboard.
 ```
 
 ---
@@ -46,16 +48,16 @@ uv add anthropic
 
 **Diagnosis**:
 ```bash
-# In Claude Code:
-Use llm_setup with action="test" provider="openai"  # test a specific provider
-Use llm_setup with action="discover"                 # scan for keys on your machine
+# the old provider-setup MCP tool has no door on the consolidated surface — use the CLI:
+llm-router setup                 # interactive wizard: discovers/adds provider keys
+llm-router doctor                # tests configured providers and shows circuit-breaker state
 ```
 
 **Fix**:
 1. Regenerate the API key at the provider's dashboard
 2. Update `.env` with the new key
 3. Restart your Claude session
-4. Test with `llm_health` or `llm_setup action=test`
+4. Test with `llm_router_status(view="health")` (in Claude Code) or `llm-router doctor` (CLI)
 
 **Keys expire or rotate**:
 - OpenAI: https://platform.openai.com/api-keys
@@ -72,15 +74,15 @@ Use llm_setup with action="discover"                 # scan for keys on your mac
 **Diagnosis**:
 ```bash
 # In Claude Code:
-Use llm_health                           # Check provider status
-Use llm_usage                            # See if budget is exhausted
-Use llm_providers                        # List available providers
+Use llm_router_status(view="health")     # Check provider status
+Use llm_router_status(view="usage")      # See if budget is exhausted
+Use llm_router_status(view="providers")  # List available providers
 ```
 
 **Possible causes**:
 1. **No providers configured**: Add at least one API key to `.env`
-2. **Budget exceeded**: Check `llm_usage` — monthly or daily limit hit
-3. **All providers down**: Check `llm_health` — circuit breakers are tripped
+2. **Budget exceeded**: Check `llm_router_status(view="usage")` — monthly or daily limit hit
+3. **All providers down**: Check `llm_router_status(view="health")` — circuit breakers are tripped
 4. **Ollama not running**: If using local models, start Ollama
 5. **Network issue**: No internet or firewall blocking API calls
 
@@ -104,17 +106,17 @@ Use llm_providers                        # List available providers
 **Diagnosis**:
 ```bash
 # In Claude Code:
-Use llm_usage period="today"             # See today's spending
-Use llm_usage period="month"             # See monthly spending
-Use llm_usage                            # See budget limits
+Use llm_router_status(view="usage", period="today")  # See today's spending
+Use llm_router_status(view="usage", period="month")  # See monthly spending
+Use llm_router_status(view="usage")                  # See budget limits
 ```
 
 **Fix — increase budget**:
 ```bash
 # In Claude Code:
-Use llm_set_profile "premium"            # Higher limits, may cost more
-# or
-Use llm_setup action="add" provider="gemini"  # Add free Gemini tier
+Use llm_router_admin(action="set_profile", value="premium")  # Higher limits, may cost more
+# or, from a terminal:
+llm-router setup                                              # Add a free Gemini tier key
 ```
 
 **Fix — check policy caps**:
@@ -143,13 +145,13 @@ cat ~/.llm-router/routing.yaml | grep -A 5 task_caps
 **Diagnosis**:
 ```bash
 # In Claude Code:
-Use llm_health  # Shows "circuit_breaker: open" for affected providers
+Use llm_router_status(view="health")  # Shows "circuit_breaker: open" for affected providers
 ```
 
 **Fix**:
 1. Wait 5 minutes for circuit breaker to reset
 2. Check provider status page (e.g., https://status.openai.com)
-3. Verify your API key is valid: `Use llm_setup action=test`
+3. Verify your API key is valid: `llm-router doctor` (from a terminal)
 4. Configure a backup provider
 
 ---
@@ -160,12 +162,12 @@ Use llm_health  # Shows "circuit_breaker: open" for affected providers
 
 **Diagnosis**:
 ```bash
-# In Claude Code:
-Use llm_quality_report  # Shows latency per model over time
+# No MCP tool shows per-model latency on the consolidated surface — from a terminal:
+llm-router routing-report  # Shows latency per model over time
 ```
 
 **Common causes**:
-- **Complex task on simple model**: Use `complexity="complex"` explicitly
+- **Complex task on simple model**: Use `tier="best"` explicitly
 - **Ollama not responsive**: Check Ollama status: `ollama serve`
 - **Rate limiting**: Provider is slowly serving due to quota limits
 - **Network latency**: Check your internet connection
@@ -173,11 +175,11 @@ Use llm_quality_report  # Shows latency per model over time
 **Fix**:
 ```bash
 # Use premium profile for faster inference
-Use llm_set_profile "premium"
+Use llm_router_admin(action="set_profile", value="premium")
 
-# Or specify a fast model:
+# Or ask for the fast tier explicitly:
 # In Claude Code:
-Use llm_route prompt="..." model="openai/gpt-4o-mini"
+Use llm(prompt="...", task="query", tier="fast")
 ```
 
 ---
@@ -199,7 +201,7 @@ Use llm_route prompt="..." model="openai/gpt-4o-mini"
 export LLM_ROUTER_ENFORCE=off
 
 # Now open Claude Code and fix the hook
-# Check ~/.claude/hooks/llm-router-enforce-route.py
+# Check ~/.claude/hooks/llm_router-enforce-route.py
 # Ensure it NEVER blocks: Read, Edit, Write, Bash, Grep, Glob, Agent
 ```
 
@@ -226,8 +228,8 @@ if violation_detected and tool_name not in CORE_TOOLS:
 **Diagnosis**:
 ```bash
 # In Claude Code:
-Use llm_classify complexity=null  # See auto-classification result
-Use llm_quality_report            # Check recent routing decisions
+Use llm_route prompt="..."  # See what the full classifier picks
+# Recent decisions: `llm-router routing-report` (from a terminal)
 ```
 
 **Why this happens**:
@@ -238,15 +240,15 @@ Use llm_quality_report            # Check recent routing decisions
 **Fix — explicit complexity override**:
 ```bash
 # In Claude Code:
-Use llm_code prompt="..." complexity="complex"
-Use llm_analyze prompt="..." complexity="complex"
+Use llm(prompt="...", task="code", tier="best")
+Use llm(prompt="...", task="analyze", tier="best")
 ```
 
-**Fix — check classification cache**:
+**Fix — clear the classification cache**:
 ```bash
 # In Claude Code:
-Use llm_cache_stats         # See classification cache hit rate
-Use llm_cache_clear         # Clear stale classifications if needed
+Use llm_router_admin(action="clear_cache")  # Clear stale classifications if needed
+# Hit-rate stats aren't exposed on the consolidated MCP surface.
 ```
 
 ---
@@ -267,7 +269,7 @@ curl -s http://localhost:11434/api/tags || echo "Ollama not running"
 ollama serve
 
 # Or disable semantic caching if you don't need it
-# In Claude Code: Use llm_setup to toggle cache
+# In Claude Code: Use llm_router_admin(action="clear_cache")
 ```
 
 ---
@@ -292,7 +294,7 @@ rm -f ~/.llm-router/routing.db
 
 # Next routing call will recreate it
 # In Claude Code:
-Use llm_usage  # This will initialize fresh database
+Use llm_router_status(view="usage")  # This will initialize fresh database
 ```
 
 ---
@@ -303,17 +305,16 @@ Use llm_usage  # This will initialize fresh database
 
 **Diagnosis**:
 ```bash
-ls -la ~/.claude/hooks/llm-router-*.py
+ls -la ~/.claude/hooks/llm_router-*.py
 # Should show: -rwxr-xr-x (755 permissions)
 ```
 
 **Fix**:
 ```bash
-chmod 755 ~/.claude/hooks/llm-router-*.py
+chmod 755 ~/.claude/hooks/llm_router-*.py
 
-# Or reinstall hooks
-# In Claude Code:
-Use llm_setup action="install_hooks"
+# Or reinstall hooks, from a terminal:
+llm-router install
 ```
 
 ---
@@ -356,7 +357,7 @@ python -c "from llm_router.config import get_config; print(get_config())"
 ```bash
 # Check active policy
 # In Claude Code:
-Use llm_policy  # Show current policy rules and violations
+Use llm_router_admin(action="policy")  # Show current policy rules and violations
 ```
 
 **Fix**:
@@ -373,8 +374,8 @@ Use llm_policy  # Show current policy rules and violations
 **Diagnosis**:
 ```bash
 # In Claude Code:
-Use llm_health providers=["openai", "gemini"]  # See provider status
-Use llm_providers                              # See available providers
+Use llm_router_status(view="health")     # See provider status
+Use llm_router_status(view="providers")  # See available providers
 ```
 
 **Why a provider disappears**:
@@ -385,10 +386,10 @@ Use llm_providers                              # See available providers
 - ❌ Provider blocked by policy rule
 
 **Fix**:
-1. Add missing API key: `Use llm_setup action="add" provider="openai"`
+1. Add missing API key: `llm-router setup` (from a terminal)
 2. Wait 5 minutes for circuit breaker reset
-3. Check budget: `Use llm_usage`
-4. Check policy: `Use llm_policy`
+3. Check budget: `Use llm_router_status(view="usage")`
+4. Check policy: `Use llm_router_admin(action="policy")`
 
 ---
 
@@ -404,8 +405,8 @@ Use llm_providers                              # See available providers
 
 **Diagnosis**:
 ```bash
-# In Claude Code:
-Use llm_quality_report  # See estimated vs actual costs
+# No MCP tool exposes estimated-vs-actual costs on the consolidated surface — from a terminal:
+llm-router routing-report
 ```
 
 **Accuracy**:
@@ -422,12 +423,6 @@ Use llm_quality_report  # See estimated vs actual costs
 ```bash
 # Show detailed routing decisions
 export LLM_ROUTER_LOG_LEVEL=DEBUG
-
-# Show SQL queries
-export LLM_ROUTER_SQL_DEBUG=1
-
-# Show hook lifecycle
-export LLM_ROUTER_HOOK_DEBUG=1
 ```
 
 ### Inspect pending state
@@ -447,20 +442,19 @@ cat ~/.llm-router/pending_route_*.json | python -m json.tool
 # See hook logs in Claude settings
 # Hooks print to stderr if debugging is enabled
 
-# Manual hook test
-python -c "from llm_router.hooks.auto_route import main; main()"
+# Manual hook test — the hook file is hyphenated (auto-route.py), so it can't
+# be imported as a module; run the installed copy as a script instead:
+echo '{"prompt": "test prompt"}' | python ~/.claude/hooks/llm_router-auto-route.py
 ```
 
 ### Validate configuration
 
 ```bash
-# In Claude Code:
-# Check syntax and conflicts
-Use llm_setup action="discover"   # Find all keys on machine
-Use llm_setup action="status"     # Show all configured providers
+# Check syntax and conflicts — the old provider-setup MCP tool has no door, use the CLI:
+llm-router setup    # Discover/add keys, show configured providers
 
-# Test each provider
-Use llm_health                     # Test connectivity
+# Test each provider, in Claude Code:
+Use llm_router_status(view="health")   # Test connectivity
 ```
 
 ---
@@ -469,29 +463,31 @@ Use llm_health                     # Test connectivity
 
 ### When to ask for help
 
-- **Can't configure a provider**: Check PROVIDERS.md first, then use `llm_setup`
-- **Budget issues**: Use `llm_usage` to understand limits
+- **Can't configure a provider**: Check PROVIDERS.md first, then run `llm-router setup`
+- **Budget issues**: Use `llm_router_status(view="usage")` to understand limits
 - **Hook deadlock**: Export `LLM_ROUTER_ENFORCE=off` and fix the hook
-- **Unexpected model selection**: Use `llm_quality_report` and `llm_classify`
+- **Unexpected model selection**: Run `llm-router routing-report` and try `llm_route` in Claude Code
 
 ### Useful diagnostic commands
 
 ```bash
 # In Claude Code:
-Use llm_quality_report              # See routing quality and latency
-Use llm_health                       # Check provider status
-Use llm_usage                        # See spending and limits
-Use llm_providers                    # List available models
-Use llm_policy                       # Show policy violations
+Use llm_router_status(view="health")     # Check provider status
+Use llm_router_status(view="usage")      # See spending and limits
+Use llm_router_status(view="providers")  # List available models
+Use llm_router_admin(action="policy")    # Show policy violations
+
+# From a terminal:
+llm-router routing-report                # Routing quality and latency
 ```
 
 ### Report a bug
 
 Include these details:
-1. Output of `llm_health`
-2. Output of `llm_usage`
-3. Your profile: `llm_set_profile` result
-4. Recent decision: `llm_quality_report period="today"`
+1. Output of `llm_router_status(view="health")`
+2. Output of `llm_router_status(view="usage")`
+3. Your profile: `llm_router_admin(action="set_profile", value="...")` result
+4. Recent decisions: `llm-router routing-report`
 5. Error message and stack trace
 
 ---
@@ -502,17 +498,17 @@ Include these details:
 
 ```bash
 # Use faster models
-Use llm_set_profile "budget"        # Haiku (3x faster than Sonnet)
+Use llm_router_admin(action="set_profile", value="budget")   # Haiku (3x faster than Sonnet)
 
-# Or explicitly:
-Use llm_code prompt="..." model="openai/gpt-4o-mini"
+# Or ask for the fast tier explicitly:
+Use llm(prompt="...", task="code", tier="fast")
 ```
 
 ### For cheaper cost
 
 ```bash
 # Use budget models
-Use llm_set_profile "budget"        # Haiku/Flash (10x cheaper)
+Use llm_router_admin(action="set_profile", value="budget")   # Haiku/Flash (10x cheaper)
 
 # Enable semantic cache (requires Ollama)
 # If embedding hits, skips LLM call entirely
@@ -522,7 +518,7 @@ Use llm_set_profile "budget"        # Haiku/Flash (10x cheaper)
 
 ```bash
 # Use frontier models
-Use llm_set_profile "premium"       # Opus/o3 (most capable)
+Use llm_router_admin(action="set_profile", value="premium")  # Opus/o3 (most capable)
 
 # Enable judge evaluation
 export LLM_ROUTER_JUDGE_SAMPLE_RATE=1.0
@@ -552,10 +548,16 @@ A: Router tries emergency BUDGET fallback as last resort. If that fails, raises 
 A: Yes — delete `~/.llm-router/routing.db` and restart (fresh database).
 
 **Q: How do I know if a model is low quality?**
-A: Use `llm_quality_report` to see average judge scores. Models with <0.7 score are automatically deprioritized.
+A: Run `llm-router routing-report` to see average judge scores. Models with <0.7 score are automatically deprioritized.
 
 **Q: Can I disable routing and call a specific model?**
-A: Yes — use explicit `model=` parameter in any `llm_*` tool: `Use llm_code model="openai/gpt-4o"`
+A: Not through the consolidated `llm()` tool — it has no `model=` parameter (by design; this
+is the front door the 1.0 consolidation collapsed the old per-task tools into). `model=` still
+exists one layer down on `llm_query` (`tools/text.py`), but `llm_query` itself is registered
+only when `LLM_ROUTER_SLIM=off` or `=routing` — not under the default `consolidated` tier. To
+force a specific model today: set `LLM_ROUTER_SLIM=routing` (or `off`) and call
+`llm_query(prompt="...", model="openai/gpt-4o")` directly, or pin the model in
+`~/.llm-router/routing.yaml`.
 
 ---
 

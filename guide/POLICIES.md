@@ -126,7 +126,7 @@ complete no-op unless this is set. Simple/moderate prompts route to local/free p
 complex prompts prefer the paid seat. Add extra self-hosted free providers with
 `LLM_ROUTER_INTERNAL_PROVIDERS`. When the seat's quota pressure reaches
 `LLM_ROUTER_SUBSCRIPTION_PRESSURE_THRESHOLD` (`0.80` by default), the seat is demoted to last and
-more traffic shifts to local providers. Enable with `LLM_ROUTER_PROFILE=subscription_local`, or
+more traffic shifts to local providers. Enable with `LLM_ROUTER_COST_PROFILE=subscription_local`, or
 leave it on under any profile once a subscription is set (turn that off with
 `LLM_ROUTER_SUBSCRIPTION_REORDER_ALL_PROFILES=off`).
 

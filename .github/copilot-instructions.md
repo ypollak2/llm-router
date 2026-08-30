@@ -1,4 +1,4 @@
-<!-- llm-router-rules-version: 1 -->
+<!-- llm_router-rules-version: 1 -->
 # LLM Router — VS Code / GitHub Copilot Routing Rules
 
 > These rules apply when using llm-router MCP tools inside VS Code with GitHub Copilot.

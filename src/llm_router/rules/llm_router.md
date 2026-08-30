@@ -8,9 +8,9 @@
 > Edit/Write/Bash proceed. In `hard`, Bash/Edit/Write/MultiEdit/NotebookEdit are
 > ALL held until you route (only Read/Glob/Grep/LS proceed). In
 > `advise`/`suggest`/`soft`/`shadow`/`off`, nothing is blocked. You can satisfy
-> the route, use an escape valve, or run `llm_router set-enforce off`. Whether a tool
+> the route, use an escape valve, or run `llm-router set-enforce off`. Whether a tool
 > is held is therefore **mode-dependent** — not a blanket guarantee. See
-> `Docs/configuration.md` and `llm_router doctor` for the resolved mode.
+> `Docs/configuration.md` and `llm-router doctor` for the resolved mode.
 
 ## Routing guarantees — honest scope (CHZ-AUD-A-03/A-05)
 
@@ -102,6 +102,7 @@ Independent of routing, keep replies tight:
 - **Skip preamble** ("I'll help", "Let me", "Great question", "Certainly").
 - **Lead with the result**; reasoning only if asked or non-obvious.
 - **Fragments are fine**: ✓ "Routed → Gemini Flash. Saved ~$0.012." over a full sentence.
+- **Drop unnecessary articles** (a/an/the) when omitting them doesn't change meaning.
 - **No trailing summaries** restating what you just did.
 - **≥3 items → table or bullets**, not prose.
 - **Don't restate the user's request** before answering it.

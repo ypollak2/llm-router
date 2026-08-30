@@ -48,10 +48,10 @@ print(f'✅ All versions in sync: {v1}')
 
 ### 6. Deploy hooks (if any hook changed)
 ```bash
-install -m 755 src/llm_router/hooks/auto-route.py ~/.claude/hooks/llm-router-auto-route.py
-install -m 755 src/llm_router/hooks/session-end.py ~/.claude/hooks/llm-router-session-end.py
-install -m 755 src/llm_router/hooks/session-start.py ~/.claude/hooks/llm-router-session-start.py
-install -m 755 src/llm_router/hooks/enforce-route.py ~/.claude/hooks/llm-router-enforce-route.py
+install -m 755 src/llm_router/hooks/auto-route.py ~/.claude/hooks/llm_router-auto-route.py
+install -m 755 src/llm_router/hooks/session-end.py ~/.claude/hooks/llm_router-session-end.py
+install -m 755 src/llm_router/hooks/session-start.py ~/.claude/hooks/llm_router-session-start.py
+install -m 755 src/llm_router/hooks/enforce-route.py ~/.claude/hooks/llm_router-enforce-route.py
 ```
 
 ### 7. Commit and tag
@@ -79,7 +79,7 @@ gh release create vX.Y.Z \
 
 ## Upgrade
 \`\`\`bash
-pip install --upgrade claude-code-llm-router && llm-router install
+pip install --upgrade llm-routing && llm-router install
 \`\`\`"
 ```
 

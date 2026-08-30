@@ -1,11 +1,11 @@
 # LLM Router — Smart Routing Skill
 
-Route tasks to the cheapest capable model automatically using llm-router MCP tools.
+Route tasks to the cheapest capable model automatically using llm_router MCP tools.
 
 ## When to Use This Skill
 
 Before answering research, code, writing, or analysis tasks — call the appropriate
-llm-router tool instead of answering directly. The router picks the cheapest model
+llm_router tool instead of answering directly. The router picks the cheapest model
 that can handle the task (Ollama → Codex → paid APIs in free-first order).
 
 ## Task → Tool Mapping

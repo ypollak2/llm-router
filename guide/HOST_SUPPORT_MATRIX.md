@@ -309,7 +309,9 @@ Automatic session tracking logs every routing decision for analytics. Manual tra
 
 ### "Can I run llm-router on multiple hosts at once?"
 
-**Yes.** Each host maintains its own `~/.llm-router/` directory. Metrics are shared if using the same SQLite DB (see `LLM_ROUTER_METRICS_DB`).
+**Yes.** Each host maintains its own `~/.llm-router/` directory. Metrics are shared automatically
+across hosts on the same machine since they all read/write the same `~/.llm-router/routing.db`
+SQLite file — there's no separate env var to configure this.
 
 ```bash
 # Claude Code

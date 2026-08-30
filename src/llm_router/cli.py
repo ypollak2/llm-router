@@ -1,53 +1,53 @@
 """CLI entry point for llm_router.
 
 Usage:
-    llm_router                  — start the MCP server (stdio transport)
-    llm_router install              — install hooks, rules, and MCP server config globally
-    llm_router install --check      — show what would be installed without doing it
-    llm_router install --force      — reinstall even if already present
-    llm_router install --claw-code  — also install into claw-code (auto-detects ~/.claw-code/)
-    llm_router install --headless   — install for Docker/agent/CI environments (API-key mode, no OAuth)
-    llm_router install --host codex       — write Codex CLI config files
-    llm_router install --host opencode    — write OpenCode config files
-    llm_router install --host gemini-cli  — write Gemini CLI config files
-    llm_router install --host copilot-cli — write GitHub Copilot CLI config files
-    llm_router install --host openclaw    — write OpenClaw config files
-    llm_router install --host trae        — write Trae IDE config files
-    llm_router install --host pi          — write Pi coding agent (pi.dev) config files
-    llm_router install --host factory     — confirm Factory Droid plugin manifest
-    llm_router install --host desktop     — print Claude Desktop config snippet
-    llm_router install --host copilot     — install VS Code / GitHub Copilot pull-routing configs
-    llm_router install --host windsurf    — install Windsurf / Cascade pull-routing configs
-    llm_router install --host kimi        — install Kimi Code (Moonshot AI) pull-routing configs
-    llm_router install --host all         — install / print all host configs
-    llm_router uninstall        — remove hooks and MCP registration
-    llm_router uninstall --purge — also delete ~/.llm-router/ (usage DB, .env, logs)
-    llm_router setup            — interactive wizard: configure providers and API keys
-    llm_router init-policy      — interactive wizard: choose or create a routing policy (v7.5.0)
-    llm_router status           — show routing status, today's savings, subscription pressure
-    llm_router savings-report   — detailed token/cost breakdown (all-time, by model/provider)
-    llm_router savings-report --period week  — weekly savings report
-    llm_router doctor           — check that everything is wired up correctly
-    llm_router okf status       — what knowledge is stored and injected for this project
-    llm_router okf gc           — find stored model prose; --apply quarantines it
-    llm_router demo             — show routing decisions for sample prompts
-    llm_router dashboard        — launch interactive TUI dashboard (real-time monitoring)
-    llm_router dashboard --web [--port 7338]  — legacy web dashboard at localhost:7337
-    llm_router set-enforce <mode>  — switch enforcement mode (smart|soft|hard|off)
-    llm_router team report [period]  — show team savings report (default: week)
-    llm_router team push [period]    — push report to Slack/Discord/Telegram/webhook
-    llm_router team setup            — interactively configure team endpoint
-    llm_router budget                — show all providers with spend, cap, pressure
-    llm_router budget set <p> <amt>  — set monthly cap in USD for provider p
-    llm_router budget remove <p>     — clear the cap for provider p
-    llm_router last [--count N]      — show your last N routing decisions (default: 5)
-    llm_router replay [--limit N]    — full transcript of routing decisions this session
-    llm_router snapshot [--date DATE] — mid-session monitoring: accuracy trends and gap detection
-    llm_router retrospect [--weekly] — IAF-style session debrief with routing directives
-    llm_router stats [--period recent] — show combined download stats (llm-routing + claude-code-llm_router)
-    llm_router verify                — end-to-end health check (30 seconds)
-    llm_router gc [--ttl-days N] [--apply] — sweep stale session shards from ~/.llm-router (dry-run by default)
-    llm_router soak [--use-gold-complexity] [--full] [--out PATH] — replay the realized-savings soak corpus and write soak/report.json
+    llm-router                  — start the MCP server (stdio transport)
+    llm-router install              — install hooks, rules, and MCP server config globally
+    llm-router install --check      — show what would be installed without doing it
+    llm-router install --force      — reinstall even if already present
+    llm-router install --claw-code  — also install into claw-code (auto-detects ~/.claw-code/)
+    llm-router install --headless   — install for Docker/agent/CI environments (API-key mode, no OAuth)
+    llm-router install --host codex       — write Codex CLI config files
+    llm-router install --host opencode    — write OpenCode config files
+    llm-router install --host gemini-cli  — write Gemini CLI config files
+    llm-router install --host copilot-cli — write GitHub Copilot CLI config files
+    llm-router install --host openclaw    — write OpenClaw config files
+    llm-router install --host trae        — write Trae IDE config files
+    llm-router install --host pi          — write Pi coding agent (pi.dev) config files
+    llm-router install --host factory     — confirm Factory Droid plugin manifest
+    llm-router install --host desktop     — print Claude Desktop config snippet
+    llm-router install --host copilot     — install VS Code / GitHub Copilot pull-routing configs
+    llm-router install --host windsurf    — install Windsurf / Cascade pull-routing configs
+    llm-router install --host kimi        — install Kimi Code (Moonshot AI) pull-routing configs
+    llm-router install --host all         — install / print all host configs
+    llm-router uninstall        — remove hooks and MCP registration
+    llm-router uninstall --purge — also delete ~/.llm-router/ (usage DB, .env, logs)
+    llm-router setup            — interactive wizard: configure providers and API keys
+    llm-router init-policy      — interactive wizard: choose or create a routing policy (v7.5.0)
+    llm-router status           — show routing status, today's savings, subscription pressure
+    llm-router savings-report   — detailed token/cost breakdown (all-time, by model/provider)
+    llm-router savings-report --period week  — weekly savings report
+    llm-router doctor           — check that everything is wired up correctly
+    llm-router okf status       — what knowledge is stored and injected for this project
+    llm-router okf gc           — find stored model prose; --apply quarantines it
+    llm-router demo             — show routing decisions for sample prompts
+    llm-router dashboard        — launch interactive TUI dashboard (real-time monitoring)
+    llm-router dashboard --web [--port 7338]  — legacy web dashboard at localhost:7337
+    llm-router set-enforce <mode>  — switch enforcement mode (smart|soft|hard|off)
+    llm-router team report [period]  — show team savings report (default: week)
+    llm-router team push [period]    — push report to Slack/Discord/Telegram/webhook
+    llm-router team setup            — interactively configure team endpoint
+    llm-router budget                — show all providers with spend, cap, pressure
+    llm-router budget set <p> <amt>  — set monthly cap in USD for provider p
+    llm-router budget remove <p>     — clear the cap for provider p
+    llm-router last [--count N]      — show your last N routing decisions (default: 5)
+    llm-router replay [--limit N]    — full transcript of routing decisions this session
+    llm-router snapshot [--date DATE] — mid-session monitoring: accuracy trends and gap detection
+    llm-router retrospect [--weekly] — IAF-style session debrief with routing directives
+    llm-router stats [--period recent] — show combined download stats (llm-routing + claude-code-llm_router)
+    llm-router verify                — end-to-end health check (30 seconds)
+    llm-router gc [--ttl-days N] [--apply] — sweep stale session shards from ~/.llm-router (dry-run by default)
+    llm-router soak [--use-gold-complexity] [--full] [--out PATH] — replay the realized-savings soak corpus and write soak/report.json
 """
 
 from __future__ import annotations

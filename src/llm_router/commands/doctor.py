@@ -917,7 +917,7 @@ def _run_doctor(host: Optional[str] = None) -> tuple[int, list[str]]:
                 print(
                     _fail(
                         "not registered in Claude Desktop",
-                        fix="llm_router install",
+                        fix="llm-router install",
                     )
                 )
                 issues.append("MCP server not registered in Claude Desktop")

@@ -9,7 +9,7 @@
 
 The router uses these benchmarks to dynamically reorder model chains so the best-performing
 model for each task type is tried first. Updated data is distributed automatically to all
-users on the next `pip install --upgrade claude-code-llm-router` + server restart.
+users on the next `pip install --upgrade llm-routing` + server restart.
 
 ---
 

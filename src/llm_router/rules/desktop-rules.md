@@ -25,7 +25,7 @@
 1. Call the matching tool **before** generating your own response.
 2. Return the tool's output to the user **as-is** (don't paraphrase).
 3. Only use native Claude intelligence for tasks where all LLM Router MCP servers
-   are unavailable (`llm_health` can verify).
+   are unavailable (`llm_router_status(view="health")` can verify).
 4. Use `llm_research` for anything time-sensitive — training has a cutoff.
 
 ## Token-Efficient Responses
