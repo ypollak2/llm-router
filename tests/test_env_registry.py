@@ -101,7 +101,18 @@ def test_every_env_var_read_is_registered():
 #: structurally cannot see them. Declared by hand in the registry and exempted
 #: here. Keep this list SHORT: every entry is a hole in the scan, and a long list
 #: means the scan has stopped describing the codebase.
-_INDIRECT_READS = frozenset({"LLM_ROUTER_ALLOW_PUBLIC_BIND", "LLM_ROUTER_SSE_ALLOW_PUBLIC"})
+_INDIRECT_READS = frozenset({
+    "LLM_ROUTER_ALLOW_PUBLIC_BIND",
+    "LLM_ROUTER_SSE_ALLOW_PUBLIC",
+    # GH#68/#70/#71: the only LITERAL reads of these two were in
+    # commands/verify_enterprise.py, removed along with the rest of the
+    # dead enterprise surface. Both still have live readers — identity.py
+    # reads them through the LLM_ROUTER_TOKEN_ENV / (audit is read through
+    # misroute_audit.py's own _AUDIT_DISABLED_ENV) constant — but only
+    # through a variable, so the literal-arg scan can't see them anymore.
+    "LLM_ROUTER_TOKEN",
+    "LLM_ROUTER_AUDIT_DISABLED",
+})
 
 
 def test_the_scanner_cannot_see_indirect_reads():

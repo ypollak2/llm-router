@@ -347,9 +347,9 @@ def _critical_modules_or_die() -> None:
       this check fires in developer profile too. Developer installs
       drift just as easily as enterprise ones — Loop-5 itself was
       blocked twice by ``No module named 'llm_router.classification_allowlist'``.
-    * ``verify_enterprise`` covers RBAC / audit / redaction / DB
-      invariants that only matter at the enterprise tier. The
-      missing-module surface is universal.
+    * ``_startup_verify_or_die`` covers the enterprise-only invariants
+      (profile / redaction defaults); the missing-module surface here
+      is universal.
 
     The G-034 install-smoke gate (``scripts/ci_install_smoke_test.sh``)
     prevents a broken sdist from publishing to PyPI in the first
@@ -424,22 +424,21 @@ def _critical_modules_or_die() -> None:
 
 
 def _startup_verify_or_die() -> None:
-    """Refinement #11 — run the enterprise verifier at boot and
-    refuse to start if any check fails.
+    """Refuse to boot under ``LLM_ROUTER_PROFILE=enterprise``.
+
+    The enterprise verifier this used to run (``commands/verify_enterprise.py``)
+    and the RBAC/audit/SCIM surface it checked (``rbac_routing.py``,
+    ``audit_routing.py``, ``commands/audit.py``'s ``verify``/``export``,
+    ``scim_api.py``) all depended on ``llm_router.enterprise``, which this
+    distribution does not ship (GH#68/#70/#71). Rather than silently boot
+    into a profile whose safety controls cannot function — or crash with a
+    confusing ``ModuleNotFoundError`` deep inside the verifier — fail loudly
+    and explain why up front.
 
     Only fires under ``LLM_ROUTER_PROFILE=enterprise`` so existing
-    developer / single-user installs see zero behaviour change.
-    Operators can bypass for emergency debug via
-    ``LLM_ROUTER_SKIP_STARTUP_VERIFY=on`` — the bypass logs a warning so
-    it can never be silent.
-
-    The verifier itself is a sub-100ms pure check list; failing fast
-    on a misconfigured enterprise deployment is the whole point.
-    Anything that needs the MCP transport (auto-route hook, llm_*
-    tools) is dead in the water until the operator fixes the
-    config, and silent boot would mean every routed call producing
-    inscrutable errors at the transport layer (the OP-1 / OP-4
-    failure mode this session showed in spades).
+    developer / single-user installs see zero behaviour change. Operators
+    can bypass for emergency debug via ``LLM_ROUTER_SKIP_STARTUP_VERIFY=on``
+    — the bypass logs a warning so it can never be silent.
     """
     import os
     import sys
@@ -456,28 +455,18 @@ def _startup_verify_or_die() -> None:
     if skip:
         sys.stderr.write(
             f"[llm_router server] {_STARTUP_VERIFY_SKIP_ENV}=on — "
-            "skipping enterprise verifier on startup. The MCP server "
-            "may boot in a degraded state; routed calls can fail "
-            "with inscrutable transport errors.\n"
+            "booting under LLM_ROUTER_PROFILE=enterprise anyway. That "
+            "profile's RBAC/audit/SCIM surface is not available in this "
+            "distribution; routed calls can fail with inscrutable errors.\n"
         )
         return
 
-    from llm_router.commands.verify_enterprise import run_verifier
-
-    report = run_verifier(enterprise=True)
-    if report.all_passed:
-        return
-
     sys.stderr.write(
-        "[llm_router server] enterprise startup verification FAILED:\n"
-    )
-    for r in report.results:
-        if not r.passed:
-            sys.stderr.write(f"  ✗ {r.name}: {r.status}\n")
-            if r.remediation:
-                sys.stderr.write(f"    → {r.remediation}\n")
-    sys.stderr.write(
-        "Set LLM_ROUTER_SKIP_STARTUP_VERIFY=on to bypass (NOT for production).\n"
+        "[llm_router server] LLM_ROUTER_PROFILE=enterprise is not supported "
+        "in this distribution — the RBAC, audit-trail, and SCIM modules it "
+        "depends on are not shipped here (see GH#68/#70/#71). Unset "
+        "LLM_ROUTER_PROFILE (or set it to 'developer') to run this package.\n"
+        "Set LLM_ROUTER_SKIP_STARTUP_VERIFY=on to boot anyway (NOT recommended).\n"
     )
     sys.exit(1)
 
