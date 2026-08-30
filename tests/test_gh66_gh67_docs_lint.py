@@ -62,8 +62,8 @@ _SCAN_DIRS = ("guide", "skills", "src/llm_router/rules", "docs")
 #     (`llm_health`, `LLM_ROUTER_SQL_DEBUG`, `llm_router install`, ...) as
 #     EVIDENCE of the bugs this test polices. Scanning it would make this test
 #     permanently red against a file that is correctly describing history.
-#   * docs/releases/ — dated migration-evidence audits (e.g.
-#     v11.1.0-chuzom-migration-evidence.md) that document env vars/flags
+#   * docs/releases/ — dated migration-evidence audits (the
+#     v11.1.0 migration record and its siblings) that document env vars/flags
 #     explicitly as REMOVED or NEVER IMPLEMENTED ("`LLM_ROUTER_QUALITY_FEEDBACK`
 #     was never implemented and never will be, by design"). They are already
 #     self-aware; rewriting them would falsify the audit trail, not fix a bug.

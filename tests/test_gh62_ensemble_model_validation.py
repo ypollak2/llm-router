@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import json
 
-import pytest
 
 from llm_router import ensemble
 from llm_router.commands import doctor as doc
