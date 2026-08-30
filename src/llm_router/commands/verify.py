@@ -145,7 +145,27 @@ def check_ollama() -> tuple[bool, str]:
         if len(models) > 3:
             model_str += f" (+{len(models) - 3} more)"
 
-        return True, f"Ollama ({url}) — {len(models)} models: {model_str}"
+        model_names = [m.get("name", "") for m in models]
+        base_msg = f"Ollama ({url}) — {len(models)} models: {model_str}"
+
+        # GH#62: mirror doctor's ensemble-model check, one line — non-fatal
+        # (heuristic fallback still works), so `success` stays True.
+        from llm_router import ensemble as _ensemble
+
+        _missing = []
+        _primary = _ensemble.primary_model()
+        if not _ensemble.model_installed(_primary, model_names):
+            _missing.append(f"primary '{_primary.removeprefix('ollama/')}'")
+        _secondary = _ensemble.secondary_model()
+        if _secondary and not _ensemble.model_installed(_secondary, model_names):
+            _missing.append(f"secondary '{_secondary.removeprefix('ollama/')}'")
+        if _missing:
+            base_msg += (
+                f" | ⚠ ensemble {', '.join(_missing)} not installed — "
+                "`ollama pull <model>` or set LLM_ROUTER_ENSEMBLE_PRIMARY/_SECONDARY"
+            )
+
+        return True, base_msg
     except Exception as e:
         return False, f"Ollama OFFLINE ({url}) — {str(e)}"
 

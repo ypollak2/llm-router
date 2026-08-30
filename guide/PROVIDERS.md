@@ -179,15 +179,17 @@ export LLM_ROUTER_POLICY=cost_aggressive   # use the OpenRouter workhorse pool
 
 ## Automated Key Discovery
 
-The `llm_setup` tool can scan your laptop for existing API keys (environment variables and `.env` files) — no data leaves your machine.
+From a terminal, the interactive setup wizard scans for existing keys and writes new ones to
+`~/.llm-router/.env` — no data leaves your machine:
 
+```bash
+llm-router setup
 ```
-# In Claude Code:
-Use llm_setup with action="discover"   # find existing keys
-Use llm_setup with action="status"     # see which providers are configured
-Use llm_setup with action="guide" provider="gemini"  # setup instructions
-Use llm_setup with action="add" provider="gemini" api_key="AIza..."  # save key to .env
-```
+
+A richer discover/status/guide/add/test MCP tool for this still exists in `tools/setup.py`,
+but it isn't part of the default `consolidated` (11-door) MCP surface, nor of the
+`routing`/`core` tiers — it's only registered with `LLM_ROUTER_SLIM=off` (the full legacy
+surface).
 
 All operations are local-only. Keys are masked in output and `.gitignore` protection is verified on write.
 
@@ -269,13 +271,16 @@ After configuring keys, verify with:
 
 ```
 # In Claude Code:
-Use llm_setup with action="status"    # see all configured providers
-Use llm_setup with action="test"      # validate API keys with minimal LLM calls (~$0.0001 each)
-Use llm_setup with action="test" provider="gemini"  # test a specific provider only
-Use llm_health to check provider status  # verify connectivity
+Use llm_router_status(view="providers")  # see all configured providers
+Use llm_router_status(view="health")     # test connectivity, see circuit-breaker state
+
+# From a terminal:
+llm-router doctor                        # checks keys are set + circuit-breaker state
 ```
 
-The `test` action sends a tiny request to each provider to confirm the key is valid and the account is active. Cost is negligible (~$0.0001 per provider tested).
+`llm-router doctor` checks that provider keys are present and reports circuit-breaker state; it
+does not send live test requests (that richer per-key validation is a legacy tool action, only
+registered under `LLM_ROUTER_SLIM=off`).
 
 Or from the command line:
 ```bash
@@ -288,5 +293,5 @@ uv run python -c "from llm_router.config import get_config; c = get_config(); pr
 
 - **Start minimal**: Begin with Gemini (free) and add providers as needed
 - **Budget profile first**: Use `budget` profile while testing to minimize costs
-- **Check health**: Use `llm_health` to verify providers are reachable before heavy use
+- **Check health**: Use `llm_router_status(view="health")` to verify providers are reachable before heavy use
 - **Rotate keys**: If a key stops working, regenerate it at the provider's dashboard

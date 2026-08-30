@@ -2,6 +2,15 @@
 
 Complete documentation of all 60 MCP tools provided by llm-router for Claude Code, Cursor, VS Code, Codex, and other AI development environments.
 
+> **Default install note**: by default (`LLM_ROUTER_SLIM=consolidated`), only 11 front-door
+> tools are registered — `llm(task=..., tier=...)`, `llm_act`, `llm_route`, `llm_router_status`,
+> `llm_router_admin`, `llm_router_session`, `llm_image`, `llm_audio`, `llm_edit`, and the two
+> `llm_router_agent_*` session tools. Every tool below still exists as an implementation
+> function and becomes directly callable with `LLM_ROUTER_SLIM=off` (full legacy surface) or
+> `=routing`/`=core` for the subsets those tiers cover — see `tool_surface.py` for exactly
+> which tier registers which name. Where a tool isn't registered under the default tier, its
+> entry below says so and gives the front-door call that reaches the same functionality today.
+
 ---
 
 ## Quick Reference
@@ -21,7 +30,7 @@ Complete documentation of all 60 MCP tools provided by llm-router for Claude Cod
 
 Core routing intelligence for intelligent model selection.
 
-### `llm_classify`
+### Classify (`tools/routing.py`; not in the default tier)
 
 Classify a prompt's complexity and get model recommendations.
 
@@ -34,10 +43,12 @@ Classify a prompt's complexity and get model recommendations.
 
 **Use When:** You need to understand task complexity before choosing a model, or want to see budget pressure impact on routing
 
-**Example:**
+**Default-tier equivalent:** `llm_route(prompt="...")` — full classify-then-route in one call.
+
+**Example (`LLM_ROUTER_SLIM=off`):**
 ```
 User: "What's the most efficient model for code review?"
-Tool: llm_classify("Review this 500-line Python module")
+Tool: (classify) "Review this 500-line Python module"
 Result: → Moderate complexity, recommend Sonnet (65% budget), budget pressure: 42%
 ```
 
@@ -364,7 +375,7 @@ Show cost savings from routing.
 
 ---
 
-### `llm_health`
+### Health check (`tools/admin.py`; consolidated as `llm_router_status(view="health")`)
 
 Check provider health status.
 
@@ -419,7 +430,7 @@ Check real-time budget pressure across providers.
 
 Configuration, reports, session management.
 
-### `llm_setup`
+### Provider setup (`tools/setup.py`; not in the default tier)
 
 Set up and manage API providers, hooks, and routing enforcement.
 
@@ -429,6 +440,8 @@ Set up and manage API providers, hooks, and routing enforcement.
 - `api_key` (optional) — API key for "add" action
 
 **Use When:** Configuring providers, testing API keys, installing auto-routing hooks
+
+**Today, from a terminal:** `llm-router setup` (add keys) and `llm-router install` (hooks).
 
 ---
 
@@ -440,7 +453,7 @@ Save current session state for cross-session context.
 
 ---
 
-### `llm_quality_report`
+### Quality report (`tools/admin.py`; not in the default tier)
 
 Generate model classification accuracy report.
 
@@ -448,6 +461,8 @@ Generate model classification accuracy report.
 - `days` (optional) — Time period (default: 7 days)
 
 **Returns:** Routing accuracy metrics, downshift frequency, cost efficiency
+
+**Today, from a terminal:** `llm-router routing-report` or `llm-router summary`.
 
 ---
 
@@ -588,7 +603,7 @@ Rate last routing decision (thumbs up/down).
 
 ---
 
-### `llm_policy`
+### Policy view (`tools/admin.py`; consolidated as `llm_router_admin(action="policy")`)
 
 Show active routing policy and enforcement events.
 
@@ -608,15 +623,15 @@ Generate savings digest with spend anomaly detection.
 
 | Question | Tool |
 |----------|------|
-| Should I use Haiku or Sonnet for this? | `llm_classify` |
+| Should I use Haiku or Sonnet for this? | `llm_route` (classify-then-route) |
 | I have a web research task | `llm_research` |
 | I need to write code | `llm_code` |
 | I need deep analysis of a bug | `llm_analyze` |
 | I need creative content | `llm_generate` |
 | I have a complex pipeline | `llm_orchestrate` |
 | How much am I saving? | `llm_savings` |
-| Is my API key working? | `llm_setup` (action="test") |
-| Which models are healthy? | `llm_health` |
+| Is my API key working? | `llm-router doctor` (CLI) |
+| Which models are healthy? | `llm_router_status(view="health")` |
 | How's my budget? | `llm_budget` |
 | Bulk refactor code | `llm_fs_edit_many` |
 | Research + analysis + writing | `llm_orchestrate` (template="research_report") |
@@ -627,10 +642,10 @@ Generate savings digest with spend anomaly detection.
 
 ### Pattern: Optimize for Cost
 ```
-1. llm_classify(prompt) → see complexity
+1. llm_route(prompt) → see complexity + route in one call
 2. Set profile to "budget"
-3. llm_route(prompt) → uses cheap models
-4. llm_savings() → track savings
+3. llm(prompt, task="auto", tier="fast") → uses cheap models
+4. llm_router_status(view="savings") → track savings
 ```
 
 ### Pattern: Deep Analysis
@@ -665,11 +680,11 @@ llm_orchestrate(
 ## Performance Tips
 
 - Use `llm_query` for simple questions (cheaper, faster)
-- Use `llm_classify` to understand complexity before deciding
+- Use `llm_route` to understand complexity before deciding
 - Batch filesystem operations with `llm_fs_edit_many`
 - Monitor `llm_budget` when approaching limits
-- Use `llm_health` to find best available model during provider outages
-- Check `llm_quality_report` weekly to catch model degradation
+- Use `llm_router_status(view="health")` to find best available model during provider outages
+- Run `llm-router routing-report` weekly to catch model degradation
 
 ---
 
@@ -679,11 +694,11 @@ llm_orchestrate(
 
 **"Budget pressure too high"** → Switch to "budget" profile with `llm_set_profile`
 
-**"Hook not running"** → Run `llm_setup action=install_hooks`
+**"Hook not running"** → Run `llm-router install` (from a terminal)
 
-**"API key failing"** → Run `llm_setup action=test provider=openai`
+**"API key failing"** → Run `llm-router doctor` (from a terminal)
 
-**"Which model was used?"** → Check `llm_usage` or `llm_savings`
+**"Which model was used?"** → Check `llm_router_status(view="usage")` or `llm_router_status(view="savings")`
 
 ---
 

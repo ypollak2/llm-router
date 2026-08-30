@@ -512,6 +512,20 @@ def build_retrospective(
 
 # ── File I/O ───────────────────────────────────────────────────────────────
 
+def _format_accuracy_pct(facts: dict) -> str:
+    """Render ``facts["classification_accuracy"]`` for human display.
+
+    GH#56/#60: an empty decision set makes ``analyze_facts`` return
+    ``classification_accuracy: None`` (unmeasured, not a perfect or zero
+    score — see the comment on that return in ``analyze_facts``). Every
+    formatter that reads this key must render "n/a" for that case instead of
+    doing arithmetic on it (``None * 100`` raises ``TypeError``) or silently
+    treating "unmeasured" as 100%/0% accurate.
+    """
+    accuracy = facts.get("classification_accuracy")
+    return "n/a" if accuracy is None else f"{accuracy * 100:.0f}%"
+
+
 def write_retrospective_file(retro: dict, session_id: str = "") -> Path:
     """Write retrospective to a dated markdown file.
 
@@ -534,6 +548,7 @@ def write_retrospective_file(retro: dict, session_id: str = "") -> Path:
     gaps = retro.get("gaps", [])
     causes = retro.get("root_causes", [])
     actions = retro.get("actions", [])
+    accuracy_str = _format_accuracy_pct(facts)
 
     content = f"""---
 name: Session Retrospective {now.strftime('%Y-%m-%d %H:%M')}
@@ -553,7 +568,7 @@ type: feedback
 - **Saved**: ${facts.get('total_saved', 0.0):.4f}
 - **Manual corrections**: {facts.get('correction_count', 0)}
 - **Avg confidence**: {facts.get('avg_confidence', 0)*100:.0f}%
-- **Accuracy**: {facts.get('classification_accuracy', 0)*100:.0f}%
+- **Accuracy**: {accuracy_str}
 
 ### Task Distribution
 
@@ -671,6 +686,7 @@ def write_claude_mem_entry(retro: dict) -> Optional[Path]:
 
     facts = retro.get("facts", {})
     gaps = retro.get("gaps", [])
+    accuracy_str = _format_accuracy_pct(facts)
 
     content = f"""---
 name: Session Retrospective {now.strftime('%Y-%m-%d')}
@@ -681,7 +697,7 @@ type: feedback
 ## Session Summary
 
 - **Calls**: {facts.get('total_calls', 0)}
-- **Accuracy**: {facts.get('classification_accuracy', 0)*100:.0f}%
+- **Accuracy**: {accuracy_str}
 - **Gaps**: {len(gaps)}
 
 ## Key Gaps
@@ -839,12 +855,11 @@ def format_compact_summary(retro: dict) -> str:
     gaps = retro.get("gaps", [])
     actions = retro.get("actions", [])
 
-    accuracy = facts.get("classification_accuracy", 1.0)
-    accuracy_pct = int(accuracy * 100)
+    accuracy_str = _format_accuracy_pct(facts)
 
     lines = [
         "  Retrospective",
-        f"  • Accuracy: {accuracy_pct}% · Gaps: {len(gaps)} · Actions: {len(actions)}",
+        f"  • Accuracy: {accuracy_str} · Gaps: {len(gaps)} · Actions: {len(actions)}",
     ]
 
     return "\n".join(lines)
@@ -880,7 +895,7 @@ def format_full_report(retro: dict) -> str:
         f"Saved: ${facts.get('total_saved', 0.0):.4f}"
     )
     lines.append(
-        f"  Accuracy: {facts.get('classification_accuracy', 1.0)*100:.0f}%  |  "
+        f"  Accuracy: {_format_accuracy_pct(facts)}  |  "
         f"Corrections: {facts.get('correction_count', 0)}  |  "
         f"Duration: {facts.get('duration_min', 0)}min"
     )

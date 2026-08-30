@@ -32,13 +32,16 @@ Most prompts are classified automatically by the `UserPromptSubmit` hook — no 
 
 ## Task Categories
 
-| Category | Tool | Signals |
+The consolidated `llm(prompt=..., task=..., tier=...)` tool is the front door for all of
+these — `task=` picks the specialization, `tier=` (fast/balanced/best) picks the cost tier:
+
+| Category | Call | Signals |
 |----------|------|---------|
-| Research | `llm_research` | Current events, news, funding, trends, market data, rankings |
-| Generate | `llm_generate` | Writing, drafting, brainstorming, emails, articles, translations |
-| Analyze | `llm_analyze` | Evaluation, debugging, comparison, trade-offs, code review |
-| Code | `llm_code` | Implementation, refactoring, building, bug fixes |
-| Query | `llm_query` | Simple questions, definitions, explanations |
+| Research | `llm(task="research")` | Current events, news, funding, trends, market data, rankings |
+| Generate | `llm(task="generate")` | Writing, drafting, brainstorming, emails, articles, translations |
+| Analyze | `llm(task="analyze")` | Evaluation, debugging, comparison, trade-offs, code review |
+| Code | `llm(task="code")` | Implementation, refactoring, building, bug fixes |
+| Query | `llm(task="query")` (or `task="auto"`) | Simple questions, definitions, explanations |
 | Image | `llm_image` | Visual generation, design, artwork |
 
 ## Complexity & Profiles
@@ -51,25 +54,25 @@ Most prompts are classified automatically by the `UserPromptSubmit` hook — no 
 
 ## Savings Awareness
 
-Every 5th routed task, the system shows estimated savings: Claude API costs avoided and rate limit capacity preserved. Run `llm_usage` for a detailed breakdown.
+Every 5th routed task, the system shows estimated savings: Claude API costs avoided and rate limit capacity preserved. Run `llm_router_status(view="usage")` for a detailed breakdown.
 
 ## Examples
 
 ```
 What are the top 3 AI startups that raised funding?
-→ research (heuristic, score=8) → llm_research (budget) → Perplexity Sonar
+→ research (heuristic, score=8) → llm(task="research") → Perplexity Sonar
 
 Write me a blog post about productivity tips
-→ generate (heuristic, score=5) → llm_generate (balanced) → Gemini 2.5 Pro
+→ generate (heuristic, score=5) → llm(task="generate", tier="balanced") → Gemini 2.5 Pro
 
 Compare React vs Vue for our new project
-→ analyze (ollama, qwen3.5) → llm_analyze (balanced) → GPT-4o
+→ analyze (ollama, qwen3.5) → llm(task="analyze", tier="balanced") → GPT-4o
 
 Implement a rate limiter in Python using sliding window
-→ code (heuristic, score=4) → llm_code (balanced) → GPT-4o
+→ code (heuristic, score=4) → llm(task="code", tier="balanced") → GPT-4o
 
 What is a monad?
-→ query (ollama, qwen3.5) → llm_query (budget) → Gemini Flash
+→ query (ollama, qwen3.5) → llm(task="query", tier="fast") → Gemini Flash
 ```
 
 ## Configuration

@@ -1831,6 +1831,7 @@ async def _finalize_successful_route(
     receipt=None,
     suppress_ledger: bool = False,
     served_from_cache: bool = False,
+    effective_complexity: str = "moderate",
 ) -> None:
     """CHZ-AUD-B-05: single source of truth for the post-success finalization
     side-effects, called from EVERY success path: the primary success path, the
@@ -1904,7 +1905,14 @@ async def _finalize_successful_route(
             )
             _fb_occurred = len(chain_errors) > 0
             _fb_reason, _mis = derive_fallback_reason(chain_errors)
-            _first_model = chain_attempts[0] if chain_attempts else None
+            # GH#64: chain_attempts may now contain quality-skip markers (visible
+            # trace of a candidate the circuit breaker excluded) ahead of the
+            # first real attempt. The ledger's chosen_model/chosen_tier must
+            # reflect an actually-dispatched model, not a marker string.
+            from llm_router.quality_feedback import is_skip_marker
+            _first_model = next(
+                (m for m in chain_attempts if not is_skip_marker(m)), None,
+            )
             _in_tok = getattr(response, "input_tokens", 0)
             _out_tok = getattr(response, "output_tokens", 0)
             _base = _baseline_cost(task_type, profile, _in_tok, _out_tok)
@@ -1976,35 +1984,70 @@ async def _finalize_successful_route(
         log.debug("session_store record failed (non-fatal): %s", _sca_err)
 
     # Routing-decision analytics + per-provider usage auto-logging.
-    if classification_data:
-        try:
-            await cost.log_routing_decision(
-                prompt=prompt,
-                task_type=classification_data.get("task_type", task_type.value),
-                profile=classification_data.get("profile", profile.value),
-                classifier_type=classification_data.get("classifier_type", "unknown"),
-                classifier_model=classification_data.get("classifier_model"),
-                classifier_confidence=classification_data.get("classifier_confidence", 0.0),
-                classifier_latency_ms=classification_data.get("classifier_latency_ms", 0.0),
-                complexity=classification_data.get("complexity", "moderate"),
-                recommended_model=classification_data.get("recommended_model", model),
-                base_model=classification_data.get("base_model", model),
-                was_downshifted=classification_data.get("was_downshifted", False),
-                budget_pct_used=classification_data.get("budget_pct_used", 0.0),
-                quality_mode=classification_data.get("quality_mode", "balanced"),
-                final_model=response.model,
-                final_provider=response.provider,
-                success=True,
-                input_tokens=response.input_tokens,
-                output_tokens=response.output_tokens,
-                cost_usd=response.cost_usd,
-                latency_ms=response.latency_ms,
-                reason_code=classification_data.get("reason_code"),
-                correlation_id=correlation_id,
-                response=response.content,
-                requested_complexity=classification_data.get("requested_complexity"),
-                subject=classification_data.get("subject"),
-            )
+    #
+    # CHZ-AUD (#60): this used to be gated behind `if classification_data:`, so
+    # any call through route_and_call(classification_data=None) never wrote a
+    # routing_decisions row — and that is every call from the primary tool
+    # surface: `llm`, `llm_query`, `llm_code`, `llm_analyze`, `llm_generate`,
+    # `llm_research` (all `tools/text.py`, zero occurrences of
+    # `classification_data` there; the consolidated `llm()` in
+    # `tools/consolidated.py` delegates straight to text.py). Only the
+    # separate `llm_route`/`llm_act` tools (`tools/routing.py`) ever built and
+    # passed this dict, so the table stayed empty for the surface people
+    # actually use. Fixing at this sink (rather than every call site) covers
+    # all current and future callers uniformly.
+    #
+    # When classification_data is None there was no classifier step at all —
+    # not a low-confidence one — so classifier fields that would otherwise
+    # come from a real classifier run (confidence, its latency, budget
+    # pressure, quality mode) are recorded as NULL rather than a
+    # plausible-looking 0.0/"balanced" default. `classifier_type="unhinted"`
+    # marks the row so quality/analytics reports can tell an uninstrumented
+    # caller apart from a real (even low-confidence) classifier run.
+    # `complexity`/`recommended_model`/`base_model` still get honest values
+    # from what this finalizer already has in scope: the complexity that was
+    # actually resolved for model selection, and the model that actually ran.
+    _cd = classification_data or {}
+    _unhinted = classification_data is None
+    try:
+        await cost.log_routing_decision(
+            prompt=prompt,
+            task_type=_cd.get("task_type", task_type.value),
+            profile=_cd.get("profile", profile.value),
+            classifier_type=(
+                "unhinted" if _unhinted else _cd.get("classifier_type", "unknown")
+            ),
+            classifier_model=_cd.get("classifier_model"),
+            classifier_confidence=(
+                None if _unhinted else _cd.get("classifier_confidence", 0.0)
+            ),
+            classifier_latency_ms=(
+                None if _unhinted else _cd.get("classifier_latency_ms", 0.0)
+            ),
+            complexity=_cd.get("complexity", effective_complexity),
+            recommended_model=_cd.get("recommended_model", model),
+            base_model=_cd.get("base_model", model),
+            was_downshifted=_cd.get("was_downshifted", False),
+            budget_pct_used=(
+                None if _unhinted else _cd.get("budget_pct_used", 0.0)
+            ),
+            quality_mode=(
+                None if _unhinted else _cd.get("quality_mode", "balanced")
+            ),
+            final_model=response.model,
+            final_provider=response.provider,
+            success=True,
+            input_tokens=response.input_tokens,
+            output_tokens=response.output_tokens,
+            cost_usd=response.cost_usd,
+            latency_ms=response.latency_ms,
+            reason_code=_cd.get("reason_code"),
+            correlation_id=correlation_id,
+            response=response.content,
+            requested_complexity=_cd.get("requested_complexity"),
+            subject=_cd.get("subject"),
+        )
+        if classification_data:
             if response.provider in {"claude_subscription", "subscription", "anthropic", "claude"}:
                 try:
                     await cost.log_claude_usage(
@@ -2047,8 +2090,8 @@ async def _finalize_successful_route(
                     )
                 except Exception as e:
                     log.debug("Failed to log gemini_usage: %s", e)
-        except Exception as e:
-            log.warning("Failed to log routing decision: %s", e)
+    except Exception as e:
+        log.warning("Failed to log routing decision: %s", e)
 
     # Daily-spend alert (fire-and-forget; never blocks the response). No new spend
     # on a cache hit, so skip (CHZ-AUD-B-05).
@@ -2110,6 +2153,7 @@ async def _dispatch_model_loop(
     suppress_ledger: bool = False,
     model_override: str | None = None,
     ledger_route_id: str | None = None,
+    pinned_model: str | None = None,
 ) -> LLMResponse:
     """Execute the main model dispatch loop with primary + emergency fallback chains.
 
@@ -2138,6 +2182,9 @@ async def _dispatch_model_loop(
         route_log: Structured logger instance.
         _reservation: Reserved budget amount for this call.
         effective_complexity: Stringified complexity for logging.
+        pinned_model: An explicit routing.yaml per-task model pin, if any
+            (GH#64) — exempted from the quality circuit-breaker exactly like
+            model_override.
 
     Returns:
         LLMResponse: The successful response.
@@ -2409,13 +2456,20 @@ async def _dispatch_model_loop(
                     continue
 
         # Quality feedback: skip models with poor track record for this task pattern.
-        # CHZ-AUD-C-02: an EXPLICIT model_override must be honored exactly — the
+        # CHZ-AUD-C-02 (extended by GH#64): an EXPLICIT model_override OR an
+        # explicit routing.yaml per-task pin must be honored exactly — the
         # process-global quality circuit-breaker must NOT silently substitute a
-        # different model for a caller's explicit pin. Only non-override models are
-        # subject to the breaker.
+        # different model for either kind of caller/user pin. A pin is exactly
+        # as intentional as a caller's model= override. Only models that are
+        # neither must be subject to the breaker.
         try:
-            from llm_router.quality_feedback import should_skip_model
-            if model != model_override and should_skip_model(model, task_type.value, c.value):
+            from llm_router.quality_feedback import (
+                format_skip_marker, get_quality_stats, should_skip_model,
+            )
+            if (
+                model not in (model_override, pinned_model)
+                and should_skip_model(model, task_type.value, c.value)
+            ):
                 log.info("Skipping low-quality model for %s/%s: %s", task_type.value, c.value, model)
                 route_log.info(
                     "model_quality_skip",
@@ -2424,6 +2478,19 @@ async def _dispatch_model_loop(
                     task_type=task_type.value,
                     complexity=c.value,
                 )
+                # GH#64: previously this `continue` happened BEFORE the model was
+                # ever appended to chain_attempts, so the exclusion left no trace
+                # anywhere a user or routing_quality.jsonl reader could see — it
+                # looked exactly as if the model had never been offered as a
+                # candidate at all. Appending a marker (instead of the bare model
+                # id) makes the exclusion visible in the response's chain_attempts
+                # and the verbose "→ Chain: a [✗] → b [✓]" rendering, while
+                # `quality_feedback.is_skip_marker` lets downstream consumers
+                # (e.g. the route-quality ledger's chosen_model/chosen_tier)
+                # distinguish it from a real dispatch attempt.
+                _stats = get_quality_stats(model, task_type.value, c.value)
+                _avg, _n = _stats if _stats is not None else (0.0, 0)
+                chain_attempts.append(format_skip_marker(model, _avg, _n))
                 continue
         except Exception as e:
             log.warning("quality_feedback_failed", error=str(e))
@@ -2843,6 +2910,7 @@ async def _dispatch_model_loop(
                     config=config,
                     receipt=_receipt,
                     suppress_ledger=suppress_ledger,
+                    effective_complexity=effective_complexity,
                 )
             except Exception as _fin_err:  # noqa: BLE001 — finalize never fails the turn
                 log.warning("finalize_successful_route failed (non-fatal): %s", _fin_err)
@@ -3096,6 +3164,7 @@ async def _dispatch_model_loop(
                             config=config,
                             receipt=None,
                             suppress_ledger=suppress_ledger,
+                            effective_complexity=effective_complexity,
                         )
                     except Exception as _fin_err:  # noqa: BLE001 — finalize never fails the turn
                         log.warning("finalize_successful_route (emergency) failed (non-fatal): %s", _fin_err)
@@ -3252,6 +3321,7 @@ async def _dispatch_model_loop(
                 chain_attempts=chain_attempts, chain_errors=chain_errors,
                 correlation_id=correlation_id, failed_attempt_cost=_floor_extra,
                 config=config, receipt=None, served_from_cache=True,
+                effective_complexity=effective_complexity,
             )
         except Exception as _fin_err:  # noqa: BLE001 — finalize never fails the turn
             log.warning("finalize_successful_route (exhaustion-floor) failed (non-fatal): %s", _fin_err)
@@ -3570,6 +3640,15 @@ async def route_and_call(
             # record the served exchange's context + analytics (served_from_cache
             # skips spend/ledger/store). Runs before profile resolution, so pass a
             # neutral profile default (only used by the skipped ledger block).
+            # effective_complexity isn't computed yet at this point in the
+            # function (that happens after profile resolution below), so derive
+            # the same honest fallback from the raw complexity_hint here — this
+            # only matters for the classification_data=None routing_decisions
+            # row (#60), not for actual model selection on this cache-hit path.
+            _pre_profile_complexity = (
+                complexity_hint.value if hasattr(complexity_hint, "value")
+                else str(complexity_hint or "moderate")
+            )
             try:
                 await _finalize_successful_route(
                     response=_cached_resp,
@@ -3581,6 +3660,7 @@ async def route_and_call(
                     chain_attempts=[], chain_errors=[], correlation_id=correlation_id,
                     failed_attempt_cost=0.0, config=config, receipt=None,
                     served_from_cache=True,
+                    effective_complexity=_pre_profile_complexity,
                 )
             except Exception as _fin_err:  # noqa: BLE001 — dedupe fail-open: never break the served turn
                 log.warning("finalize_successful_route (idempotency) failed (non-fatal): %s", _fin_err)
@@ -3816,6 +3896,20 @@ async def route_and_call(
             task_type, profile, model_override, complexity_hint, c, config
         )
 
+        # GH#64: recompute the same explicit per-task pin _build_and_filter_chain
+        # derives internally (repo_cfg.model_override), so the quality
+        # circuit-breaker in _dispatch_model_loop can exempt it exactly like
+        # model_override (CHZ-AUD-C-02). Not returned from _build_and_filter_chain
+        # itself to avoid changing that function's return contract for its other
+        # callers (including the emergency BUDGET chain build below, and tests
+        # that stub it directly) — the pin lookup is a cheap, side-effect-free
+        # dict read, so recomputing it here is not a meaningful duplication risk.
+        pinned_model = (
+            get_repo_config().model_override(task_type.value)
+            if (not model_override and profile not in (RoutingProfile.PREMIUM, RoutingProfile.REASONING))
+            else None
+        )
+
         # TQ-007 cap-downgrade is applied LAST (after precision-tier,
         # subject-specialist and bandit reorder) — see below, just before the
         # empty-chain check. Applying it here was a bug (RED1-01/RED1-02): those
@@ -4009,6 +4103,7 @@ async def route_and_call(
                             chain_errors=[], correlation_id=correlation_id,
                             failed_attempt_cost=0.0, config=config, receipt=None,
                             served_from_cache=True,
+                            effective_complexity=effective_complexity,
                         )
                     except Exception as _fin_err:  # noqa: BLE001 — must not fall through to a real call
                         # CHZ-AUD (RED-1): a finalize failure here must NOT be caught
@@ -4238,6 +4333,7 @@ async def route_and_call(
             _reservation=_reservation,
             max_cost_per_task=max_cost_per_task,
             effective_complexity=effective_complexity,
+            pinned_model=pinned_model,  # GH#64: honor explicit routing.yaml pin
             identity=identity,
             routing_policy=_routing_policy,
             suppress_ledger=suppress_ledger,

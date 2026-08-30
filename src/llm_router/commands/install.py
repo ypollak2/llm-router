@@ -127,7 +127,7 @@ def _run_install(flags: list[str]) -> None:
             else:
                 print(_fail(
                     f"{dst_name}  ({event})  — not installed",
-                    fix="llm_router install",
+                    fix="llm-router install",
                 ))
                 all_ok = False
 
@@ -136,7 +136,7 @@ def _run_install(flags: list[str]) -> None:
             print(_ok("llm_router.md  (routing rules)"))
         else:
             print(_fail("llm_router.md  (routing rules)  — not installed",
-                        fix="llm_router install"))
+                        fix="llm-router install"))
             all_ok = False
 
         print(f"\n{_bold('  Claude Desktop')}")
@@ -157,7 +157,7 @@ def _run_install(flags: list[str]) -> None:
             elif desktop_path.exists():
                 print(_fail(
                     f"not registered  ({desktop_path})",
-                    fix="llm_router install",
+                    fix="llm-router install",
                 ))
                 all_ok = False
             else:

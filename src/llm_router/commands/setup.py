@@ -99,7 +99,7 @@ def _run_setup() -> None:
         new_keys["LLM_ROUTER_CLAUDE_SUBSCRIPTION"] = "true"
     if enable_gemini:
         new_keys["LLM_ROUTER_GEMINI_SUBSCRIPTION"] = "true"
-        new_keys["LLM_ROUTER_PROFILE"] = "quota_balanced"
+        new_keys["LLM_ROUTER_COST_PROFILE"] = "quota_balanced"
 
     for env_var, name, description, url in _PROVIDERS_WIZARD:
         existing = os.getenv(env_var, "")

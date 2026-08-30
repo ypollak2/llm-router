@@ -80,15 +80,29 @@ def _session_enforce(home: Path) -> str:
     the change to take effect". Behaviour and message disagreed, and the blast
     radius was larger than either implied.
 
-    Resolved as session-scoped. The id comes from CLAUDE_SESSION_ID, the same
-    source session_spend and session_store already use.
+    Resolved as session-scoped. GH#59: the original fix resolved the id via a
+    bare ``CLAUDE_SESSION_ID`` env read, which real Claude Code never sets —
+    it sets ``CLAUDE_CODE_SESSION_ID`` — so this branch silently never engaged
+    and every session fell through to the global tier regardless. The id is
+    now resolved through :func:`llm_router.session_store.resolve_session_id`,
+    the same 4-tier chain (explicit → ``CLAUDE_SESSION_ID`` env →
+    ``CLAUDE_CODE_SESSION_ID`` env → the ``current_session.json`` pointer
+    file) used everywhere else in llm_router a session id is resolved, so the
+    writer (``set_enforce.py``) and this reader can never disagree about which
+    session "this session" is.
 
-    The id is environment-supplied, so it is treated as untrusted: anything
-    that is not a plain safe token is ignored rather than being joined onto a
-    path. Any read failure falls through to the next tier — enforcement
+    The resolved id is environment/pointer-file supplied, so it is treated as
+    untrusted: anything that is not a plain safe token is ignored rather than
+    being joined onto a path. Any read failure — including the resolver's own
+    import or call failing — falls through to the next tier; enforcement
     resolution must never raise into a hook.
     """
-    sid = os.environ.get("CLAUDE_SESSION_ID", "").strip()
+    try:
+        from llm_router.session_store import resolve_session_id
+        sid = resolve_session_id() or ""
+    except Exception:
+        sid = ""
+    sid = sid.strip()
     if not sid or not _SAFE_SESSION_ID.fullmatch(sid):
         return ""
     try:

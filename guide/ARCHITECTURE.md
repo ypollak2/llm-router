@@ -17,9 +17,12 @@ LLM Router is a **request routing layer** that sits between your applications an
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │  MCP Tools Layer (tools/*.py)                               │
+│  Registered by default (consolidated 1.0 surface):          │
+│  ├─ llm(task=..., tier=...), llm_act, llm_route             │
+│  └─ llm_router_status(view=...), llm_router_admin(action=...)│
+│  Implementation functions underneath (LLM_ROUTER_SLIM=off): │
 │  ├─ llm_query, llm_code, llm_analyze, llm_generate          │
-│  ├─ llm_route, llm_classify, llm_usage, llm_setup          │
-│  └─ llm_check_usage, llm_health, llm_providers             │
+│  └─ llm_usage, llm_providers, plus the rest of tools/*.py    │
 └────────────────┬────────────────────────────────────────────┘
                  │
 ┌────────────────▼────────────────────────────────────────────┐
@@ -248,13 +251,13 @@ LLM_ROUTER_MONTHLY_BUDGET=100.00          # Stop if spent > $100
 LLM_ROUTER_DAILY_SPEND_LIMIT=10.00        # Stop if spent > $10 today UTC
 
 # Mode
-LLM_ROUTER_MODE=subscription               # Claude subscription only
-LLM_ROUTER_MODE=api                        # Mixed API keys + subscription
+LLM_ROUTER_CLAUDE_SUBSCRIPTION=true        # Route Claude models via Claude Code subscription
+LLM_ROUTER_GEMINI_SUBSCRIPTION=true        # Route Gemini models via local Gemini CLI
 LLM_ROUTER_ENFORCE=off|soft|smart|hard     # Hook enforcement level
 
 # Features
-OLLAMA_BASE_URL=http://localhost:11434    # Enable local Ollama
-LLM_ROUTER_ENABLE_SEMANTIC_CACHE=true     # Enable cache hit optimization
+OLLAMA_BASE_URL=http://localhost:11434    # Enable local Ollama — also activates
+                                           # semantic cache (no separate on/off toggle)
 
 # API Keys (required for external providers)
 OPENAI_API_KEY=sk-...
