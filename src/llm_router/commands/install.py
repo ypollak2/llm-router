@@ -52,15 +52,15 @@ def _fail(label: str, fix: str | None = None) -> str:
 # ── Command entry point ────────────────────────────────────────────────────────
 
 _INSTALL_HELP = """\
-llm_router install — install LLM Router routing into a host
+llm-router install — install LLM Router routing into a host
 
 Usage:
-  llm_router install                     Install for Claude Code (hooks + rules + MCP)
-  llm_router install --host <name>       Install/print config for a specific host
+  llm-router install                     Install for Claude Code (hooks + rules + MCP)
+  llm-router install --host <name>       Install/print config for a specific host
                                      (claude-code, claude-desktop, cursor, copilot,
                                      windsurf, gemini-cli, codex, …)
-  llm_router install --mode <mode>       Install mode (auto | gateway)
-  llm_router install --help, -h          Show this help and exit (no changes made)
+  llm-router install --mode <mode>       Install mode (auto | gateway)
+  llm-router install --help, -h          Show this help and exit (no changes made)
 """
 
 
@@ -171,7 +171,7 @@ def _run_install(flags: list[str]) -> None:
         if all_ok:
             print(_green("  Everything looks good."))
         else:
-            print(_yellow("  Run `llm_router install` to fix the issues above."))
+            print(_yellow("  Run `llm-router install` to fix the issues above."))
         print()
         return
 
@@ -221,13 +221,13 @@ def _run_install(flags: list[str]) -> None:
     print("    You'll see: ⚡ ROUTE → Haiku (simple query)\n")
 
     print(_bold("  Subcommands:"))
-    print("    llm_router doctor               — verify everything is wired up")
-    print("    llm_router status               — today's cost & savings")
-    print("    llm_router dashboard            — web dashboard (localhost:7337)")
-    print("    llm_router install --check      — preview install state")
-    print("    llm_router install --force      — reinstall / update paths")
-    print("    llm_router install --claw-code  — also install into claw-code")
-    print("    llm_router uninstall            — remove\n")
+    print("    llm-router doctor               — verify everything is wired up")
+    print("    llm-router status               — today's cost & savings")
+    print("    llm-router dashboard            — web dashboard (localhost:7337)")
+    print("    llm-router install --check      — preview install state")
+    print("    llm-router install --force      — reinstall / update paths")
+    print("    llm-router install --claw-code  — also install into claw-code")
+    print("    llm-router uninstall            — remove\n")
 
 
 # ── install --headless ─────────────────────────────────────────────────────────
@@ -257,7 +257,7 @@ def _run_install_headless() -> None:
   FROM python:3.12-slim
 
   # Install llm_router and wire in hooks
-  RUN pip install llm-routing && llm_router install
+  RUN pip install llm-routing && llm-router install
 
   # Route to API providers — no Anthropic subscription in CI
   ENV LLM_ROUTER_CLAUDE_SUBSCRIPTION=false
@@ -272,7 +272,7 @@ def _run_install_headless() -> None:
     print(snippet)
 
     print(_bold("  .claude/settings.json — MCP + hooks merge example:"))
-    print(_dim("  (llm_router install does this automatically; shown for reference)"))
+    print(_dim("  (llm-router install does this automatically; shown for reference)"))
     import json as _json
     example = {
         "mcpServers": {"llm_router": {"command": "llm-router", "args": []}},
@@ -1227,13 +1227,13 @@ def _install_host(host: str, mode: str = "auto") -> None:
         return
 
     w = shutil.get_terminal_size((80, 24)).columns
-    print(f"\n{bold}llm_router install --host {host}{reset}\n")
+    print(f"\n{bold}llm-router install --host {host}{reset}\n")
     print("─" * min(w, 70))
 
     # Hosts that write files; all others print snippets
     _FILE_WRITERS = {
         "codex":      (lambda: _install_codex_files(mode="gateway" if mode == "auto" else mode),
-                       "Restart Codex and run `llm_router doctor --host codex` to verify automatic routing."),
+                       "Restart Codex and run `llm-router doctor --host codex` to verify automatic routing."),
         "opencode":   (_install_opencode_files,     f"Restart OpenCode and run {route_tool('llm_savings')} to verify."),
         "gemini-cli": (_install_gemini_cli_files,   f"Restart Gemini CLI and run {route_tool('llm_savings')} to verify."),
         "copilot-cli":(_install_copilot_cli_files,  f"Restart Copilot CLI and run {route_tool('llm_savings')} to verify."),
@@ -1261,6 +1261,6 @@ def _install_host(host: str, mode: str = "auto") -> None:
         print("─" * min(w, 70))
 
     print(
-        f"\nFor Claude Code (hooks + full cost-routing): {bold}llm_router install{reset}\n"
+        f"\nFor Claude Code (hooks + full cost-routing): {bold}llm-router install{reset}\n"
         f"See docs/hosts/ for setup guides and trade-off explanations.\n"
     )

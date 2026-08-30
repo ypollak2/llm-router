@@ -124,7 +124,7 @@ def _run_doctor_host(host: str) -> None:
                     print(
                         _fail(
                             f"{dst_name}  — not installed",
-                            fix="llm_router install",
+                            fix="llm-router install",
                         )
                     )
                     issues.append(f"Hook {dst_name} missing")
@@ -163,7 +163,7 @@ def _run_doctor_host(host: str) -> None:
                         print(
                             _fail(
                                 f"llm_router not in servers ({mcp_json})",
-                                fix="llm_router install --host vscode",
+                                fix="llm-router install --host vscode",
                             )
                         )
                         issues.append("llm_router not registered in VS Code mcp.json")
@@ -173,7 +173,7 @@ def _run_doctor_host(host: str) -> None:
                 print(
                     _fail(
                         f"mcp.json not found at {mcp_json}",
-                        fix="llm_router install --host vscode",
+                        fix="llm-router install --host vscode",
                     )
                 )
                 issues.append("VS Code mcp.json missing")
@@ -200,7 +200,7 @@ def _run_doctor_host(host: str) -> None:
                         print(
                             _fail(
                                 f"llm_router not in mcpServers ({mcp_json})",
-                                fix="llm_router install --host cursor",
+                                fix="llm-router install --host cursor",
                             )
                         )
                         issues.append("llm_router not registered in Cursor mcp.json")
@@ -210,7 +210,7 @@ def _run_doctor_host(host: str) -> None:
                 print(
                     _fail(
                         f"mcp.json not found at {mcp_json}",
-                        fix="llm_router install --host cursor",
+                        fix="llm-router install --host cursor",
                     )
                 )
                 issues.append("Cursor mcp.json missing")
@@ -241,7 +241,7 @@ def _run_doctor_host(host: str) -> None:
                         print(_fail(
                             "Codex model_provider is force-set to 'llm_router' — "
                             "this breaks Codex CLI (gateway wire-format mismatch)",
-                            fix="llm_router install --host codex --mode gateway",
+                            fix="llm-router install --host codex --mode gateway",
                         ))
                         issues.append("Codex model_provider forced to llm_router (breaks Codex)")
                     else:
@@ -255,7 +255,7 @@ def _run_doctor_host(host: str) -> None:
                     else:
                         print(_fail(
                             "LLM Router model provider table missing",
-                            fix="llm_router install --host codex --mode gateway",
+                            fix="llm-router install --host codex --mode gateway",
                         ))
                         issues.append("Codex LLM Router provider table missing")
                 except OSError as e:
@@ -264,7 +264,7 @@ def _run_doctor_host(host: str) -> None:
             else:
                 print(_fail(
                     f"config.toml not found at {config_toml}",
-                    fix="llm_router install --host codex --mode gateway",
+                    fix="llm-router install --host codex --mode gateway",
                 ))
                 issues.append("Codex config.toml missing")
 
@@ -754,7 +754,7 @@ def _run_doctor(host: Optional[str] = None) -> tuple[int, list[str]]:
 
     issues: list[str] = []
 
-    print(f"\n{_bold('llm_router doctor')}\n")
+    print(f"\n{_bold('llm-router doctor')}\n")
 
     # ── 1. Hooks ───────────────────────────────────────────────────────────
     print(_bold("  Hooks"))
@@ -774,7 +774,7 @@ def _run_doctor(host: Optional[str] = None) -> tuple[int, list[str]]:
                         )
                     )
                     issues.append(
-                        f"Hook {dst_name} is outdated — run `llm_router install --force`"
+                        f"Hook {dst_name} is outdated — run `llm-router install --force`"
                     )
                 else:
                     print(_ok(f"{dst_name}  ({event})"))
@@ -784,7 +784,7 @@ def _run_doctor(host: Optional[str] = None) -> tuple[int, list[str]]:
             print(
                 _fail(
                     f"{dst_name}  ({event})  — not installed",
-                    fix="llm_router install",
+                    fix="llm-router install",
                 )
             )
             issues.append(f"Hook {dst_name} not installed")
@@ -813,12 +813,12 @@ def _run_doctor(host: Optional[str] = None) -> tuple[int, list[str]]:
                                 print(
                                     _fail(
                                         f"{os.path.basename(_parts[-1])} → {_interp} NOT FOUND",
-                                        fix="llm_router install --force",
+                                        fix="llm-router install --force",
                                     )
                                 )
                                 issues.append(
                                     f"Hook interpreter missing: {_interp} — "
-                                    f"run `llm_router install --force` to fix"
+                                    f"run `llm-router install --force` to fix"
                                 )
         except Exception as _e:
             print(_warn(f"Could not parse settings.json: {_e}"))
@@ -857,7 +857,7 @@ def _run_doctor(host: Optional[str] = None) -> tuple[int, list[str]]:
     if rules_dst.exists():
         print(_ok("llm_router.md"))
     else:
-        print(_fail("llm_router.md — not installed", fix="llm_router install"))
+        print(_fail("llm_router.md — not installed", fix="llm-router install"))
         issues.append("Routing rules not installed")
 
     # ── 3. Claude Code MCP registration ────────────────────────────────────
@@ -876,7 +876,7 @@ def _run_doctor(host: Optional[str] = None) -> tuple[int, list[str]]:
         )
         if _cc_problems:
             for _p in _cc_problems:
-                print(_fail(_p, fix="llm_router install"))
+                print(_fail(_p, fix="llm-router install"))
             issues.extend(_cc_problems)
         else:
             print(_ok("MCP server registered in ~/.claude/settings.json"))
@@ -884,7 +884,7 @@ def _run_doctor(host: Optional[str] = None) -> tuple[int, list[str]]:
         print(
             _fail(
                 "MCP server not registered",
-                fix="llm_router install",
+                fix="llm-router install",
             )
         )
         issues.append("MCP server not registered in Claude Code")
@@ -909,7 +909,7 @@ def _run_doctor(host: Optional[str] = None) -> tuple[int, list[str]]:
                 )
                 if _dt_problems:
                     for _p in _dt_problems:
-                        print(_fail(_p, fix="llm_router install"))
+                        print(_fail(_p, fix="llm-router install"))
                     issues.extend(_dt_problems)
                 else:
                     print(_ok(f"registered ({desktop_path})"))
@@ -1191,7 +1191,7 @@ def _run_doctor(host: Optional[str] = None) -> tuple[int, list[str]]:
                     print(
                         _fail(
                             f"{dst_name}  — not installed",
-                            fix="llm_router install --claw-code",
+                            fix="llm-router install --claw-code",
                         )
                     )
                     issues.append(f"claw-code hook {dst_name} not installed")
@@ -1203,7 +1203,7 @@ def _run_doctor(host: Optional[str] = None) -> tuple[int, list[str]]:
                 print(
                     _fail(
                         "MCP server not registered in claw-code",
-                        fix="llm_router install --claw-code",
+                        fix="llm-router install --claw-code",
                     )
                 )
                 issues.append("MCP server not registered in claw-code")
