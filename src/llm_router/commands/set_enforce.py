@@ -12,6 +12,11 @@ from pathlib import Path
 
 _ENFORCE_MODES = ("smart", "soft", "hard", "off")
 
+# GH#59: a session id arrives from the environment/pointer file; only plain
+# tokens may become a path component. Mirrors enforce_config._SAFE_SESSION_ID
+# so the writer never persists something the reader would reject anyway.
+_SAFE_SESSION_ID = re.compile(r"[A-Za-z0-9._-]{1,128}")
+
 _ENFORCE_DESCRIPTIONS = {
     "smart": "Hard block for Q&A tasks (query/research/generate/analyze), soft for code. >80% routing compliance without blocking file editing.",
     "soft": "Route hints in context, never blocks. Lowest friction — routing is suggested but not enforced.",
@@ -76,7 +81,20 @@ def _run_set_enforce(mode: str, _global: bool = False) -> None:
     # Claude Code for the change to take effect". Now a change governs the
     # session that made it; `--global` asks for the old machine-wide behaviour
     # explicitly.
-    session_id = os.environ.get("CLAUDE_SESSION_ID", "").strip()
+    #
+    # GH#59: this used to read the bare CLAUDE_SESSION_ID env var, which real
+    # Claude Code never sets (it sets CLAUDE_CODE_SESSION_ID) — so this branch
+    # was always false on Claude Code and every call fell through to the
+    # global write below regardless of the message printed. Resolve through
+    # the same 4-tier chain enforce_config._session_enforce reads, so writer
+    # and reader can never disagree about which session "this session" is.
+    try:
+        from llm_router.session_store import resolve_session_id
+        session_id = (resolve_session_id() or "").strip()
+    except Exception:
+        session_id = ""
+    if session_id and not _SAFE_SESSION_ID.fullmatch(session_id):
+        session_id = ""
     if session_id and not _global:
         sess_dir = Path.home() / ".llm-router" / "sessions" / session_id
         sess_dir.mkdir(parents=True, exist_ok=True)
