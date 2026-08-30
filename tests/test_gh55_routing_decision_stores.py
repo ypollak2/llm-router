@@ -32,6 +32,26 @@ from llm_router.commands import doctor
 
 
 def _db(path, *, table=True, rows=0, other_rows=0):
+    """Build a scratch usage DB matching production's actual timestamp convention.
+
+    GH#75: this previously stored ``datetime('now','localtime')`` — i.e. an
+    already-local wall-clock string. `_routing_decision_state`'s read query
+    (matching the real schema in cost.py, where both tables default
+    ``timestamp`` to ``datetime('now')`` = UTC) applies the ``'localtime'``
+    modifier ONCE at read time, correctly converting a UTC timestamp to local
+    time. Applying ``'localtime'`` a SECOND time on top of a value that was
+    already shifted double-shifts it by the host's UTC offset. For any
+    nonzero-offset timezone that flips the row onto the "wrong" side of local
+    midnight for `offset` hours out of every day (23:00-24:00 local for a
+    positive offset, 00:00-`offset` for a negative one) — during which the
+    row's computed date no longer equals `date('now','localtime')`, and it
+    silently drops out of "today"'s count. That is what made this test flaky
+    by wall-clock time of day (misdiagnosed as order-dependent test pollution
+    since "alone" vs. "in the full suite" simply run at different real
+    times). Storing UTC here, like production does, makes the single
+    'localtime' conversion in the reader correct regardless of host TZ or
+    time of day.
+    """
     conn = sqlite3.connect(str(path))
     if table:
         conn.execute(
@@ -40,11 +60,11 @@ def _db(path, *, table=True, rows=0, other_rows=0):
         )
         for _ in range(rows):
             conn.execute(
-                "INSERT INTO routing_decisions VALUES (datetime('now','localtime'),'simple','')"
+                "INSERT INTO routing_decisions VALUES (datetime('now'),'simple','')"
             )
     conn.execute("CREATE TABLE usage (timestamp TEXT, model TEXT)")
     for _ in range(other_rows):
-        conn.execute("INSERT INTO usage VALUES (datetime('now','localtime'),'ollama/x')")
+        conn.execute("INSERT INTO usage VALUES (datetime('now'),'ollama/x')")
     conn.commit()
     conn.close()
     return path
