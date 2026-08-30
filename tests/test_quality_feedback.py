@@ -188,17 +188,23 @@ class TestShouldSkipModel:
         assert should_skip_model("ollama/gemma4", "analyze", "complex") is True
 
     def test_threshold_boundary(self):
+        # GH#64: this test exercises the THRESHOLD mechanism, so it must use a
+        # task_type/complexity pair that is actually eligible for skipping.
+        # query/simple is now exempt (a terse-but-correct QUERY answer can never
+        # earn score_response's length/structure bonuses), so it would make the
+        # boundary untestable here. The exemption itself is covered by
+        # tests/test_gh64_quality_skip_honors_pin.py.
         # Exactly at threshold
         for _ in range(3):
-            record_quality("test/model", "query", "simple", QUALITY_THRESHOLD)
+            record_quality("test/model", "code", "moderate", QUALITY_THRESHOLD)
         # At threshold = not skipped (must be below)
-        assert should_skip_model("test/model", "query", "simple") is False
+        assert should_skip_model("test/model", "code", "moderate") is False
 
         # Just below threshold
         reset_quality_store()
         for _ in range(3):
-            record_quality("test/model", "query", "simple", QUALITY_THRESHOLD - 0.01)
-        assert should_skip_model("test/model", "query", "simple") is True
+            record_quality("test/model", "code", "moderate", QUALITY_THRESHOLD - 0.01)
+        assert should_skip_model("test/model", "code", "moderate") is True
 
     def test_insufficient_calls_not_skipped(self):
         # Only 2 calls (below _MIN_CALLS_FOR_SIGNAL of 3)

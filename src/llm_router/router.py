@@ -1905,7 +1905,14 @@ async def _finalize_successful_route(
             )
             _fb_occurred = len(chain_errors) > 0
             _fb_reason, _mis = derive_fallback_reason(chain_errors)
-            _first_model = chain_attempts[0] if chain_attempts else None
+            # GH#64: chain_attempts may now contain quality-skip markers (visible
+            # trace of a candidate the circuit breaker excluded) ahead of the
+            # first real attempt. The ledger's chosen_model/chosen_tier must
+            # reflect an actually-dispatched model, not a marker string.
+            from llm_router.quality_feedback import is_skip_marker
+            _first_model = next(
+                (m for m in chain_attempts if not is_skip_marker(m)), None,
+            )
             _in_tok = getattr(response, "input_tokens", 0)
             _out_tok = getattr(response, "output_tokens", 0)
             _base = _baseline_cost(task_type, profile, _in_tok, _out_tok)
@@ -2146,6 +2153,7 @@ async def _dispatch_model_loop(
     suppress_ledger: bool = False,
     model_override: str | None = None,
     ledger_route_id: str | None = None,
+    pinned_model: str | None = None,
 ) -> LLMResponse:
     """Execute the main model dispatch loop with primary + emergency fallback chains.
 
@@ -2174,6 +2182,9 @@ async def _dispatch_model_loop(
         route_log: Structured logger instance.
         _reservation: Reserved budget amount for this call.
         effective_complexity: Stringified complexity for logging.
+        pinned_model: An explicit routing.yaml per-task model pin, if any
+            (GH#64) — exempted from the quality circuit-breaker exactly like
+            model_override.
 
     Returns:
         LLMResponse: The successful response.
@@ -2445,13 +2456,20 @@ async def _dispatch_model_loop(
                     continue
 
         # Quality feedback: skip models with poor track record for this task pattern.
-        # CHZ-AUD-C-02: an EXPLICIT model_override must be honored exactly — the
+        # CHZ-AUD-C-02 (extended by GH#64): an EXPLICIT model_override OR an
+        # explicit routing.yaml per-task pin must be honored exactly — the
         # process-global quality circuit-breaker must NOT silently substitute a
-        # different model for a caller's explicit pin. Only non-override models are
-        # subject to the breaker.
+        # different model for either kind of caller/user pin. A pin is exactly
+        # as intentional as a caller's model= override. Only models that are
+        # neither must be subject to the breaker.
         try:
-            from llm_router.quality_feedback import should_skip_model
-            if model != model_override and should_skip_model(model, task_type.value, c.value):
+            from llm_router.quality_feedback import (
+                format_skip_marker, get_quality_stats, should_skip_model,
+            )
+            if (
+                model not in (model_override, pinned_model)
+                and should_skip_model(model, task_type.value, c.value)
+            ):
                 log.info("Skipping low-quality model for %s/%s: %s", task_type.value, c.value, model)
                 route_log.info(
                     "model_quality_skip",
@@ -2460,6 +2478,19 @@ async def _dispatch_model_loop(
                     task_type=task_type.value,
                     complexity=c.value,
                 )
+                # GH#64: previously this `continue` happened BEFORE the model was
+                # ever appended to chain_attempts, so the exclusion left no trace
+                # anywhere a user or routing_quality.jsonl reader could see — it
+                # looked exactly as if the model had never been offered as a
+                # candidate at all. Appending a marker (instead of the bare model
+                # id) makes the exclusion visible in the response's chain_attempts
+                # and the verbose "→ Chain: a [✗] → b [✓]" rendering, while
+                # `quality_feedback.is_skip_marker` lets downstream consumers
+                # (e.g. the route-quality ledger's chosen_model/chosen_tier)
+                # distinguish it from a real dispatch attempt.
+                _stats = get_quality_stats(model, task_type.value, c.value)
+                _avg, _n = _stats if _stats is not None else (0.0, 0)
+                chain_attempts.append(format_skip_marker(model, _avg, _n))
                 continue
         except Exception as e:
             log.warning("quality_feedback_failed", error=str(e))
@@ -3865,6 +3896,20 @@ async def route_and_call(
             task_type, profile, model_override, complexity_hint, c, config
         )
 
+        # GH#64: recompute the same explicit per-task pin _build_and_filter_chain
+        # derives internally (repo_cfg.model_override), so the quality
+        # circuit-breaker in _dispatch_model_loop can exempt it exactly like
+        # model_override (CHZ-AUD-C-02). Not returned from _build_and_filter_chain
+        # itself to avoid changing that function's return contract for its other
+        # callers (including the emergency BUDGET chain build below, and tests
+        # that stub it directly) — the pin lookup is a cheap, side-effect-free
+        # dict read, so recomputing it here is not a meaningful duplication risk.
+        pinned_model = (
+            get_repo_config().model_override(task_type.value)
+            if (not model_override and profile not in (RoutingProfile.PREMIUM, RoutingProfile.REASONING))
+            else None
+        )
+
         # TQ-007 cap-downgrade is applied LAST (after precision-tier,
         # subject-specialist and bandit reorder) — see below, just before the
         # empty-chain check. Applying it here was a bug (RED1-01/RED1-02): those
@@ -4288,6 +4333,7 @@ async def route_and_call(
             _reservation=_reservation,
             max_cost_per_task=max_cost_per_task,
             effective_complexity=effective_complexity,
+            pinned_model=pinned_model,  # GH#64: honor explicit routing.yaml pin
             identity=identity,
             routing_policy=_routing_policy,
             suppress_ledger=suppress_ledger,
