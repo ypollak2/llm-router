@@ -14,6 +14,102 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 _Nothing yet._
 
+## [13.0.5] — The nine issues opened this week (2026-08-30)
+
+Fixes #59-#67. Three of them (#59, #60, #63) were retests of issues closed as
+fixed in 13.0.4, where each fix had missed the real code path because it was
+verified against existing DB rows or synthetic env rather than a fresh run.
+Every fix here was built the other way round: the repro test written first,
+observed failing, then patched, then mutation-checked by reverting the fix to
+confirm the right test dies.
+
+### Fixed
+
+- **Session-scoped `set-enforce` never activated (#59).** `_session_enforce()`
+  and `_run_set_enforce()` read a bare `CLAUDE_SESSION_ID`; Claude Code exports
+  `CLAUDE_CODE_SESSION_ID`. `set-enforce` wrote the global `routing.yaml` every
+  time while printing "(this session only)". Both now resolve through
+  `session_store.resolve_session_id()` — writer and reader share one resolver,
+  which is the property that was actually missing.
+
+- **`routing_decisions` was always empty (#60).** `log_routing_decision` was
+  gated behind `if classification_data:`, which `route_and_call` defaults to
+  `None` and `tools/text.py` never passes — so the entire consolidated tool
+  surface could not write a row. Fixed at the sink, covering `llm`, `llm_query`,
+  `llm_code`, `llm_analyze`, `llm_generate`, `llm_research` and any future
+  caller. Synthesized rows are marked `classifier_type="unhinted"` with NULL
+  confidence, latency, budget and quality_mode, so an unclassified call cannot
+  masquerade as a measured one. Ten `classification_accuracy is None` crash
+  sites are fixed — four of them in `retrospective.py` itself, which neither the
+  issue nor the plan had listed.
+
+- **An unknown subcommand started the MCP server (#61).** `main()`'s final
+  `else` was reached by any unrecognized token, so a typo launched the full
+  stdio server and hung the terminal. The server now starts only with no
+  arguments; anything else exits 2 with a `did you mean` suggestion.
+
+- **The ensemble classifier failed silently on every call (#62).** `ensemble.py`
+  hardcoded `ollama/qwen2.5:7b` with no check that it was pulled, so on a machine
+  without it the classifier failed every time, degraded to the heuristic, and
+  `doctor` still reported Ollama green. `doctor` and `verify` now compare both
+  classifier models against `/api/tags`, normalizing the implicit `:latest` tag.
+  `LLM_ROUTER_ENSEMBLE_SECONDARY` is new — the secondary had no override path at
+  all, so suggesting one would have been false advice.
+
+- **The statusline called a working setup an outage (#63).** The health check
+  tested five cloud API keys and not `LLM_ROUTER_CLAUDE_SUBSCRIPTION`, and
+  conflated "a provider is configured" with "something happened in the last 30
+  minutes". Subscription mode is recognized (via `install_hooks.check_api_keys()`,
+  not a second parser), and a new `idle` state separates a quiet Ollama from an
+  unreachable one.
+
+- **The quality breaker overrode explicit pins, invisibly (#64).**
+  `should_skip_model()` blacklisted a model after three answers below 0.4, and a
+  terse-but-correct QUERY answer scores ~0.3 because it can never earn the
+  length or structure bonuses — so three *correct* short answers permanently
+  disabled a pinned model. Pins are now exempt alongside `model_override`, and
+  every skip appends a visible marker to `chain_attempts`: a candidate exclusion
+  must leave a trace.
+
+### Added
+
+- `LLM_ROUTER_COST_PROFILE` for the routing cost tier (#65). `LLM_ROUTER_PROFILE`
+  meant both that and the enterprise identity mode, so following the documented
+  rename for one silently broke the other. The legacy name is still read, but
+  only when its value is a valid routing tier, which makes the two readers
+  mutually exclusive immediately rather than in 14.0. `VALID_PROFILES` now
+  derives from the `RoutingProfile` enum instead of a hand-written list that had
+  3 of the real 6 values.
+- `LLM_ROUTER_QUALITY_MIN_CALLS`, `LLM_ROUTER_QUALITY_SKIP_THRESHOLD` and
+  `LLM_ROUTER_QUALITY_SKIP=off` — the quality-skip thresholds were hardcoded and
+  undiscoverable.
+- A docs-lint test that derives its subcommand and hook-filename lists from
+  `cli.py` and `install_hooks.py` rather than freezing a copy, so it cannot rot
+  the way the docs it polices did.
+
+### Changed
+
+- **Documentation described a tool surface that no longer exists (#66).**
+  `llm_health`, `llm_quality_report`, `llm_classify`, `llm_cache_stats`,
+  `llm_cache_clear`, `llm_setup` and `llm_policy` are absent from the
+  consolidated 11-tool surface. 16 files were affected, not the 4 reported.
+  `LLM_ROUTER_SQL_DEBUG` and `LLM_ROUTER_HOOK_DEBUG` did not exist anywhere and
+  are gone. `plugin.json`'s `mcpServers` key pointed at a `.mcp.json` that
+  `.gitignore` excludes repo-wide, so it is removed rather than dangling.
+- **`--help` told users to run a binary that is not on `$PATH` (#67).**
+  `cli.py`'s docstring printed `llm_router <cmd>` 47 times; the installed binary
+  is `llm-router`. `rules/llm_router.md`, installed as the agent-facing rules
+  doc, was handing a live agent two commands that do not exist. The v5
+  `rules/llm-router.md` fork is deleted — `install_hooks.py` already treated its
+  installed counterpart as a pre-rebrand artifact, which is how it drifted.
+
+### Known issues
+
+`LLM_ROUTER_PROFILE=enterprise` still raises `ValidationError` at import time
+through `config.py`'s `RouterConfig`, a third reader on a different mechanism
+(#69). The enterprise surface is non-functional end-to-end: #68, #70, #71.
+Remaining underscore-CLI strings in `install` and `doctor`: #72.
+
 ## [13.0.4] — Security: remove the unauthenticated SSE entry point (2026-08-28)
 
 ### Security

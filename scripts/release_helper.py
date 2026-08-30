@@ -74,7 +74,10 @@ def update_marketplace_data(data: dict, version: str) -> dict:
 
     plugins = [dict(plugin) for plugin in updated.get("plugins", [])]
     for plugin in plugins:
-        if plugin.get("name") == "llm_router":
+        # See the note in read_versions: the manifests use `llm-router`, so an
+        # underscore-only match silently left every marketplace plugin entry at
+        # the previous version while reporting a successful bump (GH#67).
+        if plugin.get("name") in ("llm_router", "llm-router"):
             plugin["version"] = version
     updated["plugins"] = plugins
     return updated
@@ -142,12 +145,20 @@ def read_versions(*, root: Path = ROOT) -> dict[str, str]:
         plugin_version = json.loads(plugin_path.read_text(encoding="utf-8"))["version"]
         marketplace_data = json.loads(marketplace_path.read_text(encoding="utf-8"))
         marketplace_version = None
+        # The marketplace manifests name the plugin `llm-router` (the CLI
+        # binary name); this lookup accepted only the underscore module name,
+        # so it could never match and every release aborted here. Accept both
+        # rather than picking one, since all three spellings are legitimate in
+        # different places (package `llm-routing`, binary `llm-router`, module
+        # `llm_router`) -- see GH#67.
         for plugin in marketplace_data.get("plugins", []):
-            if plugin.get("name") == "llm_router":
+            if plugin.get("name") in ("llm_router", "llm-router"):
                 marketplace_version = plugin.get("version")
                 break
         if marketplace_version is None:
-            raise ValueError(f"Could not find llm_router entry in {marketplace_path}")
+            raise ValueError(
+                f"Could not find an llm-router/llm_router entry in {marketplace_path}"
+            )
 
         versions[f"{plugin_dir}/plugin.json"] = plugin_version
         versions[f"{plugin_dir}/marketplace.json"] = marketplace_version
@@ -166,8 +177,13 @@ def verify_versions(version: str, *, root: Path = ROOT) -> dict[str, str]:
 
 def extract_changelog_entry(version: str, *, changelog_path: Path = CHANGELOG_PATH) -> str:
     changelog = changelog_path.read_text(encoding="utf-8")
+    # CHANGELOG.md follows Keep a Changelog, whose headings are `## [1.2.3]`.
+    # This matcher previously accepted only `## v1.2.3`, a form that appears
+    # nowhere in either the current changelog or the archive, so extraction
+    # could never succeed. Accept both, and stop at the next heading of either
+    # shape so an entry is not swallowed by its successor.
     pattern = re.compile(
-        rf"(?ms)^## v{re.escape(version)}\b.*?(?=^## v|\Z)"
+        rf"(?ms)^## (?:v{re.escape(version)}\b|\[{re.escape(version)}\]).*?(?=^## (?:v\d|\[)|\Z)"
     )
     match = pattern.search(changelog)
     if match is None:

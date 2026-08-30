@@ -12,7 +12,7 @@ Framework: Textual (TUI framework) + Rich (formatting) + Plotext (charts)
 
 from __future__ import annotations
 
-__version__ = "0.8.4"
+__version__ = "13.0.5"
 __all__ = [
     "LLMRouterDashboard",
     "run_dashboard",
