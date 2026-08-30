@@ -60,20 +60,31 @@ def get_live_trend_indicator() -> str:
         
         current = snapshots[-1]
         current_hour = current.get("hour", 1)
-        accuracy = int(current.get("facts", {}).get("accuracy", 1.0) * 100)
+        # GH#56/#60: "accuracy" is None (unmeasured), not 0.0/1.0, when a
+        # snapshot's hour saw no routing decisions — `.get(..., 1.0)` does not
+        # catch that because the key is present with value None, so `* 100`
+        # would raise TypeError. Render "n/a" and skip the trend comparison
+        # rather than resurrecting a fake accuracy figure.
+        raw_accuracy = current.get("facts", {}).get("accuracy")
+        accuracy_str = "n/a" if raw_accuracy is None else f"{int(raw_accuracy * 100)}%"
         gaps = current.get("gap_count", 0)
-        
+
         # Show trend indicator
         if len(snapshots) > 1:
-            prev_accuracy = int(snapshots[-2].get("facts", {}).get("accuracy", 1.0) * 100)
-            if accuracy > prev_accuracy:
-                indicator = f"↑ {accuracy}% (H{current_hour})"
-            elif accuracy < prev_accuracy:
-                indicator = f"↓ {accuracy}% (H{current_hour})"
+            prev_raw_accuracy = snapshots[-2].get("facts", {}).get("accuracy")
+            if raw_accuracy is None or prev_raw_accuracy is None:
+                indicator = f"📊 {accuracy_str} (H{current_hour})"
             else:
-                indicator = f"→ {accuracy}% (H{current_hour})"
+                accuracy = int(raw_accuracy * 100)
+                prev_accuracy = int(prev_raw_accuracy * 100)
+                if accuracy > prev_accuracy:
+                    indicator = f"↑ {accuracy}% (H{current_hour})"
+                elif accuracy < prev_accuracy:
+                    indicator = f"↓ {accuracy}% (H{current_hour})"
+                else:
+                    indicator = f"→ {accuracy}% (H{current_hour})"
         else:
-            indicator = f"📊 {accuracy}% (H{current_hour})"
+            indicator = f"📊 {accuracy_str} (H{current_hour})"
         
         # Add gap warning
         if gaps > 0:
@@ -101,11 +112,12 @@ def display_hourly_progress() -> str:
         
         # Build compact progress line
         calls = facts.get("total_calls", 0)
-        accuracy = int(facts.get("accuracy", 1.0) * 100)
+        raw_accuracy = facts.get("accuracy")
+        accuracy_str = "n/a" if raw_accuracy is None else f"{int(raw_accuracy * 100)}%"
         gaps = current.get("gap_count", 0)
         saved = facts.get("total_saved", 0)
-        
-        line = f"【Hour {current_hour}】 {calls} calls · {accuracy}% accuracy"
+
+        line = f"【Hour {current_hour}】 {calls} calls · {accuracy_str} accuracy"
         if gaps > 0:
             line += f" · {gaps} gap{'s' if gaps != 1 else ''}"
         line += f" · ${saved:.2f} saved"
@@ -133,10 +145,16 @@ def get_trend_pressure() -> float:
         if not snapshots or len(snapshots) < 2:
             return 0.0  # Not enough data
         
-        # Compare last 2 snapshots
-        current_accuracy = snapshots[-1].get("facts", {}).get("accuracy", 1.0)
-        prev_accuracy = snapshots[-2].get("facts", {}).get("accuracy", 1.0)
-        
+        # Compare last 2 snapshots. GH#56/#60: accuracy is None (unmeasured)
+        # rather than defaulted when a snapshot's hour saw no decisions —
+        # `.get(..., 1.0)` doesn't apply because the key is present with
+        # value None. Treat unmeasured as "no signal" rather than inventing
+        # a trend from a fake 1.0.
+        current_accuracy = snapshots[-1].get("facts", {}).get("accuracy")
+        prev_accuracy = snapshots[-2].get("facts", {}).get("accuracy")
+        if current_accuracy is None or prev_accuracy is None:
+            return 0.0  # unmeasured — no basis for escalation pressure
+
         # Calculate trend
         trend = current_accuracy - prev_accuracy
         

@@ -43,6 +43,19 @@ from llm_router.monitoring.periodic import (
 from llm_router.terminal_style import Color
 
 
+def _format_accuracy_pct(facts: dict) -> str:
+    """Render ``facts["accuracy"]`` for display.
+
+    GH#56/#60: ``accuracy`` is ``None`` (not 0.0/1.0) when the session had no
+    measured routing decisions — ``facts.get("accuracy", 1.0)`` does NOT
+    apply that default because the key is present with value ``None``, so a
+    bare ``* 100`` raises ``TypeError``. Render "n/a" instead of resurrecting
+    a fake accuracy figure.
+    """
+    accuracy = facts.get("accuracy")
+    return "n/a" if accuracy is None else f"{int(accuracy * 100)}%"
+
+
 def format_snapshot_status(snapshot: dict) -> str:
     """Format current snapshot status.
 
@@ -63,9 +76,8 @@ def format_snapshot_status(snapshot: dict) -> str:
         f"| Saved: ${facts.get('total_saved', 0):.2f} ({int(facts.get('total_saved', 0) / max(1, facts.get('total_saved', 1) + facts.get('total_cost', 0)) * 100)}%)"
     )
 
-    accuracy_pct = int(facts.get("accuracy", 1.0) * 100)
     lines.append(
-        f"  Accuracy: {accuracy_pct}%  "
+        f"  Accuracy: {_format_accuracy_pct(facts)}  "
         f"| Gaps: {snapshot.get('gap_count', 0)}  "
         f"| Actions: {snapshot.get('action_count', 0)}"
     )
@@ -100,11 +112,9 @@ def format_hourly_snapshots(snapshots: list[dict]) -> str:
         elif gap_count > 0 and prev_gap_count == 0:
             gap_indicator = " NEW"
 
-        accuracy_pct = int(facts.get("accuracy", 1.0) * 100)
-
         lines.append(
             f"  Hour {hour}: Calls: {facts.get('total_calls', 0)}  "
-            f"| Accuracy: {accuracy_pct}%  "
+            f"| Accuracy: {_format_accuracy_pct(facts)}  "
             f"| Gaps: {gap_count}{gap_indicator}"
         )
 
@@ -136,17 +146,21 @@ def print_session_snapshot(
     # Compact mode (2 lines for mid-session checks)
     if compact:
         facts = current_snapshot.get("facts", {})
-        accuracy_pct = int(facts.get("accuracy", 1.0) * 100)
+        accuracy = facts.get("accuracy")
+        accuracy_str = _format_accuracy_pct(facts)
         gaps = current_snapshot.get("gap_count", 0)
         trend = ""
         if len(snapshots) > 1:
-            prev_accuracy = int(snapshots[-2].get("facts", {}).get("accuracy", 1.0) * 100)
-            if accuracy_pct < prev_accuracy:
-                trend = f" ↓ ({accuracy_pct}% vs {prev_accuracy}%)"
+            prev_accuracy = snapshots[-2].get("facts", {}).get("accuracy")
+            if accuracy is not None and prev_accuracy is not None:
+                accuracy_pct = int(accuracy * 100)
+                prev_accuracy_pct = int(prev_accuracy * 100)
+                if accuracy_pct < prev_accuracy_pct:
+                    trend = f" ↓ ({accuracy_pct}% vs {prev_accuracy_pct}%)"
         gap_str = f", {gaps} gap{'s' if gaps != 1 else ''}" if gaps > 0 else ""
         print(
             f"Session (Hour {hour}): {facts.get('total_calls', 0)} calls, "
-            f"{accuracy_pct}% accuracy{gap_str}{trend}"
+            f"{accuracy_str} accuracy{gap_str}{trend}"
         )
         return
 

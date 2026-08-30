@@ -169,13 +169,19 @@ def analyze_session_trends(snapshots: list[dict]) -> dict:
             "concerning": False,
         }
 
-    # Extract accuracy and gap counts
-    accuracies = [s["facts"]["accuracy"] for s in snapshots]
+    # Extract accuracy and gap counts. GH#56/#60: a snapshot's "accuracy" is
+    # None (unmeasured — that hour saw no routing decisions) rather than a
+    # numeric default, so arithmetic on it must be guarded instead of
+    # assuming every snapshot carries a comparable number.
+    accuracies = [s.get("facts", {}).get("accuracy") for s in snapshots]
     gap_counts = [s["gap_count"] for s in snapshots]
 
     first_accuracy = accuracies[0]
     last_accuracy = accuracies[-1]
-    accuracy_change = last_accuracy - first_accuracy  # Negative = degrading
+    accuracy_change = (
+        None if first_accuracy is None or last_accuracy is None
+        else last_accuracy - first_accuracy  # Negative = degrading
+    )
 
     # Detect gap emergence
     gap_emergence = []
@@ -189,8 +195,12 @@ def analyze_session_trends(snapshots: list[dict]) -> dict:
                 "delta": count - gap_counts[i - 1],
             })
 
-    # Determine trend type
-    if accuracy_change > 0.05:
+    # Determine trend type. "unmeasured" when either endpoint has no
+    # accuracy data (GH#56/#60) — distinct from "stable", which asserts we
+    # measured no meaningful change.
+    if accuracy_change is None:
+        trend_type = "unmeasured"
+    elif accuracy_change > 0.05:
         trend_type = "improving"
     elif accuracy_change < -0.05:
         trend_type = "degrading"
@@ -225,16 +235,23 @@ def format_trend_summary(trend: dict) -> str:
 
     lines = []
 
-    # Accuracy trend
-    acc_pct_start = int(trend["first_accuracy"] * 100)
-    acc_pct_end = int(trend["last_accuracy"] * 100)
-    acc_change = int(trend["accuracy_change"] * 100)
-    acc_symbol = "↑" if acc_change > 0 else "↓" if acc_change < 0 else "→"
+    # Accuracy trend. GH#56/#60: first/last/change are None when accuracy was
+    # unmeasured at one or both endpoints — render "n/a" rather than crashing
+    # on `None * 100` or resurrecting a fake number.
+    if trend["first_accuracy"] is None or trend["last_accuracy"] is None:
+        lines.append(
+            f"  Accuracy trend: n/a (unmeasured over {trend['snapshot_count']}h)"
+        )
+    else:
+        acc_pct_start = int(trend["first_accuracy"] * 100)
+        acc_pct_end = int(trend["last_accuracy"] * 100)
+        acc_change = int(trend["accuracy_change"] * 100)
+        acc_symbol = "↑" if acc_change > 0 else "↓" if acc_change < 0 else "→"
 
-    lines.append(
-        f"  Accuracy trend: {acc_pct_start}% {acc_symbol} {acc_pct_end}% "
-        f"({acc_change:+d}pp over {trend['snapshot_count']}h)"
-    )
+        lines.append(
+            f"  Accuracy trend: {acc_pct_start}% {acc_symbol} {acc_pct_end}% "
+            f"({acc_change:+d}pp over {trend['snapshot_count']}h)"
+        )
 
     # Gap emergence timeline
     if trend["gap_emergence"]:

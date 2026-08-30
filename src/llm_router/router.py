@@ -1831,6 +1831,7 @@ async def _finalize_successful_route(
     receipt=None,
     suppress_ledger: bool = False,
     served_from_cache: bool = False,
+    effective_complexity: str = "moderate",
 ) -> None:
     """CHZ-AUD-B-05: single source of truth for the post-success finalization
     side-effects, called from EVERY success path: the primary success path, the
@@ -1976,35 +1977,70 @@ async def _finalize_successful_route(
         log.debug("session_store record failed (non-fatal): %s", _sca_err)
 
     # Routing-decision analytics + per-provider usage auto-logging.
-    if classification_data:
-        try:
-            await cost.log_routing_decision(
-                prompt=prompt,
-                task_type=classification_data.get("task_type", task_type.value),
-                profile=classification_data.get("profile", profile.value),
-                classifier_type=classification_data.get("classifier_type", "unknown"),
-                classifier_model=classification_data.get("classifier_model"),
-                classifier_confidence=classification_data.get("classifier_confidence", 0.0),
-                classifier_latency_ms=classification_data.get("classifier_latency_ms", 0.0),
-                complexity=classification_data.get("complexity", "moderate"),
-                recommended_model=classification_data.get("recommended_model", model),
-                base_model=classification_data.get("base_model", model),
-                was_downshifted=classification_data.get("was_downshifted", False),
-                budget_pct_used=classification_data.get("budget_pct_used", 0.0),
-                quality_mode=classification_data.get("quality_mode", "balanced"),
-                final_model=response.model,
-                final_provider=response.provider,
-                success=True,
-                input_tokens=response.input_tokens,
-                output_tokens=response.output_tokens,
-                cost_usd=response.cost_usd,
-                latency_ms=response.latency_ms,
-                reason_code=classification_data.get("reason_code"),
-                correlation_id=correlation_id,
-                response=response.content,
-                requested_complexity=classification_data.get("requested_complexity"),
-                subject=classification_data.get("subject"),
-            )
+    #
+    # CHZ-AUD (#60): this used to be gated behind `if classification_data:`, so
+    # any call through route_and_call(classification_data=None) never wrote a
+    # routing_decisions row — and that is every call from the primary tool
+    # surface: `llm`, `llm_query`, `llm_code`, `llm_analyze`, `llm_generate`,
+    # `llm_research` (all `tools/text.py`, zero occurrences of
+    # `classification_data` there; the consolidated `llm()` in
+    # `tools/consolidated.py` delegates straight to text.py). Only the
+    # separate `llm_route`/`llm_act` tools (`tools/routing.py`) ever built and
+    # passed this dict, so the table stayed empty for the surface people
+    # actually use. Fixing at this sink (rather than every call site) covers
+    # all current and future callers uniformly.
+    #
+    # When classification_data is None there was no classifier step at all —
+    # not a low-confidence one — so classifier fields that would otherwise
+    # come from a real classifier run (confidence, its latency, budget
+    # pressure, quality mode) are recorded as NULL rather than a
+    # plausible-looking 0.0/"balanced" default. `classifier_type="unhinted"`
+    # marks the row so quality/analytics reports can tell an uninstrumented
+    # caller apart from a real (even low-confidence) classifier run.
+    # `complexity`/`recommended_model`/`base_model` still get honest values
+    # from what this finalizer already has in scope: the complexity that was
+    # actually resolved for model selection, and the model that actually ran.
+    _cd = classification_data or {}
+    _unhinted = classification_data is None
+    try:
+        await cost.log_routing_decision(
+            prompt=prompt,
+            task_type=_cd.get("task_type", task_type.value),
+            profile=_cd.get("profile", profile.value),
+            classifier_type=(
+                "unhinted" if _unhinted else _cd.get("classifier_type", "unknown")
+            ),
+            classifier_model=_cd.get("classifier_model"),
+            classifier_confidence=(
+                None if _unhinted else _cd.get("classifier_confidence", 0.0)
+            ),
+            classifier_latency_ms=(
+                None if _unhinted else _cd.get("classifier_latency_ms", 0.0)
+            ),
+            complexity=_cd.get("complexity", effective_complexity),
+            recommended_model=_cd.get("recommended_model", model),
+            base_model=_cd.get("base_model", model),
+            was_downshifted=_cd.get("was_downshifted", False),
+            budget_pct_used=(
+                None if _unhinted else _cd.get("budget_pct_used", 0.0)
+            ),
+            quality_mode=(
+                None if _unhinted else _cd.get("quality_mode", "balanced")
+            ),
+            final_model=response.model,
+            final_provider=response.provider,
+            success=True,
+            input_tokens=response.input_tokens,
+            output_tokens=response.output_tokens,
+            cost_usd=response.cost_usd,
+            latency_ms=response.latency_ms,
+            reason_code=_cd.get("reason_code"),
+            correlation_id=correlation_id,
+            response=response.content,
+            requested_complexity=_cd.get("requested_complexity"),
+            subject=_cd.get("subject"),
+        )
+        if classification_data:
             if response.provider in {"claude_subscription", "subscription", "anthropic", "claude"}:
                 try:
                     await cost.log_claude_usage(
@@ -2047,8 +2083,8 @@ async def _finalize_successful_route(
                     )
                 except Exception as e:
                     log.debug("Failed to log gemini_usage: %s", e)
-        except Exception as e:
-            log.warning("Failed to log routing decision: %s", e)
+    except Exception as e:
+        log.warning("Failed to log routing decision: %s", e)
 
     # Daily-spend alert (fire-and-forget; never blocks the response). No new spend
     # on a cache hit, so skip (CHZ-AUD-B-05).
@@ -2843,6 +2879,7 @@ async def _dispatch_model_loop(
                     config=config,
                     receipt=_receipt,
                     suppress_ledger=suppress_ledger,
+                    effective_complexity=effective_complexity,
                 )
             except Exception as _fin_err:  # noqa: BLE001 — finalize never fails the turn
                 log.warning("finalize_successful_route failed (non-fatal): %s", _fin_err)
@@ -3096,6 +3133,7 @@ async def _dispatch_model_loop(
                             config=config,
                             receipt=None,
                             suppress_ledger=suppress_ledger,
+                            effective_complexity=effective_complexity,
                         )
                     except Exception as _fin_err:  # noqa: BLE001 — finalize never fails the turn
                         log.warning("finalize_successful_route (emergency) failed (non-fatal): %s", _fin_err)
@@ -3252,6 +3290,7 @@ async def _dispatch_model_loop(
                 chain_attempts=chain_attempts, chain_errors=chain_errors,
                 correlation_id=correlation_id, failed_attempt_cost=_floor_extra,
                 config=config, receipt=None, served_from_cache=True,
+                effective_complexity=effective_complexity,
             )
         except Exception as _fin_err:  # noqa: BLE001 — finalize never fails the turn
             log.warning("finalize_successful_route (exhaustion-floor) failed (non-fatal): %s", _fin_err)
@@ -3570,6 +3609,15 @@ async def route_and_call(
             # record the served exchange's context + analytics (served_from_cache
             # skips spend/ledger/store). Runs before profile resolution, so pass a
             # neutral profile default (only used by the skipped ledger block).
+            # effective_complexity isn't computed yet at this point in the
+            # function (that happens after profile resolution below), so derive
+            # the same honest fallback from the raw complexity_hint here — this
+            # only matters for the classification_data=None routing_decisions
+            # row (#60), not for actual model selection on this cache-hit path.
+            _pre_profile_complexity = (
+                complexity_hint.value if hasattr(complexity_hint, "value")
+                else str(complexity_hint or "moderate")
+            )
             try:
                 await _finalize_successful_route(
                     response=_cached_resp,
@@ -3581,6 +3629,7 @@ async def route_and_call(
                     chain_attempts=[], chain_errors=[], correlation_id=correlation_id,
                     failed_attempt_cost=0.0, config=config, receipt=None,
                     served_from_cache=True,
+                    effective_complexity=_pre_profile_complexity,
                 )
             except Exception as _fin_err:  # noqa: BLE001 — dedupe fail-open: never break the served turn
                 log.warning("finalize_successful_route (idempotency) failed (non-fatal): %s", _fin_err)
@@ -4009,6 +4058,7 @@ async def route_and_call(
                             chain_errors=[], correlation_id=correlation_id,
                             failed_attempt_cost=0.0, config=config, receipt=None,
                             served_from_cache=True,
+                            effective_complexity=effective_complexity,
                         )
                     except Exception as _fin_err:  # noqa: BLE001 — must not fall through to a real call
                         # CHZ-AUD (RED-1): a finalize failure here must NOT be caught
