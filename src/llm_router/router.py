@@ -29,7 +29,6 @@ from llm_router import cost, media, providers
 
 if TYPE_CHECKING:
     from llm_router.agents.base import AgentRoutingPolicy
-from llm_router.audit_routing import audit_routing_turn
 from llm_router.quota_routing import check_quota, raise_quota_denied, record_consumption
 from llm_router.quota_envelope_routing import (
     commit_envelope,
@@ -39,12 +38,6 @@ from llm_router.quota_envelope_routing import (
 from llm_router.budget import get_budget_state, reserve_tokens, release_tokens
 from llm_router.identity import TurnIdentity, current_identity
 from llm_router.idempotency import get_store as _get_idempotency_store
-from llm_router.rbac_routing import (
-    check_model as _rbac_check_model,
-    check_provider as _rbac_check_provider,
-    check_route_prompt,
-    raise_route_prompt_denied,
-)
 from llm_router.redaction_routing import maybe_redact as _maybe_redact
 from llm_router.state import get_active_agent
 from llm_router.codex_agent import CODEX_MODELS, is_codex_available, run_codex
@@ -88,6 +81,15 @@ _COMPLEXITY_TO_PROFILE: dict[Complexity, RoutingProfile] = {
 }
 
 log = get_logger("llm_router.router")
+
+
+class RoutingDenied(RuntimeError):
+    """Every candidate was refused by policy before any dispatch happened.
+
+    Raised when the classification allowlist (T4-M2) or the agent routing
+    policy rejects every model in the chain, so nothing was attempted and
+    nothing was billed. Distinct from a chain that was tried and failed.
+    """
 
 # ── Tracked fire-and-forget tasks ────────────────────────────────────────────
 # Bare ``asyncio.create_task(...)`` with no saved reference has two failure
@@ -2273,10 +2275,13 @@ async def _dispatch_model_loop(
     # raise CostBudgetExceeded with the cheapest projection so the caller
     # knows what cap would have let the turn run.
     cost_skipped: list[tuple[str, float]] = []  # (model, projected_cost)
-    # T1-M3: track candidates skipped because the identity's per-provider
-    # or per-model allow-list refused them. If the whole chain is
-    # rbac-skipped, raise PermissionDenied with the offending model so
-    # the caller knows to broaden the allow-list or change the chain.
+    # T4-M2: track candidates skipped because the per-classification
+    # provider allow-list refused them (the identity-level T1-M3
+    # per-provider/per-model RBAC gate that used to also populate this
+    # list was removed with rbac_routing.py — see GH#68/#70/#71). If the
+    # whole chain is skipped this way, raise PermissionDenied with the
+    # offending model so the caller knows to broaden the allow-list or
+    # change the chain.
     rbac_skipped: list[tuple[str, str]] = []  # (model, why)
     # T3-XL1: track candidates skipped because the agent's routing policy
     # refused them (non-preferred provider under strict mode, or per-turn
@@ -2299,33 +2304,6 @@ async def _dispatch_model_loop(
                 model=model,
             )
             continue
-
-        # T1-M3: per-candidate RBAC (provider + model allow-list).
-        # In strict mode, skip candidates the identity is not allowed
-        # to use; the chain walk advances. In warn mode, log + audit
-        # but allow. In off mode (no identity or no env), no-op. The
-        # check costs nothing when no allow-list is attached to the
-        # identity (the Tier-1 default).
-        if identity is not None:
-            _prov_mode, _prov_ok = _rbac_check_provider(identity, provider)
-            if _prov_mode == "strict" and not _prov_ok:
-                route_log.info(
-                    "rbac_provider_skip",
-                    correlation_id=correlation_id,
-                    provider=provider,
-                    model=model,
-                )
-                rbac_skipped.append((model, f"provider:{provider}"))
-                continue
-            _mod_mode, _mod_ok = _rbac_check_model(identity, model)
-            if _mod_mode == "strict" and not _mod_ok:
-                route_log.info(
-                    "rbac_model_skip",
-                    correlation_id=correlation_id,
-                    model=model,
-                )
-                rbac_skipped.append((model, f"model:{model}"))
-                continue
 
         # T4-M2: per-classification provider allow-list. Operators pin
         # which providers may see which task types (e.g. CODE must
@@ -3263,11 +3241,21 @@ async def _dispatch_model_loop(
     # Precedes the generic RuntimeError for the same reason as the
     # cost-cap raise.
     if (rbac_skipped or policy_skipped) and not chain_attempts and not cost_skipped:
-        from llm_router.enterprise.rbac import Permission, PermissionDenied
+        # GH#68: this used to raise `enterprise.rbac.PermissionDenied`, but that
+        # module is not shipped, so the import itself raised ModuleNotFoundError
+        # and hid the real reason for the refusal. The path is still very much
+        # live — `rbac_skipped` is populated by the classification allowlist
+        # (T4-M2), not by the removed enterprise RBAC — so it needs a real
+        # exception rather than a dead import.
         # AC-6/INV-ROUTE-005: a pre-dispatch denial is a terminal 'cancelled' state
         # (no billable attempt was made) — record it instead of leaving it invisible.
         _emit_ledger_terminal(correlation_id, "cancelled", route_succeeded=False)
-        raise PermissionDenied(identity, Permission.ROUTE_PROMPT)
+        _denied = rbac_skipped or policy_skipped
+        _why = ", ".join(f"{m} ({reason})" for m, reason in _denied[:5])
+        raise RoutingDenied(
+            "Every candidate model was refused by policy before dispatch: "
+            f"{_why}. Broaden the policy or change the chain."
+        )
 
     # Build diagnostic chain summary showing every model that was tried
     chain_summary = ""
@@ -3479,60 +3467,6 @@ async def route_and_call(
     if identity is None:
         identity = current_identity()
 
-    # T1-M2 (G-001): RBAC gate on ``Permission.ROUTE_PROMPT``. Three modes
-    # via ``LLM_ROUTER_RBAC_MODE``:
-    #   * off (default) — no-op, preserves Tier-1 env-trust behaviour.
-    #   * warn         — log + audit a denial signal but allow the turn.
-    #     Designed for the dual-write window: ship the check, observe
-    #     which call sites fail, then flip to strict.
-    #   * strict       — raise ``PermissionDenied`` BEFORE any reservation,
-    #     dispatch, or provider call. Caller pays nothing for the deny.
-    # See llm_router.rbac_routing for the policy implementation.
-    _rbac_mode, _rbac_has_perm = check_route_prompt(identity)
-    if _rbac_mode == "strict" and not _rbac_has_perm:
-        try:
-            audit_routing_turn(
-                identity=identity,
-                task_type=str(task_type),
-                complexity=complexity_hint if isinstance(complexity_hint, str) else None,
-                model="(denied)",
-                provider="(denied)",
-                cost_usd=0.0,
-                cached=False,
-                detail_extras={
-                    "correlation_id": correlation_id,
-                    "outcome": "rbac_denied",
-                    "permission": "route_prompt",
-                    "rbac_mode": _rbac_mode,
-                },
-            )
-        except Exception as _audit_err:
-            log.warning("audit_rbac_deny_write_failed", error=str(_audit_err))
-        raise raise_route_prompt_denied(identity)
-    elif _rbac_mode == "warn" and not _rbac_has_perm:
-        # Warn mode: still write a breadcrumb so operators can find
-        # which call sites lack the permission today. action remains
-        # "routed" downstream so the existing dashboard renders these
-        # alongside real routings; the outcome field distinguishes.
-        try:
-            audit_routing_turn(
-                identity=identity,
-                task_type=str(task_type),
-                complexity=complexity_hint if isinstance(complexity_hint, str) else None,
-                model="(warn)",
-                provider="(warn)",
-                cost_usd=0.0,
-                cached=False,
-                detail_extras={
-                    "correlation_id": correlation_id,
-                    "outcome": "rbac_warn_missing_route_prompt",
-                    "permission": "route_prompt",
-                    "rbac_mode": _rbac_mode,
-                },
-            )
-        except Exception as _audit_err:
-            log.warning("audit_rbac_warn_write_failed", error=str(_audit_err))
-
     # F4: per-identity quota gate. Enterprise-gated (LLM_ROUTER_QUOTA_MODE; default
     # strict under enterprise, off in developer). strict + already-over-cap →
     # refuse BEFORE any reservation / dispatch / provider call (zero spend);
@@ -3541,27 +3475,6 @@ async def route_and_call(
     # 🥷 Backslash-security: Enforce auth/authz to prevent unauthorized access.
     _quota_mode, _quota_breached, _quota_info = check_quota(identity)
     if _quota_breached and _quota_mode in ("strict", "warn"):
-        _quota_detail = {
-            "correlation_id": correlation_id,
-            "outcome": "quota_exceeded" if _quota_mode == "strict" else "quota_warn",
-            "quota_mode": _quota_mode,
-        }
-        for _k in ("scope", "identifier", "period", "cap_usd", "consumed_usd"):
-            if _k in _quota_info:
-                _quota_detail[_k] = _quota_info[_k]
-        try:
-            audit_routing_turn(
-                identity=identity,
-                task_type=str(task_type),
-                complexity=complexity_hint if isinstance(complexity_hint, str) else None,
-                model="(quota)",
-                provider="(quota)",
-                cost_usd=0.0,
-                cached=False,
-                detail_extras=_quota_detail,
-            )
-        except Exception as _audit_err:
-            log.warning("audit_quota_write_failed", error=str(_audit_err))
         if _quota_mode == "strict":
             raise raise_quota_denied(_quota_info)
 
@@ -3576,24 +3489,6 @@ async def route_and_call(
         _dl_now = _t_dl.monotonic()
         _dl_remaining = deadline_monotonic - _dl_now
         if _dl_remaining <= 0:
-            try:
-                audit_routing_turn(
-                    identity=identity,
-                    task_type=str(task_type),
-                    complexity=complexity_hint if isinstance(complexity_hint, str) else None,
-                    model="(deadline)",
-                    provider="(deadline)",
-                    cost_usd=0.0,
-                    cached=False,
-                    detail_extras={
-                        "correlation_id": correlation_id,
-                        "outcome": "deadline_exceeded",
-                        "deadline_monotonic": deadline_monotonic,
-                        "over_by_seconds": -_dl_remaining,
-                    },
-                )
-            except Exception as _audit_err:
-                log.warning("audit_deadline_write_failed", error=str(_audit_err))
             raise DeadlineExceeded(
                 f"Routed turn refused: workflow deadline "
                 f"{deadline_monotonic:.3f} (monotonic) already passed "
@@ -3616,23 +3511,6 @@ async def route_and_call(
             log.warning("idempotency_lookup_failed", error=str(_idem_err))
             _cached_resp = None
         if _cached_resp is not None:
-            try:
-                audit_routing_turn(
-                    identity=identity,
-                    task_type=str(task_type),
-                    complexity=complexity_hint if isinstance(complexity_hint, str) else None,
-                    model=getattr(_cached_resp, "model", "unknown") or "unknown",
-                    provider=getattr(_cached_resp, "provider", "unknown") or "unknown",
-                    cost_usd=0.0,
-                    cached=True,
-                    detail_extras={
-                        "correlation_id": correlation_id,
-                        "outcome": "idempotency_dedupe",
-                        "idempotency_key": idempotency_key,
-                    },
-                )
-            except Exception as _audit_err:
-                log.warning("audit_idempotency_dedupe_write_failed", error=str(_audit_err))
             # AC-6/INV-ROUTE-005: a cache hit is a real terminal outcome (no billable
             # attempt) — record it so every route ends in exactly one recorded state.
             _emit_ledger_terminal(correlation_id, "bypassed", route_succeeded=True, agent_session_id=agent_session_id)
@@ -4079,16 +3957,6 @@ async def route_and_call(
                         cost_usd=cached.cost_usd,
                         latency_ms=cached.latency_ms,
                     )
-                    audit_routing_turn(
-                        identity=identity,
-                        task_type=str(task_type),
-                        complexity=effective_complexity,
-                        model=cached.model,
-                        provider=cached.provider,
-                        cost_usd=cached.cost_usd,
-                        cached=True,
-                        detail_extras={"correlation_id": correlation_id},
-                    )
                     # AC-6/INV-ROUTE-005: semantic-cache hit is a bypassed terminal state.
                     _emit_ledger_terminal(correlation_id, "bypassed", route_succeeded=True, agent_session_id=agent_session_id)
                     # CHZ-AUD-B-05 (sibling): a cache-served turn is a real success
@@ -4264,20 +4132,6 @@ async def route_and_call(
         _env_key = None
         _env_mode, _env_ok, _env_key = await reserve_envelope(identity, _reservation)
         if not _env_ok:
-            try:
-                audit_routing_turn(
-                    identity=identity,
-                    task_type=str(task_type),
-                    complexity=effective_complexity,
-                    model="(budget)", provider="(budget)",
-                    cost_usd=0.0, cached=False,
-                    detail_extras={
-                        "correlation_id": correlation_id,
-                        "outcome": "budget_envelope_exceeded",
-                    },
-                )
-            except Exception as _audit_err:
-                log.warning("audit_envelope_write_failed", error=str(_audit_err))
             # RED1-3-03: the envelope was NOT reserved (not _env_ok), so release
             # only the in-process _pending_spend reservation — null _env_key first
             # so the helper does not try to release an envelope that never held.
@@ -4367,25 +4221,6 @@ async def route_and_call(
             async with _budget_lock():
                 _pending_spend = max(0.0, _pending_spend - _reservation)
             await release_envelope(_env_key, _reservation)
-            try:
-                audit_routing_turn(
-                    identity=identity,
-                    task_type=str(task_type),
-                    complexity=effective_complexity,
-                    model="(deadline)",
-                    provider="(deadline)",
-                    cost_usd=0.0,
-                    cached=False,
-                    detail_extras={
-                        "correlation_id": correlation_id,
-                        "outcome": "deadline_exceeded",
-                        "deadline_monotonic": deadline_monotonic,
-                        "elapsed_seconds": _dispatch_started - (_dispatch_started + _dl_remaining_at_dispatch),
-                        "over_by_seconds": -_dl_remaining_at_dispatch,
-                    },
-                )
-            except Exception as _audit_err:
-                log.warning("audit_pre_dispatch_deadline_write_failed", error=str(_audit_err))
             raise DeadlineExceeded(
                 f"Routed turn exceeded workflow deadline during routing setup "
                 f"(deadline_monotonic={deadline_monotonic:.3f}, "
@@ -4423,44 +4258,11 @@ async def route_and_call(
         except asyncio.CancelledError as _cancel_err:
             # T3-M1: external cancellation (parent agent killed, host
             # client disconnected, supervisor pulled the plug). The
-            # routing path must release its budget reservation and
-            # leave a cancel breadcrumb in the audit chain BEFORE
-            # propagating the cancel — otherwise a cancelled turn
-            # leaks _pending_spend forever and disappears from the
-            # audit. Re-raise so the asyncio cancellation chain
-            # remains intact.
-            elapsed = _t.monotonic() - _dispatch_started
-            # G-OBS-2: write the cancel breadcrumb FIRST, before any await.
-            # audit_routing_turn is synchronous, so it cannot be skipped by
-            # the still-pending external cancellation. Under task.cancel() the
-            # cancel stays pending after we catch it here, so the very next
-            # await (the budget lock / envelope release below) re-raises
-            # CancelledError and unwinds out of this handler — previously that
-            # happened BEFORE this row was written, silently losing the
-            # "cancelled" audit record. (The internal-raise path leaves no
-            # pending cancel, so its awaits complete — which is why only the
-            # external-cancel test exposed this.)
-            try:
-                audit_routing_turn(
-                    identity=identity,
-                    task_type=str(task_type),
-                    complexity=effective_complexity,
-                    model="(cancelled)",
-                    provider="(cancelled)",
-                    cost_usd=0.0,
-                    cached=False,
-                    detail_extras={
-                        "correlation_id": correlation_id,
-                        "outcome": "cancelled",
-                        "elapsed_seconds": elapsed,
-                    },
-                )
-            except Exception as _audit_err:
-                log.warning("audit_cancel_write_failed", error=str(_audit_err))
-            # Best-effort async cleanup: release the budget reservation +
-            # envelope. Under external cancel a re-raised CancelledError here
-            # may skip these — acceptable, since the reservation is bounded and
-            # the (now-guaranteed) audit row above is the load-bearing record.
+            # routing path must release its budget reservation before
+            # propagating the cancel — otherwise a cancelled turn leaks
+            # _pending_spend forever. Re-raise so the asyncio cancellation
+            # chain remains intact.
+            # Best-effort async cleanup: release the budget reservation + envelope.
             async with _budget_lock():
                 _pending_spend = max(0.0, _pending_spend - _reservation)
             await release_envelope(_env_key, _reservation)
@@ -4474,25 +4276,6 @@ async def route_and_call(
             # wall-clock-driven timeout. ``_deadline_is_tighter`` was
             # computed at the start of the try block.
             if _deadline_is_tighter and deadline_monotonic is not None:
-                try:
-                    audit_routing_turn(
-                        identity=identity,
-                        task_type=str(task_type),
-                        complexity=effective_complexity,
-                        model="(deadline)",
-                        provider="(deadline)",
-                        cost_usd=0.0,
-                        cached=False,
-                        detail_extras={
-                            "correlation_id": correlation_id,
-                            "outcome": "deadline_exceeded",
-                            "deadline_monotonic": deadline_monotonic,
-                            "elapsed_seconds": elapsed,
-                            "over_by_seconds": elapsed - (_dl_remaining_at_dispatch or 0.0),
-                        },
-                    )
-                except Exception as _audit_err:
-                    log.warning("audit_deadline_timeout_write_failed", error=str(_audit_err))
                 raise DeadlineExceeded(
                     f"Routed turn exceeded workflow deadline "
                     f"(deadline_monotonic={deadline_monotonic:.3f}, "
@@ -4502,24 +4285,6 @@ async def route_and_call(
                     over_by_seconds=elapsed - (_dl_remaining_at_dispatch or 0.0),
                 ) from _to_err
             # Wall-clock-driven timeout (existing T3-S2 path).
-            try:
-                audit_routing_turn(
-                    identity=identity,
-                    task_type=str(task_type),
-                    complexity=effective_complexity,
-                    model="(timeout)",
-                    provider="(timeout)",
-                    cost_usd=0.0,
-                    cached=False,
-                    detail_extras={
-                        "correlation_id": correlation_id,
-                        "outcome": "wall_clock_exceeded",
-                        "cap_seconds": max_wall_clock_seconds,
-                        "elapsed_seconds": elapsed,
-                    },
-                )
-            except Exception as _audit_err:
-                log.warning("audit_timeout_write_failed", error=str(_audit_err))
             raise WallClockExceeded(
                 f"Routed turn exceeded max_wall_clock_seconds="
                 f"{max_wall_clock_seconds:.3f}s "
@@ -4558,21 +4323,6 @@ async def route_and_call(
         # disproven: those failures came from a leaky TEST (un-drained bg-tasks),
         # not this decrement (identical failures with and without it). With that
         # test fixed, single-release is correct and GATE-green.
-        _success_detail = {"correlation_id": correlation_id}
-        # T4-M1: surface scrub-rate per turn so operators can observe
-        # which PII patterns are firing without persisting any PII.
-        if _redaction_counts:
-            _success_detail["redactions"] = _redaction_counts
-        audit_routing_turn(
-            identity=identity,
-            task_type=str(task_type),
-            complexity=effective_complexity,
-            model=getattr(response, "model", "unknown") or "unknown",
-            provider=getattr(response, "provider", "unknown") or "unknown",
-            cost_usd=float(getattr(response, "cost_usd", 0.0) or 0.0),
-            cached=False,
-            detail_extras=_success_detail,
-        )
         # RED1-8-01: the TRUE turn cost is this final response's cost PLUS the
         # already-billed cost of any prior attempts a gate/quality check rejected
         # (carried out of the dispatch loop on chain_attempt_cost_usd). Settling
@@ -4881,7 +4631,6 @@ async def route_and_stream(
 
     Raises:
         BudgetExceededError: Monthly spend exceeded.
-        PermissionDenied: RBAC gate denied Permission.ROUTE_PROMPT.
         ValueError: No models available for task/profile.
         RuntimeError: All models failed (wraps last error).
         DeadlineExceeded: Absolute deadline passed before route could start.
@@ -4894,28 +4643,6 @@ async def route_and_stream(
     # Tier-1 identity resolution
     if identity is None:
         identity = current_identity()
-
-    # ── PREFLIGHT: RBAC gate ──────────────────────────────────────────────
-    _rbac_mode, _rbac_has_perm = check_route_prompt(identity)
-    if _rbac_mode == "strict" and not _rbac_has_perm:
-        try:
-            audit_routing_turn(
-                identity=identity,
-                task_type=str(task_type),
-                complexity=complexity_hint if isinstance(complexity_hint, str) else None,
-                model="(denied)",
-                provider="(denied)",
-                outcome="rbac_denied",
-                detail="Permission.ROUTE_PROMPT denied",
-                cost_usd=0.0,
-                latency_ms=0.0,
-            )
-        except Exception as e:
-            log.warning("RBAC audit write failed: %s", e)
-        raise PermissionError(
-            "RBAC: You don't have permission to route prompts. "
-            "Contact your admin or set LLM_ROUTER_RBAC_MODE=warn."
-        )
 
     # ── PREFLIGHT: Deadline check ─────────────────────────────────────────
     if deadline_monotonic is not None and time.monotonic() >= deadline_monotonic:
@@ -4946,20 +4673,6 @@ async def route_and_stream(
 
     if not models_to_try:
         error_detail = f"No models available for {task_type.value} / {profile.value}"
-        try:
-            audit_routing_turn(
-                identity=identity,
-                task_type=str(task_type),
-                complexity=effective_complexity,
-                model="(none)",
-                provider="(none)",
-                outcome="no_models_available",
-                detail=error_detail,
-                cost_usd=0.0,
-                latency_ms=0.0,
-            )
-        except Exception as e:
-            log.warning("Audit write failed: %s", e)
         raise ValueError(
             f"{error_detail}. "
             "Fix: run `llm_router doctor` to diagnose, then install Ollama (free) "

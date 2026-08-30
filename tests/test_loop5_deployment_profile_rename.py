@@ -206,25 +206,13 @@ def test_hook_detector_both_unset_is_not_enterprise(
 
 
 # ── 7. Cross-check: every slice-3-era consumer still works ──────────────
-
-
-def test_rbac_mode_honours_new_env(monkeypatch) -> None:
-    """Mirror of ``test_enterprise_profile_flips_all_three_defaults``
-    from the slice-3 test file, but using the new env name. Pin that
-    the chain still works through the rename."""
-    monkeypatch.setenv("LLM_ROUTER_DEPLOYMENT_PROFILE", "enterprise")
-    from llm_router.rbac_routing import _resolve_mode
-
-    assert _resolve_mode() == "strict"
-
-
-def test_audit_disabled_honours_new_env(monkeypatch) -> None:
-    monkeypatch.setenv("LLM_ROUTER_DEPLOYMENT_PROFILE", "enterprise")
-    monkeypatch.setenv("LLM_ROUTER_AUDIT_DISABLED", "1")
-    from llm_router.audit_routing import _audit_disabled
-
-    # Under enterprise the env is refused — audit stays on.
-    assert _audit_disabled() is False
+#
+# This section used to also cover ``rbac_routing._resolve_mode`` (G-001)
+# and ``audit_routing._audit_disabled`` (G-003) honouring the renamed env.
+# Both modules depended entirely on ``llm_router.enterprise``, which this
+# distribution never shipped, so neither ever actually enforced anything
+# here (GH#68/#71) and both were removed rather than fixed. Only the
+# live consumer (redaction) is checked below.
 
 
 def test_redaction_honours_new_env(monkeypatch) -> None:

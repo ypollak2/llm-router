@@ -34,7 +34,6 @@ from typing import Any
 import pytest
 
 from llm_router import router as router_mod
-from llm_router.audit_routing import reset_audit_log_for_tests
 from llm_router.classification_allowlist import (
     MODE_OFF,
     MODE_STRICT,
@@ -51,16 +50,6 @@ def clean_env(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.delenv("LLM_ROUTER_CLASSIFICATION_ALLOWLIST", raising=False)
     monkeypatch.delenv("LLM_ROUTER_CLASSIFICATION_ALLOWLIST_MODE", raising=False)
     yield
-
-
-@pytest.fixture
-def isolated_audit_db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    db = tmp_path / "audit.db"
-    monkeypatch.setenv("LLM_ROUTER_AUDIT_PATH", str(db))
-    monkeypatch.delenv("LLM_ROUTER_AUDIT_DISABLED", raising=False)
-    reset_audit_log_for_tests()
-    yield db
-    reset_audit_log_for_tests()
 
 
 @pytest.fixture
@@ -238,14 +227,13 @@ def test_entry_not_list_is_skipped(
 # Pattern mirrors T1-M3: one mocked-dispatch test pins the wiring
 # (identity → _dispatch_model_loop), one un-mocked test pins the
 # *actual* gate firing inside the loop by setting up a configuration
-# where every candidate is forbidden and asserting PermissionDenied.
+# where every candidate is forbidden and asserting RoutingDenied.
 
 
 @pytest.mark.asyncio
 async def test_wiring_dispatch_runs_under_off_mode(
     clean_env,
     monkeypatch: pytest.MonkeyPatch,
-    isolated_audit_db: Path,
     isolated_idempotency,
 ) -> None:
     """Sanity: off mode does not block dispatch. Pins that the
@@ -272,18 +260,17 @@ async def test_wiring_dispatch_runs_under_off_mode(
 async def test_strict_with_all_providers_forbidden_raises_permission_denied(
     clean_env,
     monkeypatch: pytest.MonkeyPatch,
-    isolated_audit_db: Path,
     isolated_idempotency,
 ) -> None:
     """The actual gate firing: pin CODE to a provider that no chain
-    member belongs to, and assert PermissionDenied bubbles up via the
+    member belongs to, and assert RoutingDenied bubbles up via the
     T1-M3 post-loop surface (the classification skip reuses
     rbac_skipped so the same error semantics apply).
 
     No dispatch mock — this exercises the real candidate walk inside
     ``_dispatch_model_loop`` so the gate is actually exercised end-to-end.
     """
-    from llm_router.enterprise.rbac import PermissionDenied
+    from llm_router.router import RoutingDenied
 
     monkeypatch.setenv("LLM_ROUTER_CLASSIFICATION_ALLOWLIST_MODE", "strict")
     monkeypatch.setenv(
@@ -291,7 +278,7 @@ async def test_strict_with_all_providers_forbidden_raises_permission_denied(
         '{"code": ["non-existent-provider"]}',
     )
 
-    with pytest.raises(PermissionDenied):
+    with pytest.raises(RoutingDenied):
         await route_and_call(
             task_type=TaskType.CODE,
             prompt="hi",
@@ -302,7 +289,6 @@ async def test_strict_with_all_providers_forbidden_raises_permission_denied(
 async def test_strict_other_classification_unaffected(
     clean_env,
     monkeypatch: pytest.MonkeyPatch,
-    isolated_audit_db: Path,
     isolated_idempotency,
 ) -> None:
     """Opt-in posture pinned at integration level: CODE locked to

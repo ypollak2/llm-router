@@ -125,20 +125,21 @@ def test_enterprise_profile_flips_forecast_alongside_other_safety_defaults(
     monkeypatch,
 ) -> None:
     """Smoke: setting LLM_ROUTER_PROFILE=enterprise flips the forecast
-    default the same way it flips RBAC/audit/redaction (slice 3).
-    One env, four safety-feature defaults aligned."""
-    from llm_router.audit_routing import _audit_disabled
-    from llm_router.rbac_routing import _resolve_mode as _rbac_resolve_mode
+    default the same way it flips redaction (slice 3).
+
+    Originally also asserted the matching RBAC (G-001, ``rbac_routing.py``)
+    and audit (G-003, ``audit_routing.py``) flips here. Both modules
+    depended entirely on ``llm_router.enterprise``, which this
+    distribution never shipped, so neither ever actually enforced
+    anything in this package (GH#68/#71) and both were removed rather
+    than fixed. Only the two safety defaults that still exist are
+    asserted below."""
     from llm_router.redaction_routing import _redaction_enabled
 
     # All envs unset, profile=enterprise.
     monkeypatch.setenv("LLM_ROUTER_PROFILE", "enterprise")
-    monkeypatch.delenv("LLM_ROUTER_RBAC_MODE", raising=False)
-    monkeypatch.delenv("LLM_ROUTER_AUDIT_DISABLED", raising=False)
     monkeypatch.delenv("LLM_ROUTER_REDACTION", raising=False)
     monkeypatch.delenv("LLM_ROUTER_BUDGET_FORECAST_MODE", raising=False)
 
-    assert _rbac_resolve_mode() == "strict"      # G-001
-    assert _audit_disabled() is False             # G-003
     assert _redaction_enabled() is True           # G-012
-    assert _forecast_mode() == "strict"           # G-016 (new)
+    assert _forecast_mode() == "strict"           # G-016

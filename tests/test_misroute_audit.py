@@ -8,11 +8,14 @@ the downstream package had this capability and LLM Router did not — one of fou
 public symbols reached downstream and defined nowhere here.
 
 The port is deliberately NOT named ``audit_routing`` upstream, because
-``llm_router.audit_routing`` already exists as an unrelated feature (a live
-per-turn compliance log). Both repositories having a file at that path with
-disjoint APIs is what would have made a file-level sync silently delete one of
-them. ``test_no_collision_with_the_live_audit_log`` below asserts the two stay
-distinguishable.
+``llm_router.audit_routing`` used to exist as a separate, unrelated feature (a
+live per-turn compliance log). Both repositories having a file at that path
+with disjoint APIs would have made a file-level sync silently delete one of
+them. ``audit_routing.py`` was itself removed in GH#68/#70/#71 (it depended
+entirely on ``llm_router.enterprise``, which this distribution never shipped,
+so the feature never worked), which retires that specific collision risk —
+noted here rather than silently dropped, since this docstring used to point
+at a test that asserted it.
 
 WHAT IS ASSERTED, AND WHY EACH ONE
 ==================================
@@ -308,23 +311,24 @@ class TestCli:
         assert "disabled" in capsys.readouterr().out.lower()
 
 
-def test_no_collision_with_the_live_audit_log():
-    """The two audit features must stay distinguishable in both directions.
+def test_audit_routing_module_is_gone():
+    """Pins the GH#68/#70/#71 removal rather than silently losing coverage.
 
-    ``llm_router.audit_routing`` is a live per-turn compliance log; this module is
-    an offline misroute scorer. They shared a filename downstream, and a
-    file-level sync between the repositories would have overwritten one with
-    the other in silence. Asserting the separation here means a later rename
-    that recreates the collision fails a test instead of losing a feature.
+    This used to be ``test_no_collision_with_the_live_audit_log``, which
+    imported ``llm_router.audit_routing`` (a live per-turn compliance log)
+    alongside this module and asserted their exported names never collided —
+    the two shared a filename downstream, and a file-level sync could have
+    silently overwritten one with the other.
+
+    ``audit_routing.py`` depended entirely on ``llm_router.enterprise``,
+    which this distribution never shipped, so the feature it implemented
+    never actually worked here (GH#68/#71) and was removed rather than
+    fixed. That retires the collision this test used to guard: there is
+    nothing left for ``misroute_audit`` to collide with. If a module named
+    ``llm_router.audit_routing`` reappears, this test should be replaced with
+    a real collision check again rather than deleted quietly.
     """
-    import llm_router.audit_routing as live
-    import llm_router.misroute_audit as offline
+    import importlib
 
-    assert live.__name__ != offline.__name__
-    live_api = {n for n in dir(live) if not n.startswith("_")}
-    offline_api = {n for n in dir(offline) if not n.startswith("_")}
-    shared = {n for n in live_api & offline_api if n in offline.__all__}
-    assert not shared, (
-        f"the two audit modules now export the same names ({sorted(shared)}), "
-        f"which is the collision that made this port necessary in the first place"
-    )
+    with pytest.raises(ModuleNotFoundError):
+        importlib.import_module("llm_router.audit_routing")
