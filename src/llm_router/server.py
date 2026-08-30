@@ -261,12 +261,23 @@ def _render_router_status(
     try:
         config = get_config()
     except Exception:
-        # Routing config failed to validate. Most likely cause:
-        # ``LLM_ROUTER_PROFILE`` is being used for the deployment-profile
-        # axis (slice 3) but llm_router's routing ``Config`` expects one
-        # of ``budget/balanced/premium/quota_balanced/subscription_local``
-        # for the same env. Surface a useful message rather than
-        # crashing the resource handler.
+        # Routing config failed to validate. Most likely cause (GH#65):
+        # ``LLM_ROUTER_PROFILE`` is set to a deployment-profile value
+        # (``developer``/``enterprise``) but the routing ``RouterConfig``
+        # (pydantic-settings) still binds its ``llm_router_profile`` field
+        # to that same env name and requires one of ``budget/balanced/
+        # premium/reasoning/quota_balanced/subscription_local`` — so a
+        # deployment-profile value raises a validation error here instead
+        # of being silently ignored.
+        #
+        # Note this is a DIFFERENT collision site than the one GH#65 fixed
+        # in ``repo_config.py``: that module's ``effective_profile()`` now
+        # reads the de-collided ``LLM_ROUTER_COST_PROFILE`` (with a
+        # value-domain-filtered legacy fallback) and never raises. This
+        # pydantic-settings field still reads the raw legacy env name
+        # directly and is NOT yet de-collided — this except-block remains
+        # the load-bearing workaround for it. Surface a useful message
+        # rather than crashing the resource handler.
         return "\n".join([
             "Profile: enterprise",
             "Status: ok",

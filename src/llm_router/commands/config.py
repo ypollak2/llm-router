@@ -140,7 +140,7 @@ def _run_config(flags: list[str]) -> None:
     # Effective settings
     enforce = merged.effective_enforce()
     profile = merged.effective_profile() or "balanced  (default)"
-    print(f"  {_bold('Effective profile:')}  {_green(profile)}")
+    print(f"  {_bold('Effective cost profile:')}  {_green(profile)}")
     print(f"  {_bold('Enforce mode:')}       {_yellow(enforce)}")
 
     if merged.block_providers:

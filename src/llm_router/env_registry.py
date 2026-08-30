@@ -78,6 +78,7 @@ ENV_REGISTRY: dict[str, tuple[str, str, int]] = {
     "LLM_ROUTER_COMPRESS_RESPONSE": ("llm_router", "tools/text.py", 1),
     "LLM_ROUTER_CONFIDENCE_THRESHOLD": ("llm_router", "hooks/auto-route.py", 1),
     "LLM_ROUTER_CONTEXT_OPTIMIZER": ("llm_router", "context.py", 1),
+    "LLM_ROUTER_COST_PROFILE": ("llm_router", "repo_config.py", 1),
     "LLM_ROUTER_CP_AUDIT_PATH": ("llm_router", "control_plane/audit.py", 1),
     "LLM_ROUTER_CP_POSTGRES_DSN": ("llm_router", "control_plane/store_postgres.py", 1),
     "LLM_ROUTER_CP_STORE_PATH": ("llm_router", "commands/cp.py", 2),

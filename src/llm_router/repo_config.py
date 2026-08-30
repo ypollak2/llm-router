@@ -20,11 +20,70 @@ from typing import Any
 
 import yaml
 
+from llm_router.types import RoutingProfile
+
 # ── Schema ────────────────────────────────────────────────────────────────────
 
-VALID_PROFILES  = {"budget", "balanced", "premium"}
+# Derived from the real routing-tier enum (llm_router.types.RoutingProfile)
+# rather than a hand-maintained literal — GH#65 found this set had drifted
+# (it was missing "reasoning" and "quota_balanced"/"subscription_local" were
+# reintroduced from the plan by hand and still incomplete). Keeping it wired
+# to the enum means it can't silently drift again.
+VALID_PROFILES  = {p.value for p in RoutingProfile}
 VALID_ENFORCE   = {"shadow", "suggest", "advise", "smart", "enforce", "hard", "soft", "off"}
 VALID_TASK_TYPES = {"query", "code", "analyze", "generate", "research", "image", "video", "audio"}
+
+# ── GH#65: LLM_ROUTER_PROFILE collision ─────────────────────────────────────
+#
+# LLM_ROUTER_PROFILE used to be read here for the *routing cost tier*
+# (budget/balanced/premium/...) AND separately by llm_router.profile /
+# identity.py / server.py for the completely unrelated *enterprise identity*
+# axis (developer/enterprise). profile.py already renamed its side to
+# LLM_ROUTER_DEPLOYMENT_PROFILE (see PROFILE_ENV there) — re-renaming that
+# again would break users who already followed that deprecation warning
+# (this is what the GH#65 reporter hit: they renamed their env per the
+# identity-side guidance and silently broke routing, which fell through to
+# None because this reader never knew LLM_ROUTER_DEPLOYMENT_PROFILE existed).
+#
+# So the ROUTING side takes the new name instead: LLM_ROUTER_COST_PROFILE.
+# The legacy LLM_ROUTER_PROFILE name is still honored as a fallback, but
+# ONLY when its value is actually a valid routing tier — a value like
+# "developer" or "enterprise" is identity-axis data, not routing data, and
+# must never be misinterpreted here. This value-domain filter is what makes
+# the two readers mutually exclusive even during the deprecation window.
+_COST_PROFILE_ENV = "LLM_ROUTER_COST_PROFILE"
+_LEGACY_COST_PROFILE_ENV = "LLM_ROUTER_PROFILE"
+
+# One-shot latch so the deprecation warning fires once per process, mirroring
+# the pattern in llm_router.profile (_legacy_warning_emitted /
+# _maybe_emit_legacy_warning) rather than inventing a second mechanism.
+_legacy_cost_profile_warning_emitted = False
+
+
+def _maybe_emit_legacy_cost_profile_warning(value: str) -> None:
+    """Print a one-shot deprecation warning when LLM_ROUTER_PROFILE is read
+    as a routing cost tier. Latched at module level so a long-running
+    process emits the message once, not on every ``effective_profile()``
+    call."""
+    global _legacy_cost_profile_warning_emitted
+    if _legacy_cost_profile_warning_emitted:
+        return
+    _legacy_cost_profile_warning_emitted = True
+    import sys
+    sys.stderr.write(
+        f"[llm_router] DEPRECATED: {_LEGACY_COST_PROFILE_ENV}={value!r} read "
+        f"as a routing cost tier; this env name collides with the "
+        f"enterprise-identity profile axis (see llm_router.profile). Rename "
+        f"your env to {_COST_PROFILE_ENV} (GH#65). Backward-compat support "
+        "will be removed in a future release.\n"
+    )
+
+
+def _reset_legacy_cost_profile_warning_latch() -> None:
+    """Test affordance — reset the one-shot latch so the warning can be
+    re-observed in subsequent tests. Not part of the public API."""
+    global _legacy_cost_profile_warning_emitted
+    _legacy_cost_profile_warning_emitted = False
 
 
 @dataclass
@@ -40,7 +99,7 @@ class RepoConfig:
 
     All fields are optional — omitting a field means "use the default".
     """
-    profile: str | None = None                            # budget | balanced | premium
+    profile: str | None = None                            # budget | balanced | premium | reasoning | quota_balanced | subscription_local
     enforce: str | None = None                            # shadow | suggest | enforce
     block_providers: list[str] = field(default_factory=list)
     block_models: list[str] = field(default_factory=list)   # model-level deny (v3.2)
@@ -85,10 +144,26 @@ class RepoConfig:
             return "smart"
 
     def effective_profile(self) -> str | None:
-        """Return profile: env var wins, then repo config."""
-        env = os.environ.get("LLM_ROUTER_PROFILE", "").lower()
+        """Return profile: env var wins, then repo config.
+
+        Reads ``LLM_ROUTER_COST_PROFILE`` first (GH#65). Falls back to the
+        legacy ``LLM_ROUTER_PROFILE`` name only when its value is a valid
+        routing tier — that same env name is also read by
+        ``llm_router.profile`` / ``identity.py`` / ``server.py`` for the
+        unrelated enterprise-identity axis (``developer``/``enterprise``),
+        so a value outside the routing-tier domain is never routing data
+        and must be ignored here rather than misinterpreted.
+        """
+        # Literal env names here (not the module constants below) so the
+        # env_registry AST scan (tests/test_env_registry.py) can see these
+        # reads directly instead of needing an _INDIRECT_READS exemption.
+        env = os.environ.get("LLM_ROUTER_COST_PROFILE", "").lower()
         if env in VALID_PROFILES:
             return env
+        legacy = os.environ.get("LLM_ROUTER_PROFILE", "").lower()
+        if legacy in VALID_PROFILES:
+            _maybe_emit_legacy_cost_profile_warning(legacy)
+            return legacy
         return self.profile
 
 
