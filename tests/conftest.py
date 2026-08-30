@@ -601,6 +601,29 @@ def _reset_quality_store():
 
 
 @pytest.fixture(autouse=True)
+async def _drain_judge_background_tasks():
+    """Await/cancel every fire-and-forget judge task before the next test runs.
+
+    GH#75: ``llm_router.judge.evaluate_response_async`` schedules
+    ``_evaluate_background`` via ``asyncio.create_task`` and never awaits it.
+    Because ``asyncio_default_fixture_loop_scope = "session"`` (see
+    pyproject.toml) gives the whole suite ONE event loop, a task created by
+    one test can still be pending — and gets scheduled to run — during a
+    LATER test's own ``await`` points. That later test's
+    ``patch("litellm.acompletion", ...)`` is a global attribute patch, so the
+    orphaned task's ``call_llm(model="claude-haiku-4-5-20251001", ...)`` call
+    is dispatched through the later test's mock and silently overwrites its
+    captured request kwargs — the "expected provider X, got
+    claude-haiku-4-5-20251001" flake in tests/test_integration.py. Draining
+    here (after every test, in addition to whatever `mock_env`/`temp_db`
+    reset) guarantees no judge task ever survives to poison another test.
+    """
+    yield
+    from llm_router.judge import drain_pending_judge_tasks
+    await drain_pending_judge_tasks()
+
+
+@pytest.fixture(autouse=True)
 def _hermetic_host_state(monkeypatch):
     """Isolate router tests from real host state (repo config + CLI probes).
 
@@ -636,6 +659,22 @@ def _hermetic_host_state(monkeypatch):
     # re-enables per-test (test-level monkeypatch wins). OKF stays ON — it is
     # part of the shipped default and its suites exercise it with a tmp base.
     monkeypatch.setenv("LLM_ROUTER_ENSEMBLE", "off")
+    # GH#75: judge.evaluate_response_async samples LLM_ROUTER_JUDGE_SAMPLE_RATE
+    # (default 0.1 in production) and, on a hit, fires an unawaited
+    # asyncio.create_task that calls litellm.acompletion(model="claude-haiku-
+    # 4-5-20251001", ...) via call_llm. Any test that patches
+    # "litellm.acompletion" is a global attribute patch, so if that background
+    # task happens to run before the test's own assertion — a real race, since
+    # the task is scheduled, not awaited — it silently overwrites the test's
+    # captured request kwargs with the judge's model. That's the exact
+    # "expected provider X, got claude-haiku-4-5-20251001" flake in
+    # tests/test_integration.py, and it fired ~10% of the time (whenever
+    # random.random() happened to clear the default sample rate) independent
+    # of test order. Default sampling OFF here so ordinary tests never race
+    # this task at all; tests/test_judge.py explicitly re-enables it per test
+    # (test-level monkeypatch wins over this autouse default), and
+    # `_drain_judge_background_tasks` below still cleans up after those.
+    monkeypatch.setenv("LLM_ROUTER_JUDGE_SAMPLE_RATE", "0")
     yield
 
 

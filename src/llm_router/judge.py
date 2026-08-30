@@ -17,6 +17,21 @@ from datetime import datetime, timedelta
 from llm_router.cost import _get_db
 from llm_router.providers import call_llm
 
+# GH#75: fire-and-forget tasks created below outlive the test that spawned
+# them. pytest-asyncio's `asyncio_default_fixture_loop_scope = "session"`
+# means every test shares ONE event loop, so a judge task created by test A
+# (via `asyncio.create_task`, never awaited) can still be pending when test B
+# starts. Since `call_llm` -> `litellm.acompletion` is patched globally by
+# whichever test currently holds a `with patch("litellm.acompletion", ...)`
+# block, test A's orphaned judge call gets dispatched through test B's mock
+# and silently overwrites test B's captured request kwargs with
+# `model="claude-haiku-4-5-20251001"` — the exact "wrong provider" flake
+# reported in GH#75 (test_integration.py comparing captured["model"] against
+# the test's own override). Tracking every scheduled task here lets a test
+# fixture (`drain_pending_judge_tasks`) await/cancel them before the next
+# test runs, instead of letting them survive into it.
+_pending_tasks: set[asyncio.Task] = set()
+
 
 async def evaluate_response_async(
     prompt: str,
@@ -42,7 +57,32 @@ async def evaluate_response_async(
         return
 
     # Fire background task without awaiting
-    asyncio.create_task(_evaluate_background(prompt, response, task_type, routing_decision_id))
+    task = asyncio.create_task(_evaluate_background(prompt, response, task_type, routing_decision_id))
+    # Track real Task/Future objects only — tests that patch
+    # `asyncio.create_task` itself get a MagicMock back, which is neither
+    # awaitable by `asyncio.wait` nor a real leak risk.
+    if isinstance(task, asyncio.Future):
+        _pending_tasks.add(task)
+        task.add_done_callback(_pending_tasks.discard)
+
+
+async def drain_pending_judge_tasks(timeout: float = 2.0) -> None:
+    """Test-only helper: await (or cancel) every in-flight judge task.
+
+    GH#75: without this, a judge task scheduled by one test can execute
+    during a LATER test's `await`s, on the session-wide event loop, and hit
+    whatever mock that later test currently has installed. Call this from an
+    autouse fixture after each test so no task ever crosses a test boundary.
+    """
+    if not _pending_tasks:
+        return
+    pending = list(_pending_tasks)
+    _done, still_pending = await asyncio.wait(pending, timeout=timeout)
+    for t in still_pending:
+        t.cancel()
+    if still_pending:
+        await asyncio.gather(*still_pending, return_exceptions=True)
+    _pending_tasks.difference_update(pending)
 
 
 async def _evaluate_background(
