@@ -28,15 +28,6 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # The pinned skill-publish action shells out to corepack pnpm, which
-      # now resolves to 11.24.0 and requires `node:sqlite` (Node 22+). The
-      # runner's default Node 20 makes pnpm crash on module load, before the
-      # action reads any of our files. Pin Node 22 so the action can start.
-      - name: Use Node 22 (pnpm 11 needs node:sqlite)
-        uses: actions/setup-node@v4
-        with:
-          node-version: '22'
-
       - name: Validate skill package
         uses: hashgraph-online/skill-publish@df6ae95e010d9792158a441eec9ac50d4d17139d
         with:
