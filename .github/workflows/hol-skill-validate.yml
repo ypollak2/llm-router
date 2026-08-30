@@ -24,6 +24,16 @@ jobs:
       group: hol-skill-validate-${{ github.event.pull_request.number || github.ref }}
       cancel-in-progress: true
     runs-on: ubuntu-latest
+    # The pinned skill-publish action runs its own `actions/setup-node@v4`
+    # with node-version 20, then `pnpm install` via corepack. Corepack
+    # defaults to fetching pnpm *latest*, which is now 11.24.0 and needs the
+    # `node:sqlite` builtin (Node 22.13+), so it crashes on module load before
+    # reading any skill file. We cannot change the action's Node version from
+    # out here -- its setup-node step overrides ours -- but corepack reads
+    # this env var, so telling it not to upgrade keeps it on a pnpm that runs
+    # on Node 20.
+    env:
+      COREPACK_DEFAULT_TO_LATEST: "0"
     steps:
       - name: Checkout
         uses: actions/checkout@v4
