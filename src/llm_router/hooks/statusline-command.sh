@@ -346,38 +346,72 @@ case "$enforce" in
 esac
 
 # ── ❤ Health (mirrors llm_router.observability.surface_status, dependency-free) ────────────────
-# down ✗  : no model provider reachable (no API key, no recent local model)
-# degraded ⚠: usage data stale (>30 min)
-# ok ✓     : routing normally
-health=$(CHZ_SAVINGS_LOG="$SAVINGS_LOG" CHZ_USAGE_JSON="$USAGE_JSON" python3 -c '
+# ok ✓      : a provider (cloud key, Claude subscription, or recently-active
+#             Ollama) is configured, and usage data is fresh.
+# degraded ⚠: as ok, but usage data is stale (>30 min).
+# idle ○    : no cloud key/subscription and no Ollama activity in the last 30
+#             min, but a cheap reachability probe confirms Ollama is up —
+#             quiet, not broken (GH#63).
+# down ✗    : no cloud key/subscription configured AND Ollama is unreachable —
+#             the ONLY combination that earns the outage glyph (GH#63).
+health=$(CHZ_SAVINGS_LOG="$SAVINGS_LOG" CHZ_USAGE_JSON="$USAGE_JSON" CHZ_OLLAMA_URL="${OLLAMA_URL:-http://localhost:11434}" python3 -c '
 import json, os, time
 now = time.time()
+
+# GH#63: match install_hooks.check_api_keys() truthy parsing EXACTLY. A second,
+# divergent parser of LLM_ROUTER_CLAUDE_SUBSCRIPTION is how this class of bug
+# recurs — "1"/"true"/"yes", case-insensitive, same as doctor reports.
 keys = ("ANTHROPIC_API_KEY","OPENAI_API_KEY","GEMINI_API_KEY","DEEPSEEK_API_KEY","GROQ_API_KEY")
-providers = any(os.environ.get(k) for k in keys)
-if not providers:
-    try:
-        from datetime import datetime
-        for line in reversed(open(os.environ["CHZ_SAVINGS_LOG"]).readlines()[-200:]):
-            r = json.loads(line)
-            m = r.get("model","")
-            if isinstance(m,str) and m.startswith("ollama/"):
-                ts = datetime.fromisoformat(r["timestamp"]).timestamp()
-                if now - ts <= 1800:
-                    providers = True; break
-    except Exception:
-        pass
+subscription_on = os.environ.get("LLM_ROUTER_CLAUDE_SUBSCRIPTION","").lower() in ("1","true","yes")
+providers = any(os.environ.get(k) for k in keys) or subscription_on
+
+# Recent Ollama activity is an ACTIVITY signal, kept separate from "providers"
+# so it cannot stand in for "a provider is configured" (GH#63 root cause #1)
+# while still counting as live evidence routing is working (GH#63 root cause #2
+# is handled below: its ABSENCE no longer means "down" by itself).
+ollama_recent = False
+try:
+    from datetime import datetime
+    for line in reversed(open(os.environ["CHZ_SAVINGS_LOG"]).readlines()[-200:]):
+        r = json.loads(line)
+        m = r.get("model","")
+        if isinstance(m,str) and m.startswith("ollama/"):
+            ts = datetime.fromisoformat(r["timestamp"]).timestamp()
+            if now - ts <= 1800:
+                ollama_recent = True; break
+except Exception:
+    pass
+
 try:
     stale = (now - os.path.getmtime(os.environ["CHZ_USAGE_JSON"])) > 1800
 except OSError:
     stale = True
-print("down" if not providers else ("degraded" if stale else "ok"))
+
+if providers or ollama_recent:
+    print("degraded" if stale else "ok")
+else:
+    # Nothing configured, no recent local activity. This script runs on every
+    # render (GH#50 history), so the probe must be cheap and MUST NOT raise:
+    # short timeout, any failure at all (network, DNS, missing stdlib bits)
+    # just means "treat as unreachable" — never propagate.
+    reachable = False
+    try:
+        import urllib.request
+        url = os.environ.get("CHZ_OLLAMA_URL","http://localhost:11434").rstrip("/") + "/api/tags"
+        with urllib.request.urlopen(urllib.request.Request(url, method="GET"), timeout=0.3):
+            reachable = True
+    except Exception:
+        reachable = False
+    print("idle" if reachable else "down")
 ' 2>/dev/null)
-# A glyph with no noun is not actionable. `✗` meant "no provider keys in env AND
-# no Ollama call in 30 minutes" — a real fault the reader had no way to name, and
-# the same defect as the unlabelled money figure it sits beside.
+# A glyph with no noun is not actionable. `✗` now means "no provider keys/
+# subscription in env AND Ollama unreachable" — a real fault, distinct from
+# "○ idle" (Ollama reachable, just hasn't run recently) — the same defect as
+# the unlabelled money figure it sits beside.
 case "$health" in
     ok)       parts+=("${_GREEN}✓${_RESET}") ;;
     degraded) parts+=("${_YELLOW}⚠ stale${_RESET}") ;;
+    idle)     parts+=("${_DIM}○ idle${_RESET}") ;;
     down)     parts+=("${_RED}✗ no provider${_RESET}") ;;
 esac
 
