@@ -803,6 +803,64 @@ def _make_output_encoding_safe() -> None:
             pass  # nothing to do; better a mangled glyph than a dead command
 
 
+# Every literal subcommand name dispatched below (GH#61). Used only to power
+# a "did you mean" suggestion for typos — NOT a second source of truth for
+# dispatch itself, so it can drift without breaking anything except the
+# suggestion quality. Keep it roughly in sync with the if/elif chain.
+_KNOWN_SUBCOMMANDS = frozenset(
+    {
+        "install",
+        "uninstall",
+        "update",
+        "setup",
+        "status",
+        "probe",
+        "welcome",
+        "dev-refresh",
+        "serve",
+        "doctor",
+        "init-policy",
+        "demo",
+        "dashboard",
+        "set-enforce",
+        "team",
+        "budget",
+        "config",
+        "profile",
+        "routing",
+        "routing-report",
+        "broker",
+        "gateway",
+        "invoice",
+        "cp",
+        "share",
+        "summary",
+        "onboard",
+        "quickstart",
+        "init-claude-memory",
+        "okf",
+        "tui",
+        "test",
+        "verify",
+        "audit",
+        "last",
+        "replay",
+        "gc",
+        "soak",
+        "retrospect",
+        "snapshot",
+        "stats",
+        "savings-report",
+        "benchmark",
+        "test-delta",
+        "migrate",
+        "team-sync",
+        "policy",
+        "explain-dashboard",
+    }
+)
+
+
 def main() -> None:
     """Unified CLI: dispatches to MCP server or subcommands."""
     _make_output_encoding_safe()
@@ -1025,8 +1083,24 @@ def main() -> None:
     elif args and args[0] == "explain-dashboard":
         from llm_router.commands.explain_dashboard import cmd_explain_dashboard
         sys.exit(cmd_explain_dashboard(args[1:]))
+    elif args:
+        # GH#61: an unrecognized args[0] used to fall through to the final
+        # `else` below and silently start the MCP stdio server, which then
+        # hangs forever waiting for JSON-RPC input on a bare terminal. Any
+        # non-empty, unmatched subcommand belongs here instead — never in
+        # the server-startup branch.
+        import difflib
+
+        suggestion = difflib.get_close_matches(args[0], _KNOWN_SUBCOMMANDS, n=1)
+        msg = f"llm-router: unknown command '{args[0]}' — see 'llm-router --help'"
+        if suggestion:
+            msg += f" (did you mean '{suggestion[0]}'?)"
+        print(msg, file=sys.stderr)
+        sys.exit(2)
     else:
-        # Default: start the MCP server (original behavior)
+        # Default: start the MCP server (original behavior). Only reached
+        # when no CLI arguments were given at all — this is the documented
+        # `llm-router` (no args) behavior.
         from llm_router.server import main as _mcp_main
         _mcp_main()
 
