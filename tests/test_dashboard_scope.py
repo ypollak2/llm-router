@@ -158,12 +158,24 @@ def test_routing_logic_uses_today_cutoff(fake_state_dir, monkeypatch):
     )
 
     # Three rows: two today, one yesterday.
+    #
+    # GH#79: the "today" rows are anchored to start_of_day, NOT to `now`.
+    # They used to be `now - 5` and `now - 100`, which silently assumed the
+    # suite runs more than 100 seconds after local midnight. Inside that
+    # window `now - 100` falls into yesterday, gets correctly excluded, and
+    # the assertion below fails -- which is exactly what happened on a CI
+    # run that started at 23:58 UTC. Anchoring to the day boundary makes the
+    # fixture describe the behaviour under test rather than the wall clock.
+    # Both values are clamped so they never exceed `now` on a run that
+    # starts within a minute of midnight.
+    today_early = min(start_of_day + 1, now)
+    today_later = min(start_of_day + 60, now)
     _seed_tracking_jsonl(
         tracking,
         [
-            {"timestamp": now - 5, "classification_method": "heuristic",
+            {"timestamp": today_later, "classification_method": "heuristic",
              "classification_confidence": 1.0},
-            {"timestamp": now - 100, "classification_method": "heuristic-weak",
+            {"timestamp": today_early, "classification_method": "heuristic-weak",
              "classification_confidence": 0.5},
             {"timestamp": start_of_day - 3600, "classification_method": "ollama",
              "classification_confidence": 0.9},  # yesterday — must be excluded
