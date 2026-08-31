@@ -31,6 +31,37 @@ import multiprocessing
 import os
 from pathlib import Path
 
+import pytest
+
+# GH#84: the project-wide pytest-timeout default (`timeout = 30` in
+# pyproject.toml, mirrored by CI's `--timeout=30`) is sized for ordinary unit
+# tests, not this one. Six real forked processes doing 200 lock-serialized
+# writes apiece across 3 rounds routinely take single-digit seconds when the
+# host is idle, but pytest's own per-test SETUP already includes every
+# autouse fixture, and both setup and this test's own `_run_round` slow down
+# sharply under CPU pressure from whatever else happens to be running at the
+# time — which is exactly what pytest-randomly's shuffled ordering changes
+# from run to run. Confirmed by instrumentation: saturating the host with
+# background CPU load reproduces
+# `Failed: Timeout (>30.0s) from pytest-timeout` deterministically, with
+# `_run_round`'s own `p.join(timeout=JOIN_TIMEOUT_SECONDS)` still in flight —
+# i.e. pytest-timeout's watchdog fires and unwinds the test WHILE worker
+# processes are still writing, orphaning them and (via the enclosing
+# `tempfile.TemporaryDirectory` in the caller) deleting the directory out
+# from under them. That is indistinguishable from "writes were lost" and is
+# the actual GH#84 order-dependent flake — not corrupted/leaked
+# session_store state (instrumented and ruled out: no module-level cache or
+# singleton in session_store.py/paths.py depends on call order, and repeated
+# runs under heavy synthetic thread/CPU load with real accumulated
+# background state from a full suite pass never produced a single genuinely
+# lost marker once the timeout was removed from the equation).
+#
+# `tests/reliability/test_ledger_concurrency.py` — the other real-multiprocess
+# regression test in this suite — already carries the identical
+# `pytest.mark.timeout(180)` override for the same reason; this mirrors that
+# established precedent rather than inventing a parallel mechanism.
+pytestmark = pytest.mark.timeout(180)
+
 N_WORKERS = 6
 ITERATIONS_PER_WORKER = 200
 N_ROUNDS = 3
