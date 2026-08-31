@@ -22,7 +22,7 @@ import urllib.request
 from pathlib import Path
 from typing import Literal
 
-from pydantic import Field, field_validator
+from pydantic import AliasChoices, Field, field_validator
 from pydantic_settings import BaseSettings
 
 from llm_router.paths import state_path
@@ -127,6 +127,65 @@ def validate_ollama_url(url: str) -> str:
     if host.startswith("169.254.") or host.startswith("fe80:") or "169.254.169.254" in host:
         return ""
     return url
+
+
+# ── GH#69: LLM_ROUTER_PROFILE collision, third reader ──────────────────────
+#
+# ``RouterConfig.llm_router_profile`` is the field that actually drives live
+# routing (router.py, orchestrator.py, state.py, tools/routing.py, the
+# dashboard, ...) — unlike ``repo_config.RepoConfig.effective_profile()``,
+# whose only caller is the ``llm_router config`` display (GH#65 fixed THAT
+# reader by adding ``LLM_ROUTER_COST_PROFILE`` with a value-domain-filtered
+# fallback to the legacy name). This field is a THIRD, independent reader:
+# pydantic-settings binds it to ``LLM_ROUTER_PROFILE`` purely by naming
+# convention and validates it strictly against ``RoutingProfile`` — so any
+# value outside the six routing tiers (most notably ``enterprise``/
+# ``developer``, which are ``llm_router.profile`` / ``identity.py``'s
+# UNRELATED deployment-identity axis) raised ``pydantic_core.ValidationError``
+# at ``RouterConfig()`` construction time, which server.py triggers at
+# IMPORT time — so the MCP server could not boot at all under the one env
+# value historically documented to select the enterprise profile.
+#
+# Fix: apply the same value-domain filter GH#65 established, extended so
+# this field (the one that matters for real routing) finally honors
+# ``LLM_ROUTER_COST_PROFILE`` too, with precedence over the legacy name —
+# via ``validation_alias`` below — and a ``mode="before"`` validator that
+# NEVER raises for an unrecognized value: it warns once and falls back to
+# the default profile instead. A value that is merely unrecognized must
+# not prevent the server from starting.
+_VALID_LLM_ROUTER_PROFILES = {p.value for p in RoutingProfile}
+_llm_router_profile_fallback_warning_emitted = False
+
+
+def _maybe_emit_llm_router_profile_fallback_warning(value: str) -> None:
+    """One-shot stderr warning when ``llm_router_profile`` falls back.
+
+    Mirrors the latch pattern in ``llm_router.profile`` /
+    ``llm_router.repo_config`` (``_maybe_emit_legacy_warning`` /
+    ``_maybe_emit_legacy_cost_profile_warning``) so a long-running process
+    emits the message once rather than on every ``RouterConfig()`` build.
+    """
+    global _llm_router_profile_fallback_warning_emitted
+    if _llm_router_profile_fallback_warning_emitted:
+        return
+    _llm_router_profile_fallback_warning_emitted = True
+    import sys
+    sys.stderr.write(
+        f"[llm_router] WARNING: LLM_ROUTER_PROFILE (or LLM_ROUTER_COST_PROFILE) "
+        f"is set to {value!r}, which is not a valid routing tier "
+        f"({sorted(_VALID_LLM_ROUTER_PROFILES)}). Falling back to the default "
+        f"profile ({RoutingProfile.BALANCED.value!r}) instead of crashing. "
+        "If you meant the deployment-identity axis (developer/enterprise), "
+        "set LLM_ROUTER_DEPLOYMENT_PROFILE instead (see llm_router.profile). "
+        "If you meant a routing cost tier, use LLM_ROUTER_COST_PROFILE and "
+        "rename/remove the stale LLM_ROUTER_PROFILE (GH#65/GH#69).\n"
+    )
+
+
+def _reset_llm_router_profile_fallback_warning_latch() -> None:
+    """Test affordance — reset the one-shot latch. Not part of the public API."""
+    global _llm_router_profile_fallback_warning_emitted
+    _llm_router_profile_fallback_warning_emitted = False
 
 
 class RouterConfig(BaseSettings):
@@ -261,7 +320,46 @@ class RouterConfig(BaseSettings):
     replicate_api_token: str = ""   # Replicate — various models
 
     # ── Router settings ──
-    llm_router_profile: RoutingProfile = RoutingProfile.BALANCED
+    # GH#69 (see the block above the class): reads LLM_ROUTER_COST_PROFILE
+    # first (GH#65's de-collided name), then falls back to the legacy
+    # LLM_ROUTER_PROFILE — validated below so neither name can crash
+    # construction when it holds a value outside the routing-tier domain.
+    llm_router_profile: RoutingProfile = Field(
+        default=RoutingProfile.BALANCED,
+        validation_alias=AliasChoices("LLM_ROUTER_COST_PROFILE", "LLM_ROUTER_PROFILE"),
+    )
+
+    @field_validator("llm_router_profile", mode="before")
+    @classmethod
+    def _validate_llm_router_profile(cls, v: object) -> object:
+        """Never let an unrecognized value crash config construction (GH#69).
+
+        A stale ``LLM_ROUTER_PROFILE=enterprise`` (or any other garbage
+        string — this must not special-case ``"enterprise"``) is not a
+        routing tier; raising here took down ``RouterConfig()`` at import
+        time and therefore the whole MCP server. Fall back to the default
+        profile with a one-shot warning instead.
+        """
+        if v is None or isinstance(v, RoutingProfile):
+            return v
+        s = str(v).strip()
+        if not s:
+            return v
+        if s.lower() in _VALID_LLM_ROUTER_PROFILES:
+            return s.lower()
+        # `v` came from whichever alias AliasChoices picked FIRST BY
+        # PRESENCE (LLM_ROUTER_COST_PROFILE if set at all, else the legacy
+        # name) — not by validity. So an invalid LLM_ROUTER_COST_PROFILE
+        # must still give the legacy LLM_ROUTER_PROFILE its own chance
+        # before giving up, exactly mirroring the two-step check in
+        # repo_config.effective_profile() (GH#65).
+        import os
+        legacy = os.environ.get("LLM_ROUTER_PROFILE", "").strip().lower()
+        if legacy and legacy != s.lower() and legacy in _VALID_LLM_ROUTER_PROFILES:
+            return legacy
+        _maybe_emit_llm_router_profile_fallback_warning(s)
+        return RoutingProfile.BALANCED
+
     llm_router_tier: Tier = Tier.FREE
     # RED2-07: a default_factory, not a bare default. As a bare default this
     # expression ran at CLASS-DEFINITION time, freezing the real home directory
@@ -445,6 +543,17 @@ class RouterConfig(BaseSettings):
         "env_file": (Path.home() / ".llm-router" / ".env", ".env"),
         "env_file_encoding": "utf-8",
         "extra": "ignore",
+        # GH#69: llm_router_profile sets an explicit validation_alias
+        # (AliasChoices) to read LLM_ROUTER_COST_PROFILE ahead of the legacy
+        # LLM_ROUTER_PROFILE name. Without populate_by_name, an explicit
+        # validation_alias also stops the plain field name from being
+        # accepted as a constructor kwarg — every OTHER field in this class
+        # is still constructible by field name (`RouterConfig(foo_bar=...)`,
+        # as the existing test suite does throughout), so this keeps
+        # `RouterConfig(llm_router_profile=...)` working the same way
+        # rather than silently ignoring the kwarg and falling back to the
+        # default profile.
+        "populate_by_name": True,
     }
 
     # Maps each Pydantic field name to (provider_name, litellm_env_var).
