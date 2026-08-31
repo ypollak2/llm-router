@@ -32,5 +32,8 @@
     ],
     "brandColor": "#6366f1",
     "logo": "assets/logo.png"
-  }
+  },
+  "mcpServers": ".claude-plugin/mcp.json",
+  "commands": "commands/",
+  "hooks": "hooks/hooks.json"
 }

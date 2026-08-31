@@ -10,7 +10,7 @@
   "repository": "https://github.com/ypollak2/llm-router",
   "license": "MIT",
   "skills": "skills/",
-  "mcpServers": ".mcp.json",
+  "mcpServers": ".codex-plugin/mcp.json",
   "interface": {
     "displayName": "LLM Router",
     "shortDescription": "Smart LLM routing \u2014 cheapest capable model, every task",
@@ -33,5 +33,7 @@
     ],
     "brandColor": "#6366f1",
     "logo": "assets/logo.png"
-  }
+  },
+  "commands": "commands/",
+  "hooks": ".codex-plugin/hooks.json"
 }
