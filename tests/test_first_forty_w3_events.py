@@ -100,3 +100,58 @@ def test_cursor_scope_limitation_is_documented():
     assert CURSOR.plugin_root_var is None
     assert any("PROJECT-scoped" in n for n in CURSOR.notes)
     assert any("Cloud agents" in n for n in CURSOR.notes)
+
+
+# ── the matrix must agree with the map (task 29) ──────────────────────────────
+
+
+def _matrix_text() -> str:
+    from pathlib import Path
+
+    return (Path(__file__).resolve().parent.parent / "guide" / "HOST_SUPPORT_MATRIX.md").read_text()
+
+
+def test_matrix_no_longer_claims_hooks_are_impossible_elsewhere():
+    """"❌ No" on the auto-routing row said the host could not do it.
+
+    That was true when Claude Code was the only host with prompt interception.
+    Codex and Cursor both ship one now, so the row has to distinguish "the host
+    cannot" from "we have not built it" — otherwise the docs argue against the
+    roadmap.
+    """
+    text = _matrix_text()
+    header = next(line for line in text.splitlines() if line.startswith("| Feature"))
+    row = next(line for line in text.splitlines() if "Auto-Routing Hooks" in line)
+
+    columns = [c.strip() for c in header.strip("|").split("|")]
+    cells = [c.strip() for c in row.strip("|").split("|")]
+    by_host = dict(zip(columns, cells))
+
+    # Browser keeps its ❌ legitimately: a web page cannot run a local hook.
+    for host in ("Codex CLI", "VS Code/Cursor"):
+        assert "❌" not in by_host[host], (
+            f"{host} is still marked incapable of auto-routing hooks. Codex "
+            "ships UserPromptSubmit and Cursor ships beforeSubmitPrompt, both "
+            f"able to block. Cell: {by_host[host]!r}"
+        )
+        assert "🔜" in by_host[host], (
+            f"{host} should read 'not yet' — we have not built it, which is a "
+            f"different claim from the host being unable. Cell: {by_host[host]!r}"
+        )
+
+    assert "❌" in by_host["Browser"], (
+        "Browser genuinely cannot run local hooks; that ❌ is correct and "
+        "should not have been swept up in the rewrite"
+    )
+
+
+def test_matrix_documents_the_cursor_limitation():
+    """Cloud agents do not fire prompt hooks. Say so before someone files it."""
+    text = _matrix_text()
+    assert "cloud agents" in text.lower()
+    assert "project-scoped" in text.lower()
+
+
+def test_matrix_points_at_the_machine_readable_source():
+    """Docs drift; a docs page that names its source drifts more slowly."""
+    assert "llm_router.hosts.events" in _matrix_text()
