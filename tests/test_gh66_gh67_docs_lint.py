@@ -37,8 +37,11 @@ with an explanation instead of silently going stale itself.
 
 from __future__ import annotations
 
+import ast
+import io
 import json
 import re
+import tokenize
 from pathlib import Path
 
 import pytest
@@ -285,3 +288,161 @@ def test_plugin_json_mcp_servers_path_exists_if_present():
         target = _REPO_ROOT / mcp_servers
         assert target.exists(), f"plugin.json's mcpServers points at {mcp_servers!r}, which does not exist"
     # A dict-shaped mcpServers is an inline config, not a path reference — nothing to check.
+
+
+# ── 7. Underscore CLI invocations inside SOURCE user-facing strings (GH#72) ──
+#
+# Section 4 above catches `llm_router <subcommand>` in docs/skills/rules, but
+# does NOT scan `src/` — which is exactly where GH#72 found it: install.py's
+# `--help` text and the Dockerfile snippet it prints, and doctor.py's own
+# `fix="llm_router ..."` remediation hints (including the bold `llm_router
+# doctor` heading the command prints about itself).
+#
+# SCOPE: this section lints only `commands/install.py` and `commands/
+# doctor.py` — the two files GH#72 named and the two this fix touches. A
+# full-`src/` sweep turns up ~130 more pre-existing hits across
+# commands/*.py, hooks/*.py, router.py, and friends; fixing those is a much
+# larger, separate cleanup and out of scope for this issue (and this branch
+# is constrained to touching only install.py/doctor.py/this test). Widening
+# `_CLI_LINT_FILES` file-by-file as each is cleaned up is the natural
+# follow-up — the moment a file is added here, this test starts guarding it
+# for free.
+#
+# THE HARD PART, mechanically: telling a PRINTED shell command apart from a
+# legitimate `import llm_router`, an MCP server dict key, or a docstring
+# narrating past behavior — without a lint so blunt everyone has to suppress
+# it. The rule has two layers:
+#
+#   1. Reuse `_UNDERSCORE_COMMAND_PATTERN` (section 4): it only fires on
+#      `llm_router` + a space + one of cli.py's real subcommand words. That
+#      alone already rejects `import llm_router` (nothing follows), a bare
+#      `"llm_router"` MCP/dict key (nothing follows), `llm_router.md` /
+#      `llm_router-auto-route.py` (a `.` or `-` follows, not a space), and
+#      `model_provider=llm_router` (an `=` follows, and it's a config VALUE,
+#      not an invocation). Only "llm_router install/doctor/status/..." shaped
+#      exactly like a shell command survives this filter.
+#   2. A survivor is excluded only if its line falls inside (a) a genuine
+#      docstring — computed with `ast`, by walking Module/FunctionDef/
+#      AsyncFunctionDef/ClassDef nodes and taking the line span of each
+#      node's leading `Expr(Constant(str))`, i.e. precisely what `__doc__`
+#      returns — or (b) a `#` comment, found with `tokenize` (comments are
+#      invisible to `ast` entirely, so tokenize is the only way to see them).
+#      Both are prose ABOUT behavior, past or present; neither is ever text
+#      the CLI itself prints. Everything else that survives layer 1 — a
+#      `print()` argument, an f-string assigned then printed, a `fix=`/
+#      `actions.append(...)` remediation message — reaches a real terminal.
+#
+# `test_docstring_and_comment_detection_tells_command_from_reference` below
+# proves this split actually works on a minimal fixture before the real
+# scan trusts it on install.py/doctor.py.
+
+_CLI_LINT_FILES = (
+    _REPO_ROOT / "src" / "llm_router" / "commands" / "install.py",
+    _REPO_ROOT / "src" / "llm_router" / "commands" / "doctor.py",
+)
+
+
+def _docstring_line_span(tree: ast.AST) -> set[int]:
+    """Every line number that belongs to a real docstring: the first
+    statement of a Module/FunctionDef/AsyncFunctionDef/ClassDef body, when
+    that statement is a bare string constant — exactly what `__doc__` picks
+    up at runtime. Comments are not visible to `ast` at all, so this can
+    never accidentally swallow one."""
+    lines: set[int] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            body = getattr(node, "body", None)
+            if not body:
+                continue
+            first = body[0]
+            if (
+                isinstance(first, ast.Expr)
+                and isinstance(first.value, ast.Constant)
+                and isinstance(first.value.value, str)
+            ):
+                doc = first.value
+                end = doc.end_lineno or doc.lineno
+                lines.update(range(doc.lineno, end + 1))
+    return lines
+
+
+def _comment_line_span(src: str) -> set[int]:
+    """Every line number carrying a `#` comment token. `ast` drops comments
+    entirely, so `tokenize` — the stdlib's own source of truth for comment
+    tokens — is the only mechanical way to see them."""
+    lines: set[int] = set()
+    try:
+        for tok in tokenize.generate_tokens(io.StringIO(src).readline):
+            if tok.type == tokenize.COMMENT:
+                lines.add(tok.start[0])
+    except (tokenize.TokenizeError, IndentationError, SyntaxError):
+        pass
+    return lines
+
+
+def _underscore_cli_hits_in_source(path: Path) -> list[str]:
+    """Lines in `path` where `llm_router <subcommand>` appears as a live,
+    user-facing string — a `print()` argument, an f-string, a `fix=`/
+    `actions.append(...)` remediation message, a `--help` constant — and NOT
+    inside a docstring or `#` comment (which narrate past/other behavior
+    rather than instructing a current action)."""
+    src = _read(path)
+    if not src:
+        return []
+    tree = ast.parse(src, filename=str(path))
+    excluded = _docstring_line_span(tree) | _comment_line_span(src)
+    try:
+        label = str(path.relative_to(_REPO_ROOT))
+    except ValueError:
+        label = str(path)
+    hits = []
+    for i, line in enumerate(src.splitlines(), 1):
+        if i in excluded:
+            continue
+        if _UNDERSCORE_COMMAND_PATTERN.search(line):
+            hits.append(f"{label}:{i}: {line.strip()}")
+    return hits
+
+
+def test_cli_lint_files_exist_and_are_nonempty():
+    """Guards the guard, same purpose as test_the_scan_finds_something above:
+    an empty/missing file would make the real lint below pass vacuously."""
+    for p in _CLI_LINT_FILES:
+        assert p.is_file(), p
+        assert len(_read(p).splitlines()) > 100, f"{p} looks truncated"
+
+
+def test_docstring_and_comment_detection_tells_command_from_reference(tmp_path):
+    """Unit-level proof that the AST/tokenize split actually distinguishes a
+    PRINTED shell command from a module reference / historical narration —
+    GH#72's own warning that a lint which cannot tell them apart is worse
+    than none. All four lines below contain the literal same offending text
+    (`llm_router install`); only the `print()` one may ever surface as a hit."""
+    sample = '''"""Module docstring: `llm_router install` is what an old release told you to run."""
+
+import llm_router  # not a command — must never match on its own
+
+
+def f():
+    """`llm_router install` here too — still just prose about the past."""
+    # `llm_router install` — also just a comment, not printed
+    print("Run `llm_router install` to fix this")
+'''
+    sample_path = tmp_path / "gh72_sample.py"
+    sample_path.write_text(sample)
+
+    hits = _underscore_cli_hits_in_source(sample_path)
+
+    assert len(hits) == 1, f"expected exactly the print() line to match, got: {hits}"
+    assert 'print("Run `llm_router install` to fix this")' in hits[0]
+
+
+def test_no_underscore_cli_invocations_in_install_and_doctor_source():
+    hits: list[str] = []
+    for p in _CLI_LINT_FILES:
+        hits.extend(_underscore_cli_hits_in_source(p))
+    assert not hits, (
+        "`llm_router <subcommand>` used as a printed/user-facing CLI "
+        "instruction in source (the real CLI binary is `llm-router`; "
+        "underscore is the Python module / MCP key):\n" + "\n".join(hits)
+    )

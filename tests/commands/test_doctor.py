@@ -177,7 +177,7 @@ class TestRunDoctorHost:
         _run_doctor_host("codex")
         output = capsys.readouterr().out
         assert "force-set to 'llm_router'" in output
-        assert "llm_router install --host codex --mode gateway" in output
+        assert "llm-router install --host codex --mode gateway" in output
 
     def test_run_doctor_host_codex_reports_not_gateway(self, capsys, tmp_path, monkeypatch):
         monkeypatch.setattr(pathlib.Path, "home", classmethod(lambda cls: tmp_path))
@@ -189,7 +189,7 @@ class TestRunDoctorHost:
         output = capsys.readouterr().out
         assert "Codex using its own default model provider" in output
         assert "LLM Router model provider table missing" in output
-        assert "llm_router install --host codex --mode gateway" in output
+        assert "llm-router install --host codex --mode gateway" in output
 
     def test_run_doctor_host_all(self, capsys):
         """Test doctor checks all hosts."""
