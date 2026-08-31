@@ -14,6 +14,99 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 _Nothing yet._
 
+## [13.0.6] — Remove the dead enterprise surface, and a credential leak (2026-08-31)
+
+Closes #68, #69, #70, #71, #72, #74, #75, #79 — everything a repo-wide
+audit turned up after 13.0.5, plus three bugs found while fixing them.
+
+### Security
+
+- **Importing `llm_router.providers` loaded an unrelated `.env` into the
+  process (#74).** `litellm/__init__.py` calls `dotenv.load_dotenv()`
+  unconditionally at import time when `LITELLM_MODE` is unset — and it
+  defaults to `"DEV"`. With no argument, `find_dotenv()` walks upward from
+  *the caller's own source file*, i.e. from inside
+  `.venv/lib/.../litellm/`, not from the working directory. That walk
+  climbs out of the project entirely and can reach a personal `~/.env`,
+  whose contents are merged into `os.environ` for the life of the
+  interpreter. Verified directly: `XAI_API_KEY` absent before the import,
+  present after. Any credential in any `.env` above the virtualenv was
+  being loaded without the operator asking. Fixed by setting
+  `LITELLM_MODE=PROD` before importing litellm, which still honors an
+  explicit setting.
+
+### Removed
+
+- **The enterprise surface (#68, #70, #71).** `llm_router.enterprise` is
+  not shipped, and five modules depended on it — each converting the
+  missing module into a failure at a different layer, all invisible by
+  default. `LLM_ROUTER_RBAC_MODE=strict` made every route raise
+  `AttributeError` before contacting a provider, so enabling the
+  officially safer mode was a total outage rather than enforcement.
+  `audit_routing.py` raised on every routed turn behind a blanket
+  `except`, so the routing audit trail has never worked on any install.
+  `llm-router audit verify`, the documented tamper-evidence gate, died
+  with a raw `TypeError`. And `verify_enterprise.py` — the tool built to
+  catch exactly this drift — was never wired into the CLI and crashed if
+  invoked, which is why the other three went unnoticed.
+
+  `commands/audit.py` is kept: its `misroute` subcommand is the only entry
+  point for a live, unrelated feature. Default-mode routing is unchanged,
+  proven by an identical 239-test router battery before and after.
+
+### Fixed
+
+- **An unrecognized `LLM_ROUTER_PROFILE` stopped the server booting
+  (#69).** `RouterConfig.llm_router_profile` is bound by naming
+  convention to that variable and validated against the routing tiers, so
+  `LLM_ROUTER_PROFILE=enterprise` raised `ValidationError` at import time
+  — before the startup checks that would have refused it with an
+  actionable message. This was the third reader of that one variable, and
+  the one that actually drives routing; #65 fixed only the display-only
+  one. It now accepts `LLM_ROUTER_COST_PROFILE` as an alias and falls back
+  to `balanced` with a warning naming both axes, without special-casing
+  any particular value.
+
+- **`install` and `doctor` printed a command that does not exist (#72).**
+  37 user-facing strings said `llm_router <cmd>`; the binary is
+  `llm-router`. Every failing doctor check named an unrunnable command in
+  its `fix=` hint, and the headless Dockerfile snippet failed at its
+  second line when copy-pasted. The docs-lint now covers these two source
+  files, distinguishing a printed command from `import llm_router` by what
+  follows the name, then dropping docstrings via `ast` and comments via
+  `tokenize`.
+
+- **Two unrelated bugs behind the "flaky tests" (#75).**
+  `judge.evaluate_response_async` created an `asyncio` task and never
+  awaited it or held a reference. On the session-scoped event loop, that
+  orphan ran during a *later* test's awaits and hit whatever
+  `litellm.acompletion` mock was installed — so a Claude model appeared in
+  assertions expecting another provider. Not ordering at all: the sample
+  rate is 0.1, so it fired on `random.random()`, which is why identical
+  commits gave opposite CI results. Holding a reference is also a
+  production fix — asyncio may collect a pending task nothing refers to.
+  Separately, a test's own SQL stored `datetime('now','localtime')` where
+  production stores UTC, so the reader's single `'localtime'` conversion
+  shifted it twice.
+
+- **A fixture that failed for ~100 seconds after local midnight (#79).**
+  `test_routing_logic_uses_today_cutoff` seeded rows at `now - 100` and
+  asserted they counted as today. A CI run starting at 23:58 UTC failed
+  both Python jobs. Rows are now anchored to the day boundary.
+
+### Internal
+
+- The release tooling could not read this changelog: `extract_changelog_entry`
+  matched only `## v1.2.3` headings, and the plugin lookup used the module
+  name `llm_router` where the manifests say `llm-router` — the same naming
+  confusion, in the tooling that ships releases. Both fixed in 13.0.5's
+  release commit.
+
+### Known issues
+
+Underscore-CLI strings remain across the rest of `src/` (#82). One
+order-dependent test remains in `test_session_store_concurrency.py` (#84).
+
 ## [13.0.5] — The nine issues opened this week (2026-08-30)
 
 Fixes #59-#67. Three of them (#59, #60, #63) were retests of issues closed as
