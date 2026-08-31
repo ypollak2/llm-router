@@ -248,3 +248,51 @@ def test_a_second_router_is_reported_not_deleted():
     assert len(rival) == 1
     assert "otherrouter-auto-route.py" in rival[0]
     assert not any("llm_router" in c for c in rival), "our own hooks must never be flagged"
+
+
+# ── task 41 ────────────────────────────────────────────────────────────────────
+
+
+def _statusline_source() -> str:
+    from llm_router import install_hooks as ih
+
+    return (ih._PACKAGE_DIR / "hooks" / "statusline-command.sh").read_text()
+
+
+def test_statusline_probes_the_real_cli_name():
+    """The money figure silently vanished because the CLI name was wrong.
+
+    The interpreter-resolution loop probed `command -v llm_router` (underscore).
+    The installed executable is `llm-router` (hyphen), so the highest-signal
+    candidate — the interpreter behind the user's own install — never matched.
+    On a host where no other candidate could import llm_router, the savings
+    figure disappeared with no error, because the loop is wrapped in a
+    never-break-the-statusline fallback.
+    """
+    src = _statusline_source()
+    assert "command -v llm-router" in src, (
+        "statusline does not probe the hyphenated CLI name, so it cannot find "
+        "the interpreter behind a normal install"
+    )
+
+
+def test_statusline_labels_the_money_as_saved():
+    """A bare dollar figure beside a quota percentage reads as spend.
+
+    It is the opposite: savings versus an all-premium baseline, summed over
+    every session since local midnight.
+    """
+    src = _statusline_source()
+    assert "saved" in src.split("💰")[1][:80], (
+        "the money segment must say 'saved' — an unlabelled figure next to a "
+        "quota percentage is read as money spent"
+    )
+
+
+def test_statusline_reports_today_not_the_session():
+    """Today means every session since midnight, via the canonical union."""
+    src = _statusline_source()
+    assert 'query_window("today"' in src, (
+        "the statusline must use the canonical today-window aggregation, which "
+        "unions all five usage tables; a per-session figure under-reports"
+    )
