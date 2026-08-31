@@ -322,18 +322,27 @@ if [ -f "$USAGE_DB" ]; then
     # usage tables — not this session, and not spend. query_window does that
     # union; the label has to say which of the two it is, because a bare dollar
     # figure beside a quota percentage reads as money spent.
-    _saved=""
-    [ -n "$_chz_py" ] && _saved=$(CHZ_DB="$USAGE_DB" "$_chz_py" -c '
+    # Delegates the FORMAT as well as the total. INV-COST-004 said surfaces
+    # delegate the aggregation; it did not say they delegate the rendering, so
+    # every surface invented its own money format and the two that mattered
+    # disagreed. render_money() is now the only place a dollar figure is shaped:
+    # measured spend exact and only above a cent, modelled savings tilde-
+    # prefixed and rounded, both carrying a verb, coverage called out when the
+    # estimate is soft.
+    _money=""
+    [ -n "$_chz_py" ] && _money=$(CHZ_DB="$USAGE_DB" "$_chz_py" -c '
 import os, pathlib
 try:
-    from llm_router.dashboard_data import query_window
+    from llm_router.dashboard_data import (
+        query_window, render_money, session_spend_usd,
+    )
     t = query_window("today", db_path=pathlib.Path(os.environ["CHZ_DB"]))
-    print(f"{t.saved_usd:.2f}")
+    print(render_money(t, session_spend_usd()))
 except Exception:
     print("")            # never break the statusline over a reporting figure
 ' 2>/dev/null)
-    if [ -n "$_saved" ] && [ "$_saved" != "0.00" ]; then
-        parts+=("💰 ${_GREEN}\$${_saved} saved${_RESET}${_DIM} today${_RESET}")
+    if [ -n "$_money" ]; then
+        parts+=("💰 ${_GREEN}${_money}${_RESET}")
     fi
 
     # ⚖ route mix — local vs paid over the last 6h. Answers "is routing working
