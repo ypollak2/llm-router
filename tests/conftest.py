@@ -1034,6 +1034,63 @@ def _claude_json_mcp_slice(p: Path):
     return data.get("mcpServers", {}).get("llm_router")
 
 
+def _claude_settings_slice(p: Path):
+    """The only parts of ~/.claude/settings.json this installer ever writes.
+
+    GH#92: the same structural problem GH#88 fixed for ~/.claude.json. This
+    file is co-owned -- a live Claude Code session, another tool, or the user
+    editing their own settings all write to it -- so diffing it whole makes
+    the guard fire on somebody else's change and blame whichever test happened
+    to sample it at that moment. It has not flaked yet only because of timing;
+    the race is identical.
+
+    `install()` writes exactly three things here (see install_hooks.py):
+    `mcpServers["llm_router"]` (~line 964), `statusLine` (~1019), and hook
+    registrations via `_register_hook` (~563). Hooks are filtered to the
+    entries whose command names this package rather than compared wholesale,
+    because the user's own hook registrations live in the same lists and are
+    none of this guard's business.
+
+    A genuine escape -- a stray llm_router hook, MCP entry or statusLine
+    written by a test -- still shows up. Everything else no longer does.
+    """
+    try:
+        if not p.is_file():
+            return None
+        data = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return "<unreadable>"
+    if not isinstance(data, dict):
+        return "<unexpected-shape>"
+
+    ours: dict = {
+        "mcpServers.llm_router": data.get("mcpServers", {}).get("llm_router")
+        if isinstance(data.get("mcpServers"), dict)
+        else None,
+        "statusLine": data.get("statusLine"),
+    }
+
+    # Keep only the hook commands that mention this package. Sorted so an
+    # ordering change by another writer is not mistaken for a content change.
+    hook_cmds: list[str] = []
+    hooks = data.get("hooks")
+    if isinstance(hooks, dict):
+        for event, entries in sorted(hooks.items()):
+            if not isinstance(entries, list):
+                continue
+            for entry in entries:
+                if not isinstance(entry, dict):
+                    continue
+                for hook in entry.get("hooks", []) or []:
+                    if not isinstance(hook, dict):
+                        continue
+                    cmd = hook.get("command")
+                    if isinstance(cmd, str) and "llm_router" in cmd:
+                        hook_cmds.append(f"{event}:{entry.get('matcher', '')}:{cmd}")
+    ours["hooks.llm_router"] = sorted(hook_cmds)
+    return ours
+
+
 @pytest.fixture(autouse=True)
 def _no_repo_mutation(request):
     """Fail any test that writes an installer artifact into the real checkout."""
@@ -1059,6 +1116,9 @@ def _no_repo_mutation(request):
         for label, p in _targets():
             if label == "home:.claude.json":
                 out[label] = _claude_json_mcp_slice(p)
+                continue
+            if label == "home:.claude/settings.json":
+                out[label] = _claude_settings_slice(p)
                 continue
             try:
                 out[label] = (p.read_bytes(), p.stat().st_mtime_ns) if p.is_file() else None
