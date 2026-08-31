@@ -25,7 +25,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: hashgraph-online/ai-plugin-scanner-action@v1
+      - uses: hashgraph-online/ai-plugin-scanner-action@ffaee77ef21faa6df92a33b03d09278ac8c844f2 # v1
         with:
           plugin_dir: "."
           # `high` and above breaks the build. Medium and low are reported and

@@ -162,7 +162,7 @@ def test_on_disk_provider_keys_are_loaded(tmp_path, monkeypatch):
 
     state = tmp_path / ".llm-router"
     state.mkdir()
-    (state / "openrouter.key").write_text("sk-or-v1-testkey\n")
+    (state / "openrouter.key").write_text("FAKE-KEY-FOR-TEST-ONLY\n")
 
     monkeypatch.setattr(cfg, "STATE_DIR", state, raising=False)
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
@@ -170,7 +170,7 @@ def test_on_disk_provider_keys_are_loaded(tmp_path, monkeypatch):
     loaded = cfg.load_disk_keys()
 
     assert "OPENROUTER_API_KEY" in loaded
-    assert loaded["OPENROUTER_API_KEY"] == "sk-or-v1-testkey"
+    assert loaded["OPENROUTER_API_KEY"] == "FAKE-KEY-FOR-TEST-ONLY"
 
 
 def test_disk_keys_never_override_the_environment(tmp_path, monkeypatch):
@@ -179,16 +179,16 @@ def test_disk_keys_never_override_the_environment(tmp_path, monkeypatch):
 
     state = tmp_path / ".llm-router"
     state.mkdir()
-    (state / "openrouter.key").write_text("sk-or-v1-stale\n")
+    (state / "openrouter.key").write_text("FAKE-KEY-STALE-ON-DISK\n")
 
     monkeypatch.setattr(cfg, "STATE_DIR", state, raising=False)
-    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-v1-live")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "FAKE-KEY-FROM-ENVIRONMENT")
 
     cfg.load_disk_keys()
 
     import os
 
-    assert os.environ["OPENROUTER_API_KEY"] == "sk-or-v1-live"
+    assert os.environ["OPENROUTER_API_KEY"] == "FAKE-KEY-FROM-ENVIRONMENT"
 
 
 # ── task 11 ────────────────────────────────────────────────────────────────────
