@@ -1,5 +1,6 @@
 """Shared pytest fixtures for all llm_router tests."""
 
+import json
 import os
 import socket as _socket
 from pathlib import Path
@@ -998,6 +999,40 @@ _REPORT_ONLY = frozenset({
     "home:.claude/settings.json",
 })
 
+# GH#88: whole-file diffing of ~/.claude.json produced failures that were not
+# reproducible from the code under test. Instrumenting every write path
+# (Path.write_text/write_bytes, builtins.open in a write mode, and
+# subprocess.run of `claude mcp add/remove`) across dozens of full-suite runs
+# at the reported seeds never once caught llm_router's own code touching the
+# real file — the *label* said "escaped its sandbox", but the mechanism,
+# checked directly, was something else: this machine runs several live Claude
+# Code sessions at once (`ps aux` shows multiple long-running MCP server
+# processes, one set per session), and each session's CLI process rewrites its
+# own bookkeeping in ~/.claude.json continuously and on its own schedule —
+# numStartups, promptQueueUseCount, cachedGrowthBookFeaturesAt, and the like.
+# Re-running the IDENTICAL command (same seed, same test order, hence the same
+# sequence of before/after snapshots) passed and failed nondeterministically,
+# which a real in-process defect — same interpreter, same order — cannot do;
+# a race against an independently-scheduled external writer can and did.
+#
+# llm_router's own installer only ever touches one slice of this file:
+# mcpServers["llm_router"] (see _install_claude_code_cli in install_hooks.py).
+# So that slice is the only part of ~/.claude.json worth diffing — comparing
+# the rest just launders a concurrent session's own writes into a false
+# "installer escaped its sandbox" failure blamed on whichever test's teardown
+# happened to sample the file at the wrong instant. Genuine escapes (a stray
+# `mcpServers.llm_router` created, or overwritten with test scaffolding) are
+# still caught; unrelated CLI churn no longer is.
+def _claude_json_mcp_slice(p: Path):
+    """The only part of ~/.claude.json llm_router's installer ever writes."""
+    try:
+        if not p.is_file():
+            return None
+        data = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return "<unreadable>"
+    return data.get("mcpServers", {}).get("llm_router")
+
 
 @pytest.fixture(autouse=True)
 def _no_repo_mutation(request):
@@ -1016,8 +1051,15 @@ def _no_repo_mutation(request):
         # file it had no business touching; on another machine, or after a code
         # change, those same bytes would differ. Byte-equality would call that
         # clean and let the leak persist, which is exactly what it did.
+        #
+        # ~/.claude.json is the one exception: it is also live CLI state (see
+        # GH#88 above), so it is reduced to just the sub-tree llm_router's own
+        # installer can write, rather than diffed whole.
         out = {}
         for label, p in _targets():
+            if label == "home:.claude.json":
+                out[label] = _claude_json_mcp_slice(p)
+                continue
             try:
                 out[label] = (p.read_bytes(), p.stat().st_mtime_ns) if p.is_file() else None
             except OSError:
