@@ -224,10 +224,11 @@ def _render_router_status(
     the SEC-004 contract (enterprise + no valid identity →
     redacted; everything else → full).
 
-    Crucially the gate check happens BEFORE we touch ``get_config``
-    so a Pydantic-rejected ``LLM_ROUTER_PROFILE`` value (llm_router's
-    Config schema predates the enterprise profile axis introduced
-    in slice 3) can't crash the redacted path."""
+    Crucially the gate check happens BEFORE we touch ``get_config`` so a
+    ``RouterConfig()`` construction failure (GH#69 fixed the one specific
+    cause that used to bite here — see the ``except`` below — but this
+    still guards against any other unrelated config validation error)
+    can't crash the redacted path."""
     if force_redacted is None:
         from llm_router.profile import is_enterprise
         from llm_router.identity import (
@@ -261,30 +262,32 @@ def _render_router_status(
     try:
         config = get_config()
     except Exception:
-        # Routing config failed to validate. Most likely cause (GH#65):
-        # ``LLM_ROUTER_PROFILE`` is set to a deployment-profile value
-        # (``developer``/``enterprise``) but the routing ``RouterConfig``
-        # (pydantic-settings) still binds its ``llm_router_profile`` field
-        # to that same env name and requires one of ``budget/balanced/
-        # premium/reasoning/quota_balanced/subscription_local`` — so a
-        # deployment-profile value raises a validation error here instead
-        # of being silently ignored.
+        # GH#69 fixed the specific cause this except-block used to exist
+        # for: ``RouterConfig.llm_router_profile`` (config.py) used to bind
+        # directly (by pydantic-settings naming convention) to
+        # ``LLM_ROUTER_PROFILE`` and validate it strictly against the six
+        # routing tiers — so a deployment-identity value like
+        # ``developer``/``enterprise`` (a completely different axis, see
+        # ``llm_router.profile`` / ``identity.py``) raised
+        # ``pydantic_core.ValidationError`` here. That field now applies
+        # the same value-domain filter GH#65 established for
+        # ``repo_config.RepoConfig.effective_profile()`` (reads
+        # ``LLM_ROUTER_COST_PROFILE`` first, falls back to the legacy name
+        # only when it's a genuine routing tier, and otherwise warns once
+        # and defaults instead of raising) — so THIS specific collision can
+        # no longer reach this except-block.
         #
-        # Note this is a DIFFERENT collision site than the one GH#65 fixed
-        # in ``repo_config.py``: that module's ``effective_profile()`` now
-        # reads the de-collided ``LLM_ROUTER_COST_PROFILE`` (with a
-        # value-domain-filtered legacy fallback) and never raises. This
-        # pydantic-settings field still reads the raw legacy env name
-        # directly and is NOT yet de-collided — this except-block remains
-        # the load-bearing workaround for it. Surface a useful message
-        # rather than crashing the resource handler.
+        # Left in place as generic defense: ``RouterConfig()`` can still
+        # fail to validate for reasons unrelated to the profile axis (e.g.
+        # a malformed numeric/enum env var elsewhere in the schema), and
+        # this resource must stay resilient to that too rather than
+        # crashing the redacted-status path.
         return "\n".join([
             "Profile: enterprise",
             "Status: ok",
-            "Note: routing config unavailable — the deployment-profile "
-            "env may collide with the routing config's LLM_ROUTER_PROFILE "
-            "expectations. Restart with a clean routing profile to see "
-            "provider details.",
+            "Note: routing config unavailable — check your environment "
+            "for a malformed llm_router env var. Restart with a clean "
+            "environment to see provider details.",
         ])
     tracker = get_tracker()
     report = tracker.status_report()
