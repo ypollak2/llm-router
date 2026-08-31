@@ -14,6 +14,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 _Nothing yet._
 
+## [13.0.8] — Close the second co-owned-file guard (2026-08-31)
+
+Closes #92.
+
+### Fixed
+
+- **The sandbox guard no longer whole-file-diffs `.claude/settings.json`.**
+  The same structural problem #88 fixed for `~/.claude.json`, in the other
+  `_REPORT_ONLY` entry. That file is co-owned — a live Claude Code
+  session, another tool, or the user editing their own settings all write
+  to it — so diffing it whole makes the guard fire on somebody else's
+  change and blame whichever test sampled it at that instant. It had not
+  flaked yet purely because of timing; the race was identical, and #88
+  cost hours precisely because a false escape report looks exactly like a
+  real one.
+
+  The snapshot now compares only what `install()` writes:
+  `mcpServers["llm_router"]`, `statusLine`, and hook registrations —
+  with hooks filtered to commands naming this package, since the user's
+  own registrations share those lists. Mutation-checked both ways:
+  unrelated key churn, a third-party MCP entry and a user-edited hook are
+  all ignored, while our own mcp entry, statusLine or hook being changed
+  is still caught. Not an allowlist entry, which would have blinded the
+  guard to the escapes it exists to detect.
+
+### Known issues
+
+An `-m slow` run still calls `uv build` three times (#91): three test
+files each define their own module-scoped `built` fixture. Excluded from
+the default addopts and from CI, so no standard run pays it.
+
 ## [13.0.7] — Test-suite honesty (2026-08-31)
 
 Closes #82, #84, #87, #88. Every one of these is a test that reported

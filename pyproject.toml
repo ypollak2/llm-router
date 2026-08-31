@@ -1,6 +1,6 @@
 [project]
 name = "llm-routing"
-version = "13.0.7"
+version = "13.0.8"
 description = "Multi-LLM router MCP server — smart complexity routing, budget-aware model selection, 20+ providers (Claude, OpenAI, Gemini, Ollama, etc.)"
 readme = "README.md"
 license = "MIT"
