@@ -42,7 +42,7 @@ __all__ = ["cmd_soak"]
 
 
 def cmd_soak(args: list[str]) -> int:
-    parser = argparse.ArgumentParser(prog="llm_router soak")
+    parser = argparse.ArgumentParser(prog="llm-router soak")
     parser.add_argument(
         "--use-gold-complexity",
         action="store_true",

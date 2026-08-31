@@ -127,9 +127,9 @@ class PremiumStatusCommand:
     def render_quick_actions(self) -> str:
         """Render quick action shortcuts footer."""
         actions = [
-            "① llm_router dashboard  — Live web dashboard",
-            "② llm_router doctor     — System health check",
-            "③ llm_router update     — Pull latest hooks",
+            "① llm-router dashboard  — Live web dashboard",
+            "② llm-router doctor     — System health check",
+            "③ llm-router update     — Pull latest hooks",
         ]
         return "\n".join(f"  {action}" for action in actions)
 

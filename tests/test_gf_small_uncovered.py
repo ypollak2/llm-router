@@ -164,7 +164,7 @@ class TestAuthErrorHint:
     def test_an_unknown_provider_gets_the_generic_hint_without_an_env_var(self):
         hint = router._auth_error_hint("some-unknown-provider")
         assert "some-unknown-provider" in hint
-        assert "llm_router setup" in hint
+        assert "llm-router setup" in hint
         # The generic branch must not invent a variable name.
         assert not any(v in hint for v in router._PROVIDER_KEY_ENV.values())
 

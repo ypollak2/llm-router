@@ -107,7 +107,7 @@ def main() -> None:
     )
 
     print("\n" + "═" * 54)
-    print("  llm_router quickstart — first routed call in < 5min")
+    print("  llm-router quickstart — first routed call in < 5min")
     print("═" * 54)
 
     total_steps = 5
@@ -133,7 +133,7 @@ def main() -> None:
 
     if has_keys:
         print("  ✓ At least one API key found in environment.")
-        print("  Tip: run `llm_router setup` for full provider configuration.")
+        print("  Tip: run `llm-router setup` for full provider configuration.")
     elif has_ollama:
         print("  ✓ Ollama detected — you can route for free locally.")
         print("  For cloud providers, add keys to your shell profile:")
@@ -153,7 +153,7 @@ def main() -> None:
         print("    3. Re-run this wizard")
         print("")
         if not _ask_yes("Continue without API keys?", default=False):
-            print("\n  Exiting. Add keys and re-run: llm_router quickstart\n")
+            print("\n  Exiting. Add keys and re-run: llm-router quickstart\n")
             return
 
     # ── Step 3: Install ────────────────────────────────────────────────────────
@@ -171,7 +171,7 @@ def main() -> None:
             print(f"  ✓ {host} configured")
         except Exception as e:
             print(f"  ⚠ Could not auto-install for {host}: {e}")
-            print(f"    Manual: llm_router install --host {host}")
+            print(f"    Manual: llm-router install --host {host}")
 
     # ── Step 4: Test call ──────────────────────────────────────────────────────
     _print_step(4, total_steps, "Test routing (live call)")
@@ -195,7 +195,7 @@ def main() -> None:
             print(f"\n  ✓ Routing works! Response: {result[:80]!r}")
         except Exception as e:
             print(f"\n  ⚠ Test call failed: {e}")
-            print("    Check your API keys with: llm_router doctor")
+            print("    Check your API keys with: llm-router doctor")
     else:
         print("  Skipped.")
 
@@ -228,7 +228,7 @@ def main() -> None:
             print("    • Restart VS Code and enable MCP in Copilot settings")
     print("")
     print("  Commands:")
-    print("    llm_router status    — view routing status and savings")
-    print("    llm_router doctor    — diagnose any installation issues")
-    print("    llm_router setup     — configure additional providers")
+    print("    llm-router status    — view routing status and savings")
+    print("    llm-router doctor    — diagnose any installation issues")
+    print("    llm-router setup     — configure additional providers")
     print("═" * 54 + "\n")

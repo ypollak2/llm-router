@@ -106,7 +106,7 @@ def _cmd_down(args: argparse.Namespace) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="llm_router migrate")
+    parser = argparse.ArgumentParser(prog="llm-router migrate")
     parser.add_argument(
         "--db-path",
         type=Path,

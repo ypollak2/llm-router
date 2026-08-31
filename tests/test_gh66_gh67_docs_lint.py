@@ -298,15 +298,19 @@ def test_plugin_json_mcp_servers_path_exists_if_present():
 # `fix="llm_router ..."` remediation hints (including the bold `llm_router
 # doctor` heading the command prints about itself).
 #
-# SCOPE: this section lints only `commands/install.py` and `commands/
-# doctor.py` — the two files GH#72 named and the two this fix touches. A
-# full-`src/` sweep turns up ~130 more pre-existing hits across
-# commands/*.py, hooks/*.py, router.py, and friends; fixing those is a much
-# larger, separate cleanup and out of scope for this issue (and this branch
-# is constrained to touching only install.py/doctor.py/this test). Widening
-# `_CLI_LINT_FILES` file-by-file as each is cleaned up is the natural
-# follow-up — the moment a file is added here, this test starts guarding it
-# for free.
+# SCOPE: GH#72 lint only `commands/install.py` and `commands/doctor.py` — the
+# two files it named. GH#82 is the named follow-up: it widens the same lint,
+# file-by-file, to the rest of `src/llm_router` rather than flipping to a
+# whole-tree scan in one step, so each batch stays reviewable. This batch
+# adds every file a fresh raw scan over `src/llm_router` turned up with a
+# genuine (non-docstring, non-comment) violation as of GH#82 — 44 files, 97
+# real hits, all now fixed to `llm-router <subcommand>`. Files the same raw
+# scan touched but which had ZERO real violations (the raw hit was entirely
+# inside a docstring/comment already) are intentionally NOT added here —
+# nothing to guard yet, and a full-tree flip is exactly what this issue asks
+# to avoid doing in one step. Widening further as those files pick up real
+# violations (or just because full coverage is wanted) is the natural
+# follow-up.
 #
 # THE HARD PART, mechanically: telling a PRINTED shell command apart from a
 # legitimate `import llm_router`, an MCP server dict key, or a docstring
@@ -322,47 +326,118 @@ def test_plugin_json_mcp_servers_path_exists_if_present():
 #      not an invocation). Only "llm_router install/doctor/status/..." shaped
 #      exactly like a shell command survives this filter.
 #   2. A survivor is excluded only if its line falls inside (a) a genuine
-#      docstring — computed with `ast`, by walking Module/FunctionDef/
-#      AsyncFunctionDef/ClassDef nodes and taking the line span of each
-#      node's leading `Expr(Constant(str))`, i.e. precisely what `__doc__`
-#      returns — or (b) a `#` comment, found with `tokenize` (comments are
-#      invisible to `ast` entirely, so tokenize is the only way to see them).
-#      Both are prose ABOUT behavior, past or present; neither is ever text
-#      the CLI itself prints. Everything else that survives layer 1 — a
-#      `print()` argument, an f-string assigned then printed, a `fix=`/
-#      `actions.append(...)` remediation message — reaches a real terminal.
+#      docstring, INCLUDING a "trailing docstring" (GH#82 widened this from
+#      GH#72's `body[0]`-only check — see `_docstring_line_span`'s own
+#      docstring for why matching on the bare `Expr(Constant(str))` node
+#      shape directly is a strict, lossless generalization) — or (b) a `#`
+#      comment, found with `tokenize` (comments are invisible to `ast`
+#      entirely, so tokenize is the only way to see them). Both are prose
+#      ABOUT behavior, past or present; neither is ever text the CLI itself
+#      prints. Everything else that survives layer 1 — a `print()` argument,
+#      an f-string assigned then printed, a `fix=`/`actions.append(...)`
+#      remediation message — reaches a real terminal.
+#
+# KNOWN RULE GAP (GH#82, not fixed mechanically — see the two source edits
+# instead): `llm_router` immediately followed by a subcommand WORD that is
+# also just an ordinary English noun/verb (`routing`, `status`, ...) used in
+# prose rather than as an invocation — e.g. a banner reading "--- llm_router
+# routing (inherited) ---" or a progress message "llm_router routing
+# {task}/{complexity}..." — is indistinguishable from a real invocation by
+# any local, mechanical rule: both are literally "llm_router" + space +
+# subcommand-shaped word. There is no live signal (unlike layer 2's ast/
+# tokenize spans) to derive the exclusion from. Rather than adding a
+# suppression list for this, the two affected strings
+# (`hooks/agent-route.py`'s `_SPAWN_ROUTING_NOTE` banner + its paired
+# containment check, and `tools/text.py`'s `_announce_routing` progress
+# message) were reworded to `llm_router: routing ...` — same meaning, and it
+# no longer collides with the pattern's required bare space. Both files are
+# genuinely clean now, not suppressed.
 #
 # `test_docstring_and_comment_detection_tells_command_from_reference` below
 # proves this split actually works on a minimal fixture before the real
 # scan trusts it on install.py/doctor.py.
 
-_CLI_LINT_FILES = (
-    _REPO_ROOT / "src" / "llm_router" / "commands" / "install.py",
-    _REPO_ROOT / "src" / "llm_router" / "commands" / "doctor.py",
+_CLI_LINT_FILES = tuple(
+    _REPO_ROOT / "src" / "llm_router" / rel
+    for rel in (
+        # GH#72
+        "commands/install.py",
+        "commands/doctor.py",
+        # GH#82
+        "auto_profile.py",
+        "benchmark/regression.py",
+        "cli_init_memory.py",
+        "commands/audit.py",
+        "commands/benchmark.py",
+        "commands/budget.py",
+        "commands/config.py",
+        "commands/cp.py",
+        "commands/demo.py",
+        "commands/gc.py",
+        "commands/invoice.py",
+        "commands/migrate.py",
+        "commands/okf.py",
+        "commands/onboard.py",
+        "commands/policy.py",
+        "commands/probe.py",
+        "commands/profile.py",
+        "commands/routing.py",
+        "commands/serve.py",
+        "commands/set_enforce.py",
+        "commands/setup.py",
+        "commands/share.py",
+        "commands/soak.py",
+        "commands/team.py",
+        "commands/team_sync.py",
+        "commands/test.py",
+        "commands/update.py",
+        "cost.py",
+        "hooks/agent-route.py",
+        "hooks/auto-route.py",
+        "hooks/enforce-route.py",
+        "hooks/session-end.py",
+        "hooks/session-start.py",
+        "install_hooks.py",
+        "observability/summary.py",
+        "onboard.py",
+        "quickstart.py",
+        "router.py",
+        "server.py",
+        "test_delta.py",
+        "tools/admin.py",
+        "tools/setup.py",
+        "tools/text.py",
+        "ui/status_premium.py",
+    )
 )
 
 
 def _docstring_line_span(tree: ast.AST) -> set[int]:
-    """Every line number that belongs to a real docstring: the first
-    statement of a Module/FunctionDef/AsyncFunctionDef/ClassDef body, when
-    that statement is a bare string constant — exactly what `__doc__` picks
-    up at runtime. Comments are not visible to `ast` at all, so this can
-    never accidentally swallow one."""
+    """Every line number that belongs to a real docstring OR a "trailing
+    docstring" — GH#82: this codebase also uses bare string-literal
+    statements that are NOT the first statement of their block (e.g.
+    `cost.py`'s narrative blurbs describing a constant/table defined just
+    above them) purely as documentation. A bare `ast.Expr(ast.Constant(str))`
+    is a no-op at runtime by construction — Python evaluates it and throws
+    the value away — so it is categorically impossible for it to be
+    something a user ever sees printed; only a `Call` (`print(...)`), an
+    f-string interpolation, an `Assign`, or similar could ever reach a
+    terminal. Matching on the node shape directly (rather than restricting
+    to `body[0]` of a Module/FunctionDef/AsyncFunctionDef/ClassDef, as the
+    original GH#72 version did) is therefore a strict generalization with no
+    loss of precision: every leading docstring is *also* a bare
+    `Expr(Constant(str))`, so this still catches everything the narrower
+    check did, plus the orphan/trailing case it missed. Comments are not
+    visible to `ast` at all, so this can never accidentally swallow one."""
     lines: set[int] = set()
     for node in ast.walk(tree):
-        if isinstance(node, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-            body = getattr(node, "body", None)
-            if not body:
-                continue
-            first = body[0]
-            if (
-                isinstance(first, ast.Expr)
-                and isinstance(first.value, ast.Constant)
-                and isinstance(first.value.value, str)
-            ):
-                doc = first.value
-                end = doc.end_lineno or doc.lineno
-                lines.update(range(doc.lineno, end + 1))
+        if (
+            isinstance(node, ast.Expr)
+            and isinstance(node.value, ast.Constant)
+            and isinstance(node.value.value, str)
+        ):
+            end = node.value.end_lineno or node.value.lineno
+            lines.update(range(node.value.lineno, end + 1))
     return lines
 
 
@@ -406,10 +481,17 @@ def _underscore_cli_hits_in_source(path: Path) -> list[str]:
 
 def test_cli_lint_files_exist_and_are_nonempty():
     """Guards the guard, same purpose as test_the_scan_finds_something above:
-    an empty/missing file would make the real lint below pass vacuously."""
+    an empty/missing file would make the real lint below pass vacuously.
+
+    GH#72's two files (`install.py`/`doctor.py`) are both large, so that
+    fix used `> 100` lines as its "not truncated" signal. GH#82 widens
+    `_CLI_LINT_FILES` to genuinely short, complete files too (e.g.
+    `commands/probe.py` is 36 lines) — a flat `> 100` would make this guard
+    fail on files that are correct, not truncated. `> 10` still catches an
+    accidentally-emptied/truncated file while accepting every real one."""
     for p in _CLI_LINT_FILES:
         assert p.is_file(), p
-        assert len(_read(p).splitlines()) > 100, f"{p} looks truncated"
+        assert len(_read(p).splitlines()) > 10, f"{p} looks truncated"
 
 
 def test_docstring_and_comment_detection_tells_command_from_reference(tmp_path):
@@ -437,7 +519,38 @@ def f():
     assert 'print("Run `llm_router install` to fix this")' in hits[0]
 
 
-def test_no_underscore_cli_invocations_in_install_and_doctor_source():
+def test_trailing_docstring_is_excluded_like_a_leading_one(tmp_path):
+    """GH#82 unit-level proof for the widened `_docstring_line_span`: a bare
+    string statement that is NOT `body[0]` (e.g. narrating the constant
+    defined just above it, `cost.py`'s idiom) must be excluded exactly like
+    a real leading docstring — it is a no-op statement, never printed."""
+    sample = '''X = 1
+"""Trailing docs: `llm_router install` narrates past behavior here too, not
+`body[0]` of anything."""
+
+
+def f():
+    y = 2
+    """Also trailing, inside a function body, still not body[0]: `llm_router
+    install` again."""
+    print("Run `llm_router install` to fix this")
+    return y
+'''
+    sample_path = tmp_path / "gh82_trailing_sample.py"
+    sample_path.write_text(sample)
+
+    hits = _underscore_cli_hits_in_source(sample_path)
+
+    assert len(hits) == 1, f"expected exactly the print() line to match, got: {hits}"
+    assert 'print("Run `llm_router install` to fix this")' in hits[0]
+
+
+def test_no_underscore_cli_invocations_in_cli_lint_files():
+    """GH#72 covered `install.py`/`doctor.py`; GH#82 widens `_CLI_LINT_FILES`
+    to 44 more files across `src/llm_router` with a real (non-docstring,
+    non-comment) `llm_router <subcommand>` violation, all now fixed to
+    `llm-router <subcommand>`. See the `_CLI_LINT_FILES` comment above for
+    which files this batch does and does not cover."""
     hits: list[str] = []
     for p in _CLI_LINT_FILES:
         hits.extend(_underscore_cli_hits_in_source(p))

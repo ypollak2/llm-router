@@ -41,13 +41,13 @@ def _y(s: str) -> str:
 
 def _print_help() -> None:
     print(f"""
-{_b('llm_router okf')} — inspect the knowledge store that feeds routed prompts
+{_b('llm-router okf')} — inspect the knowledge store that feeds routed prompts
 
-  {_b('llm_router okf status')}        what is stored, per project, and what gets injected
-  {_b('llm_router okf gc')}            report docs that are model prose rather than verified structure
-  {_b('llm_router okf gc --apply')}    move those to knowledge/quarantine/ (recoverable, never deleted)
-  {_b('llm_router okf adopt')}         move VERIFIED legacy docs into this project's store
-  {_b('llm_router okf restore')}       move everything in quarantine/ back into retrieval
+  {_b('llm-router okf status')}        what is stored, per project, and what gets injected
+  {_b('llm-router okf gc')}            report docs that are model prose rather than verified structure
+  {_b('llm-router okf gc --apply')}    move those to knowledge/quarantine/ (recoverable, never deleted)
+  {_b('llm-router okf adopt')}         move VERIFIED legacy docs into this project's store
+  {_b('llm-router okf restore')}       move everything in quarantine/ back into retrieval
 
 Docs are scoped per project. Retrieval sees this project's docs plus the shared
 model catalog — never another project's.
@@ -81,13 +81,13 @@ def cmd_okf(args: list[str]) -> None:
         if legacy:
             print(f"\n  {_y('legacy (pre-scoping, NOT injected)')}: {len(legacy)} doc(s)")
             print(_dim("    These predate per-project scoping and were shared across all"))
-            print(_dim("    projects. Run `llm_router okf gc` to see which are model prose."))
+            print(_dim("    projects. Run `llm-router okf gc` to see which are model prose."))
             for p in legacy:
                 print(f"    {p.name}")
 
         q = sorted(okf.QUARANTINE_DIR.rglob("*.md")) if okf.QUARANTINE_DIR.exists() else []
         if q:
-            print(f"\n  {_dim('quarantined')}: {len(q)} doc(s) — `llm_router okf restore` to undo")
+            print(f"\n  {_dim('quarantined')}: {len(q)} doc(s) — `llm-router okf restore` to undo")
 
         others = sorted(okf.PROJECTS_DIR.glob("*")) if okf.PROJECTS_DIR.exists() else []
         if len(others) > 1:
@@ -118,9 +118,9 @@ def cmd_okf(args: list[str]) -> None:
             print("\n  " + _g(f"Moved {moved_count} doc(s) to quarantine/"))
             for src, dest in report["moved"]:
                 print(_dim(f"    {Path(src).name} → {dest}"))
-            print(_dim("\n  Nothing was deleted. `llm_router okf restore` puts them back.\n"))
+            print(_dim("\n  Nothing was deleted. `llm-router okf restore` puts them back.\n"))
         else:
-            print(f"\n  Run {_b('llm_router okf gc --apply')} to move them to quarantine/.")
+            print(f"\n  Run {_b('llm-router okf gc --apply')} to move them to quarantine/.")
             print(_dim("  They are moved, never deleted, and can be restored.\n"))
         return
 

@@ -283,7 +283,7 @@ def format_report(report: RegressionReport) -> str:
         f"Threshold: drop > {report.threshold:.4f}\n"
     )
     if not report.history:
-        return header + "No history recorded yet — run `llm_router benchmark run` first."
+        return header + "No history recorded yet — run `llm-router benchmark run` first."
 
     lines = [header, "History:"]
     prev_score: float | None = None

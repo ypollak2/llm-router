@@ -426,7 +426,7 @@ def _cmd_list(_args: argparse.Namespace) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    p = argparse.ArgumentParser(prog="llm_router test-delta")
+    p = argparse.ArgumentParser(prog="llm-router test-delta")
     sub = p.add_subparsers(dest="cmd", required=True)
 
     sp = sub.add_parser("snapshot", help="Capture current state.")

@@ -115,7 +115,7 @@ def _run_demo() -> None:
     sep = "─" * (sum(col_w) + len(col_w) * 2 + 2)
 
     title = "your last routing decisions" if using_real else "cost-optimized routing examples"
-    print(f"\n{_bold('llm_router demo')}  — {title}\n")
+    print(f"\n{_bold('llm-router demo')}  — {title}\n")
 
     if not using_real:
         config_parts = []
@@ -190,10 +190,10 @@ def _run_demo() -> None:
 
     if not using_real:
         print(f"\n  {_yellow('Next steps:')}")
-        print(f"    {_yellow('→')} Run {_bold('llm_router install')} to enable automatic routing")
+        print(f"    {_yellow('→')} Run {_bold('llm-router install')} to enable automatic routing")
         if not cc_mode:
             print(f"    {_yellow('→')} Set {_bold('LLM_ROUTER_CLAUDE_SUBSCRIPTION=true')} to use subscription models")
     else:
         print(f"\n  {_yellow('Your routing history:')}")
     print(f"  {_yellow('→')} Check savings: {_bold('llm_router gain')}")
-    print(f"  {_yellow('→')} View dashboard: {_bold('llm_router dashboard')}\n")
+    print(f"  {_yellow('→')} View dashboard: {_bold('llm-router dashboard')}\n")

@@ -2002,7 +2002,7 @@ def _condense(summary: str) -> str:
 
     if not bits:
         return ""
-    return "⚡ llm_router · " + " · ".join(bits) + "  ·  `llm_router summary` for detail"
+    return "⚡ llm_router · " + " · ".join(bits) + "  ·  `llm-router summary` for detail"
 
 
 def main() -> None:
@@ -2251,7 +2251,7 @@ def main() -> None:
             final_summary_output = _re.sub(r"\x1b\[[0-9;]*[mGKHF]", "", colored_output)
             # Append color hint so user knows how to view the colored version.
             final_summary_output = final_summary_output.rstrip() + (
-                "\n\n🎨  Full colored summary: cat ~/.llm-router/last_summary.ansi  (or: llm_router summary)\n"
+                "\n\n🎨  Full colored summary: cat ~/.llm-router/last_summary.ansi  (or: llm-router summary)\n"
             )
         except Exception as e:
             # 🥷 Backslash-Security: using vibe-coding rules for Logging & Error Handling

@@ -94,7 +94,7 @@ enforce: enforce
     with open(path, "w") as f:
         f.write(template)
     print(_ok(f"Created {path}  (repo type: {repo_type}, suggested profile: {suggested})"))
-    print(f"  Edit it, then run {_bold('llm_router config lint')} to validate.\n")
+    print(f"  Edit it, then run {_bold('llm-router config lint')} to validate.\n")
 
 
 # ── Config show/lint subcommands ───────────────────────────────────────────
@@ -125,7 +125,7 @@ def _run_config(flags: list[str]) -> None:
 
     HR = "─" * 60
 
-    print(f"\n{_bold('llm_router config')}\n")
+    print(f"\n{_bold('llm-router config')}\n")
     print(HR)
 
     # Sources
@@ -169,7 +169,7 @@ def _run_config(flags: list[str]) -> None:
     warnings: list[str] = []
     if not user_path.exists() and repo_path is None:
         warnings.append(
-            "No config files found — using defaults. Run `llm_router config init` to create one."
+            "No config files found — using defaults. Run `llm-router config init` to create one."
         )
     if merged.effective_enforce() == "shadow":
         warnings.append(

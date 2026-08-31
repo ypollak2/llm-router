@@ -33,7 +33,7 @@ class ServeOptions:
 def parse_serve_args(args: list[str]) -> ServeOptions:
     """Parse ``llm_router serve`` flags into :class:`ServeOptions` (pure, testable)."""
     parser = argparse.ArgumentParser(
-        prog="llm_router serve",
+        prog="llm-router serve",
         description="Run llm_router as a long-lived HTTP service.",
     )
     parser.add_argument(

@@ -60,9 +60,9 @@ class TestStatusIntegration:
             with patch("os.path.exists", return_value=False):
                 cmd_status([])
         captured = capsys.readouterr()
-        assert "llm_router update" in captured.out
-        assert "llm_router doctor" in captured.out
-        assert "llm_router dashboard" in captured.out
+        assert "llm-router update" in captured.out
+        assert "llm-router doctor" in captured.out
+        assert "llm-router dashboard" in captured.out
 
     def test_status_handles_missing_pressure_data(self, capsys):
         """status should handle missing subscription pressure data gracefully."""

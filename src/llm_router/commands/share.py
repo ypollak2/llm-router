@@ -299,7 +299,7 @@ def _run_share() -> None:
 
     print(f"  {_green('✓')}  Card copied to clipboard")
     print(f"  {_yellow('→')}  Tweet it: {_dim(tweet_url[:72] + '…')}")
-    print(f"  {_dim('Tip:')}  llm_router share --svg  → writes an embeddable savings-card.svg")
+    print(f"  {_dim('Tip:')}  llm-router share --svg  → writes an embeddable savings-card.svg")
     print()
 
     try:

@@ -167,9 +167,9 @@ def _run_routing() -> None:
             pass
 
     print(f"\n{'─' * min(w, 70)}")
-    print(_dim("Run: llm_router status     # Usage & savings"))
-    print(_dim("Run: llm_router routing    # This command"))
-    print(_dim("Run: llm_router budget     # Budget management\n"))
+    print(_dim("Run: llm-router status     # Usage & savings"))
+    print(_dim("Run: llm-router routing    # This command"))
+    print(_dim("Run: llm-router budget     # Budget management\n"))
 
 
 # ── Entry point ─────────────────────────────────────────────────────────────

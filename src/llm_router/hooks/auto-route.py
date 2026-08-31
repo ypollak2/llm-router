@@ -173,7 +173,7 @@ try:
             if _pkg_ver > _inst_ver:
                 print(
                     f"⚠️  LLM Router hook is outdated (installed v{_inst_ver}, current v{_pkg_ver}). "
-                    "Run `llm_router install --force` to update.",
+                    "Run `llm-router install --force` to update.",
                     file=sys.stderr,
                 )
 except Exception:
@@ -2753,7 +2753,7 @@ def _build_mini_summary() -> str | None:
             "📊 llm_router session check (every 10 prompts):\n"
             f"   routes: {n}  ·  top tier: {top_tier} ({top_tier_n})  ·  "
             f"top task: {top_task} ({top_task_n})  ·  recorded cost: ${savings:.4f}\n"
-            "   run `llm_router summary` for the full dashboard."
+            "   run `llm-router summary` for the full dashboard."
         )
     except Exception:
         return None

@@ -136,7 +136,7 @@ class TestConfigShow:
                     _run_config(["show"])
         
         captured = capsys.readouterr()
-        assert "llm_router config" in captured.out
+        assert "llm-router config" in captured.out
 
     def test_config_lint_validates_yaml(self):
         """config lint should validate YAML syntax."""

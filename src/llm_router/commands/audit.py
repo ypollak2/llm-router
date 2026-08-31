@@ -27,7 +27,7 @@ import json
 import sys
 
 _USAGE = (
-    "llm_router audit — post-hoc misroute audit\n"
+    "llm-router audit — post-hoc misroute audit\n"
     "\n"
     "Commands:\n"
     "  misroute [--json] [--limit N]   re-score past routing decisions offline\n"
@@ -80,7 +80,7 @@ def _misroute(args: argparse.Namespace) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        prog="llm_router audit", description="Post-hoc misroute audit",
+        prog="llm-router audit", description="Post-hoc misroute audit",
         usage=_USAGE,
     )
     sub = parser.add_subparsers(dest="command")

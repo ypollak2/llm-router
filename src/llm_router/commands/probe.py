@@ -17,7 +17,7 @@ def cmd_probe(args: list[str]) -> int:
 
     if not verdicts:
         if use_cache:
-            print("No cached verdicts yet. Run `llm_router probe` (no --cached) to build the registry.")
+            print("No cached verdicts yet. Run `llm-router probe` (no --cached) to build the registry.")
         else:
             print("No models probed — is Ollama running and are any models installed?")
         return 1

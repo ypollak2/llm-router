@@ -254,7 +254,7 @@ async def llm_usage(period: str = "today") -> str:
             lines.append(section("MONTHLY BUDGET"))
             lines.append(
                 "  Unknown — spend could not be read, so routing is denying paid "
-                "models until it can. See `llm_router doctor`."
+                "models until it can. See `llm-router doctor`."
             )
             return "\n".join(lines)
         budget = config.llm_router_monthly_budget
@@ -695,7 +695,7 @@ async def llm_savings() -> str:
         lines.append(row("  No routed calls yet. Run a few prompts to see savings."))
 
     lines.append(HR)
-    lines.append(row("  Tip: run `llm_router test \"<prompt>\"` to simulate routing"))
+    lines.append(row("  Tip: run `llm-router test \"<prompt>\"` to simulate routing"))
     lines.append(HR)
 
     return "\n".join(lines)
@@ -1257,7 +1257,7 @@ async def llm_budget() -> str:
             providers_str = ", ".join(sorted(uncapped))
             nudge = (
                 f"\n\n💡 **No cap set for**: {providers_str}\n"
-                f"   Run `llm_router budget set <provider> <amount>` to protect against runaway costs."
+                f"   Run `llm-router budget set <provider> <amount>` to protect against runaway costs."
             )
 
         return f"{summary}{nudge}\n\n**Adaptive Router v5.0+**: ✅ Always-on dynamic routing (feature flag removed)"

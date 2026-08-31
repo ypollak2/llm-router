@@ -40,7 +40,7 @@ class TestSetEnforceCommand:
         """set-enforce with invalid mode should show help."""
         _run_set_enforce("invalid")
         captured = capsys.readouterr()
-        assert "Usage: llm_router set-enforce" in captured.out
+        assert "Usage: llm-router set-enforce" in captured.out
         assert "smart" in captured.out
         assert "soft" in captured.out
         assert "hard" in captured.out
@@ -50,7 +50,7 @@ class TestSetEnforceCommand:
         """set-enforce with no mode should show help."""
         _run_set_enforce("")
         captured = capsys.readouterr()
-        assert "Usage: llm_router set-enforce" in captured.out
+        assert "Usage: llm-router set-enforce" in captured.out
 
     def test_set_enforce_valid_mode_creates_files(self, monkeypatch):
         """set-enforce with valid mode should create config files."""

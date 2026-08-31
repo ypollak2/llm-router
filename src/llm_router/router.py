@@ -1347,14 +1347,14 @@ def _auth_error_hint(provider: str) -> str:
     if env_var:
         return (
             f"❌  {provider} authentication failed — {env_var} is missing or invalid.\n"
-            f"    Fix: run `llm_router setup` to configure it, or set {env_var} in "
+            f"    Fix: run `llm-router setup` to configure it, or set {env_var} in "
             f"~/.llm-router/.env\n"
             f"    Note: Claude Code subscription covers Haiku/Sonnet/Opus — no API key needed "
             f"for those. External providers like {provider} require their own key."
         )
     return (
         f"❌  {provider} authentication failed — API key missing or invalid.\n"
-        f"    Fix: run `llm_router setup` to configure your providers.\n"
+        f"    Fix: run `llm-router setup` to configure your providers.\n"
         f"    Note: Claude Code subscription covers Haiku/Sonnet/Opus — no API key needed "
         f"for those. External providers require their own key."
     )
@@ -3201,11 +3201,11 @@ async def _dispatch_model_loop(
 
     last_is_auth = last_error is not None and _is_auth_error(last_error)
     setup_hint = (
-        " Run `llm_router setup` to configure provider API keys, or "
-        "`llm_router doctor` to diagnose all issues."
+        " Run `llm-router setup` to configure provider API keys, or "
+        "`llm-router doctor` to diagnose all issues."
         if last_is_auth else
         f" Run `{route_call('llm_health')}` to see circuit breaker status, or "
-        "`llm_router doctor` to diagnose all issues."
+        "`llm-router doctor` to diagnose all issues."
     )
     set_span_attributes(
         route_span,
@@ -3934,7 +3934,7 @@ async def route_and_call(
             raise ValueError(
                 f"No providers available for {task_type.value}/{profile.value}. "
                 f"Configured providers: {available or 'none'}. "
-                "Fix: run `llm_router doctor` to diagnose, then one of:\n"
+                "Fix: run `llm-router doctor` to diagnose, then one of:\n"
                 "  • Install Ollama (free, local): https://ollama.com\n"
                 "  • Set GEMINI_API_KEY or OPENAI_API_KEY in ~/.llm-router/.env\n"
                 "  • Set LLM_ROUTER_CLAUDE_SUBSCRIPTION=true if you have Claude Pro/Max"
@@ -4675,7 +4675,7 @@ async def route_and_stream(
         error_detail = f"No models available for {task_type.value} / {profile.value}"
         raise ValueError(
             f"{error_detail}. "
-            "Fix: run `llm_router doctor` to diagnose, then install Ollama (free) "
+            "Fix: run `llm-router doctor` to diagnose, then install Ollama (free) "
             "or set GEMINI_API_KEY / OPENAI_API_KEY in ~/.llm-router/.env"
         )
 
