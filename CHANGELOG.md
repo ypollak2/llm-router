@@ -14,6 +14,67 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 _Nothing yet._
 
+## [13.0.7] — Test-suite honesty (2026-08-31)
+
+Closes #82, #84, #87, #88. Every one of these is a test that reported
+something other than what was actually wrong, and three of the four
+issue titles turned out to be misdiagnoses corrected by reproduction.
+
+### Fixed
+
+- **~100 more `llm_router <cmd>` strings across `src/` (#82).** Follow-up
+  to #72. A fresh scan found 225 raw matches across 86 files, not the ~89
+  estimated; after the `ast`/`tokenize` pass that drops docstrings and
+  comments, 100 were genuine user-facing violations across 44 files. The
+  lint's file list grows from 2 to 46 — the ~42 files whose matches were
+  entirely comment noise are deliberately excluded, since there is
+  nothing there to guard. Two matches were prose that merely reads like a
+  command; rather than start a suppression list they were reworded, so
+  both files are genuinely clean instead of exempted. Nine more
+  assertions across eight test files had the broken string encoded as
+  expected output.
+
+- **The concurrency test now has a budget it can meet (#84).** Filed as
+  order-dependence; it is not. The project-wide `timeout = 30` is sized
+  for unit tests, and this one forks six processes doing 200
+  lock-serialized writes each. Under CPU load, pytest's own setup was
+  measured at 22-27s, so setup plus call crossed 30s; the watchdog then
+  unwound the test while workers were still writing and the enclosing
+  `TemporaryDirectory` deleted the directory underneath them —
+  indistinguishable from lost writes. Random ordering never leaked state
+  into it; it only changed how much of the budget was left.
+
+- **The build-artifact tests likewise (#87).** Same error string, a
+  different cause — worth stating, because #84 had just taught the
+  opposite lesson. Here pytest-timeout fires inside
+  `subprocess.communicate`, blocked on a real `uv build` child: 16.8s
+  idle, 76.4s under load. The suggestion that each test rebuilds the
+  package was checked and disproved — the fixture is already
+  module-scoped and builds once — so no session fixture was written. The
+  global default stays at 30: three files needing more is a property of
+  those tests, not of a ~6,900-test suite.
+
+- **The sandbox guard no longer blames tests for another process's
+  writes (#88).** Filed as tests escaping their sandbox to write
+  `~/.claude.json`. Instrumenting every write path across ~10 full-suite
+  runs never once caught this package touching that file. What changed
+  between a failing run's before/after pair was `promptQueueUseCount`
+  — a concurrently running Claude Code session's own bookkeeping. The
+  tell was that an identical seed and test order passed and failed on
+  back-to-back runs, which an in-process defect cannot do. The guard now
+  diffs only `mcpServers["llm_router"]`, the one slice the installer
+  owns; real escapes are still caught, and it is not an allowlist entry.
+
+### Known issues
+
+An `-m slow` run calls `uv build` three times, because
+`test_sdist_excludes_quarantined_tests.py` and
+`test_gh43_direct_execution_disclosure.py` each define their own
+module-scoped `built` fixture. Excluded from the default addopts and from
+CI, so it affects no standard run. `.claude/settings.json` has the same
+whole-file-diff weakness #88 fixed for `.claude.json`; it has not flaked
+yet.
+
 ## [13.0.6] — Remove the dead enterprise surface, and a credential leak (2026-08-31)
 
 Closes #68, #69, #70, #71, #72, #74, #75, #79 — everything a repo-wide
