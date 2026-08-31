@@ -583,6 +583,63 @@ def _reset_ollama_isolation():
                 os.environ[k] = v
 
 
+# ── Provider-key hermeticity (GH-74) ────────────────────────────────────────
+# ``RouterConfig.available_providers`` is assembled straight from process env
+# vars (see ``RouterConfig._PROVIDER_MAP``), so anything that puts a real key
+# into ``os.environ`` before a test runs changes that test's outcome — a
+# developer's shell profile exporting a personal key, a stray ancestor-
+# directory ``.env`` a *dependency* auto-loads (litellm's own ``__init__.py``
+# used to call ``dotenv.load_dotenv()`` unconditionally on first import, an
+# upward filesystem search from deep inside site-packages that has nothing to
+# do with this repo or ``$HOME`` — fixed at the source in
+# ``llm_router/providers.py`` by setting ``LITELLM_MODE=PROD`` before
+# importing litellm), or simply test-ordering leakage. None of that should be
+# able to change what a test observes.
+#
+# Five tests (three in test_t3_s2_max_wall_clock_seconds.py, two in
+# test_t4_m2_classification_allowlist.py) exercise ``route_and_call`` without
+# configuring a provider at all, so they only ever passed because CI happens
+# to export a dummy ``OPENAI_API_KEY`` at the job level (see
+# .github/workflows/ci.yml) — on a clean local checkout with no such export
+# (and, before the litellm fix above, with a personal ``~/.env`` leaking a
+# real ``XAI_API_KEY`` in instead) they failed with "No providers available".
+# A suite whose result depends on which ambient key happens to exist gives no
+# reliable signal either way — see tests/test_gh74_env_hermeticity.py, which
+# pins this property directly.
+
+
+@pytest.fixture(autouse=True)
+def _isolate_provider_api_keys(monkeypatch):
+    """Give every test a deterministic provider configuration, ambient-free.
+
+    Clears every env var ``RouterConfig`` or litellm could read a provider key
+    from (both the pydantic field's own env var, e.g. ``PERPLEXITY_API_KEY``,
+    and the distinct litellm-facing name where it differs, e.g.
+    ``PERPLEXITYAI_API_KEY``), then sets exactly one deterministic provider —
+    ``OPENAI_API_KEY=test-key``, matching the existing ``mock_env``/
+    ``minimal_env`` convention elsewhere in this file — so
+    ``available_providers`` is always ``{"openai"}`` unless a test explicitly
+    overrides it. A test's own ``monkeypatch.setenv``/``no_providers_env``/
+    ``minimal_env`` call runs after this fixture's setup (autouse fixtures
+    apply first) and therefore wins, so nothing that already configures its
+    own providers is affected.
+    """
+    import llm_router.config as config_module
+
+    # ``_PROVIDER_MAP`` is a leading-underscore class attribute on a pydantic
+    # BaseSettings model, so pydantic treats it as a private-attribute
+    # descriptor rather than a plain class dict — ``RouterConfig._PROVIDER_MAP``
+    # returns a ``ModelPrivateAttr`` wrapper, not the mapping. Every existing
+    # caller therefore reads it off an *instance* (``self._PROVIDER_MAP``);
+    # this fixture has none, so it unwraps the same default the descriptor
+    # would hand any instance.
+    provider_map = config_module.RouterConfig.__private_attributes__["_PROVIDER_MAP"].default
+    for field_name, (_, litellm_var) in provider_map.items():
+        monkeypatch.delenv(field_name.upper(), raising=False)
+        monkeypatch.delenv(litellm_var, raising=False)
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+
+
 @pytest.fixture(autouse=True)
 def _reset_quality_store():
     """Reset the module-global quality-feedback store before and after each test.

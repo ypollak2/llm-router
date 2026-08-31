@@ -19,9 +19,27 @@ Safety invariants (Phase B):
 
 from __future__ import annotations
 
+import os
 import time
 from collections.abc import AsyncIterator
 from typing import TypedDict
+
+# GH-74: litellm's own __init__.py unconditionally calls ``dotenv.load_dotenv()``
+# (no path) the first time it is imported, unless ``LITELLM_MODE`` is already set
+# to something other than "DEV" (its default). ``load_dotenv()`` with no
+# arguments does an *upward filesystem search* from litellm's own install
+# location (deep inside site-packages), not from this repo or from ``$HOME`` —
+# so on a machine where any ancestor directory of the venv happens to contain a
+# ``.env`` (e.g. a developer's personal ``~/.env`` with real provider keys for
+# unrelated tools), importing litellm silently merges those keys into the real
+# process ``os.environ`` for the lifetime of the interpreter. llm_router already
+# owns its own, explicit config loading via ``RouterConfig`` (which reads
+# ``~/.llm-router/.env``); it neither needs nor wants a second, uncontrolled,
+# ancestor-directory dotenv load happening as a side effect of a third-party
+# import. Setting ``LITELLM_MODE`` before the import (without clobbering an
+# operator's explicit choice) opts out of that behaviour for good, in both
+# production and tests — see tests/test_gh74_env_hermeticity.py.
+os.environ.setdefault("LITELLM_MODE", "PROD")
 
 import litellm
 
