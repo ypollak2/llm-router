@@ -35,7 +35,7 @@ def cmd_test(args: list[str]) -> int:
 def _run_test(prompt: str) -> None:
     """Dry-run route simulation: classify prompt + show model choice + cost estimate."""
     if not prompt:
-        print(_red("Usage: llm_router test \"<your prompt>\""))
+        print(_red("Usage: llm-router test \"<your prompt>\""))
         sys.exit(1)
 
     async def _simulate() -> None:

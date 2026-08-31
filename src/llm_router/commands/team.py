@@ -70,7 +70,7 @@ def _run_team(subcmd: str, flags: list[str]) -> None:
     calls = report["total_calls"]
     if calls == 0:
         print(_yellow("  No routing data found for this period."))
-        print(f"  Try: {_bold('llm_router team report all')}\n")
+        print(f"  Try: {_bold('llm-router team report all')}\n")
         return
 
     saved = report["saved_usd"]
@@ -97,7 +97,7 @@ def _run_team(subcmd: str, flags: list[str]) -> None:
     if subcmd == "push":
         if not endpoint:
             print(f"\n{_red('✗')} No endpoint configured.")
-            print(f"  Run {_bold('llm_router team setup')} to configure Slack/Discord/Telegram.\n")
+            print(f"  Run {_bold('llm-router team setup')} to configure Slack/Discord/Telegram.\n")
             return
         channel = detect_channel(endpoint)
         print(f"\n  Pushing to {_bold(channel)}...")
@@ -110,9 +110,9 @@ def _run_team(subcmd: str, flags: list[str]) -> None:
             print(_red(f"  {msg}"))
     elif endpoint:
         channel = detect_channel(endpoint)
-        print(f"\n  {_dim(f'Endpoint: {channel} configured — run llm_router team push to send.')}")
+        print(f"\n  {_dim(f'Endpoint: {channel} configured — run llm-router team push to send.')}")
     else:
-        print(f"\n  {_dim('Tip: run llm_router team setup to configure Slack/Discord/Telegram push.')}")
+        print(f"\n  {_dim('Tip: run llm-router team setup to configure Slack/Discord/Telegram push.')}")
     print()
 
 
@@ -173,7 +173,7 @@ def _run_team_setup(config) -> None:
     from llm_router.team import detect_channel
     channel = detect_channel(url)
     print(f"\n{_green('✓')} Team endpoint configured: {_bold(channel)}")
-    print(f"  Run {_bold('llm_router team push')} to send your first report.\n")
+    print(f"  Run {_bold('llm-router team push')} to send your first report.\n")
 
 
 # ── Entry point ─────────────────────────────────────────────────────────────

@@ -1070,7 +1070,7 @@ def install(force: bool = False) -> list[str]:
                         actions.append(
                             "WARNING: replacing an existing statusLine in "
                             f"settings.json{_where}. The original is recorded and "
-                            "`llm_router uninstall` restores it."
+                            "`llm-router uninstall` restores it."
                         )
 
                 settings3["statusLine"] = {
@@ -1092,7 +1092,7 @@ def install(force: bool = False) -> list[str]:
     try:
         from llm_router.agentic_registry import populate_in_background
         if populate_in_background():
-            actions.append("Probing local models for agentic capability (background; see `llm_router probe`)")
+            actions.append("Probing local models for agentic capability (background; see `llm-router probe`)")
     except Exception:
         pass
 

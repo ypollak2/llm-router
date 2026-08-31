@@ -479,7 +479,7 @@ def _setup_add(provider: str, api_key: str) -> str:
     if _get_stored_cap(provider) <= 0:
         budget_nudge = (
             f"\n\n💰 **Set a monthly budget cap** to protect against runaway costs:\n"
-            f"   `llm_router budget set {provider} 20`\n"
+            f"   `llm-router budget set {provider} 20`\n"
             f"   (or any amount — the router will route away from this provider as you approach the cap)"
         )
 

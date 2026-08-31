@@ -93,7 +93,7 @@ def _cmd_summary(args: argparse.Namespace) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="llm_router team-sync")
+    parser = argparse.ArgumentParser(prog="llm-router team-sync")
     sub = parser.add_subparsers(dest="cmd", required=True)
 
     sp = sub.add_parser("export", help="Dump local routing decisions to JSONL.")

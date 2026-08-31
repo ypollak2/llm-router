@@ -225,7 +225,7 @@ For non-interactive setup, write ~/.llm-router/.env directly.""",
         print("   Hooks installed successfully.")
     except Exception as exc:
         print(f"   ⚠ Hook installation failed: {exc}")
-        print("   Fix manually: run `llm_router install` in your terminal.")
+        print("   Fix manually: run `llm-router install` in your terminal.")
 
     print("\n   Next: Open Claude Code — routing is now active.\n")
 

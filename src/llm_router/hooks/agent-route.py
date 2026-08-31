@@ -728,7 +728,7 @@ def _allow_routed_spawn() -> bool:
 
 
 _SPAWN_ROUTING_NOTE = (
-    "\n\n--- llm_router routing (inherited) ---\n"
+    "\n\n--- llm_router: routing (inherited) ---\n"
     "You are a llm_router-routed subagent. For substantive generation, analysis, "
     f"research, or code synthesis, prefer the llm_router MCP tools ("
     f"{route_tool('llm_query')} / {route_tool('llm_analyze')} / "
@@ -742,7 +742,7 @@ _SPAWN_ROUTING_NOTE = (
 def _with_routing_note(tool_input: dict) -> dict:
     ti = dict(tool_input)
     p = ti.get("prompt") or ""
-    if "llm_router routing (inherited)" not in p:
+    if "llm_router: routing (inherited)" not in p:
         ti["prompt"] = p + _SPAWN_ROUTING_NOTE
     return ti
 

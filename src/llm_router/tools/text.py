@@ -22,7 +22,7 @@ async def _announce_routing(ctx: Context, task_type: str, complexity: str) -> No
     knows which task/complexity pair was received, and that routing is starting.
     """
     try:
-        await ctx.info(f"⚡ llm_router routing {task_type}/{complexity}...")
+        await ctx.info(f"⚡ llm_router: routing {task_type}/{complexity}...")
         await ctx.report_progress(0, 100, f"routing {task_type}/{complexity}")
     except Exception:
         pass

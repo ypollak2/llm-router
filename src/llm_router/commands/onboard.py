@@ -165,7 +165,7 @@ def _run_onboard() -> None:
     print()
     print("  Next steps:")
     print("    • Start a new Claude Code session to activate routing")
-    print("    • Run `llm_router status` to see savings accumulate")
+    print("    • Run `llm-router status` to see savings accumulate")
     if enforce == "shadow":
-        print("    • Upgrade to suggest/enforce when ready: llm_router onboard")
+        print("    • Upgrade to suggest/enforce when ready: llm-router onboard")
     print()

@@ -419,7 +419,7 @@ def _critical_modules_or_die() -> None:
         "     (or `pip install -e .` from the source checkout)\n"
         "  2. Restart the MCP server process — in-memory module table "
         "is cached from the previous install.\n"
-        "  3. Verify with `llm_router doctor` (the OP-4 transport probe).\n"
+        "  3. Verify with `llm-router doctor` (the OP-4 transport probe).\n"
         f"  4. Bypass for emergency debug only: "
         f"{_CRITICAL_MODULE_SKIP_ENV}=on (NOT for production).\n"
     )

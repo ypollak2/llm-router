@@ -92,4 +92,4 @@ def run_init_claude_memory() -> None:
     print("Next Steps:")
     print("  1. If using Ollama only: Nothing to do — you're all set! ✅")
     print("  2. If .env is blocked: Edit ~/.llm-router/config.yaml and add your API keys")
-    print("  3. Run 'llm_router status' to verify the setup\n")
+    print("  3. Run 'llm-router status' to verify the setup\n")

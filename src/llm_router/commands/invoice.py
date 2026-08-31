@@ -69,7 +69,7 @@ def _pull_invoice(provider: str, month: str):
 
 def cmd_invoice(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        prog="llm_router invoice", description="Provider invoice reconciliation report",
+        prog="llm-router invoice", description="Provider invoice reconciliation report",
     )
     sub = parser.add_subparsers(dest="command")
     p_report = sub.add_parser("report", help="finance-facing reconciliation report")

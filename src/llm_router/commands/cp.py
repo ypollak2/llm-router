@@ -15,7 +15,7 @@ from pathlib import Path
 
 
 def cmd_cp(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="llm_router cp", description="Control-plane operations")
+    parser = argparse.ArgumentParser(prog="llm-router cp", description="Control-plane operations")
     sub = parser.add_subparsers(dest="command")
     p = sub.add_parser("bootstrap-tenant", help="seed a tenant's policy from the local policy")
     p.add_argument("--tenant-id", required=True)
@@ -41,7 +41,7 @@ def cmd_cp(argv: list[str] | None = None) -> int:
             policy_path=args.policy_path or None, force=args.force,
         )
     except ValueError as exc:
-        print(f"[llm_router cp] {exc}", file=sys.stderr)
+        print(f"[llm-router cp] {exc}", file=sys.stderr)
         store.close()
         return 1
     finally:

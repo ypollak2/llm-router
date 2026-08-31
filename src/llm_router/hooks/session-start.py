@@ -153,7 +153,7 @@ BANNER_LOCAL = """
 ║  available locally (Ollama / Codex / Gemini CLI) or falls     ║
 ║  through to Claude when nothing else can serve the task.      ║
 ║  Add OPENAI_API_KEY / GEMINI_API_KEY / GROQ_API_KEY, etc. to  ║
-║  enable cloud fallbacks — run `llm_router setup` to configure.    ║
+║  enable cloud fallbacks — run `llm-router setup` to configure.    ║
 ╠════════════════════════════════════════════════════════════════╣
 ║  routing is advisory; enforce mode decides what is blocked  ║
 ╚════════════════════════════════════════════════════════════════╝
@@ -341,7 +341,7 @@ def _render_welcome(is_subscription: bool) -> str:
         f"   enforce → {enforce}",
         f"   opened  → {now}",
         "   chain   → Ollama · Codex · Gemini Flash · GPT-4o · Perplexity",
-        "   tip     → run `llm_router summary` to see what this session saved",
+        "   tip     → run `llm-router summary` to see what this session saved",
     ]
 
     # F1: pull-routing feedback — if the project also has Cursor or Windsurf

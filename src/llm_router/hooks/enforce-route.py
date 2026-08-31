@@ -960,7 +960,7 @@ def main() -> None:
             if not _auto_route_hook.exists():
                 print(
                     "⚠️  LLM Router: auto-route.py hook is missing from ~/.claude/hooks/. "
-                    "Routing is inactive — run `llm_router install` to restore it.",
+                    "Routing is inactive — run `llm-router install` to restore it.",
                     file=sys.stderr,
                 )
         except Exception:

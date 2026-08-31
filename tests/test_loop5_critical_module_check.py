@@ -123,7 +123,7 @@ def test_failure_message_includes_remediation_steps(
             server._critical_modules_or_die()
     err = capsys.readouterr().err
     assert "uv tool install --reinstall --editable" in err
-    assert "llm_router doctor" in err  # the OP-4 transport probe
+    assert "llm-router doctor" in err  # the OP-4 transport probe
     assert "Restart the MCP server" in err
 
 

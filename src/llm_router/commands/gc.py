@@ -65,7 +65,7 @@ def collect_stale(root: Path, ttl_days: float) -> list[Path]:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        prog="llm_router gc",
+        prog="llm-router gc",
         description="Sweep stale per-session shard files from ~/.llm-router (dry-run by default).",
     )
     parser.add_argument(
@@ -106,7 +106,7 @@ def main(argv: list[str] | None = None) -> int:
 
     kb = total_bytes / 1024
     print(
-        f"llm_router gc: {verb} {len(stale)} shard(s) older than "
+        f"llm-router gc: {verb} {len(stale)} shard(s) older than "
         f"{args.ttl_days:g}d ({kb:.1f} KiB) in {args.root}"
     )
     if not args.apply and stale:

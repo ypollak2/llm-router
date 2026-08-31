@@ -107,7 +107,7 @@ class TestBudgetList:
 
         captured = capsys.readouterr()
         assert "No cap set for: openai" in captured.out
-        assert "Set one: llm_router budget set" in captured.out
+        assert "Set one: llm-router budget set" in captured.out
 
 
 class TestBudgetSet:

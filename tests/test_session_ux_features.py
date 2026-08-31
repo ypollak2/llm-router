@@ -174,7 +174,7 @@ def test_build_mini_summary_returns_compact_block(auto_route_module, monkeypatch
     # Most common tier is "cheap" (2 vs 1), most common task is "query" (2 vs 1)
     assert "top tier: cheap" in block
     assert "top task: query" in block
-    assert "llm_router summary" in block  # follow-up command pointer
+    assert "llm-router summary" in block  # follow-up command pointer
     assert block.count("\n") == 2  # exactly 3 lines
 
 
