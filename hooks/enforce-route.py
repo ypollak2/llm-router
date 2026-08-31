@@ -106,6 +106,15 @@ _BASH_READONLY_PREFIX_RE = re.compile(
     r"""^\s*(?:
         ls|find|cat|head|tail|wc|file|stat|du|tree|pwd|whoami|hostname|date|uname|env|
         grep|rg|ag|fd|
+        # `sed -n` prints without editing and is one of the most common ways to
+        # read a slice of a file. Only the -n form is allowed: bare `sed` can
+        # carry -i and edit in place, and the fail-closed default keeps it out.
+        sed\s+-n|
+        # Reading structured local state. `jq` and `sort`/`uniq` appear almost
+        # exclusively downstream of a pipe, but a command may legitimately start
+        # with them when fed from a file argument.
+        jq|sort|uniq|diff|cmp|basename|dirname|realpath|readlink|which|command\s+-v|
+        awk|cut|
         git\s+(?:log|status|diff|show|branch|remote|ls-files|check-ignore|
                 rev-parse|describe|tag|blame|worktree\s+list|config\s+--get|
                 config\s+--list|stash\s+list|reflog|shortlog|fsck|count-objects)|
@@ -425,6 +434,36 @@ _BASH_ROUTABLE_ESCAPE_RE = re.compile(
     )""",
     re.VERBOSE | re.IGNORECASE,
 )
+
+
+def _bash_exempt_from_hold(task_type: str, command: str, redirect_fires: bool) -> bool:
+    """Should this Bash command run natively despite an unsatisfied route?
+
+    An inherently-local operation under a NON-QA task type is exempt: no routed
+    model can run `git commit` for you, so holding it to force routing is pure
+    drift rather than a saving.
+
+    QA task types (query/research/analyze/generate) are deliberately NOT exempt,
+    even for read-only commands — see test_readonly_bash_blocked_for_qa_tasks.
+    A read-only command can *answer* a Q&A question natively (`cat the file`,
+    then reply from it), which is exactly the bypass enforcement exists to stop.
+    That invariant is intentional and is left alone here.
+
+    The misrouting that motivated task 14 — local debugging landing in
+    `research` and then holding `grep` against the user's own checkout — is
+    therefore fixed where it originates, in the classifier's `research` intent
+    pattern, not by loosening this gate.
+
+    Network fetches and shell-driven LLM calls are never exempt, so the shell
+    cannot be used to bypass routing.
+    """
+    if not command or not command.strip():
+        return False
+    if _BASH_ROUTABLE_ESCAPE_RE.search(command):
+        return False
+    if task_type in _QA_TASK_TYPES or task_type == "code" or redirect_fires:
+        return False
+    return _is_local_only_bash(command)
 
 
 def _is_local_only_bash(command: str) -> bool:
@@ -1085,9 +1124,7 @@ def main() -> None:
         _lb_redirect = _delegate_redirect_fires(
             pending.get("original_prompt", ""), pending.get("complexity", "simple")
         )
-        if (_lb_task not in _QA_TASK_TYPES and _lb_task != "code"
-                and not _lb_redirect
-                and _is_local_only_bash(_bash_cmd)):
+        if _bash_exempt_from_hold(_lb_task, _bash_cmd, _lb_redirect):
             enforce = "soft"
             try:
                 _ROUTER_DIR.mkdir(parents=True, exist_ok=True)
