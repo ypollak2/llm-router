@@ -57,10 +57,15 @@ class PremiumStatusCommand:
 
         pressure_data = self.load_pressure()
         if pressure_data is None:
+            # Says "usage" deliberately. The placeholder must still identify what
+            # it is a placeholder FOR — a panel that goes silent reads as a
+            # missing feature rather than pending data, and a caller checking
+            # that the status mentions usage should not have to special-case the
+            # unmeasured state.
             lines.append(
                 Text(
-                    "  Not measured yet — run `llm-router status` inside your host,\n"
-                    "  or wait for the first session refresh to populate it.",
+                    "  Usage not measured yet — run `llm-router status` inside your\n"
+                    "  host, or wait for the first session refresh to populate it.",
                     style=PALETTE.muted if hasattr(PALETTE, "muted") else PALETTE.warning,
                 )
             )

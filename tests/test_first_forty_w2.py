@@ -354,3 +354,26 @@ def test_session_summary_is_on_by_default():
         "the session summary must render without opt-in; it is the product's "
         "most shareable artifact"
     )
+
+
+def test_unmeasured_quota_panel_still_names_itself():
+    """The placeholder must say what it is a placeholder FOR.
+
+    Removing the fabricated 0% left a panel mentioning neither usage nor a
+    percentage, so a caller checking that the status surfaces usage saw nothing
+    and a reader saw what looked like a missing feature. CI caught it; a machine
+    with a populated usage.json never would have.
+    """
+    from llm_router.ui import status_premium as sp
+
+    cmd = sp.PremiumStatusCommand()
+    cmd.usage_json = cmd.state_dir / "definitely-absent-usage.json"
+
+    from rich.console import Console
+
+    console = Console(record=True, width=100)
+    console.print(cmd.render_subscription_quotas())
+    out = console.export_text().lower()
+
+    assert "usage" in out, f"unmeasured quota panel does not mention usage: {out!r}"
+    assert "0%" not in out, "the fabricated zero is back"
