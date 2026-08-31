@@ -1988,8 +1988,13 @@ def _condense(summary: str) -> str:
     if routes:
         # Sourced from the decisions/routes count above, never from "classified".
         bits.append(f"{routes.group(1)} routed")
+    # "saved" is not decoration. These are savings against an all-premium
+    # baseline, and they render inches from "quota used NN%" — so an unlabelled
+    # `today $32.85` reads as money SPENT, the exact inversion a user hit on the
+    # statusline's identical figure. Say what the number is, once, in the line
+    # that gets screenshotted.
     if today:
-        bits.append(f"today {today}")
+        bits.append(f"saved today {today}")
     if lifetime:
         bits.append(f"lifetime {lifetime}")
     if used_5h is not None or used_wk is not None:

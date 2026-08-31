@@ -296,3 +296,61 @@ def test_statusline_reports_today_not_the_session():
         "the statusline must use the canonical today-window aggregation, which "
         "unions all five usage tables; a per-session figure under-reports"
     )
+
+
+# ── task 33 ────────────────────────────────────────────────────────────────────
+
+
+def test_session_summary_labels_money_as_saved():
+    """The most-screenshotted line this product produces must not read as spend.
+
+    The condensed summary renders `saved today $X · lifetime $Y · quota used
+    5h N%`. Before this, the money bits were bare (`today $32.85`) and sat
+    inches from a quota percentage — the identical inversion a user hit on the
+    statusline, where an unlabelled figure was read as money spent.
+    """
+    import importlib.util
+
+    from llm_router import install_hooks as ih
+
+    spec = importlib.util.spec_from_file_location(
+        "session_end_under_test", ih._PACKAGE_DIR / "hooks" / "session-end.py"
+    )
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    # A captured excerpt of the real box, not an invented fixture — the module's
+    # own docstring records that a hand-written fixture once kept these tests
+    # green while the line printed no money at all.
+    summary = (
+        "  1153 decisions routed\n"
+        "  today $32.88\n"
+        "  lifetime $52.19\n"
+        "  5h 16%  weekly 18%\n"
+    )
+    line = mod._condense(summary)
+
+    assert "saved today" in line, (
+        f"the money figure is unlabelled and will be read as spend: {line!r}"
+    )
+    assert "quota used" in line, "quota label lost"
+
+
+def test_session_summary_is_on_by_default():
+    """A summary nobody sees cannot be the thing people share."""
+    import importlib.util
+    import os
+
+    from llm_router import install_hooks as ih
+
+    spec = importlib.util.spec_from_file_location(
+        "session_end_default_mode", ih._PACKAGE_DIR / "hooks" / "session-end.py"
+    )
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    os.environ.pop("LLM_ROUTER_STOP_HOOK", None)
+    assert mod._stop_hook_mode() == "condensed", (
+        "the session summary must render without opt-in; it is the product's "
+        "most shareable artifact"
+    )

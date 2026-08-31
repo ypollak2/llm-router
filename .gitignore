@@ -109,3 +109,17 @@ tests/hook_rendering/
 !/docs/BENCHMARKS.md
 !/docs/releases/
 !/docs/releases/**
+# Public, user-facing docs. /docs/* is ignore-by-default because this
+# tree also holds internal strategy notes, so anything meant to SHIP has
+# to be un-ignored explicitly. A page that is written but never committed
+# is the same failure that left the Codex plugin pointing at a .mcp.json
+# no clone ever contained.
+!/docs/ROUTERARENA.md
+!/docs/decisions/
+!/docs/decisions/**
+
+# RouterArena working data — regenerable, and large
+data/benchmarks/*.parquet
+data/corpus/*.jsonl
+data/outcomes/*.jsonl
+scripts/routerarena/data/_graded_*.json
