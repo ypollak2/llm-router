@@ -1071,15 +1071,45 @@ def _run_doctor(host: Optional[str] = None) -> tuple[int, list[str]]:
     # ── 6. Usage data freshness ────────────────────────────────────────────
     print(f"\n{_bold('  Usage data (Claude subscription pressure)')}")
     usage_path = Path.home() / ".llm-router" / "usage.json"
+    # Quota pressure IS the headline of subscription mode. When that mode is on
+    # and the file is absent, the statusline shows the user nothing and doctor
+    # used to still print "all checks passed" — a check that misses the thing the
+    # user is looking at is worse than no check (task 15).
+    _subscription_on = os.environ.get("LLM_ROUTER_CLAUDE_SUBSCRIPTION", "").lower() in {
+        "1",
+        "true",
+        "yes",
+    }
     if not usage_path.exists():
-        print(
-            _warn(
-                f"usage.json not found — run `{route_tool('llm_check_usage')}` in Claude Code to populate"
-            )
+        _msg = (
+            f"usage.json not found — quota will render as unmeasured. "
+            f"Run `{route_tool('llm_check_usage')}` in Claude Code, or reinstall to seed it"
         )
+        if _subscription_on:
+            print(_fail(_msg, fix="llm-router install   (seeds the placeholder)"))
+            issues.append("Quota data missing while subscription mode is on")
+        else:
+            print(_warn(_msg))
     else:
         try:
             data = json.loads(usage_path.read_text())
+        except Exception as e:
+            print(_fail(f"could not read usage.json: {e}"))
+            data = None
+
+        if data is None:
+            pass  # already reported
+        elif data.get("pending"):
+            # The install-time placeholder. Not an error — but say so plainly,
+            # rather than measuring an age against a zero timestamp and calling
+            # the file decades stale.
+            print(
+                _warn(
+                    "placeholder only — no refresh has run yet. Quota appears "
+                    "once the first session populates it."
+                )
+            )
+        else:
             age_s = time.time() - data.get("updated_at", 0)
             if age_s < 1800:
                 print(_ok(f"fresh ({int(age_s / 60)}m old)"))
@@ -1097,8 +1127,6 @@ def _run_doctor(host: Optional[str] = None) -> tuple[int, list[str]]:
                     )
                 )
                 issues.append("Usage data is stale")
-        except Exception as e:
-            print(_fail(f"could not read usage.json: {e}"))
 
     # ── 7. Provider keys ───────────────────────────────────────────────────
     print(f"\n{_bold('  Provider API keys')}")

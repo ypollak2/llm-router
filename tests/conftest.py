@@ -1209,3 +1209,24 @@ def _redirect_claude_json(tmp_path, monkeypatch):
     import llm_router.install_hooks as ih
 
     monkeypatch.setattr(ih, "_CLAUDE_JSON_PATH", tmp_path / "_claude_json" / ".claude.json")
+
+
+@pytest.fixture(autouse=True)
+def _isolate_router_state_dir(monkeypatch, tmp_path):
+    """Point every STATE_DIR at a tmp dir for the duration of each test.
+
+    The backup bounding fix (#94) moved timestamped backups out of ~/.claude and
+    into ~/.llm-router/backups, and the quota seed (task 09) writes
+    ~/.llm-router/usage.json. Both are real-home writes if a test exercises them
+    unpatched — the same sandbox escape #88 fixed for ~/.claude.json.
+
+    Redirecting by default inverts the failure mode: a test has to opt IN to
+    touching real state. A test that patches it itself still wins, because
+    autouse fixtures apply before test-level monkeypatch calls.
+    """
+    import llm_router.config as _cfg
+    import llm_router.install_hooks as _ih
+
+    state = tmp_path / "_router_state"
+    monkeypatch.setattr(_ih, "STATE_DIR", state, raising=False)
+    monkeypatch.setattr(_cfg, "STATE_DIR", state, raising=False)

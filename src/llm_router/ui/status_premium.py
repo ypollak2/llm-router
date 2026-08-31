@@ -34,29 +34,53 @@ class PremiumStatusCommand:
         header = f"⚡ LLM_ROUTER Status  ·  Health: {health}"
         return f"[bold {PALETTE.accent}]{header}[/]"
 
+    def load_pressure(self) -> Optional[dict]:
+        """Return the subscription pressure data, or None when it is unknown.
+
+        None and "0%" are different facts and must not be conflated. A fresh
+        install has no usage.json until the first refresh runs, and reporting
+        that as 0% told the user they had their whole quota left when the truth
+        was that nothing had been measured yet.
+        """
+        try:
+            with open(self.usage_json) as f:
+                data = json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            return None
+        if not isinstance(data, dict) or data.get("pending"):
+            return None
+        return data
+
     def render_subscription_quotas(self) -> Group:
         """Render Claude Code subscription quotas."""
         lines = [Text("📊  Claude Code Subscription", style=f"bold {PALETTE.accent}")]
 
-        # Load pressure data
-        try:
-            with open(self.usage_json) as f:
-                pressure_data = json.load(f)
-        except (FileNotFoundError, json.JSONDecodeError):
-            pressure_data = {}
+        pressure_data = self.load_pressure()
+        if pressure_data is None:
+            lines.append(
+                Text(
+                    "  Not measured yet — run `llm-router status` inside your host,\n"
+                    "  or wait for the first session refresh to populate it.",
+                    style=PALETTE.muted if hasattr(PALETTE, "muted") else PALETTE.warning,
+                )
+            )
+            return Group(*lines)
 
         quotas = [
-            ("Session Quota (5h)", pressure_data.get("session_pct", 0.0), "2.8h"),
-            ("Weekly Usage", pressure_data.get("weekly_pct", 0.0), "4.2d"),
-            ("Sonnet Monthly", pressure_data.get("sonnet_pct", 0.0), "No pressure"),
+            ("Session Quota (5h)", pressure_data.get("session_pct"), "5h window"),
+            ("Weekly Usage", pressure_data.get("weekly_pct"), "7d window"),
+            ("Sonnet Monthly", pressure_data.get("sonnet_pct"), "30d window"),
         ]
 
-        for label, pct, remaining in quotas:
+        for label, pct, window in quotas:
+            if pct is None:
+                lines.append(Text(f"  {label:<20} {'—':<16}  not reported  ·  {window}"))
+                continue
             bar = progress_bar(pct, max_val=100.0, width=16)
             pct_color = (
                 PALETTE.success if pct < 70 else PALETTE.warning if pct < 90 else PALETTE.error
             )
-            line = f"  {label:<20} {bar}  [{pct_color}]{pct:.0f}%[/]  ·  {remaining}"
+            line = f"  {label:<20} {bar}  [{pct_color}]{pct:.0f}%[/]  ·  {window}"
             lines.append(Text(line))
 
         return Group(*lines)
