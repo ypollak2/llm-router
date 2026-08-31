@@ -22,25 +22,28 @@ from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as _pkg_version
 
 
-def _resolve_version() -> str:
-    try:
-        import tomllib
-        from pathlib import Path
+__version__ = ""
 
-        _pp = Path(__file__).resolve().parent.parent.parent / "pyproject.toml"
-        if _pp.is_file():
-            data = tomllib.load(_pp.open("rb"))
-            if data.get("project", {}).get("name") in {"llm-routing", "llm_routing"}:
-                return data["project"]["version"]
-    except Exception:
-        pass
+# Kept as a module-level try-chain rather than a helper function: a `def` here
+# sits between the two import groups in this file and makes the re-exports below
+# E402. Behaviour is the same, and the file keeps the shape ruff expects.
+try:
+    import tomllib
+    from pathlib import Path as _Path
+
+    _pp = _Path(__file__).resolve().parent.parent.parent / "pyproject.toml"
+    if _pp.is_file():
+        _data = tomllib.load(_pp.open("rb"))
+        if _data.get("project", {}).get("name") in {"llm-routing", "llm_routing"}:
+            __version__ = _data["project"]["version"]
+except Exception:
+    pass
+
+if not __version__:
     try:
-        return _pkg_version("llm-routing")
+        __version__ = _pkg_version("llm-routing")
     except PackageNotFoundError:
-        return "0.0.0+unknown"
-
-
-__version__ = _resolve_version()
+        __version__ = "0.0.0+unknown"
 
 # Export response router for easy access
 from llm_router.response_router import route_response as route_response_explanations
