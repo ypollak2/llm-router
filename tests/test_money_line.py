@@ -166,9 +166,12 @@ def test_uncosted_sources_are_named_not_counted_as_free():
     conn.execute(
         "CREATE TABLE claude_usage (timestamp TEXT, tokens_used INT, cost_saved_usd REAL)"
     )
-    conn.execute(
-        "INSERT INTO claude_usage VALUES (datetime('now','localtime'), 100, 1.5)"
-    )
+    # Store UTC, as the real writers do. The window filter is
+    # `date(timestamp,'localtime') = date('now','localtime')`, so a row written
+    # in localtime gets converted a SECOND time and lands on the wrong day
+    # whenever the doubled offset crosses midnight — which is how this passed
+    # all afternoon and failed near a boundary.
+    conn.execute("INSERT INTO claude_usage VALUES (datetime('now'), 100, 1.5)")
     conn.commit()
     conn.close()
 
