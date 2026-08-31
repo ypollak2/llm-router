@@ -45,6 +45,20 @@ from pathlib import Path
 
 import pytest
 
+# The project-wide `timeout = 30` in pyproject.toml is sized for ordinary unit
+# tests. The `built` fixture below runs a real `uv build` (sdist + wheel):
+# ~17s on an idle host, but the subprocess itself competes for CPU under load
+# rather than pytest incurring per-test overhead (unlike #84's cause). Measured
+# at 58.9s-76.4s wall-clock under a saturated host — comfortably past the 30s
+# default and comfortably inside this budget. `--durations=0` confirms the
+# `built` fixture's setup runs exactly once per session (module-scoped, shared
+# by all three tests below), so this is one slow real operation, not repeated
+# work. Mirrors the identical override on
+# tests/reliability/test_ledger_concurrency.py and
+# tests/test_session_store_concurrency.py (#84), the suite's other
+# real-subprocess/multiprocess regression tests.
+pytestmark = pytest.mark.timeout(180)
+
 _REPO = Path(__file__).resolve().parent.parent
 _SRC = _REPO / "src" / "llm_router"
 
