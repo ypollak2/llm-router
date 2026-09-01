@@ -218,8 +218,48 @@ def test_upload_does_not_assume_every_platform_produces_a_tarball():
     wf = WORKFLOW.read_text()
     step = wf.split("Attach to the release")[1].split("upload-artifact")[0]
 
-    assert "nullglob" in step, (
-        "the upload names specific files instead of globbing what the platform "
-        "actually produced"
-    )
     assert "artifacts[@]" in step, "artifacts are not passed as a discovered list"
+    # Comments may still discuss nullglob; what matters is that no code uses it.
+    code = "\n".join(
+        line for line in step.splitlines() if not line.lstrip().startswith("#")
+    )
+    assert "nullglob" not in code, (
+        "nullglob only drops patterns containing wildcards, and `<asset>.tar.gz` "
+        "has none — a missing file stays in the array as a literal. It broke "
+        "Linux, which had been working. Test existence instead."
+    )
+    assert "[ -f " in step, "the upload does not test whether each artifact exists"
+
+
+def test_upload_selection_is_correct_for_each_platform():
+    """Run the workflow's own selection logic against each platform's outputs.
+
+    Reading the shell and reasoning about it is what produced three wrong
+    fixes in a row. This executes it.
+    """
+    import subprocess
+    import tempfile
+
+    cases = {
+        "linux": ([".tar.gz"], 1),
+        "macos": ([".tar.gz", ".zip"], 2),
+        "windows": ([".zip"], 1),
+    }
+    for platform, (built, expected) in cases.items():
+        with tempfile.TemporaryDirectory() as d:
+            asset = f"llm-router-{platform}"
+            for ext in built:
+                Path(d, asset + ext).touch()
+            script = (
+                'artifacts=(); '
+                f'for f in "{asset}.tar.gz" "{asset}.zip"; do '
+                '[ -f "$f" ] && artifacts+=( "$f" ); done; '
+                'echo ${#artifacts[@]}'
+            )
+            out = subprocess.run(
+                ["bash", "-c", script], cwd=d, capture_output=True, text=True
+            ).stdout.strip()
+            assert out == str(expected), (
+                f"{platform} builds {built} but the upload selected {out} "
+                f"artifacts, expected {expected}"
+            )

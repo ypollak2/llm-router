@@ -231,8 +231,14 @@ jobs:
           # so on Windows BOTH the primary and the fallback referenced a file
           # that does not exist and the step failed with three platforms already
           # uploaded. Globbing removes the assumption entirely.
-          shopt -s nullglob
-          artifacts=( "${{ matrix.asset }}".tar.gz "${{ matrix.asset }}".zip )
+          # Test each candidate for existence. `nullglob` was the wrong tool:
+          # it only drops patterns containing wildcards, and `<asset>.tar.gz` has
+          # none — so a missing file stayed in the array as a literal and the
+          # upload failed on it. That broke Linux, which HAD been working.
+          artifacts=()
+          for f in "${{ matrix.asset }}.tar.gz" "${{ matrix.asset }}.zip"; do
+            [ -f "$f" ] && artifacts+=( "$f" )
+          done
           if [ ${#artifacts[@]} -eq 0 ]; then
             echo "no packaged artifact found for ${{ matrix.asset }}" >&2
             exit 1
