@@ -93,8 +93,11 @@ token-savings-viz.html
 Dockerfile
 Procfile
 
-# Local MCP config
+# Local MCP config. The PLUGIN's own .mcp.json is committed (negated
+# below): the scanner looks for it at the repo root, and a manifest
+# pointing into a dot-directory instead reads as an unsafe declared path.
 .mcp.json
+!/.mcp.json
 
 # Claude Code session/project artifacts (machine-specific)
 .claude/sessions/

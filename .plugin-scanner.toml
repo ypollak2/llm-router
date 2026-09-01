@@ -1,0 +1,51 @@
+# HOL plugin scanner configuration.
+#
+# The HARDCODED_SECRET rule fires 58 times on this repository and every one is a
+# false positive — because this is a project ABOUT handling API keys, and the
+# rule matches on the shape of key-handling code rather than on a live
+# credential.
+#
+# No rule is disabled here. Disabling HARDCODED_SECRET globally would hide a
+# genuine leak in application code, which is exactly the finding worth keeping.
+# Instead the paths where the rule is definitionally wrong are excluded, and
+# each exclusion is justified below. A new secret committed to src/ is still a
+# failure.
+#
+# Verified before excluding: every finding was read. The two in src/ are
+#   safe_config.py:89   an f-string TEMPLATE that interpolates a discovered key
+#                       into example YAML. There is no literal there, only the
+#                       shape of one — and quoting that shape HERE made this very
+#                       file trip the rule, twice, which is its own small proof
+#                       that the rule matches form rather than substance.
+#   org_policy.py:29    a vault REFERENCE — `${vault:secret/...#openai_key}` —
+#                       which is the documented way to avoid hardcoding a
+#                       secret. The rule flags the recommendation against
+#                       itself.
+
+[scanner]
+ignore_paths = [
+  # Test fixtures. The secret-redaction feature cannot be tested without inputs
+  # that look like credentials: test_secret_scrubber.py, test_signals_pii.py and
+  # test_sec01_shared_scrubber.py exist to prove that a prompt containing an API
+  # key is forced to a local model and never leaves the machine. Any scanner
+  # will flag them forever, correctly by its own rules and wrongly by ours.
+  "tests/*",
+  "_quarantined_tests/*",
+
+  # Development tooling. Not part of the plugin surface — .codexignore already
+  # keeps these out of an installed plugin — and they carry the same
+  # deliberately-fake credentials for the same reason.
+  "scripts/*",
+
+  # CI sets OPENAI_API_KEY to a placeholder whose own value states that it is
+  # a dummy for CI and makes no real calls, so provider code paths run without
+  # network access. Not quoted here: naming the literal in this file made THIS
+  # file trip the rule it exists to scope.
+  ".github/workflows/ci.yml",
+
+  # The two source files justified in the header above. Named individually
+  # rather than excluding src/, so a real secret in application code still
+  # fails the build.
+  "src/llm_router/safe_config.py",
+  "src/llm_router/org_policy.py",
+]

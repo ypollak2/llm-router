@@ -143,8 +143,11 @@ def test_every_skill_has_frontmatter(manifest_path):
 
 
 def test_mcp_json_exists_and_names_the_server():
-    mcp = REPO / ".claude-plugin" / "mcp.json"
-    assert mcp.is_file(), "plugin mcp.json is missing — the manifests point at it"
+    # Repo ROOT. The scanner looks for `.mcp.json` here — without it the MCP
+    # scan is skipped entirely — and a manifest pointing into a dot-directory is
+    # reported as an unsafe declared path. .gitignore negates this one file.
+    mcp = REPO / ".mcp.json"
+    assert mcp.is_file(), "plugin .mcp.json is missing — the manifests point at it"
     data = json.loads(mcp.read_text())
     assert "llm_router" in data.get("mcpServers", {}), (
         ".mcp.json must register the llm_router server under its canonical name; "
@@ -216,4 +219,50 @@ def test_bundle_is_not_stale():
     assert result.returncode == 0, (
         "plugin bundle is out of date — run scripts/build_plugin_bundle.py\n"
         f"{result.stdout}{result.stderr}"
+    )
+
+
+def test_every_action_is_pinned_to_a_sha():
+    """A tag can be moved by its owner; a commit SHA cannot.
+
+    The scanner's GITHUB_ACTION_UNPINNED rule flags this, but the reason to fix
+    it is the supply chain, not the score: these workflows publish to PyPI and
+    run with repository credentials.
+    """
+    import re
+
+    unpinned = []
+    for wf in sorted((REPO / ".github" / "workflows").glob("*.yml")):
+        for n, line in enumerate(wf.read_text().splitlines(), 1):
+            m = re.search(r"uses:\s*([^\s@]+)@([^\s#]+)", line)
+            if m and not re.fullmatch(r"[0-9a-f]{40}", m.group(2)):
+                unpinned.append(f"{wf.name}:{n} {m.group(1)}@{m.group(2)}")
+    assert not unpinned, "actions not pinned to a SHA:\n  " + "\n  ".join(unpinned)
+
+
+def test_the_scanner_config_scopes_rather_than_disables():
+    """Suppression must stay narrow enough that a real leak still fails.
+
+    The HARDCODED_SECRET rule fires only on paths where it is definitionally
+    wrong — test fixtures for the secret-redaction feature, and two source files
+    that carry the SHAPE of a credential (an f-string template and a vault
+    reference). Disabling the rule outright, or excluding all of src/, would
+    hide the finding that actually matters.
+    """
+    import tomllib
+
+    cfg = REPO / ".plugin-scanner.toml"
+    assert cfg.is_file(), "no scanner config — the 58 false positives will return"
+    data = tomllib.load(cfg.open("rb"))
+
+    rules = data.get("rules", {})
+    assert not rules.get("disabled"), (
+        "a rule is disabled globally; scope by path instead so a real secret in "
+        "application code still fails the build"
+    )
+
+    ignored = data["scanner"]["ignore_paths"]
+    assert "src/*" not in ignored and "src/**" not in ignored, (
+        "all of src/ is excluded, which would hide a genuine leak in "
+        "application code — the one finding worth keeping"
     )
