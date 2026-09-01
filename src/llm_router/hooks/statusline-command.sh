@@ -366,7 +366,11 @@ try:
         query_window, render_money, session_spend_usd,
     )
     t = query_window("today", db_path=pathlib.Path(os.environ["CHZ_DB"]))
-    print(render_money(t, session_spend_usd()))
+    # Spend is deliberately omitted here: the statusline is about whether routing
+    # is working, and session spend answers a different question in a line that has
+    # no room for both. show_spend=False is a real flag because passing None falls
+    # back to totals.cost_usd rather than suppressing it.
+    print(render_money(t, session_spend_usd(), show_spend=False, show_coverage=False))
 except Exception:
     print("")            # never break the statusline over a reporting figure
 ' 2>/dev/null)

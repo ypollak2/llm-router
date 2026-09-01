@@ -779,6 +779,8 @@ def render_money(
     totals: "WindowTotals",
     session_usd: float | None = None,
     scope: str = "today",
+    show_spend: bool = True,
+    show_coverage: bool = True,
 ) -> str:
     """The one-line money summary, in the only format any surface should use.
 
@@ -793,11 +795,24 @@ def render_money(
 
     Both carry a verb. A bare dollar amount beside a quota percentage is read as
     money spent, which is how this whole line was misread in the first place.
+
+    `show_spend=False` drops the spend clause entirely, for a surface with no
+    room for it. It has to be its own flag: passing session_usd=None does not
+    suppress spend, it falls back to totals.cost_usd, so the only way to hide it
+    without this was to pass a number below the floor and hope.
+
+    `show_coverage=False` drops the "(NN% observed)" note. The tilde still marks
+    the figure as modelled, which is the part that stops it being read as billed
+    spend; the percentage quantifies how modelled, which an ambient one-line
+    surface has no room to act on. Note also that coverage is ROLLING, not
+    window-scoped -- see WindowTotals.observed_n -- so inside a phrase ending
+    "saved today" it invites the reading that the percentage is today's. A
+    caller that keeps it should be somewhere that has room to say otherwise.
     """
     parts: list[str] = []
 
     spend = session_usd if session_usd is not None else totals.cost_usd
-    if spend is not None and spend >= SPEND_FLOOR_USD:
+    if show_spend and spend is not None and spend >= SPEND_FLOOR_USD:
         parts.append(f"${spend:,.2f} spent")
 
     saved = totals.saved_usd
@@ -812,7 +827,7 @@ def render_money(
         # reads as though the coverage, not the saving, was today's.
         chunk = f"~${amount} saved{' ' + scope if scope else ''}"
         pct = totals.coverage_pct
-        if pct is not None and pct < COVERAGE_CALLOUT_PCT:
+        if show_coverage and pct is not None and pct < COVERAGE_CALLOUT_PCT:
             # Say how much of the estimate is actually observed rather than
             # asserting a soft number with a hard face.
             chunk += f" ({pct:.0f}% observed)"
