@@ -9,6 +9,7 @@ This script ensures that version is in sync across:
 - .codex-plugin/marketplace.json
 - .factory-plugin/plugin.json
 - .factory-plugin/marketplace.json
+- npm/package.json
 
 Fails with exit code 1 if versions don't match, enabling use in CI.
 """
@@ -69,6 +70,23 @@ def read_marketplace_json_versions(project_root: Path, plugin_dir: str) -> tuple
     return plugin_version, marketplace_version
 
 
+def read_npm_version(project_root: Path) -> str:
+    """Read version from npm/package.json.
+
+    The npm postinstall builds its download URL from this version:
+
+        https://github.com/<repo>/releases/download/v<version>/<asset>
+
+    So a drift here does not fail a build — it points every `npm install` at a
+    release tag that does not exist, and the 404 lands on a stranger.
+    """
+    package_path = project_root / "npm" / "package.json"
+    if not package_path.exists():
+        raise FileNotFoundError(f"package.json not found at {package_path}")
+    with package_path.open() as handle:
+        return json.load(handle)["version"]
+
+
 def main():
     """Verify all versions are in sync."""
     project_root = Path(__file__).parent.parent.parent
@@ -85,6 +103,8 @@ def main():
             versions[f"{plugin_dir}/plugin.json"] = plugin_version
             versions[f"{plugin_dir}/marketplace.json (plugin)"] = marketplace_plugin_version
             versions[f"{plugin_dir}/marketplace.json (root)"] = marketplace_version
+
+        versions["npm/package.json"] = read_npm_version(project_root)
 
         print("📋 Version Sync Check")
         print("=" * 50)
