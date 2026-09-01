@@ -140,3 +140,26 @@ def test_binary_is_not_vendored_into_the_package():
     assert not (NPM / "vendor").exists() or not any((NPM / "vendor").iterdir()), (
         "a built binary is sitting in npm/vendor and would be published"
     )
+
+
+def test_binaries_reach_the_url_npm_downloads_from():
+    """Building the artifact is not publishing it.
+
+    upload-artifact attaches to the workflow RUN and expires after 14 days.
+    install.js fetches from releases/download/v<version>/<asset>, which is a
+    RELEASE asset — a different destination entirely. A workflow that only does
+    the first builds perfect binaries that no `npm install` can ever reach, and
+    the 404 lands on a stranger rather than in CI.
+    """
+    wf = WORKFLOW.read_text()
+    js = INSTALL_JS.read_text()
+
+    assert "releases/download" in js, "install.js no longer uses release assets"
+    assert "gh release upload" in wf, (
+        "the workflow never attaches binaries to the release, so every "
+        "npm install would 404 on the URL install.js builds"
+    )
+    assert "startsWith(github.ref, 'refs/tags/v')" in wf, (
+        "release upload is not gated on a tag; a dispatch build would try to "
+        "upload to a release that does not exist"
+    )

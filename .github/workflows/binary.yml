@@ -178,6 +178,8 @@ jobs:
             fi
           fi
 
+      # Run artifacts: for inspecting a workflow_dispatch build. These expire and
+      # live at a URL nothing else references.
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: ${{ matrix.asset }}
@@ -186,3 +188,27 @@ jobs:
             ${{ matrix.asset }}.zip
           if-no-files-found: error
           retention-days: 14
+
+      # RELEASE assets: what the npm postinstall actually downloads.
+      #
+      # These are two different destinations and it is easy to ship only the
+      # first. upload-artifact attaches to the workflow RUN and expires;
+      # npm/install.js fetches
+      #   https://github.com/<repo>/releases/download/v<version>/<asset>
+      # which requires a release asset. Building perfect binaries into the run
+      # and never onto the release means every `npm install` 404s, and the
+      # failure lands on a stranger rather than in CI.
+      - name: Attach to the release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          # --clobber so re-running a tag build replaces rather than fails.
+          gh release upload "${GITHUB_REF_NAME}" \
+            ${{ matrix.asset }}.tar.gz ${{ matrix.asset }}.zip \
+            --clobber --repo "${GITHUB_REPOSITORY}" 2>/dev/null || \
+          gh release upload "${GITHUB_REF_NAME}" \
+            ${{ matrix.asset }}.tar.gz \
+            --clobber --repo "${GITHUB_REPOSITORY}"
