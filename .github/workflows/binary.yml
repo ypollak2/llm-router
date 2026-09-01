@@ -316,8 +316,32 @@ jobs:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           set -euo pipefail
+
           if [ -z "${NODE_AUTH_TOKEN:-}" ]; then
             echo "::warning::NPM_TOKEN is not configured — skipping the npm publish."
             exit 0
           fi
+
+          # An EMPTY token and an INVALID one are different failures, and only
+          # the first was handled. An invalid token got as far as `npm publish`
+          # and died on a 401 halfway through a release, which reads like the
+          # publish broke rather than like the credential is wrong.
+          #
+          # Checked here because the two mistakes are easy to make and look
+          # identical from the outside:
+          #   - an npm OTP (six digits, ~30s lifetime) is not a token, and CI
+          #     cannot use one: it expires before the build reaches this step
+          #   - a token without "bypass 2FA" authenticates for reads and is
+          #     refused for publish, so whoami alone is not proof
+          if ! npm whoami --registry https://registry.npmjs.org/ >/dev/null 2>&1; then
+            echo "::warning::NPM_TOKEN did not authenticate (401) — skipping the npm publish."
+            echo "Generate a GRANULAR ACCESS TOKEN at npmjs.com with:"
+            echo "  packages    : llm-routing"
+            echo "  permissions : read and write"
+            echo "  2FA         : bypass enabled  (CI cannot answer an OTP prompt)"
+            echo "It starts with npm_ . A six-digit OTP is not a token."
+            exit 0
+          fi
+          echo "authenticated as: $(npm whoami --registry https://registry.npmjs.org/)"
+
           npm publish --provenance --access public

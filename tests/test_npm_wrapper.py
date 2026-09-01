@@ -339,3 +339,34 @@ def test_the_package_ships_a_readme():
         "the README does not explain why the package is tiny, which is the "
         "first thing anyone looking at the code tab wonders"
     )
+
+
+def test_an_invalid_token_skips_rather_than_fails_mid_release():
+    """An empty token and an invalid one are different failures.
+
+    Only the first was handled, so an invalid token reached `npm publish` and
+    died on a 401 halfway through a release — which reads like the publish
+    broke rather than like the credential is wrong.
+
+    Two mistakes make this likely and they look identical from outside: an npm
+    OTP is six digits with a ~30 second lifetime and cannot be used by CI at
+    all, and a token without 2FA bypass authenticates for reads while being
+    refused for publish.
+    """
+    wf = WORKFLOW.read_text()
+    step = wf.split("- name: Publish")[1]
+
+    assert "npm whoami" in step, (
+        "the token is never validated, so an invalid one fails at publish time "
+        "with a bare 401 instead of a clear message"
+    )
+    # Skip, not fail: a fork or a lapsed token must not break the release that
+    # already produced working binaries.
+    assert step.count("exit 0") >= 2, (
+        "an invalid token fails the job rather than skipping; the binaries are "
+        "already attached and a missing npm publish should not undo that"
+    )
+    assert "bypass" in step.lower(), (
+        "the failure message does not say what kind of token is needed, which "
+        "is the only thing the reader needs to know"
+    )
