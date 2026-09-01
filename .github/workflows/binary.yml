@@ -247,3 +247,77 @@ jobs:
           # --clobber so re-running a tag build replaces rather than fails.
           gh release upload "${GITHUB_REF_NAME}" "${artifacts[@]}" \
             --clobber --repo "${GITHUB_REPOSITORY}"
+
+  # ── npm, gated on the binaries actually existing ────────────────────────
+  #
+  # This job exists because of what happened on 13.1.4: the package was
+  # published by hand before any release asset existed, so every install 404'd
+  # on every platform — and npm can never republish a version, only deprecate
+  # it. The recovery was to rush the tag through and hope nobody installed in
+  # the window.
+  #
+  # Ordering is the whole point. `needs: build` means npm cannot publish until
+  # every binary job has succeeded, so the sequence that has to hold is
+  # enforced by the graph rather than by remembering it.
+  publish-npm:
+    name: Publish to npm
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    environment: npm
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "20"
+          registry-url: "https://registry.npmjs.org"
+
+      # The version in package.json is what install.js turns into a download
+      # URL. Publishing a version whose tag has no assets is the exact failure
+      # this job exists to prevent, so verify before publishing rather than
+      # after.
+      - name: Verify every asset the postinstall can request
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          version="$(node -p "require('./npm/package.json').version")"
+          tag="${GITHUB_REF_NAME}"
+          if [ "v$version" != "$tag" ]; then
+            echo "npm/package.json is $version but the tag is $tag" >&2
+            exit 1
+          fi
+
+          published=$(gh release view "$tag" --repo "${GITHUB_REPOSITORY}" \
+            --json assets --jq '[.assets[].name]|join(" ")')
+          echo "assets on $tag: $published"
+
+          # Every target install.js can select must be downloadable. A platform
+          # with no asset is a 404 for that user, and they cannot be told to
+          # wait for a later publish of the same version.
+          missing=0
+          for a in $(grep -oE "llm-router-[a-z0-9_-]+\.(tar\.gz|zip)" npm/install.js | sort -u); do
+            case " $published " in
+              *" $a "*) echo "  ok      $a" ;;
+              *)        echo "  MISSING $a"; missing=1 ;;
+            esac
+          done
+          [ "$missing" -eq 0 ] || {
+            echo "refusing to publish: install.js can request assets that do not exist" >&2
+            exit 1
+          }
+
+      - name: Publish
+        working-directory: npm
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${NODE_AUTH_TOKEN:-}" ]; then
+            echo "::warning::NPM_TOKEN is not configured — skipping the npm publish."
+            exit 0
+          fi
+          npm publish --provenance --access public
