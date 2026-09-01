@@ -875,6 +875,38 @@ def main() -> None:
         print(f"llm_router v{__version__}")
         return
 
+    # `run-hook <path>` — execute a hook script in this interpreter.
+    #
+    # Hooks are registered as `<interpreter> <hook>.py`, which assumes a Python
+    # on the machine. A standalone binary has none: sys.executable IS the
+    # binary, and handing it a .py path would just be an unknown argument. This
+    # gives the frozen build a way to run its own hooks, so a user without
+    # Python still gets auto-routing rather than only the MCP tools.
+    #
+    # Deliberately not argparse'd or advertised in --help: it is an internal
+    # entry point that install_hooks writes into settings.json, not something to
+    # invoke by hand.
+    if args and args[0] == "run-hook":
+        if len(args) < 2:
+            print("llm-router run-hook: expected a hook path", file=sys.stderr)
+            sys.exit(2)
+        import runpy
+
+        hook_path = args[1]
+        # The hook reads sys.argv itself, so present it the argv it would have
+        # seen had it been launched directly.
+        sys.argv = [hook_path, *args[2:]]
+        try:
+            runpy.run_path(hook_path, run_name="__main__")
+        except SystemExit:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            # A hook that raises must not take the host's turn down with it —
+            # the same fail-open contract the hooks apply internally.
+            print(f"llm-router run-hook: {hook_path} failed: {exc}", file=sys.stderr)
+            sys.exit(0)
+        return
+
     if args and args[0] == "install":
         from llm_router.commands.install import cmd_install
         sys.exit(cmd_install(args[1:]))
