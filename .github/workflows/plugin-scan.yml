@@ -23,7 +23,7 @@ jobs:
     name: HOL plugin scanner
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - uses: hashgraph-online/ai-plugin-scanner-action@ffaee77ef21faa6df92a33b03d09278ac8c844f2 # v1
         with:
@@ -32,3 +32,20 @@ jobs:
           # reviewed rather than gated, so the check stays actionable instead of
           # becoming something contributors learn to re-run until it passes.
           fail_on_severity: high
+
+          # Honour this repository's own .plugin-scanner.toml.
+          #
+          # OFF BY DEFAULT, and that default is right: a scanner run by someone
+          # else against an untrusted repository must not let that repository
+          # silently suppress its own findings. Here the repository and the
+          # workflow have the same owner, the suppressions are scoped by path
+          # rather than by disabling any rule, and every one is justified in the
+          # config with the finding it covers.
+          #
+          # What this does NOT do: change what a third party sees. Anyone
+          # scanning this repo without the flag still sees the 58
+          # HARDCODED_SECRET findings — the secret-redaction test fixtures and
+          # the two src/ files carrying the shape of a credential. That is the
+          # honest state and the reason #97 is a design question rather than a
+          # cleanup.
+          trust_repository_policy: true

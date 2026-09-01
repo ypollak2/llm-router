@@ -135,9 +135,12 @@ def build() -> dict[Path, str]:
     # two different files that happened to share a name — a developer's machine-
     # specific config, and the plugin's shipped declaration. Keeping the plugin's
     # copy inside the plugin metadata directory lets both exist.
-    mcp_body = json.dumps(_mcp_json(), indent=2) + "\n"
-    files[REPO / ".claude-plugin" / "mcp.json"] = mcp_body
-    files[REPO / ".codex-plugin" / "mcp.json"] = mcp_body
+    # Repo ROOT, not the metadata directories. The scanner looks for
+    # `.mcp.json` here (without it the MCP scan is skipped entirely), and a
+    # manifest pointing into a dot-directory is reported as an unsafe declared
+    # path. .gitignore now negates this one file explicitly, so a developer's
+    # local MCP config and the shipped declaration no longer collide.
+    files[REPO / ".mcp.json"] = json.dumps(_mcp_json(), indent=2) + "\n"
 
     # Task 03 — the hook scripts themselves must sit at the plugin root, because
     # a plugin is distributed as a repo clone or a zip and cannot reach into
@@ -179,7 +182,7 @@ def build() -> dict[Path, str]:
         # directory — the pre-existing `"skills": "skills/"` entry, which
         # resolves to the repo root, is the proof.
         meta_dir = manifest_path.parent.name
-        manifest["mcpServers"] = f"{meta_dir}/mcp.json"
+        manifest["mcpServers"] = ".mcp.json"
         manifest["commands"] = "commands/"
         manifest["hooks"] = (
             "hooks/hooks.json" if meta_dir == ".claude-plugin" else f"{meta_dir}/hooks.json"

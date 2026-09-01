@@ -36,7 +36,7 @@ jobs:
       COREPACK_DEFAULT_TO_LATEST: "0"
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Validate skill package
         uses: hashgraph-online/skill-publish@df6ae95e010d9792158a441eec9ac50d4d17139d
