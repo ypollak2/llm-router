@@ -1,6 +1,6 @@
 {
   "name": "llm-routing",
-  "version": "13.1.5",
+  "version": "13.1.6",
   "description": "Stop hitting the limit on your Claude Pro or Max plan. Routes routine prompts to free and cheap models so your subscription quota is there when you need it. No API keys.",
   "keywords": [
     "llm",
