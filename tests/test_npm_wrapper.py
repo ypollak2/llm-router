@@ -263,3 +263,79 @@ def test_upload_selection_is_correct_for_each_platform():
                 f"{platform} builds {built} but the upload selected {out} "
                 f"artifacts, expected {expected}"
             )
+
+
+# ── npm publishing belongs to the release, not to a terminal ──────────────────
+
+
+def test_npm_publish_is_part_of_the_release_workflow():
+    """13.1.4 was published by hand before any asset existed.
+
+    Every install 404'd on every platform, and npm can never republish a
+    version — only deprecate it. The recovery was to rush the tag through and
+    hope nobody installed in the window.
+    """
+    import yaml
+
+    wf = yaml.safe_load(WORKFLOW.read_text())
+    assert "publish-npm" in wf["jobs"], "npm publishing is still a manual step"
+
+
+def test_npm_publish_cannot_run_before_the_binaries():
+    """Ordering enforced by the graph, not by remembering it."""
+    import yaml
+
+    wf = yaml.safe_load(WORKFLOW.read_text())
+    job = wf["jobs"]["publish-npm"]
+    assert job["needs"] == "build" or "build" in job["needs"], (
+        "publish-npm does not depend on the binary build, so it could publish "
+        "before a single asset exists — exactly what happened with 13.1.4"
+    )
+    assert "refs/tags/v" in job["if"], "npm would publish on a non-tag run"
+
+
+def test_npm_publish_verifies_every_asset_it_could_request():
+    """A platform with no asset is a 404 for that user, and they cannot be told
+    to wait for a later publish of the same version."""
+    wf = WORKFLOW.read_text()
+    step = wf.split("Verify every asset")[1].split("- name: Publish")[0]
+
+    assert "gh release view" in step, "the assets on the release are never read"
+    assert "install.js" in step, (
+        "the check does not derive its list from install.js, so a target added "
+        "there could be published without a binary"
+    )
+    assert "exit 1" in step, "a missing asset does not stop the publish"
+
+
+def test_npm_publish_checks_version_against_the_tag():
+    """install.js turns package.json's version into the download URL.
+
+    Publishing 13.1.4 from a v13.1.3 tag points every install at the wrong
+    release.
+    """
+    wf = WORKFLOW.read_text()
+    step = wf.split("Verify every asset")[1].split("- name: Publish")[0]
+    assert "GITHUB_REF_NAME" in step and "package.json" in step
+
+
+def test_the_package_ships_a_readme():
+    """package.json listed README.md in `files` and the file did not exist.
+
+    13.1.4 published with nothing for the npm page to render: a visitor saw
+    three tiny files, no explanation, and no reason to believe a 3 kB package
+    does anything. The package was correct and looked like a mistake, which for
+    a first impression is the same thing.
+    """
+    readme = NPM / "README.md"
+    assert readme.is_file(), "npm/README.md is missing; the npm page renders nothing"
+    assert "README.md" in _package_json()["files"], (
+        "README.md is not in `files`, so it will not be included in the tarball"
+    )
+
+    text = readme.read_text()
+    # The single question a visitor asks about a 3 kB package.
+    assert "3 kB" in text or "300 MB" in text, (
+        "the README does not explain why the package is tiny, which is the "
+        "first thing anyone looking at the code tab wonders"
+    )
