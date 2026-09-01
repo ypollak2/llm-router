@@ -162,6 +162,13 @@ def _get_cc_usage() -> tuple[dict | None, dict | None, bool]:
     if live:
         return start, live, True
     cached = _read_json(USAGE_JSON)
+    # A snapshot flagged is_fallback is the placeholder session-start.py writes
+    # when the OAuth fetch fails: session, weekly and sonnet all set to 50. The
+    # session summary reported "quota used 5h 50%/wk 50%" from it, which is not
+    # a reading — it is the shape of a failure. Returning None makes the caller
+    # omit the quota rather than quote a number nobody measured.
+    if cached and cached.get("is_fallback"):
+        cached = None
     return start, cached, False
 
 

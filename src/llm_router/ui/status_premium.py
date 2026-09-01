@@ -47,7 +47,19 @@ class PremiumStatusCommand:
                 data = json.load(f)
         except (FileNotFoundError, json.JSONDecodeError, OSError):
             return None
-        if not isinstance(data, dict) or data.get("pending"):
+        if not isinstance(data, dict):
+            return None
+        # `pending` is the install-time placeholder; `is_fallback` is the one
+        # session-start.py writes when the OAuth fetch fails, setting session,
+        # weekly and sonnet all to 50. This method originally covered only the
+        # first — the missing-file case — and the second is the more common one:
+        # it was observed rendering "50%/5h 50%/wk" while the API returned 2%
+        # and 24%.
+        #
+        # Absence of is_fallback means measured. The refresh hook's success path
+        # omits the key, so defaulting the other way blanks the quota on every
+        # healthy install.
+        if data.get("pending") or data.get("is_fallback"):
             return None
         return data
 
