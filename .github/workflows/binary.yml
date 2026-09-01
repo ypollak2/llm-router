@@ -19,6 +19,8 @@ on:
         type: boolean
         default: true
 
+# Least privilege at the workflow level; the one job that needs to write
+# escalates for itself below.
 permissions:
   contents: read
 
@@ -26,6 +28,12 @@ jobs:
   build:
     name: ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
+    # Creating a release and uploading assets both require contents: write.
+    # The workflow-level `contents: read` made `gh release create` and
+    # `gh release upload` fail on every tag build — after every binary had been
+    # built, at the last step. Neither v13.1.0 nor v13.1.1 could attach a thing.
+    permissions:
+      contents: write
     strategy:
       fail-fast: false        # one platform failing must not hide the others
       matrix:
