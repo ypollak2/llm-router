@@ -69,18 +69,31 @@ def _hooks_json(root_var: str) -> dict:
 
 
 def _mcp_json() -> dict:
-    """The MCP server entry, resolved through the plugin root rather than a venv.
+    """The MCP server entry a plugin-only install can actually run (task 38).
 
-    The previous manifests assumed a `llm-router` binary already on PATH from a
-    separate `pip install`. Declaring the module entry point keeps the plugin
-    self-describing; task 38 replaces this with the bundled binary.
+    `"command": "llm-router"` assumed a prior `pip install` had put the CLI on
+    PATH. Someone who installs from the marketplace has done no such thing, so
+    the plugin registered a server that could never start — the pip prerequisite
+    the marketplace channel exists to remove.
+
+    Vendoring the runtime into the plugin repo is not an option: the standalone
+    build is ~314 MB per platform. `npx -y` obtains it on demand instead, via
+    the npm wrapper, which downloads only the binary matching the host. That is
+    the same outcome as bundling from the user's point of view, without four
+    platform trees in git.
+
+    Node rather than Python deliberately. The audiences this channel targets —
+    Cursor, Claude Desktop, the JS ecosystem — have Node far more reliably than
+    a 3.11+ Python, and Node is what npx needs. A developer who already has
+    `llm-router` on PATH is unaffected: npx prefers a local binary of the same
+    name before fetching anything.
     """
     return {
         "mcpServers": {
             "llm_router": {
                 "type": "stdio",
-                "command": "llm-router",
-                "args": [],
+                "command": "npx",
+                "args": ["-y", "llm-routing"],
                 "env": {},
             }
         }

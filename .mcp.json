@@ -2,8 +2,11 @@
   "mcpServers": {
     "llm_router": {
       "type": "stdio",
-      "command": "llm-router",
-      "args": [],
+      "command": "npx",
+      "args": [
+        "-y",
+        "llm-routing"
+      ],
       "env": {}
     }
   }
