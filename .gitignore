@@ -126,3 +126,6 @@ data/benchmarks/*.parquet
 data/corpus/*.jsonl
 data/outcomes/*.jsonl
 scripts/routerarena/data/_graded_*.json
+
+# Downloaded by the npm postinstall; never committed and never published.
+npm/vendor/
