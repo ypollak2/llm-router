@@ -11,8 +11,9 @@
 <h1 align="center">llm-router</h1>
 
 <p align="center">
-  <strong>Make Claude Code, Codex, and Gemini CLI use the cheapest model that can still do the job well.</strong><br/>
-  Save 35-80% on routine prompts, protect premium quota, and fall back automatically when providers fail.
+  <strong>Stop hitting the limit on your Claude Pro or Max plan.</strong><br/>
+  llm-router answers the routine prompts on free and cheap models, so your subscription quota
+  is still there when you need it at 4pm. No API keys. No change to how you work.
 </p>
 
 <p align="center">
@@ -35,7 +36,7 @@
 <p align="center">
 
 ```bash
-pip install llm-routing   # PyPI name is llm-routing; the CLI command is llm-router
+pip install llm-routing        # installs the `llm-router` command
 ```
 
 </p>
@@ -61,7 +62,7 @@ pip install llm-routing   # PyPI name is llm-routing; the CLI command is llm-rou
 <details>
 <summary><b>📑 Table of Contents</b></summary>
 
-- [Why People Install This](#why-people-install-this)
+- [Why people install this](#why-people-install-this)
 - [On the RouterArena leaderboard](#on-the-routerarena-leaderboard)
 - [Quick Start](#quick-start)
 - [Example Routing](#example-routing)
@@ -83,19 +84,48 @@ pip install llm-routing   # PyPI name is llm-routing; the CLI command is llm-rou
 
 ---
 
-## Why People Install This
+## Why people install this
 
-AI coding tools send too many prompts to premium models by default.
+You are on a Claude Pro or Max plan. You have not spent a cent beyond the
+subscription. And at 3pm you hit the five-hour limit and stop working.
 
-That means:
+The cause is not that you asked too much. It is that *every* prompt went to the
+premium model — "what does this error mean", "reformat this JSON", "is the
+service up" — and each one drew down the same quota as the architectural
+question you actually needed it for.
 
-- You waste paid tokens on simple questions
-- You burn through Claude, Gemini, or OpenAI quota faster than necessary
-- You stop working when one provider is rate-limited or down
+`llm-router` runs inside your coding tool's own lifecycle. It reads each prompt
+before the model does, sends the routine ones to a local or cheap model, and
+leaves your seat for the work that needs it. Same workflow, same commands, same
+transcript — the model choice changes underneath.
 
-`llm-router` sits between your coding tool and your model providers. It classifies each prompt, tries the cheapest capable model first, and falls back automatically when needed.
+### Why a proxy cannot do this
 
-You keep the same workflow. The router changes the model choice underneath.
+Every other router in this category is a **proxy**: you point your agent at a
+local endpoint and it forwards requests using *your API keys*. That design has a
+hard limit — **a proxy cannot intercept a session authenticated by a
+subscription, because there is no key to forward.**
+
+If you pay per token, a proxy serves you well and there are good ones. If you pay
+a flat monthly fee and the thing you run out of is *quota*, a proxy has nothing
+to offer, and that is the gap this fills.
+
+|  | Pays per token | Pays a subscription |
+|---|---|---|
+| What runs out | your invoice | your five-hour window |
+| Needs API keys | yes | **no** |
+| A proxy can help | yes | **no — nothing to intercept** |
+| llm-router helps | yes | **yes** |
+
+### Two things worth checking before you install
+
+- **It works with zero API keys.** On a Claude subscription, routing goes through
+  MCP tools and local models. Adding keys widens the pool; nothing requires them.
+- **The routing quality is measured by someone else.** llm-router is scored on
+  [RouterArena](https://github.com/RouteWorks/RouterArena), a third-party
+  accuracy-versus-cost leaderboard. What was measured, what it cost, and what
+  did *not* work is written up in **[docs/ROUTERARENA.md](docs/ROUTERARENA.md)** —
+  including the negative results.
 
 <p align="center">
   <picture>
@@ -109,7 +139,17 @@ You keep the same workflow. The router changes the model choice underneath.
 
 ## On the RouterArena leaderboard
 
-`llm-router` is independently benchmarked on [RouterArena](https://github.com/RouteWorks/RouterArena), a community leaderboard that scores model routers on an accuracy-versus-cost curve, plus optimality, robustness and latency. Rank moves as new routers land — see the [live leaderboard](https://github.com/RouteWorks/RouterArena#leaderboard) for the current standing.
+`llm-router` is benchmarked on [RouterArena](https://github.com/RouteWorks/RouterArena),
+a community leaderboard scoring routers on accuracy versus cost, plus optimality,
+robustness and latency.
+
+The claim worth reading is not the badge. **[docs/ROUTERARENA.md](docs/ROUTERARENA.md)**
+states what was measured, on which split, what it cost to reproduce, and what
+failed — including that skill-cluster classification never beat simply always
+picking one model, and that tuning on a proxy split misled by 4.25 points. Rank
+moves as new routers land; see the
+[live leaderboard](https://github.com/RouteWorks/RouterArena#leaderboard) for the
+current standing.
 
 ---
 
@@ -122,7 +162,6 @@ pip install llm-routing
 llm-router install
 ```
 
-> Package name: `llm-routing` on PyPI. CLI command: `llm-router`.
 
 ### 2. Add providers (optional)
 
@@ -162,9 +201,9 @@ The exact chain depends on your configured providers, budget profile, and routin
 | Tool | Mode | Savings (this host) |
 |------|------|-----------------|
 | **Claude Code** | Full auto-routing via hooks | 60–80% |
-| **Codex CLI** | Full auto-routing via hooks | 60–80% |
+| **Codex CLI** | Manual MCP tools · hooks 🔜 | 30–50% |
 | **Gemini CLI** | Full auto-routing via hooks | 50–70% |
-| **VS Code / Cursor** | Manual MCP tools | 30–50% |
+| **VS Code / Cursor** | Manual MCP tools · hooks 🔜 | 30–50% |
 | **Any MCP client** | Manual MCP tools | Varies |
 
 <p align="center">
@@ -177,6 +216,14 @@ The exact chain depends on your configured providers, budget profile, and routin
 
 - **Full auto-routing** means hooks intercept prompts and route automatically with no workflow change.
 - **Manual MCP tools** means routing is available on demand through tools such as `llm_query`.
+- **🔜** means *the host supports prompt interception and we have not shipped it yet* — not that
+  it cannot be done. Codex CLI ships `UserPromptSubmit` (enabled by default, and its `PreToolUse`
+  can even rewrite arguments); Cursor ships `beforeSubmitPrompt`. Both can block a prompt before
+  the model sees it, which is the same mechanism Claude Code uses today.
+
+The full picture, including what each host genuinely cannot do and which payload fields have been
+verified against a real run rather than read off a docs page, is in
+**[guide/HOST_SUPPORT_MATRIX.md](guide/HOST_SUPPORT_MATRIX.md)**.
 
 ```bash
 llm-router install                    # Claude Code (default)
