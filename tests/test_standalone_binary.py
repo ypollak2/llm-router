@@ -183,3 +183,46 @@ def test_binary_build_is_not_on_every_push():
     on_block = wf.split("on:")[1].split("permissions:")[0]
     assert "tags:" in on_block
     assert "pull_request" not in on_block
+
+
+# ── macOS signing (task 36) ───────────────────────────────────────────────────
+
+
+def test_signing_is_gated_on_secrets_being_present():
+    """A fork without Apple credentials must still get a working build.
+
+    Failing the job when secrets are absent would make every contributor's
+    branch red for a reason they cannot fix.
+    """
+    wf = WORKFLOW.read_text()
+    assert "notarytool" in wf, "no notarisation step"
+    assert 'if [ -z "${CERT_P12:-}" ]' in wf, (
+        "signing is not gated on the secret existing, so a fork's build fails"
+    )
+    assert "::warning::" in wf, (
+        "an unsigned build is produced silently; it must say so, because the "
+        "user-visible symptom is Gatekeeper quarantine much later"
+    )
+
+
+def test_signing_covers_bundled_libraries_not_just_the_launcher():
+    """A onedir loads .so/.dylib files at runtime.
+
+    An unsigned one fails notarisation for the whole archive, and the error
+    names the archive rather than the file, which makes it hard to chase.
+    """
+    wf = WORKFLOW.read_text()
+    assert '-name "*.so"' in wf and '-name "*.dylib"' in wf, (
+        "only the launcher is signed; bundled libraries will fail notarisation"
+    )
+    assert "--options runtime" in wf, "hardened runtime not enabled"
+
+
+def test_macos_packaging_preserves_signatures():
+    """GNU tar drops some extended attributes codesign writes, which
+    invalidates the signature on extraction."""
+    wf = WORKFLOW.read_text()
+    assert "ditto -c -k" in wf, (
+        "macOS artifacts are packaged with tar alone, which can strip the "
+        "metadata the signature depends on"
+    )
