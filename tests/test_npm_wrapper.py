@@ -204,3 +204,22 @@ def test_the_release_job_can_actually_write():
     )
     # Still least-privilege at the top: only the job that needs it escalates.
     assert wf["permissions"]["contents"] == "read"
+
+
+def test_upload_does_not_assume_every_platform_produces_a_tarball():
+    """Windows packages a .zip and no .tar.gz.
+
+    The upload step named both files with a `.tar.gz`-only fallback, so on
+    Windows the primary AND the fallback referenced a file that does not exist.
+    It failed with the other three platforms already uploaded — a partial
+    release, which is worse than none, because the assets that did land make it
+    look finished.
+    """
+    wf = WORKFLOW.read_text()
+    step = wf.split("Attach to the release")[1].split("upload-artifact")[0]
+
+    assert "nullglob" in step, (
+        "the upload names specific files instead of globbing what the platform "
+        "actually produced"
+    )
+    assert "artifacts[@]" in step, "artifacts are not passed as a discovered list"

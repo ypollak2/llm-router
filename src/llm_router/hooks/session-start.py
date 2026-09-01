@@ -615,6 +615,9 @@ def _refresh_claude_usage() -> str:
                 "weekly_pct": result["weekly_pct"],
                 "sonnet_pct": result["sonnet_pct"],
                 "highest_pressure": result["highest_pressure"],
+                # Carried through so the two writers of usage.json agree on its
+                # shape. Absent here, a session start silently removed it.
+                "session_resets_at": result.get("session_resets_at", ""),
                 "updated_at": time.time(),
                 # RED2-9-04: the SUCCESS path must set is_fallback explicitly.
                 # Omitting it made the banner reader `get("is_fallback", True)`
@@ -718,13 +721,21 @@ def _refresh_claude_usage_attempt() -> dict:
         weekly_pct = float((data.get("seven_day") or {}).get("utilization", 0.0))
         sonnet_pct = float((data.get("seven_day_sonnet") or {}).get("utilization", 0.0))
         highest_pressure = max(session_pct, weekly_pct, sonnet_pct) / 100.0
-        
+        # When the 5h window refreshes. The same endpoint has always carried it
+        # next to the utilization figure this function already reads; dropping it
+        # here is why the statusline's ⏰ segment never rendered. usage-refresh.py
+        # was taught to persist it, but THIS writer overwrites usage.json at every
+        # session start, so a key only one of two writers knew about was wiped
+        # within a minute of being written.
+        session_resets_at = (data.get("five_hour") or {}).get("resets_at", "")
+
         return {
             "success": True,
             "session_pct": round(session_pct, 1),
             "weekly_pct": round(weekly_pct, 1),
             "sonnet_pct": round(sonnet_pct, 1),
             "highest_pressure": round(highest_pressure, 4),
+            "session_resets_at": session_resets_at,
         }
     except Exception:
         return {"success": False}
