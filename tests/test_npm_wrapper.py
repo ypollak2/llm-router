@@ -163,3 +163,21 @@ def test_binaries_reach_the_url_npm_downloads_from():
         "release upload is not gated on a tag; a dispatch build would try to "
         "upload to a release that does not exist"
     )
+
+
+def test_release_upload_does_not_assume_a_release_exists():
+    """A tag is not a release.
+
+    `gh release upload` requires a release object, and pushing a tag does not
+    create one. The first real tag build hit exactly this: every binary built
+    correctly and the upload step would have failed with nothing to attach to.
+    """
+    wf = WORKFLOW.read_text()
+    assert "gh release create" in wf, (
+        "the workflow uploads to a release it never creates; a plain tag push "
+        "leaves nothing to upload to"
+    )
+    assert "gh release view" in wf, (
+        "no existence check before creating — a re-run would fail on the "
+        "already-created release"
+    )

@@ -205,6 +205,16 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # A TAG IS NOT A RELEASE. `gh release upload` needs a release object,
+          # and pushing a tag does not create one — the first real tag build hit
+          # exactly this and would have failed at the upload step with every
+          # binary already built. Create it if absent, then upload.
+          gh release view "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1 || \
+            gh release create "${GITHUB_REF_NAME}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --title "${GITHUB_REF_NAME}" \
+              --generate-notes
+
           # --clobber so re-running a tag build replaces rather than fails.
           gh release upload "${GITHUB_REF_NAME}" \
             ${{ matrix.asset }}.tar.gz ${{ matrix.asset }}.zip \
