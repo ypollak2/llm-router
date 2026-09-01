@@ -1,7 +1,7 @@
 #!/bin/bash
 # Claude Code statusline — llm_router routing indicators
 #
-# Layout: 🤖 CC quota · ⏰ reset · 📂 cwd · 🧠 ctx [bar] · 💰 saved · 🛡 mode · 🔀 last
+# Layout: 🤖 CC quota · ⏰ reset · 📂 cwd · 🧠 ctx [bar] · 💰 spent/saved · ⚖ mix · 🛡 mode · health · 🔀 last
 #
 # v10.1.5: Catppuccin Mocha palette + emoji icons + context bar, inspired by
 # AwesomeJun/CC-statusline. Truecolor (24-bit) ANSI — falls back gracefully
@@ -151,7 +151,27 @@ except Exception:
     fi
 fi
 
-if [ -f "$USAGE_JSON" ]; then
+# is_fallback marks a snapshot session-start.py wrote when the OAuth fetch
+# FAILED: session/weekly/sonnet all set to 50. Rendering that as a measurement
+# told a user pacing a five-hour window that half of it was gone when the real
+# figure was 2%. Three identical 50s is not data.
+#
+# Absence of the key means measured, matching session-start.py's own reader —
+# the refresh hook's success path omits it, so defaulting the other way would
+# blank the quota on every healthy install.
+usage_is_fallback=$(CHZ_USAGE_JSON="$USAGE_JSON" python3 -c '
+import json, os
+try:
+    d = json.load(open(os.environ["CHZ_USAGE_JSON"]))
+    print("1" if d.get("is_fallback") else "0")
+except Exception:
+    print("1")   # unreadable is not measured either
+' 2>/dev/null)
+
+if [ -f "$USAGE_JSON" ] && [ "$usage_is_fallback" = "1" ]; then
+    # Say what is true: the number is unknown, not zero and not fifty.
+    parts+=("🤖 ${_DIM}quota unknown${_RESET}")
+elif [ -f "$USAGE_JSON" ]; then
     session_pct=$(CHZ_USAGE_JSON="$USAGE_JSON" python3 -c 'import json,os; d=json.load(open(os.environ["CHZ_USAGE_JSON"])); print("%.0f" % d.get("session_pct",0))' 2>/dev/null)
     weekly_pct=$(CHZ_USAGE_JSON="$USAGE_JSON" python3 -c 'import json,os; d=json.load(open(os.environ["CHZ_USAGE_JSON"])); print("%.0f" % d.get("weekly_pct",0))' 2>/dev/null)
     if [ -n "$session_pct" ]; then
@@ -169,7 +189,16 @@ if [ -f "$USAGE_JSON" ]; then
 fi
 
 # ── ⏰ Quota reset time ──────────────────────────────────────────────────────
-if [ -f "$USAGE_JSON" ]; then
+#
+# This could never render for as long as it existed: it reads
+# `session_resets_at`, and usage-refresh.py reduced the OAuth response to three
+# `utilization` floats and discarded the rest, so no writer produced the key.
+#
+# The field was there the whole time. session-end.py has always read
+# data["five_hour"]["resets_at"] from the same endpoint — four surfaces consumed
+# the key and only one writer knew it existed. usage-refresh.py now persists it,
+# which lights up this segment and the three others that were waiting on it.
+if [ -f "$USAGE_JSON" ] && [ "$usage_is_fallback" != "1" ]; then
     reset_str=$(CHZ_USAGE_JSON="$USAGE_JSON" python3 -c '
 import json, datetime, os
 try:
@@ -408,13 +437,37 @@ try:
 except Exception:
     pass
 
+# ONE definition of stale, shared with the ° marker beside the quota.
+#
+# This compared the file MTIME against 1800s while the ° marker compared
+# `updated_at` INSIDE the json against 300s: two clocks and a 6x threshold gap,
+# on one file, at opposite ends of the same rendered line. They agreed only
+# because the data was far past both. `updated_at` wins because it describes the
+# data rather than the inode — it survives a copy, and a touch without a rewrite
+# cannot make it lie.
+#
+# A snapshot flagged is_fallback is never "ok" either. A green check sitting
+# beside an invented number is the worst available combination: it actively
+# certifies the thing that is wrong.
+stale = True
+fallback = False
 try:
-    stale = (now - os.path.getmtime(os.environ["CHZ_USAGE_JSON"])) > 1800
-except OSError:
-    stale = True
+    _p = os.environ["CHZ_USAGE_JSON"]
+    with open(_p) as fh:
+        _u = json.load(fh)
+    fallback = bool(_u.get("is_fallback"))
+    # updated_at when the snapshot carries it, mtime otherwise. Preferring the
+    # embedded timestamp is what makes this agree with the ° marker; falling
+    # back to mtime keeps snapshots written before that field existed from
+    # reading as infinitely stale, and keeps mtime usable as a test control.
+    _ts = _u.get("updated_at")
+    _age = (now - float(_ts)) if _ts else (now - os.path.getmtime(_p))
+    stale = _age > 1800
+except Exception:
+    pass
 
 if providers or ollama_recent:
-    print("degraded" if stale else "ok")
+    print("degraded" if (stale or fallback) else "ok")
 else:
     # Nothing configured, no recent local activity. This script runs on every
     # render (GH#50 history), so the probe must be cheap and MUST NOT raise:

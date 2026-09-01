@@ -201,6 +201,74 @@ def _append_savings_log(tool_name: str) -> None:
         pass
 
 
+#: Where a failed refresh leaves its reason. Read by `llm-router doctor` so a
+#: permanently stale quota is diagnosable instead of merely puzzling.
+_REFRESH_ERROR_FILE = "last_refresh_error.json"
+
+#: Fallback backoff when a 429 carries no usable Retry-After header.
+_DEFAULT_BACKOFF_S = 900
+
+#: Floor for any 429 backoff, whatever the header says. Observed in the field:
+#: this endpoint returns `Retry-After: 0`, and honouring that literally produced
+#: a one-second backoff — which is no backoff, from a caller the statusline
+#: fires on every render. A 429 means stop asking; a server claiming otherwise
+#: in the same breath is not a reason to keep asking.
+_MIN_BACKOFF_S = 60
+
+#: Ceiling, so a stray header cannot blank the quota for hours.
+_MAX_BACKOFF_S = 3600
+
+
+def _parse_retry_after(value) -> int:
+    """Seconds to wait, from a Retry-After header. Delta-seconds form only.
+
+    An HTTP-date is also legal but is not worth parsing here: falling back to a
+    fixed backoff is correct-enough, and a wrong parse would either hammer the
+    endpoint or stall the quota for hours.
+
+    Always clamped to [_MIN_BACKOFF_S, _MAX_BACKOFF_S] — the header advises, it
+    does not get to set the interval to zero.
+    """
+    try:
+        parsed = int(str(value).strip())
+    except (TypeError, ValueError):
+        parsed = _DEFAULT_BACKOFF_S
+    return max(_MIN_BACKOFF_S, min(parsed, _MAX_BACKOFF_S))
+
+
+def _record_refresh_error(kind: str, detail: str, backoff_s: int = 0) -> None:
+    """Persist why the refresh could not run, and until when to stop trying."""
+    try:
+        _ensure_state_dir()
+        path = os.path.join(STATE_DIR, _REFRESH_ERROR_FILE)
+        with open(path, "w") as f:
+            json.dump({
+                "kind": kind,
+                "detail": detail,
+                "at": time.time(),
+                "retry_after_ts": (time.time() + backoff_s) if backoff_s else 0,
+            }, f)
+    except OSError:
+        pass  # a diagnostic that breaks the thing it diagnoses is worse than none
+
+
+def _clear_refresh_error() -> None:
+    """Remove the error record after a successful fetch."""
+    try:
+        os.unlink(os.path.join(STATE_DIR, _REFRESH_ERROR_FILE))
+    except OSError:
+        pass
+
+
+def _rate_limited() -> bool:
+    """True while a server-instructed backoff is still in effect."""
+    try:
+        with open(os.path.join(STATE_DIR, _REFRESH_ERROR_FILE)) as f:
+            return time.time() < float(json.load(f).get("retry_after_ts", 0))
+    except (OSError, ValueError):
+        return False
+
+
 def _oauth_refresh_and_write() -> None:
     """Fetch live Claude subscription usage via OAuth and write usage.json.
 
@@ -210,7 +278,17 @@ def _oauth_refresh_and_write() -> None:
     inactive windows like ``seven_day_sonnet``, so we coerce ``None`` to ``{}``.
     """
     import subprocess
+    import urllib.error
     import urllib.request
+
+    # A failure here used to be a bare `return`: the old file stayed on disk,
+    # nothing was recorded, and the only evidence was a number that quietly
+    # stopped changing. Observed in the field at 148 minutes stale, carrying the
+    # 50% placeholder, while running this function by hand fixed it instantly.
+    #
+    # The mechanism was never broken. It simply had no way to say it had not run.
+    if _rate_limited():
+        return  # inside a server-instructed backoff; retrying is guaranteed noise
 
     try:
         r = subprocess.run(
@@ -218,9 +296,11 @@ def _oauth_refresh_and_write() -> None:
             capture_output=True, text=True, timeout=10,
         )
         if r.returncode != 0 or not r.stdout.strip():
+            _record_refresh_error("no-credentials", "keychain lookup returned nothing")
             return
         token = json.loads(r.stdout.strip()).get("claudeAiOauth", {}).get("accessToken", "")
         if not token:
+            _record_refresh_error("no-token", "credentials contain no accessToken")
             return
         req = urllib.request.Request(
             "https://api.anthropic.com/api/oauth/usage",
@@ -231,14 +311,34 @@ def _oauth_refresh_and_write() -> None:
         session_pct = float((data.get("five_hour") or {}).get("utilization", 0.0))
         weekly_pct = float((data.get("seven_day") or {}).get("utilization", 0.0))
         sonnet_pct = float((data.get("seven_day_sonnet") or {}).get("utilization", 0.0))
-    except Exception:
-        return  # leave the last-known usage.json untouched on any failure
+        # The endpoint DOES return a reset timestamp — session-end.py has been
+        # reading data["five_hour"]["resets_at"] all along. This hook dropped it,
+        # which is why the statusline's ⏰ segment could never fire: four
+        # surfaces consume `session_resets_at` and no writer produced it.
+        session_resets_at = (data.get("five_hour") or {}).get("resets_at", "")
+    except urllib.error.HTTPError as exc:
+        # 429 in particular: the statusline fires this on every render past TTL,
+        # throttled to 60s, so without a backoff a rate-limited endpoint becomes
+        # a retry loop that can never succeed and keeps the limit tripped.
+        if exc.code == 429:
+            retry_after = exc.headers.get("Retry-After") if exc.headers else None
+            _record_refresh_error("rate-limited", f"HTTP 429 (Retry-After: {retry_after})",
+                                  backoff_s=_parse_retry_after(retry_after))
+        else:
+            _record_refresh_error(f"http-{exc.code}", str(exc.reason))
+        return
+    except Exception as exc:  # noqa: BLE001 — recorded, then surfaced by doctor
+        _record_refresh_error(type(exc).__name__, str(exc)[:200])
+        return
+
+    _clear_refresh_error()
 
     snap = {
         "session_pct": round(session_pct, 1),
         "weekly_pct": round(weekly_pct, 1),
         "sonnet_pct": round(sonnet_pct, 1),
         "highest_pressure": round(max(session_pct, weekly_pct, sonnet_pct) / 100.0, 4),
+        "session_resets_at": session_resets_at,
         "updated_at": time.time(),
     }
     _ensure_state_dir()
