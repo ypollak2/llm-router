@@ -181,3 +181,26 @@ def test_release_upload_does_not_assume_a_release_exists():
         "no existence check before creating — a re-run would fail on the "
         "already-created release"
     )
+
+
+def test_the_release_job_can_actually_write():
+    """Creating a release and uploading assets need contents: write.
+
+    The workflow declared `contents: read` and nothing overrode it, so
+    `gh release create` and `gh release upload` failed on every tag build —
+    after all four binaries had been built, at the very last step. Two tags,
+    v13.1.0 and v13.1.1, produced correct binaries and attached none of them.
+
+    A permission that is wrong fails at the end of the job, not the start,
+    which is the most expensive place for it to be wrong.
+    """
+    import yaml
+
+    wf = yaml.safe_load(WORKFLOW.read_text())
+    job_perms = wf["jobs"]["build"].get("permissions", {})
+    assert job_perms.get("contents") == "write", (
+        "the build job cannot write releases, so no asset can ever attach; "
+        f"got {job_perms}"
+    )
+    # Still least-privilege at the top: only the job that needs it escalates.
+    assert wf["permissions"]["contents"] == "read"
