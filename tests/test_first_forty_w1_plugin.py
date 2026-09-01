@@ -266,3 +266,44 @@ def test_the_scanner_config_scopes_rather_than_disables():
         "all of src/ is excluded, which would hide a genuine leak in "
         "application code — the one finding worth keeping"
     )
+
+
+def test_plugin_mcp_command_works_without_a_prior_install():
+    """A marketplace install must not assume pip already ran (task 38).
+
+    `"command": "llm-router"` assumed the CLI was already on PATH from a
+    separate `pip install`. Someone installing from the marketplace has done no
+    such thing, so the plugin registered a server that could never start — the
+    exact prerequisite this channel exists to remove.
+    """
+    mcp = json.loads((REPO / ".mcp.json").read_text())
+    entry = mcp["mcpServers"]["llm_router"]
+
+    assert entry["command"] != "llm-router", (
+        "the plugin still assumes llm-router is on PATH, which it is not for "
+        "anyone who installed only the plugin"
+    )
+    assert entry["command"] == "npx", entry
+    assert entry["args"][:2] == ["-y", "llm-routing"], (
+        f"npx invocation is not the published package name: {entry['args']}"
+    )
+
+
+def test_plugin_does_not_vendor_the_binary():
+    """~314 MB per platform. Four of them in git is not a plugin.
+
+    Checks what git TRACKS, not what happens to be on disk — an untracked
+    scratch file is not a publishing problem, and the first version of this test
+    failed on one.
+    """
+    tracked = subprocess.run(
+        ["git", "ls-files"], capture_output=True, text=True, cwd=REPO
+    ).stdout.splitlines()
+
+    vendored = [
+        f
+        for f in tracked
+        if f.endswith((".tar.gz", ".zip"))
+        or f.startswith(("llm-router-macos", "llm-router-linux", "llm-router-windows"))
+    ]
+    assert not vendored, f"built artifacts are committed: {vendored}"
