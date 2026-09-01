@@ -324,6 +324,12 @@ jobs:
     environment: npm
     permissions:
       contents: read
+      # `npm publish --provenance` mints a signed attestation linking the
+      # package to this workflow run, and that needs an OIDC token. Without
+      # id-token: write the publish fails at the very last step, after the
+      # binaries are already attached — the same shape as the contents: read
+      # bug two releases ago.
+      id-token: write
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 

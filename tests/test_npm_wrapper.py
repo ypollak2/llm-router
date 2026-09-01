@@ -425,3 +425,24 @@ def test_only_the_scarce_platform_is_optional():
     assert "*macos-x86_64*" in step, (
         "the optional case is not scoped to macOS Intel specifically"
     )
+
+
+def test_provenance_has_the_permission_it_requires():
+    """`npm publish --provenance` mints a signed attestation via OIDC.
+
+    Without id-token: write it fails at the very last step, after the binaries
+    are already attached — the same shape as the contents: read bug two
+    releases earlier. Both are permissions that fail at the END of a job, which
+    is the most expensive place for them to be wrong.
+    """
+    import yaml
+
+    wf_text = WORKFLOW.read_text()
+    wf = yaml.safe_load(wf_text)
+    perms = wf["jobs"]["publish-npm"]["permissions"]
+
+    if "--provenance" in wf_text:
+        assert perms.get("id-token") == "write", (
+            "publish uses --provenance but the job cannot mint an OIDC token; "
+            f"got {perms}"
+        )
