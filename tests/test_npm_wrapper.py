@@ -446,3 +446,29 @@ def test_provenance_has_the_permission_it_requires():
             "publish uses --provenance but the job cannot mint an OIDC token; "
             f"got {perms}"
         )
+
+
+def test_the_guard_proves_write_access_not_just_identity():
+    """v13.1.7 failed with EOTP after provenance was already signed.
+
+    A token whose account has 2FA set to "authorization and writes"
+    authenticates for reads and is refused at publish. `npm whoami` cannot tell
+    the two apart, so the guard passed a token that could not publish — and the
+    failure landed after the provenance statement had been written to a public
+    transparency log, which cannot be unwritten.
+
+    A dry-run publish runs the same authorization path, cheaply, first.
+    """
+    wf = WORKFLOW.read_text()
+    step = wf.split("- name: Publish")[1]
+
+    assert "--dry-run" in step, (
+        "the guard only checks identity; a read-capable token that cannot write "
+        "still reaches the real publish"
+    )
+    dry = step.index("--dry-run")
+    real = step.index("npm publish --provenance")
+    assert dry < real, "the dry run must happen before the real publish"
+    assert "bypass two-factor" in step.lower(), (
+        "the failure message does not name the fix"
+    )

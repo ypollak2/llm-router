@@ -408,6 +408,12 @@ jobs:
           #     cannot use one: it expires before the build reaches this step
           #   - a token without "bypass 2FA" authenticates for reads and is
           #     refused for publish, so whoami alone is not proof
+          # whoami is NOT proof of publish rights. A token whose account has
+          # 2FA set to "authorization and writes" authenticates for reads and is
+          # then refused at publish with EOTP -- which is exactly what happened
+          # on v13.1.7, AFTER provenance had been signed and written to the
+          # public transparency log. The comment below this guard warned about
+          # this case and the guard did not check for it.
           if ! npm whoami --registry https://registry.npmjs.org/ >/dev/null 2>&1; then
             echo "::warning::NPM_TOKEN did not authenticate (401) — skipping the npm publish."
             echo "Generate a GRANULAR ACCESS TOKEN at npmjs.com with:"
@@ -418,5 +424,20 @@ jobs:
             exit 0
           fi
           echo "authenticated as: $(npm whoami --registry https://registry.npmjs.org/)"
+
+          # Prove the token can WRITE before doing anything irreversible.
+          # `--dry-run` runs the same authorization path as a real publish, so
+          # an EOTP surfaces here -- cheaply, before provenance is signed and
+          # recorded in a public log that cannot be unwritten.
+          if ! npm publish --dry-run --access public >/dev/null 2>&1; then
+            echo "::warning::NPM_TOKEN cannot publish — skipping."
+            echo "The token authenticates but is refused for writes. Either:"
+            echo "  - regenerate it with 'bypass two-factor authentication', or"
+            echo "  - set the npm account's 2FA to 'authorization only' rather"
+            echo "    than 'authorization and writes'"
+            echo "CI cannot answer an OTP prompt: a six-digit code expires long"
+            echo "before a build reaches this step."
+            exit 0
+          fi
 
           npm publish --provenance --access public
