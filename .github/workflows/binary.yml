@@ -40,8 +40,6 @@ jobs:
         include:
           - os: macos-14      # arm64
             asset: llm-router-macos-arm64
-          - os: macos-13      # x86_64
-            asset: llm-router-macos-x86_64
           - os: ubuntu-latest
             asset: llm-router-linux-x86_64
           - os: windows-latest
@@ -248,6 +246,65 @@ jobs:
           gh release upload "${GITHUB_REF_NAME}" "${artifacts[@]}" \
             --clobber --repo "${GITHUB_REPOSITORY}"
 
+  # ── macOS Intel, deliberately outside the dependency chain ──────────────
+  #
+  # GitHub's macos-13 runners were scarce enough to queue for HOURS on every run
+  # across a full day and complete on none of them. It was originally a leg of
+  # the `build` matrix, which made it a hard block: `needs: build` waits for
+  # every leg to FINISH, and `always()` does not change that — it only decides
+  # whether the dependent runs once the wait is over. A permanently queued job
+  # therefore blocked the npm publish forever.
+  #
+  # So it builds on its own. When a runner frees up the asset is attached to the
+  # release exactly as before; until then a darwin-x64 user gets install.js's
+  # clean "no standalone binary is published for this platform" message and the
+  # pip fallback, rather than a broken install.
+  #
+  # continue-on-error so a failure here is visible without failing the release.
+  build-macos-x86:
+    name: macos-13 (best effort)
+    runs-on: macos-13
+    continue-on-error: true
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.11"
+      - name: Install project and PyInstaller
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install . pyinstaller
+      - name: Build
+        run: pyinstaller --noconfirm --clean packaging/llm-router.spec
+      - name: Smoke test
+        run: |
+          BIN=dist/llm-router/llm-router
+          "$BIN" --version
+          test -f dist/llm-router/_internal/litellm/model_prices_and_context_window_backup.json \
+            || { echo "litellm data file missing"; exit 1; }
+      - name: Package
+        run: |
+          cd dist
+          ditto -c -k --keepParent llm-router "../llm-router-macos-x86_64.zip"
+          tar -czf "../llm-router-macos-x86_64.tar.gz" llm-router
+      - name: Attach to the release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          gh release view "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1 || \
+            gh release create "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" \
+              --title "${GITHUB_REF_NAME}" --generate-notes
+          artifacts=()
+          for f in "llm-router-macos-x86_64.tar.gz" "llm-router-macos-x86_64.zip"; do
+            [ -f "$f" ] && artifacts+=( "$f" )
+          done
+          gh release upload "${GITHUB_REF_NAME}" "${artifacts[@]}" \
+            --clobber --repo "${GITHUB_REPOSITORY}"
+
   # ── npm, gated on the binaries actually existing ────────────────────────
   #
   # This job exists because of what happened on 13.1.4: the package was
@@ -298,11 +355,23 @@ jobs:
           # Every target install.js can select must be downloadable. A platform
           # with no asset is a 404 for that user, and they cannot be told to
           # wait for a later publish of the same version.
+          # macOS Intel builds on a best-effort job outside this dependency
+          # chain, because its runners queue for hours. Missing it is tolerated
+          # and reported: install.js refuses cleanly on a platform with no asset
+          # and points at the pip fallback, so a darwin-x64 user gets an honest
+          # message rather than a broken install. Every OTHER platform is
+          # mandatory — those are the ones this release actually promises.
           missing=0
           for a in $(grep -oE "llm-router-[a-z0-9_-]+\.(tar\.gz|zip)" npm/install.js | sort -u); do
             case " $published " in
-              *" $a "*) echo "  ok      $a" ;;
-              *)        echo "  MISSING $a"; missing=1 ;;
+              *" $a "*) echo "  ok       $a" ;;
+              *)
+                case "$a" in
+                  *macos-x86_64*)
+                    echo "  optional $a (macOS Intel runner did not complete)" ;;
+                  *)
+                    echo "  MISSING  $a"; missing=1 ;;
+                esac ;;
             esac
           done
           [ "$missing" -eq 0 ] || {

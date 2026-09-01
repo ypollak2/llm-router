@@ -66,7 +66,14 @@ def test_every_workflow_asset_is_downloadable():
     import yaml
 
     wf = yaml.safe_load(WORKFLOW.read_text())
+    # Assets come from two places now: the gating matrix, and the best-effort
+    # macOS Intel job that sits outside the dependency chain. Reading only the
+    # matrix would report a false mismatch for a platform that IS built.
     assets = {m["asset"] for m in wf["jobs"]["build"]["strategy"]["matrix"]["include"]}
+    assets |= set(
+        re.findall(r"(llm-router-[a-z0-9_-]+)\.(?:tar\.gz|zip)",
+                   yaml.dump(wf["jobs"]["build-macos-x86"]))
+    )
 
     js = INSTALL_JS.read_text()
     referenced = set(re.findall(r"(llm-router-[a-z0-9_-]+)\.(?:tar\.gz|zip)", js))
@@ -369,4 +376,52 @@ def test_an_invalid_token_skips_rather_than_fails_mid_release():
     assert "bypass" in step.lower(), (
         "the failure message does not say what kind of token is needed, which "
         "is the only thing the reader needs to know"
+    )
+
+
+def test_a_scarce_runner_cannot_block_the_publish():
+    """macos-13 queued for hours on every run across a day and completed on none.
+
+    As a leg of the `build` matrix it was a hard block: `needs: build` waits for
+    every leg to FINISH, and `always()` does not change that — it only decides
+    whether the dependent runs once the wait is over. A permanently queued job
+    therefore blocked the npm publish forever.
+
+    It now builds outside the dependency chain and attaches when it lands.
+    """
+    import yaml
+
+    wf = yaml.safe_load(WORKFLOW.read_text())
+
+    matrix = wf["jobs"]["build"]["strategy"]["matrix"]["include"]
+    gating = {m["os"] for m in matrix}
+    assert "macos-13" not in gating, (
+        "macos-13 is back in the gating matrix, so a queued Intel runner blocks "
+        "the npm publish again"
+    )
+
+    assert "build-macos-x86" in wf["jobs"], "macOS Intel is no longer built at all"
+    assert wf["jobs"]["build-macos-x86"].get("continue-on-error") is True
+
+    needs = wf["jobs"]["publish-npm"]["needs"]
+    assert "build-macos-x86" not in str(needs), (
+        "publish-npm depends on the best-effort job, which reintroduces the block"
+    )
+
+
+def test_only_the_scarce_platform_is_optional():
+    """Relaxing the wait must not relax what the release promises.
+
+    Every platform except macOS Intel stays mandatory: publishing without a
+    Linux or Windows binary would 404 for those users, and npm cannot
+    republish a version to fix it.
+    """
+    wf = WORKFLOW.read_text()
+    step = wf.split("Verify every asset")[1].split("- name: Publish")[0]
+
+    assert "macos-x86_64" in step, "no platform is treated as optional"
+    assert "exit 1" in step, "a missing mandatory asset no longer stops the publish"
+    # The tolerated case must be narrow — a wildcard would excuse everything.
+    assert "*macos-x86_64*" in step, (
+        "the optional case is not scoped to macOS Intel specifically"
     )
