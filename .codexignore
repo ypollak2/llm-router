@@ -1,0 +1,44 @@
+# What a host does NOT need when it installs this plugin.
+#
+# The plugin surface is the manifests, hooks/, commands/, skills/ and the MCP
+# declaration. Everything below is development apparatus: shipping it enlarges
+# the download, widens what a scanner has to reason about, and puts files in
+# front of an agent that have nothing to do with routing.
+
+# Tests and their fixtures. The secret-redaction tests deliberately contain
+# credential-shaped strings so the guard can be verified; they are not needed
+# at runtime and should not travel with an installed plugin.
+tests/
+_quarantined_tests/
+conftest.py
+.pytest_cache/
+.hypothesis/
+
+# Benchmark and research apparatus — large, regenerable, irrelevant to routing.
+submissions/
+experiments/
+data/
+scripts/routerarena/
+*.parquet
+
+# Build and tooling artifacts.
+.venv/
+dist/
+build/
+*.egg-info/
+__pycache__/
+*.py[cod]
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Local development state.
+.env
+.env.*
+!.env.example
+.DS_Store
+.vscode/
+.idea/
+
+# Source docs that ship as rendered pages elsewhere.
+CHANGELOG-ARCHIVE.md

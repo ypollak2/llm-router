@@ -93,6 +93,55 @@ def test_manifest_targets_are_not_gitignored(manifest_path):
     )
 
 
+@pytest.mark.parametrize("manifest_path", MANIFESTS, ids=lambda p: p.parent.name)
+def test_declared_interface_assets_exist(manifest_path):
+    """`interface.logo` is a declared path like any other, and it was dangling.
+
+    The first version of test_every_manifest_reference_resolves checked
+    `skills`, `mcpServers`, `hooks` and `commands` — and missed `interface`,
+    so `assets/logo.png` was declared by both manifests while existing nowhere
+    in the repo. Exactly the `.mcp.json` failure, one nesting level deeper,
+    surviving the test written to catch that class of bug.
+    """
+    manifest = json.loads(manifest_path.read_text())
+    interface = manifest.get("interface") or {}
+
+    for key in ("logo", "icon", "banner"):
+        ref = interface.get(key)
+        if not isinstance(ref, str) or ref.startswith(("http://", "https://")):
+            continue
+        target = REPO / ref
+        assert target.is_file(), (
+            f"{manifest_path.parent.name}/plugin.json declares interface.{key}="
+            f"{ref!r}, but {target} does not exist"
+        )
+        assert target.stat().st_size > 0, f"{ref} is an empty file"
+
+
+@pytest.mark.parametrize("manifest_path", MANIFESTS, ids=lambda p: p.parent.name)
+def test_every_skill_has_frontmatter(manifest_path):
+    """A skill without frontmatter has no name or description for a host to show."""
+    manifest = json.loads(manifest_path.read_text())
+    skills_ref = manifest.get("skills")
+    if not isinstance(skills_ref, str):
+        pytest.skip("manifest declares no skills directory")
+
+    skill_files = sorted((REPO / skills_ref).glob("*/SKILL.md"))
+    assert skill_files, f"no SKILL.md files under {skills_ref}"
+
+    for path in skill_files:
+        text = path.read_text()
+        assert text.startswith("---\n"), (
+            f"{path.relative_to(REPO)} has no frontmatter block, so a host has "
+            "no name or description to display for it"
+        )
+        block = text.split("---", 2)[1]
+        for field_name in ("name:", "description:"):
+            assert field_name in block, (
+                f"{path.relative_to(REPO)} frontmatter is missing {field_name!r}"
+            )
+
+
 def test_mcp_json_exists_and_names_the_server():
     mcp = REPO / ".claude-plugin" / "mcp.json"
     assert mcp.is_file(), "plugin mcp.json is missing — the manifests point at it"

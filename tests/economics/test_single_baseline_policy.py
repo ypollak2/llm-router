@@ -43,10 +43,29 @@ def test_policy_symbol_exists_and_is_opus_5():
 
 def test_env_override_still_resolves_through_the_policy(monkeypatch):
     """The override is retained, but it must go through the one policy function
-    rather than each surface reading the env var for itself."""
+    rather than each surface reading the env var for itself.
+
+    Asserts against the registry rather than a price literal. The previous
+    version hardcoded (2.0, 10.0) -- Sonnet 5's introductory rate, which
+    pricing.py itself documents as running only "through 2026-08-31". The
+    rollover to (3.0, 15.0) fired on schedule and broke this test on main
+    overnight, while the code it guards was behaving exactly as designed.
+
+    A test that encodes a price with an expiry date is a scheduled failure. What
+    this test is actually for is that the override resolves THROUGH the policy;
+    the number is incidental, so it now comes from the same source the policy
+    reads.
+    """
     monkeypatch.setenv("LLM_ROUTER_SAVINGS_BASELINE", "claude-sonnet-5")
     assert pricing.savings_baseline_model() == "claude-sonnet-5"
-    assert pricing.savings_baseline_rates() == (2.0, 10.0)
+
+    expected = (
+        pricing.input_rate("claude-sonnet-5"),
+        pricing.output_rate("claude-sonnet-5"),
+    )
+    assert pricing.savings_baseline_rates() == expected
+    # And it is genuinely resolving the override, not the default baseline.
+    assert pricing.savings_baseline_rates() != (5.0, 25.0)
 
 
 def test_unknown_override_falls_back_rather_than_pricing_at_zero(monkeypatch):

@@ -1,3 +1,9 @@
+---
+name: routing
+description: Route tasks to the cheapest capable model automatically using llm_router MCP tools
+trigger: /routing
+---
+
 # LLM Router — Smart Routing Skill
 
 Route tasks to the cheapest capable model automatically using llm_router MCP tools.
