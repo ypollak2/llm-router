@@ -818,6 +818,52 @@ class RouterConfig(BaseSettings):
             os.environ.setdefault("OLLAMA_API_BASE", self.ollama_base_url)
 
 
+STATE_DIR = Path.home() / ".llm-router"
+
+# `<provider>.key` files the setup flows write into the state directory, mapped to
+# the environment variable each provider is read from.
+_DISK_KEY_FILES: dict[str, str] = {
+    "openrouter": "OPENROUTER_API_KEY",
+    "openai": "OPENAI_API_KEY",
+    "gemini": "GEMINI_API_KEY",
+    "deepseek": "DEEPSEEK_API_KEY",
+    "groq": "GROQ_API_KEY",
+    "perplexity": "PERPLEXITY_API_KEY",
+    "xai": "XAI_API_KEY",
+    "anthropic": "ANTHROPIC_API_KEY",
+}
+
+
+def load_disk_keys() -> dict[str, str]:
+    """Load ``~/.llm-router/<provider>.key`` files into ``os.environ``.
+
+    The key-setup flows write these files, but nothing ever read them back: on a
+    real host ``openrouter.key`` sat populated while `doctor` reported
+    OPENROUTER_API_KEY as unset and the entire OpenRouter pool stayed dark.
+
+    An explicitly exported variable always wins — a shell export is a deliberate
+    act and must not be overridden by a file that may be stale. Returns the keys
+    found on disk (whether or not they were applied), for diagnostics.
+    """
+    import os
+
+    found: dict[str, str] = {}
+    for stem, env_var in _DISK_KEY_FILES.items():
+        path = STATE_DIR / f"{stem}.key"
+        try:
+            if not path.is_file():
+                continue
+            value = path.read_text().strip()
+        except OSError:
+            continue
+        if not value:
+            continue
+        found[env_var] = value
+        if not os.environ.get(env_var):
+            os.environ[env_var] = value
+    return found
+
+
 _config: RouterConfig | None = None
 _config_lock = threading.Lock()
 
@@ -828,6 +874,9 @@ def get_config() -> RouterConfig:
     if _config is None:
         with _config_lock:
             if _config is None:
+                # Disk keys first: RouterConfig reads from the environment, so a
+                # key file only takes effect if it is exported before construction.
+                load_disk_keys()
                 _config = RouterConfig()
                 _config.apply_keys_to_env()
     if _config.llm_router_claude_subscription:

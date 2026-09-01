@@ -96,16 +96,31 @@ _SIGNALS: dict[str, dict[str, re.Pattern]] = {
             re.IGNORECASE,
         ),
     },
+    # Verbs like "investigate", "find out", "look up" and "check if" are NOT
+    # research signals on their own: they are the ordinary vocabulary of local
+    # debugging ("investigate why the statusline is blank", "check if the hook
+    # fired"). Claiming them sent local work into a QA task type, where
+    # enforcement correctly refuses to exempt even read-only Bash — so asking
+    # why a local surface was broken blocked `grep` against the user's own
+    # checkout. Observed repeatedly, including while this fix was written.
+    #
+    # They are kept, but only when paired with an external-knowledge object:
+    # something published, current, or about the outside world. A bare
+    # "investigate X" now falls through to the code/query classifiers, which is
+    # where local work belongs.
     "research": {
         "intent": re.compile(
-            r"\b(?:research|look up|look into|search for|find out|investigate|discover|"
+            r"\b(?:research\b|"
+            r"(?:look up|look into|search for|find out|investigate|discover)\s+"
+            r"(?:the\s+)?(?:latest|current|recent|newest|best practices?|"
+            r"guidance|recommendations?|market|industry|pricing|competitors?|"
+            r"who|what|how)\b|"
             r"find (?:the |current |recent )?(?:latest|current|recent|newest|"
             r"best practices?|guidance|recommendations?)|"
             r"what(?:'s| is) (?:the )?(?:latest|newest|most recent|current)|"
             r"what happened|who (?:won|raised|acquired|launched|announced|released|founded|created)|"
             r"how (?:much|many) (?:did|has|have|does|were|are|is|was)|"
-            r"market analysis|competitive analysis|benchmark|survey|report on|"
-            r"check (?:the |if |whether ))\b",
+            r"market analysis|competitive analysis|survey|report on)\b",
             re.IGNORECASE,
         ),
         "topic": re.compile(

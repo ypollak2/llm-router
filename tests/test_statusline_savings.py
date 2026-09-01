@@ -446,6 +446,21 @@ def test_the_savings_figure_is_labelled():
     render = [line for line in script.splitlines()
               if "parts+=(" in line and "💰" in line]
     assert render, "no 💰 render line found in the statusline script"
-    assert "today" in render[0], (
-        f"the 💰 segment carries no period label: {render[0].strip()}"
+
+    # The label moved INTO render_money(). It used to be appended here by the
+    # shell, which put it after the coverage note — "~$34 saved (33% observed)
+    # today" — reading as though the coverage were today's rather than the
+    # saving. So assert the label on the rendered OUTPUT, which is what a user
+    # sees, rather than on the shell string, which is an implementation detail.
+    from llm_router.dashboard_data import WindowTotals, render_money
+
+    line = render_money(
+        WindowTotals(window="today", calls=1, tokens=1, saved_usd=34.0),
+        session_usd=0.0,
+    )
+    assert "today" in line, f"the 💰 segment carries no period label: {line!r}"
+    assert "saved" in line, f"the 💰 segment does not say what the money is: {line!r}"
+    assert line.index("saved") < line.index("today"), (
+        f"the verb must precede the scope, else the scope modifies the wrong "
+        f"clause: {line!r}"
     )

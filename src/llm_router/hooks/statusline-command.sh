@@ -292,31 +292,57 @@ if [ -f "$USAGE_DB" ]; then
     # narrow version passed locally, where a dev checkout always matched.
     #
     # If none can import llm_router the figure is omitted rather than guessed.
+    # The CLI is `llm-router` with a HYPHEN. This loop probed for `llm_router`
+    # with an underscore, which is not an executable that has ever existed, so
+    # the highest-signal candidate — the interpreter behind the user's own
+    # install — never matched. The same naming confusion the #72/#82 sweeps
+    # chased through install.py and doctor.py had survived here, and the
+    # "never break the statusline" fallback below hid it perfectly: on a host
+    # where no other candidate could import llm_router the money figure simply
+    # vanished, with no error anywhere.
+    #
+    # The dev-checkout fallback was also wrong by one level. This script installs
+    # to ~/.claude/hooks/, so ../../../ is $HOME's parent, not a checkout.
     _chz_py=""
     for _cand in \
+        "$(command -v llm-router 2>/dev/null | xargs -I{} head -1 {} 2>/dev/null | sed 's|^#!||' | awk '{print $1}')" \
         "$(command -v llm_router 2>/dev/null | xargs -I{} head -1 {} 2>/dev/null | sed 's|^#!||' | awk '{print $1}')" \
         "$(command -v python3 2>/dev/null)" \
         "$(command -v python 2>/dev/null)" \
         "$HOME/.local/pipx/venvs/llm-routing/bin/python" \
         "$HOME/.local/bin/python3" \
-        "$(dirname "$0")/../../../.venv/bin/python3"; do
+        "$HOME/Projects/llm-router/.venv/bin/python3" \
+        "$(dirname "$0")/../../.venv/bin/python3"; do
         if [ -n "$_cand" ] && [ -x "$_cand" ] && "$_cand" -c "import llm_router" 2>/dev/null; then
             _chz_py="$_cand"; break
         fi
     done
 
-    _saved=""
-    [ -n "$_chz_py" ] && _saved=$(CHZ_DB="$USAGE_DB" "$_chz_py" -c '
+    # "today" is every session since local midnight, unioned across all five
+    # usage tables — not this session, and not spend. query_window does that
+    # union; the label has to say which of the two it is, because a bare dollar
+    # figure beside a quota percentage reads as money spent.
+    # Delegates the FORMAT as well as the total. INV-COST-004 said surfaces
+    # delegate the aggregation; it did not say they delegate the rendering, so
+    # every surface invented its own money format and the two that mattered
+    # disagreed. render_money() is now the only place a dollar figure is shaped:
+    # measured spend exact and only above a cent, modelled savings tilde-
+    # prefixed and rounded, both carrying a verb, coverage called out when the
+    # estimate is soft.
+    _money=""
+    [ -n "$_chz_py" ] && _money=$(CHZ_DB="$USAGE_DB" "$_chz_py" -c '
 import os, pathlib
 try:
-    from llm_router.dashboard_data import query_window
+    from llm_router.dashboard_data import (
+        query_window, render_money, session_spend_usd,
+    )
     t = query_window("today", db_path=pathlib.Path(os.environ["CHZ_DB"]))
-    print(f"{t.saved_usd:.2f}")
+    print(render_money(t, session_spend_usd()))
 except Exception:
     print("")            # never break the statusline over a reporting figure
 ' 2>/dev/null)
-    if [ -n "$_saved" ] && [ "$_saved" != "0.00" ]; then
-        parts+=("💰 ${_GREEN}\$${_saved}${_RESET}${_DIM} today${_RESET}")
+    if [ -n "$_money" ]; then
+        parts+=("💰 ${_GREEN}${_money}${_RESET}")
     fi
 
     # ⚖ route mix — local vs paid over the last 6h. Answers "is routing working

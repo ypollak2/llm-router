@@ -1,0 +1,34 @@
+name: Plugin Security Scan
+
+# Required by the awesome-ai-plugins listing (issue #39): a plugin is only
+# accepted with the HOL scanner running in CI, a score of at least 80, and zero
+# critical or high findings. Running it on every push means the listing's
+# precondition is continuously true rather than true once at submission.
+#
+# It is also a check worth having on its own terms. This repo ships hooks that
+# run inside other people's agent sessions and a plugin bundle that installs
+# them; a scanner that fails the build on a high-severity finding is a cheap
+# guard on a surface where a regression reaches users directly.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  scan:
+    name: HOL plugin scanner
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashgraph-online/ai-plugin-scanner-action@ffaee77ef21faa6df92a33b03d09278ac8c844f2 # v1
+        with:
+          plugin_dir: "."
+          # `high` and above breaks the build. Medium and low are reported and
+          # reviewed rather than gated, so the check stays actionable instead of
+          # becoming something contributors learn to re-run until it passes.
+          fail_on_severity: high

@@ -1,0 +1,23 @@
+version: 2
+
+# Third-party actions are pinned to commit SHAs, which is the right default —
+# a tag can be moved, a SHA cannot. The cost of pinning is that security fixes
+# no longer arrive on their own, so Dependabot supplies the other half: it opens
+# a PR when a pinned action moves, and the pin keeps that change reviewable
+# rather than silent.
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "ci"
+
+  - package-ecosystem: pip
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "deps"

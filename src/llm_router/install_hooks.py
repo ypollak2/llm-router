@@ -51,6 +51,66 @@ _HOOKS_DST = _CLAUDE_DIR / "hooks"
 _RULES_DST = _CLAUDE_DIR / "rules"
 _SETTINGS_PATH = _CLAUDE_DIR / "settings.json"
 
+# The router's own state lives here, and so — as of the first-run fixes — do the
+# backups. Writing them next to the destination is what let ~/.claude/hooks and
+# ~/.claude/rules grow to 697 files / 17 MB on a real host (issue #94).
+STATE_DIR = Path.home() / ".llm-router"
+
+# How many timestamped backups to retain per file. The plain `<name>.bak`, which
+# holds the FIRST captured hand-edit, is kept forever and does not count against
+# this budget (RED1-8-03).
+MAX_BACKUPS_PER_FILE = 3
+
+
+def seed_usage_json() -> Path:
+    """Write a placeholder usage.json so quota never renders as a fabricated 0%.
+
+    Quota pressure is the headline of subscription mode, and it is populated by a
+    PostToolUse hook that has not run yet at install time. Without this seed the
+    statusline had no file to read and silently reported zeros next to hardcoded
+    'remaining' strings. The `pending` flag lets every reader say "not measured
+    yet" instead of inventing a number.
+    """
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    path = STATE_DIR / "usage.json"
+    if path.exists():
+        try:
+            existing = json.loads(path.read_text())
+            if isinstance(existing, dict) and not existing.get("pending"):
+                return path  # real data already present — never clobber it
+        except (json.JSONDecodeError, OSError):
+            pass
+    tmp = path.with_suffix(".json.tmp")
+    tmp.write_text(
+        json.dumps(
+            {
+                "pending": True,
+                "seeded_at": time.time(),
+                "note": "placeholder written by `llm-router install`; "
+                "replaced on the first usage refresh",
+            }
+        )
+    )
+    os.replace(tmp, path)
+    return path
+
+
+def _prune_backups(stem: str) -> None:
+    """Keep at most MAX_BACKUPS_PER_FILE timestamped backups for one file."""
+    backups_dir = STATE_DIR / "backups"
+    try:
+        existing = sorted(
+            backups_dir.glob(f"{stem}.*.bak"),
+            key=lambda p: p.stat().st_mtime,
+        )
+    except OSError:
+        return
+    for stale in existing[:-MAX_BACKUPS_PER_FILE] if len(existing) > MAX_BACKUPS_PER_FILE else []:
+        try:
+            stale.unlink()
+        except OSError:
+            pass
+
 
 def _legacy_llm_router_paths() -> list[Path]:
     """RED2-4-01: pre-rebrand 'llm-router' artifacts that shipped before the
@@ -65,6 +125,53 @@ def _legacy_llm_router_paths() -> list[Path]:
     return paths
 
 
+def _orphaned_managed_hooks() -> list[Path]:
+    """Installed ``llm_router-*.py`` hooks this version no longer defines.
+
+    Three generations of hook script were observed coexisting in ~/.claude/hooks
+    on a real host: the current ``llm_router-*`` set, the pre-rebrand
+    ``llm-router-*`` set, and a third-party router's. The pre-rebrand set was
+    already reaped; hooks dropped from _HOOK_DEFS between versions were not, so
+    they lingered forever — still on disk, referenced by nothing, and
+    indistinguishable to the user from the live set.
+
+    Only files this installer owns are considered. A hook belonging to another
+    product is never a candidate, no matter how similar its name.
+    """
+    if not _HOOKS_DST.exists():
+        return []
+    current = {installed for _src, installed, _ev, _m in _HOOK_DEFS}
+    current |= {dst for _src, dst in _HOOK_SUPPORT_FILES}
+    current |= {"llm_router-statusline.sh"}
+    orphans = []
+    for path in sorted(_HOOKS_DST.glob("llm_router-*")):
+        if path.name not in current and path.suffix in {".py", ".sh"}:
+            orphans.append(path)
+    return orphans
+
+
+def _competing_router_hooks(settings: dict) -> list[str]:
+    """Hook commands from a DIFFERENT router that are registered alongside ours.
+
+    Two routers both firing UserPromptSubmit means every prompt is classified and
+    held twice. We report it and let the user decide — silently deleting another
+    product's files is precisely the overreach that produced issue #94.
+    """
+    found: list[str] = []
+    for _event, groups in (settings.get("hooks") or {}).items():
+        for group in groups or []:
+            for hook in group.get("hooks", []) or []:
+                cmd = hook.get("command", "")
+                low = cmd.lower()
+                if "llm_router" in low or "llm-router" in low:
+                    continue
+                # Another router is one that routes: it registers a prompt or
+                # tool gate whose script name advertises routing.
+                if any(k in low for k in ("auto-route", "enforce-route", "-route.py")):
+                    found.append(cmd)
+    return found
+
+
 def _migrate_remove_legacy_llm_router() -> list[str]:
     """Remove the conflicting pre-rebrand llm-router.md/hooks on install/upgrade."""
     actions: list[str] = []
@@ -75,6 +182,12 @@ def _migrate_remove_legacy_llm_router() -> list[str]:
                 actions.append(f"Removed conflicting legacy artifact {p}")
             except OSError:
                 pass
+    for p in _orphaned_managed_hooks():
+        try:
+            p.unlink()
+            actions.append(f"Removed orphaned hook no longer shipped: {p.name}")
+        except OSError:
+            pass
     return actions
 
 
@@ -172,23 +285,32 @@ def _backup_before_overwrite(dst: Path) -> Path | None:
     caller MUST NOT overwrite when None is returned — RED1-8-02).
 
     RED1-8-03/RED2-8-02: never clobber an existing backup. The plain ``<dst>.bak``
-    is written only if absent (it holds the FIRST captured edit); a subsequent
-    drift event writes a timestamped ``<dst>.<ts>.bak`` instead, so no earlier
-    hand-edit is ever lost.
+    is written only if absent (it holds the FIRST captured edit) and is kept
+    forever, so no user's original hand-edit is ever lost.
+
+    Issue #94: subsequent drift events used to write a timestamped
+    ``<dst>.<ts>.bak`` NEXT TO the destination and never pruned them, which grew
+    ~/.claude/hooks and ~/.claude/rules to 697 files / 17 MB on a real host. Those
+    now go to ``~/.llm-router/backups/`` and are capped at MAX_BACKUPS_PER_FILE,
+    keeping the user's own directories clean and the history bounded.
     """
     try:
         primary = dst.with_suffix(dst.suffix + ".bak")
         if not primary.exists():
             shutil.copy2(dst, primary)
             return primary
+
+        backups_dir = STATE_DIR / "backups"
+        backups_dir.mkdir(parents=True, exist_ok=True)
         ts = time.strftime("%Y%m%d-%H%M%S")
-        alt = dst.with_suffix(dst.suffix + f".{ts}.bak")
+        alt = backups_dir / f"{dst.name}.{ts}.bak"
         # Guard the sub-second collision case so we still never clobber.
         n = 0
         while alt.exists():
             n += 1
-            alt = dst.with_suffix(dst.suffix + f".{ts}-{n}.bak")
+            alt = backups_dir / f"{dst.name}.{ts}-{n}.bak"
         shutil.copy2(dst, alt)
+        _prune_backups(dst.name)
         return alt
     except OSError:
         return None
@@ -1084,6 +1206,33 @@ def install(force: bool = False) -> list[str]:
 
     # ── Register in Claude Desktop ────────────────────────────────────────
     actions.extend(_install_claude_desktop())
+
+    # ── Warn about a second router on the same events ─────────────────────
+    # Not removed: another product's hooks are not ours to delete. But two
+    # routers both gating UserPromptSubmit classify and hold every prompt twice,
+    # and the user cannot see that from the statusline.
+    try:
+        rival = _competing_router_hooks(_load_settings())
+        if rival:
+            actions.append(
+                f"WARNING: {len(rival)} hook(s) from another router are still "
+                "registered — every prompt will be routed twice. Remove them from "
+                "settings.json to avoid double-classification:"
+            )
+            for cmd in rival[:5]:
+                actions.append(f"    {cmd}")
+    except Exception:
+        pass
+
+    # ── Seed the quota placeholder ────────────────────────────────────────
+    # Quota pressure is populated by a PostToolUse hook that has not run yet, so
+    # without this the statusline has no file to read on a brand-new install and
+    # previously rendered a fabricated 0%. See seed_usage_json().
+    try:
+        seeded = seed_usage_json()
+        actions.append(f"Seeded quota placeholder → {seeded} (refreshes on first session)")
+    except OSError:
+        actions.append("WARNING: could not seed usage.json — quota will show as unmeasured")
 
     # ── Populate the agentic-model registry (Fix #3) ──────────────────────
     # Probe which installed Ollama models can actually drive the tool-loop, so

@@ -6,7 +6,7 @@ This page documents **exactly which features work where**, without sugar-coating
 
 | Feature | Claude Code | Codex CLI | Gemini CLI | Pi (pi.dev) | VS Code/Cursor | Browser | Local CLI |
 |---------|:-----------:|:---------:|:----------:|:-----------:|:--------------:|:-------:|:---------:|
-| **Auto-Routing Hooks** | ✅ Full | ❌ No | ✅ Full | ✅ Full | ❌ No | ❌ No | ✅ Limited |
+| **Auto-Routing Hooks** | ✅ Full | 🔜 Not yet | ✅ Full | ✅ Full | 🔜 Not yet | ❌ No | ✅ Limited |
 | **Session-End Tracking** | ✅ Yes | ❌ No | ✅ Yes | ✅ Yes | ❌ No | ❌ No | ✅ Manual |
 | **Quota Pressure Display** | ✅ Yes | ❌ No | ✅ Yes | ❌ No | ❌ No | ❌ No | ❌ No |
 | **60 MCP Tools (Direct)** | ✅ Yes | ✅ Yes | ✅ Yes | ✅ Yes | ✅ Yes | ✅ Yes | ✅ Yes |
@@ -18,9 +18,35 @@ This page documents **exactly which features work where**, without sugar-coating
 **Legend:**
 - ✅ **Yes** — Fully supported, automatic
 - ⚠️ **Partial** — Limited or requires configuration
-- ❌ **No** — Not supported on this host
+- 🔜 **Not yet** — *the host supports this; llm-router has not shipped it*
+- ❌ **No** — Not possible on this host
 - *Codex/VS Code/Cursor: Manual routing via MCP tools, no automatic native-turn hooks
 - **Manual analytics requires running `llm-router snapshot` periodically
+
+### Why "not yet" is a separate row from "no"
+
+Until recently, Claude Code was the only host that let anything intercept a
+prompt before the model saw it, and this page said "❌ No" for the others. That
+is no longer true, and the distinction matters: **❌** means the host cannot do
+it, **🔜** means we haven't built it.
+
+| Host | Prompt-interception hook | Can it block? | Status here |
+|---|---|:---:|---|
+| Claude Code | `UserPromptSubmit` | yes | shipped |
+| Codex CLI | `UserPromptSubmit` | yes — `{"decision":"block"}` | not yet |
+| Cursor | `beforeSubmitPrompt` | yes | not yet |
+| Gemini CLI | `UserPromptSubmit` | yes | shipped |
+
+Codex hooks are enabled by default and its `PreToolUse` can additionally
+*rewrite* tool arguments via `updatedInput`, which the Claude Code path cannot.
+Cursor's hooks are project-scoped (`.cursor/hooks.json`) with no plugin-root
+variable, and its **cloud agents run project hooks but not prompt hooks** — so
+auto-routing will not apply to cloud agents even after the port lands.
+
+The machine-readable version of this table is
+`llm_router.hosts.events`, which also records which payload fields have been
+verified against a real run of each host versus only read off a docs page.
+`routing_ready(host)` is the function this page's first row should agree with.
 
 ---
 

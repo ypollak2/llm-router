@@ -1,3 +1,9 @@
+---
+name: savings
+description: Report how much routing has saved by sending tasks to cheaper models
+trigger: /savings
+---
+
 # LLM Router — Savings Tracking Skill
 
 Track and report how much you've saved by routing tasks to cheaper models.

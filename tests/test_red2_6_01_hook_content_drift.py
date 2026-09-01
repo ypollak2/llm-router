@@ -104,8 +104,11 @@ def test_second_drift_does_not_clobber_first_bak(tmp_path, monkeypatch):
     ih.check_and_update_hooks()  # refresh #2
 
     assert bak.read_text() == edit1, "RED1-8-03: first .bak clobbered — original edit lost"
-    # edit2 preserved somewhere (a timestamped .bak)
+    # edit2 preserved somewhere. Since the #94 bounding fix, timestamped backups
+    # live under STATE_DIR/backups rather than beside the destination, so both
+    # locations count as "preserved".
     others = [p for p in dst.parent.glob(dst.name + ".*bak") if p != bak]
+    others += list((ih.STATE_DIR / "backups").glob(dst.name + ".*bak"))
     assert any(p.read_text() == edit2 for p in others), "second edit not preserved"
 
 

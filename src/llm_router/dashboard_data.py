@@ -138,6 +138,21 @@ class WindowTotals:
     # Per-source breakdown so consumers can show drill-down detail.
     by_source: dict[str, dict] = field(default_factory=dict)
 
+    # Real money leaving the account, as distinct from money this router
+    # believes it avoided. There was no such field for a long time: every
+    # surface could say what was SAVED and none could say what anything COST,
+    # which is why an unlabelled savings figure on the statusline was read as
+    # spend — the reader was looking for a number that did not exist.
+    #
+    # Only sources carrying a genuine cost column contribute. The per-platform
+    # tables store `cost_saved_usd`, which is a savings field; counting it here
+    # would double the confusion rather than resolve it. `uncosted_sources`
+    # names the tables that contributed calls but no cost, so "0.00" is never
+    # mistaken for "free" when it means "not measured" — the same distinction
+    # the quota placeholder draws.
+    cost_usd: float = 0.0
+    uncosted_sources: tuple[str, ...] = ()
+
     # WP-07 / I-1: `calls` counts traffic LLM Router OBSERVED. Without a count of
     # what it missed, every rate derived from `calls` silently redefines its own
     # denominator -- "100% of the calls we saw" is not "100% of the calls", and
@@ -278,6 +293,8 @@ def query_window(
     by_source: dict[str, dict] = {}
     total_calls = total_tokens = 0
     total_saved = 0.0
+    total_cost = 0.0
+    uncosted: list[str] = []
     try:
         # Legacy ``usage`` table — recalculate savings from in/out at Opus rates.
         # Opus: $15/M input, $75/M output.  Stored saved_usd used a blended
@@ -313,6 +330,7 @@ def query_window(
             total_calls += calls
             total_tokens += in_tok + out_tok
             total_saved += saved
+            total_cost += cost  # the one table with a genuine cost column
 
         # Per-platform tables — tokens_used + cost_saved_usd.
         for table in _PLATFORM_TABLES:
@@ -333,6 +351,10 @@ def query_window(
             total_calls += calls
             total_tokens += tokens
             total_saved += saved
+            # `cost_saved_usd` is a SAVINGS column. This table records no spend,
+            # so it contributes none — and says so rather than implying $0.00.
+            if calls:
+                uncosted.append(table)
 
         # ``savings_stats`` — DIRECT-routed (free-provider) calls. Token columns
         # added in v7.4; older DBs lack them, so sum defensively.
@@ -362,6 +384,8 @@ def query_window(
         calls=total_calls,
         tokens=total_tokens,
         saved_usd=total_saved,
+        cost_usd=total_cost,
+        uncosted_sources=tuple(uncosted),
         by_source=by_source,
         **_coverage_fields(),
     )
@@ -711,3 +735,87 @@ def query_realized_savings(
         likely_used_routes=accounting.likely_used_routes,
         cost_unknown_attempts=accounting.cost_unknown_attempts,
     )
+
+
+# ── The money line ────────────────────────────────────────────────────────────
+#
+# Every surface that prints money renders it through here. INV-COST-004 already
+# said the aggregation functions are the only cost totals and surfaces delegate;
+# it said so in a comment, and the statusline spent a year violating its spirit
+# by resolving no interpreter at all and printing nothing. A shared renderer
+# makes the rule mechanical instead of aspirational.
+
+#: Below this, external spend is noise on a subscription seat and the segment is
+#: omitted entirely. A user on a Max plan is anxious about quota, not about a
+#: third of a cent, and a $0.00 segment spends pixels to say nothing.
+SPEND_FLOOR_USD = 0.01
+
+#: Coverage below this makes the savings estimate soft enough that the figure
+#: has to admit it. `coverage_is_degraded` uses 90% for dashboards; the
+#: statusline has one line and only flags genuinely poor coverage.
+COVERAGE_CALLOUT_PCT = 60.0
+
+
+def session_spend_usd(state_dir: Path | None = None) -> float | None:
+    """Measured external spend for the CURRENT session, or None if unknown.
+
+    ``session_spend.json`` was written by the routing path and read by no
+    surface at all -- the only genuinely measured money figure on disk, and it
+    reached no user. Returning None rather than 0.0 keeps "no session yet"
+    distinct from "this session spent nothing".
+    """
+    base = state_dir or (Path.home() / ".llm-router")
+    try:
+        import json
+
+        data = json.loads((base / "session_spend.json").read_text())
+    except (OSError, ValueError):
+        return None
+    total = data.get("total_usd")
+    return float(total) if isinstance(total, (int, float)) else None
+
+
+def render_money(
+    totals: "WindowTotals",
+    session_usd: float | None = None,
+    scope: str = "today",
+) -> str:
+    """The one-line money summary, in the only format any surface should use.
+
+    Two quantities that are NOT the same kind of number, formatted so they
+    cannot be confused:
+
+      * spend is MEASURED -- exact, to the cent, and shown only when it clears
+        SPEND_FLOOR_USD;
+      * savings are MODELLED against a counterfactual baseline -- prefixed with
+        a tilde and rounded to the dollar, because precision is itself a claim
+        and 255 of 382 recent decisions were never observed.
+
+    Both carry a verb. A bare dollar amount beside a quota percentage is read as
+    money spent, which is how this whole line was misread in the first place.
+    """
+    parts: list[str] = []
+
+    spend = session_usd if session_usd is not None else totals.cost_usd
+    if spend is not None and spend >= SPEND_FLOOR_USD:
+        parts.append(f"${spend:,.2f} spent")
+
+    saved = totals.saved_usd
+    if saved and saved >= 0.01:
+        # Rounding scales with magnitude. Whole dollars suit $34, where the
+        # cents are noise against a counterfactual baseline -- but they overstate
+        # $0.70 as "~$1", a 43% exaggeration in the direction that flatters the
+        # product. Below $10 the cents are the number.
+        amount = f"{saved:,.2f}" if saved < 10 else f"{saved:,.0f}"
+        # Scope belongs INSIDE the phrase. Appended by the caller it landed
+        # after the coverage note -- "~$34 saved (33% observed) today" -- which
+        # reads as though the coverage, not the saving, was today's.
+        chunk = f"~${amount} saved{' ' + scope if scope else ''}"
+        pct = totals.coverage_pct
+        if pct is not None and pct < COVERAGE_CALLOUT_PCT:
+            # Say how much of the estimate is actually observed rather than
+            # asserting a soft number with a hard face.
+            chunk += f" ({pct:.0f}% observed)"
+        parts.append(chunk)
+
+    return " · ".join(parts)
