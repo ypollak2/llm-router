@@ -1311,8 +1311,14 @@ def _format_cumulative_section(periods: list[tuple[str, int, int, int, float]]) 
     month_d = period_map.get("this month", (0, 0, 0, 0.0))
 
     lifetime_saved = all_time[3]
-    saved_hero = f"${lifetime_saved:.2f}" if lifetime_saved >= 1.0 else f"${lifetime_saved:.4f}"
-    today_s = f"${today_d[3]:.2f}" if today_d[3] >= 1.0 else f"${today_d[3]:.4f}"
+    # Savings are MODELLED against a counterfactual baseline, not measured, so they
+    # carry the tilde here exactly as render_money() gives them on the status line.
+    # Without it this panel was the last surface asserting a soft number with a hard
+    # face — and because the Stop line EXTRACTS its figure from this text rather than
+    # recomputing it, the bare "$8.97" printed here was the reason the two surfaces
+    # disagreed about the same quantity.
+    saved_hero = f"~${lifetime_saved:.2f}" if lifetime_saved >= 1.0 else f"~${lifetime_saved:.4f}"
+    today_s = f"~${today_d[3]:.2f}" if today_d[3] >= 1.0 else f"~${today_d[3]:.4f}"
 
     lines: list[str] = [
         f"  {_BOLD}Savings{_RESET}",
@@ -1324,7 +1330,7 @@ def _format_cumulative_section(periods: list[tuple[str, int, int, int, float]]) 
 
     # Period grid — vertical for readability
     for label, calls, _ti, _to, saved in periods:
-        s = f"${saved:.2f}" if saved >= 1.0 else f"${saved:.4f}"
+        s = f"~${saved:.2f}" if saved >= 1.0 else f"~${saved:.4f}"
         call_str = f"{calls:,}" if calls >= 1000 else str(calls)
         short_label = {"today": "today", "this week": "week", "this month": "month", "all time": "all"}.get(label, label)
         lines.append(
@@ -1961,9 +1967,28 @@ def _condense(summary: str) -> str:
     """
     plain = _ANSI_RE.sub("", summary)
 
+    _MONEY = r"~?\$[0-9][0-9,]*\.[0-9]{2}"
+
     def _money(label: str) -> str | None:
-        # Real render: "lifetime $2299.39" / "today    $159.74" — label, then money.
-        m = re.search(label + r"\s+(\$[0-9][0-9,]*\.[0-9]{2})", plain, re.I)
+        """The savings figure for `label`, from the rendered cumulative panel.
+
+        The hero line puts the money BEFORE its label -- "~$64.80  lifetime
+        ~$8.97  today" -- so the long-standing label-then-money pattern matched
+        the figure that FOLLOWS the label, and `lifetime` returned today's
+        number. It read correctly only because an earlier line in the full
+        document happened to match first; in isolation it is simply wrong.
+        Money-then-label is tried first because that is what the panel actually
+        emits, with the label-then-money grid row as the fallback.
+
+        The tilde is captured, not dropped: it is the only mark distinguishing a
+        modelled saving from a measured spend, and this line prints inches from
+        "quota used NN%" where a bare dollar figure reads as money spent. It is
+        optional so a panel rendered before the tilde landed still matches.
+        """
+        m = re.search(r"(" + _MONEY + r")\s+" + label + r"\b", plain, re.I)
+        if m:
+            return m.group(1)
+        m = re.search(label + r"\s+(" + _MONEY + r")", plain, re.I)
         return m.group(1) if m else None
 
     def _pct(label: str) -> int | None:

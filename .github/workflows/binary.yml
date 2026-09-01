@@ -223,10 +223,21 @@ jobs:
               --title "${GITHUB_REF_NAME}" \
               --generate-notes
 
+          # Upload whatever this platform actually produced.
+          #
+          # Windows packages a .zip and no .tar.gz; POSIX packages a .tar.gz,
+          # and macOS additionally a .zip so codesign metadata survives. The
+          # previous version named both files and fell back to `.tar.gz` alone,
+          # so on Windows BOTH the primary and the fallback referenced a file
+          # that does not exist and the step failed with three platforms already
+          # uploaded. Globbing removes the assumption entirely.
+          shopt -s nullglob
+          artifacts=( "${{ matrix.asset }}".tar.gz "${{ matrix.asset }}".zip )
+          if [ ${#artifacts[@]} -eq 0 ]; then
+            echo "no packaged artifact found for ${{ matrix.asset }}" >&2
+            exit 1
+          fi
+          echo "uploading: ${artifacts[*]}"
           # --clobber so re-running a tag build replaces rather than fails.
-          gh release upload "${GITHUB_REF_NAME}" \
-            ${{ matrix.asset }}.tar.gz ${{ matrix.asset }}.zip \
-            --clobber --repo "${GITHUB_REPOSITORY}" 2>/dev/null || \
-          gh release upload "${GITHUB_REF_NAME}" \
-            ${{ matrix.asset }}.tar.gz \
+          gh release upload "${GITHUB_REF_NAME}" "${artifacts[@]}" \
             --clobber --repo "${GITHUB_REPOSITORY}"
