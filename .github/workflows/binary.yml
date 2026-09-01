@@ -1,0 +1,188 @@
+name: Standalone binary
+
+# Task 35. Removes Python as a prerequisite, which is what unblocks Cursor
+# users, Claude Desktop users, and the npm channel (task 37) — none of whom
+# reliably have a 3.11+ toolchain and none of whom will acquire one to save
+# money on tokens.
+#
+# Builds on tag, and on demand. NOT on every push: the build is ~40 s of
+# PyInstaller work per platform over a ~565 MB dependency tree, and nothing
+# downstream consumes an untagged artifact.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      upload:
+        description: "Attach artifacts to the run"
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false        # one platform failing must not hide the others
+      matrix:
+        include:
+          - os: macos-14      # arm64
+            asset: llm-router-macos-arm64
+          - os: macos-13      # x86_64
+            asset: llm-router-macos-x86_64
+          - os: ubuntu-latest
+            asset: llm-router-linux-x86_64
+          - os: windows-latest
+            asset: llm-router-windows-x86_64
+
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          # Match the floor in pyproject. Building on a newer interpreter than
+          # the floor would produce a binary that silently requires newer
+          # bytecode semantics than the project claims to support.
+          python-version: "3.11"
+
+      - name: Install project and PyInstaller
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install . pyinstaller
+
+      - name: Build
+        run: pyinstaller --noconfirm --clean packaging/llm-router.spec
+
+      # A binary that builds and cannot run is worse than no binary: it ships,
+      # and the failure surfaces on a user's machine. These are the exact checks
+      # that caught litellm being absent from the first local build — it ran
+      # fine until something needed the pricing data.
+      - name: Smoke test (POSIX)
+        if: runner.os != 'Windows'
+        run: |
+          BIN=dist/llm-router/llm-router
+          "$BIN" --version
+          "$BIN" --help > /dev/null
+          test -f dist/llm-router/_internal/litellm/model_prices_and_context_window_backup.json \
+            || { echo "litellm data file missing — pricing will fail at runtime"; exit 1; }
+          test "$(ls dist/llm-router/_internal/llm_router/hooks/*.py | wc -l)" -gt 10 \
+            || { echo "hook scripts missing — run-hook cannot work"; exit 1; }
+          echo '{}' | "$BIN" run-hook dist/llm-router/_internal/llm_router/hooks/usage-refresh.py
+
+      - name: Smoke test (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $bin = "dist\llm-router\llm-router.exe"
+          & $bin --version
+          & $bin --help > $null
+          if (-not (Test-Path "dist\llm-router\_internal\litellm\model_prices_and_context_window_backup.json")) {
+            throw "litellm data file missing — pricing will fail at runtime"
+          }
+
+      # ── macOS signing and notarisation (task 36) ────────────────────────
+      #
+      # An unsigned binary triggers Gatekeeper on first run of a tool that asks
+      # for shell access. Skipping this turns the binary from an unlock into a
+      # scare, and the npm postinstall currently has to tell mac users to run
+      # `xattr -dr com.apple.quarantine` themselves.
+      #
+      # GATED ON SECRETS BEING PRESENT. A fork or a contributor without the
+      # credentials still gets a working unsigned build rather than a red X,
+      # and the step says plainly which artifacts are unsigned.
+      #
+      # Required repository secrets:
+      #   APPLE_CERT_P12        base64 of a Developer ID Application .p12
+      #   APPLE_CERT_PASSWORD   its export password
+      #   APPLE_TEAM_ID         10-character team identifier
+      #   APPLE_API_KEY_ID      App Store Connect API key id
+      #   APPLE_API_ISSUER_ID   its issuer id
+      #   APPLE_API_KEY         base64 of the .p8 private key
+      - name: Sign and notarize (macOS)
+        if: runner.os == 'macOS'
+        env:
+          CERT_P12: ${{ secrets.APPLE_CERT_P12 }}
+          CERT_PASSWORD: ${{ secrets.APPLE_CERT_PASSWORD }}
+          TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
+          API_KEY: ${{ secrets.APPLE_API_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "${CERT_P12:-}" ]; then
+            echo "::warning::Apple signing secrets are not configured — "\
+                 "${{ matrix.asset }} will be UNSIGNED and Gatekeeper will "\
+                 "quarantine it on first run."
+            exit 0
+          fi
+
+          # Import the certificate into a throwaway keychain rather than the
+          # runner's login keychain, so nothing outlives this job.
+          KEYCHAIN="$RUNNER_TEMP/signing.keychain-db"
+          KEYCHAIN_PW="$(uuidgen)"
+          security create-keychain -p "$KEYCHAIN_PW" "$KEYCHAIN"
+          security set-keychain-settings -lut 900 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PW" "$KEYCHAIN"
+          echo "$CERT_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security import "$RUNNER_TEMP/cert.p12" -k "$KEYCHAIN" \
+            -P "$CERT_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: \
+            -k "$KEYCHAIN_PW" "$KEYCHAIN" > /dev/null
+          security list-keychains -d user -s "$KEYCHAIN"
+          rm -f "$RUNNER_TEMP/cert.p12"
+
+          # Sign every Mach-O inside the onedir, not just the launcher: the
+          # bundled .so files are loaded at runtime and an unsigned one fails
+          # the notarisation check for the whole archive.
+          find dist/llm-router -type f \( -name "*.so" -o -name "*.dylib" \) -print0 |
+            xargs -0 -I{} codesign --force --timestamp --options runtime \
+              --sign "Developer ID Application" {}
+          codesign --force --timestamp --options runtime \
+            --sign "Developer ID Application" dist/llm-router/llm-router
+          codesign --verify --deep --strict --verbose=2 dist/llm-router/llm-router
+
+          # Notarisation takes a zip, and the ticket is stapled to the app
+          # afterwards. A onedir has no bundle to staple, so the check that
+          # matters is Gatekeeper's assessment of the extracted tree.
+          echo "$API_KEY" | base64 --decode > "$RUNNER_TEMP/key.p8"
+          ditto -c -k --keepParent dist/llm-router "$RUNNER_TEMP/notarize.zip"
+          xcrun notarytool submit "$RUNNER_TEMP/notarize.zip" \
+            --key "$RUNNER_TEMP/key.p8" \
+            --key-id "$API_KEY_ID" \
+            --issuer "$API_ISSUER_ID" \
+            --team-id "$TEAM_ID" \
+            --wait --timeout 30m
+          rm -f "$RUNNER_TEMP/key.p8"
+
+          security delete-keychain "$KEYCHAIN"
+          echo "signed and notarized: ${{ matrix.asset }}"
+
+      - name: Package
+        shell: bash
+        run: |
+          cd dist
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            7z a -tzip "../${{ matrix.asset }}.zip" llm-router
+          else
+            # ditto preserves the extended attributes and symlinks codesign
+            # writes; GNU tar drops some of them and invalidates the signature.
+            if [ "${{ runner.os }}" = "macOS" ]; then
+              ditto -c -k --keepParent llm-router "../${{ matrix.asset }}.zip"
+              tar -czf "../${{ matrix.asset }}.tar.gz" llm-router
+            else
+              tar -czf "../${{ matrix.asset }}.tar.gz" llm-router
+            fi
+          fi
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ${{ matrix.asset }}
+          path: |
+            ${{ matrix.asset }}.tar.gz
+            ${{ matrix.asset }}.zip
+          if-no-files-found: error
+          retention-days: 14

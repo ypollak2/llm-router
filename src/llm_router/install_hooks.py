@@ -23,15 +23,30 @@ from pathlib import Path
 from llm_router.tool_surface import localize  # CHZ-SURF-01
 
 
-def _python_exe() -> str:
-    """Return the best Python interpreter path for use in hook command strings.
+def is_frozen() -> bool:
+    """True when running from a PyInstaller build rather than a Python install."""
+    return bool(getattr(sys, "frozen", False)) and hasattr(sys, "_MEIPASS")
 
-    Preference order:
-    1. The interpreter currently running this code (most reliable — same venv/pipx env).
+
+def _python_exe() -> str:
+    """Return the command prefix that will run a hook script.
+
+    Under a standalone binary this is NOT an interpreter. sys.executable is the
+    binary itself, and handing it a .py path would be an unknown argument — so
+    the prefix becomes `<binary> run-hook`, the internal entry point that
+    executes a hook in-process. That is what lets a machine with no Python
+    installed still get auto-routing rather than only the MCP tools.
+
+    Otherwise, preference order:
+    1. The interpreter currently running this code (same venv/pipx env).
     2. ``python3`` on PATH (Linux/macOS standard).
     3. ``python`` on PATH (Windows fallback).
     """
     import shutil as _shutil
+
+    if is_frozen():
+        return f"{sys.executable} run-hook"
+
     current = sys.executable
     if current and Path(current).exists():
         return current

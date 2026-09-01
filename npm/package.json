@@ -1,0 +1,17 @@
+{
+  "name": "llm-routing",
+  "version": "13.0.8",
+  "description": "Stop hitting the limit on your Claude Pro or Max plan. Routes routine prompts to free and cheap models so your subscription quota is there when you need it. No API keys.",
+  "keywords": ["llm", "router", "claude", "claude-code", "codex", "cursor", "mcp", "cost-optimization", "quota", "ollama"],
+  "homepage": "https://github.com/ypollak2/llm-router#readme",
+  "bugs": { "url": "https://github.com/ypollak2/llm-router/issues" },
+  "repository": { "type": "git", "url": "git+https://github.com/ypollak2/llm-router.git" },
+  "license": "MIT",
+  "author": "ypollak2",
+  "bin": { "llm-router": "bin/llm-router.js" },
+  "files": ["bin/", "install.js", "README.md"],
+  "scripts": { "postinstall": "node install.js" },
+  "engines": { "node": ">=18" },
+  "os": ["darwin", "linux", "win32"],
+  "cpu": ["x64", "arm64"]
+}
