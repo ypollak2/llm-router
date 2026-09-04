@@ -60,6 +60,9 @@ Usage:
                                      (claude-code, claude-desktop, cursor, copilot,
                                      windsurf, gemini-cli, codex, …)
   llm-router install --mode <mode>       Install mode (auto | gateway)
+  llm-router install --no-hosts          Claude Code only; skip other detected hosts (Codex)
+  llm-router install --project           Write AGENTS.md + CLAUDE.md (link) into the current
+                                     repository so both agents read one set of rules
   llm-router install --help, -h          Show this help and exit (no changes made)
 """
 
@@ -101,6 +104,12 @@ def _run_install(flags: list[str]) -> None:
             _install_host(host, mode=mode)
             return
         flags = [f for i, f in enumerate(flags) if i not in (idx, idx + 1)]
+
+    if "--project" in flags:
+        import pathlib
+        for a in _install_project_files(pathlib.Path.cwd()):
+            print(f"  {a}")
+        return
 
     check_only = "--check" in flags
     force = "--force" in flags
@@ -732,6 +741,73 @@ def _install_codex_files(mode: str = "mcp") -> list[str]:
     elif mode not in {"mcp", "companion", "mcp-only", "rules", "auto"}:
         actions.append(f"  Unknown Codex mode {mode!r}; installed MCP, hooks and rules only")
 
+    return actions
+
+
+def _install_project_files(root, *, use_symlink: bool | None = None) -> list[str]:
+    """Write one set of project rules both agents read.
+
+    ``AGENTS.md`` gets a marked llm-router block (Codex reads AGENTS.md).
+    ``CLAUDE.md`` becomes a symlink to it (Claude Code reads CLAUDE.md), or a
+    copy on Windows. An existing CLAUDE.md that is a real file is kept and gets
+    the same marked block appended -- a user's file is never replaced by a
+    link. Re-runs replace the block in place.
+    """
+    import os
+    import pathlib
+
+    from llm_router import codex_host, install_manifest
+    from llm_router.install_hooks import _localized_rules_text
+
+    root = pathlib.Path(root)
+    actions: list[str] = []
+    template = pathlib.Path(__file__).parent.parent / "rules" / "project-agents.md"
+    if not template.exists():
+        return [f"  rules template missing: {template}"]
+    body = _localized_rules_text(template)
+    if use_symlink is None:
+        use_symlink = os.name != "nt"
+
+    agents = root / "AGENTS.md"
+    existing = agents.read_text() if agents.exists() else ""
+    updated = codex_host.upsert_marked_block(existing, body)
+    if updated != existing:
+        agents.write_text(updated)
+        actions.append(f"✓ {'Updated' if existing else 'Created'} {agents}")
+    else:
+        actions.append(f"  {agents} already current (skipped)")
+    install_manifest.record("codex_agents_block", agents)
+
+    claude = root / "CLAUDE.md"
+    if claude.is_symlink():
+        try:
+            target = (claude.parent / os.readlink(claude)).resolve()
+        except OSError:
+            target = None
+        if target == agents.resolve():
+            actions.append(f"  {claude} already links to AGENTS.md (skipped)")
+        else:
+            actions.append(f"  {claude} is a link elsewhere — left alone")
+    elif claude.exists():
+        text = claude.read_text()
+        new_text = codex_host.upsert_marked_block(text, body)
+        if new_text != text:
+            claude.write_text(new_text)
+            actions.append(f"✓ Added the rules block to existing {claude} (kept as a file)")
+        else:
+            actions.append(f"  {claude} already current (skipped)")
+        install_manifest.record("codex_agents_block", claude)
+    elif use_symlink:
+        claude.symlink_to("AGENTS.md")
+        # Not kind "file": record() resolves an existing path, and resolving
+        # the link yields AGENTS.md -- uninstall would then delete the user's
+        # rules file instead of our link.
+        install_manifest.record("claude_link", agents, link=str(claude.absolute()))
+        actions.append(f"✓ Linked {claude} -> AGENTS.md")
+    else:
+        claude.write_text(updated)
+        install_manifest.record("codex_agents_block", claude)
+        actions.append(f"✓ Copied the rules into {claude} (symlinks unavailable here)")
     return actions
 
 
