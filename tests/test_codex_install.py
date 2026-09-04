@@ -62,7 +62,7 @@ def test_hand_edited_config_toml_survives_byte_for_byte(home):
         '# mine\nmodel = "gpt-5.5"\nmodel_reasoning_effort = "medium"\n\n'
         '[model_providers.gemini]\nname = "Gemini"\nbase_url = "https://x/v1"\n\n'
         '[projects."/Users/me/proj"]\ntrust_level = "trusted"\n\n'
-        '[mcp_servers.chuzom]\ncommand = "/x/chuzom"\nargs = []\n'
+        '[mcp_servers.other_mcp]\ncommand = "/x/other_mcp"\nargs = []\n'
     )
     (home / ".codex").mkdir()
     (home / ".codex" / "config.toml").write_text(user)
@@ -72,7 +72,7 @@ def test_hand_edited_config_toml_survives_byte_for_byte(home):
     assert codex_host.read_mcp_server(text)["command"] == "/opt/llm/bin/llm-router"
     # the other MCP server is still there and still parses
     import tomllib
-    assert tomllib.loads(text)["mcp_servers"]["chuzom"]["command"] == "/x/chuzom"
+    assert tomllib.loads(text)["mcp_servers"]["other_mcp"]["command"] == "/x/other_mcp"
 
 
 def test_missing_router_binary_warns_and_installs_nothing_unrunnable(home, monkeypatch):
@@ -172,7 +172,7 @@ def test_legacy_files_codex_never_read_are_cleaned(home):
     codex.mkdir()
     (codex / "config.yaml").write_text("other: 1\n" + install._CODEX_LEGACY_YAML_BLOCK)
     (codex / "config.json").write_text(json.dumps({"mcpServers": {
-        "chuzom": {"command": "chuzom", "args": []},
+        "other_mcp": {"command": "other_mcp", "args": []},
         "llm-router": {"command": "uvx", "args": ["claude-code-llm-router"]},
         "llm_router": {"command": "llm-router", "args": []},
     }}))
@@ -184,7 +184,7 @@ def test_legacy_files_codex_never_read_are_cleaned(home):
 
     actions = install._install_codex_files()
     assert (codex / "config.yaml").read_text() == "other: 1\n"
-    assert json.loads((codex / "config.json").read_text()) == {"mcpServers": {"chuzom": {"command": "chuzom", "args": []}}}
+    assert json.loads((codex / "config.json").read_text()) == {"mcpServers": {"other_mcp": {"command": "other_mcp", "args": []}}}
     assert not (codex / "rules" / "llm_router.md").exists()
     assert (codex / "rules" / "mine.md").exists()
     assert not (codex / "instructions.md").exists()
@@ -209,14 +209,14 @@ def test_legacy_cleanup_leaves_files_that_are_not_ours(home):
 def test_uninstall_removes_only_what_we_wrote(home):
     codex = home / ".codex"
     codex.mkdir()
-    (codex / "config.toml").write_text('model = "gpt-5.5"\n\n[mcp_servers.chuzom]\ncommand = "/x"\n')
+    (codex / "config.toml").write_text('model = "gpt-5.5"\n\n[mcp_servers.other_mcp]\ncommand = "/x"\n')
     (codex / "hooks.json").write_text(json.dumps({"hooks": {"Stop": [{"hooks": [{"type": "command", "command": "/theirs"}]}]}}))
     (codex / "AGENTS.md").write_text("# mine\n")
     install._install_codex_files()
     install_manifest.apply_uninstall()
 
     text = _toml(home)
-    assert 'model = "gpt-5.5"' in text and "[mcp_servers.chuzom]" in text
+    assert 'model = "gpt-5.5"' in text and "[mcp_servers.other_mcp]" in text
     assert codex_host.read_mcp_server(text) is None
     assert codex_host.read_trust_records(text) == {}
     doc = _hooks(home)
