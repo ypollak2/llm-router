@@ -249,7 +249,10 @@ jobs:
   # ── macOS Intel, deliberately outside the dependency chain ──────────────
   #
   # GitHub's macos-13 runners were scarce enough to queue for HOURS on every run
-  # across a full day and complete on none of them. It was originally a leg of
+  # across a full day and complete on none of them -- and then the label was
+  # retired outright: every macos-13 job for a week sat "waiting for a runner"
+  # for 24 h and was cancelled. macos-15-intel is GitHub's free Intel label
+  # (macos-26-intel is the other; the `-large` ones are paid). It was originally a leg of
   # the `build` matrix, which made it a hard block: `needs: build` waits for
   # every leg to FINISH, and `always()` does not change that — it only decides
   # whether the dependent runs once the wait is over. A permanently queued job
@@ -262,8 +265,8 @@ jobs:
   #
   # continue-on-error so a failure here is visible without failing the release.
   build-macos-x86:
-    name: macos-13 (best effort)
-    runs-on: macos-13
+    name: macos-15-intel (best effort)
+    runs-on: macos-15-intel
     continue-on-error: true
     permissions:
       contents: write
@@ -410,4 +413,13 @@ jobs:
           set -euo pipefail
           npm install -g npm@11
           npm --version
+
+          # A tag build is re-runnable (assets upload with --clobber), but npm
+          # can never republish a version. Re-running a tag whose version is
+          # already live -- to pick up a late binary, say -- must not fail here.
+          version="$(node -p "require('./package.json').version")"
+          if npm view "llm-routing@${version}" version >/dev/null 2>&1; then
+            echo "::notice::llm-routing@${version} is already on npm -- skipping the publish."
+            exit 0
+          fi
           npm publish --provenance --access public
