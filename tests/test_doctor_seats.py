@@ -37,7 +37,7 @@ def test_doctor_lists_every_seat_and_the_free_bucket(monkeypatch, tmp_path):
     assert "Gemini CLI api key only" in text
     assert "local(2 models)" in text
     assert "free bucket: claude, codex, ollama" in text
-    assert "defaults to 'claude'" in text
+    assert "defaults to 'anthropic'" in text
     # persisted for the session hook
     assert (tmp_path / ".llm-router" / "seats.json").exists()
 
@@ -56,7 +56,7 @@ def test_doctor_flags_env_override_that_disagrees_with_the_seat(monkeypatch, tmp
     seats = S.Seats(claude=S.Seat(kind="claude.ai", plan="pro"), detected_at="2026-09-04T00:00:00+00:00")
     monkeypatch.setattr(S, "refresh_seats", _fake_refresh(seats))
     text = "\n".join(doc._seats_report())
-    assert "LLM_ROUTER_SUBSCRIPTION_PROVIDER=gemini but the detected seat is 'claude'" in text
+    assert "LLM_ROUTER_SUBSCRIPTION_PROVIDER=gemini but the detected seat is 'anthropic'" in text
 
 
 def test_doctor_never_crashes_on_a_probe_error(monkeypatch, tmp_path):

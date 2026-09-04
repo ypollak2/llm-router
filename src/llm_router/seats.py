@@ -103,8 +103,33 @@ class Seats:
         return frozenset(out)
 
     def subscription_provider(self) -> str | None:
-        """Default for ``LLM_ROUTER_SUBSCRIPTION_PROVIDER`` when unset."""
-        return "claude" if self.claude.present else None
+        """Default for ``LLM_ROUTER_SUBSCRIPTION_PROVIDER`` when unset, in
+        that variable's vocabulary (``anthropic`` / ``openai`` / ``gemini``).
+
+        The strongest seat heads complex chains: a Claude seat over a
+        ChatGPT seat over a Google one. The seats that are not the
+        subscription join the free bucket (:meth:`seat_free_providers`), so
+        a machine with Claude Max and ChatGPT routes cheap work to Codex and
+        hard work to Claude, from either host.
+        """
+        if self.claude.present:
+            return "anthropic"
+        if self.codex.present:
+            return "openai"
+        if self.gemini.present:
+            return "gemini"
+        return None
+
+    def seat_free_providers(self) -> frozenset[str]:
+        """Chain provider names that are free because a seat covers them and
+        it is not the subscription seat. Ollama is already in LOCAL_PROVIDERS."""
+        sub = self.subscription_provider()
+        out = set()
+        if self.codex.present and sub != "openai":
+            out.add("codex")
+        if self.gemini.present and sub != "gemini":
+            out.add("gemini_cli")
+        return frozenset(out)
 
     def summary_line(self) -> str:
         return (

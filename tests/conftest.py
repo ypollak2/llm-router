@@ -710,6 +710,11 @@ def _hermetic_host_state(monkeypatch):
     monkeypatch.setattr(repo_config_module, "load_user_config", lambda *a, **k: RepoConfig())
     monkeypatch.setattr(router_module, "is_codex_available", lambda: False)
     monkeypatch.setattr(router_module, "is_gemini_cli_available", lambda: False)
+    # 3. The seat table (~/.llm-router/seats.json) supplies the subscription
+    #    provider and free-bucket defaults when the env is unset. A developer
+    #    logged in to Claude Code would otherwise get a reordered chain in
+    #    every test. Tests of the seat default re-enable it explicitly.
+    monkeypatch.setenv("LLM_ROUTER_SEATS_AUTO", "off")
     # The LLM-first ensemble makes live Ollama classifier calls, which in unit
     # tests punch through host-state isolation — real model latency,
     # non-determinism, and background warmup threads that leak global state
