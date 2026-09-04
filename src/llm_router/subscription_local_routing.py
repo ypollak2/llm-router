@@ -24,9 +24,11 @@ cost up to the quota."
 Configuration:
 
 * ``LLM_ROUTER_SUBSCRIPTION_PROVIDER`` — single provider name
-  (e.g. ``anthropic`` / ``openai`` / ``gemini``). Empty / unset →
-  the profile no-ops (chain passes through unchanged), preserving
-  backward compatibility.
+  (e.g. ``anthropic`` / ``openai`` / ``gemini``). Unset → the seat
+  table written by install / doctor / session-start
+  (``~/.llm-router/seats.json``, see ``llm_router.seats``) supplies
+  the strongest logged-in seat. No env and no seat → the profile
+  no-ops. ``LLM_ROUTER_SEATS_AUTO=off`` disables the seat default.
 * ``LLM_ROUTER_INTERNAL_PROVIDERS`` — comma-separated provider names
   the org hosts internally (e.g. ``internal_llm,company_mistral``).
   These join ``LOCAL_PROVIDERS`` to form the "free bucket."
@@ -83,11 +85,38 @@ _PROVIDER_TO_PRESSURE_KEY: dict[str, str] = {
 }
 
 
+def _seats_auto_enabled() -> bool:
+    """Seat-derived defaults are on unless ``LLM_ROUTER_SEATS_AUTO`` is off-ish."""
+    raw = (os.environ.get("LLM_ROUTER_SEATS_AUTO") or "").strip().lower()
+    return raw not in _REORDER_OFF_VALUES
+
+
+def _cached_seats():
+    """The seat table install / doctor / session-start wrote, or ``None``.
+    A missing or unreadable cache means "no seat known" -- never an error."""
+    if not _seats_auto_enabled():
+        return None
+    try:
+        from llm_router.seats import load_seats
+        return load_seats()
+    except Exception:  # noqa: BLE001 -- a cache problem must not break routing
+        return None
+
+
 def get_subscription_provider() -> str | None:
-    """Return the org's subscription provider name, or ``None`` when
-    unset (the profile then no-ops)."""
+    """Return the subscription provider name, or ``None`` when there is none.
+
+    ``LLM_ROUTER_SUBSCRIPTION_PROVIDER`` wins when set. Otherwise the seat
+    table (``~/.llm-router/seats.json``) supplies the default: the strongest
+    logged-in seat, so a user who is logged in to Claude Code gets the
+    cost-inverted reorder without setting anything. ``LLM_ROUTER_SEATS_AUTO=off``
+    restores the env-only behaviour.
+    """
     raw = (os.environ.get(_SUBSCRIPTION_PROVIDER_ENV) or "").strip().lower()
-    return raw or None
+    if raw:
+        return raw
+    seats = _cached_seats()
+    return seats.subscription_provider() if seats is not None else None
 
 
 def get_internal_providers() -> frozenset[str]:
@@ -105,10 +134,15 @@ def get_internal_providers() -> frozenset[str]:
 
 
 def get_free_bucket() -> frozenset[str]:
-    """Union of LOCAL_PROVIDERS + LLM_ROUTER_INTERNAL_PROVIDERS. Both
-    tiers are "zero incremental cost to the org" so the router
-    treats them identically."""
-    return LOCAL_PROVIDERS | get_internal_providers()
+    """Union of LOCAL_PROVIDERS + LLM_ROUTER_INTERNAL_PROVIDERS + the seats that
+    are logged in but are not the subscription seat (a ChatGPT seat makes
+    ``codex`` free; a Google seat makes ``gemini_cli`` free). All are "zero
+    incremental cost" so the router treats them identically."""
+    bucket = LOCAL_PROVIDERS | get_internal_providers()
+    seats = _cached_seats()
+    if seats is not None:
+        bucket = bucket | seats.seat_free_providers()
+    return bucket
 
 
 def _provider_of(model_id: str) -> str:

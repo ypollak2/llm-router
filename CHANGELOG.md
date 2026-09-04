@@ -33,6 +33,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Routing defaults come from the seat table.** With
+  `LLM_ROUTER_SUBSCRIPTION_PROVIDER` unset, the strongest logged-in seat is
+  the subscription provider (Claude over ChatGPT over Google) and the other
+  seats join the free bucket, so a Claude Max + ChatGPT machine sends cheap
+  work to Codex and hard work to Claude from either host, with nothing
+  configured. The env var still wins; `LLM_ROUTER_SEATS_AUTO=off` restores
+  env-only behaviour.
 - **`llm-router install` auto-detects Codex.** With no `--host`, a machine
   that has Codex gets it wired in the same run, and the seat table prints at
   the end. `--no-hosts` opts out; `--host codex` is unchanged. Gateway mode is

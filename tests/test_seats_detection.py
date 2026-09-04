@@ -203,13 +203,31 @@ def test_free_bucket_is_local_plus_every_seat(tmp_path):
         models=["m"],
     )
     assert seats.free_bucket() == frozenset({"ollama", "codex", "claude"})
-    assert seats.subscription_provider() == "claude"
+    assert seats.subscription_provider() == "anthropic"
+    assert seats.seat_free_providers() == frozenset({"codex"})
 
 
 def test_no_seats_means_empty_bucket_and_no_subscription_default(tmp_path):
     seats = _detect(tmp_path, env={"OPENAI_API_KEY": "k"})
     assert seats.free_bucket() == frozenset()
     assert seats.subscription_provider() is None
+
+
+def test_subscription_seat_priority_and_free_providers(tmp_path):
+    """Strongest seat is the subscription; the others become free providers."""
+    _codex_auth(tmp_path)
+    both = _detect(tmp_path, runner=_runner({"claude auth": CLAUDE_MAX, "codex login": CODEX_CHATGPT}))
+    assert both.subscription_provider() == "anthropic"
+    assert both.seat_free_providers() == frozenset({"codex"})
+    codex_only = _detect(tmp_path, runner=_runner({"codex login": CODEX_CHATGPT}))
+    assert codex_only.subscription_provider() == "openai"
+    assert codex_only.seat_free_providers() == frozenset()
+    (tmp_path / ".gemini").mkdir(exist_ok=True)
+    (tmp_path / ".gemini" / "oauth_creds.json").write_text("{}")
+    gem = _detect(tmp_path, runner=_runner({"codex login": CODEX_CHATGPT}),
+                  which=lambda b: "/usr/bin/gemini" if b == "gemini" else None)
+    assert gem.subscription_provider() == "openai"
+    assert gem.seat_free_providers() == frozenset({"gemini_cli"})
 
 
 def test_summary_line_names_every_seat(tmp_path):
