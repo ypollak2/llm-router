@@ -335,7 +335,8 @@ jobs:
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: "20"
+          # npm 11 (trusted publishing) needs Node 22+; npm 12 needs 22.22+.
+          node-version: "22"
           registry-url: "https://registry.npmjs.org"
 
       # The version in package.json is what install.js turns into a download
@@ -399,11 +400,14 @@ jobs:
       #   package llm-routing -> Settings -> Trusted Publisher -> GitHub Actions
       #   owner: ypollak2   repo: llm-router
       #   workflow: binary.yml   environment: npm
-      # Needs npm >= 11.5.1; Node 20 bundles npm 10, hence the upgrade.
+      # Needs npm >= 11.5.1; Node 22 bundles npm 10, hence the upgrade.
+      # Pinned to the 11 line: `npm@latest` became 12 and refused Node 22
+      # with EBADENGINE, which is exactly the "fails at the last step after
+      # the binaries are attached" failure this job keeps rediscovering.
       - name: Publish
         working-directory: npm
         run: |
           set -euo pipefail
-          npm install -g npm@latest
+          npm install -g npm@11
           npm --version
           npm publish --provenance --access public
