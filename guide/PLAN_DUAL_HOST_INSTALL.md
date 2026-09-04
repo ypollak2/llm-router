@@ -1,6 +1,6 @@
 # Plan: one install that wires Claude Code AND Codex, and knows which seats you pay for
 
-Status: proposed, 2026-09-04. Not started.
+Status: 2026-09-04 — PR 1 (#128, seats) open; PR 2 (Codex writer, autodetect, doctor, push hook) on `feat/codex-dual-host`. PR 3, 4 not started.
 
 ## Goal
 
@@ -103,6 +103,10 @@ Delete `cli._install_codex_cli_files` and rewrite `commands.install._install_cod
 6. Push routing, same as Claude Code: install a `UserPromptSubmit` hook in `~/.codex/hooks.json`
    that runs the same auto-route script and injects the `⚡ ROUTE:` hint. Without it Codex is pull
    only (it has to decide to call the tool from AGENTS.md); with it both hosts behave identically.
+   **Found while building:** Codex silently skips any hook without a
+   `[hooks.state."<hooks.json>:<event>:<group>:<handler>"] trusted_hash` record in `config.toml`.
+   The hash is SHA-256 of a canonical-JSON identity of the hook (`llm_router.codex_host`), verified
+   against a real run. The real `UserPromptSubmit` payload is in `tests/fixtures/`.
 
 ### E. `llm-router install` with no `--host`
 

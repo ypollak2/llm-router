@@ -195,6 +195,10 @@ def apply_uninstall() -> list[str]:
                 actions += _restore_json_key(
                     path, rec.get("key", ""), bool(rec.get("had_key")), rec.get("previous")
                 )
+            elif kind == "codex_hooks":
+                actions += _remove_codex_hooks(path)
+            elif kind == "codex_agents_block":
+                actions += _remove_codex_agents_block(path)
         except Exception as e:  # noqa: BLE001 — one bad record must not abort the rest
             _p = rec.get("path", "?")
             actions.append(f"  manifest removal skipped ({_p}): {e}")
@@ -250,3 +254,49 @@ def _remove_text_block(path: pathlib.Path, block: str) -> list[str]:
             path.unlink()
         return [f"✓ Removed llm_router block from {path}"]
     return []
+
+
+def _remove_codex_hooks(path: pathlib.Path) -> list[str]:
+    """Drop the hook groups whose command points into ~/.llm-router/hooks.
+    Everything else in the user's hooks.json is untouched."""
+    if not path.exists():
+        return []
+    try:
+        data = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return []
+    ours = str(pathlib.Path.home() / ".llm-router" / "hooks")
+    hooks = data.get("hooks") if isinstance(data, dict) else None
+    if not isinstance(hooks, dict):
+        return []
+    removed = 0
+    for event, groups in list(hooks.items()):
+        if not isinstance(groups, list):
+            continue
+        kept = []
+        for g in groups:
+            handlers = (g.get("hooks") or []) if isinstance(g, dict) else []
+            if any(isinstance(h, dict) and ours in str(h.get("command", "")) for h in handlers):
+                removed += 1
+            else:
+                kept.append(g)
+        hooks[event] = kept
+    if removed:
+        path.write_text(json.dumps(data, indent=2) + "\n")
+        return [f"✓ Removed {removed} llm_router hook group(s) from {path}"]
+    return []
+
+
+def _remove_codex_agents_block(path: pathlib.Path) -> list[str]:
+    if not path.exists():
+        return []
+    from llm_router import codex_host
+    text = path.read_text()
+    updated = codex_host.remove_marked_block(text)
+    if updated == text:
+        return []
+    if updated.strip():
+        path.write_text(updated)
+    else:
+        path.unlink()
+    return [f"✓ Removed llm_router block from {path}"]

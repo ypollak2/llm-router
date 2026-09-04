@@ -587,28 +587,6 @@ def _install_pi_files() -> list[str]:
     return actions
 
 
-def _install_codex_cli_files() -> list[str]:
-    """Install llm_router MCP config for Codex CLI."""
-    actions = []
-    home = Path.home()
-
-    # Codex CLI config location
-    config_json = home / ".codex" / "config.json"
-    actions.extend(
-        _merge_json_mcp_block(
-            config_json,
-            "llm_router",
-            {"command": "llm-router", "args": []},
-        )
-    )
-
-    # Add Codex rules
-    rules_file = home / ".codex" / "rules" / "llm_router.md"
-    actions.extend(_append_routing_rules(rules_file, "codex-rules.md"))
-
-    return actions
-
-
 def _print_claude_desktop_config() -> list[str]:
     """Print Claude Desktop config snippet."""
     config = {
@@ -684,7 +662,10 @@ def _install_host(host: str) -> None:
         for action in actions:
             print(f"  {action}")
     elif host == "codex":
-        actions = _install_codex_cli_files()
+        # One implementation only (RED8-06): the real writer lives in
+        # commands/install.py and targets config.toml, hooks.json, AGENTS.md.
+        from llm_router.commands.install import _install_codex_files
+        actions = _install_codex_files()
         print("Codex CLI configuration:")
         for action in actions:
             print(f"  {action}")

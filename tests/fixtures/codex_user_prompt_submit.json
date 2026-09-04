@@ -1,0 +1,10 @@
+{
+  "session_id": "01a06e3d-a1cc-7d41-927b-8ad26b5f69ec",
+  "turn_id": "01a06e3d-a247-77f1-a270-4a2cb877b4c2",
+  "transcript_path": "/Users/me/.codex/sessions/2026/09/04/rollout-2026-09-04T22-05-28-01a06e3d.jsonl",
+  "cwd": "/Users/me/project",
+  "hook_event_name": "UserPromptSubmit",
+  "model": "gpt-5.5",
+  "permission_mode": "bypassPermissions",
+  "prompt": "Reply with the single word: pong"
+}
