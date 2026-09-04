@@ -349,7 +349,8 @@ def test_the_package_ships_a_readme():
 
 
 def test_a_scarce_runner_cannot_block_the_publish():
-    """macos-13 queued for hours on every run across a day and completed on none.
+    """macos-13 queued for hours on every run across a day and completed on none
+    (and was later retired; the Intel job now runs on macos-15-intel).
 
     As a leg of the `build` matrix it was a hard block: `needs: build` waits for
     every leg to FINISH, and `always()` does not change that — it only decides
