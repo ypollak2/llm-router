@@ -60,6 +60,9 @@ Usage:
                                      (claude-code, claude-desktop, cursor, copilot,
                                      windsurf, gemini-cli, codex, …)
   llm-router install --mode <mode>       Install mode (auto | gateway)
+  llm-router install --no-hosts          Claude Code only; skip other detected hosts (Codex)
+  llm-router install --project           Write AGENTS.md + CLAUDE.md (link) into the current
+                                     repository so both agents read one set of rules
   llm-router install --help, -h          Show this help and exit (no changes made)
 """
 
@@ -89,7 +92,7 @@ def _run_install(flags: list[str]) -> None:
     if "--host" in flags:
         idx = flags.index("--host")
         raw_host = (flags[idx + 1] if idx + 1 < len(flags) else "all").strip().lower()
-        mode = "gateway" if raw_host == "codex" else "auto"
+        mode = "auto"
         if "--mode" in flags:
             mode_idx = flags.index("--mode")
             mode = (flags[mode_idx + 1] if mode_idx + 1 < len(flags) else mode).strip().lower()
@@ -101,6 +104,12 @@ def _run_install(flags: list[str]) -> None:
             _install_host(host, mode=mode)
             return
         flags = [f for i, f in enumerate(flags) if i not in (idx, idx + 1)]
+
+    if "--project" in flags:
+        import pathlib
+        for a in _install_project_files(pathlib.Path.cwd()):
+            print(f"  {a}")
+        return
 
     check_only = "--check" in flags
     force = "--force" in flags
@@ -208,8 +217,35 @@ def _run_install(flags: list[str]) -> None:
             marker = _green('✓') if ok else _yellow('⚠')
             print(f"  {marker}  {a}")
 
+    # ── Other hosts on this machine (auto-detect) ──────────────────────────
+    # A user with Claude Code AND Codex wants both wired, both ways, from the
+    # one command. --host still targets a single host; --no-hosts skips this.
+    installed_hosts = ["Claude Code"]
+    if "--no-hosts" not in flags:
+        from llm_router.host_detect import detect_hosts
+        hosts = detect_hosts()
+        if hosts["codex"].present:
+            print(f"\n{_bold('  Codex CLI detected — installing...')}")
+            for a in _install_codex_files():
+                ok = a.lstrip().startswith("✓")
+                print(f"  {_green('✓') if ok else _dim('·')}  {a.lstrip('✓ ').strip()}")
+            installed_hosts.append("Codex CLI")
+
+    # ── Seats: which subscriptions are logged in (drives the free bucket) ──
+    try:
+        from llm_router import seats as _seats
+        _found = _seats.refresh_seats()
+        print(f"\n{_bold('  Seats')}  {_found.summary_line()}")
+        _bucket = sorted(_found.free_bucket())
+        if _bucket:
+            print(f"  free bucket: {', '.join(_bucket)}")
+        else:
+            print(_yellow("  no seat found — routed calls will bill an API key; log in to Claude Code, Codex, or start Ollama"))
+    except Exception:  # noqa: BLE001 -- install must not fail on a probe
+        pass
+
     print(f"\n{_green('✓')} {_bold('LLM Router installed globally.')}")
-    print("  Every Claude Code session will now auto-route tasks.")
+    print(f"  Every {' and '.join(installed_hosts)} session will now auto-route tasks.")
     print("  Restart Claude Code (and Claude Desktop if installed) to activate.\n")
 
     print(_bold("  Provider keys (optional — router works without any):"))
@@ -302,22 +338,14 @@ _SNIPPET_TOOLS = {
 
 _HOST_SNIPPETS: dict[str, str] = {
     "codex": """\
-{bold}Codex CLI{reset}  (capability extension — no cost-routing)
+{bold}Codex CLI{reset}  (MCP server + push-routing hook + AGENTS.md rules)
 ──────────────────────────────────────────────────────────────────
-1. Add to ~/.codex/config.yaml:
-
-   mcp:
-     servers:
-       llm_router:
-         command: llm-router
-         args: []
-
-2. Copy routing rules so Codex knows when to call llm_auto:
-
-   cp "$(python3 -c "import llm_router; import pathlib; print(pathlib.Path(llm_router.__file__).parent / 'rules' / 'codex-rules.md')")" \\
-      ~/.codex/instructions.md
-
-3. Restart Codex — run {savings_tool} to verify the DB is shared.
+Writes, in ~/.codex:
+  config.toml  [mcp_servers.llm_router] and the hook trust records
+  hooks.json   UserPromptSubmit -> auto-route (the ⚡ ROUTE hint), PostToolUse -> telemetry
+  AGENTS.md    a marked block of routing rules (replaced on re-run)
+Legacy config.yaml / config.json / rules/llm_router.md entries are removed: Codex never read them.
+Restart Codex, then run {savings_tool} to verify the DB is shared.
 """,
 
     "desktop": """\
@@ -522,122 +550,348 @@ def _install_codex_gateway_config(codex_dir) -> list[str]:
     return actions
 
 
-def _install_codex_files(mode: str = "gateway") -> list[str]:
-    """Write Codex-specific config files and return a list of actions taken."""
+# ── Codex CLI ───────────────────────────────────────────────────────────────
+#
+# One writer, targeting what Codex actually reads (verified against Codex
+# 0.153, 2026-09-04 -- see llm_router.codex_host):
+#
+#   ~/.codex/config.toml   [mcp_servers.llm_router]         the MCP server
+#                          [hooks.state."…"] trusted_hash   without this Codex
+#                                                           silently skips a hook
+#   ~/.codex/hooks.json    UserPromptSubmit -> auto-route   push routing, same
+#                          PostToolUse      -> telemetry    hint Claude Code gets
+#   ~/.codex/AGENTS.md     marked block of routing rules    Codex reads AGENTS.md
+#
+# Earlier versions wrote config.yaml, config.json, rules/llm_router.md and
+# instructions.md. Codex reads none of them, so Codex -> llm-router never
+# worked for anyone. Those are cleaned up below when they are ours.
+
+_CODEX_LEGACY_YAML_BLOCK = (
+    "\nmcp:\n"
+    "  servers:\n"
+    "    llm_router:\n"
+    "      command: llm-router\n"
+    "      args: []\n"
+)
+def _codex_hook_command(dst) -> str:
+    from llm_router.install_hooks import _python_exe
+    return f"{_python_exe()} {dst}"
+
+
+def _install_codex_files(mode: str = "mcp") -> list[str]:
+    """Write Codex-specific config files and return a list of actions taken.
+
+    ``mode``: "mcp" (default) registers the MCP server, hooks and rules.
+    "gateway" additionally registers the opt-in model provider table; it is
+    never the default because the gateway does not yet speak Codex's wire
+    format (see _install_codex_gateway_config).
+    """
+    import json as _json
     import pathlib
     import shutil as _shutil
 
+    from llm_router import codex_host, install_manifest
+    from llm_router.install_hooks import _build_mcp_entry, _localized_rules_text
+
     actions: list[str] = []
     home = pathlib.Path.home()
-
-    # 1. MCP server entry in ~/.codex/config.yaml
     codex_dir = home / ".codex"
     codex_dir.mkdir(parents=True, exist_ok=True)
-    config_yaml = codex_dir / "config.yaml"
-
-    mcp_block = (
-        "\nmcp:\n"
-        "  servers:\n"
-        "    llm_router:\n"
-        "      command: llm-router\n"
-        "      args: []\n"
-    )
-    existing = config_yaml.read_text() if config_yaml.exists() else ""
-    if "llm_router" not in existing:
-        with config_yaml.open("a") as f:
-            f.write(mcp_block)
-        actions.append(f"✓ Added llm_router MCP server to {config_yaml}")
-        try:
-            from llm_router import install_manifest
-            install_manifest.record("text_block", config_yaml, block=mcp_block)
-        except Exception:
-            pass
-    else:
-        actions.append(f"  llm_router already in {config_yaml} (skipped)")
-
-    # 2. PostToolUse hook in ~/.codex/hooks.json
+    config_toml = codex_dir / "config.toml"
     hooks_json = codex_dir / "hooks.json"
-    hook_script = home / ".llm-router" / "hooks" / "codex-post-tool.py"
+    agents_md = codex_dir / "AGENTS.md"
 
-    # Copy the hook script to ~/.llm-router/hooks/
-    hook_script.parent.mkdir(parents=True, exist_ok=True)
-    src_hook = pathlib.Path(__file__).parent.parent / "hooks" / "codex-post-tool.py"
-    if src_hook.exists():
-        _shutil.copy2(src_hook, hook_script)
-        hook_script.chmod(0o755)
-        actions.append(f"✓ Installed hook script to {hook_script}")
-        try:
-            from llm_router import install_manifest
-            install_manifest.record("file", hook_script)
-        except Exception:
-            pass
+    original = config_toml.read_text() if config_toml.exists() else ""
+    text = original
 
-    hook_entry = {
-        "hooks": {
-            "PostToolUse": [
-                {
-                    "matcher": "Bash",
-                    "hooks": [{"type": "command", "command": str(hook_script)}],
-                }
-            ]
-        }
-    }
+    # 1. MCP server ----------------------------------------------------------
+    # Surgical TOML insert, not `codex mcp add`: the CLI rewrites the whole
+    # file (re-orders the user's tables, drops blank lines and `args = []`).
+    # Codex users hand-edit config.toml; we own one table and the per-tool
+    # approval tables under it, nothing else.
+    entry, warnings = _build_mcp_entry()
+    if entry is None:
+        actions.extend(f"  {w}" for w in warnings)
+    else:
+        command, args = entry["command"], list(entry.get("args") or [])
+        text = codex_host.upsert_toml_table(
+            text, codex_host.MCP_TABLE, codex_host.mcp_table_body(command, args),
+        )
+        install_manifest.record("toml_table", config_toml, header=codex_host.MCP_TABLE)
+        # `codex exec` runs with approval policy "never": an MCP tool without
+        # approval_mode = "approve" fails with "MCP tool call requires
+        # approval" instead of routing. Approve the routing doors only; the
+        # admin / agent tools still prompt.
+        for tool in codex_host.approved_tools():
+            header = codex_host.tool_table(tool)
+            text = codex_host.upsert_toml_table(text, header, 'approval_mode = "approve"')
+            install_manifest.record("toml_table", config_toml, header=header)
+        actions.append(f"✓ Registered llm_router MCP server in {config_toml} ({command})")
+
+    # 2. Hooks ---------------------------------------------------------------
+    hooks_dir = home / ".llm-router" / "hooks"
+    hooks_dir.mkdir(parents=True, exist_ok=True)
+    pkg_hooks = pathlib.Path(__file__).parent.parent / "hooks"
+    our_commands: set[str] = set()
+
+    route_dst = hooks_dir / "codex-auto-route.py"
+    route_src = pkg_hooks / "auto-route.py"
+    if route_src.exists():
+        _shutil.copy2(route_src, route_dst)
+        route_dst.chmod(0o755)
+        install_manifest.record("file", route_dst)
+        our_commands.add(_codex_hook_command(route_dst))
+        actions.append(f"✓ Installed auto-route hook to {route_dst}")
+    # The support module the hook falls back to when llm_router is not importable.
+    support_src = pathlib.Path(__file__).parent.parent / "tool_surface.py"
+    if support_src.exists():
+        _shutil.copy2(support_src, hooks_dir / "llm_router_tool_surface.py")
+        install_manifest.record("file", hooks_dir / "llm_router_tool_surface.py")
+
+    post_dst = hooks_dir / "codex-post-tool.py"
+    post_src = pkg_hooks / "codex-post-tool.py"
+    if post_src.exists():
+        _shutil.copy2(post_src, post_dst)
+        post_dst.chmod(0o755)
+        install_manifest.record("file", post_dst)
+        our_commands.add(str(post_dst))
+        actions.append(f"✓ Installed telemetry hook to {post_dst}")
+
+    doc: dict = {}
     if hooks_json.exists():
         try:
-            import json as _json
-            current = _json.loads(hooks_json.read_text())
-            existing_hooks = current.get("hooks", {}).get("PostToolUse", [])
-            already = any(
-                str(hook_script) in str(h)
-                for entry in existing_hooks
-                for h in entry.get("hooks", [])
-            )
-            if not already:
-                existing_hooks.append(hook_entry["hooks"]["PostToolUse"][0])
-                current.setdefault("hooks", {})["PostToolUse"] = existing_hooks
-                hooks_json.write_text(_json.dumps(current, indent=2))
-                actions.append(f"✓ Added PostToolUse hook to {hooks_json}")
-            else:
-                actions.append(f"  Hook already in {hooks_json} (skipped)")
-        except Exception as e:
-            actions.append(f"  Could not update {hooks_json}: {e}")
-    else:
-        import json as _json
-        hooks_json.write_text(_json.dumps(hook_entry, indent=2))
-        actions.append(f"✓ Created {hooks_json} with PostToolUse hook")
+            doc = _json.loads(hooks_json.read_text())
+        except (OSError, ValueError):
+            actions.append(f"  {hooks_json} is not valid JSON -- leaving it alone; hooks not installed")
+            doc = None
+    if doc is not None:
+        hooks = doc.setdefault("hooks", {})
+        changed = False
 
-    # 3. Copy routing rules to ~/.codex/instructions.md (append if exists)
-    instructions = codex_dir / "instructions.md"
+        def _ensure(event: str, matcher: str | None, cmd: str) -> None:
+            nonlocal changed
+            groups = hooks.setdefault(event, [])
+            for g in groups:
+                if any(h.get("command") == cmd for h in (g.get("hooks") or []) if isinstance(h, dict)):
+                    return
+            group: dict = {"hooks": [{"type": "command", "command": cmd}]}
+            if matcher is not None:
+                group["matcher"] = matcher
+            groups.append(group)
+            changed = True
+
+        if route_src.exists():
+            _ensure("UserPromptSubmit", None, _codex_hook_command(route_dst))
+        if post_src.exists():
+            _ensure("PostToolUse", "Bash", str(post_dst))
+        if changed or not hooks_json.exists():
+            hooks_json.write_text(_json.dumps(doc, indent=2) + "\n")
+            install_manifest.record("codex_hooks", hooks_json)
+            actions.append(f"✓ Registered hooks in {hooks_json}")
+        else:
+            actions.append(f"  Hooks already in {hooks_json} (skipped)")
+
+        # 3. Trust records -- the part every earlier version missed ---------
+        for key, digest in codex_host.trust_records(hooks_json, doc, only_commands=our_commands).items():
+            text = codex_host.upsert_toml_table(
+                text, codex_host.hook_state_table(key), f'trusted_hash = "{digest}"',
+            )
+            install_manifest.record("toml_table", config_toml, header=codex_host.hook_state_table(key))
+        if our_commands:
+            actions.append("✓ Trusted the hooks in config.toml (Codex skips untrusted hooks silently)")
+
+    # 4. Self-heal a forced global default from an old install ---------------
+    import re as _re
+    if _re.search(r'^model_provider\s*=\s*"llm_router"\s*$', text, _re.MULTILINE):
+        actions.append(
+            "✓ Reverted Codex's default model_provider (was force-set to 'llm_router' by an "
+            f"earlier install, which broke Codex CLI — see {config_toml})"
+        )
+    text = _remove_toml_scalar_if_equals(text, "model", "auto")
+    text = _remove_toml_scalar_if_equals(text, "model_provider", "llm_router")
+
+    if text != original:
+        try:
+            bak = codex_dir / "config.toml.llm_router-bak"
+            if config_toml.exists() and not bak.exists():
+                _shutil.copy2(config_toml, bak)
+                actions.append(f"✓ Backed up Codex config to {bak}")
+            config_toml.write_text(text)
+        except OSError as e:
+            actions.append(f"  Could not update {config_toml}: {e}")
+
+    # 5. AGENTS.md -----------------------------------------------------------
     rules_src = pathlib.Path(__file__).parent.parent / "rules" / "codex-rules.md"
     if rules_src.exists():
-        rules_text = rules_src.read_text()
-        if instructions.exists():
-            existing_inst = instructions.read_text()
-            if "llm_router" not in existing_inst:
-                block = f"\n\n{rules_text}"
-                with instructions.open("a") as f:
-                    f.write(block)
-                actions.append(f"✓ Appended routing rules to {instructions}")
-                try:
-                    from llm_router import install_manifest
-                    install_manifest.record("text_block", instructions, block=block)
-                except Exception:
-                    pass
-            else:
-                actions.append(f"  Routing rules already in {instructions} (skipped)")
+        rules_text = _localized_rules_text(rules_src)
+        existing = agents_md.read_text() if agents_md.exists() else ""
+        updated = codex_host.upsert_marked_block(existing, rules_text)
+        if updated != existing:
+            agents_md.write_text(updated)
+            actions.append(f"✓ Wrote routing rules block to {agents_md}")
         else:
-            instructions.write_text(rules_text)
-            actions.append(f"✓ Created {instructions} with routing rules")
-            try:
-                from llm_router import install_manifest
-                install_manifest.record("created_file", instructions, block=rules_text)
-            except Exception:
-                pass
+            actions.append(f"  Routing rules already current in {agents_md} (skipped)")
+        install_manifest.record("codex_agents_block", agents_md)
+
+    # 6. Legacy files Codex never read ---------------------------------------
+    actions.extend(_cleanup_codex_legacy(codex_dir))
 
     if mode == "gateway":
         actions += _install_codex_gateway_config(codex_dir)
-    elif mode not in {"companion", "mcp", "mcp-only", "rules", "auto"}:
-        actions.append(f"  Unknown Codex mode {mode!r}; installed MCP companion only")
+    elif mode not in {"mcp", "companion", "mcp-only", "rules", "auto"}:
+        actions.append(f"  Unknown Codex mode {mode!r}; installed MCP, hooks and rules only")
+
+    return actions
+
+
+def _install_project_files(root, *, use_symlink: bool | None = None) -> list[str]:
+    """Write one set of project rules both agents read.
+
+    ``AGENTS.md`` gets a marked llm-router block (Codex reads AGENTS.md).
+    ``CLAUDE.md`` becomes a symlink to it (Claude Code reads CLAUDE.md), or a
+    copy on Windows. An existing CLAUDE.md that is a real file is kept and gets
+    the same marked block appended -- a user's file is never replaced by a
+    link. Re-runs replace the block in place.
+    """
+    import os
+    import pathlib
+
+    from llm_router import codex_host, install_manifest
+    from llm_router.install_hooks import _localized_rules_text
+
+    root = pathlib.Path(root)
+    actions: list[str] = []
+    template = pathlib.Path(__file__).parent.parent / "rules" / "project-agents.md"
+    if not template.exists():
+        return [f"  rules template missing: {template}"]
+    body = _localized_rules_text(template)
+    if use_symlink is None:
+        use_symlink = os.name != "nt"
+
+    agents = root / "AGENTS.md"
+    existing = agents.read_text() if agents.exists() else ""
+    updated = codex_host.upsert_marked_block(existing, body)
+    if updated != existing:
+        agents.write_text(updated)
+        actions.append(f"✓ {'Updated' if existing else 'Created'} {agents}")
+    else:
+        actions.append(f"  {agents} already current (skipped)")
+    install_manifest.record("codex_agents_block", agents)
+
+    claude = root / "CLAUDE.md"
+    if claude.is_symlink():
+        try:
+            target = (claude.parent / os.readlink(claude)).resolve()
+        except OSError:
+            target = None
+        if target == agents.resolve():
+            actions.append(f"  {claude} already links to AGENTS.md (skipped)")
+        else:
+            actions.append(f"  {claude} is a link elsewhere — left alone")
+    elif claude.exists():
+        text = claude.read_text()
+        new_text = codex_host.upsert_marked_block(text, body)
+        if new_text != text:
+            claude.write_text(new_text)
+            actions.append(f"✓ Added the rules block to existing {claude} (kept as a file)")
+        else:
+            actions.append(f"  {claude} already current (skipped)")
+        install_manifest.record("codex_agents_block", claude)
+    elif use_symlink:
+        claude.symlink_to("AGENTS.md")
+        # Not kind "file": record() resolves an existing path, and resolving
+        # the link yields AGENTS.md -- uninstall would then delete the user's
+        # rules file instead of our link.
+        install_manifest.record("claude_link", agents, link=str(claude.absolute()))
+        actions.append(f"✓ Linked {claude} -> AGENTS.md")
+    else:
+        claude.write_text(updated)
+        install_manifest.record("codex_agents_block", claude)
+        actions.append(f"✓ Copied the rules into {claude} (symlinks unavailable here)")
+    return actions
+
+
+def _cleanup_codex_legacy(codex_dir) -> list[str]:
+    """Remove what earlier installers wrote to files Codex does not read.
+
+    Only content that is recognisably ours is touched: the exact YAML block,
+    JSON entries whose command is ours, a rules file that starts with our
+    header, and an instructions.md block recorded in the manifest (or a file
+    that is nothing but our rules).
+    """
+    import json as _json
+    import pathlib
+
+    from llm_router import install_manifest
+
+    actions: list[str] = []
+    codex_dir = pathlib.Path(codex_dir)
+
+    yaml_path = codex_dir / "config.yaml"
+    if yaml_path.exists():
+        try:
+            y = yaml_path.read_text()
+            if _CODEX_LEGACY_YAML_BLOCK in y:
+                y = y.replace(_CODEX_LEGACY_YAML_BLOCK, "", 1)
+                if y.strip():
+                    yaml_path.write_text(y)
+                else:
+                    yaml_path.unlink()
+                actions.append(f"✓ Removed legacy MCP block from {yaml_path} (Codex never read it)")
+        except OSError:
+            pass
+
+    json_path = codex_dir / "config.json"
+    if json_path.exists():
+        try:
+            data = _json.loads(json_path.read_text())
+            servers = data.get("mcpServers") if isinstance(data, dict) else None
+            if isinstance(servers, dict):
+                removed = False
+                for name in ("llm_router", "llm-router"):
+                    ent = servers.get(name)
+                    if isinstance(ent, dict) and (
+                        ent.get("command") in ("llm-router", "llm_router")
+                        or "claude-code-llm-router" in (ent.get("args") or [])
+                    ):
+                        servers.pop(name)
+                        removed = True
+                if removed:
+                    if servers or len(data) > 1:
+                        json_path.write_text(_json.dumps(data, indent=2))
+                    else:
+                        json_path.unlink()
+                    actions.append(f"✓ Removed legacy MCP entry from {json_path} (Codex never read it)")
+        except (OSError, ValueError):
+            pass
+
+    rules_md = codex_dir / "rules" / "llm_router.md"
+    if rules_md.exists():
+        try:
+            if rules_md.read_text().lstrip().startswith("<!-- llm_router-rules-version"):
+                rules_md.unlink()
+                actions.append(f"✓ Removed legacy {rules_md} (Codex reads AGENTS.md, not rules/*.md)")
+        except OSError:
+            pass
+
+    instructions = codex_dir / "instructions.md"
+    if instructions.exists():
+        try:
+            rec = install_manifest.find("text_block", instructions)
+            created = install_manifest.find("created_file", instructions)
+            content = instructions.read_text()
+            if rec and rec.get("block") and rec["block"] in content:
+                remaining = content.replace(rec["block"], "", 1)
+                if remaining.strip():
+                    instructions.write_text(remaining)
+                else:
+                    instructions.unlink()
+                actions.append(f"✓ Removed legacy routing rules from {instructions}")
+            elif created and content.lstrip().startswith("<!-- llm_router-rules-version"):
+                instructions.unlink()
+                actions.append(f"✓ Removed legacy {instructions}")
+        except OSError:
+            pass
 
     return actions
 
@@ -1232,8 +1486,8 @@ def _install_host(host: str, mode: str = "auto") -> None:
 
     # Hosts that write files; all others print snippets
     _FILE_WRITERS = {
-        "codex":      (lambda: _install_codex_files(mode="gateway" if mode == "auto" else mode),
-                       "Restart Codex and run `llm-router doctor --host codex` to verify automatic routing."),
+        "codex":      (lambda: _install_codex_files(mode="mcp" if mode == "auto" else mode),
+                       "Restart Codex and run `llm-router doctor --host codex` to verify."),
         "opencode":   (_install_opencode_files,     f"Restart OpenCode and run {route_tool('llm_savings')} to verify."),
         "gemini-cli": (_install_gemini_cli_files,   f"Restart Gemini CLI and run {route_tool('llm_savings')} to verify."),
         "copilot-cli":(_install_copilot_cli_files,  f"Restart Copilot CLI and run {route_tool('llm_savings')} to verify."),

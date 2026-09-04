@@ -47,6 +47,77 @@ def _clean_env(monkeypatch) -> None:
         "LLM_ROUTER_SUBSCRIPTION_REORDER_ALL_PROFILES",
     ):
         monkeypatch.delenv(env, raising=False)
+    # conftest turns the seat default off for every test; the seat tests
+    # below re-enable it against a temp home.
+    monkeypatch.setenv("LLM_ROUTER_SEATS_AUTO", "off")
+
+
+# ── 0. Seat-derived defaults ────────────────────────────────────────────────
+
+
+@pytest.fixture
+def seat_home(monkeypatch, tmp_path):
+    import pathlib
+    monkeypatch.setattr(pathlib.Path, "home", classmethod(lambda cls: tmp_path))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("LLM_ROUTER_SEATS_AUTO", "on")
+    return tmp_path
+
+
+def _write_seats(home, **kw):
+    from llm_router import seats as S
+    S.save_seats(S.Seats(detected_at="2026-09-04T00:00:00+00:00", **kw), home)
+
+
+def test_seat_table_supplies_the_subscription_provider_when_env_unset(seat_home) -> None:
+    from llm_router import seats as S
+    _write_seats(seat_home, claude=S.Seat(kind="claude.ai", plan="max"), codex=S.Seat(kind="chatgpt", plan="plus"))
+    assert get_subscription_provider() == "anthropic"
+    assert "codex" in get_free_bucket()
+    assert is_subscription_local_active(RoutingProfile.BALANCED)
+
+
+def test_env_wins_over_the_seat_table(seat_home, monkeypatch) -> None:
+    from llm_router import seats as S
+    _write_seats(seat_home, claude=S.Seat(kind="claude.ai", plan="max"))
+    monkeypatch.setenv("LLM_ROUTER_SUBSCRIPTION_PROVIDER", "openai")
+    assert get_subscription_provider() == "openai"
+
+
+def test_seats_auto_off_restores_env_only_behaviour(seat_home, monkeypatch) -> None:
+    from llm_router import seats as S
+    _write_seats(seat_home, claude=S.Seat(kind="claude.ai", plan="max"), codex=S.Seat(kind="chatgpt"))
+    monkeypatch.setenv("LLM_ROUTER_SEATS_AUTO", "off")
+    assert get_subscription_provider() is None
+    assert "codex" not in get_free_bucket()
+    assert not is_subscription_local_active(RoutingProfile.BALANCED)
+
+
+def test_no_cache_or_no_seat_means_no_default(seat_home) -> None:
+    from llm_router import seats as S
+    assert get_subscription_provider() is None          # no seats.json at all
+    _write_seats(seat_home, codex=S.Seat(kind="api-key"))
+    assert get_subscription_provider() is None          # an API key is not a seat
+    assert "codex" not in get_free_bucket()
+
+
+def test_codex_seat_alone_is_the_subscription_not_free(seat_home) -> None:
+    from llm_router import seats as S
+    _write_seats(seat_home, codex=S.Seat(kind="chatgpt", plan="pro"))
+    assert get_subscription_provider() == "openai"
+    assert "codex" not in get_free_bucket()
+
+
+def test_seat_default_drives_the_reorder_end_to_end(seat_home) -> None:
+    """Claude Max + ChatGPT: cheap work goes free-first (Codex is free), hard
+    work goes to the Claude seat first -- from either host."""
+    from llm_router import seats as S
+    _write_seats(seat_home, claude=S.Seat(kind="claude.ai", plan="max"), codex=S.Seat(kind="chatgpt", plan="plus"))
+    chain = ["anthropic/claude-opus", "openai/gpt-5", "codex/gpt-5.5", "ollama/qwen"]
+    simple = reorder_for_subscription_local(chain, complexity="simple", profile=RoutingProfile.BALANCED)
+    assert simple == ["codex/gpt-5.5", "ollama/qwen", "anthropic/claude-opus", "openai/gpt-5"]
+    complex_ = reorder_for_subscription_local(chain, complexity="complex", profile=RoutingProfile.BALANCED)
+    assert complex_ == ["anthropic/claude-opus", "codex/gpt-5.5", "ollama/qwen", "openai/gpt-5"]
 
 
 # ── 1. Configuration accessors ──────────────────────────────────────────────

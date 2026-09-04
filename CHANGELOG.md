@@ -12,7 +12,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Codex → llm-router works, for the first time.** The installer wrote the
+  MCP server to `~/.codex/config.yaml` (and an older path to `config.json`
+  and `rules/llm_router.md`). Codex reads only `config.toml`, so no Codex
+  session has ever seen llm-router. One writer now targets
+  `[mcp_servers.llm_router]` in `config.toml` (via `codex mcp add`, TOML
+  fallback), `hooks.json`, and a marked block in `AGENTS.md`, and removes the
+  legacy entries when they are ours. The duplicate installer in `cli.py` is
+  gone.
+- **Codex hooks now actually run.** Codex 0.153 silently skips any hook in
+  `hooks.json` without a `[hooks.state."…"] trusted_hash` record in
+  `config.toml`. `llm_router.codex_host` computes the hash (verified against a
+  real run) and install writes it for every hook it installs; doctor fails on
+  a missing or stale record.
+- `llm-router doctor --host codex` validated `config.yaml` and reported a
+  broken install as healthy. It now checks `config.toml`, that the command
+  can start, `codex mcp list`, hook trust, and `AGENTS.md`.
+
 ### Added
+
+- **Routing defaults come from the seat table.** With
+  `LLM_ROUTER_SUBSCRIPTION_PROVIDER` unset, the strongest logged-in seat is
+  the subscription provider (Claude over ChatGPT over Google) and the other
+  seats join the free bucket, so a Claude Max + ChatGPT machine sends cheap
+  work to Codex and hard work to Claude from either host, with nothing
+  configured. The env var still wins; `LLM_ROUTER_SEATS_AUTO=off` restores
+  env-only behaviour.
+- **`llm-router install --project`** writes a marked llm-router block into the
+  repository's `AGENTS.md` and links `CLAUDE.md` to it (a copy on Windows; an
+  existing `CLAUDE.md` file is kept and gets the same block), so Claude Code and
+  Codex read one set of project rules.
+- **`llm-router install` auto-detects Codex.** With no `--host`, a machine
+  that has Codex gets it wired in the same run, and the seat table prints at
+  the end. `--no-hosts` opts out; `--host codex` is unchanged. Gateway mode is
+  opt-in (`--mode gateway`), no longer the Codex default.
+- **Codex gets push routing.** A `UserPromptSubmit` hook injects the same
+  `⚡ ROUTE:` hint Claude Code gets. `hosts/events.py` now carries the verified
+  Codex prompt payload keys (fixture from a real run).
 
 - **Seat detection.** `llm-router doctor` and the session banner now show which
   subscriptions this machine is logged in to (Claude via `claude auth status`,

@@ -219,6 +219,7 @@ ENV_REGISTRY: dict[str, tuple[str, str, int]] = {
     "LLM_ROUTER_PROJECT_ID": ("provider_credential", "session_store.py", 1),
     "LLM_ROUTER_RESPONSE_ROUTER_TOKEN_THRESHOLD": ("provider_credential", "response_router.py", 1),
     "LLM_ROUTER_SCIM_TOKEN": ("provider_credential", "admin_api.py", 2),
+    "LLM_ROUTER_SEATS_AUTO": ("llm_router", "subscription_local_routing.py", 1),
     "LLM_ROUTER_SUBSCRIPTION_PROVIDER": ("llm_router", "subscription_local_routing.py", 2),
     "LLM_ROUTER_TOKEN": ("provider_credential", "identity.py", 1),
     "DEEPSEEK_API_KEY": ("provider_credential", "commands/doctor.py", 1),

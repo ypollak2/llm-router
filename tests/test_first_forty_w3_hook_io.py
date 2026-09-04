@@ -47,13 +47,27 @@ def test_claude_code_tool_payload_normalizes():
     assert req.tool_input == {"command": "ls"}
 
 
-@pytest.mark.parametrize("host", ["codex", "cursor"])
+@pytest.mark.parametrize("host", ["cursor"])
 def test_unported_host_refuses_to_normalize_a_prompt(host):
     """Reading a documented-but-unverified key is how a port fails silently."""
     with pytest.raises(UnverifiedHost) as exc:
         normalize(host, Event.PROMPT_SUBMIT, {"prompt": "hi", "session_id": "s"})
     assert "prompt_key" in exc.value.missing
     assert "Do not fill them in" in str(exc.value)
+
+
+def test_codex_prompt_is_ported_but_its_tool_events_are_not():
+    """Codex's UserPromptSubmit keys were captured from a real run (2026-09-04,
+    tests/fixtures/codex_user_prompt_submit.json); its PreToolUse keys were not."""
+    import json
+    import pathlib
+    payload = json.loads((pathlib.Path(__file__).parent / "fixtures" / "codex_user_prompt_submit.json").read_text())
+    req = normalize("codex", Event.PROMPT_SUBMIT, payload)
+    assert req.prompt == "Reply with the single word: pong"
+    assert req.session_id.startswith("01a06e3d")
+    with pytest.raises(UnverifiedHost) as exc:
+        normalize("codex", Event.PRE_TOOL, {"tool_name": "Bash", "tool_input": {}})
+    assert "tool_name_key" in exc.value.missing
 
 
 def test_unknown_host_is_a_hard_error():
