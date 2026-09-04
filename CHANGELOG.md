@@ -40,6 +40,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   work to Codex and hard work to Claude from either host, with nothing
   configured. The env var still wins; `LLM_ROUTER_SEATS_AUTO=off` restores
   env-only behaviour.
+- **`llm-router install --project`** writes a marked llm-router block into the
+  repository's `AGENTS.md` and links `CLAUDE.md` to it (a copy on Windows; an
+  existing `CLAUDE.md` file is kept and gets the same block), so Claude Code and
+  Codex read one set of project rules.
 - **`llm-router install` auto-detects Codex.** With no `--host`, a machine
   that has Codex gets it wired in the same run, and the seat table prints at
   the end. `--no-hosts` opts out; `--host codex` is unchanged. Gateway mode is

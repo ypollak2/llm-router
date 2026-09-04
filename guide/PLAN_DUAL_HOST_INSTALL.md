@@ -1,6 +1,6 @@
 # Plan: one install that wires Claude Code AND Codex, and knows which seats you pay for
 
-Status: 2026-09-04 — PR 1 (#128, seats) open; PR 2 (Codex writer, autodetect, doctor, push hook) on `feat/codex-dual-host`. PR 3 (seat-derived defaults) on `feat/seat-derived-routing`. PR 4 not started.
+Status: 2026-09-04 — PR 1 (#128, seats) open; PR 2 (Codex writer, autodetect, doctor, push hook) on `feat/codex-dual-host`. PR 3 = #130 (seat-derived defaults); PR 4 (`--project`) on `feat/project-agents-md`. All four coded; merge in order.
 
 ## Goal
 

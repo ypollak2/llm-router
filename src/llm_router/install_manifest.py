@@ -34,6 +34,7 @@ install, and a single removal failure must never abort uninstall.
 from __future__ import annotations
 
 import json
+import os
 import pathlib
 from typing import Any
 
@@ -199,6 +200,8 @@ def apply_uninstall() -> list[str]:
                 actions += _remove_codex_hooks(path)
             elif kind == "codex_agents_block":
                 actions += _remove_codex_agents_block(path)
+            elif kind == "claude_link":
+                actions += _remove_claude_link(pathlib.Path(rec.get("link", "")), path)
         except Exception as e:  # noqa: BLE001 — one bad record must not abort the rest
             _p = rec.get("path", "?")
             actions.append(f"  manifest removal skipped ({_p}): {e}")
@@ -300,3 +303,18 @@ def _remove_codex_agents_block(path: pathlib.Path) -> list[str]:
     else:
         path.unlink()
     return [f"✓ Removed llm_router block from {path}"]
+
+
+def _remove_claude_link(link: pathlib.Path, target: pathlib.Path) -> list[str]:
+    """Remove the CLAUDE.md symlink we created, only while it still points at
+    the AGENTS.md we recorded. A file or a re-pointed link is the user's."""
+    if not str(link) or not link.is_symlink():
+        return []
+    try:
+        points_at = (link.parent / os.readlink(link)).resolve()
+    except OSError:
+        return []
+    if points_at != pathlib.Path(target).resolve():
+        return []
+    link.unlink()
+    return [f"✓ Removed link {link}"]
