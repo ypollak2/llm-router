@@ -731,6 +731,55 @@ def _tool_surface_phantoms() -> list[str]:
     return found
 
 
+def _seats_report() -> list[str]:
+    """Detect seats (3 s budget), persist them, and render one line per seat."""
+    try:
+        from llm_router import seats as _seats
+        seats = _seats.refresh_seats()
+    except Exception as e:  # noqa: BLE001 -- doctor must never crash on a probe
+        return [_warn(f"seat detection failed: {e}")]
+
+    lines: list[str] = []
+    for name, seat in (
+        ("Claude", seats.claude),
+        ("Codex", seats.codex),
+        ("Gemini CLI", seats.gemini),
+        ("Ollama", seats.ollama),
+    ):
+        if seat.present:
+            text = f"{name:<11}{seat.label()}"
+            if seat.plan_stale:
+                lines.append(_warn(
+                    f"{text} -- the plan claim in the login token is past its window; "
+                    "login still works, so it still counts as a seat"
+                ))
+            else:
+                lines.append(_ok(text))
+        elif seat.kind == "api-key":
+            lines.append(_dim(f"    {name:<11}api key only (billed per call, not a seat)"))
+        else:
+            lines.append(_dim(f"    {name:<11}not logged in"))
+
+    bucket = sorted(seats.free_bucket())
+    if bucket:
+        lines.append(_ok(f"free bucket: {', '.join(bucket)}"))
+    else:
+        lines.append(_warn(
+            "no seat found -- every routed call is billed to an API key; "
+            "log in to Claude Code, Codex, or start Ollama to get a free tier"
+        ))
+    sub = seats.subscription_provider()
+    env_sub = os.environ.get("LLM_ROUTER_SUBSCRIPTION_PROVIDER", "").strip()
+    if sub and not env_sub:
+        lines.append(_dim(f"    subscription provider defaults to '{sub}' (from the Claude seat)"))
+    elif env_sub and sub and env_sub.lower() != sub:
+        lines.append(_warn(
+            f"LLM_ROUTER_SUBSCRIPTION_PROVIDER={env_sub} but the detected seat is '{sub}'"
+        ))
+    lines.append(_dim(f"    cached in ~/.llm-router/{_seats.SEATS_FILE_NAME}"))
+    return lines
+
+
 def _run_doctor(host: Optional[str] = None) -> tuple[int, list[str]]:
     """Comprehensive health check — verify every component is wired up.
 
@@ -1129,6 +1178,15 @@ def _run_doctor(host: Optional[str] = None) -> tuple[int, list[str]]:
                 issues.append("Usage data is stale")
 
     # ── 7. Provider keys ───────────────────────────────────────────────────
+    # ── 6b. Seats: which subscriptions this machine is logged in to ─────────
+    # A seat is a subscription already paid for, so routed work landing on it
+    # costs nothing extra. This is what the free bucket is derived from; a
+    # plan claim past its window is a hint, not a verdict (login status is
+    # the fact), so it warns and never fails.
+    print(f"\n{_bold('  Seats (subscriptions this machine is logged in to)')}")
+    for line in _seats_report():
+        print(f"  {line}")
+
     print(f"\n{_bold('  Provider API keys')}")
     for line in check_api_keys():
         print(f"  {line}")

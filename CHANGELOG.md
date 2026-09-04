@@ -12,7 +12,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-_Nothing yet._
+### Added
+
+- **Seat detection.** `llm-router doctor` and the session banner now show which
+  subscriptions this machine is logged in to (Claude via `claude auth status`,
+  ChatGPT via `codex login status` plus the plan claim in the Codex login
+  token, Gemini CLI, Ollama) and the free bucket derived from them. Cached in
+  `~/.llm-router/seats.json`; kinds and plan names only, never tokens. A plan
+  claim past its window is reported as stale but still counts, because login
+  status is the fact and the claim a hint. First step of
+  `guide/PLAN_DUAL_HOST_INSTALL.md`.
 
 ## [13.0.8] — Close the second co-owned-file guard (2026-08-31)
 
