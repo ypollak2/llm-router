@@ -681,8 +681,11 @@ async def _drain_judge_background_tasks():
     await drain_pending_judge_tasks()
 
 
+_REAL_HOME = __import__("pathlib").Path.home()
+
+
 @pytest.fixture(autouse=True)
-def _hermetic_host_state(monkeypatch):
+def _hermetic_host_state(monkeypatch, tmp_path_factory):
     """Isolate router tests from real host state (repo config + CLI probes).
 
     Even with ``cm._config`` fully stubbed, chain building still reads two
@@ -715,6 +718,42 @@ def _hermetic_host_state(monkeypatch):
     #    logged in to Claude Code would otherwise get a reordered chain in
     #    every test. Tests of the seat default re-enable it explicitly.
     monkeypatch.setenv("LLM_ROUTER_SEATS_AUTO", "off")
+    # 4. The install manifest. `_run_uninstall` replays ~/.llm-router/
+    #    install-manifest.json and then clears it; a test that exercises the
+    #    uninstall command without patching this removed a developer's REAL
+    #    Codex wiring (config.toml tables, hooks.json entries, hook files,
+    #    AGENTS.md block) mid-suite on 2026-09-04. Every test gets its own
+    #    manifest path; tests of the manifest itself patch Path.home anyway.
+    #    A test that patches Path.home keeps the manifest under its fake home
+    #    (the manifest tests plant files there); everyone else is redirected
+    #    to a per-test sandbox instead of the developer's real one.
+    import pathlib as _pathlib
+
+    import llm_router.install_manifest as _manifest_module
+
+    _real_home = _REAL_HOME
+    _sandbox = tmp_path_factory.mktemp("manifest") / "install-manifest.json"
+
+    def _manifest_path():
+        home = _pathlib.Path.home()
+        if home == _real_home:
+            return _sandbox
+        return home / ".llm-router" / "install-manifest.json"
+
+    monkeypatch.setattr(_manifest_module, "_manifest_path", _manifest_path)
+    #    The legacy enumerated host cleanup (`uninstall_host_integrations`) edits
+    #    ~/.codex/hooks.json and friends directly, with no manifest. Same rule:
+    #    real home -> no-op, patched home -> run.
+    import llm_router.commands.install as _install_module
+
+    _real_host_cleanup = _install_module.uninstall_host_integrations
+
+    def _host_cleanup():
+        if _pathlib.Path.home() == _real_home:
+            return []
+        return _real_host_cleanup()
+
+    monkeypatch.setattr(_install_module, "uninstall_host_integrations", _host_cleanup)
     # The LLM-first ensemble makes live Ollama classifier calls, which in unit
     # tests punch through host-state isolation — real model latency,
     # non-determinism, and background warmup threads that leak global state
