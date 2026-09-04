@@ -741,6 +741,26 @@ def _refresh_claude_usage_attempt() -> dict:
         return {"success": False}
 
 
+def _seats_hint() -> str:
+    """One line naming the subscriptions this machine is logged in to.
+
+    Uses the cache written by install/doctor when it is fresh (24 h), and
+    re-detects with a short budget otherwise, so a session start never waits
+    on a slow CLI. Empty string when the seats module is unavailable.
+    """
+    try:
+        from llm_router import seats as _seats
+    except ImportError:
+        return ""
+    try:
+        cached = _seats.load_seats()
+        if cached is None or cached.is_stale():
+            cached = _seats.refresh_seats(timeout=2.0)
+    except Exception:  # noqa: BLE001
+        return ""
+    return "\n💺 Seats: " + cached.summary_line()
+
+
 def _weekly_digest() -> str:
     """Return a one-line weekly savings summary shown on Mondays (or after 6+ day gap).
 
@@ -1233,6 +1253,7 @@ def main() -> None:
     is_subscription = not usage_hint.startswith("\n⚠️")
 
     hints += usage_hint
+    hints += _seats_hint()
     hints += _format_learned_memory()
     hints += _weekly_digest()
     hints += _latency_hint()
