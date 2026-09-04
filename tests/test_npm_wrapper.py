@@ -348,37 +348,6 @@ def test_the_package_ships_a_readme():
     )
 
 
-def test_an_invalid_token_skips_rather_than_fails_mid_release():
-    """An empty token and an invalid one are different failures.
-
-    Only the first was handled, so an invalid token reached `npm publish` and
-    died on a 401 halfway through a release — which reads like the publish
-    broke rather than like the credential is wrong.
-
-    Two mistakes make this likely and they look identical from outside: an npm
-    OTP is six digits with a ~30 second lifetime and cannot be used by CI at
-    all, and a token without 2FA bypass authenticates for reads while being
-    refused for publish.
-    """
-    wf = WORKFLOW.read_text()
-    step = wf.split("- name: Publish")[1]
-
-    assert "npm whoami" in step, (
-        "the token is never validated, so an invalid one fails at publish time "
-        "with a bare 401 instead of a clear message"
-    )
-    # Skip, not fail: a fork or a lapsed token must not break the release that
-    # already produced working binaries.
-    assert step.count("exit 0") >= 2, (
-        "an invalid token fails the job rather than skipping; the binaries are "
-        "already attached and a missing npm publish should not undo that"
-    )
-    assert "bypass" in step.lower(), (
-        "the failure message does not say what kind of token is needed, which "
-        "is the only thing the reader needs to know"
-    )
-
-
 def test_a_scarce_runner_cannot_block_the_publish():
     """macos-13 queued for hours on every run across a day and completed on none.
 
@@ -448,27 +417,37 @@ def test_provenance_has_the_permission_it_requires():
         )
 
 
-def test_the_guard_proves_write_access_not_just_identity():
-    """v13.1.7 failed with EOTP after provenance was already signed.
+def test_npm_publish_uses_trusted_publishing_not_a_token():
+    """v13.1.5-v13.1.7 all died with EOTP.
 
-    A token whose account has 2FA set to "authorization and writes"
-    authenticates for reads and is refused at publish. `npm whoami` cannot tell
-    the two apart, so the guard passed a token that could not publish — and the
-    failure landed after the provenance statement had been written to a public
-    transparency log, which cannot be unwritten.
+    The account's 2FA is "authorization and writes" and a classic token cannot
+    bypass it, so `npm publish` asked CI for a one-time code -- after the
+    provenance statement had already been written to a public transparency
+    log. No pre-flight can catch that: `npm publish --dry-run` never contacts
+    the registry, and `npm whoami` proves reads, not writes.
 
-    A dry-run publish runs the same authorization path, cheaply, first.
+    Trusted publishing removes the token altogether: npm mints a short-lived
+    credential from the GitHub OIDC token. That needs id-token: write and
+    npm >= 11.5.1, which Node 20 does not bundle.
     """
     wf = WORKFLOW.read_text()
     step = wf.split("- name: Publish")[1]
 
-    assert "--dry-run" in step, (
-        "the guard only checks identity; a read-capable token that cannot write "
-        "still reaches the real publish"
+    assert "NPM_TOKEN" not in step and "NODE_AUTH_TOKEN" not in step, (
+        "the publish still uses a stored token, which the account's 2FA "
+        "refuses at write time with EOTP"
     )
-    dry = step.index("--dry-run")
-    real = step.index("npm publish --provenance")
-    assert dry < real, "the dry run must happen before the real publish"
-    assert "bypass two-factor" in step.lower(), (
-        "the failure message does not name the fix"
+    assert "npm install -g npm@" in step, (
+        "trusted publishing needs npm >= 11.5.1; Node 20 bundles npm 10"
+    )
+    upgrade = step.index("npm install -g npm@")
+    real = step.index("npm publish")
+    assert upgrade < real, "npm must be upgraded before the publish runs"
+
+    import yaml
+
+    job = yaml.safe_load(wf)["jobs"]["publish-npm"]
+    assert job.get("permissions", {}).get("id-token") == "write", (
+        "trusted publishing exchanges a GitHub OIDC token for npm credentials; "
+        "without id-token: write there is nothing to exchange"
     )
