@@ -122,74 +122,73 @@ class TestRunDoctorHost:
             # Cursor may not be installed
             pass
 
-    def test_run_doctor_host_codex_gateway_reachable(self, capsys, tmp_path, monkeypatch):
-        """Codex doctor proves the llm_router provider is registered and reachable
-        for opt-in use, WITHOUT it being forced as Codex's global default —
-        forcing it breaks Codex CLI (gateway wire-format mismatch with
-        Codex's expected OpenAI "responses" shape)."""
+    def _codex_home(self, tmp_path, monkeypatch, toml: str, hooks: dict | None = None):
         monkeypatch.setattr(pathlib.Path, "home", classmethod(lambda cls: tmp_path))
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setattr("llm_router.commands.doctor.shutil.which", lambda name: None)
         codex = tmp_path / ".codex"
         codex.mkdir()
-        (codex / "config.toml").write_text(
-            '[model_providers.gemini]\n'
-            'base_url = "https://generativelanguage.googleapis.com/v1beta/openai"\n\n'
-            '[model_providers.llm_router]\n'
-            'base_url = "http://127.0.0.1:17900/v1"\n'
-            'wire_api = "responses"\n'
+        (codex / "config.toml").write_text(toml)
+        if hooks is not None:
+            import json as _json
+            (codex / "hooks.json").write_text(_json.dumps(hooks))
+        return codex
+
+    def test_run_doctor_host_codex_healthy(self, capsys, tmp_path, monkeypatch):
+        """Registered in config.toml with a runnable command, hooks trusted, rules present."""
+        from llm_router import codex_host
+        script = tmp_path / "llm-router"
+        script.write_text("#!/bin/sh\n")
+        script.chmod(0o755)
+        hook_cmd = f"/usr/bin/python3 {tmp_path}/.llm-router/hooks/codex-auto-route.py"
+        hooks = {"hooks": {"UserPromptSubmit": [{"hooks": [{"type": "command", "command": hook_cmd}]}]}}
+        key = codex_host.hook_state_key(tmp_path / ".codex" / "hooks.json", "UserPromptSubmit", 0, 0)
+        digest = codex_host.hook_trust_hash("UserPromptSubmit", {"type": "command", "command": hook_cmd})
+        toml = (
+            f'[mcp_servers.llm_router]\ncommand = "{script}"\nargs = []\n\n'
+            f'[mcp_servers.llm_router.tools.llm]\napproval_mode = "approve"\n\n'
+            f'[hooks.state."{key}"]\ntrusted_hash = "{digest}"\n'
         )
-        (codex / "config.yaml").write_text("mcp:\n  servers:\n    llm_router: {}\n")
-        (codex / "hooks.json").write_text("codex-post-tool.py\n")
+        codex = self._codex_home(tmp_path, monkeypatch, toml, hooks)
+        (codex / "AGENTS.md").write_text(f"{codex_host.AGENTS_BLOCK_START}\nx\n{codex_host.AGENTS_BLOCK_END}\n")
 
-        class _Resp:
-            def __enter__(self):
-                return self
-
-            def __exit__(self, *_args):
-                return False
-
-            def read(self):
-                return b'{"ok": true}'
-
-        seen = {}
-
-        def _fake_urlopen(req, **_kwargs):
-            seen["url"] = req.full_url
-            return _Resp()
-
-        monkeypatch.setattr("llm_router.commands.doctor.urllib.request.urlopen", _fake_urlopen)
         _run_doctor_host("codex")
-        output = capsys.readouterr().out
-        assert "Codex using its own default model provider" in output
-        assert "LLM Router model provider registered" in output
-        assert "gateway reachable" in output
-        assert "Opt-in routing" in output
-        assert seen["url"] == "http://127.0.0.1:17900/healthz"
+        out = capsys.readouterr().out
+        assert "MCP server registered in config.toml" in out
+        assert "UserPromptSubmit hook trusted" in out
+        assert "routing rules block in AGENTS.md" in out
+        assert "✗" not in out
+
+    def test_run_doctor_host_codex_untrusted_hook_is_a_failure(self, capsys, tmp_path, monkeypatch):
+        """Codex silently skips an untrusted hook, so a missing or stale record must fail."""
+        from llm_router import codex_host
+        hook_cmd = f"/usr/bin/python3 {tmp_path}/.llm-router/hooks/codex-auto-route.py"
+        hooks = {"hooks": {"UserPromptSubmit": [{"hooks": [{"type": "command", "command": hook_cmd}]}]}}
+        key = codex_host.hook_state_key(tmp_path / ".codex" / "hooks.json", "UserPromptSubmit", 0, 0)
+        self._codex_home(tmp_path, monkeypatch, f'[hooks.state."{key}"]\ntrusted_hash = "sha256:stale"\n', hooks)
+        issues: list[str] = []
+        from llm_router.commands.doctor import _codex_report
+        lines = "\n".join(_codex_report(issues))
+        assert "trust record is stale" in lines
+        assert "[mcp_servers.llm_router] missing" in lines
+        assert any("untrusted" in i for i in issues) and any("not registered" in i for i in issues)
 
     def test_run_doctor_host_codex_reports_forced_default_as_broken(self, capsys, tmp_path, monkeypatch):
         """A config with model_provider forced to llm_router (left over from an
-        older llm_router install) must be flagged as broken, not healthy — it
-        breaks every Codex call via the gateway wire-format mismatch."""
-        monkeypatch.setattr(pathlib.Path, "home", classmethod(lambda cls: tmp_path))
-        codex = tmp_path / ".codex"
-        codex.mkdir()
-        (codex / "config.toml").write_text('model = "auto"\nmodel_provider = "llm_router"\n')
-
+        older llm_router install) must be flagged as broken, not healthy."""
+        self._codex_home(tmp_path, monkeypatch, 'model = "auto"\nmodel_provider = "llm_router"\n')
         _run_doctor_host("codex")
         output = capsys.readouterr().out
         assert "force-set to 'llm_router'" in output
-        assert "llm-router install --host codex --mode gateway" in output
+        assert "llm-router install" in output
 
-    def test_run_doctor_host_codex_reports_not_gateway(self, capsys, tmp_path, monkeypatch):
-        monkeypatch.setattr(pathlib.Path, "home", classmethod(lambda cls: tmp_path))
-        codex = tmp_path / ".codex"
-        codex.mkdir()
-        (codex / "config.toml").write_text('model = "gpt-5.5"\nmodel_provider = "openai"\n')
-
+    def test_run_doctor_host_codex_flags_legacy_files_codex_never_reads(self, capsys, tmp_path, monkeypatch):
+        codex = self._codex_home(tmp_path, monkeypatch, 'model = "gpt-5.5"\n')
+        (codex / "config.yaml").write_text("mcp:\n  servers:\n    llm_router: {}\n")
         _run_doctor_host("codex")
         output = capsys.readouterr().out
-        assert "Codex using its own default model provider" in output
-        assert "LLM Router model provider table missing" in output
-        assert "llm-router install --host codex --mode gateway" in output
+        assert "config.yaml mentions llm_router but Codex never reads it" in output
+        assert "[mcp_servers.llm_router] missing" in output
 
     def test_run_doctor_host_all(self, capsys):
         """Test doctor checks all hosts."""

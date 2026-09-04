@@ -99,6 +99,151 @@ def _extract_toml_section_string(text: str, section: str, key: str) -> str | Non
     return _extract_toml_string(section_text, key)
 
 
+def _codex_checks() -> tuple[list[str], list[str]]:
+    """(report lines, issues) for the Codex CLI wiring.
+
+    Checks what Codex actually reads: `[mcp_servers.llm_router]` in
+    config.toml with a runnable command, `codex mcp list` agreeing, and every
+    llm_router hook in hooks.json carrying a matching trust record (Codex
+    skips an untrusted hook silently, so a hook without one is a failure,
+    not a warning). Legacy config.yaml / config.json entries are reported as
+    ignored. The opt-in gateway provider table is informational only.
+    """
+    from llm_router import codex_host
+
+    lines: list[str] = []
+    issues: list[str] = []
+    codex_dir = Path.home() / ".codex"
+    config_toml = codex_dir / "config.toml"
+    hooks_json = codex_dir / "hooks.json"
+    fix = "llm-router install"
+
+    text = ""
+    if config_toml.exists():
+        try:
+            text = config_toml.read_text()
+        except OSError as e:
+            lines.append(_fail(f"could not read {config_toml}: {e}"))
+            issues.append("Codex config.toml unreadable")
+            return lines, issues
+    else:
+        lines.append(_fail(f"config.toml not found at {config_toml}", fix=fix))
+        issues.append("Codex config.toml missing")
+        return lines, issues
+
+    # 1. MCP server
+    entry = codex_host.read_mcp_server(text)
+    if entry is None:
+        lines.append(_fail("[mcp_servers.llm_router] missing from config.toml — Codex cannot see llm-router", fix=fix))
+        issues.append("Codex MCP server not registered")
+    else:
+        problems = _mcp_command_problems(entry, "Codex")
+        if problems:
+            for p in problems:
+                lines.append(_fail(p, fix=fix))
+            issues.append("Codex MCP command cannot start")
+        else:
+            lines.append(_ok(f"MCP server registered in config.toml ({entry.get('command')})"))
+            tools = entry.get("tools") if isinstance(entry.get("tools"), dict) else {}
+            door = (tools.get("llm") or {}).get("approval_mode")
+            if door != "approve" and entry.get("default_tools_approval_mode") != "approve":
+                lines.append(_warn(
+                    "the `llm` tool is not auto-approved — `codex exec` (approval policy never) "
+                    "fails every routed call with 'requires approval'", ))
+                lines.append(_dim(f"    fix: {fix}"))
+
+    # 2. Codex's own view
+    binary = shutil.which("codex")
+    if binary and entry is not None:
+        try:
+            proc = subprocess.run(
+                [binary, "mcp", "list"], capture_output=True, text=True, timeout=5, check=False,
+                env={**os.environ, "CODEX_HOME": str(codex_dir)},
+            )
+            listed = "llm_router" in (proc.stdout or "")
+        except (OSError, subprocess.SubprocessError):
+            listed = None
+        if listed is True:
+            lines.append(_ok("`codex mcp list` shows llm_router"))
+        elif listed is False:
+            lines.append(_fail("`codex mcp list` does not show llm_router", fix=fix))
+            issues.append("codex mcp list missing llm_router")
+        else:
+            lines.append(_warn("`codex mcp list` did not answer in 5 s — skipped"))
+    elif not binary:
+        lines.append(_dim("    codex binary not on PATH — skipped `codex mcp list`"))
+
+    # 3. Hooks + trust
+    ours = str(Path.home() / ".llm-router" / "hooks")
+    if hooks_json.exists():
+        try:
+            doc = json.loads(hooks_json.read_text())
+        except (OSError, ValueError):
+            doc = None
+        if doc is None:
+            lines.append(_warn(f"{hooks_json} is not valid JSON — hooks disabled"))
+        else:
+            wanted = {}
+            for event, groups in (doc.get("hooks") or {}).items():
+                if event not in codex_host.EVENT_LABELS or not isinstance(groups, list):
+                    continue
+                for gi, g in enumerate(groups):
+                    for hi, hnd in enumerate((g.get("hooks") or []) if isinstance(g, dict) else []):
+                        if isinstance(hnd, dict) and ours in str(hnd.get("command", "")):
+                            key = codex_host.hook_state_key(hooks_json, event, gi, hi)
+                            wanted[key] = (event, codex_host.hook_trust_hash(event, hnd, g.get("matcher")))
+            have = codex_host.read_trust_records(text)
+            if not wanted:
+                lines.append(_warn("no llm_router hook in hooks.json — Codex gets pull routing only (no ⚡ ROUTE hint)"))
+            for key, (event, digest) in wanted.items():
+                if have.get(key) == digest:
+                    lines.append(_ok(f"{event} hook trusted"))
+                elif key in have:
+                    lines.append(_fail(f"{event} hook trust record is stale — Codex skips it silently", fix=fix))
+                    issues.append(f"Codex {event} hook untrusted (modified)")
+                else:
+                    lines.append(_fail(f"{event} hook has no trust record — Codex skips it silently", fix=fix))
+                    issues.append(f"Codex {event} hook untrusted")
+    else:
+        lines.append(_warn("hooks.json not found — Codex gets pull routing only (no ⚡ ROUTE hint)"))
+
+    # 4. AGENTS.md
+    agents = codex_dir / "AGENTS.md"
+    try:
+        has_block = agents.exists() and codex_host.AGENTS_BLOCK_START in agents.read_text()
+    except OSError:
+        has_block = False
+    lines.append(_ok("routing rules block in AGENTS.md") if has_block
+                 else _warn("no routing rules block in AGENTS.md", ))
+
+    # 5. Gateway (opt-in) and the one setting that breaks Codex
+    if _extract_toml_string(text, "model_provider") == "llm_router":
+        lines.append(_fail(
+            "Codex model_provider is force-set to 'llm_router' — this breaks Codex CLI "
+            "(gateway wire-format mismatch)", fix=fix,
+        ))
+        issues.append("Codex model_provider forced to llm_router (breaks Codex)")
+    if "[model_providers.llm_router]" in text:
+        lines.append(_dim("    opt-in gateway provider registered (use -c model_provider=llm_router per call)"))
+
+    # 6. Legacy leftovers
+    for legacy in ("config.yaml", "config.json", "rules/llm_router.md", "instructions.md"):
+        p = codex_dir / legacy
+        try:
+            if p.exists() and "llm_router" in p.read_text(errors="ignore"):
+                lines.append(_warn(f"{legacy} mentions llm_router but Codex never reads it — re-run install to clean up"))
+        except OSError:
+            pass
+
+    return lines, issues
+
+
+def _codex_report(issues: list[str]) -> list[str]:
+    lines, found = _codex_checks()
+    issues.extend(found)
+    return lines
+
+
 def _run_doctor_host(host: str) -> None:
     """Run host-specific installation checks."""
     valid_hosts = {"claude", "vscode", "cursor", "codex", "all"}
@@ -221,81 +366,8 @@ def _run_doctor_host(host: str) -> None:
                 print(_warn(f"routing rules not found at {cursor_rules}"))
 
         elif h == "codex":
-            codex_dir = Path.home() / ".codex"
-            config_toml = codex_dir / "config.toml"
-            config_yaml = codex_dir / "config.yaml"
-            hooks_json = codex_dir / "hooks.json"
-
-            gateway_url = None
-            if config_toml.exists():
-                try:
-                    text = config_toml.read_text()
-                    model_provider = _extract_toml_string(text, "model_provider")
-                    if model_provider == "llm_router":
-                        # The LLM Router gateway doesn't yet speak Codex's exact
-                        # OpenAI "responses" wire shape — forcing it as the
-                        # global default breaks EVERY Codex call (interactive
-                        # and LLM Router's own routed dispatch alike) with an
-                        # undecodable-stream error. An older llm_router install
-                        # set this; re-running the installer self-heals it.
-                        print(_fail(
-                            "Codex model_provider is force-set to 'llm_router' — "
-                            "this breaks Codex CLI (gateway wire-format mismatch)",
-                            fix="llm-router install --host codex --mode gateway",
-                        ))
-                        issues.append("Codex model_provider forced to llm_router (breaks Codex)")
-                    else:
-                        print(_ok(f"Codex using its own default model provider ({config_toml})"))
-
-                    if "[model_providers.llm_router]" in text:
-                        print(_ok("LLM Router model provider registered (available via -c model_provider=llm_router)"))
-                        gateway_url = _extract_toml_section_string(
-                            text, "model_providers.llm_router", "base_url"
-                        )
-                    else:
-                        print(_fail(
-                            "LLM Router model provider table missing",
-                            fix="llm-router install --host codex --mode gateway",
-                        ))
-                        issues.append("Codex LLM Router provider table missing")
-                except OSError as e:
-                    print(_fail(f"could not read {config_toml}: {e}"))
-                    issues.append("Codex config.toml unreadable")
-            else:
-                print(_fail(
-                    f"config.toml not found at {config_toml}",
-                    fix="llm-router install --host codex --mode gateway",
-                ))
-                issues.append("Codex config.toml missing")
-
-            if config_yaml.exists() and "llm_router" in config_yaml.read_text(errors="ignore"):
-                print(_ok("MCP companion registered in config.yaml"))
-            else:
-                print(_warn("MCP companion not found in config.yaml"))
-
-            if hooks_json.exists() and "codex-post-tool.py" in hooks_json.read_text(errors="ignore"):
-                print(_ok("PostToolUse telemetry hook installed"))
-            else:
-                print(_warn("PostToolUse telemetry hook not found"))
-
-            if gateway_url:
-                health_url = gateway_url.rstrip("/").removesuffix("/v1") + "/healthz"
-                try:
-                    req = urllib.request.Request(health_url, method="GET")
-                    with urllib.request.urlopen(req, timeout=2) as resp:
-                        data = json.loads(resp.read())
-                    if data.get("ok"):
-                        print(_ok(f"gateway reachable ({health_url})"))
-                        print(_green("  Opt-in routing (-c model_provider=llm_router): available"))
-                    else:
-                        print(_warn(f"gateway responded without ok=true ({health_url})"))
-                        print(_yellow("  Opt-in routing: registered, gateway health uncertain"))
-                except Exception as e:
-                    print(_warn(f"gateway not reachable at {health_url}: {e}"))
-                    print(_yellow("  Opt-in routing: registered, but gateway is not running"))
-
-        if not issues:
-            print(_green(f"  ✓ {h} is correctly configured"))
+            for line in _codex_report(issues):
+                print(f"  {line}")
         else:
             print(_red(f"  {len(issues)} issue(s) found for {h}"))
 
@@ -939,6 +1011,20 @@ def _run_doctor(host: Optional[str] = None) -> tuple[int, list[str]]:
         issues.append("MCP server not registered in Claude Code")
 
     # ── 4. Claude Desktop ──────────────────────────────────────────────────
+    # ── 4b. Codex CLI (only when installed) ──────────────────────────────────
+    # A present host with no registration is a FAIL: the user installed
+    # llm-router expecting both hosts wired, and a one-way install looks
+    # identical from inside Claude Code.
+    try:
+        from llm_router.host_detect import detect_hosts as _detect_hosts
+        _codex_present = _detect_hosts()["codex"].present
+    except Exception:  # noqa: BLE001
+        _codex_present = False
+    if _codex_present:
+        print(f"\n{_bold('  Codex CLI')}")
+        for line in _codex_report(issues):
+            print(f"  {line}")
+
     print(f"\n{_bold('  Claude Desktop')}")
     desktop_path = claude_desktop_config_path()
     if desktop_path is None:

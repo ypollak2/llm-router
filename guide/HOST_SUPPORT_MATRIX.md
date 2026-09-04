@@ -33,7 +33,7 @@ it, **🔜** means we haven't built it.
 | Host | Prompt-interception hook | Can it block? | Status here |
 |---|---|:---:|---|
 | Claude Code | `UserPromptSubmit` | yes | shipped |
-| Codex CLI | `UserPromptSubmit` | yes — `{"decision":"block"}` | not yet |
+| Codex CLI | `UserPromptSubmit` | yes — `{"decision":"block"}` | shipped (`llm-router install`; hook trust record written to config.toml) |
 | Cursor | `beforeSubmitPrompt` | yes | not yet |
 | Gemini CLI | `UserPromptSubmit` | yes | shipped |
 
@@ -83,39 +83,44 @@ llm-router install
 
 ---
 
-### 🟡 Codex CLI (Strong)
+### 🟢 Codex CLI (Full)
 
-**Tier: Explicit MCP Routing**
+**Tier: Automatic Routing (push) + MCP**
 
-OpenAI's agent runner. llm-router MCP tools can be called from Codex, but
-native Codex turns do not pass through llm-router.
+OpenAI's agent runner. `llm-router install` detects Codex and wires it the
+same way it wires Claude Code, so routing works in both directions: cheap
+work from Claude Code lands on the ChatGPT seat, hard work from Codex lands
+on the Claude seat.
 
 **Activation:**
 ```bash
-llm-router install --host codex
+llm-router install            # auto-detects Codex; or: --host codex
+llm-router doctor             # Codex CLI section + Seats table
 ```
 
+**What is written (verified against Codex 0.153):**
+- `~/.codex/config.toml` — `[mcp_servers.llm_router]` (via `codex mcp add`, TOML
+  fallback) and a `[hooks.state."…"] trusted_hash` record per hook. Codex
+  silently skips a hook without that record; earlier installers never wrote it.
+- `~/.codex/hooks.json` — `UserPromptSubmit` → auto-route (the ⚡ ROUTE hint),
+  `PostToolUse` → telemetry.
+- `~/.codex/AGENTS.md` — a marked block of routing rules, replaced on re-run.
+
+Earlier versions wrote `config.yaml`, `config.json`, `rules/llm_router.md`
+and `instructions.md`. Codex reads none of them; install removes ours.
+
 **Features:**
-- ✅ Explicit MCP routing via `llm_auto` and routed tools
-- ✅ Tracks calls made through llm-router MCP tools
+- ✅ Push routing: the same ⚡ ROUTE hint Claude Code gets, on every prompt
+- ✅ MCP routing via `llm_auto` and routed tools
 - ✅ Codex injected as free tier 1 in all chains
-- ✅ Cost tracking via SQLite
-- ✅ Decision analytics
-
-**Cost savings:** Up to 60–80% for tasks explicitly sent through llm-router
-
-**Why it is useful:**
-- Codex CLI runtime is purpose-built for agent work
-- Codex injected automatically within explicitly invoked routing chains
-- Routed-call analytics are available
+- ✅ Cost tracking via SQLite; decision analytics
 
 **Limitations:**
 - Requires Codex CLI installed locally
-- No automatic routing for native Codex turns
+- PreToolUse payload keys are not yet captured, so `enforce-route` is Claude Code only
 - No native Codex turn/token metering in `llm_session_spend`
-- No real-time quota pressure display (use `llm-router budget` manually)
-
----
+- Gateway mode (`--mode gateway`) is opt-in: the gateway does not yet speak
+  Codex's "responses" wire format
 
 ### 🟡 Gemini CLI (Strong)
 

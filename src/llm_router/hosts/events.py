@@ -111,17 +111,28 @@ CODEX = HostEvents(
         Event.SUBAGENT_STOP: "SubagentStop",
         Event.STOP: "Stop",
     },
-    # Payload keys NOT yet captured from a running Codex. Task 18 must record a
-    # real payload before reading any of these.
-    prompt_key=None,
-    session_key=None,
+    # UserPromptSubmit payload captured from a real `codex exec` run of Codex
+    # 0.153.2 on 2026-09-04 (tests/fixtures/codex_user_prompt_submit.json).
+    # Tool-event keys are still unverified: no PreToolUse payload has been
+    # captured, so a port must not read them yet.
+    prompt_key="prompt",
+    session_key="session_id",
     tool_name_key=None,
     tool_input_key=None,
     can_block_prompt=True,
     can_rewrite_tool_input=True,
     block_shape={"decision": "block", "reason": "<text>"},
-    context_key=None,
+    # codex-rs/hooks/src/schema.rs UserPromptSubmitHookSpecificOutputWire:
+    # {"hookSpecificOutput": {"hookEventName": "UserPromptSubmit",
+    #  "additionalContext": "..."}} -- deny_unknown_fields, so nothing else.
+    context_key="hookSpecificOutput.additionalContext",
     notes=(
+        "A hook in hooks.json runs ONLY with a matching "
+        "[hooks.state.\"<hooks.json>:<event>:<group>:<handler>\"] trusted_hash "
+        "record in config.toml; otherwise Codex skips it silently. "
+        "llm_router.codex_host computes the hash.",
+        "The payload also carries turn_id, transcript_path, cwd, "
+        "hook_event_name, model (e.g. gpt-5.5) and permission_mode.",
         "Hooks are enabled by default; disabled via [features].hooks = false.",
         "PreToolUse can rewrite arguments via updatedInput — a capability the "
         "Claude Code path does not have, so the shared core must treat rewrite "
