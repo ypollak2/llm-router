@@ -12,6 +12,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [13.2.2] — The injected block repeated itself (2026-09-10)
+
+### Fixed
+
+- **Every retrieved document reached the model twice.**
+  `_write_source_concept` stores one string in two fields — `description` is
+  `summary[:120]`, the body is the full `summary` — and `as_context_block` emitted
+  both. So a SourceFile arrived as its symbol list truncated mid-name, followed
+  immediately by the same list in full:
+
+      ## [SourceFile] src/llm_router/router.py
+      Defines: route_and_call, build_chain, ..., _format_subprocess_chain_error,     <- 120 chars
+      Defines: route_and_call, build_chain, ..., execute_chain, _call_text, ...      <- 1003 chars
+
+  With up to three documents injected inside a 3000-token draft budget, that is
+  real space spent on a duplicate — and the truncated copy is worse than useless: a
+  name cut in half is a name the model can complete wrongly, which is the failure
+  the grounding checks exist to catch.
+
+  Deduplicated at render, not at write, so documents already on disk benefit
+  without a re-index. The body wins when one string contains the other, since the
+  description is the truncated one; a description that says something the body does
+  not — curated notes, the model catalog — is kept. Measured on a live document:
+  765 -> 644 characters.
+
+
 ## [13.2.1] — The index eroded itself (2026-09-10)
 
 ### Fixed

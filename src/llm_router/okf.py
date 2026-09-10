@@ -170,11 +170,33 @@ class OKFConcept:
     extra: dict[str, Any] = field(default_factory=dict)
 
     def as_context_block(self) -> str:
+        """Render for injection, without saying the same thing twice.
+
+        `_write_source_concept` stores one string in two fields: `description` is
+        `summary[:120]` and the body is the full `summary`. Emitting both put every
+        SourceFile into the prompt as its symbol list truncated mid-name, followed
+        immediately by the same list in full — 120 against 1003 characters for
+        `router.py` on the machine this was found on. With three docs injected
+        inside a 3000-token budget that is real space spent on a duplicate, and the
+        truncated copy is worse than useless: a name cut in half is a name the model
+        can complete wrongly.
+
+        Deduplicated at render rather than at write, so documents already on disk
+        benefit without a re-index. When one contains the other the body wins,
+        because the description is the truncated one.
+        """
         parts = [f"## [{self.type}] {self.title}"]
-        if self.description:
-            parts.append(self.description)
-        if self.body.strip():
-            parts.append(self.body.strip())
+        desc = (self.description or "").strip()
+        body = (self.body or "").strip()
+        if desc and body:
+            # Curated docs carry a description that genuinely says something the
+            # body does not; only drop it when it is redundant.
+            if body.startswith(desc) or desc.startswith(body):
+                desc = ""
+        if desc:
+            parts.append(desc)
+        if body:
+            parts.append(body)
         return "\n".join(parts)
 
 
