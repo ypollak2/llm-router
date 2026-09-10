@@ -22,7 +22,19 @@ import aiosqlite
 from llm_router.contract import RoutingContract
 from llm_router.gates import GateResult
 
-_DB_PATH = Path.home() / ".llm-router" / "receipts.db"
+def _db_path() -> Path:
+    """Where receipts.db lives, resolved PER CALL.
+
+    Was a module-level constant evaluated at import, which captured the real user's
+    home before `LLM_ROUTER_HOME` could be honoured — so the supported isolation
+    override silently did nothing and receipts from an isolated run landed in the
+    developer's real store. Same defect class as cost.savings_log_path() and the
+    auto-route debug log: a path computed at import ignores every isolation
+    mechanism added afterwards.
+    """
+    from llm_router.paths import state_path
+
+    return state_path("receipts.db")
 
 _CREATE_TABLE = """
 CREATE TABLE IF NOT EXISTS receipts (
@@ -113,11 +125,11 @@ def compute_receipt(
 async def store_receipt(receipt: Receipt) -> None:
     """Persist a receipt to SQLite. Silent on failure."""
     try:
-        _DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+        _db_path().parent.mkdir(parents=True, exist_ok=True)
         # Daemon thread: store_receipt runs fire-and-forget; if the loop
         # shuts down before this task finishes, the `async with` never exits
         # and a non-daemon aiosqlite worker thread would hang interpreter exit.
-        _conn = aiosqlite.connect(str(_DB_PATH))
+        _conn = aiosqlite.connect(str(_db_path()))
         # See cost._get_db: mark the worker thread daemon before it starts
         # (aiosqlite >=0.22 stores it as `_thread`; older versions were a
         # Thread subclass) so a dropped pending write can't block exit.
@@ -160,10 +172,10 @@ async def store_receipt(receipt: Receipt) -> None:
 async def get_session_receipts(since_timestamp: float) -> list[dict]:
     """Retrieve receipts since a given timestamp for session summary."""
     try:
-        if not _DB_PATH.exists():
+        if not _db_path().exists():
             return []
         from llm_router.aiosqlite_util import mark_worker_daemon
-        _conn = aiosqlite.connect(str(_DB_PATH))
+        _conn = aiosqlite.connect(str(_db_path()))
         mark_worker_daemon(_conn)  # CHZ-PY-004: before __aenter__ starts the worker
         async with _conn as db:
             await db.execute(_CREATE_TABLE)
