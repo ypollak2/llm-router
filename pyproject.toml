@@ -143,6 +143,31 @@ exclude = [
     # there the pattern matched too much, here it matched too little.
     "/_quarantined_tests/",
     "/awesome-readme/",
+    # Research/eval working data at the repo ROOT. `src/llm_router/data/` is
+    # package data and MUST stay — hence the leading slash, per the anchoring
+    # lesson above.
+    #
+    # Caught by building the sdist before tagging: /data/policy/embed_cache.jsonl
+    # alone is 224 MB, which took the 13.2.0 sdist to 101 MB compressed — over
+    # PyPI's 100 MB per-file limit. The upload would have failed, or worse
+    # succeeded and permanently shipped a RouterArena embedding cache to everyone
+    # who installs the router.
+    "/data/",
+    "/experiments/",
+    # Hypothesis's local example database — per-machine test state, never
+    # something an installer needs.
+    "/.hypothesis/",
+    # Scratch files that accumulate at the repo root during development. They are
+    # untracked, so git never complains, and nothing but an sdist listing reveals
+    # that they were about to be published.
+    "/test_uploads_task_func/",
+    "/file1.txt",
+    "/file2.jpg",
+    "/file_sizes.csv",
+    "/files.zip",
+    "/prefix_42.json",
+    "/test_server.csv",
+    "/test_server_structured.csv",
     # ── Backup / temp files — never publish (CLAUDE.md sdist safety rule) ─
     ".env.backup.*",
     "*.bak",
