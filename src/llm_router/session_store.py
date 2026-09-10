@@ -722,7 +722,18 @@ def build_session_context(
             return ""
         # RED2-04: block context egress to ANY non-free-local provider under
         # `local` (was a two-provider allowlist that let Perplexity through).
-        if mode == "local" and target_provider not in ("ollama", "codex", "gemini_cli"):
+        #
+        # S2-5: "local" itself belongs in the allowlist. The hook passes
+        # `target_provider="local"` — a category, not a provider name, meaning "the
+        # free-local draft chain", which the free-tier-drafts filter has already
+        # guaranteed. It was not in the list, so setting
+        # LLM_ROUTER_SESSION_CONTEXT=local silently returned "" for every draft: the
+        # privacy setting most likely to be chosen by someone who wants context to
+        # stay on the machine was the one that switched context off entirely, with
+        # no error. Masked until now only because the default mode is `all`.
+        if mode == "local" and target_provider not in (
+            "local", "ollama", "codex", "gemini_cli"
+        ):
             return ""
 
         records = load_events(session_id, limit=200)

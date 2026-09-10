@@ -2278,6 +2278,61 @@ def _extract_turn_text(content) -> str:
 
 _ASSISTANT_PERSIST_TURNS = 6
 
+# S2-5. A gated prompt is routable when its reference can be RESOLVED, not merely
+# when it names something. Minimums below are what separates "there is an exchange
+# to resolve against" from "there is a scrap that invites a confident wrong guess";
+# without context a model refuses, which is safe, so thin context is strictly worse
+# than none.
+_RESCUE_MIN_ASSISTANT_TURNS = 1   # what was concluded, not just what was asked
+_RESCUE_MIN_CONTEXT_CHARS = 200   # a real exchange, not "hi" / "ok"
+
+
+def _session_context_rescue(prompt: str, session_id: str) -> str | None:
+    """Session context able to resolve *prompt*, or None to leave the gate closed.
+
+    `_is_context_dependent` blocks ~48% of real prompts and is right to: they point
+    at local state. Stage 1's OKF rescue covers the ones that NAME code, worth 1.3%.
+    The remainder point rather than name — "commit this and show me the demo again"
+    — and no document retrieval resolves "this". The conversation does. Measured on
+    a real transcript, same prompt and model:
+
+        without context: "I need more specific details... Could you clarify?"
+        with context:    "'This' refers to the technical assessment submission for
+                          the Head of AI role in the arena-demo repo..."
+
+    Requires at least one prior ASSISTANT turn. A store holding only the user's own
+    prompts records what was asked and never what was concluded, which is exactly
+    the half "did that work?" and "commit this" refer to.
+
+    `LLM_ROUTER_SESSION_RESCUE=off` disables it for operators who would rather not
+    relay conversation to a local model at all.
+    """
+    if not session_id:
+        return None
+    if os.environ.get("LLM_ROUTER_SESSION_RESCUE", "on").strip().lower() in (
+        "0", "off", "false", "no"
+    ):
+        return None
+    try:
+        from llm_router import session_store as _ss
+
+        events = _ss.load_events(session_id, limit=200)
+        assistant = [e for e in events if e.get("role") == "assistant"]
+        if len(assistant) < _RESCUE_MIN_ASSISTANT_TURNS:
+            return None
+        ctx = _ss.build_session_context(
+            session_id,
+            max_tokens=_draft_context_budget(),
+            task_type="",
+            query=prompt,
+            target_provider="ollama",
+        )
+        if not ctx or len(ctx.strip()) < _RESCUE_MIN_CONTEXT_CHARS:
+            return None
+        return ctx
+    except Exception:  # noqa: BLE001 — context is best-effort, never fatal
+        return None
+
 # S2-4. 800 was written into the call site while
 # `RouterConfig.session_context_max_tokens_draft` — which documents itself as the
 # "budget for hook-level direct/draft call injection" — sat unread. Changing the
@@ -3515,8 +3570,24 @@ def main() -> None:
                 f"({', '.join(d.title for d in _okf_docs)}) — routing WITH context"
             )
         else:
-            _direct_enabled = False
-            _debug_log(f"[INVOCATION {invocation_id:.3f}] DIRECT SKIP: context-dependent prompt")
+            # S2-5: the prompt names nothing, but it may still POINT at something
+            # the conversation can resolve. "commit this and show me the demo
+            # again" is unanswerable from documents and perfectly answerable from
+            # the exchange it follows. Requires a prior assistant turn — a store of
+            # the user's own prompts records what was asked, never what was
+            # concluded, and the conclusion is the half being pointed at.
+            _rescue_ctx = _session_context_rescue(prompt, session_id or "")
+            if _rescue_ctx:
+                _debug_log(
+                    f"[INVOCATION {invocation_id:.3f}] SESSION RESCUE: context-dependent "
+                    f"but {len(_rescue_ctx)} chars of conversation resolve it — "
+                    f"routing WITH context"
+                )
+            else:
+                _direct_enabled = False
+                _debug_log(
+                    f"[INVOCATION {invocation_id:.3f}] DIRECT SKIP: context-dependent prompt"
+                )
 
     # Coordination prompts are advisory-only in ALL modes (including
     # zero-Claude): the direct path has no subagents, so a pre-generated
