@@ -105,6 +105,7 @@ ENV_REGISTRY: dict[str, tuple[str, str, int]] = {
     "LLM_ROUTER_FREE_TIER_DRAFTS": ("llm_router", "hooks/auto-route.py", 1),
     "LLM_ROUTER_GATES": ("llm_router", "gates.py", 1),
     "LLM_ROUTER_GROUNDING_CHECK": ("llm_router", "hooks/auto-route.py", 1),
+    "LLM_ROUTER_SYMBOL_GROUNDING": ("llm_router", "hooks/auto-route.py", 1),
     "LLM_ROUTER_GATEWAY_HOST": ("llm_router", "presets.py", 1),
     "LLM_ROUTER_GATEWAY_PORT": ("llm_router", "presets.py", 1),
     "LLM_ROUTER_GATEWAY_URL": ("llm_router", "presets.py", 1),

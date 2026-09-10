@@ -2325,6 +2325,82 @@ def _grounding_violations(draft: str, context: str, prompt: str = "") -> list[st
     return out
 
 
+# S5. A CALL, not a word before a bracket. Two requirements, both learned by
+# measuring against real model output rather than assumed:
+#
+#   * the paren must be adjacent. `\s*\(` matched ordinary English — "threads (or
+#     processes)" and "keywords (from the prompt)" were both reported as invented
+#     functions, a 2-in-3 false-positive rate on real answers.
+#   * the name must look like an identifier: an underscore, or internal capitals.
+#     A bare lowercase word before a paren is prose far more often than it is code,
+#     and a guard that rejects correct answers costs routing silently — the
+#     fallthrough is indistinguishable from a model that simply did not answer.
+_DRAFT_SYMBOL_RE = re.compile(r"\b([A-Za-z_][A-Za-z0-9_]*(?:_[A-Za-z0-9_]+|[a-z][A-Z][A-Za-z0-9_]*))\(")
+
+# Words that appear with parens in ordinary writing and in shell, and would
+# otherwise be read as invented functions. `test()`, `build()` and `run()` are
+# English before they are identifiers.
+_SYMBOL_NOISE = frozenset({
+    "and", "build", "check", "def", "deploy", "elif", "for", "fix", "function",
+    "get", "here", "http", "https", "if", "install", "int", "json", "list", "log",
+    "not", "note", "open", "print", "return", "run", "set", "sudo", "test", "the",
+    "this", "try", "update", "use", "using", "while", "with", "yaml",
+})
+
+
+def _known_symbols() -> set[str]:
+    """Every symbol name the OKF index knows for this project.
+
+    Only meaningful once `okf index` has run. An empty set means "nothing is
+    checkable", never "everything is invented" — see _symbol_violations.
+    """
+    out: set[str] = set()
+    try:
+        from llm_router import okf as _okf
+
+        for concept in _okf._get_bundle():
+            for sym in concept.extra.get("key_symbols") or []:
+                out.add(str(sym))
+    except Exception:  # noqa: BLE001
+        return set()
+    return out
+
+
+def _symbol_violations(draft: str, context: str, prompt: str = "") -> list[str]:
+    """Functions/classes the draft calls that exist nowhere checkable.
+
+    S2-6 validates paths; this validates the other half of the verified structure
+    `okf index` now holds. A draft sounds specific when it cites
+    `reconcile_invoice_totals()`, and specificity is exactly what makes a fabricated
+    answer persuasive.
+
+    Deliberately NOT a fix for the U7-class failure, which invented prose and named
+    no symbols at all — nothing structural can catch that, which is why S2-5b fixed
+    it at the gate. This covers the case in between.
+
+    A symbol in the index, the context, or the prompt is grounded. Only a name in
+    none of them is a violation, and only when the index is populated: unknown is
+    not invented, and unknown must never reject.
+    """
+    if not draft:
+        return []
+    try:
+        known = _known_symbols()
+    except Exception:  # noqa: BLE001
+        return []
+    if not known:
+        return []  # nothing indexed → nothing checkable
+    haystack = f"{context or ''}\n{prompt or ''}"
+    out: list[str] = []
+    for m in _DRAFT_SYMBOL_RE.finditer(draft):
+        name = m.group(1)
+        if name.lower() in _SYMBOL_NOISE or name in known or name in haystack:
+            continue
+        if name not in out:
+            out.append(name)
+    return out
+
+
 def _draft_is_relayable(draft: str, context: str, prompt: str = "") -> bool:
     """Whether a DIRECT draft may be shown, or should fall through to Claude.
 
@@ -2337,7 +2413,15 @@ def _draft_is_relayable(draft: str, context: str, prompt: str = "") -> bool:
     ):
         return True
     try:
-        return not _grounding_violations(draft, context, prompt)
+        if _grounding_violations(draft, context, prompt):
+            return False
+        # Symbol checking has its own switch: path checking is cheap and certain,
+        # while this depends on the OKF index being present and reasonably fresh.
+        if os.environ.get("LLM_ROUTER_SYMBOL_GROUNDING", "on").strip().lower() in (
+            "0", "off", "false", "no"
+        ):
+            return True
+        return not _symbol_violations(draft, context, prompt)
     except Exception:  # noqa: BLE001
         return True
 
