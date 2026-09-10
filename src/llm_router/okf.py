@@ -724,8 +724,32 @@ def _write_source_concept(
     key_symbols: list[str],
     last_model: str,
     base: Path,
+    authoritative: bool = False,
 ) -> None:
-    """Synchronous write; called in executor thread."""
+    """Synchronous write; called in executor thread.
+
+    MERGES by default: the new symbols are added to whatever the document already
+    holds, never substituted for them.
+
+    The overwrite this replaces was fine while only routed answers enriched, which
+    was rare. OKF-INDEX-01 then put enrichment on `context-capture.py`, which fires
+    on EVERY tool call with the default cap of 10 and sees only what the tool
+    printed — so one tool result mentioning one function replaced a file's entire
+    indexed document with that single symbol. Measured after a few hours of ordinary
+    work against 1069 indexed documents:
+
+        src/llm_router/hooks/auto-route.py    stored   1 / real  91
+        src/llm_router/cost.py                stored   1 / real  63
+        src/llm_router/okf.py                 stored   1 / real  36
+
+    Silent, and pointed the wrong way: the eroded files are the large central ones,
+    because those are what tool calls keep touching, so the documents most likely to
+    be asked about were hollowed out first.
+
+    ``authoritative=True`` is for `index_project`, which read the whole file and is
+    therefore entitled to say a symbol is gone. A writer that saw a fragment must
+    never be able to assert that the file contains less than it does.
+    """
     rel = Path(file_path)
     # CHZ-OKF-01: under this PROJECT's directory, not the flat global `source/`.
     # A doc about `middleware.py` is only meaningful next to the repo it came
@@ -737,6 +761,22 @@ def _write_source_concept(
     if rel.suffix in (".py", ".ts", ".js", ".go", ".rs", ".java"):
         tags.append(rel.suffix.lstrip("."))
 
+    merged = list(key_symbols)
+    if not authoritative and concept_path.exists():
+        try:
+            prior = _parse_okf(concept_path.read_text(encoding="utf-8"), concept_path)
+        except OSError:
+            prior = None
+        if prior is not None:
+            # Order: what this writer saw first, then what was already known. The
+            # cap then trims the least recently observed rather than the newest.
+            known = [str(x) for x in (prior.extra.get("key_symbols") or [])]
+            merged = list(dict.fromkeys(merged + known))
+    if merged != list(key_symbols):
+        # The description is body text to `_score`; a stale one leaves the document
+        # unfindable by symbols it still claims to hold.
+        summary = "Defines: " + ", ".join(merged)
+
     fm: dict[str, Any] = {
         "type": "SourceFile",
         "title": str(rel),
@@ -747,8 +787,8 @@ def _write_source_concept(
     }
     if last_model:
         fm["last_model"] = last_model
-    if key_symbols:
-        fm["key_symbols"] = key_symbols[:200]
+    if merged:
+        fm["key_symbols"] = merged[:200]
 
     body = summary or f"Source file: {file_path}"
     text = f"---\n{yaml.dump(fm, default_flow_style=False).strip()}\n---\n\n{body}\n"
@@ -982,8 +1022,12 @@ def index_project(
         if not symbols:
             result["skipped"] += 1
             continue
+        # authoritative: the whole file was just read, so this IS the symbol set.
+        # Only the indexer gets to shrink a document; enrichment, which sees a
+        # fragment, merges.
         _write_source_concept(
-            rel, "Defines: " + ", ".join(symbols), symbols, "", base
+            rel, "Defines: " + ", ".join(symbols), symbols, "", base,
+            authoritative=True,
         )
         result["indexed"] += 1
 
