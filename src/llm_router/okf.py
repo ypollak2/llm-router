@@ -52,7 +52,24 @@ def project_root(start: Path | None = None) -> Path:
     Git root rather than raw cwd, so context follows the PROJECT and not whichever
     subdirectory a command ran from — otherwise `src/` and `tests/` would
     accumulate two disjoint stores for the same codebase.
+
+    ``$LLM_ROUTER_PROJECT_ROOT`` overrides the walk (precedence mirrors
+    ``session_store._project_id``'s ``$LLM_ROUTER_PROJECT_ID``). The override is
+    what makes scoping usable from the MCP server at all: the server is a
+    long-lived process whose cwd is wherever the host editor was launched — in the
+    field that is ``$HOME``, which has no ``.git``, so every project collapsed into
+    one bucket named after the home directory and cross-injected into every other
+    (OKF-SCOPE-01: a `capital of Portugal` prompt retrieved another repo's
+    `demo/llm/__init__.py`). An explicit root is the only signal that survives a
+    process whose cwd is meaningless.
     """
+    if start is None:
+        override = os.environ.get("LLM_ROUTER_PROJECT_ROOT", "").strip()
+        if override:
+            try:
+                return Path(override).expanduser().resolve()
+            except Exception:  # noqa: BLE001 — expanduser raises RuntimeError on ~baduser
+                pass  # unusable override → fall through to the cwd walk
     here = (start or Path.cwd()).resolve()
     for candidate in (here, *here.parents):
         if (candidate / ".git").exists():
@@ -213,7 +230,23 @@ def _retrieval_roots(base: Path = KNOWLEDGE_DIR) -> list[Path]:
     guard in ``find_relevant_sessions`` is simply unused. Both behaviours are
     pinned in tests/okf/test_cross_model_context.py.
     """
-    return [project_knowledge_dir(base=base), base / "models"]
+    return [project_knowledge_dir(base=base)]
+
+
+def _catalog_root(base: Path = KNOWLEDGE_DIR) -> Path:
+    """The shared ModelCapability catalog — read for ROUTING decisions, never
+    injected as task context.
+
+    It used to be a second retrieval root, which made it the single most
+    frequently injected doc in the store: it is project-independent (so it
+    matches every project), and its prose advertises the machinery itself
+    ("Best used with: OKF context injection"), so any prompt containing the word
+    "context" scored a hit. A `capital of Portugal` prompt came back carrying the
+    `gemini-2.5-flash` capability sheet (OKF-SCOPE-01). A catalog of which model
+    to pick is input to the router, not background for the task, so it is no
+    longer reachable from ``find_relevant``.
+    """
+    return base / "models"
 
 
 def _load_dir_sync(root: Path) -> list[OKFConcept]:
@@ -289,11 +322,71 @@ def invalidate_cache() -> None:
 # Relevance scoring and context injection (#1)
 # ---------------------------------------------------------------------------
 
+# Words that pass the \w{5,} filter but carry no domain signal — they describe the
+# ACT of asking or the machinery being asked, so they match docs about anything.
+# "context", "knowledge" and "injection" are the sharpest offenders: the store's
+# own docs talk about OKF context injection, so any prompt that mentions context
+# scored a hit on the machinery describing itself (OKF-SCOPE-01).
+_SCORE_STOPWORDS = frozenset({
+    "about", "above", "after", "again", "against", "already", "although", "always",
+    "another", "answer", "anything", "because", "before", "being", "below", "between",
+    "block", "blocks", "cannot", "could", "context", "could", "current", "described",
+    "detail", "details", "differ", "different", "document", "documents", "during",
+    "email", "every", "example", "examples", "exact", "exactly", "explain", "first",
+    "following", "further", "given", "header", "hello", "helps", "information",
+    "injection", "inside", "instead", "instruction", "instructions", "knowledge",
+    "later", "least", "level", "might", "never", "nothing", "other", "others",
+    "output", "please", "point", "possible", "prompt", "provide", "provided",
+    "question", "really", "reply", "respond", "response", "result", "return",
+    "right", "same", "section", "sections", "shall", "short", "should", "simply",
+    "since", "something", "specific", "still", "story", "suppose", "supplied",
+    "table", "their", "there", "these", "thing", "things", "think", "those",
+    "three", "title", "titles", "today", "under", "until", "using", "value",
+    "where", "whether", "which", "while", "whole", "would", "write", "wrote",
+})
+
+# A doc must reach this weighted score to be injected. Weights are assigned by
+# WHERE the keyword lands (see _score), so the floor is not a keyword count:
+# one hit on a doc's identity (title/tag) clears it, one hit in its prose does not.
+# A flat count of 2 was tried first and was wrong — a file path is a single
+# highly distinctive token, so `alpha_only.py` retrieved nothing.
+_MIN_SCORE_DEFAULT = 2
+
+# What a keyword match is worth. Title and tags are the doc's IDENTITY: matching
+# them means the prompt is about this thing. Body prose is weak evidence — it is
+# where incidental vocabulary lives, and it is how unrelated docs used to score.
+_W_TITLE = 2
+_W_TAG = 2
+_W_BODY = 1
+
+
+def _min_score() -> int:
+    try:
+        return max(1, int(os.environ.get("LLM_ROUTER_OKF_MIN_SCORE", _MIN_SCORE_DEFAULT)))
+    except ValueError:
+        return _MIN_SCORE_DEFAULT
+
+
 def _score(concept: OKFConcept, keywords: list[str]) -> int:
-    searchable = (
-        f"{concept.title} {concept.description} {' '.join(concept.tags)} {concept.body}"
-    ).lower()
-    return sum(1 for kw in keywords if kw in searchable)
+    """Weighted relevance: identity matches count double, prose matches count once.
+
+    The old scorer flattened title, tags, description and body into one string and
+    counted bare hits, so a doc whose *prose* happened to share one word with the
+    prompt scored exactly as high as a doc the prompt actually named. Combined with
+    a `> 0` floor that let every unrelated doc in (OKF-SCOPE-01).
+    """
+    title = concept.title.lower()
+    tags = " ".join(concept.tags).lower()
+    body = f"{concept.description} {concept.body}".lower()
+    total = 0
+    for kw in keywords:
+        if kw in title:
+            total += _W_TITLE
+        elif kw in tags:
+            total += _W_TAG
+        elif kw in body:
+            total += _W_BODY
+    return total
 
 
 def find_relevant(
@@ -308,21 +401,40 @@ def find_relevant(
     if not concepts:
         return []
     keywords = list(dict.fromkeys(
-        w for w in re.findall(r'\b\w{5,}\b', prompt.lower()) if not w.isdigit()
+        w for w in re.findall(r'\b\w{5,}\b', prompt.lower())
+        if not w.isdigit() and w not in _SCORE_STOPWORDS
     ))[:25]
     if not keywords:
         return []
+    floor = _min_score()
     scored = [(c, _score(c, keywords)) for c in concepts]
     scored.sort(key=lambda x: x[1], reverse=True)
-    return [c for c, s in scored[:limit] if s > 0]
+    return [c for c, s in scored[:limit] if s >= floor]
 
 
 def inject_context(prompt: str, concepts: list[OKFConcept]) -> str:
-    """Prepend OKF concept docs to prompt inside a <knowledge_context> block."""
+    """Prepend OKF concept docs to prompt inside a <knowledge_context> block.
+
+    The block is explicitly labelled as retrieved-and-possibly-irrelevant. It used
+    to be an unlabelled wall of markdown sitting in the most salient position in
+    the request, above both the caller's own ``context=`` payload and the question,
+    and models answered *from it* — a review asked about a supplied diff described
+    the retrieved doc instead. Retrieval is a guess; the caller's material is not.
+    Saying so in the prompt is what makes a wrong guess recoverable.
+    """
     if not concepts:
         return prompt
     blocks = "\n\n".join(c.as_context_block() for c in concepts)
-    return f"<knowledge_context>\n{blocks}\n</knowledge_context>\n\n{prompt}"
+    return (
+        "<knowledge_context>\n"
+        "Background retrieved by keyword match from this project's notes. It may be\n"
+        "irrelevant to the question. Anything the user supplied directly, and the\n"
+        "question itself, take precedence — if this block does not bear on the\n"
+        "question, ignore it entirely and never describe it back as the answer.\n\n"
+        f"{blocks}\n"
+        "</knowledge_context>\n\n"
+        f"{prompt}"
+    )
 
 
 # ---------------------------------------------------------------------------

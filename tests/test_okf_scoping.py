@@ -79,14 +79,24 @@ def test_another_projects_docs_are_never_injected(tmp_path, monkeypatch):
     assert "theirs/beta.py" not in titles, "another project's doc leaked into retrieval"
 
 
-def test_model_catalog_is_shared_across_projects(tmp_path, monkeypatch):
-    """Model strengths do not change per repo, so the catalog stays global."""
+def test_model_catalog_is_global_but_out_of_task_retrieval(tmp_path, monkeypatch):
+    """Model strengths do not change per repo, so the catalog stays global — but
+    being global is exactly why it must not be TASK context (OKF-SCOPE-01).
+
+    This test previously asserted the catalog was in the injection bundle. It is
+    project-independent, so it matched every prompt everywhere; a `capital of
+    Portugal` question came back carrying a capability sheet. The catalog is still
+    shared and still read for routing decisions — it is simply no longer reachable
+    from `find_relevant`, which exists to supply background about the user's code.
+    """
     base = tmp_path / "knowledge"
     repo = tmp_path / "repo"
     (repo / ".git").mkdir(parents=True)
     _write(base / "models" / "m.md", type_="ModelCapability", title="fast-model", body="cheap")
     monkeypatch.chdir(repo)
-    assert "fast-model" in {c.title for c in okf._get_bundle(base)}
+    assert "fast-model" not in {c.title for c in okf._get_bundle(base)}
+    # still on disk, still global, still one shared location for every project
+    assert (okf._catalog_root(base) / "m.md").exists()
 
 
 def test_legacy_flat_source_is_no_longer_injected(tmp_path, monkeypatch):
