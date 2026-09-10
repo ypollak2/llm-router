@@ -22,7 +22,7 @@ import time
 import uuid
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel
 
 
@@ -159,8 +159,77 @@ def _qualify_model(model: str | None, provider: str) -> str | None:
     return model if "/" in model else f"{provider}/{model}"
 
 
+PROJECT_HEADER = "X-LLM-Router-Project"
+
+
+def _resolve_project_scope(request, body_value: str | None = None) -> str | None:
+    """The caller's project for OKF retrieval scope, or None to leave it alone.
+
+    The gateway has the MCP server's defect for the same reason: long-lived
+    process, cwd wherever it was launched, so retrieval scoped to it finds the
+    wrong project or none. It has no roots capability, and the OpenAI/Anthropic/
+    Ollama schemas are fixed, so four of the five endpoints cannot carry scope in
+    the body. A header can, identically for every client.
+
+    Precedence: header, then body, then None (env, then cwd, unchanged). The header
+    wins because it is the more specific signal — a caller that set it on this
+    request meant this request.
+
+    C4, the access question. A header naming an arbitrary path is a read primitive
+    into any project's knowledge store on this machine — the concern CHZ-AUD-024
+    raised for session logs, arriving through a different door. Bounded by three
+    facts: the gateway binds loopback, it already rejects cross-origin browser
+    requests, and the store holds only paths and symbol names from the user's own
+    repositories. So the default trusts a local caller but insists the path is
+    real, and `LLM_ROUTER_PROJECT_ALLOWLIST` locks it down for anyone who wants
+    that. A refused scope narrows context; it never fails the request, because
+    losing retrieval is not worth losing the answer.
+    """
+    raw = ""
+    try:
+        raw = (request.headers.get(PROJECT_HEADER) or "").strip()
+    except Exception:  # noqa: BLE001 — a header lookup must never break a route
+        raw = ""
+    if not raw:
+        raw = (body_value or "").strip()
+    if not raw:
+        return None
+
+    try:
+        candidate = Path(raw).expanduser().resolve()
+    except Exception:  # noqa: BLE001
+        return None
+    # Must be a real directory: a typo would otherwise scope to nothing silently,
+    # and a caller could probe for the existence of arbitrary paths by watching
+    # for a different outcome.
+    if not candidate.is_dir():
+        return None
+
+    allow = os.environ.get("LLM_ROUTER_PROJECT_ALLOWLIST", "").strip()
+    if allow:
+        for entry in allow.split(os.pathsep):
+            entry = entry.strip()
+            if not entry:
+                continue
+            try:
+                root = Path(entry).expanduser().resolve()
+            except Exception:  # noqa: BLE001
+                continue
+            # relative_to, not startswith: a string prefix would admit
+            # `/srv/app-evil` under an allowlist of `/srv/app`, and `..` segments
+            # are already gone because both sides are resolved.
+            try:
+                candidate.relative_to(root)
+                break
+            except ValueError:
+                continue
+        else:
+            return None
+    return str(candidate)
+
+
 async def _route(prompt: str, task_type: str | None, complexity: str | None,
-                 prefer_model: str | None = None):
+                 prefer_model: str | None = None, project_root: str | None = None):
     """Shared core for every wire-format endpoint: classify (if needed) → route
     through LLM Router's FULL router and adapt the result.
 
@@ -182,6 +251,7 @@ async def _route(prompt: str, task_type: str | None, complexity: str | None,
             "task_type": task_type,
             "complexity": complexity,
             "model": prefer_model,
+            "project_root": project_root,
         })
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -265,7 +335,7 @@ def health() -> dict:
 
 # ── Native: POST /route (parity with the zero-dep route_server) ───────────────
 @app.post("/route")
-async def route(payload: dict) -> dict:
+async def route(payload: dict, request: Request) -> dict:
     """Minimal native routing endpoint — same contract as ``llm_router.route_server``.
 
     Body: ``{"prompt", "complexity"?, "system"?, "task_type"?, "max_tokens"?,
@@ -274,6 +344,12 @@ async def route(payload: dict) -> dict:
     ``route_payload`` core as every other endpoint.
     """
     from llm_router.route_server import route_payload_async
+    # Header wins over the body field; both may be absent.
+    _scope = _resolve_project_scope(request, payload.get("project_root"))
+    if _scope:
+        payload = {**payload, "project_root": _scope}
+    else:
+        payload = {k: v for k, v in payload.items() if k != "project_root"}
     try:
         return await route_payload_async(payload)
     except ValueError as e:
@@ -302,9 +378,10 @@ class _OAIRequest(BaseModel):
 
 
 @app.post("/v1/chat/completions")
-async def openai_chat(req: _OAIRequest) -> dict:
+async def openai_chat(req: _OAIRequest, request: Request) -> dict:
     r = await _route(_flatten(req.messages), req.task_type, req.complexity,
-                     prefer_model=_qualify_model(req.model, "openai"))
+                     prefer_model=_qualify_model(req.model, "openai"),
+                     project_root=_resolve_project_scope(request))
     return {
         "id": f"chatcmpl-{uuid.uuid4().hex[:24]}",
         "object": "chat.completion",
@@ -327,12 +404,13 @@ class _ResponsesRequest(BaseModel):
 
 
 @app.post("/v1/responses")
-async def openai_responses(req: _ResponsesRequest) -> dict:
+async def openai_responses(req: _ResponsesRequest, request: Request) -> dict:
     prompt = _flatten_responses_input(req.input)
     if req.instructions:
         prompt = f"system: {req.instructions}\n{prompt}"
     r = await _route(prompt, req.task_type, req.complexity,
-                     prefer_model=_qualify_model(req.model, "openai"))
+                     prefer_model=_qualify_model(req.model, "openai"),
+                     project_root=_resolve_project_scope(request))
     output_id = f"msg_{uuid.uuid4().hex[:24]}"
     return {
         "id": f"resp_{uuid.uuid4().hex[:24]}",
@@ -373,10 +451,11 @@ class _AnthropicRequest(BaseModel):
 
 
 @app.post("/v1/messages")
-async def anthropic_messages(req: _AnthropicRequest) -> dict:
+async def anthropic_messages(req: _AnthropicRequest, request: Request) -> dict:
     prompt = (f"system: {req.system}\n" if req.system else "") + _flatten(req.messages)
     r = await _route(prompt, None, None,
-                     prefer_model=_qualify_model(req.model, "anthropic"))
+                     prefer_model=_qualify_model(req.model, "anthropic"),
+                     project_root=_resolve_project_scope(request))
     return {
         "id": f"msg_{uuid.uuid4().hex[:24]}",
         "type": "message",
@@ -400,9 +479,10 @@ class _OllamaGenerate(BaseModel):
 
 
 @app.post("/api/chat")
-async def ollama_chat(req: _OllamaChat) -> dict:
+async def ollama_chat(req: _OllamaChat, request: Request) -> dict:
     r = await _route(_flatten(req.messages), None, None,
-                     prefer_model=_qualify_model(req.model, "ollama"))
+                     prefer_model=_qualify_model(req.model, "ollama"),
+                     project_root=_resolve_project_scope(request))
     return {
         "model": f"{r.model.provider}/{r.model.model}",
         "message": {"role": "assistant", "content": r.text},
@@ -412,9 +492,10 @@ async def ollama_chat(req: _OllamaChat) -> dict:
 
 
 @app.post("/api/generate")
-async def ollama_generate(req: _OllamaGenerate) -> dict:
+async def ollama_generate(req: _OllamaGenerate, request: Request) -> dict:
     r = await _route(req.prompt, None, None,
-                     prefer_model=_qualify_model(req.model, "ollama"))
+                     prefer_model=_qualify_model(req.model, "ollama"),
+                     project_root=_resolve_project_scope(request))
     return {
         "model": f"{r.model.provider}/{r.model.model}",
         "response": r.text,

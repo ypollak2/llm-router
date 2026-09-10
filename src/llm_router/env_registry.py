@@ -222,6 +222,7 @@ ENV_REGISTRY: dict[str, tuple[str, str, int]] = {
     "LLM_ROUTER_ESCALATE_MIN_PROMPT_TOKENS": ("provider_credential", "router.py", 1),
     "LLM_ROUTER_HF_TOKENIZERS": ("provider_credential", "token_budget.py", 1),
     "LLM_ROUTER_PROJECT_ID": ("provider_credential", "session_store.py", 1),
+    "LLM_ROUTER_PROJECT_ALLOWLIST": ("llm_router", "gateway.py", 1),
     "LLM_ROUTER_PROJECT_ROOT": ("llm_router", "okf.py", 1),
     "LLM_ROUTER_RESPONSE_ROUTER_TOKEN_THRESHOLD": ("provider_credential", "response_router.py", 1),
     "LLM_ROUTER_SCIM_TOKEN": ("provider_credential", "admin_api.py", 2),
