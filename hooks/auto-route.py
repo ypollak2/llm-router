@@ -3355,9 +3355,33 @@ def main() -> None:
     # routed model can't see the user's files/repo/history/state, so a pre-generated
     # draft would be fabrication. Leave these for Claude (it has context + tools);
     # also saves the wasted local-model call. (zero_claude mode still routes.)
+    #
+    # OKF-INDEX-01: the gate now asks whether the model would ACTUALLY be blind,
+    # rather than assuming it. Measured on 376 real prompts from this machine, the
+    # gate skips ~48% — and reading them confirmed they genuinely do reference local
+    # state, so widening the gate is not the answer. Retrieving what they reference
+    # is. When `okf index` has put the repo in the store and the prompt names
+    # something in it, the routed model gets that material and the prompt stops
+    # being unanswerable. Retrieval is deliberately high-precision (an exact,
+    # distinctive symbol or path token), so an empty result is the common case and
+    # the gate still closes on it.
+    _okf_docs = []
     if _direct_enabled and not zero_claude and _is_context_dependent(prompt):
-        _direct_enabled = False
-        _debug_log(f"[INVOCATION {invocation_id:.3f}] DIRECT SKIP: context-dependent prompt")
+        try:
+            from llm_router import okf as _okf
+            _okf_docs = _okf.find_relevant(prompt)
+        except Exception as _exc:  # noqa: BLE001 — retrieval must never break routing
+            _okf_docs = []
+            _debug_log(f"[INVOCATION {invocation_id:.3f}] OKF LOOKUP FAILED: {_exc}")
+        if _okf_docs:
+            _debug_log(
+                f"[INVOCATION {invocation_id:.3f}] OKF RESCUE: context-dependent but "
+                f"{len(_okf_docs)} doc(s) retrieved "
+                f"({', '.join(d.title for d in _okf_docs)}) — routing WITH context"
+            )
+        else:
+            _direct_enabled = False
+            _debug_log(f"[INVOCATION {invocation_id:.3f}] DIRECT SKIP: context-dependent prompt")
 
     # Coordination prompts are advisory-only in ALL modes (including
     # zero-Claude): the direct path has no subagents, so a pre-generated
@@ -3418,6 +3442,24 @@ def main() -> None:
                     )
                 except Exception:
                     _session_ctx = None
+
+            # OKF-INDEX-01: prepend the docs that rescued this prompt from the gate.
+            # Without this the rescue above would route a prompt on the STRENGTH of
+            # retrieved context and then not send it — the worst of both, and
+            # exactly the fabrication the gate was protecting against.
+            if _okf_docs:
+                try:
+                    from llm_router import okf as _okf
+                    _okf_block = _okf.inject_context("", _okf_docs).rstrip()
+                    _session_ctx = (
+                        f"{_okf_block}\n\n{_session_ctx}" if _session_ctx else _okf_block
+                    )
+                except Exception as _exc:  # noqa: BLE001
+                    _debug_log(
+                        f"[INVOCATION {invocation_id:.3f}] OKF INJECT FAILED: {_exc}"
+                    )
+                    # The rescue is only valid if the material actually ships.
+                    _direct_enabled = False
 
             _direct_result = None
             # GH#57: wall-clock for the DIRECT attempt, so a timeout can be

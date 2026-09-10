@@ -45,6 +45,7 @@ def store(tmp_path: Path) -> Path:
             title: billing/invoice_reconciler.py
             description: Reconciles invoice line items against ledger entries.
             tags: [billing, invoice, reconciler]
+            key_symbols: [reconcile_invoice, ledger_delta, InvoiceMismatch]
             ---
 
             Defines: reconcile_invoice, ledger_delta, InvoiceMismatch.

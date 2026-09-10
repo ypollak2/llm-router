@@ -44,6 +44,8 @@ def _print_help() -> None:
 {_b('llm-router okf')} — inspect the knowledge store that feeds routed prompts
 
   {_b('llm-router okf status')}        what is stored, per project, and what gets injected
+  {_b('llm-router okf index')}         index this repo's tracked source into the store
+  {_b('llm-router okf index <path>')}  index another repo instead
   {_b('llm-router okf gc')}            report docs that are model prose rather than verified structure
   {_b('llm-router okf gc --apply')}    move those to knowledge/quarantine/ (recoverable, never deleted)
   {_b('llm-router okf adopt')}         move VERIFIED legacy docs into this project's store
@@ -93,6 +95,26 @@ def cmd_okf(args: list[str]) -> None:
         if len(others) > 1:
             print(f"\n  {_dim('other projects with a store')}: {len(others) - 1}")
         print()
+        return
+
+    if sub == "index":
+        target = None
+        for a in args[1:]:
+            if not a.startswith("-"):
+                target = Path(a).expanduser()
+                break
+        root = (target or okf.project_root()).resolve()
+        print(f"\n{_b('Indexing')} {root}")
+        print(_dim("  tracked source files only (git ls-files); symbols and paths, never prose"))
+        report = okf.index_project(root=root)
+        if report.get("error"):
+            print(f"  {_y('skipped')}: {report['error']}\n")
+            return
+        print(f"\n  scanned  : {report['scanned']} source file(s)")
+        print(f"  {_g('indexed')}  : {report['indexed']} doc(s)")
+        print(f"  skipped  : {report['skipped']} (no extractable symbols)")
+        print(f"  store    : {report['store']}")
+        print(_dim("\n  These are now retrievable as context for prompts about this repo.\n"))
         return
 
     if sub == "gc":
