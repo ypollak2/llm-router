@@ -2278,6 +2278,47 @@ def _extract_turn_text(content) -> str:
 
 _ASSISTANT_PERSIST_TURNS = 6
 
+# S2-4. 800 was written into the call site while
+# `RouterConfig.session_context_max_tokens_draft` — which documents itself as the
+# "budget for hook-level direct/draft call injection" — sat unread. Changing the
+# config did nothing; the only way to alter the budget was to edit the hook.
+#
+# The value is 3000 rather than 800 because 800 was set without reference to what
+# the receiving model holds. Across this machine's 27 sessions with 5+ events the
+# largest carry ~40k, ~12k and ~9k tokens of content, so 800 was 1-8% of a real
+# working session. The ceiling was measured, not guessed: qwen3-coder:30b at
+# default num_ctx processed a 4656-token prompt with prompt_eval_count=4656 and
+# still recovered a marker planted after the filler, so a 4.6k prompt survives
+# intact on the model this routes to. 3000 leaves room for the prompt, any OKF
+# block, and the answer.
+_DRAFT_CTX_DEFAULT = 3000
+_DRAFT_CTX_MAX = 32000
+
+
+def _draft_context_budget() -> int:
+    """Token budget for session context injected into a DIRECT draft.
+
+    Precedence: env → RouterConfig → default. Clamped, because 0 would silently
+    disable context injection and a huge value would push the prompt out of the
+    model's window — both failures that look like "context stopped working".
+    """
+    raw = os.environ.get("LLM_ROUTER_SESSION_CONTEXT_DRAFT_BUDGET", "").strip()
+    value: int | None = None
+    if raw:
+        try:
+            value = int(raw)
+        except ValueError:
+            value = None
+    if value is None:
+        try:
+            from llm_router.config import get_config
+            value = int(getattr(get_config(), "session_context_max_tokens_draft", 0)) or None
+        except Exception:  # noqa: BLE001 — config is optional in early-boot hooks
+            value = None
+    if value is None or value <= 0:
+        value = _DRAFT_CTX_DEFAULT
+    return max(1, min(value, _DRAFT_CTX_MAX))
+
 
 def _persist_assistant_turns(
     transcript_path: str,
@@ -3529,7 +3570,7 @@ def main() -> None:
                     from llm_router import session_store as _session_store
                     _session_ctx = _session_store.build_session_context(
                         session_id,
-                        max_tokens=800,
+                        max_tokens=_draft_context_budget(),
                         task_type=task_type,
                         query=prompt,
                         target_provider="local",

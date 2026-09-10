@@ -176,6 +176,7 @@ ENV_REGISTRY: dict[str, tuple[str, str, int]] = {
     "LLM_ROUTER_SESSIONS_PATH": ("llm_router", "agents/session.py", 1),
     "LLM_ROUTER_SESSION_BUDGET": ("llm_router", "hooks/enforce-route.py", 1),
     "LLM_ROUTER_SESSION_CONTEXT": ("llm_router", "session_store.py", 1),
+    "LLM_ROUTER_SESSION_CONTEXT_DRAFT_BUDGET": ("llm_router", "hooks/auto-route.py", 1),
     "LLM_ROUTER_SESSION_ID": ("llm_router", "hooks/auto-route.py", 2),
     "LLM_ROUTER_SESSION_PAID_CAP": ("llm_router", "hooks/auto-route.py", 1),
     "LLM_ROUTER_SIDECAR_PREFETCH": ("llm_router", "commands/doctor.py", 2),
