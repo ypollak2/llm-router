@@ -12,6 +12,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [13.2.1] — The index eroded itself (2026-09-10)
+
+### Fixed
+
+- **`okf index` decayed as you worked.** `_write_source_concept` overwrote the
+  document rather than merging into it. That was harmless while only routed answers
+  enriched, which was rare — and 13.2.0 put enrichment on `context-capture.py`,
+  which fires on EVERY tool call with a cap of 10 symbols and sees only what the
+  tool printed. So one tool result mentioning one function replaced that file's
+  entire indexed document with that single symbol.
+
+  Measured after a few hours of ordinary work, against 1069 indexed documents:
+
+      docs with FEWER symbols than the file defines: 19
+
+      src/llm_router/hooks/auto-route.py    stored   1 / real  91
+      src/llm_router/cost.py                stored   1 / real  63
+      src/llm_router/router.py              stored   1 / real  52
+      src/llm_router/okf.py                 stored   1 / real  36
+
+  Silent, and it points the wrong way: the eroded files are the large central ones,
+  because those are what tool calls keep touching, so the documents most likely to
+  be asked about were hollowed out first. It also disguises itself — a query that
+  worked right after indexing stops working an hour later, and the cause looks like
+  a scoping problem.
+
+  Writes now merge. Only `index_project` may shrink a document, because only it
+  read the whole file; a writer that saw a fragment can no longer assert that the
+  file contains less than it does.
+
+### Upgrading
+
+Anyone who ran `llm-router okf index` on 13.2.0 has a partly eroded store. Re-run
+it once after upgrading; the merge keeps it correct from then on.
+
+
 ## [13.2.0] — Routing recovery: the timeout, the contamination, the fragmentation (2026-09-10)
 
 Sustained routing had fallen from 31-39% to ~2% of real prompts (5 successes in 246,
