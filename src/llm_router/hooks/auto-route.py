@@ -253,7 +253,15 @@ def _load_discovered_ollama_models() -> list[str]:
 _DISCOVERED_OLLAMA = _load_discovered_ollama_models()
 # First discovered model used as the single-model fallback (e.g. for tracking)
 OLLAMA_MODEL = _DISCOVERED_OLLAMA[0] if _DISCOVERED_OLLAMA else "qwen3.5:latest"
-OLLAMA_TIMEOUT = int(os.environ.get("LLM_ROUTER_OLLAMA_TIMEOUT", "4"))
+# 4s was the old default and no local model could ever meet it: measured p50s on
+# this machine are 11.4s (lfm2.5:8b), 15.8s (qwen3-coder:30b) and 28.5s (qwen3.8),
+# and even "Say OK." took 6.6s warm. Every DIRECT attempt therefore aborted at
+# exactly 4s and fell through to Claude — 86 of 246 real prompts in one week.
+# Measured on 376 real prompts, the context-dependent gate lets 52.1% through, so
+# the timeout — not the gate — is what was stopping those from routing.
+# 45s clears the slowest local model with headroom for a cold load (Ollama.app
+# serves one slot, so a queued request waits for the one ahead of it).
+OLLAMA_TIMEOUT = int(os.environ.get("LLM_ROUTER_OLLAMA_TIMEOUT", "45"))
 CONFIDENCE_THRESHOLD = int(os.environ.get("LLM_ROUTER_CONFIDENCE_THRESHOLD", "2"))  # v7.5.0: Aggressive routing — route more with lower threshold
 # Privacy-first: classify locally only (heuristic + Ollama) by default.
 # Set LLM_ROUTER_CLASSIFY_LOCAL_ONLY=false to enable external classifiers.
@@ -2688,7 +2696,18 @@ def _get_selected_model(task_type: str, complexity: str) -> tuple[str, str]:
         return "unknown", "unknown"
 
 
-_DEBUG_LOG = Path.home() / ".llm-router" / "auto-route-debug.log"
+def _debug_log_path() -> Path:
+    """Resolved PER CALL, never at import.
+
+    As a module-level constant this baked in the real `$HOME` at import time, so a
+    test that monkeypatched HOME afterwards still wrote to the developer's live
+    log. That is how 227 invocations carrying `chain=['ollama/fake-model']` and an
+    empty `session_id` ended up interleaved with real routing decisions in
+    `~/.llm-router/auto-route-debug.log` — they were test-suite runs, and they made
+    the production log unusable for measuring the routing rate until they were
+    filtered back out by hand. Same class of defect as the receipt-path bug.
+    """
+    return Path.home() / ".llm-router" / "auto-route-debug.log"
 _PROMPT_COUNTS = Path.home() / ".llm-router" / "session_prompt_counts.json"
 
 
@@ -2763,7 +2782,7 @@ def _debug_log(msg: str) -> None:
     """Log debug info to help diagnose hook invocation issues."""
     try:
         timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
-        with open(_DEBUG_LOG, "a") as f:
+        with open(_debug_log_path(), "a") as f:
             f.write(f"[{timestamp}] {msg}\n")
     except Exception:
         pass  # Silently fail if logging doesn't work
