@@ -303,7 +303,16 @@ llm-router install      # wire up your host (Claude Code by default)
 llm-router health       # provider connectivity
 llm-router status       # savings + quota at a glance
 llm-router doctor       # diagnose a broken setup
+
+llm-router okf index    # index this repo so routed models can see your code
+llm-router okf status   # what is in the knowledge store, per project
+llm-router sessions status   # is any session's context unreadable?
 ```
+
+`okf index` is worth running once per repo you work in. Without it the knowledge
+store can only learn from answers that were already routed, which is a deadlock —
+nothing routes because the model has no context, and the store stays empty because
+nothing routed.
 
 Full command reference: **[guide/GETTING_STARTED.md](guide/GETTING_STARTED.md)**
 
@@ -423,6 +432,14 @@ export LLM_ROUTER_DIRECT_EXECUTION=false
 
 Routing still works with it disabled; you lose only the local pre-answer path.
 
+**Since 13.2.0**, a draft that reaches you has passed two grounding checks: it may not
+cite a file, or call a function, that exists neither in the material it was given nor
+in the indexed repo. A draft that does is discarded and the turn falls through to
+Claude. This catches the mechanical way a context-fed answer goes wrong — a confident
+reference to a test that was never written. It does **not** verify that the answer is
+correct, and it cannot see invented prose; `LLM_ROUTER_GROUNDING_CHECK=off` and
+`LLM_ROUTER_SYMBOL_GROUNDING=off` disable them.
+
 See [SECURITY.md](https://github.com/ypollak2/llm-router/blob/main/SECURITY.md) for the full
 analysis and the responsible disclosure policy.
 
@@ -437,7 +454,14 @@ export OPENROUTER_API_KEY="sk-or-v1-..."          # biggest single unlock
 export OLLAMA_BASE_URL="http://localhost:11434"   # local, free
 export LLM_ROUTER_POLICY="cost_aggressive"        # routing policy
 export LLM_ROUTER_ENFORCE="smart"                 # off | advise | smart | hard
+export LLM_ROUTER_OLLAMA_TIMEOUT=45               # seconds; 45 clears a real local p50
+export LLM_ROUTER_PROJECT_ROOT="$PWD"             # scope the knowledge store explicitly
 ```
+
+`LLM_ROUTER_OLLAMA_TIMEOUT` matters more than it looks. It was 4s before 13.2.0, and
+no local model can answer in 4s — measured p50s on an M-series machine are 11-28s, so
+every local attempt aborted and fell through to Claude. If you run larger models,
+raise it further rather than wondering why nothing routes.
 
 Full reference, config file schema and per-host overrides:
 **[guide/GETTING_STARTED.md](guide/GETTING_STARTED.md)**
