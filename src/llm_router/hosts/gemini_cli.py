@@ -15,7 +15,7 @@ class GeminiCliAdapter:
     name: str = "gemini-cli"
     config_path: Path = Path.home() / ".gemini" / "mcp_servers.json"
 
-    def install(self, server_command: list[str]) -> Path:
+    def install(self, server_command: list[str], env: dict[str, str] | None = None) -> Path:
         self.config_path.parent.mkdir(parents=True, exist_ok=True)
         config = self._read_or_init()
         config.setdefault("mcpServers", {})

@@ -69,9 +69,25 @@ def _note_lock_timeout(what: str) -> None:
 # so injected context never gets re-captured and re-injected into itself.
 SENTINEL_OPEN = "[llm_router-session-context]"
 SENTINEL_CLOSE = "[/llm_router-session-context]"
+
+# S2-3: there are TWO injectors, and this guard only knew about its own.
+# `okf.inject_context` wraps retrieved documents in `<knowledge_context>`, and
+# `router.py` rebinds `prompt = _okf.inject_context(prompt, concepts)` BEFORE
+# dispatch — so `router.py:1977` recorded the rebound value as the user's turn.
+# Every routed call with retrieval active wrote the retrieved documents into the
+# conversation history as though the user had said them, and build_session_context
+# served them back on later turns. Found in this machine's live shard as:
+#
+#     [user] <knowledge_context> ## [ModelCapability] gemini-2.5-pro ...
+#
+# Guarding here rather than at each call site: there are six writers, and a
+# seventh must not be able to reopen the loop by not knowing about it.
 _INJECTED_CTX_RE = re.compile(
-    re.escape(SENTINEL_OPEN) + r".*?" + re.escape(SENTINEL_CLOSE),
-    re.DOTALL,
+    "(?:"
+    + re.escape(SENTINEL_OPEN) + r".*?" + re.escape(SENTINEL_CLOSE)
+    + r"|<knowledge_context>.*?</knowledge_context>"
+    + ")",
+    re.DOTALL | re.IGNORECASE,
 )
 
 # ── Tunables ──────────────────────────────────────────────────────────────
@@ -188,10 +204,37 @@ def _project_id() -> str:
         cwd = os.getcwd()
     except Exception:
         cwd = os.path.expanduser("~")
+    # S2-1: the REPO ROOT of the cwd, not the raw cwd. Hashing the raw cwd made
+    # `repo/`, `repo/src/` and `repo/tests/` three different projects, and the
+    # PostToolUse hook runs with whatever cwd the last tool call left behind — so a
+    # session that touched several directories scattered its events across several
+    # buckets while build_session_context read exactly one. Measured on this
+    # machine: one session across 7 buckets, 299 events recorded, 176 readable.
+    cwd = _repo_root_of(cwd)
     # Namespacing key, not a security hash (usedforsecurity=False → bandit B324).
     return hashlib.sha1(
         cwd.encode("utf-8", errors="ignore"), usedforsecurity=False
     ).hexdigest()[:16]
+
+
+def _repo_root_of(start: str) -> str:
+    """Nearest ancestor of *start* containing ``.git``, else *start* unchanged.
+
+    Cross-project isolation is preserved: two different repos still hash to two
+    different ids. Only subdirectories of the SAME repo are merged, which is what
+    "project scope" was always supposed to mean.
+    """
+    try:
+        here = Path(start).resolve()
+    except Exception:
+        return start
+    for candidate in (here, *here.parents):
+        try:
+            if (candidate / ".git").exists():
+                return str(candidate)
+        except OSError:
+            break
+    return str(here)
 
 
 def _project_dir() -> Path:
@@ -204,6 +247,19 @@ def _sanitize(session_id: str) -> str:
 
 
 def _session_path(session_id: str) -> Path:
+    """Where this session's log lives, within the CURRENT project scope.
+
+    Resolution deliberately stays scope-local. Following a session id across
+    buckets was tried — a session id is arguably a stronger identity than a
+    directory, and it would have consolidated the remaining fragmentation — but it
+    breaks the isolation guarantee CHZ-AUD-024 pins: a project must not be able to
+    read a session it does not own, even knowing its id. Reassembling more context
+    is not worth handing one project a read path into another's conversation.
+
+    What remains is bounded and by design: events recorded while the cwd was in a
+    genuinely different project stay with that project. See ``_repo_root_of`` for
+    the part that IS fixed — subdirectories of one repo no longer split.
+    """
     return _project_dir() / f"session_context_{_sanitize(session_id)}.jsonl"
 
 
@@ -666,7 +722,18 @@ def build_session_context(
             return ""
         # RED2-04: block context egress to ANY non-free-local provider under
         # `local` (was a two-provider allowlist that let Perplexity through).
-        if mode == "local" and target_provider not in ("ollama", "codex", "gemini_cli"):
+        #
+        # S2-5: "local" itself belongs in the allowlist. The hook passes
+        # `target_provider="local"` — a category, not a provider name, meaning "the
+        # free-local draft chain", which the free-tier-drafts filter has already
+        # guaranteed. It was not in the list, so setting
+        # LLM_ROUTER_SESSION_CONTEXT=local silently returned "" for every draft: the
+        # privacy setting most likely to be chosen by someone who wants context to
+        # stay on the machine was the one that switched context off entirely, with
+        # no error. Masked until now only because the default mode is `all`.
+        if mode == "local" and target_provider not in (
+            "local", "ollama", "codex", "gemini_cli"
+        ):
             return ""
 
         records = load_events(session_id, limit=200)
@@ -725,6 +792,148 @@ def cleanup_old_sessions(max_age_days: int = _TTL_DAYS) -> None:
                 pass
     except Exception:
         pass
+
+
+# ---------------------------------------------------------------------------
+# Shard recovery (S4)
+# ---------------------------------------------------------------------------
+# S2-1 stopped NEW fragmentation but deliberately left existing shards alone:
+# consolidating them at runtime would be a cross-project read, which CHZ-AUD-024
+# forbids. What makes recovery legitimate is who asks and when — the audit forbids
+# a running project silently reading another project's session by id; it does not
+# forbid the owner of the machine explicitly migrating their own store, which is
+# what `okf adopt` and `okf gc` already do for the knowledge store.
+#
+# Hence: explicit CLI only, never a runtime path; dry-run by default; and the
+# originating shards are left on disk, so a merge that turns out wrong costs disk
+# rather than data.
+
+def _shard_paths(session_id: str) -> list[Path]:
+    """Every bucket holding a log for *session_id*, within this machine's store."""
+    name = f"session_context_{_sanitize(session_id)}.jsonl"
+    try:
+        return sorted(
+            p for p in (_state_dir() / "projects").glob(f"*/{name}")
+            if p.is_file()
+        )
+    except OSError:
+        return []
+
+
+def _read_shard(path: Path) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    try:
+        with path.open(encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except json.JSONDecodeError:
+                    continue  # torn trailing line — same tolerance as load_events
+                if isinstance(rec, dict):
+                    out.append(rec)
+    except OSError:
+        pass
+    return out
+
+
+def fragmented_sessions() -> dict[str, dict[str, Any]]:
+    """Sessions whose events are split across more than one project bucket."""
+    found: dict[str, dict[str, Any]] = {}
+    try:
+        root = _state_dir() / "projects"
+        by_session: dict[str, list[Path]] = {}
+        for p in root.glob("*/session_context_*.jsonl"):
+            sid = p.name[len("session_context_"):-len(".jsonl")]
+            by_session.setdefault(sid, []).append(p)
+    except OSError:
+        return found
+    for sid, paths in by_session.items():
+        counts = {p.parent.name: len(_read_shard(p)) for p in paths}
+        counts = {k: v for k, v in counts.items() if v}
+        if len(counts) > 1:
+            total = sum(counts.values())
+            found[sid] = {
+                "shards": len(counts),
+                "events": total,
+                "readable": max(counts.values()),
+                "stranded": total - max(counts.values()),
+                "buckets": counts,
+            }
+    return found
+
+
+def merge_session_shards(session_id: str, apply: bool = False) -> dict[str, Any]:
+    """Consolidate every shard of *session_id* into the current project's log.
+
+    Ordering is by recorded timestamp where events carry one, because a merged
+    conversation with interleaved turns in the wrong order is worse than one that is
+    merely split: it reads as a coherent history that never happened.
+
+    Returns a report dict. With ``apply=False`` (the default) nothing is written —
+    a merge that turns out to be wrong should be discovered before it is applied.
+    """
+    paths = _shard_paths(session_id)
+    report: dict[str, Any] = {
+        "session_id": session_id,
+        "shards": len(paths),
+        "events": 0,
+        "merged": 0,
+        "applied": False,
+        "target": None,
+    }
+    if not paths:
+        return report
+
+    seen: set[tuple[str, str, Any]] = set()
+    merged: list[dict[str, Any]] = []
+    for p in paths:
+        for rec in _read_shard(p):
+            # Shards overlap when the same turn was recorded from two cwds.
+            key = (rec.get("role", ""), (rec.get("content") or "").strip(), rec.get("ts"))
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append(rec)
+    report["events"] = len(merged)
+
+    def _ts(rec: dict[str, Any]) -> float:
+        raw = rec.get("ts", rec.get("timestamp", 0))
+        try:
+            return float(raw)
+        except (TypeError, ValueError):
+            return 0.0
+
+    merged.sort(key=_ts)
+    target = _session_path(session_id)
+    report["target"] = str(target)
+    report["merged"] = max(0, len(merged) - max(
+        (len(_read_shard(p)) for p in paths), default=0
+    ))
+    if len(paths) < 2 or not apply:
+        return report
+
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        tmp = target.with_suffix(".jsonl.merging")
+        with tmp.open("w", encoding="utf-8") as fh:
+            for rec in merged:
+                fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
+        # Originating shards are NOT removed. See the note above: a bad merge
+        # should cost disk, not the only copy of a conversation.
+        for p in paths:
+            if p != target:
+                try:
+                    p.rename(p.with_suffix(".jsonl.premerge"))
+                except OSError:
+                    pass
+        os.replace(str(tmp), str(target))
+        report["applied"] = True
+    except OSError:
+        pass
+    return report
 
 
 def archive_session(session_id: str | None) -> None:

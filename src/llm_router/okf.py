@@ -52,7 +52,24 @@ def project_root(start: Path | None = None) -> Path:
     Git root rather than raw cwd, so context follows the PROJECT and not whichever
     subdirectory a command ran from — otherwise `src/` and `tests/` would
     accumulate two disjoint stores for the same codebase.
+
+    ``$LLM_ROUTER_PROJECT_ROOT`` overrides the walk (precedence mirrors
+    ``session_store._project_id``'s ``$LLM_ROUTER_PROJECT_ID``). The override is
+    what makes scoping usable from the MCP server at all: the server is a
+    long-lived process whose cwd is wherever the host editor was launched — in the
+    field that is ``$HOME``, which has no ``.git``, so every project collapsed into
+    one bucket named after the home directory and cross-injected into every other
+    (OKF-SCOPE-01: a `capital of Portugal` prompt retrieved another repo's
+    `demo/llm/__init__.py`). An explicit root is the only signal that survives a
+    process whose cwd is meaningless.
     """
+    if start is None:
+        override = os.environ.get("LLM_ROUTER_PROJECT_ROOT", "").strip()
+        if override:
+            try:
+                return Path(override).expanduser().resolve()
+            except Exception:  # noqa: BLE001 — expanduser raises RuntimeError on ~baduser
+                pass  # unusable override → fall through to the cwd walk
     here = (start or Path.cwd()).resolve()
     for candidate in (here, *here.parents):
         if (candidate / ".git").exists():
@@ -110,15 +127,29 @@ _SYM_PAT = re.compile(
 )
 
 
-def _extract_files_and_symbols(clean_prompt: str, clean_response: str) -> tuple[list[str], list[str]]:
+def _extract_files_and_symbols(
+    clean_prompt: str,
+    clean_response: str,
+    max_symbols: int = 10,
+) -> tuple[list[str], list[str]]:
     """Pull checkable structure only: real file paths + defined symbol names.
-    Shared by enrichment and session capture so both honor the verified-only rule."""
+    Shared by enrichment and session capture so both honor the verified-only rule.
+
+    ``max_symbols`` defaults to 10, which is right for enrichment — a model reply
+    mentions a handful of symbols and the rest of the cap would be noise. It is
+    wrong for indexing a whole file: `okf.py` defines ~40 functions and
+    `find_relevant` is not among the first ten, so a prompt naming it retrieved
+    unrelated test files while the module that defines it scored zero. Callers
+    that read a complete source file raise the cap.
+    """
     files = list(dict.fromkeys(
         m.group(1).lstrip("./")
         for m in _FILE_PAT.finditer(clean_prompt + "\n" + clean_response)
         if not m.group(1).startswith(".")
     ))[:5]
-    symbols = list(dict.fromkeys(m.group(1) for m in _SYM_PAT.finditer(clean_response)))[:10]
+    symbols = list(dict.fromkeys(
+        m.group(1) for m in _SYM_PAT.finditer(clean_response)
+    ))[:max_symbols]
     return files, symbols
 
 
@@ -213,7 +244,23 @@ def _retrieval_roots(base: Path = KNOWLEDGE_DIR) -> list[Path]:
     guard in ``find_relevant_sessions`` is simply unused. Both behaviours are
     pinned in tests/okf/test_cross_model_context.py.
     """
-    return [project_knowledge_dir(base=base), base / "models"]
+    return [project_knowledge_dir(base=base)]
+
+
+def _catalog_root(base: Path = KNOWLEDGE_DIR) -> Path:
+    """The shared ModelCapability catalog — read for ROUTING decisions, never
+    injected as task context.
+
+    It used to be a second retrieval root, which made it the single most
+    frequently injected doc in the store: it is project-independent (so it
+    matches every project), and its prose advertises the machinery itself
+    ("Best used with: OKF context injection"), so any prompt containing the word
+    "context" scored a hit. A `capital of Portugal` prompt came back carrying the
+    `gemini-2.5-flash` capability sheet (OKF-SCOPE-01). A catalog of which model
+    to pick is input to the router, not background for the task, so it is no
+    longer reachable from ``find_relevant``.
+    """
+    return base / "models"
 
 
 def _load_dir_sync(root: Path) -> list[OKFConcept]:
@@ -289,11 +336,194 @@ def invalidate_cache() -> None:
 # Relevance scoring and context injection (#1)
 # ---------------------------------------------------------------------------
 
+# Words that pass the \w{5,} filter but carry no domain signal — they describe the
+# ACT of asking or the machinery being asked, so they match docs about anything.
+# "context", "knowledge" and "injection" are the sharpest offenders: the store's
+# own docs talk about OKF context injection, so any prompt that mentions context
+# scored a hit on the machinery describing itself (OKF-SCOPE-01).
+_SCORE_STOPWORDS = frozenset({
+    "about", "above", "after", "again", "against", "already", "although", "always",
+    "another", "answer", "anything", "because", "before", "being", "below", "between",
+    "block", "blocks", "cannot", "could", "context", "could", "current", "described",
+    "detail", "details", "differ", "different", "document", "documents", "during",
+    "email", "every", "example", "examples", "exact", "exactly", "explain", "first",
+    "following", "further", "given", "header", "hello", "helps", "information",
+    "injection", "inside", "instead", "instruction", "instructions", "knowledge",
+    "later", "least", "level", "might", "never", "nothing", "other", "others",
+    "output", "please", "point", "possible", "prompt", "provide", "provided",
+    "question", "really", "reply", "respond", "response", "result", "return",
+    "right", "same", "section", "sections", "shall", "short", "should", "simply",
+    "since", "something", "specific", "still", "story", "suppose", "supplied",
+    "table", "their", "there", "these", "thing", "things", "think", "those",
+    "three", "title", "titles", "today", "under", "until", "using", "value",
+    "where", "whether", "which", "while", "whole", "would", "write", "wrote",
+})
+
+# A doc must reach this weighted score to be injected. Weights are assigned by
+# WHERE the keyword lands (see _score), so the floor is not a keyword count:
+# one hit on a doc's identity (title/tag) clears it, one hit in its prose does not.
+# A flat count of 2 was tried first and was wrong — a file path is a single
+# highly distinctive token, so `alpha_only.py` retrieved nothing.
+_MIN_SCORE_DEFAULT = 2
+
+# What a keyword match is worth. Title and tags are the doc's IDENTITY: matching
+# them means the prompt is about this thing. Body prose is weak evidence — it is
+# where incidental vocabulary lives, and it is how unrelated docs used to score.
+_W_SYMBOL = 3
+_W_TITLE = 2
+_W_TAG = 2
+_W_PATH_PART = 1
+_W_BODY = 1
+
+# A title that is a PATH is not the same kind of identity as a title that is a
+# name. `tests/test_agent_loop.py` contains the word "agent", but the doc is not
+# about agents — it is about that file. Scoring a path component at full title
+# weight is what let "draft a blog post about agent evaluation" retrieve three
+# test files once the store held 1063 docs instead of 2. Path components score
+# like prose; the symbols the file actually defines score highest, because those
+# are the verified structure the store exists to hold.
+_PATHY_TITLE_RE = re.compile(r"[/\\]|\.\w{1,5}$")
+
+# Split an identifier or path into matchable tokens: reconcile_invoice ->
+# {reconcile, invoice, reconcile_invoice}. Substring matching was the earlier
+# behaviour and it made "agent" match "agentic", "agents" and "test_agent_loop".
+_TOKEN_SPLIT_RE = re.compile(r"[^a-z0-9]+")
+
+# A prompt "names" something in the store only if it WRITES it as code: an
+# identifier with an underscore, a dotted or slashed path, or camelCase. A word
+# length threshold was tried first (>=6 chars) and was far too weak — "commit",
+# "changes", "private", "process" and "working" all cleared it, so "yes, commit
+# it" retrieved a budget-backend test and would have been routed as though the
+# model had been handed relevant code. Measured on 376 real prompts that rule
+# "rescued" 22.9% of gated prompts, nearly all of them false. English prose does
+# not contain underscores or file extensions; source identifiers do.
+_IDENTIFIER_SHAPED_RE = re.compile(
+    r"_"                        # snake_case
+    r"|\.(?:py|ts|tsx|js|jsx|go|rs|java|md|json|toml|ya?ml|sh)$"   # a real file
+    r"|/"                       # a path
+)
+
+# Identifiers and paths must be pulled out BEFORE lowercasing and BEFORE the
+# \b\w+\b pass, which splits on "." and "/" — that pass turns `okf.py` into
+# {"okf", "py"} and `src/llm_router/okf.py` into four unremarkable words, so a
+# prompt that quoted a real path could never be recognised as naming one.
+_CODEISH_RE = re.compile(r"[A-Za-z_][\w./-]*(?:_[\w./-]*|\.[a-z]{1,4}|/[\w./-]+)")
+
+
+def _tokens(text: str) -> set[str]:
+    """Lowercased whole tokens, plus the undivided form of each identifier."""
+    low = (text or "").lower()
+    out = {t for t in _TOKEN_SPLIT_RE.split(low) if t}
+    out.update(m for m in re.findall(r"[a-z_][a-z0-9_]{2,}", low))
+    # Dotted/slashed forms too, so a doc mentioning `alpha_only.py` is matchable by
+    # a prompt that writes `alpha_only.py`. Without this the split above turns the
+    # filename into {"alpha", "only", "py"} on the doc side while the prompt side
+    # keeps it whole (_CODEISH_RE), and the two can never meet.
+    out.update(m for m in re.findall(r"[\w./-]*\w\.[a-z]{1,4}\b", low))
+    return out
+
+
+def _min_score() -> int:
+    try:
+        return max(1, int(os.environ.get("LLM_ROUTER_OKF_MIN_SCORE", _MIN_SCORE_DEFAULT)))
+    except ValueError:
+        return _MIN_SCORE_DEFAULT
+
+
+def _is_indexed_source(concept: OKFConcept) -> bool:
+    """A bulk-indexed source file: type SourceFile AND a path-shaped title.
+
+    Both signals, because either alone misfires. Type alone catches hand-written
+    SourceFile notes whose title is a name ("Router Module"), which are curated and
+    few. Title shape alone catches a SessionNote whose title is the user's sentence
+    — "fix the webhook backoff in retry.py" ends in ".py" without being a file.
+    Only the conjunction identifies the docs `okf index` writes by the thousand,
+    which are the ones that need the stricter matching rules.
+    """
+    return concept.type == "SourceFile" and bool(_PATHY_TITLE_RE.search(concept.title))
+
+
+def _kw_in(kw: str, tokens: set[str]) -> bool:
+    """Whole-token match, tolerant of a trailing plural.
+
+    Exact tokens are what stopped "agent" matching "agentic" and every
+    `test_agent_*.py`. But they also stopped "webhook" matching a note about
+    `webhooks.py`, which is a real question about a real file. English plurals are
+    the one variation worth keeping; broader stemming would reopen the substring
+    problem it just closed.
+    """
+    if kw in tokens:
+        return True
+    if kw.endswith("s") and kw[:-1] in tokens:
+        return True
+    return kw + "s" in tokens
+
+
 def _score(concept: OKFConcept, keywords: list[str]) -> int:
-    searchable = (
-        f"{concept.title} {concept.description} {' '.join(concept.tags)} {concept.body}"
-    ).lower()
-    return sum(1 for kw in keywords if kw in searchable)
+    """Weighted relevance: identity matches count double, prose matches count once.
+
+    The old scorer flattened title, tags, description and body into one string and
+    counted bare hits, so a doc whose *prose* happened to share one word with the
+    prompt scored exactly as high as a doc the prompt actually named. Combined with
+    a `> 0` floor that let every unrelated doc in (OKF-SCOPE-01).
+
+    Matching is on whole tokens, not substrings. Substring matching made "agent"
+    hit "agentic", "agents" and every `test_agent_*.py` in the repo — invisible
+    while the store held 2 docs, decisive once `okf index` put 1063 in it.
+    """
+    title_raw = concept.title
+    # Keyed on TYPE, not on whether the title happens to look like a path. A
+    # SessionNote's title is the user's own sentence, and "fix the webhook backoff
+    # in retry.py" contains ".py" — under a shape test it was treated as a source
+    # file, scored at path weight and then required an identifier anchor it could
+    # never have. SourceFile is the type `okf index` and enrichment write in bulk,
+    # and bulk is the whole reason the stricter rules exist.
+    pathy = _is_indexed_source(concept)
+    symbols = {
+        str(s).lower() for s in (concept.extra.get("key_symbols") or [])
+    }
+    sym_tokens: set[str] = set()
+    for s in symbols:
+        sym_tokens |= _tokens(s)
+    # Naming the file itself — its stem or its whole path — identifies the doc as
+    # surely as naming a symbol in it. Only an EXACT match counts: `agent` must not
+    # earn this from `tests/test_agent_loop.py`, whose stem is `test_agent_loop`.
+    low_title = title_raw.lower()
+    exact_names = {low_title, low_title.rsplit("/", 1)[-1]}
+    exact_names.add(exact_names.copy().pop().rsplit(".", 1)[0])
+    exact_names.add(low_title.rsplit("/", 1)[-1].rsplit(".", 1)[0])
+    title_tokens = _tokens(title_raw)
+    tag_tokens = _tokens(" ".join(concept.tags))
+    body_tokens = _tokens(f"{concept.description} {concept.body}")
+
+    total = 0
+    for kw in keywords:
+        if kw in symbols or kw in exact_names:   # names the symbol, or the file
+            total += _W_SYMBOL
+        elif _kw_in(kw, sym_tokens):  # part of a symbol (reconcile in reconcile_invoice)
+            total += _W_TITLE
+        elif _kw_in(kw, title_tokens):
+            total += _W_PATH_PART if pathy else _W_TITLE
+        elif _kw_in(kw, tag_tokens):
+            total += _W_TAG
+        elif _kw_in(kw, body_tokens):
+            total += _W_BODY
+    return total
+
+
+def _keywords_for_retrieval(prompt: str) -> list[str]:
+    """Prompt tokens usable for scoring: code-shaped tokens first, then prose.
+
+    Code-shaped tokens (`find_relevant`, `src/llm_router/okf.py`) are extracted
+    before the prose pass so that "." and "/" survive; they are what
+    ``_IDENTIFIER_SHAPED_RE`` later accepts as evidence the prompt NAMES something.
+    """
+    codeish = [m.group(0).lower() for m in _CODEISH_RE.finditer(prompt or "")]
+    prose = [
+        w for w in re.findall(r"\b\w{5,}\b", (prompt or "").lower())
+        if not w.isdigit() and w not in _SCORE_STOPWORDS
+    ]
+    return list(dict.fromkeys(codeish + prose))[:40]
 
 
 def find_relevant(
@@ -307,22 +537,81 @@ def find_relevant(
     concepts = _get_bundle(base)
     if not concepts:
         return []
-    keywords = list(dict.fromkeys(
-        w for w in re.findall(r'\b\w{5,}\b', prompt.lower()) if not w.isdigit()
-    ))[:25]
+    keywords = _keywords_for_retrieval(prompt)
     if not keywords:
         return []
-    scored = [(c, _score(c, keywords)) for c in concepts]
+    floor = _min_score()
+    # Precision gate (OKF-INDEX-01). Weighted keyword overlap ranks well among a
+    # handful of docs and collapses at scale: with 1063 indexed files, "draft a
+    # blog post about agent evaluation" and "write a python function that reverses
+    # a linked list" both cleared the floor on incidental vocabulary, and prompts
+    # that SHOULD have matched came back with unrelated test files ranked above the
+    # module that actually defines the symbol.
+    #
+    # So a doc is injectable only when the prompt NAMES something in it — an exact
+    # symbol or path token, and a distinctive one (>=6 chars, or containing an
+    # underscore, which is what identifiers look like and what English words in a
+    # question do not). `find_relevant` and `build_session_context` qualify; "list",
+    # "agent" and "python" do not.
+    #
+    # This trades recall for precision deliberately. Injecting nothing costs a
+    # routing opportunity; injecting the wrong file is what produces a confident
+    # answer about code the model never saw.
+    # The anchor requirement applies ONLY to indexed source files (a path-shaped
+    # title). Those arrive in bulk — `okf index` writes one per tracked file, 1063
+    # on this repo — and at that volume prose overlap is meaningless: every common
+    # English word appears in some filename or symbol somewhere, so "yes, commit
+    # it" retrieved a budget-backend test. Requiring the prompt to actually NAME
+    # such a file, in identifier or path form, is what makes a bulk index safe.
+    #
+    # Curated concept docs (Table, Metric, SessionNote — things a human or the
+    # session recorder wrote deliberately) are few and topical, so they keep
+    # matching on topic. Demanding an identifier from them would make them
+    # unreachable: nobody writes "caching_strategy" when they mean caching.
+    anchors = {k for k in keywords if _IDENTIFIER_SHAPED_RE.search(k)}
+    scored = []
+    for c in concepts:
+        s = _score(c, keywords)
+        if s < floor:
+            continue
+        if _is_indexed_source(c) and not (anchors & _anchor_tokens(c)):
+            continue
+        scored.append((c, s))
     scored.sort(key=lambda x: x[1], reverse=True)
-    return [c for c, s in scored[:limit] if s > 0]
+    return [c for c, _s in scored[:limit]]
+
+
+def _anchor_tokens(concept: OKFConcept) -> set[str]:
+    """The names a prompt can NAME this doc by: its symbols and its path tokens."""
+    out = {str(s).lower() for s in (concept.extra.get("key_symbols") or [])}
+    out |= _tokens(concept.title)
+    out |= _tokens(" ".join(concept.tags))
+    return out
 
 
 def inject_context(prompt: str, concepts: list[OKFConcept]) -> str:
-    """Prepend OKF concept docs to prompt inside a <knowledge_context> block."""
+    """Prepend OKF concept docs to prompt inside a <knowledge_context> block.
+
+    The block is explicitly labelled as retrieved-and-possibly-irrelevant. It used
+    to be an unlabelled wall of markdown sitting in the most salient position in
+    the request, above both the caller's own ``context=`` payload and the question,
+    and models answered *from it* — a review asked about a supplied diff described
+    the retrieved doc instead. Retrieval is a guess; the caller's material is not.
+    Saying so in the prompt is what makes a wrong guess recoverable.
+    """
     if not concepts:
         return prompt
     blocks = "\n\n".join(c.as_context_block() for c in concepts)
-    return f"<knowledge_context>\n{blocks}\n</knowledge_context>\n\n{prompt}"
+    return (
+        "<knowledge_context>\n"
+        "Background retrieved by keyword match from this project's notes. It may be\n"
+        "irrelevant to the question. Anything the user supplied directly, and the\n"
+        "question itself, take precedence — if this block does not bear on the\n"
+        "question, ignore it entirely and never describe it back as the answer.\n\n"
+        f"{blocks}\n"
+        "</knowledge_context>\n\n"
+        f"{prompt}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -459,7 +748,7 @@ def _write_source_concept(
     if last_model:
         fm["last_model"] = last_model
     if key_symbols:
-        fm["key_symbols"] = key_symbols[:10]
+        fm["key_symbols"] = key_symbols[:200]
 
     body = summary or f"Source file: {file_path}"
     text = f"---\n{yaml.dump(fm, default_flow_style=False).strip()}\n---\n\n{body}\n"
@@ -605,14 +894,101 @@ def find_relevant_sessions(
         concepts = [c for c in concepts if c.extra.get("session_id") != safe]
     if not concepts:
         return []
+    # Same stopword filter and weighted floor as find_relevant. This function has
+    # no production caller today, but leaving the old `s > 0` scoring here would
+    # quietly reintroduce OKF-SCOPE-01 the moment anything wired it up.
     keywords = list(dict.fromkeys(
-        w for w in re.findall(r"\b\w{5,}\b", prompt.lower()) if not w.isdigit()
+        w for w in re.findall(r"\b\w{5,}\b", prompt.lower())
+        if not w.isdigit() and w not in _SCORE_STOPWORDS
     ))[:25]
     if not keywords:
         return []
+    floor = _min_score()
     scored = [(c, _score(c, keywords)) for c in concepts]
     scored.sort(key=lambda x: x[1], reverse=True)
-    return [c for c, s in scored[:limit] if s > 0]
+    return [c for c, s in scored[:limit] if s >= floor]
+
+
+# ---------------------------------------------------------------------------
+# Indexing a repository into the store (OKF-INDEX-01)
+# ---------------------------------------------------------------------------
+# Before this existed the store could ONLY be populated as a side effect of a
+# successful routed call (`enrich_from_response`). That is a deadlock: routing is
+# skipped because the model has no context, the model has no context because the
+# store is empty, and the store is empty because nothing routed. On the machine
+# this was found on the entire store held 2 project docs after weeks of work.
+#
+# Indexing writes the same verified-only material the enrichment path writes —
+# real file paths and symbol NAMES pulled by the shared extractors, never prose —
+# so nothing enters the store here that could not have entered it before. The only
+# change is that it no longer requires a routed answer to get there.
+
+def index_project(
+    root: Path | None = None,
+    base: Path = KNOWLEDGE_DIR,
+    limit: int = 2000,
+) -> dict[str, Any]:
+    """Walk a repo's tracked source files and write a SourceFile doc for each.
+
+    Uses ``git ls-files`` rather than a filesystem walk so the index inherits the
+    repo's own .gitignore — a node_modules or .venv sweep would bury real code
+    under vendored files and blow the store up.
+
+    Only files that yield at least one extractable symbol are written. A file with
+    no parseable definitions has nothing checkable to say, and a doc whose body is
+    just its own filename adds retrieval noise without adding information.
+
+    Returns a summary dict: ``{indexed, skipped, scanned, store}``.
+    """
+    root = (root or project_root()).resolve()
+    store = project_knowledge_dir(root=root, base=base)
+    result: dict[str, Any] = {"indexed": 0, "skipped": 0, "scanned": 0, "store": store}
+    if not _okf_enabled():
+        result["error"] = "OKF disabled (LLM_ROUTER_OKF=off)"
+        return result
+
+    import subprocess
+
+    try:
+        listing = subprocess.run(
+            ["git", "-C", str(root), "ls-files"],
+            capture_output=True, text=True, timeout=60,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        result["error"] = f"git ls-files failed: {exc}"
+        return result
+    if listing.returncode != 0:
+        result["error"] = f"not a git repository: {root}"
+        return result
+
+    exts = {".py", ".ts", ".tsx", ".js", ".jsx", ".go", ".rs", ".java"}
+    for rel in listing.stdout.splitlines():
+        if result["indexed"] >= limit:
+            break
+        rel = rel.strip()
+        if not rel or Path(rel).suffix not in exts:
+            continue
+        result["scanned"] += 1
+        try:
+            text = (root / rel).read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            result["skipped"] += 1
+            continue
+        # Same extractors as the enrichment path — symbols only, never prose. The
+        # file's own path is passed as the "prompt" side so _FILE_PAT has it.
+        # 200, not the enrichment default of 10 — indexing reads a whole file and
+        # a module's later functions are exactly the ones a prompt tends to name.
+        _files, symbols = _extract_files_and_symbols(rel, text, max_symbols=200)
+        if not symbols:
+            result["skipped"] += 1
+            continue
+        _write_source_concept(
+            rel, "Defines: " + ", ".join(symbols), symbols, "", base
+        )
+        result["indexed"] += 1
+
+    invalidate_cache()
+    return result
 
 
 # ---------------------------------------------------------------------------

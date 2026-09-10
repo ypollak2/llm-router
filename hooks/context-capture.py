@@ -131,6 +131,27 @@ def main() -> None:
     except Exception:
         pass  # fail-open — never blocks the tool call this hook fires after
 
+    # OKF-INDEX-01: also enrich the knowledge store from Claude's OWN work.
+    # Enrichment used to happen only on a successful routed call, which is a
+    # deadlock — the store stays empty because nothing routes, and nothing routes
+    # because the store is empty. `okf index` seeds it; this keeps it current as
+    # files change, without waiting for a routed answer that may never come.
+    #
+    # Same verified-only material as every other writer: real paths and symbol
+    # names pulled by the shared extractors, never prose. A tool call that yields
+    # no extractable structure is skipped rather than summarised.
+    try:
+        from llm_router import okf
+
+        files, symbols = okf._extract_files_and_symbols("", content)
+        if files and symbols:
+            okf._write_source_concept(
+                files[0], "Defines: " + ", ".join(symbols), symbols, "", okf.KNOWLEDGE_DIR
+            )
+            okf.invalidate_cache()
+    except Exception:
+        pass  # fail-open — enrichment is never worth failing a tool call over
+
     sys.exit(0)
 
 

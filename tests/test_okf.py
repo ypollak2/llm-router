@@ -572,16 +572,31 @@ class TestEndToEndPipeline:
     def setup_method(self) -> None:
         _reset_cache()
 
-    def test_seeded_models_are_findable(self, tmp_path: Path) -> None:
+    def test_seeded_models_are_NOT_injectable_as_task_context(self, tmp_path: Path) -> None:
+        """OKF-SCOPE-01 contract change: the catalog informs ROUTING, not the task.
+
+        This test previously asserted the opposite. The catalog is
+        project-independent, so it matched every prompt in every repo, and its own
+        prose advertises the machinery ("Best used with: OKF context injection") —
+        so any prompt containing "context" scored a hit on the catalog describing
+        itself. In the field a `capital of Portugal` question came back carrying the
+        `gemini-2.5-flash` capability sheet. Which model to pick is input to the
+        router; it is not background for the user's task.
+        """
         seed_model_catalog(tmp_path)
         invalidate_cache()
         results = find_relevant("gemini routing performance latency", base=tmp_path)
-        assert any("gemini" in c.title for c in results)
+        assert not any("gemini" in c.title for c in results)
 
     def test_inject_after_find_produces_valid_prompt(self, tmp_path: Path) -> None:
-        seed_model_catalog(tmp_path)
+        """Injection round-trips a real PROJECT doc — the catalog is no longer one."""
+        _concept(
+            tmp_path, "router_pick", "SourceFile", "routing/model_picker.py",
+            ["routing", "picker"], "Defines: pick_model, tier_for_task.",
+        )
         invalidate_cache()
-        concepts = find_relevant("gemini flash code routing task", base=tmp_path)
+        concepts = find_relevant("model_picker routing tier_for_task", base=tmp_path)
+        assert concepts, "fixture doc should be retrievable"
         prompt = "Write a router that picks gemini flash for simple tasks"
         result = inject_context(prompt, concepts)
         assert "<knowledge_context>" in result

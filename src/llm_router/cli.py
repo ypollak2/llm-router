@@ -820,6 +820,7 @@ _KNOWN_SUBCOMMANDS = frozenset(
         "quickstart",
         "init-claude-memory",
         "okf",
+        "sessions",
         "tui",
         "test",
         "verify",
@@ -963,6 +964,9 @@ def main() -> None:
     elif args and args[0] == "init-claude-memory":
         from llm_router.cli_init_memory import run_init_claude_memory
         run_init_claude_memory()
+    elif args and args[0] == "sessions":
+        from llm_router.commands.sessions import cmd_sessions
+        cmd_sessions(args[1:])
     elif args and args[0] == "okf":
         from llm_router.commands.okf import cmd_okf
         cmd_okf(args[1:])

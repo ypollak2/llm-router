@@ -12,7 +12,92 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [13.2.0] — Routing recovery: the timeout, the contamination, the fragmentation (2026-09-10)
+
+Sustained routing had fallen from 31-39% to ~2% of real prompts (5 successes in 246,
+2026-09-04..09-10). Three separate defects, each found by measuring rather than
+reasoning, and one non-fix that the measurement talked us out of.
+
 ### Fixed
+
+- **`OLLAMA_TIMEOUT` defaulted to 4s, which no local model could meet.** Measured
+  p50s are 11.4s (lfm2.5:8b), 15.8s (qwen3-coder:30b) and 28.5s (qwen3.8); even
+  "Say OK." took 6.6s warm. Every DIRECT attempt aborted at exactly 4s and fell
+  through — 86 of 246 real prompts in one week. Now 45s.
+
+- **OKF retrieval contaminated prompts it had nothing to do with.** A `capital of
+  Portugal` question came back carrying another project's source doc and a model
+  capability sheet: the MCP server's cwd is `$HOME`, which has no `.git`, so every
+  project collapsed into one scope; the shared model catalog was a retrieval root
+  and matched everything; and the relevance floor was `> 0`. Scope now honours
+  `LLM_ROUTER_PROJECT_ROOT`, the catalog is out of task retrieval, and matching is
+  weighted and token-based.
+
+- **Session events were scattered across project buckets and mostly unreadable.**
+  `_project_id()` hashed the raw cwd, so a session that moved between directories
+  split its log while `build_session_context` read one bucket — 451 recorded, 284
+  readable. Now resolved to the repo root.
+
+- **Claude's own answers were never persisted**, only routed ones, so the stored
+  conversation held every question and no conclusion.
+
+- **Four import-time path bugs of one class**, where a module-level constant froze
+  `$HOME` before any isolation override could apply: the auto-route debug log (227
+  test rows in the production log), `cost.savings_log_path()`, `receipt_store`,
+  and session scoping. A path computed at import ignores every isolation mechanism
+  added afterwards.
+
+- **The gateway rejected every normally-configured SDK client.** Honouring the
+  caller's `model` forwarded a bare name to `model_override`, which requires
+  `provider/model` and 400s otherwise. Each wire endpoint now qualifies with its
+  own provider; `auto` still means "you pick".
+
+- **`LLM_ROUTER_SESSION_CONTEXT=local` silently disabled context entirely** — the
+  hook passes `target_provider="local"`, which was missing from the allowlist.
+
+- **The session store re-ingested its own injected context.** `record_event`
+  stripped llm-router's sentinel but not OKF's `<knowledge_context>`, so retrieved
+  documents were recorded as though the user had typed them.
+
+### Added
+
+- **`llm-router okf index`** — index a repo's tracked source into the knowledge
+  store. The store could previously only be filled by a successful routed call,
+  which is a deadlock; it held 2 documents after weeks of use, and 1063 after.
+- **`llm-router sessions status` / `merge`** — recover events stranded by the old
+  scoping bug. Dry-run by default, timestamp-ordered, originating shards kept.
+- **Grounding checks on routed drafts.** A draft citing a file or calling a
+  function that exists neither in its context nor in the index is discarded and the
+  turn falls through, rather than being shown.
+- **Host `env` propagation** — `LLM_ROUTER_*` settings now travel in each host's
+  MCP config, so Cursor/OpenCode/Codex get the tuned models instead of falling back
+  to one that is not installed. Credential-shaped names are never propagated.
+
+### Not changed, deliberately
+
+- **The context-dependent gate was left alone.** It skips ~48% of prompts and
+  looked like the main culprit; its noun list even contains `agent`, matching every
+  prompt about the user's own "Transfer Agent". Measured against 376 real prompts,
+  loosening it freed 36 — and almost every one genuinely needed local state
+  ("commit this and show me the demo again"). Routing those produces fabrication,
+  not savings. Seven of those prompts are pinned in a test so the next attempt has
+  to argue with the measurement.
+
+- **Consolidating session shards at runtime**, which would have recovered the rest
+  of the fragmentation but turned `load_events` into a cross-project read path.
+
+### Notes
+
+Two mechanisms in this release were measured, found to be producing confident
+fabrication, and fixed before shipping — an eligibility count is not a quality
+measurement, and both times only real model output caught it.
+
+---
+
+The following also ships in 13.2.0; it was already on `main` unreleased when the
+routing work landed.
+
+### Fixed (host installation)
 
 - **Codex → llm-router works, for the first time.** The installer wrote the
   MCP server to `~/.codex/config.yaml` (and an older path to `config.json`

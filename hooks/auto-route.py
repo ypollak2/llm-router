@@ -253,7 +253,15 @@ def _load_discovered_ollama_models() -> list[str]:
 _DISCOVERED_OLLAMA = _load_discovered_ollama_models()
 # First discovered model used as the single-model fallback (e.g. for tracking)
 OLLAMA_MODEL = _DISCOVERED_OLLAMA[0] if _DISCOVERED_OLLAMA else "qwen3.5:latest"
-OLLAMA_TIMEOUT = int(os.environ.get("LLM_ROUTER_OLLAMA_TIMEOUT", "4"))
+# 4s was the old default and no local model could ever meet it: measured p50s on
+# this machine are 11.4s (lfm2.5:8b), 15.8s (qwen3-coder:30b) and 28.5s (qwen3.8),
+# and even "Say OK." took 6.6s warm. Every DIRECT attempt therefore aborted at
+# exactly 4s and fell through to Claude — 86 of 246 real prompts in one week.
+# Measured on 376 real prompts, the context-dependent gate lets 52.1% through, so
+# the timeout — not the gate — is what was stopping those from routing.
+# 45s clears the slowest local model with headroom for a cold load (Ollama.app
+# serves one slot, so a queued request waits for the one ahead of it).
+OLLAMA_TIMEOUT = int(os.environ.get("LLM_ROUTER_OLLAMA_TIMEOUT", "45"))
 CONFIDENCE_THRESHOLD = int(os.environ.get("LLM_ROUTER_CONFIDENCE_THRESHOLD", "2"))  # v7.5.0: Aggressive routing — route more with lower threshold
 # Privacy-first: classify locally only (heuristic + Ollama) by default.
 # Set LLM_ROUTER_CLASSIFY_LOCAL_ONLY=false to enable external classifiers.
@@ -2268,6 +2276,398 @@ def _extract_turn_text(content) -> str:
     return ""
 
 
+_ASSISTANT_PERSIST_TURNS = 6
+
+# S2-6. Paths the draft asserts must be traceable to something real. Mirrors
+# okf._FILE_PAT: the store restricts itself to verified structure for the same
+# reason — a path is checkable, prose is not.
+_DRAFT_PATH_RE = re.compile(
+    r"(?:^|[\s`'\"(\[])([\w./-]*[\w-]/[\w./-]*\w\.(?:py|ts|tsx|js|jsx|go|rs|java|md|json|toml|ya?ml|sh))\b"
+)
+
+
+def _grounding_violations(draft: str, context: str, prompt: str = "") -> list[str]:
+    """File paths the draft names that appear in neither its inputs nor the repo.
+
+    Every other item in Stage 2 makes the routed model more willing to answer, and
+    S2-5 flips the failure mode: a model with no context refuses, which is safe; a
+    model with the WRONG context answers just as fluently about the wrong thing.
+    This catches the mechanical version of that — the draft citing a file nobody
+    mentioned and that does not exist. It is the shape of the 2026-09-06 failure,
+    where routed reviews "listed tests that do not exist".
+
+    Deliberately narrow. It does not judge whether the draft is RIGHT; a judge that
+    is wrong is worse than no judge. It checks the one claim that can be settled
+    without asking another model.
+    """
+    if not draft:
+        return []
+    haystack = f"{context or ''}\n{prompt or ''}"
+    out: list[str] = []
+    for m in _DRAFT_PATH_RE.finditer(draft):
+        path = m.group(1)
+        # `a/` and `b/` are git's diff prefixes, not directories. A draft quoting a
+        # diff of a file that IS in context was being reported as citing two
+        # invented paths, which would have rejected a correct answer.
+        if path[:2] in ("a/", "b/"):
+            path = path[2:]
+        if path in haystack:
+            continue
+        try:
+            # Existing on disk is evidence too: the model may have been shown the
+            # file in an earlier turn that has since fallen out of the budget.
+            if Path(path).exists():
+                continue
+        except OSError:
+            pass
+        if path not in out:
+            out.append(path)
+    return out
+
+
+# S5. A CALL, not a word before a bracket. Two requirements, both learned by
+# measuring against real model output rather than assumed:
+#
+#   * the paren must be adjacent. `\s*\(` matched ordinary English — "threads (or
+#     processes)" and "keywords (from the prompt)" were both reported as invented
+#     functions, a 2-in-3 false-positive rate on real answers.
+#   * the name must look like an identifier: an underscore, or internal capitals.
+#     A bare lowercase word before a paren is prose far more often than it is code,
+#     and a guard that rejects correct answers costs routing silently — the
+#     fallthrough is indistinguishable from a model that simply did not answer.
+_DRAFT_SYMBOL_RE = re.compile(r"\b([A-Za-z_][A-Za-z0-9_]*(?:_[A-Za-z0-9_]+|[a-z][A-Z][A-Za-z0-9_]*))\(")
+
+# Words that appear with parens in ordinary writing and in shell, and would
+# otherwise be read as invented functions. `test()`, `build()` and `run()` are
+# English before they are identifiers.
+_SYMBOL_NOISE = frozenset({
+    "and", "build", "check", "def", "deploy", "elif", "for", "fix", "function",
+    "get", "here", "http", "https", "if", "install", "int", "json", "list", "log",
+    "not", "note", "open", "print", "return", "run", "set", "sudo", "test", "the",
+    "this", "try", "update", "use", "using", "while", "with", "yaml",
+})
+
+
+def _known_symbols() -> set[str]:
+    """Every symbol name the OKF index knows for this project.
+
+    Only meaningful once `okf index` has run. An empty set means "nothing is
+    checkable", never "everything is invented" — see _symbol_violations.
+    """
+    out: set[str] = set()
+    try:
+        from llm_router import okf as _okf
+
+        for concept in _okf._get_bundle():
+            for sym in concept.extra.get("key_symbols") or []:
+                out.add(str(sym))
+    except Exception:  # noqa: BLE001
+        return set()
+    return out
+
+
+def _symbol_violations(draft: str, context: str, prompt: str = "") -> list[str]:
+    """Functions/classes the draft calls that exist nowhere checkable.
+
+    S2-6 validates paths; this validates the other half of the verified structure
+    `okf index` now holds. A draft sounds specific when it cites
+    `reconcile_invoice_totals()`, and specificity is exactly what makes a fabricated
+    answer persuasive.
+
+    Deliberately NOT a fix for the U7-class failure, which invented prose and named
+    no symbols at all — nothing structural can catch that, which is why S2-5b fixed
+    it at the gate. This covers the case in between.
+
+    A symbol in the index, the context, or the prompt is grounded. Only a name in
+    none of them is a violation, and only when the index is populated: unknown is
+    not invented, and unknown must never reject.
+    """
+    if not draft:
+        return []
+    try:
+        known = _known_symbols()
+    except Exception:  # noqa: BLE001
+        return []
+    if not known:
+        return []  # nothing indexed → nothing checkable
+    haystack = f"{context or ''}\n{prompt or ''}"
+    out: list[str] = []
+    for m in _DRAFT_SYMBOL_RE.finditer(draft):
+        name = m.group(1)
+        if name.lower() in _SYMBOL_NOISE or name in known or name in haystack:
+            continue
+        if name not in out:
+            out.append(name)
+    return out
+
+
+def _draft_is_relayable(draft: str, context: str, prompt: str = "") -> bool:
+    """Whether a DIRECT draft may be shown, or should fall through to Claude.
+
+    Fail-open on any internal error: a bug in the guard must not silently stop all
+    routing, which would look exactly like the regression this branch is fixing.
+    `LLM_ROUTER_GROUNDING_CHECK=off` disables it.
+    """
+    if os.environ.get("LLM_ROUTER_GROUNDING_CHECK", "on").strip().lower() in (
+        "0", "off", "false", "no"
+    ):
+        return True
+    try:
+        if _grounding_violations(draft, context, prompt):
+            return False
+        # Symbol checking has its own switch: path checking is cheap and certain,
+        # while this depends on the OKF index being present and reasonably fresh.
+        if os.environ.get("LLM_ROUTER_SYMBOL_GROUNDING", "on").strip().lower() in (
+            "0", "off", "false", "no"
+        ):
+            return True
+        return not _symbol_violations(draft, context, prompt)
+    except Exception:  # noqa: BLE001
+        return True
+
+# S2-5. A gated prompt is routable when its reference can be RESOLVED, not merely
+# when it names something. Minimums below are what separates "there is an exchange
+# to resolve against" from "there is a scrap that invites a confident wrong guess";
+# without context a model refuses, which is safe, so thin context is strictly worse
+# than none.
+_RESCUE_MIN_ASSISTANT_TURNS = 1   # what was concluded, not just what was asked
+_RESCUE_MIN_CONTEXT_CHARS = 200   # a real exchange, not "hi" / "ok"
+
+# S2-5b. The conditions above describe the SESSION. They say nothing about whether
+# the conversation bears on the prompt in front of us, and on their own they
+# rescued every gated prompt once any exchange existed — 100% of 376 real prompts,
+# which is a bypass rather than a result. The quality check is what settled it:
+# with one arena-demo exchange stored, "continue with U7" and "continue with U4"
+# both produced confident, detailed, entirely invented documents. Neither U7 nor U4
+# appeared anywhere in the context; the model anchored on the only material it had.
+# S2-6 does not catch this — the fabrication is prose, not file paths.
+#
+# A rescue is legitimate on one of two grounds, never on mere history:
+#   1. the prompt shares real subject matter with the conversation, or
+#   2. the prompt is a pure continuation whose whole meaning is "what we just
+#      agreed", where recency genuinely is the referent.
+# An affirmation, a continuation verb, or both — and nothing else. The "nothing
+# else" is the whole point: "continue" carries no specifics and means the previous
+# turn, while "continue with U7" names a target the conversation never mentioned,
+# and that is the prompt that fabricated a whole invented document.
+_CONT_AFFIRM = r"(?:yes|yeah|yep|ok|okay|sure|alright|fine|please)"
+_CONT_VERB = r"(?:go\s+ahead|go\s+on|do\s+it|do\s+that|continue|carry\s+on|proceed|next|keep\s+going|go)"
+_CONTINUATION_ONLY_RE = re.compile(
+    rf"^\s*(?:{_CONT_AFFIRM}\b[\s,.!]*)?"
+    rf"(?:{_CONT_VERB}\b[\s,.!]*)?"
+    r"(?:it|that|this|them|then|now|please)?[\s,.!]*$",
+    re.I,
+)
+
+# Words that carry subject matter. Deliberately the same stopword discipline as OKF
+# retrieval: prompts are mostly machinery ("please", "again", "check"), and matching
+# on machinery is how everything matched everything.
+_RESCUE_STOPWORDS = frozenset({
+    "about", "again", "already", "also", "another", "anything", "because", "been",
+    "before", "being", "bring", "check", "could", "current", "does", "doing", "done",
+    "else", "even", "every", "first", "from", "give", "going", "have", "here", "into",
+    "just", "keep", "last", "like", "make", "many", "more", "most", "much", "need",
+    "next", "note", "only", "other", "over", "please", "really", "right", "same",
+    "should", "show", "some", "still", "sure", "take", "tell", "than", "that", "them",
+    "then", "there", "these", "they", "thing", "things", "think", "this", "those",
+    "time", "usmuch", "very", "want", "well", "were", "what", "when", "where", "which",
+    "while", "will", "with", "work", "worked", "working", "would", "your",
+})
+
+_RESCUE_MIN_SHARED_TERMS = 1
+
+
+def _rescue_is_relevant(prompt: str, context: str) -> bool:
+    """Whether *context* plausibly answers *prompt*, rather than merely existing."""
+    p = prompt or ""
+    # Every part of the continuation pattern is optional, so it also matches the
+    # empty string; an empty prompt is not a continuation of anything.
+    if p.strip() and _CONTINUATION_ONLY_RE.match(p):
+        # A bare continuation refers to the previous turn by construction. One that
+        # names an unexplained target does not — "continue with U7" is shaped like a
+        # continuation and is exactly the prompt that fabricated, so the regex above
+        # matches only continuations carrying no specifics of their own.
+        return True
+    ctx_terms = {
+        w for w in re.findall(r"\b\w{4,}\b", (context or "").lower())
+        if w not in _RESCUE_STOPWORDS
+    }
+    prompt_terms = {
+        w for w in re.findall(r"\b\w{4,}\b", p.lower())
+        if w not in _RESCUE_STOPWORDS
+    }
+    return len(prompt_terms & ctx_terms) >= _RESCUE_MIN_SHARED_TERMS
+
+
+def _session_context_rescue(prompt: str, session_id: str) -> str | None:
+    """Session context able to resolve *prompt*, or None to leave the gate closed.
+
+    `_is_context_dependent` blocks ~48% of real prompts and is right to: they point
+    at local state. Stage 1's OKF rescue covers the ones that NAME code, worth 1.3%.
+    The remainder point rather than name — "commit this and show me the demo again"
+    — and no document retrieval resolves "this". The conversation does. Measured on
+    a real transcript, same prompt and model:
+
+        without context: "I need more specific details... Could you clarify?"
+        with context:    "'This' refers to the technical assessment submission for
+                          the Head of AI role in the arena-demo repo..."
+
+    Requires at least one prior ASSISTANT turn. A store holding only the user's own
+    prompts records what was asked and never what was concluded, which is exactly
+    the half "did that work?" and "commit this" refer to.
+
+    `LLM_ROUTER_SESSION_RESCUE=off` disables it for operators who would rather not
+    relay conversation to a local model at all.
+    """
+    if not session_id:
+        return None
+    if os.environ.get("LLM_ROUTER_SESSION_RESCUE", "on").strip().lower() in (
+        "0", "off", "false", "no"
+    ):
+        return None
+    try:
+        from llm_router import session_store as _ss
+
+        events = _ss.load_events(session_id, limit=200)
+        assistant = [e for e in events if e.get("role") == "assistant"]
+        if len(assistant) < _RESCUE_MIN_ASSISTANT_TURNS:
+            return None
+        ctx = _ss.build_session_context(
+            session_id,
+            max_tokens=_draft_context_budget(),
+            task_type="",
+            query=prompt,
+            target_provider="ollama",
+        )
+        if not ctx or len(ctx.strip()) < _RESCUE_MIN_CONTEXT_CHARS:
+            return None
+        # S2-5b: and it must actually bear on THIS prompt. Without this the rescue
+        # fires on every gated prompt in any warm session and the model answers
+        # about whatever happens to be in the buffer.
+        if not _rescue_is_relevant(prompt, ctx):
+            return None
+        return ctx
+    except Exception:  # noqa: BLE001 — context is best-effort, never fatal
+        return None
+
+# S2-4. 800 was written into the call site while
+# `RouterConfig.session_context_max_tokens_draft` — which documents itself as the
+# "budget for hook-level direct/draft call injection" — sat unread. Changing the
+# config did nothing; the only way to alter the budget was to edit the hook.
+#
+# The value is 3000 rather than 800 because 800 was set without reference to what
+# the receiving model holds. Across this machine's 27 sessions with 5+ events the
+# largest carry ~40k, ~12k and ~9k tokens of content, so 800 was 1-8% of a real
+# working session. The ceiling was measured, not guessed: qwen3-coder:30b at
+# default num_ctx processed a 4656-token prompt with prompt_eval_count=4656 and
+# still recovered a marker planted after the filler, so a 4.6k prompt survives
+# intact on the model this routes to. 3000 leaves room for the prompt, any OKF
+# block, and the answer.
+_DRAFT_CTX_DEFAULT = 3000
+_DRAFT_CTX_MAX = 32000
+
+
+def _draft_context_budget() -> int:
+    """Token budget for session context injected into a DIRECT draft.
+
+    Precedence: env → RouterConfig → default. Clamped, because 0 would silently
+    disable context injection and a huge value would push the prompt out of the
+    model's window — both failures that look like "context stopped working".
+    """
+    raw = os.environ.get("LLM_ROUTER_SESSION_CONTEXT_DRAFT_BUDGET", "").strip()
+    value: int | None = None
+    if raw:
+        try:
+            value = int(raw)
+        except ValueError:
+            value = None
+    if value is None:
+        try:
+            from llm_router.config import get_config
+            value = int(getattr(get_config(), "session_context_max_tokens_draft", 0)) or None
+        except Exception:  # noqa: BLE001 — config is optional in early-boot hooks
+            value = None
+    if value is None or value <= 0:
+        value = _DRAFT_CTX_DEFAULT
+    return max(1, min(value, _DRAFT_CTX_MAX))
+
+
+def _persist_assistant_turns(
+    transcript_path: str,
+    session_id: str,
+    current_prompt: str = "",
+    max_turns: int = _ASSISTANT_PERSIST_TURNS,
+) -> int:
+    """Copy Claude's recent answers from the CC transcript into the session store.
+
+    S2-2. `record_event(role="assistant")` fired only when a LOCAL model produced
+    a DIRECT draft, or when a routed MCP call answered — never when Claude did the
+    work. So a session where Claude did the work accumulated the user's prompts and
+    64 tool calls and not one conclusion, and anything reading the durable store
+    afterwards saw a conversation with half of every exchange missing. "Did that
+    work?" and "commit this" are unanswerable from that.
+
+    The transcript is already parsed here for the immediate DIRECT draft
+    (``_load_conversation_history``); this persists the same turns so a later
+    routed call, or a later session, can see them too.
+
+    Injected ``<knowledge_context>`` blocks are stripped before writing. One was
+    found recorded as a genuine turn in this machine's live data — re-persisting
+    injected material is the self-poisoning loop ``okf._KNOWLEDGE_CTX_RE`` exists to
+    close, and the session store had no equivalent guard.
+
+    Best-effort throughout: returns the number of turns written, 0 on any failure.
+    Never raises — a hook that breaks the prompt is worse than thin context.
+    """
+    if not session_id or not transcript_path:
+        return 0
+    try:
+        turns = _load_conversation_history(
+            transcript_path, current_prompt or "", max_turns=max_turns,
+            session_id=session_id,
+        )
+    except Exception:  # noqa: BLE001
+        return 0
+    if not turns:
+        return 0
+
+    try:
+        from llm_router import session_store as _ss
+
+        try:
+            from llm_router.okf import _KNOWLEDGE_CTX_RE as _KCTX
+        except Exception:  # noqa: BLE001 — stripping is a guard, not a dependency
+            _KCTX = None
+
+        # Dedupe against what is already stored. The hook runs once per prompt over
+        # a transcript that keeps growing, so without this the same conclusion is
+        # appended again on every turn until compaction throws it all away.
+        existing = {
+            (e.get("content") or "").strip()
+            for e in _ss.load_events(session_id, limit=200)
+            if e.get("role") == "assistant"
+        }
+
+        written = 0
+        for turn in turns:
+            if turn.get("role") != "assistant":
+                continue
+            text = (turn.get("content") or "")
+            if _KCTX is not None:
+                text = _KCTX.sub("", text)
+            text = text.strip()
+            if not text or text in existing:
+                continue
+            _ss.record_event(
+                session_id, "claude_answer", text, role="assistant", task_type="",
+            )
+            existing.add(text)
+            written += 1
+        return written
+    except Exception:  # noqa: BLE001
+        return 0
+
+
 def _load_conversation_history(
     transcript_path: str,
     current_prompt: str,
@@ -2688,7 +3088,18 @@ def _get_selected_model(task_type: str, complexity: str) -> tuple[str, str]:
         return "unknown", "unknown"
 
 
-_DEBUG_LOG = Path.home() / ".llm-router" / "auto-route-debug.log"
+def _debug_log_path() -> Path:
+    """Resolved PER CALL, never at import.
+
+    As a module-level constant this baked in the real `$HOME` at import time, so a
+    test that monkeypatched HOME afterwards still wrote to the developer's live
+    log. That is how 227 invocations carrying `chain=['ollama/fake-model']` and an
+    empty `session_id` ended up interleaved with real routing decisions in
+    `~/.llm-router/auto-route-debug.log` — they were test-suite runs, and they made
+    the production log unusable for measuring the routing rate until they were
+    filtered back out by hand. Same class of defect as the receipt-path bug.
+    """
+    return Path.home() / ".llm-router" / "auto-route-debug.log"
 _PROMPT_COUNTS = Path.home() / ".llm-router" / "session_prompt_counts.json"
 
 
@@ -2763,7 +3174,7 @@ def _debug_log(msg: str) -> None:
     """Log debug info to help diagnose hook invocation issues."""
     try:
         timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
-        with open(_DEBUG_LOG, "a") as f:
+        with open(_debug_log_path(), "a") as f:
             f.write(f"[{timestamp}] {msg}\n")
     except Exception:
         pass  # Silently fail if logging doesn't work
@@ -3319,6 +3730,21 @@ def main() -> None:
         except Exception:
             pass
 
+        # S2-2: and Claude's answers to the PREVIOUS prompts, which nothing else
+        # records. This is the only point in the lifecycle where the transcript is
+        # already open and the turns before this one are complete, so it is where
+        # the other half of the conversation gets persisted. Fail-open.
+        try:
+            _n = _persist_assistant_turns(
+                hook_input.get("transcript_path", ""), session_id, current_prompt=prompt,
+            )
+            if _n:
+                _debug_log(
+                    f"[INVOCATION {invocation_id:.3f}] PERSISTED {_n} Claude turn(s) to session store"
+                )
+        except Exception:
+            pass
+
     # ── Phase 1: Direct Execution (0 subscription tokens) ──────────────────────
     # Try to handle the prompt directly from the hook by calling models via HTTP.
     # If successful, return {"decision": "block"} so Claude never sees the prompt.
@@ -3336,9 +3762,49 @@ def main() -> None:
     # routed model can't see the user's files/repo/history/state, so a pre-generated
     # draft would be fabrication. Leave these for Claude (it has context + tools);
     # also saves the wasted local-model call. (zero_claude mode still routes.)
+    #
+    # OKF-INDEX-01: the gate now asks whether the model would ACTUALLY be blind,
+    # rather than assuming it. Measured on 376 real prompts from this machine, the
+    # gate skips ~48% — and reading them confirmed they genuinely do reference local
+    # state, so widening the gate is not the answer. Retrieving what they reference
+    # is. When `okf index` has put the repo in the store and the prompt names
+    # something in it, the routed model gets that material and the prompt stops
+    # being unanswerable. Retrieval is deliberately high-precision (an exact,
+    # distinctive symbol or path token), so an empty result is the common case and
+    # the gate still closes on it.
+    _okf_docs = []
     if _direct_enabled and not zero_claude and _is_context_dependent(prompt):
-        _direct_enabled = False
-        _debug_log(f"[INVOCATION {invocation_id:.3f}] DIRECT SKIP: context-dependent prompt")
+        try:
+            from llm_router import okf as _okf
+            _okf_docs = _okf.find_relevant(prompt)
+        except Exception as _exc:  # noqa: BLE001 — retrieval must never break routing
+            _okf_docs = []
+            _debug_log(f"[INVOCATION {invocation_id:.3f}] OKF LOOKUP FAILED: {_exc}")
+        if _okf_docs:
+            _debug_log(
+                f"[INVOCATION {invocation_id:.3f}] OKF RESCUE: context-dependent but "
+                f"{len(_okf_docs)} doc(s) retrieved "
+                f"({', '.join(d.title for d in _okf_docs)}) — routing WITH context"
+            )
+        else:
+            # S2-5: the prompt names nothing, but it may still POINT at something
+            # the conversation can resolve. "commit this and show me the demo
+            # again" is unanswerable from documents and perfectly answerable from
+            # the exchange it follows. Requires a prior assistant turn — a store of
+            # the user's own prompts records what was asked, never what was
+            # concluded, and the conclusion is the half being pointed at.
+            _rescue_ctx = _session_context_rescue(prompt, session_id or "")
+            if _rescue_ctx:
+                _debug_log(
+                    f"[INVOCATION {invocation_id:.3f}] SESSION RESCUE: context-dependent "
+                    f"but {len(_rescue_ctx)} chars of conversation resolve it — "
+                    f"routing WITH context"
+                )
+            else:
+                _direct_enabled = False
+                _debug_log(
+                    f"[INVOCATION {invocation_id:.3f}] DIRECT SKIP: context-dependent prompt"
+                )
 
     # Coordination prompts are advisory-only in ALL modes (including
     # zero-Claude): the direct path has no subagents, so a pre-generated
@@ -3392,13 +3858,31 @@ def main() -> None:
                     from llm_router import session_store as _session_store
                     _session_ctx = _session_store.build_session_context(
                         session_id,
-                        max_tokens=800,
+                        max_tokens=_draft_context_budget(),
                         task_type=task_type,
                         query=prompt,
                         target_provider="local",
                     )
                 except Exception:
                     _session_ctx = None
+
+            # OKF-INDEX-01: prepend the docs that rescued this prompt from the gate.
+            # Without this the rescue above would route a prompt on the STRENGTH of
+            # retrieved context and then not send it — the worst of both, and
+            # exactly the fabrication the gate was protecting against.
+            if _okf_docs:
+                try:
+                    from llm_router import okf as _okf
+                    _okf_block = _okf.inject_context("", _okf_docs).rstrip()
+                    _session_ctx = (
+                        f"{_okf_block}\n\n{_session_ctx}" if _session_ctx else _okf_block
+                    )
+                except Exception as _exc:  # noqa: BLE001
+                    _debug_log(
+                        f"[INVOCATION {invocation_id:.3f}] OKF INJECT FAILED: {_exc}"
+                    )
+                    # The rescue is only valid if the material actually ships.
+                    _direct_enabled = False
 
             _direct_result = None
             # GH#57: wall-clock for the DIRECT attempt, so a timeout can be
@@ -3440,6 +3924,23 @@ def main() -> None:
                     prompt, _direct_chain, task_type,
                     timeout=OLLAMA_TIMEOUT, history=_history, context=_session_ctx,
                 )
+
+            # S2-6: a draft that cites a file nobody mentioned and that does not
+            # exist is not a weak answer, it is a fabricated one — and Stage 2 made
+            # the model far more willing to answer. Reject it and let Claude take
+            # the turn; a fallthrough costs a routing opportunity, relaying costs
+            # the user's trust in every routed answer.
+            if _direct_result and not _draft_is_relayable(
+                getattr(_direct_result, "text", "") or "", _session_ctx or "", prompt
+            ):
+                _bad = _grounding_violations(
+                    getattr(_direct_result, "text", "") or "", _session_ctx or "", prompt
+                )
+                _debug_log(
+                    f"[INVOCATION {invocation_id:.3f}] DRAFT REJECTED (ungrounded): "
+                    f"cites {', '.join(_bad)} — falling through to Claude"
+                )
+                _direct_result = None
 
             if _direct_result:
                 _debug_log(

@@ -508,7 +508,7 @@ class RouterConfig(BaseSettings):
     session_context_enabled: bool = True          # SESSION_CONTEXT_ENABLED
     session_context_share_external: bool = True   # SESSION_CONTEXT_SHARE_EXTERNAL — allow durable events into non-local (paid API) routed calls; default "all" per approved decision
     session_context_max_tokens_mcp: int = 1500    # SESSION_CONTEXT_MAX_TOKENS_MCP — budget for MCP-routed call injection
-    session_context_max_tokens_draft: int = 800   # SESSION_CONTEXT_MAX_TOKENS_DRAFT — budget for hook-level direct/draft call injection
+    session_context_max_tokens_draft: int = 3000  # SESSION_CONTEXT_MAX_TOKENS_DRAFT — budget for hook-level direct/draft call injection (S2-4: was 800, set without reference to the receiving model's window)
 
     # ── Compaction settings ──
     compaction_mode: str = "structural"  # off | structural | full

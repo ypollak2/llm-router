@@ -122,6 +122,43 @@ class _RoutedResult:
         self.model = _ModelRef(prov, bare)
 
 
+# "let the router choose" — never a real model name to be qualified.
+_AUTO_SENTINELS = frozenset({"auto", "llm_router-auto", "llm-router-auto"})
+
+
+def _qualify_model(model: str | None, provider: str) -> str | None:
+    """Qualify a bare wire-format model name with the endpoint's own provider.
+
+    F-03 made the gateway honour the caller's `model` instead of discarding it,
+    and forwarded it to `model_override` verbatim. But every real client sends a
+    bare, provider-less name, because on its own API the provider is implied by the
+    endpoint:
+
+        OpenAI     model="gpt-4o"
+        Anthropic  model="claude-haiku-4-5"
+        Ollama     model="llama3.2"
+
+    `model_override` requires `provider/model` and raises ValueError otherwise,
+    which the gateway maps to HTTP 400 — so the fix that started honouring `model`
+    also started rejecting every request from a normally-configured SDK client.
+    Found by pointing the real anthropic SDK at a live gateway; no mocked test
+    caught it because they all sent the already-qualified form.
+
+    Each endpoint knows its own provider — that is what having separate endpoints
+    means, and it is what makes the bare name unambiguous. An already-qualified
+    name is passed through untouched.
+
+    Sentinels meaning "you pick" are passed through untouched. Qualifying `auto`
+    would turn "choose for me" into a demand for a model literally named
+    `openai/auto`, which is the opposite of what the caller asked for.
+    """
+    if not model:
+        return model
+    if model.strip().lower() in _AUTO_SENTINELS:
+        return model
+    return model if "/" in model else f"{provider}/{model}"
+
+
 async def _route(prompt: str, task_type: str | None, complexity: str | None,
                  prefer_model: str | None = None):
     """Shared core for every wire-format endpoint: classify (if needed) → route
@@ -266,7 +303,8 @@ class _OAIRequest(BaseModel):
 
 @app.post("/v1/chat/completions")
 async def openai_chat(req: _OAIRequest) -> dict:
-    r = await _route(_flatten(req.messages), req.task_type, req.complexity, prefer_model=req.model)
+    r = await _route(_flatten(req.messages), req.task_type, req.complexity,
+                     prefer_model=_qualify_model(req.model, "openai"))
     return {
         "id": f"chatcmpl-{uuid.uuid4().hex[:24]}",
         "object": "chat.completion",
@@ -293,7 +331,8 @@ async def openai_responses(req: _ResponsesRequest) -> dict:
     prompt = _flatten_responses_input(req.input)
     if req.instructions:
         prompt = f"system: {req.instructions}\n{prompt}"
-    r = await _route(prompt, req.task_type, req.complexity, prefer_model=req.model)
+    r = await _route(prompt, req.task_type, req.complexity,
+                     prefer_model=_qualify_model(req.model, "openai"))
     output_id = f"msg_{uuid.uuid4().hex[:24]}"
     return {
         "id": f"resp_{uuid.uuid4().hex[:24]}",
@@ -336,7 +375,8 @@ class _AnthropicRequest(BaseModel):
 @app.post("/v1/messages")
 async def anthropic_messages(req: _AnthropicRequest) -> dict:
     prompt = (f"system: {req.system}\n" if req.system else "") + _flatten(req.messages)
-    r = await _route(prompt, None, None)
+    r = await _route(prompt, None, None,
+                     prefer_model=_qualify_model(req.model, "anthropic"))
     return {
         "id": f"msg_{uuid.uuid4().hex[:24]}",
         "type": "message",
@@ -361,7 +401,8 @@ class _OllamaGenerate(BaseModel):
 
 @app.post("/api/chat")
 async def ollama_chat(req: _OllamaChat) -> dict:
-    r = await _route(_flatten(req.messages), None, None)
+    r = await _route(_flatten(req.messages), None, None,
+                     prefer_model=_qualify_model(req.model, "ollama"))
     return {
         "model": f"{r.model.provider}/{r.model.model}",
         "message": {"role": "assistant", "content": r.text},
@@ -372,7 +413,8 @@ async def ollama_chat(req: _OllamaChat) -> dict:
 
 @app.post("/api/generate")
 async def ollama_generate(req: _OllamaGenerate) -> dict:
-    r = await _route(req.prompt, None, None)
+    r = await _route(req.prompt, None, None,
+                     prefer_model=_qualify_model(req.model, "ollama"))
     return {
         "model": f"{r.model.provider}/{r.model.model}",
         "response": r.text,
