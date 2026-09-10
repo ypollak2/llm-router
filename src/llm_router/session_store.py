@@ -69,9 +69,25 @@ def _note_lock_timeout(what: str) -> None:
 # so injected context never gets re-captured and re-injected into itself.
 SENTINEL_OPEN = "[llm_router-session-context]"
 SENTINEL_CLOSE = "[/llm_router-session-context]"
+
+# S2-3: there are TWO injectors, and this guard only knew about its own.
+# `okf.inject_context` wraps retrieved documents in `<knowledge_context>`, and
+# `router.py` rebinds `prompt = _okf.inject_context(prompt, concepts)` BEFORE
+# dispatch — so `router.py:1977` recorded the rebound value as the user's turn.
+# Every routed call with retrieval active wrote the retrieved documents into the
+# conversation history as though the user had said them, and build_session_context
+# served them back on later turns. Found in this machine's live shard as:
+#
+#     [user] <knowledge_context> ## [ModelCapability] gemini-2.5-pro ...
+#
+# Guarding here rather than at each call site: there are six writers, and a
+# seventh must not be able to reopen the loop by not knowing about it.
 _INJECTED_CTX_RE = re.compile(
-    re.escape(SENTINEL_OPEN) + r".*?" + re.escape(SENTINEL_CLOSE),
-    re.DOTALL,
+    "(?:"
+    + re.escape(SENTINEL_OPEN) + r".*?" + re.escape(SENTINEL_CLOSE)
+    + r"|<knowledge_context>.*?</knowledge_context>"
+    + ")",
+    re.DOTALL | re.IGNORECASE,
 )
 
 # ── Tunables ──────────────────────────────────────────────────────────────
