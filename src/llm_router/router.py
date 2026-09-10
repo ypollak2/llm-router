@@ -28,6 +28,8 @@ from uuid import uuid4
 from llm_router import cost, media, providers
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from llm_router.agents.base import AgentRoutingPolicy
 from llm_router.quota_routing import check_quota, raise_quota_denied, record_consumption
 from llm_router.quota_envelope_routing import (
@@ -3340,6 +3342,13 @@ async def route_and_call(
     ctx: Any | None = None,
     classification_data: dict | None = None,
     caller_context: str | None = None,
+    # Stage A: the project the CALLER is working in, for OKF retrieval scope.
+    # Without it, scope falls back to this process's cwd — which for a long-lived
+    # MCP server or gateway is wherever it happened to be launched, not where the
+    # asker is. On the machine this was found on that is `$HOME`, so a question
+    # about `_write_source_concept` retrieved nothing while 1068 documents about
+    # that exact repository sat one directory away. See okf.find_relevant.
+    project_root: str | Path | None = None,
     identity: TurnIdentity | None = None,
     max_cost_per_task: float | None = None,
     max_wall_clock_seconds: float | None = None,
@@ -4147,7 +4156,7 @@ async def route_and_call(
         # Both are best-effort; any failure falls through to normal routing.
         try:
             _okf.seed_model_catalog()
-            _okf_concepts = _okf.find_relevant(prompt)
+            _okf_concepts = _okf.find_relevant(prompt, root=project_root)
             if _okf_concepts:
                 prompt = _okf.inject_context(prompt, _okf_concepts)
                 if ctx is not None:
