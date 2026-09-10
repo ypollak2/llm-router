@@ -17,14 +17,21 @@ class CursorAdapter:
     name: str = "cursor"
     config_path: Path = Path.home() / ".cursor" / "mcp.json"
 
-    def install(self, server_command: list[str]) -> Path:
+    def install(self, server_command: list[str], env: dict[str, str] | None = None) -> Path:
         self.config_path.parent.mkdir(parents=True, exist_ok=True)
         config = self._read_or_init()
         config.setdefault("mcpServers", {})
-        config["mcpServers"]["llm_router"] = {
+        entry: dict = {
             "command": server_command[0],
             "args": server_command[1:],
         }
+        # Only when there is something to carry — an empty `env: {}` is noise in a
+        # file humans read and edit. See hosts.base.routing_env for why this exists
+        # at all: Cursor never reads Claude Code's settings.json, so without it the
+        # ensemble classifier falls back to a model that is not installed.
+        if env:
+            entry["env"] = dict(env)
+        config["mcpServers"]["llm_router"] = entry
         self.config_path.write_text(json.dumps(config, indent=2))
         return self.config_path
 
