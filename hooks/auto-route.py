@@ -2306,6 +2306,11 @@ def _grounding_violations(draft: str, context: str, prompt: str = "") -> list[st
     out: list[str] = []
     for m in _DRAFT_PATH_RE.finditer(draft):
         path = m.group(1)
+        # `a/` and `b/` are git's diff prefixes, not directories. A draft quoting a
+        # diff of a file that IS in context was being reported as citing two
+        # invented paths, which would have rejected a correct answer.
+        if path[:2] in ("a/", "b/"):
+            path = path[2:]
         if path in haystack:
             continue
         try:
@@ -2343,6 +2348,71 @@ def _draft_is_relayable(draft: str, context: str, prompt: str = "") -> bool:
 # than none.
 _RESCUE_MIN_ASSISTANT_TURNS = 1   # what was concluded, not just what was asked
 _RESCUE_MIN_CONTEXT_CHARS = 200   # a real exchange, not "hi" / "ok"
+
+# S2-5b. The conditions above describe the SESSION. They say nothing about whether
+# the conversation bears on the prompt in front of us, and on their own they
+# rescued every gated prompt once any exchange existed — 100% of 376 real prompts,
+# which is a bypass rather than a result. The quality check is what settled it:
+# with one arena-demo exchange stored, "continue with U7" and "continue with U4"
+# both produced confident, detailed, entirely invented documents. Neither U7 nor U4
+# appeared anywhere in the context; the model anchored on the only material it had.
+# S2-6 does not catch this — the fabrication is prose, not file paths.
+#
+# A rescue is legitimate on one of two grounds, never on mere history:
+#   1. the prompt shares real subject matter with the conversation, or
+#   2. the prompt is a pure continuation whose whole meaning is "what we just
+#      agreed", where recency genuinely is the referent.
+# An affirmation, a continuation verb, or both — and nothing else. The "nothing
+# else" is the whole point: "continue" carries no specifics and means the previous
+# turn, while "continue with U7" names a target the conversation never mentioned,
+# and that is the prompt that fabricated a whole invented document.
+_CONT_AFFIRM = r"(?:yes|yeah|yep|ok|okay|sure|alright|fine|please)"
+_CONT_VERB = r"(?:go\s+ahead|go\s+on|do\s+it|do\s+that|continue|carry\s+on|proceed|next|keep\s+going|go)"
+_CONTINUATION_ONLY_RE = re.compile(
+    rf"^\s*(?:{_CONT_AFFIRM}\b[\s,.!]*)?"
+    rf"(?:{_CONT_VERB}\b[\s,.!]*)?"
+    r"(?:it|that|this|them|then|now|please)?[\s,.!]*$",
+    re.I,
+)
+
+# Words that carry subject matter. Deliberately the same stopword discipline as OKF
+# retrieval: prompts are mostly machinery ("please", "again", "check"), and matching
+# on machinery is how everything matched everything.
+_RESCUE_STOPWORDS = frozenset({
+    "about", "again", "already", "also", "another", "anything", "because", "been",
+    "before", "being", "bring", "check", "could", "current", "does", "doing", "done",
+    "else", "even", "every", "first", "from", "give", "going", "have", "here", "into",
+    "just", "keep", "last", "like", "make", "many", "more", "most", "much", "need",
+    "next", "note", "only", "other", "over", "please", "really", "right", "same",
+    "should", "show", "some", "still", "sure", "take", "tell", "than", "that", "them",
+    "then", "there", "these", "they", "thing", "things", "think", "this", "those",
+    "time", "usmuch", "very", "want", "well", "were", "what", "when", "where", "which",
+    "while", "will", "with", "work", "worked", "working", "would", "your",
+})
+
+_RESCUE_MIN_SHARED_TERMS = 1
+
+
+def _rescue_is_relevant(prompt: str, context: str) -> bool:
+    """Whether *context* plausibly answers *prompt*, rather than merely existing."""
+    p = prompt or ""
+    # Every part of the continuation pattern is optional, so it also matches the
+    # empty string; an empty prompt is not a continuation of anything.
+    if p.strip() and _CONTINUATION_ONLY_RE.match(p):
+        # A bare continuation refers to the previous turn by construction. One that
+        # names an unexplained target does not — "continue with U7" is shaped like a
+        # continuation and is exactly the prompt that fabricated, so the regex above
+        # matches only continuations carrying no specifics of their own.
+        return True
+    ctx_terms = {
+        w for w in re.findall(r"\b\w{4,}\b", (context or "").lower())
+        if w not in _RESCUE_STOPWORDS
+    }
+    prompt_terms = {
+        w for w in re.findall(r"\b\w{4,}\b", p.lower())
+        if w not in _RESCUE_STOPWORDS
+    }
+    return len(prompt_terms & ctx_terms) >= _RESCUE_MIN_SHARED_TERMS
 
 
 def _session_context_rescue(prompt: str, session_id: str) -> str | None:
@@ -2386,6 +2456,11 @@ def _session_context_rescue(prompt: str, session_id: str) -> str | None:
             target_provider="ollama",
         )
         if not ctx or len(ctx.strip()) < _RESCUE_MIN_CONTEXT_CHARS:
+            return None
+        # S2-5b: and it must actually bear on THIS prompt. Without this the rescue
+        # fires on every gated prompt in any warm session and the model answers
+        # about whatever happens to be in the buffer.
+        if not _rescue_is_relevant(prompt, ctx):
             return None
         return ctx
     except Exception:  # noqa: BLE001 — context is best-effort, never fatal

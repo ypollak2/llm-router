@@ -80,9 +80,12 @@ def test_a_file_that_really_exists_in_the_repo_is_grounded(hook, tmp_path, monke
 
 
 def test_several_inventions_are_all_reported(hook):
-    draft = "Touch a/one.py, b/two.py and demo/host/identity.py."
+    # Not `a/...` or `b/...`: those are git diff prefixes and are stripped before
+    # comparison, so using them here tested prefix handling rather than the
+    # several-inventions behaviour this is named for.
+    draft = "Touch pkg/one.py, lib/two.py and demo/host/identity.py."
     bad = hook._grounding_violations(draft, CONTEXT, prompt="go")
-    assert set(bad) == {"a/one.py", "b/two.py"}
+    assert set(bad) == {"pkg/one.py", "lib/two.py"}
 
 
 def test_prose_without_paths_is_never_flagged(hook):
@@ -116,3 +119,24 @@ def test_a_broken_check_does_not_reject_everything(hook, monkeypatch):
     """Fail-open: a bug in the guard must not silently stop all routing."""
     monkeypatch.setattr(hook, "_grounding_violations", lambda *a, **k: (_ for _ in ()).throw(RuntimeError()))
     assert hook._draft_is_relayable("anything", CONTEXT, prompt="x") is True
+
+
+def test_git_diff_prefixes_are_not_invented_paths(hook):
+    """`a/` and `b/` are git's diff prefixes, not directories.
+
+    Found by the S2-5b quality check: a draft quoting a diff of
+    `demo/host/identity.py` — a file that IS in context — was reported as citing
+    two invented paths, which would have rejected a correct answer. A guard with
+    false positives silently costs routing opportunities and is hard to notice,
+    because the fallthrough looks exactly like a model that just did not answer.
+    """
+    ctx = "[assistant] Fixed persona documents in demo/host/identity.py."
+    draft = "```diff\n--- a/demo/host/identity.py\n+++ b/demo/host/identity.py\n```"
+    assert hook._grounding_violations(draft, ctx, prompt="commit this") == []
+
+
+def test_a_genuinely_invented_path_under_a_prefix_is_still_caught(hook):
+    """Stripping the prefix must not become a way to smuggle anything through."""
+    ctx = "[assistant] Fixed persona documents in demo/host/identity.py."
+    draft = "--- a/demo/totally_invented.py"
+    assert hook._grounding_violations(draft, ctx, prompt="x") == ["demo/totally_invented.py"]
