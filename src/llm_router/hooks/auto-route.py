@@ -2337,6 +2337,26 @@ def _grounding_violations(draft: str, context: str, prompt: str = "") -> list[st
 #     fallthrough is indistinguishable from a model that simply did not answer.
 _DRAFT_SYMBOL_RE = re.compile(r"\b([A-Za-z_][A-Za-z0-9_]*(?:_[A-Za-z0-9_]+|[a-z][A-Z][A-Za-z0-9_]*))\(")
 
+# The second form, added after the call shape missed a live fabrication. Probing
+# the real MCP tool produced: retrieval correct (`src/llm_router/okf.py` is right,
+# and only OKF could have supplied it), then two invented callers —
+# `write_concept` and `write_concept_from_mcp`, neither of which exists. Both were
+# written as fenced prose rather than calls, so the paren requirement never saw
+# them.
+#
+# A fenced identifier is an explicit code claim: nobody writes `write_concept` in
+# backticks meaning an English word. Same identifier-shape requirement as the call
+# form, plus two exclusions that matter in practice:
+#
+#   * anything containing "/" or "." is a path or a dotted attribute — the path
+#     check owns those, and double-reporting one mistake as two is noise;
+#   * ALL_CAPS is an env var or a module constant, which is the most common
+#     backticked identifier-shaped token in this project's own writing. Flagging
+#     `LLM_ROUTER_PROJECT_ROOT` would reject correct answers about configuration.
+_DRAFT_FENCED_SYMBOL_RE = re.compile(
+    r"`([A-Za-z_][A-Za-z0-9_]*(?:_[A-Za-z0-9_]+|[a-z][A-Z][A-Za-z0-9_]*))`"
+)
+
 # Words that appear with parens in ordinary writing and in shell, and would
 # otherwise be read as invented functions. `test()`, `build()` and `run()` are
 # English before they are identifiers.
@@ -2384,6 +2404,18 @@ def _symbol_violations(draft: str, context: str, prompt: str = "") -> list[str]:
     """
     if not draft:
         return []
+    # Only meaningful when the answer is ABOUT the indexed project. The index knows
+    # this repository's symbols and nothing else, so absence from it is not evidence
+    # of non-existence — measured on real output, a mutex/semaphore answer naming
+    # `pthread_mutex_lock` and `sem_init` was reported as inventing them, and a
+    # question about configuration was rejected for naming `load_dotenv`. Those are
+    # real functions; they are simply not in this repo.
+    #
+    # Retrieval having fired is the signal that the model was answering about this
+    # codebase. With no injected knowledge, the draft is general-purpose and the
+    # index has no standing to judge the names in it.
+    if "<knowledge_context>" not in (context or ""):
+        return []
     try:
         known = _known_symbols()
     except Exception:  # noqa: BLE001
@@ -2392,8 +2424,12 @@ def _symbol_violations(draft: str, context: str, prompt: str = "") -> list[str]:
         return []  # nothing indexed → nothing checkable
     haystack = f"{context or ''}\n{prompt or ''}"
     out: list[str] = []
-    for m in _DRAFT_SYMBOL_RE.finditer(draft):
-        name = m.group(1)
+    names = [m.group(1) for m in _DRAFT_SYMBOL_RE.finditer(draft)]
+    names += [
+        m.group(1) for m in _DRAFT_FENCED_SYMBOL_RE.finditer(draft)
+        if not m.group(1).isupper()   # env var / constant, not a function
+    ]
+    for name in names:
         if name.lower() in _SYMBOL_NOISE or name in known or name in haystack:
             continue
         if name not in out:

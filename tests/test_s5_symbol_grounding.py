@@ -43,7 +43,18 @@ def hook():
     return mod
 
 
-CONTEXT = "[assistant] Fixed persona attachment in demo/host/identity.py."
+def _retrieved(body: str) -> str:
+    """Context as it actually arrives when OKF fired.
+
+    Symbol checking only applies to retrieval-backed answers — the index knows this
+    repository and nothing else, so it has no standing to judge names in a
+    general-purpose answer. The block is the signal that the draft is about the
+    indexed project, so a realistic fixture has to carry it.
+    """
+    return f"<knowledge_context>\n{body}\n</knowledge_context>"
+
+
+CONTEXT = _retrieved("[assistant] Fixed persona attachment in demo/host/identity.py.")
 
 
 def test_a_symbol_from_the_context_is_grounded(hook):
@@ -123,3 +134,81 @@ def test_a_broken_symbol_lookup_fails_open(hook, monkeypatch):
         raise RuntimeError("index unavailable")
     monkeypatch.setattr(hook, "_known_symbols", _boom)
     assert hook._symbol_violations("Call whatever() now.", CONTEXT, prompt="go") == []
+
+
+# ── backticked identifiers: the gap the live probe found ────────────────────
+
+LIVE_ANSWER = (
+    "The function `_write_source_concept` is defined in `src/llm_router/okf.py`. "
+    "It writes a concept's source code to a file, primarily used for debugging or "
+    "logging purposes. The function is called by `write_concept` and "
+    "`write_concept_from_mcp`."
+)
+
+
+def test_the_live_fabrication_is_caught(hook, monkeypatch):
+    """Found by probing the real MCP tool after Stage B landed.
+
+    Retrieval was correct — `src/llm_router/okf.py` is where the function lives,
+    and the model could only know that from OKF. It then invented two callers.
+    Neither `write_concept` nor `write_concept_from_mcp` exists; the real callers
+    are okf.py:1078 and context-capture.py:148.
+
+    The check passed it, because `_symbol_violations` required a CALL shape —
+    `name(` with adjacent parens — and the model wrote prose with the names in
+    backticks. That shape requirement was deliberate: `\\w+\\s*\\(` had a 2-in-3
+    false-positive rate on ordinary English. Backticks are the missing third form:
+    a fenced identifier is an explicit code claim, not incidental prose.
+    """
+    monkeypatch.setattr(hook, "_known_symbols", lambda: {"_write_source_concept"})
+    bad = hook._symbol_violations(LIVE_ANSWER, _retrieved("okf.py"), prompt="what does it do")
+    assert "write_concept" in bad
+    assert "write_concept_from_mcp" in bad
+    assert "_write_source_concept" not in bad, "the real symbol must stay grounded"
+
+
+def test_a_backticked_symbol_that_exists_is_grounded(hook, monkeypatch):
+    monkeypatch.setattr(hook, "_known_symbols", lambda: {"find_relevant"})
+    assert hook._symbol_violations(
+        "Call `find_relevant` first.", _retrieved("okf.py"), prompt="explain"
+    ) == []
+
+
+@pytest.mark.parametrize("fenced", [
+    "`src/llm_router/okf.py`",       # a path — the path check's job, not this one
+    "`okf.py`",
+    "`--dry-run`",                   # a flag
+    "`pip install llm-routing`",     # a command
+    "`LLM_ROUTER_PROJECT_ROOT`",     # an env var, not a function
+    "`MAX_RETRIES`",                 # a module constant
+    "`true`",                        # a literal
+    "`some plain words`",
+])
+def test_backticked_non_symbols_are_not_flagged(hook, monkeypatch, fenced):
+    """Backticks fence many things. Only identifier-shaped names are code claims.
+
+    ALL_CAPS is excluded on purpose: env vars and constants are the most common
+    backticked identifier-shaped tokens in this project's own writing, and flagging
+    them would reject correct answers about configuration.
+    """
+    monkeypatch.setattr(hook, "_known_symbols", lambda: {"find_relevant"})
+    flagged = hook._symbol_violations(
+        f"See {fenced} for details.", _retrieved("okf.py"), prompt="go")
+    assert flagged == [], f"{fenced} was read as an invented symbol: {flagged}"
+
+
+def test_a_backticked_symbol_present_in_context_is_grounded(hook, monkeypatch):
+    monkeypatch.setattr(hook, "_known_symbols", lambda: {"other_thing"})
+    ctx = _retrieved("[assistant] attach_persona_documents was never called.")
+    assert hook._symbol_violations(
+        "Call `attach_persona_documents` during setup.", ctx, prompt="fix"
+    ) == []
+
+
+def test_backticked_and_called_forms_agree(hook, monkeypatch):
+    """The same invented name must be caught whichever way it is written."""
+    monkeypatch.setattr(hook, "_known_symbols", lambda: {"find_relevant"})
+    ctx = _retrieved("## [SourceFile] src/llm_router/okf.py")
+    a = hook._symbol_violations("Call `made_up_helper` now.", ctx, prompt="x")
+    b = hook._symbol_violations("Call made_up_helper() now.", ctx, prompt="x")
+    assert a == b == ["made_up_helper"]
