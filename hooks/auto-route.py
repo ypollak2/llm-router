@@ -2278,6 +2278,64 @@ def _extract_turn_text(content) -> str:
 
 _ASSISTANT_PERSIST_TURNS = 6
 
+# S2-6. Paths the draft asserts must be traceable to something real. Mirrors
+# okf._FILE_PAT: the store restricts itself to verified structure for the same
+# reason — a path is checkable, prose is not.
+_DRAFT_PATH_RE = re.compile(
+    r"(?:^|[\s`'\"(\[])([\w./-]*[\w-]/[\w./-]*\w\.(?:py|ts|tsx|js|jsx|go|rs|java|md|json|toml|ya?ml|sh))\b"
+)
+
+
+def _grounding_violations(draft: str, context: str, prompt: str = "") -> list[str]:
+    """File paths the draft names that appear in neither its inputs nor the repo.
+
+    Every other item in Stage 2 makes the routed model more willing to answer, and
+    S2-5 flips the failure mode: a model with no context refuses, which is safe; a
+    model with the WRONG context answers just as fluently about the wrong thing.
+    This catches the mechanical version of that — the draft citing a file nobody
+    mentioned and that does not exist. It is the shape of the 2026-09-06 failure,
+    where routed reviews "listed tests that do not exist".
+
+    Deliberately narrow. It does not judge whether the draft is RIGHT; a judge that
+    is wrong is worse than no judge. It checks the one claim that can be settled
+    without asking another model.
+    """
+    if not draft:
+        return []
+    haystack = f"{context or ''}\n{prompt or ''}"
+    out: list[str] = []
+    for m in _DRAFT_PATH_RE.finditer(draft):
+        path = m.group(1)
+        if path in haystack:
+            continue
+        try:
+            # Existing on disk is evidence too: the model may have been shown the
+            # file in an earlier turn that has since fallen out of the budget.
+            if Path(path).exists():
+                continue
+        except OSError:
+            pass
+        if path not in out:
+            out.append(path)
+    return out
+
+
+def _draft_is_relayable(draft: str, context: str, prompt: str = "") -> bool:
+    """Whether a DIRECT draft may be shown, or should fall through to Claude.
+
+    Fail-open on any internal error: a bug in the guard must not silently stop all
+    routing, which would look exactly like the regression this branch is fixing.
+    `LLM_ROUTER_GROUNDING_CHECK=off` disables it.
+    """
+    if os.environ.get("LLM_ROUTER_GROUNDING_CHECK", "on").strip().lower() in (
+        "0", "off", "false", "no"
+    ):
+        return True
+    try:
+        return not _grounding_violations(draft, context, prompt)
+    except Exception:  # noqa: BLE001
+        return True
+
 # S2-5. A gated prompt is routable when its reference can be RESOLVED, not merely
 # when it names something. Minimums below are what separates "there is an exchange
 # to resolve against" from "there is a scrap that invites a confident wrong guess";
@@ -3707,6 +3765,23 @@ def main() -> None:
                     prompt, _direct_chain, task_type,
                     timeout=OLLAMA_TIMEOUT, history=_history, context=_session_ctx,
                 )
+
+            # S2-6: a draft that cites a file nobody mentioned and that does not
+            # exist is not a weak answer, it is a fabricated one — and Stage 2 made
+            # the model far more willing to answer. Reject it and let Claude take
+            # the turn; a fallthrough costs a routing opportunity, relaying costs
+            # the user's trust in every routed answer.
+            if _direct_result and not _draft_is_relayable(
+                getattr(_direct_result, "text", "") or "", _session_ctx or "", prompt
+            ):
+                _bad = _grounding_violations(
+                    getattr(_direct_result, "text", "") or "", _session_ctx or "", prompt
+                )
+                _debug_log(
+                    f"[INVOCATION {invocation_id:.3f}] DRAFT REJECTED (ungrounded): "
+                    f"cites {', '.join(_bad)} — falling through to Claude"
+                )
+                _direct_result = None
 
             if _direct_result:
                 _debug_log(
