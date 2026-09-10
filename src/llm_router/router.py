@@ -4156,7 +4156,15 @@ async def route_and_call(
         # Both are best-effort; any failure falls through to normal routing.
         try:
             _okf.seed_model_catalog()
-            _okf_concepts = _okf.find_relevant(prompt, root=project_root)
+            # Stage B: an explicit project_root wins — a caller that named a
+            # project meant it. Otherwise ask the MCP client for its workspace
+            # roots, which is the only per-connection signal a long-lived server
+            # has. None from either falls through to env, then cwd, unchanged.
+            _scope_root = project_root
+            if _scope_root is None:
+                from llm_router.mcp_roots import root_from_ctx as _root_from_ctx
+                _scope_root = await _root_from_ctx(ctx)
+            _okf_concepts = _okf.find_relevant(prompt, root=_scope_root)
             if _okf_concepts:
                 prompt = _okf.inject_context(prompt, _okf_concepts)
                 if ctx is not None:
