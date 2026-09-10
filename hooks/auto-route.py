@@ -2276,6 +2276,85 @@ def _extract_turn_text(content) -> str:
     return ""
 
 
+_ASSISTANT_PERSIST_TURNS = 6
+
+
+def _persist_assistant_turns(
+    transcript_path: str,
+    session_id: str,
+    current_prompt: str = "",
+    max_turns: int = _ASSISTANT_PERSIST_TURNS,
+) -> int:
+    """Copy Claude's recent answers from the CC transcript into the session store.
+
+    S2-2. `record_event(role="assistant")` fired only when a LOCAL model produced
+    a DIRECT draft, or when a routed MCP call answered — never when Claude did the
+    work. So a session where Claude did the work accumulated the user's prompts and
+    64 tool calls and not one conclusion, and anything reading the durable store
+    afterwards saw a conversation with half of every exchange missing. "Did that
+    work?" and "commit this" are unanswerable from that.
+
+    The transcript is already parsed here for the immediate DIRECT draft
+    (``_load_conversation_history``); this persists the same turns so a later
+    routed call, or a later session, can see them too.
+
+    Injected ``<knowledge_context>`` blocks are stripped before writing. One was
+    found recorded as a genuine turn in this machine's live data — re-persisting
+    injected material is the self-poisoning loop ``okf._KNOWLEDGE_CTX_RE`` exists to
+    close, and the session store had no equivalent guard.
+
+    Best-effort throughout: returns the number of turns written, 0 on any failure.
+    Never raises — a hook that breaks the prompt is worse than thin context.
+    """
+    if not session_id or not transcript_path:
+        return 0
+    try:
+        turns = _load_conversation_history(
+            transcript_path, current_prompt or "", max_turns=max_turns,
+            session_id=session_id,
+        )
+    except Exception:  # noqa: BLE001
+        return 0
+    if not turns:
+        return 0
+
+    try:
+        from llm_router import session_store as _ss
+
+        try:
+            from llm_router.okf import _KNOWLEDGE_CTX_RE as _KCTX
+        except Exception:  # noqa: BLE001 — stripping is a guard, not a dependency
+            _KCTX = None
+
+        # Dedupe against what is already stored. The hook runs once per prompt over
+        # a transcript that keeps growing, so without this the same conclusion is
+        # appended again on every turn until compaction throws it all away.
+        existing = {
+            (e.get("content") or "").strip()
+            for e in _ss.load_events(session_id, limit=200)
+            if e.get("role") == "assistant"
+        }
+
+        written = 0
+        for turn in turns:
+            if turn.get("role") != "assistant":
+                continue
+            text = (turn.get("content") or "")
+            if _KCTX is not None:
+                text = _KCTX.sub("", text)
+            text = text.strip()
+            if not text or text in existing:
+                continue
+            _ss.record_event(
+                session_id, "claude_answer", text, role="assistant", task_type="",
+            )
+            existing.add(text)
+            written += 1
+        return written
+    except Exception:  # noqa: BLE001
+        return 0
+
+
 def _load_conversation_history(
     transcript_path: str,
     current_prompt: str,
@@ -3335,6 +3414,21 @@ def main() -> None:
                 role="user",
                 task_type=task_type,
             )
+        except Exception:
+            pass
+
+        # S2-2: and Claude's answers to the PREVIOUS prompts, which nothing else
+        # records. This is the only point in the lifecycle where the transcript is
+        # already open and the turns before this one are complete, so it is where
+        # the other half of the conversation gets persisted. Fail-open.
+        try:
+            _n = _persist_assistant_turns(
+                hook_input.get("transcript_path", ""), session_id, current_prompt=prompt,
+            )
+            if _n:
+                _debug_log(
+                    f"[INVOCATION {invocation_id:.3f}] PERSISTED {_n} Claude turn(s) to session store"
+                )
         except Exception:
             pass
 
