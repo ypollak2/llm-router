@@ -188,10 +188,37 @@ def _project_id() -> str:
         cwd = os.getcwd()
     except Exception:
         cwd = os.path.expanduser("~")
+    # S2-1: the REPO ROOT of the cwd, not the raw cwd. Hashing the raw cwd made
+    # `repo/`, `repo/src/` and `repo/tests/` three different projects, and the
+    # PostToolUse hook runs with whatever cwd the last tool call left behind — so a
+    # session that touched several directories scattered its events across several
+    # buckets while build_session_context read exactly one. Measured on this
+    # machine: one session across 7 buckets, 299 events recorded, 176 readable.
+    cwd = _repo_root_of(cwd)
     # Namespacing key, not a security hash (usedforsecurity=False → bandit B324).
     return hashlib.sha1(
         cwd.encode("utf-8", errors="ignore"), usedforsecurity=False
     ).hexdigest()[:16]
+
+
+def _repo_root_of(start: str) -> str:
+    """Nearest ancestor of *start* containing ``.git``, else *start* unchanged.
+
+    Cross-project isolation is preserved: two different repos still hash to two
+    different ids. Only subdirectories of the SAME repo are merged, which is what
+    "project scope" was always supposed to mean.
+    """
+    try:
+        here = Path(start).resolve()
+    except Exception:
+        return start
+    for candidate in (here, *here.parents):
+        try:
+            if (candidate / ".git").exists():
+                return str(candidate)
+        except OSError:
+            break
+    return str(here)
 
 
 def _project_dir() -> Path:
@@ -204,6 +231,19 @@ def _sanitize(session_id: str) -> str:
 
 
 def _session_path(session_id: str) -> Path:
+    """Where this session's log lives, within the CURRENT project scope.
+
+    Resolution deliberately stays scope-local. Following a session id across
+    buckets was tried — a session id is arguably a stronger identity than a
+    directory, and it would have consolidated the remaining fragmentation — but it
+    breaks the isolation guarantee CHZ-AUD-024 pins: a project must not be able to
+    read a session it does not own, even knowing its id. Reassembling more context
+    is not worth handing one project a read path into another's conversation.
+
+    What remains is bounded and by design: events recorded while the cwd was in a
+    genuinely different project stay with that project. See ``_repo_root_of`` for
+    the part that IS fixed — subdirectories of one repo no longer split.
+    """
     return _project_dir() / f"session_context_{_sanitize(session_id)}.jsonl"
 
 
