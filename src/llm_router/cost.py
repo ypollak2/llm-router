@@ -154,8 +154,20 @@ CREATE TABLE IF NOT EXISTS savings_stats (
 Each row represents one routed call logged by the PostToolUse hook via JSONL,
 then imported into SQLite by the MCP server for lifetime analytics."""
 
-SAVINGS_LOG_PATH = Path.home() / ".llm-router" / "savings_log.jsonl"
-"""Path to the JSONL file written by the PostToolUse hook for async import."""
+
+def savings_log_path() -> Path:
+    """Where the savings JSONL lives, resolved PER CALL.
+
+    This was a module-level constant evaluated at import, which froze the real
+    user's home the moment cost.py was first imported — so LLM_ROUTER_HOME could
+    not move it. That matters more here than elsewhere: import_savings_log does
+    not merely read this file, it CLAIMS it with os.replace and deletes it after
+    importing. A test that believed it was isolated could consume a developer's
+    real, not-yet-imported savings history.
+    """
+    from llm_router.paths import state_path
+
+    return state_path("savings_log.jsonl")
 
 
 CREATE_SEMANTIC_CACHE_TABLE = """
@@ -2874,12 +2886,12 @@ async def import_savings_log() -> int:
     import os
     import uuid
 
-    claim = SAVINGS_LOG_PATH.with_name(
-        f"{SAVINGS_LOG_PATH.name}.{os.getpid()}.{uuid.uuid4().hex[:8]}.claim"
+    claim = savings_log_path().with_name(
+        f"{savings_log_path().name}.{os.getpid()}.{uuid.uuid4().hex[:8]}.claim"
     )
     # Atomic claim — serializes concurrent drainers at the filesystem layer.
     try:
-        await asyncio.to_thread(os.replace, str(SAVINGS_LOG_PATH), str(claim))
+        await asyncio.to_thread(os.replace, str(savings_log_path()), str(claim))
     except OSError:
         return 0  # no live log, or another drainer claimed it first
 
@@ -2931,7 +2943,7 @@ async def import_savings_log() -> int:
         await asyncio.to_thread(_safe_unlink, claim)
     else:
         # Insert failed — return the rows to the live log for a later retry.
-        await asyncio.to_thread(_restore_claim, claim, SAVINGS_LOG_PATH)
+        await asyncio.to_thread(_restore_claim, claim, savings_log_path())
 
     return imported
 

@@ -24,8 +24,12 @@ def savings_env(tmp_path, monkeypatch):
     monkeypatch.setenv("LLM_ROUTER_DB_PATH", str(db))
     import llm_router.config as config_module
     config_module._config = None  # re-read env
-    log = tmp_path / "savings_log.jsonl"
-    monkeypatch.setattr(cost, "SAVINGS_LOG_PATH", log)
+    # The savings log follows LLM_ROUTER_HOME now rather than being patched onto
+    # a module constant: `cost.savings_log_path()` resolves per call, so pointing
+    # the state dir at tmp_path is what isolates it. Patching a constant tested a
+    # constant; this tests the mechanism the importer actually uses.
+    monkeypatch.setenv("LLM_ROUTER_HOME", str(tmp_path))
+    log = cost.savings_log_path()
     return db, log
 
 
