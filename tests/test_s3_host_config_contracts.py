@@ -151,6 +151,7 @@ def test_a_bare_command_is_recognised_as_unresolvable():
 
 @pytest.mark.parametrize("host_file,key_path", [
     (Path.home() / ".cursor" / "mcp.json", ("mcpServers",)),
+    (Path.home() / ".config" / "opencode" / "config.json", ("mcpServers",)),
 ])
 def test_live_host_config_is_startable(host_file, key_path):
     """Against this machine's real config, when it exists.
@@ -163,9 +164,13 @@ def test_live_host_config_is_startable(host_file, key_path):
     cfg = json.loads(host_file.read_text())
     for k in key_path:
         cfg = cfg.get(k, {})
-    entries = {k: v for k, v in cfg.items() if "llm" in k.lower() and "router" in k.lower()}
+    # THIS project's server only. An earlier version matched any key containing
+    # "llm" and "router", which also caught the separate upstream `llm-router`
+    # product — failing this suite over a config entry that belongs to something
+    # else. A contract test polices what we write, not what shares the file.
+    entries = {k: v for k, v in cfg.items() if k == SERVER_KEY}
     if not entries:
-        pytest.skip("no llm-router entry in this host's config")
+        pytest.skip(f"no {SERVER_KEY} entry in this host's config")
     for name, entry in entries.items():
         command = entry.get("command", "")
         assert _resolvable_from_gui(command), (
