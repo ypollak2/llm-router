@@ -23,6 +23,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+from pathlib import Path
 import urllib.error
 import urllib.request
 
@@ -54,6 +55,39 @@ Snapshot:
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
+def _load_hook_payload():
+    """Shared PostToolUse payload reader — package import, else the bundled copy.
+
+    A plugin ships as a repo clone or a zip with the hook scripts at its root
+    and no importable `llm_router` package, so the package import is the
+    in-repo path and the sibling file is the distributed one. Same two-step
+    used by enforce-route.py for tool_surface.
+    """
+    try:
+        from llm_router.hooks import hook_payload
+        return hook_payload
+    except ImportError:
+        pass
+    import importlib.util as _ilu
+    _here = Path(__file__).resolve().parent
+    for _cand in (_here / "llm_router_hook_payload.py",   # installed alongside hooks
+                  _here.parent / "hook_payload.py"):      # in-repo fallback
+        if not _cand.exists():
+            continue
+        try:
+            _spec = _ilu.spec_from_file_location("llm_router_hook_payload", _cand)
+            _mod = _ilu.module_from_spec(_spec)
+            sys.modules["llm_router_hook_payload"] = _mod
+            _spec.loader.exec_module(_mod)
+            return _mod
+        except Exception:  # noqa: BLE001 — a broken reader must not break the hook
+            continue
+    return None
+
+
+_payload = _load_hook_payload()
+
+
 def _bare_tool_name(full_name: str) -> str:
     """Strip MCP server prefix: mcp__plugin_playwright__browser_snapshot → browser_snapshot."""
     return full_name.split("__")[-1] if "__" in full_name else full_name
@@ -61,7 +95,7 @@ def _bare_tool_name(full_name: str) -> str:
 
 def _extract_snapshot(payload: dict) -> str | None:
     """Pull text content from a browser_snapshot tool result."""
-    result = payload.get("toolResult", {})
+    result = _payload._first(payload, _payload._RESULT_KEYS, {})
     if isinstance(result, str):
         return result or None
     if isinstance(result, dict):
@@ -167,14 +201,16 @@ def main() -> None:
     if os.environ.get("LLM_ROUTER_PLAYWRIGHT_COMPRESS", "").lower() == "off":
         sys.exit(0)
 
+    if _payload is None:
+        sys.exit(0)
+
     try:
         payload = json.loads(sys.stdin.read())
     except (json.JSONDecodeError, OSError):
         sys.exit(0)
 
     # Only fire for browser_snapshot
-    tool_name = payload.get("toolName", "")
-    if _bare_tool_name(tool_name) != "browser_snapshot":
+    if not _payload.is_tool(payload, "browser_snapshot"):
         sys.exit(0)
 
     snapshot = _extract_snapshot(payload)
