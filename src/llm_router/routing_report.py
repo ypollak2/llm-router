@@ -107,6 +107,12 @@ def summarise(records: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
             "prompts": 0, "success": 0, "failed": 0, "skipped": 0, "other": 0,
             "session_rescue": 0, "okf_rescue": 0, "rejected": 0,
             "turns_persisted": 0, "rate": 0.0,
+            # Phase 3(a): a draft was PRODUCED and then either relayed or discarded.
+            # The denominator for grounding is drafts, not prompts — a prompt the
+            # gate never routed produced no draft, so it was never a chance for the
+            # check to fire, and counting it would dilute the rate with cases
+            # grounding had no part in.
+            "drafts": 0, "grounding_rate": None,
         })
         d["prompts"] += 1
         d[(rec["outcome"] or Outcome.OTHER).value] += 1
@@ -114,6 +120,12 @@ def summarise(records: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
             d[note] += 1
     for d in days.values():
         d["rate"] = (d["success"] / d["prompts"]) if d["prompts"] else 0.0
+        d["drafts"] = d["success"] + d["rejected"]
+        # None, not 0.0: a day with no drafts is a day grounding was never asked
+        # about, and reporting that as a perfect record would be a lie of omission.
+        d["grounding_rate"] = (
+            d["rejected"] / d["drafts"] if d["drafts"] else None
+        )
     return days
 
 

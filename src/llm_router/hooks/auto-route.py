@@ -3629,6 +3629,7 @@ def main() -> None:
     # distinctive symbol or path token), so an empty result is the common case and
     # the gate still closes on it.
     _okf_docs = []
+    _grounding_notice = ""
     if _direct_enabled and not zero_claude and _is_context_dependent(prompt):
         try:
             from llm_router import okf as _okf
@@ -3795,6 +3796,19 @@ def main() -> None:
                 _debug_log(
                     f"[INVOCATION {invocation_id:.3f}] DRAFT REJECTED (ungrounded): "
                     f"cites {', '.join(_bad)} — falling through to Claude"
+                )
+                # Phase 3(b): say so, rather than only logging it. A discarded draft
+                # is otherwise indistinguishable from a cheap model that simply did
+                # not answer — which is how a false-positive guard hides, and how
+                # the symbol check ran at a 3-in-4 false-rejection rate for a while
+                # without anyone noticing. It is also the one capability here that
+                # no competitor has, and it was invisible.
+                _cited = ", ".join(_bad[:3]) if _bad else "something not in the repo"
+                _grounding_notice = (
+                    "🛡  A local draft was discarded before you saw it: it cited "
+                    f"{_cited}, which exists neither in the material it was given "
+                    "nor in this repository. Answering directly instead.\n"
+                    "   Disable with LLM_ROUTER_GROUNDING_CHECK=off."
                 )
                 _direct_result = None
 
@@ -4276,6 +4290,8 @@ def main() -> None:
     # Append the every-N-prompts mini-summary widget when this turn
     # happened to be the Nth (populated above in main()).
     _final_context = directive
+    if _grounding_notice:
+        _final_context = _final_context + "\n\n" + _grounding_notice
     if _mini_summary_block:
         _final_context = _final_context + "\n\n" + _mini_summary_block
 
