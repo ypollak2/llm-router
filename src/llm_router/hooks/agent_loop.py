@@ -324,6 +324,55 @@ def _get_ollama_url() -> str:
 _TOOL_NAMES = "|".join(t["function"]["name"] for t in TOOL_DEFINITIONS)
 _TOOLCALL_TEXT_RE = re.compile(r'\{\s*"name"\s*:\s*"(?:' + _TOOL_NAMES + r')"', re.IGNORECASE)
 
+# Qwen's XML tool-call dialect. qwen3-coder:30b emits every tool call as
+#
+#     <function=read_file>
+#     <parameter=path>
+#     src/llm_router/hooks/auto-route.py
+#     </parameter>
+#     </function>
+#
+# and leaves Ollama's structured `tool_calls` field empty. The JSON shim above
+# does not match it, so `tools_used` stayed 0 and run_agent_loop discarded a
+# CORRECT tool call as "the model only chatted" (the `tools_used == 0` guard).
+# That is what produced the 2026-09-06 conclusion that a local model cannot
+# drive the loop: the model drove it fine and the parser could not hear it.
+# Closing tags are optional — the model frequently omits `</function>` and
+# closes with a stray `</tool_call>` instead, so the body runs to the next
+# `<function=` or end of string.
+_XML_FUNC_RE = re.compile(
+    r"<function[=\s]+([A-Za-z_][A-Za-z0-9_]*)\s*>(.*?)(?=</function>|<function[=\s]|\Z)",
+    re.DOTALL,
+)
+_XML_PARAM_RE = re.compile(
+    r"<parameter[=\s]+([A-Za-z_][A-Za-z0-9_]*)\s*>(.*?)(?=</parameter>|<parameter[=\s]|\Z)",
+    re.DOTALL,
+)
+
+
+def _repair_xml_toolcalls(content: str) -> list[dict]:
+    """Recover tool calls emitted in Qwen's ``<function=name>`` XML dialect.
+
+    Argument values are kept as stripped strings and never coerced: every tool
+    in TOOL_DEFINITIONS takes strings, and json-parsing the value would silently
+    turn a path like ``2.0.0`` or a pattern like ``true`` into something else.
+    Unknown tool names are dropped here rather than in execute_tool, so a model
+    hallucinating ``<function=grep>`` falls through to the next model instead of
+    burning an iteration on an "Unknown tool" string.
+    """
+    if not content or "<function" not in content:
+        return []
+    known = {t["function"]["name"] for t in TOOL_DEFINITIONS}
+    calls: list[dict] = []
+    for m in _XML_FUNC_RE.finditer(content):
+        name = m.group(1)
+        if name not in known:
+            continue
+        args = {k: v.strip() for k, v in _XML_PARAM_RE.findall(m.group(2))}
+        if args:
+            calls.append({"function": {"name": name, "arguments": args}})
+    return calls
+
 
 def _repair_toolcalls(content: str) -> list[dict]:
     """Recover tool calls a model emitted as TEXT instead of structured output.
@@ -336,8 +385,10 @@ def _repair_toolcalls(content: str) -> list[dict]:
     shape the executor expects. Empirically flips qwen2.5-coder:7b 0/3 → 3/3 on a
     write-then-run task; a no-op (returns ``[]``) for well-behaved models.
     """
-    if not content or not _TOOLCALL_TEXT_RE.search(content):
+    if not content:
         return []
+    if not _TOOLCALL_TEXT_RE.search(content):
+        return _repair_xml_toolcalls(content)
     calls: list[dict] = []
     for m in _TOOLCALL_TEXT_RE.finditer(content):
         start = content.rfind("{", 0, m.start() + 1)
