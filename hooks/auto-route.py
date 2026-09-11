@@ -2355,6 +2355,44 @@ def _rescue_is_relevant(prompt: str, context: str) -> bool:
     return len(prompt_terms & ctx_terms) >= _RESCUE_MIN_SHARED_TERMS
 
 
+def _local_agent_loop_enabled() -> bool:
+    """Is the local tool-calling loop allowed to answer context-dependent prompts?
+
+    OFF BY DEFAULT, and deliberately so. Turning it on lets a local model reach
+    `write_file` / `edit_file` / `run_command` on prompts the context-dependent
+    gate would otherwise have sent straight to Claude. The loop has a command
+    blocklist and a non-shell argv executor, but NO diff gate: an edit it makes
+    lands in the working tree with nothing between the model and the file. Until
+    that gate exists this is opt-in per machine.
+    """
+    return os.environ.get("LLM_ROUTER_LOCAL_AGENT_LOOP", "").strip().lower() in (
+        "1", "on", "true", "yes",
+    )
+
+
+def _tool_loop_rescue(prompt: str, task_type: str) -> bool:
+    """Third rescue arm for a context-dependent prompt: give it the tools.
+
+    The context-dependent gate exists to stop a BLIND model answering about local
+    state. A model holding read_file/search_files is not blind — it can resolve
+    the reference the gate is protecting, which is why the gate sits in the wrong
+    place relative to the tool branch.
+
+    Measured before this arm existed: 348 context-dependent skips in the debug
+    log, of which 0 ever reached the needs_tools branch at all. The agent loop's
+    entire input population was being consumed by an upstream gate, which is why
+    `needs_tools=True` appears 3 times in 1961 invocations and the loop had run
+    once in its lifetime.
+    """
+    if not _local_agent_loop_enabled():
+        return False
+    try:
+        from llm_router.hooks.chain_builder import needs_claude_tools
+        return bool(needs_claude_tools(prompt, task_type))
+    except Exception:
+        return False
+
+
 def _session_context_rescue(prompt: str, session_id: str) -> str | None:
     """Session context able to resolve *prompt*, or None to leave the gate closed.
 
@@ -3656,6 +3694,16 @@ def main() -> None:
                     f"[INVOCATION {invocation_id:.3f}] SESSION RESCUE: context-dependent "
                     f"but {len(_rescue_ctx)} chars of conversation resolve it — "
                     f"routing WITH context"
+                )
+            elif _tool_loop_rescue(prompt, task_type):
+                # The prompt points at local state AND is tool-shaped. The agent
+                # loop can go read what it points at, so the gate's premise —
+                # that the routed model would be answering blind — does not hold.
+                # The tool branch below re-tests the same predicate, so this
+                # rescue and that branch cannot disagree about which path runs.
+                _debug_log(
+                    f"[INVOCATION {invocation_id:.3f}] TOOL LOOP RESCUE: context-dependent "
+                    f"but tool-shaped — routing to the local agent loop"
                 )
             else:
                 _direct_enabled = False
