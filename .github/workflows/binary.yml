@@ -358,8 +358,23 @@ jobs:
             exit 1
           fi
 
-          published=$(gh release view "$tag" --repo "${GITHUB_REPOSITORY}" \
-            --json assets --jq '[.assets[].name]|join(" ")')
+          # This job runs with `contents: read`, under which a DRAFT release is
+          # not visible: gh reports a bare "release not found" for a release
+          # that exists and has every asset attached. That message sent a
+          # release investigation down the wrong path once — the ordering of
+          # this job was blamed before the draft state was noticed — so the
+          # failure now names the two causes it can actually have.
+          if ! published=$(gh release view "$tag" --repo "${GITHUB_REPOSITORY}" \
+            --json assets --jq '[.assets[].name]|join(" ")' 2>/dev/null); then
+            echo "cannot read the release for $tag." >&2
+            echo "  Two causes look identical from here, because this job has" >&2
+            echo "  contents: read and a draft release is invisible to it:" >&2
+            echo "    1. the release is still a DRAFT — publish it:" >&2
+            echo "       gh release edit $tag --draft=false --latest" >&2
+            echo "    2. no release exists for $tag at all — check the tag was" >&2
+            echo "       pushed and the attach step ran." >&2
+            exit 1
+          fi
           echo "assets on $tag: $published"
 
           # Every target install.js can select must be downloadable. A platform
