@@ -136,6 +136,9 @@ _BLOCKED_COMMANDS = re.compile(
 )
 
 
+from llm_router.hooks import agent_writes as _writes
+
+
 def _resolve_path(path: str, project_root: Path) -> Path:
     """Resolve a path safely within the project root.
 
@@ -171,9 +174,14 @@ def execute_tool(name: str, args: dict, project_root: Path) -> str:
 
         elif name == "write_file":
             path = _resolve_path(args["path"], project_root)
+            content = args["content"]
+            before = path.read_text(encoding="utf-8") if path.exists() else None
+            allowed, message = _writes.guard(path, before, content, project_root)
+            if not allowed:
+                return message
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(args["content"], encoding="utf-8")
-            return f"Written {len(args['content'])} chars to {args['path']}"
+            path.write_text(content, encoding="utf-8")
+            return message
 
         elif name == "edit_file":
             path = _resolve_path(args["path"], project_root)
@@ -186,9 +194,12 @@ def execute_tool(name: str, args: dict, project_root: Path) -> str:
                 return f"Error: old_string not found in {args['path']}"
             if content.count(old) > 1:
                 return f"Error: old_string appears {content.count(old)} times — must be unique"
-            content = content.replace(old, new, 1)
-            path.write_text(content, encoding="utf-8")
-            return f"Edited {args['path']}: replaced {len(old)} chars with {len(new)} chars"
+            updated = content.replace(old, new, 1)
+            allowed, message = _writes.guard(path, content, updated, project_root)
+            if not allowed:
+                return message
+            path.write_text(updated, encoding="utf-8")
+            return message
 
         elif name == "list_files":
             path = _resolve_path(args["path"], project_root)
@@ -241,6 +252,9 @@ def execute_tool(name: str, args: dict, project_root: Path) -> str:
                 return f"Error: could not parse command: {exc}"
             if not argv:
                 return "Error: empty command"
+            _allowed, _refusal = _writes.guard_command(argv)
+            if not _allowed:
+                return _refusal
             try:
                 result = subprocess.run(
                     argv, capture_output=True, text=True,
