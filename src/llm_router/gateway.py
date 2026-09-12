@@ -358,6 +358,80 @@ async def route(payload: dict, request: Request) -> dict:
         raise HTTPException(status_code=502, detail=f"route failed: {e}")
 
 
+# ── Native: POST /ground (structural check, no model call) ───────────────────
+@app.post("/ground")
+async def ground(payload: dict, request: Request) -> dict:
+    """Is this draft grounded in the material it was given, and in this repo?
+
+    Body: ``{"draft", "context"?, "prompt"?, "project_root"?}`` ->
+    ``{"relayable", "violations", "symbol_violations", "checked"}``.
+
+    The check is STRUCTURAL and calls no model: it asks whether the files and
+    symbols a draft cites actually exist. That is why it is worth exposing —
+    any host that gets an answer from a cheap model can run it in a few
+    milliseconds, with no second inference and no judge, and decide whether to
+    relay the answer or do the work itself.
+
+    What it does NOT do is assess correctness. A draft that cites only real
+    files can still be wrong about them, so `relayable: true` means "nothing in
+    this draft is provably invented", never "this draft is right". Callers that
+    treat it as a quality score will be misled, so the field is named for what
+    it decides.
+
+    `symbol_violations` is only meaningful when the draft was given repo
+    material: the symbol index knows THIS repository, so outside it the absence
+    of a symbol is not evidence that the symbol does not exist. The `checked`
+    field says which checks actually ran.
+    """
+    draft = payload.get("draft")
+    if not isinstance(draft, str) or not draft.strip():
+        raise HTTPException(status_code=400, detail="`draft` is required and must be a non-empty string")
+    # Validate BEFORE coercing: `or ""` turns a falsy wrong type ([], 0, {})
+    # into a valid empty string, so the type check never sees it and a caller
+    # sending the wrong shape gets a clean 200 describing nothing.
+    for field in ("context", "prompt"):
+        value = payload.get(field)
+        if value is not None and not isinstance(value, str):
+            raise HTTPException(status_code=400, detail=f"`{field}` must be a string")
+    context = payload.get("context") or ""
+    prompt = payload.get("prompt") or ""
+
+    scope = _resolve_project_scope(request, payload.get("project_root"))
+    prior = os.environ.get("LLM_ROUTER_PROJECT_ROOT")
+    if scope:
+        os.environ["LLM_ROUTER_PROJECT_ROOT"] = scope
+    try:
+        from llm_router import grounding
+
+        path_violations = grounding.grounding_violations(draft, context, prompt)
+        symbol_hits = grounding.symbol_violations(draft, context, prompt)
+        relayable = grounding.draft_is_relayable(draft, context, prompt)
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=502, detail=f"grounding check failed: {e}")
+    finally:
+        # Restore rather than delete: the process may have had a scope already,
+        # and leaking this request's project into the next one is the
+        # cross-project contamination that OKF scoping exists to prevent.
+        if scope:
+            if prior is None:
+                os.environ.pop("LLM_ROUTER_PROJECT_ROOT", None)
+            else:
+                os.environ["LLM_ROUTER_PROJECT_ROOT"] = prior
+
+    return {
+        "relayable": relayable,
+        "violations": path_violations,
+        "symbol_violations": symbol_hits,
+        "checked": {
+            "paths": True,
+            # symbol_violations short-circuits without repo material, so saying
+            # it "ran" when it could not would report a clean result it never
+            # earned.
+            "symbols": "<knowledge_context>" in context,
+        },
+    }
+
+
 @app.get("/v1/models")
 def models() -> dict:
     return {"object": "list",
