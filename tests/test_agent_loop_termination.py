@@ -22,7 +22,6 @@ from __future__ import annotations
 
 import json
 
-import pytest
 
 from llm_router.hooks import agent_loop
 from llm_router.hooks.agent_loop import (

@@ -126,7 +126,6 @@ def _probe_image(code: str) -> bytes:
                     row[x0:x0 + _SCALE] = b"\x00" * _SCALE
 
     # Box blur -> grey edges, the partial coverage a font rasteriser produces.
-    span = _BLUR * 2 + 1
     blurred = []
     for y in range(height):
         row = bytearray(width)

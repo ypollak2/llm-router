@@ -51,7 +51,8 @@ def test_the_probe_image_is_antialiased():
     aliased blocks, a capable model dropped one digit every time. A grey pixel
     somewhere is the evidence that edges are soft."""
     png = vr._probe_image("8315")
-    import struct, zlib
+    import struct
+    import zlib
     # walk the chunks to the IDAT
     pos, idat = 8, b""
     while pos < len(png):

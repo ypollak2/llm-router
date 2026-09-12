@@ -12,7 +12,6 @@ access, and the gate cannot raise, because it runs inside a tool call.
 from __future__ import annotations
 
 import json
-from pathlib import Path
 
 import pytest
 

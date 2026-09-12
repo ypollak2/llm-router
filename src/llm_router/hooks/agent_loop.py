@@ -23,6 +23,9 @@ import time
 import urllib.request
 from pathlib import Path
 
+from llm_router.hooks import agent_writes as _writes
+from llm_router.hooks import context_budget as _budget
+
 
 # ── Tool Definitions (sent to the LLM) ───────────────────────────────────────
 
@@ -137,8 +140,6 @@ _BLOCKED_COMMANDS = re.compile(
 )
 
 
-from llm_router.hooks import agent_writes as _writes
-from llm_router.hooks import context_budget as _budget
 
 
 def _resolve_path(path: str, project_root: Path) -> Path:

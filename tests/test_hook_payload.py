@@ -89,7 +89,10 @@ def test_a_bare_string_result_is_the_output():
 def test_garbage_never_raises(bad):
     """These run inside a PostToolUse hook: an exception is a visible error on
     every single tool call."""
-    tool_name(bad); is_tool(bad, "bash"); tool_input(bad); tool_output(bad)
+    tool_name(bad)
+    is_tool(bad, "bash")
+    tool_input(bad)
+    tool_output(bad)
 
 
 def test_a_json_string_input_is_parsed_and_a_broken_one_is_empty():
