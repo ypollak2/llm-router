@@ -117,6 +117,8 @@ ENV_REGISTRY: dict[str, tuple[str, str, int]] = {
     "LLM_ROUTER_LOCAL_VISION": ("llm_router", "vision_registry.py", 1),
     "LLM_ROUTER_VISION_MODEL": ("llm_router", "vision_registry.py", 1),
     "LLM_ROUTER_COMPRESS_EMIT": ("llm_router", "hooks/bash-compress.py", 1),
+    "LLM_ROUTER_IMAGE_INTERCEPT": ("llm_router", "hooks/tool_intercept.py", 1),
+    "LLM_ROUTER_BASH_INTERCEPT": ("llm_router", "hooks/tool_intercept.py", 1),
     "LLM_ROUTER_HOME": ("llm_router", "hooks/agent_writes.py", 2),
     "LLM_ROUTER_SYMBOL_GROUNDING": ("llm_router", "hooks/auto-route.py", 1),
     "LLM_ROUTER_GATEWAY_HOST": ("llm_router", "presets.py", 1),
