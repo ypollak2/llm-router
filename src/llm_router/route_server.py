@@ -64,6 +64,11 @@ async def route_payload_async(payload: dict) -> dict:
         model_override=_override,
         max_tokens=payload.get("max_tokens"),
         temperature=payload.get("temperature"),
+        # Stage A: the caller's project, for OKF retrieval scope. Both HTTP
+        # surfaces hand the router a plain dict, so this is the only place the key
+        # can survive the trip. Absent → scope falls back to env, then cwd, which
+        # is this process's launch directory and not the asker's.
+        project_root=payload.get("project_root") or None,
     )
 
     # Surface this external route in the host-tagged savings pipeline so gateway /

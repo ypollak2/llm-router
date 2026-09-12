@@ -23,6 +23,56 @@ class CompressionResult:
         return self.original_tokens - self.compressed_tokens
 
 
+# Prefixes that position a command without being the command: the interesting
+# part is what follows. Kept deliberately small — guessing wrong here silently
+# mis-files output, which is the bug this exists to fix.
+_POSITIONING_CMDS = frozenset({"cd", "pushd", "env", "time", "nohup", "exec"})
+
+# Separators after which a new command begins. `|` is excluded on purpose: the
+# output of `git log | head` is shaped by `git log`, not by `head`.
+# A NEWLINE separates commands too, and in agent transcripts it is the common
+# case: a multi-line Bash block that opens with `cd /repo` on its own line.
+# Omitting it left 377 of 993 real outputs still classified as `cd`.
+_SEPARATORS = ("&&", ";", "||", "\n")
+
+
+def effective_command(command: str) -> str:
+    """The command whose OUTPUT we are about to compress.
+
+    `cd /repo && git status` produces git output, not cd output. Walks past
+    leading positioning commands and returns the first real one; returns the
+    original string when there is nothing to strip.
+    """
+    if not command:
+        return ""
+    remaining = command.strip()
+    for _ in range(4):  # bounded: `cd a && cd b && env X=1 git status`
+        parts = remaining.split()
+        if not parts or parts[0] not in _POSITIONING_CMDS:
+            break
+        # `env`/`time`/`nohup` prefix a command directly rather than via a
+        # separator: `env X=1 pytest tests` is a pytest run. Step over the
+        # keyword and any VAR=value assignments that follow it.
+        if parts[0] in ("env", "time", "nohup", "exec"):
+            rest = parts[1:]
+            while rest and "=" in rest[0] and not rest[0].startswith("-"):
+                rest = rest[1:]
+            if rest:
+                remaining = " ".join(rest)
+                continue
+            break
+
+        cut = -1
+        for sep in _SEPARATORS:
+            idx = remaining.find(sep)
+            if idx != -1 and (cut == -1 or idx < cut):
+                cut = idx + len(sep)
+        if cut == -1:
+            break          # `cd /repo` alone really is a cd
+        remaining = remaining[cut:].strip()
+    return remaining or command.strip()
+
+
 class RTKAdapter:
     """Compress shell command outputs like RTK does.
 
@@ -87,8 +137,15 @@ class RTKAdapter:
                 strategy="disabled",
             )
 
-        # Parse command
-        parts = command.split()
+        # Parse command — the EFFECTIVE one, not the first word.
+        #
+        # Measured on 989 real Bash outputs from live transcripts: 710 of them
+        # (72%) were classified as `cd`, because an agent's command is routinely
+        # `cd /some/repo && git status`. The filter was chosen from the `cd`, so
+        # the git/pytest/grep filter that would have compressed the output never
+        # ran: those 710 calls saved 4.8%, while a correctly-classified `sed`
+        # saved 36%.
+        parts = effective_command(command).split()
         if not parts:
             return self._no_compression(output)
 
@@ -138,12 +195,39 @@ class RTKAdapter:
         return "\n".join(lines[:10] + ["..."] + lines[-5:])
 
     def _git_status(self, output: str) -> str:
-        """Compress git status output.
+        """Compress git status output, in either of its two formats.
 
-        Extract: branch, modified files count, new files count
+        This was written for the VERBOSE format only ("On branch",
+        "modified:", "new file:"). Against `--porcelain` — ` M path`, `?? path`
+        — nothing matched, `summary` came out empty, and the fallback returned
+        `output[:200]`: a blind character cut that dropped 18 of 28 lines and
+        ended mid-word, with nothing to say it had happened.
+
+        That was survivable while compression output was merely appended and
+        ignored. It is not survivable now that the output REPLACES what the
+        model sees: silently discarding two thirds of a file list produces
+        confident wrong answers about which files changed.
         """
         lines = output.split("\n")
         summary = []
+
+        # Porcelain: a two-character status code, a space, then a path.
+        porcelain = [ln for ln in lines if len(ln) > 3 and ln[2] == " " and ln[:2].strip("? MADRCU!") == ""]
+        if porcelain and len(porcelain) >= len([ln for ln in lines if ln.strip()]) // 2:
+            buckets: dict[str, list[str]] = {}
+            for line in porcelain:
+                buckets.setdefault(line[:2].strip() or "??", []).append(line[3:])
+            names = {"M": "modified", "A": "added", "D": "deleted",
+                     "R": "renamed", "??": "untracked", "!!": "ignored"}
+            out = []
+            for code, paths in sorted(buckets.items()):
+                label = names.get(code, code)
+                # Name a few, then COUNT the rest. Every path is accounted for,
+                # which is the difference between compression and data loss.
+                shown = paths[:8]
+                out.append(f"{label} ({len(paths)}): " + ", ".join(shown)
+                           + (f", +{len(paths) - len(shown)} more" if len(paths) > len(shown) else ""))
+            return "\n".join(out)
 
         for line in lines:
             # Keep branch info
@@ -162,7 +246,9 @@ class RTKAdapter:
         if modified_count > 0 or new_count > 0:
             summary.append(f"Files changed: {modified_count} modified, {new_count} new")
 
-        return "\n".join(summary) if summary else output[:200]
+        # Decline rather than truncate. A filter that did not recognise its
+        # input has no basis for choosing which 200 characters matter.
+        return "\n".join(summary) if summary else output
 
     def _git_diff(self, output: str) -> str:
         """Compress git diff output.
@@ -184,7 +270,7 @@ class RTKAdapter:
                 result.append(line)
 
         if not result:
-            return output[:300]
+            return output  # decline rather than cut blindly
 
         # Add summary
         additions = output.count("\n+")
@@ -324,7 +410,7 @@ class RTKAdapter:
             elif "FAIL" in line:
                 result.append(line)
 
-        return "\n".join(result) if result else output[-200:]
+        return "\n".join(result) if result else output
 
     # ─────────────────────────────────────────────────────
     # UV filter

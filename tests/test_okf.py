@@ -188,10 +188,15 @@ class TestBundleLoading:
         assert len(after) == 2
 
     def test_get_bundle_ttl_expiry(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Stage A replaced the single-slot cache (`_BUNDLE_LOADED_AT` plus a scope
+        # tuple) with a dict keyed by scope, so a long-lived server alternating
+        # between projects keeps both bundles resident instead of evicting on every
+        # request. TTL expiry is now per entry: rewind the stored timestamp rather
+        # than a module-level one.
         _concept(tmp_path, "one", "Table", "One", [], "body")
-        # Simulate TTL expiry by rewinding the loaded-at timestamp
         _get_bundle(tmp_path)
-        monkeypatch.setattr(okf, "_BUNDLE_LOADED_AT", 0.0)
+        for scope, (_loaded_at, concepts) in list(okf._BUNDLE_CACHE.items()):
+            okf._BUNDLE_CACHE[scope] = (0.0, concepts)
         _concept(tmp_path, "two", "Table", "Two", [], "body")
         reloaded = _get_bundle(tmp_path)
         assert len(reloaded) == 2

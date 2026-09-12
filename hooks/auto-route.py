@@ -2278,158 +2278,14 @@ def _extract_turn_text(content) -> str:
 
 _ASSISTANT_PERSIST_TURNS = 6
 
-# S2-6. Paths the draft asserts must be traceable to something real. Mirrors
-# okf._FILE_PAT: the store restricts itself to verified structure for the same
-# reason — a path is checkable, prose is not.
-_DRAFT_PATH_RE = re.compile(
-    r"(?:^|[\s`'\"(\[])([\w./-]*[\w-]/[\w./-]*\w\.(?:py|ts|tsx|js|jsx|go|rs|java|md|json|toml|ya?ml|sh))\b"
+# Grounding moved to llm_router.grounding in 13.3.0 so the gateway can reach it —
+# this file's hyphenated name makes it unimportable. Aliases keep the call sites
+# and the existing tests unchanged.
+from llm_router.grounding import (  # noqa: E402
+    draft_is_relayable as _draft_is_relayable,
+    grounding_violations as _grounding_violations,
 )
 
-
-def _grounding_violations(draft: str, context: str, prompt: str = "") -> list[str]:
-    """File paths the draft names that appear in neither its inputs nor the repo.
-
-    Every other item in Stage 2 makes the routed model more willing to answer, and
-    S2-5 flips the failure mode: a model with no context refuses, which is safe; a
-    model with the WRONG context answers just as fluently about the wrong thing.
-    This catches the mechanical version of that — the draft citing a file nobody
-    mentioned and that does not exist. It is the shape of the 2026-09-06 failure,
-    where routed reviews "listed tests that do not exist".
-
-    Deliberately narrow. It does not judge whether the draft is RIGHT; a judge that
-    is wrong is worse than no judge. It checks the one claim that can be settled
-    without asking another model.
-    """
-    if not draft:
-        return []
-    haystack = f"{context or ''}\n{prompt or ''}"
-    out: list[str] = []
-    for m in _DRAFT_PATH_RE.finditer(draft):
-        path = m.group(1)
-        # `a/` and `b/` are git's diff prefixes, not directories. A draft quoting a
-        # diff of a file that IS in context was being reported as citing two
-        # invented paths, which would have rejected a correct answer.
-        if path[:2] in ("a/", "b/"):
-            path = path[2:]
-        if path in haystack:
-            continue
-        try:
-            # Existing on disk is evidence too: the model may have been shown the
-            # file in an earlier turn that has since fallen out of the budget.
-            if Path(path).exists():
-                continue
-        except OSError:
-            pass
-        if path not in out:
-            out.append(path)
-    return out
-
-
-# S5. A CALL, not a word before a bracket. Two requirements, both learned by
-# measuring against real model output rather than assumed:
-#
-#   * the paren must be adjacent. `\s*\(` matched ordinary English — "threads (or
-#     processes)" and "keywords (from the prompt)" were both reported as invented
-#     functions, a 2-in-3 false-positive rate on real answers.
-#   * the name must look like an identifier: an underscore, or internal capitals.
-#     A bare lowercase word before a paren is prose far more often than it is code,
-#     and a guard that rejects correct answers costs routing silently — the
-#     fallthrough is indistinguishable from a model that simply did not answer.
-_DRAFT_SYMBOL_RE = re.compile(r"\b([A-Za-z_][A-Za-z0-9_]*(?:_[A-Za-z0-9_]+|[a-z][A-Z][A-Za-z0-9_]*))\(")
-
-# Words that appear with parens in ordinary writing and in shell, and would
-# otherwise be read as invented functions. `test()`, `build()` and `run()` are
-# English before they are identifiers.
-_SYMBOL_NOISE = frozenset({
-    "and", "build", "check", "def", "deploy", "elif", "for", "fix", "function",
-    "get", "here", "http", "https", "if", "install", "int", "json", "list", "log",
-    "not", "note", "open", "print", "return", "run", "set", "sudo", "test", "the",
-    "this", "try", "update", "use", "using", "while", "with", "yaml",
-})
-
-
-def _known_symbols() -> set[str]:
-    """Every symbol name the OKF index knows for this project.
-
-    Only meaningful once `okf index` has run. An empty set means "nothing is
-    checkable", never "everything is invented" — see _symbol_violations.
-    """
-    out: set[str] = set()
-    try:
-        from llm_router import okf as _okf
-
-        for concept in _okf._get_bundle():
-            for sym in concept.extra.get("key_symbols") or []:
-                out.add(str(sym))
-    except Exception:  # noqa: BLE001
-        return set()
-    return out
-
-
-def _symbol_violations(draft: str, context: str, prompt: str = "") -> list[str]:
-    """Functions/classes the draft calls that exist nowhere checkable.
-
-    S2-6 validates paths; this validates the other half of the verified structure
-    `okf index` now holds. A draft sounds specific when it cites
-    `reconcile_invoice_totals()`, and specificity is exactly what makes a fabricated
-    answer persuasive.
-
-    Deliberately NOT a fix for the U7-class failure, which invented prose and named
-    no symbols at all — nothing structural can catch that, which is why S2-5b fixed
-    it at the gate. This covers the case in between.
-
-    A symbol in the index, the context, or the prompt is grounded. Only a name in
-    none of them is a violation, and only when the index is populated: unknown is
-    not invented, and unknown must never reject.
-    """
-    if not draft:
-        return []
-    try:
-        known = _known_symbols()
-    except Exception:  # noqa: BLE001
-        return []
-    if not known:
-        return []  # nothing indexed → nothing checkable
-    haystack = f"{context or ''}\n{prompt or ''}"
-    out: list[str] = []
-    for m in _DRAFT_SYMBOL_RE.finditer(draft):
-        name = m.group(1)
-        if name.lower() in _SYMBOL_NOISE or name in known or name in haystack:
-            continue
-        if name not in out:
-            out.append(name)
-    return out
-
-
-def _draft_is_relayable(draft: str, context: str, prompt: str = "") -> bool:
-    """Whether a DIRECT draft may be shown, or should fall through to Claude.
-
-    Fail-open on any internal error: a bug in the guard must not silently stop all
-    routing, which would look exactly like the regression this branch is fixing.
-    `LLM_ROUTER_GROUNDING_CHECK=off` disables it.
-    """
-    if os.environ.get("LLM_ROUTER_GROUNDING_CHECK", "on").strip().lower() in (
-        "0", "off", "false", "no"
-    ):
-        return True
-    try:
-        if _grounding_violations(draft, context, prompt):
-            return False
-        # Symbol checking has its own switch: path checking is cheap and certain,
-        # while this depends on the OKF index being present and reasonably fresh.
-        if os.environ.get("LLM_ROUTER_SYMBOL_GROUNDING", "on").strip().lower() in (
-            "0", "off", "false", "no"
-        ):
-            return True
-        return not _symbol_violations(draft, context, prompt)
-    except Exception:  # noqa: BLE001
-        return True
-
-# S2-5. A gated prompt is routable when its reference can be RESOLVED, not merely
-# when it names something. Minimums below are what separates "there is an exchange
-# to resolve against" from "there is a scrap that invites a confident wrong guess";
-# without context a model refuses, which is safe, so thin context is strictly worse
-# than none.
 _RESCUE_MIN_ASSISTANT_TURNS = 1   # what was concluded, not just what was asked
 _RESCUE_MIN_CONTEXT_CHARS = 200   # a real exchange, not "hi" / "ok"
 
@@ -2497,6 +2353,68 @@ def _rescue_is_relevant(prompt: str, context: str) -> bool:
         if w not in _RESCUE_STOPWORDS
     }
     return len(prompt_terms & ctx_terms) >= _RESCUE_MIN_SHARED_TERMS
+
+
+def _local_agent_loop_enabled() -> bool:
+    """Is the local tool-calling loop allowed to answer context-dependent prompts?
+
+    ON BY DEFAULT since the two preconditions are met.
+
+    SAFETY: writes no longer reach the tree unreviewed — `agent_writes.guard`
+    defaults to `propose` (compute the diff, change nothing) and run_command
+    defaults to an inspection allowlist. The loop can read the repo and propose a
+    patch; it cannot quietly rewrite a file or run an arbitrary program.
+
+    LATENCY: the loop runs inside UserPromptSubmit, before the user sees
+    anything, and 15 iterations at a 60s per-call timeout is a 15-minute worst
+    case. `_agent_loop_budget_s` bounds the whole loop, so a prompt is delayed by
+    a known amount or not at all.
+
+    Set LLM_ROUTER_LOCAL_AGENT_LOOP=off to go back to sending these prompts
+    straight to Claude.
+    """
+    return os.environ.get("LLM_ROUTER_LOCAL_AGENT_LOOP", "").strip().lower() not in (
+        "0", "off", "false", "no",
+    )
+
+
+def _agent_loop_budget_s() -> float:
+    """Wall-clock seconds the local agent loop may spend before giving up.
+
+    90s is chosen from measurement, not taste: on this machine a real multi-step
+    repo question (read a file, find a value, answer) took 96-115s end to end and
+    a single-step one took 2-9s. So 90s completes the common case and cuts the
+    tail that would otherwise stall a prompt for minutes.
+    """
+    raw = os.environ.get("LLM_ROUTER_AGENT_LOOP_BUDGET_S", "").strip()
+    try:
+        value = float(raw)
+        return value if value > 0 else 90.0
+    except ValueError:
+        return 90.0
+
+
+def _tool_loop_rescue(prompt: str, task_type: str) -> bool:
+    """Third rescue arm for a context-dependent prompt: give it the tools.
+
+    The context-dependent gate exists to stop a BLIND model answering about local
+    state. A model holding read_file/search_files is not blind — it can resolve
+    the reference the gate is protecting, which is why the gate sits in the wrong
+    place relative to the tool branch.
+
+    Measured before this arm existed: 348 context-dependent skips in the debug
+    log, of which 0 ever reached the needs_tools branch at all. The agent loop's
+    entire input population was being consumed by an upstream gate, which is why
+    `needs_tools=True` appears 3 times in 1961 invocations and the loop had run
+    once in its lifetime.
+    """
+    if not _local_agent_loop_enabled():
+        return False
+    try:
+        from llm_router.hooks.chain_builder import needs_claude_tools
+        return bool(needs_claude_tools(prompt, task_type))
+    except Exception:
+        return False
 
 
 def _session_context_rescue(prompt: str, session_id: str) -> str | None:
@@ -2590,6 +2508,25 @@ def _draft_context_budget() -> int:
     if value is None or value <= 0:
         value = _DRAFT_CTX_DEFAULT
     return max(1, min(value, _DRAFT_CTX_MAX))
+
+
+def _last_assistant_text(transcript_path: str) -> str:
+    """The most recent assistant reply from the CC transcript, or "".
+
+    Used to judge whether the previous draft was relayed. Best-effort: an
+    unreadable transcript yields "", which reads as UNUSED — the conservative
+    direction, since this counter replaces one that flattered itself.
+    """
+    if not transcript_path:
+        return ""
+    try:
+        turns = _load_conversation_history(transcript_path, current_prompt="", max_turns=2)
+    except Exception:  # noqa: BLE001
+        return ""
+    for turn in reversed(turns or []):
+        if turn.get("role") == "assistant":
+            return str(turn.get("content") or "")
+    return ""
 
 
 def _persist_assistant_turns(
@@ -3745,6 +3682,28 @@ def main() -> None:
         except Exception:
             pass
 
+        # Judge the PREVIOUS invocation's draft, now that the turn it produced is
+        # complete. This is the only point in the lifecycle where that is true and
+        # the transcript is already open. A draft that was injected and then
+        # discarded is not routed work, and counting it as such is what let a
+        # session read as fully routed while quota went 49% -> 79%.
+        try:
+            from llm_router.hooks import draft_usage as _draft_usage
+
+            _verdict = _draft_usage.audit(
+                session_id, _last_assistant_text(hook_input.get("transcript_path", "")),
+            )
+            if _verdict is not None:
+                _outcome, _rec = _verdict
+                _debug_log(
+                    f"[INVOCATION {invocation_id:.3f}] DRAFT {_outcome.upper()}: "
+                    f"the draft from invocation {_rec.get('invocation_id')} "
+                    f"({_rec.get('model')}) was "
+                    f"{'relayed as the answer' if _outcome == _draft_usage.USED else 'discarded; Claude answered instead'}"
+                )
+        except Exception:
+            pass
+
     # ── Phase 1: Direct Execution (0 subscription tokens) ──────────────────────
     # Try to handle the prompt directly from the hook by calling models via HTTP.
     # If successful, return {"decision": "block"} so Claude never sees the prompt.
@@ -3773,6 +3732,7 @@ def main() -> None:
     # distinctive symbol or path token), so an empty result is the common case and
     # the gate still closes on it.
     _okf_docs = []
+    _grounding_notice = ""
     if _direct_enabled and not zero_claude and _is_context_dependent(prompt):
         try:
             from llm_router import okf as _okf
@@ -3799,6 +3759,16 @@ def main() -> None:
                     f"[INVOCATION {invocation_id:.3f}] SESSION RESCUE: context-dependent "
                     f"but {len(_rescue_ctx)} chars of conversation resolve it — "
                     f"routing WITH context"
+                )
+            elif _tool_loop_rescue(prompt, task_type):
+                # The prompt points at local state AND is tool-shaped. The agent
+                # loop can go read what it points at, so the gate's premise —
+                # that the routed model would be answering blind — does not hold.
+                # The tool branch below re-tests the same predicate, so this
+                # rescue and that branch cannot disagree about which path runs.
+                _debug_log(
+                    f"[INVOCATION {invocation_id:.3f}] TOOL LOOP RESCUE: context-dependent "
+                    f"but tool-shaped — routing to the local agent loop"
                 )
             else:
                 _direct_enabled = False
@@ -3897,7 +3867,10 @@ def main() -> None:
             elif _needs_claude_tools(prompt, task_type):
                 # File-op task — use agent loop (Ollama with tool calling)
                 from llm_router.hooks.direct_executor import execute_agent as _execute_agent
-                _direct_result = _execute_agent(prompt, _direct_chain, timeout=60, context=_session_ctx)
+                _direct_result = _execute_agent(
+                    prompt, _direct_chain, timeout=60, context=_session_ctx,
+                    deadline_s=_agent_loop_budget_s(),
+                )
                 if _direct_result:
                     _debug_log(f"[INVOCATION {invocation_id:.3f}] AGENT LOOP SUCCESS")
             else:
@@ -3940,6 +3913,19 @@ def main() -> None:
                     f"[INVOCATION {invocation_id:.3f}] DRAFT REJECTED (ungrounded): "
                     f"cites {', '.join(_bad)} — falling through to Claude"
                 )
+                # Phase 3(b): say so, rather than only logging it. A discarded draft
+                # is otherwise indistinguishable from a cheap model that simply did
+                # not answer — which is how a false-positive guard hides, and how
+                # the symbol check ran at a 3-in-4 false-rejection rate for a while
+                # without anyone noticing. It is also the one capability here that
+                # no competitor has, and it was invisible.
+                _cited = ", ".join(_bad[:3]) if _bad else "something not in the repo"
+                _grounding_notice = (
+                    "🛡  A local draft was discarded before you saw it: it cited "
+                    f"{_cited}, which exists neither in the material it was given "
+                    "nor in this repository. Answering directly instead.\n"
+                    "   Disable with LLM_ROUTER_GROUNDING_CHECK=off."
+                )
                 _direct_result = None
 
             if _direct_result:
@@ -3948,6 +3934,17 @@ def main() -> None:
                     f"model={_direct_result.model.provider}/{_direct_result.model.model} "
                     f"latency={_direct_result.latency_ms}ms"
                 )
+                # DIRECT SUCCESS says a draft was PRODUCED, not that it was used.
+                # Note it so the next invocation can judge it against the reply
+                # that followed — see hooks/draft_usage.py. Fail-open.
+                try:
+                    from llm_router.hooks import draft_usage as _draft_usage
+                    _draft_usage.record_draft(
+                        session_id, invocation_id,
+                        f"{_direct_result.model.provider}/{_direct_result.model.model}",
+                    )
+                except Exception:
+                    pass
                 # Rolling per-session transcript shard (audit §2.5/P2): record
                 # this llm_router-answered turn so later routed turns can see it.
                 _append_transcript_shard(session_id, prompt, _direct_result.text)
@@ -4420,6 +4417,8 @@ def main() -> None:
     # Append the every-N-prompts mini-summary widget when this turn
     # happened to be the Nth (populated above in main()).
     _final_context = directive
+    if _grounding_notice:
+        _final_context = _final_context + "\n\n" + _grounding_notice
     if _mini_summary_block:
         _final_context = _final_context + "\n\n" + _mini_summary_block
 

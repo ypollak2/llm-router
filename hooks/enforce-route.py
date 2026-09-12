@@ -892,11 +892,33 @@ def _clear_turn_blocks(session_id: str) -> None:
         pass
 
 
+def _try_local_intercept(hook_input: dict) -> None:
+    """Answer this tool call locally, if a local model can, and stop the call.
+
+    Runs FIRST, before any enforcement logic: interception is about cost, not
+    policy, and a call that never happens needs no permission decision. Every
+    failure path inside returns None and falls through to normal handling, so a
+    broken local model degrades to "Claude does it" rather than to a broken
+    tool.
+    """
+    try:
+        from llm_router.hooks.tool_intercept import deny_payload, try_intercept
+        reason = try_intercept(hook_input)
+    except Exception:
+        return
+    if not reason:
+        return
+    json.dump(deny_payload(reason), sys.stdout)
+    sys.exit(0)
+
+
 def main() -> None:
     try:
         hook_input = json.load(sys.stdin)
     except (json.JSONDecodeError, EOFError):
         sys.exit(0)
+
+    _try_local_intercept(hook_input)
 
     # Single source of truth — the SAME resolver auto-route.py's banner uses, so
     # the two can never disagree. Priority: env LLM_ROUTER_ENFORCE > repo .llm_router.yml

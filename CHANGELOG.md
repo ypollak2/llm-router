@@ -10,6 +10,80 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 | [CHANGELOG-ARCHIVE.md](CHANGELOG-ARCHIVE.md) | v10.1.5 back to v6.3.0 |
 | [GitHub Releases](https://github.com/ypollak2/llm-router/releases) | v6.2 and earlier |
 
+## [13.3.0] - 2026-09-12
+
+Local models can now do the work, and the tool calls that cost the most can be
+answered before they reach Claude. No savings figure is claimed here on purpose —
+see "What is not claimed" below.
+
+### The agent loop actually works now
+
+`qwen3-coder:30b` emits tool calls in Qwen's XML dialect while leaving Ollama's
+structured `tool_calls` field empty. The loop read that as "the model only
+chatted" and discarded correct calls. Fixing the parser moved a 5-task harness
+from 2/5 to 5/5, and the loop now scores 40/40 across shell, code navigation,
+file edits and vision.
+
+- Qwen XML tool-call dialect is parsed (`_repair_xml_toolcalls`)
+- Grammar-constrained decoding via Ollama `format=`, with `finish` as a real
+  tool so a constrained model can stop — without it the grammar could only
+  express "call something" and the model repeated one read to exhaustion
+- An identical repeated call is interrupted rather than run again
+- A wall-clock budget bounds the loop (default 90s); 15 iterations at a 60s
+  per-call timeout was a 15-minute worst case inside UserPromptSubmit
+- Context discipline: tool results capped, `read_file` takes offset/limit, the
+  task is re-stated every turn, and the harness evicts oldest TOOL RESULTS —
+  llama.cpp evicts the system prompt instead, silently
+- The loop runs by default (`LLM_ROUTER_LOCAL_AGENT_LOOP`)
+
+### Local interception (opt-in)
+
+A PostToolUse hook cannot replace a tool result — verified live. A PreToolUse
+`deny` carrying the answer can, so that is the mechanism.
+
+- `image_intercept`: a Read of a raster image is answered by a probed local
+  vision model; the image is never loaded
+- `bash_intercept`: an allowlisted read-only command is run by the hook and its
+  output compressed; the uncompressed output never enters context
+- Both OFF by default, configured in `~/.llm-router/routing.yaml` (a hook never
+  sees a shell export)
+- Every interception is logged to `~/.llm-router/intercepts.jsonl`
+
+### Vision capability is measured, not assumed
+
+`vision_registry` probes each model that advertises vision by asking it to read
+a randomly generated code from an image, three times, exactly. Verdicts are
+cached and re-probed when the installed model set changes. Nothing is hardcoded
+per model, and anything unproven routes to Claude.
+
+### Safety
+
+- `agent_writes`: local edits default to `propose` — a diff, not a write — and
+  `apply` journals the previous contents first, refusing any edit it cannot undo
+- `run_command` defaults to an inspection allowlist; compound commands are
+  refused whole rather than parsed
+- A cross-session leak in `mcp_roots` is fixed: the cache was keyed on
+  `id(session)`, a memory address, so a recycled address served one session's
+  project root to another
+
+### Measurement
+
+- `effective_rate` in the routing report counts drafts USED, not produced — the
+  old rate counted production, which is how a fully-routed-looking session drove
+  quota from 49% to 79%
+- `POST /ground` exposes the grounding check (docs/GROUNDING_API.md)
+- Compression no longer truncates blindly: an unrecognised output shape declines
+  rather than returning `output[:200]`, which had been silently dropping data
+
+### What is not claimed
+
+No token-savings figure. Two figures reported during development were
+projections from offline replays rather than observations, and both were wrong.
+`scripts/intercept_report.py` reads the interception log so the next figure is
+measured from real use. Until then this release ships the capability and no
+number.
+
+
 ## [Unreleased]
 
 ## [13.2.2] — The injected block repeated itself (2026-09-10)

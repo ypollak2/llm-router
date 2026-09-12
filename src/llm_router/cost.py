@@ -707,6 +707,12 @@ async def _get_db() -> aiosqlite.Connection:
         + MIGRATE_ADD_QUOTA_SNAPSHOTS_TABLE
         + MIGRATE_ROUTING_DECISIONS_ADD_SUBJECT
         + MIGRATE_ROUTING_DECISIONS_ADD_PROVENANCE
+        # Defined in v6.2 and never applied: compression_stats was declared,
+        # log_compression_stat wrote to it, and the table did not exist. The
+        # write raised OperationalError straight into bash-compress's bare
+        # `except (ImportError, Exception): pass`, so every compression was
+        # recorded nowhere and the absence looked like 'nothing compressed'.
+        + MIGRATE_ADD_COMPRESSION_STATS
     )
     for stmt in all_migrations:
         await _safe_migrate(db, stmt)

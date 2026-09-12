@@ -169,6 +169,12 @@ def build() -> dict[Path, str]:
     if support.is_file():
         files[REPO / "hooks" / "llm_router_tool_surface.py"] = support.read_text()
 
+    # Same deal for the shared PostToolUse payload reader: the compression hooks
+    # import it, and a bundled plugin has no importable llm_router package.
+    payload_mod = hooks_src / "hook_payload.py"
+    if payload_mod.is_file():
+        files[REPO / "hooks" / "llm_router_hook_payload.py"] = payload_mod.read_text()
+
     # Task 03 — one script set, two hooks.json files.
     #
     # Both hosts treat the repo root as the plugin root, so the scripts are

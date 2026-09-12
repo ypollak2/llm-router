@@ -77,7 +77,22 @@ def project_root(start: Path | None = None) -> Path:
     return here
 
 
-def project_slug(root: Path | None = None) -> str:
+def _as_root(root: "str | Path | None") -> Path | None:
+    """Normalise a caller-supplied root. Accepts str because most callers have one.
+
+    router.py has no module-level `Path` import, and requiring every caller to
+    construct one invites exactly the NameError this avoids. Normalising once, here,
+    means a root can be a string anywhere it is accepted.
+    """
+    if root is None or isinstance(root, Path):
+        return root
+    try:
+        return Path(root)
+    except TypeError:
+        return None
+
+
+def project_slug(root: "str | Path | None" = None) -> str:
     """Stable directory name for a project: ``<basename>-<8 hex of abs path>``.
 
     The hash disambiguates same-named checkouts (two clones both called `llm_router`)
@@ -85,21 +100,29 @@ def project_slug(root: Path | None = None) -> str:
     """
     import hashlib
 
-    resolved = (root or project_root()).resolve()
+    resolved = (_as_root(root) or project_root()).resolve()
     digest = hashlib.sha256(str(resolved).encode("utf-8")).hexdigest()[:8]
     name = _SLUG_UNSAFE_RE.sub("_", resolved.name) or "root"
     return f"{name}-{digest}"
 
 
-def project_knowledge_dir(root: Path | None = None, base: Path = KNOWLEDGE_DIR) -> Path:
+def project_knowledge_dir(
+    root: "str | Path | None" = None, base: Path = KNOWLEDGE_DIR
+) -> Path:
     """Where THIS project's OKF docs live."""
     return base / "projects" / project_slug(root)
 
 
-_BUNDLE_CACHE: list[OKFConcept] | None = None
-_BUNDLE_LOADED_AT: float = 0.0
-_BUNDLE_BASE: tuple[Path, Path] | None = None  # (base, project dir) — see _get_bundle
+# Stage A: a DICT keyed by scope, not one slot. A single slot holds one project's
+# bundle at a time, so a process alternating between two — which is what a
+# long-lived MCP server does — evicts and reloads on every request, turning the
+# cache into a 1000-file rescan per prompt while still being correct. Keying it
+# keeps both resident.
+_BUNDLE_CACHE: dict[tuple[Path, Path], tuple[float, list[OKFConcept]]] = {}
 _BUNDLE_TTL_S: float = 60.0  # reload if knowledge dir changes within this window
+# Bounds the dict: a server touching many projects must not accumulate every
+# bundle it has ever seen.
+_BUNDLE_CACHE_MAX = 8
 
 # OKF context injection + enrichment are ON by default (verified-only policy).
 # The store holds ONLY checkable facts — seeded ModelCapability docs, extracted
@@ -236,7 +259,9 @@ def _parse_okf(text: str, path: Path) -> OKFConcept | None:
 # Bundle loading (cached)
 # ---------------------------------------------------------------------------
 
-def _retrieval_roots(base: Path = KNOWLEDGE_DIR) -> list[Path]:
+def _retrieval_roots(
+    base: Path = KNOWLEDGE_DIR, root: Path | None = None
+) -> list[Path]:
     """Directories eligible for INJECTION, most specific first.
 
     Exactly two: this project's docs, and the shared model catalog (which is
@@ -266,7 +291,7 @@ def _retrieval_roots(base: Path = KNOWLEDGE_DIR) -> list[Path]:
     guard in ``find_relevant_sessions`` is simply unused. Both behaviours are
     pinned in tests/okf/test_cross_model_context.py.
     """
-    return [project_knowledge_dir(base=base)]
+    return [project_knowledge_dir(root=root, base=base)]
 
 
 def _catalog_root(base: Path = KNOWLEDGE_DIR) -> Path:
@@ -303,9 +328,11 @@ def _load_dir_sync(root: Path) -> list[OKFConcept]:
     return out
 
 
-def _load_bundle_sync(base: Path = KNOWLEDGE_DIR) -> list[OKFConcept]:
+def _load_bundle_sync(
+    base: Path = KNOWLEDGE_DIR, root: Path | None = None
+) -> list[OKFConcept]:
     """Scan and parse the OKF concept docs eligible for injection."""
-    roots = [r for r in _retrieval_roots(base) if r.exists()]
+    roots = [r for r in _retrieval_roots(base, root) if r.exists()]
     if not roots:
         return []
     concepts: list[OKFConcept] = []
@@ -323,35 +350,45 @@ def _load_bundle_sync(base: Path = KNOWLEDGE_DIR) -> list[OKFConcept]:
     return concepts
 
 
-def _get_bundle(base: Path = KNOWLEDGE_DIR) -> list[OKFConcept]:
-    """Return cached bundle, reloading if TTL expired or the SCOPE changed.
+def _get_bundle(
+    base: Path = KNOWLEDGE_DIR, root: Path | None = None
+) -> list[OKFConcept]:
+    """Return the cached bundle for this scope, reloading if the TTL expired.
 
     CHZ-OKF-01: the cache key is (base, project dir), not base alone. Since
     scoping, the bundle depends on which project we are in — and the MCP server is
     a long-running process that can serve requests for several. Keying on `base`
     only would hand one project's docs to another for up to the TTL, which is the
     exact cross-contamination the scoping exists to prevent.
+
+    Stage A: the project dir now comes from the caller's *root* when given, rather
+    than from ambient process state. That is the same failure one layer down — an
+    explicit per-request root was correct at the retrieval call and then ignored by
+    a cache that had computed its key from the cwd.
     """
-    global _BUNDLE_CACHE, _BUNDLE_LOADED_AT, _BUNDLE_BASE
     now = time.monotonic()
-    scope = (base, project_knowledge_dir(base=base))
-    if (
-        _BUNDLE_CACHE is not None
-        and _BUNDLE_BASE == scope
-        and (now - _BUNDLE_LOADED_AT) < _BUNDLE_TTL_S
-    ):
-        return _BUNDLE_CACHE
-    _BUNDLE_CACHE = _load_bundle_sync(base)
-    _BUNDLE_LOADED_AT = now
-    _BUNDLE_BASE = scope
-    return _BUNDLE_CACHE
+    scope = (base, project_knowledge_dir(root=root, base=base))
+    hit = _BUNDLE_CACHE.get(scope)
+    if hit is not None and (now - hit[0]) < _BUNDLE_TTL_S:
+        return hit[1]
+    concepts = _load_bundle_sync(base, root)
+    if len(_BUNDLE_CACHE) >= _BUNDLE_CACHE_MAX:
+        # Evict the oldest entry. Crude, and right for this shape: entries are
+        # whole project bundles, there are a handful, and a wrong eviction costs
+        # one reload rather than a wrong answer.
+        oldest = min(_BUNDLE_CACHE, key=lambda k: _BUNDLE_CACHE[k][0])
+        _BUNDLE_CACHE.pop(oldest, None)
+    _BUNDLE_CACHE[scope] = (now, concepts)
+    return concepts
 
 
 def invalidate_cache() -> None:
-    """Force bundle reload on next access (call after writing new concepts)."""
-    global _BUNDLE_LOADED_AT, _BUNDLE_BASE
-    _BUNDLE_LOADED_AT = 0.0
-    _BUNDLE_BASE = None
+    """Force a bundle reload on next access (call after writing new concepts).
+
+    Clears every scope, not just the current one: a writer may have touched any of
+    them, and re-reading a handful of bundles is cheaper than reasoning about which.
+    """
+    _BUNDLE_CACHE.clear()
 
 
 # ---------------------------------------------------------------------------
@@ -552,11 +589,24 @@ def find_relevant(
     prompt: str,
     limit: int = 3,
     base: Path = KNOWLEDGE_DIR,
+    root: "str | Path | None" = None,
 ) -> list[OKFConcept]:
-    """Find OKF concepts most relevant to prompt via keyword overlap."""
+    """Find OKF concepts most relevant to prompt via keyword overlap.
+
+    ``root`` is the project the CALLER is working in. Without it, scope falls back
+    to ``$LLM_ROUTER_PROJECT_ROOT`` then the cwd, which is right for a hook — one
+    process, one prompt, the user's real cwd — and wrong for anything long-lived
+    serving several projects. The MCP server's cwd is wherever the editor was
+    launched: on the machine this was found on, `$HOME`, so a question about
+    `_write_source_concept` retrieved nothing while 1068 documents about that exact
+    repository sat one directory away.
+
+    Passing the root pins the answer to the asker's project instead of the server's
+    accident of a working directory.
+    """
     if not _okf_enabled():
         return []  # opt-in; see _okf_enabled() — off by default to avoid contamination
-    concepts = _get_bundle(base)
+    concepts = _get_bundle(base, _as_root(root))
     if not concepts:
         return []
     keywords = _keywords_for_retrieval(prompt)

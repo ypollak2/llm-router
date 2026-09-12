@@ -11,7 +11,9 @@ from __future__ import annotations
 
 import re
 import sqlite3
+from enum import Enum
 from pathlib import Path
+from typing import Any, Iterable
 
 HOME = Path.home() / ".llm-router"
 
@@ -26,14 +28,147 @@ def _pctl(vals: list[float], p: float) -> float:
     return vals[lo] + (vals[hi] - vals[lo]) * (k - lo)
 
 
+_START_RE = re.compile(r"^\[(\d{4}-\d\d-\d\d) [\d:]+\] \[INVOCATION START\] ID=([\d.]+)")
+_LINE_RE = re.compile(r"^\[(\d{4}-\d\d-\d\d) [\d:]+\] \[INVOCATION ([\d.]+)\] (.*)$")
+_SESSION_RE = re.compile(r"session_id=(\S*)")
+
+# A session id the hook could not resolve. The hook ran, but this is not a user
+# prompt — same reason an empty id is excluded, which is what the test suite writes.
+_NON_SESSIONS = {"", "unknown", "none", "None"}
+
+
+class Outcome(str, Enum):
+    SUCCESS = "success"      # a local model answered
+    FAILED = "failed"        # it was tried and could not
+    SKIPPED = "skipped"      # the gate declined to try
+    OTHER = "other"          # no terminal line: crashed, truncated, still running
+
+
+# Terminal markers, most specific first. A rejected draft is NOT a success: S2-6
+# discarded it and the turn fell through to Claude.
+_TERMINAL = (
+    ("DRAFT REJECTED", Outcome.FAILED),
+    ("DIRECT SUCCESS", Outcome.SUCCESS),
+    ("DIRECT FAILED", Outcome.FAILED),
+    ("DIRECT SKIP", Outcome.SKIPPED),
+)
+
+# Annotations — they describe WHY an invocation went the way it did, and are
+# reported alongside rather than as outcomes. Counting a rescue as an outcome would
+# double-count the invocation it belongs to.
+_ANNOTATIONS = (
+    ("SESSION RESCUE", "session_rescue"),
+    ("OKF RESCUE", "okf_rescue"),
+    ("DRAFT REJECTED", "rejected"),
+    # Whether the draft was RELAYED or discarded. These land on the invocation
+    # AFTER the one that produced the draft — the verdict needs the reply to
+    # exist before it can be read — so they are annotations, not outcomes, and
+    # `used + unused` tracks `drafts` without being tied to it across a day
+    # boundary or a session that ended before the next prompt.
+    ("DRAFT USED", "used"),
+    ("DRAFT UNUSED", "unused"),
+    ("PERSISTED", "turns_persisted"),
+)
+
+
+def parse_log(lines: Iterable[str]) -> dict[str, dict[str, Any]]:
+    """One record per invocation, keyed by id. Malformed lines are skipped."""
+    records: dict[str, dict[str, Any]] = {}
+    for raw in lines:
+        line = raw.rstrip("\n")
+        m = _START_RE.match(line)
+        if m:
+            day, iid = m.group(1), m.group(2)
+            records.setdefault(iid, {"day": day, "session": None,
+                                     "outcome": None, "notes": set()})
+            continue
+        m = _LINE_RE.match(line)
+        if not m:
+            continue
+        day, iid, rest = m.group(1), m.group(2), m.group(3)
+        rec = records.setdefault(iid, {"day": day, "session": None,
+                                       "outcome": None, "notes": set()})
+        s = _SESSION_RE.search(rest)
+        if s:
+            rec["session"] = s.group(1)
+        for marker, note in _ANNOTATIONS:
+            if marker in rest:
+                rec["notes"].add(note)
+        if rec["outcome"] is None:
+            # First terminal line wins: a line can repeat on retry, the outcome
+            # cannot.
+            for marker, outcome in _TERMINAL:
+                if rest.startswith(marker) or f"] {marker}" in rest or marker in rest.split(":")[0]:
+                    rec["outcome"] = outcome
+                    break
+    return records
+
+
+def summarise(records: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """Per-day counts over real user prompts only."""
+    days: dict[str, dict[str, Any]] = {}
+    for rec in records.values():
+        if rec.get("session") in _NON_SESSIONS or rec.get("session") is None:
+            continue
+        d = days.setdefault(rec["day"], {
+            "prompts": 0, "success": 0, "failed": 0, "skipped": 0, "other": 0,
+            "session_rescue": 0, "okf_rescue": 0, "rejected": 0,
+            "turns_persisted": 0, "rate": 0.0,
+            # Phase 3(a): a draft was PRODUCED and then either relayed or discarded.
+            # The denominator for grounding is drafts, not prompts — a prompt the
+            # gate never routed produced no draft, so it was never a chance for the
+            # check to fire, and counting it would dilute the rate with cases
+            # grounding had no part in.
+            "drafts": 0, "grounding_rate": None,
+            # A draft PRODUCED is not work routed. Claude is told to discard the
+            # draft whenever the answer depends on anything the draft model could
+            # not see, which in a repo is most of the time — so `success` is an
+            # upper bound and `used` is the number that corresponds to spend.
+            "used": 0, "unused": 0, "use_rate": None, "effective_rate": None,
+        })
+        d["prompts"] += 1
+        d[(rec["outcome"] or Outcome.OTHER).value] += 1
+        for note in rec["notes"]:
+            d[note] += 1
+    for d in days.values():
+        d["rate"] = (d["success"] / d["prompts"]) if d["prompts"] else 0.0
+        d["drafts"] = d["success"] + d["rejected"]
+        # None, not 0.0: a day with no drafts is a day grounding was never asked
+        # about, and reporting that as a perfect record would be a lie of omission.
+        d["grounding_rate"] = (
+            d["rejected"] / d["drafts"] if d["drafts"] else None
+        )
+        judged = d["used"] + d["unused"]
+        # None rather than 0.0 on a day with no verdicts: "we did not measure"
+        # and "nothing was used" are different claims, and reporting the second
+        # when the first is true is how the old counter misled.
+        d["use_rate"] = (d["used"] / judged) if judged else None
+        # The headline worth quoting: prompts whose answer actually came from a
+        # local model, over all prompts. `rate` above counts drafts produced.
+        d["effective_rate"] = (d["used"] / d["prompts"]) if d["prompts"] else None
+    return days
+
+
 def _outcome_counts(log: Path) -> dict[str, int]:
-    keys = ["DIRECT SUCCESS", "DIRECT SKIP", "DIRECT FAILED", "AGENT LOOP SUCCESS"]
-    counts = {k: 0 for k in keys}
-    if log.exists():
-        text = log.read_text(errors="ignore")
-        for k in keys:
-            counts[k] = len(re.findall(re.escape(k), text))
-    return counts
+    """Outcome matrix over REAL user prompts, one outcome per invocation.
+
+    Counted raw line occurrences before. That included the test suite — 227
+    invocations carrying `chain=['ollama/fake-model']` and an empty session id once
+    sat in this log — and it could report more successes than prompts, because a
+    DIRECT SUCCESS invocation never reaches OUTPUT COMPLETE, so the two were
+    disjoint sets. `parse_log` groups by invocation and `summarise` drops
+    non-sessions, so the numbers reconcile with the per-day view and with each
+    other.
+    """
+    if not log.exists():
+        return {k: 0 for k in ("DIRECT SUCCESS", "DIRECT SKIP", "DIRECT FAILED")}
+    with log.open(encoding="utf-8", errors="ignore") as fh:
+        days = summarise(parse_log(fh))
+    return {
+        "DIRECT SUCCESS": sum(d["success"] for d in days.values()),
+        "DIRECT SKIP": sum(d["skipped"] for d in days.values()),
+        "DIRECT FAILED": sum(d["failed"] for d in days.values()),
+    }
 
 
 def _violations(log: Path) -> int:

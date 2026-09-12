@@ -23,6 +23,7 @@ import asyncio
 import json
 import os
 import sys
+from pathlib import Path
 
 # ── RTK Compression ────────────────────────────────────────────────────────────
 
@@ -30,6 +31,39 @@ try:
     from llm_router.compression.rtk_adapter import RTKAdapter
 except ImportError:
     RTKAdapter = None
+
+
+def _load_hook_payload():
+    """Shared PostToolUse payload reader — package import, else the bundled copy.
+
+    A plugin ships as a repo clone or a zip with the hook scripts at its root
+    and no importable `llm_router` package, so the package import is the
+    in-repo path and the sibling file is the distributed one. Same two-step
+    used by enforce-route.py for tool_surface.
+    """
+    try:
+        from llm_router.hooks import hook_payload
+        return hook_payload
+    except ImportError:
+        pass
+    import importlib.util as _ilu
+    _here = Path(__file__).resolve().parent
+    for _cand in (_here / "llm_router_hook_payload.py",   # installed alongside hooks
+                  _here.parent / "hook_payload.py"):      # in-repo fallback
+        if not _cand.exists():
+            continue
+        try:
+            _spec = _ilu.spec_from_file_location("llm_router_hook_payload", _cand)
+            _mod = _ilu.module_from_spec(_spec)
+            sys.modules["llm_router_hook_payload"] = _mod
+            _spec.loader.exec_module(_mod)
+            return _mod
+        except Exception:  # noqa: BLE001 — a broken reader must not break the hook
+            continue
+    return None
+
+
+_payload = _load_hook_payload()
 
 
 def _estimate_tokens(text: str) -> int:
@@ -100,34 +134,11 @@ def _extract_bash_output(payload: dict) -> tuple[str, str] | None:
 
     Returns (command, output) tuple or None if extraction fails.
     """
-    # Tool params contain the command
-    tool_params = payload.get("toolInputs", {})
-    if isinstance(tool_params, str):
-        try:
-            tool_params = json.loads(tool_params)
-        except json.JSONDecodeError:
-            return None
-
-    command = tool_params.get("command", "")
-
-    # Tool result contains stdout/stderr
-    result = payload.get("toolResult", {})
-    if isinstance(result, str):
-        output = result
-    elif isinstance(result, dict):
-        output = result.get("text", "")
-        if not output:
-            # Try to extract from content array
-            content = result.get("content", [])
-            if isinstance(content, list):
-                parts = [
-                    item.get("text", "")
-                    for item in content
-                    if isinstance(item, dict) and item.get("type") == "text"
-                ]
-                output = "\n".join(parts)
-    else:
-        return None
+    # Host-agnostic: Claude Code sends tool_input/tool_response, others send
+    # toolInputs/toolResult. Reading only one spelling is what kept this hook
+    # from ever firing on Claude Code. See hooks/hook_payload.py.
+    command = _payload.tool_input(payload).get("command", "")
+    output = _payload.tool_output(payload)
 
     if not command or not output:
         return None
@@ -141,14 +152,18 @@ def main() -> None:
     if os.environ.get("LLM_ROUTER_BASH_COMPRESS", "").lower() == "off":
         sys.exit(0)
 
+    if _payload is None:
+        sys.exit(0)
+
     try:
         payload = json.loads(sys.stdin.read())
     except (json.JSONDecodeError, OSError):
         sys.exit(0)
 
-    # Only fire for bash tool
-    tool_name = payload.get("toolName", "")
-    if _bare_tool_name(tool_name) != "execute_shell_command" and not tool_name.endswith("bash"):
+    # Only fire for the shell tool. Matching is case-insensitive: Claude Code's
+    # tool is `Bash`, and `"Bash".endswith("bash")` is False — that one capital
+    # disabled this hook on its primary host.
+    if not _payload.is_tool(payload, "bash", "execute_shell_command"):
         sys.exit(0)
 
     extraction = _extract_bash_output(payload)
@@ -193,15 +208,40 @@ def main() -> None:
         f"Full output available if needed."
     )
 
-    json.dump(
-        {
-            "hookSpecificOutput": {
-                "hookEventName": "PostToolUse",
-                "contextForAgent": context,
-            }
-        },
-        sys.stdout,
-    )
+    # VERIFIED LIVE, and the answer kills this hook's premise.
+    #
+    # A PostToolUse hook CANNOT replace what the model sees. Tested in-session
+    # against a real `git status --porcelain`:
+    #
+    #   contextForAgent  -> not a Claude Code field; parsed and dropped
+    #   updatedOutput    -> ignored; all 56 lines still arrived in full
+    #   additionalContext-> honoured, but APPENDS
+    #
+    # So compression here cannot save a single token: the uncompressed output
+    # reaches the model either way. Emitting a summary alongside it makes the
+    # turn LARGER than doing nothing, which is the one outcome worse than the
+    # hook being dead — and it was dead until today, so nothing regressed while
+    # this was believed to work.
+    #
+    # The stat is still recorded above, because the compressor itself works
+    # (measured 9.6% over 994 real outputs) and that number becomes REAL the
+    # moment there is a mechanism that can substitute. Until then this hook
+    # prints nothing, and the saving stays potential.
+    #
+    # The mechanism that can: PreToolUse `deny` with the compressed text in
+    # permissionDecisionReason — the command never runs, so its output never
+    # enters the context at all. That is a different hook with different
+    # failure modes, and it is the next piece of work rather than a tweak here.
+    if os.environ.get("LLM_ROUTER_COMPRESS_EMIT", "").strip().lower() in ("1", "on", "true"):
+        json.dump(
+            {
+                "hookSpecificOutput": {
+                    "hookEventName": "PostToolUse",
+                    "updatedOutput": context,
+                }
+            },
+            sys.stdout,
+        )
 
 
 if __name__ == "__main__":

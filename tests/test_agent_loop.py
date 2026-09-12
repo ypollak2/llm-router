@@ -53,10 +53,22 @@ class TestReadFile:
         assert "truncated" in result
 
 
+@pytest.fixture(autouse=True)
+def _writes_land(monkeypatch, tmp_path):
+    """These tests assert the write MECHANICS, which is a different question from
+    whether the gate lets a write through. The gate defaults to `propose` (see
+    tests/test_agent_writes.py); this opts into `apply` so the mechanics are
+    still covered, and journals into tmp_path rather than the real ~/.llm-router.
+    """
+    monkeypatch.setenv("LLM_ROUTER_AGENT_WRITES", "apply")
+    monkeypatch.setenv("LLM_ROUTER_AGENT_COMMANDS", "all")
+    monkeypatch.setenv("LLM_ROUTER_HOME", str(tmp_path / ".llm-router"))
+
+
 class TestWriteFile:
     def test_write_new_file(self, tmp_path):
         result = execute_tool("write_file", {"path": "new.py", "content": "hello"}, tmp_path)
-        assert "Written" in result
+        assert "APPLIED" in result
         assert (tmp_path / "new.py").read_text() == "hello"
 
     def test_write_creates_directories(self, tmp_path):
@@ -76,7 +88,7 @@ class TestEditFile:
             "old_string": "y = 2",
             "new_string": "y = 42",
         }, tmp_path)
-        assert "Edited" in result
+        assert "APPLIED" in result
         assert "y = 42" in (tmp_path / "code.py").read_text()
 
     def test_edit_old_string_not_found(self, tmp_path):
