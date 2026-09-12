@@ -22,6 +22,7 @@ directory is worse than one with no context at all.
 from __future__ import annotations
 
 import time
+import weakref
 from pathlib import Path
 from typing import Any
 from urllib.parse import unquote, urlparse
@@ -29,7 +30,17 @@ from urllib.parse import unquote, urlparse
 # `list_roots()` is a round-trip to the client, and a routed call is on the user's
 # critical path. Roots change when a workspace changes, which is rare.
 _TTL_S = 300.0
-_CACHE: dict[int, tuple[float, Path | None]] = {}
+# Keyed by id(session) — WITH a weak reference held alongside, because id() is a
+# memory address and addresses are reused. Once a session is collected, the next
+# object allocated there can take its id, and a cache keyed on id() alone then
+# serves the dead session's project root to an unrelated live one. That is
+# cross-project contamination in the middle of the machinery built to prevent
+# it, and it is not theoretical: two sequentially-created sessions in a test
+# landed on the same address and the second was handed the first's root.
+#
+# The weakref makes the collision detectable. A dead or substituted referent is
+# a miss, and a miss is always safe here — it costs one list_roots round-trip.
+_CACHE: dict[int, tuple[float, Path | None, "weakref.ref"]] = {}
 # A server may see many sessions over its life; the cache must not be one of the
 # things that grows forever.
 _CACHE_MAX = 32
@@ -67,7 +78,10 @@ async def root_from_ctx(ctx: Any) -> Path | None:
     now = time.monotonic()
     hit = _CACHE.get(key)
     if hit is not None and (now - hit[0]) < _TTL_S:
-        return hit[1]
+        # Only a hit if the entry still belongs to THIS session object.
+        if hit[2]() is session:
+            return hit[1]
+        _CACHE.pop(key, None)
 
     resolved: Path | None = None
     try:
@@ -100,5 +114,10 @@ async def root_from_ctx(ctx: Any) -> Path | None:
     if len(_CACHE) >= _CACHE_MAX:
         oldest = min(_CACHE, key=lambda k: _CACHE[k][0])
         _CACHE.pop(oldest, None)
-    _CACHE[key] = (now, resolved)
+    try:
+        _CACHE[key] = (now, resolved, weakref.ref(session))
+    except TypeError:
+        # Not weak-referenceable: skip the cache rather than risk an id()
+        # collision serving another session's root.
+        pass
     return resolved

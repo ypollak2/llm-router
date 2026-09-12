@@ -269,21 +269,22 @@ def test_an_exhausted_budget_after_real_work_reports_partial(monkeypatch, tmp_pa
     import llm_router.hooks.agent_loop as loop
 
     seen = {"n": 0}
-    real_sleep_free_response = {
-        "message": {"content": "", "tool_calls": [
-            {"function": {"name": "list_files", "arguments": {"path": "."}}}]}
-    }
 
     class _Resp:
+        def __init__(self, n): self.n = n
         def __enter__(self): return self
         def __exit__(self, *a): return False
         def read(self):
             import json as _j
-            return _j.dumps(real_sleep_free_response).encode()
+            # Each call must DIFFER, or the repeat-interrupt fires first and this
+            # stops testing the wall clock. Two guards, two tests.
+            return _j.dumps({"message": {"content": "", "tool_calls": [
+                {"function": {"name": "list_files",
+                              "arguments": {"path": ".", "pattern": f"*{self.n}"}}}]}}).encode()
 
     def _one_tool_call(*a, **k):
         seen["n"] += 1
-        return _Resp()
+        return _Resp(seen["n"])
 
     monkeypatch.setattr(loop.urllib.request, "urlopen", _one_tool_call)
     out = loop.run_agent_loop(prompt="x", model="m", project_root=tmp_path,

@@ -172,3 +172,35 @@ def test_env_still_wins_when_there_are_no_roots(tmp_path, monkeypatch):
     (repo / ".git").mkdir(parents=True)
     monkeypatch.setenv("LLM_ROUTER_PROJECT_ROOT", str(repo))
     assert okf.project_root() == repo.resolve()
+
+
+def test_a_recycled_memory_address_does_not_leak_the_previous_root(tmp_path):
+    """The cache is keyed by id(session), and id() is a memory address.
+
+    Once a session is collected, the next object allocated can take its address.
+    Keyed on id() alone, the cache then serves the DEAD session's project root to
+    an unrelated live one — cross-project contamination inside the machinery
+    built to prevent it. This is how it was found: two sequentially created
+    sessions landed on the same address and the second was handed the first's
+    root, which read as a flaky test rather than the leak it was.
+    """
+    import gc
+
+    a, b = tmp_path / "a", tmp_path / "b"
+    a.mkdir()
+    b.mkdir()
+
+    first = _FakeSession([a.as_uri()])
+    first_id = id(first)
+    assert _resolve(_FakeCtx(first)) == a
+    del first
+    gc.collect()
+
+    # Allocate until something reuses the address, then prove it gets its OWN root.
+    for _ in range(2000):
+        candidate = _FakeSession([b.as_uri()])
+        if id(candidate) == first_id:
+            assert _resolve(_FakeCtx(candidate)) == b, \
+                "a recycled address served the previous session's root"
+            return
+    pytest.skip("no address reuse observed in this run")
