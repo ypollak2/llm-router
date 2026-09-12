@@ -2486,6 +2486,25 @@ def _draft_context_budget() -> int:
     return max(1, min(value, _DRAFT_CTX_MAX))
 
 
+def _last_assistant_text(transcript_path: str) -> str:
+    """The most recent assistant reply from the CC transcript, or "".
+
+    Used to judge whether the previous draft was relayed. Best-effort: an
+    unreadable transcript yields "", which reads as UNUSED — the conservative
+    direction, since this counter replaces one that flattered itself.
+    """
+    if not transcript_path:
+        return ""
+    try:
+        turns = _load_conversation_history(transcript_path, current_prompt="", max_turns=2)
+    except Exception:  # noqa: BLE001
+        return ""
+    for turn in reversed(turns or []):
+        if turn.get("role") == "assistant":
+            return str(turn.get("content") or "")
+    return ""
+
+
 def _persist_assistant_turns(
     transcript_path: str,
     session_id: str,
@@ -3639,6 +3658,28 @@ def main() -> None:
         except Exception:
             pass
 
+        # Judge the PREVIOUS invocation's draft, now that the turn it produced is
+        # complete. This is the only point in the lifecycle where that is true and
+        # the transcript is already open. A draft that was injected and then
+        # discarded is not routed work, and counting it as such is what let a
+        # session read as fully routed while quota went 49% -> 79%.
+        try:
+            from llm_router.hooks import draft_usage as _draft_usage
+
+            _verdict = _draft_usage.audit(
+                session_id, _last_assistant_text(hook_input.get("transcript_path", "")),
+            )
+            if _verdict is not None:
+                _outcome, _rec = _verdict
+                _debug_log(
+                    f"[INVOCATION {invocation_id:.3f}] DRAFT {_outcome.upper()}: "
+                    f"the draft from invocation {_rec.get('invocation_id')} "
+                    f"({_rec.get('model')}) was "
+                    f"{'relayed as the answer' if _outcome == _draft_usage.USED else 'discarded; Claude answered instead'}"
+                )
+        except Exception:
+            pass
+
     # ── Phase 1: Direct Execution (0 subscription tokens) ──────────────────────
     # Try to handle the prompt directly from the hook by calling models via HTTP.
     # If successful, return {"decision": "block"} so Claude never sees the prompt.
@@ -3866,6 +3907,17 @@ def main() -> None:
                     f"model={_direct_result.model.provider}/{_direct_result.model.model} "
                     f"latency={_direct_result.latency_ms}ms"
                 )
+                # DIRECT SUCCESS says a draft was PRODUCED, not that it was used.
+                # Note it so the next invocation can judge it against the reply
+                # that followed — see hooks/draft_usage.py. Fail-open.
+                try:
+                    from llm_router.hooks import draft_usage as _draft_usage
+                    _draft_usage.record_draft(
+                        session_id, invocation_id,
+                        f"{_direct_result.model.provider}/{_direct_result.model.model}",
+                    )
+                except Exception:
+                    pass
                 # Rolling per-session transcript shard (audit §2.5/P2): record
                 # this llm_router-answered turn so later routed turns can see it.
                 _append_transcript_shard(session_id, prompt, _direct_result.text)

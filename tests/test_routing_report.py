@@ -171,3 +171,67 @@ def test_outcome_is_assigned_once_even_if_lines_repeat():
 
 def test_outcome_enum_covers_what_the_hook_emits():
     assert {o.value for o in Outcome} >= {"success", "failed", "skipped", "other"}
+
+
+def test_a_produced_draft_and_a_used_draft_are_counted_separately():
+    """`rate` counts drafts PRODUCED; `effective_rate` counts drafts actually
+    relayed as the answer. Conflating them is how a fully-routed-looking session
+    drove quota from 49% to 79%."""
+    lines = _log(
+        "[2026-09-12 10:00:00] [INVOCATION START] ID=20.0",
+        "[2026-09-12 10:00:00] [INVOCATION 20.0] prompt_len=12 session_id=s1",
+        "[2026-09-12 10:00:05] [INVOCATION 20.0] DIRECT SUCCESS: model=ollama/x",
+        "[2026-09-12 10:01:00] [INVOCATION START] ID=21.0",
+        "[2026-09-12 10:01:00] [INVOCATION 21.0] prompt_len=9 session_id=s1",
+        "[2026-09-12 10:01:00] [INVOCATION 21.0] DRAFT UNUSED: the draft from invocation 20.0 was discarded",
+        "[2026-09-12 10:01:05] [INVOCATION 21.0] DIRECT SUCCESS: model=ollama/x",
+        "[2026-09-12 10:02:00] [INVOCATION START] ID=22.0",
+        "[2026-09-12 10:02:00] [INVOCATION 22.0] prompt_len=9 session_id=s1",
+        "[2026-09-12 10:02:00] [INVOCATION 22.0] DRAFT USED: the draft from invocation 21.0 was relayed",
+        "[2026-09-12 10:02:01] [INVOCATION 22.0] OUTPUT COMPLETE",
+    )
+    d = summarise(parse_log(lines))["2026-09-12"]
+    assert d["prompts"] == 3
+    assert d["success"] == 2, "two drafts were produced"
+    assert d["rate"] == pytest.approx(2 / 3)
+    assert d["used"] == 1 and d["unused"] == 1
+    assert d["use_rate"] == pytest.approx(0.5)
+    assert d["effective_rate"] == pytest.approx(1 / 3), "only one draft was the answer"
+
+
+def test_a_usage_verdict_is_not_an_outcome():
+    """The verdict lands on the invocation AFTER the draft, so counting it as an
+    outcome would give that invocation two."""
+    lines = _log(
+        "[2026-09-12 11:00:00] [INVOCATION START] ID=30.0",
+        "[2026-09-12 11:00:00] [INVOCATION 30.0] prompt_len=9 session_id=s1",
+        "[2026-09-12 11:00:00] [INVOCATION 30.0] DRAFT USED: relayed",
+        "[2026-09-12 11:00:00] [INVOCATION 30.0] DIRECT SKIP: context-dependent prompt",
+        "[2026-09-12 11:00:01] [INVOCATION 30.0] OUTPUT COMPLETE",
+    )
+    d = summarise(parse_log(lines))["2026-09-12"]
+    assert d["prompts"] == 1
+    assert d["success"] + d["failed"] + d["skipped"] + d["other"] == d["prompts"]
+    assert d["used"] == 1
+
+
+def test_a_day_with_no_verdicts_reports_none_not_zero():
+    """"We did not measure" and "nothing was used" are different claims."""
+    d = summarise(parse_log(REAL))["2026-09-10"]
+    assert d["use_rate"] is None
+    assert d["effective_rate"] == 0.0, "a prompt count exists, so the rate is real"
+
+
+def test_a_rejected_draft_is_not_also_counted_as_unused():
+    """DRAFT REJECTED and DRAFT UNUSED are different events: the first is the
+    grounding check discarding a draft before Claude saw it, the second is
+    Claude discarding one it did see."""
+    lines = _log(
+        "[2026-09-12 12:00:00] [INVOCATION START] ID=40.0",
+        "[2026-09-12 12:00:00] [INVOCATION 40.0] prompt_len=9 session_id=s1",
+        "[2026-09-12 12:00:03] [INVOCATION 40.0] DRAFT REJECTED (ungrounded): cites x.py",
+        "[2026-09-12 12:00:03] [INVOCATION 40.0] OUTPUT COMPLETE",
+    )
+    d = summarise(parse_log(lines))["2026-09-12"]
+    assert d["rejected"] == 1
+    assert d["unused"] == 0

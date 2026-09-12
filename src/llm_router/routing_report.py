@@ -60,6 +60,13 @@ _ANNOTATIONS = (
     ("SESSION RESCUE", "session_rescue"),
     ("OKF RESCUE", "okf_rescue"),
     ("DRAFT REJECTED", "rejected"),
+    # Whether the draft was RELAYED or discarded. These land on the invocation
+    # AFTER the one that produced the draft — the verdict needs the reply to
+    # exist before it can be read — so they are annotations, not outcomes, and
+    # `used + unused` tracks `drafts` without being tied to it across a day
+    # boundary or a session that ended before the next prompt.
+    ("DRAFT USED", "used"),
+    ("DRAFT UNUSED", "unused"),
     ("PERSISTED", "turns_persisted"),
 )
 
@@ -113,6 +120,11 @@ def summarise(records: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
             # check to fire, and counting it would dilute the rate with cases
             # grounding had no part in.
             "drafts": 0, "grounding_rate": None,
+            # A draft PRODUCED is not work routed. Claude is told to discard the
+            # draft whenever the answer depends on anything the draft model could
+            # not see, which in a repo is most of the time — so `success` is an
+            # upper bound and `used` is the number that corresponds to spend.
+            "used": 0, "unused": 0, "use_rate": None, "effective_rate": None,
         })
         d["prompts"] += 1
         d[(rec["outcome"] or Outcome.OTHER).value] += 1
@@ -126,6 +138,14 @@ def summarise(records: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
         d["grounding_rate"] = (
             d["rejected"] / d["drafts"] if d["drafts"] else None
         )
+        judged = d["used"] + d["unused"]
+        # None rather than 0.0 on a day with no verdicts: "we did not measure"
+        # and "nothing was used" are different claims, and reporting the second
+        # when the first is true is how the old counter misled.
+        d["use_rate"] = (d["used"] / judged) if judged else None
+        # The headline worth quoting: prompts whose answer actually came from a
+        # local model, over all prompts. `rate` above counts drafts produced.
+        d["effective_rate"] = (d["used"] / d["prompts"]) if d["prompts"] else None
     return days
 
 
