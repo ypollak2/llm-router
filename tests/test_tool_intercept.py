@@ -20,9 +20,18 @@ from llm_router.hooks import tool_intercept as ti
 
 
 @pytest.fixture(autouse=True)
-def _off_by_default(monkeypatch):
+def _off_by_default(monkeypatch, tmp_path):
+    """Clearing the env vars is not enough to isolate these.
+
+    The flags also resolve from ~/.llm-router/routing.yaml — deliberately, since
+    a hook never sees a shell export. That means a developer who has turned
+    interception ON for real would have flipped these tests' answers, and the
+    suite would pass or fail based on machine configuration rather than code.
+    LLM_ROUTER_HOME points the lookup at an empty tmp dir.
+    """
     monkeypatch.delenv("LLM_ROUTER_IMAGE_INTERCEPT", raising=False)
     monkeypatch.delenv("LLM_ROUTER_BASH_INTERCEPT", raising=False)
+    monkeypatch.setenv("LLM_ROUTER_HOME", str(tmp_path))
 
 
 # ── gating ──────────────────────────────────────────────────────────────────
@@ -216,3 +225,34 @@ def test_try_intercept_dispatches_by_tool(monkeypatch):
     assert ti.try_intercept({"tool_name": "Read"}) == "IMG"
     assert ti.try_intercept({"tool_name": "Bash"}) == "BASH"
     assert ti.try_intercept({"tool_name": "Edit"}) is None
+
+
+# ── configuration ───────────────────────────────────────────────────────────
+
+def test_the_flags_resolve_from_the_config_file(monkeypatch, tmp_path):
+    """A hook inherits the environment the HOST was launched with, so a shell
+    export never reaches it — the same reason enforce_config reads routing.yaml.
+    Without file config these features cannot actually be turned on."""
+    monkeypatch.setenv("LLM_ROUTER_HOME", str(tmp_path))
+    monkeypatch.delenv("LLM_ROUTER_IMAGE_INTERCEPT", raising=False)
+    monkeypatch.delenv("LLM_ROUTER_BASH_INTERCEPT", raising=False)
+    (tmp_path / "routing.yaml").write_text("image_intercept: on\nbash_intercept: on\n")
+    assert ti.image_intercept_enabled() is True
+    assert ti.bash_intercept_enabled() is True
+
+
+def test_an_env_var_overrides_the_config_file(monkeypatch, tmp_path):
+    """Priority matches enforce_config: an explicit export is the strongest
+    signal a user can give in the moment."""
+    monkeypatch.setenv("LLM_ROUTER_HOME", str(tmp_path))
+    (tmp_path / "routing.yaml").write_text("image_intercept: on\n")
+    monkeypatch.setenv("LLM_ROUTER_IMAGE_INTERCEPT", "off")
+    assert ti.image_intercept_enabled() is False
+
+
+def test_a_missing_or_broken_config_leaves_them_off(monkeypatch, tmp_path):
+    monkeypatch.setenv("LLM_ROUTER_HOME", str(tmp_path))
+    monkeypatch.delenv("LLM_ROUTER_IMAGE_INTERCEPT", raising=False)
+    assert ti.image_intercept_enabled() is False
+    (tmp_path / "routing.yaml").write_text("\x00 not: yaml: at all\n")
+    assert ti.image_intercept_enabled() is False

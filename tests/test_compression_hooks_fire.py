@@ -25,7 +25,12 @@ BUNDLED_HOOK = REPO / "hooks" / "bash-compress.py"
 
 
 def _payload(lines: int = 60) -> str:
-    out = "\n".join(f"note: line {i} of verbose git output" for i in range(lines))
+    # REAL porcelain, not filler. The old payload was 60 lines of prose that no
+    # git filter recognises; it "compressed" 91% only because the unrecognised
+    # branch returned output[:200] — a blind cut that silently dropped 50 lines.
+    # That fallback is gone (it became data loss once output was substituted
+    # rather than appended), so a payload has to be the shape a filter handles.
+    out = "\n".join(f"?? generated/file_{i}.txt" for i in range(lines))
     return json.dumps({
         "session_id": "t", "cwd": "/tmp", "hook_event_name": "PostToolUse",
         "tool_name": "Bash",

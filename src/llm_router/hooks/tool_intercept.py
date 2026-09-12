@@ -25,6 +25,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+import time
 import urllib.request
 from pathlib import Path
 
@@ -45,6 +46,85 @@ _DESCRIBE_PROMPT = (
 )
 
 
+
+
+def _env_override(name: str) -> str:
+    """Literal env reads, so a scanner can see the names this module honours."""
+    if name == ENV_IMAGE_INTERCEPT:
+        return os.environ.get("LLM_ROUTER_IMAGE_INTERCEPT", "").strip().lower()
+    if name == ENV_BASH_INTERCEPT:
+        return os.environ.get("LLM_ROUTER_BASH_INTERCEPT", "").strip().lower()
+    return os.environ.get(name, "").strip().lower()
+
+
+def _flag(env_name: str, yaml_key: str) -> bool:
+    """Resolve a boolean from the env, else ~/.llm-router/routing.yaml.
+
+    Env alone is not enough to turn these on. A hook inherits the environment
+    the HOST was launched with, so an export in a shell — or in the terminal
+    running Claude Code — never reaches it, and `enforce_config` says as much:
+    relying on a ~/.zshrc export produced inconsistent enforcement between
+    sessions. File config is what survives a restart and a GUI launch.
+
+    Parsed line-wise rather than with a yaml import, matching enforce_config,
+    because this is on the PreToolUse critical path for every tool call.
+    """
+    raw = _env_override(env_name)
+    if raw:
+        return raw in ("1", "on", "true", "yes")
+    try:
+        base = os.environ.get("LLM_ROUTER_HOME", "").strip()
+        root = Path(base).expanduser() if base else Path.home() / ".llm-router"
+        for line in (root / "routing.yaml").read_text(encoding="utf-8").splitlines():
+            stripped = line.strip()
+            if not stripped.startswith(f"{yaml_key}:"):
+                continue
+            value = stripped.split(":", 1)[1].strip().strip("'\"").lower()
+            return value in ("1", "on", "true", "yes")
+    except Exception:
+        pass
+    return False
+
+
+
+
+def _log_intercept(kind: str, detail: str, before_tokens: int,
+                   after_tokens: int) -> None:
+    """Append one JSONL record per interception. Never raises.
+
+    Without this there is nothing to audit: an interception leaves no trace in
+    the transcript beyond a denial, and "it seems faster" is not a measurement.
+    Each record carries what the call WOULD have cost and what it did cost, so
+    the saving is computed from observations rather than from the benchmark's
+    projection — which is the distinction that made the earlier 9.6% figure
+    wrong.
+    """
+    try:
+        base = os.environ.get("LLM_ROUTER_HOME", "").strip()
+        root = Path(base).expanduser() if base else Path.home() / ".llm-router"
+        root.mkdir(parents=True, exist_ok=True)
+        record = {
+            "at": time.time(),
+            "kind": kind,
+            "detail": detail[:200],
+            "before_tokens": int(before_tokens),
+            "after_tokens": int(after_tokens),
+            "saved_tokens": int(before_tokens) - int(after_tokens),
+        }
+        with (root / "intercepts.jsonl").open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(record) + "\n")
+    except Exception:
+        pass
+
+
+# Named as literals so the env_registry scanner can see them: it greps for
+# os.environ.get("NAME"), and passing the name through _flag as a parameter made
+# both vars look undeclared-but-read — "phantom" entries the registry test
+# correctly refused.
+ENV_IMAGE_INTERCEPT = "LLM_ROUTER_IMAGE_INTERCEPT"
+ENV_BASH_INTERCEPT = "LLM_ROUTER_BASH_INTERCEPT"
+
+
 def image_intercept_enabled() -> bool:
     """Default OFF.
 
@@ -55,9 +135,7 @@ def image_intercept_enabled() -> bool:
     Turning this on is a decision about what the images are FOR, which belongs
     to the person who took them.
     """
-    return os.environ.get("LLM_ROUTER_IMAGE_INTERCEPT", "").strip().lower() in (
-        "1", "on", "true", "yes",
-    )
+    return _flag(ENV_IMAGE_INTERCEPT, "image_intercept")
 
 
 def is_image(path: str) -> bool:
@@ -157,7 +235,16 @@ def try_intercept_read(hook_input: dict) -> str | None:
     description = describe_image(path, model)
     if not description:
         return None
-    return substitute_message(path, model, description)
+    message = substitute_message(path, model, description)
+    try:
+        # An image costs roughly bytes/3 base64 chars, ~4 chars per token. The
+        # estimate is coarse; what matters is that it is the SAME estimate on
+        # both sides of the comparison.
+        raw_bytes = Path(path).stat().st_size
+        _log_intercept("image", path, raw_bytes // 3 // 4, len(message) // 4)
+    except Exception:
+        pass
+    return message
 
 
 def deny_payload(reason: str) -> dict:
@@ -202,9 +289,7 @@ _MIN_LINES_TO_BOTHER = 12
 def bash_intercept_enabled() -> bool:
     """Default OFF. Running the command here makes this hook the executor, and
     a wrong environment is worse than an uncompressed result."""
-    return os.environ.get("LLM_ROUTER_BASH_INTERCEPT", "").strip().lower() in (
-        "1", "on", "true", "yes",
-    )
+    return _flag(ENV_BASH_INTERCEPT, "bash_intercept")
 
 
 def _interceptable(command: str) -> bool:
@@ -272,6 +357,7 @@ def try_intercept_bash(hook_input: dict) -> str | None:
         return None
 
     saved = (len(output) - len(compressed)) // 4
+    _log_intercept("bash", command, len(output) // 4, len(compressed) // 4)
     return (
         f"[llm-router] This command was run locally by the router and its output "
         f"compressed, so the full output never entered your context "

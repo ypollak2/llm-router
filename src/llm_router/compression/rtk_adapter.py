@@ -195,12 +195,39 @@ class RTKAdapter:
         return "\n".join(lines[:10] + ["..."] + lines[-5:])
 
     def _git_status(self, output: str) -> str:
-        """Compress git status output.
+        """Compress git status output, in either of its two formats.
 
-        Extract: branch, modified files count, new files count
+        This was written for the VERBOSE format only ("On branch",
+        "modified:", "new file:"). Against `--porcelain` — ` M path`, `?? path`
+        — nothing matched, `summary` came out empty, and the fallback returned
+        `output[:200]`: a blind character cut that dropped 18 of 28 lines and
+        ended mid-word, with nothing to say it had happened.
+
+        That was survivable while compression output was merely appended and
+        ignored. It is not survivable now that the output REPLACES what the
+        model sees: silently discarding two thirds of a file list produces
+        confident wrong answers about which files changed.
         """
         lines = output.split("\n")
         summary = []
+
+        # Porcelain: a two-character status code, a space, then a path.
+        porcelain = [ln for ln in lines if len(ln) > 3 and ln[2] == " " and ln[:2].strip("? MADRCU!") == ""]
+        if porcelain and len(porcelain) >= len([ln for ln in lines if ln.strip()]) // 2:
+            buckets: dict[str, list[str]] = {}
+            for line in porcelain:
+                buckets.setdefault(line[:2].strip() or "??", []).append(line[3:])
+            names = {"M": "modified", "A": "added", "D": "deleted",
+                     "R": "renamed", "??": "untracked", "!!": "ignored"}
+            out = []
+            for code, paths in sorted(buckets.items()):
+                label = names.get(code, code)
+                # Name a few, then COUNT the rest. Every path is accounted for,
+                # which is the difference between compression and data loss.
+                shown = paths[:8]
+                out.append(f"{label} ({len(paths)}): " + ", ".join(shown)
+                           + (f", +{len(paths) - len(shown)} more" if len(paths) > len(shown) else ""))
+            return "\n".join(out)
 
         for line in lines:
             # Keep branch info
@@ -219,7 +246,9 @@ class RTKAdapter:
         if modified_count > 0 or new_count > 0:
             summary.append(f"Files changed: {modified_count} modified, {new_count} new")
 
-        return "\n".join(summary) if summary else output[:200]
+        # Decline rather than truncate. A filter that did not recognise its
+        # input has no basis for choosing which 200 characters matter.
+        return "\n".join(summary) if summary else output
 
     def _git_diff(self, output: str) -> str:
         """Compress git diff output.
@@ -241,7 +270,7 @@ class RTKAdapter:
                 result.append(line)
 
         if not result:
-            return output[:300]
+            return output  # decline rather than cut blindly
 
         # Add summary
         additions = output.count("\n+")
@@ -381,7 +410,7 @@ class RTKAdapter:
             elif "FAIL" in line:
                 result.append(line)
 
-        return "\n".join(result) if result else output[-200:]
+        return "\n".join(result) if result else output
 
     # ─────────────────────────────────────────────────────
     # UV filter
