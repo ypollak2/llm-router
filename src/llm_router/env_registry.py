@@ -108,6 +108,7 @@ ENV_REGISTRY: dict[str, tuple[str, str, int]] = {
     "LLM_ROUTER_LOCAL_AGENT_LOOP": ("llm_router", "hooks/auto-route.py", 1),
     "LLM_ROUTER_AGENT_WRITES": ("llm_router", "hooks/agent_writes.py", 1),
     "LLM_ROUTER_AGENT_COMMANDS": ("llm_router", "hooks/agent_writes.py", 1),
+    "LLM_ROUTER_AGENT_LOOP_BUDGET_S": ("llm_router", "hooks/auto-route.py", 1),
     "LLM_ROUTER_HOME": ("llm_router", "hooks/agent_writes.py", 2),
     "LLM_ROUTER_SYMBOL_GROUNDING": ("llm_router", "hooks/auto-route.py", 1),
     "LLM_ROUTER_GATEWAY_HOST": ("llm_router", "presets.py", 1),

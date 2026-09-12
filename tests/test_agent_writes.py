@@ -239,3 +239,54 @@ def test_a_refused_command_does_not_execute(repo, tmp_path):
 def test_the_catastrophic_blocklist_still_runs_first(repo):
     out = execute_tool("run_command", {"command": "rm -rf /"}, repo)
     assert "blocked for safety" in out.lower()
+
+
+# ── the loop's wall clock ────────────────────────────────────────────────────
+
+def test_the_loop_stops_when_its_budget_is_spent(monkeypatch, tmp_path):
+    """15 iterations at a 60s per-call timeout is a 15-minute worst case, and the
+    loop runs in UserPromptSubmit before the user sees anything. The per-call
+    timeout does not bound the loop; this does."""
+    import llm_router.hooks.agent_loop as loop
+
+    calls = {"n": 0}
+
+    def _never_finishes(*a, **k):
+        calls["n"] += 1
+        raise AssertionError("the loop should have stopped before calling out")
+
+    monkeypatch.setattr(loop.urllib.request, "urlopen", _never_finishes)
+    # deadline already spent: the budget is checked before the first request.
+    out = loop.run_agent_loop(prompt="x", model="m", project_root=tmp_path,
+                              deadline_s=0.0)
+    assert out is None, "a loop that never ran a tool must not report an answer"
+    assert calls["n"] == 0
+
+
+def test_an_exhausted_budget_after_real_work_reports_partial(monkeypatch, tmp_path):
+    """Partial work is worth returning; a stall is not. The difference is whether
+    any tool actually ran."""
+    import llm_router.hooks.agent_loop as loop
+
+    seen = {"n": 0}
+    real_sleep_free_response = {
+        "message": {"content": "", "tool_calls": [
+            {"function": {"name": "list_files", "arguments": {"path": "."}}}]}
+    }
+
+    class _Resp:
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def read(self):
+            import json as _j
+            return _j.dumps(real_sleep_free_response).encode()
+
+    def _one_tool_call(*a, **k):
+        seen["n"] += 1
+        return _Resp()
+
+    monkeypatch.setattr(loop.urllib.request, "urlopen", _one_tool_call)
+    out = loop.run_agent_loop(prompt="x", model="m", project_root=tmp_path,
+                              deadline_s=0.001)
+    assert seen["n"] >= 1
+    assert out is not None and "budget exhausted" in out

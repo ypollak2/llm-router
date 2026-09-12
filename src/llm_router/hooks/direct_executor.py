@@ -463,6 +463,7 @@ def execute_agent(
     project_root: str | None = None,
     timeout: int = 60,
     context: str | None = None,
+    deadline_s: float | None = None,
 ) -> DirectResult | None:
     """Run a tool-calling agent loop for tasks that need file operations.
 
@@ -545,6 +546,7 @@ def execute_agent(
             project_root=root,
             timeout_per_call=timeout,
             system_prompt=_agent_system_prompt(context),
+            deadline_s=deadline_s,
         )
 
         if response and quality_ok(response, "code"):

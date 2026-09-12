@@ -685,6 +685,23 @@ _REAL_HOME = __import__("pathlib").Path.home()
 
 
 @pytest.fixture(autouse=True)
+def _no_live_agent_loop(monkeypatch):
+    """No test spawns a real local agent loop unless it asks to.
+
+    The tool-loop rescue defaults ON, so any test whose prompt is tool-shaped —
+    "refactor the module please" was enough — now reaches a live Ollama and
+    spends up to the wall-clock budget there. One path-traversal test that had
+    nothing to do with routing started timing out at 30s the moment the default
+    flipped.
+
+    Set in the environment rather than patched, because several of these tests
+    run the hook as a SUBPROCESS with `os.environ.copy()`, where a monkeypatched
+    attribute would not travel. A test that wants the loop overrides it.
+    """
+    monkeypatch.setenv("LLM_ROUTER_LOCAL_AGENT_LOOP", "off")
+
+
+@pytest.fixture(autouse=True)
 def _hermetic_host_state(monkeypatch, tmp_path_factory):
     """Isolate router tests from real host state (repo config + CLI probes).
 

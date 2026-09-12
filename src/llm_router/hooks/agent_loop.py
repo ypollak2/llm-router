@@ -19,6 +19,7 @@ import json
 import os
 import re
 import subprocess
+import time
 import urllib.request
 from pathlib import Path
 
@@ -439,6 +440,7 @@ def run_agent_loop(
     project_root: Path,
     timeout_per_call: int = 60,
     system_prompt: str | None = None,
+    deadline_s: float | None = None,
 ) -> str | None:
     """Run a tool-calling agent loop with an Ollama model.
 
@@ -467,7 +469,21 @@ def run_agent_loop(
     ollama_url = _get_ollama_url()
     tools_used = 0  # How many tool calls actually executed across the whole loop.
 
+    # WALL CLOCK, not just per-call. 15 iterations at a 60s per-call timeout is a
+    # 15-minute worst case, and this loop runs in UserPromptSubmit — before the
+    # user sees anything at all. A budget that bounds the whole loop is what makes
+    # running it by default tolerable; without one the honest setting is off.
+    started = time.monotonic()
+
     for iteration in range(1, _MAX_ITERATIONS + 1):
+        if deadline_s is not None and (time.monotonic() - started) >= deadline_s:
+            # Out of time. Return partial work only if tools actually ran —
+            # otherwise this is a loop that stalled, and the caller's ladder
+            # should try the next model rather than relay a stall as an answer.
+            return (
+                f"Agent stopped after {deadline_s:g}s (budget exhausted) having "
+                f"made {tools_used} tool call(s). Partial work may have been done."
+            ) if tools_used else None
         body = json.dumps({
             "model": model,
             "messages": messages,

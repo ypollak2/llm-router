@@ -2358,16 +2358,40 @@ def _rescue_is_relevant(prompt: str, context: str) -> bool:
 def _local_agent_loop_enabled() -> bool:
     """Is the local tool-calling loop allowed to answer context-dependent prompts?
 
-    OFF BY DEFAULT, and deliberately so. Turning it on lets a local model reach
-    `write_file` / `edit_file` / `run_command` on prompts the context-dependent
-    gate would otherwise have sent straight to Claude. The loop has a command
-    blocklist and a non-shell argv executor, but NO diff gate: an edit it makes
-    lands in the working tree with nothing between the model and the file. Until
-    that gate exists this is opt-in per machine.
+    ON BY DEFAULT since the two preconditions are met.
+
+    SAFETY: writes no longer reach the tree unreviewed — `agent_writes.guard`
+    defaults to `propose` (compute the diff, change nothing) and run_command
+    defaults to an inspection allowlist. The loop can read the repo and propose a
+    patch; it cannot quietly rewrite a file or run an arbitrary program.
+
+    LATENCY: the loop runs inside UserPromptSubmit, before the user sees
+    anything, and 15 iterations at a 60s per-call timeout is a 15-minute worst
+    case. `_agent_loop_budget_s` bounds the whole loop, so a prompt is delayed by
+    a known amount or not at all.
+
+    Set LLM_ROUTER_LOCAL_AGENT_LOOP=off to go back to sending these prompts
+    straight to Claude.
     """
-    return os.environ.get("LLM_ROUTER_LOCAL_AGENT_LOOP", "").strip().lower() in (
-        "1", "on", "true", "yes",
+    return os.environ.get("LLM_ROUTER_LOCAL_AGENT_LOOP", "").strip().lower() not in (
+        "0", "off", "false", "no",
     )
+
+
+def _agent_loop_budget_s() -> float:
+    """Wall-clock seconds the local agent loop may spend before giving up.
+
+    90s is chosen from measurement, not taste: on this machine a real multi-step
+    repo question (read a file, find a value, answer) took 96-115s end to end and
+    a single-step one took 2-9s. So 90s completes the common case and cuts the
+    tail that would otherwise stall a prompt for minutes.
+    """
+    raw = os.environ.get("LLM_ROUTER_AGENT_LOOP_BUDGET_S", "").strip()
+    try:
+        value = float(raw)
+        return value if value > 0 else 90.0
+    except ValueError:
+        return 90.0
 
 
 def _tool_loop_rescue(prompt: str, task_type: str) -> bool:
@@ -3843,7 +3867,10 @@ def main() -> None:
             elif _needs_claude_tools(prompt, task_type):
                 # File-op task — use agent loop (Ollama with tool calling)
                 from llm_router.hooks.direct_executor import execute_agent as _execute_agent
-                _direct_result = _execute_agent(prompt, _direct_chain, timeout=60, context=_session_ctx)
+                _direct_result = _execute_agent(
+                    prompt, _direct_chain, timeout=60, context=_session_ctx,
+                    deadline_s=_agent_loop_budget_s(),
+                )
                 if _direct_result:
                     _debug_log(f"[INVOCATION {invocation_id:.3f}] AGENT LOOP SUCCESS")
             else:

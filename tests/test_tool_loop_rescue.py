@@ -39,23 +39,46 @@ def hook():
 TOOL_SHAPED = "fix the timeout bug in src/llm_router/hooks/auto-route.py"
 
 
-def test_off_by_default(hook, monkeypatch):
-    """A machine that never opts in must behave exactly as it did before."""
+def test_on_by_default(hook, monkeypatch):
+    # conftest sets this off suite-wide so no test spawns a live loop; this test
+    # is about the DEFAULT, so it has to see a clean environment.
+    """Default-on became defensible once writes stopped reaching the tree
+    (agent_writes defaults to `propose`) and the loop gained a wall-clock budget.
+    Before either, this was correctly off."""
     monkeypatch.delenv("LLM_ROUTER_LOCAL_AGENT_LOOP", raising=False)
+    assert hook._local_agent_loop_enabled() is True
+    assert hook._tool_loop_rescue(TOOL_SHAPED, "code") is True
+
+
+@pytest.mark.parametrize("val", ["0", "off", "false", "no", "OFF", " off "])
+def test_it_can_be_turned_off(hook, monkeypatch, val):
+    monkeypatch.setenv("LLM_ROUTER_LOCAL_AGENT_LOOP", val)
     assert hook._local_agent_loop_enabled() is False
     assert hook._tool_loop_rescue(TOOL_SHAPED, "code") is False
 
 
-@pytest.mark.parametrize("val", ["1", "on", "true", "yes", "ON", " true "])
-def test_the_flag_accepts_the_usual_spellings(hook, monkeypatch, val):
+@pytest.mark.parametrize("val", ["1", "on", "true", "yes", "", "maybe"])
+def test_anything_else_leaves_it_on(hook, monkeypatch, val):
     monkeypatch.setenv("LLM_ROUTER_LOCAL_AGENT_LOOP", val)
     assert hook._local_agent_loop_enabled() is True
 
 
-@pytest.mark.parametrize("val", ["0", "off", "false", "no", "", "maybe"])
-def test_anything_else_leaves_it_off(hook, monkeypatch, val):
-    monkeypatch.setenv("LLM_ROUTER_LOCAL_AGENT_LOOP", val)
-    assert hook._local_agent_loop_enabled() is False
+def test_the_loop_has_a_wall_clock_budget(hook, monkeypatch):
+    """The loop runs inside UserPromptSubmit, before the user sees anything.
+    15 iterations at a 60s per-call timeout is a 15-minute worst case, which is
+    why a per-call timeout alone is not enough to justify running by default."""
+    monkeypatch.delenv("LLM_ROUTER_AGENT_LOOP_BUDGET_S", raising=False)
+    assert hook._agent_loop_budget_s() == 90.0
+    monkeypatch.setenv("LLM_ROUTER_AGENT_LOOP_BUDGET_S", "30")
+    assert hook._agent_loop_budget_s() == 30.0
+
+
+@pytest.mark.parametrize("bad", ["nonsense", "-5", "0", ""])
+def test_a_nonsense_budget_falls_back_rather_than_disabling_the_bound(hook, monkeypatch, bad):
+    """A budget of 0 or a typo must not mean "no limit" — that silently restores
+    the 15-minute worst case this bound exists to remove."""
+    monkeypatch.setenv("LLM_ROUTER_AGENT_LOOP_BUDGET_S", bad)
+    assert hook._agent_loop_budget_s() == 90.0
 
 
 def test_the_prompt_it_exists_for_is_both_context_dependent_and_tool_shaped(hook):
@@ -67,7 +90,7 @@ def test_the_prompt_it_exists_for_is_both_context_dependent_and_tool_shaped(hook
 
 
 def test_enabled_rescues_a_tool_shaped_prompt(hook, monkeypatch):
-    monkeypatch.setenv("LLM_ROUTER_LOCAL_AGENT_LOOP", "1")
+    monkeypatch.delenv("LLM_ROUTER_LOCAL_AGENT_LOOP", raising=False)
     assert hook._tool_loop_rescue(TOOL_SHAPED, "code") is True
 
 
