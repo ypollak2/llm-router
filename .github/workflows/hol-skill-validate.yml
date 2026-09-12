@@ -39,7 +39,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Validate skill package
-        uses: hashgraph-online/skill-publish@df6ae95e010d9792158a441eec9ac50d4d17139d
+        uses: hashgraph-online/skill-publish@af745ef996469efe9ea404985e5552621f2ca562
         with:
           mode: validate
           skill-dir: skills/route
