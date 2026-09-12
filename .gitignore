@@ -118,6 +118,9 @@ tests/hook_rendering/
 # is the same failure that left the Codex plugin pointing at a .mcp.json
 # no clone ever contained.
 !/docs/ROUTERARENA.md
+# The POST /ground contract — shipped surface, so it has to be readable by
+# someone who does not have this checkout.
+!/docs/GROUNDING_API.md
 !/docs/decisions/
 !/docs/decisions/**
 
