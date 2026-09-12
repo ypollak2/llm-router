@@ -37,6 +37,12 @@ def _payload(lines: int = 60) -> str:
 def _run(hook: Path, payload: str, *, isolated: bool = False) -> subprocess.CompletedProcess:
     env = dict(os.environ)
     env.pop("LLM_ROUTER_BASH_COMPRESS", None)
+    # The hook is SILENT by default now: a PostToolUse hook cannot replace what
+    # the model sees (verified live — updatedOutput ignored, additionalContext
+    # appends), so emitting anything would enlarge the turn rather than shrink
+    # it. These tests are about the hook running and compressing correctly, so
+    # they turn the emission on explicitly.
+    env["LLM_ROUTER_COMPRESS_EMIT"] = "1"
     if isolated:
         env["PYTHONPATH"] = ""          # no llm_router package, as in a shipped plugin
     else:
@@ -53,7 +59,7 @@ def test_the_hook_fires_on_a_real_claude_code_payload():
     assert r.stdout.strip(), "hook produced no output on a Claude Code payload"
     body = json.loads(r.stdout)["hookSpecificOutput"]
     assert body["hookEventName"] == "PostToolUse"
-    assert "reduction" in body["contextForAgent"]
+    assert "reduction" in body["updatedOutput"]
 
 
 @pytest.mark.skipif(not BUNDLED_HOOK.exists(), reason="bundle not built")
@@ -127,3 +133,43 @@ def test_the_migration_is_actually_applied():
     assert "+ MIGRATE_ADD_COMPRESSION_STATS" in src, \
         "MIGRATE_ADD_COMPRESSION_STATS is defined but not in all_migrations"
     assert MIGRATE_ADD_COMPRESSION_STATS
+
+
+def test_the_hook_is_silent_by_default():
+    """A PostToolUse hook cannot replace a tool result.
+
+    Verified live in-session against a real `git status --porcelain`:
+    `contextForAgent` is not a Claude Code field and was dropped;
+    `updatedOutput` was ignored and all 56 lines arrived in full;
+    `additionalContext` was honoured but APPENDS.
+
+    So compression here saves nothing — the uncompressed output reaches the
+    model regardless — and emitting a summary alongside it makes the turn
+    LARGER than doing nothing. Silence is the correct default until a
+    mechanism exists that can actually substitute (PreToolUse deny, where the
+    command never runs at all).
+    """
+    env = dict(os.environ, PYTHONPATH=str(REPO / "src"))
+    env.pop("LLM_ROUTER_COMPRESS_EMIT", None)
+    env.pop("LLM_ROUTER_BASH_COMPRESS", None)
+    r = subprocess.run([sys.executable, str(SRC_HOOK)], input=_payload(),
+                       capture_output=True, text=True, env=env, timeout=60)
+    assert r.returncode == 0
+    assert r.stdout.strip() == "", "the hook added tokens it cannot save"
+
+
+def test_the_stat_is_still_recorded_while_silent(tmp_path):
+    """The compressor works (9.6% over 994 real outputs); only the DELIVERY is
+    impossible. Keeping the measurement means the number is ready the day a
+    substitution mechanism exists."""
+    import sqlite3
+
+    db = tmp_path / "usage.db"
+    env = dict(os.environ, PYTHONPATH=str(REPO / "src"), LLM_ROUTER_DB_PATH=str(db))
+    env.pop("LLM_ROUTER_COMPRESS_EMIT", None)
+    env.pop("LLM_ROUTER_BASH_COMPRESS", None)
+    subprocess.run([sys.executable, str(SRC_HOOK)], input=_payload(),
+                   capture_output=True, text=True, env=env, timeout=60)
+    rows = sqlite3.connect(db).execute(
+        "SELECT tokens_saved FROM compression_stats").fetchall()
+    assert rows and rows[0][0] > 0

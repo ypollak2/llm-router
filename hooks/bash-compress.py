@@ -208,15 +208,40 @@ def main() -> None:
         f"Full output available if needed."
     )
 
-    json.dump(
-        {
-            "hookSpecificOutput": {
-                "hookEventName": "PostToolUse",
-                "contextForAgent": context,
-            }
-        },
-        sys.stdout,
-    )
+    # VERIFIED LIVE, and the answer kills this hook's premise.
+    #
+    # A PostToolUse hook CANNOT replace what the model sees. Tested in-session
+    # against a real `git status --porcelain`:
+    #
+    #   contextForAgent  -> not a Claude Code field; parsed and dropped
+    #   updatedOutput    -> ignored; all 56 lines still arrived in full
+    #   additionalContext-> honoured, but APPENDS
+    #
+    # So compression here cannot save a single token: the uncompressed output
+    # reaches the model either way. Emitting a summary alongside it makes the
+    # turn LARGER than doing nothing, which is the one outcome worse than the
+    # hook being dead — and it was dead until today, so nothing regressed while
+    # this was believed to work.
+    #
+    # The stat is still recorded above, because the compressor itself works
+    # (measured 9.6% over 994 real outputs) and that number becomes REAL the
+    # moment there is a mechanism that can substitute. Until then this hook
+    # prints nothing, and the saving stays potential.
+    #
+    # The mechanism that can: PreToolUse `deny` with the compressed text in
+    # permissionDecisionReason — the command never runs, so its output never
+    # enters the context at all. That is a different hook with different
+    # failure modes, and it is the next piece of work rather than a tweak here.
+    if os.environ.get("LLM_ROUTER_COMPRESS_EMIT", "").strip().lower() in ("1", "on", "true"):
+        json.dump(
+            {
+                "hookSpecificOutput": {
+                    "hookEventName": "PostToolUse",
+                    "updatedOutput": context,
+                }
+            },
+            sys.stdout,
+        )
 
 
 if __name__ == "__main__":
