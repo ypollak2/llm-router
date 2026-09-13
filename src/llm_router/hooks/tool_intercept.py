@@ -292,27 +292,102 @@ def bash_intercept_enabled() -> bool:
     return _flag(ENV_BASH_INTERCEPT, "bash_intercept")
 
 
-def _interceptable(command: str) -> bool:
-    """Only a single, side-effect-free, allowlisted command.
+# Everything below is refused before any parsing happens. `|` and the
+# redirections need a shell to mean anything, and handing this module a shell is
+# how a cost optimisation turns into an arbitrary-execution surface. `||` and
+# `;` are excluded for a subtler reason than danger: they run the right-hand
+# side after the left-hand side FAILED, or regardless of it, so the output a
+# caller gets back depends on a control-flow decision this module would have to
+# model correctly. `&&` has no such ambiguity — every segment ran, in order, and
+# each one succeeded.
+_SHELL_METACHARS = ("||", ";", "|", ">", "<", "`", "$(", "&>", "$\{")
 
-    A compound command is refused outright rather than parsed: `git status &&
-    rm -rf build` starts with an allowlisted verb, and deciding which half is
-    safe is exactly the kind of judgement that should not live in a cost
-    optimisation.
-    """
-    from llm_router.compression.rtk_adapter import effective_command
 
-    if any(sep in command for sep in ("&&", "||", ";", "|", ">", "<", "`", "$(")):
-        return False
-    effective = effective_command(command).strip()
-    if "\n" in effective:
-        return False
-    parts = effective.split()
+def _single_interceptable(segment: str) -> bool:
+    """One bare command, no operators, whose verb is on the allowlist."""
+    parts = segment.split()
     if not parts:
         return False
     one = parts[0]
     two = f"{parts[0]} {parts[1]}" if len(parts) > 1 else ""
     return two in _INTERCEPT_VERBS or one in _INTERCEPT_VERBS
+
+
+class Plan:
+    """What to actually run, and where.
+
+    `cwd` is None unless the command opened with `cd <dir>`, in which case every
+    remaining segment runs there.
+    """
+
+    __slots__ = ("cwd", "segments")
+
+    def __init__(self, cwd: str | None, segments: list[str]):
+        self.cwd = cwd
+        self.segments = segments
+
+    def __eq__(self, other):  # tests compare against a plain list of segments
+        if isinstance(other, list):
+            return self.segments == other
+        return (self.cwd, self.segments) == (other.cwd, other.segments)
+
+    def __repr__(self):
+        return f"Plan(cwd={self.cwd!r}, segments={self.segments!r})"
+
+
+def plan_for(command: str) -> "Plan | None":
+    """The execution plan for *command*, or None if it is not safe here.
+
+    A conjunction is admitted only when EVERY segment independently passes the
+    single-command allowlist. That is a rule, not a judgement: `git status &&
+    rm -rf build` is refused because `rm` is not on the list, without this
+    module ever deciding which half of a command is the dangerous one — the
+    thing the previous blanket refusal existed to avoid.
+
+    A leading `cd <dir>` is honoured rather than stripped. `effective_command`
+    discards it, which is right when the question is "what shape of output is
+    this" and WRONG when the question is "what do I execute": dropping it runs
+    the rest in the hook's own directory, and `cd elsewhere && cat config.py`
+    would then return a different file's contents as the answer. Only the first
+    segment may be a `cd`, it must name an existing directory, and it changes
+    nothing on disk.
+    """
+    if not command or any(sep in command for sep in _SHELL_METACHARS):
+        return None
+    raw = command.strip()
+    if "\n" in raw or not raw:
+        return None
+
+    segments = [seg.strip() for seg in raw.split("&&")]
+    if not all(segments):                      # a dangling `&&`
+        return None
+
+    cwd: str | None = None
+    first = segments[0].split()
+    if first and first[0] == "cd":
+        if len(first) != 2 or len(segments) == 1:
+            return None                        # bare `cd`, or nothing to run after it
+        target = Path(first[1]).expanduser()
+        if not target.is_dir():
+            return None
+        cwd = str(target)
+        segments = segments[1:]
+
+    if any(seg.split() and seg.split()[0] == "cd" for seg in segments):
+        return None                            # a later `cd` would move the goalposts
+    if not all(_single_interceptable(seg) for seg in segments):
+        return None
+    return Plan(cwd, segments)
+
+
+def segments_of(command: str) -> "Plan | None":
+    """Back-compatible alias — compares equal to its list of segments."""
+    return plan_for(command)
+
+
+def _interceptable(command: str) -> bool:
+    """Is this command safe to run here instead of letting Claude run it?"""
+    return plan_for(command) is not None
 
 
 def try_intercept_bash(hook_input: dict) -> str | None:
@@ -329,16 +404,48 @@ def try_intercept_bash(hook_input: dict) -> str | None:
     import shlex
     import subprocess
 
-    try:
-        argv = shlex.split(command)
-    except ValueError:
+    plan = plan_for(command)
+    if plan is None:
         return None
-    cwd = hook_input.get("cwd") or os.getcwd()
-    try:
-        completed = subprocess.run(argv, capture_output=True, text=True,
-                                   timeout=_BASH_TIMEOUT_S, cwd=cwd)
-    except Exception:
-        return None
+    segments = plan.segments
+    cwd = plan.cwd or hook_input.get("cwd") or os.getcwd()
+
+    # Each segment runs as its own argv — no shell, so nothing in the text can
+    # expand, glob or chain. `&&` semantics are reproduced here rather than
+    # delegated: stop at the first non-zero exit and hand the whole thing back
+    # to Claude, because a partial result presented as a complete one is worse
+    # than not intercepting at all.
+    stdout_parts: list[str] = []
+    completed = None
+    deadline_s = _BASH_TIMEOUT_S
+    for segment in segments:
+        try:
+            argv = shlex.split(segment)
+        except ValueError:
+            return None
+        if not argv:
+            return None
+        try:
+            import time as _time
+            _t0 = _time.monotonic()
+            completed = subprocess.run(argv, capture_output=True, text=True,
+                                       timeout=max(1, int(deadline_s)), cwd=cwd)
+            deadline_s -= _time.monotonic() - _t0
+        except Exception:
+            return None
+        if completed.returncode != 0:
+            return None
+        stdout_parts.append(completed.stdout or "")
+        if deadline_s <= 0:
+            return None
+
+    class _Joined:
+        """Stand-in for the single CompletedProcess the rest of this function
+        expects, carrying every segment's stdout in order."""
+        returncode = 0
+        stdout = "".join(stdout_parts)
+
+    completed = _Joined()
     # A non-zero exit is information the model needs and the reason text is a
     # poor place to convey a failure, so hand those back to Claude untouched.
     if completed.returncode != 0:

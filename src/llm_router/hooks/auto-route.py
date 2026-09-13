@@ -3967,21 +3967,6 @@ def main() -> None:
                     except Exception:
                         # Never let UI presentation block the routing decision.
                         pass
-                # Persist savings — fire-and-forget; helper swallows all errors.
-                # Without this call, sessions that route exclusively to DIRECT
-                # providers (Ollama, Gemini, OpenAI) show $0.00 saved in the
-                # session-end summary because savings_log.jsonl never gets
-                # appended to.
-                try:
-                    from llm_router.hooks.savings_logger import log_direct_savings
-                    log_direct_savings(
-                        result=_direct_result,
-                        task_type=task_type,
-                        complexity=complexity,
-                        session_id=session_id,
-                    )
-                except Exception:
-                    pass
                 # Persist into usage + routing_decisions so DIRECT-routed turns
                 # show up in the routing view / summary, not just the savings
                 # dashboard. The MCP-tool path writes these tables via
@@ -4012,6 +3997,30 @@ def main() -> None:
                 # also set — bypassing Claude with an unverified draft in exactly the
                 # advisory-only config the operator opted into. "echo" never blocks.
                 _turn_blocked = _render_mode != "echo"
+                # Persist savings — fire-and-forget; helper swallows all errors.
+                # Without this call, sessions that route exclusively to DIRECT
+                # providers (Ollama, Gemini, OpenAI) show $0.00 saved in the
+                # session-end summary because savings_log.jsonl never gets
+                # appended to.
+                #
+                # It sits BELOW _turn_blocked deliberately. It used to run ~39
+                # lines earlier, unconditionally, which credited an
+                # Opus-equivalent baseline for every draft produced — including
+                # the echo-mode drafts Claude then answered over at full price.
+                # Measured 2026-09-12: $0.426410 booked for drafts the debug log
+                # recorded as DRAFT UNUSED. `realized` carries the verdict; a
+                # non-realized call still writes a row, at zero.
+                try:
+                    from llm_router.hooks.savings_logger import log_direct_savings
+                    log_direct_savings(
+                        result=_direct_result,
+                        task_type=task_type,
+                        complexity=complexity,
+                        session_id=session_id,
+                        realized=_turn_blocked,
+                    )
+                except Exception:
+                    pass
                 # Persist into usage + routing_decisions ONLY for turns that
                 # actually bypass Claude (audit P1): an echo turn still consumes
                 # a full Claude turn, so counting it as a "saving" inflates the

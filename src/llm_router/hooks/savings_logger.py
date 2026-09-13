@@ -139,8 +139,21 @@ def log_direct_savings(
     session_id: str,
     *,
     host: str = "claude_code",
+    realized: bool = True,
 ) -> None:
     """Append a savings record for a successful DIRECT routing.
+
+    ``realized`` says whether the routed answer actually REPLACED Claude's turn.
+    It defaults to True because most callers sit on a substituting path, but the
+    UserPromptSubmit hook's echo mode does not: there the draft is injected as
+    advisory context and Claude still answers at full price. Crediting those was
+    a real defect — $0.426410 was booked on 2026-09-12 for drafts the log itself
+    recorded as discarded.
+
+    A non-realized call still writes a row, with ``estimated_saved`` 0.0 and
+    ``mode`` "echo". Dropping the row instead would make "the draft was not
+    used" indistinguishable from "the hook never ran", and those need different
+    fixes.
 
     Fire-and-forget — never raises. Any filesystem or serialization failure
     is silently swallowed so the calling hook (``auto-route.py``) stays
@@ -154,7 +167,7 @@ def log_direct_savings(
 
         external_cost = _cost_for(provider, model, input_tokens, output_tokens)
         baseline = _baseline_cost(complexity, input_tokens, output_tokens)
-        estimated_saved = max(0.0, baseline - external_cost)
+        estimated_saved = max(0.0, baseline - external_cost) if realized else 0.0
 
         record = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -162,6 +175,7 @@ def log_direct_savings(
             "task_type": task_type,
             "complexity": complexity,
             "estimated_saved": estimated_saved,
+            "mode": "block" if realized else "echo",
             "external_cost": external_cost,
             "model": f"{provider}/{model}",
             "input_tokens": input_tokens,
@@ -192,11 +206,15 @@ def log_direct_savings(
                 output_tokens=output_tokens,
                 cost_usd=external_cost,
             )
-            _spend.record_reclaimed(
-                tokens_reclaimed=input_tokens + output_tokens,
-                opus_equivalent_usd=baseline,
-                gates_passed=True,
-            )
+            # record() above is the real spend and is true either way — the
+            # local call happened. record_reclaimed drives the headline savings
+            # number, so it only fires when a Claude turn was actually replaced.
+            if realized:
+                _spend.record_reclaimed(
+                    tokens_reclaimed=input_tokens + output_tokens,
+                    opus_equivalent_usd=baseline,
+                    gates_passed=True,
+                )
         except Exception:
             pass
     except Exception:
