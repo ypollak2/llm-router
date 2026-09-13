@@ -45,6 +45,8 @@ import subprocess
 import time
 from pathlib import Path
 
+from llm_router import trace as _trace
+
 # Terminal statuses. `verified_complete` is the ONLY one that means the work is
 # done, and it requires an acceptance check that actually ran and passed.
 VERIFIED_COMPLETE = "verified_complete"   # check supplied, ran, passed
@@ -156,6 +158,9 @@ async def llm_local_task(
         os.environ["LLM_ROUTER_AGENT_COMMANDS"] = "all"
 
     before = _snapshot(root)
+    _trace.emit("task.start", objective=objective, workdir=str(root),
+                model=model, budget_s=budget_s, apply_writes=apply_writes,
+                acceptance_check=acceptance_check, files_before=len(before))
     report, error = None, None
     try:
         report = run_agent_loop(
@@ -197,6 +202,9 @@ async def llm_local_task(
             # No check means nothing proved this works. Never claim it did.
             status, check_passed, check_out = (INCOMPLETE if exhausted else PROPOSED), None, ""
 
+    _trace.emit("task.end", status=status, changed_files=changed,
+                check_passed=check_passed, elapsed_s=round(elapsed, 1),
+                error=error, report=report)
     return json.dumps({
         "status": status,
         "model": f"ollama/{model}",

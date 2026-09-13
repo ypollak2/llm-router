@@ -722,7 +722,47 @@ def run_codex(prompt: str, sandbox: Path, model: str, timeout: int):
     return (answer or out), err
 
 
+def run_local_task(prompt: str, sandbox: Path, model: str, timeout: int):
+    """The llm_local_task service — the same local model, but owning the task.
+
+    Two conditions, chosen by BENCH_TASK_CHECK:
+
+      unchecked  the service gets exactly the information the raw `local`
+                 backend gets. The only variables are the larger budget and the
+                 typed terminal status, so a difference is attributable to those.
+
+      suite      the service is additionally told "the existing test suite must
+                 still pass". That is a check a real caller could legitimately
+                 supply — and it is NOT this benchmark's verifier. Handing the
+                 model the verifier would tell it the trap the prompt
+                 deliberately withholds, which is the premise of the whole
+                 suite; the result would measure leakage, not capability.
+    """
+    import asyncio, json as _json
+    from llm_router.tools.local_task import llm_local_task
+
+    check = None
+    if os.environ.get("BENCH_TASK_CHECK", "unchecked") == "suite":
+        if (sandbox / "tests").is_dir():
+            check = "python3 -m pytest tests -q"
+
+    try:
+        raw = asyncio.run(llm_local_task(
+            objective=prompt, workdir=str(sandbox), acceptance_check=check,
+            model=model, budget_s=float(timeout), apply_writes=True,
+        ))
+    except Exception as e:  # noqa: BLE001
+        return None, f"{type(e).__name__}: {e}"
+
+    d = _json.loads(raw)
+    # The service's own status is NOT the score — the suite's verifier is. What
+    # the status buys is an honest label on the answer text handed back.
+    report = d.get("report") or ""
+    return f"[status={d.get('status')}] {report}", d.get("error")
+
+
 BACKENDS = {
+    "local_task": (run_local_task, os.environ.get("BENCH_LOCAL_MODEL", "qwen3-coder:30b"), 600),
     "local":  (run_local,  os.environ.get("BENCH_LOCAL_MODEL", "qwen3-coder:30b"), 300),
     "claude": (run_claude, os.environ.get("BENCH_CLAUDE_MODEL", "sonnet"), 300),
     "codex":  (run_codex,  os.environ.get("BENCH_CODEX_MODEL", "gpt-5.5"), 300),
