@@ -3036,6 +3036,14 @@ def _debug_log_path() -> Path:
     the production log unusable for measuring the routing rate until they were
     filtered back out by hand. Same class of defect as the receipt-path bug.
     """
+    if os.environ.get("PYTEST_CURRENT_TEST"):
+        # The comment above is not hypothetical: 1,037 of 1,938 entries on
+        # 2026-08-31 were test-suite runs, and every routing rate computed from
+        # this file was wrong by about a factor of two — in the direction that
+        # looks like a regression. Splitting the file at WRITE time rather than
+        # filtering at read time is deliberate: every consumer would otherwise
+        # have to remember, and two of them did not.
+        return Path.home() / ".llm-router" / "auto-route-debug.test.log"
     return Path.home() / ".llm-router" / "auto-route-debug.log"
 _PROMPT_COUNTS = Path.home() / ".llm-router" / "session_prompt_counts.json"
 
@@ -3108,13 +3116,28 @@ def _build_mini_summary() -> str | None:
 
 
 def _debug_log(msg: str) -> None:
-    """Log debug info to help diagnose hook invocation issues."""
+    """Log debug info to help diagnose hook invocation issues.
+
+    Also mirrored into the structured trace (llm_router.trace, off unless
+    LLM_ROUTER_TRACE is set). The prose log says what happened; the trace makes
+    it joinable — by invocation id, and against the agent loop's own records, so
+    one prompt's whole journey reads as a single sequence instead of two files
+    that have to be correlated by eye.
+    """
     try:
         timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
         with open(_debug_log_path(), "a") as f:
             f.write(f"[{timestamp}] {msg}\n")
     except Exception:
         pass  # Silently fail if logging doesn't work
+    try:
+        from llm_router import trace as _t
+        if _t.enabled():
+            m = re.match(r"\[INVOCATION ([\d.]+)\]\s*(.*)", msg, re.S)
+            _t.emit("route.log", invocation=(m.group(1) if m else None),
+                    msg=(m.group(2) if m else msg))
+    except Exception:
+        pass
 
 
 # ─── v9.3.0: Platform detection for Codex CLI vs Claude Code ─────────────────
@@ -3271,6 +3294,13 @@ def main() -> None:
 
     prompt = hook_input.get("prompt", "")
     _debug_log(f"[INVOCATION {invocation_id:.3f}] prompt_len={len(prompt)} session_id={hook_input.get('session_id', 'unknown')[:8]}")
+    try:
+        from llm_router import trace as _t
+        _t.emit("route.prompt", invocation=f"{invocation_id:.3f}",
+                session=str(hook_input.get("session_id", "unknown"))[:8],
+                prompt=prompt, prompt_len=len(prompt))
+    except Exception:
+        pass
     if not prompt.strip():
         # Audit T10 (§2.3): an empty/whitespace prompt must not silently become a
         # native Claude turn under zero-Claude — that leaks past "strict" mode.
@@ -3785,6 +3815,24 @@ def main() -> None:
         _direct_enabled = False
         _debug_log(f"[INVOCATION {invocation_id:.3f}] DIRECT SKIP: coordination task (advisory-only)")
 
+    # Every branch that can skip routing logs WHY. This one did not, and that
+    # cost a day: `ENFORCE=off`/`shadow` accounted for 28.5% of one day's
+    # prompts while being completely invisible in the log, so the routing rate
+    # looked like a code regression for as long as nobody ran the hook under
+    # all four modes side by side. The invariant, enforced by
+    # tests/test_routing_outcome_logged.py: an invocation that logs
+    # `prompt_len=` logs exactly one terminal outcome.
+    if not _direct_enabled:
+        _debug_log(
+            f"[INVOCATION {invocation_id:.3f}] DIRECT SKIP: direct execution "
+            f"disabled by env (LLM_ROUTER_DIRECT_EXECUTION)"
+        )
+    elif _enforce_mode in ("shadow", "off"):
+        _debug_log(
+            f"[INVOCATION {invocation_id:.3f}] DIRECT SKIP: enforcement "
+            f"disabled (mode={_enforce_mode})"
+        )
+
     if _direct_enabled and _enforce_mode not in ("shadow", "off"):
         try:
             from llm_router.hooks.chain_builder import (
@@ -3817,6 +3865,16 @@ def main() -> None:
                 f"pressure={_raw_pct:.0f}% needs_tools={_needs_claude_tools(prompt, task_type)} "
                 f"chain={[f'{m.provider}/{m.model}' for m in _direct_chain]}"
             )
+            try:
+                from llm_router import trace as _t
+                _t.emit("route.decision", invocation=f"{invocation_id:.3f}",
+                        task_type=task_type, complexity=complexity,
+                        method=method, zone=_zone, pressure_pct=round(_raw_pct),
+                        needs_tools=_needs_claude_tools(prompt, task_type),
+                        chain=[f"{m.provider}/{m.model}" for m in _direct_chain],
+                        enforce_mode=_enforce_mode, zero_claude=zero_claude)
+            except Exception:
+                pass
 
             # Session Context Accumulator: build durable context for the draft
             # model. target_provider="local" — the draft chain here is always
@@ -3967,21 +4025,6 @@ def main() -> None:
                     except Exception:
                         # Never let UI presentation block the routing decision.
                         pass
-                # Persist savings — fire-and-forget; helper swallows all errors.
-                # Without this call, sessions that route exclusively to DIRECT
-                # providers (Ollama, Gemini, OpenAI) show $0.00 saved in the
-                # session-end summary because savings_log.jsonl never gets
-                # appended to.
-                try:
-                    from llm_router.hooks.savings_logger import log_direct_savings
-                    log_direct_savings(
-                        result=_direct_result,
-                        task_type=task_type,
-                        complexity=complexity,
-                        session_id=session_id,
-                    )
-                except Exception:
-                    pass
                 # Persist into usage + routing_decisions so DIRECT-routed turns
                 # show up in the routing view / summary, not just the savings
                 # dashboard. The MCP-tool path writes these tables via
@@ -4012,6 +4055,41 @@ def main() -> None:
                 # also set — bypassing Claude with an unverified draft in exactly the
                 # advisory-only config the operator opted into. "echo" never blocks.
                 _turn_blocked = _render_mode != "echo"
+                try:
+                    from llm_router import trace as _t
+                    _t.emit("route.outcome", invocation=f"{invocation_id:.3f}",
+                            model=f"{_direct_result.model.provider}/{_direct_result.model.model}",
+                            render_mode=_render_mode,
+                            substituted=_turn_blocked,
+                            latency_ms=_direct_result.latency_ms,
+                            input_tokens=_direct_result.input_tokens,
+                            output_tokens=_direct_result.output_tokens)
+                except Exception:
+                    pass
+                # Persist savings — fire-and-forget; helper swallows all errors.
+                # Without this call, sessions that route exclusively to DIRECT
+                # providers (Ollama, Gemini, OpenAI) show $0.00 saved in the
+                # session-end summary because savings_log.jsonl never gets
+                # appended to.
+                #
+                # It sits BELOW _turn_blocked deliberately. It used to run ~39
+                # lines earlier, unconditionally, which credited an
+                # Opus-equivalent baseline for every draft produced — including
+                # the echo-mode drafts Claude then answered over at full price.
+                # Measured 2026-09-12: $0.426410 booked for drafts the debug log
+                # recorded as DRAFT UNUSED. `realized` carries the verdict; a
+                # non-realized call still writes a row, at zero.
+                try:
+                    from llm_router.hooks.savings_logger import log_direct_savings
+                    log_direct_savings(
+                        result=_direct_result,
+                        task_type=task_type,
+                        complexity=complexity,
+                        session_id=session_id,
+                        realized=_turn_blocked,
+                    )
+                except Exception:
+                    pass
                 # Persist into usage + routing_decisions ONLY for turns that
                 # actually bypass Claude (audit P1): an echo turn still consumes
                 # a full Claude turn, so counting it as a "saving" inflates the

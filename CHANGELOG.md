@@ -10,6 +10,84 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 | [CHANGELOG-ARCHIVE.md](CHANGELOG-ARCHIVE.md) | v10.1.5 back to v6.3.0 |
 | [GitHub Releases](https://github.com/ypollak2/llm-router/releases) | v6.2 and earlier |
 
+## [Unreleased]
+
+### `llm_local_task` — one Claude turn for a whole task
+
+A new MCP tool (consolidated tier). Claude submits an objective and reads one
+result; every read, edit and command in between runs on a local model and never
+enters Claude's context. The prompt-time loop could not do this: it fires inside
+UserPromptSubmit, is bounded at 90s, and answers a prompt rather than owning a
+task.
+
+Three properties, each from a measured failure:
+
+- **A typed terminal status.** The loop returns "Agent reached maximum
+  iterations" on exhaustion and `quality_ok` scored that string as a pass in the
+  2026-09-12 benchmark. Exhaustion is now `incomplete` and can never be
+  `verified_complete`.
+- **Acceptance checked by a supervisor subprocess**, never by the worker. The
+  same benchmark caught the local model diagnosing a bug correctly in prose and
+  never changing the code.
+- **No cloud fallback.** Ollama down or budget gone returns a typed failure with
+  whatever was staged.
+
+Verified end to end against Ollama: a failing test fixed, edited on disk, check
+passed, in one Claude turn.
+
+**What it does not do: make the model better.** Measured on the 11-task brutal
+suite across four local configurations — raw loop, raw loop with two previously
+broken tools fixed, the service with no acceptance check, and the service with
+one — every run scored **8/11 with the same three failures**. Codex and Claude
+score 10/11. Budget, checking and task-ownership move none of it. Ship it for
+the turn saving; scope the work to failures you would catch.
+
+### Savings are credited only when a Claude turn was actually replaced
+
+`log_direct_savings()` ran unconditionally ~39 lines before the `_turn_blocked`
+check that decides whether the routed answer substituted for anything. In echo
+mode — the default — nothing is substituted, so **$0.426410 was credited on
+2026-09-12 against drafts the debug log recorded as `DRAFT UNUSED`**. The call
+now sits below the check and carries `realized`; a non-realized route still
+writes a row, at zero, tagged `mode='echo'`, because a missing row is
+indistinguishable from the hook never running. New nullable `mode` column;
+existing rows stay NULL rather than being backfilled as verified.
+
+### Execution and routing traces
+
+`LLM_ROUTER_TRACE=1` (or `LLM_ROUTER_TRACE_FILE`) writes a JSONL fact stream.
+The agent loop emits every model round-trip, every tool call with arguments and
+result, and a terminal reason: `max_iterations`, `budget_exhausted`,
+`repeated_identical_call`, `llm_unreachable`,
+`final_text_without_any_tool_call`. The routing hook emits the prompt, the
+decision (task type, zone, pressure, `needs_tools`, the chain actually built)
+and the outcome — including `substituted`, which says whether Claude's turn was
+replaced or merely decorated.
+
+`scripts/trace_view.py` renders it: `--verdict` for "did the model do the work",
+`--routes` for "did routing replace a Claude turn, or just route". Both
+distinctions have historically been miscounted here.
+
+### Fixed
+
+- **`list_files` and `search_files` were broken under any symlinked project
+  root.** They reported paths relative to the unresolved root while
+  `_resolve_path` validated against the resolved one, so on macOS — where `/tmp`
+  is `/private/tmp` — both returned "is not in the subpath of" for directories
+  the model could legitimately read, and it burned its iteration budget
+  retrying. Every local benchmark score before 2026-09-13 was measured this way.
+  Re-running with the fix gives the same 8/11.
+- **Interception admits `&&` conjunctions of allowlisted reads.** Every segment
+  must independently pass the allowlist, so `git status && rm -rf build` stays
+  refused without this module judging which half is dangerous. Honest effect:
+  eligibility moves from 8/492 to 12/492 of real commands; 436 of the rest are
+  pipes and redirects. It did expose a real bug — a leading `cd` was being
+  stripped by `effective_command`, which would have returned a different
+  directory's file as the answer.
+- **The benchmark harness measures `time.monotonic()`.** A macOS Maintenance
+  Sleep advances the wall clock and not the monotonic one; one task was recorded
+  as 918.6s when 902s of that was the laptop asleep.
+
 ## [13.3.0] - 2026-09-12
 
 Local models can now do the work, and the tool calls that cost the most can be

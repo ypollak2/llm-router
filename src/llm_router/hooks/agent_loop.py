@@ -23,6 +23,7 @@ import time
 import urllib.request
 from pathlib import Path
 
+from llm_router import trace as _trace
 from llm_router.hooks import agent_writes as _writes
 from llm_router.hooks import context_budget as _budget
 
@@ -164,6 +165,15 @@ def _resolve_path(path: str, project_root: Path) -> Path:
 
 def execute_tool(name: str, args: dict, project_root: Path) -> str:
     """Execute a tool call and return the result as a string."""
+    # Every path this function reports must be relative to the SAME root that
+    # _resolve_path validated against, which is the resolved one. Using the
+    # caller's unresolved root here made `relative_to` raise for any root
+    # containing a symlink — on macOS that is every path under /tmp, where
+    # `/tmp` -> `/private/tmp`. list_files and search_files then returned
+    # "Error executing …: is not in the subpath of …" for a directory the model
+    # was perfectly entitled to read, and it burned its whole iteration budget
+    # retrying. Found by the execution trace, not by a test.
+    root = project_root.resolve()
     try:
         if name == "read_file":
             path = _resolve_path(args["path"], project_root)
@@ -226,7 +236,7 @@ def execute_tool(name: str, args: dict, project_root: Path) -> str:
             if not path.is_dir():
                 return f"Error: Not a directory: {args['path']}"
             pattern = args.get("pattern", "*")
-            files = sorted(str(f.relative_to(project_root)) for f in path.glob(pattern) if f.is_file())
+            files = sorted(str(f.relative_to(root)) for f in path.glob(pattern) if f.is_file())
             if not files:
                 return "(no matching files)"
             return _budget.truncate_tool_result("\n".join(files[:200]))
@@ -243,7 +253,7 @@ def execute_tool(name: str, args: dict, project_root: Path) -> str:
                 try:
                     for i, line in enumerate(fpath.read_text(encoding="utf-8", errors="replace").splitlines(), 1):
                         if regex.search(line):
-                            rel = fpath.relative_to(project_root)
+                            rel = fpath.relative_to(root)
                             results.append(f"{rel}:{i}: {line.strip()}")
                             if len(results) >= 50:
                                 break
@@ -646,12 +656,18 @@ def run_agent_loop(
     # user sees anything at all. A budget that bounds the whole loop is what makes
     # running it by default tolerable; without one the honest setting is off.
     started = time.monotonic()
+    _trace.emit("loop.start", model=model, project_root=str(project_root),
+                deadline_s=deadline_s, max_iterations=_MAX_ITERATIONS,
+                prompt=prompt)
 
     for iteration in range(1, _MAX_ITERATIONS + 1):
         if deadline_s is not None and (time.monotonic() - started) >= deadline_s:
             # Out of time. Return partial work only if tools actually ran —
             # otherwise this is a loop that stalled, and the caller's ladder
             # should try the next model rather than relay a stall as an answer.
+            _trace.emit("loop.end", reason="budget_exhausted", iteration=iteration,
+                        tools_used=tools_used,
+                        elapsed_s=round(time.monotonic() - started, 1))
             return (
                 f"Agent stopped after {deadline_s:g}s (budget exhausted) having "
                 f"made {tools_used} tool call(s). Partial work may have been done."
@@ -681,16 +697,28 @@ def run_agent_loop(
             headers={"Content-Type": "application/json"},
         )
 
+        _trace.emit("llm.request", iteration=iteration, model=model,
+                    n_messages=len(messages), payload_bytes=len(body))
+        _t0 = time.monotonic()
         try:
             with urllib.request.urlopen(req, timeout=timeout_per_call) as resp:
                 result = json.loads(resp.read())
-        except Exception:
+        except Exception as _exc:
+            _trace.emit("llm.error", iteration=iteration,
+                        error=f"{type(_exc).__name__}: {_exc}",
+                        ms=int((time.monotonic() - _t0) * 1000))
+            _trace.emit("loop.end", reason="llm_unreachable", iteration=iteration,
+                        tools_used=tools_used)
             return None
 
         msg = result.get("message", {})
         tool_calls = msg.get("tool_calls", [])
         content = msg.get("content", "")
         thinking = msg.get("thinking", "")
+        _trace.emit("llm.response", iteration=iteration,
+                    ms=int((time.monotonic() - _t0) * 1000),
+                    n_tool_calls=len(tool_calls), content=content,
+                    thinking_len=len(thinking or ""))
 
         # Constrained decoding puts the call in `content` as schema JSON, not in
         # Ollama's `tool_calls` field. Tried before the repair shim because it is
@@ -715,7 +743,12 @@ def run_agent_loop(
             # None so the caller's fallback ladder tries the next model, rather
             # than passing off a plausible-looking no-op as success.
             if tools_used == 0:
+                _trace.emit("loop.end", reason="final_text_without_any_tool_call",
+                            iteration=iteration, tools_used=0, content=content)
                 return None
+            _trace.emit("loop.end", reason="final_text", iteration=iteration,
+                        tools_used=tools_used,
+                        elapsed_s=round(time.monotonic() - started, 1))
             return content or thinking or None
 
         # Add assistant message with tool calls to conversation
@@ -737,8 +770,13 @@ def run_agent_loop(
                     f"and got the result above. Do not repeat it. Either use a "
                     f"different tool, or call `{FINISH_TOOL}` with your answer now."
                 )
+                _trace.emit("tool.repeat_refused", iteration=iteration,
+                            tool=tool_name, repeats=repeats + 1)
                 if repeats >= 2:
                     messages.append({"role": "tool", "content": tool_result})
+                    _trace.emit("loop.end", reason="repeated_identical_call",
+                                iteration=iteration, tool=tool_name,
+                                tools_used=tools_used)
                     return (
                         f"Stopped: the model repeated {tool_name} identically "
                         f"{repeats + 1} times without making progress."
@@ -746,7 +784,14 @@ def run_agent_loop(
             else:
                 last_signature = signature
                 repeats = 0
+                _trace.emit("tool.call", iteration=iteration, tool=tool_name,
+                            args=tool_args)
+                _tt0 = time.monotonic()
                 tool_result = execute_tool(tool_name, tool_args, project_root)
+                _trace.emit("tool.result", iteration=iteration, tool=tool_name,
+                            ms=int((time.monotonic() - _tt0) * 1000),
+                            result_len=len(tool_result or ""),
+                            result=tool_result)
             tools_used += 1
 
             messages.append({
@@ -758,4 +803,7 @@ def run_agent_loop(
             })
 
     # Hit max iterations — return whatever we have
+    _trace.emit("loop.end", reason="max_iterations", iterations=_MAX_ITERATIONS,
+                tools_used=tools_used,
+                elapsed_s=round(time.monotonic() - started, 1))
     return "Agent reached maximum iterations. Partial work may have been done."

@@ -297,6 +297,17 @@ MIGRATE_SAVINGS_STATS_ADD_TOKENS = [
 """Idempotent migration: record token counts for DIRECT-routed calls so the
 dashboard's token totals include free-provider (Ollama/Codex) throughput (v7.4)."""
 
+MIGRATE_SAVINGS_STATS_ADD_MODE = [
+    "ALTER TABLE savings_stats ADD COLUMN mode TEXT",
+]
+"""Idempotent migration: record WHETHER a routed draft replaced Claude's turn.
+
+Nullable on purpose. Every pre-existing row predates the distinction, and
+backfilling them with a value would retroactively assert something that was
+never measured — the one thing this column exists to stop. NULL means "not
+recorded"; 'block' means the turn was replaced; 'echo' means it was not, and
+such a row carries estimated_claude_cost_saved = 0."""
+
 MIGRATE_ROUTING_DECISIONS_ADD_POLICY = [
     "ALTER TABLE routing_decisions ADD COLUMN policy_applied TEXT",
 ]
@@ -694,6 +705,7 @@ async def _get_db() -> aiosqlite.Connection:
         + MIGRATE_USAGE_ADD_COMPLEXITY
         + MIGRATE_SAVINGS_STATS_ADD_HOST
         + MIGRATE_SAVINGS_STATS_ADD_TOKENS
+        + MIGRATE_SAVINGS_STATS_ADD_MODE
         + MIGRATE_ROUTING_DECISIONS_ADD_POLICY
         + MIGRATE_ADD_CORRELATION_ID
         + MIGRATE_ADD_CACHE_METRICS
@@ -2925,8 +2937,8 @@ async def import_savings_log() -> int:
             await db.execute(
                 "INSERT INTO savings_stats "
                 "(timestamp, session_id, task_type, estimated_claude_cost_saved, "
-                "external_cost, model_used, host, input_tokens, output_tokens) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "external_cost, model_used, host, input_tokens, output_tokens, mode) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     entry.get("timestamp", datetime.now(timezone.utc).isoformat()),
                     entry.get("session_id", "unknown"),
@@ -2937,6 +2949,9 @@ async def import_savings_log() -> int:
                     entry.get("host", "claude_code"),
                     int(entry.get("input_tokens", 0) or 0),
                     int(entry.get("output_tokens", 0) or 0),
+                    # None for a record written before the field existed: absent
+                    # is not the same as echo, and must not read as one.
+                    entry.get("mode"),
                 ),
             )
             imported += 1
