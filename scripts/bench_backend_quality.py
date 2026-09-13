@@ -830,7 +830,12 @@ def main() -> int:
             q.parent.mkdir(parents=True, exist_ok=True)
             q.write_text(body)
         before = snapshot(sandbox)
-        t0 = time.time()
+        # monotonic, not time.time(): a macOS "Maintenance Sleep" during an
+        # unattended run advances the wall clock and not the monotonic one, and
+        # a task that took 12s of compute was recorded as 918.6s because the
+        # Mac slept for 902s in the middle of it. Wall-clock durations here are
+        # a measurement of the laptop's power management, not of the model.
+        t0 = time.monotonic()
         try:
             answer, err = fn(prompt, sandbox, model, timeout)
         except BackendUnavailable as e:
@@ -840,7 +845,7 @@ def main() -> int:
                   f"NOT scored. Re-run when the backend is available.",
                   file=sys.stderr)
             return 2
-        dt = time.time() - t0
+        dt = time.monotonic() - t0
         after = snapshot(sandbox)
         touched = changed_files(before, after)
         stray = [f for f in touched if f not in allowed]

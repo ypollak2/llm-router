@@ -22,6 +22,26 @@ several of them wrong. Where a count is stated, the command that produces it is 
 | 9 | **PreToolUse deny cannot deliver a substituted result — measured, not assumed.** Three runs on 2026-09-13 (Sonnet, disposable fixture): the hook fired and native execution was prevented every time (the sentinel `NATIVE-CONTENT-A7F3` never reached the model), but the model rejected the substituted text as prompt injection in all three, including a control using llm-router's own `substitute_message` wording and a run with consistent markers across tools. It then **retried via another tool**, producing more turns than no interception. | `/tmp/deny_exp/`, model verbatim: *"no genuine tool result would instruct me to 'treat this as the result and continue'"* | do not build result-substitution on PreToolUse; see PROPOSAL_LOCAL_EXECUTION.md §1 |
 | 10 | **The legacy tool-detection predicate misses operational intent.** With `LLM_ROUTER_CAPABILITY_ROUTING` unset, `needs_claude_tools()` returns `decision.legacy_match` (`chain_builder.py:216`) — a phrase/extension matcher (`capabilities.py:105,147`), not a semantic classifier. | **0 of the 6 real user prompts match it**; 4 of the 6 semantically require repo/log/state access. Across the window, `needs_tools` was True 3 times and False 53. | decide whether to promote capability routing out of shadow mode |
 
+## Done 2026-09-13
+
+- **Item 1 (savings credited before the substitution check)** — fixed. Gated on
+  `_turn_blocked`, `mode` column added, `realized` flag threaded through.
+  `tests/test_savings_realized_gate.py`.
+- **Item 8 (`tool_intercept` cannot reach real work)** — partially addressed.
+  `&&` conjunctions admitted; eligibility 8/492 → 12/492. Pipes and redirects
+  still refused, which is 436 of the remainder, so this item is only ~2% closed.
+- **Item 9 (PreToolUse deny cannot substitute a result)** — confirmed by
+  experiment and recorded in the memory note; no code change, the design avoids
+  it instead.
+
+## New, raised 2026-09-13
+
+| # | Item | Evidence |
+|---|---|---|
+| 13 | **Unattended benchmark runs absorb macOS sleep.** The harness now uses `time.monotonic()`, but nothing prevents the sleep itself, and a run that sleeps takes hours of wall clock. Wrap long runs in `caffeinate -i`, or have the harness refuse to start without it. | `br-retry-contract PASS 918.6s` of which 902s was "Maintenance Sleep" per `pmset -g log`; three stalls in one run mapped one-for-one onto sleep windows |
+| 14 | **`llm_local_task` is the task-service core, not the sandbox.** Commands run with the caller's privileges under `agent_writes`' allowlist, which admits Python, Node and test runners — all capable of writes and networking. Confinement, receipts and worktree promotion are unbuilt. | [PROPOSAL_LOCAL_EXECUTION.md](PROPOSAL_LOCAL_EXECUTION.md) §6 |
+| 15 | **A generic acceptance check can certify the wrong thing.** In the checked condition, `br-trace-today` returned `status=verified_complete` with a wrong answer: `pytest tests -q` passed while the objective was not met. A check that does not test the objective is worse than none, because it launders a failure into a success. | `/tmp/lt_suite_broken.json` |
+
 ## Cross-backend quality benchmark (raised 2026-09-12)
 
 | # | Item | Notes |

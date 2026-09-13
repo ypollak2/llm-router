@@ -141,6 +141,70 @@ file (`src/schema.py`). Budget for a bigger diff than you asked for.
 **Claude was clean everywhere** — 10/10 correct and 10/10 clean on hard, with a
 median of 19s, faster than Codex.
 
+## Does owning the whole task make the local model better? No.
+
+`llm_local_task` (shipped 2026-09-13) hands a whole objective to the local model
+instead of a prompt: it reads, edits and runs commands locally, and returns one
+typed result. The architectural win is real — one Claude turn instead of one per
+tool call. The question here is whether it also makes the WORK better.
+
+Four local configurations, same 11 brutal tasks:
+
+| run | correct | qa | edit | clean |
+|---|---|---|---|---|
+| raw loop, broken tools | 8/11 | 1/2 | 7/9 | 11/11 |
+| raw loop, tools fixed | 8/11 | 1/2 | 7/9 | 10/11 |
+| `llm_local_task`, no acceptance check | 8/11 | 1/2 | 7/9 | 10/11 |
+| `llm_local_task` + "the suite must still pass" | 8/11 | 1/2 | 7/9 | 10/11 |
+| codex gpt-5.5 | **10/11** | 2/2 | 8/9 | 3/11 |
+| claude sonnet | **10/11** | 2/2 | 8/9 | 10/11 |
+
+**Identical. Same score, same three failures, every time.** A 5x larger budget
+changes nothing. An acceptance check changes nothing. Fixing two broken tools
+changed nothing. `br-money-total`, `br-dedupe-order` and `br-trace-today` fail in
+all four, for the same reasons each time — the model keeps `float` against an
+explicit docstring, reaches for `dict.fromkeys` on input the prompt says contains
+dicts, and reports the order the code is *supposed* to produce rather than the
+order it does.
+
+Three failures repeating across five independent runs is not variance. It is a
+ceiling, and it is a property of the model, not of its harness.
+
+The local model also beat both cloud agents on `br-collect-errors` in all four
+runs — the hidden-test trap, where returning `[]` for a valid row breaks a test
+that was already passing. That is now four samples, not one.
+
+**Read this as a scoping rule, not a disappointment.** Give the service work
+whose failure you would catch, and expect the architecture to save turns rather
+than raise quality. Nothing measured here suggests local gets better with more
+rope.
+
+### Two tools were broken for every earlier measurement
+
+`agent_loop.execute_tool` reported results relative to the caller's UNRESOLVED
+project root while `_resolve_path` validated against the resolved one. `/tmp` is
+a symlink to `/private/tmp` on macOS, so in every sandbox this suite creates,
+`list_files` and `search_files` returned "is not in the subpath of" for
+directories the model was entitled to read. It could not tell a broken tool from
+a wrong approach, so it retried until its iterations ran out.
+
+Every local score recorded before 2026-09-13 was measured that way. Re-running
+with the tools fixed produced **the same 8/11** — so the finding stands, but it
+stood for the wrong reason until it was checked.
+
+### The wall-clock numbers in this document are not trustworthy
+
+A traced run recorded `br-retry-contract PASS 918.6s`. The execution trace
+disagreed with itself: 909s of wall clock against 12.7s of monotonic time.
+`pmset -g log` settled it — macOS entered "Maintenance Sleep" for 902s in the
+middle of the task. Three stalls in that run map one-for-one onto sleep windows.
+
+The harness now measures `time.monotonic()`. Durations recorded before that
+change include however long the laptop was asleep, so treat every second in this
+document as an upper bound and run unattended benchmarks under `caffeinate -i`.
+Correctness figures are unaffected — a sleeping Mac does not change an answer.
+
+
 ## Two findings that are not about model quality
 
 1. **The local agent loop cannot edit files in its default configuration.**
