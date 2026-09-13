@@ -88,6 +88,62 @@ def _flag(env_name: str, yaml_key: str) -> bool:
 
 
 
+# Anthropic bills an image by its DIMENSIONS, about (width * height) / 750
+# tokens, after downscaling so the longest side is at most 1568px. File size is
+# not the measure: a 1280x720 screenshot costs ~1,228 tokens whatever it
+# compresses to on disk.
+#
+# The first version of this estimated base64 length (bytes/3/4) and overstated
+# three real screenshots by 10.7x — turning a measured 12% saving into a
+# reported 92% one. That is the fourth projection-shaped error in this project,
+# and the first to survive into a released measurement tool, so the formula is
+# now the billed one and the fallback is conservative rather than flattering.
+_MAX_IMAGE_EDGE = 1568
+_PIXELS_PER_TOKEN = 750
+
+
+def _image_token_cost(path: str) -> int:
+    """Tokens this image would have cost Claude, or 0 if it cannot be measured.
+
+    0, not a guess: an unmeasurable image contributes nothing to the numerator
+    OR the denominator of a savings figure, which is the only honest way to
+    leave it out. Reading dimensions needs no third-party library — PNG and JPEG
+    headers are parsed directly, since Pillow is optional in this tree and its
+    absence already caused one silent failure (vision_registry's probe).
+    """
+    try:
+        blob = Path(path).read_bytes()
+    except OSError:
+        return 0
+    width = height = 0
+    try:
+        if blob[:8] == b"\x89PNG\r\n\x1a\n":
+            import struct
+            width, height = struct.unpack(">II", blob[16:24])
+        elif blob[:2] == b"\xff\xd8":
+            i = 2
+            while i < len(blob) - 9:
+                if blob[i] != 0xFF:
+                    i += 1
+                    continue
+                marker = blob[i + 1]
+                if marker in (0xC0, 0xC1, 0xC2, 0xC3):
+                    import struct
+                    height, width = struct.unpack(">HH", blob[i + 5:i + 9])
+                    break
+                if marker in (0xD8, 0xD9) or 0xD0 <= marker <= 0xD7:
+                    i += 2
+                    continue
+                import struct
+                i += 2 + struct.unpack(">H", blob[i + 2:i + 4])[0]
+    except Exception:
+        return 0
+    if width <= 0 or height <= 0:
+        return 0
+    scale = min(1.0, _MAX_IMAGE_EDGE / max(width, height))
+    return int(width * scale) * int(height * scale) // _PIXELS_PER_TOKEN
+
+
 def _log_intercept(kind: str, detail: str, before_tokens: int,
                    after_tokens: int) -> None:
     """Append one JSONL record per interception. Never raises.
@@ -237,11 +293,7 @@ def try_intercept_read(hook_input: dict) -> str | None:
         return None
     message = substitute_message(path, model, description)
     try:
-        # An image costs roughly bytes/3 base64 chars, ~4 chars per token. The
-        # estimate is coarse; what matters is that it is the SAME estimate on
-        # both sides of the comparison.
-        raw_bytes = Path(path).stat().st_size
-        _log_intercept("image", path, raw_bytes // 3 // 4, len(message) // 4)
+        _log_intercept("image", path, _image_token_cost(path), len(message) // 4)
     except Exception:
         pass
     return message

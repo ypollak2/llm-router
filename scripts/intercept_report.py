@@ -28,6 +28,34 @@ def log_path() -> Path:
     return root / "intercepts.jsonl"
 
 
+def _correct_image_cost(record: dict) -> None:
+    """Recompute an image row's "would have cost" from the file's dimensions.
+
+    Rows written before 2026-09-13 estimated it from base64 length, which
+    overstated three real 1280x720 screenshots by 10.7x and turned a measured
+    12% saving into a reported 92% one. Anthropic bills an image at about
+    (width * height) / 750 tokens after downscaling to a 1568px longest edge;
+    file size is not the measure.
+
+    Recomputing here rather than rewriting the log keeps the log an append-only
+    record of what was observed, and self-heals old rows whose file still
+    exists. A row whose file is gone is left alone and counted as-is — noting
+    that it may be an old overstated one is better than silently dropping it.
+    """
+    if record.get("kind") != "image":
+        return
+    try:
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
+        from llm_router.hooks.tool_intercept import _image_token_cost
+        actual = _image_token_cost(record.get("detail", ""))
+    except Exception:
+        return
+    if actual > 0:
+        record["before_tokens"] = actual
+        record["saved_tokens"] = actual - int(record.get("after_tokens", 0))
+
+
+
 def main() -> int:
     days = float(sys.argv[1]) if len(sys.argv) > 1 else 1.0
     path = log_path()
@@ -44,6 +72,7 @@ def main() -> int:
         except Exception:
             continue          # a torn final line is normal for an append log
         if float(record.get("at", 0)) >= cutoff:
+            _correct_image_cost(record)
             rows.append(record)
 
     if not rows:

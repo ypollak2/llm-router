@@ -153,6 +153,11 @@ CONSOLIDATED_TOOLS: frozenset[str] = frozenset({
     "llm_edit",        # file ops (future: llm_fs)
     "llm_router_agent_start_session",  # rich session action (kept until llm_router_session covers it)
     "llm_router_agent_route",          # rich session action
+    # Whole-task local execution. A door of its own rather than a mode of
+    # llm_act: llm_act delegates through the general router (its planner and
+    # adapter set include paid models), and the entire point of this one is
+    # that nothing leaves the machine.
+    "llm_local_task",
 })
 """~11-tool CONSOLIDATED front-door tier (North Star 1.0 direction)."""
 

@@ -103,8 +103,10 @@ def test_leading_cd_is_honoured_not_discarded(tmp_path):
     """
     import subprocess
 
-    here = tmp_path / "here"; there = tmp_path / "there"
-    here.mkdir(); there.mkdir()
+    here = tmp_path / "here"
+    there = tmp_path / "there"
+    here.mkdir()
+    there.mkdir()
     (here / "settings.txt").write_text("WRONG FILE\n")
     (there / "settings.txt").write_text("RIGHT FILE\n")
 
