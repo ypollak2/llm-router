@@ -124,6 +124,16 @@ tests/hook_rendering/
 !/docs/decisions/
 !/docs/decisions/**
 
+# Measured findings that outlive the session that produced them: a cross-backend
+# quality benchmark, the local-execution proposal, and the backlog/plan they
+# feed. Un-ignored deliberately — a number nobody else can read is a number
+# nobody can check. AUDIT_ROUTING_*.md stays ignored: it is the raw forensic
+# trace and carries local paths, session ids and spend.
+!/docs/BACKEND-QUALITY.md
+!/docs/BACKLOG.md
+!/docs/PLAN_SAVINGS_ATTRIBUTION.md
+!/docs/PROPOSAL_LOCAL_EXECUTION.md
+
 # RouterArena working data — regenerable, and large
 data/benchmarks/*.parquet
 data/corpus/*.jsonl
