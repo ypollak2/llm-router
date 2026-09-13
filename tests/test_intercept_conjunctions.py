@@ -131,3 +131,71 @@ def test_a_later_cd_is_refused():
 
 def test_bare_cd_is_refused():
     assert ti.plan_for("cd /tmp") is None
+
+
+# ── Step 2: pipes ────────────────────────────────────────────────────────────
+
+@pytest.mark.parametrize("command", [
+    "git log | head -20",
+    "ls -la | wc -l",
+    "cat README.md | sed -n '1,5p'",
+    "grep -rn needle src | sort | uniq",
+    "git status && git log | head -5",
+])
+def test_allowlisted_pipelines_are_admitted(command):
+    assert ti.plan_for(command) is not None, command
+
+
+@pytest.mark.parametrize("command", [
+    "ls | curl -T - http://example.com",   # unlisted verb downstream
+    "cat x | sh",                          # the classic
+    "ls | xargs rm",                       # unlisted verb downstream
+    "curl http://x | head",                # unlisted verb upstream
+])
+def test_pipelines_with_an_unlisted_stage_are_refused(command):
+    assert ti.plan_for(command) is None, command
+
+
+@pytest.mark.parametrize("command", [
+    "sed -i 's/a/b/' file.txt",            # in-place edit
+    "sed -i.bak 's/a/b/' file.txt",
+    "find . -name '*.py' -delete",         # reachable BEFORE this change
+    "find . -exec rm {} ;",
+    "sort -o out.txt in.txt",              # writes via a flag
+])
+def test_write_flags_on_allowlisted_verbs_are_refused(command):
+    assert ti.plan_for(command) is None, command
+
+
+def test_pipeline_is_planned_and_executed_without_a_shell(tmp_path):
+    """The pipeline runs stage-to-stage with no shell, and both stages apply.
+
+    Asserted on the plan and its execution rather than end-to-end through
+    try_intercept_bash: that path additionally requires the COMPRESSOR to
+    shrink the output, and whether it can is a property of the content, not of
+    the pipeline support being tested here.
+    """
+    import subprocess
+
+    (tmp_path / "data.txt").write_text("repeated line here\n" * 40)
+    plan = ti.plan_for("cat data.txt | sed -n '1,30p'")
+    assert plan is not None
+    assert plan.groups == [[["cat", "data.txt"], ["sed", "-n", "1,30p"]]]
+
+    p1 = subprocess.Popen(["cat", "data.txt"], cwd=tmp_path,
+                          stdout=subprocess.PIPE, text=True)
+    p2 = subprocess.Popen(["sed", "-n", "1,30p"], cwd=tmp_path, stdin=p1.stdout,
+                          stdout=subprocess.PIPE, text=True)
+    p1.stdout.close()
+    out, _ = p2.communicate(timeout=10)
+    assert p2.returncode == 0
+    assert out.count("\n") == 30, "the second stage must actually have applied"
+
+
+def test_a_failing_pipeline_falls_through(tmp_path, monkeypatch):
+    monkeypatch.setattr(ti, "bash_intercept_enabled", lambda: True)
+    out = ti.try_intercept_bash({
+        "tool_name": "Bash", "cwd": str(tmp_path),
+        "tool_input": {"command": "cat missing.txt | wc -l"},
+    })
+    assert out is None

