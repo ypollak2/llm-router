@@ -516,8 +516,6 @@ def try_intercept_bash(hook_input: dict) -> str | None:
     if not command or not _interceptable(command):
         return None
 
-    import shlex
-    import subprocess
 
     plan = plan_for(command)
     if plan is None:

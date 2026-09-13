@@ -618,11 +618,15 @@ def _child_env() -> dict[str, str]:
     measure the hook, not the model.
     """
     env = dict(os.environ)
+    # Only LLM_ROUTER_ENFORCE does anything here. An earlier version of this
+    # function also set LLM_ROUTER_DISABLE and two upstream-branded variables;
+    # none of the three is read anywhere in this tree — `grep -rn
+    # LLM_ROUTER_DISABLE src/` returns only unrelated names — so they gave a
+    # false sense of having isolated the subprocess while the hook ran anyway.
+    # The upstream-branded pair also failed this repo's identity gate, which is
+    # how they were noticed.
     env.update({
         "LLM_ROUTER_ENFORCE": "off",
-        "CHUZOM_ENFORCE": "off",
-        "LLM_ROUTER_DISABLE": "1",
-        "CHUZOM_DISABLE": "1",
         "LLM_ROUTER_API_KEY": env.get("LLM_ROUTER_API_KEY", "unused-placeholder"),
     })
     return env
