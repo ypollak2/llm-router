@@ -133,6 +133,9 @@ tests/hook_rendering/
 !/docs/BACKLOG.md
 !/docs/PLAN_SAVINGS_ATTRIBUTION.md
 !/docs/PROPOSAL_LOCAL_EXECUTION.md
+!/docs/PLAN_ROUTING_OBSERVABILITY.md
+!/docs/MEASUREMENT.md
+!/docs/PLAN_LOCAL_EXECUTION_ROADMAP.md
 
 # RouterArena working data — regenerable, and large
 data/benchmarks/*.parquet

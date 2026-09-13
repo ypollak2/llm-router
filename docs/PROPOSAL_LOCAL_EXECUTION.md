@@ -21,7 +21,7 @@ These are the current documented contracts. `updatedInput` changes arguments to 
 
 **Can deny-with-output work? Yes as substitute text; no as a normal successful tool-result API.**
 
-This checkout already implements that distinction. [`tool_intercept.py:9`](/Users/yaliandrona/Projects/llm-router/src/llm_router/hooks/tool_intercept.py:9) reports an earlier live verification: the native call was prevented and substitute text reached Claude, **wrapped as an error**. [`deny_payload():250`](/Users/yaliandrona/Projects/llm-router/src/llm_router/hooks/tool_intercept.py:250) carries the answer in `permissionDecisionReason`.
+This checkout already implements that distinction. [`tool_intercept.py:9`](src/llm_router/hooks/tool_intercept.py:9) reports an earlier live verification: the native call was prevented and substitute text reached Claude, **wrapped as an error**. [`deny_payload():250`](src/llm_router/hooks/tool_intercept.py:250) carries the answer in `permissionDecisionReason`.
 
 Therefore, the hook can execute an operation itself and deliver its answer through denial feedback. Whether Claude accepts that answer or retries remains model behavior.
 
@@ -39,15 +39,15 @@ The current documentation’s `PostToolUse.updatedToolOutput` support differs fr
 | **B. Whole-task handoff** | Local loop owns reads | Local model generates changes; executor applies permitted changes | Local loop investigates | Sandboxed command adapter | Removes intermediate operations from Claude’s reasoning loop. Requires durable execution outside the prompt hook. |
 | **C. Dedicated local MCP process** | Via primitive tools or internal task operations | Same | Same | Same | Provides a real tool response and process lifetime independent of hooks. Primitive-by-primitive delegation still retains Claude’s loop; a task interface implements B. |
 
-**A is useful as a compatibility optimization, not the primary enforcement architecture.** Current interception covers raster-image Read and selected Bash calls, not general Read/Edit/Write/Grep. Its Bash implementation executes first, then falls through on nonzero exit, short output or ineffective compression. That can cause the command to execute again natively. See [`tool_intercept.py:318`](/Users/yaliandrona/Projects/llm-router/src/llm_router/hooks/tool_intercept.py:318). Never extend that behavior to mutations.
+**A is useful as a compatibility optimization, not the primary enforcement architecture.** Current interception covers raster-image Read and selected Bash calls, not general Read/Edit/Write/Grep. Its Bash implementation executes first, then falls through on nonzero exit, short output or ineffective compression. That can cause the command to execute again natively. See [`tool_intercept.py:318`](src/llm_router/hooks/tool_intercept.py:318). Never extend that behavior to mutations.
 
 Executing inside a hook also assumes responsibility for authorization. Matching hooks run in parallel, so another hook’s denial does not stop an executor hook’s side effects. Hook errors can allow the original action to proceed. [Hook behavior and limitations](https://code.claude.com/docs/en/hooks-guide)
 
-**B needs a new lifetime, not merely a higher timeout.** The current prompt branch invokes `execute_agent` at [`auto-route.py:3867`](/Users/yaliandrona/Projects/llm-router/src/llm_router/hooks/auto-route.py:3867), with the default 90-second budget at [`auto-route.py:2381`](/Users/yaliandrona/Projects/llm-router/src/llm_router/hooks/auto-route.py:2381). Its default rendering remains advisory at [`auto-route.py:2731`](/Users/yaliandrona/Projects/llm-router/src/llm_router/hooks/auto-route.py:2731). Extending that synchronous draft computation does not establish task ownership.
+**B needs a new lifetime, not merely a higher timeout.** The current prompt branch invokes `execute_agent` at [`auto-route.py:3867`](src/llm_router/hooks/auto-route.py:3867), with the default 90-second budget at [`auto-route.py:2381`](src/llm_router/hooks/auto-route.py:2381). Its default rendering remains advisory at [`auto-route.py:2731`](src/llm_router/hooks/auto-route.py:2731). Extending that synchronous draft computation does not establish task ownership.
 
 **Recommend B delivered through C.** Expose task submission, bounded waiting/result retrieval and cancellation. Keep filesystem primitives internal to the service in this mode.
 
-All three need explicit adapters for notebooks, binary/media operations, browser automation and other integrations. Unsupported operations must return `blocked`; they must not fall through to native tools. The existing local `run_command` deliberately supports one argv invocation, not shell pipelines or redirects. [`agent_loop.py:258`](/Users/yaliandrona/Projects/llm-router/src/llm_router/hooks/agent_loop.py:258)
+All three need explicit adapters for notebooks, binary/media operations, browser automation and other integrations. Unsupported operations must return `blocked`; they must not fall through to native tools. The existing local `run_command` deliberately supports one argv invocation, not shell pipelines or redirects. [`agent_loop.py:258`](src/llm_router/hooks/agent_loop.py:258)
 
 **3. What needs a model**
 
@@ -67,7 +67,7 @@ The service should accept **objectives and constraints**, then keep intermediate
 
 Add a new `local_only` execution mode, separate from today’s route-first enforcement.
 
-The current gate clears pending state on any bare `llm_*` name before that tool executes. Exact-name and same-server matches also clear it. [`enforce-route.py:1333`](/Users/yaliandrona/Projects/llm-router/src/llm_router/hooks/enforce-route.py:1333) Read-only native tools have exemptions, and repeated violations can trigger an automatic unblock. [`enforce-route.py:1403`](/Users/yaliandrona/Projects/llm-router/src/llm_router/hooks/enforce-route.py:1403), [`enforce-route.py:1502`](/Users/yaliandrona/Projects/llm-router/src/llm_router/hooks/enforce-route.py:1502)
+The current gate clears pending state on any bare `llm_*` name before that tool executes. Exact-name and same-server matches also clear it. [`enforce-route.py:1333`](src/llm_router/hooks/enforce-route.py:1333) Read-only native tools have exemptions, and repeated violations can trigger an automatic unblock. [`enforce-route.py:1403`](src/llm_router/hooks/enforce-route.py:1403), [`enforce-route.py:1502`](src/llm_router/hooks/enforce-route.py:1502)
 
 Replace those semantics **within the new mode** with these invariants:
 
@@ -86,7 +86,7 @@ The worker must run with scoped filesystem access, stripped credentials and rest
 
 Pin approved local model identities/digests and a loopback Ollama endpoint. Reject remote endpoints, redirects and cloud-backed model configurations. Restrict planning, repair and verification model calls too.
 
-Do not simply reuse default `llm_delegate`: its planner uses the general router, and its adapter set includes Codex. [`tools/agentic.py:60`](/Users/yaliandrona/Projects/llm-router/src/llm_router/tools/agentic.py:60), [`tools/agentic.py:88`](/Users/yaliandrona/Projects/llm-router/src/llm_router/tools/agentic.py:88)
+Do not simply reuse default `llm_delegate`: its planner uses the general router, and its adapter set includes Codex. [`tools/agentic.py:60`](src/llm_router/tools/agentic.py:60), [`tools/agentic.py:88`](src/llm_router/tools/agentic.py:88)
 
 **5. Task lifecycle and completion contract**
 
@@ -123,7 +123,7 @@ Return statuses such as:
 
 Terminal statuses should distinguish `verified_complete`, `proposed`, `incomplete`, `blocked`, `failed` and `cancelled`.
 
-This fixes a concrete current defect: the loop returns partial-work strings on deadline or iteration exhaustion, while `quality_ok` primarily checks length and refusal phrases. Those strings can pass as successful results. [`agent_loop.py:650`](/Users/yaliandrona/Projects/llm-router/src/llm_router/hooks/agent_loop.py:650), [`agent_loop.py:760`](/Users/yaliandrona/Projects/llm-router/src/llm_router/hooks/agent_loop.py:760), [`direct_executor.py:317`](/Users/yaliandrona/Projects/llm-router/src/llm_router/hooks/direct_executor.py:317)
+This fixes a concrete current defect: the loop returns partial-work strings on deadline or iteration exhaustion, while `quality_ok` primarily checks length and refusal phrases. Those strings can pass as successful results. [`agent_loop.py:650`](src/llm_router/hooks/agent_loop.py:650), [`agent_loop.py:760`](src/llm_router/hooks/agent_loop.py:760), [`direct_executor.py:317`](src/llm_router/hooks/direct_executor.py:317)
 
 Receipts must come from the executor’s protected store and bind task/turn identity, policy, model identity, operation arguments, read ranges, truncation, file hashes, subprocess outcomes and verification. They prove recorded execution and checks—not semantic correctness.
 
@@ -145,14 +145,14 @@ Detect the observed failure patterns directly:
 
 - **Assumed facts:** repository claims must reference captured evidence from the relevant snapshot. Validate citation existence; recognize that this cannot prove interpretation.
 - **Skipped investigation:** require task-specific evidence obligations. One irrelevant read does not establish completion.
-- **Search blind spots:** preserve options, scope and truncation indicators; support pagination. Current search defaults to `*.py`, ignores case and caps matches at 50. [`agent_loop.py:234`](/Users/yaliandrona/Projects/llm-router/src/llm_router/hooks/agent_loop.py:234)
-- **False modification claims:** distinguish staged, proposed and applied artifacts. Current `propose` correctly changes nothing. [`agent_writes.py:213`](/Users/yaliandrona/Projects/llm-router/src/llm_router/hooks/agent_writes.py:213)
+- **Search blind spots:** preserve options, scope and truncation indicators; support pagination. Current search defaults to `*.py`, ignores case and caps matches at 50. [`agent_loop.py:234`](src/llm_router/hooks/agent_loop.py:234)
+- **False modification claims:** distinguish staged, proposed and applied artifacts. Current `propose` correctly changes nothing. [`agent_writes.py:213`](src/llm_router/hooks/agent_writes.py:213)
 - **False verification:** supervisor-owned checks must inspect real state. The worker cannot replace a regression check with `echo ok`, weaken its acceptance criteria or grade its own output.
 - **Stalls/exhaustion:** terminate as incomplete with evidence and remaining obligations.
 
-Reuse the actual-repository verification approach in [`acceptance.py:129`](/Users/yaliandrona/Projects/llm-router/src/llm_router/agentic/acceptance.py:129), but require meaningful criteria. A matching diff symbol or zero exit code alone is insufficient.
+Reuse the actual-repository verification approach in [`acceptance.py:129`](src/llm_router/agentic/acceptance.py:129), but require meaningful criteria. A matching diff symbol or zero exit code alone is insufficient.
 
-The command allowlist is also insufficient confinement: it admits Python, Node, test runners and other programs capable of writes or networking. [`agent_writes.py:47`](/Users/yaliandrona/Projects/llm-router/src/llm_router/hooks/agent_writes.py:47) Enforce restrictions through the sandbox, including when running repository tests.
+The command allowlist is also insufficient confinement: it admits Python, Node, test runners and other programs capable of writes or networking. [`agent_writes.py:47`](src/llm_router/hooks/agent_writes.py:47) Enforce restrictions through the sandbox, including when running repository tests.
 
 Cloud review can remain an explicitly permitted **text review** using locally gathered evidence. Cloud tool execution stays disabled. Fully local deployments surface uncertainty to the user instead.
 
@@ -173,7 +173,7 @@ Paths below are relative to `src/llm_router/`.
 | `install_hooks.py`, `install_manifest.py`, `enforce_config.py`, `env_registry.py`, `tool_surface.py` | Install, validate and report the new profile and tool surface |
 | `execution_ledger.py` | Separate attempted, executed, rejected, proposed and verified outcomes |
 
-Worktree handling needs explicit hardening: current creation ignores command failure, and merge applies a tracked diff then discards the worktree even when application fails. Preserve failed artifacts and include new files. [`worktree.py:51`](/Users/yaliandrona/Projects/llm-router/src/llm_router/agentic/worktree.py:51)
+Worktree handling needs explicit hardening: current creation ignores command failure, and merge applies a tracked diff then discards the worktree even when application fails. Preserve failed artifacts and include new files. [`worktree.py:51`](src/llm_router/agentic/worktree.py:51)
 
 Proposed configuration:
 
@@ -208,12 +208,12 @@ Both properties must pass. A system that blocks everything satisfies only half t
 7. **Mutation tests:** intentionally remove the gate, unlock after a receipt, accept incomplete results or enable cloud fallback. Each mutation must fail the suite.
 8. **Live quality evaluation:** rerun the supplied benchmark plus held-out cases and repeated trials. Report false completion, verified task completion, native execution count, cloud turns/tokens and end-to-end latency separately.
 
-Extend the existing interception, agent-loop, write-guard, installation and verification suites; add a pinned-Claude conformance suite. Existing denial-payload unit tests establish JSON shape, not live enforcement. [`test_tool_intercept.py:212`](/Users/yaliandrona/Projects/llm-router/tests/test_tool_intercept.py:212)
+Extend the existing interception, agent-loop, write-guard, installation and verification suites; add a pinned-Claude conformance suite. Existing denial-payload unit tests establish JSON shape, not live enforcement. [`test_tool_intercept.py:212`](tests/test_tool_intercept.py:212)
 
 **9. Honest failure modes**
 
 - **Latency:** cold model loading and dozens of local inference steps can take minutes. Warm workers and task batching help; the proposed budget requires measurement.
-- **Context loss:** a task summary may omit an earlier constraint. Carry original instructions, relevant conversation facts, snapshot identity and unresolved questions explicitly. Avoid the current blanket 2,000-character delegation-context truncation. [`tools/agentic.py:161`](/Users/yaliandrona/Projects/llm-router/src/llm_router/tools/agentic.py:161)
+- **Context loss:** a task summary may omit an earlier constraint. Carry original instructions, relevant conversation facts, snapshot identity and unresolved questions explicitly. Avoid the current blanket 2,000-character delegation-context truncation. [`tools/agentic.py:161`](src/llm_router/tools/agentic.py:161)
 - **Wrong but plausible results:** evidence and passing tests cannot establish complete correctness. Unsupported conclusions remain uncertain; high-impact changes need review.
 - **Ollama unavailable:** return a typed failure and preserve staged work. No native/cloud execution fallback.
 - **Claude refuses to delegate:** execution can be prevented; useful cooperation cannot be guaranteed. Bound denial loops and terminate with an actionable failure, without unlocking tools.
