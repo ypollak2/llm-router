@@ -10,7 +10,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 | [CHANGELOG-ARCHIVE.md](CHANGELOG-ARCHIVE.md) | v10.1.5 back to v6.3.0 |
 | [GitHub Releases](https://github.com/ypollak2/llm-router/releases) | v6.2 and earlier |
 
-## [Unreleased]
+## [13.3.1] - 2026-09-13
+
+Measurement, and what measuring exposed. Nothing here raises the routing rate;
+several entries lower a number this project previously reported.
+
+**A patch release that adds a tool.** `llm_local_task` is new API surface, and
+the semver this file declares makes that a MINOR bump. Shipped as a patch at the
+maintainer's explicit instruction — recorded here so the version number does not
+have to carry the explanation by itself.
 
 ### `llm_local_task` — one Claude turn for a whole task
 
@@ -162,7 +170,6 @@ measured from real use. Until then this release ships the capability and no
 number.
 
 
-## [Unreleased]
 
 ## [13.2.2] — The injected block repeated itself (2026-09-10)
 
