@@ -3036,6 +3036,14 @@ def _debug_log_path() -> Path:
     the production log unusable for measuring the routing rate until they were
     filtered back out by hand. Same class of defect as the receipt-path bug.
     """
+    if os.environ.get("PYTEST_CURRENT_TEST"):
+        # The comment above is not hypothetical: 1,037 of 1,938 entries on
+        # 2026-08-31 were test-suite runs, and every routing rate computed from
+        # this file was wrong by about a factor of two — in the direction that
+        # looks like a regression. Splitting the file at WRITE time rather than
+        # filtering at read time is deliberate: every consumer would otherwise
+        # have to remember, and two of them did not.
+        return Path.home() / ".llm-router" / "auto-route-debug.test.log"
     return Path.home() / ".llm-router" / "auto-route-debug.log"
 _PROMPT_COUNTS = Path.home() / ".llm-router" / "session_prompt_counts.json"
 
@@ -3806,6 +3814,24 @@ def main() -> None:
     if _direct_enabled and task_type == "coordinate":
         _direct_enabled = False
         _debug_log(f"[INVOCATION {invocation_id:.3f}] DIRECT SKIP: coordination task (advisory-only)")
+
+    # Every branch that can skip routing logs WHY. This one did not, and that
+    # cost a day: `ENFORCE=off`/`shadow` accounted for 28.5% of one day's
+    # prompts while being completely invisible in the log, so the routing rate
+    # looked like a code regression for as long as nobody ran the hook under
+    # all four modes side by side. The invariant, enforced by
+    # tests/test_routing_outcome_logged.py: an invocation that logs
+    # `prompt_len=` logs exactly one terminal outcome.
+    if not _direct_enabled:
+        _debug_log(
+            f"[INVOCATION {invocation_id:.3f}] DIRECT SKIP: direct execution "
+            f"disabled by env (LLM_ROUTER_DIRECT_EXECUTION)"
+        )
+    elif _enforce_mode in ("shadow", "off"):
+        _debug_log(
+            f"[INVOCATION {invocation_id:.3f}] DIRECT SKIP: enforcement "
+            f"disabled (mode={_enforce_mode})"
+        )
 
     if _direct_enabled and _enforce_mode not in ("shadow", "off"):
         try:

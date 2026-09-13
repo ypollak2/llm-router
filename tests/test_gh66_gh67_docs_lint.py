@@ -77,6 +77,17 @@ _EXCLUDED_FILES = {
     # Sanitising the quotes would destroy the report's value as a record.
     _REPO_ROOT / "docs" / "AUDIT_2026-08-30.md",
 }
+# A design proposal names the configuration it would ADD
+# (LLM_ROUTER_EXECUTION_MODE, LLM_ROUTER_LOCAL_TASK_BUDGET_S, ...). Those
+# variables not existing in src/ is the POINT of a proposal: the lint is right
+# about the fact and wrong about the conclusion. Excluded by prefix rather than
+# renamed, because renaming them would make the proposal unimplementable as
+# written — and file-by-file, because the next proposal would fail the same way.
+#
+# The trade is explicit: a proposal that is later IMPLEMENTED stops being
+# checked, so when one lands, move its doc out of PROPOSAL_ and the lint starts
+# guarding it again.
+_EXCLUDED_NAME_PREFIXES = ("PROPOSAL_",)
 _EXCLUDED_DIR_PREFIXES = (_REPO_ROOT / "docs" / "releases",)
 
 
@@ -89,7 +100,7 @@ def _scanned_files() -> list[Path]:
         for p in sorted(base.rglob("*")):
             if not p.is_file():
                 continue
-            if p in _EXCLUDED_FILES:
+            if p in _EXCLUDED_FILES or p.name.startswith(_EXCLUDED_NAME_PREFIXES):
                 continue
             if any(str(p).startswith(str(pref)) for pref in _EXCLUDED_DIR_PREFIXES):
                 continue

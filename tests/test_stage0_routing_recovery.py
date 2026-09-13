@@ -134,12 +134,19 @@ def test_debug_log_path_is_resolved_per_call(hook, monkeypatch, tmp_path):
     decisions, and had to be filtered out by hand before the routing rate could be
     measured at all.
     """
+    # The log now splits at write time: under PYTEST_CURRENT_TEST it targets
+    # auto-route-debug.test.log, which is what stops test runs polluting the
+    # production log this docstring describes. This test asserts the PRODUCTION
+    # path, so it opts out of the split explicitly rather than asserting
+    # whichever branch happens to be active.
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
     assert hook._debug_log_path() == tmp_path / ".llm-router" / "auto-route-debug.log"
 
 
 def test_debug_log_writes_under_the_patched_home(hook, monkeypatch, tmp_path):
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)   # assert the production path
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
     (tmp_path / ".llm-router").mkdir(parents=True)
     hook._debug_log("STAGE0 PROBE")
