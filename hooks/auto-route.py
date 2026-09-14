@@ -4159,7 +4159,20 @@ def main() -> None:
                 # model really did produce this answer regardless of whether
                 # it's shown via block or echo, and future context should
                 # reflect that. Fire-and-forget.
-                if session_id:
+                # A draft becomes the next turn's context, so the bar for
+                # REMEMBERING it is higher than the bar for showing it once.
+                _memorable, _why_not = (True, "")
+                try:
+                    from llm_router.grounding import draft_is_memorable
+                    _memorable, _why_not = draft_is_memorable(_direct_result.text or "")
+                except Exception:                            # noqa: BLE001
+                    pass
+                if not _memorable:
+                    _debug_log(
+                        f"[INVOCATION {invocation_id:.3f}] DRAFT NOT REMEMBERED: "
+                        f"{_why_not} — shown this turn, kept out of session context"
+                    )
+                if session_id and _memorable:
                     try:
                         from llm_router import session_store as _session_store
                         _session_store.record_event(

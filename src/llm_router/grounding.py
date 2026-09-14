@@ -181,6 +181,49 @@ def symbol_violations(draft: str, context: str, prompt: str = "") -> list[str]:
     return out
 
 
+# A draft is written into session memory and becomes CONTEXT for the next turn
+# (auto-route.py records it as an assistant event, session_store always injects
+# the 3 newest). Until 2026-09-14 the only gate on that write was file/symbol
+# grounding, which has no opinion about a draft that asks a question or claims an
+# action. So a fabricated status became the next turn's ground truth and the
+# model escalated its own invention across turns — observed in real session data:
+# "63.2% complete (5,309/8,400)" became "78.5% complete (6,600/8,400)" one turn
+# later, for a project that does not exist.
+#
+# Grounding catches an invented FILE. This catches an invented ACTION, which is
+# the more dangerous of the two because nothing else looks for it.
+_UNOBSERVABLE_CLAIM = re.compile(
+    r"all tests? (pass|passed)|completed successfully|"
+    r"(have|has|i) (been )?(merged|pushed|committed|deployed|installed)|"
+    r"✅|task .{0,20}(complete|done)|successfully (ran|executed|created|updated)",
+    re.I)
+_DEFERRAL = re.compile(
+    r"would you like me to|shall i |let me know if|do you want me to|"
+    r"could you (share|provide|clarify|confirm)|please (share|provide|clarify)",
+    re.I)
+
+
+def draft_is_memorable(text: str) -> tuple[bool, str]:
+    """Is this draft safe to persist as an assistant turn for future context?
+
+    Stricter than :func:`draft_is_relayable`, and deliberately so: relaying a
+    weak draft costs one turn, remembering one costs every turn after it.
+    Returns (ok, reason-if-not).
+    """
+    body = (text or "").strip()
+    # 20, not 40: a correct answer can be short ("os.path.join joins path
+    # components." is 35 chars and worth remembering). The real signals are the
+    # two below — an invented action and a deferral — not length. This floor only
+    # drops bare acknowledgements like "Sure."
+    if len(body) < 20:
+        return False, "too short to be worth remembering"
+    if _UNOBSERVABLE_CLAIM.search(body):
+        return False, "claims an action it could not have performed"
+    if _DEFERRAL.search(body):
+        return False, "defers to the user rather than answering"
+    return True, ""
+
+
 def draft_is_relayable(draft: str, context: str, prompt: str = "") -> bool:
     """Whether a DIRECT draft may be shown, or should fall through to Claude.
 

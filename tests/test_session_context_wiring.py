@@ -195,7 +195,12 @@ def test_records_routed_qa_on_success(ar, monkeypatch):
 
     def fake_execute_chain(prompt, chain, task_type, timeout=4, history=None, context=None, deadline_s=None):
         return direct_executor.DirectResult(
-            text="the answer text", model=chain[0], latency_ms=5, input_tokens=2, output_tokens=4,
+            # A realistic draft, not a 15-char placeholder: since 2026-09-14 a
+            # draft is only written to session memory if it is worth being the
+            # NEXT turn's context (grounding.draft_is_memorable). This test is
+            # about the wiring; the gate has its own tests.
+            text="os.path.join joins path components using the platform separator.",
+            model=chain[0], latency_ms=5, input_tokens=2, output_tokens=4,
         )
 
     _patch_direct_execution(ar, monkeypatch, execute_chain_fn=fake_execute_chain)
@@ -205,7 +210,7 @@ def test_records_routed_qa_on_success(ar, monkeypatch):
     routed = [c for c in rec.record_event_calls if c["kind"] == "routed_qa"]
     assert len(routed) == 1
     assert routed[0]["session_id"] == "sess-qa"
-    assert routed[0]["content"] == "the answer text"
+    assert routed[0]["content"].startswith("os.path.join joins")
     assert routed[0]["role"] == "assistant"
     assert routed[0]["task_type"] == "query"
     assert routed[0]["model"] == "ollama/fake-model"

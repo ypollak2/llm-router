@@ -35,6 +35,7 @@ import json
 import os
 import random
 import re
+import hashlib
 import subprocess
 import sys
 import time
@@ -46,9 +47,40 @@ sys.path.insert(0, str(ROOT / "src"))
 HOOK = ROOT / "src/llm_router/hooks/auto-route.py"
 PY = str(ROOT / ".venv/bin/python")
 
+# Widened 2026-09-14 after the new system prompt forbade the exact phrases this
+# regex looked for. A draft then came back with "Could you share: 1. The workflow
+# file content" and scored ACCEPTABLE — the same deferral, reworded around the
+# grep. A scorer that a prompt change can teach a model to evade is measuring the
+# wording, not the behaviour.
 ASKS_BACK = re.compile(
     r"would you like me to|shall i |should i |let me know if|please confirm|"
-    r"do you want me to|would you prefer", re.I)
+    r"do you want me to|would you prefer|"
+    r"could you (share|provide|clarify|confirm|tell me|send|paste|specify)|"
+    r"can you (share|provide|clarify|confirm|tell me|send|paste|specify)|"
+    r"please (share|provide|clarify|send|paste|specify)|"
+    r"once you (provide|share|send)|"
+    r"(i|we) (would )?need (you to|more|additional) (know|information|details|context)|"
+    r"if you (can )?(share|provide|send) ", re.I)
+# A draft that says "I'll go look at the codebase" is not an answer, it is a
+# promise to produce one. Claude cannot relay it — there is nothing to relay.
+# Caught when a rescued continuation scored ACCEPTABLE on the body "I'll continue
+# with W3 ... Let me first check the current state of the codebase."
+PROMISES_ONLY = re.compile(
+    r"\b(i'?ll|i will|let me|i'?m going to|first,? (i|let)|i can) "
+    r"(start|begin|continue|check|look|review|examine|investigate|analyz|read|"
+    r"proceed|go (through|over)|take a look)", re.I)
+
+# Substance = something only a model that actually engaged could produce: a path,
+# a symbol, a command, a number, or a structured list of real steps.
+_SUBSTANCE = re.compile(
+    r"`[^`]+`|\b\w+\.(py|sh|md|json|yaml|toml|js|ts)\b|^\s*[-*\d]+[.)]\s+\S+",
+    re.M)
+
+
+def _has_substance(body: str) -> bool:
+    return len(_SUBSTANCE.findall(body)) >= 2
+
+
 ASSERTS_STATUS = re.compile(
     r"all tests? (pass|passed)|completed successfully|no further action|"
     r"has (been )?(completed|finished) successfully|✅|task .* (complete|done)", re.I)
@@ -66,9 +98,18 @@ def draft_body(stdout: str) -> str | None:
     return body.replace("(no context — verify or discard)", " ")
 
 
+WANTS_QUESTIONS = re.compile(
+    r"ask me|american question|multiple choice|give me options|"
+    r"what do you (need|want) (to know|from me)", re.I)
+
+
 def verdict(body: str, prompt: str) -> tuple[bool, str]:
     """(acceptable, reason-if-not)."""
-    if ASKS_BACK.search(body):
+    # The user's own house rule is to be asked in multiple choice. When the
+    # PROMPT asks for questions, answering with questions is correct, and
+    # scoring it a failure measured the rule rather than the model: 7 of 20
+    # ASKS_BACK rejects on 2026-09-14 were exactly this.
+    if ASKS_BACK.search(body) and not WANTS_QUESTIONS.search(prompt):
         return False, "asks the user a question instead of answering"
     if ASSERTS_STATUS.search(body):
         return False, "asserts a status it cannot observe"
@@ -81,6 +122,8 @@ def verdict(body: str, prompt: str) -> tuple[bool, str]:
         pass
     if len(body.strip()) < 80:
         return False, "too short to be an answer"
+    if PROMISES_ONLY.search(body) and not _has_substance(body):
+        return False, "announces intent without answering"
     return True, ""
 
 
@@ -143,7 +186,12 @@ def run(prompt: str, model: str, okf: bool, timeout: int) -> str | None:
         env.pop("LLM_ROUTER_OLLAMA_MODEL", None)
     env["LLM_ROUTER_CONTEXT_INJECTION"] = "on" if okf else "off"
     env["LLM_ROUTER_TRACE"] = ""
-    payload = json.dumps({"session_id": "aabbccdd", "prompt": prompt,
+    # One session id per prompt. Sharing one across a shuffled corpus let a draft
+    # about prompt N become the injected context for unrelated prompt N+1 — 29 of
+    # 144 drafts in the 2026-09-14 run carried "Gable 5" into prompts that had
+    # nothing to do with it, and the resulting 72%/55% measured contamination.
+    sid = hashlib.sha1(f"{prompt}|{os.getpid()}".encode()).hexdigest()[:8]
+    payload = json.dumps({"session_id": sid, "prompt": prompt,
                           "cwd": str(ROOT), "transcript_path": ""})
     try:
         r = subprocess.run([PY, str(HOOK)], input=payload, capture_output=True,
@@ -161,6 +209,8 @@ def main() -> int:
     ap.add_argument("--corpus", default="/tmp/corpus.json")
     ap.add_argument("--timeout", type=int, default=120)
     ap.add_argument("--seed", type=int, default=7)
+    ap.add_argument("--out", default="/tmp/draft_bodies.json",
+                    help="where  draft body is saved for re-scoring")
     args = ap.parse_args()
 
     corpus = json.loads(Path(args.corpus).read_text())
@@ -173,12 +223,19 @@ def main() -> int:
     produced = accepted = 0
     reasons: dict[str, int] = {}
     skip_causes: dict[str, int] = {}
+    # Every draft body is written out as it arrives, so a change to the scoring
+    # rules never costs another hour of model time — and a run that dies halfway
+    # still leaves everything it managed to collect.
+    captured: list[dict] = []
     for i, prompt in enumerate(sample, 1):
         mark = _log_size()
         t0 = time.monotonic()
         body = run(prompt, args.model, okf, args.timeout)
         dt = time.monotonic() - t0
         skips = _skips_since(mark)
+        captured.append({"prompt": prompt, "body": body, "seconds": round(dt, 1),
+                         "skips": skips})
+        Path(args.out).write_text(json.dumps(captured, indent=1))
         if body is None:
             reasons["no draft produced"] = reasons.get("no draft produced", 0) + 1
             for sk in skips:

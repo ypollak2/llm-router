@@ -45,15 +45,40 @@ class DirectResult:
 
 # ── System Prompts ────────────────────────────────────────────────────────────
 
+# This prompt is the only thing that tells the model what situation it is in, and
+# for a long time it told it the wrong one. Measured on 200 real prompts
+# (2026-09-14): of 144 drafts produced, 35 were unusable, and 30 of those 35 were
+# the model behaving like a live chat assistant — 20 asked a question back and 10
+# claimed to have performed an action. Zero cited a file that does not exist, so
+# grounding was never the problem; SITUATIONAL AWARENESS was. Guideline 4 used to
+# say "displayed directly in the user's terminal", which actively taught the model
+# it was in a conversation where a question would be answered. It is not.
 DIRECT_SYSTEM_PROMPT = """\
-You are an AI assistant operating within the llm_router system, providing a direct response to a user of Claude Code.
-Your primary goal is to provide a helpful, accurate, and concise response to the user's request.
+You are drafting a single answer inside llm_router, on behalf of a user of Claude Code.
 
-Guidelines:
-1. Be concise and get straight to the point.
-2. Use standard Markdown for formatting (code blocks, bold, lists).
-3. Do not include unnecessary conversational filler or meta-commentary about being an AI.
-4. Your response will be displayed directly in the user's terminal.
+YOUR SITUATION — read this before answering:
+- This is ONE SHOT. There is no next turn. Your draft is generated before the
+  user sees anything, so a question you ask reaches nobody and wastes the turn.
+- You have NO shell, NO git, NO file system, NO network, and NO tools. You have
+  not run anything. You cannot check anything.
+- Your draft will be relayed only if it stands on its own. Anything that needs a
+  reply from the user is discarded.
+
+Rules:
+1. ANSWER. Never ask "would you like me to", "shall I", "should I", "let me know
+   if", or offer a menu of next steps — unless the user's own request explicitly
+   asked you to ask them questions. If a detail is missing, state your assumption
+   and answer under it.
+2. Never claim an action happened. Do not write "merged", "pushed", "tests pass",
+   "completed successfully", or a ✅ against work you cannot observe. Give the
+   exact commands a human would run instead, and say what to look for.
+3. Do not announce what you are about to do ("I'll start by...", "Let me check
+   the codebase..."). There is no later in which you would do it. Produce the
+   answer itself.
+4. Say plainly when you do not know. "I can't tell without seeing X" is a useful
+   draft; a confident invention is worse than silence.
+5. Be concise and lead with the answer. Standard Markdown. No filler, no
+   meta-commentary about being an AI.
 """
 
 
@@ -196,6 +221,40 @@ def _chat_messages(
     return messages
 
 
+# Measured on this machine 2026-09-14: qwen3.8 generates at ~16-20 tokens/sec.
+# A flat num_predict of 2048 therefore authorised up to ~128s of generation
+# inside a 36s budget, so the model was still writing when the socket was cut and
+# the whole call was discarded. 72 of 166 attempts died this way, burning 50 of
+# the benchmark's 99 minutes. Bound the ceiling by the time we actually have.
+_TOKENS_PER_SEC = 16.0
+_NUM_PREDICT_CEILING = 2048
+_NUM_PREDICT_FLOOR = 128
+
+
+def _trim_to_sentence(text: str) -> str:
+    """Cut a truncated draft back to its last complete sentence or block.
+
+    Half a sentence reads as a bug; a short complete thought reads as an answer
+    that stopped. Returns "" when there is no complete thought to keep.
+    """
+    body = (text or "").rstrip()
+    if len(body) < 40:
+        return ""
+    cut = max(body.rfind(". "), body.rfind(".\n"), body.rfind("\n\n"),
+              body.rfind("!\n"), body.rfind("?\n"), body.rfind("```"))
+    return body[:cut + 1].rstrip() if cut >= 40 else ""
+
+
+def _num_predict_for(timeout: float) -> int:
+    """Most tokens that can plausibly finish inside `timeout` seconds.
+
+    A truncated answer beats a discarded one: the caller's quality gate accepts a
+    short answer, and nothing accepts silence.
+    """
+    budget = int(max(0.0, timeout) * _TOKENS_PER_SEC)
+    return max(_NUM_PREDICT_FLOOR, min(_NUM_PREDICT_CEILING, budget))
+
+
 def call_ollama(
     prompt: str, model: str, timeout: int = 4,
     history: list[dict] | None = None, system_prompt: str | None = None,
@@ -204,9 +263,9 @@ def call_ollama(
     body = json.dumps({
         "model": model,
         "messages": _chat_messages(prompt, history, system_prompt),
-        "stream": False,
+        "stream": True,
         "think": False,
-        "options": {"temperature": 0.3, "num_predict": 2048},
+        "options": {"temperature": 0.3, "num_predict": _num_predict_for(timeout)},
     }).encode()
     ollama_url = _get_ollama_url()
     req = urllib.request.Request(
@@ -214,26 +273,57 @@ def call_ollama(
         data=body,
         headers={"Content-Type": "application/json"},
     )
+    # Streamed, not for latency, but because a non-streamed call that runs out of
+    # time returns NOTHING — the tokens already produced die with the socket.
+    # Measured 2026-09-14: 72 of 166 attempts hit the deadline, each having
+    # generated hundreds of usable tokens at ~16 tok/s. A truncated answer beats
+    # silence, provided it is labelled and cut at a sentence boundary.
+    deadline = time.monotonic() + timeout
+    parts: list[str] = []
+    usage: dict = {}
+    truncated = False
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:  # nosec B310 — URL validated by _get_ollama_url (not localhost-only: a remote Ollama is supported)
-            result = json.loads(resp.read())
-            msg = result.get("message", {})
-            content = msg.get("content", "")
-            # Some models (qwen3.5) put response in thinking field when content is empty
-            if not content.strip() and msg.get("thinking"):
-                content = msg["thinking"]
-            
-            # Capture usage metrics if available
-            usage = {
-                "input_tokens": result.get("prompt_eval_count", 0),
-                "output_tokens": result.get("eval_count", 0),
-            }
-            if not content.strip():
-                _call_failure("ollama", model, "returned_empty_content")
-            return content, usage
+            for raw in resp:
+                if not raw.strip():
+                    continue
+                try:
+                    chunk = json.loads(raw)
+                except ValueError:
+                    continue
+                msg = chunk.get("message", {})
+                piece = msg.get("content", "") or ""
+                # Some models put the response in `thinking` when content is
+                # empty; keep that fallback rather than return nothing.
+                if not piece and msg.get("thinking") and not parts:
+                    piece = msg["thinking"]
+                parts.append(piece)
+                if chunk.get("done"):
+                    usage = {
+                        "input_tokens": chunk.get("prompt_eval_count", 0),
+                        "output_tokens": chunk.get("eval_count", 0),
+                    }
+                    break
+                if time.monotonic() >= deadline:
+                    truncated = True
+                    break
     except Exception as exc:                                 # noqa: BLE001
-        _call_failure("ollama", model, _failure_reason(exc, timeout))
-        return None, {}
+        if not parts:
+            _call_failure("ollama", model, _failure_reason(exc, timeout))
+            return None, {}
+        truncated = True
+        _call_failure("ollama", model, f"partial_{_failure_reason(exc, timeout)}")
+
+    content = "".join(parts)
+    if truncated:
+        content = _trim_to_sentence(content)
+        if not content:
+            _call_failure("ollama", model, f"timeout_{timeout:g}s")
+            return None, {}
+        content += "\n\n_[draft cut off at the time limit \u2014 incomplete]_"
+    if not content.strip():
+        _call_failure("ollama", model, "returned_empty_content")
+    return content, usage
 
 
 def call_gemini(
