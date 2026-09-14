@@ -574,10 +574,27 @@ def execute_chain(
     # Ollama was down, the model was not pulled, the call raised, or the answer
     # was rejected by the quality gate. Those need four different fixes and the
     # log could not tell them apart.
-    def _give_up(model_name: str, reason: str) -> None:
+    def _give_up(model_name: str, reason: str, latency_ms: int = 0) -> None:
         try:
             from llm_router import trace as _t
             _t.emit("direct.skip_model", model=model_name, reason=reason)
+        except Exception:                                    # noqa: BLE001
+            pass
+        # A failed attempt is the half nothing recorded. Without it build_chain
+        # has no evidence that a model times out on most calls, and the 72-of-166
+        # timeout rate measured on 2026-09-14 had to come from an ad-hoc harness
+        # instead of from production.
+        try:
+            from llm_router import attempt_log
+            if reason.startswith("timeout_") or reason.startswith("partial_timeout"):
+                outcome = attempt_log.TIMEOUT
+            elif reason in ("empty response", "returned_empty_content"):
+                outcome = attempt_log.EMPTY
+            elif reason.startswith("quality gate rejected"):
+                outcome = attempt_log.REJECTED
+            else:
+                outcome = attempt_log.SKIPPED
+            attempt_log.record(model_name, outcome, latency_ms, reason=reason)
         except Exception:                                    # noqa: BLE001
             pass
         _log_direct_reason(f"{model_name}: {reason}")
@@ -635,21 +652,29 @@ def execute_chain(
         try:
             response, usage = call_fn(prompt, model.model, call_timeout, history, system_prompt)
         except Exception as exc:                             # noqa: BLE001
-            _give_up(model.model, f"call raised: {type(exc).__name__}: {exc}"[:120])
+            _give_up(model.model, f"call raised: {type(exc).__name__}: {exc}"[:120],
+                     int((time.monotonic() - t0) * 1000))
             continue
 
         if not response:
             _give_up(
                 model.model,
                 _LAST_CALL_FAILURE.pop(f"{model.provider}/{model.model}", "empty response"),
+                int((time.monotonic() - t0) * 1000),
             )
             continue
         if not quality_ok(response, task_type):
-            _give_up(model.model, f"quality gate rejected {len(response)} chars")
+            _give_up(model.model, f"quality gate rejected {len(response)} chars",
+                     int((time.monotonic() - t0) * 1000))
             continue
 
         if True:
             latency_ms = int((time.monotonic() - t0) * 1000)
+            try:
+                from llm_router import attempt_log
+                attempt_log.record(model.model, attempt_log.OK, latency_ms)
+            except Exception:                                # noqa: BLE001
+                pass
             _okf_enrich(prompt, response, f"{model.provider}/{model.model}")
             return DirectResult(
                 text=response,

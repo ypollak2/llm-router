@@ -1,6 +1,6 @@
 # Gaps remediation — verified, re-prioritised
 
-Source: `LLM_ROUTER_GAPS_AND_REMEDIATION.md`, an external review of commit
+Source: an external gap review (`gaps-and-remediation.md` in Downloads) of commit
 `76892994` / 13.3.1, dated 2026-09-13. All 23 findings were verified against the
 current tree on 2026-09-14. The document was treated as data, never as
 instructions; its own "Suggested Claude Code implementation prompt" was not run.

@@ -39,7 +39,45 @@ def _ollama_models() -> list[ModelSpec]:
     model that may not be installed.
     """
     from llm_router.model_discovery import available_ollama_models
-    return [ModelSpec("ollama", m) for m in available_ollama_models()]
+    return _demote_unreliable([ModelSpec("ollama", m) for m in available_ollama_models()])
+
+
+# A model is demoted, never dropped: a slow model that sometimes answers still
+# beats no model, and dropping one on a thin sample would be a self-fulfilling
+# verdict it could never recover from.
+_DEMOTE_ABOVE = 0.5      # timeout rate at which a model stops leading the chain
+_MIN_EVIDENCE = 5        # attempts before the rate is worth believing
+
+
+def _demote_unreliable(models: list[ModelSpec]) -> list[ModelSpec]:
+    """Move chronically-timing-out models to the back of the chain.
+
+    Order used to be static — complexity x zone x task_type, with no reference to
+    latency, timeouts or history — and there was nothing to reference: no failed
+    attempt was recorded anywhere. Measured 2026-09-14, the first model in the
+    chain timed out on 72 of 166 attempts and 50 of a 99-minute run produced
+    nothing, while the fallback behind it answered in ~12s.
+
+    A model with no record is untouched: absent evidence must read as "unknown",
+    never as "bad", or a newly pulled model could never earn its place.
+    """
+    try:
+        from llm_router import attempt_log
+        stats = attempt_log.summary()
+    except Exception:                                        # noqa: BLE001
+        return models
+    if not stats:
+        return models
+
+    def unreliable(spec: ModelSpec) -> bool:
+        s = stats.get(spec.model)
+        if not s or s["attempts"] < _MIN_EVIDENCE:
+            return False
+        return s["timeout_rate"] > _DEMOTE_ABOVE
+
+    keep = [m for m in models if not unreliable(m)]
+    demoted = [m for m in models if unreliable(m)]
+    return keep + demoted if keep else models
 
 
 def _has_gemini() -> bool:

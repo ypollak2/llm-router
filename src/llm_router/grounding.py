@@ -203,6 +203,27 @@ _DEFERRAL = re.compile(
     re.I)
 
 
+def response_is_usable(text: str) -> bool:
+    """Did this response actually answer, or merely arrive?
+
+    The routing bandit's reward is ``success_rate / avg_cost`` and every write
+    site passed ``success=True`` unconditionally — there was no ``success=False``
+    anywhere on the routing path. So the reward collapsed to ``1 / avg_cost``:
+    ranking by cheapness with a constant numerator, learning nothing about
+    quality. An empty string logged success too.
+
+    Measured 2026-09-14 on 200 real prompts: of 144 drafts produced, 35 were
+    unusable — 20 asked the user a question instead of answering and 10 claimed an
+    action they could not have performed. Under the old signal each of those
+    reinforced the model that produced it.
+
+    This is deliberately the SAME predicate as :func:`draft_is_memorable`, so
+    "worth remembering" and "counts as success" cannot drift apart.
+    """
+    ok, _ = draft_is_memorable(text)
+    return ok
+
+
 def draft_is_memorable(text: str) -> tuple[bool, str]:
     """Is this draft safe to persist as an assistant turn for future context?
 

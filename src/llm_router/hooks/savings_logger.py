@@ -132,6 +132,21 @@ def _savings_log_path() -> Path:
     return Path.home() / ".llm-router" / _SAVINGS_LOG_FILENAME
 
 
+def _response_is_usable(text: str) -> bool:
+    """See router._response_is_usable — the fallback is the old constant-ish
+    signal, so a silent degradation would undo A2 without anyone noticing."""
+    try:
+        from llm_router.grounding import response_is_usable
+        return response_is_usable(text)
+    except Exception as exc:                                 # noqa: BLE001
+        try:
+            from llm_router import failopen
+            failopen.record("CHZ-FO-SAVINGS-SUCCESS-SIGNAL", exc)
+        except Exception:                                    # noqa: BLE001
+            pass
+        return bool((text or "").strip())
+
+
 def log_direct_savings(
     result: "DirectResult",
     task_type: str,
@@ -332,12 +347,16 @@ def log_direct_to_db(
             provider=provider,
         )
 
+        # An empty string used to log success, so a model that returned nothing
+        # was reinforced exactly like one that answered.
+        _usable = _response_is_usable(response.content)
+
         async def _persist() -> None:
             await _cost_log_usage(
                 response,
                 _task,
                 _profile,
-                success=True,
+                success=_usable,
                 complexity=complexity,
             )
             await _cost_log_routing_decision(
@@ -356,7 +375,7 @@ def log_direct_to_db(
                 quality_mode="balanced",
                 final_model=model,
                 final_provider=provider,
-                success=True,
+                success=_usable,
                 input_tokens=input_tokens,
                 output_tokens=output_tokens,
                 cost_usd=cost_usd,
