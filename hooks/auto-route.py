@@ -3357,6 +3357,19 @@ def main() -> None:
             sys.exit(0)
 
     session_id = hook_input.get("session_id", "")
+
+    # Refresh the session pointer on every prompt. It used to be written once by
+    # session-start.py, so it went stale after the 6h TTL and a long session lost
+    # its own identity — measured 2026-09-14, all 30 pointers on this machine
+    # were stale and the MCP server resolved none of them, which is why routed
+    # models (Codex, Gemini, llm()) ran with no session context at all while the
+    # hook path had it. The hook is the only component that sees every prompt.
+    if session_id:
+        try:
+            from llm_router.session_store import write_pointer as _write_pointer
+            _write_pointer(session_id)
+        except Exception:                                    # noqa: BLE001
+            pass
     zero_claude = _zero_claude_enabled()
 
     # ── Mini-summary widget — every Nth routed prompt, inject a compact

@@ -33,7 +33,10 @@ def enabled() -> bool:
     return os.environ.get("LLM_ROUTER_CONTEXT_INJECTION", "on").strip().lower() not in _DISABLE
 
 
-def inject(prompt: str, *, root: str | None = None, limit: int = 3) -> str:
+def inject(prompt: str, *, root: str | None = None, limit: int = 3,
+           session_id: str | None = None, task_type: str | None = None,
+           target_provider: str | None = None,
+           session_tokens: int = 1200) -> str:
     """Return *prompt* with relevant repo knowledge prepended, or unchanged.
 
     Fail-open in every direction: no knowledge, no match, a broken store or an
@@ -44,9 +47,15 @@ def inject(prompt: str, *, root: str | None = None, limit: int = 3) -> str:
     `root` scopes retrieval to a project. Passing it matters more than it looks:
     the MCP server's cwd is $HOME, which has no .git, so unscoped retrieval has
     previously pulled one project's documents into another project's prompt.
+
+    `session_id` adds the conversation and the tool facts recorded for that
+    session — what was said AND what was actually done. `target_provider` is
+    passed through to the privacy gate, so naming the provider is what keeps
+    session content from reaching an external paid API under `local` mode.
     """
     if not enabled() or not prompt:
         return prompt
+    body = prompt
     try:
         from pathlib import Path
 
@@ -54,9 +63,33 @@ def inject(prompt: str, *, root: str | None = None, limit: int = 3) -> str:
         scope = okf.project_root(Path(root)) if root else None
         concepts = (okf.find_relevant(prompt, limit=limit, root=scope)
                     if scope is not None else okf.find_relevant(prompt, limit=limit))
-        return okf.inject_context(prompt, concepts) if concepts else prompt
+        if concepts:
+            body = okf.inject_context(prompt, concepts)
     except Exception:                                        # noqa: BLE001
-        return prompt
+        body = prompt
+
+    # OKF answers "what does this repo say". It cannot answer "what did we just
+    # do", which is what a continuation points at. Both belong to every routed
+    # model, not just the hook's draft path — measured 2026-09-14, router.py (the
+    # MCP / Codex / Gemini path) made ZERO calls to build_session_context, so a
+    # routed model got documents and no idea what happened in the session.
+    #
+    # build_session_context already enforces the privacy mode (it returns "" when
+    # the target is an external paid provider under `local`), already budgets
+    # itself with max_tokens, and already wraps its output in the sentinel that
+    # stops injected context being re-recorded as new ground truth. So this is
+    # wiring, not a new mechanism.
+    if not session_id:
+        return body
+    try:
+        from llm_router.session_store import build_session_context
+        block = build_session_context(
+            session_id, max_tokens=session_tokens, query=prompt,
+            task_type=task_type, target_provider=target_provider,
+        )
+    except Exception:                                        # noqa: BLE001
+        return body
+    return f"{block}\n\n{body}" if block else body
 
 
 def inject_system_prompt(system_prompt: str | None, objective: str,
