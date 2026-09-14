@@ -11,7 +11,12 @@
 #   1 — Ollama failed to start or model unavailable
 
 OLLAMA_URL="${LLM_ROUTER_OLLAMA_URL:-http://localhost:11434}"
-OLLAMA_MODEL="${LLM_ROUTER_OLLAMA_MODEL:-qwen3.5:latest}"
+# Set only when the operator names a model. An unset value means "whatever is
+# already installed" — this script must never download a model of its own
+# choosing. It used to default to qwen3.5:latest and `ollama pull` it, which on
+# 2026-09-14 silently re-downloaded 17GB of a model the user had removed, put it
+# back at the head of the routing chain, and contaminated a benchmark in flight.
+OLLAMA_MODEL="${LLM_ROUTER_OLLAMA_MODEL:-}"
 MAX_WAIT=10  # seconds to wait for Ollama to become ready after starting
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
@@ -32,11 +37,32 @@ sys.exit(0 if any(n == model or n.startswith(base) for n in names) else 1)
 " 2>/dev/null
 }
 
+installed_models() {
+    curl -sf "${OLLAMA_URL}/api/tags" 2>/dev/null \
+        | python3 -c "
+import json, sys
+skip = ('embed', 'bge-', 'gte-', 'e5-', 'all-minilm')
+for m in json.load(sys.stdin).get('models', []):
+    name = m.get('name', '')
+    if name and not any(s in name for s in skip):
+        print(name)
+" 2>/dev/null
+}
+
 # ── --status mode ─────────────────────────────────────────────────────────────
 
 if [[ "$1" == "--status" ]]; then
     if ! is_running; then
         echo "❌ Ollama not running (${OLLAMA_URL})"
+        exit 1
+    fi
+    if [[ -z "${OLLAMA_MODEL}" ]]; then
+        found=$(installed_models | paste -sd, -)
+        if [[ -n "${found}" ]]; then
+            echo "✅ Ollama running | installed: ${found}"
+            exit 0
+        fi
+        echo "⚠️  Ollama running but no completion models installed"
         exit 1
     fi
     if has_model; then
@@ -79,10 +105,22 @@ fi
 
 # ── Ensure model is installed ─────────────────────────────────────────────────
 
+# Pull ONLY a model the operator asked for by name, or one explicitly requested
+# with --pull. With no model named, having any completion model installed is
+# success; having none is a message, never a multi-gigabyte download.
+if [[ -z "${OLLAMA_MODEL}" ]]; then
+    if installed_models | grep -q .; then
+        exit 0
+    fi
+    echo "⚠️  Ollama is running but no models are installed." >&2
+    echo "   Pull one you want, e.g.: ollama pull qwen3-coder:30b" >&2
+    echo "   Or set LLM_ROUTER_OLLAMA_MODEL=<model> to have this script pull it." >&2
+    exit 1
+fi
+
 if ! has_model || [[ "$1" == "--pull" ]]; then
-    echo "⬇️  Pulling '${OLLAMA_MODEL}'..."
-    ollama pull "${OLLAMA_MODEL}"
-    if [[ $? -ne 0 ]]; then
+    echo "⬇️  Pulling '${OLLAMA_MODEL}' (named by LLM_ROUTER_OLLAMA_MODEL)..."
+    if ! ollama pull "${OLLAMA_MODEL}"; then
         echo "❌ Failed to pull '${OLLAMA_MODEL}'" >&2
         exit 1
     fi
