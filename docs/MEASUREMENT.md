@@ -80,3 +80,37 @@ scored for correctness both ways.
 macOS Maintenance Sleep advances `time.time()` and not `time.monotonic()`. One
 benchmark task was recorded at 918.6s of which **902s was the laptop asleep**.
 Use `time.monotonic()` for durations and `caffeinate -i` for unattended runs.
+
+### Verify the thing you are measuring exists
+
+Measured 2026-09-14: an A/B comparison ran its "old configuration" arm pinned to
+`qwen3.5:latest`, a model **not installed on the machine**. Ollama answers a
+missing model with a 404 the hook swallows, so the arm produced a number and no
+error, and that number was reported as a baseline.
+
+A benchmark asserts its subject is present before it measures. `bench_draft_
+acceptance.py --model X` now exits non-zero naming the models that ARE installed.
+`--model auto` measures the real discovered chain, which is what production uses;
+pinning one model also removes the fallback and so measures a different system.
+
+### A rate measured under a budget overrun is measuring the budget
+
+Two runs of one identical configuration scored 17% and 53%. The cause was not the
+model: the per-model timeout (45s), the hook timeout (60s) and the agent-loop
+budget (90s) were each set without reference to the others, so whether a run
+scored well depended on whether the first model happened to finish before the
+process was killed. Claude Code discards a killed hook's output silently, so the
+failure arrives as "no routing", never as an error.
+
+Before comparing two configurations, confirm neither is hitting a wall clock.
+`tests/test_direct_executor_deadline.py` keeps the chain inside the hook budget;
+`auto-route-debug.log` now records `timeout_45s` where it used to say
+"empty response".
+
+### Never let one `except Exception` stand for two different bugs
+
+`call_ollama` caught everything and returned `None`, so a socket timeout and a
+model that genuinely returned "" were logged with the same reason. They have
+different fixes, and conflating them cost a full measurement round. Name the
+failure at the point it happens (`_failure_reason`), not at the point it is
+noticed.

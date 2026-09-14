@@ -228,8 +228,11 @@ def call_ollama(
                 "input_tokens": result.get("prompt_eval_count", 0),
                 "output_tokens": result.get("eval_count", 0),
             }
+            if not content.strip():
+                _call_failure("ollama", model, "returned_empty_content")
             return content, usage
-    except Exception:
+    except Exception as exc:                                 # noqa: BLE001
+        _call_failure("ollama", model, _failure_reason(exc, timeout))
         return None, {}
 
 
@@ -341,6 +344,63 @@ _PROVIDER_CALLS = {
 }
 
 
+# Why the last transport-level call produced nothing, keyed "provider/model".
+# A 45s timeout on a cold 17GB model and a model that genuinely returns "" are
+# different bugs with different fixes; reporting both as "empty response" cost a
+# whole measurement round (three runs of the same config spread 17%-53%).
+_LAST_CALL_FAILURE: dict[str, str] = {}
+
+# Wall-clock a fallback model needs to be worth attempting, and the floor below
+# which a call is not worth starting at all. Both measured on this machine:
+# qwen3-coder:30b answered an analyze-class prompt in 10.5s.
+_FALLBACK_RESERVE_S = 12.0
+_MIN_CALL_S = 3.0
+
+
+def _failure_reason(exc: BaseException, timeout: float) -> str:
+    """Name the transport failure precisely enough to act on it."""
+    import socket
+    import urllib.error
+
+    if isinstance(exc, urllib.error.HTTPError):
+        return f"http_{exc.code}"
+    if isinstance(exc, urllib.error.URLError):
+        inner = getattr(exc, "reason", None)
+        if isinstance(inner, (socket.timeout, TimeoutError)):
+            return f"timeout_{timeout:g}s"
+        return f"urlerror_{type(inner).__name__ if inner is not None else 'unknown'}"
+    if isinstance(exc, (socket.timeout, TimeoutError)):
+        return f"timeout_{timeout:g}s"
+    return type(exc).__name__
+
+
+def _call_failure(provider: str, model: str, reason: str) -> None:
+    _LAST_CALL_FAILURE[f"{provider}/{model}"] = reason
+
+
+def _log_direct_reason(msg: str) -> None:
+    """Append a per-model abandonment reason to the routing debug log.
+
+    Same file the hook writes, so one invocation's story stays in one place.
+    Fail-open: diagnosis must never be why a route fails.
+    """
+    try:
+        import os
+        import time as _time
+        from pathlib import Path as _Path
+        if os.environ.get("PYTEST_CURRENT_TEST"):
+            name = "auto-route-debug.test.log"
+        else:
+            name = "auto-route-debug.log"
+        base = os.environ.get("LLM_ROUTER_HOME", "").strip()
+        root = _Path(base).expanduser() if base else _Path.home() / ".llm-router"
+        root.mkdir(parents=True, exist_ok=True)
+        with (root / name).open("a") as fh:
+            fh.write(f"[{_time.strftime('%Y-%m-%d %H:%M:%S')}] DIRECT MODEL SKIPPED: {msg}\n")
+    except Exception:                                        # noqa: BLE001
+        pass
+
+
 def _okf_inject(prompt: str) -> str:
     """Delegate to the shared choke point.
 
@@ -377,6 +437,7 @@ def execute_chain(
     timeout: int = 4,
     history: list[dict] | None = None,
     context: str | None = None,
+    deadline_s: float | None = None,
 ) -> DirectResult | None:
     """Try each model in the chain until one returns a quality response.
 
@@ -405,9 +466,39 @@ def execute_chain(
     # to the store, and OKF looked enabled while doing nothing for most calls.
     prompt = _okf_inject(prompt)
 
-    for model in chain:
+    # Every abandonment below says WHY. It used to say nothing: six `continue`
+    # paths all surfaced as one line, "DIRECT FAILED: falling through to
+    # Claude", which was 23% of one measured run and could equally have meant
+    # Ollama was down, the model was not pulled, the call raised, or the answer
+    # was rejected by the quality gate. Those need four different fixes and the
+    # log could not tell them apart.
+    def _give_up(model_name: str, reason: str) -> None:
+        try:
+            from llm_router import trace as _t
+            _t.emit("direct.skip_model", model=model_name, reason=reason)
+        except Exception:                                    # noqa: BLE001
+            pass
+        _log_direct_reason(f"{model_name}: {reason}")
+
+    # A per-model timeout larger than the wall-clock left is how a chain ends up
+    # with no answer at all: model #1 burns the whole hook budget, the process is
+    # killed mid-fallback, and Claude Code reports "hook timed out — output
+    # discarded". Measured here: qwen3.8 hit timeout_45s, the fallback then needed
+    # 10.5s, and 45+10.5 does not fit a 60s hook. So each call gets the smaller of
+    # its own timeout and what is actually left, minus a reserve for the models
+    # still behind it in the chain.
+    def _call_budget(index: int) -> float:
+        if deadline_s is None:
+            return float(timeout)
+        left = deadline_s - time.monotonic()
+        remaining_models = max(0, len(chain) - index - 1)
+        reserve = min(remaining_models, 1) * _FALLBACK_RESERVE_S
+        return max(_MIN_CALL_S, min(float(timeout), left - reserve))
+
+    for index, model in enumerate(chain):
         if model.provider == "claude":
-            continue  # Can't call Claude from the hook — skip
+            _give_up(f"{model.provider}/{model.model}", "claude cannot be called from the hook")
+            continue
 
         # Pre-flight for Ollama models (evaluated once, cached for the chain):
         #   1. Enumerate installed models via /api/tags.
@@ -422,21 +513,40 @@ def execute_chain(
                 if _ollama_alive is None:
                     _ollama_alive = ollama_is_alive(timeout=0.5)
                 if not _ollama_alive:
+                    _give_up(model.model, "ollama unreachable")
                     continue
             elif not _ollama_model_available(model.model, _ollama_installed):
-                continue  # model not pulled — do not call (§2.4)
+                _give_up(model.model, "model not pulled")
+                continue
 
         call_fn = _PROVIDER_CALLS.get(model.provider)
         if not call_fn:
+            _give_up(f"{model.provider}/{model.model}", "no call function for provider")
+            continue
+
+        call_timeout = _call_budget(index)
+        if deadline_s is not None and deadline_s - time.monotonic() <= _MIN_CALL_S:
+            _give_up(model.model, "out of hook budget before the call")
             continue
 
         t0 = time.monotonic()
         try:
-            response, usage = call_fn(prompt, model.model, timeout, history, system_prompt)
-        except Exception:
+            response, usage = call_fn(prompt, model.model, call_timeout, history, system_prompt)
+        except Exception as exc:                             # noqa: BLE001
+            _give_up(model.model, f"call raised: {type(exc).__name__}: {exc}"[:120])
             continue
 
-        if response and quality_ok(response, task_type):
+        if not response:
+            _give_up(
+                model.model,
+                _LAST_CALL_FAILURE.pop(f"{model.provider}/{model.model}", "empty response"),
+            )
+            continue
+        if not quality_ok(response, task_type):
+            _give_up(model.model, f"quality gate rejected {len(response)} chars")
+            continue
+
+        if True:
             latency_ms = int((time.monotonic() - t0) * 1000)
             _okf_enrich(prompt, response, f"{model.provider}/{model.model}")
             return DirectResult(

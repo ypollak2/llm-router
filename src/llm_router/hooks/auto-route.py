@@ -240,6 +240,37 @@ OLLAMA_MODEL = _DISCOVERED_OLLAMA[0] if _DISCOVERED_OLLAMA else "qwen3.5:latest"
 # 45s clears the slowest local model with headroom for a cold load (Ollama.app
 # serves one slot, so a queued request waits for the one ahead of it).
 OLLAMA_TIMEOUT = int(os.environ.get("LLM_ROUTER_OLLAMA_TIMEOUT", "45"))
+
+# When this process started, and how long Claude Code will wait for it. Every
+# sub-budget below is derived from these two, because the failure they prevent is
+# not "a model was slow" but "the hook was killed and its output discarded" —
+# which the user sees as no routing at all, never as an error.
+#
+# Measured 2026-09-14: the per-model timeout (45s) and the agent-loop budget (90s)
+# were both set without reference to the hook's own timeout (60s in
+# ~/.claude/settings.json). A qwen3.8 call that hit timeout_45s left 15s for a
+# fallback that needs 10.5s, so the chain finished at ~56s and any variance killed
+# the turn. Two runs of the identical configuration then scored 17% and 53%.
+_HOOK_STARTED_AT = time.monotonic()
+
+
+def _hook_budget_s() -> float:
+    """Wall-clock this hook may use before Claude Code discards its output.
+
+    Defaults to 55s: 5s under the 60s `timeout` registered in settings.json, so
+    the process exits with an answer rather than being killed holding one.
+    """
+    raw = os.environ.get("LLM_ROUTER_HOOK_BUDGET_S", "").strip()
+    try:
+        value = float(raw)
+        return value if value > 0 else 55.0
+    except ValueError:
+        return 55.0
+
+
+def _hook_deadline() -> float:
+    """The single monotonic instant every local-execution budget answers to."""
+    return _HOOK_STARTED_AT + _hook_budget_s()
 CONFIDENCE_THRESHOLD = int(os.environ.get("LLM_ROUTER_CONFIDENCE_THRESHOLD", "2"))  # v7.5.0: Aggressive routing — route more with lower threshold
 # Privacy-first: classify locally only (heuristic + Ollama) by default.
 # Set LLM_ROUTER_CLASSIFY_LOCAL_ONLY=false to enable external classifiers.
@@ -2372,6 +2403,17 @@ def _agent_loop_budget_s() -> float:
         return 90.0
 
 
+def _loop_deadline() -> float:
+    """When the agent loop must stop — the earlier of its budget and the hook's.
+
+    `_agent_loop_budget_s` keeps its documented meaning (how long the loop is
+    worth running); this is the instant it actually has to be finished by, so a
+    90s loop inside a 60s hook stops with an answer instead of being killed
+    holding one.
+    """
+    return min(time.monotonic() + _agent_loop_budget_s(), _hook_deadline())
+
+
 def _tool_loop_rescue(prompt: str, task_type: str) -> bool:
     """Third rescue arm for a context-dependent prompt: give it the tools.
 
@@ -3234,6 +3276,13 @@ def main() -> None:
     # stdout PrintLogger and corrupt the JSON payload (audit §2.1).
     _init_hook_logging()
 
+    # The wall-clock budget belongs to THIS invocation, not to whenever the module
+    # was imported. In the hook those are the same instant; in a test process, or
+    # any host that imports once and calls repeatedly, an import-time start would
+    # hand every later invocation a deadline that has already passed.
+    global _HOOK_STARTED_AT
+    _HOOK_STARTED_AT = time.monotonic()
+
     _mark("start")
     invocation_id = time.time()
     _debug_log(f"[INVOCATION START] ID={invocation_id:.3f}")
@@ -3905,7 +3954,7 @@ def main() -> None:
                 from llm_router.hooks.direct_executor import execute_agent as _execute_agent
                 _direct_result = _execute_agent(
                     prompt, _direct_chain, timeout=60, context=_session_ctx,
-                    deadline_s=_agent_loop_budget_s(),
+                    deadline_s=_loop_deadline(),
                 )
                 if _direct_result:
                     _debug_log(f"[INVOCATION {invocation_id:.3f}] AGENT LOOP SUCCESS")
@@ -3932,6 +3981,7 @@ def main() -> None:
                 _direct_result = _execute_chain(
                     prompt, _direct_chain, task_type,
                     timeout=OLLAMA_TIMEOUT, history=_history, context=_session_ctx,
+                    deadline_s=_hook_deadline(),
                 )
 
             # S2-6: a draft that cites a file nobody mentioned and that does not
