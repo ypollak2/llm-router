@@ -214,40 +214,18 @@ OLLAMA_URL = os.environ.get("LLM_ROUTER_OLLAMA_URL", "http://localhost:11434")
 
 
 def _load_discovered_ollama_models() -> list[str]:
-    """Return Ollama model short-names actually available right now.
+    """Ollama models available right now — delegated to the shared resolver.
 
-    Priority:
-      1. LLM_ROUTER_OLLAMA_MODEL env var (single explicit override)
-      2. OLLAMA_BUDGET_MODELS env var (comma-separated list)
-      3. OLLAMA_MODELS env var (set by Ollama itself or the user)
-      4. ~/.llm-router/discovery.json (written by llm_router discover on startup)
-      5. Empty list (caller handles the no-Ollama case)
+    This function used to own the logic and was evaluated once at import, while
+    chain_builder had a second, worse copy that the draft path actually used.
+    Two answers to one question, and the hot path used the hardcoded one. Both
+    now call `llm_router.model_discovery`.
     """
-    explicit = os.environ.get("LLM_ROUTER_OLLAMA_MODEL", "").strip()
-    if explicit:
-        return [explicit]
-
-    for env_var in ("OLLAMA_BUDGET_MODELS", "OLLAMA_MODELS"):
-        raw = os.environ.get(env_var, "").strip()
-        if raw:
-            models = [m.strip() for m in raw.split(",") if m.strip()]
-            if models:
-                return models
-
     try:
-        discovery_path = Path.home() / ".llm-router" / "discovery.json"
-        data = json.loads(discovery_path.read_text())
-        models = [
-            mid.removeprefix("ollama/")
-            for mid in data.get("models", {})
-            if mid.startswith("ollama/")
-        ]
-        if models:
-            return models
-    except Exception:
-        pass
-
-    return []
+        from llm_router.model_discovery import available_ollama_models
+        return available_ollama_models()
+    except Exception:                                        # noqa: BLE001
+        return []
 
 
 _DISCOVERED_OLLAMA = _load_discovered_ollama_models()
@@ -3900,8 +3878,8 @@ def main() -> None:
             # exactly the fabrication the gate was protecting against.
             if _okf_docs:
                 try:
-                    from llm_router import okf as _okf
-                    _okf_block = _okf.inject_context("", _okf_docs).rstrip()
+                    from llm_router.context_injection import render_block
+                    _okf_block = render_block(_okf_docs)
                     _session_ctx = (
                         f"{_okf_block}\n\n{_session_ctx}" if _session_ctx else _okf_block
                     )

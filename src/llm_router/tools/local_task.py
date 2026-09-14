@@ -157,6 +157,12 @@ async def llm_local_task(
         os.environ["LLM_ROUTER_AGENT_WRITES"] = "apply"
         os.environ["LLM_ROUTER_AGENT_COMMANDS"] = "all"
 
+    try:
+        from llm_router.context_injection import inject
+        objective = inject(objective, root=str(root))
+    except Exception:                                        # noqa: BLE001
+        pass
+
     before = _snapshot(root)
     _trace.emit("task.start", objective=objective, workdir=str(root),
                 model=model, budget_s=budget_s, apply_writes=apply_writes,

@@ -59,14 +59,28 @@ def load(path: Path) -> dict[str, dict]:
     return inv
 
 
+# A real session id is what the host actually emits: Claude Code and Codex both
+# log the first 8 characters of a UUID, so it is exactly 8 lowercase hex digits.
+# Anything else is a fixture.
+_REAL_SESSION = re.compile(r"^[0-9a-f]{8}$")
+
+
 def is_real(rec: dict) -> bool:
     """A prompt from a real session — the only thing a rate may be computed over.
 
-    `session_id=unknown` is the test suite. Counting it is the single mistake
-    this script exists to prevent.
+    Excluding only `session_id=unknown` is NOT enough, and getting that wrong is
+    the third denominator error in this investigation — this time in the script
+    written to prevent the first two. Test fixtures use readable ids, and they
+    were counted as real sessions: `sess-fai` (496 prompts), `sess-xyz` (251),
+    `sess-abc` (248), `sess-qa` (248), `sess-emp` (248) — 1,508 in total, which
+    moved the overall rate by several points.
+
+    So the test is positive, not negative: a session id must LOOK like one the
+    host emits, rather than merely not look like one particular fixture. A new
+    fixture name cannot silently rejoin the denominator.
     """
     return (any(m.startswith("prompt_len=") for m in rec["msgs"])
-            and rec.get("sid") not in (None, "unknown"))
+            and bool(_REAL_SESSION.match(rec.get("sid") or "")))
 
 
 def outcome(rec: dict) -> str:

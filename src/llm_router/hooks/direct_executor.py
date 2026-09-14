@@ -342,19 +342,15 @@ _PROVIDER_CALLS = {
 
 
 def _okf_inject(prompt: str) -> str:
-    """Prepend relevant stored knowledge, or return the prompt unchanged.
+    """Delegate to the shared choke point.
 
-    Best-effort in every failure mode: OKF is an enhancement, and a hook that
-    raises here would drop the whole turn through to the expensive model — the
-    opposite of the point.
+    This used to hold its own copy of find_relevant + inject_context. Two
+    implementations of "attach repo knowledge" meant two places to forget a
+    scope argument, and the rest of the codebase had neither. Kept as a named
+    function because callers here read better for it.
     """
-    try:
-        from llm_router import okf
-
-        concepts = okf.find_relevant(prompt)
-        return okf.inject_context(prompt, concepts) if concepts else prompt
-    except Exception:  # noqa: BLE001
-        return prompt
+    from llm_router.context_injection import inject
+    return inject(prompt)
 
 
 def _okf_enrich(prompt: str, response: str, model: str) -> None:

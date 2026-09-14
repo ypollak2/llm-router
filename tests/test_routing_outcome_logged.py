@@ -101,7 +101,7 @@ def _fixture(path: Path, real_ok: int, real_total: int, unknown: int) -> None:
     for i in range(real_total):
         n += 1
         lines += [f"[2026-09-01 10:00:00] [INVOCATION START] ID={n}.0",
-                  f"[2026-09-01 10:00:00] [INVOCATION {n}.0] prompt_len=20 session_id=abc123"]
+                  f"[2026-09-01 10:00:00] [INVOCATION {n}.0] prompt_len=20 session_id=3e33e160"]
         lines.append(f"[2026-09-01 10:00:00] [INVOCATION {n}.0] "
                      + ("DIRECT SUCCESS: model=ollama/x latency=10ms" if i < real_ok
                         else "DIRECT SKIP: context-dependent prompt"))
@@ -141,7 +141,7 @@ def test_rate_surfaces_unlogged_prompts_as_a_bug(tmp_path):
     log = tmp_path / "f.log"
     log.write_text(
         "[2026-09-01 10:00:00] [INVOCATION START] ID=1.0\n"
-        "[2026-09-01 10:00:00] [INVOCATION 1.0] prompt_len=20 session_id=abc\n"
+        "[2026-09-01 10:00:00] [INVOCATION 1.0] prompt_len=20 session_id=3e33e160\n"
         "[2026-09-01 10:00:00] [INVOCATION 1.0] OUTPUT COMPLETE\n")
     out = _rate_script(log, "--min-sample", "1")
     assert "UNLOGGED" in out, out
