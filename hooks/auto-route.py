@@ -3768,11 +3768,25 @@ def main() -> None:
     # cannot complete. Strict zero-Claude mode blocks instead.
     _direct_enabled = os.environ.get("LLM_ROUTER_DIRECT_EXECUTION", "true").lower() in ("1", "true", "yes", "on")
     
-    # v2.6.1: Disable direct execution for context inheritance
-    # These tasks are inherently conversational and the direct hook is stateless
-    if method in ("context-inherit", "code-context-inherit") and not zero_claude:
-        _direct_enabled = False
-        _debug_log(f"[INVOCATION {invocation_id:.3f}] DIRECT SKIP: conversational context")
+    # v2.6.1 disabled direct execution outright here, on the premise that "the
+    # direct hook is stateless". That premise expired: the hook now relays
+    # conversation history, builds session context, and retrieves OKF documents.
+    # Hard-disabling short-circuited all three — the OKF / session / tool-loop
+    # rescue ladder below sits behind `if _direct_enabled`, so a continuation like
+    # "keep going into W3" never reached the machinery built to resolve exactly
+    # that. Measured 2026-09-14: 7 of 25 real prompts, the single largest reason
+    # no draft was produced.
+    #
+    # A continuation is still context-DEPENDENT — it points at the previous turn —
+    # so it is routed into the same gate as any other context-dependent prompt
+    # rather than waved through. If nothing resolves the reference, that gate
+    # disables direct execution and the behaviour is unchanged.
+    _inherits_context = method in ("context-inherit", "code-context-inherit")
+    if _inherits_context and not zero_claude:
+        _debug_log(
+            f"[INVOCATION {invocation_id:.3f}] CONVERSATIONAL CONTEXT: "
+            "continuation — resolving through the context-dependent gate"
+        )
 
     # v0.7.0: Disable direct execution for context-DEPENDENT prompts. A stateless
     # routed model can't see the user's files/repo/history/state, so a pre-generated
@@ -3790,7 +3804,9 @@ def main() -> None:
     # the gate still closes on it.
     _okf_docs = []
     _grounding_notice = ""
-    if _direct_enabled and not zero_claude and _is_context_dependent(prompt):
+    if _direct_enabled and not zero_claude and (
+        _is_context_dependent(prompt) or _inherits_context
+    ):
         try:
             from llm_router import okf as _okf
             _okf_docs = _okf.find_relevant(prompt)

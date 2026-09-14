@@ -44,8 +44,8 @@ def test_first_model_cannot_consume_the_fallbacks_budget(monkeypatch):
     )
     assert result is not None, "the fallback never got a chance to answer"
     assert seen[0] < 45, f"first model was handed its full {seen[0]}s inside a 30s budget"
-    assert seen[0] <= 30 - 12 + 0.5, (
-        f"first model got {seen[0]:.1f}s, leaving under the 12s a fallback needs"
+    assert seen[0] <= 30 - 18 + 0.5, (
+        f"first model got {seen[0]:.1f}s, leaving under the 18s a fallback needs"
     )
 
 

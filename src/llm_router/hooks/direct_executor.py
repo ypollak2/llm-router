@@ -351,9 +351,21 @@ _PROVIDER_CALLS = {
 _LAST_CALL_FAILURE: dict[str, str] = {}
 
 # Wall-clock a fallback model needs to be worth attempting, and the floor below
-# which a call is not worth starting at all. Both measured on this machine:
-# qwen3-coder:30b answered an analyze-class prompt in 10.5s.
-_FALLBACK_RESERVE_S = 12.0
+# which a call is not worth starting at all.
+#
+# Measured on this machine 2026-09-14, from DIRECT SUCCESS / timeout lines in
+# auto-route-debug.log:
+#
+#   qwen3.8:latest      141 wins  p50 18.0s  p90 32.8s   16 timeouts
+#   qwen3-coder:30b       6 wins  p50 11.9s  p90 17.1s   12 timeouts
+#
+# The reserve was first set to 12s from a single 10.5s observation. That is the
+# fallback's MEDIAN, so the fallback ran out of budget on about half its
+# attempts — 12 timeouts in 18 tries, most of the damage this constant exists to
+# prevent. It is the fallback's p90 that has to fit, not its p50. 18s leaves the
+# primary 37s inside the default 55s hook budget, which still covers qwen3.8's
+# own p90 of 32.8s.
+_FALLBACK_RESERVE_S = 18.0
 _MIN_CALL_S = 3.0
 
 
