@@ -68,15 +68,47 @@ DEFAULT_BUDGET_S = 600.0
 DEFAULT_MODEL = "qwen3-coder:30b"
 
 
+# A snapshot exists to tell which files the run CHANGED. It does not need to
+# hash the world to do that. `rglob("*")` with a six-entry noise set descends into
+# .venv, node_modules, build output and any other repo vendored under the root —
+# on a real project that is minutes of hashing before the model is even called,
+# and it is unbounded in both file count and bytes.
+_SNAPSHOT_MAX_FILES = 4000
+_SNAPSHOT_MAX_BYTES = 8 * 1024 * 1024
+_SKIP_DIRS = {
+    "__pycache__", ".pytest_cache", ".git", ".ruff_cache", ".mypy_cache",
+    ".venv", "venv", "node_modules", ".tox", ".next", ".cache", "dist",
+    "build", "target", ".gradle", ".terraform", "site-packages",
+}
+
+
 def _snapshot(root: Path) -> dict[str, str]:
     out: dict[str, str] = {}
-    for p in root.rglob("*"):
-        if not p.is_file() or (_NOISE & set(p.parts)) or p.name in _NOISE:
-            continue
-        try:
-            out[str(p.relative_to(root))] = hashlib.sha256(p.read_bytes()).hexdigest()
-        except OSError:
-            continue
+    budget = _SNAPSHOT_MAX_BYTES
+    for dirpath, dirnames, filenames in os.walk(root):
+        # Prune in place so os.walk never descends into them at all — the reason
+        # this is os.walk and not rglob.
+        dirnames[:] = [d for d in dirnames
+                       if d not in _SKIP_DIRS and d not in _NOISE and not d.startswith(".")
+                       or d in (".github",)]
+        for name in filenames:
+            if name in _NOISE or name.startswith("."):
+                continue
+            p = Path(dirpath) / name
+            try:
+                size = p.stat().st_size
+            except OSError:
+                continue
+            if size > budget or len(out) >= _SNAPSHOT_MAX_FILES:
+                # Stop rather than truncate silently into a wrong answer: a
+                # partial snapshot would report files as unchanged that were
+                # never looked at.
+                return out
+            try:
+                out[str(p.relative_to(root))] = hashlib.sha256(p.read_bytes()).hexdigest()
+                budget -= size
+            except OSError:
+                continue
     return out
 
 
