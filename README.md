@@ -409,13 +409,21 @@ llm-router runs entirely on your machine. There is no hosted proxy, no telemetry
 **This is on by default.** When enabled, `hooks/auto-route.py` tries to answer a prompt
 locally before Claude Code sees it. For prompts it classifies as needing file work, it runs
 a tool-calling agent loop that hands the local model three tools — `write_file`, `edit_file`
-and `run_command` — **unsupervised, with no confirmation step**, for up to 15 iterations.
-`run_command` executes through a shell.
+and `run_command` — for up to 15 iterations. Writes do NOT reach disk by default:
+`LLM_ROUTER_AGENT_WRITES` defaults to `propose`, so the loop returns a patch.
 
 What is actually enforced:
 
 - `write_file` / `edit_file` are confined to the project root. This works as described.
-- `run_command` is filtered by a small regex blocklist of top-level destructive patterns.
+- `run_command` does **not** use a shell. It is `shlex.split` + `subprocess.run(argv)`,
+  so pipes, redirections, `;` and `$(...)` are literal arguments, not operators.
+- `run_command` passes through two independent layers: `agent_writes.guard_command`
+  (an allowlist of inspection programs, plus blocked subcommands) and a regex
+  blocklist of top-level destructive patterns. The allowlist is the stronger of
+  the two and is what blocks `git push --force`, `npm install`, `pip install`
+  and `rm -rf ./src`.
+- Setting `LLM_ROUTER_AGENT_COMMANDS=all` disables the allowlist, leaving only the
+  regex. Nothing sets it for you.
 
 What that blocklist does **not** stop (measured, not estimated): targeted deletes inside the
 project (`rm -rf ./src`), `$HOME` deletes via shell expansion, `git push --force`,

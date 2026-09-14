@@ -244,14 +244,26 @@ When llm-router maintainers report a security vulnerability:
 **Default: on.** With it enabled, `hooks/auto-route.py` attempts to answer a prompt
 locally before Claude Code sees it. For prompts it classifies as needing file work, it
 runs a tool-calling agent loop (`hooks/agent_loop.py`) that hands the local model
-`write_file`, `edit_file` and `run_command` — the last via `subprocess.run(cmd,
-shell=True, ...)` — unsupervised, with no confirmation step, up to 15 iterations.
+`write_file`, `edit_file` and `run_command`, up to 15 iterations. Writes do not
+reach disk by default — `LLM_ROUTER_AGENT_WRITES` defaults to `propose`.
 
 ### What is actually enforced
 
 - File-path operations are confined to the project root. This works as described.
-- `run_command` is filtered by `_BLOCKED_COMMANDS`, a regex over a handful of
-  top-level destructive patterns.
+- `run_command` does **not** execute through a shell. `hooks/agent_loop.py` uses
+  `shlex.split` and `subprocess.run(argv, ...)` with `shell=False`, so shell
+  metacharacters are literal arguments. (This document previously said the
+  opposite; the code has never matched that claim.)
+- `run_command` passes two independent layers: `agent_writes.guard_command` — an
+  allowlist of inspection programs plus blocked subcommands — and then
+  `_BLOCKED_COMMANDS`, a regex over top-level destructive patterns. The table
+  below measures only the second layer, so it UNDERSTATES what is blocked in the
+  default configuration: of its twelve commands, six are in fact refused by the
+  allowlist, and `echo $OPENAI_API_KEY` cannot leak a secret because there is no
+  shell to expand it.
+- `LLM_ROUTER_AGENT_COMMANDS=all` skips the allowlist entirely, leaving only the
+  regex. `llm_local_task` set that implicitly whenever writes were applied; since
+  2026-09-14 it does not, and its `apply_writes` defaults to False.
 
 ### What that filter does NOT cover — measured against 13.0.1, not estimated
 
