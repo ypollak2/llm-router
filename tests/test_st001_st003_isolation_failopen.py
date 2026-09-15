@@ -63,6 +63,13 @@ def test_traversal_session_id_writes_no_file_outside_state_dir(tmp_path: Path) -
         "HOME": str(home),
         "LLM_ROUTER_DISABLE_LLM_CLASSIFIERS": "1",
         "OPENAI_API_KEY": "", "GEMINI_API_KEY": "",
+        # This test is about failing open on a read-only state dir. It is not
+        # about model latency, and it spawned the hook with a 30s subprocess
+        # timeout while the hook's own budget is 55s — so on a loaded machine it
+        # flaked on a timeout that says nothing about what it asserts. Measured
+        # 2026-09-15: it failed exactly this way while two replays were saturating
+        # Ollama. Turning direct execution off makes it deterministic AND faster.
+        "LLM_ROUTER_DIRECT_EXECUTION": "0",
     })
     # A code prompt so the hook attempts to save last_route.
     payload = f'{{"prompt": "refactor the module please", "session_id": "{evil_sid}"}}'
@@ -84,6 +91,13 @@ def test_readonly_state_dir_fails_open(tmp_path: Path) -> None:
         "HOME": str(home),
         "LLM_ROUTER_DISABLE_LLM_CLASSIFIERS": "1",
         "OPENAI_API_KEY": "", "GEMINI_API_KEY": "",
+        # This test is about failing open on a read-only state dir. It is not
+        # about model latency, and it spawned the hook with a 30s subprocess
+        # timeout while the hook's own budget is 55s — so on a loaded machine it
+        # flaked on a timeout that says nothing about what it asserts. Measured
+        # 2026-09-15: it failed exactly this way while two replays were saturating
+        # Ollama. Turning direct execution off makes it deterministic AND faster.
+        "LLM_ROUTER_DIRECT_EXECUTION": "0",
     })
     try:
         proc = subprocess.run(

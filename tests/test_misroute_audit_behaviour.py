@@ -1,25 +1,21 @@
-# Ported from Chuzom's audit_routing.py tests; env vars renamed to LLM_ROUTER_*; data source rewired to llm-router's layer.
-"""Tests for the WS6 post-hoc misroute audit (src/llm_router/audit_routing.py).
+# Restored from _quarantined_tests/ on 2026-09-15, renamed module only.
+"""Post-hoc misroute audit — the behaviour, not just the rename.
 
-Chuzom has no direct equivalent test module for this capability — its
-``audit_routing.py`` is a live enterprise AuditLog writer (out of scope, see
-that module's docstring), so these tests are original, written against the
-new post-hoc audit design. Coverage:
+Quarantined during the 13.0.0 sync because `llm_router.audit_routing` no longer
+imports. The module was RENAMED to `misroute_audit`, not removed: it still
+exports `score_decision`, `audit_disabled` and `AuditedDecision`, unchanged.
 
-* ``score_decision``: table-driven, pure-function coverage of every branch
-  of the heuristic (judge_score primary tiers, complexity_downgraded /
-  was_downshifted secondary tiers, and the no-signal default).
-* Non-destructive write-back: verdicts land in the new ``audit_verdict`` /
-  ``audit_checked_at`` columns, never in ``was_good`` or ``reason_code``.
-* Idempotent re-audit: running the audit twice never flips or double-counts
-  a verdict.
-* Fail-open behavior when the database is unavailable.
-* The ``LLM_ROUTER_AUDIT_DISABLED`` env gate.
-* Brand-leak: no "chuzom" outside this file's own provenance header /
-  docstring commentary (which the identity gate allowlists for ported
-  files under tests/, same as every other WS's brand-leak test).
+Its supposed replacement, tests/test_misroute_audit.py, contains exactly one
+case — `test_audit_routing_module_is_gone` — which asserts the old name is gone
+and says nothing about what the module does. So the scoring decision table, the
+precedence between judge_score and the downgrade flags, and the env-gate parsing
+had NO coverage at all for four weeks.
+
+That is precisely the trap _quarantined_tests/README.md warns about: "upstream
+has a file with a similar name" is not the same claim as "upstream asserts the
+same behaviour", and only the second justifies dropping coverage. Counting files
+would have said this was covered 1-for-1.
 """
-
 from __future__ import annotations
 
 from datetime import datetime, timedelta
@@ -28,7 +24,7 @@ from unittest.mock import patch
 import pytest
 
 from llm_router import cost
-from llm_router.audit_routing import (
+from llm_router.misroute_audit import (
     AuditedDecision,
     audit_disabled,
     run_audit,
@@ -322,7 +318,7 @@ async def test_run_audit_includes_routing_quality_baseline(temp_db):
 @pytest.mark.asyncio
 async def test_sample_unaudited_decisions_fails_open_on_db_error(monkeypatch):
     monkeypatch.delenv("LLM_ROUTER_AUDIT_DISABLED", raising=False)
-    with patch("llm_router.audit_routing._get_db", side_effect=RuntimeError("db unavailable")):
+    with patch("llm_router.misroute_audit._get_db", side_effect=RuntimeError("db unavailable")):
         rows = await sample_unaudited_decisions()
     assert rows == []
 
@@ -330,7 +326,7 @@ async def test_sample_unaudited_decisions_fails_open_on_db_error(monkeypatch):
 @pytest.mark.asyncio
 async def test_run_audit_fails_open_on_db_error(monkeypatch):
     monkeypatch.delenv("LLM_ROUTER_AUDIT_DISABLED", raising=False)
-    with patch("llm_router.audit_routing._get_db", side_effect=RuntimeError("db unavailable")):
+    with patch("llm_router.misroute_audit._get_db", side_effect=RuntimeError("db unavailable")):
         report = await run_audit()
     assert report["sampled"] == 0
     assert report["audited"] == 0
@@ -347,7 +343,7 @@ def test_audit_routing_module_has_no_unallowed_brand_leak():
     src/llm_router/ and tests/ files carrying a "ported from chuzom" header
     line) but must never leak into a runtime-facing identifier, env var
     name, or value the module actually produces."""
-    from llm_router import audit_routing
+    from llm_router import misroute_audit as audit_routing
 
     # No env var, class, or function name may contain "chuzom".
     for name in dir(audit_routing):
