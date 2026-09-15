@@ -462,6 +462,23 @@ _IDENTIFIER_SHAPED_RE = re.compile(
     r"|/"                       # a path
 )
 
+# A LABEL: "W3", "Q-J", "P3.7", "B8", "C6b", "#137". Short, and deliberately not
+# identifier-shaped, so the gate above rejects every one of them — "finish P3.7
+# and P3.8" and "answer Q-L and Q-J" could never reach the document that defines
+# them. Measured 2026-09-15: 19 of 660 real prompts (3%) carry one.
+#
+# Admitted ONLY as a session-local anchor. A label is exactly the kind of token
+# that collides across projects — "B8" means something different in every repo —
+# so letting it anchor the bulk index is how OKF-INDEX-01's precision collapse
+# happened. It is allowed to anchor a document only when THIS session has already
+# seen the same label, which makes it a continuation of something the user said
+# rather than a guess about what they meant.
+_LABEL_SHAPED_RE = re.compile(
+    r"^(?:#\d{1,4}"                                  # "#137"
+    r"|[a-z]{1,2}[-.]?\d{1,3}(?:\.\d{1,3})?[a-z]?"   # "W3", "B8", "C6b", "P3.7"
+    r"|[a-z]-[a-z])$",                               # "Q-J"
+    re.I)
+
 # Identifiers and paths must be pulled out BEFORE lowercasing and BEFORE the
 # \b\w+\b pass, which splits on "." and "/" — that pass turns `okf.py` into
 # {"okf", "py"} and `src/llm_router/okf.py` into four unremarkable words, so a
@@ -641,6 +658,9 @@ def find_relevant(
     # matching on topic. Demanding an identifier from them would make them
     # unreachable: nobody writes "caching_strategy" when they mean caching.
     anchors = {k for k in keywords if _IDENTIFIER_SHAPED_RE.search(k)}
+    # Session-local labels join the anchor set, never the bulk-matching rules.
+    anchors |= {k for k in keywords
+                if _LABEL_SHAPED_RE.match(k) and _seen_this_session(k)}
     scored = []
     for c in concepts:
         s = _score(c, keywords)
@@ -651,6 +671,28 @@ def find_relevant(
         scored.append((c, s))
     scored.sort(key=lambda x: x[1], reverse=True)
     return [c for c, _s in scored[:limit]]
+
+
+def _seen_this_session(label: str) -> bool:
+    """Has this session already mentioned *label*?
+
+    The whole safety of admitting a short label rests here. "B8" is meaningless
+    across projects and would wreck bulk precision if it anchored on its own; it
+    is admissible only as a callback to something already in this conversation.
+
+    Fails CLOSED: any error means "not seen", so the gate stays as strict as it
+    was rather than quietly widening.
+    """
+    try:
+        from llm_router.session_store import build_session_context, resolve_session_id
+
+        sid = resolve_session_id()
+        if not sid:
+            return False
+        ctx = build_session_context(sid, max_tokens=2000) or ""
+        return label.lower() in ctx.lower()
+    except Exception:                                        # noqa: BLE001
+        return False
 
 
 def _anchor_tokens(concept: OKFConcept) -> set[str]:
