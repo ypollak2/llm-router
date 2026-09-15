@@ -377,7 +377,7 @@ def bash_intercept_enabled() -> bool:
 # caller gets back depends on a control-flow decision this module would have to
 # model correctly. `&&` has no such ambiguity — every segment ran, in order, and
 # each one succeeded.
-_SHELL_METACHARS = ("||", ";", ">", "<", "`", "$(", "&>", "$\{")
+_SHELL_METACHARS = ("||", ";", ">", "<", "`", "$(", "&>", "${")
 
 
 def _single_interceptable(segment: str) -> bool:

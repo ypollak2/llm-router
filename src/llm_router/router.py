@@ -2040,7 +2040,9 @@ async def _finalize_successful_route(
             ),
             final_model=response.model,
             final_provider=response.provider,
-            success=True,
+            # Not "a response object exists" — that was always true, which is why
+            # the bandit was optimising a constant. See grounding.response_is_usable.
+            success=_response_is_usable(getattr(response, "content", "") or ""),
             input_tokens=response.input_tokens,
             output_tokens=response.output_tokens,
             cost_usd=response.cost_usd,
@@ -3326,6 +3328,22 @@ async def _dispatch_model_loop(
         f"All models failed for {task_type.value}/{profile.value}. "
         f"Last error: {last_error}.{chain_summary}{setup_hint}"
     )
+
+
+def _response_is_usable(text: str) -> bool:
+    """Wrapper so a grounding import failure cannot break routing.
+
+    The fallback is the OLD behaviour — "non-empty means success" — which is
+    degraded, not broken. It is recorded because a silent degradation here would
+    quietly restore the constant reward this change exists to remove.
+    """
+    try:
+        from llm_router.grounding import response_is_usable
+        return response_is_usable(text)
+    except Exception as exc:                                 # noqa: BLE001
+        from llm_router import failopen
+        failopen.record("CHZ-FO-ROUTER-SUCCESS-SIGNAL", exc)
+        return bool((text or "").strip())
 
 
 async def route_and_call(

@@ -611,6 +611,16 @@ def run_agent_loop(
 
     Returns the final text response, or None if the loop fails.
     """
+    # Repo knowledge for a model that cannot see the repo. Crosses the shared
+    # choke point (llm_router.context_injection) so a new execution path cannot
+    # quietly skip it — tests/test_okf_choke_point.py enforces that.
+    try:
+        from llm_router.context_injection import inject_system_prompt
+        system_prompt = inject_system_prompt(system_prompt, prompt,
+                                             root=str(project_root))
+    except Exception:                                        # noqa: BLE001
+        pass
+
     messages = []
 
     if system_prompt:

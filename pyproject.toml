@@ -221,12 +221,16 @@ markers = [
     "requires_ollama: marks tests that require local Ollama instance (skip in CI)",
     "requires_api_keys: marks tests that require mocked API keys (skip in CI)",
     "requires_codex: marks tests that require Codex availability (skip in CI)",
+    "e2e: end-to-end: real boundaries, not doubles",
+    "mcp_handshake: MCP protocol handshake conformance",
+    "performance: latency/throughput measurement, not correctness",
+    "routing_hermetic: routing with every external call stubbed",
 ]
 addopts = "-m 'not slow and not requires_ollama and not requires_api_keys and not requires_codex' -q --tb=short"
 
 [tool.ruff]
 line-length = 100
-target-version = "py310"
+target-version = "py311"  # matches requires-python = ">=3.11"
 
 [tool.ruff.lint]
 # Pin rule selection explicitly (pre-0.16 ruff defaults) so unpinned `uvx ruff`

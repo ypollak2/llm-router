@@ -1,7 +1,15 @@
-"""Canonical 'is this prompt context-dependent?' signal.
+"""An 'is this prompt context-dependent?' signal — NOT the one in production.
 
-Single source of truth shared by the UserPromptSubmit advisory (auto-route.py)
-and the enforcement hook (enforce-route.py), so the two can't diverge: any prompt
+Intended as the single source of truth for the UserPromptSubmit advisory and the
+enforcement hook. Verified 2026-09-15: neither imports it. The advisory uses its
+own ``_is_context_dependent`` (hooks/auto-route.py), and enforce-route.py records
+that its redundant recheck was deliberately removed. Every reference outside this
+module is a test or mutation configuration.
+
+Left in place because it declares a public API, but tests against it do not
+verify the live hook predicate, and changing it changes no routing behaviour.
+
+The design intent it describes is still sound: any prompt
 the advisory flags as context-dependent is the same one enforcement exempts from
 hard-blocking. A context-dependent prompt references the user's local
 code/files/history/state — things a stateless routed model cannot see, so forcing

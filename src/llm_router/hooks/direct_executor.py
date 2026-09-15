@@ -45,15 +45,40 @@ class DirectResult:
 
 # ── System Prompts ────────────────────────────────────────────────────────────
 
+# This prompt is the only thing that tells the model what situation it is in, and
+# for a long time it told it the wrong one. Measured on 200 real prompts
+# (2026-09-14): of 144 drafts produced, 35 were unusable, and 30 of those 35 were
+# the model behaving like a live chat assistant — 20 asked a question back and 10
+# claimed to have performed an action. Zero cited a file that does not exist, so
+# grounding was never the problem; SITUATIONAL AWARENESS was. Guideline 4 used to
+# say "displayed directly in the user's terminal", which actively taught the model
+# it was in a conversation where a question would be answered. It is not.
 DIRECT_SYSTEM_PROMPT = """\
-You are an AI assistant operating within the llm_router system, providing a direct response to a user of Claude Code.
-Your primary goal is to provide a helpful, accurate, and concise response to the user's request.
+You are drafting a single answer inside llm_router, on behalf of a user of Claude Code.
 
-Guidelines:
-1. Be concise and get straight to the point.
-2. Use standard Markdown for formatting (code blocks, bold, lists).
-3. Do not include unnecessary conversational filler or meta-commentary about being an AI.
-4. Your response will be displayed directly in the user's terminal.
+YOUR SITUATION — read this before answering:
+- This is ONE SHOT. There is no next turn. Your draft is generated before the
+  user sees anything, so a question you ask reaches nobody and wastes the turn.
+- You have NO shell, NO git, NO file system, NO network, and NO tools. You have
+  not run anything. You cannot check anything.
+- Your draft will be relayed only if it stands on its own. Anything that needs a
+  reply from the user is discarded.
+
+Rules:
+1. ANSWER. Never ask "would you like me to", "shall I", "should I", "let me know
+   if", or offer a menu of next steps — unless the user's own request explicitly
+   asked you to ask them questions. If a detail is missing, state your assumption
+   and answer under it.
+2. Never claim an action happened. Do not write "merged", "pushed", "tests pass",
+   "completed successfully", or a ✅ against work you cannot observe. Give the
+   exact commands a human would run instead, and say what to look for.
+3. Do not announce what you are about to do ("I'll start by...", "Let me check
+   the codebase..."). There is no later in which you would do it. Produce the
+   answer itself.
+4. Say plainly when you do not know. "I can't tell without seeing X" is a useful
+   draft; a confident invention is worse than silence.
+5. Be concise and lead with the answer. Standard Markdown. No filler, no
+   meta-commentary about being an AI.
 """
 
 
@@ -196,6 +221,40 @@ def _chat_messages(
     return messages
 
 
+# Measured on this machine 2026-09-14: qwen3.8 generates at ~16-20 tokens/sec.
+# A flat num_predict of 2048 therefore authorised up to ~128s of generation
+# inside a 36s budget, so the model was still writing when the socket was cut and
+# the whole call was discarded. 72 of 166 attempts died this way, burning 50 of
+# the benchmark's 99 minutes. Bound the ceiling by the time we actually have.
+_TOKENS_PER_SEC = 16.0
+_NUM_PREDICT_CEILING = 2048
+_NUM_PREDICT_FLOOR = 128
+
+
+def _trim_to_sentence(text: str) -> str:
+    """Cut a truncated draft back to its last complete sentence or block.
+
+    Half a sentence reads as a bug; a short complete thought reads as an answer
+    that stopped. Returns "" when there is no complete thought to keep.
+    """
+    body = (text or "").rstrip()
+    if len(body) < 40:
+        return ""
+    cut = max(body.rfind(". "), body.rfind(".\n"), body.rfind("\n\n"),
+              body.rfind("!\n"), body.rfind("?\n"), body.rfind("```"))
+    return body[:cut + 1].rstrip() if cut >= 40 else ""
+
+
+def _num_predict_for(timeout: float) -> int:
+    """Most tokens that can plausibly finish inside `timeout` seconds.
+
+    A truncated answer beats a discarded one: the caller's quality gate accepts a
+    short answer, and nothing accepts silence.
+    """
+    budget = int(max(0.0, timeout) * _TOKENS_PER_SEC)
+    return max(_NUM_PREDICT_FLOOR, min(_NUM_PREDICT_CEILING, budget))
+
+
 def call_ollama(
     prompt: str, model: str, timeout: int = 4,
     history: list[dict] | None = None, system_prompt: str | None = None,
@@ -204,9 +263,9 @@ def call_ollama(
     body = json.dumps({
         "model": model,
         "messages": _chat_messages(prompt, history, system_prompt),
-        "stream": False,
+        "stream": True,
         "think": False,
-        "options": {"temperature": 0.3, "num_predict": 2048},
+        "options": {"temperature": 0.3, "num_predict": _num_predict_for(timeout)},
     }).encode()
     ollama_url = _get_ollama_url()
     req = urllib.request.Request(
@@ -214,23 +273,57 @@ def call_ollama(
         data=body,
         headers={"Content-Type": "application/json"},
     )
+    # Streamed, not for latency, but because a non-streamed call that runs out of
+    # time returns NOTHING — the tokens already produced die with the socket.
+    # Measured 2026-09-14: 72 of 166 attempts hit the deadline, each having
+    # generated hundreds of usable tokens at ~16 tok/s. A truncated answer beats
+    # silence, provided it is labelled and cut at a sentence boundary.
+    deadline = time.monotonic() + timeout
+    parts: list[str] = []
+    usage: dict = {}
+    truncated = False
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:  # nosec B310 — URL validated by _get_ollama_url (not localhost-only: a remote Ollama is supported)
-            result = json.loads(resp.read())
-            msg = result.get("message", {})
-            content = msg.get("content", "")
-            # Some models (qwen3.5) put response in thinking field when content is empty
-            if not content.strip() and msg.get("thinking"):
-                content = msg["thinking"]
-            
-            # Capture usage metrics if available
-            usage = {
-                "input_tokens": result.get("prompt_eval_count", 0),
-                "output_tokens": result.get("eval_count", 0),
-            }
-            return content, usage
-    except Exception:
-        return None, {}
+            for raw in resp:
+                if not raw.strip():
+                    continue
+                try:
+                    chunk = json.loads(raw)
+                except ValueError:
+                    continue
+                msg = chunk.get("message", {})
+                piece = msg.get("content", "") or ""
+                # Some models put the response in `thinking` when content is
+                # empty; keep that fallback rather than return nothing.
+                if not piece and msg.get("thinking") and not parts:
+                    piece = msg["thinking"]
+                parts.append(piece)
+                if chunk.get("done"):
+                    usage = {
+                        "input_tokens": chunk.get("prompt_eval_count", 0),
+                        "output_tokens": chunk.get("eval_count", 0),
+                    }
+                    break
+                if time.monotonic() >= deadline:
+                    truncated = True
+                    break
+    except Exception as exc:                                 # noqa: BLE001
+        if not parts:
+            _call_failure("ollama", model, _failure_reason(exc, timeout))
+            return None, {}
+        truncated = True
+        _call_failure("ollama", model, f"partial_{_failure_reason(exc, timeout)}")
+
+    content = "".join(parts)
+    if truncated:
+        content = _trim_to_sentence(content)
+        if not content:
+            _call_failure("ollama", model, f"timeout_{timeout:g}s")
+            return None, {}
+        content += "\n\n_[draft cut off at the time limit \u2014 incomplete]_"
+    if not content.strip():
+        _call_failure("ollama", model, "returned_empty_content")
+    return content, usage
 
 
 def call_gemini(
@@ -341,20 +434,85 @@ _PROVIDER_CALLS = {
 }
 
 
-def _okf_inject(prompt: str) -> str:
-    """Prepend relevant stored knowledge, or return the prompt unchanged.
+# Why the last transport-level call produced nothing, keyed "provider/model".
+# A 45s timeout on a cold 17GB model and a model that genuinely returns "" are
+# different bugs with different fixes; reporting both as "empty response" cost a
+# whole measurement round (three runs of the same config spread 17%-53%).
+_LAST_CALL_FAILURE: dict[str, str] = {}
 
-    Best-effort in every failure mode: OKF is an enhancement, and a hook that
-    raises here would drop the whole turn through to the expensive model — the
-    opposite of the point.
+# Wall-clock a fallback model needs to be worth attempting, and the floor below
+# which a call is not worth starting at all.
+#
+# Measured on this machine 2026-09-14, from DIRECT SUCCESS / timeout lines in
+# auto-route-debug.log:
+#
+#   qwen3.8:latest      141 wins  p50 18.0s  p90 32.8s   16 timeouts
+#   qwen3-coder:30b       6 wins  p50 11.9s  p90 17.1s   12 timeouts
+#
+# The reserve was first set to 12s from a single 10.5s observation. That is the
+# fallback's MEDIAN, so the fallback ran out of budget on about half its
+# attempts — 12 timeouts in 18 tries, most of the damage this constant exists to
+# prevent. It is the fallback's p90 that has to fit, not its p50. 18s leaves the
+# primary 37s inside the default 55s hook budget, which still covers qwen3.8's
+# own p90 of 32.8s.
+_FALLBACK_RESERVE_S = 18.0
+_MIN_CALL_S = 3.0
+
+
+def _failure_reason(exc: BaseException, timeout: float) -> str:
+    """Name the transport failure precisely enough to act on it."""
+    import socket
+    import urllib.error
+
+    if isinstance(exc, urllib.error.HTTPError):
+        return f"http_{exc.code}"
+    if isinstance(exc, urllib.error.URLError):
+        inner = getattr(exc, "reason", None)
+        if isinstance(inner, (socket.timeout, TimeoutError)):
+            return f"timeout_{timeout:g}s"
+        return f"urlerror_{type(inner).__name__ if inner is not None else 'unknown'}"
+    if isinstance(exc, (socket.timeout, TimeoutError)):
+        return f"timeout_{timeout:g}s"
+    return type(exc).__name__
+
+
+def _call_failure(provider: str, model: str, reason: str) -> None:
+    _LAST_CALL_FAILURE[f"{provider}/{model}"] = reason
+
+
+def _log_direct_reason(msg: str) -> None:
+    """Append a per-model abandonment reason to the routing debug log.
+
+    Same file the hook writes, so one invocation's story stays in one place.
+    Fail-open: diagnosis must never be why a route fails.
     """
     try:
-        from llm_router import okf
+        import os
+        import time as _time
+        from pathlib import Path as _Path
+        if os.environ.get("PYTEST_CURRENT_TEST"):
+            name = "auto-route-debug.test.log"
+        else:
+            name = "auto-route-debug.log"
+        base = os.environ.get("LLM_ROUTER_HOME", "").strip()
+        root = _Path(base).expanduser() if base else _Path.home() / ".llm-router"
+        root.mkdir(parents=True, exist_ok=True)
+        with (root / name).open("a") as fh:
+            fh.write(f"[{_time.strftime('%Y-%m-%d %H:%M:%S')}] DIRECT MODEL SKIPPED: {msg}\n")
+    except Exception:                                        # noqa: BLE001
+        pass
 
-        concepts = okf.find_relevant(prompt)
-        return okf.inject_context(prompt, concepts) if concepts else prompt
-    except Exception:  # noqa: BLE001
-        return prompt
+
+def _okf_inject(prompt: str) -> str:
+    """Delegate to the shared choke point.
+
+    This used to hold its own copy of find_relevant + inject_context. Two
+    implementations of "attach repo knowledge" meant two places to forget a
+    scope argument, and the rest of the codebase had neither. Kept as a named
+    function because callers here read better for it.
+    """
+    from llm_router.context_injection import inject
+    return inject(prompt)
 
 
 def _okf_enrich(prompt: str, response: str, model: str) -> None:
@@ -381,6 +539,7 @@ def execute_chain(
     timeout: int = 4,
     history: list[dict] | None = None,
     context: str | None = None,
+    deadline_s: float | None = None,
 ) -> DirectResult | None:
     """Try each model in the chain until one returns a quality response.
 
@@ -409,9 +568,56 @@ def execute_chain(
     # to the store, and OKF looked enabled while doing nothing for most calls.
     prompt = _okf_inject(prompt)
 
-    for model in chain:
+    # Every abandonment below says WHY. It used to say nothing: six `continue`
+    # paths all surfaced as one line, "DIRECT FAILED: falling through to
+    # Claude", which was 23% of one measured run and could equally have meant
+    # Ollama was down, the model was not pulled, the call raised, or the answer
+    # was rejected by the quality gate. Those need four different fixes and the
+    # log could not tell them apart.
+    def _give_up(model_name: str, reason: str, latency_ms: int = 0) -> None:
+        try:
+            from llm_router import trace as _t
+            _t.emit("direct.skip_model", model=model_name, reason=reason)
+        except Exception:                                    # noqa: BLE001
+            pass
+        # A failed attempt is the half nothing recorded. Without it build_chain
+        # has no evidence that a model times out on most calls, and the 72-of-166
+        # timeout rate measured on 2026-09-14 had to come from an ad-hoc harness
+        # instead of from production.
+        try:
+            from llm_router import attempt_log
+            if reason.startswith("timeout_") or reason.startswith("partial_timeout"):
+                outcome = attempt_log.TIMEOUT
+            elif reason in ("empty response", "returned_empty_content"):
+                outcome = attempt_log.EMPTY
+            elif reason.startswith("quality gate rejected"):
+                outcome = attempt_log.REJECTED
+            else:
+                outcome = attempt_log.SKIPPED
+            attempt_log.record(model_name, outcome, latency_ms, reason=reason)
+        except Exception:                                    # noqa: BLE001
+            pass
+        _log_direct_reason(f"{model_name}: {reason}")
+
+    # A per-model timeout larger than the wall-clock left is how a chain ends up
+    # with no answer at all: model #1 burns the whole hook budget, the process is
+    # killed mid-fallback, and Claude Code reports "hook timed out — output
+    # discarded". Measured here: qwen3.8 hit timeout_45s, the fallback then needed
+    # 10.5s, and 45+10.5 does not fit a 60s hook. So each call gets the smaller of
+    # its own timeout and what is actually left, minus a reserve for the models
+    # still behind it in the chain.
+    def _call_budget(index: int) -> float:
+        if deadline_s is None:
+            return float(timeout)
+        left = deadline_s - time.monotonic()
+        remaining_models = max(0, len(chain) - index - 1)
+        reserve = min(remaining_models, 1) * _FALLBACK_RESERVE_S
+        return max(_MIN_CALL_S, min(float(timeout), left - reserve))
+
+    for index, model in enumerate(chain):
         if model.provider == "claude":
-            continue  # Can't call Claude from the hook — skip
+            _give_up(f"{model.provider}/{model.model}", "claude cannot be called from the hook")
+            continue
 
         # Pre-flight for Ollama models (evaluated once, cached for the chain):
         #   1. Enumerate installed models via /api/tags.
@@ -426,22 +632,49 @@ def execute_chain(
                 if _ollama_alive is None:
                     _ollama_alive = ollama_is_alive(timeout=0.5)
                 if not _ollama_alive:
+                    _give_up(model.model, "ollama unreachable")
                     continue
             elif not _ollama_model_available(model.model, _ollama_installed):
-                continue  # model not pulled — do not call (§2.4)
+                _give_up(model.model, "model not pulled")
+                continue
 
         call_fn = _PROVIDER_CALLS.get(model.provider)
         if not call_fn:
+            _give_up(f"{model.provider}/{model.model}", "no call function for provider")
+            continue
+
+        call_timeout = _call_budget(index)
+        if deadline_s is not None and deadline_s - time.monotonic() <= _MIN_CALL_S:
+            _give_up(model.model, "out of hook budget before the call")
             continue
 
         t0 = time.monotonic()
         try:
-            response, usage = call_fn(prompt, model.model, timeout, history, system_prompt)
-        except Exception:
+            response, usage = call_fn(prompt, model.model, call_timeout, history, system_prompt)
+        except Exception as exc:                             # noqa: BLE001
+            _give_up(model.model, f"call raised: {type(exc).__name__}: {exc}"[:120],
+                     int((time.monotonic() - t0) * 1000))
             continue
 
-        if response and quality_ok(response, task_type):
+        if not response:
+            _give_up(
+                model.model,
+                _LAST_CALL_FAILURE.pop(f"{model.provider}/{model.model}", "empty response"),
+                int((time.monotonic() - t0) * 1000),
+            )
+            continue
+        if not quality_ok(response, task_type):
+            _give_up(model.model, f"quality gate rejected {len(response)} chars",
+                     int((time.monotonic() - t0) * 1000))
+            continue
+
+        if True:
             latency_ms = int((time.monotonic() - t0) * 1000)
+            try:
+                from llm_router import attempt_log
+                attempt_log.record(model.model, attempt_log.OK, latency_ms)
+            except Exception:                                # noqa: BLE001
+                pass
             _okf_enrich(prompt, response, f"{model.provider}/{model.model}")
             return DirectResult(
                 text=response,

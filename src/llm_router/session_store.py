@@ -322,15 +322,42 @@ def resolve_session_id(explicit: str | None = None) -> str | None:
         env2 = os.environ.get("CLAUDE_CODE_SESSION_ID", "").strip()
         if env2:
             return env2
-        ptr = _pointer_path()
-        if ptr.exists():
-            data = json.loads(ptr.read_text(encoding="utf-8"))
-            sid = data.get("session_id")
-            ts = data.get("ts")
-            if sid and isinstance(ts, (int, float)):
-                if time.time() - ts <= _POINTER_MAX_AGE_SECONDS:
-                    return sid
+        # Project pointer first, then the machine-wide one. Both are needed:
+        # the project pointer is keyed on cwd, and the MCP server's cwd is $HOME,
+        # which is a directory no session ever writes to. Measured 2026-09-14 —
+        # 30 pointers existed on this machine and the MCP server resolved NONE of
+        # them, so every routed model ran with no session context at all.
+        for ptr in (_pointer_path(), _global_pointer_path()):
+            sid = _read_pointer(ptr)
+            if sid:
+                return sid
     except Exception:
+        pass
+    return None
+
+
+def _global_pointer_path() -> Path:
+    """Pointer that does not depend on the reader's working directory."""
+    return _state_dir() / "current_session.json"
+
+
+def _read_pointer(ptr: Path) -> str | None:
+    """Session id from *ptr*, or None when missing, malformed or stale.
+
+    Stale must mean None, never the old id: a pointer that outlives its session
+    hands the next reader somebody else's conversation, which is a worse failure
+    than having no context at all.
+    """
+    try:
+        if not ptr.exists():
+            return None
+        data = json.loads(ptr.read_text(encoding="utf-8"))
+        sid = data.get("session_id")
+        ts = data.get("ts")
+        if sid and isinstance(ts, (int, float)):
+            if time.time() - ts <= _POINTER_MAX_AGE_SECONDS:
+                return sid
+    except Exception:                                        # noqa: BLE001
         pass
     return None
 
@@ -345,9 +372,13 @@ def write_pointer(session_id: str | None) -> None:
     try:
         if not session_id:
             return
-        _write_json_atomic(
-            _pointer_path(), {"session_id": session_id, "ts": time.time()},
-        )
+        payload = {"session_id": session_id, "ts": time.time()}
+        # Both pointers, every time. The project one is keyed on cwd and a
+        # session's cwd changes as work moves between repos; the machine-wide one
+        # is what a reader with a different cwd — notably the MCP server, whose
+        # cwd is $HOME — can actually find.
+        _write_json_atomic(_pointer_path(), payload)
+        _write_json_atomic(_global_pointer_path(), payload)
     except Exception:
         pass
 

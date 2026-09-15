@@ -148,6 +148,12 @@ async def run_claude(
     """
     from llm_router.safe_subprocess import get_safe_env
 
+    try:
+        from llm_router.context_injection import inject
+        prompt = inject(prompt, root=working_dir)
+    except Exception:                                        # noqa: BLE001
+        pass
+
     binary = find_claude_binary()
     if not binary:
         return ClaudeResult(

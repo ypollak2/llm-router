@@ -54,7 +54,7 @@ def test_confident_report_with_a_failing_check_is_not_success(tmp_path, monkeypa
         "llm_router.hooks.agent_loop.run_agent_loop",
         lambda **kw: "Done — I fixed it and verified it works.",
     )
-    out = _call(objective="x", workdir=str(tmp_path), acceptance_check="exit 1")
+    out = _call(objective="x", workdir=str(tmp_path), acceptance_check=["python3", "-c", "raise SystemExit(1)"])
     assert out["status"] == lt.FAILED_CHECK, out
     assert out["check_passed"] is False
 
@@ -64,7 +64,7 @@ def test_passing_check_is_verified_complete(tmp_path, monkeypatch):
         "llm_router.hooks.agent_loop.run_agent_loop",
         lambda **kw: "did the thing",
     )
-    out = _call(objective="x", workdir=str(tmp_path), acceptance_check="exit 0")
+    out = _call(objective="x", workdir=str(tmp_path), acceptance_check=["python3", "-c", "raise SystemExit(0)"])
     assert out["status"] == lt.VERIFIED_COMPLETE
     assert out["check_passed"] is True
 
@@ -75,7 +75,7 @@ def test_a_passing_check_beats_exhaustion(tmp_path, monkeypatch):
         "llm_router.hooks.agent_loop.run_agent_loop",
         lambda **kw: "Agent reached maximum iterations.",
     )
-    out = _call(objective="x", workdir=str(tmp_path), acceptance_check="exit 0")
+    out = _call(objective="x", workdir=str(tmp_path), acceptance_check=["python3", "-c", "raise SystemExit(0)"])
     assert out["status"] == lt.VERIFIED_COMPLETE
 
 

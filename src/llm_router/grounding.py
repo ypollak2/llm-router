@@ -173,12 +173,155 @@ def symbol_violations(draft: str, context: str, prompt: str = "") -> list[str]:
         m.group(1) for m in _DRAFT_FENCED_SYMBOL_RE.finditer(draft)
         if not m.group(1).isupper()   # env var / constant, not a function
     ]
+    unresolved: list[str] = []
     for name in names:
         if name.lower() in _SYMBOL_NOISE or name in known or name in haystack:
             continue
-        if name not in out:
-            out.append(name)
+        if name not in unresolved:
+            unresolved.append(name)
+    # Last escape before calling a name invented: look on DISK. The index is a
+    # snapshot and the working tree is the truth, so a symbol written five minutes
+    # ago is absent from the index and present in the repo. Measured 2026-09-14: a
+    # function created seconds earlier was reported as a violation while the index
+    # held 11,697 symbols, so a correct draft was rejected and the turn escalated
+    # to a premium model. `grounding_violations` has had exactly this escape since
+    # S2-6 ("Existing on disk is evidence too"); the symbol half never got it.
+    #
+    # Re-indexing at session start does NOT fix this. The gap is WITHIN a session:
+    # write the function at 14:20, ask about it at 14:21, and any index built
+    # beforehand is already stale.
+    on_disk = _defined_on_disk(unresolved)
+    out.extend(n for n in unresolved if n not in on_disk)
     return out
+
+
+def _defined_on_disk(names: list[str], root: str | None = None) -> set[str]:
+    """Which of *names* are defined in the working tree right now.
+
+    ONE `git grep` for the whole set, not one per symbol: the cost here is process
+    spawn, so eight names in a draft must not mean eight subprocesses (measured:
+    893ms that way, ~110ms batched).
+
+    `--untracked` matters as much as the batching. A file written five minutes ago
+    is exactly the case this exists for, and it is usually not committed yet; plain
+    `git grep` searches only tracked content and would still reject it.
+    `.gitignore` is still respected, so a match inside `.venv` cannot ground a
+    symbol the project does not define.
+
+    Fails to the EMPTY set on any error, so the caller falls back to the index
+    verdict — the pre-existing behaviour, never something looser.
+    """
+    wanted = [n for n in names if n and n.isidentifier()]
+    if not wanted:
+        return set()
+    known = {n: _DISK_SYMBOL_CACHE[n] for n in wanted if n in _DISK_SYMBOL_CACHE}
+    todo = [n for n in wanted if n not in known]
+    found = {n for n, hit in known.items() if hit}
+    if not todo:
+        return found
+    try:
+        import subprocess
+
+        # POSIX ERE, not PCRE. `git grep -E` rejects `(?:...)` outright with
+        # "repetition-operator operand invalid" — and because the failure is a
+        # non-zero exit rather than an exception, a swallowed error here looks
+        # exactly like "no symbol found" and silently restores the bug this
+        # function exists to fix. Hence the explicit returncode check below.
+        alternation = "|".join(re.escape(n) for n in todo)
+        # Scoped to source extensions. `--untracked` otherwise walks every
+        # untracked file in the tree — on this repo that included stray data/
+        # and experiments/ directories and cost 3.3s, against a first-model
+        # budget of ~37s. With the pathspec it is ~0.2s.
+        r = subprocess.run(
+            ["git", "grep", "--untracked", "-hoE",
+             rf"(def|class)[[:space:]]+({alternation})",
+             "--", "*.py", "*.pyi", "*.ts", "*.tsx", "*.js", "*.jsx",
+             "*.go", "*.rs", "*.java", "*.rb"],
+            cwd=root or None, capture_output=True, text=True, timeout=5.0,
+        )
+        if r.returncode not in (0, 1):                       # 1 == no matches
+            raise RuntimeError(f"git grep failed: {(r.stderr or '').strip()[:120]}")
+        hits = {line.strip().split()[-1] for line in r.stdout.splitlines()
+                if line.strip()} & set(todo)
+        for n in todo:
+            _DISK_SYMBOL_CACHE[n] = n in hits
+        found |= hits
+    except Exception as exc:                                 # noqa: BLE001
+        try:
+            from llm_router import failopen
+            failopen.record("CHZ-FO-GROUNDING-DISK-SYMBOL", exc)
+        except Exception:                                    # noqa: BLE001
+            pass
+    return found
+
+
+# Per-process only. The hook is a fresh process per prompt, so this caches within
+# one draft and can never go stale across turns.
+_DISK_SYMBOL_CACHE: dict[str, bool] = {}
+
+
+# A draft is written into session memory and becomes CONTEXT for the next turn
+# (auto-route.py records it as an assistant event, session_store always injects
+# the 3 newest). Until 2026-09-14 the only gate on that write was file/symbol
+# grounding, which has no opinion about a draft that asks a question or claims an
+# action. So a fabricated status became the next turn's ground truth and the
+# model escalated its own invention across turns — observed in real session data:
+# "63.2% complete (5,309/8,400)" became "78.5% complete (6,600/8,400)" one turn
+# later, for a project that does not exist.
+#
+# Grounding catches an invented FILE. This catches an invented ACTION, which is
+# the more dangerous of the two because nothing else looks for it.
+_UNOBSERVABLE_CLAIM = re.compile(
+    r"all tests? (pass|passed)|completed successfully|"
+    r"(have|has|i) (been )?(merged|pushed|committed|deployed|installed)|"
+    r"✅|task .{0,20}(complete|done)|successfully (ran|executed|created|updated)",
+    re.I)
+_DEFERRAL = re.compile(
+    r"would you like me to|shall i |let me know if|do you want me to|"
+    r"could you (share|provide|clarify|confirm)|please (share|provide|clarify)",
+    re.I)
+
+
+def response_is_usable(text: str) -> bool:
+    """Did this response actually answer, or merely arrive?
+
+    The routing bandit's reward is ``success_rate / avg_cost`` and every write
+    site passed ``success=True`` unconditionally — there was no ``success=False``
+    anywhere on the routing path. So the reward collapsed to ``1 / avg_cost``:
+    ranking by cheapness with a constant numerator, learning nothing about
+    quality. An empty string logged success too.
+
+    Measured 2026-09-14 on 200 real prompts: of 144 drafts produced, 35 were
+    unusable — 20 asked the user a question instead of answering and 10 claimed an
+    action they could not have performed. Under the old signal each of those
+    reinforced the model that produced it.
+
+    This is deliberately the SAME predicate as :func:`draft_is_memorable`, so
+    "worth remembering" and "counts as success" cannot drift apart.
+    """
+    ok, _ = draft_is_memorable(text)
+    return ok
+
+
+def draft_is_memorable(text: str) -> tuple[bool, str]:
+    """Is this draft safe to persist as an assistant turn for future context?
+
+    Stricter than :func:`draft_is_relayable`, and deliberately so: relaying a
+    weak draft costs one turn, remembering one costs every turn after it.
+    Returns (ok, reason-if-not).
+    """
+    body = (text or "").strip()
+    # 20, not 40: a correct answer can be short ("os.path.join joins path
+    # components." is 35 chars and worth remembering). The real signals are the
+    # two below — an invented action and a deferral — not length. This floor only
+    # drops bare acknowledgements like "Sure."
+    if len(body) < 20:
+        return False, "too short to be worth remembering"
+    if _UNOBSERVABLE_CLAIM.search(body):
+        return False, "claims an action it could not have performed"
+    if _DEFERRAL.search(body):
+        return False, "defers to the user rather than answering"
+    return True, ""
 
 
 def draft_is_relayable(draft: str, context: str, prompt: str = "") -> bool:
