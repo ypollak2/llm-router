@@ -145,3 +145,10 @@ scripts/routerarena/data/_graded_*.json
 
 # Downloaded by the npm postinstall; never committed and never published.
 npm/vendor/
+
+# Local measurement outputs and caches, never committed. A blanket `git add -A`
+# staged data/policy/embed_cache.jsonl (213MB) on 2026-09-15 and GitHub refused
+# the push at its 100MB limit. These are outputs, not sources.
+data/
+experiments/
+scripts/backend_quality_out/

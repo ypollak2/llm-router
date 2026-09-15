@@ -20,12 +20,25 @@ On 2026-08-31 that was **1,037 of 1,938 entries — 54% of the file.** A rate
 computed over the raw log is wrong by roughly a factor of two, and it is wrong
 in a direction that looks like a regression.
 
-```
-real prompts = lines with prompt_len= AND a session_id that is present and != unknown
+The exclusion above is NOT sufficient, and believing it was cost a third wrong
+number. Excluding `unknown` still admitted fixture session ids — `sess-fai` (496
+prompts), `sess-xyz` (251) and others, 1,510 in all. The rate moved from 64.0% to
+16.4% when they were removed.
+
+Test with a POSITIVE pattern, never a list of things to exclude. A real Claude
+Code session id is eight hex characters; anything that fails that test is not one,
+and a new fixture naming convention cannot silently rejoin the denominator:
+
+```python
+_REAL_SESSION = re.compile(r"^[0-9a-f]{8}$")
+
+def is_real(rec):
+    return (any(m.startswith("prompt_len=") for m in rec["msgs"])
+            and bool(_REAL_SESSION.match(rec.get("sid") or "")))
 ```
 
-Use `scripts/routing_rate.py`. Do not write another ad-hoc parser; two of them
-disagreed today.
+Use `scripts/routing_rate.py`, which implements exactly this. Do not write another
+ad-hoc parser; two of them disagreed on the same day.
 
 ### A rate without its denominator is not a measurement
 
