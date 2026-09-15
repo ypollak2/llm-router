@@ -179,12 +179,12 @@ Measured 2026-09-15, and nearly reported as a ten-point regression:
     both re-scored, CURRENT scorer        53%      53%
 
 There was no regression. The scorer had changed between the runs - N3 widened
- to catch bare filenames, so "cites files that do not exist"
+`grounding_violations` to catch bare filenames, so "cites files that do not exist"
 went 7 -> 11 on the SAME drafts. Reading a stored verdict computed under the old
 rules against a live verdict computed under the new ones measures the edit to the
 ruler, not the change to the system.
 
-The corpus had moved too: a filter dropping  blocks meant the
+The corpus had moved too: a filter dropping `<task-notification>` blocks meant the
 two runs no longer replayed the same list, so a 115-prompt comparison was really
 60.
 
