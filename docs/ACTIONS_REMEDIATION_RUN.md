@@ -6,8 +6,13 @@ that says it is done. Status is updated as each action completes, so this file �
 not anyone's memory — is the state of the run.
 
 Baseline every action is measured against: `scripts/bench_session_replay.py`,
-5 real sessions replayed in their real order. Current: **82% drafts / 70%
-acceptable** (n=66 of 115 at time of writing).
+5 real sessions replayed in their real order. Baseline, complete run:
+**76% drafts / 66% acceptable** (n=115, 2026-09-14, saved as
+session_replay_BASELINE.json).
+
+An earlier partial read of the same run said 82%/70% at n=66. That was the
+running total of a run still in progress, not a result — the last 49 prompts
+brought it down. A partial rate is not a rate.
 
 Rule: a gate never asks a question. On failure, repair twice, then PARK the action
 with the exact failure recorded and move to the next. Every action ends done,

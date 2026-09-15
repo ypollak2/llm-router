@@ -30,9 +30,9 @@ Three measurements exist. Only the third describes production.
 |---|---|---|---|
 | One shared session id, shuffled corpus | 72% | 55% | **withdrawn** — 29 of 144 drafts carried "Gable 5" into unrelated prompts |
 | Isolated empty session per prompt | 44% | 33% | floor — 95 of 200 gated with nothing to resolve them |
-| Real sessions, real order, real history (`bench_session_replay.py`) | **82%** | **58%** | in progress at n=33/115; this is the baseline |
+| Real sessions, real order, real history (`bench_session_replay.py`) | **76%** | **66%** | n=115, complete; this is the baseline |
 
-At n=33 the session-ordered replay shows ZERO `context-dependent` gates. The only
+The completed session-ordered replay shows ZERO `context-dependent` gates. The only
 recorded blocker is `no free-tier model available` (complex code/research routed
 to Claude by design, the user's own carve-out).
 

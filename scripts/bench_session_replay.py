@@ -48,7 +48,14 @@ _spec.loader.exec_module(_acc)
 # A slash command, a paste, or a hook's own injected text is not something the
 # user typed at the router. Counting them measures the harness.
 _NOT_A_PROMPT = re.compile(
-    r"^\s*(/|<command-|<local-command|<system-reminder|Caveat:|\[Request interrupted)", re.S)
+    r"^\s*(/|<command-|<local-command|<system-reminder|<task-notification"
+    r"|<user-prompt-submit-hook|Caveat:|\[Request interrupted)", re.S)
+
+# A bare acknowledgement carries nothing to route, and the hook deliberately
+# bypasses it (CONTINUATION: bypass to host agent). Counting it as a miss makes
+# the router look worse than it is for doing the right thing — on 2026-09-14 it
+# understated both the baseline and the after-run by ~4 points each.
+_BARE_ACK = re.compile(r"^(continue|proceed|yes|no|go|ok|okay|go on|keep going|next)[.!]?$", re.I)
 
 
 def user_turns(path: Path) -> list[str]:
@@ -79,18 +86,41 @@ def _log_size() -> int:
         return 0
 
 
+# Every way the hook can terminate without producing a draft. Reading only the
+# first two of these left 8 of 115 misses in the 2026-09-14 run reported as "no
+# reason logged" — 7% of prompts vanishing unexplained, in a comparison being
+# argued over 6-point differences. Seven of those eight were a deliberate
+# CONTINUATION bypass ("continue", "yes", "Proceed" carry nothing to route) and
+# were being counted as a failure of the router rather than a choice by it.
+_TERMINAL = (
+    "DIRECT SKIP:",
+    "DIRECT MODEL SKIPPED:",
+    "DIRECT FAILED:",
+    "DIRECT ERROR:",
+    "CONTINUATION:",
+    "EARLY EXIT:",
+    "CRITICAL PRESSURE:",
+    "DRAFT REJECTED",
+    "SIDECAR ERROR:",
+)
+
+
 def _reason_since(offset: int) -> str:
     try:
         with DEBUG_LOG.open() as fh:
             fh.seek(offset)
             tail = fh.read()
     except OSError:
-        return "unknown"
+        return "log unreadable"
     for line in tail.splitlines():
-        if "DIRECT SKIP:" in line:
-            return line.split("DIRECT SKIP:", 1)[1].strip()
-        if "DIRECT MODEL SKIPPED:" in line:
-            return re.sub(r"[0-9.]+", "N", line.split("SKIPPED:", 1)[1].strip())
+        for marker in _TERMINAL:
+            if marker in line:
+                reason = line.split(marker, 1)[1].strip() or marker.rstrip(":").lower()
+                # Collapse digits so "timeout_35.4s" and "timeout_36.1s" are one
+                # bucket rather than two.
+                return f"{marker.rstrip(':').lower()}: {re.sub(r'[0-9.]+', 'N', reason)}"[:70]
+    if "DIRECT SUCCESS" in tail:
+        return "drafted then discarded downstream"
     return "no reason logged"
 
 
@@ -154,9 +184,17 @@ def main() -> int:
             print(f"   {i:3d}. {mark} [{dt:5.1f}s] {prompt[:44]!r}"
                   + ("" if ok else f" — {(why or reason)[:38]}"))
 
+    routable = [c for c in captured if not _BARE_ACK.match(c["prompt"].strip())]
+    r_prod = sum(1 for c in routable if c["body"])
+    r_acc = sum(1 for c in routable if c["acceptable"])
     print(f"\n{'='*62}\n  prompts        : {total}  (real sessions, real order, real history)")
     print(f"  drafts produced: {produced}/{total} ({100*produced/total:.0f}%)")
     print(f"  ACCEPTABLE     : {accepted}/{total} ({100*accepted/total:.0f}%)")
+    if routable and len(routable) != total:
+        print(f"\n  excluding {total - len(routable)} bare acknowledgements the hook")
+        print(f"  deliberately bypasses ('continue', 'yes', 'Proceed'):")
+        print(f"     drafts produced: {r_prod}/{len(routable)} ({100*r_prod/len(routable):.0f}%)")
+        print(f"     ACCEPTABLE     : {r_acc}/{len(routable)} ({100*r_acc/len(routable):.0f}%)")
     print("\n  breakdown:")
     for k, v in reasons.most_common():
         print(f"     {v:4d}  {k}")

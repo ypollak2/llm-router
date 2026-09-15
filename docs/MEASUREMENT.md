@@ -114,3 +114,45 @@ model that genuinely returned "" were logged with the same reason. They have
 different fixes, and conflating them cost a full measurement round. Name the
 failure at the point it happens (`_failure_reason`), not at the point it is
 noticed.
+
+### A partial rate is not a rate
+
+Reported 2026-09-14 from a benchmark still in progress: "82% drafts / 70%
+acceptable" at n=66 of 115. The completed run was **76% / 66%** — the last 49
+prompts pulled it down six and four points.
+
+Nothing was wrong with the measurement. The mistake was quoting a running total as
+though it were a result, and then writing it into three planning documents as the
+baseline other work would be compared against.
+
+Read a partial run to see whether it is behaving, never to get the number. The
+number exists when the run ends.
+
+### Count what the system was asked to do, not what it was handed
+
+"continue", "yes", "Proceed" carry nothing to route, and the hook deliberately
+bypasses them (`CONTINUATION: bypass to host agent`). Counting them as misses
+makes the router look worse for doing the right thing.
+
+Measured 2026-09-14 on the session replay: 10 of 115 prompts were bare
+acknowledgements. Including them understated BOTH runs by about four points:
+
+    all prompts     baseline 76% drafts / 66% acceptable -> after 77% / 72%
+    routable only   baseline 80% / 70%                   -> after 81% / 76%
+
+The comparison is unaffected — both runs were understated equally — but the
+absolute number was wrong, and it is the absolute number that gets quoted.
+
+Two related corpus leaks found the same way: `<task-notification>` blocks and
+hook-injected text were being replayed as if the user had typed them.
+`bench_session_replay.py` now filters both and reports both denominators.
+
+### A miss with no recorded reason is a hole in the instrument
+
+The same run reported 8 of 115 misses as "no reason logged" — 7% of prompts
+vanishing unexplained, while 6-point differences were being argued over. Seven
+were the deliberate CONTINUATION bypass and one was transient; none was a router
+defect. The bench read only two of the hook nine terminal outcomes.
+
+When a measurement cannot explain an outcome, fix the measurement before trusting
+any number it produces.

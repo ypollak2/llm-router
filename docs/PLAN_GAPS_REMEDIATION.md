@@ -171,4 +171,4 @@ with its own environment.
 
 A1 -> A2 -> A3 (A1 gates the other two), then B1 + B2 + B3 together, then A4, then
 A5, then Track C. Nothing merges without `scripts/bench_session_replay.py` before
-and after; the current baseline is 82% drafts / 70% acceptable.
+and after; the baseline is 76% drafts / 66% acceptable (n=115).
