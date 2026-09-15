@@ -1023,12 +1023,23 @@ def _warm_ollama_bg() -> None:
     finds the model already loaded.
 
     Opt-out: ``LLM_ROUTER_OLLAMA_WARMUP=off``. Override the model with
-    ``LLM_ROUTER_OLLAMA_WARMUP_MODEL`` (default ``qwen3.5:latest`` — the
+    ``LLM_ROUTER_OLLAMA_WARMUP_MODEL`` (default: the first installed model — the
     model the production chain uses for classification).
     """
     if os.environ.get("LLM_ROUTER_OLLAMA_WARMUP", "on").strip().lower() in ("0", "off", "false", "no"):
         return
-    model = os.environ.get("LLM_ROUTER_OLLAMA_WARMUP_MODEL", "qwen3.5:latest")
+    # Discovery, not a guess. This defaulted to qwen3.5:latest, which is not
+    # installed here, so the warm-up 404'd and warmed nothing on EVERY session
+    # while reporting success. Another fixed name would rot the same way.
+    model = os.environ.get("LLM_ROUTER_OLLAMA_WARMUP_MODEL", "").strip()
+    if not model:
+        try:
+            from llm_router.model_discovery import first_installed
+            model = first_installed() or ""
+        except Exception:
+            model = ""
+    if not model:
+        return          # nothing installed; nothing to warm
     base_url = _validated_ollama_env_url(
         os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
     ).rstrip("/")

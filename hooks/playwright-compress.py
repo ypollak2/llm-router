@@ -13,7 +13,7 @@ the re-snapshot and retry-storm patterns.
 
 Env vars:
   OLLAMA_HOST                     Ollama base URL (default: http://localhost:11434)
-  LLM_ROUTER_OLLAMA_MODEL         Model for compression (default: qwen2.5:7b)
+  LLM_ROUTER_OLLAMA_MODEL         Model for compression (default: first installed)
   GEMINI_API_KEY                  Enables Gemini Flash fallback
   LLM_ROUTER_PLAYWRIGHT_COMPRESS  Set to "off" to disable this hook
 """
@@ -30,7 +30,20 @@ import urllib.request
 # ── Configuration ─────────────────────────────────────────────────────────────
 SNAPSHOT_LINE_THRESHOLD = 40       # Skip compression for small snapshots
 OLLAMA_BASE = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
-OLLAMA_MODEL = os.environ.get("LLM_ROUTER_OLLAMA_MODEL", "qwen2.5:7b")
+def _default_model() -> str:
+    """The first installed local model, never a guessed name.
+
+    This was hardcoded to qwen2.5:7b, absent from this machine, so every
+    compression attempt 404'd and silently returned the uncompressed output.
+    """
+    try:
+        from llm_router.model_discovery import first_installed
+        return first_installed() or ""
+    except Exception:
+        return ""
+
+
+OLLAMA_MODEL = os.environ.get("LLM_ROUTER_OLLAMA_MODEL", "").strip() or _default_model()
 OLLAMA_TIMEOUT = 8                 # seconds — fast enough for local models
 MAX_SNAPSHOT_CHARS = 10_000        # Truncate before sending to LLM
 

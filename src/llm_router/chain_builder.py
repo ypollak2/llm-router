@@ -1,8 +1,21 @@
 """Dynamic Chain Builder — core routing engine for Adaptive Universal Router v5.0+.
 
 Assembles a ranked model chain for a given (task_type, complexity) pair using
-the output of the Unified Scorer.  This is the primary chain selection mechanism
-(always-on as of v5.0; feature flag removed).
+the output of the Unified Scorer.
+
+NOT the live chain builder, despite what this docstring claimed until 2026-09-15
+("the primary chain selection mechanism, always-on"). Verified: every repository
+reference to this module's ``build_chain()`` is a test. The paths that actually
+run are
+
+    MCP router   router.py -> dynamic_routing.get_dynamic_model_chain(),
+                 falling back to profiles.get_model_chain()
+    hook drafts  hooks/auto-route.py -> hooks.chain_builder
+    public SDK   sdk.py -> hooks.chain_builder
+
+A reader who believed the old sentence would tune this file and see nothing
+change. It is retained as a declared public API (see ``__all__``), not deleted —
+but it is a compatibility surface, not the router.
 
 Design constraints
 ------------------

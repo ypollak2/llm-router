@@ -170,3 +170,28 @@ def available_ollama_models(*, allow_probe: bool = True) -> list[str]:
             return live
 
     return cached          # stale, or [] when there is no cache at all
+
+def first_installed(prefer: tuple[str, ...] = ()) -> str | None:
+    """The best local model that is ACTUALLY installed, or None.
+
+    Several call sites used to carry a hardcoded default — `qwen3.5:latest` for
+    the session warm-up, `qwen2.5:7b` for the Playwright compressor and the ReAct
+    adapter, `qwen2.5-coder:7b` for the librarian. None of those was installed on
+    the machine running them, so each call 404'd and degraded silently: the
+    warm-up warmed nothing, every session.
+
+    Substituting a different hardcoded name would repeat the mistake the first
+    time the inventory changes. `prefer` expresses a preference among models that
+    exist; it never invents one.
+    """
+    try:
+        installed = available_ollama_models()
+    except Exception:                                        # noqa: BLE001
+        return None
+    if not installed:
+        return None
+    for want in prefer:
+        for have in installed:
+            if have == want or have.split(":")[0] == want.split(":")[0]:
+                return have
+    return installed[0]

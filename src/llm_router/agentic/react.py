@@ -203,6 +203,15 @@ def default_tool_executor(cwd: str | None = None, timeout: float = 30.0) -> Tool
     return execute
 
 
+def _default_local_model() -> str:
+    """First installed Ollama model that can drive a tool-calling loop."""
+    try:
+        from llm_router.model_discovery import first_installed
+        return first_installed(("qwen3-coder:30b", "qwen3.8:latest")) or ""
+    except Exception:                                        # noqa: BLE001
+        return ""
+
+
 @dataclass
 class ReActAgent:
     """A local ReAct agent (tier 0). ``client`` + ``executor`` are injected."""
@@ -210,10 +219,11 @@ class ReActAgent:
     tier: int = 0
     client: OllamaClient | None = None
     executor: ToolExecutor | None = None
-    # Default to a model that is actually installed AND supports Ollama native
-    # tool-calling. qwen2.5-coder:7b is frequently absent -> 404 -> silent empty
-    # runs; qwen2.5:7b is the warm local default.
-    model: str = "qwen2.5:7b"
+    # The comment below used to say "a model that is actually installed" while
+    # naming qwen2.5:7b, which was not installed either — the same 404 -> silent
+    # empty run it was written to avoid. Resolved from discovery instead, so it
+    # cannot rot again when the local inventory changes.
+    model: str = field(default_factory=lambda: _default_local_model())
     max_steps: int = 8
     cwd: str | None = None
     cost_per_call_usd: float = 0.0
