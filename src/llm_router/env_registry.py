@@ -171,7 +171,6 @@ ENV_REGISTRY: dict[str, tuple[str, str, int]] = {
     "LLM_ROUTER_PLAYWRIGHT_COMPRESS": ("llm_router", "hooks/playwright-compress.py", 1),
     "LLM_ROUTER_POLICY": ("llm_router", "cli_init_policy.py", 2),
     "LLM_ROUTER_POLICY_PATH": ("llm_router", "control_plane/migration.py", 1),
-    "LLM_ROUTER_POLICY_STORE_PATH": ("llm_router", "policy_versions.py", 1),
     "LLM_ROUTER_PREMIUM_MAX_PRESSURE": ("llm_router", "router.py", 1),
     "LLM_ROUTER_PRESET": ("llm_router", "presets.py", 1),
     "LLM_ROUTER_PROFILE": ("llm_router", "repo_config.py", 2),

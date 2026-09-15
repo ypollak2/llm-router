@@ -1,0 +1,15 @@
+{
+ "pipeline_params": {
+  "router_name": "llm-router-heads",
+  "router_cls_name": "DifficultyHeadRouter",
+  "models": [
+   "gemini-3.1-flash-lite-preview",
+   "deepseek/deepseek-v4-flash",
+   "qwen/qwen3-30b-a3b-instruct-2507"
+  ],
+  "description": "Per-model difficulty heads: a linear head over frozen sentence embeddings plus structural features estimates P(correct | query, model) for each candidate, and the router picks argmax of that probability minus a cost penalty. Trained on 27 public datasets audited SHA-256 exact plus MinHash near-duplicate against all 9,613 RouterArena evaluation questions at zero overlap, with per-model correctness measured by us. Pool and cost weight selected on a disjoint split of that corpus. No RouterArena prompt, answer, label or outcome informs any parameter."
+ },
+ "router": "llm-router-heads",
+ "router_name": "llm-router-heads",
+ "description": "llm-router by Yali Pollak - per-model difficulty prediction."
+}

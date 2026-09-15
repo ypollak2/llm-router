@@ -29,6 +29,54 @@ _DRAFT_PATH_RE = re.compile(
     r"(?:^|[\s`'\"(\[])([\w./-]*[\w-]/[\w./-]*\w\.(?:py|ts|tsx|js|jsx|go|rs|java|md|json|toml|ya?ml|sh))\b"
 )
 
+# A filename with no directory was never checked, because the pattern above
+# requires a "/". Measured 2026-09-15 across 88 real drafts: 22 bare filenames
+# were cited and 10 of them exist nowhere in the repo — `router.json`,
+# `llm-router.yaml`, `30_CI_GAP_PLAN.md`. That is the same fabrication the path
+# check exists to catch, wearing a shorter name.
+_DRAFT_BARE_FILE_RE = re.compile(
+    r"(?:^|[\s`'\"(\[])([\w-]+\.(?:py|ts|tsx|js|jsx|go|rs|java|md|json|toml|ya?ml|sh))\b"
+)
+
+# Names too generic to accuse anyone of inventing. A draft saying "add it to
+# package.json" is describing a convention, not claiming this repo has the file.
+_GENERIC_FILENAMES = frozenset({
+    "package.json", "package-lock.json", "tsconfig.json", "setup.py", "setup.cfg",
+    "pyproject.toml", "requirements.txt", "readme.md", "license.md", "makefile",
+    "dockerfile", "docker-compose.yml", "docker-compose.yaml", ".env",
+    "conftest.py", "__init__.py", "index.js", "index.ts", "main.py", "app.py",
+    "config.yaml", "config.yml", "config.json", "settings.py", "cargo.toml",
+    "go.mod", "go.sum", "changelog.md", "contributing.md", "claude.md",
+})
+
+
+def _file_exists_in_repo(name: str, root: str | None = None) -> bool:
+    """Does a file with this basename exist anywhere in the working tree?
+
+    `git ls-files` respects .gitignore, so a match inside .venv cannot ground a
+    filename the project does not have. Untracked files are included because a
+    file written minutes ago is exactly the case worth admitting.
+    """
+    cached = _REPO_FILE_CACHE.get(name)
+    if cached is not None:
+        return cached
+    found = False
+    try:
+        import subprocess
+
+        r = subprocess.run(
+            ["git", "ls-files", "--cached", "--others", "--exclude-standard", "*/" + name, name],
+            cwd=root or None, capture_output=True, text=True, timeout=3.0,
+        )
+        found = r.returncode == 0 and bool(r.stdout.strip())
+    except Exception:                                        # noqa: BLE001
+        found = False
+    _REPO_FILE_CACHE[name] = found
+    return found
+
+
+_REPO_FILE_CACHE: dict[str, bool] = {}
+
 
 def grounding_violations(draft: str, context: str, prompt: str = "") -> list[str]:
     """File paths the draft names that appear in neither its inputs nor the repo.
@@ -48,8 +96,13 @@ def grounding_violations(draft: str, context: str, prompt: str = "") -> list[str
         return []
     haystack = f"{context or ''}\n{prompt or ''}"
     out: list[str] = []
-    for m in _DRAFT_PATH_RE.finditer(draft):
+    bare = [m.group(1) for m in _DRAFT_BARE_FILE_RE.finditer(draft)
+            if m.group(1).lower() not in _GENERIC_FILENAMES]
+    for m in list(_DRAFT_PATH_RE.finditer(draft)) + list(_DRAFT_BARE_FILE_RE.finditer(draft)):
         path = m.group(1)
+        if "/" not in path and (path.lower() in _GENERIC_FILENAMES
+                                or path not in bare):
+            continue
         # `a/` and `b/` are git's diff prefixes, not directories. A draft quoting a
         # diff of a file that IS in context was being reported as citing two
         # invented paths, which would have rejected a correct answer.
@@ -64,6 +117,10 @@ def grounding_violations(draft: str, context: str, prompt: str = "") -> list[str
                 continue
         except OSError:
             pass
+        # A bare filename has no directory to resolve against, so ask the repo
+        # whether a file of that name exists ANYWHERE before calling it invented.
+        if "/" not in path and _file_exists_in_repo(path):
+            continue
         if path not in out:
             out.append(path)
     return out

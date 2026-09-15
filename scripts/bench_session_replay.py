@@ -116,9 +116,12 @@ def _reason_since(offset: int) -> str:
         for marker in _TERMINAL:
             if marker in line:
                 reason = line.split(marker, 1)[1].strip() or marker.rstrip(":").lower()
-                # Collapse digits so "timeout_35.4s" and "timeout_36.1s" are one
-                # bucket rather than two.
-                return f"{marker.rstrip(':').lower()}: {re.sub(r'[0-9.]+', 'N', reason)}"[:70]
+                # Collapse digits so "timeout_35.4s" and "timeout_36.1s" bucket
+                # together — but ONLY in a numeric run, never a bare dot. The
+                # first version used [0-9.]+ and turned ".claude/settings.json"
+                # into "Nclaude/settingsNjson", destroying exactly the filename a
+                # reader needs to judge whether the rejection was correct.
+                return f"{marker.rstrip(':').lower()}: {re.sub(r'\d[\d.]*', 'N', reason)}"[:70]
     if "DIRECT SUCCESS" in tail:
         return "drafted then discarded downstream"
     return "no reason logged"

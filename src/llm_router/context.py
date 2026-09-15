@@ -581,6 +581,7 @@ async def build_context_messages(
     session_id: str | None = None,
     project_id: str | None = None,
     target_provider: str | None = None,
+    project_root: str | None = None,
 ) -> list[dict[str, str]]:
     """Assemble context messages for injection into LLM calls.
 
@@ -698,6 +699,9 @@ async def build_context_messages(
                 max_tokens=mcp_budget,
                 query=caller_context,
                 target_provider=target_provider,
+                # The caller's project, not this process's cwd. For the MCP
+                # server those differ and the cwd one is always wrong.
+                project_root=project_root,
             )
             if durable_context:
                 parts.append(durable_context)

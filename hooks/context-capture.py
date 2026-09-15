@@ -61,6 +61,19 @@ def _stringify(value: object, limit: int) -> str:
     return text[:limit]
 
 
+# Tools whose OUTPUT is what a later prompt refers back to ("what did the tests
+# say", "which branch am I on"), versus tools whose output is bulk the prompt
+# never cites.
+_HIGH_SIGNAL = frozenset({"Bash", "Write", "Edit", "MultiEdit", "NotebookEdit"})
+
+
+def _capture_budget(tool_name: str) -> tuple[int, int]:
+    """(input_chars, result_chars) to store for this tool."""
+    if tool_name in _HIGH_SIGNAL:
+        return 600, 1800
+    return 200, 500
+
+
 def _is_noisy_tool(tool_name: str) -> bool:
     if not tool_name:
         return True
@@ -88,8 +101,17 @@ def main() -> None:
     tool_input = hook_input.get("tool_input", {}) or {}
     tool_result = hook_input.get("tool_response", hook_input.get("tool_result", ""))
 
-    inputs_str = _stringify(tool_input, 200)
-    result_str = _stringify(tool_result, 500)
+    # 200/500 was uniform across every tool, and it bit: measured 2026-09-15 on
+    # 371 stored events, 29% sat at the 700-char ceiling, p90 710, max 782. The
+    # token that makes a tool call worth remembering — a filename, a branch, an
+    # exit code — is routinely what gets cut.
+    #
+    # Widened only for the tools whose content a later prompt actually points at.
+    # A Read of a 2,000-line file still gets the narrow budget: its VALUE is the
+    # path, which is in the input, not the body.
+    _in_cap, _out_cap = _capture_budget(tool_name)
+    inputs_str = _stringify(tool_input, _in_cap)
+    result_str = _stringify(tool_result, _out_cap)
 
     # Never let an already-injected context block get re-recorded — that's
     # exactly the self-poisoning loop the sentinel wrapper exists to prevent.

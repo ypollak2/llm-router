@@ -2,7 +2,7 @@
 
 C3 of docs/ACTIONS_REMEDIATION_RUN.md, narrowed on evidence. The external gap
 review (P1-3) says broad fail-open handling can hide loss of routing and evidence.
-Verified: `hooks/auto-route.py` contains 45 BROAD handlers (bare,
+Verified: `hooks/auto-route.py` contains 32 BROAD handlers (bare,
 `Exception` or `BaseException`) whose entire body is `pass` or `return None`,
 with no `failopen.record`. The core modules — router.py, cost.py,
 classify.py and both chain builders — are already clean, so the problem is
@@ -31,8 +31,12 @@ import pytest
 
 SRC = Path(__file__).resolve().parent.parent / "src/llm_router"
 
-# Measured 2026-09-14, broad catches only. Lower this as sites are fixed; never raise it silently.
-BASELINE = {"hooks/auto-route.py": 45}
+# Measured 2026-09-14 at 45; lowered to 32 on 2026-09-15 when the 13 sites
+# that lose EVIDENCE or change ROUTING were given failopen.record
+# (tests/test_failopen_records_evidence_loss.py). The remaining 32 are trace
+# emits, display, and optional-feature imports, where recording would be noise
+# and could recurse. Lower this as more are fixed; never raise it silently. Lower this as sites are fixed; never raise it silently.
+BASELINE = {"hooks/auto-route.py": 32}
 
 # These carry the routing decision and its evidence. A silent failure here loses a
 # route or a receipt with no trace that it happened.

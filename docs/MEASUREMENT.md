@@ -20,12 +20,25 @@ On 2026-08-31 that was **1,037 of 1,938 entries — 54% of the file.** A rate
 computed over the raw log is wrong by roughly a factor of two, and it is wrong
 in a direction that looks like a regression.
 
-```
-real prompts = lines with prompt_len= AND a session_id that is present and != unknown
+The exclusion above is NOT sufficient, and believing it was cost a third wrong
+number. Excluding `unknown` still admitted fixture session ids — `sess-fai` (496
+prompts), `sess-xyz` (251) and others, 1,510 in all. The rate moved from 64.0% to
+16.4% when they were removed.
+
+Test with a POSITIVE pattern, never a list of things to exclude. A real Claude
+Code session id is eight hex characters; anything that fails that test is not one,
+and a new fixture naming convention cannot silently rejoin the denominator:
+
+```python
+_REAL_SESSION = re.compile(r"^[0-9a-f]{8}$")
+
+def is_real(rec):
+    return (any(m.startswith("prompt_len=") for m in rec["msgs"])
+            and bool(_REAL_SESSION.match(rec.get("sid") or "")))
 ```
 
-Use `scripts/routing_rate.py`. Do not write another ad-hoc parser; two of them
-disagreed today.
+Use `scripts/routing_rate.py`, which implements exactly this. Do not write another
+ad-hoc parser; two of them disagreed on the same day.
 
 ### A rate without its denominator is not a measurement
 
@@ -156,3 +169,56 @@ defect. The bench read only two of the hook nine terminal outcomes.
 
 When a measurement cannot explain an outcome, fix the measurement before trusting
 any number it produces.
+
+### Freeze the instrument before comparing two runs
+
+Measured 2026-09-15, and nearly reported as a ten-point regression:
+
+    like-for-like, 60 prompts        baseline    after
+    as STORED (mixed scorers)             61%      53%
+    both re-scored, CURRENT scorer        53%      53%
+
+There was no regression. The scorer had changed between the runs - N3 widened
+`grounding_violations` to catch bare filenames, so "cites files that do not exist"
+went 7 -> 11 on the SAME drafts. Reading a stored verdict computed under the old
+rules against a live verdict computed under the new ones measures the edit to the
+ruler, not the change to the system.
+
+The corpus had moved too: a filter dropping `<task-notification>` blocks meant the
+two runs no longer replayed the same list, so a 115-prompt comparison was really
+60.
+
+Two rules follow:
+
+* **Re-score both arms from raw outputs** whenever the scorer has changed. This is
+  the reason every draft body is persisted - both arms re-scored in seconds
+  instead of 100 minutes of model time.
+* **Change the corpus or the scorer, never both, between runs you intend to
+  compare** - and say which one moved.
+
+This was the fifth measurement defect in two days, after the contaminated corpus,
+the survivorship-biased p90, the partial rate quoted as final, and the instrument
+that could not explain 7% of its own outcomes. Every one inflated or deflated a
+number that had already been reported.
+
+
+### The noise floor for this benchmark, measured
+
+Two runs of `bench_session_replay.py` on the same commit, same corpus, same
+scorer (2026-09-15, n=115 each):
+
+    acceptable        69.6%   69.6%      identical
+    drafts produced   70.4%   77.4%      7 points apart
+    verdict flips     24 of 115 prompts changed verdict between runs
+
+The headline was identical and the internals were not; the two effects cancelled.
+
+What follows, and what every claim in this repo must respect:
+
+* **Acceptance is stable.** A difference above ~5 points is probably real.
+* **Draft production is not.** Anything below ~10 points there is noise.
+* **Per-prompt comparison is worthless.** A fifth of prompts flip for free, so
+  "this prompt improved" is never evidence.
+
+Establish this before comparing, not after. It is the only reason G1's
+57% -> 70% can be stated as a result rather than a hope.
