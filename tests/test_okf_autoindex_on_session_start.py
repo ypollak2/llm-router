@@ -19,7 +19,6 @@ Constraint: the first prompt must not be delayed. A full index of this repo is
 from __future__ import annotations
 
 import importlib.util
-import os
 from pathlib import Path
 
 import pytest
@@ -112,7 +111,8 @@ def test_a_changed_repo_is_reindexed_even_inside_the_ttl(repo, monkeypatch):
 
 def test_each_project_has_its_own_stamp(repo, tmp_path, monkeypatch):
     import subprocess
-    other = tmp_path / "other"; other.mkdir()
+    other = tmp_path / "other"
+    other.mkdir()
     subprocess.run(["git", "init", "-q"], cwd=other, check=False)
     calls = _spawned(monkeypatch)
     sshook._maybe_reindex_okf_bg(str(repo))

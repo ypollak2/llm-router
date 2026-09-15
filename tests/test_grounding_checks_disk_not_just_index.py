@@ -96,7 +96,6 @@ def test_a_mere_mention_does_not_ground_a_symbol(tmp_path, monkeypatch):
 
 def test_one_subprocess_for_many_symbols(new_symbol, monkeypatch):
     calls = {"n": 0}
-    real = g.subprocess.run if hasattr(g, "subprocess") else None
 
     import subprocess as sp
     orig = sp.run

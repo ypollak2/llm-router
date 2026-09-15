@@ -16,10 +16,8 @@ or `git`.
 from __future__ import annotations
 
 import inspect
-import os
 from pathlib import Path
 
-import pytest
 
 from llm_router.tools import local_task as lt
 
