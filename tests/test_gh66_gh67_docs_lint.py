@@ -88,7 +88,16 @@ _EXCLUDED_FILES = {
 # checked, so when one lands, move its doc out of PROPOSAL_ and the lint starts
 # guarding it again.
 _EXCLUDED_NAME_PREFIXES = ("PROPOSAL_",)
-_EXCLUDED_DIR_PREFIXES = (_REPO_ROOT / "docs" / "releases",)
+# Released notes and archived plans both describe what WAS true. Linting them for
+# current tool names, package names and env vars asks a historical record to
+# describe the present, and the only way to satisfy it is to falsify the record.
+# docs/archive/README.md states the rule; see the audits there, which quote the
+# pre-rebrand `llm_router <subcommand>` spellings precisely because they are what
+# the audit found.
+_EXCLUDED_DIR_PREFIXES = (
+    _REPO_ROOT / "docs" / "releases",
+    _REPO_ROOT / "docs" / "archive",
+)
 
 
 def _scanned_files() -> list[Path]:

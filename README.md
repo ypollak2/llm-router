@@ -11,9 +11,18 @@
 <h1 align="center">llm-router</h1>
 
 <p align="center">
-  <strong>Stop hitting the limit on your Claude Pro or Max plan.</strong><br/>
-  llm-router answers the routine prompts on free and cheap models, so your subscription quota
-  is still there when you need it at 4pm. No API keys. No change to how you work.
+  <strong>Spend less of your Claude Pro or Max plan on routine prompts.</strong><br/>
+  llm-router drafts an answer on a free local model first, so the cheap questions can be
+  answered cheaply. No API keys. No change to how you work.
+</p>
+
+<p align="center">
+  <sub><b>How the default mode actually works:</b> the draft is injected into Claude's context
+  as an unverified hint, and Claude decides whether to use it. A draft being produced does
+  <i>not</i> by itself mean a Claude turn was skipped or quota was saved — Claude still takes the
+  turn. Only the explicit turn-replacement modes (<code>LLM_ROUTER_ZERO_CLAUDE=1</code>) substitute
+  the routed answer outright. Measured on 105 real prompts from this author's own sessions,
+  76% produced a draft and 72% produced one worth relaying.</sub>
 </p>
 
 <p align="center">
@@ -101,7 +110,7 @@ transcript — the model choice changes underneath.
 
 ### Why a proxy cannot do this
 
-Every other router in this category is a **proxy**: you point your agent at a
+Most routers in this category are a **proxy**: you point your agent at a
 local endpoint and it forwards requests using *your API keys*. That design has a
 hard limit — **a proxy cannot intercept a session authenticated by a
 subscription, because there is no key to forward.**
@@ -321,7 +330,7 @@ Full command reference: **[guide/GETTING_STARTED.md](guide/GETTING_STARTED.md)**
 ## Providers
 
 20+ providers, free-first. **Ollama** (local, free) leads the chain; **OpenRouter**
-(343 models behind one key) is the biggest single unlock; **Gemini** and **Groq** have
+(hundreds of models behind one key — see the provider reference for the current list) is the biggest single unlock; **Gemini** and **Groq** have
 usable free tiers. Anthropic works via your existing Claude subscription — no API key
 needed.
 
@@ -377,13 +386,24 @@ Savings are calculated by comparing actual spend against a baseline of routing e
 - Savings vary significantly by workload — code-heavy sessions route more to cheap models
 - The router itself adds small overhead (classification costs ~$0.0001 per ambiguous task)
 
-**Observed range:** 35–80% savings depending on policy and task mix. The "87%" figure in some docs represents a single-user peak over a specific development period, not a guaranteed outcome.
+**On savings figures.** Percentages quoted anywhere in this project are a *counterfactual* —
+what the same tokens would have cost at API list price, against what was actually spent. On a
+flat-rate subscription that is not money saved; it is quota preserved, and the two are not
+interchangeable. The "35–80%" and "87%" figures are single-user observations over particular
+development periods, with no stated denominator, and should be read as anecdotes rather than
+as a range you can expect. `llm-router summary` reports what your own usage actually did.
 
 ---
 
 ## Trust, Privacy, and Local-First Design
 
-llm-router runs entirely on your machine. There is no hosted proxy, no telemetry, no account required.
+llm-router runs entirely on your machine. There is no hosted proxy, nothing is sent to an
+llm-router service, and no account is required.
+
+It does keep **local** telemetry, and since 2026-09 that telemetry steers routing: every model
+attempt and its outcome is recorded so a chronically slow model can be demoted, and a routed
+answer is marked successful only if it is actually usable. All of it stays in
+`~/.llm-router/` and none of it leaves the machine.
 
 | What | Where | Details |
 |------|-------|---------|
@@ -392,6 +412,9 @@ llm-router runs entirely on your machine. There is no hosted proxy, no telemetry
 | **Usage logs** | `~/.llm-router/usage.db` | Unencrypted SQLite (filesystem permissions) |
 | **Classification cache** | In-memory | Cleared on process restart |
 | **Hook scripts** | `~/.claude/hooks/` | Local shell scripts, inspectable |
+| **Model attempts** | `~/.llm-router/attempts.jsonl` | Per-attempt outcome and latency; rotated |
+| **Session context** | `~/.llm-router/projects/<id>/` | Your prompts, tool calls and routed answers, per project |
+| **Repo knowledge (OKF)** | `~/.llm-router/knowledge/` | Symbols and paths from tracked files, never prose |
 
 **What we do:**
 - Scrub API keys from structured logs
@@ -518,7 +541,8 @@ uv run ruff check src/ tests/   # Lint
 
 ---
 
--|-----------|
+| Name | What it is |
+|------|------------|
 | `llm-routing` | Current PyPI package (`pip install llm-routing`) |
 | `llm-router` | CLI command and GitHub repo name |
 | `claude-code-llm-router` | Deprecated legacy package (redirects to `llm-routing`) |

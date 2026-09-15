@@ -1,5 +1,13 @@
 # Backlog
 
+> One list. An item is open until a line under "Done" says otherwise, and an item
+> that is done is struck through here rather than deleted — the evidence is what
+> makes it checkable later.
+>
+> Executed plans live in [archive/](archive/), not in `docs/`. A finished plan
+> left alongside current documents reads as current intent, which is how item 1
+> below came to be listed as open in the table and fixed twelve lines later.
+
 Open items with a plan behind them. Newest first. No item lands here without
 either a linked plan or a one-line repro.
 
@@ -11,7 +19,7 @@ several of them wrong. Where a count is stated, the command that produces it is 
 
 | # | Item | Evidence | Plan |
 |---|---|---|---|
-| 1 | **Savings are credited before the substitution check.** `log_direct_savings()` fires unconditionally at `auto-route.py:3975` with `gates_passed=True` and no adoption check (`savings_logger.py:149,184`); `_turn_blocked` is computed at `:4014` and gates only `log_direct_to_db()` at `:4020`. Rows reach `savings_stats` via either importer (`session-end.py:348,391` or `cost.py:2925`), still unchecked. | Window 2026-09-12 16:30 → 09-13 07:17: **38 rows / $0.593715** booked, of which **31 rows ($0.516110) are DIRECT drafts** and 7 ($0.077605) are receipt records. Matching the 26 `DRAFT UNUSED` invocation ids to their rows gives **$0.426410 credited for explicitly discarded drafts**. | [PLAN_SAVINGS_ATTRIBUTION.md](PLAN_SAVINGS_ATTRIBUTION.md) |
+| 1 | ~~**Savings are credited before the substitution check.**~~ **FIXED 2026-09-13** (see Done, below) — `log_direct_savings()` fires unconditionally at `auto-route.py:3975` with `gates_passed=True` and no adoption check (`savings_logger.py:149,184`); `_turn_blocked` is computed at `:4014` and gates only `log_direct_to_db()` at `:4020`. Rows reach `savings_stats` via either importer (`session-end.py:348,391` or `cost.py:2925`), still unchecked. | Window 2026-09-12 16:30 → 09-13 07:17: **38 rows / $0.593715** booked, of which **31 rows ($0.516110) are DIRECT drafts** and 7 ($0.077605) are receipt records. Matching the 26 `DRAFT UNUSED` invocation ids to their rows gives **$0.426410 credited for explicitly discarded drafts**. | [PLAN_SAVINGS_ATTRIBUTION.md](archive/PLAN_SAVINGS_ATTRIBUTION.md) |
 | 2 | **`TOOL LOOP RESCUE` logs "routing to the local agent loop" before the guard that decides whether anything runs.** The announcement sits at `auto-route.py:3763`; the execution block at `:3788` excludes enforce modes `off`/`shadow`. In a session with enforcement off, the line is emitted and nothing executes. | 38 rescue announcements in the window, **all in benchmark subprocesses** whose launcher sets `LLM_ROUTER_ENFORCE: "off"` (`scripts/bench_backend_quality.py:622`). **Not a swallowed exception** — an earlier entry here claimed that and was wrong. | move the log line below the guard, or state the mode in it |
 | 3 | **The mini-summary banner does not count routes.** `routes: N` is the `limit=200` argument to `LineageStore().recent()` saturating; `top tier: local (M)` counts classification-time rows in `model_tracking.jsonl`, written before any model is called — including `research/*` rows naming Ollama when `build_chain()` returns `[]` for research (`chain_builder.py:147`). | `auto-route.py:3073-3105` | Stage 3 of PLAN_SAVINGS_ATTRIBUTION |
 | 4 | **Enforcement is satisfiable without routing any work.** `enforce-route.py:1329` clears the hold on any tool whose bare name starts with `llm_`, plus exact-name and same-server matches; read-only tools are exempt (`:1403`) and repeated violations auto-unblock (`:1502`). Cleared holds are recorded as positive `route_realized` events. | All **4** `mcp__llm_router__llm` calls in session `3e33e160` were "Release lock … one-word ack" requests. Zero substantive delegation. | undesigned — decide whether enforcement verifies the call, or stops claiming it proves routing |
