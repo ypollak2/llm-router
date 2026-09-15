@@ -146,6 +146,17 @@ else
 fi
 echo ""
 
+echo "🔟 Checking the version bump against the public surface..."
+# N14: CHANGELOG.md records in its own words that 13.3.1 added llm_local_task -
+# new API surface - and shipped as a PATCH. Writing the violation down did not
+# stop it; nothing in this path ever compared the surface to the number.
+if ! python3 scripts/release/semver_gate.py --check; then
+    echo -e "${RED}The version bump is smaller than the public surface change.${NC}"
+    echo "Bump the version, or record the override deliberately in CHANGELOG.md."
+    exit 1
+fi
+echo ""
+
 echo -e "${GREEN}========================================${NC}"
 echo -e "${GREEN}✅ All pre-release checks passed!${NC}"
 echo -e "${GREEN}Ready to run: bash scripts/release/release.sh${NC}"

@@ -1,0 +1,11 @@
+{
+  "pipeline_params": {
+    "router_name": "llm-router-knn",
+    "router_cls_name": "KNNRetrievalRouter",
+    "models": ["gemini-3.1-flash-lite-preview", "qwen/qwen3-235b-a22b-2507", "deepseek/deepseek-v4-flash"],
+    "description": "Instance-level retrieval routing. Each query retrieves its 120 nearest neighbours from an external corpus we have already measured the candidate pool over, estimates P(correct | query, model) from those neighbours' outcomes with shrinkage toward each model's global prior, and picks the argmax. Similarity combines a frozen sentence embedding with deterministic structural features. Retrieval index is 5,200 questions from 27 public datasets, audited SHA-256 exact plus MinHash near-duplicate against all 9,613 RouterArena evaluation questions at zero overlap; hyperparameters and pool selected on a disjoint split of that external corpus; per-model cost estimates use RouterArena's published price table with output lengths measured on external prompts only. No RouterArena prompt, answer, label or outcome informs any parameter."
+  },
+  "router": "llm-router-knn",
+  "router_name": "llm-router-knn",
+  "description": "llm-router by Yali Pollak - instance-level retrieval router over a measured outcome matrix."
+}
