@@ -1838,7 +1838,9 @@ def _coverage_unobserved(reason_name: str) -> None:
         from llm_router.coverage import Reason, record_unobserved
 
         record_unobserved(Reason[reason_name])
-    except Exception:  # noqa: BLE001
+    except Exception as _exc:  # noqa: BLE001
+        from llm_router import failopen as _fo
+        _fo.record("CHZ-FO-HOOK-COVERAGE-UNOBSERVED", _exc)
         pass
 
 
@@ -1848,7 +1850,9 @@ def _coverage_observed(tool: str) -> None:
         from llm_router.coverage import record_observed
 
         record_observed(tool)
-    except Exception:  # noqa: BLE001
+    except Exception as _exc:  # noqa: BLE001
+        from llm_router import failopen as _fo
+        _fo.record("CHZ-FO-HOOK-COVERAGE-OBSERVED", _exc)
         pass
 
 
@@ -3131,7 +3135,9 @@ def _build_mini_summary() -> str | None:
             f"top task: {top_task} ({top_task_n})  ·  recorded cost: ${savings:.4f}\n"
             "   run `llm-router summary` for the full dashboard."
         )
-    except Exception:
+    except Exception as _exc:
+        from llm_router import failopen as _fo
+        _fo.record("CHZ-FO-HOOK-LINEAGE-RECENT", _exc)
         return None
 
 
@@ -3368,7 +3374,9 @@ def main() -> None:
         try:
             from llm_router.session_store import write_pointer as _write_pointer
             _write_pointer(session_id)
-        except Exception:                                    # noqa: BLE001
+        except Exception as _exc:                                    # noqa: BLE001
+            from llm_router import failopen as _fo
+            _fo.record("CHZ-FO-HOOK-SESSION-POINTER", _exc)
             pass
     zero_claude = _zero_claude_enabled()
 
@@ -3734,7 +3742,9 @@ def main() -> None:
                 role="user",
                 task_type=task_type,
             )
-        except Exception:
+        except Exception as _exc:
+            from llm_router import failopen as _fo
+            _fo.record("CHZ-FO-HOOK-SESSION-RECORD", _exc)
             pass
 
         # S2-2: and Claude's answers to the PREVIOUS prompts, which nothing else
@@ -3749,7 +3759,9 @@ def main() -> None:
                 _debug_log(
                     f"[INVOCATION {invocation_id:.3f}] PERSISTED {_n} Claude turn(s) to session store"
                 )
-        except Exception:
+        except Exception as _exc:
+            from llm_router import failopen as _fo
+            _fo.record("CHZ-FO-HOOK-ASSISTANT-TURNS", _exc)
             pass
 
         # Judge the PREVIOUS invocation's draft, now that the turn it produced is
@@ -4145,7 +4157,9 @@ def main() -> None:
                         session_id=session_id,
                         realized=_turn_blocked,
                     )
-                except Exception:
+                except Exception as _exc:
+                    from llm_router import failopen as _fo
+                    _fo.record("CHZ-FO-HOOK-SAVINGS-LOG", _exc)
                     pass
                 # Persist into usage + routing_decisions ONLY for turns that
                 # actually bypass Claude (audit P1): an echo turn still consumes
@@ -4163,7 +4177,9 @@ def main() -> None:
                             classifier_type=method,
                             session_id=session_id,
                         )
-                    except Exception:
+                    except Exception as _exc:
+                        from llm_router import failopen as _fo
+                        _fo.record("CHZ-FO-HOOK-SAVINGS-DB", _exc)
                         pass
                 # Session Context Accumulator: record this routed Q&A so later
                 # turns (in this session or a future one) have real prior
@@ -4178,7 +4194,9 @@ def main() -> None:
                 try:
                     from llm_router.grounding import draft_is_memorable
                     _memorable, _why_not = draft_is_memorable(_direct_result.text or "")
-                except Exception:                            # noqa: BLE001
+                except Exception as _exc:                            # noqa: BLE001
+                    from llm_router import failopen as _fo
+                    _fo.record("CHZ-FO-HOOK-DRAFT-MEMORABLE", _exc)
                     pass
                 if not _memorable:
                     _debug_log(
@@ -4197,7 +4215,9 @@ def main() -> None:
                             tool=tool,
                             model=f"{_direct_result.model.provider}/{_direct_result.model.model}",
                         )
-                    except Exception:
+                    except Exception as _exc:
+                        from llm_router import failopen as _fo
+                        _fo.record("CHZ-FO-HOOK-SESSION-ROUTED-QA", _exc)
                         pass
                 _violation_notice = _prior_violation_notice(previous_unrouted)
                 # Audit §2.3: under zero-Claude a SUCCESSFUL route must bypass
@@ -4241,7 +4261,9 @@ def main() -> None:
                 try:
                     from llm_router.direct_diagnostics import record_sample as _rec
                     _rec(_direct_elapsed_s, timed_out=True)
-                except Exception:
+                except Exception as _exc:
+                    from llm_router import failopen as _fo
+                    _fo.record("CHZ-FO-HOOK-DIRECT-SAMPLE", _exc)
                     pass
         except ImportError:
             _debug_log(f"[INVOCATION {invocation_id:.3f}] DIRECT SKIP: modules not available")
@@ -4368,7 +4390,9 @@ def main() -> None:
             from llm_router.execution_signal import needs_execution as _needs_exec
             if _needs_exec(prompt):
                 _ctx_tool = "llm_act"
-        except Exception:
+        except Exception as _exc:
+            from llm_router import failopen as _fo
+            _fo.record("CHZ-FO-HOOK-EXECUTION-SIGNAL", _exc)
             pass
         # CHZ-SURF-01: same display-boundary translation as `tool` above.
         _ctx_disp = route_tool(_ctx_tool)
@@ -4624,7 +4648,9 @@ def main() -> None:
             metadata={"tool": str(tool), "method": str(method),
                       "complexity": str(complexity)},
         ))
-    except Exception:
+    except Exception as _exc:
+        from llm_router import failopen as _fo
+        _fo.record("CHZ-FO-HOOK-EXECUTION-LEDGER", _exc)
         pass
     _mark("ledger_write")
 
