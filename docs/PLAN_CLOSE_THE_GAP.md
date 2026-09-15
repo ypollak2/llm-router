@@ -1,5 +1,13 @@
 # Closing the gap — where the 115 prompts actually go
 
+> **Update 2026-09-15, after G5 and G1.** Usable drafts moved **57% -> 70%**,
+> measured twice on independent runs that both landed on 70%. The noise floor:
+> acceptance is stable across identical runs, draft PRODUCTION swings 7 points,
+> and 24 of 115 prompts flip verdict for free — so per-prompt comparisons are
+> worthless and only differences above ~5 points on acceptance mean anything.
+> G1 was the whole gain. The sections below are the pre-G1 state, kept because
+> the arithmetic of what is and is not addressable has not changed.
+
 Written 2026-09-15 from the session-ordered replay (`scripts/bench_session_replay.py`,
 5 real sessions in order, n=115), scored with the current scorer.
 

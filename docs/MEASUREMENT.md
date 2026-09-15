@@ -200,3 +200,25 @@ This was the fifth measurement defect in two days, after the contaminated corpus
 the survivorship-biased p90, the partial rate quoted as final, and the instrument
 that could not explain 7% of its own outcomes. Every one inflated or deflated a
 number that had already been reported.
+
+
+### The noise floor for this benchmark, measured
+
+Two runs of `bench_session_replay.py` on the same commit, same corpus, same
+scorer (2026-09-15, n=115 each):
+
+    acceptable        69.6%   69.6%      identical
+    drafts produced   70.4%   77.4%      7 points apart
+    verdict flips     24 of 115 prompts changed verdict between runs
+
+The headline was identical and the internals were not; the two effects cancelled.
+
+What follows, and what every claim in this repo must respect:
+
+* **Acceptance is stable.** A difference above ~5 points is probably real.
+* **Draft production is not.** Anything below ~10 points there is noise.
+* **Per-prompt comparison is worthless.** A fifth of prompts flip for free, so
+  "this prompt improved" is never evidence.
+
+Establish this before comparing, not after. It is the only reason G1's
+57% -> 70% can be stated as a result rather than a hope.
