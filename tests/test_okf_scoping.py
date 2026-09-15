@@ -237,7 +237,14 @@ def test_okf_helpers_never_raise_into_the_hook(tmp_path, monkeypatch):
 
     monkeypatch.setattr(okf, "find_relevant", _boom)
     monkeypatch.setattr(okf, "enrich_from_response", _boom)
-    assert de._okf_inject("hello") == "hello", "injection failure must pass the prompt through"
+    out = de._okf_inject("hello")
+    # The invariant is that an OKF STORE failure neither raises nor contributes
+    # content — not that the prompt is byte-identical. Since N11 the same choke
+    # point also carries observed repo state, which is read from `git` and cannot
+    # be affected by the store being on fire. Asserting byte-identity here would
+    # pin the absence of every future context source, not the OKF contract.
+    assert "hello" in out, "injection failure must pass the prompt through"
+    assert "knowledge_context" not in out, "a failed store must contribute nothing"
     de._okf_enrich("p", "r", "m")  # must not raise
 
 
