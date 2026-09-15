@@ -169,3 +169,34 @@ defect. The bench read only two of the hook nine terminal outcomes.
 
 When a measurement cannot explain an outcome, fix the measurement before trusting
 any number it produces.
+
+### Freeze the instrument before comparing two runs
+
+Measured 2026-09-15, and nearly reported as a ten-point regression:
+
+    like-for-like, 60 prompts        baseline    after
+    as STORED (mixed scorers)             61%      53%
+    both re-scored, CURRENT scorer        53%      53%
+
+There was no regression. The scorer had changed between the runs - N3 widened
+ to catch bare filenames, so "cites files that do not exist"
+went 7 -> 11 on the SAME drafts. Reading a stored verdict computed under the old
+rules against a live verdict computed under the new ones measures the edit to the
+ruler, not the change to the system.
+
+The corpus had moved too: a filter dropping  blocks meant the
+two runs no longer replayed the same list, so a 115-prompt comparison was really
+60.
+
+Two rules follow:
+
+* **Re-score both arms from raw outputs** whenever the scorer has changed. This is
+  the reason every draft body is persisted - both arms re-scored in seconds
+  instead of 100 minutes of model time.
+* **Change the corpus or the scorer, never both, between runs you intend to
+  compare** - and say which one moved.
+
+This was the fifth measurement defect in two days, after the contaminated corpus,
+the survivorship-biased p90, the partial rate quoted as final, and the instrument
+that could not explain 7% of its own outcomes. Every one inflated or deflated a
+number that had already been reported.
