@@ -1332,6 +1332,17 @@ LAYER_WEIGHTS = {
 }
 
 
+# The hook's OWN scorer, and NOT a duplicate of llm_router.classify.
+#
+# Delegating it to classify._score_categories was tried on 2026-09-15 and
+# reverted: they disagree on 150 of 150 real prompts, because this version
+# scores a `coordination` category the shared engine does not have at all, with
+# a length gate on top. Four tests caught it in the same minute.
+#
+# classify_complexity above IS a delegation, verified 1000/1000 against the
+# implementation it replaced. Same file, same shape, different answer: two
+# functions looking alike is not evidence they do the same thing, and only the
+# measurement settles which is which.
 def score_categories(text: str) -> dict[str, int]:
     """Score each category using three signal layers."""
     scores: dict[str, int] = {}
@@ -1500,35 +1511,20 @@ def classify_with_gemini(text: str) -> str | None:
 
 
 def classify_complexity(text: str, task_type: str) -> str:
-    """Determine task complexity from text signals."""
-    if COMPLEXITY_DEEP_REASONING.search(text):
-        return "deep_reasoning"
-    if COMPLEXITY_COMPLEX.search(text):
-        return "complex"
-    if COMPLEXITY_SIMPLE.search(text):
-        return "simple"
-    n = len(text)
-    # Length-based fallback — reached only when no lexical complexity/simplicity
-    # signal fired. The old flat gate (>150 chars → moderate, else moderate
-    # unless a query) tagged ordinary one-line prompts as moderate, so the
-    # simple-share sat at ~3% vs a ~30% target. Recalibrated so plain Q&A stays
-    # cheap far longer, while generation/analysis/code escalate to moderate once
-    # past a one-liner (they usually imply real work, not a lookup).
-    if n > 500:
-        return "complex"
-    if task_type == "query":
-        # Plain questions/lookups are cheap even when verbose. This is the fix
-        # for the moderate over-tagging: the old flat >150-char gate demoted
-        # ordinary questions to moderate; queries now stay simple up to ~400
-        # chars. Other task types (research/generate/analyze/code) imply real
-        # work and stay moderate.
-        return "moderate" if n > 400 else "simple"
-    return "moderate"
+    """Delegates to the shared engine. Kept as a name, not an implementation.
 
+    This was an AST-extracted copy of `llm_router.classify`, and the copy is what
+    made the two drift. HOOK_LIVE_POLICY reproduces the old local behaviour
+    EXACTLY — 1000 of 1000 comparisons over 200 real prompts x 5 task types — so
+    this delegation changes no routing.
 
-# ── Main Classifier ──────────────────────────────────────────────────────────
+    Not HOOK_POLICY, despite the name: that one applies `apply_complexity_floor`,
+    which the hook never did, and would push 26% of prompts to a more expensive
+    tier. `tests/test_hook_classifier_equivalence.py` pins both facts.
+    """
+    from llm_router.classify import HOOK_LIVE_POLICY, complexity_for
 
-
+    return complexity_for(text, policy=HOOK_LIVE_POLICY, task_type=task_type).value
 def classify_prompt(text: str) -> dict | None:
     """Classify using heuristic scoring → Ollama → cheap API → weak heuristic → auto."""
     stripped = text.strip()
