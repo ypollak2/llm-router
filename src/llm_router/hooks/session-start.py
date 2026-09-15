@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+import hashlib
 import subprocess
 import sys
 import time
@@ -1104,6 +1105,105 @@ def _maybe_refresh_benchmarks_bg() -> None:
         pass  # never block session start
 
 
+def _maybe_reindex_okf_bg(cwd: str | None = None) -> None:
+    """Refresh this project's OKF index in the background, if it looks stale.
+
+    WHY, precisely — because the obvious reason is wrong. A stale index does NOT
+    cause the grounding gate to reject a valid citation:
+
+      * `grounding_violations` checks the DISK (`Path(path).exists()`), so a file
+        created seconds ago already passes.
+      * `symbol_violations` consults the index, but since 2026-09-15 it falls back
+        to `git grep --untracked` before calling a name invented. That is what
+        closes the within-session gap, and re-indexing cannot: you write a
+        function at 14:20 and ask about it at 14:21, and any index built at
+        session start is already stale.
+
+    What a stale index actually costs is RETRIEVAL. `okf.find_relevant` cannot
+    return a document it has never seen, so a prompt about a new module gets no
+    injected context, the OKF RESCUE arm cannot fire, and the prompt falls through
+    to Claude for want of material rather than for want of capability.
+
+    Detached exactly like `_warm_ollama_bg` and `_maybe_refresh_benchmarks_bg`, so
+    the first prompt is never delayed. The index takes seconds on a 1200-file
+    repo; doing it inline would be felt on every session.
+
+    Note the index covers TRACKED files only (`git ls-files`), so an uncommitted
+    new file is never indexed however often this runs — another reason the disk
+    fallback in `symbol_violations`, not this, is what fixes the rejection.
+
+    Off with LLM_ROUTER_OKF_AUTOINDEX=0.
+    """
+    if os.environ.get("LLM_ROUTER_OKF_AUTOINDEX", "").strip() in ("0", "off", "false", "no"):
+        return
+    root = cwd or os.getcwd()
+    try:
+        if not os.path.isdir(os.path.join(root, ".git")):
+            return          # not a project; nothing to index
+    except Exception:
+        return
+
+    # Only when something actually changed since the last index. The stamp is per
+    # project, so switching repos re-indexes the new one rather than skipping it.
+    ttl_h = float(os.environ.get("LLM_ROUTER_OKF_AUTOINDEX_TTL_H", "6") or 6)
+    stamp = os.path.join(
+        STATE_DIR, "okf_index_stamp",
+        hashlib.sha1(os.path.realpath(root).encode()).hexdigest()[:16],
+    )
+    try:
+        age_h = (time.time() - os.path.getmtime(stamp)) / 3600.0
+        if age_h < ttl_h and not _repo_changed_since(root, os.path.getmtime(stamp)):
+            return
+    except OSError:
+        pass                # no stamp yet — index
+
+    try:
+        os.makedirs(os.path.dirname(stamp), exist_ok=True)
+        with open(stamp, "w") as fh:
+            fh.write(str(time.time()))
+    except OSError:
+        pass
+
+    # index_project takes a Path, not a str. Passing a str raised AttributeError
+    # in the detached child — which, with stderr going to DEVNULL, failed in total
+    # silence and looked exactly like "the index is up to date". A background task
+    # that cannot report its own failure is worse than no background task, so the
+    # child writes its outcome to a log the stamp points at.
+    log = stamp + ".log"
+    script = (
+        "from pathlib import Path; from llm_router import okf; "
+        f"okf.index_project(Path({root!r}))"
+    )
+    try:
+        with open(log, "w") as errfh:
+            subprocess.Popen(
+                [sys.executable, "-c", script],
+                cwd=root,
+                stdout=subprocess.DEVNULL,
+                stderr=errfh,
+                start_new_session=True,
+            )
+    except Exception:
+        pass                # never block session start
+
+
+def _repo_changed_since(root: str, since: float) -> bool:
+    """Has any tracked source file been modified since *since*?
+
+    Cheap enough to run inline: `git status --porcelain` on a warm repo is a few
+    milliseconds, and it answers the only question that matters — is there
+    anything new to index at all.
+    """
+    try:
+        r = subprocess.run(
+            ["git", "status", "--porcelain", "--untracked-files=normal"],
+            cwd=root, capture_output=True, text=True, timeout=2.0,
+        )
+        return bool(r.stdout.strip())
+    except Exception:
+        return True         # unknown means index; a wasted index is cheap
+
+
 def _maybe_update_pull_routing_rules() -> None:
     """Silently refresh IDE pull-routing rule files if they are out of date.
 
@@ -1262,6 +1362,16 @@ def main() -> None:
     # 5. Trigger benchmark refresh in background if stale (v5.0 adaptive router).
     # Runs as a detached subprocess so the session start is never blocked.
     _maybe_refresh_benchmarks_bg()
+
+    # 5b. Refresh this project's OKF index in the background. A stale index does
+    # not cause false rejections (the gates check disk), but it does cost
+    # RETRIEVAL: find_relevant cannot return a document it has never seen, so a
+    # prompt about a new module gets no context and falls through to Claude for
+    # want of material rather than capability.
+    _maybe_reindex_okf_bg(
+        (_hook_input.get("cwd") if isinstance(_hook_input, dict) else None)
+        or os.getcwd()
+    )
 
     # 6. Warm up Ollama's classifier model in the background so the first
     # prompt of the new session doesn't pay model-load latency on its
