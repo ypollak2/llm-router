@@ -216,6 +216,7 @@ ENV_REGISTRY: dict[str, tuple[str, str, int]] = {
     "LLM_ROUTER_SUBAGENT_DIRECT_MAX_COMPLEXITY": ("llm_router", "hooks/agent-route.py", 1),
     "LLM_ROUTER_SUBAGENT_GOVERNANCE": ("llm_router", "hooks/agent-route.py", 1),
     "LLM_ROUTER_SUBAGENT_MODEL_PIN": ("llm_router", "hooks/agent-route.py", 1),
+    "LLM_ROUTER_STOP_HOOK": ("llm_router", "hooks/codex-stop.py", 2),
     "LLM_ROUTER_SUBPROCESS_TIMEOUT": ("llm_router", "hooks/session-end.py", 2),
     "LLM_ROUTER_SUBSCRIPTION_USD_PER_MONTH": ("llm_router", "quota_savings.py", 1),
     "LLM_ROUTER_SUPPRESS_PRICING_STALENESS": ("llm_router", "pricing.py", 1),
