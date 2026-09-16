@@ -32,8 +32,9 @@ and local-task execution defaults. No MCP tool or CLI command is added or remove
 - `llm_local_task` now defaults to proposing writes (`apply_writes=False`) and
   no longer implicitly enables unrestricted commands when writes are applied.
   Acceptance checks remain separate from worker execution.
-- Removed unused policy-version code and a module that could not be imported;
-  restored regression coverage while triaging quarantined tests.
+- Removed unused policy-version code and restored regression coverage while
+  triaging quarantined tests. Added an import regression check that records two
+  existing control-plane modules with missing enterprise dependencies.
 
 ### Release checks
 
