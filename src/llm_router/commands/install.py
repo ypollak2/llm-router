@@ -342,7 +342,7 @@ _HOST_SNIPPETS: dict[str, str] = {
 ──────────────────────────────────────────────────────────────────
 Writes, in ~/.codex:
   config.toml  [mcp_servers.llm_router] and the hook trust records
-  hooks.json   UserPromptSubmit -> auto-route (the ⚡ ROUTE hint), PostToolUse -> telemetry
+  hooks.json   UserPromptSubmit -> auto-route, PostToolUse -> telemetry, Stop -> savings
   AGENTS.md    a marked block of routing rules (replaced on re-run)
 Legacy config.yaml / config.json / rules/llm_router.md entries are removed: Codex never read them.
 Restart Codex, then run {savings_tool} to verify the DB is shared.
@@ -657,6 +657,15 @@ def _install_codex_files(mode: str = "mcp") -> list[str]:
         our_commands.add(str(post_dst))
         actions.append(f"✓ Installed telemetry hook to {post_dst}")
 
+    stop_dst = hooks_dir / "codex-stop.py"
+    stop_src = pkg_hooks / "codex-stop.py"
+    if stop_src.exists():
+        _shutil.copy2(stop_src, stop_dst)
+        stop_dst.chmod(0o755)
+        install_manifest.record("file", stop_dst)
+        our_commands.add(_codex_hook_command(stop_dst))
+        actions.append(f"✓ Installed per-turn savings hook to {stop_dst}")
+
     doc: dict = {}
     if hooks_json.exists():
         try:
@@ -684,6 +693,8 @@ def _install_codex_files(mode: str = "mcp") -> list[str]:
             _ensure("UserPromptSubmit", None, _codex_hook_command(route_dst))
         if post_src.exists():
             _ensure("PostToolUse", "Bash", str(post_dst))
+        if stop_src.exists():
+            _ensure("Stop", None, _codex_hook_command(stop_dst))
         if changed or not hooks_json.exists():
             hooks_json.write_text(_json.dumps(doc, indent=2) + "\n")
             install_manifest.record("codex_hooks", hooks_json)

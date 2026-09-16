@@ -17,6 +17,10 @@ and local-task execution defaults. No MCP tool or CLI command is added or remove
 
 ### Fixed
 
+- Codex installations now register and trust a Stop hook that shows estimated
+  savings today and over the router's lifetime after every turn. The Codex
+  plugin uses the same reporter, which preserves ongoing session context and
+  reads the existing shared ledger across hosts.
 - Routed execution paths share repository knowledge injection. The MCP path now
   loads session events from the caller's project even when the server starts in
   another directory. Fresh Git facts supply branch, commit and working-tree state.
