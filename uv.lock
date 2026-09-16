@@ -1197,7 +1197,7 @@ wheels = [
 
 [[package]]
 name = "llm-routing"
-version = "13.3.1"
+version = "13.3.2"
 source = { editable = "." }
 dependencies = [
     { name = "aiohttp" },
