@@ -79,6 +79,19 @@ def inject(prompt: str, *, root: str | None = None, limit: int = 3,
     # itself with max_tokens, and already wraps its output in the sentinel that
     # stops injected context being re-recorded as new ground truth. So this is
     # wiring, not a new mechanism.
+    # Observed repository state — what is true right now, which neither OKF (what
+    # is written) nor the session (what was said) can answer. A continuation like
+    # "merge once CI is green" needs the branch; without it a model invents one.
+    # Read from git, never from model output, and overwritten every call, so it
+    # cannot compound the way a remembered fabrication does.
+    try:
+        from llm_router.repo_facts import render as _repo_render
+        state = _repo_render(root)
+    except Exception:                                        # noqa: BLE001
+        state = ""
+    if state:
+        body = f"{state}\n\n{body}"
+
     if not session_id:
         return body
     try:

@@ -49,6 +49,8 @@ def _hooks_json(root_var: str) -> dict:
     """
     events: dict[str, dict[str, list]] = {}
     for src_name, installed_name, event, matcher in _HOOK_DEFS:
+        if root_var == "${CODEX_PLUGIN_ROOT}" and event == "Stop" and src_name == "session-end.py":
+            src_name = "codex-stop.py"
         events.setdefault(event, {}).setdefault(matcher, []).append(
             {
                 "type": "command",
@@ -160,6 +162,7 @@ def build() -> dict[Path, str]:
     # src/llm_router/. Copying keeps the bundle self-contained; the --check mode
     # then fails CI whenever a source hook is edited without rebuilding.
     hooks_src = REPO / "src" / "llm_router" / "hooks"
+    files[REPO / "hooks" / "codex-stop.py"] = (hooks_src / "codex-stop.py").read_text()
     for src_name, _installed, _event, _matcher in _HOOK_DEFS:
         origin = hooks_src / src_name
         if origin.is_file():

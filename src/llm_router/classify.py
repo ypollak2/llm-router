@@ -415,9 +415,30 @@ class ClassifyPolicy:
     apply_floor: bool = True  # clamp complexity up to the task-type floor (anti-under-routing)
 
 
-# Reference policy (the UserPromptSubmit hook): keyword-aware, >500 → complex,
-# query-aware. This is the module default.
+# The module default: keyword-aware, >500 -> complex, query-aware, WITH the
+# anti-under-routing floor. `ensemble` and `tools/agentic` rely on this default,
+# so it is not free to change.
+#
+# Its name is a historical inaccuracy that cost real time. It was introduced as
+# "the reference policy (the UserPromptSubmit hook)", and the hook does NOT behave
+# this way: it never applies the complexity floor. Measured 2026-09-15 over 200
+# real prompts x 4 task types, hook vs classify(HOOK_POLICY) agree on 74%, and
+# every one of the 207 disagreements is the floor clamping the shared engine UP
+# — 189 of them "moderate" becoming "complex". Believing the name, one would
+# rewire the hook to this policy and make a quarter of all prompts route to a
+# more expensive tier.
 HOOK_POLICY = ClassifyPolicy()
+
+# What the hook ACTUALLY does. Identical to HOOK_POLICY except that the floor is
+# not applied, which reproduces `hooks/auto-route.py:classify_complexity` exactly:
+# 800 of 800 comparisons agree. This is the policy to rewire the hook to when its
+# duplicated classifier is finally deleted, because it changes no routing.
+#
+# Whether the hook SHOULD apply the floor is a separate, measurable question:
+# the floor exists to stop under-routing, and answering it needs a replay, not a
+# preference. Consolidating the implementation and changing the behaviour are two
+# changes, and doing them in one commit is how a refactor hides a regression.
+HOOK_LIVE_POLICY = ClassifyPolicy(apply_floor=False)
 
 # Router ``_resolve_profile`` no-hint fallback: pure length, <600 simple /
 # [600,2000] moderate / >2000 complex. Preserves the documented cost fix exactly.

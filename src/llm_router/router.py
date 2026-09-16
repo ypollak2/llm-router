@@ -1607,11 +1607,42 @@ def _baseline_cost(
         return 0.0
 
 
+def _cli_scope_root() -> str | None:
+    """Project root for a CLI-dispatch call, or None.
+
+    The MCP tool layer resolves the caller's workspace root for OKF retrieval;
+    this is the same question for session context. LLM_ROUTER_PROJECT_ROOT is the
+    explicit override, and the repo containing the cwd is the fallback — which is
+    correct for the hook and for the CLI, and simply absent for the long-lived
+    server, where it yields None rather than a confidently wrong bucket.
+    """
+    import os as _os
+
+    explicit = _os.environ.get("LLM_ROUTER_PROJECT_ROOT", "").strip()
+    if explicit:
+        return explicit
+    try:
+        from pathlib import Path as _P
+        here = _P.cwd()
+        for parent in [here, *here.parents]:
+            if (parent / ".git").exists():
+                return str(parent)
+    except Exception as exc:                                 # noqa: BLE001
+        # Recorded, not swallowed: a silent failure here returns None, the caller
+        # falls back to cwd-derived scope, and the session context comes back
+        # empty for reasons nobody can count. That is the exact failure this
+        # whole change exists to remove.
+        from llm_router import failopen
+        failopen.record("CHZ-FO-ROUTER-CLI-SCOPE-ROOT", exc)
+    return None
+
+
 async def _cli_prompt_with_context(
     prompt: str,
     provider: str,
     caller_context: str | None,
     config: Any,
+    project_root: str | None = None,
 ) -> str:
     """Fold accumulated session context into a CLI-dispatch prompt.
 
@@ -1647,6 +1678,14 @@ async def _cli_prompt_with_context(
             max_context_tokens=getattr(config, "context_max_tokens", 1500),
             is_free_model=provider in ("codex", "gemini_cli"),
             target_provider=provider,
+            # Same root OKF retrieval is scoped to. Without it the session bucket
+            # is derived from the server's cwd ($HOME), which no session writes
+            # to, so the durable-context layer silently returned nothing.
+            # The CALLER's project, threaded in. Deriving it from this process's
+            # cwd is wrong for the MCP server, whose cwd is $HOME — a directory no
+            # session ever writes to, so the durable-context layer came back empty
+            # while the session id resolved perfectly.
+            project_root=project_root,
         )
     except Exception as e:
         # CHZ-FO-02: this returns the bare prompt, which is what the SUCCESS path returns
@@ -2576,7 +2615,7 @@ async def _dispatch_model_loop(
                 elif provider == "codex" and (
                     _brokered := await _maybe_broker_dispatch(
                         "codex", model_name,
-                        await _cli_prompt_with_context(prompt, "codex", caller_context, config),
+                        await _cli_prompt_with_context(prompt, "codex", caller_context, config, _cli_scope_root()),
                     )
                 ) is not None:
                     # P1 phase 2: local Codex disabled (headless daemon) but the
@@ -2591,7 +2630,7 @@ async def _dispatch_model_loop(
                         elif ev_type == "turn.completed":
                             await _notify(ctx, "info", f"✓ {model_name} — {text}")
                     codex_result = await run_codex(
-                        await _cli_prompt_with_context(prompt, "codex", caller_context, config),
+                        await _cli_prompt_with_context(prompt, "codex", caller_context, config, _cli_scope_root()),
                         model=model_name, on_event=_codex_on_event
                     )
                     if not codex_result.success:
@@ -2614,7 +2653,7 @@ async def _dispatch_model_loop(
                 elif provider == "gemini_cli" and (
                     _brokered := await _maybe_broker_dispatch(
                         "gemini_cli", model_name,
-                        await _cli_prompt_with_context(prompt, "gemini_cli", caller_context, config),
+                        await _cli_prompt_with_context(prompt, "gemini_cli", caller_context, config, _cli_scope_root()),
                     )
                 ) is not None:
                     # P1 phase 2: local Gemini CLI disabled but the session broker ran it.
@@ -2624,7 +2663,7 @@ async def _dispatch_model_loop(
                         if text:
                             await _notify(ctx, "info", f"⚡ gemini: {text}")
                     gemini_result = await run_gemini_cli(
-                        await _cli_prompt_with_context(prompt, "gemini_cli", caller_context, config),
+                        await _cli_prompt_with_context(prompt, "gemini_cli", caller_context, config, _cli_scope_root()),
                         model=model_name, on_event=_gemini_on_event
                     )
                     if not gemini_result.success:
@@ -2656,7 +2695,7 @@ async def _dispatch_model_loop(
                         if text:
                             await _notify(ctx, "info", f"⚡ claude: {text}")
                     claude_result = await run_claude(
-                        await _cli_prompt_with_context(prompt, "anthropic", caller_context, config),
+                        await _cli_prompt_with_context(prompt, "anthropic", caller_context, config, _cli_scope_root()),
                         model=model_name, on_event=_claude_on_event
                     )
                     if not claude_result.success:

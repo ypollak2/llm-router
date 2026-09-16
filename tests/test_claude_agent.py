@@ -77,7 +77,11 @@ async def test_run_claude_success_and_argv():
     assert r.success and r.content == "pong"
     argv = list(captured["args"])
     assert argv[0] == "/usr/bin/claude"
-    assert "-p" in argv and "say pong" in argv
+    # The prompt now arrives with an observed-repo-state prefix (N11), so it is
+    # no longer its own argv element. What matters is that it is PASSED, not that
+    # it is passed bare.
+    assert "-p" in argv
+    assert any("say pong" in a for a in argv), argv
     assert "--output-format" in argv and "text" in argv
     # per-tier alias made it to --model
     assert argv[argv.index("--model") + 1] == "opus"

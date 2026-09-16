@@ -185,7 +185,7 @@ def _state_dir() -> Path:
     return llm_router_home()
 
 
-def _project_id() -> str:
+def _project_id(project_root: str | None = None) -> str:
     """Stable identifier for the current project scope.
 
     Precedence: ``$LLM_ROUTER_PROJECT_ID`` (explicit override) → a short hash of
@@ -200,10 +200,19 @@ def _project_id() -> str:
             return re.sub(r"[^A-Za-z0-9._-]", "_", explicit)[:64] or "default"
     except Exception:
         pass
-    try:
-        cwd = os.getcwd()
-    except Exception:
-        cwd = os.path.expanduser("~")
+    if project_root:
+        # An explicit root from the CALLER. The MCP server's cwd is $HOME, a
+        # directory no session ever writes to, so deriving the bucket from the
+        # server's own cwd looked up the wrong project every time — identity
+        # resolved and the events were somewhere else. This does NOT merge
+        # buckets: the caller declares which project it is asking about, which is
+        # the isolation CHZ-AUD-024 pins, not a way around it.
+        cwd = project_root
+    else:
+        try:
+            cwd = os.getcwd()
+        except Exception:
+            cwd = os.path.expanduser("~")
     # S2-1: the REPO ROOT of the cwd, not the raw cwd. Hashing the raw cwd made
     # `repo/`, `repo/src/` and `repo/tests/` three different projects, and the
     # PostToolUse hook runs with whatever cwd the last tool call left behind — so a
@@ -237,16 +246,16 @@ def _repo_root_of(start: str) -> str:
     return str(here)
 
 
-def _project_dir() -> Path:
+def _project_dir(project_root: str | None = None) -> Path:
     """Project-scoped state dir: ``~/.llm-router/projects/<project_id>``."""
-    return _state_dir() / "projects" / _project_id()
+    return _state_dir() / "projects" / _project_id(project_root)
 
 
 def _sanitize(session_id: str) -> str:
     return re.sub(r"[^A-Za-z0-9._-]", "_", session_id) or "unknown"
 
 
-def _session_path(session_id: str) -> Path:
+def _session_path(session_id: str, project_root: str | None = None) -> Path:
     """Where this session's log lives, within the CURRENT project scope.
 
     Resolution deliberately stays scope-local. Following a session id across
@@ -260,7 +269,7 @@ def _session_path(session_id: str) -> Path:
     genuinely different project stay with that project. See ``_repo_root_of`` for
     the part that IS fixed — subdirectories of one repo no longer split.
     """
-    return _project_dir() / f"session_context_{_sanitize(session_id)}.jsonl"
+    return _project_dir(project_root) / f"session_context_{_sanitize(session_id)}.jsonl"
 
 
 def _lock_path(path: Path) -> Path:
@@ -679,7 +688,8 @@ def _maybe_compact(path: Path) -> None:
 
 # ── Reading ──────────────────────────────────────────────────────────────────
 
-def load_events(session_id: str | None, *, limit: int = 200) -> list[dict[str, Any]]:
+def load_events(session_id: str | None, *, limit: int = 200,
+                project_root: str | None = None) -> list[dict[str, Any]]:
     """Load up to ``limit`` newest events for *session_id*, oldest first.
 
     Tolerates torn/unparseable trailing lines. Fails open to ``[]``.
@@ -687,7 +697,7 @@ def load_events(session_id: str | None, *, limit: int = 200) -> list[dict[str, A
     try:
         if not session_id:
             return []
-        path = _session_path(session_id)
+        path = _session_path(session_id, project_root)
         if not path.exists():
             return []
         records: list[dict[str, Any]] = []
@@ -737,8 +747,16 @@ def build_session_context(
     task_type: str | None = None,
     query: str | None = None,
     target_provider: str | None = None,
+    project_root: str | None = None,
 ) -> str:
     """Assemble a compact, sentinel-wrapped context block for *session_id*.
+
+    `project_root` names the project the CALLER is asking about. Without it the
+    bucket is derived from this process's cwd, which for the MCP server is $HOME
+    — a directory no session ever writes to. Measured 2026-09-15: the session id
+    resolved correctly and the context came back EMPTY, because the events were
+    in the writing project's bucket. Passing the caller's root is not a way around
+    the isolation CHZ-AUD-024 pins; it is the caller declaring its own scope.
 
     Applies the privacy mode from :func:`get_mode` (returns ``""`` for
     ``off``, and for ``local`` when *target_provider* is an external paid
@@ -767,7 +785,7 @@ def build_session_context(
         ):
             return ""
 
-        records = load_events(session_id, limit=200)
+        records = load_events(session_id, limit=200, project_root=project_root)
         if not records:
             return ""
 

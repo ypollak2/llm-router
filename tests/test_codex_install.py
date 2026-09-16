@@ -89,15 +89,18 @@ def test_hooks_are_registered_and_trusted(home):
     doc = _hooks(home)
     route_cmd = f"/opt/py/bin/python3 {home}/.llm-router/hooks/codex-auto-route.py"
     post_cmd = f"{home}/.llm-router/hooks/codex-post-tool.py"
+    stop_cmd = f"/opt/py/bin/python3 {home}/.llm-router/hooks/codex-stop.py"
     assert doc["hooks"]["UserPromptSubmit"] == [{"hooks": [{"type": "command", "command": route_cmd}]}]
     assert doc["hooks"]["PostToolUse"] == [{"matcher": "Bash", "hooks": [{"type": "command", "command": post_cmd}]}]
+    assert doc["hooks"]["Stop"] == [{"hooks": [{"type": "command", "command": stop_cmd}]}]
+    assert (home / ".llm-router" / "hooks" / "codex-stop.py").exists()
     assert (home / ".llm-router" / "hooks" / "codex-auto-route.py").exists()
     assert (home / ".llm-router" / "hooks" / "llm_router_tool_surface.py").exists()
 
     hooks_json = home / ".codex" / "hooks.json"
     records = codex_host.read_trust_records(_toml(home))
     expected = codex_host.trust_records(hooks_json, doc)
-    assert records == expected and len(records) == 2, "every hook we wrote must carry its trust record"
+    assert records == expected and len(records) == 3, "every hook we wrote must carry its trust record"
     assert records[f"{hooks_json}:user_prompt_submit:0:0"] == codex_host.hook_trust_hash(
         "UserPromptSubmit", {"type": "command", "command": route_cmd})
 
@@ -224,6 +227,7 @@ def test_uninstall_removes_only_what_we_wrote(home):
     assert doc["hooks"].get("UserPromptSubmit", []) == []
     assert (codex / "AGENTS.md").read_text() == "# mine\n"
     assert not (home / ".llm-router" / "hooks" / "codex-auto-route.py").exists()
+    assert not (home / ".llm-router" / "hooks" / "codex-stop.py").exists()
 
 
 # ── Autodetect from the plain install ──────────────────────────────────────

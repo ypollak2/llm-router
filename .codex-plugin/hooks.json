@@ -98,7 +98,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${CODEX_PLUGIN_ROOT}/hooks/session-end.py"
+            "command": "${CODEX_PLUGIN_ROOT}/hooks/codex-stop.py"
           }
         ]
       }

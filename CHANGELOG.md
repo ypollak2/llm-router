@@ -10,6 +10,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 | [CHANGELOG-ARCHIVE.md](CHANGELOG-ARCHIVE.md) | v10.1.5 back to v6.3.0 |
 | [GitHub Releases](https://github.com/ypollak2/llm-router/releases) | v6.2 and earlier |
 
+## [13.3.2] - 2026-09-16
+
+Fixes to repository and session context, draft validation, routing telemetry,
+and local-task execution defaults. No MCP tool or CLI command is added or removed.
+
+### Fixed
+
+- Codex installations now register and trust a Stop hook that shows estimated
+  savings today and over the router's lifetime after every turn. The Codex
+  plugin uses the same reporter, which preserves ongoing session context and
+  reads the existing shared ledger across hosts.
+- Routed execution paths share repository knowledge injection. The MCP path now
+  loads session events from the caller's project even when the server starts in
+  another directory. Fresh Git facts supply branch, commit and working-tree state.
+- Session context retains more Bash, Write and Edit output. Knowledge retrieval
+  recognizes document labels already mentioned in the same session, and session
+  startup refreshes the repository index.
+- Draft grounding checks bare filenames and checks symbols against the working
+  tree, reducing both invented references and rejection of newly written code.
+- Hook classification stays aligned with the shared classifier. Ollama model
+  discovery and checked-in startup settings replace guessed model defaults.
+- Routing telemetry records failed attempts and lost context evidence. Provider
+  success signals require usable output, and unreliable providers are demoted.
+- `llm_local_task` now defaults to proposing writes (`apply_writes=False`) and
+  no longer implicitly enables unrestricted commands when writes are applied.
+  Acceptance checks remain separate from worker execution.
+- Removed unused policy-version code and restored regression coverage while
+  triaging quarantined tests. Added an import regression check that records two
+  existing control-plane modules with missing enterprise dependencies.
+
+### Release checks
+
+- Added a public-surface version check to the pre-release gate and a local gate
+  covering lint, generated plugin files, mutation configuration and tests.
+- Updated measurement guidance and benchmarks. This release makes no new token
+  savings or routing-rate claim.
+
 ## [13.3.1] - 2026-09-13
 
 Measurement, and what measuring exposed. Nothing here raises the routing rate;

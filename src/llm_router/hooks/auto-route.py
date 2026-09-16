@@ -1332,6 +1332,17 @@ LAYER_WEIGHTS = {
 }
 
 
+# The hook's OWN scorer, and NOT a duplicate of llm_router.classify.
+#
+# Delegating it to classify._score_categories was tried on 2026-09-15 and
+# reverted: they disagree on 150 of 150 real prompts, because this version
+# scores a `coordination` category the shared engine does not have at all, with
+# a length gate on top. Four tests caught it in the same minute.
+#
+# classify_complexity above IS a delegation, verified 1000/1000 against the
+# implementation it replaced. Same file, same shape, different answer: two
+# functions looking alike is not evidence they do the same thing, and only the
+# measurement settles which is which.
 def score_categories(text: str) -> dict[str, int]:
     """Score each category using three signal layers."""
     scores: dict[str, int] = {}
@@ -1500,35 +1511,20 @@ def classify_with_gemini(text: str) -> str | None:
 
 
 def classify_complexity(text: str, task_type: str) -> str:
-    """Determine task complexity from text signals."""
-    if COMPLEXITY_DEEP_REASONING.search(text):
-        return "deep_reasoning"
-    if COMPLEXITY_COMPLEX.search(text):
-        return "complex"
-    if COMPLEXITY_SIMPLE.search(text):
-        return "simple"
-    n = len(text)
-    # Length-based fallback — reached only when no lexical complexity/simplicity
-    # signal fired. The old flat gate (>150 chars → moderate, else moderate
-    # unless a query) tagged ordinary one-line prompts as moderate, so the
-    # simple-share sat at ~3% vs a ~30% target. Recalibrated so plain Q&A stays
-    # cheap far longer, while generation/analysis/code escalate to moderate once
-    # past a one-liner (they usually imply real work, not a lookup).
-    if n > 500:
-        return "complex"
-    if task_type == "query":
-        # Plain questions/lookups are cheap even when verbose. This is the fix
-        # for the moderate over-tagging: the old flat >150-char gate demoted
-        # ordinary questions to moderate; queries now stay simple up to ~400
-        # chars. Other task types (research/generate/analyze/code) imply real
-        # work and stay moderate.
-        return "moderate" if n > 400 else "simple"
-    return "moderate"
+    """Delegates to the shared engine. Kept as a name, not an implementation.
 
+    This was an AST-extracted copy of `llm_router.classify`, and the copy is what
+    made the two drift. HOOK_LIVE_POLICY reproduces the old local behaviour
+    EXACTLY — 1000 of 1000 comparisons over 200 real prompts x 5 task types — so
+    this delegation changes no routing.
 
-# ── Main Classifier ──────────────────────────────────────────────────────────
+    Not HOOK_POLICY, despite the name: that one applies `apply_complexity_floor`,
+    which the hook never did, and would push 26% of prompts to a more expensive
+    tier. `tests/test_hook_classifier_equivalence.py` pins both facts.
+    """
+    from llm_router.classify import HOOK_LIVE_POLICY, complexity_for
 
-
+    return complexity_for(text, policy=HOOK_LIVE_POLICY, task_type=task_type).value
 def classify_prompt(text: str) -> dict | None:
     """Classify using heuristic scoring → Ollama → cheap API → weak heuristic → auto."""
     stripped = text.strip()
@@ -1838,7 +1834,9 @@ def _coverage_unobserved(reason_name: str) -> None:
         from llm_router.coverage import Reason, record_unobserved
 
         record_unobserved(Reason[reason_name])
-    except Exception:  # noqa: BLE001
+    except Exception as _exc:  # noqa: BLE001
+        from llm_router import failopen as _fo
+        _fo.record("CHZ-FO-HOOK-COVERAGE-UNOBSERVED", _exc)
         pass
 
 
@@ -1848,7 +1846,9 @@ def _coverage_observed(tool: str) -> None:
         from llm_router.coverage import record_observed
 
         record_observed(tool)
-    except Exception:  # noqa: BLE001
+    except Exception as _exc:  # noqa: BLE001
+        from llm_router import failopen as _fo
+        _fo.record("CHZ-FO-HOOK-COVERAGE-OBSERVED", _exc)
         pass
 
 
@@ -3131,7 +3131,9 @@ def _build_mini_summary() -> str | None:
             f"top task: {top_task} ({top_task_n})  ·  recorded cost: ${savings:.4f}\n"
             "   run `llm-router summary` for the full dashboard."
         )
-    except Exception:
+    except Exception as _exc:
+        from llm_router import failopen as _fo
+        _fo.record("CHZ-FO-HOOK-LINEAGE-RECENT", _exc)
         return None
 
 
@@ -3368,7 +3370,9 @@ def main() -> None:
         try:
             from llm_router.session_store import write_pointer as _write_pointer
             _write_pointer(session_id)
-        except Exception:                                    # noqa: BLE001
+        except Exception as _exc:                                    # noqa: BLE001
+            from llm_router import failopen as _fo
+            _fo.record("CHZ-FO-HOOK-SESSION-POINTER", _exc)
             pass
     zero_claude = _zero_claude_enabled()
 
@@ -3734,7 +3738,9 @@ def main() -> None:
                 role="user",
                 task_type=task_type,
             )
-        except Exception:
+        except Exception as _exc:
+            from llm_router import failopen as _fo
+            _fo.record("CHZ-FO-HOOK-SESSION-RECORD", _exc)
             pass
 
         # S2-2: and Claude's answers to the PREVIOUS prompts, which nothing else
@@ -3749,7 +3755,9 @@ def main() -> None:
                 _debug_log(
                     f"[INVOCATION {invocation_id:.3f}] PERSISTED {_n} Claude turn(s) to session store"
                 )
-        except Exception:
+        except Exception as _exc:
+            from llm_router import failopen as _fo
+            _fo.record("CHZ-FO-HOOK-ASSISTANT-TURNS", _exc)
             pass
 
         # Judge the PREVIOUS invocation's draft, now that the turn it produced is
@@ -4145,7 +4153,9 @@ def main() -> None:
                         session_id=session_id,
                         realized=_turn_blocked,
                     )
-                except Exception:
+                except Exception as _exc:
+                    from llm_router import failopen as _fo
+                    _fo.record("CHZ-FO-HOOK-SAVINGS-LOG", _exc)
                     pass
                 # Persist into usage + routing_decisions ONLY for turns that
                 # actually bypass Claude (audit P1): an echo turn still consumes
@@ -4163,7 +4173,9 @@ def main() -> None:
                             classifier_type=method,
                             session_id=session_id,
                         )
-                    except Exception:
+                    except Exception as _exc:
+                        from llm_router import failopen as _fo
+                        _fo.record("CHZ-FO-HOOK-SAVINGS-DB", _exc)
                         pass
                 # Session Context Accumulator: record this routed Q&A so later
                 # turns (in this session or a future one) have real prior
@@ -4178,7 +4190,9 @@ def main() -> None:
                 try:
                     from llm_router.grounding import draft_is_memorable
                     _memorable, _why_not = draft_is_memorable(_direct_result.text or "")
-                except Exception:                            # noqa: BLE001
+                except Exception as _exc:                            # noqa: BLE001
+                    from llm_router import failopen as _fo
+                    _fo.record("CHZ-FO-HOOK-DRAFT-MEMORABLE", _exc)
                     pass
                 if not _memorable:
                     _debug_log(
@@ -4197,7 +4211,9 @@ def main() -> None:
                             tool=tool,
                             model=f"{_direct_result.model.provider}/{_direct_result.model.model}",
                         )
-                    except Exception:
+                    except Exception as _exc:
+                        from llm_router import failopen as _fo
+                        _fo.record("CHZ-FO-HOOK-SESSION-ROUTED-QA", _exc)
                         pass
                 _violation_notice = _prior_violation_notice(previous_unrouted)
                 # Audit §2.3: under zero-Claude a SUCCESSFUL route must bypass
@@ -4241,7 +4257,9 @@ def main() -> None:
                 try:
                     from llm_router.direct_diagnostics import record_sample as _rec
                     _rec(_direct_elapsed_s, timed_out=True)
-                except Exception:
+                except Exception as _exc:
+                    from llm_router import failopen as _fo
+                    _fo.record("CHZ-FO-HOOK-DIRECT-SAMPLE", _exc)
                     pass
         except ImportError:
             _debug_log(f"[INVOCATION {invocation_id:.3f}] DIRECT SKIP: modules not available")
@@ -4368,7 +4386,9 @@ def main() -> None:
             from llm_router.execution_signal import needs_execution as _needs_exec
             if _needs_exec(prompt):
                 _ctx_tool = "llm_act"
-        except Exception:
+        except Exception as _exc:
+            from llm_router import failopen as _fo
+            _fo.record("CHZ-FO-HOOK-EXECUTION-SIGNAL", _exc)
             pass
         # CHZ-SURF-01: same display-boundary translation as `tool` above.
         _ctx_disp = route_tool(_ctx_tool)
@@ -4624,7 +4644,9 @@ def main() -> None:
             metadata={"tool": str(tool), "method": str(method),
                       "complexity": str(complexity)},
         ))
-    except Exception:
+    except Exception as _exc:
+        from llm_router import failopen as _fo
+        _fo.record("CHZ-FO-HOOK-EXECUTION-LEDGER", _exc)
         pass
     _mark("ledger_write")
 

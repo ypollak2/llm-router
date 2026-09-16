@@ -83,6 +83,33 @@ if ! is_running; then
         exit 1
     fi
 
+    # Tuning, measured rather than guessed, and set HERE because it otherwise
+    # lives only in whichever shell happened to start the server and evaporates
+    # on the next restart.
+    #
+    # KEEP_ALIVE: how long a 17-21GB model stays resident. Measured on 765 real
+    # gaps between this user's prompts across 6 sessions (p50 6.4 min, p90 47
+    # min):
+    #
+    #     keep_alive   prompts finding a warm model   reload cost /100 prompts
+    #        5 min                44%                        225s
+    #       15 min                68%                        127s
+    #       30 min                84%                         65s
+    #
+    # No knee; it is a straight trade. 30 min buys 0.6s per prompt over 15 min and
+    # holds 17GB a third longer — and at 30 min a background task on this 48GB
+    # machine was killed for memory. 15 min takes two thirds of the benefit at
+    # meaningfully less pressure. Override with LLM_ROUTER_OLLAMA_KEEP_ALIVE.
+    #
+    # MAX_LOADED_MODELS=2 is aspirational on this hardware: the server reports
+    # 38,337 MiB free and the two models need ~42GB together, so it holds one.
+    # Harmless, and correct on a larger machine.
+    export OLLAMA_KEEP_ALIVE="${LLM_ROUTER_OLLAMA_KEEP_ALIVE:-15m}"
+    export OLLAMA_MAX_LOADED_MODELS="${OLLAMA_MAX_LOADED_MODELS:-2}"
+    # 32768 was ~70x the real payload (measured worst case ~457 tokens) and cost
+    # 10GB of KV cache per model.
+    export OLLAMA_CONTEXT_LENGTH="${OLLAMA_CONTEXT_LENGTH:-8192}"
+
     # Start in background, detached from this process
     nohup ollama serve >/dev/null 2>&1 &
     OLLAMA_PID=$!

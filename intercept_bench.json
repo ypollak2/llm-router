@@ -1,0 +1,277 @@
+[
+  {
+    "kind": "image",
+    "case": "form:full name",
+    "ok": true,
+    "s": 9.8,
+    "image_tokens_avoided": 1677,
+    "desc_tokens": 426
+  },
+  {
+    "kind": "image",
+    "case": "form:email",
+    "ok": true,
+    "s": 9.8,
+    "image_tokens_avoided": 1677,
+    "desc_tokens": 426
+  },
+  {
+    "kind": "image",
+    "case": "form:country",
+    "ok": true,
+    "s": 9.8,
+    "image_tokens_avoided": 1677,
+    "desc_tokens": 426
+  },
+  {
+    "kind": "image",
+    "case": "form:plan",
+    "ok": true,
+    "s": 9.8,
+    "image_tokens_avoided": 1677,
+    "desc_tokens": 426
+  },
+  {
+    "kind": "image",
+    "case": "form:button",
+    "ok": true,
+    "s": 9.8,
+    "image_tokens_avoided": 1677,
+    "desc_tokens": 426
+  },
+  {
+    "kind": "image",
+    "case": "table:overdue customer",
+    "ok": true,
+    "s": 11.7,
+    "image_tokens_avoided": 2206,
+    "desc_tokens": 373
+  },
+  {
+    "kind": "image",
+    "case": "table:last invoice id",
+    "ok": true,
+    "s": 11.7,
+    "image_tokens_avoided": 2206,
+    "desc_tokens": 373
+  },
+  {
+    "kind": "image",
+    "case": "table:largest amount",
+    "ok": true,
+    "s": 11.7,
+    "image_tokens_avoided": 2206,
+    "desc_tokens": 373
+  },
+  {
+    "kind": "image",
+    "case": "table:pending customer",
+    "ok": true,
+    "s": 11.7,
+    "image_tokens_avoided": 2206,
+    "desc_tokens": 373
+  },
+  {
+    "kind": "image",
+    "case": "table:first customer",
+    "ok": true,
+    "s": 11.7,
+    "image_tokens_avoided": 2206,
+    "desc_tokens": 373
+  },
+  {
+    "kind": "image",
+    "case": "error:error code",
+    "ok": true,
+    "s": 5.4,
+    "image_tokens_avoided": 1096,
+    "desc_tokens": 203
+  },
+  {
+    "kind": "image",
+    "case": "error:failure reason",
+    "ok": true,
+    "s": 5.4,
+    "image_tokens_avoided": 1096,
+    "desc_tokens": 203
+  },
+  {
+    "kind": "image",
+    "case": "error:headline",
+    "ok": true,
+    "s": 5.4,
+    "image_tokens_avoided": 1096,
+    "desc_tokens": 203
+  },
+  {
+    "kind": "image",
+    "case": "error:action button",
+    "ok": true,
+    "s": 5.4,
+    "image_tokens_avoided": 1096,
+    "desc_tokens": 203
+  },
+  {
+    "kind": "image",
+    "case": "error:who declined",
+    "ok": true,
+    "s": 5.4,
+    "image_tokens_avoided": 1096,
+    "desc_tokens": 203
+  },
+  {
+    "kind": "image",
+    "case": "dashboard:active users",
+    "ok": true,
+    "s": 10.0,
+    "image_tokens_avoided": 1435,
+    "desc_tokens": 365
+  },
+  {
+    "kind": "image",
+    "case": "dashboard:revenue",
+    "ok": true,
+    "s": 10.0,
+    "image_tokens_avoided": 1435,
+    "desc_tokens": 365
+  },
+  {
+    "kind": "image",
+    "case": "dashboard:churn",
+    "ok": true,
+    "s": 10.0,
+    "image_tokens_avoided": 1435,
+    "desc_tokens": 365
+  },
+  {
+    "kind": "image",
+    "case": "dashboard:tickets",
+    "ok": true,
+    "s": 10.0,
+    "image_tokens_avoided": 1435,
+    "desc_tokens": 365
+  },
+  {
+    "kind": "image",
+    "case": "dashboard:last month",
+    "ok": true,
+    "s": 10.0,
+    "image_tokens_avoided": 1435,
+    "desc_tokens": 365
+  },
+  {
+    "kind": "image",
+    "case": "nav:selected item",
+    "ok": true,
+    "s": 8.2,
+    "image_tokens_avoided": 1131,
+    "desc_tokens": 303
+  },
+  {
+    "kind": "image",
+    "case": "nav:first item",
+    "ok": true,
+    "s": 8.2,
+    "image_tokens_avoided": 1131,
+    "desc_tokens": 303
+  },
+  {
+    "kind": "image",
+    "case": "nav:last item",
+    "ok": true,
+    "s": 8.2,
+    "image_tokens_avoided": 1131,
+    "desc_tokens": 303
+  },
+  {
+    "kind": "image",
+    "case": "nav:invoice month",
+    "ok": true,
+    "s": 8.2,
+    "image_tokens_avoided": 1131,
+    "desc_tokens": 303
+  },
+  {
+    "kind": "image",
+    "case": "nav:second item",
+    "ok": true,
+    "s": 8.2,
+    "image_tokens_avoided": 1131,
+    "desc_tokens": 303
+  },
+  {
+    "kind": "bash",
+    "case": "git status --porcelain",
+    "ok": true,
+    "s": 0.01,
+    "before_tokens": 272,
+    "after_tokens": 154
+  },
+  {
+    "kind": "bash",
+    "case": "git log --oneline -20",
+    "ok": true,
+    "s": 0.01,
+    "before_tokens": 368,
+    "after_tokens": 353
+  },
+  {
+    "kind": "bash",
+    "case": "ls -la src/llm_router",
+    "ok": true,
+    "s": 0.01,
+    "before_tokens": 3835,
+    "after_tokens": 750
+  },
+  {
+    "kind": "bash",
+    "case": "ls src/llm_router/hooks",
+    "ok": null,
+    "s": 0.0,
+    "skipped": true
+  },
+  {
+    "kind": "bash",
+    "case": "wc -l src/llm_router/okf.py",
+    "ok": null,
+    "s": 0.0,
+    "skipped": true
+  },
+  {
+    "kind": "bash",
+    "case": "find src/llm_router/hooks -name '*",
+    "ok": null,
+    "s": 0.0,
+    "skipped": true
+  },
+  {
+    "kind": "bash",
+    "case": "git branch -a",
+    "ok": true,
+    "s": 0.01,
+    "before_tokens": 1252,
+    "after_tokens": 97
+  },
+  {
+    "kind": "bash",
+    "case": "cat pyproject.toml",
+    "ok": true,
+    "s": 0.0,
+    "before_tokens": 2154,
+    "after_tokens": 557
+  },
+  {
+    "kind": "bash",
+    "case": "head -40 README.md",
+    "ok": null,
+    "s": 0.0,
+    "skipped": true
+  },
+  {
+    "kind": "bash",
+    "case": "git diff --stat",
+    "ok": null,
+    "s": 0.01,
+    "skipped": true
+  }
+]
