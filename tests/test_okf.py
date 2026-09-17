@@ -472,17 +472,42 @@ class TestEnrichFromResponse:
         assert c.type == "SourceFile"
 
     async def test_extracts_symbols_from_response(self, tmp_path: Path) -> None:
+        # OKF-SCOPE-03: the file has to exist and has to define these names.
+        # This test used to pass with the module unread — the response text was
+        # the only evidence that `Router` was in it.
+        repo = tmp_path / "repo"
+        (repo / "src" / "llm_router").mkdir(parents=True)
+        (repo / "src" / "llm_router" / "router.py").write_text(
+            "def route_and_call(prompt):\n    pass\n\n\nclass Router:\n    pass\n")
+
         await enrich_from_response(
             "Update src/llm_router/router.py",
             "def route_and_call(prompt):\n    pass\nclass Router:\n    pass",
             "gpt-5.5",
-            base=tmp_path,
+            base=tmp_path, root=repo,
         )
-        md = next((okf.project_knowledge_dir(base=tmp_path) / "source").rglob("*.md"))
+        md = next((okf.project_knowledge_dir(root=repo, base=tmp_path) / "source").rglob("*.md"))
         c = _parse_okf(md.read_text(), md)
         assert c is not None
         assert "route_and_call" in (c.extra.get("key_symbols") or [])
         assert "Router" in (c.extra.get("key_symbols") or [])
+
+    async def test_a_symbol_the_file_does_not_define_is_rejected(self, tmp_path: Path) -> None:
+        """The other half of the above: the reply says it, the file does not."""
+        repo = tmp_path / "repo"
+        (repo / "src").mkdir(parents=True)
+        (repo / "src" / "router.py").write_text("def route_and_call(p):\n    pass\n")
+
+        await enrich_from_response(
+            "Update src/router.py",
+            "def route_and_call(p):\n    pass\nclass NeverWritten:\n    pass",
+            "gpt-5.5",
+            base=tmp_path, root=repo,
+        )
+        md = next((okf.project_knowledge_dir(root=repo, base=tmp_path) / "source").rglob("*.md"))
+        c = _parse_okf(md.read_text(), md)
+        assert c is not None
+        assert (c.extra.get("key_symbols") or []) == ["route_and_call"]
 
     async def test_records_model_name(self, tmp_path: Path) -> None:
         await enrich_from_response(
@@ -517,13 +542,21 @@ class TestEnrichFromResponse:
         )
 
     async def test_detects_typescript_files(self, tmp_path: Path) -> None:
+        # OKF-SCOPE-03: non-Python verification reuses `_SYM_PAT` against the
+        # FILE, so the TypeScript path is checked the same way Python's `ast`
+        # check is — just with a weaker parser.
+        repo = tmp_path / "repo"
+        (repo / "src" / "app").mkdir(parents=True)
+        (repo / "src" / "app" / "router.ts").write_text("function routeRequest() {}\n")
+
         await enrich_from_response(
             "Refactor src/app/router.ts for TypeScript",
             "function routeRequest() {}",
             "gemini-2.5-flash",
-            base=tmp_path,
+            base=tmp_path, root=repo,
         )
-        md_files = list((okf.project_knowledge_dir(base=tmp_path) / "source").rglob("*.md")) if (okf.project_knowledge_dir(base=tmp_path) / "source").exists() else []
+        source_dir = okf.project_knowledge_dir(root=repo, base=tmp_path) / "source"
+        md_files = list(source_dir.rglob("*.md")) if source_dir.exists() else []
         assert len(md_files) >= 1
 
     async def test_limits_to_first_file_when_many_mentioned(self, tmp_path: Path) -> None:

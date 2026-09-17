@@ -29,13 +29,23 @@ def test_okf_disabled_when_off(monkeypatch):
 
 # ── verified-only capture ────────────────────────────────────────────────────
 def test_records_files_and_symbols_not_prose(tmp_path):
+    # OKF-SCOPE-03: `src/auth.py` has to exist for the note to assert anything
+    # about it. Before that change the path and the symbol were written on the
+    # strength of appearing in the text, which is how a reply could file a
+    # symbol under a module that was never there.
+    repo = tmp_path / "repo"
+    (repo / "src").mkdir(parents=True)
+    (repo / "src" / "auth.py").write_text("def authenticate(user):\n    return True\n")
+
     prompt = "refactor src/auth.py to fix the login bug"
     response = (
         "Here is my detailed reasoning about why the login flow is broken and a "
         "long fabricated explanation of the plugin API that must not be stored.\n"
         "def authenticate(user):\n    return True\n"
     )
-    path = okf.record_session_turn("sess-A", prompt, response, "ollama/qwen", base=tmp_path)
+    path = okf.record_session_turn(
+        "sess-A", prompt, response, "ollama/qwen", base=tmp_path, root=repo,
+    )
     assert path is not None
     text = path.read_text()
     # Verified structure IS present...
