@@ -4428,8 +4428,15 @@ async def route_and_call(
         try:
             _resp_text = getattr(response, "content", "") or ""
             _resp_model = getattr(response, "model", "") or ""
+            # OKF-SCOPE-02: both writers are told which project this turn belongs
+            # to. Without it they recomputed the destination from the process cwd
+            # — and the MCP server's cwd is $HOME, which has no .git, so every
+            # project's turns landed in one shared bucket.
+            _write_root = project_root or _okf.project_root()
             _spawn_bg(
-                _okf.enrich_from_response(prompt, _resp_text, _resp_model),
+                _okf.enrich_from_response(
+                    prompt, _resp_text, _resp_model, root=_write_root,
+                ),
                 name="okf_enrich",
             )
             if agent_session_id:
@@ -4437,6 +4444,7 @@ async def route_and_call(
                     asyncio.to_thread(
                         _okf.record_session_turn,
                         agent_session_id, prompt, _resp_text, _resp_model,
+                        root=_write_root,
                     ),
                     name="okf_session",
                 )

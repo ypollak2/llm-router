@@ -534,7 +534,10 @@ def _okf_enrich(prompt: str, response: str, model: str) -> None:
 
         from llm_router import okf
 
-        _asyncio.run(okf.enrich_from_response(prompt, response, model))
+        # OKF-SCOPE-02: an explicit root, not the cwd fallback inside the writer.
+        _asyncio.run(okf.enrich_from_response(
+            prompt, response, model, root=okf.project_root(),
+        ))
     except Exception:  # noqa: BLE001
         pass
 

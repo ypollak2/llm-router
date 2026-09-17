@@ -11,6 +11,7 @@ OKF format: markdown + YAML frontmatter. Spec:
 from __future__ import annotations
 
 import asyncio
+import functools
 import os
 import re
 import time
@@ -839,6 +840,7 @@ def _write_source_concept(
     last_model: str,
     base: Path,
     authoritative: bool = False,
+    root: "str | Path | None" = None,
 ) -> None:
     """Synchronous write; called in executor thread.
 
@@ -863,12 +865,18 @@ def _write_source_concept(
     ``authoritative=True`` is for `index_project`, which read the whole file and is
     therefore entitled to say a symbol is gone. A writer that saw a fragment must
     never be able to assert that the file contains less than it does.
+
+    OKF-SCOPE-02: ``root`` names the project being written to. Without it this
+    function recomputed its destination from the process cwd, so
+    `index_project(root=B)` called from inside A reported B's store in its summary
+    and wrote A's directory on disk. Every caller passes it; a caller that cannot
+    is writing to whichever repository the process happens to be sitting in.
     """
     rel = Path(file_path)
     # CHZ-OKF-01: under this PROJECT's directory, not the flat global `source/`.
     # A doc about `middleware.py` is only meaningful next to the repo it came
     # from; filed globally it becomes a retrieval hazard for every other project.
-    concept_path = project_knowledge_dir(base=base) / "source" / rel.with_suffix(".md")
+    concept_path = project_knowledge_dir(root=root, base=base) / "source" / rel.with_suffix(".md")
     concept_path.parent.mkdir(parents=True, exist_ok=True)
 
     tags: list[str] = ["source-file"]
@@ -915,6 +923,7 @@ async def enrich_from_response(
     response_text: str,
     model: str,
     base: Path = KNOWLEDGE_DIR,
+    root: "str | Path | None" = None,
 ) -> None:
     """Extract file references from prompt+response and write OKF SourceFile concepts.
 
@@ -943,7 +952,11 @@ async def enrich_from_response(
 
         loop = asyncio.get_event_loop()
         await loop.run_in_executor(
-            None, _write_source_concept, files[0], summary, symbols, model, base
+            None,
+            functools.partial(
+                _write_source_concept,
+                files[0], summary, symbols, model, base, root=root,
+            ),
         )
     except Exception:  # noqa: BLE001 — enrichment must never crash the caller
         pass
@@ -968,6 +981,7 @@ def record_session_turn(
     response_text: str,
     model: str,
     base: Path = KNOWLEDGE_DIR,
+    root: "str | Path | None" = None,
 ) -> Path | None:
     """Capture VERIFIED-ONLY context for a turn → ``sessions/<id>/turn-NNNN.md``.
 
@@ -991,7 +1005,12 @@ def record_session_turn(
         # CHZ-OKF-01: under the project, like every other written doc. A session
         # transcript is the most project-specific material in the store; sharing
         # it across repos was the worst case of the cross-contamination.
-        sess_dir = project_knowledge_dir(base=base) / "sessions" / safe_sid
+        # OKF-SCOPE-02: `root`, not the process cwd. A session transcript is the
+        # most project-specific material in the store, and this is a second write
+        # path that never crosses `_write_source_concept` — fixing that function
+        # alone would have left this one pointed at whatever repo the process was
+        # sitting in.
+        sess_dir = project_knowledge_dir(root=root, base=base) / "sessions" / safe_sid
         sess_dir.mkdir(parents=True, exist_ok=True)
         turn_n = len(list(sess_dir.glob("turn-*.md"))) + 1
 
@@ -1141,7 +1160,7 @@ def index_project(
         # fragment, merges.
         _write_source_concept(
             rel, "Defines: " + ", ".join(symbols), symbols, "", base,
-            authoritative=True,
+            authoritative=True, root=root,
         )
         result["indexed"] += 1
 
