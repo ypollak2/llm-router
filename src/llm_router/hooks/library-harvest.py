@@ -62,17 +62,35 @@ def _files_touched(tool: str, tool_input: dict) -> list[str]:
     return sorted(set(files))[:16]
 
 
-def _outcome(hook_input: dict) -> tuple[str, int]:
+def _outcome(hook_input: dict) -> tuple[str, int | None]:
+    """What happened, in three answers: ok, error, interrupted — or unknown.
+
+    The last line used to be ``return "ok", 0``, reached whenever
+    `tool_response` was not a dict, or was a dict with no `exit_code`, no
+    `returnCode`, no `is_error` and no `error`. That is the branch for "I could
+    not tell", and it answered "it worked".
+
+    This store is the memory the project reasons from later, so a command whose
+    result nobody observed, recorded as `ok`, becomes evidence that a fix
+    succeeded. A remembered false diagnosis is repeated more confidently than a
+    forgotten one. `sealer.is_seal_event` also seals a chapter only on `ok`, so
+    the fallback was quietly deciding that unverified git commits were
+    milestones that held.
+
+    `unknown` is a third answer rather than a shade of failure: the event
+    happened, its result was not observed. The exit code is None, because 0
+    would be a claim and None is the absence of one.
+    """
     resp = hook_input.get("tool_response")
     if isinstance(resp, dict):
         if resp.get("interrupted"):
             return "interrupted", -1
         code = resp.get("exit_code", resp.get("returnCode"))
-        if isinstance(code, int):
+        if isinstance(code, int) and not isinstance(code, bool):
             return ("ok" if code == 0 else "error"), code
         if resp.get("is_error") or resp.get("error"):
             return "error", 1
-    return "ok", 0
+    return "unknown", None
 
 
 def _current_book(store: LibraryStore) -> str | None:
