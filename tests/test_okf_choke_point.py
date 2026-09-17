@@ -56,7 +56,12 @@ def test_only_the_choke_point_implements_injection():
     skip_prefixes = ("#", '"""', "'''", "*")
     offenders = []
     for path in SRC.rglob("*.py"):
-        if path.name in ("context_injection.py", "okf.py", "router.py"):
+        # router.py was exempted here from the day this test was written: it
+        # predated the choke point and injected OKF with its own
+        # find_relevant + inject_context pair. It now crosses inject() like
+        # every other path, so the rule has no exceptions left. The swap was
+        # measured before it was made — see tests/test_router_context_seam.py.
+        if path.name in ("context_injection.py", "okf.py"):
             continue
         for i, line in enumerate(path.read_text().splitlines(), 1):
             if line.strip().startswith(skip_prefixes):
