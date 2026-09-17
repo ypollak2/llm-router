@@ -66,19 +66,17 @@ def project_root(start: Path | None = None) -> Path:
     (OKF-SCOPE-01: a `capital of Portugal` prompt retrieved another repo's
     `demo/llm/__init__.py`). An explicit root is the only signal that survives a
     process whose cwd is meaningless.
+
+    OKF-SCOPE-04: the body moved to `semantic.scope.resolve_scope`, which is now
+    the single resolver for OKF, both caches and the gateway. Four modules used
+    to answer this question privately, with two different environment variable
+    names and two different fallbacks — so running from `src/` put OKF at the
+    repo root and the caches on the subdirectory, one project in two namespaces.
+    This name stays because it reads correctly at its call sites.
     """
-    if start is None:
-        override = os.environ.get("LLM_ROUTER_PROJECT_ROOT", "").strip()
-        if override:
-            try:
-                return Path(override).expanduser().resolve()
-            except Exception:  # noqa: BLE001 — expanduser raises RuntimeError on ~baduser
-                pass  # unusable override → fall through to the cwd walk
-    here = (start or Path.cwd()).resolve()
-    for candidate in (here, *here.parents):
-        if (candidate / ".git").exists():
-            return candidate
-    return here
+    from llm_router.semantic.scope import resolve_scope
+
+    return resolve_scope(start)
 
 
 def _as_root(root: "str | Path | None") -> Path | None:

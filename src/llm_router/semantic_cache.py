@@ -66,12 +66,24 @@ def _project_scope() -> str:
     The semantic cache previously had *no* project column, so a query in
     project B could return project A's cached response verbatim (observed at
     similarity=1.000, leaking a secret across projects on the same machine).
-    The scope key is a hash of the project root (cwd, or LLM_ROUTER_PROJECT_DIR),
-    matching how result_cache.py derives its project hash. Entries only match
-    within the same project; the raw path is never stored.
+    The scope key is a hash of the project root. Entries only match within the
+    same project; the raw path is never stored.
+
+    OKF-SCOPE-04: it used to be `sha256(LLM_ROUTER_PROJECT_DIR or os.getcwd())`,
+    which claimed to match result_cache.py and did not — that one hashed its
+    caller's argument — and matched OKF even less, since OKF walks to the repo
+    root. So running from `src/` scoped OKF to the project and this cache to the
+    subdirectory: one project, two namespaces, and the split shows up as an
+    ordinary cache miss. `resolve_scope` is now the single answer for all of
+    them, and it walks to the repo root from whatever it is given.
+
+    Existing rows keyed under the old hash simply stop matching and age out on
+    the 24h TTL — the same self-healing path `_ensure_project_scope_column`
+    established when this column was introduced.
     """
-    root = os.environ.get("LLM_ROUTER_PROJECT_DIR") or os.getcwd()
-    return hashlib.sha256(root.encode()).hexdigest()[:16]
+    from llm_router.semantic.scope import scope_key
+
+    return scope_key()
 
 
 async def _ensure_project_scope_column(db) -> None:

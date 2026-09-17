@@ -102,10 +102,23 @@ def _prompt_hash(prompt: str) -> str:
 
 
 def _get_db_path(project_dir: str | None, task_type: str) -> Path:
-    """Determine which cache DB to use based on task and project."""
+    """Determine which cache DB to use based on task and project.
+
+    OKF-SCOPE-04: the project hash comes from `semantic.scope.scope_key`, not
+    from `sha256(project_dir)` on whatever string the caller happened to hold.
+
+    This one mattered more than the other caches. `semantic_cache` keys a COLUMN
+    in a shared table with a 24h TTL, so a divergent key stops matching and ages
+    out. This keys a FILE PATH. A second spelling of one project — `repo` vs
+    `repo/src`, or the raw root an MCP client reports vs the walked repo root —
+    creates a second database that is never reopened, and therefore never
+    purged. It does not heal.
+    """
     # Code tasks use project-level cache
     if task_type in ("code", "analyze") and project_dir:
-        project_hash = hashlib.sha256(project_dir.encode()).hexdigest()[:12]
+        from llm_router.semantic.scope import scope_key
+
+        project_hash = scope_key(project_dir, length=12)
         path = _ROUTER_DIR / "projects" / project_hash / "result_cache.db"
     else:
         # Knowledge tasks use user-level cache

@@ -1615,18 +1615,18 @@ def _cli_scope_root() -> str | None:
     explicit override, and the repo containing the cwd is the fallback — which is
     correct for the hook and for the CLI, and simply absent for the long-lived
     server, where it yields None rather than a confidently wrong bucket.
-    """
-    import os as _os
 
-    explicit = _os.environ.get("LLM_ROUTER_PROJECT_ROOT", "").strip()
-    if explicit:
-        return explicit
+    OKF-SCOPE-04: the walk moved to `semantic.scope.resolve_scope_or_none`,
+    which keeps the None-rather-than-a-wrong-bucket rule this function was
+    written for and adds the repo-root normalisation the private copy lacked —
+    so a CLI call from `src/` now scopes to the project, as OKF already did.
+    """
     try:
-        from pathlib import Path as _P
-        here = _P.cwd()
-        for parent in [here, *here.parents]:
-            if (parent / ".git").exists():
-                return str(parent)
+        from llm_router.semantic.scope import resolve_scope_or_none
+
+        root = resolve_scope_or_none()
+        if root is not None:
+            return str(root)
     except Exception as exc:                                 # noqa: BLE001
         # Recorded, not swallowed: a silent failure here returns None, the caller
         # falls back to cwd-derived scope, and the session context comes back
