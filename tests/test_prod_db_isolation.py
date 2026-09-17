@@ -51,9 +51,17 @@ def _prod_path() -> Path:
     return Path.home() / ".llm-router" / "usage.db"
 
 
-def test_refuses_when_a_test_targets_the_real_production_database():
+def test_refuses_when_a_test_targets_the_real_production_database(monkeypatch):
     """The load-bearing assertion. This test is itself running under pytest, so
-    PYTEST_CURRENT_TEST is set — exactly the situation that produced 28,536 rows."""
+    PYTEST_CURRENT_TEST is set — exactly the situation that produced 28,536 rows.
+
+    `LLM_ROUTER_HOME` is cleared because the conftest now sets it for every
+    test, and an isolated home is itself sufficient proof of isolation — the
+    guard correctly declines to refuse. This test is about the case where a run
+    is NOT sandboxed and reaches for the real database anyway, which is the
+    situation that wrote those rows.
+    """
+    monkeypatch.delenv("LLM_ROUTER_HOME", raising=False)
     assert _refuse_unisolated_test_write(_prod_path()) is True
 
 
