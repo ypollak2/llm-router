@@ -138,6 +138,50 @@ class Applied:
     config: ModeConfig = ModeConfig()
     pack: spack.ContextPack | None = None
     shadow: dict[str, Any] | None = None
+    # Set when an arm was selected and the run was recorded, so a later outcome
+    # can be joined to the treatment that produced it. None when no arm is
+    # running — ordinary use is not an experiment and should not accumulate
+    # rows in an evaluation store.
+    trace_id: int | None = None
+
+
+def _trace_store(root: Path | str | None):
+    """Traces live beside the index, under the same project namespace."""
+    from llm_router import okf
+    from llm_router.semantic.scope import resolve_scope
+    from llm_router.semantic.traces import TraceStore
+
+    scope = resolve_scope(root)
+    return TraceStore(okf.project_knowledge_dir(root=scope) / "semantic" / "traces")
+
+
+def _empty_pack(root: Path | str | None) -> spack.ContextPack:
+    """A pack for an arm that deliberately retrieves nothing.
+
+    Carries the scope and code snapshot so the baseline row says which state it
+    ran on, and a `retrieval_status` of "off" that cannot be confused with
+    "empty" — one means the layer was disabled, the other that it looked and
+    found nothing, and conflating them makes arm B unreadable.
+    """
+    from llm_router.semantic.scope import resolve_scope, scope_key
+
+    scope = resolve_scope(root)
+    return spack.ContextPack(
+        scope_id=scope_key(scope),
+        snapshot_id=spack._snapshot_id(scope),
+        retrieval_status="off",
+    )
+
+
+def _record_quietly(pack, prompt: str, arm: str, root) -> int | None:
+    """Write a trace without letting a failed write change the experiment."""
+    try:
+        return _trace_store(root).record_retrieval(pack, query=prompt, arm=arm)
+    except Exception as exc:                                 # noqa: BLE001
+        import logging
+        logging.getLogger("llm_router").debug(
+            "semantic trace write failed: %s", exc)
+        return None
 
 
 def apply(
@@ -159,6 +203,14 @@ def apply(
     result = Applied(prompt=prompt, arm=arm, config=config)
 
     if config.source is Mode.OFF and config.history is Mode.OFF:
+        # Arm B lands here, and B is what every other arm is compared AGAINST.
+        # Returning without a trace leaves the baseline as the one arm with no
+        # rows — and an absent denominator looks exactly like a run nobody
+        # performed. So a no-op arm still records that it ran, on which code,
+        # and retrieved nothing on purpose.
+        if arm:
+            result.trace_id = _record_quietly(
+                _empty_pack(root), prompt, arm, root)
         return result
 
     started = time.monotonic()
@@ -174,6 +226,14 @@ def apply(
         max_hops=ARM_MAX_HOPS.get(arm, 0),
     )
     elapsed_ms = (time.monotonic() - started) * 1000
+
+    # Recorded ONLY under an arm. Ordinary use is not an experiment, and a
+    # trace store that fills up during normal work makes the evaluation rows
+    # harder to find rather than easier — and costs a write on the hot path
+    # for nothing. An arm, by contrast, exists to be compared later, which is
+    # impossible without the row.
+    if arm:
+        result.trace_id = _record_quietly(built, prompt, arm, root)
 
     rendered = spack.render(built)
     # `source` governs attachment for both halves: history alone with no source
