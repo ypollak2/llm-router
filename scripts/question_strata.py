@@ -223,22 +223,42 @@ def derive(stratum: str, n: int, seed: int) -> list[dict]:
     return _DERIVERS[stratum](n, seed)
 
 
-def score_absent(answer: str) -> bool:
-    """Correct means declining to name a file for something that is not there.
+_ABSTAINS = re.compile(
+    r"not\s+found|does\s*n[o']?t\s+exist|no\s+such|cannot\s+find|"
+    r"could\s+not\s+find|unable\s+to\s+find|not\s+defined|no\s+file|"
+    r"don'?t\s+see\s+any\s+file|is\s+not\s+present",
+    re.IGNORECASE)
 
-    Deliberately generous about the phrasing and strict about the substance: any
-    plausible path-shaped token in the reply is a fabrication, whatever hedging
-    surrounds it.
+_PATH_TOKEN = re.compile(r"[\w./-]+\.(?:py|pyi|ts|js|go|rs|java)")
+
+
+def score_absent(answer: str) -> bool:
+    """Correct means declining to assert a definition that does not exist.
+
+    Abstention is checked FIRST, and this ordering was wrong in the first
+    version. That one rejected any reply containing a path-shaped token, on the
+    reasoning that naming a file for a symbol nobody wrote is a fabrication.
+    The n=60 run produced the counterexample:
+
+        NOT FOUND
+
+        I don't see any file in the provided repository that defines
+        `_drive_v2`. The repository contains files for a Google Drive API
+        client library, but ...
+
+    That is a correct answer, scored wrong, because the model mentioned other
+    filenames while explaining itself. The question is whether it ASSERTED a
+    definition, not whether a filename appears anywhere in the prose.
+
+    A reply that never abstains and names a path is still a fabrication, which
+    is the case this exists to catch.
     """
     text = (answer or "").strip()
     if not text:
         return False
-    if re.search(r"[\w./-]+\.(?:py|pyi|ts|js|go|rs|java)", text):
-        return False
-    return bool(re.search(
-        r"not\s+found|does\s*n[o']?t\s+exist|no\s+such|cannot\s+find|"
-        r"could\s+not\s+find|unable\s+to\s+find|not\s+defined|no\s+file",
-        text, re.IGNORECASE))
+    if _ABSTAINS.search(text):
+        return True
+    return not _PATH_TOKEN.search(text)
 
 
 if __name__ == "__main__":

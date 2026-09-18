@@ -426,3 +426,109 @@ def test_diagnostics_still_render_alongside_real_content(project, store):
     rendered = spack.render(p)
     if p.evidence and p.omissions:
         assert "omitted:" in rendered
+
+
+# ── seeds must look like code, not like English ──────────────────────────────
+
+class TestSeedsAreIdentifiersNotWords:
+    """Ordinary prose must not seed a symbol lookup.
+
+    Found by the `concept` stratum — questions phrased from a docstring with
+    the identifier removed. Every one of them retrieved the same five
+    irrelevant files, because `seeds_from` accepted any word of three or more
+    characters and this repository contains entities named `project`,
+    `implements`, `routing` and `override`.
+
+    It is not a benchmark artifact. Source retrieval is on by default, so a
+    user asking "how does the routing override work?" gets whatever happens to
+    be named `routing` or `override` — confidently, with source spans and
+    hashes attached, which is the shape of evidence rather than the shape of a
+    guess.
+
+    A stopword list cannot fix this; English is too large. The rule is that a
+    seed has to LOOK like code: backticked, snake_case, CamelCase, dotted, or a
+    path. A bare lowercase word is prose until proven otherwise, and a user who
+    means a symbol can always backtick it.
+    """
+
+    def test_a_plain_english_question_seeds_nothing(self):
+        idents, paths = sretrieve.seeds_from(
+            "Which file in this project implements the routing override "
+            "confidence tracking behaviour?")
+        assert idents == [], (
+            f"ordinary words became symbol lookups: {idents}"
+        )
+        assert paths == []
+
+    def test_a_backticked_symbol_still_seeds(self):
+        idents, _ = sretrieve.seeds_from("Where is `post_entry` defined?")
+        assert "post_entry" in idents
+
+    def test_snake_case_seeds_without_backticks(self):
+        idents, _ = sretrieve.seeds_from("fix reconcile_invoice please")
+        assert "reconcile_invoice" in idents
+
+    def test_camel_case_seeds(self):
+        idents, _ = sretrieve.seeds_from("what does OKFConcept do")
+        assert "OKFConcept" in idents
+
+    def test_a_dotted_name_seeds(self):
+        idents, _ = sretrieve.seeds_from("check okf.project_root behaviour")
+        assert any("project_root" in i for i in idents)
+
+    def test_paths_still_seed(self):
+        _, paths = sretrieve.seeds_from("fix src/llm_router/okf.py")
+        assert "src/llm_router/okf.py" in paths
+
+    def test_the_benchmark_question_shape_is_unaffected(self):
+        """The 58/60 was measured with this wording — it must still seed."""
+        idents, _ = sretrieve.seeds_from(
+            "Which file in this project defines `resolve_scope`? "
+            "Answer with the file path and nothing else.")
+        assert idents == ["resolve_scope"], (
+            f"the measured question shape now seeds {idents}, so the existing "
+            f"result would not reproduce"
+        )
+
+    def test_a_concept_question_retrieves_nothing_rather_than_noise(
+        self, project
+    ):
+        """Empty is the honest answer when the query names no code."""
+        repo, base = project
+        result = sretrieve.retrieve(
+            "Which file in this project implements the logging behaviour?",
+            root=repo, base=base)
+        assert result.status == "ok"
+        assert result.entities == [], (
+            f"a prose question retrieved {[e.name for e in result.entities]}"
+        )
+
+
+def test_the_absent_scorer_credits_abstention_even_with_filenames_nearby():
+    """Scored wrong in the n=60 run; the model was right and the rule was not.
+
+    The first version rejected any reply containing a path-shaped token, on the
+    reasoning that naming a file for a symbol nobody wrote is a fabrication.
+    Then a model abstained clearly and went on to mention other filenames while
+    explaining itself, and was marked wrong for it. The question is whether the
+    reply ASSERTED a definition, not whether a filename appears in the prose.
+    """
+    import importlib.util
+    from pathlib import Path as _P
+
+    spec = importlib.util.spec_from_file_location(
+        "question_strata",
+        _P(__file__).resolve().parent.parent.parent / "scripts" / "question_strata.py")
+    qs = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(qs)
+
+    assert qs.score_absent(
+        "NOT FOUND\n\nI don't see any file in the repository that defines "
+        "`_drive_v2`. The repository contains src/llm_router/okf.py and "
+        "others, but none define it."), "a clear abstention was scored wrong"
+    assert qs.score_absent("It does not exist in this project.")
+    # And the case the rule exists for.
+    assert not qs.score_absent("src/llm_router/okf.py"), (
+        "a confident fabricated path was scored correct"
+    )
+    assert not qs.score_absent("")

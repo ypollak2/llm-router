@@ -50,18 +50,38 @@ from llm_router.semantic.scope import resolve_scope
 
 DEFAULT_LIMIT = 20
 
-_IDENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]{2,}")
 _PATHISH = re.compile(r"[\w./-]+\.(?:py|pyi|ts|js|go|rs|java)")
 
-# Words that look like identifiers and never are. Without this, "the", "file"
-# and "class" seed a lookup from every query.
-_STOPWORDS = frozenset({
-    "the", "and", "for", "with", "this", "that", "what", "where", "which",
-    "does", "into", "from", "when", "why", "how", "are", "was", "were", "has",
-    "have", "can", "should", "would", "could", "fix", "add", "make", "run",
-    "file", "files", "code", "function", "class", "method", "test", "tests",
-    "please", "explain", "show", "capital", "portugal",
-})
+# A seed has to LOOK like code. Prose does not.
+#
+# This used to be `[A-Za-z_][A-Za-z0-9_]{2,}` behind a stopword list, which
+# meant any word of three or more characters seeded a symbol lookup. The
+# `concept` stratum — docstring questions with the identifier removed — showed
+# what that does: every question retrieved the same five irrelevant files,
+# because this repository contains entities named `project`, `implements`,
+# `routing` and `override`.
+#
+# Not a benchmark artifact. Source retrieval is on by default, so "how does the
+# routing override work?" was retrieving whatever happened to be named
+# `routing`, and handing it over with source spans and content hashes attached
+# — the shape of evidence, holding a guess.
+#
+# A longer stopword list cannot fix this; English is too large and every word
+# in it is somebody's variable name. So the test is shape, not membership:
+#
+#   `backticked`     the user said explicitly that this is code
+#   snake_case       an underscore between word characters
+#   CamelCase        two or more capitals, so `Ledger` is prose and
+#                    `OKFConcept` is not
+#   dotted.name      a qualified reference
+#
+# A bare lowercase word is prose until proven otherwise. Someone who means a
+# symbol can always backtick it, and that is a smaller cost than retrieving
+# confident nonsense for every sentence containing a common noun.
+_QUOTED = re.compile(r"[`'\"]([A-Za-z_][A-Za-z0-9_.]*)[`'\"]")
+_SNAKE = re.compile(r"\b[A-Za-z][A-Za-z0-9]*(?:_[A-Za-z0-9]+)+\b")
+_CAMEL = re.compile(r"\b[A-Z][a-z0-9]*[A-Z][A-Za-z0-9]*\b")
+_DOTTED = re.compile(r"\b[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)+\b")
 
 
 @dataclass(frozen=True)
@@ -84,15 +104,31 @@ class RetrievalResult:
 
 
 def seeds_from(query: str) -> tuple[list[str], list[str]]:
-    """(identifiers, paths) worth looking up. Order preserved, deduplicated."""
+    """(identifiers, paths) worth looking up. Order preserved, deduplicated.
+
+    Returning an empty identifier list is a normal, frequent and correct
+    outcome: most sentences do not name any code. Retrieval then finds nothing,
+    the pack renders as nothing, and the prompt goes out untouched — which is
+    the right behaviour for a question that was never about a symbol.
+    """
     paths = list(dict.fromkeys(_PATHISH.findall(query)))
-    idents = []
-    for match in _IDENT.finditer(query):
-        word = match.group(0)
-        if word.lower() in _STOPWORDS or word in paths:
-            continue
-        if word not in idents:
-            idents.append(word)
+
+    # Strip the paths before scanning, so `src/llm_router/okf.py` does not also
+    # yield `okf.py` as a dotted identifier.
+    scannable = query
+    for path in paths:
+        scannable = scannable.replace(path, " ")
+
+    idents: list[str] = []
+    for pattern in (_QUOTED, _DOTTED, _SNAKE, _CAMEL):
+        for match in pattern.finditer(scannable):
+            token = match.group(1) if pattern is _QUOTED else match.group(0)
+            # A dotted reference is looked up by its last segment, which is what
+            # the index stores as a name; the qualified form is kept too.
+            for candidate in ({token, token.rsplit(".", 1)[-1]}
+                              if "." in token else {token}):
+                if candidate and candidate not in idents:
+                    idents.append(candidate)
     return idents, paths
 
 
