@@ -8,10 +8,10 @@ a cap. "Retrieved prose cannot change permissions" is satisfied by doing
 nothing at all, since the current architecture has no mechanism for it — a
 gate that passes before the code is written is not a gate.
 
-So: the flooding threshold and the share are both fixed below; the injection
-test runs an actual attempt and asserts on the resulting pack; and the empty
-case is distinguished from the failure case by name, because "retrieval found
-nothing" and "retrieval broke" are the same empty list and opposite facts.
+So: the injection test runs an actual attempt and asserts on the resulting
+pack, and the empty case is distinguished from the failure case by name,
+because "retrieval found nothing" and "retrieval broke" are the same empty list
+and opposite facts.
 
 THE PACK'S CONTRACT
 
@@ -32,10 +32,6 @@ from llm_router.semantic import indexer as ix
 from llm_router.semantic import pack as spack
 from llm_router.semantic import retrieve as sretrieve
 
-# The two numbers this file pins. Named, so a future change to either is a
-# deliberate edit to a constant rather than a quietly different test.
-HIGH_DEGREE_THRESHOLD = 20      # inbound references that make a node "utility"
-MAX_UTILITY_SHARE = 0.25        # of a top-K result set
 
 
 def _repo(path: Path, files: dict[str, str]) -> Path:
@@ -82,42 +78,45 @@ def store(tmp_path: Path) -> exp.ExperienceStore:
 
 # ── retrieval ────────────────────────────────────────────────────────────────
 
-def test_an_exact_symbol_is_found_without_traversal(project):
+def test_an_exact_symbol_is_found(project):
     repo, base = project
     result = sretrieve.retrieve("where is post_entry defined?", root=repo, base=base)
 
     assert result.status == "ok"
     assert any(e.qualified_name == "post_entry" for e in result.entities)
-    assert result.hops_used == 0, (
-        "an exact symbol lookup expanded the graph, which costs budget and "
-        "buys nothing"
-    )
 
 
-def test_a_high_degree_utility_node_cannot_flood_the_results(project):
-    """The threshold and the share are both fixed, so a bare cap will not pass."""
+def test_only_what_the_query_named_comes_back(project):
+    """The property that replaced the traversal caps.
+
+    Arm D — seeds plus two hops — was run at n=60 against arm C and gave
+    identical answers on every question, so the expansion was deleted rather
+    than left switched off. The three tests that lived here (no traversal on an
+    exact lookup, a high-degree node held to a share of the result, expansion
+    bounded by hop and node caps) all guarded machinery that no longer exists.
+
+    What replaces them is stronger and simpler: nothing comes back that the
+    query did not name. `log_it` has thirty inbound references and is one import
+    away from `ledger.py`, which is exactly the node a connectivity-ranked
+    traversal surfaces for every query — and it must not appear for a query
+    about `post_entry`.
+    """
     repo, base = project
-    result = sretrieve.retrieve(
-        "post_entry in ledger.py", root=repo, base=base, limit=8, max_hops=2,
+    result = sretrieve.retrieve("post_entry in ledger.py", root=repo, base=base,
+                                limit=8)
+
+    assert result.entities
+    assert not [e for e in result.entities if e.name == "log_it"], (
+        "a node the query never named came back; that is the flooding the "
+        "deleted traversal had to be policed for"
     )
-
-    assert result.entities, "nothing retrieved at all"
-    utility = [e for e in result.entities if e.name == "log_it"]
-    share = len(utility) / len(result.entities)
-    assert share <= MAX_UTILITY_SHARE, (
-        f"log_it has 30 inbound references and took {share:.0%} of a "
-        f"{len(result.entities)}-entity result; the budget went to the most "
-        f"connected node rather than the most relevant one"
-    )
+    assert {e.relative_path for e in result.entities} == {"ledger.py"}
 
 
-def test_expansion_is_bounded_by_the_hop_and_node_caps(project):
+def test_the_result_is_bounded_by_the_limit(project):
     repo, base = project
-    result = sretrieve.retrieve(
-        "post_entry", root=repo, base=base, limit=5, max_hops=2,
-    )
+    result = sretrieve.retrieve("post_entry", root=repo, base=base, limit=5)
     assert len(result.entities) <= 5
-    assert result.hops_used <= 2
 
 
 def test_nothing_relevant_is_an_answer_not_a_failure(project):
@@ -396,3 +395,34 @@ def test_every_evidence_item_has_a_citable_id(project, store):
     ids = [e["id"] for e in p.evidence]
     assert ids == sorted(set(ids), key=ids.index), "evidence ids are not unique"
     assert all(i.startswith("e") for i in ids)
+
+
+def test_a_pack_with_nothing_to_offer_renders_as_nothing(tmp_path):
+    """Diagnostics are for the caller, not for the model's prompt.
+
+    Found by `test_okf_choke_point.py::test_injection_is_fail_open` the moment
+    source retrieval was defaulted on: with no index built, every prompt in the
+    project was getting "missing: structural_index" prepended to it. Fail-open
+    means the prompt comes back untouched, and a diagnostic string is a touch.
+
+    The fields stay on the object — whoever is debugging still gets them.
+    """
+    repo = _repo(tmp_path / "repo", {"a.py": "def f():\n    pass\n"})
+
+    p = spack.build("what is the capital of Portugal?", root=repo,
+                    base=tmp_path / "never-indexed")
+
+    assert p.missing_requirements, "the caller must still be told"
+    assert spack.render(p) == "", (
+        f"an empty pack rendered {spack.render(p)!r} into the prompt"
+    )
+
+
+def test_diagnostics_still_render_alongside_real_content(project, store):
+    """The other half: when there IS content, say what was left out."""
+    repo, base = project
+    p = spack.build("post_entry", root=repo, base=base, experience=store,
+                    budget_tokens=20)
+    rendered = spack.render(p)
+    if p.evidence and p.omissions:
+        assert "omitted:" in rendered

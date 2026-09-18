@@ -61,17 +61,49 @@ def test_the_choke_point_reaches_the_semantic_layer(project, monkeypatch):
     assert "reconcile_invoice" in on
 
 
-def test_the_default_is_unchanged_behaviour(project, monkeypatch):
-    """Wiring it in must not turn it on."""
+def test_source_retrieval_attaches_by_default(project, monkeypatch):
+    """It is on now, and it was not before.
+
+    This test asserted the opposite until 18 Sep 2026, when the measurement
+    arrived: 58/60 against the corrected baseline's 41/60, 17 discordant pairs
+    all one way, p=1.5e-05 — measured on the configuration that actually ships,
+    OKF and the semantic pack together. The old assertion was right while the
+    layer was unmeasured and is wrong now; both versions say why.
+    """
     for name in ("SOURCE", "HISTORY", "INTERVENTION"):
         monkeypatch.delenv(f"LLM_ROUTER_SEMANTIC_{name}", raising=False)
     monkeypatch.delenv("LLM_ROUTER_SEMANTIC_ARM", raising=False)
-    prompt = "fix reconcile_invoice in reconciler.py"
 
-    assert "<repository_evidence>" not in inject(prompt, root=str(project)), (
-        "the semantic layer attached itself with no switch set; it has not been "
-        "measured and defaulting it on skips the experiment it exists for"
+    out = inject("fix reconcile_invoice in reconciler.py", root=str(project))
+    assert "<repository_evidence>" in out
+    assert "reconcile_invoice" in out
+
+
+def test_the_unmeasured_halves_stay_off_by_default(project, monkeypatch):
+    """Source was measured. History and intervention were not.
+
+    A flip that took all three together would have turned on a layer whose
+    M0/M1/M2 track has never been run, on the strength of a benchmark that says
+    nothing about it.
+    """
+    for name in ("SOURCE", "HISTORY", "INTERVENTION"):
+        monkeypatch.delenv(f"LLM_ROUTER_SEMANTIC_{name}", raising=False)
+    monkeypatch.delenv("LLM_ROUTER_SEMANTIC_ARM", raising=False)
+
+    out = inject("fix reconcile_invoice in reconciler.py", root=str(project))
+    assert "<engineering_experience>" not in out, (
+        "experience records reached a prompt by default, and the track that "
+        "would justify that has not been run"
     )
+
+
+def test_turning_it_off_is_still_one_variable(project, monkeypatch):
+    """A default that cannot be overridden is a policy, not a default."""
+    monkeypatch.delenv("LLM_ROUTER_SEMANTIC_ARM", raising=False)
+    monkeypatch.setenv("LLM_ROUTER_SEMANTIC_SOURCE", "off")
+
+    out = inject("fix reconcile_invoice in reconciler.py", root=str(project))
+    assert "<repository_evidence>" not in out
 
 
 def test_shadow_is_byte_identical_through_the_choke_point(project, monkeypatch):

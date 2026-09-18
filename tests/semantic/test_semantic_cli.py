@@ -64,9 +64,9 @@ def test_index_then_status_reports_what_was_built(project, capsys):
 
 def test_status_always_prints_the_selected_arm(project, capsys, monkeypatch):
     """A run labelled with the wrong arm is a measurement of nothing."""
-    monkeypatch.setenv("LLM_ROUTER_SEMANTIC_ARM", "D")
+    monkeypatch.setenv("LLM_ROUTER_SEMANTIC_ARM", "C")
     assert cmd_semantic(["status"]) == 0
-    assert "D" in capsys.readouterr().out
+    assert "C" in capsys.readouterr().out
 
 
 def test_an_invalid_arm_exits_nonzero_rather_than_looking_fine(project, capsys,

@@ -30,15 +30,15 @@ no treatment attached cannot be compared with anything and offline replay of it
 is not valid.
 
     B    corrected baseline — the five prerequisite fixes, no semantic layer
-    C    budget-matched retrieval, no graph traversal
-    D    C plus bounded traversal
+    C    budget-matched retrieval
     M0   structural baseline plus flat search over the same history
     M1   M0 plus typed, applicable experience records
     M2   M1 plus memory-guided intervention
 
 WHAT AN ARM MAY NOT DO
 
-Change model selection. D vs C measures retrieval; E vs D measures routing. An
+Change model selection. C vs B measures retrieval; a routing arm would measure
+routing. An
 arm that moved both would make neither attributable, which is the one thing
 this structure exists to prevent — and there is a test asserting this module
 never mentions the routing symbols.
@@ -83,16 +83,15 @@ class ModeConfig:
 ARMS: dict[str, ModeConfig] = {
     "B":  ModeConfig(Mode.OFF, Mode.OFF, Mode.OFF),
     "C":  ModeConfig(Mode.ON, Mode.OFF, Mode.OFF),
-    "D":  ModeConfig(Mode.ON, Mode.OFF, Mode.OFF),
     "M0": ModeConfig(Mode.ON, Mode.OFF, Mode.OFF),
     "M1": ModeConfig(Mode.ON, Mode.ON, Mode.OFF),
     "M2": ModeConfig(Mode.ON, Mode.ON, Mode.ON),
 }
 
-# C and D share their switches and differ in traversal depth, which is the
-# thing being compared. Kept separate from ARMS so the switch table stays
-# readable as switches.
-ARM_MAX_HOPS: dict[str, int] = {"C": 0, "D": 2, "M0": 0, "M1": 0, "M2": 0}
+# Arm D was "C plus two hops of graph traversal". It was run at n=60 and gave
+# identical answers to C on every question, so the traversal was deleted and D
+# with it — see semantic/retrieve.py and
+# Docs/measurements/2026-09-18-semantic-arms.md.
 
 
 def _mode(raw: str) -> Mode:
@@ -102,6 +101,31 @@ def _mode(raw: str) -> Mode:
         # A typo becomes off, never a guess. Guessing "on" from "onn" enables a
         # measured-nothing feature; guessing at all makes the config unreadable.
         return Mode.OFF
+
+
+# Source retrieval defaults to ON. History and intervention do not.
+#
+# The split follows the evidence exactly. Source retrieval was measured at n=60,
+# paired, against the corrected OKF baseline: 58/60 against 41/60, +28.3 points,
+# 17 discordant pairs all one way, McNemar exact p=1.5e-05 — and the arm that
+# was measured is the one that ships, OKF and the semantic pack TOGETHER, which
+# performed identically to the pack alone on every question.
+#
+# History and intervention have no such number. The M0/M1/M2 track has not been
+# run, so they stay off until it has. Turning on the measured half and leaving
+# the unmeasured half alone is the whole reason these are three switches rather
+# than one.
+#
+# The honest caveat, recorded here because this is where someone will look: the
+# task measured is exact symbol lookup on uniquely-defined symbols, which is
+# close to a best case for an ast index. See
+# Docs/measurements/2026-09-18-semantic-arms.md.
+_DEFAULTS = {"SOURCE": Mode.ON, "HISTORY": Mode.OFF, "INTERVENTION": Mode.OFF}
+
+
+def _mode_or(raw: str, fallback: Mode) -> Mode:
+    """A set value wins; an unset one takes the measured default."""
+    return _mode(raw) if raw.strip() else fallback
 
 
 def current() -> ModeConfig:
@@ -123,9 +147,12 @@ def current() -> ModeConfig:
             )
         return ARMS[arm]
     return ModeConfig(
-        _mode(os.environ.get("LLM_ROUTER_SEMANTIC_SOURCE", "")),
-        _mode(os.environ.get("LLM_ROUTER_SEMANTIC_HISTORY", "")),
-        _mode(os.environ.get("LLM_ROUTER_SEMANTIC_INTERVENTION", "")),
+        _mode_or(os.environ.get("LLM_ROUTER_SEMANTIC_SOURCE", ""),
+                 _DEFAULTS["SOURCE"]),
+        _mode_or(os.environ.get("LLM_ROUTER_SEMANTIC_HISTORY", ""),
+                 _DEFAULTS["HISTORY"]),
+        _mode_or(os.environ.get("LLM_ROUTER_SEMANTIC_INTERVENTION", ""),
+                 _DEFAULTS["INTERVENTION"]),
     )
 
 
@@ -223,7 +250,6 @@ def apply(
         # and the comparison charges the wrong arm.
         experience=experience if config.history is not Mode.OFF else None,
         budget_tokens=budget_tokens,
-        max_hops=ARM_MAX_HOPS.get(arm, 0),
     )
     elapsed_ms = (time.monotonic() - started) * 1000
 

@@ -86,16 +86,35 @@ def test_the_three_controls_are_independent(monkeypatch):
     assert cfg.intervention is modes.Mode.OFF
 
 
-def test_everything_is_off_by_default(monkeypatch):
-    """Nothing measured, nothing adopted. The document is explicit about it."""
+def test_only_the_measured_switch_is_on_by_default(monkeypatch):
+    """The defaults follow the evidence, switch by switch.
+
+    Source retrieval was measured at n=60 against the corrected baseline —
+    58/60 vs 41/60, 17 discordant pairs all one way, p=1.5e-05 — and the
+    configuration measured is the one that ships. So it is on.
+
+    History and intervention have no such number; the M0/M1/M2 track has not
+    been run. They stay off. Turning on the measured half while leaving the
+    unmeasured half alone is the entire reason these are three switches and not
+    one, and a change that flips all three together has lost the distinction.
+    """
     for name in ("SOURCE", "HISTORY", "INTERVENTION"):
         monkeypatch.delenv(f"LLM_ROUTER_SEMANTIC_{name}", raising=False)
+    monkeypatch.delenv("LLM_ROUTER_SEMANTIC_ARM", raising=False)
 
     cfg = modes.current()
-    assert cfg.source is modes.Mode.OFF
-    assert cfg.history is modes.Mode.OFF
+    assert cfg.source is modes.Mode.ON
+    assert cfg.history is modes.Mode.OFF, (
+        "history retrieval is on by default and the M-track has never been run"
+    )
     assert cfg.intervention is modes.Mode.OFF
-    assert not cfg.any_enabled
+
+
+def test_an_explicit_off_still_beats_the_default(monkeypatch):
+    """A default is not a policy. Anyone can still turn it off."""
+    monkeypatch.delenv("LLM_ROUTER_SEMANTIC_ARM", raising=False)
+    monkeypatch.setenv("LLM_ROUTER_SEMANTIC_SOURCE", "off")
+    assert modes.current().source is modes.Mode.OFF
 
 
 def test_an_unknown_mode_falls_back_to_off_rather_than_guessing(monkeypatch):
@@ -176,7 +195,7 @@ def test_off_does_no_work_at_all(project, store, monkeypatch):
 def test_every_arm_is_selectable_and_stamps_its_own_name(project, store,
                                                          monkeypatch):
     repo, base = project
-    for arm in ("B", "C", "D", "M0", "M1", "M2"):
+    for arm in ("B", "C", "M0", "M1", "M2"):
         monkeypatch.setenv("LLM_ROUTER_SEMANTIC_ARM", arm)
         result = modes.apply("fix post_entry in ledger.py", root=repo,
                              base=base, experience=store)
@@ -195,14 +214,14 @@ def test_arm_b_is_the_corrected_baseline_with_no_semantic_layer(project, store,
     assert result.pack is None, "arm B is the no-graph baseline and got a pack"
 
 
-def test_arm_d_has_source_evidence_and_arm_m1_has_experience(project, store,
+def test_arm_c_has_source_evidence_and_arm_m1_has_experience(project, store,
                                                              monkeypatch):
     repo, base = project
 
-    monkeypatch.setenv("LLM_ROUTER_SEMANTIC_ARM", "D")
-    d = modes.apply("fix post_entry in ledger.py", root=repo, base=base,
+    monkeypatch.setenv("LLM_ROUTER_SEMANTIC_ARM", "C")
+    c = modes.apply("fix post_entry in ledger.py", root=repo, base=base,
                     experience=store)
-    assert d.pack is not None and d.pack.evidence
+    assert c.pack is not None and c.pack.evidence
 
     monkeypatch.setenv("LLM_ROUTER_SEMANTIC_ARM", "M1")
     m1 = modes.apply("fix post_entry in ledger.py", root=repo, base=base,

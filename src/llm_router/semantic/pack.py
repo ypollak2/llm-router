@@ -88,7 +88,6 @@ def build(
     budget_tokens: int = DEFAULT_BUDGET_TOKENS,
     limit: int = retrieve.DEFAULT_LIMIT,
     lesson_limit: int = 5,
-    max_hops: int = retrieve.DEFAULT_MAX_HOPS,
 ) -> ContextPack:
     scope = resolve_scope(root)
     pack = ContextPack(scope_id=scope_key(scope), budget_tokens=budget_tokens)
@@ -98,8 +97,7 @@ def build(
     # empty" are different answers and only the first is a missing requirement.
     index_existed = sstore.index_path(scope, base).exists()
 
-    result = retrieve.retrieve(query, root=scope, base=base, limit=limit,
-                               max_hops=max_hops)
+    result = retrieve.retrieve(query, root=scope, base=base, limit=limit)
     pack.snapshot_id = _snapshot_id(scope)
 
     if result.status == "unavailable":
@@ -287,6 +285,16 @@ def render(pack: ContextPack) -> str:
         out.append("  " + UNTRUSTED_MARKER.replace("<", "</"))
         out.append(EXPERIENCE_HEADING.replace("<", "</"))
 
+    # Diagnostics belong to the CALLER, not to the model's prompt, and only
+    # alongside content the model can use. A pack that found nothing renders as
+    # nothing — the fields are still on the object for whoever is debugging.
+    #
+    # Caught by `test_injection_is_fail_open` the moment source retrieval was
+    # defaulted on: with no index built, every prompt in the project was having
+    # "missing: structural_index" prepended to it. Fail-open means the prompt
+    # comes back untouched, and a diagnostic string is a touch.
+    if not out:
+        return ""
     if pack.missing_requirements:
         out.append("  missing: " + ", ".join(pack.missing_requirements))
     if pack.omissions:

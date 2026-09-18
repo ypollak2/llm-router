@@ -16,8 +16,8 @@ THE ARMS, AND WHAT EACH ONE ISOLATES
 
 B is the one that matters. Beating arm A proves only that retrieval beats no
 retrieval, which OKF already demonstrated at +66.7%. The question this layer
-has to answer is whether it beats the thing already in production, and D vs C
-is whether graph expansion earns its cost on top of that.
+has to answer is whether it beats the thing already in production, and BC is
+the configuration a default-on router would actually send.
 
 WHY THE QUESTIONS COME FROM THE REPOSITORY
 
@@ -61,22 +61,27 @@ _SPEC = importlib.util.spec_from_file_location(
 bench = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(bench)
 
-ARMS = ("A", "B", "C", "D")
+ARMS = ("A", "B", "C", "BC")
 _ARM_WHAT = {
     "A": "no context",
     "B": "OKF context (the corrected baseline)",
     "C": "semantic pack, no traversal",
-    "D": "semantic pack, 2 hops",
+    # The configuration that actually SHIPS if source retrieval defaults to on.
+    # `context_injection.inject` attaches OKF first and then the semantic pack,
+    # so a default-on router sends both — and B and C each measured one of them
+    # alone. An arm that nobody ran is an arm nobody can vouch for, and this is
+    # the one users would get.
+    "BC": "OKF + semantic together (what default-on ships)",
 }
 
 
-def _semantic_context(prompt: str, base: Path, max_hops: int,
+def _semantic_context(prompt: str, base: Path,
                       budget_tokens: int) -> tuple[str, dict]:
     """A rendered pack, plus what it cost — or ("", …) when it finds nothing."""
     from llm_router.semantic import pack as spack
 
     built = spack.build(prompt, root=str(REPO), base=base,
-                        budget_tokens=budget_tokens, max_hops=max_hops)
+                        budget_tokens=budget_tokens)
     return spack.render(built), {
         "status": built.retrieval_status,
         "tokens": built.retrieved_tokens,
@@ -127,10 +132,15 @@ def main() -> int:
                 context, meta = "", {"status": "off", "tokens": 0}
             elif arm == "B":
                 context, meta = bench.okf_context(q["prompt"]), {"status": "okf"}
+            elif arm == "BC":
+                okf_ctx = bench.okf_context(q["prompt"])
+                sem_ctx, meta = _semantic_context(
+                    q["prompt"], base, args.budget_tokens)
+                context = "\n\n".join(x for x in (okf_ctx, sem_ctx) if x)
+                meta = {**meta, "status": "okf+semantic"}
             else:
                 context, meta = _semantic_context(
-                    q["prompt"], base, 0 if arm == "C" else 2,
-                    args.budget_tokens)
+                    q["prompt"], base, args.budget_tokens)
             answer, secs = bench.ask(args.model, q["prompt"], context,
                                      args.timeout)
             strict, lenient = bench.score(answer, q)

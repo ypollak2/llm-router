@@ -157,10 +157,10 @@ def test_two_identical_runs_produce_identical_traces(project, tmp_path):
 
     a = sink.get_retrieval(sink.record_retrieval(
         spack.build("post_entry", root=repo, base=base, experience=store),
-        query="post_entry", arm="D"))
+        query="post_entry", arm="C"))
     b = sink.get_retrieval(sink.record_retrieval(
         spack.build("post_entry", root=repo, base=base, experience=store),
-        query="post_entry", arm="D"))
+        query="post_entry", arm="C"))
 
     assert a.replay_key() == b.replay_key(), (
         "the same query at the same snapshots selected different evidence"
@@ -316,9 +316,9 @@ def test_traces_survive_a_reopen(project, tmp_path):
     repo, base, store = project
     root = tmp_path / "traces"
     pack = spack.build("post_entry", root=repo, base=base, experience=store)
-    rid = tr.TraceStore(root).record_retrieval(pack, query="post_entry", arm="D")
+    rid = tr.TraceStore(root).record_retrieval(pack, query="post_entry", arm="C")
 
-    assert tr.TraceStore(root).get_retrieval(rid).arm == "D"
+    assert tr.TraceStore(root).get_retrieval(rid).arm == "C"
 
 
 # ── the baseline arm needs a row too ─────────────────────────────────────────
