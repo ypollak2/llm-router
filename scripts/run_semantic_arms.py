@@ -61,6 +61,11 @@ _SPEC = importlib.util.spec_from_file_location(
 bench = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(bench)
 
+_STRATA_SPEC = importlib.util.spec_from_file_location(
+    "question_strata", REPO / "scripts" / "question_strata.py")
+strata_mod = importlib.util.module_from_spec(_STRATA_SPEC)
+_STRATA_SPEC.loader.exec_module(strata_mod)
+
 ARMS = ("A", "B", "C", "BC")
 _ARM_WHAT = {
     "A": "no context",
@@ -98,6 +103,11 @@ def main() -> int:
     ap.add_argument("--timeout", type=int, default=120)
     ap.add_argument("--budget-tokens", type=int, default=2000)
     ap.add_argument("--arms", default=",".join(ARMS))
+    ap.add_argument("--stratum", default="symbol",
+                    choices=strata_mod.STRATA,
+                    help="which question set. `symbol` is the original and the "
+                         "one the layer is built for; the others are where it "
+                         "should struggle")
     ap.add_argument("--out", default="")
     args = ap.parse_args()
 
@@ -107,9 +117,10 @@ def main() -> int:
             print(f"unknown arm {arm!r}; valid: {list(ARMS)}", file=sys.stderr)
             return 2
 
-    questions = bench.derive_questions(args.n, args.seed)
+    questions = strata_mod.derive(args.stratum, args.n, args.seed)
     if not questions:
-        print("no uniquely-defined symbols found — is this a git checkout?")
+        print(f"no questions derived for stratum {args.stratum!r} — is this a "
+              f"git checkout?")
         return 1
 
     # Build the index once, and report it, so the run says what it read.
@@ -119,7 +130,8 @@ def main() -> int:
     idx = ix.index(root=str(REPO))
     print(f"index: {idx.files_parsed} parsed / {idx.files_skipped} unchanged / "
           f"{idx.entities} entities in {time.monotonic() - t0:.1f}s")
-    print(f"n = {len(questions)} · model = {args.model} · seed = {args.seed} · "
+    print(f"stratum = {args.stratum} · n = {len(questions)} · "
+          f"model = {args.model} · seed = {args.seed} · "
           f"budget = {args.budget_tokens} tokens")
     print(f"arms: {', '.join(f'{a} ({_ARM_WHAT[a]})' for a in arms)}\n")
 
@@ -143,7 +155,13 @@ def main() -> int:
                     q["prompt"], base, args.budget_tokens)
             answer, secs = bench.ask(args.model, q["prompt"], context,
                                      args.timeout)
-            strict, lenient = bench.score(answer, q)
+            if args.stratum == "absent":
+                # A different question needs a different scorer. Correct here
+                # is declining to name a file, and any path-shaped token in the
+                # reply is a fabrication whatever hedging surrounds it.
+                strict = lenient = strata_mod.score_absent(answer)
+            else:
+                strict, lenient = bench.score(answer, q)
             row["arms"][arm] = {
                 "strict": strict, "lenient": lenient, "secs": round(secs, 1),
                 "had_context": bool(context), "meta": meta,
@@ -194,6 +212,7 @@ def main() -> int:
 
     if args.out:
         Path(args.out).write_text(json.dumps({
+            "stratum": args.stratum,
             "n": n, "model": args.model, "seed": args.seed,
             "budget_tokens": args.budget_tokens, "arms": arms,
             "totals": totals, "rows": rows,
