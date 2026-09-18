@@ -53,7 +53,6 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-import pytest
 
 SRC = Path(__import__("llm_router").__file__).resolve().parent
 ROUTER = (SRC / "router.py").read_text(encoding="utf-8")
@@ -123,9 +122,9 @@ def test_intent_gates_measure_the_user_prompt_not_the_attached_context():
     `_short_prompt` decided whether to escalate on quality by measuring
     `len(prompt)` — the prompt AFTER attachment. Latent while attachment only
     happened when OKF matched; live the moment it became unconditional, because
-    every prompt then gained a constant ~250 bytes of repository state and
-    "say OK" stopped being a short prompt. Five tests failed on it, and they
-    were right to.
+    every prompt then gained a block of repository state — a couple of hundred
+    bytes, varying with the tree — and "say OK" stopped being a short prompt.
+    Five tests failed on it, and they were right to.
 
     The rule: what gets SENT is `prompt` and that is correct for cost and token
     estimates. What the user MEANT is `user_prompt`, and that is what an intent

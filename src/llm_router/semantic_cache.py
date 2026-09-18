@@ -19,7 +19,6 @@ Only active when ``ollama_base_url`` is set — zero overhead otherwise.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import logging
 import math

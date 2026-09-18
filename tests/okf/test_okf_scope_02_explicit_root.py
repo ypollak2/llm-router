@@ -29,7 +29,6 @@ commit that adds it, rather than months later in a store nobody can explain.
 """
 from __future__ import annotations
 
-import os
 import subprocess
 from pathlib import Path
 
