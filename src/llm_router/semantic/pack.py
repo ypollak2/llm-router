@@ -77,6 +77,7 @@ def build(
     budget_tokens: int = DEFAULT_BUDGET_TOKENS,
     limit: int = retrieve.DEFAULT_LIMIT,
     lesson_limit: int = 5,
+    max_hops: int = retrieve.DEFAULT_MAX_HOPS,
 ) -> ContextPack:
     scope = resolve_scope(root)
     pack = ContextPack(scope_id=scope_key(scope), budget_tokens=budget_tokens)
@@ -86,7 +87,8 @@ def build(
     # empty" are different answers and only the first is a missing requirement.
     index_existed = sstore.index_path(scope, base).exists()
 
-    result = retrieve.retrieve(query, root=scope, base=base, limit=limit)
+    result = retrieve.retrieve(query, root=scope, base=base, limit=limit,
+                               max_hops=max_hops)
     pack.snapshot_id = _snapshot_id(scope)
 
     if result.status == "unavailable":
