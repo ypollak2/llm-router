@@ -10,13 +10,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 | [CHANGELOG-ARCHIVE.md](CHANGELOG-ARCHIVE.md) | v10.1.5 back to v6.3.0 |
 | [GitHub Releases](https://github.com/ypollak2/llm-router/releases) | v6.2 and earlier |
 
-## [Unreleased]
+## [14.0.0] - 2026-09-18
 
 Five prerequisite defects in project scoping and grounding measurement, and a
-new `semantic` package. Source retrieval is **on by default on measured
-evidence**; history and intervention stay off because they have none. Adds one
-CLI command (`llm-router semantic`) and four environment variables. No MCP tool is
-added or removed, and model-selection policy is unchanged.
+new `semantic` package. Adds one CLI command (`llm-router semantic`) and four
+environment variables. No MCP tool is added or removed, and model-selection
+policy is unchanged.
+
+### Why this is a major version
+
+No public name was removed or renamed, so the repository's own semver gate
+reports `PATCH` as the minimum. The gate compares the surface, and the surface
+is not what changed here — **the default behaviour is**:
+
+- **Source retrieval is on by default.** Every routed prompt now carries a
+  `<repository_evidence>` block it did not carry before. Nobody asked for that,
+  and it changes what every model sees on every call. That alone is what a
+  major version is for.
+- **An unobserved command outcome is recorded as `unknown` rather than `ok`.**
+  Chapter sealing requires `ok`, and most tool responses carry no exit code, so
+  expect markedly fewer sealed chapters. Correct, and a visible drop in a
+  number somebody may be watching.
+- **OKF writes less.** Definitions are verified against the file before being
+  stored, so a store that previously accumulated unverified symbol names stops
+  growing as fast — and some of what it already holds is wrong.
+
+Anyone who wants the previous behaviour sets `LLM_ROUTER_SEMANTIC_SOURCE=off`.
+
+Two notes for whoever reads the release tooling's output. The semver gate
+reported "public surface unchanged" despite this release adding a CLI
+subcommand, because it extracts top-level `def`/`class` names from eleven fixed
+files and a subcommand is a string in a `choices` list — the same blind spot
+its own comment records from 13.3.1. And `sync-versions.py` did not update
+`npm/package.json` while `verify-version-sync.py` checked it; fixed here.
 
 ### Fixed
 

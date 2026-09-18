@@ -8,6 +8,7 @@ Uses pyproject.toml as the source of truth and updates:
 - .codex-plugin/marketplace.json
 - .factory-plugin/plugin.json
 - .factory-plugin/marketplace.json
+- npm/package.json
 """
 
 import json
@@ -90,6 +91,31 @@ def sync_marketplace_json(project_root: Path, version: str, plugin_dir: str) -> 
     return True
 
 
+def sync_npm_package(project_root: Path, version: str) -> bool:
+    """Update version in npm/package.json.
+
+    Added at the 14.0.0 bump, where this script reported "all versions in sync"
+    and `verify-version-sync.py` immediately failed on npm/package.json — one
+    script wrote six files and the other checked seven. A sync tool that misses
+    a file the verifier checks is worse than no sync tool: it reports success
+    and hands the failure to the next step.
+    """
+    package_path = project_root / "npm" / "package.json"
+    if not package_path.exists():
+        print("⚠️  npm/package.json not found, skipping")
+        return False
+
+    data = json.loads(package_path.read_text(encoding="utf-8"))
+    if data.get("version") == version:
+        print(f"✅ npm/package.json already at {version}")
+        return False
+
+    data["version"] = version
+    package_path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    print(f"✅ Updated npm/package.json to {version}")
+    return True
+
+
 def main():
     """Sync versions across all files."""
     project_root = Path(__file__).parent.parent.parent
@@ -104,6 +130,7 @@ def main():
         for plugin_dir in PLUGIN_DIRS:
             changes.append(sync_plugin_json(project_root, version, plugin_dir))
             changes.append(sync_marketplace_json(project_root, version, plugin_dir))
+        changes.append(sync_npm_package(project_root, version))
 
         print("=" * 50)
 
