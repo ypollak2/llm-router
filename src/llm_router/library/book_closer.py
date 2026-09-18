@@ -18,7 +18,74 @@ from pathlib import Path
 from llm_router.library.sealer import _librarian, seal_chapter
 from llm_router.library.store import LibraryDoc, LibraryStore, now_utc, scrub_secrets
 
+# How many facts the READABLE DIGEST shows. Not how many are kept.
+#
+# This used to be both, and that made the biography freeze. Once the document
+# held 40 bullets, `max(0, MAX_BIO_FACTS - current_count)` was 0 on every
+# subsequent merge, so every fact the project learned after that point was
+# discarded in silence — no warning, no counter, nothing to notice. The comment
+# justifying it said the oldest facts "earned their shelf space", but arriving
+# first is not the same as mattering, and a fact from the first week outranked
+# the bug that is live today purely by age.
+#
+# Raising the number postpones that by exactly the amount it is raised. So the
+# digest is now a bounded VIEW and `biography/facts/` is the store of record.
 MAX_BIO_FACTS = 40
+
+# One file per fact, so nothing is capped and each is retrievable on its own.
+FACTS_DIR = "biography/facts"
+
+# Marks the digest's own status line, which is rewritten on each merge. Facts
+# are never rewritten; this line is not a fact, it is a label on a view.
+_TRUNCATION_MARKER = "_showing"
+
+
+def _fact_key(line: str) -> str:
+    """The fact itself, without its provenance suffix — the identity for dedup."""
+    return line.lstrip("- ").split(" (as of")[0].strip()
+
+
+def _fact_filename(key: str) -> str:
+    import hashlib
+
+    return hashlib.sha256(key.encode("utf-8")).hexdigest()[:20] + ".md"
+
+
+def all_durable_facts(store: LibraryStore) -> list[str]:
+    """Every recorded durable fact, digest cap or not.
+
+    The digest shows the first `MAX_BIO_FACTS`; this is the whole set, and it
+    is what any later retrieval reads. A high-impact fact learned in month six
+    is here even though the readable document filled up in week one.
+    """
+    root = store.root / FACTS_DIR
+    if not root.exists():
+        return []
+    out = []
+    for path in sorted(root.glob("*.md")):
+        doc = store.read_doc(f"{FACTS_DIR}/{path.name}")
+        if doc is not None:
+            text = doc.body.strip()
+            if text:
+                out.append(text)
+    return out
+
+
+def _record_fact(store: LibraryStore, line: str, book: str, sha: str) -> bool:
+    """Write one fact as its own record. False if it was already recorded."""
+    key = _fact_key(line)
+    if not key:
+        return False
+    rel = f"{FACTS_DIR}/{_fact_filename(key)}"
+    if (store.root / FACTS_DIR / _fact_filename(key)).exists():
+        return False
+    store.write_doc(
+        rel,
+        {"type": "durable-fact", "book": book, "sha": sha or "unknown",
+         "recorded_at": now_utc()},
+        line.lstrip("- ").strip(),
+    )
+    return True
 
 
 def _chapter_synopsis(ch: LibraryDoc) -> str:
@@ -85,23 +152,37 @@ def _merge_biography(store: LibraryStore, book: str, durable: str, sha: str) -> 
     if not new_facts:
         return
 
+    # Record FIRST, and record everything. The digest below is a bounded view;
+    # this is the store of record, and it is what keeps the 41st fact.
+    recorded_now = [f for f in new_facts if _record_fact(store, f, book, sha)]
+    total_recorded = len(all_durable_facts(store))
+
     if bio is None:
-        body = "# Biography\n\n(auto-started by book closer)\n\n## Durable facts\n" + "\n".join(new_facts)
+        shown = new_facts[:MAX_BIO_FACTS]
+        body = ("# Biography\n\n(auto-started by book closer)\n\n"
+                "## Durable facts\n" + "\n".join(shown))
         meta = {"type": "biography", "written_at": now_utc(), "last_updated": now_utc(),
                 "source_books": [book]}
     else:
         body = bio.body
         if "## Durable facts" not in body:
             body += "\n\n## Durable facts\n"
-        existing = {ln.split(" (as of")[0].strip() for ln in body.splitlines()
-                    if ln.startswith("- ")}
-        add = [f for f in new_facts if f.split(" (as of")[0].strip() not in existing]
-        # cap growth; oldest facts stay (they earned their shelf space)
+        # Drop any previous status line before measuring or appending, so it
+        # does not accumulate and is not counted as a fact.
+        kept = [ln for ln in body.splitlines()
+                if not ln.strip().startswith(_TRUNCATION_MARKER)]
+        body = "\n".join(kept).rstrip()
+
+        existing = {_fact_key(ln) for ln in body.splitlines() if ln.startswith("- ")}
+        add = [f for f in recorded_now if _fact_key(f) not in existing]
+        # The digest stays human-sized. Anything beyond it is not lost — it is
+        # in biography/facts/, and the status line below says how much.
         current_count = sum(1 for ln in body.splitlines() if ln.startswith("- "))
         add = add[: max(0, MAX_BIO_FACTS - current_count)]
-        if not add:
+        if not add and not recorded_now:
             return
-        body = body.rstrip() + "\n" + "\n".join(add)
+        if add:
+            body = body.rstrip() + "\n" + "\n".join(add)
         meta = dict(bio.meta)
         meta["last_updated"] = now_utc()
         books = meta.get("source_books") or []
@@ -110,4 +191,14 @@ def _merge_biography(store: LibraryStore, book: str, durable: str, sha: str) -> 
         if book not in books:
             books.append(book)
         meta["source_books"] = books[-12:]
+
+    # A truncated view that looks complete is worse than no view: a reader who
+    # cannot tell it is truncated will conclude the project knows 40 things.
+    shown_count = sum(1 for ln in body.splitlines() if ln.startswith("- "))
+    if total_recorded > shown_count:
+        body = body.rstrip() + (
+            f"\n\n{_TRUNCATION_MARKER} {shown_count} of {total_recorded} "
+            f"recorded facts — all of them are in `{FACTS_DIR}/`_"
+        )
+    meta["fact_count"] = total_recorded
     store.write_doc("biography/biography.md", meta, body)

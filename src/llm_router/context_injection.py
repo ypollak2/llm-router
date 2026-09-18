@@ -92,6 +92,20 @@ def inject(prompt: str, *, root: str | None = None, limit: int = 3,
     if state:
         body = f"{state}\n\n{body}"
 
+    # The semantic layer attaches here or nowhere. It is off by default and its
+    # shadow mode is byte-identical to off, so this call changes nothing until
+    # someone selects an arm — but it has to EXIST, or "ships dark" quietly
+    # means "is not wired in", and those are different claims. The choke point
+    # is the only place that may attach context; a second attach path is the
+    # defect this module was created to close.
+    try:
+        from llm_router.semantic import modes as _semantic_modes
+
+        applied = _semantic_modes.apply(body, root=root)
+        body = applied.prompt
+    except Exception:                                        # noqa: BLE001
+        pass  # retrieval is an improvement to a call, never a precondition
+
     if not session_id:
         return body
     try:

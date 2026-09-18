@@ -1615,18 +1615,18 @@ def _cli_scope_root() -> str | None:
     explicit override, and the repo containing the cwd is the fallback — which is
     correct for the hook and for the CLI, and simply absent for the long-lived
     server, where it yields None rather than a confidently wrong bucket.
-    """
-    import os as _os
 
-    explicit = _os.environ.get("LLM_ROUTER_PROJECT_ROOT", "").strip()
-    if explicit:
-        return explicit
+    OKF-SCOPE-04: the walk moved to `semantic.scope.resolve_scope_or_none`,
+    which keeps the None-rather-than-a-wrong-bucket rule this function was
+    written for and adds the repo-root normalisation the private copy lacked —
+    so a CLI call from `src/` now scopes to the project, as OKF already did.
+    """
     try:
-        from pathlib import Path as _P
-        here = _P.cwd()
-        for parent in [here, *here.parents]:
-            if (parent / ".git").exists():
-                return str(parent)
+        from llm_router.semantic.scope import resolve_scope_or_none
+
+        root = resolve_scope_or_none()
+        if root is not None:
+            return str(root)
     except Exception as exc:                                 # noqa: BLE001
         # Recorded, not swallowed: a silent failure here returns None, the caller
         # falls back to cwd-derived scope, and the session context comes back
@@ -2194,6 +2194,14 @@ async def _dispatch_model_loop(
     effective_complexity: str,
     max_cost_per_task: float | None = None,
     identity: TurnIdentity | None = None,
+    # The user's prompt BEFORE context was attached. `prompt` is what gets sent
+    # and is right for cost and token estimates; it is wrong for any gate that
+    # is really asking about the user's INTENT. `_short_prompt` is one: "say OK"
+    # is a short prompt whether or not the router prepended a repository-state
+    # block to it. Latent until context attachment became unconditional, at
+    # which point every prompt gained a constant ~250 bytes and "say OK" stopped
+    # being short. Defaults to None so every existing caller is unaffected.
+    user_prompt: str | None = None,
     routing_policy: "AgentRoutingPolicy | None" = None,
     suppress_ledger: bool = False,
     model_override: str | None = None,
@@ -2788,7 +2796,10 @@ async def _dispatch_model_loop(
                     # reasoning model buys latency not quality; and escalation must
                     # not compound latency on an already-slow dispatch.
                     _next_model = models_to_try[attempt] if attempt < len(models_to_try) else ""
-                    _short_prompt = (len(prompt) // 4) < _escalate_min_prompt_tokens
+                    # The user's words, not the assembled context — see the
+                    # `user_prompt` parameter. Injected material is not intent.
+                    _intent_text = user_prompt if user_prompt is not None else prompt
+                    _short_prompt = (len(_intent_text) // 4) < _escalate_min_prompt_tokens
                     _slow_target = (
                         c == Complexity.SIMPLE
                         and any(mk in _next_model for mk in _SLOW_MODEL_MARKERS)
@@ -4142,6 +4153,28 @@ async def route_and_call(
         # Enrich the system prompt with task-specific behavioral rules when the
         # caller hasn't provided a custom system prompt. This gives cheap models
         # focused instructions that improve response quality.
+        # Resolved ONCE, here, and reused by context prep, OKF and enrichment
+        # below. It used to be computed forty lines further down, for OKF only,
+        # which is why context_prep never received it — see `_prepare` below.
+        #
+        # An explicit project_root wins: a caller that named a project meant it.
+        # Otherwise ask the MCP client for its workspace roots, the only
+        # per-connection signal a long-lived server has. `resolve_scope` then
+        # walks whatever comes back to its repo root, because the client reports
+        # whatever it likes and `result_cache` turns that string into a file
+        # path — a second spelling there orphans a database nothing reopens.
+        _scope_root: str | None = None
+        try:
+            _raw_root = project_root
+            if _raw_root is None:
+                from llm_router.mcp_roots import root_from_ctx as _root_from_ctx
+                _raw_root = await _root_from_ctx(ctx)
+            if _raw_root is not None:
+                from llm_router.semantic.scope import resolve_scope as _resolve_scope
+                _scope_root = str(_resolve_scope(_raw_root))
+        except Exception as _scope_err:  # noqa: BLE001 — scope is an improvement
+            log.debug("Project scope resolution failed: %s", _scope_err)
+
         if system_prompt is None and task_type not in MEDIA_TASK_TYPES and models_to_try:
             try:
                 from llm_router.context_prep import prepare_prompt as _prepare
@@ -4150,6 +4183,7 @@ async def route_and_call(
                     task_type=task_type,
                     complexity=c,
                     target_model=models_to_try[0],
+                    project_dir=_scope_root,
                 )
                 system_prompt = _prepared.full_system
                 if _prepared.context_source != "none":
@@ -4211,24 +4245,41 @@ async def route_and_call(
         # OKF #1: context injection — prepend relevant knowledge bundle docs to prompt.
         # OKF #3: seed model catalog on first run (no-op if docs already exist).
         # Both are best-effort; any failure falls through to normal routing.
+        # Bound before the try: if attachment fails, `prompt` is still the
+        # user's words and the gates below must not see an unbound name.
+        _user_prompt = prompt
         try:
             _okf.seed_model_catalog()
-            # Stage B: an explicit project_root wins — a caller that named a
-            # project meant it. Otherwise ask the MCP client for its workspace
-            # roots, which is the only per-connection signal a long-lived server
-            # has. None from either falls through to env, then cwd, unchanged.
-            _scope_root = project_root
-            if _scope_root is None:
-                from llm_router.mcp_roots import root_from_ctx as _root_from_ctx
-                _scope_root = await _root_from_ctx(ctx)
-            _okf_concepts = _okf.find_relevant(prompt, root=_scope_root)
-            if _okf_concepts:
-                prompt = _okf.inject_context(prompt, _okf_concepts)
-                if ctx is not None:
-                    _spawn_bg(
-                        _notify(ctx, "info", f"📚 OKF: injected {len(_okf_concepts)} context doc(s)"),
-                        name="okf_notify",
-                    )
+            # The choke point, not a private copy. `tests/test_okf_choke_point.py`
+            # exempted router.py by name because this block predated it; the
+            # exemption is gone and the rule now has no exceptions.
+            #
+            # This is NOT a pure deduplication. `inject()` composes three sources
+            # where this composed one, so the swap was measured first —
+            # scripts/shadow_diff_router_injection.py, 12 router-shaped prompts:
+            # the OKF half is byte-identical 12/12, and the entire delta is the
+            # <repo_state> block, which every other execution path already
+            # carried. Retrieval does not change.
+            #
+            # The delta is uniform ACROSS prompts at any one moment and is not a
+            # fixed number of bytes: <repo_state> renders the branch name, the
+            # last commit subject and the dirty-file list, so it measured ~211
+            # bytes on a clean tree and ~260 on a dirty one. An audit caught an
+            # earlier version of this comment calling it "a constant +252",
+            # which would have been quoted later as a fixed cost.
+            #
+            # No session_id: that would add the session-context block to every
+            # routed prompt, which is a larger decision than this seam and gets
+            # its own commit, its own shadow diff and its own gate.
+            from llm_router import context_injection as _ctx_inject
+
+            _before = prompt
+            prompt = _ctx_inject.inject(prompt, root=_scope_root)
+            if prompt != _before and ctx is not None:
+                _spawn_bg(
+                    _notify(ctx, "info", "📚 OKF: repo context attached"),
+                    name="okf_notify",
+                )
         except Exception as exc:  # noqa: BLE001
             from llm_router import failopen
             failopen.record("CHZ-FO-ROUTER-OKF-NOTIFY", exc)
@@ -4244,6 +4295,7 @@ async def route_and_call(
             task_type=task_type,
             profile=profile,
             prompt=prompt,
+            user_prompt=_user_prompt,
             system_prompt=system_prompt,
             temperature=temperature,
             max_tokens=max_tokens,
@@ -4428,8 +4480,15 @@ async def route_and_call(
         try:
             _resp_text = getattr(response, "content", "") or ""
             _resp_model = getattr(response, "model", "") or ""
+            # OKF-SCOPE-02: both writers are told which project this turn belongs
+            # to. Without it they recomputed the destination from the process cwd
+            # — and the MCP server's cwd is $HOME, which has no .git, so every
+            # project's turns landed in one shared bucket.
+            _write_root = _scope_root or project_root or _okf.project_root()
             _spawn_bg(
-                _okf.enrich_from_response(prompt, _resp_text, _resp_model),
+                _okf.enrich_from_response(
+                    prompt, _resp_text, _resp_model, root=_write_root,
+                ),
                 name="okf_enrich",
             )
             if agent_session_id:
@@ -4437,6 +4496,7 @@ async def route_and_call(
                     asyncio.to_thread(
                         _okf.record_session_turn,
                         agent_session_id, prompt, _resp_text, _resp_model,
+                        root=_write_root,
                     ),
                     name="okf_session",
                 )

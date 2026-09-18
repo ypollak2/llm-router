@@ -123,6 +123,18 @@ tests/hook_rendering/
 !/docs/GROUNDING_API.md
 !/docs/decisions/
 !/docs/decisions/**
+# Measurement evidence. Same category as /docs/releases/ above — a permanent
+# record, not a working note. Every number this project publishes is supposed
+# to carry the file it came from, and a file no clone contains cannot be that
+# file. Un-ignored after 14.0.0's CI caught the CHANGELOG citing four
+# measurement documents and a seed record citing a fifth, none of which had
+# ever been committed: `git add -A` skips ignored paths in silence.
+!/docs/measurements/
+!/docs/measurements/**
+# The research this branch implements, referenced by ADR 0002. Vendored so the
+# ADR's link resolves inside the repository rather than pointing at a file in
+# somebody's Downloads folder — which only works if it is actually here.
+!/docs/RESEARCH_SEMANTIC_LAYER.md
 
 # Measured findings that outlive the session that produced them: a cross-backend
 # quality benchmark, the local-execution proposal, and the backlog/plan they

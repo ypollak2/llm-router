@@ -11,6 +11,8 @@ OKF format: markdown + YAML frontmatter. Spec:
 from __future__ import annotations
 
 import asyncio
+import functools
+import logging
 import os
 import re
 import time
@@ -20,6 +22,8 @@ from pathlib import Path
 from typing import Any
 
 import yaml
+
+log = logging.getLogger("llm_router")
 
 KNOWLEDGE_DIR = Path.home() / ".llm-router" / "knowledge"
 
@@ -62,19 +66,17 @@ def project_root(start: Path | None = None) -> Path:
     (OKF-SCOPE-01: a `capital of Portugal` prompt retrieved another repo's
     `demo/llm/__init__.py`). An explicit root is the only signal that survives a
     process whose cwd is meaningless.
+
+    OKF-SCOPE-04: the body moved to `semantic.scope.resolve_scope`, which is now
+    the single resolver for OKF, both caches and the gateway. Four modules used
+    to answer this question privately, with two different environment variable
+    names and two different fallbacks — so running from `src/` put OKF at the
+    repo root and the caches on the subdirectory, one project in two namespaces.
+    This name stays because it reads correctly at its call sites.
     """
-    if start is None:
-        override = os.environ.get("LLM_ROUTER_PROJECT_ROOT", "").strip()
-        if override:
-            try:
-                return Path(override).expanduser().resolve()
-            except Exception:  # noqa: BLE001 — expanduser raises RuntimeError on ~baduser
-                pass  # unusable override → fall through to the cwd walk
-    here = (start or Path.cwd()).resolve()
-    for candidate in (here, *here.parents):
-        if (candidate / ".git").exists():
-            return candidate
-    return here
+    from llm_router.semantic.scope import resolve_scope
+
+    return resolve_scope(start)
 
 
 def _as_root(root: "str | Path | None") -> Path | None:
@@ -174,6 +176,87 @@ def _extract_files_and_symbols(
         m.group(1) for m in _SYM_PAT.finditer(clean_response)
     ))[:max_symbols]
     return files, symbols
+
+
+def verify_symbols(
+    file_path: "str | Path",
+    symbols: list[str],
+    root: "str | Path | None" = None,
+) -> tuple[list[str], list[str]]:
+    """Split *symbols* into (actually defined in *file_path*, rejected).
+
+    OKF-SCOPE-03. The extractors return two INDEPENDENT lists — paths matched
+    anywhere in prompt+response, symbol names matched anywhere in the response —
+    and the writers then paired `files[0]` with all of them. Nothing opened the
+    file. So a reply mentioning `nonexistent_module.py` and showing a
+    `def fabricated_symbol():` produced a stored, retrievable claim that the one
+    defines the other, and a reply discussing two real modules filed the second
+    module's function under the first module's name.
+
+    The store's verified-only policy already stops the model inventing prose.
+    This is the path where it could still invent structure, which is why it
+    survived that policy: it looks like evidence.
+
+    Reading is the check. Python goes through `ast`, so a name in a comment, a
+    string or a call does not count as a definition; other languages reuse the
+    same `_SYM_PAT` the extractors use, applied to the FILE rather than to the
+    model's reply. A path that does not exist, cannot be read, or resolves
+    outside *root* verifies nothing and rejects everything — an unreadable file
+    is not evidence of absence, but it is equally not evidence of definition.
+
+    Returns both halves because the caller has to be able to tell "there was
+    nothing to record" from "everything on offer was invented". Those are the
+    same empty write and very different facts.
+    """
+    if not symbols:
+        return [], []
+    base_root = (_as_root(root) or project_root()).resolve()
+    try:
+        target = (base_root / Path(file_path)).resolve()
+        target.relative_to(base_root)          # no escaping the project
+        source = target.read_text(encoding="utf-8", errors="ignore")
+    except (OSError, ValueError, RuntimeError):
+        return [], list(symbols)
+
+    defined: set[str] = set()
+    if target.suffix == ".py":
+        import ast as _ast
+        try:
+            tree = _ast.parse(source)
+        except SyntaxError:
+            return [], list(symbols)
+        for node in _ast.walk(tree):
+            if isinstance(node, (_ast.FunctionDef, _ast.AsyncFunctionDef, _ast.ClassDef)):
+                defined.add(node.name)
+    else:
+        defined = {m.group(1) for m in _SYM_PAT.finditer(source)}
+
+    kept = [s for s in symbols if s in defined]
+    rejected = [s for s in symbols if s not in defined]
+    return kept, rejected
+
+
+def _verified_pairing(
+    files: list[str],
+    symbols: list[str],
+    root: "str | Path | None" = None,
+) -> tuple[str | None, list[str], list[str]]:
+    """Find the candidate file that actually defines some of *symbols*.
+
+    The old code took `files[0]` on faith. Candidate order comes from where the
+    regex happened to match in the text, which has nothing to do with which file
+    the definitions are in, so the first candidate is right only by luck.
+
+    Returns (file, kept, rejected). ``file`` is None when no candidate defines
+    anything — the case that used to be written anyway.
+    """
+    rejected_all: list[str] = []
+    for candidate in files:
+        kept, rejected = verify_symbols(candidate, symbols, root=root)
+        if kept:
+            return candidate, kept, rejected
+        rejected_all = rejected
+    return None, [], rejected_all or list(symbols)
 
 
 # ---------------------------------------------------------------------------
@@ -839,6 +922,7 @@ def _write_source_concept(
     last_model: str,
     base: Path,
     authoritative: bool = False,
+    root: "str | Path | None" = None,
 ) -> None:
     """Synchronous write; called in executor thread.
 
@@ -863,12 +947,18 @@ def _write_source_concept(
     ``authoritative=True`` is for `index_project`, which read the whole file and is
     therefore entitled to say a symbol is gone. A writer that saw a fragment must
     never be able to assert that the file contains less than it does.
+
+    OKF-SCOPE-02: ``root`` names the project being written to. Without it this
+    function recomputed its destination from the process cwd, so
+    `index_project(root=B)` called from inside A reported B's store in its summary
+    and wrote A's directory on disk. Every caller passes it; a caller that cannot
+    is writing to whichever repository the process happens to be sitting in.
     """
     rel = Path(file_path)
     # CHZ-OKF-01: under this PROJECT's directory, not the flat global `source/`.
     # A doc about `middleware.py` is only meaningful next to the repo it came
     # from; filed globally it becomes a retrieval hazard for every other project.
-    concept_path = project_knowledge_dir(base=base) / "source" / rel.with_suffix(".md")
+    concept_path = project_knowledge_dir(root=root, base=base) / "source" / rel.with_suffix(".md")
     concept_path.parent.mkdir(parents=True, exist_ok=True)
 
     tags: list[str] = ["source-file"]
@@ -915,6 +1005,7 @@ async def enrich_from_response(
     response_text: str,
     model: str,
     base: Path = KNOWLEDGE_DIR,
+    root: "str | Path | None" = None,
 ) -> None:
     """Extract file references from prompt+response and write OKF SourceFile concepts.
 
@@ -939,11 +1030,27 @@ async def enrich_from_response(
         if not symbols:
             return  # nothing verifiable to record — don't invent a summary
 
-        summary = "Defines: " + ", ".join(symbols)
+        # OKF-SCOPE-03: read the file before claiming what it defines. The old
+        # code paired `files[0]` — whichever path the regex matched first — with
+        # every symbol name found anywhere in the reply, and wrote that as fact.
+        target, kept, dropped = _verified_pairing(files, symbols, root=root)
+        if dropped:
+            log.debug(
+                "okf_enrich_rejected_unverified symbols=%d of=%d files=%s",
+                len(dropped), len(symbols), files[:3],
+            )
+        if target is None or not kept:
+            return  # nothing survived verification — record nothing
+
+        summary = "Defines: " + ", ".join(kept)
 
         loop = asyncio.get_event_loop()
         await loop.run_in_executor(
-            None, _write_source_concept, files[0], summary, symbols, model, base
+            None,
+            functools.partial(
+                _write_source_concept,
+                target, summary, kept, model, base, root=root,
+            ),
         )
     except Exception:  # noqa: BLE001 — enrichment must never crash the caller
         pass
@@ -968,6 +1075,7 @@ def record_session_turn(
     response_text: str,
     model: str,
     base: Path = KNOWLEDGE_DIR,
+    root: "str | Path | None" = None,
 ) -> Path | None:
     """Capture VERIFIED-ONLY context for a turn → ``sessions/<id>/turn-NNNN.md``.
 
@@ -987,11 +1095,40 @@ def record_session_turn(
         if not files and not symbols:
             return None  # nothing verifiable → don't store chatter
 
+        # OKF-SCOPE-03: this path has its own copy of the unverified-write bug,
+        # and it is the worse copy — unverified paths go into `tags`, which
+        # `find_relevant` SCORES. An invented filename there is not inert
+        # metadata, it is a retrieval key pointing at a file that never existed.
+        #
+        # But the note itself still earns its place. Two different kinds of fact
+        # are stored here and only one of them is a claim about the repository:
+        #
+        #   the user's prompt   — checkable because it IS their literal input,
+        #                         true even when it names a file that does not
+        #                         exist (asking about the wrong path is a thing
+        #                         people do, and remembering that they did is
+        #                         the cross-session memory this was built for)
+        #   Files: / Symbols: / tags
+        #                       — assertions about what the repo contains, and
+        #                         the material `find_relevant` scores
+        #
+        # So verification filters the second kind and leaves the first alone.
+        # Dropping the whole note would have thrown away a real user prompt to
+        # punish a filename the user mistyped.
+        target, kept, _dropped = _verified_pairing(files, symbols, root=root)
+        files = [target] if target else []
+        symbols = kept
+
         safe_sid = _safe_session_id(session_id)
         # CHZ-OKF-01: under the project, like every other written doc. A session
         # transcript is the most project-specific material in the store; sharing
         # it across repos was the worst case of the cross-contamination.
-        sess_dir = project_knowledge_dir(base=base) / "sessions" / safe_sid
+        # OKF-SCOPE-02: `root`, not the process cwd. A session transcript is the
+        # most project-specific material in the store, and this is a second write
+        # path that never crosses `_write_source_concept` — fixing that function
+        # alone would have left this one pointed at whatever repo the process was
+        # sitting in.
+        sess_dir = project_knowledge_dir(root=root, base=base) / "sessions" / safe_sid
         sess_dir.mkdir(parents=True, exist_ok=True)
         turn_n = len(list(sess_dir.glob("turn-*.md"))) + 1
 
@@ -1141,7 +1278,7 @@ def index_project(
         # fragment, merges.
         _write_source_concept(
             rel, "Defines: " + ", ".join(symbols), symbols, "", base,
-            authoritative=True,
+            authoritative=True, root=root,
         )
         result["indexed"] += 1
 

@@ -58,6 +58,16 @@ def _isolate_llm_router_writes(tmp_path, monkeypatch):
     after this fixture)."""
     monkeypatch.setenv("LLM_ROUTER_EXECUTION_LEDGER_DB", str(tmp_path / "usage.db"))
     monkeypatch.setenv("LLM_ROUTER_HEALTH_SNAPSHOT", str(tmp_path / "provider_health.json"))
+    # The READ side, which bit again on 2026-09-18. `session_store._state_dir`
+    # already delegates to `paths.llm_router_home()` precisely because a full
+    # suite run once read the developer's live session_context_*.jsonl and
+    # injected real prompt text into a test's messages — but nothing was
+    # actually setting LLM_ROUTER_HOME, so the canonical sandbox was never
+    # switched on. The live context-capture hook writes there continuously
+    # while you work, so `test_session_store_import_failure_is_fail_open`
+    # failed carrying the text of the Write call from the session running it:
+    # a test that passes or fails according to what you were doing.
+    monkeypatch.setenv("LLM_ROUTER_HOME", str(tmp_path / "home"))
 
 
 # ── Config-singleton isolation (CHZ-AUD-001) ────────────────────────────────

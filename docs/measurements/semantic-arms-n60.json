@@ -1,0 +1,3200 @@
+{
+  "n": 60,
+  "model": "qwen3-coder:30b",
+  "seed": 7,
+  "budget_tokens": 2000,
+  "arms": [
+    "A",
+    "B",
+    "C",
+    "D"
+  ],
+  "totals": {
+    "A": 0,
+    "B": 40,
+    "C": 58,
+    "D": 58
+  },
+  "rows": [
+    {
+      "symbol": "_classify_failure",
+      "answer": "src/llm_router/hooks/agent-error.py",
+      "arms": {
+        "A": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.7,
+          "had_context": false,
+          "meta": {
+            "status": "off",
+            "tokens": 0
+          },
+          "answer": "I don't have access to any specific code repository to analyze. Could you please provide me with the repository or codebase you're referring to? Once you share "
+        },
+        "B": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.4,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/hooks/agent-error.py"
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.4,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 125,
+            "evidence": 6,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/hooks/agent-error.py"
+        },
+        "D": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.4,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 316,
+            "evidence": 14,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/hooks/agent-error.py"
+        }
+      }
+    },
+    {
+      "symbol": "ClassifyRequest",
+      "answer": "src/llm_router/service.py",
+      "arms": {
+        "A": {
+          "strict": false,
+          "lenient": false,
+          "secs": 1.2,
+          "had_context": false,
+          "meta": {
+            "status": "off",
+            "tokens": 0
+          },
+          "answer": "I don't have access to any specific code repository or project files to analyze. To help you find the file that defines `ClassifyRequest`, I would need you to e"
+        },
+        "B": {
+          "strict": false,
+          "lenient": false,
+          "secs": 2.4,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "I need to find which file defines `ClassifyRequest` in this project. Based on the provided knowledge context, I can see there are references to files like `src/"
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 120,
+            "evidence": 6,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/service.py"
+        },
+        "D": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.5,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 439,
+            "evidence": 20,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/service.py"
+        }
+      }
+    },
+    {
+      "symbol": "_construct_lineage_store",
+      "answer": "tests/reliability/test_ledger_concurrency.py",
+      "arms": {
+        "A": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.9,
+          "had_context": false,
+          "meta": {
+            "status": "off",
+            "tokens": 0
+          },
+          "answer": "I don't have access to any specific code repository to analyze. To help you find the file that defines `_construct_lineage_store`, I would need you to either:\n\n"
+        },
+        "B": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.5,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "tests/reliability/test_ledger_concurrency.py"
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 127,
+            "evidence": 6,
+            "omissions": 0
+          },
+          "answer": "tests/reliability/test_ledger_concurrency.py"
+        },
+        "D": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.4,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 309,
+            "evidence": 14,
+            "omissions": 0
+          },
+          "answer": "tests/reliability/test_ledger_concurrency.py"
+        }
+      }
+    },
+    {
+      "symbol": "TestNoColor",
+      "answer": "tests/test_terminal_styling.py",
+      "arms": {
+        "A": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.6,
+          "had_context": false,
+          "meta": {
+            "status": "off",
+            "tokens": 0
+          },
+          "answer": "I don't have access to any specific code repository to analyze. Please provide the project files or repository you're referring to, and I'll identify which file"
+        },
+        "B": {
+          "strict": false,
+          "lenient": false,
+          "secs": 4.4,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "I need to find which file defines `TestNoColor` in this project. Based on the repository information provided, I can see there are test files mentioned like `te"
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 118,
+            "evidence": 6,
+            "omissions": 0
+          },
+          "answer": "tests/test_terminal_styling.py"
+        },
+        "D": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.5,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 455,
+            "evidence": 20,
+            "omissions": 0
+          },
+          "answer": "tests/test_terminal_styling.py"
+        }
+      }
+    },
+    {
+      "symbol": "is_free",
+      "answer": "src/llm_router/pricing.py",
+      "arms": {
+        "A": {
+          "strict": false,
+          "lenient": false,
+          "secs": 1.5,
+          "had_context": false,
+          "meta": {
+            "status": "off",
+            "tokens": 0
+          },
+          "answer": "I don't have access to any specific code repository or project files to determine which file defines `is_free`. You would need to provide the actual codebase or"
+        },
+        "B": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.4,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/pricing.py"
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 118,
+            "evidence": 6,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/pricing.py"
+        },
+        "D": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.5,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 408,
+            "evidence": 18,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/pricing.py"
+        }
+      }
+    },
+    {
+      "symbol": "_jwt_payload",
+      "answer": "src/llm_router/seats.py",
+      "arms": {
+        "A": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.6,
+          "had_context": false,
+          "meta": {
+            "status": "off",
+            "tokens": 0
+          },
+          "answer": "I don't have access to any specific code repository to analyze. Please provide the project files or repository you're referring to, and I'll help you identify w"
+        },
+        "B": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.4,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/seats.py"
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 119,
+            "evidence": 6,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/seats.py"
+        },
+        "D": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.4,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 307,
+            "evidence": 14,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/seats.py"
+        }
+      }
+    },
+    {
+      "symbol": "_assert_pyproject_would_not_hijack",
+      "answer": "scripts/gf_mutmut.py",
+      "arms": {
+        "A": {
+          "strict": false,
+          "lenient": false,
+          "secs": 1.4,
+          "had_context": false,
+          "meta": {
+            "status": "off",
+            "tokens": 0
+          },
+          "answer": "I don't have access to any specific code repository to analyze. To help you find the file that defines `_assert_pyproject_would_not_hijack`, I would need you to"
+        },
+        "B": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.4,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "scripts/gf_mutmut.py"
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 122,
+            "evidence": 6,
+            "omissions": 0
+          },
+          "answer": "scripts/gf_mutmut.py"
+        },
+        "D": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.4,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 310,
+            "evidence": 14,
+            "omissions": 0
+          },
+          "answer": "scripts/gf_mutmut.py"
+        }
+      }
+    },
+    {
+      "symbol": "TestCacheHashKey",
+      "answer": "tests/test_cache.py",
+      "arms": {
+        "A": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.6,
+          "had_context": false,
+          "meta": {
+            "status": "off",
+            "tokens": 0
+          },
+          "answer": "I don't have access to any specific code repository to analyze. Please provide the project files or repository you're referring to, and I'll be happy to help id"
+        },
+        "B": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "tests/llm_router/test_cache_hash_key.py"
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.2,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 117,
+            "evidence": 6,
+            "omissions": 0
+          },
+          "answer": "tests/test_cache.py"
+        },
+        "D": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.4,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 337,
+            "evidence": 16,
+            "omissions": 0
+          },
+          "answer": "tests/test_cache.py"
+        }
+      }
+    },
+    {
+      "symbol": "fetch_routing_decisions",
+      "answer": "src/llm_router/commands/replay.py",
+      "arms": {
+        "A": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.7,
+          "had_context": false,
+          "meta": {
+            "status": "off",
+            "tokens": 0
+          },
+          "answer": "I don't have access to any specific code repository to analyze. Please provide me with the project files or repository you're referring to, and I'll be happy to"
+        },
+        "B": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.4,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/commands/replay.py"
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 129,
+            "evidence": 6,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/commands/replay.py"
+        },
+        "D": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.5,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 430,
+            "evidence": 20,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/commands/replay.py"
+        }
+      }
+    },
+    {
+      "symbol": "_mock_stream",
+      "answer": "tests/test_streaming.py",
+      "arms": {
+        "A": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.8,
+          "had_context": false,
+          "meta": {
+            "status": "off",
+            "tokens": 0
+          },
+          "answer": "I don't have access to any specific code repository to analyze. You'll need to provide the actual project files or repository contents for me to identify where "
+        },
+        "B": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.4,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "tests/test_streaming.py"
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 120,
+            "evidence": 6,
+            "omissions": 0
+          },
+          "answer": "tests/test_streaming.py"
+        },
+        "D": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.4,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 382,
+            "evidence": 17,
+            "omissions": 0
+          },
+          "answer": "tests/test_streaming.py"
+        }
+      }
+    },
+    {
+      "symbol": "reset_vault_for_tests",
+      "answer": "src/llm_router/secrets_vault.py",
+      "arms": {
+        "A": {
+          "strict": false,
+          "lenient": false,
+          "secs": 1.1,
+          "had_context": false,
+          "meta": {
+            "status": "off",
+            "tokens": 0
+          },
+          "answer": "I don't have access to any specific code repository to analyze. You'll need to provide the repository or codebase you're referring to, or share the relevant fil"
+        },
+        "B": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.4,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/secrets_vault.py"
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 121,
+            "evidence": 6,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/secrets_vault.py"
+        },
+        "D": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.5,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 400,
+            "evidence": 18,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/secrets_vault.py"
+        }
+      }
+    },
+    {
+      "symbol": "bundle_payload_bytes",
+      "answer": "src/llm_router/control_plane/policy_bundle.py",
+      "arms": {
+        "A": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.7,
+          "had_context": false,
+          "meta": {
+            "status": "off",
+            "tokens": 0
+          },
+          "answer": "I don't have access to any specific code repository to analyze. Could you please provide me with the repository or codebase you're referring to? Once you share "
+        },
+        "B": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.4,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/control_plane/policy_bundle.py"
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 126,
+            "evidence": 6,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/control_plane/policy_bundle.py"
+        },
+        "D": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.6,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 430,
+            "evidence": 20,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/control_plane/policy_bundle.py"
+        }
+      }
+    },
+    {
+      "symbol": "should_use_caveman",
+      "answer": "src/llm_router/caveman.py",
+      "arms": {
+        "A": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.7,
+          "had_context": false,
+          "meta": {
+            "status": "off",
+            "tokens": 0
+          },
+          "answer": "I don't have access to any specific code repository to analyze. Please provide the project files or repository you're referring to, and I'll be happy to help id"
+        },
+        "B": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.4,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/caveman.py"
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 122,
+            "evidence": 6,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/caveman.py"
+        },
+        "D": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.5,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 421,
+            "evidence": 20,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/caveman.py"
+        }
+      }
+    },
+    {
+      "symbol": "_snapshot_id",
+      "answer": "src/llm_router/semantic/pack.py",
+      "arms": {
+        "A": {
+          "strict": false,
+          "lenient": false,
+          "secs": 1.1,
+          "had_context": false,
+          "meta": {
+            "status": "off",
+            "tokens": 0
+          },
+          "answer": "I don't have access to any project files or repositories to analyze. You'll need to provide the actual codebase or specify which project you're referring to, so"
+        },
+        "B": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/okf.py"
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 121,
+            "evidence": 6,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/semantic/pack.py"
+        },
+        "D": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.5,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 376,
+            "evidence": 18,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/semantic/pack.py"
+        }
+      }
+    },
+    {
+      "symbol": "TestTokenShapeProfile",
+      "answer": "tests/test_calibration.py",
+      "arms": {
+        "A": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.7,
+          "had_context": false,
+          "meta": {
+            "status": "off",
+            "tokens": 0
+          },
+          "answer": "I don't have access to any specific code repository to analyze. Could you please provide the repository or codebase you're referring to? Once you share the proj"
+        },
+        "B": {
+          "strict": false,
+          "lenient": false,
+          "secs": 2.1,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "I need to find which file defines `TestTokenShapeProfile`. However, looking at the provided knowledge context, there's no mention of `TestTokenShapeProfile` or "
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 119,
+            "evidence": 6,
+            "omissions": 0
+          },
+          "answer": "tests/test_calibration.py"
+        },
+        "D": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.4,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 376,
+            "evidence": 17,
+            "omissions": 0
+          },
+          "answer": "tests/test_calibration.py"
+        }
+      }
+    },
+    {
+      "symbol": "TestPressureBasedReordering",
+      "answer": "tests/test_routing_value.py",
+      "arms": {
+        "A": {
+          "strict": false,
+          "lenient": false,
+          "secs": 1.0,
+          "had_context": false,
+          "meta": {
+            "status": "off",
+            "tokens": 0
+          },
+          "answer": "I don't have access to any project files or repositories to analyze. To help you find the file that defines `TestPressureBasedReordering`, I would need you to e"
+        },
+        "B": {
+          "strict": false,
+          "lenient": false,
+          "secs": 2.4,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "I need to find which file defines `TestPressureBasedReordering`. However, looking at the provided knowledge context, there's no mention of `TestPressureBasedReo"
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 121,
+            "evidence": 6,
+            "omissions": 0
+          },
+          "answer": "tests/test_routing_value.py"
+        },
+        "D": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.5,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 446,
+            "evidence": 20,
+            "omissions": 0
+          },
+          "answer": "tests/test_routing_value.py"
+        }
+      }
+    },
+    {
+      "symbol": "_worker_threads",
+      "answer": "tests/test_chz_aud_026.py",
+      "arms": {
+        "A": {
+          "strict": false,
+          "lenient": false,
+          "secs": 1.2,
+          "had_context": false,
+          "meta": {
+            "status": "off",
+            "tokens": 0
+          },
+          "answer": "I don't have access to any specific code repository or project files to determine which file defines `_worker_threads`. You would need to provide the actual cod"
+        },
+        "B": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.4,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "tests/test_chz_aud_026.py"
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 118,
+            "evidence": 6,
+            "omissions": 0
+          },
+          "answer": "tests/test_chz_aud_026.py"
+        },
+        "D": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.5,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 306,
+            "evidence": 14,
+            "omissions": 0
+          },
+          "answer": "tests/test_chz_aud_026.py"
+        }
+      }
+    },
+    {
+      "symbol": "TestLiteLLMBudget",
+      "answer": "tests/test_integrations.py",
+      "arms": {
+        "A": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.7,
+          "had_context": false,
+          "meta": {
+            "status": "off",
+            "tokens": 0
+          },
+          "answer": "I don't have access to any specific code repository to analyze. Could you please provide the repository or codebase you're referring to? Once you share the proj"
+        },
+        "B": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "tests/llm_router/test_litemap.py"
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 119,
+            "evidence": 6,
+            "omissions": 0
+          },
+          "answer": "tests/test_integrations.py"
+        },
+        "D": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.5,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 454,
+            "evidence": 20,
+            "omissions": 0
+          },
+          "answer": "tests/test_integrations.py"
+        }
+      }
+    },
+    {
+      "symbol": "TestFormatTokens",
+      "answer": "tests/test_dashboard.py",
+      "arms": {
+        "A": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.6,
+          "had_context": false,
+          "meta": {
+            "status": "off",
+            "tokens": 0
+          },
+          "answer": "I don't have access to any specific code repository to analyze. Please provide the repository or codebase you're referring to, and I'll be happy to help identif"
+        },
+        "B": {
+          "strict": false,
+          "lenient": false,
+          "secs": 2.1,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "I need to find which file defines `TestFormatTokens`. However, looking at the provided knowledge context, there's no mention of `TestFormatTokens` or any relate"
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 117,
+            "evidence": 6,
+            "omissions": 0
+          },
+          "answer": "tests/test_dashboard.py"
+        },
+        "D": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.5,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 433,
+            "evidence": 20,
+            "omissions": 0
+          },
+          "answer": "tests/test_dashboard.py"
+        }
+      }
+    },
+    {
+      "symbol": "run_delegation",
+      "answer": "src/llm_router/agentic/service.py",
+      "arms": {
+        "A": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.7,
+          "had_context": false,
+          "meta": {
+            "status": "off",
+            "tokens": 0
+          },
+          "answer": "I don't have access to any specific code repository to analyze. Please provide the project files or repository you're referring to, and I'll identify which file"
+        },
+        "B": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.4,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/agentic/service.py"
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 155,
+            "evidence": 6,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/agentic/service.py"
+        },
+        "D": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.5,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 462,
+            "evidence": 20,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/agentic/service.py"
+        }
+      }
+    },
+    {
+      "symbol": "_detect_gemini",
+      "answer": "src/llm_router/seats.py",
+      "arms": {
+        "A": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.7,
+          "had_context": false,
+          "meta": {
+            "status": "off",
+            "tokens": 0
+          },
+          "answer": "I don't have access to any specific code repository to analyze. You'll need to provide the project files or repository contents for me to identify which file co"
+        },
+        "B": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/seats.py"
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 122,
+            "evidence": 6,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/seats.py"
+        },
+        "D": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.4,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 310,
+            "evidence": 14,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/seats.py"
+        }
+      }
+    },
+    {
+      "symbol": "RoutingRecommendation",
+      "answer": "src/llm_router/types.py",
+      "arms": {
+        "A": {
+          "strict": false,
+          "lenient": false,
+          "secs": 1.7,
+          "had_context": false,
+          "meta": {
+            "status": "off",
+            "tokens": 0
+          },
+          "answer": "I don't have access to any specific code repository or project files to analyze. Without being able to see the actual project structure, source files, or codeba"
+        },
+        "B": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/okf.py"
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 119,
+            "evidence": 6,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/types.py"
+        },
+        "D": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.5,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 418,
+            "evidence": 20,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/types.py"
+        }
+      }
+    },
+    {
+      "symbol": "TokenFeedback",
+      "answer": "src/llm_router/feedback.py",
+      "arms": {
+        "A": {
+          "strict": false,
+          "lenient": false,
+          "secs": 1.0,
+          "had_context": false,
+          "meta": {
+            "status": "off",
+            "tokens": 0
+          },
+          "answer": "I don't have access to any specific code repository or project files to determine which file defines `TokenFeedback`. You'll need to provide the actual project "
+        },
+        "B": {
+          "strict": false,
+          "lenient": false,
+          "secs": 2.1,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "I need to find which file defines `TokenFeedback`, but based on the provided knowledge context, there's no mention of `TokenFeedback` or any related definitions"
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 117,
+            "evidence": 6,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/feedback.py"
+        },
+        "D": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.5,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 382,
+            "evidence": 18,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/feedback.py"
+        }
+      }
+    },
+    {
+      "symbol": "cmd_stats",
+      "answer": "src/llm_router/commands/stats.py",
+      "arms": {
+        "A": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.6,
+          "had_context": false,
+          "meta": {
+            "status": "off",
+            "tokens": 0
+          },
+          "answer": "I don't have access to any specific code repository to analyze. Please provide the repository or codebase you're referring to, and I'll be happy to help identif"
+        },
+        "B": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.4,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/commands/stats.py"
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 119,
+            "evidence": 6,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/commands/stats.py"
+        },
+        "D": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.5,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 393,
+            "evidence": 18,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/commands/stats.py"
+        }
+      }
+    },
+    {
+      "symbol": "TestLlmPolicyTool",
+      "answer": "tests/test_policy_digest_community.py",
+      "arms": {
+        "A": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.6,
+          "had_context": false,
+          "meta": {
+            "status": "off",
+            "tokens": 0
+          },
+          "answer": "I don't have access to any specific code repository to analyze. Please provide the project files or repository contents so I can identify which file defines `Te"
+        },
+        "B": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/okf.py"
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 121,
+            "evidence": 6,
+            "omissions": 0
+          },
+          "answer": "tests/test_policy_digest_community.py"
+        },
+        "D": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.5,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 400,
+            "evidence": 20,
+            "omissions": 0
+          },
+          "answer": "tests/test_policy_digest_community.py"
+        }
+      }
+    },
+    {
+      "symbol": "_setup_test",
+      "answer": "src/llm_router/tools/setup.py",
+      "arms": {
+        "A": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.7,
+          "had_context": false,
+          "meta": {
+            "status": "off",
+            "tokens": 0
+          },
+          "answer": "I don't have access to any specific code repository to analyze. Could you please provide the repository or project you're referring to? Once you share the proje"
+        },
+        "B": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.4,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/tools/setup.py"
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 122,
+            "evidence": 6,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/tools/setup.py"
+        },
+        "D": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.5,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 365,
+            "evidence": 18,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/tools/setup.py"
+        }
+      }
+    },
+    {
+      "symbol": "llm_reason",
+      "answer": "src/llm_router/tools/text.py",
+      "arms": {
+        "A": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.6,
+          "had_context": false,
+          "meta": {
+            "status": "off",
+            "tokens": 0
+          },
+          "answer": "I don't have access to any specific code repository to analyze. Please provide the project files or repository you're referring to, and I'll identify which file"
+        },
+        "B": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.4,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/tools/text.py"
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 131,
+            "evidence": 6,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/tools/text.py"
+        },
+        "D": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.5,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 454,
+            "evidence": 20,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/tools/text.py"
+        }
+      }
+    },
+    {
+      "symbol": "PyPIStats",
+      "answer": "src/llm_router/stats.py",
+      "arms": {
+        "A": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.7,
+          "had_context": false,
+          "meta": {
+            "status": "off",
+            "tokens": 0
+          },
+          "answer": "I don't have access to any specific code repository to analyze. Please provide the repository or codebase you're referring to, and I'll be happy to help you loc"
+        },
+        "B": {
+          "strict": false,
+          "lenient": false,
+          "secs": 2.6,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "I need to find which file defines `PyPIStats`. However, looking at the provided knowledge context, there's no mention of `PyPIStats` or any related definitions."
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 116,
+            "evidence": 6,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/stats.py"
+        },
+        "D": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.4,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 304,
+            "evidence": 14,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/stats.py"
+        }
+      }
+    },
+    {
+      "symbol": "DeadlineExceeded",
+      "answer": "src/llm_router/types.py",
+      "arms": {
+        "A": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.6,
+          "had_context": false,
+          "meta": {
+            "status": "off",
+            "tokens": 0
+          },
+          "answer": "I don't have access to any specific code repository to analyze. Please provide the project files or repository you're referring to, and I'll identify which file"
+        },
+        "B": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/exceptions.py"
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 121,
+            "evidence": 6,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/types.py"
+        },
+        "D": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.5,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 417,
+            "evidence": 20,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/types.py"
+        }
+      }
+    },
+    {
+      "symbol": "_lerp_color",
+      "answer": "src/llm_router/dashboard/tui.py",
+      "arms": {
+        "A": {
+          "strict": false,
+          "lenient": false,
+          "secs": 1.3,
+          "had_context": false,
+          "meta": {
+            "status": "off",
+            "tokens": 0
+          },
+          "answer": "I don't have access to any specific code repository or project files to identify where `_lerp_color` is defined. To help you find this function, I would need yo"
+        },
+        "B": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.4,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/dashboard/tui.py"
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 121,
+            "evidence": 6,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/dashboard/tui.py"
+        },
+        "D": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.5,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 368,
+            "evidence": 17,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/dashboard/tui.py"
+        }
+      }
+    },
+    {
+      "symbol": "TestEditFile",
+      "answer": "tests/test_agent_loop.py",
+      "arms": {
+        "A": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.9,
+          "had_context": false,
+          "meta": {
+            "status": "off",
+            "tokens": 0
+          },
+          "answer": "I don't have access to any project files or repositories to analyze. You'll need to provide the actual project files or repository contents for me to identify w"
+        },
+        "B": {
+          "strict": false,
+          "lenient": false,
+          "secs": 2.7,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "I need to find which file defines `TestEditFile`. However, looking at the provided knowledge context, there's no mention of `TestEditFile` or any test-related c"
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 117,
+            "evidence": 6,
+            "omissions": 0
+          },
+          "answer": "tests/test_agent_loop.py"
+        },
+        "D": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.4,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 352,
+            "evidence": 16,
+            "omissions": 0
+          },
+          "answer": "tests/test_agent_loop.py"
+        }
+      }
+    },
+    {
+      "symbol": "sanitize_api_error",
+      "answer": "src/llm_router/error_sanitization.py",
+      "arms": {
+        "A": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.6,
+          "had_context": false,
+          "meta": {
+            "status": "off",
+            "tokens": 0
+          },
+          "answer": "I don't have access to any specific code repository to analyze. Please provide the project files or repository you're referring to, and I'll help you locate whe"
+        },
+        "B": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.4,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/error_sanitization.py"
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 127,
+            "evidence": 6,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/error_sanitization.py"
+        },
+        "D": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.5,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 401,
+            "evidence": 18,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/error_sanitization.py"
+        }
+      }
+    },
+    {
+      "symbol": "cmd_demo",
+      "answer": "src/llm_router/commands/demo.py",
+      "arms": {
+        "A": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.6,
+          "had_context": false,
+          "meta": {
+            "status": "off",
+            "tokens": 0
+          },
+          "answer": "I don't have access to any project files or repositories to analyze. Please provide the project files or repository you're referring to, and I'll be happy to he"
+        },
+        "B": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.4,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/commands/demo.py"
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 119,
+            "evidence": 6,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/commands/demo.py"
+        },
+        "D": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.5,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 357,
+            "evidence": 16,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/commands/demo.py"
+        }
+      }
+    },
+    {
+      "symbol": "_verified_pairing",
+      "answer": "src/llm_router/okf.py",
+      "arms": {
+        "A": {
+          "strict": false,
+          "lenient": false,
+          "secs": 1.0,
+          "had_context": false,
+          "meta": {
+            "status": "off",
+            "tokens": 0
+          },
+          "answer": "I don't have access to any specific code repository or project files to determine which file defines `_verified_pairing`. You would need to provide the actual r"
+        },
+        "B": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.5,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/okf.py"
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 123,
+            "evidence": 6,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/okf.py"
+        },
+        "D": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.4,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 309,
+            "evidence": 14,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/okf.py"
+        }
+      }
+    },
+    {
+      "symbol": "output_per_1k",
+      "answer": "src/llm_router/pricing.py",
+      "arms": {
+        "A": {
+          "strict": false,
+          "lenient": false,
+          "secs": 1.1,
+          "had_context": false,
+          "meta": {
+            "status": "off",
+            "tokens": 0
+          },
+          "answer": "I don't have access to any specific code repository or project files to determine which file defines `output_per_1k`. You would need to search through the proje"
+        },
+        "B": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/pricing.py"
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 121,
+            "evidence": 6,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/pricing.py"
+        },
+        "D": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.5,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 456,
+            "evidence": 20,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/pricing.py"
+        }
+      }
+    },
+    {
+      "symbol": "_evaluate",
+      "answer": "tests/scenarios/test_cli_scenarios.py",
+      "arms": {
+        "A": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.6,
+          "had_context": false,
+          "meta": {
+            "status": "off",
+            "tokens": 0
+          },
+          "answer": "I don't have access to any specific code repository to analyze. You'll need to provide the project files or repository contents for me to identify which file de"
+        },
+        "B": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.4,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/decisions/engine.py"
+        },
+        "C": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 144,
+            "evidence": 7,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/decisions/engine.py"
+        },
+        "D": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.5,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 388,
+            "evidence": 20,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/decisions/engine.py"
+        }
+      }
+    },
+    {
+      "symbol": "validate_budget_cap_semantically",
+      "answer": "src/llm_router/routing_hints.py",
+      "arms": {
+        "A": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.9,
+          "had_context": false,
+          "meta": {
+            "status": "off",
+            "tokens": 0
+          },
+          "answer": "I don't have access to any specific code repository to search through. You'll need to provide the repository or project files for me to locate where `validate_b"
+        },
+        "B": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.4,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/routing_hints.py"
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 129,
+            "evidence": 6,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/routing_hints.py"
+        },
+        "D": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.5,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 442,
+            "evidence": 18,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/routing_hints.py"
+        }
+      }
+    },
+    {
+      "symbol": "remove_marked_block",
+      "answer": "src/llm_router/codex_host.py",
+      "arms": {
+        "A": {
+          "strict": false,
+          "lenient": false,
+          "secs": 1.7,
+          "had_context": false,
+          "meta": {
+            "status": "off",
+            "tokens": 0
+          },
+          "answer": "I don't have access to any specific code repository or project files to analyze. Without being able to see the actual project structure, source files, or codeba"
+        },
+        "B": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.4,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/codex_host.py"
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 121,
+            "evidence": 6,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/codex_host.py"
+        },
+        "D": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.5,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 435,
+            "evidence": 20,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/codex_host.py"
+        }
+      }
+    },
+    {
+      "symbol": "TestCalcSavings",
+      "answer": "tests/test_savings.py",
+      "arms": {
+        "A": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.6,
+          "had_context": false,
+          "meta": {
+            "status": "off",
+            "tokens": 0
+          },
+          "answer": "I don't have access to any project files or repositories to analyze. You'll need to provide the actual project files or repository contents for me to identify w"
+        },
+        "B": {
+          "strict": false,
+          "lenient": false,
+          "secs": 2.5,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "I need to find which file defines `TestCalcSavings`. However, looking at the provided knowledge context, there's no mention of `TestCalcSavings` or any test-rel"
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 116,
+            "evidence": 6,
+            "omissions": 0
+          },
+          "answer": "tests/test_savings.py"
+        },
+        "D": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.6,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 509,
+            "evidence": 20,
+            "omissions": 0
+          },
+          "answer": "tests/test_savings.py"
+        }
+      }
+    },
+    {
+      "symbol": "collect_audit_chain_metrics",
+      "answer": "src/llm_router/metrics.py",
+      "arms": {
+        "A": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.7,
+          "had_context": false,
+          "meta": {
+            "status": "off",
+            "tokens": 0
+          },
+          "answer": "I don't have access to any specific code repository to analyze. Please provide the project files or repository you're referring to, and I'll help you locate whe"
+        },
+        "B": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.4,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/metrics.py"
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 124,
+            "evidence": 6,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/metrics.py"
+        },
+        "D": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.5,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 357,
+            "evidence": 16,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/metrics.py"
+        }
+      }
+    },
+    {
+      "symbol": "save_learned_profile",
+      "answer": "src/llm_router/memory/profiles.py",
+      "arms": {
+        "A": {
+          "strict": false,
+          "lenient": false,
+          "secs": 1.1,
+          "had_context": false,
+          "meta": {
+            "status": "off",
+            "tokens": 0
+          },
+          "answer": "I don't have access to any specific code repository or project files to analyze. To help you find the file that defines `save_learned_profile`, I would need you"
+        },
+        "B": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.4,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/memory/profiles.py"
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 124,
+            "evidence": 6,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/memory/profiles.py"
+        },
+        "D": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.5,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 408,
+            "evidence": 20,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/memory/profiles.py"
+        }
+      }
+    },
+    {
+      "symbol": "TestPolicyCostImplications",
+      "answer": "tests/test_policy_scenarios.py",
+      "arms": {
+        "A": {
+          "strict": false,
+          "lenient": false,
+          "secs": 1.0,
+          "had_context": false,
+          "meta": {
+            "status": "off",
+            "tokens": 0
+          },
+          "answer": "I don't have access to any specific code repository or project files to analyze. Without being able to examine the actual project files, I cannot determine whic"
+        },
+        "B": {
+          "strict": false,
+          "lenient": false,
+          "secs": 3.2,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "I need to find which file defines `TestPolicyCostImplications`. However, looking at the provided knowledge context, there's no mention of `TestPolicyCostImplica"
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 122,
+            "evidence": 6,
+            "omissions": 0
+          },
+          "answer": "tests/test_policy_scenarios.py"
+        },
+        "D": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.4,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 302,
+            "evidence": 14,
+            "omissions": 0
+          },
+          "answer": "tests/test_policy_scenarios.py"
+        }
+      }
+    },
+    {
+      "symbol": "sample_daily_14d",
+      "answer": "tests/test_session_summary_contract.py",
+      "arms": {
+        "A": {
+          "strict": false,
+          "lenient": false,
+          "secs": 1.1,
+          "had_context": false,
+          "meta": {
+            "status": "off",
+            "tokens": 0
+          },
+          "answer": "I don't have access to any project files or repositories to analyze. To help you find where `sample_daily_14d` is defined, I would need you to either:\n\n1. Share"
+        },
+        "B": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.4,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "tests/test_session_summary_contract.py"
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 122,
+            "evidence": 6,
+            "omissions": 0
+          },
+          "answer": "tests/test_session_summary_contract.py"
+        },
+        "D": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.4,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 310,
+            "evidence": 14,
+            "omissions": 0
+          },
+          "answer": "tests/test_session_summary_contract.py"
+        }
+      }
+    },
+    {
+      "symbol": "_skip",
+      "answer": "conftest.py",
+      "arms": {
+        "A": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.6,
+          "had_context": false,
+          "meta": {
+            "status": "off",
+            "tokens": 0
+          },
+          "answer": "I don't have access to any specific code repository to analyze. Please provide the project files or repository you're referring to, and I'll identify which file"
+        },
+        "B": {
+          "strict": false,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "conftest.py"
+        },
+        "C": {
+          "strict": false,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 116,
+            "evidence": 6,
+            "omissions": 0
+          },
+          "answer": "conftest.py"
+        },
+        "D": {
+          "strict": false,
+          "lenient": true,
+          "secs": 0.4,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 304,
+            "evidence": 14,
+            "omissions": 0
+          },
+          "answer": "conftest.py"
+        }
+      }
+    },
+    {
+      "symbol": "llm_router_agent_route",
+      "answer": "src/llm_router/tools/agents.py",
+      "arms": {
+        "A": {
+          "strict": false,
+          "lenient": false,
+          "secs": 1.0,
+          "had_context": false,
+          "meta": {
+            "status": "off",
+            "tokens": 0
+          },
+          "answer": "I don't have access to any specific code repository to analyze. Please provide the project files or repository you're referring to, and I'll be happy to help id"
+        },
+        "B": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.4,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/tools/agents.py"
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 135,
+            "evidence": 6,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/tools/agents.py"
+        },
+        "D": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.6,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 474,
+            "evidence": 20,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/tools/agents.py"
+        }
+      }
+    },
+    {
+      "symbol": "import_savings_log",
+      "answer": "src/llm_router/cost.py",
+      "arms": {
+        "A": {
+          "strict": false,
+          "lenient": false,
+          "secs": 1.0,
+          "had_context": false,
+          "meta": {
+            "status": "off",
+            "tokens": 0
+          },
+          "answer": "I don't have access to any project files or repositories to analyze. You'll need to provide the actual project files or repository contents for me to identify w"
+        },
+        "B": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.6,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/cost.py"
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 121,
+            "evidence": 6,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/cost.py"
+        },
+        "D": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.6,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 494,
+            "evidence": 20,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/cost.py"
+        }
+      }
+    },
+    {
+      "symbol": "llm_video",
+      "answer": "src/llm_router/tools/media.py",
+      "arms": {
+        "A": {
+          "strict": false,
+          "lenient": false,
+          "secs": 1.1,
+          "had_context": false,
+          "meta": {
+            "status": "off",
+            "tokens": 0
+          },
+          "answer": "I don't have access to any project files or directories to determine which file defines `llm_video`. You'll need to provide me with the actual project files or "
+        },
+        "B": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.4,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/tools/media.py"
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 126,
+            "evidence": 6,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/tools/media.py"
+        },
+        "D": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.4,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 314,
+            "evidence": 14,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/tools/media.py"
+        }
+      }
+    },
+    {
+      "symbol": "_still_parses",
+      "answer": "scripts/sync_downstream.py",
+      "arms": {
+        "A": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.7,
+          "had_context": false,
+          "meta": {
+            "status": "off",
+            "tokens": 0
+          },
+          "answer": "I don't have access to any specific code repository to analyze. Could you please provide the repository or codebase you're referring to? Once you share the proj"
+        },
+        "B": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.4,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "scripts/sync_downstream.py"
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 124,
+            "evidence": 6,
+            "omissions": 0
+          },
+          "answer": "scripts/sync_downstream.py"
+        },
+        "D": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.4,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 312,
+            "evidence": 14,
+            "omissions": 0
+          },
+          "answer": "scripts/sync_downstream.py"
+        }
+      }
+    },
+    {
+      "symbol": "_build_intelligence",
+      "answer": "src/llm_router/hooks/cyber_grid.py",
+      "arms": {
+        "A": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.6,
+          "had_context": false,
+          "meta": {
+            "status": "off",
+            "tokens": 0
+          },
+          "answer": "I don't have access to any specific code repository to analyze. You would need to provide the actual project files or repository contents for me to identify whi"
+        },
+        "B": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.5,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/hooks/cyber_grid.py"
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.4,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 123,
+            "evidence": 6,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/hooks/cyber_grid.py"
+        },
+        "D": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.6,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 446,
+            "evidence": 20,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/hooks/cyber_grid.py"
+        }
+      }
+    },
+    {
+      "symbol": "_post_agent",
+      "answer": "tests/test_agent_depth_release_wiring.py",
+      "arms": {
+        "A": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.6,
+          "had_context": false,
+          "meta": {
+            "status": "off",
+            "tokens": 0
+          },
+          "answer": "I don't have access to any specific code repository to analyze. Please provide the project files or repository you're referring to, and I'll help you identify w"
+        },
+        "B": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.4,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "tests/test_agent_depth_release_wiring.py"
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 122,
+            "evidence": 6,
+            "omissions": 0
+          },
+          "answer": "tests/test_agent_depth_release_wiring.py"
+        },
+        "D": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.4,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 310,
+            "evidence": 14,
+            "omissions": 0
+          },
+          "answer": "tests/test_agent_depth_release_wiring.py"
+        }
+      }
+    },
+    {
+      "symbol": "get_provider_pressures",
+      "answer": "src/llm_router/quota_balance.py",
+      "arms": {
+        "A": {
+          "strict": false,
+          "lenient": false,
+          "secs": 1.6,
+          "had_context": false,
+          "meta": {
+            "status": "off",
+            "tokens": 0
+          },
+          "answer": "I don't have access to any specific code repository to search for the `get_provider_pressures` function. Please provide me with the repository you're referring "
+        },
+        "B": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.4,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/quota_balance.py"
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 123,
+            "evidence": 6,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/quota_balance.py"
+        },
+        "D": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.5,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 398,
+            "evidence": 20,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/quota_balance.py"
+        }
+      }
+    },
+    {
+      "symbol": "main_sse",
+      "answer": "src/llm_router/server.py",
+      "arms": {
+        "A": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.7,
+          "had_context": false,
+          "meta": {
+            "status": "off",
+            "tokens": 0
+          },
+          "answer": "I don't have access to any specific code repository to analyze. Please provide the project files or repository you're referring to, and I'll be happy to help id"
+        },
+        "B": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.4,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/server.py"
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 118,
+            "evidence": 6,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/server.py"
+        },
+        "D": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.5,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 387,
+            "evidence": 20,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/server.py"
+        }
+      }
+    },
+    {
+      "symbol": "record_id",
+      "answer": "src/llm_router/semantic/experience.py",
+      "arms": {
+        "A": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.6,
+          "had_context": false,
+          "meta": {
+            "status": "off",
+            "tokens": 0
+          },
+          "answer": "I don't have access to any specific code repository to analyze. Please provide the project files or repository you're referring to, and I'll identify which file"
+        },
+        "B": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/hooks/context-capture.py"
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 122,
+            "evidence": 6,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/semantic/experience.py"
+        },
+        "D": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.5,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 404,
+            "evidence": 20,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/semantic/experience.py"
+        }
+      }
+    },
+    {
+      "symbol": "_fact_filename",
+      "answer": "src/llm_router/library/book_closer.py",
+      "arms": {
+        "A": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.7,
+          "had_context": false,
+          "meta": {
+            "status": "off",
+            "tokens": 0
+          },
+          "answer": "I don't have access to any project files or repositories to analyze. You'll need to provide the actual codebase or repository you're referring to, and then I ca"
+        },
+        "B": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.4,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/library/book_closer.py"
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 122,
+            "evidence": 6,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/library/book_closer.py"
+        },
+        "D": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.6,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 422,
+            "evidence": 20,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/library/book_closer.py"
+        }
+      }
+    },
+    {
+      "symbol": "cyber_grid",
+      "answer": "tests/test_cyber_grid_layout.py",
+      "arms": {
+        "A": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.7,
+          "had_context": false,
+          "meta": {
+            "status": "off",
+            "tokens": 0
+          },
+          "answer": "I don't have access to any project files or repository contents to determine which file defines `cyber_grid`. You'll need to provide the actual codebase or repo"
+        },
+        "B": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.5,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "tests/test_cyber_grid_layout.py"
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 118,
+            "evidence": 6,
+            "omissions": 0
+          },
+          "answer": "tests/test_cyber_grid_layout.py"
+        },
+        "D": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.4,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 306,
+            "evidence": 14,
+            "omissions": 0
+          },
+          "answer": "tests/test_cyber_grid_layout.py"
+        }
+      }
+    },
+    {
+      "symbol": "TestRoutingDecision",
+      "answer": "tests/test_terminal_styling.py",
+      "arms": {
+        "A": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.7,
+          "had_context": false,
+          "meta": {
+            "status": "off",
+            "tokens": 0
+          },
+          "answer": "I don't have access to any specific code repository to analyze. Could you please provide the repository or codebase you're referring to? Once you share the proj"
+        },
+        "B": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/okf.py"
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 120,
+            "evidence": 6,
+            "omissions": 0
+          },
+          "answer": "tests/test_terminal_styling.py"
+        },
+        "D": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.5,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 457,
+            "evidence": 20,
+            "omissions": 0
+          },
+          "answer": "tests/test_terminal_styling.py"
+        }
+      }
+    },
+    {
+      "symbol": "bash_intercept_enabled",
+      "answer": "src/llm_router/hooks/tool_intercept.py",
+      "arms": {
+        "A": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.8,
+          "had_context": false,
+          "meta": {
+            "status": "off",
+            "tokens": 0
+          },
+          "answer": "I don't have access to any specific code repository to analyze. Could you please provide me with the repository or codebase you're referring to? Once you share "
+        },
+        "B": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.5,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/hooks/tool_intercept.py"
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 124,
+            "evidence": 6,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/hooks/tool_intercept.py"
+        },
+        "D": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.6,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 440,
+            "evidence": 20,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/hooks/tool_intercept.py"
+        }
+      }
+    },
+    {
+      "symbol": "payload_type_for",
+      "answer": "src/llm_router/streaming_types.py",
+      "arms": {
+        "A": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.6,
+          "had_context": false,
+          "meta": {
+            "status": "off",
+            "tokens": 0
+          },
+          "answer": "I don't have access to any specific code repository to analyze. You'll need to provide the project files or repository contents for me to identify which file de"
+        },
+        "B": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.4,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/streaming_types.py"
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 123,
+            "evidence": 6,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/streaming_types.py"
+        },
+        "D": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.5,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 398,
+            "evidence": 18,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/streaming_types.py"
+        }
+      }
+    },
+    {
+      "symbol": "_repair_xml_toolcalls",
+      "answer": "src/llm_router/hooks/agent_loop.py",
+      "arms": {
+        "A": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.8,
+          "had_context": false,
+          "meta": {
+            "status": "off",
+            "tokens": 0
+          },
+          "answer": "I don't have access to any specific code repository to examine. You'll need to provide the repository or project files for me to identify where `_repair_xml_too"
+        },
+        "B": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.4,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/hooks/agent_loop.py"
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 124,
+            "evidence": 6,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/hooks/agent_loop.py"
+        },
+        "D": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.6,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 463,
+            "evidence": 20,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/hooks/agent_loop.py"
+        }
+      }
+    },
+    {
+      "symbol": "_agent_payload",
+      "answer": "tests/test_cc_usage_track.py",
+      "arms": {
+        "A": {
+          "strict": false,
+          "lenient": false,
+          "secs": 1.0,
+          "had_context": false,
+          "meta": {
+            "status": "off",
+            "tokens": 0
+          },
+          "answer": "I don't have access to any specific code repository or project files to determine which file defines `_agent_payload`. Could you please provide the project file"
+        },
+        "B": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.4,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "tests/test_cc_usage_track.py"
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 128,
+            "evidence": 6,
+            "omissions": 0
+          },
+          "answer": "tests/test_cc_usage_track.py"
+        },
+        "D": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.4,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 316,
+            "evidence": 14,
+            "omissions": 0
+          },
+          "answer": "tests/test_cc_usage_track.py"
+        }
+      }
+    }
+  ]
+}

@@ -82,13 +82,24 @@ class TestLLMRouterHomeIsHonoured:
 
 
 class TestPathHomePatchIsHonoured:
-    """The mechanism 88 test files actually use, including this repo's conftest."""
+    """The mechanism 88 test files actually use, including this repo's conftest.
 
-    def test_state_dir_follows_a_patched_path_home(self, tmp_path):
+    Both tests here clear ``LLM_ROUTER_HOME`` first. The conftest now sets it
+    for every test — the canonical sandbox was documented as the fix for this
+    leak but nothing was actually switching it on, so session context kept
+    being read from the developer's live store. These two are specifically
+    about the FALLBACK, which only runs when the canonical variable is absent,
+    so they have to remove it to reach the branch they exist to cover.
+    """
+
+    def test_state_dir_follows_a_patched_path_home(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("LLM_ROUTER_HOME", raising=False)
         with patch("pathlib.Path.home", return_value=tmp_path):
             assert session_store._state_dir() == tmp_path / ".llm-router"
 
-    def test_a_written_event_lands_in_the_sandbox_not_the_real_home(self, tmp_path):
+    def test_a_written_event_lands_in_the_sandbox_not_the_real_home(
+        self, tmp_path, monkeypatch
+    ):
         """The end-to-end property, and the one that actually failed.
 
         Reading `_state_dir()` proves where the module INTENDS to write. This proves
@@ -102,6 +113,7 @@ class TestPathHomePatchIsHonoured:
         on llm_router working correctly. A per-run session id can only appear in a file this
         test caused to be created.
         """
+        monkeypatch.delenv("LLM_ROUTER_HOME", raising=False)
         session_id = f"iso-sess-{uuid.uuid4()}"
         real_home_store = pathlib.Path.home() / ".llm-router"
 

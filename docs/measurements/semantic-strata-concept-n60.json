@@ -1,0 +1,2539 @@
+{
+  "stratum": "concept",
+  "n": 60,
+  "model": "qwen3-coder:30b",
+  "seed": 7,
+  "budget_tokens": 2000,
+  "arms": [
+    "B",
+    "C",
+    "BC"
+  ],
+  "totals": {
+    "B": 2,
+    "C": 0,
+    "BC": 2
+  },
+  "rows": [
+    {
+      "symbol": "LearnedRoute",
+      "answer": "src/llm_router/memory/profiles.py",
+      "arms": {
+        "B": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.4,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/router.py"
+        },
+        "C": {
+          "strict": false,
+          "lenient": false,
+          "secs": 3.3,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 102,
+            "evidence": 5,
+            "omissions": 0
+          },
+          "answer": "I need to analyze the repository evidence provided to find which file implements \"A learned routing override with confidence tracking.\"\n\nLooking at the evidence"
+        },
+        "BC": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.4,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 102,
+            "evidence": 5,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/router.py"
+        }
+      }
+    },
+    {
+      "symbol": "test_the_1x_field_name_is_gone",
+      "answer": "tests/test_mcp2_field_names.py",
+      "arms": {
+        "B": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.5,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/semantic/scope.py"
+        },
+        "C": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 102,
+            "evidence": 5,
+            "omissions": 0
+          },
+          "answer": "tests/semantic/test_modes_and_arms.py"
+        },
+        "BC": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.4,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 102,
+            "evidence": 5,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/semantic/scope.py"
+        }
+      }
+    },
+    {
+      "symbol": "test_prompts_about_the_conversation_are_still_rescued",
+      "answer": "tests/test_s2_05b_rescue_relevance.py",
+      "arms": {
+        "B": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.5,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/okf.py"
+        },
+        "C": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 127,
+            "evidence": 6,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/hooks/agent_writes.py"
+        },
+        "BC": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.4,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 127,
+            "evidence": 6,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/hooks/agent_writes.py"
+        }
+      }
+    },
+    {
+      "symbol": "_public_names",
+      "answer": "scripts/release/semver_gate.py",
+      "arms": {
+        "B": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/okf.py"
+        },
+        "C": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 102,
+            "evidence": 5,
+            "omissions": 0
+          },
+          "answer": "tests/semantic/test_semantic_is_wired_in.py"
+        },
+        "BC": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.4,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 102,
+            "evidence": 5,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/okf.py"
+        }
+      }
+    },
+    {
+      "symbol": "enumerate_universe",
+      "answer": "scripts/gf_split.py",
+      "arms": {
+        "B": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/semantic/scope.py"
+        },
+        "C": {
+          "strict": false,
+          "lenient": false,
+          "secs": 3.3,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 102,
+            "evidence": 5,
+            "omissions": 0
+          },
+          "answer": "I need to analyze the repository evidence provided to find where \"(mutant_name, module, base_function) for every generated mutant\" is implemented.\n\nLooking at t"
+        },
+        "BC": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.4,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 102,
+            "evidence": 5,
+            "omissions": 0
+          },
+          "answer": "tests/semantic/test_modes_and_arms.py"
+        }
+      }
+    },
+    {
+      "symbol": "detect_regressions",
+      "answer": "src/llm_router/benchmark/regression.py",
+      "arms": {
+        "B": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/hooks/context-capture.py"
+        },
+        "C": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 207,
+            "evidence": 11,
+            "omissions": 0
+          },
+          "answer": "scripts/routerarena/replay.py"
+        },
+        "BC": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.4,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 207,
+            "evidence": 11,
+            "omissions": 0
+          },
+          "answer": "scripts/routerarena/replay.py"
+        }
+      }
+    },
+    {
+      "symbol": "_NeverPasses",
+      "answer": "tests/agentic/test_escalation_bounds.py",
+      "arms": {
+        "B": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/okf.py"
+        },
+        "C": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 120,
+            "evidence": 6,
+            "omissions": 0
+          },
+          "answer": "scripts/routerarena/score_policy.py"
+        },
+        "BC": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.4,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 120,
+            "evidence": 6,
+            "omissions": 0
+          },
+          "answer": "scripts/routerarena/score_policy.py"
+        }
+      }
+    },
+    {
+      "symbol": "_hermetic_env",
+      "answer": "tests/test_red1_3_reservation_leaks.py",
+      "arms": {
+        "B": {
+          "strict": false,
+          "lenient": false,
+          "secs": 2.7,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "I need to analyze the provided knowledge context to find which file implements the isolation of DB access to a throwaway tmp file with config reset.\n\nLooking at"
+        },
+        "C": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 137,
+            "evidence": 7,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/session_spend.py"
+        },
+        "BC": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.4,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 117,
+            "evidence": 6,
+            "omissions": 1
+          },
+          "answer": "src/llm_router/session_spend.py"
+        }
+      }
+    },
+    {
+      "symbol": "_worker",
+      "answer": "tests/test_session_store_concurrency.py",
+      "arms": {
+        "B": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/okf.py"
+        },
+        "C": {
+          "strict": false,
+          "lenient": false,
+          "secs": 2.1,
+          "had_context": true,
+          "meta": {
+            "status": "partial",
+            "tokens": 116,
+            "evidence": 6,
+            "omissions": 1
+          },
+          "answer": "I need to analyze the provided repository evidence to find which file implements the functionality described by \"Write *iterations* uniquely-marked events, self"
+        },
+        "BC": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.4,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 116,
+            "evidence": 6,
+            "omissions": 1
+          },
+          "answer": "src/llm_router/hooks/context-capture.py"
+        }
+      }
+    },
+    {
+      "symbol": "SubmissionResult",
+      "answer": "src/llm_router/benchmark/__init__.py",
+      "arms": {
+        "B": {
+          "strict": false,
+          "lenient": false,
+          "secs": 2.2,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "I need to find the file that implements \"Outcome of pushing predictions to a leaderboard\" functionality.\n\nBased on the repository context provided, I can see th"
+        },
+        "C": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "partial",
+            "tokens": 118,
+            "evidence": 6,
+            "omissions": 1
+          },
+          "answer": "src/llm_router/routing_report.py"
+        },
+        "BC": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 118,
+            "evidence": 6,
+            "omissions": 1
+          },
+          "answer": "src/llm_router/routing_report.py"
+        }
+      }
+    },
+    {
+      "symbol": "test_the_rescue_can_be_disabled",
+      "answer": "tests/test_s2_05_session_context_rescue.py",
+      "arms": {
+        "B": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/okf.py"
+        },
+        "C": {
+          "strict": false,
+          "lenient": false,
+          "secs": 3.9,
+          "had_context": true,
+          "meta": {
+            "status": "partial",
+            "tokens": 82,
+            "evidence": 4,
+            "omissions": 1
+          },
+          "answer": "I need to analyze the provided repository evidence to find which file implements the concept of \"An operator who does not want conversation relayed to a local m"
+        },
+        "BC": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.4,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 82,
+            "evidence": 4,
+            "omissions": 1
+          },
+          "answer": "src/llm_router/okf.py"
+        }
+      }
+    },
+    {
+      "symbol": "LLMResponse",
+      "answer": "src/llm_router/types.py",
+      "arms": {
+        "B": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/okf.py"
+        },
+        "C": {
+          "strict": false,
+          "lenient": false,
+          "secs": 2.4,
+          "had_context": true,
+          "meta": {
+            "status": "partial",
+            "tokens": 302,
+            "evidence": 14,
+            "omissions": 1
+          },
+          "answer": "The provided repository evidence does not contain a file that directly implements \"Unified response from any LLM or media generation call.\" The evidence lists v"
+        },
+        "BC": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.6,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 302,
+            "evidence": 14,
+            "omissions": 1
+          },
+          "answer": "src/llm_router/okf.py"
+        }
+      }
+    },
+    {
+      "symbol": "test_an_experience_record_joins_to_the_entity_it_names",
+      "answer": "tests/semantic/test_structural_index.py",
+      "arms": {
+        "B": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.4,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/semantic/index.py"
+        },
+        "C": {
+          "strict": false,
+          "lenient": false,
+          "secs": 3.1,
+          "had_context": true,
+          "meta": {
+            "status": "partial",
+            "tokens": 82,
+            "evidence": 4,
+            "omissions": 1
+          },
+          "answer": "I need to analyze the provided repository evidence to find which file implements the concept described in \"Otherwise the two layers are two databases that never"
+        },
+        "BC": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.4,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 82,
+            "evidence": 4,
+            "omissions": 1
+          },
+          "answer": "src/llm_router/semantic/indexer.py"
+        }
+      }
+    },
+    {
+      "symbol": "_records_a_failopen",
+      "answer": "scripts/lint_fail_open.py",
+      "arms": {
+        "B": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.4,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/hooks/context-capture.py"
+        },
+        "C": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.5,
+          "had_context": true,
+          "meta": {
+            "status": "partial",
+            "tokens": 293,
+            "evidence": 14,
+            "omissions": 1
+          },
+          "answer": "src/llm_router/session_spend.py"
+        },
+        "BC": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.6,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 293,
+            "evidence": 14,
+            "omissions": 1
+          },
+          "answer": "src/llm_router/attempt_log.py"
+        }
+      }
+    },
+    {
+      "symbol": "append",
+      "answer": "src/llm_router/admin_actions.py",
+      "arms": {
+        "B": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/okf.py"
+        },
+        "C": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.5,
+          "had_context": true,
+          "meta": {
+            "status": "partial",
+            "tokens": 354,
+            "evidence": 19,
+            "omissions": 1
+          },
+          "answer": "src/llm_router/tools/admin.py"
+        },
+        "BC": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.6,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 354,
+            "evidence": 19,
+            "omissions": 1
+          },
+          "answer": "src/llm_router/tools/admin.py"
+        }
+      }
+    },
+    {
+      "symbol": "clean_env",
+      "answer": "tests/test_doctor_savings_posture.py",
+      "arms": {
+        "B": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.5,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/gateway.py"
+        },
+        "C": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.4,
+          "had_context": true,
+          "meta": {
+            "status": "partial",
+            "tokens": 198,
+            "evidence": 10,
+            "omissions": 1
+          },
+          "answer": "src/llm_router/agentic/acceptance.py"
+        },
+        "BC": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.5,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 198,
+            "evidence": 10,
+            "omissions": 1
+          },
+          "answer": "src/llm_router/gateway.py"
+        }
+      }
+    },
+    {
+      "symbol": "test_original_messages_not_mutated",
+      "answer": "tests/test_prompt_cache.py",
+      "arms": {
+        "B": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.5,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/prompt_cache.py"
+        },
+        "C": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "partial",
+            "tokens": 108,
+            "evidence": 5,
+            "omissions": 1
+          },
+          "answer": "src/llm_router/prompt_cache.py"
+        },
+        "BC": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.4,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 108,
+            "evidence": 5,
+            "omissions": 1
+          },
+          "answer": "src/llm_router/prompt_cache.py"
+        }
+      }
+    },
+    {
+      "symbol": "ScoreRequest",
+      "answer": "src/llm_router/service.py",
+      "arms": {
+        "B": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.4,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/okf.py"
+        },
+        "C": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.4,
+          "had_context": true,
+          "meta": {
+            "status": "partial",
+            "tokens": 192,
+            "evidence": 10,
+            "omissions": 1
+          },
+          "answer": "src/llm_router/agentic_registry.py"
+        },
+        "BC": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.5,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 192,
+            "evidence": 10,
+            "omissions": 1
+          },
+          "answer": "src/llm_router/semantic/applicability.py"
+        }
+      }
+    },
+    {
+      "symbol": "test_audit_routing_module_is_gone",
+      "answer": "tests/test_misroute_audit.py",
+      "arms": {
+        "B": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/hooks/context-capture.py"
+        },
+        "C": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "partial",
+            "tokens": 82,
+            "evidence": 4,
+            "omissions": 1
+          },
+          "answer": "tests/semantic/test_modes_and_arms.py"
+        },
+        "BC": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.4,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 82,
+            "evidence": 4,
+            "omissions": 1
+          },
+          "answer": "tests/semantic/test_modes_and_arms.py"
+        }
+      }
+    },
+    {
+      "symbol": "test_the_two_rates_are_not_swapped",
+      "answer": "tests/test_gf_uncovered_pricing_refresh.py",
+      "arms": {
+        "B": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.4,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "tests/okf/test_okf_scope_02_explicit_root.py"
+        },
+        "C": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "partial",
+            "tokens": 82,
+            "evidence": 4,
+            "omissions": 1
+          },
+          "answer": "tests/semantic/test_modes_and_arms.py"
+        },
+        "BC": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.4,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 82,
+            "evidence": 4,
+            "omissions": 1
+          },
+          "answer": "tests/semantic/test_modes_and_arms.py"
+        }
+      }
+    },
+    {
+      "symbol": "TestFeedbackHandler",
+      "answer": "tests/test_feedback_handler.py",
+      "arms": {
+        "B": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/okf.py"
+        },
+        "C": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "partial",
+            "tokens": 116,
+            "evidence": 6,
+            "omissions": 1
+          },
+          "answer": "src/llm_router/semantic/experience.py"
+        },
+        "BC": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.4,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 116,
+            "evidence": 6,
+            "omissions": 1
+          },
+          "answer": "src/llm_router/semantic/experience.py"
+        }
+      }
+    },
+    {
+      "symbol": "test_a_session_id_is_not_a_key_into_another_project",
+      "answer": "tests/test_s2_01_session_scope_stability.py",
+      "arms": {
+        "B": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/okf.py"
+        },
+        "C": {
+          "strict": false,
+          "lenient": false,
+          "secs": 4.4,
+          "had_context": true,
+          "meta": {
+            "status": "partial",
+            "tokens": 82,
+            "evidence": 4,
+            "omissions": 1
+          },
+          "answer": "I need to analyze the provided repository evidence to find which file implements the trade \"CHZ-AUD-024\".\n\nLooking at the evidence, I can see there are several "
+        },
+        "BC": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.4,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 82,
+            "evidence": 4,
+            "omissions": 1
+          },
+          "answer": "src/llm_router/okf.py"
+        }
+      }
+    },
+    {
+      "symbol": "test_the_notice_names_what_was_cited_and_how_to_turn_it_off",
+      "answer": "tests/test_p3_grounding_visibility.py",
+      "arms": {
+        "B": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/okf.py"
+        },
+        "C": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.4,
+          "had_context": true,
+          "meta": {
+            "status": "partial",
+            "tokens": 160,
+            "evidence": 8,
+            "omissions": 1
+          },
+          "answer": "src/llm_router/hooks/agent_writes.py"
+        },
+        "BC": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.5,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 160,
+            "evidence": 8,
+            "omissions": 1
+          },
+          "answer": "src/llm_router/hooks/agent_writes.py"
+        }
+      }
+    },
+    {
+      "symbol": "TestSyncAnthropicBaseUrl",
+      "answer": "tests/test_session_start_pxpipe.py",
+      "arms": {
+        "B": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.6,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "hooks/session-start.py"
+        },
+        "C": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.4,
+          "had_context": true,
+          "meta": {
+            "status": "partial",
+            "tokens": 126,
+            "evidence": 6,
+            "omissions": 1
+          },
+          "answer": "src/llm_router/hooks/session-start.py"
+        },
+        "BC": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.4,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 126,
+            "evidence": 6,
+            "omissions": 1
+          },
+          "answer": "hooks/session-start.py"
+        }
+      }
+    },
+    {
+      "symbol": "discover",
+      "answer": "src/llm_router/migrations/__init__.py",
+      "arms": {
+        "B": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/migration.py"
+        },
+        "C": {
+          "strict": false,
+          "lenient": false,
+          "secs": 4.1,
+          "had_context": true,
+          "meta": {
+            "status": "partial",
+            "tokens": 82,
+            "evidence": 4,
+            "omissions": 1
+          },
+          "answer": "I need to analyze the repository evidence provided to find which file implements the functionality \"Return migration modules from ``versions/`` ordered by versi"
+        },
+        "BC": {
+          "strict": false,
+          "lenient": false,
+          "secs": 23.9,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 82,
+            "evidence": 4,
+            "omissions": 1
+          },
+          "answer": "src/llm_router/semantic/scope.py"
+        }
+      }
+    },
+    {
+      "symbol": "derive_concept",
+      "answer": "scripts/question_strata.py",
+      "arms": {
+        "B": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.4,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/okf.py"
+        },
+        "C": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.4,
+          "had_context": true,
+          "meta": {
+            "status": "partial",
+            "tokens": 82,
+            "evidence": 4,
+            "omissions": 1
+          },
+          "answer": "tests/semantic/test_modes_and_arms.py"
+        },
+        "BC": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.4,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 82,
+            "evidence": 4,
+            "omissions": 1
+          },
+          "answer": "src/llm_router/okf.py"
+        }
+      }
+    },
+    {
+      "symbol": "_from_env",
+      "answer": "src/llm_router/model_discovery.py",
+      "arms": {
+        "B": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/router.py"
+        },
+        "C": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "partial",
+            "tokens": 100,
+            "evidence": 5,
+            "omissions": 1
+          },
+          "answer": "scripts/routerarena/score_policy.py"
+        },
+        "BC": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.4,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 100,
+            "evidence": 5,
+            "omissions": 1
+          },
+          "answer": "src/llm_router/router.py"
+        }
+      }
+    },
+    {
+      "symbol": "Problem",
+      "answer": "src/llm_router/semantic/experience.py",
+      "arms": {
+        "B": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/okf.py"
+        },
+        "C": {
+          "strict": false,
+          "lenient": false,
+          "secs": 2.0,
+          "had_context": true,
+          "meta": {
+            "status": "partial",
+            "tokens": 116,
+            "evidence": 6,
+            "omissions": 1
+          },
+          "answer": "The provided repository evidence does not contain any file that directly implements the concept of \"A symptom and its candidate causes, held apart from any acce"
+        },
+        "BC": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.4,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 116,
+            "evidence": 6,
+            "omissions": 1
+          },
+          "answer": "src/llm_router/okf.py"
+        }
+      }
+    },
+    {
+      "symbol": "test_chatter_with_no_verifiable_structure_is_not_stored",
+      "answer": "tests/okf/test_cross_model_context.py",
+      "arms": {
+        "B": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/okf.py"
+        },
+        "C": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.6,
+          "had_context": true,
+          "meta": {
+            "status": "partial",
+            "tokens": 360,
+            "evidence": 18,
+            "omissions": 2
+          },
+          "answer": "src/llm_router/semantic_cache.py"
+        },
+        "BC": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.7,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 360,
+            "evidence": 18,
+            "omissions": 2
+          },
+          "answer": "src/llm_router/semantic_cache.py"
+        }
+      }
+    },
+    {
+      "symbol": "test_main_sse_defaults_to_localhost",
+      "answer": "tests/test_sec1_no_unauthenticated_sse_script.py",
+      "arms": {
+        "B": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/okf.py"
+        },
+        "C": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "partial",
+            "tokens": 82,
+            "evidence": 4,
+            "omissions": 1
+          },
+          "answer": "tests/semantic/test_modes_and_arms.py"
+        },
+        "BC": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.4,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 82,
+            "evidence": 4,
+            "omissions": 1
+          },
+          "answer": "src/llm_router/okf.py"
+        }
+      }
+    },
+    {
+      "symbol": "skip_reason",
+      "answer": "scripts/check_docs_commands.py",
+      "arms": {
+        "B": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/okf.py"
+        },
+        "C": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.4,
+          "had_context": true,
+          "meta": {
+            "status": "partial",
+            "tokens": 154,
+            "evidence": 8,
+            "omissions": 1
+          },
+          "answer": "src/llm_router/session_broker.py"
+        },
+        "BC": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.5,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 154,
+            "evidence": 8,
+            "omissions": 1
+          },
+          "answer": "src/llm_router/okf.py"
+        }
+      }
+    },
+    {
+      "symbol": "_load_painting",
+      "answer": "src/llm_router/banner.py",
+      "arms": {
+        "B": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.4,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/hooks/context-capture.py"
+        },
+        "C": {
+          "strict": false,
+          "lenient": false,
+          "secs": 2.8,
+          "had_context": true,
+          "meta": {
+            "status": "partial",
+            "tokens": 82,
+            "evidence": 4,
+            "omissions": 1
+          },
+          "answer": "I need to find which file implements the functionality that \"Reads the canonical ASCII source. Returns ``None`` when missing.\"\n\nLooking at the repository eviden"
+        },
+        "BC": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.4,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 82,
+            "evidence": 4,
+            "omissions": 1
+          },
+          "answer": "src/llm_router/hooks/context-capture.py"
+        }
+      }
+    },
+    {
+      "symbol": "__call__",
+      "answer": "src/llm_router/terminal_style.py",
+      "arms": {
+        "B": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/hooks/context-capture.py"
+        },
+        "C": {
+          "strict": false,
+          "lenient": false,
+          "secs": 3.2,
+          "had_context": true,
+          "meta": {
+            "status": "partial",
+            "tokens": 82,
+            "evidence": 4,
+            "omissions": 1
+          },
+          "answer": "I need to find which file implements the functionality to \"Apply color to text, respecting NO_COLOR env var.\"\n\nBased on the repository evidence provided, I can "
+        },
+        "BC": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.4,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 82,
+            "evidence": 4,
+            "omissions": 1
+          },
+          "answer": "src/llm_router/hooks/context-capture.py"
+        }
+      }
+    },
+    {
+      "symbol": "PreparedPrompt",
+      "answer": "src/llm_router/context_prep.py",
+      "arms": {
+        "B": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/router.py"
+        },
+        "C": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "partial",
+            "tokens": 104,
+            "evidence": 5,
+            "omissions": 1
+          },
+          "answer": "src/llm_router/server.py"
+        },
+        "BC": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.4,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 104,
+            "evidence": 5,
+            "omissions": 1
+          },
+          "answer": "src/llm_router/router.py"
+        }
+      }
+    },
+    {
+      "symbol": "TestFormatContext",
+      "answer": "tests/test_result_cache.py",
+      "arms": {
+        "B": {
+          "strict": false,
+          "lenient": false,
+          "secs": 2.7,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "I need to analyze the provided knowledge context to find which file implements \"Test context formatting for prompt injection.\"\n\nThe knowledge context discusses:"
+        },
+        "C": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "partial",
+            "tokens": 82,
+            "evidence": 4,
+            "omissions": 1
+          },
+          "answer": "tests/semantic/test_modes_and_arms.py"
+        },
+        "BC": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 82,
+            "evidence": 4,
+            "omissions": 1
+          },
+          "answer": "tests/semantic/test_modes_and_arms.py"
+        }
+      }
+    },
+    {
+      "symbol": "main",
+      "answer": "src/llm_router/hooks/agent-error.py",
+      "arms": {
+        "B": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/hooks/post-tool-use.py"
+        },
+        "C": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "partial",
+            "tokens": 99,
+            "evidence": 5,
+            "omissions": 1
+          },
+          "answer": "src/llm_router/agentic/engine.py"
+        },
+        "BC": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.4,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 99,
+            "evidence": 5,
+            "omissions": 1
+          },
+          "answer": "src/llm_router/agentic/engine.py"
+        }
+      }
+    },
+    {
+      "symbol": "OpenRouterQuirks",
+      "answer": "src/llm_router/provider_quirks.py",
+      "arms": {
+        "B": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/openrouter.py"
+        },
+        "C": {
+          "strict": false,
+          "lenient": false,
+          "secs": 4.4,
+          "had_context": true,
+          "meta": {
+            "status": "partial",
+            "tokens": 82,
+            "evidence": 4,
+            "omissions": 1
+          },
+          "answer": "I need to analyze the provided repository evidence to find which file implements \"OpenRouter universal-name resolution + max_tokens cap.\"\n\nLooking at the eviden"
+        },
+        "BC": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.4,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 82,
+            "evidence": 4,
+            "omissions": 1
+          },
+          "answer": "src/llm_router/openrouter.py"
+        }
+      }
+    },
+    {
+      "symbol": "test_localize_never_emits_a_double_call",
+      "answer": "tests/test_tool_surface.py",
+      "arms": {
+        "B": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.5,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/tools/text.py"
+        },
+        "C": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "partial",
+            "tokens": 133,
+            "evidence": 6,
+            "omissions": 1
+          },
+          "answer": "src/llm_router/tools/text.py"
+        },
+        "BC": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.4,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 133,
+            "evidence": 6,
+            "omissions": 1
+          },
+          "answer": "src/llm_router/tools/text.py"
+        }
+      }
+    },
+    {
+      "symbol": "TestRequestIDLinkage",
+      "answer": "tests/lineage/test_audit_edge_cases.py",
+      "arms": {
+        "B": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.4,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/semantic/index.py"
+        },
+        "C": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "partial",
+            "tokens": 99,
+            "evidence": 5,
+            "omissions": 1
+          },
+          "answer": "tests/semantic/test_traces.py"
+        },
+        "BC": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.4,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 99,
+            "evidence": 5,
+            "omissions": 1
+          },
+          "answer": "src/llm_router/semantic/test_modes_and_arms.py"
+        }
+      }
+    },
+    {
+      "symbol": "test_flag_on_off_single_threaded_equivalence",
+      "answer": "_quarantined_tests/test_budget_envelope.py",
+      "arms": {
+        "B": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.4,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/context_prep.py"
+        },
+        "C": {
+          "strict": false,
+          "lenient": false,
+          "secs": 3.4,
+          "had_context": true,
+          "meta": {
+            "status": "partial",
+            "tokens": 82,
+            "evidence": 4,
+            "omissions": 1
+          },
+          "answer": "I need to analyze the provided repository evidence to find which file implements the concept described in \"The manager's own accounting behavior does not itself"
+        },
+        "BC": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.4,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 82,
+            "evidence": 4,
+            "omissions": 1
+          },
+          "answer": "src/llm_router/context_prep.py"
+        }
+      }
+    },
+    {
+      "symbol": "_keywords_for_retrieval",
+      "answer": "src/llm_router/okf.py",
+      "arms": {
+        "B": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.5,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/context_prep.py"
+        },
+        "C": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.4,
+          "had_context": true,
+          "meta": {
+            "status": "partial",
+            "tokens": 112,
+            "evidence": 6,
+            "omissions": 1
+          },
+          "answer": "src/llm_router/benchmark/__init__.py"
+        },
+        "BC": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.5,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 112,
+            "evidence": 6,
+            "omissions": 1
+          },
+          "answer": "src/llm_router/benchmark/__init__.py"
+        }
+      }
+    },
+    {
+      "symbol": "test_a_record_naming_only_a_file_is_resolved_not_empty",
+      "answer": "tests/semantic/test_structural_index.py",
+      "arms": {
+        "B": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.4,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/semantic/scope.py"
+        },
+        "C": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "partial",
+            "tokens": 99,
+            "evidence": 5,
+            "omissions": 1
+          },
+          "answer": "tests/test_terminal_styling.py"
+        },
+        "BC": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.4,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 99,
+            "evidence": 5,
+            "omissions": 1
+          },
+          "answer": "src/llm_router/semantic/scope.py"
+        }
+      }
+    },
+    {
+      "symbol": "_retrieval_roots",
+      "answer": "src/llm_router/okf.py",
+      "arms": {
+        "B": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/okf.py"
+        },
+        "C": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "partial",
+            "tokens": 82,
+            "evidence": 4,
+            "omissions": 1
+          },
+          "answer": "tests/semantic/test_modes_and_arms.py"
+        },
+        "BC": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.4,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 82,
+            "evidence": 4,
+            "omissions": 1
+          },
+          "answer": "src/llm_router/okf.py"
+        }
+      }
+    },
+    {
+      "symbol": "TestPluginRegistry",
+      "answer": "tests/test_c1_redaction_plugin_seam.py",
+      "arms": {
+        "B": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "tests/llm_router/test_redactor_plugin_registry.py"
+        },
+        "C": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "partial",
+            "tokens": 82,
+            "evidence": 4,
+            "omissions": 1
+          },
+          "answer": "tests/semantic/test_modes_and_arms.py"
+        },
+        "BC": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.4,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 82,
+            "evidence": 4,
+            "omissions": 1
+          },
+          "answer": "tests/llm_router/test_redactor_plugin_registry.py"
+        }
+      }
+    },
+    {
+      "symbol": "test_subscription_helper_fails_closed_to_pay_per_token",
+      "answer": "tests/economics/test_subscription_no_cash_figure.py",
+      "arms": {
+        "B": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/hooks/context-capture.py"
+        },
+        "C": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.5,
+          "had_context": true,
+          "meta": {
+            "status": "partial",
+            "tokens": 351,
+            "evidence": 19,
+            "omissions": 1
+          },
+          "answer": "tests/semantic/test_modes_and_arms.py"
+        },
+        "BC": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.7,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 351,
+            "evidence": 19,
+            "omissions": 1
+          },
+          "answer": "src/llm_router/hooks/context-capture.py"
+        }
+      }
+    },
+    {
+      "symbol": "submit",
+      "answer": "src/llm_router/benchmark/__init__.py",
+      "arms": {
+        "B": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/leaderboard.py"
+        },
+        "C": {
+          "strict": false,
+          "lenient": false,
+          "secs": 4.0,
+          "had_context": true,
+          "meta": {
+            "status": "partial",
+            "tokens": 82,
+            "evidence": 4,
+            "omissions": 1
+          },
+          "answer": "I need to analyze the provided repository evidence to find which file implements the functionality \"Push results to a leaderboard. Optional \u2014 return ``None`` if"
+        },
+        "BC": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.4,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 82,
+            "evidence": 4,
+            "omissions": 1
+          },
+          "answer": "src/llm_router/leaderboard.py"
+        }
+      }
+    },
+    {
+      "symbol": "TestQuickCheck",
+      "answer": "tests/test_hook_deadlock_detector.py",
+      "arms": {
+        "B": {
+          "strict": false,
+          "lenient": false,
+          "secs": 2.5,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "I need to find which file implements a \"quick deadlock check function\" test, but based on the provided knowledge context, there's no mention of any deadlock che"
+        },
+        "C": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.4,
+          "had_context": true,
+          "meta": {
+            "status": "partial",
+            "tokens": 198,
+            "evidence": 10,
+            "omissions": 1
+          },
+          "answer": "tests/test_agentic_mgee.py"
+        },
+        "BC": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.5,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 198,
+            "evidence": 10,
+            "omissions": 1
+          },
+          "answer": "tests/test_agentic_mgee.py"
+        }
+      }
+    },
+    {
+      "symbol": "test_default_epsilon_is_ten_percent",
+      "answer": "tests/test_bandit_telemetry.py",
+      "arms": {
+        "B": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.4,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/okf.py"
+        },
+        "C": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "partial",
+            "tokens": 198,
+            "evidence": 10,
+            "omissions": 1
+          },
+          "answer": "src/llm_router/agentic/acceptance.py"
+        },
+        "BC": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.5,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 198,
+            "evidence": 10,
+            "omissions": 1
+          },
+          "answer": "src/llm_router/semantic_cache.py"
+        }
+      }
+    },
+    {
+      "symbol": "test_taskype_import_used",
+      "answer": "tests/test_cat_f_deferred_sites.py",
+      "arms": {
+        "B": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/hooks/context-capture.py"
+        },
+        "C": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.5,
+          "had_context": true,
+          "meta": {
+            "status": "partial",
+            "tokens": 344,
+            "evidence": 19,
+            "omissions": 1
+          },
+          "answer": "src/llm_router/types.py"
+        },
+        "BC": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.7,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 344,
+            "evidence": 19,
+            "omissions": 1
+          },
+          "answer": "src/llm_router/types.py"
+        }
+      }
+    },
+    {
+      "symbol": "SemanticCacheEntry",
+      "answer": "src/llm_router/cache/store.py",
+      "arms": {
+        "B": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/semantic_cache.py"
+        },
+        "C": {
+          "strict": false,
+          "lenient": false,
+          "secs": 1.6,
+          "had_context": true,
+          "meta": {
+            "status": "partial",
+            "tokens": 82,
+            "evidence": 4,
+            "omissions": 1
+          },
+          "answer": "The provided repository evidence does not contain information about a file that implements \"A response cache entry keyed by prompt embedding similarity (v0.0.2+"
+        },
+        "BC": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.4,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 82,
+            "evidence": 4,
+            "omissions": 1
+          },
+          "answer": "src/llm_router/semantic_cache.py"
+        }
+      }
+    },
+    {
+      "symbol": "needs_reasoning",
+      "answer": "src/llm_router/reason_gate.py",
+      "arms": {
+        "B": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/okf.py"
+        },
+        "C": {
+          "strict": false,
+          "lenient": false,
+          "secs": 4.4,
+          "had_context": true,
+          "meta": {
+            "status": "partial",
+            "tokens": 82,
+            "evidence": 4,
+            "omissions": 1
+          },
+          "answer": "I need to find the file that implements a \"Boolean convenience wrapper \u2014 the drop-in for ``_COMPLEXITY_DEEP.search``\" functionality.\n\nLooking at the repository "
+        },
+        "BC": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.4,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 82,
+            "evidence": 4,
+            "omissions": 1
+          },
+          "answer": "src/llm_router/okf.py"
+        }
+      }
+    },
+    {
+      "symbol": "test_no_single_member_is_enormous",
+      "answer": "tests/test_sdist_size_and_contents.py",
+      "arms": {
+        "B": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/okf.py"
+        },
+        "C": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.4,
+          "had_context": true,
+          "meta": {
+            "status": "partial",
+            "tokens": 148,
+            "evidence": 8,
+            "omissions": 1
+          },
+          "answer": "src/llm_router/agentic_registry.py"
+        },
+        "BC": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.5,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 148,
+            "evidence": 8,
+            "omissions": 1
+          },
+          "answer": "src/llm_router/cache/classification.py"
+        }
+      }
+    },
+    {
+      "symbol": "TestBuildDynamicChain",
+      "answer": "tests/test_chain_builder.py",
+      "arms": {
+        "B": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.5,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "tests/test_dict_values_bug.py"
+        },
+        "C": {
+          "strict": false,
+          "lenient": false,
+          "secs": 2.8,
+          "had_context": true,
+          "meta": {
+            "status": "partial",
+            "tokens": 82,
+            "evidence": 4,
+            "omissions": 1
+          },
+          "answer": "I need to find which file implements regression tests for the dict.values() bug where iterating dict yields keys instead of values.\n\nLooking at the repository e"
+        },
+        "BC": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.4,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 82,
+            "evidence": 4,
+            "omissions": 1
+          },
+          "answer": "tests/semantic/test_modes_and_arms.py"
+        }
+      }
+    },
+    {
+      "symbol": "TestLLMRouterHomeIsHonoured",
+      "answer": "tests/test_p0_session_store_isolation.py",
+      "arms": {
+        "B": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.4,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/paths.py"
+        },
+        "C": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "partial",
+            "tokens": 97,
+            "evidence": 5,
+            "omissions": 1
+          },
+          "answer": "src/llm_router/paths.py"
+        },
+        "BC": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.4,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 97,
+            "evidence": 5,
+            "omissions": 1
+          },
+          "answer": "src/llm_router/paths.py"
+        }
+      }
+    },
+    {
+      "symbol": "TestCustomPolicies",
+      "answer": "tests/test_policies.py",
+      "arms": {
+        "B": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.4,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "tests/okf/test_okf_scope_02_explicit_root.py"
+        },
+        "C": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "partial",
+            "tokens": 101,
+            "evidence": 5,
+            "omissions": 1
+          },
+          "answer": "scripts/routerarena/reliability_ceiling.py"
+        },
+        "BC": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.4,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 101,
+            "evidence": 5,
+            "omissions": 1
+          },
+          "answer": "scripts/routerarena/reliability_ceiling.py"
+        }
+      }
+    },
+    {
+      "symbol": "test_coverage_names_the_gap_rather_than_only_counting_it",
+      "answer": "tests/economics/test_calibration_provenance.py",
+      "arms": {
+        "B": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/okf.py"
+        },
+        "C": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "partial",
+            "tokens": 96,
+            "evidence": 5,
+            "omissions": 1
+          },
+          "answer": "src/llm_router/gateway.py"
+        },
+        "BC": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.4,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 96,
+            "evidence": 5,
+            "omissions": 1
+          },
+          "answer": "src/llm_router/gateway.py"
+        }
+      }
+    },
+    {
+      "symbol": "test_child_process_can_still_do_useful_work",
+      "answer": "tests/security/test_agentic_env_isolation.py",
+      "arms": {
+        "B": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/okf.py"
+        },
+        "C": {
+          "strict": false,
+          "lenient": false,
+          "secs": 1.8,
+          "had_context": true,
+          "meta": {
+            "status": "partial",
+            "tokens": 133,
+            "evidence": 7,
+            "omissions": 1
+          },
+          "answer": "I cannot determine which specific file implements the principle \"Isolation that breaks the tool is not a fix, it is an outage\" based solely on the provided repo"
+        },
+        "BC": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.5,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 133,
+            "evidence": 7,
+            "omissions": 1
+          },
+          "answer": "src/llm_router/okf.py"
+        }
+      }
+    },
+    {
+      "symbol": "_key",
+      "answer": "scripts/lint_pricing.py",
+      "arms": {
+        "B": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/okf.py"
+        },
+        "C": {
+          "strict": false,
+          "lenient": false,
+          "secs": 3.1,
+          "had_context": true,
+          "meta": {
+            "status": "partial",
+            "tokens": 100,
+            "evidence": 5,
+            "omissions": 1
+          },
+          "answer": "I need to find which file implements the concept of \"Stable identity for a violation: path + name + kind, NOT line number.\"\n\nThis appears to be related to seman"
+        },
+        "BC": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.4,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 100,
+            "evidence": 5,
+            "omissions": 1
+          },
+          "answer": "src/llm_router/okf.py"
+        }
+      }
+    },
+    {
+      "symbol": "_guard_cross_origin",
+      "answer": "src/llm_router/gateway.py",
+      "arms": {
+        "B": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.4,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/gateway.py"
+        },
+        "C": {
+          "strict": false,
+          "lenient": false,
+          "secs": 4.5,
+          "had_context": true,
+          "meta": {
+            "status": "partial",
+            "tokens": 82,
+            "evidence": 4,
+            "omissions": 1
+          },
+          "answer": "I need to analyze the repository evidence provided to find which file implements the security feature \"CHZ-SEC-04: block browser CSRF / DNS-rebinding on this lo"
+        },
+        "BC": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.4,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 82,
+            "evidence": 4,
+            "omissions": 1
+          },
+          "answer": "src/llm_router/gateway.py"
+        }
+      }
+    },
+    {
+      "symbol": "FeedbackStore",
+      "answer": "src/llm_router/feedback.py",
+      "arms": {
+        "B": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/semantic/index.py"
+        },
+        "C": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "partial",
+            "tokens": 116,
+            "evidence": 6,
+            "omissions": 1
+          },
+          "answer": "src/llm_router/semantic/experience.py"
+        },
+        "BC": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.5,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 116,
+            "evidence": 6,
+            "omissions": 1
+          },
+          "answer": "src/llm_router/semantic/experience.py"
+        }
+      }
+    }
+  ]
+}

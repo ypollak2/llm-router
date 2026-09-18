@@ -167,8 +167,14 @@ def main() -> None:
 
         files, symbols = okf._extract_files_and_symbols("", content)
         if files and symbols:
+            # OKF-SCOPE-02: say which project. This hook fires on EVERY tool call,
+            # so it is the highest-volume writer in the system — and it calls
+            # `_write_source_concept` directly, bypassing `enrich_from_response`.
+            # Leaving `root` unset here would keep that volume on the cwd fallback
+            # while the unit tests around the function itself went green.
             okf._write_source_concept(
-                files[0], "Defines: " + ", ".join(symbols), symbols, "", okf.KNOWLEDGE_DIR
+                files[0], "Defines: " + ", ".join(symbols), symbols, "",
+                okf.KNOWLEDGE_DIR, root=okf.project_root(),
             )
             okf.invalidate_cache()
     except Exception:

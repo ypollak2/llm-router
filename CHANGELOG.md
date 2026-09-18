@@ -10,6 +10,145 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 | [CHANGELOG-ARCHIVE.md](CHANGELOG-ARCHIVE.md) | v10.1.5 back to v6.3.0 |
 | [GitHub Releases](https://github.com/ypollak2/llm-router/releases) | v6.2 and earlier |
 
+## [14.0.0] - 2026-09-18
+
+Five prerequisite defects in project scoping and grounding measurement, and a
+new `semantic` package. Adds one CLI command (`llm-router semantic`) and four
+environment variables. No MCP tool is added or removed, and model-selection
+policy is unchanged.
+
+### Why this is a major version
+
+No public name was removed or renamed, so the repository's own semver gate
+reports `PATCH` as the minimum. The gate compares the surface, and the surface
+is not what changed here — **the default behaviour is**:
+
+- **Source retrieval is on by default.** Every routed prompt now carries a
+  `<repository_evidence>` block it did not carry before. Nobody asked for that,
+  and it changes what every model sees on every call. That alone is what a
+  major version is for.
+- **An unobserved command outcome is recorded as `unknown` rather than `ok`.**
+  Chapter sealing requires `ok`, and most tool responses carry no exit code, so
+  expect markedly fewer sealed chapters. Correct, and a visible drop in a
+  number somebody may be watching.
+- **OKF writes less.** Definitions are verified against the file before being
+  stored, so a store that previously accumulated unverified symbol names stops
+  growing as fast — and some of what it already holds is wrong.
+
+Anyone who wants the previous behaviour sets `LLM_ROUTER_SEMANTIC_SOURCE=off`.
+
+Two notes for whoever reads the release tooling's output. The semver gate
+reported "public surface unchanged" despite this release adding a CLI
+subcommand, because it extracts top-level `def`/`class` names from eleven fixed
+files and a subcommand is a string in a `choices` list — the same blind spot
+its own comment records from 13.3.1. And `sync-versions.py` did not update
+`npm/package.json` while `verify-version-sync.py` checked it; fixed here.
+
+### Fixed
+
+- Indexing a project while the process sits in a different one no longer writes
+  the first project's documents into the second. `index_project(root=B)` called
+  from inside A reported B's store in its return value and wrote A's directory;
+  six OKF write paths recomputed their destination from the process cwd, and
+  two of them had not been named in any prior audit of this bug.
+- OKF no longer records what a file defines without reading the file. Two
+  independent regexes produced a list of paths and a list of symbols, and the
+  writers paired the first path with every symbol, so a reply mentioning a
+  module that does not exist alongside a function defined elsewhere became a
+  stored, retrievable claim that one defines the other.
+- The grounding benchmark's scorer no longer accepts a wrong directory.
+  `wrong_directory/okf.py` scored correct against `src/llm_router/okf.py`
+  because the lenient rule was a substring test — it was meant to forgive an
+  omitted directory and equally forgave a wrong one. Strict and lenient are now
+  reported separately, each with its `n`.
+- `router.py` now passes the project root into context preparation, so the
+  code-context branch — gated on that argument and therefore unreachable for
+  every routed call — can run. It also attaches context through the shared
+  choke point instead of its own copy; it was the last path exempted by name.
+- One project now resolves to one scope. Five modules answered "which project
+  is this" privately, with two environment variable names and two fallbacks, so
+  running from a subdirectory put OKF at the repository root and the caches on
+  the subdirectory. `result_cache` was the one that did not heal: it hashes into
+  a file path rather than a TTL'd column, so a divergent spelling orphaned a
+  database nothing reopens.
+- A command whose outcome could not be determined is recorded as `unknown`
+  rather than `ok`. The fallback branch meant unobserved commands became
+  evidence that a fix succeeded, and — because chapter sealing requires `ok` —
+  quietly decided that unverified commits were milestones. Expect noticeably
+  fewer sealed chapters; most tool responses carry no exit code.
+- The biography no longer freezes at forty facts. Once the document was full,
+  every durable fact learned afterwards was discarded in silence. The cap is now
+  on the readable view, which says when it is showing a subset; the records
+  themselves are uncapped and individually retrievable.
+- Quality-escalation's short-prompt guard measures the user's prompt rather than
+  the assembled context, so attached material cannot make a short prompt long.
+- Tests no longer read the developer's live session store. `LLM_ROUTER_HOME` was
+  documented as the sandbox for this and nothing set it, so a test asserting on
+  context contents could fail carrying text from whatever you were doing.
+
+### Added
+
+- `llm_router.semantic`: a per-project derived index (SQLite, `ast`-extracted,
+  rebuildable) and typed engineering-experience records carrying two timelines
+  and four independent state axes. Retrieval produces an evidence pack that
+  names what it omitted and why, renders filed prose inside an explicit
+  untrusted region, and surfaces contradictory records rather than letting the
+  newest win.
+- `llm-router semantic index|status|explain|lessons|seed`.
+- `LLM_ROUTER_SEMANTIC_SOURCE`, `_HISTORY`, `_INTERVENTION` (`off`/`shadow`/`on`,
+  all `off` by default; `shadow` is byte-identical to `off`) and
+  `LLM_ROUTER_SEMANTIC_ARM` (`B`/`C`/`D`/`M0`/`M1`/`M2`).
+
+### Measured
+
+Grounding, after the fixes above and before any semantic-layer work, so that a
+scope fix cannot later be credited to a graph: **0/60 → 40/60 (+66.7%)** with
+OKF context, on questions derived from symbols the repository defines exactly
+once. Strict and lenient scoring agreed exactly (40 = 40). Material was
+retrieved for 41 of 60; on those alone, 0% → 97.6%. Model `qwen3-coder:30b`,
+seed 7. Full provenance and per-question detail in
+`docs/measurements/2026-09-18-grounding-corrected-baseline.md`.
+
+Arms A/B/C/D, same n=60 and same scorer, paired
+(`docs/measurements/2026-09-18-semantic-arms.md`):
+
+| arm | | correct |
+|---|---|---|
+| A | no context | 0/60 |
+| B | OKF context — the corrected baseline | 40/60 |
+| C | semantic pack, no traversal | **58/60** |
+| BC | OKF + semantic — what default-on ships | 58/60 |
+
+C beats the baseline by +30.0 points, 18 discordant pairs all one way, McNemar
+exact p=7.6e-06 — and uses a median 122 of its 2000-token budget.
+
+**Traversal was deleted, not switched off:** arm D answered all 60 questions
+identically to C and cost 0.2s more. The blueprint's adoption gate for the
+graph was +3 points over the corrected baseline; it scored zero, so the
+expansion code, hop caps and high-degree penalty are gone — 97 lines net.
+
+Three harder strata were then derived and run at n=60 each
+(`docs/measurements/2026-09-18-harder-strata.md`), and they bound the claim:
+
+| stratum | B | C | BC |
+|---|---|---|---|
+| symbol — query names the identifier | 41/60 | 60/60 | 60/60 |
+| decoy — basename in two or more directories | 42/60 | 59/60 | 59/60 |
+| concept — docstring, identifier hidden | 2/60 | 1/60 | 3/60 |
+| absent — symbol does not exist | 60/60 | 60/60 | 60/60 |
+
+The win survives same-basename decoys under a scorer that rejects a wrong
+directory. It does **not** generalise to questions phrased in prose: on
+`concept` everything collapses to a floor and the layer does not rescue it. On
+`absent` nothing hallucinates, and the semantic arm retrieves nothing at all —
+the correct behaviour for a symbol nobody wrote.
+
+**It does not show improved task completion**, and the M0/M1/M2 history track
+is still scaffolded and unrun, which is why history and intervention remain off
+while source retrieval does not.
+See `docs/decisions/0002-semantic-layer.md` for what was deliberately narrowed
+and what is known to be broken and unfixed.
+
 ## [13.3.2] - 2026-09-16
 
 Fixes to repository and session context, draft validation, routing telemetry,

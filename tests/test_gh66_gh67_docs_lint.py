@@ -98,6 +98,16 @@ _EXCLUDED_DIR_PREFIXES = (
     _REPO_ROOT / "docs" / "releases",
     _REPO_ROOT / "docs" / "archive",
 )
+# Raw measurement artifacts are DATA, not documentation. A benchmark run over
+# this repository records the symbols it asked about, and one of them is called
+# `llm_setup` — which is a fact about the source tree, not a doc telling anyone
+# to call a retired tool. Sanitising it would falsify the measurement for the
+# sake of a lint about prose.
+#
+# By suffix, not by directory: the .md write-ups that live beside these files
+# ARE prose and stay linted, which is where a stale tool name would actually
+# mislead somebody.
+_EXCLUDED_SUFFIXES = (".json",)
 
 
 def _scanned_files() -> list[Path]:
@@ -110,6 +120,8 @@ def _scanned_files() -> list[Path]:
             if not p.is_file():
                 continue
             if p in _EXCLUDED_FILES or p.name.startswith(_EXCLUDED_NAME_PREFIXES):
+                continue
+            if p.suffix in _EXCLUDED_SUFFIXES:
                 continue
             if any(str(p).startswith(str(pref)) for pref in _EXCLUDED_DIR_PREFIXES):
                 continue
