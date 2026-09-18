@@ -116,9 +116,25 @@ new package, four new environment variables, one new CLI command. Experience
 records need curation; fifteen seeded honestly is not fifty, and the value of
 the layer is a function of whether people keep filing.
 
-**Unresolved, and deliberately so.** Whether any of it improves task outcomes.
-The blueprint's evaluation — arms B/C/D and M0/M1/M2, a curated task set,
-contamination controls, quality regret — is scaffolded but not run. The
+**Measured on retrieval, 18 Sep 2026** (`Docs/measurements/2026-09-18-semantic-arms.md`,
+n=60, paired): the semantic pack beats the corrected OKF baseline 58/60 against
+40/60, +30.0 points, 18 discordant pairs all one way, McNemar exact p=7.6e-06.
+
+**And traversal earns nothing.** Arms C and D gave identical answers on all 60
+questions. The blueprint's gate was "D beats the strongest corrected non-graph
+baseline by at least 3 points"; it beat it by zero. Per the blueprint's own
+instruction, the simpler system is the right one — traversal stays in the code
+for the impact-shaped questions it was meant for, off by default and without
+evidence.
+
+Read the +30 with its caveats in front of it: exact symbol lookup on
+uniquely-defined symbols is close to a best case for an `ast` index and close to
+a worst case for lexical matching over prose, and the blueprint explicitly warns
+that a graph-favourable diagnostic set cannot establish general product value.
+
+**Still unresolved.** Whether any of it improves TASK OUTCOMES. Retrieval
+accuracy is not a finished patch. The M0/M1/M2 history track — recurrence,
+lesson applicability, prevention coverage — is scaffolded and not run. The
 adoption gate it proposes is +3 points on the relationship-heavy stratum over
 the corrected non-graph baseline with a 95% paired interval excluding zero. If
 traversal cannot beat corrected hybrid retrieval under those controls, the

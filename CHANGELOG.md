@@ -82,8 +82,26 @@ retrieved for 41 of 60; on those alone, 0% → 97.6%. Model `qwen3-coder:30b`,
 seed 7. Full provenance and per-question detail in
 `Docs/measurements/2026-09-18-grounding-corrected-baseline.md`.
 
-**Nothing in the new `semantic` package has been shown to improve any outcome.**
-Its evaluation — arms B/C/D and M0/M1/M2 — is scaffolded and has not been run.
+Arms A/B/C/D, same n=60 and same scorer, paired
+(`Docs/measurements/2026-09-18-semantic-arms.md`):
+
+| arm | | correct |
+|---|---|---|
+| A | no context | 0/60 |
+| B | OKF context — the corrected baseline | 40/60 |
+| C | semantic pack, no traversal | **58/60** |
+| D | semantic pack, 2 hops | 58/60 |
+
+C beats the baseline by +30.0 points, 18 discordant pairs all one way, McNemar
+exact p=7.6e-06 — and uses a median 122 of its 2000-token budget.
+
+**Traversal adds nothing:** C and D answered all 60 questions identically. The
+blueprint's adoption gate for the graph was +3 points over the corrected
+baseline; it scored zero, so the simpler retrieval path is the one that stands.
+
+This is retrieval on exact symbol lookup, which is close to a best case for an
+`ast` index. **It does not show improved task completion**, and the M0/M1/M2
+history track is still scaffolded and unrun. Everything stays off by default.
 See `Docs/decisions/0002-semantic-layer.md` for what was deliberately narrowed
 and what is known to be broken and unfixed.
 
