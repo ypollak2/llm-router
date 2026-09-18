@@ -144,6 +144,18 @@ def main() -> int:
     print(f"prompts where the OKF half is byte-identical: {identical_okf}/{n}")
     print(f"total added bytes: {total_delta:+d} "
           f"(mean {total_delta / n:+.0f} per prompt)")
+    deltas = {r["delta_bytes"] for r in rows}
+    if len(deltas) == 1:
+        print(f"the delta is the same for every prompt in this run "
+              f"({deltas.pop():+d} bytes)")
+    else:
+        print(f"** the delta VARIES across prompts: {sorted(deltas)} **")
+    print("NOTE: that magnitude is a property of the working tree, not of the "
+          "change. <repo_state> renders the branch name, the last commit "
+          "subject and the dirty-file list, so it grows and shrinks as you "
+          "work — measured ~211 bytes clean and ~260 dirty on one machine. "
+          "Quote 'the same for every prompt', never a fixed byte count.")
+
     if identical_okf == n:
         print("\nretrieval is unchanged by the swap — the entire delta is the "
               "blocks inject() adds, and those are listed above")

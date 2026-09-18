@@ -364,6 +364,41 @@ def starter_records() -> list:
             known_from="2026-09-13",
         ),
 
+        Lesson(
+            lesson_id="stated-conditions-012",
+            statement=(
+                "An n is necessary and not sufficient: a measurement also needs "
+                "the state it ran against, or the next person reproduces a "
+                "different thing and one of you concludes the other was wrong."
+            ),
+            failure_family="measurement",
+            triggers=["publishing a number in a commit message or release note",
+                      "a figure that depends on an index, a store or a branch"],
+            supported_mechanism=(
+                "an audit of this branch could not reproduce '595 of 2000 "
+                "tokens' (it got 254 — correctly, against an unseeded store at "
+                "a different commit) and found '+252 bytes, constant' varied "
+                "211/260/391 across three runs, because <repo_state> renders "
+                "the branch name, commit subject and dirty-file list"
+            ),
+            suggested_action=(
+                "name the commit, the index, the store and the tree state "
+                "beside the number, and prefer an artifact someone can re-run "
+                "to a figure in prose"
+            ),
+            affected_paths=["Docs/measurements/2026-09-18-context-pack-shape.md",
+                            "scripts/shadow_diff_router_injection.py"],
+            evidence_ids=["Docs/measurements/2026-09-18-context-pack-shape.md"],
+            check_refs=["tests/test_bench_grounding_scoring.py"],
+            review=Review.REVIEWED,
+            validation=Validation.REPRODUCED,
+            applicability=Applicability.ACTIVE,
+            enforcement=Enforcement.ADVISORY,
+            repair_status=RepairStatus.VERIFIED,
+            valid_from=_LEARNED,
+            known_from=_LEARNED,
+        ),
+
         # ── decisions ───────────────────────────────────────────────────────
         Decision(
             decision_id="sqlite-for-the-derived-index",

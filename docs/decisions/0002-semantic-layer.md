@@ -125,6 +125,32 @@ traversal cannot beat corrected hybrid retrieval under those controls, the
 simpler system is the right system, and that is a useful outcome rather than a
 reason to redesign the benchmark until the graph wins.
 
+**Narrowed from the blueprint, deliberately, and not previously written down.**
+An independent review found these cuts unflagged, which is how a cut becomes an
+oversight in the retelling:
+
+- §5.3's contract lists `Snapshot`, `Evidence`, `Experience event`,
+  `Intervention trace` and `Retrieval trace` as first-class records. None is
+  persisted. The index keeps one `meta` row rather than per-generation snapshot
+  rows, and retrieval and intervention traces are computed and discarded. That
+  is fine for an MVP and fatal for the evaluation track, which needs to replay a
+  pack against a recorded treatment — so this is the first thing Phase 5 needs.
+- Three of §9's acceptance cases have no implementation: a curated business rule
+  conflicting with observed source (record-versus-record conflict *is* handled;
+  rule-versus-code is not), preserving source identity when a historical summary
+  is regenerated, and reporting partial prevention coverage when a host action
+  bypasses the router's observation points. There is no prevention-coverage
+  reporting at all.
+- `ContextPack` does not implement §6's `id` on evidence items as a stable
+  cross-snapshot identifier; ids are positional within one pack.
+
+**A behaviour change worth watching in the field.** `_outcome` returning
+`unknown` where it used to return `ok` means any tool response without an
+explicit exit code no longer seals a chapter. Most host tool responses probably
+carry no exit code, so chapter sealing will become markedly rarer. That is
+correct — an unobserved command is not a milestone — but it is a visible drop in
+a number someone may have been watching.
+
 **Known and not fixed.** `gateway.py` passes project scope by setting
 `$LLM_ROUTER_PROJECT_ROOT` for the duration of a request and restoring it in a
 `finally`. That races the moment two requests arrive together — process

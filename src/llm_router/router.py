@@ -4257,9 +4257,16 @@ async def route_and_call(
             # This is NOT a pure deduplication. `inject()` composes three sources
             # where this composed one, so the swap was measured first —
             # scripts/shadow_diff_router_injection.py, 12 router-shaped prompts:
-            # the OKF half is byte-identical 12/12, and the entire delta is a
-            # constant +252 bytes of <repo_state>, which every other execution
-            # path already carried. Retrieval does not change.
+            # the OKF half is byte-identical 12/12, and the entire delta is the
+            # <repo_state> block, which every other execution path already
+            # carried. Retrieval does not change.
+            #
+            # The delta is uniform ACROSS prompts at any one moment and is not a
+            # fixed number of bytes: <repo_state> renders the branch name, the
+            # last commit subject and the dirty-file list, so it measured ~211
+            # bytes on a clean tree and ~260 on a dirty one. An audit caught an
+            # earlier version of this comment calling it "a constant +252",
+            # which would have been quoted later as a fixed cost.
             #
             # No session_id: that would add the session-context block to every
             # routed prompt, which is a larger decision than this seam and gets

@@ -25,11 +25,18 @@ when a session_id is given. `scripts/shadow_diff_router_injection.py` built
 both forms for 12 router-shaped prompts:
 
     OKF half byte-identical            12/12
-    delta                              +252 bytes on every prompt, constant
+    delta                              uniform across all 12 prompts
     that delta                         the <repo_state> block, nothing else
 
 So retrieval does not change. What changes is that a routed prompt now carries
 the repository state every other execution path already carried.
+
+The delta's MAGNITUDE is not fixed and this docstring used to say it was
+("+252 bytes, constant"). `<repo_state>` renders the branch name, the last
+commit subject and the dirty-file list, so it measured ~211 bytes on a clean
+tree and ~260 on a dirty one. An audit caught it. What is stable, and what the
+swap actually rests on, is that the delta is the same for every prompt at a
+given moment and that the OKF half does not move at all.
 
 The session block is deliberately NOT adopted here. router.py has an
 `agent_session_id` and passing it would be a second, larger behaviour change

@@ -333,3 +333,66 @@ def test_source_evidence_and_experience_occupy_separate_slots(project, store):
         spack.EXPERIENCE_HEADING)
     assert p.schema_version >= 1
     assert p.scope_id and p.snapshot_id
+
+
+# ── fields the spec's §6 contract names, added after review ──────────────────
+
+def test_the_two_snapshots_move_independently(project, store):
+    """Code and memory version separately, and a result names both.
+
+    An outcome attributed to a code snapshot when what actually changed was
+    somebody filing a lesson is attributed to the wrong treatment. Adding a
+    record must change memory_snapshot_id and leave snapshot_id alone.
+    """
+    repo, base = project
+    store.put(exp.Lesson(
+        lesson_id="first", statement="One.",
+        affected_paths=["ledger.py"], affected_symbols=["post_entry"],
+        known_from="2026-09-18",
+    ))
+    before = spack.build("post_entry", root=repo, base=base, experience=store)
+
+    store.put(exp.Lesson(
+        lesson_id="second", statement="Two.",
+        affected_paths=["ledger.py"], affected_symbols=["post_entry"],
+        known_from="2026-09-18",
+    ))
+    after = spack.build("post_entry", root=repo, base=base, experience=store)
+
+    assert before.snapshot_id == after.snapshot_id, "the code did not change"
+    assert before.memory_snapshot_id != after.memory_snapshot_id, (
+        "filing a record left the memory snapshot unchanged, so a run cannot "
+        "say which version of the store it read"
+    )
+    assert before.memory_snapshot_id
+
+
+def test_a_decision_is_a_constraint_not_a_cautionary_tale(project, store):
+    """Decisions and lessons land in different slots."""
+    repo, base = project
+    store.put(exp.Decision(
+        decision_id="ledger-append-only",
+        statement="The ledger is append-only.",
+        affected_paths=["ledger.py"], affected_symbols=["post_entry"],
+        known_from="2026-09-18",
+    ))
+    store.put(exp.Lesson(
+        lesson_id="double-post", statement="post_entry must not run twice.",
+        affected_paths=["ledger.py"], affected_symbols=["post_entry"],
+        known_from="2026-09-18",
+    ))
+
+    p = spack.build("post_entry", root=repo, base=base, experience=store)
+
+    assert [i.record.decision_id for i in p.decision_constraints] == \
+        ["ledger-append-only"]
+    assert [i.record.lesson_id for i in p.applicable_lessons] == ["double-post"]
+    assert "CONSTRAINT" in spack.render(p)
+
+
+def test_every_evidence_item_has_a_citable_id(project, store):
+    repo, base = project
+    p = spack.build("post_entry", root=repo, base=base, experience=store)
+    ids = [e["id"] for e in p.evidence]
+    assert ids == sorted(set(ids), key=ids.index), "evidence ids are not unique"
+    assert all(i.startswith("e") for i in ids)
