@@ -101,10 +101,25 @@ identically to C and cost 0.2s more. The blueprint's adoption gate for the
 graph was +3 points over the corrected baseline; it scored zero, so the
 expansion code, hop caps and high-degree penalty are gone — 97 lines net.
 
-This is retrieval on exact symbol lookup, which is close to a best case for an
-`ast` index. **It does not show improved task completion**, and the M0/M1/M2
-history track is still scaffolded and unrun, which is why history and
-intervention remain off while source retrieval does not.
+Three harder strata were then derived and run at n=60 each
+(`Docs/measurements/2026-09-18-harder-strata.md`), and they bound the claim:
+
+| stratum | B | C | BC |
+|---|---|---|---|
+| symbol — query names the identifier | 41/60 | 60/60 | 60/60 |
+| decoy — basename in two or more directories | 42/60 | 59/60 | 59/60 |
+| concept — docstring, identifier hidden | 2/60 | 1/60 | 3/60 |
+| absent — symbol does not exist | 60/60 | 60/60 | 60/60 |
+
+The win survives same-basename decoys under a scorer that rejects a wrong
+directory. It does **not** generalise to questions phrased in prose: on
+`concept` everything collapses to a floor and the layer does not rescue it. On
+`absent` nothing hallucinates, and the semantic arm retrieves nothing at all —
+the correct behaviour for a symbol nobody wrote.
+
+**It does not show improved task completion**, and the M0/M1/M2 history track
+is still scaffolded and unrun, which is why history and intervention remain off
+while source retrieval does not.
 See `Docs/decisions/0002-semantic-layer.md` for what was deliberately narrowed
 and what is known to be broken and unfixed.
 
