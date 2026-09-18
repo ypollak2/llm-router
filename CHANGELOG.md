@@ -13,8 +13,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 Five prerequisite defects in project scoping and grounding measurement, and a
-new `semantic` package that is **off by default and unmeasured**. Adds one CLI
-command (`llm-router semantic`) and four environment variables. No MCP tool is
+new `semantic` package. Source retrieval is **on by default on measured
+evidence**; history and intervention stay off because they have none. Adds one
+CLI command (`llm-router semantic`) and four environment variables. No MCP tool is
 added or removed, and model-selection policy is unchanged.
 
 ### Fixed
@@ -90,18 +91,20 @@ Arms A/B/C/D, same n=60 and same scorer, paired
 | A | no context | 0/60 |
 | B | OKF context — the corrected baseline | 40/60 |
 | C | semantic pack, no traversal | **58/60** |
-| D | semantic pack, 2 hops | 58/60 |
+| BC | OKF + semantic — what default-on ships | 58/60 |
 
 C beats the baseline by +30.0 points, 18 discordant pairs all one way, McNemar
 exact p=7.6e-06 — and uses a median 122 of its 2000-token budget.
 
-**Traversal adds nothing:** C and D answered all 60 questions identically. The
-blueprint's adoption gate for the graph was +3 points over the corrected
-baseline; it scored zero, so the simpler retrieval path is the one that stands.
+**Traversal was deleted, not switched off:** arm D answered all 60 questions
+identically to C and cost 0.2s more. The blueprint's adoption gate for the
+graph was +3 points over the corrected baseline; it scored zero, so the
+expansion code, hop caps and high-degree penalty are gone — 97 lines net.
 
 This is retrieval on exact symbol lookup, which is close to a best case for an
 `ast` index. **It does not show improved task completion**, and the M0/M1/M2
-history track is still scaffolded and unrun. Everything stays off by default.
+history track is still scaffolded and unrun, which is why history and
+intervention remain off while source retrieval does not.
 See `Docs/decisions/0002-semantic-layer.md` for what was deliberately narrowed
 and what is known to be broken and unfixed.
 

@@ -79,9 +79,13 @@ is an explicit, recorded act.
 read later by a model. It renders inside an explicit untrusted region that says
 so, because otherwise filing a bug report is a way to issue instructions.
 
-**Everything is off by default, with a shadow mode that is byte-identical to
-off.** Shadow that alters one character confounds every comparison against off
-and is a change nobody agreed to, running under a name that says it is not one.
+**Each switch defaults to what its own evidence supports.** Source retrieval is
+on: measured at n=60 on the configuration that ships. History and intervention
+are off: the M0/M1/M2 track has not been run. Three switches exist precisely so
+that one measurement cannot turn on two unmeasured things. Shadow mode remains
+byte-identical to off, because a shadow that alters one character confounds
+every comparison against off and is a change nobody agreed to under a name that
+says it is not one.
 
 **Model-selection policy does not move.** D vs C measures retrieval; E vs D
 measures routing. An arm that changed both would make neither attributable.
@@ -123,9 +127,9 @@ n=60, paired): the semantic pack beats the corrected OKF baseline 58/60 against
 **And traversal earns nothing.** Arms C and D gave identical answers on all 60
 questions. The blueprint's gate was "D beats the strongest corrected non-graph
 baseline by at least 3 points"; it beat it by zero. Per the blueprint's own
-instruction, the simpler system is the right one — traversal stays in the code
-for the impact-shaped questions it was meant for, off by default and without
-evidence.
+instruction, the simpler system is the right one — so the traversal was
+DELETED rather than left switched off, taking 97 lines with it. git has the
+code if a later task set ever justifies rebuilding it.
 
 Read the +30 with its caveats in front of it: exact symbol lookup on
 uniquely-defined symbols is close to a best case for an `ast` index and close to
