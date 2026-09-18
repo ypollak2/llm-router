@@ -10,6 +10,83 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 | [CHANGELOG-ARCHIVE.md](CHANGELOG-ARCHIVE.md) | v10.1.5 back to v6.3.0 |
 | [GitHub Releases](https://github.com/ypollak2/llm-router/releases) | v6.2 and earlier |
 
+## [Unreleased]
+
+Five prerequisite defects in project scoping and grounding measurement, and a
+new `semantic` package that is **off by default and unmeasured**. Adds one CLI
+command (`llm-router semantic`) and four environment variables. No MCP tool is
+added or removed, and model-selection policy is unchanged.
+
+### Fixed
+
+- Indexing a project while the process sits in a different one no longer writes
+  the first project's documents into the second. `index_project(root=B)` called
+  from inside A reported B's store in its return value and wrote A's directory;
+  six OKF write paths recomputed their destination from the process cwd, and
+  two of them had not been named in any prior audit of this bug.
+- OKF no longer records what a file defines without reading the file. Two
+  independent regexes produced a list of paths and a list of symbols, and the
+  writers paired the first path with every symbol, so a reply mentioning a
+  module that does not exist alongside a function defined elsewhere became a
+  stored, retrievable claim that one defines the other.
+- The grounding benchmark's scorer no longer accepts a wrong directory.
+  `wrong_directory/okf.py` scored correct against `src/llm_router/okf.py`
+  because the lenient rule was a substring test — it was meant to forgive an
+  omitted directory and equally forgave a wrong one. Strict and lenient are now
+  reported separately, each with its `n`.
+- `router.py` now passes the project root into context preparation, so the
+  code-context branch — gated on that argument and therefore unreachable for
+  every routed call — can run. It also attaches context through the shared
+  choke point instead of its own copy; it was the last path exempted by name.
+- One project now resolves to one scope. Five modules answered "which project
+  is this" privately, with two environment variable names and two fallbacks, so
+  running from a subdirectory put OKF at the repository root and the caches on
+  the subdirectory. `result_cache` was the one that did not heal: it hashes into
+  a file path rather than a TTL'd column, so a divergent spelling orphaned a
+  database nothing reopens.
+- A command whose outcome could not be determined is recorded as `unknown`
+  rather than `ok`. The fallback branch meant unobserved commands became
+  evidence that a fix succeeded, and — because chapter sealing requires `ok` —
+  quietly decided that unverified commits were milestones. Expect noticeably
+  fewer sealed chapters; most tool responses carry no exit code.
+- The biography no longer freezes at forty facts. Once the document was full,
+  every durable fact learned afterwards was discarded in silence. The cap is now
+  on the readable view, which says when it is showing a subset; the records
+  themselves are uncapped and individually retrievable.
+- Quality-escalation's short-prompt guard measures the user's prompt rather than
+  the assembled context, so attached material cannot make a short prompt long.
+- Tests no longer read the developer's live session store. `LLM_ROUTER_HOME` was
+  documented as the sandbox for this and nothing set it, so a test asserting on
+  context contents could fail carrying text from whatever you were doing.
+
+### Added
+
+- `llm_router.semantic`: a per-project derived index (SQLite, `ast`-extracted,
+  rebuildable) and typed engineering-experience records carrying two timelines
+  and four independent state axes. Retrieval produces an evidence pack that
+  names what it omitted and why, renders filed prose inside an explicit
+  untrusted region, and surfaces contradictory records rather than letting the
+  newest win.
+- `llm-router semantic index|status|explain|lessons|seed`.
+- `LLM_ROUTER_SEMANTIC_SOURCE`, `_HISTORY`, `_INTERVENTION` (`off`/`shadow`/`on`,
+  all `off` by default; `shadow` is byte-identical to `off`) and
+  `LLM_ROUTER_SEMANTIC_ARM` (`B`/`C`/`D`/`M0`/`M1`/`M2`).
+
+### Measured
+
+Grounding, after the fixes above and before any semantic-layer work, so that a
+scope fix cannot later be credited to a graph: **0/60 → 40/60 (+66.7%)** with
+OKF context, on questions derived from symbols the repository defines exactly
+once. Strict and lenient scoring agreed exactly (40 = 40). Material was
+retrieved for 41 of 60; on those alone, 0% → 97.6%. Model `qwen3-coder:30b`,
+seed 7. Full provenance and per-question detail in
+`Docs/measurements/2026-09-18-grounding-corrected-baseline.md`.
+
+**Nothing in the new `semantic` package has been shown to improve any outcome.**
+Its evaluation — arms B/C/D and M0/M1/M2 — is scaffolded and has not been run.
+See `Docs/decisions/0002-semantic-layer.md` for what was deliberately narrowed
+and what is known to be broken and unfixed.
+
 ## [13.3.2] - 2026-09-16
 
 Fixes to repository and session context, draft validation, routing telemetry,
