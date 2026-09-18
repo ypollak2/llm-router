@@ -1,0 +1,2539 @@
+{
+  "stratum": "concept",
+  "n": 60,
+  "model": "qwen3-coder:30b",
+  "seed": 7,
+  "budget_tokens": 2000,
+  "arms": [
+    "B",
+    "C",
+    "BC"
+  ],
+  "totals": {
+    "B": 2,
+    "C": 1,
+    "BC": 3
+  },
+  "rows": [
+    {
+      "symbol": "LearnedRoute",
+      "answer": "src/llm_router/memory/profiles.py",
+      "arms": {
+        "B": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.4,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/router.py"
+        },
+        "C": {
+          "strict": false,
+          "lenient": false,
+          "secs": 1.0,
+          "had_context": false,
+          "meta": {
+            "status": "empty",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "I don't have access to any specific code repository or project files to analyze. Without being able to see the actual project structure, code files, or document"
+        },
+        "BC": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.2,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/router.py"
+        }
+      }
+    },
+    {
+      "symbol": "test_the_1x_field_name_is_gone",
+      "answer": "tests/test_mcp2_field_names.py",
+      "arms": {
+        "B": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.5,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/semantic/scope.py"
+        },
+        "C": {
+          "strict": false,
+          "lenient": false,
+          "secs": 1.1,
+          "had_context": false,
+          "meta": {
+            "status": "empty",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "I don't have access to the specific code repository you're referring to. You'll need to provide the repository or project files for me to identify which file im"
+        },
+        "BC": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.2,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/semantic/scope.py"
+        }
+      }
+    },
+    {
+      "symbol": "test_ten_installs_still_leave_one_copy",
+      "answer": "tests/test_kimi_rules_idempotence.py",
+      "arms": {
+        "B": {
+          "strict": false,
+          "lenient": false,
+          "secs": 2.9,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "I need to analyze the provided knowledge context to understand what implementation corresponds to \"The committed file reached 53 copies; one run per suite execu"
+        },
+        "C": {
+          "strict": false,
+          "lenient": false,
+          "secs": 1.2,
+          "had_context": false,
+          "meta": {
+            "status": "empty",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "I don't have access to any specific code repository or project files to analyze. Without being able to see the actual project structure, code files, or context "
+        },
+        "BC": {
+          "strict": false,
+          "lenient": false,
+          "secs": 3.2,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "I need to analyze the provided knowledge context to find which file implements the functionality described by \"The committed file reached 53 copies; one run per"
+        }
+      }
+    },
+    {
+      "symbol": "TN",
+      "answer": "src/llm_router/dashboard/tui.py",
+      "arms": {
+        "B": {
+          "strict": false,
+          "lenient": false,
+          "secs": 1.4,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "I cannot determine which file implements the \"Tokyo Night Storm palette \u2014 muted bg, vibrant accents\" theme based on the provided repository information. The giv"
+        },
+        "C": {
+          "strict": false,
+          "lenient": false,
+          "secs": 1.3,
+          "had_context": false,
+          "meta": {
+            "status": "empty",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "I don't have access to the specific project files you're referring to. To help you find the file that implements the \"Tokyo Night Storm palette \u2014 muted bg, vibr"
+        },
+        "BC": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.8,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "I cannot determine which file implements the \"Tokyo Night Storm palette \u2014 muted bg, vibrant accents\" based on the provided repository context. The context discu"
+        }
+      }
+    },
+    {
+      "symbol": "enumerate_universe",
+      "answer": "scripts/gf_split.py",
+      "arms": {
+        "B": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/semantic/scope.py"
+        },
+        "C": {
+          "strict": false,
+          "lenient": false,
+          "secs": 2.7,
+          "had_context": false,
+          "meta": {
+            "status": "empty",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "I need to analyze the code repository to find where \"(mutant_name, module, base_function) for every generated mutant\" is implemented.\n\nBased on the description,"
+        },
+        "BC": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.2,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/semantic/scope.py"
+        }
+      }
+    },
+    {
+      "symbol": "test_quota_savings_are_labelled_as_quota_not_cash",
+      "answer": "tests/economics/test_unknown_not_zero.py",
+      "arms": {
+        "B": {
+          "strict": false,
+          "lenient": false,
+          "secs": 2.7,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "I need to analyze the provided knowledge context to find which file implements the concept \"WP-05: a subscription user has been handed headroom, not money.\"\n\nLo"
+        },
+        "C": {
+          "strict": false,
+          "lenient": false,
+          "secs": 1.4,
+          "had_context": false,
+          "meta": {
+            "status": "empty",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "I don't have access to the specific code repository you're referring to, so I cannot determine which file implements the functionality related to \"WP-05: a subs"
+        },
+        "BC": {
+          "strict": false,
+          "lenient": false,
+          "secs": 2.4,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "I need to find which file implements the concept of \"WP-05: a subscription user has been handed headroom, not money.\"\n\nLooking at the provided knowledge context"
+        }
+      }
+    },
+    {
+      "symbol": "_NeverPasses",
+      "answer": "tests/agentic/test_escalation_bounds.py",
+      "arms": {
+        "B": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/okf.py"
+        },
+        "C": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.9,
+          "had_context": false,
+          "meta": {
+            "status": "empty",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "I don't have access to any specific code repository to analyze. Without being able to see the actual project files, I cannot determine which file implements an "
+        },
+        "BC": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.2,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/okf.py"
+        }
+      }
+    },
+    {
+      "symbol": "_interceptable",
+      "answer": "src/llm_router/hooks/tool_intercept.py",
+      "arms": {
+        "B": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/okf.py"
+        },
+        "C": {
+          "strict": false,
+          "lenient": false,
+          "secs": 1.2,
+          "had_context": false,
+          "meta": {
+            "status": "empty",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "I don't have access to any specific code repository or project files to analyze. Without being able to see the actual codebase, I cannot determine which file im"
+        },
+        "BC": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.2,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/okf.py"
+        }
+      }
+    },
+    {
+      "symbol": "reject_stubs",
+      "answer": "src/llm_router/agentic/acceptance.py",
+      "arms": {
+        "B": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.4,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/semantic/scope.py"
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.4,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 116,
+            "evidence": 6,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/agentic/acceptance.py"
+        },
+        "BC": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.4,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 116,
+            "evidence": 6,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/agentic/acceptance.py"
+        }
+      }
+    },
+    {
+      "symbol": "StreamingJudgeVerdict",
+      "answer": "src/llm_router/streaming_judge.py",
+      "arms": {
+        "B": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/okf.py"
+        },
+        "C": {
+          "strict": false,
+          "lenient": false,
+          "secs": 1.2,
+          "had_context": false,
+          "meta": {
+            "status": "empty",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "I don't have access to any specific code repository or project files to analyze. Without being able to see the actual project structure, codebase, or files, I c"
+        },
+        "BC": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.2,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/okf.py"
+        }
+      }
+    },
+    {
+      "symbol": "test_the_rescue_can_be_disabled",
+      "answer": "tests/test_s2_05_session_context_rescue.py",
+      "arms": {
+        "B": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/okf.py"
+        },
+        "C": {
+          "strict": false,
+          "lenient": false,
+          "secs": 1.2,
+          "had_context": false,
+          "meta": {
+            "status": "empty",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "I don't have access to any specific code repository or project files to analyze. Without being able to see the actual project structure, codebase, or context, I"
+        },
+        "BC": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.2,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/okf.py"
+        }
+      }
+    },
+    {
+      "symbol": "llm",
+      "answer": "src/llm_router/tools/consolidated.py",
+      "arms": {
+        "B": {
+          "strict": false,
+          "lenient": false,
+          "secs": 3.1,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "I need to find which file implements the \"Unified COMPLETION door \u2014 one text-in\u2192text-out entry that routes to the\" functionality described in the question.\n\nBas"
+        },
+        "C": {
+          "strict": false,
+          "lenient": false,
+          "secs": 1.2,
+          "had_context": false,
+          "meta": {
+            "status": "empty",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "I don't have access to any specific code repository or project files to analyze. Without being able to see the actual project structure, code files, or document"
+        },
+        "BC": {
+          "strict": false,
+          "lenient": false,
+          "secs": 2.4,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "I need to find which file implements the \"Unified COMPLETION door \u2014 one text-in\u2192text-out entry that routes to the\" functionality mentioned in the question.\n\nBas"
+        }
+      }
+    },
+    {
+      "symbol": "OrgPolicy",
+      "answer": "src/llm_router/policy.py",
+      "arms": {
+        "B": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/router.py"
+        },
+        "C": {
+          "strict": false,
+          "lenient": false,
+          "secs": 1.1,
+          "had_context": false,
+          "meta": {
+            "status": "empty",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "I don't have access to any specific code repository or project files to analyze. Without being able to see the actual project structure, files, or code, I canno"
+        },
+        "BC": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.2,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/router.py"
+        }
+      }
+    },
+    {
+      "symbol": "_providers_available",
+      "answer": "src/llm_router/observability/surface_status.py",
+      "arms": {
+        "B": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/router.py"
+        },
+        "C": {
+          "strict": false,
+          "lenient": false,
+          "secs": 1.1,
+          "had_context": false,
+          "meta": {
+            "status": "empty",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "I don't have access to the specific code repository you're referring to. You'll need to provide the repository or project files for me to identify which file im"
+        },
+        "BC": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.2,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/router.py"
+        }
+      }
+    },
+    {
+      "symbol": "YamlAdapter",
+      "answer": "src/llm_router/storage/adapters/yaml_adapter.py",
+      "arms": {
+        "B": {
+          "strict": false,
+          "lenient": false,
+          "secs": 5.4,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "I need to analyze the provided knowledge context to find which file implements \"Persist configuration as YAML files with version tracking.\"\n\nLooking at the know"
+        },
+        "C": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.9,
+          "had_context": false,
+          "meta": {
+            "status": "empty",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "I don't have access to the specific code repository you're referring to. You'll need to provide the repository or project files for me to identify which file im"
+        },
+        "BC": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.2,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/config.py"
+        }
+      }
+    },
+    {
+      "symbol": "LLMResponse",
+      "answer": "src/llm_router/response_validation.py",
+      "arms": {
+        "B": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/okf.py"
+        },
+        "C": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.8,
+          "had_context": false,
+          "meta": {
+            "status": "empty",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "I don't have access to any specific code repository to analyze. To answer your question about which file implements \"Strict schema for LLM provider responses,\" "
+        },
+        "BC": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.2,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/okf.py"
+        }
+      }
+    },
+    {
+      "symbol": "_docstrings",
+      "answer": "scripts/lint_tool_surface.py",
+      "arms": {
+        "B": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/okf.py"
+        },
+        "C": {
+          "strict": false,
+          "lenient": false,
+          "secs": 1.0,
+          "had_context": false,
+          "meta": {
+            "status": "empty",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "I don't have access to any specific code repository to examine. Without being able to see the actual project files, I cannot determine which file implements the"
+        },
+        "BC": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.2,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/hooks/context-capture.py"
+        }
+      }
+    },
+    {
+      "symbol": "test_the_response_says_which_checks_actually_ran",
+      "answer": "tests/test_gateway_ground.py",
+      "arms": {
+        "B": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.4,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/okf.py"
+        },
+        "C": {
+          "strict": false,
+          "lenient": false,
+          "secs": 1.6,
+          "had_context": false,
+          "meta": {
+            "status": "empty",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "I don't have access to the specific code repository you're referring to, so I cannot determine which file implements the functionality described in \"Reporting a"
+        },
+        "BC": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.2,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/okf.py"
+        }
+      }
+    },
+    {
+      "symbol": "test_a_working_identity_records_nothing",
+      "answer": "tests/test_gf_c1_failopen_remaining.py",
+      "arms": {
+        "B": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/hooks/context-capture.py"
+        },
+        "C": {
+          "strict": false,
+          "lenient": false,
+          "secs": 1.0,
+          "had_context": false,
+          "meta": {
+            "status": "empty",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "I don't have access to the specific code repository you're referring to. You'll need to provide the repository or codebase for me to identify which file impleme"
+        },
+        "BC": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.2,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/hooks/context-capture.py"
+        }
+      }
+    },
+    {
+      "symbol": "_build_dynamic_chain",
+      "answer": "src/llm_router/chain_builder.py",
+      "arms": {
+        "B": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/semantic/scope.py"
+        },
+        "C": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.9,
+          "had_context": false,
+          "meta": {
+            "status": "empty",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "I don't see any project files or code provided in your message. To answer which file implements \"Inner implementation \u2014 may raise, caller must handle\" you would"
+        },
+        "BC": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.2,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/semantic/scope.py"
+        }
+      }
+    },
+    {
+      "symbol": "main",
+      "answer": "src/llm_router/cli.py",
+      "arms": {
+        "B": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.2,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/cli/main.py"
+        },
+        "C": {
+          "strict": false,
+          "lenient": false,
+          "secs": 1.1,
+          "had_context": false,
+          "meta": {
+            "status": "empty",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "I don't have access to the specific code repository you're referring to, so I cannot determine which file implements the \"Unified CLI: dispatches to MCP server "
+        },
+        "BC": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.1,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "src/cli/main.py"
+        }
+      }
+    },
+    {
+      "symbol": "current",
+      "answer": "src/llm_router/semantic/modes.py",
+      "arms": {
+        "B": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/okf.py"
+        },
+        "C": {
+          "strict": false,
+          "lenient": false,
+          "secs": 1.0,
+          "had_context": false,
+          "meta": {
+            "status": "empty",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "I need to find which file implements \"The three switches, or the arm that overrides them.\" However, you haven't provided the project code repository for me to a"
+        },
+        "BC": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.2,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/okf.py"
+        }
+      }
+    },
+    {
+      "symbol": "test_the_notice_names_what_was_cited_and_how_to_turn_it_off",
+      "answer": "tests/test_p3_grounding_visibility.py",
+      "arms": {
+        "B": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/okf.py"
+        },
+        "C": {
+          "strict": false,
+          "lenient": false,
+          "secs": 2.2,
+          "had_context": false,
+          "meta": {
+            "status": "empty",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "I need to find which file implements the concept described in the quote \"A guard the user cannot see is a guard they cannot judge, and one they\". This appears t"
+        },
+        "BC": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.2,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/okf.py"
+        }
+      }
+    },
+    {
+      "symbol": "TestClassifyPromptIntegration",
+      "answer": "tests/test_auto_route_signals.py",
+      "arms": {
+        "B": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/okf.py"
+        },
+        "C": {
+          "strict": false,
+          "lenient": false,
+          "secs": 1.0,
+          "had_context": false,
+          "meta": {
+            "status": "empty",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "I don't have access to any specific code repository to analyze. Without being able to see the actual project files, I cannot determine which file implements \"Ex"
+        },
+        "BC": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.2,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/okf.py"
+        }
+      }
+    },
+    {
+      "symbol": "detect_hosts",
+      "answer": "src/llm_router/host_detect.py",
+      "arms": {
+        "B": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/okf.py"
+        },
+        "C": {
+          "strict": false,
+          "lenient": false,
+          "secs": 1.0,
+          "had_context": false,
+          "meta": {
+            "status": "empty",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "I don't have access to any specific code repository to analyze. You would need to provide the project files or repository contents for me to identify which file"
+        },
+        "BC": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.2,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/okf.py"
+        }
+      }
+    },
+    {
+      "symbol": "derive_concept",
+      "answer": "scripts/question_strata.py",
+      "arms": {
+        "B": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/okf.py"
+        },
+        "C": {
+          "strict": false,
+          "lenient": false,
+          "secs": 1.1,
+          "had_context": false,
+          "meta": {
+            "status": "empty",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "I don't see any project files or code provided in your message. To help you identify which file implements \"A function's own docstring, with its name never ment"
+        },
+        "BC": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.2,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/okf.py"
+        }
+      }
+    },
+    {
+      "symbol": "test_every_requirement_flag_is_written",
+      "answer": "tests/test_capability_shadow_persistence.py",
+      "arms": {
+        "B": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/okf.py"
+        },
+        "C": {
+          "strict": false,
+          "lenient": false,
+          "secs": 1.3,
+          "had_context": false,
+          "meta": {
+            "status": "empty",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "I need to find the file that implements the \"Explicit field list, so a new dataclass field is a visible change\" functionality.\n\nThis appears to be related to ho"
+        },
+        "BC": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.2,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/okf.py"
+        }
+      }
+    },
+    {
+      "symbol": "Problem",
+      "answer": "src/llm_router/semantic/experience.py",
+      "arms": {
+        "B": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/okf.py"
+        },
+        "C": {
+          "strict": false,
+          "lenient": false,
+          "secs": 1.5,
+          "had_context": false,
+          "meta": {
+            "status": "empty",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "I need to find the file that implements \"A symptom and its candidate causes, held apart from any accepted one.\"\n\nThis sounds like it's describing a medical diag"
+        },
+        "BC": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.2,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/okf.py"
+        }
+      }
+    },
+    {
+      "symbol": "test_chatter_with_no_verifiable_structure_is_not_stored",
+      "answer": "tests/okf/test_cross_model_context.py",
+      "arms": {
+        "B": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/okf.py"
+        },
+        "C": {
+          "strict": false,
+          "lenient": false,
+          "secs": 1.4,
+          "had_context": false,
+          "meta": {
+            "status": "empty",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "I don't have access to any specific code repository to analyze. The quote \"A store full of 'thanks!' is a store nobody can retrieve from\" appears to be a philos"
+        },
+        "BC": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.2,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/okf.py"
+        }
+      }
+    },
+    {
+      "symbol": "test_main_sse_defaults_to_localhost",
+      "answer": "tests/test_sec1_no_unauthenticated_sse_script.py",
+      "arms": {
+        "B": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/okf.py"
+        },
+        "C": {
+          "strict": false,
+          "lenient": false,
+          "secs": 1.1,
+          "had_context": false,
+          "meta": {
+            "status": "empty",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "I don't have access to the specific code repository you're referring to, so I cannot determine which file implements \"Condition 3 of the docstring's own re-add "
+        },
+        "BC": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.2,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/okf.py"
+        }
+      }
+    },
+    {
+      "symbol": "_today_utc_iso",
+      "answer": "tests/test_statusline_savings.py",
+      "arms": {
+        "B": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.4,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/semantic/index.py"
+        },
+        "C": {
+          "strict": false,
+          "lenient": false,
+          "secs": 1.4,
+          "had_context": false,
+          "meta": {
+            "status": "empty",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "I don't have access to the specific code repository you're referring to. Without being able to see the actual files and code structure of your project, I cannot"
+        },
+        "BC": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.2,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/semantic/index.py"
+        }
+      }
+    },
+    {
+      "symbol": "test_import_is_idempotent",
+      "answer": "tests/test_team_sync.py",
+      "arms": {
+        "B": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/semantic_cache.py"
+        },
+        "C": {
+          "strict": false,
+          "lenient": false,
+          "secs": 1.1,
+          "had_context": false,
+          "meta": {
+            "status": "empty",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "I don't have access to the specific code repository you're referring to. To determine which file implements the logic for \"Re-running with the same JSONL must N"
+        },
+        "BC": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.2,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/semantic_cache.py"
+        }
+      }
+    },
+    {
+      "symbol": "__call__",
+      "answer": "src/llm_router/terminal_style.py",
+      "arms": {
+        "B": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/hooks/context-capture.py"
+        },
+        "C": {
+          "strict": false,
+          "lenient": false,
+          "secs": 1.1,
+          "had_context": false,
+          "meta": {
+            "status": "empty",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "I don't see any project files or code provided in your message. To determine which file implements \"Apply color to text, respecting NO_COLOR env var\", I would n"
+        },
+        "BC": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.2,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/hooks/context-capture.py"
+        }
+      }
+    },
+    {
+      "symbol": "PreparedPrompt",
+      "answer": "src/llm_router/context_prep.py",
+      "arms": {
+        "B": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/router.py"
+        },
+        "C": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.8,
+          "had_context": false,
+          "meta": {
+            "status": "empty",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "I don't have access to any specific code repository to analyze. Could you please provide me with the project files or repository you're referring to? Once you s"
+        },
+        "BC": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.2,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/router.py"
+        }
+      }
+    },
+    {
+      "symbol": "TestCommitBarrierInvariant",
+      "answer": "tests/test_streaming_integration.py",
+      "arms": {
+        "B": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "tests/okf/test_okf_scope_02_explicit_root.py"
+        },
+        "C": {
+          "strict": false,
+          "lenient": false,
+          "secs": 1.1,
+          "had_context": false,
+          "meta": {
+            "status": "empty",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "I don't have access to the specific project repository you're referring to. To accurately identify which file implements \"Test commit barrier safety invariant e"
+        },
+        "BC": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "tests/okf/test_okf_scope_02_explicit_root.py"
+        }
+      }
+    },
+    {
+      "symbol": "test_every_table_agrees_on_the_same_model",
+      "answer": "tests/economics/test_pricing_no_second_source.py",
+      "arms": {
+        "B": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/okf.py"
+        },
+        "C": {
+          "strict": false,
+          "lenient": false,
+          "secs": 1.1,
+          "had_context": false,
+          "meta": {
+            "status": "empty",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "I don't have access to the specific code repository you're referring to, so I cannot determine which file implements the functionality related to Haiku and o3 a"
+        },
+        "BC": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.2,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/okf.py"
+        }
+      }
+    },
+    {
+      "symbol": "TestOpenRouterQuirks",
+      "answer": "tests/test_provider_quirks.py",
+      "arms": {
+        "B": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/providers/openrouter.py"
+        },
+        "C": {
+          "strict": false,
+          "lenient": false,
+          "secs": 2.2,
+          "had_context": false,
+          "meta": {
+            "status": "empty",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "I need to find the file that implements the fix for OpenRouter requiring the \"anthropic/\" prefix that universal-name resolution strips.\n\nBased on the context ab"
+        },
+        "BC": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.2,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/okf.py"
+        }
+      }
+    },
+    {
+      "symbol": "test_localize_never_emits_a_double_call",
+      "answer": "tests/test_tool_surface.py",
+      "arms": {
+        "B": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.4,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/tools/text.py"
+        },
+        "C": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 35,
+            "evidence": 1,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/tools/text.py"
+        },
+        "BC": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.4,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 35,
+            "evidence": 1,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/tools/text.py"
+        }
+      }
+    },
+    {
+      "symbol": "MockRedactor",
+      "answer": "tests/test_c1_redaction_plugin_seam.py",
+      "arms": {
+        "B": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "tests/test_redactor.py"
+        },
+        "C": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.9,
+          "had_context": false,
+          "meta": {
+            "status": "empty",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "I don't have access to any specific code repository to analyze. Without being able to see the actual project files, I cannot determine which file implements a r"
+        },
+        "BC": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.2,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "tests/test_redactor.py"
+        }
+      }
+    },
+    {
+      "symbol": "baselines",
+      "answer": "scripts/routerarena/score_policy.py",
+      "arms": {
+        "B": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/okf.py"
+        },
+        "C": {
+          "strict": false,
+          "lenient": false,
+          "secs": 1.3,
+          "had_context": false,
+          "meta": {
+            "status": "empty",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "I don't have access to any specific code repository or project files to analyze. Without being able to see the actual project structure, code files, or document"
+        },
+        "BC": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.2,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/okf.py"
+        }
+      }
+    },
+    {
+      "symbol": "two_projects",
+      "answer": "tests/okf/test_okf_scope_02_explicit_root.py",
+      "arms": {
+        "B": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.4,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/hooks/context-capture.py"
+        },
+        "C": {
+          "strict": false,
+          "lenient": false,
+          "secs": 1.2,
+          "had_context": false,
+          "meta": {
+            "status": "empty",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "I don't have access to any project files or repositories to analyze. The question appears to be asking about a specific code implementation where \"Project A is "
+        },
+        "BC": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.2,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/okf.py"
+        }
+      }
+    },
+    {
+      "symbol": "test_a_record_naming_only_a_file_is_resolved_not_empty",
+      "answer": "tests/semantic/test_structural_index.py",
+      "arms": {
+        "B": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.4,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/semantic/scope.py"
+        },
+        "C": {
+          "strict": false,
+          "lenient": false,
+          "secs": 1.2,
+          "had_context": false,
+          "meta": {
+            "status": "empty",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "I don't have access to the specific project repository you're referring to. Without being able to see the actual codebase, I cannot determine which file impleme"
+        },
+        "BC": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.2,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/semantic/scope.py"
+        }
+      }
+    },
+    {
+      "symbol": "_retrieval_roots",
+      "answer": "src/llm_router/okf.py",
+      "arms": {
+        "B": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/okf.py"
+        },
+        "C": {
+          "strict": false,
+          "lenient": false,
+          "secs": 1.1,
+          "had_context": false,
+          "meta": {
+            "status": "empty",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "I don't have access to any specific code repository or project files to analyze. Without being able to see the actual project structure, code files, or document"
+        },
+        "BC": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.2,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/okf.py"
+        }
+      }
+    },
+    {
+      "symbol": "TestScoreResponse",
+      "answer": "tests/test_quality_feedback.py",
+      "arms": {
+        "B": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.5,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "tests/test_bench_grounding_scoring.py"
+        },
+        "C": {
+          "strict": false,
+          "lenient": false,
+          "secs": 1.1,
+          "had_context": false,
+          "meta": {
+            "status": "empty",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "I don't have access to any specific code repository to analyze. You would need to provide me with the actual project files or repository contents so I can ident"
+        },
+        "BC": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.2,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "tests/test_bench_grounding_scoring.py"
+        }
+      }
+    },
+    {
+      "symbol": "test_iterations_check_precedes_budget_check",
+      "answer": "tests/test_t3_m3_max_iterations_recursion.py",
+      "arms": {
+        "B": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/okf.py"
+        },
+        "C": {
+          "strict": false,
+          "lenient": false,
+          "secs": 1.2,
+          "had_context": false,
+          "meta": {
+            "status": "empty",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "I need to find the file that implements the logic where \"If both caps would be breached, the iteration cap wins (cheaper)\".\n\nHowever, you haven't provided the p"
+        },
+        "BC": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.2,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/okf.py"
+        }
+      }
+    },
+    {
+      "symbol": "TestDetectRegressions",
+      "answer": "tests/test_benchmark_cat_g.py",
+      "arms": {
+        "B": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/okf.py"
+        },
+        "C": {
+          "strict": false,
+          "lenient": false,
+          "secs": 1.1,
+          "had_context": false,
+          "meta": {
+            "status": "empty",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "I don't have access to any specific code repository or project files to analyze. Without being able to see the actual project structure, code files, or reposito"
+        },
+        "BC": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.2,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/okf.py"
+        }
+      }
+    },
+    {
+      "symbol": "_install_vscode_files",
+      "answer": "src/llm_router/commands/install.py",
+      "arms": {
+        "B": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/mcp.py"
+        },
+        "C": {
+          "strict": false,
+          "lenient": false,
+          "secs": 1.1,
+          "had_context": false,
+          "meta": {
+            "status": "empty",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "I don't have access to the specific code repository you're referring to, so I cannot determine which file implements the functionality \"Write VS Code MCP config"
+        },
+        "BC": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.2,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/mcp.py"
+        }
+      }
+    },
+    {
+      "symbol": "test_simple_success_scenario",
+      "answer": "tests/test_streaming_integration.py",
+      "arms": {
+        "B": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/okf.py"
+        },
+        "C": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.8,
+          "had_context": false,
+          "meta": {
+            "status": "empty",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "I don't have access to any specific code repository to analyze. Could you please provide me with the project files or repository you're referring to? Once you s"
+        },
+        "BC": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.2,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/okf.py"
+        }
+      }
+    },
+    {
+      "symbol": "LLMRouter",
+      "answer": "submissions/routerarena/llm_router.py",
+      "arms": {
+        "B": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/semantic/scope.py"
+        },
+        "C": {
+          "strict": false,
+          "lenient": false,
+          "secs": 1.0,
+          "had_context": false,
+          "meta": {
+            "status": "empty",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "I don't have access to the specific code repository you're referring to, so I cannot determine which file implements the \"Skill-cluster router\" functionality. T"
+        },
+        "BC": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.2,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/semantic/scope.py"
+        }
+      }
+    },
+    {
+      "symbol": "SemanticCacheEntry",
+      "answer": "src/llm_router/cache/store.py",
+      "arms": {
+        "B": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/semantic_cache.py"
+        },
+        "C": {
+          "strict": false,
+          "lenient": false,
+          "secs": 1.0,
+          "had_context": false,
+          "meta": {
+            "status": "empty",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "I don't have access to the specific code repository you're referring to. Without being able to see the actual files and code structure of your project, I cannot"
+        },
+        "BC": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.2,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/semantic_cache.py"
+        }
+      }
+    },
+    {
+      "symbol": "needs_reasoning",
+      "answer": "src/llm_router/reason_gate.py",
+      "arms": {
+        "B": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/okf.py"
+        },
+        "C": {
+          "strict": false,
+          "lenient": false,
+          "secs": 1.5,
+          "had_context": false,
+          "meta": {
+            "status": "empty",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "I need to find the file that implements a boolean convenience wrapper for `_COMPLEXITY_DEEP.search`. However, I don't have access to the actual project files or"
+        },
+        "BC": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.2,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/okf.py"
+        }
+      }
+    },
+    {
+      "symbol": "test_seeded_with_claude_sonnet_query",
+      "answer": "tests/test_calibration.py",
+      "arms": {
+        "B": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.4,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/router.py"
+        },
+        "C": {
+          "strict": false,
+          "lenient": false,
+          "secs": 1.7,
+          "had_context": false,
+          "meta": {
+            "status": "empty",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "I don't have access to the specific code repository you're referring to, so I cannot determine which file implements the statement about \"The single empirically"
+        },
+        "BC": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.2,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/router.py"
+        }
+      }
+    },
+    {
+      "symbol": "TestSingleSourceOfTruth",
+      "answer": "tests/test_cat_f_deferred_sites.py",
+      "arms": {
+        "B": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/pricing.py"
+        },
+        "C": {
+          "strict": false,
+          "lenient": false,
+          "secs": 2.3,
+          "had_context": false,
+          "meta": {
+            "status": "empty",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "I need to find the file that implements the regression guard preventing modules from shipping their own pricing dict.\n\nBased on the context of a \"regression gua"
+        },
+        "BC": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.2,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/pricing.py"
+        }
+      }
+    },
+    {
+      "symbol": "test_reorder_is_actually_invoked_when_active",
+      "answer": "tests/test_subscription_local_is_wired.py",
+      "arms": {
+        "B": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/okf.py"
+        },
+        "C": {
+          "strict": false,
+          "lenient": false,
+          "secs": 2.7,
+          "had_context": false,
+          "meta": {
+            "status": "empty",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "I need to analyze the question about \"The call, observed. Not an import, not a name in the file \u2014 the call.\"\n\nThis appears to be a riddle or puzzle about findin"
+        },
+        "BC": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.2,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/okf.py"
+        }
+      }
+    },
+    {
+      "symbol": "TestFormatContext",
+      "answer": "tests/test_result_cache.py",
+      "arms": {
+        "B": {
+          "strict": false,
+          "lenient": false,
+          "secs": 2.6,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "I need to analyze the provided knowledge context to find which file implements \"Test context formatting for prompt injection.\"\n\nLooking at the knowledge context"
+        },
+        "C": {
+          "strict": false,
+          "lenient": false,
+          "secs": 1.2,
+          "had_context": false,
+          "meta": {
+            "status": "empty",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "I don't have access to any specific code repository or project structure to identify which file implements \"Test context formatting for prompt injection.\" Witho"
+        },
+        "BC": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.2,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/hooks/context-capture.py"
+        }
+      }
+    },
+    {
+      "symbol": "test_coverage_names_the_gap_rather_than_only_counting_it",
+      "answer": "tests/economics/test_calibration_provenance.py",
+      "arms": {
+        "B": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/okf.py"
+        },
+        "C": {
+          "strict": false,
+          "lenient": false,
+          "secs": 1.7,
+          "had_context": false,
+          "meta": {
+            "status": "empty",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "I need to find the file that implements the functionality related to \"A bare percentage tells a maintainer nothing actionable. Which models\" - this appears to b"
+        },
+        "BC": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.2,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/okf.py"
+        }
+      }
+    },
+    {
+      "symbol": "isolated_budgets",
+      "answer": "tests/test_budget_store.py",
+      "arms": {
+        "B": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/hooks/context-capture.py"
+        },
+        "C": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 17,
+            "evidence": 1,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/storage/service.py"
+        },
+        "BC": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 17,
+            "evidence": 1,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/storage/service.py"
+        }
+      }
+    },
+    {
+      "symbol": "_filter_files_under_root",
+      "answer": "src/llm_router/tools/fs.py",
+      "arms": {
+        "B": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.5,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/semantic/scope.py"
+        },
+        "C": {
+          "strict": false,
+          "lenient": false,
+          "secs": 1.0,
+          "had_context": false,
+          "meta": {
+            "status": "empty",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "I don't have access to the specific code repository you're referring to. Without being able to see the actual project files, I cannot determine which file imple"
+        },
+        "BC": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.2,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/semantic/scope.py"
+        }
+      }
+    },
+    {
+      "symbol": "_guard_cross_origin",
+      "answer": "src/llm_router/gateway.py",
+      "arms": {
+        "B": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.4,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/gateway.py"
+        },
+        "C": {
+          "strict": false,
+          "lenient": false,
+          "secs": 1.5,
+          "had_context": false,
+          "meta": {
+            "status": "empty",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "I don't have access to the specific code repository you're referring to, so I cannot determine which file implements the CHZ-SEC-04 security measure for blockin"
+        },
+        "BC": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.2,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/gateway.py"
+        }
+      }
+    },
+    {
+      "symbol": "test_assert_under_root_resolves_symlinks",
+      "answer": "tests/test_fs_path_validation.py",
+      "arms": {
+        "B": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/hooks/context-capture.py"
+        },
+        "C": {
+          "strict": false,
+          "lenient": false,
+          "secs": 1.1,
+          "had_context": false,
+          "meta": {
+            "status": "empty",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "I don't have access to the specific code repository you're referring to, so I cannot determine which file implements the security measure for rejecting symlinks"
+        },
+        "BC": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.2,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/hooks/context-capture.py"
+        }
+      }
+    }
+  ]
+}

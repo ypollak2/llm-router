@@ -1,12 +1,12 @@
 """Three switches and a set of arms, so a result can say what produced it.
 
-OFF BY DEFAULT
+EACH SWITCH DEFAULTS TO WHAT ITS OWN EVIDENCE SUPPORTS
 
-Nothing here has been shown to help yet. The corrected baseline is measured
-(Docs/measurements/2026-09-18-grounding-corrected-baseline.md) and the semantic
-layer is not, so it ships dark and is turned on by whoever is running the
-comparison. A feature that defaults to on before its arm has been run has
-skipped the experiment it was built for.
+Source retrieval is ON: measured at n=60, paired, on the configuration that
+actually ships (docs/measurements/2026-09-18-semantic-arms.md). History and
+intervention are OFF: the M0/M1/M2 track has never been run. A feature that
+defaults to on before its arm has been run has skipped the experiment it was
+built for — which is why these are three switches and not one.
 
 SHADOW IS A MEASUREMENT, NOT A SOFT LAUNCH
 
@@ -38,10 +38,9 @@ is not valid.
 WHAT AN ARM MAY NOT DO
 
 Change model selection. C vs B measures retrieval; a routing arm would measure
-routing. An
-arm that moved both would make neither attributable, which is the one thing
-this structure exists to prevent — and there is a test asserting this module
-never mentions the routing symbols.
+routing, and an arm that moved both would make neither attributable. That is
+the one thing this structure exists to prevent, and there is a test asserting
+this module never mentions the routing symbols.
 """
 from __future__ import annotations
 
@@ -91,7 +90,7 @@ ARMS: dict[str, ModeConfig] = {
 # Arm D was "C plus two hops of graph traversal". It was run at n=60 and gave
 # identical answers to C on every question, so the traversal was deleted and D
 # with it — see semantic/retrieve.py and
-# Docs/measurements/2026-09-18-semantic-arms.md.
+# docs/measurements/2026-09-18-semantic-arms.md.
 
 
 def _mode(raw: str) -> Mode:
@@ -119,7 +118,7 @@ def _mode(raw: str) -> Mode:
 # The honest caveat, recorded here because this is where someone will look: the
 # task measured is exact symbol lookup on uniquely-defined symbols, which is
 # close to a best case for an ast index. See
-# Docs/measurements/2026-09-18-semantic-arms.md.
+# docs/measurements/2026-09-18-semantic-arms.md.
 _DEFAULTS = {"SOURCE": Mode.ON, "HISTORY": Mode.OFF, "INTERVENTION": Mode.OFF}
 
 

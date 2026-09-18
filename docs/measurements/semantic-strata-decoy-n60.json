@@ -1,0 +1,2539 @@
+{
+  "stratum": "decoy",
+  "n": 60,
+  "model": "qwen3-coder:30b",
+  "seed": 7,
+  "budget_tokens": 2000,
+  "arms": [
+    "B",
+    "C",
+    "BC"
+  ],
+  "totals": {
+    "B": 42,
+    "C": 59,
+    "BC": 59
+  },
+  "rows": [
+    {
+      "symbol": "complexity_to_profile",
+      "answer": "src/llm_router/profiles.py",
+      "arms": {
+        "B": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.4,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/profiles.py"
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 21,
+            "evidence": 1,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/profiles.py"
+        },
+        "BC": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 21,
+            "evidence": 1,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/profiles.py"
+        }
+      }
+    },
+    {
+      "symbol": "AgentProfile",
+      "answer": "src/llm_router/agents/base.py",
+      "arms": {
+        "B": {
+          "strict": false,
+          "lenient": false,
+          "secs": 1.5,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "I don't see any information in the provided context about where `AgentProfile` is defined. The context discusses project scoping, indexing, and some hook mechan"
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 16,
+            "evidence": 1,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/agents/base.py"
+        },
+        "BC": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 16,
+            "evidence": 1,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/agents/base.py"
+        }
+      }
+    },
+    {
+      "symbol": "enrich_from_response",
+      "answer": "src/llm_router/okf.py",
+      "arms": {
+        "B": {
+          "strict": false,
+          "lenient": true,
+          "secs": 0.5,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "okf.py"
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 29,
+            "evidence": 1,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/okf.py"
+        },
+        "BC": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.4,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 29,
+            "evidence": 1,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/okf.py"
+        }
+      }
+    },
+    {
+      "symbol": "DecisionEngine",
+      "answer": "src/llm_router/decisions/engine.py",
+      "arms": {
+        "B": {
+          "strict": false,
+          "lenient": false,
+          "secs": 2.2,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "I don't see any information about a `DecisionEngine` class or function in the provided repository context. The context only mentions files related to project sc"
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 18,
+            "evidence": 1,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/decisions/engine.py"
+        },
+        "BC": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 18,
+            "evidence": 1,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/decisions/engine.py"
+        }
+      }
+    },
+    {
+      "symbol": "_hermetic_host_state",
+      "answer": "tests/conftest.py",
+      "arms": {
+        "B": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.5,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "tests/conftest.py"
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 23,
+            "evidence": 1,
+            "omissions": 0
+          },
+          "answer": "tests/conftest.py"
+        },
+        "BC": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 23,
+            "evidence": 1,
+            "omissions": 0
+          },
+          "answer": "tests/conftest.py"
+        }
+      }
+    },
+    {
+      "symbol": "emit_routing_decision",
+      "answer": "src/llm_router/observability/core.py",
+      "arms": {
+        "B": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.5,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/observability/core.py"
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 22,
+            "evidence": 1,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/observability/core.py"
+        },
+        "BC": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 22,
+            "evidence": 1,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/observability/core.py"
+        }
+      }
+    },
+    {
+      "symbol": "MGEEEngine",
+      "answer": "src/llm_router/agentic/engine.py",
+      "arms": {
+        "B": {
+          "strict": false,
+          "lenient": false,
+          "secs": 2.7,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "I need to find which file defines `MGEEEngine` in this project.\n\nLooking at the provided knowledge context, I can see information about:\n- `src/llm_router/okf.p"
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 16,
+            "evidence": 1,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/agentic/engine.py"
+        },
+        "BC": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 16,
+            "evidence": 1,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/agentic/engine.py"
+        }
+      }
+    },
+    {
+      "symbol": "RouterConfig",
+      "answer": "src/llm_router/config.py",
+      "arms": {
+        "B": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/config.py"
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 18,
+            "evidence": 1,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/config.py"
+        },
+        "BC": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 18,
+            "evidence": 1,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/config.py"
+        }
+      }
+    },
+    {
+      "symbol": "get_policy_manager",
+      "answer": "src/llm_router/policy.py",
+      "arms": {
+        "B": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.5,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/policy.py"
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 17,
+            "evidence": 1,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/policy.py"
+        },
+        "BC": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 17,
+            "evidence": 1,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/policy.py"
+        }
+      }
+    },
+    {
+      "symbol": "reserve_tokens",
+      "answer": "src/llm_router/budget.py",
+      "arms": {
+        "B": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.4,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/budget.py"
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 20,
+            "evidence": 1,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/budget.py"
+        },
+        "BC": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 20,
+            "evidence": 1,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/budget.py"
+        }
+      }
+    },
+    {
+      "symbol": "llm_setup",
+      "answer": "src/llm_router/tools/setup.py",
+      "arms": {
+        "B": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.4,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/tools/setup.py"
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 24,
+            "evidence": 1,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/tools/setup.py"
+        },
+        "BC": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 24,
+            "evidence": 1,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/tools/setup.py"
+        }
+      }
+    },
+    {
+      "symbol": "_hard_cap_priority",
+      "answer": "src/llm_router/profiles.py",
+      "arms": {
+        "B": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/profiles.py"
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 18,
+            "evidence": 1,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/profiles.py"
+        },
+        "BC": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 18,
+            "evidence": 1,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/profiles.py"
+        }
+      }
+    },
+    {
+      "symbol": "_get_cap",
+      "answer": "src/llm_router/budget.py",
+      "arms": {
+        "B": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/budget.py"
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 18,
+            "evidence": 1,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/budget.py"
+        },
+        "BC": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 18,
+            "evidence": 1,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/budget.py"
+        }
+      }
+    },
+    {
+      "symbol": "relative_age",
+      "answer": "src/llm_router/library/store.py",
+      "arms": {
+        "B": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.4,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/library/store.py"
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 20,
+            "evidence": 1,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/library/store.py"
+        },
+        "BC": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 20,
+            "evidence": 1,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/library/store.py"
+        }
+      }
+    },
+    {
+      "symbol": "get_event_bus",
+      "answer": "src/llm_router/control_plane/events.py",
+      "arms": {
+        "B": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.4,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/control_plane/events.py"
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 19,
+            "evidence": 1,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/control_plane/events.py"
+        },
+        "BC": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 19,
+            "evidence": 1,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/control_plane/events.py"
+        }
+      }
+    },
+    {
+      "symbol": "_yaml_scalar",
+      "answer": "src/llm_router/library/store.py",
+      "arms": {
+        "B": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/library/store.py"
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 17,
+            "evidence": 1,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/library/store.py"
+        },
+        "BC": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 17,
+            "evidence": 1,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/library/store.py"
+        }
+      }
+    },
+    {
+      "symbol": "_restore_config_singleton",
+      "answer": "tests/conftest.py",
+      "arms": {
+        "B": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.2,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "tests/conftest.py"
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 17,
+            "evidence": 1,
+            "omissions": 0
+          },
+          "answer": "tests/conftest.py"
+        },
+        "BC": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 17,
+            "evidence": 1,
+            "omissions": 0
+          },
+          "answer": "tests/conftest.py"
+        }
+      }
+    },
+    {
+      "symbol": "PipelineStep",
+      "answer": "src/llm_router/types.py",
+      "arms": {
+        "B": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/okf.py"
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 15,
+            "evidence": 1,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/types.py"
+        },
+        "BC": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 15,
+            "evidence": 1,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/types.py"
+        }
+      }
+    },
+    {
+      "symbol": "TaskResult",
+      "answer": "src/llm_router/agentic/engine.py",
+      "arms": {
+        "B": {
+          "strict": false,
+          "lenient": false,
+          "secs": 2.9,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "I need to find which file defines `TaskResult` in this project. Based on the repository context provided, I can see there are files related to LLM routing and c"
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 16,
+            "evidence": 1,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/agentic/engine.py"
+        },
+        "BC": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 16,
+            "evidence": 1,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/agentic/engine.py"
+        }
+      }
+    },
+    {
+      "symbol": "cmd_setup",
+      "answer": "src/llm_router/commands/setup.py",
+      "arms": {
+        "B": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.4,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/commands/setup.py"
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 17,
+            "evidence": 1,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/commands/setup.py"
+        },
+        "BC": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 17,
+            "evidence": 1,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/commands/setup.py"
+        }
+      }
+    },
+    {
+      "symbol": "_lid",
+      "answer": "src/llm_router/semantic/pack.py",
+      "arms": {
+        "B": {
+          "strict": false,
+          "lenient": false,
+          "secs": 2.8,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "I need to find which file defines `_lid` based on the provided context.\n\nLooking at the context information, I can see references to:\n- `index_project` function"
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 16,
+            "evidence": 1,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/semantic/pack.py"
+        },
+        "BC": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 16,
+            "evidence": 1,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/semantic/pack.py"
+        }
+      }
+    },
+    {
+      "symbol": "get_project_root",
+      "answer": "tests/conftest.py",
+      "arms": {
+        "B": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.2,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "tests/conftest.py"
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 15,
+            "evidence": 1,
+            "omissions": 0
+          },
+          "answer": "tests/conftest.py"
+        },
+        "BC": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 15,
+            "evidence": 1,
+            "omissions": 0
+          },
+          "answer": "tests/conftest.py"
+        }
+      }
+    },
+    {
+      "symbol": "demo_routing_spinner",
+      "answer": "src/llm_router/ui/demo.py",
+      "arms": {
+        "B": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.4,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/ui/demo.py"
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 17,
+            "evidence": 1,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/ui/demo.py"
+        },
+        "BC": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 17,
+            "evidence": 1,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/ui/demo.py"
+        }
+      }
+    },
+    {
+      "symbol": "_make_metric_exporter",
+      "answer": "src/llm_router/observability/core.py",
+      "arms": {
+        "B": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/observability/core.py"
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 21,
+            "evidence": 1,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/observability/core.py"
+        },
+        "BC": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 21,
+            "evidence": 1,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/observability/core.py"
+        }
+      }
+    },
+    {
+      "symbol": "_missing_excluded_module",
+      "answer": "conftest.py",
+      "arms": {
+        "B": {
+          "strict": false,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "conftest.py"
+        },
+        "C": {
+          "strict": false,
+          "lenient": true,
+          "secs": 0.2,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 16,
+            "evidence": 1,
+            "omissions": 0
+          },
+          "answer": "conftest.py"
+        },
+        "BC": {
+          "strict": false,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 16,
+            "evidence": 1,
+            "omissions": 0
+          },
+          "answer": "conftest.py"
+        }
+      }
+    },
+    {
+      "symbol": "fires",
+      "answer": "src/llm_router/signals/base.py",
+      "arms": {
+        "B": {
+          "strict": false,
+          "lenient": false,
+          "secs": 2.9,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "I need to analyze the provided knowledge context to find which file defines `fires`.\n\nLooking at the context, I can see references to:\n- `src/llm_router/okf.py`"
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 16,
+            "evidence": 1,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/signals/base.py"
+        },
+        "BC": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 16,
+            "evidence": 1,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/signals/base.py"
+        }
+      }
+    },
+    {
+      "symbol": "_run_demo",
+      "answer": "src/llm_router/commands/demo.py",
+      "arms": {
+        "B": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.4,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/commands/demo.py"
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 16,
+            "evidence": 1,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/commands/demo.py"
+        },
+        "BC": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 16,
+            "evidence": 1,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/commands/demo.py"
+        }
+      }
+    },
+    {
+      "symbol": "load_disk_keys",
+      "answer": "src/llm_router/config.py",
+      "arms": {
+        "B": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.4,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/config.py"
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 16,
+            "evidence": 1,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/config.py"
+        },
+        "BC": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 16,
+            "evidence": 1,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/config.py"
+        }
+      }
+    },
+    {
+      "symbol": "TestTeamSetup",
+      "answer": "tests/commands/test_team.py",
+      "arms": {
+        "B": {
+          "strict": false,
+          "lenient": false,
+          "secs": 2.8,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "I need to find which file defines `TestTeamSetup`. However, looking at the provided knowledge context, there's no mention of `TestTeamSetup` or any test-related"
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 16,
+            "evidence": 1,
+            "omissions": 0
+          },
+          "answer": "tests/commands/test_team.py"
+        },
+        "BC": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 16,
+            "evidence": 1,
+            "omissions": 0
+          },
+          "answer": "tests/commands/test_team.py"
+        }
+      }
+    },
+    {
+      "symbol": "_html",
+      "answer": "src/llm_router/dashboard/server.py",
+      "arms": {
+        "B": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.4,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/dashboard/server.py"
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 18,
+            "evidence": 1,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/dashboard/server.py"
+        },
+        "BC": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 18,
+            "evidence": 1,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/dashboard/server.py"
+        }
+      }
+    },
+    {
+      "symbol": "would_exceed",
+      "answer": "src/llm_router/agents/budget.py",
+      "arms": {
+        "B": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.4,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/agents/budget.py"
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 24,
+            "evidence": 1,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/agents/budget.py"
+        },
+        "BC": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 24,
+            "evidence": 1,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/agents/budget.py"
+        }
+      }
+    },
+    {
+      "symbol": "format_timestamp",
+      "answer": "src/llm_router/commands/replay.py",
+      "arms": {
+        "B": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.4,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/commands/replay.py"
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 22,
+            "evidence": 1,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/commands/replay.py"
+        },
+        "BC": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 22,
+            "evidence": 1,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/commands/replay.py"
+        }
+      }
+    },
+    {
+      "symbol": "supports",
+      "answer": "src/llm_router/hosts/events.py",
+      "arms": {
+        "B": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/okf.py"
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 19,
+            "evidence": 1,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/hosts/events.py"
+        },
+        "BC": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 19,
+            "evidence": 1,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/hosts/events.py"
+        }
+      }
+    },
+    {
+      "symbol": "routing_span",
+      "answer": "src/llm_router/observability/core.py",
+      "arms": {
+        "B": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/observability/core.py"
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 23,
+            "evidence": 1,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/observability/core.py"
+        },
+        "BC": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 23,
+            "evidence": 1,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/observability/core.py"
+        }
+      }
+    },
+    {
+      "symbol": "_install_pi_files",
+      "answer": "src/llm_router/cli.py",
+      "arms": {
+        "B": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.4,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/cli.py"
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 16,
+            "evidence": 1,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/cli.py"
+        },
+        "BC": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 16,
+            "evidence": 1,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/cli.py"
+        }
+      }
+    },
+    {
+      "symbol": "register_runner",
+      "answer": "src/llm_router/benchmark/__init__.py",
+      "arms": {
+        "B": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.4,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/benchmark/__init__.py"
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 21,
+            "evidence": 1,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/benchmark/__init__.py"
+        },
+        "BC": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.4,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 21,
+            "evidence": 1,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/benchmark/__init__.py"
+        }
+      }
+    },
+    {
+      "symbol": "_has_gemini",
+      "answer": "src/llm_router/hooks/chain_builder.py",
+      "arms": {
+        "B": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.4,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/hooks/chain_builder.py"
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 18,
+            "evidence": 1,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/hooks/chain_builder.py"
+        },
+        "BC": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.4,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 18,
+            "evidence": 1,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/hooks/chain_builder.py"
+        }
+      }
+    },
+    {
+      "symbol": "_get_bundle",
+      "answer": "src/llm_router/okf.py",
+      "arms": {
+        "B": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.4,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/okf.py"
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 17,
+            "evidence": 1,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/okf.py"
+        },
+        "BC": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 17,
+            "evidence": 1,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/okf.py"
+        }
+      }
+    },
+    {
+      "symbol": "_verified_pairing",
+      "answer": "src/llm_router/okf.py",
+      "arms": {
+        "B": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/okf.py"
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 21,
+            "evidence": 1,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/okf.py"
+        },
+        "BC": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.4,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 21,
+            "evidence": 1,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/okf.py"
+        }
+      }
+    },
+    {
+      "symbol": "SessionState",
+      "answer": "src/llm_router/agents/base.py",
+      "arms": {
+        "B": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/hooks/context-capture.py"
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 18,
+            "evidence": 1,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/agents/base.py"
+        },
+        "BC": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 18,
+            "evidence": 1,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/agents/base.py"
+        }
+      }
+    },
+    {
+      "symbol": "_tier_value",
+      "answer": "src/llm_router/observability/core.py",
+      "arms": {
+        "B": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/observability/core.py"
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 19,
+            "evidence": 1,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/observability/core.py"
+        },
+        "BC": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 19,
+            "evidence": 1,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/observability/core.py"
+        }
+      }
+    },
+    {
+      "symbol": "ClassificationResult",
+      "answer": "src/llm_router/types.py",
+      "arms": {
+        "B": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/okf.py"
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 17,
+            "evidence": 1,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/types.py"
+        },
+        "BC": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 17,
+            "evidence": 1,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/types.py"
+        }
+      }
+    },
+    {
+      "symbol": "TestWindowConversion",
+      "answer": "tests/test_dashboard.py",
+      "arms": {
+        "B": {
+          "strict": false,
+          "lenient": false,
+          "secs": 2.2,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "I need to find which file defines `TestWindowConversion`. However, looking at the provided knowledge context, there's no mention of `TestWindowConversion` or an"
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 16,
+            "evidence": 1,
+            "omissions": 0
+          },
+          "answer": "tests/test_dashboard.py"
+        },
+        "BC": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 16,
+            "evidence": 1,
+            "omissions": 0
+          },
+          "answer": "tests/test_dashboard.py"
+        }
+      }
+    },
+    {
+      "symbol": "ensure_ledger",
+      "answer": "src/llm_router/migrations/__init__.py",
+      "arms": {
+        "B": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.4,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/migrations/__init__.py"
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 22,
+            "evidence": 1,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/migrations/__init__.py"
+        },
+        "BC": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.4,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 22,
+            "evidence": 1,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/migrations/__init__.py"
+        }
+      }
+    },
+    {
+      "symbol": "_get_stats",
+      "answer": "src/llm_router/dashboard/server.py",
+      "arms": {
+        "B": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/dashboard/server.py"
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 19,
+            "evidence": 1,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/dashboard/server.py"
+        },
+        "BC": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 19,
+            "evidence": 1,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/dashboard/server.py"
+        }
+      }
+    },
+    {
+      "symbol": "chain_has_claude",
+      "answer": "src/llm_router/hooks/chain_builder.py",
+      "arms": {
+        "B": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/hooks/chain_builder.py"
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 21,
+            "evidence": 1,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/hooks/chain_builder.py"
+        },
+        "BC": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.4,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 21,
+            "evidence": 1,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/hooks/chain_builder.py"
+        }
+      }
+    },
+    {
+      "symbol": "_extract_files_and_symbols",
+      "answer": "src/llm_router/okf.py",
+      "arms": {
+        "B": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/okf.py"
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 29,
+            "evidence": 1,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/okf.py"
+        },
+        "BC": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 29,
+            "evidence": 1,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/okf.py"
+        }
+      }
+    },
+    {
+      "symbol": "SqliteControlPlaneStore",
+      "answer": "src/llm_router/control_plane/store.py",
+      "arms": {
+        "B": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/store/sqlite.py"
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 21,
+            "evidence": 1,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/control_plane/store.py"
+        },
+        "BC": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 21,
+            "evidence": 1,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/control_plane/store.py"
+        }
+      }
+    },
+    {
+      "symbol": "generate_image_openai",
+      "answer": "src/llm_router/media.py",
+      "arms": {
+        "B": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.4,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/media.py"
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 26,
+            "evidence": 1,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/media.py"
+        },
+        "BC": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 26,
+            "evidence": 1,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/media.py"
+        }
+      }
+    },
+    {
+      "symbol": "DecisionResult",
+      "answer": "src/llm_router/decisions/engine.py",
+      "arms": {
+        "B": {
+          "strict": false,
+          "lenient": false,
+          "secs": 2.6,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "I need to find which file defines `DecisionResult`. Based on the provided knowledge context, I can see this is about a project related to LLM routing and indexi"
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 17,
+            "evidence": 1,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/decisions/engine.py"
+        },
+        "BC": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 17,
+            "evidence": 1,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/decisions/engine.py"
+        }
+      }
+    },
+    {
+      "symbol": "ContextPack",
+      "answer": "src/llm_router/semantic/pack.py",
+      "arms": {
+        "B": {
+          "strict": false,
+          "lenient": false,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/hooks/context-capture.py"
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 16,
+            "evidence": 1,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/semantic/pack.py"
+        },
+        "BC": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 16,
+            "evidence": 1,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/semantic/pack.py"
+        }
+      }
+    },
+    {
+      "symbol": "mock_llm_query",
+      "answer": "tests/storage/conftest.py",
+      "arms": {
+        "B": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.4,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "tests/storage/conftest.py"
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 16,
+            "evidence": 1,
+            "omissions": 0
+          },
+          "answer": "tests/storage/conftest.py"
+        },
+        "BC": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 16,
+            "evidence": 1,
+            "omissions": 0
+          },
+          "answer": "tests/storage/conftest.py"
+        }
+      }
+    },
+    {
+      "symbol": "generate_image_gemini",
+      "answer": "src/llm_router/media.py",
+      "arms": {
+        "B": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/media.py"
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 26,
+            "evidence": 1,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/media.py"
+        },
+        "BC": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 26,
+            "evidence": 1,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/media.py"
+        }
+      }
+    },
+    {
+      "symbol": "IterationsExceeded",
+      "answer": "src/llm_router/agents/budget.py",
+      "arms": {
+        "B": {
+          "strict": false,
+          "lenient": false,
+          "secs": 1.2,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "I need to find which file defines `IterationsExceeded`. However, looking at the provided knowledge context, there's no mention of an `IterationsExceeded` except"
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 20,
+            "evidence": 1,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/agents/budget.py"
+        },
+        "BC": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.4,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 20,
+            "evidence": 1,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/agents/budget.py"
+        }
+      }
+    },
+    {
+      "symbol": "read_ledgers",
+      "answer": "tests/e2e/conftest.py",
+      "arms": {
+        "B": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.4,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "tests/e2e/conftest.py"
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 18,
+            "evidence": 1,
+            "omissions": 0
+          },
+          "answer": "tests/e2e/conftest.py"
+        },
+        "BC": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 18,
+            "evidence": 1,
+            "omissions": 0
+          },
+          "answer": "tests/e2e/conftest.py"
+        }
+      }
+    },
+    {
+      "symbol": "policy_shipped",
+      "answer": "scripts/routerarena/replay.py",
+      "arms": {
+        "B": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.4,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "scripts/routerarena/replay.py"
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 19,
+            "evidence": 1,
+            "omissions": 0
+          },
+          "answer": "scripts/routerarena/replay.py"
+        },
+        "BC": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 19,
+            "evidence": 1,
+            "omissions": 0
+          },
+          "answer": "scripts/routerarena/replay.py"
+        }
+      }
+    },
+    {
+      "symbol": "_static_chain",
+      "answer": "src/llm_router/chain_builder.py",
+      "arms": {
+        "B": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.4,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/chain_builder.py"
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 22,
+            "evidence": 1,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/chain_builder.py"
+        },
+        "BC": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 22,
+            "evidence": 1,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/chain_builder.py"
+        }
+      }
+    },
+    {
+      "symbol": "startup_discovery_warmup",
+      "answer": "src/llm_router/service.py",
+      "arms": {
+        "B": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.4,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "src/llm_router/service.py"
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 20,
+            "evidence": 1,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/service.py"
+        },
+        "BC": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 20,
+            "evidence": 1,
+            "omissions": 0
+          },
+          "answer": "src/llm_router/service.py"
+        }
+      }
+    },
+    {
+      "symbol": "build_split",
+      "answer": "scripts/routerarena/replay.py",
+      "arms": {
+        "B": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "scripts/routerarena/replay.py"
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 18,
+            "evidence": 1,
+            "omissions": 0
+          },
+          "answer": "scripts/routerarena/replay.py"
+        },
+        "BC": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 18,
+            "evidence": 1,
+            "omissions": 0
+          },
+          "answer": "scripts/routerarena/replay.py"
+        }
+      }
+    },
+    {
+      "symbol": "_isolate_router_state_dir",
+      "answer": "tests/conftest.py",
+      "arms": {
+        "B": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "tests/conftest.py"
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "ok",
+            "tokens": 23,
+            "evidence": 1,
+            "omissions": 0
+          },
+          "answer": "tests/conftest.py"
+        },
+        "BC": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 23,
+            "evidence": 1,
+            "omissions": 0
+          },
+          "answer": "tests/conftest.py"
+        }
+      }
+    }
+  ]
+}

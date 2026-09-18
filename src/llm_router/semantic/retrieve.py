@@ -19,7 +19,7 @@ otherwise:
     a reason to redesign the benchmark until the graph wins.
 
 So it was deleted rather than left switched off, and this comment is the reason
-it will not be rebuilt by accident. `Docs/measurements/2026-09-18-semantic-arms.md`
+it will not be rebuilt by accident. `docs/measurements/2026-09-18-semantic-arms.md`
 has the run; `git log` has the code if a later task set ever justifies it.
 
 Two things went with it and are worth knowing about if it comes back. A

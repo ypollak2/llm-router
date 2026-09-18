@@ -1,0 +1,2539 @@
+{
+  "stratum": "absent",
+  "n": 60,
+  "model": "qwen3-coder:30b",
+  "seed": 7,
+  "budget_tokens": 2000,
+  "arms": [
+    "B",
+    "C",
+    "BC"
+  ],
+  "totals": {
+    "B": 60,
+    "C": 60,
+    "BC": 60
+  },
+  "rows": [
+    {
+      "symbol": "_realize_legacy",
+      "answer": "",
+      "arms": {
+        "B": {
+          "strict": true,
+          "lenient": true,
+          "secs": 4.8,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "NOT FOUND"
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.2,
+          "had_context": false,
+          "meta": {
+            "status": "empty",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "NOT FOUND"
+        },
+        "BC": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.1,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "NOT FOUND"
+        }
+      }
+    },
+    {
+      "symbol": "probe_all_internal",
+      "answer": "",
+      "arms": {
+        "B": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.2,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "NOT FOUND"
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.7,
+          "had_context": false,
+          "meta": {
+            "status": "empty",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "I don't have access to any project files or repositories to search for the definition of `probe_all_internal`. Without being able to examine actual code files, "
+        },
+        "BC": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.1,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "NOT FOUND"
+        }
+      }
+    },
+    {
+      "symbol": "token_estimate_for_batch",
+      "answer": "",
+      "arms": {
+        "B": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.2,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "NOT FOUND"
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.2,
+          "had_context": false,
+          "meta": {
+            "status": "empty",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "NOT FOUND"
+        },
+        "BC": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.1,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "NOT FOUND"
+        }
+      }
+    },
+    {
+      "symbol": "_drive_v2",
+      "answer": "",
+      "arms": {
+        "B": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.2,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "NOT FOUND"
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.8,
+          "had_context": false,
+          "meta": {
+            "status": "empty",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "NOT FOUND\n\nI don't have access to any specific code repository to examine its files and determine which file defines `_drive_v2`. To properly answer this questi"
+        },
+        "BC": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.1,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "NOT FOUND"
+        }
+      }
+    },
+    {
+      "symbol": "TestSavingsSummary_async",
+      "answer": "",
+      "arms": {
+        "B": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.2,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "NOT FOUND"
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.2,
+          "had_context": false,
+          "meta": {
+            "status": "empty",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "NOT FOUND"
+        },
+        "BC": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.1,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "NOT FOUND"
+        }
+      }
+    },
+    {
+      "symbol": "make_form_cached",
+      "answer": "",
+      "arms": {
+        "B": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.2,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "NOT FOUND"
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.7,
+          "had_context": false,
+          "meta": {
+            "status": "empty",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "I don't have access to any project files or code repositories to search for the `make_form_cached` function definition. Without being able to examine actual cod"
+        },
+        "BC": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.1,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "NOT FOUND"
+        }
+      }
+    },
+    {
+      "symbol": "TestComplexityValidation_v2",
+      "answer": "",
+      "arms": {
+        "B": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.2,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "NOT FOUND"
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.2,
+          "had_context": false,
+          "meta": {
+            "status": "empty",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "NOT FOUND"
+        },
+        "BC": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.1,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "NOT FOUND"
+        }
+      }
+    },
+    {
+      "symbol": "try_intercept_read_legacy",
+      "answer": "",
+      "arms": {
+        "B": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.2,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "NOT FOUND"
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.2,
+          "had_context": false,
+          "meta": {
+            "status": "empty",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "NOT FOUND"
+        },
+        "BC": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.1,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "NOT FOUND"
+        }
+      }
+    },
+    {
+      "symbol": "_pull_invoice_cached",
+      "answer": "",
+      "arms": {
+        "B": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.2,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "NOT FOUND"
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.2,
+          "had_context": false,
+          "meta": {
+            "status": "empty",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "NOT FOUND"
+        },
+        "BC": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.1,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "NOT FOUND"
+        }
+      }
+    },
+    {
+      "symbol": "_policy_dynamic_cached",
+      "answer": "",
+      "arms": {
+        "B": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.2,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "NOT FOUND"
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.2,
+          "had_context": false,
+          "meta": {
+            "status": "empty",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "NOT FOUND"
+        },
+        "BC": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.1,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "NOT FOUND"
+        }
+      }
+    },
+    {
+      "symbol": "TestBufferEviction_legacy",
+      "answer": "",
+      "arms": {
+        "B": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.2,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "NOT FOUND"
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.2,
+          "had_context": false,
+          "meta": {
+            "status": "empty",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "NOT FOUND"
+        },
+        "BC": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.1,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "NOT FOUND"
+        }
+      }
+    },
+    {
+      "symbol": "_get_cap_v2",
+      "answer": "",
+      "arms": {
+        "B": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.2,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "NOT FOUND"
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.7,
+          "had_context": false,
+          "meta": {
+            "status": "empty",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "I don't have access to any project files or repositories to search for the definition of `_get_cap_v2`. Without being able to examine actual code files, I canno"
+        },
+        "BC": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.1,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "NOT FOUND"
+        }
+      }
+    },
+    {
+      "symbol": "abridge_book_internal",
+      "answer": "",
+      "arms": {
+        "B": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.2,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "NOT FOUND"
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.2,
+          "had_context": false,
+          "meta": {
+            "status": "empty",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "NOT FOUND"
+        },
+        "BC": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.1,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "NOT FOUND"
+        }
+      }
+    },
+    {
+      "symbol": "get_hook_info_internal",
+      "answer": "",
+      "arms": {
+        "B": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.2,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "NOT FOUND"
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.2,
+          "had_context": false,
+          "meta": {
+            "status": "empty",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "NOT FOUND"
+        },
+        "BC": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.1,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "NOT FOUND"
+        }
+      }
+    },
+    {
+      "symbol": "_resolve_weekly_quota_usd_impl",
+      "answer": "",
+      "arms": {
+        "B": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.2,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "NOT FOUND"
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.2,
+          "had_context": false,
+          "meta": {
+            "status": "empty",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "NOT FOUND"
+        },
+        "BC": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.1,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "NOT FOUND"
+        }
+      }
+    },
+    {
+      "symbol": "TestBuildProgressiveContext_async",
+      "answer": "",
+      "arms": {
+        "B": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.2,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "NOT FOUND"
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": false,
+          "meta": {
+            "status": "empty",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "NOT FOUND"
+        },
+        "BC": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.1,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "NOT FOUND"
+        }
+      }
+    },
+    {
+      "symbol": "TestClassifierEdgeCases_impl",
+      "answer": "",
+      "arms": {
+        "B": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.2,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "NOT FOUND"
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.2,
+          "had_context": false,
+          "meta": {
+            "status": "empty",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "NOT FOUND"
+        },
+        "BC": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.1,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "NOT FOUND"
+        }
+      }
+    },
+    {
+      "symbol": "TestBudgetHardCap_impl",
+      "answer": "",
+      "arms": {
+        "B": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.2,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "NOT FOUND"
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": false,
+          "meta": {
+            "status": "empty",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "NOT FOUND"
+        },
+        "BC": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.1,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "NOT FOUND"
+        }
+      }
+    },
+    {
+      "symbol": "_reset_registry_impl",
+      "answer": "",
+      "arms": {
+        "B": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.2,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "NOT FOUND"
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.7,
+          "had_context": false,
+          "meta": {
+            "status": "empty",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "I don't have access to any specific code repository to search for the definition of `_reset_registry_impl`. Without being able to examine actual files from a pr"
+        },
+        "BC": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.1,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "NOT FOUND"
+        }
+      }
+    },
+    {
+      "symbol": "supports_for_batch",
+      "answer": "",
+      "arms": {
+        "B": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.2,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "NOT FOUND"
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.7,
+          "had_context": false,
+          "meta": {
+            "status": "empty",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "I don't have access to any project files or repositories to search for the definition of `supports_for_batch`. Without being able to examine actual code files, "
+        },
+        "BC": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.1,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "NOT FOUND"
+        }
+      }
+    },
+    {
+      "symbol": "_EmptyStore_async",
+      "answer": "",
+      "arms": {
+        "B": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.2,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "NOT FOUND"
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.2,
+          "had_context": false,
+          "meta": {
+            "status": "empty",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "NOT FOUND"
+        },
+        "BC": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.1,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "NOT FOUND"
+        }
+      }
+    },
+    {
+      "symbol": "TestCacheTTL_internal",
+      "answer": "",
+      "arms": {
+        "B": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.2,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "NOT FOUND"
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 1.0,
+          "had_context": false,
+          "meta": {
+            "status": "empty",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "NOT FOUND\n\nI don't have access to any specific code repository to search for the definition of `TestCacheTTL_internal`. Without being able to examine actual pro"
+        },
+        "BC": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.1,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "NOT FOUND"
+        }
+      }
+    },
+    {
+      "symbol": "_returns_live_data_legacy",
+      "answer": "",
+      "arms": {
+        "B": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.2,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "NOT FOUND"
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 1.1,
+          "had_context": false,
+          "meta": {
+            "status": "empty",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "I don't have access to any specific code repository to search through. To find where `_returns_live_data_legacy` is defined, I would need you to either:\n\n1. Pro"
+        },
+        "BC": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.1,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "NOT FOUND"
+        }
+      }
+    },
+    {
+      "symbol": "why_impl",
+      "answer": "",
+      "arms": {
+        "B": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.2,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "NOT FOUND"
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.7,
+          "had_context": false,
+          "meta": {
+            "status": "empty",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "NOT FOUND\n\nI don't have access to any specific code repository to analyze. To properly answer which file defines `why_impl`, I would need you to provide the act"
+        },
+        "BC": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.1,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "NOT FOUND"
+        }
+      }
+    },
+    {
+      "symbol": "_detect_contention_v2",
+      "answer": "",
+      "arms": {
+        "B": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.2,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "NOT FOUND"
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.8,
+          "had_context": false,
+          "meta": {
+            "status": "empty",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "NOT FOUND\n\nI don't have access to any specific code repository to search for the `_detect_contention_v2` function definition. Without being able to examine actu"
+        },
+        "BC": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.1,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "NOT FOUND"
+        }
+      }
+    },
+    {
+      "symbol": "_analyze_hook_impl",
+      "answer": "",
+      "arms": {
+        "B": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.2,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "NOT FOUND"
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.2,
+          "had_context": false,
+          "meta": {
+            "status": "empty",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "NOT FOUND"
+        },
+        "BC": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.1,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "NOT FOUND"
+        }
+      }
+    },
+    {
+      "symbol": "_contract_v2",
+      "answer": "",
+      "arms": {
+        "B": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.2,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "NOT FOUND"
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.2,
+          "had_context": false,
+          "meta": {
+            "status": "empty",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "NOT FOUND"
+        },
+        "BC": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.1,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "NOT FOUND"
+        }
+      }
+    },
+    {
+      "symbol": "_validated_ollama_url_legacy",
+      "answer": "",
+      "arms": {
+        "B": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.2,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "NOT FOUND"
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.2,
+          "had_context": false,
+          "meta": {
+            "status": "empty",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "NOT FOUND"
+        },
+        "BC": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.1,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "NOT FOUND"
+        }
+      }
+    },
+    {
+      "symbol": "_enterprise_identity_v2",
+      "answer": "",
+      "arms": {
+        "B": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.2,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "NOT FOUND"
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.2,
+          "had_context": false,
+          "meta": {
+            "status": "empty",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "NOT FOUND"
+        },
+        "BC": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.1,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "NOT FOUND"
+        }
+      }
+    },
+    {
+      "symbol": "hybrid_plan_internal",
+      "answer": "",
+      "arms": {
+        "B": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.2,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "NOT FOUND"
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.8,
+          "had_context": false,
+          "meta": {
+            "status": "empty",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "NOT FOUND\n\nI don't have access to any specific code repository to search for the definition of `hybrid_plan_internal`. To properly answer this question, I would"
+        },
+        "BC": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.1,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "NOT FOUND"
+        }
+      }
+    },
+    {
+      "symbol": "detect_symbols_internal",
+      "answer": "",
+      "arms": {
+        "B": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.2,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "NOT FOUND"
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.2,
+          "had_context": false,
+          "meta": {
+            "status": "empty",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "NOT FOUND"
+        },
+        "BC": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.1,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "NOT FOUND"
+        }
+      }
+    },
+    {
+      "symbol": "run_app_internal",
+      "answer": "",
+      "arms": {
+        "B": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.2,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "NOT FOUND"
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.7,
+          "had_context": false,
+          "meta": {
+            "status": "empty",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "I don't have access to any project files or repositories to search for the `run_app_internal` function definition. Without being able to examine actual code fil"
+        },
+        "BC": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.1,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "NOT FOUND"
+        }
+      }
+    },
+    {
+      "symbol": "diff_v2",
+      "answer": "",
+      "arms": {
+        "B": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.2,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "NOT FOUND"
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.2,
+          "had_context": false,
+          "meta": {
+            "status": "empty",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "NOT FOUND"
+        },
+        "BC": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.1,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "NOT FOUND"
+        }
+      }
+    },
+    {
+      "symbol": "ConfidenceLevel_legacy",
+      "answer": "",
+      "arms": {
+        "B": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.2,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "NOT FOUND"
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.2,
+          "had_context": false,
+          "meta": {
+            "status": "empty",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "NOT FOUND"
+        },
+        "BC": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.1,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "NOT FOUND"
+        }
+      }
+    },
+    {
+      "symbol": "_model_style_internal",
+      "answer": "",
+      "arms": {
+        "B": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.2,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "NOT FOUND"
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 1.1,
+          "had_context": false,
+          "meta": {
+            "status": "empty",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "I don't have access to any specific code repository to analyze. To help you find where `_model_style_internal` is defined, I would need you to either:\n\n1. Provi"
+        },
+        "BC": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.1,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "NOT FOUND"
+        }
+      }
+    },
+    {
+      "symbol": "_default_librarian_model_async",
+      "answer": "",
+      "arms": {
+        "B": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.2,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "NOT FOUND"
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.8,
+          "had_context": false,
+          "meta": {
+            "status": "empty",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "I don't have access to any specific code repository to search through. To find where `_default_librarian_model_async` is defined, I would need you to either:\n\n1"
+        },
+        "BC": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.1,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "NOT FOUND"
+        }
+      }
+    },
+    {
+      "symbol": "generate_benchmarks_json_for_batch",
+      "answer": "",
+      "arms": {
+        "B": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.2,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "NOT FOUND"
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.2,
+          "had_context": false,
+          "meta": {
+            "status": "empty",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "NOT FOUND"
+        },
+        "BC": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.1,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "NOT FOUND"
+        }
+      }
+    },
+    {
+      "symbol": "TestDiscoverCacheCorruption_v2",
+      "answer": "",
+      "arms": {
+        "B": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.2,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "NOT FOUND"
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.8,
+          "had_context": false,
+          "meta": {
+            "status": "empty",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "NOT FOUND\n\nI don't have access to any specific code repository to search for the definition of `TestDiscoverCacheCorruption_v2`. Without being able to examine a"
+        },
+        "BC": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.1,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "NOT FOUND"
+        }
+      }
+    },
+    {
+      "symbol": "_NoReconfigure_impl",
+      "answer": "",
+      "arms": {
+        "B": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.2,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "NOT FOUND"
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.7,
+          "had_context": false,
+          "meta": {
+            "status": "empty",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "I don't have access to any specific code repository to search for the definition of `_NoReconfigure_impl`. Without being able to examine actual files from a pro"
+        },
+        "BC": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.1,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "NOT FOUND"
+        }
+      }
+    },
+    {
+      "symbol": "_handle_recent_commits_cached",
+      "answer": "",
+      "arms": {
+        "B": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.2,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "NOT FOUND"
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.2,
+          "had_context": false,
+          "meta": {
+            "status": "empty",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "NOT FOUND"
+        },
+        "BC": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.1,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "NOT FOUND"
+        }
+      }
+    },
+    {
+      "symbol": "TestInstallOpenCode_legacy",
+      "answer": "",
+      "arms": {
+        "B": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.2,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "NOT FOUND"
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.2,
+          "had_context": false,
+          "meta": {
+            "status": "empty",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "NOT FOUND"
+        },
+        "BC": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.1,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "NOT FOUND"
+        }
+      }
+    },
+    {
+      "symbol": "llm_dashboard_legacy",
+      "answer": "",
+      "arms": {
+        "B": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.2,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "NOT FOUND"
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.2,
+          "had_context": false,
+          "meta": {
+            "status": "empty",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "NOT FOUND"
+        },
+        "BC": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.1,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "NOT FOUND"
+        }
+      }
+    },
+    {
+      "symbol": "_claude_subscription_state_cached",
+      "answer": "",
+      "arms": {
+        "B": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.2,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "NOT FOUND"
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.7,
+          "had_context": false,
+          "meta": {
+            "status": "empty",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "I don't have access to any specific code repository to analyze. To determine which file defines `_claude_subscription_state_cached`, I would need you to provide"
+        },
+        "BC": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.1,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "NOT FOUND"
+        }
+      }
+    },
+    {
+      "symbol": "install_gateway_service_impl",
+      "answer": "",
+      "arms": {
+        "B": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.2,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "NOT FOUND"
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.2,
+          "had_context": false,
+          "meta": {
+            "status": "empty",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "NOT FOUND"
+        },
+        "BC": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.1,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "NOT FOUND"
+        }
+      }
+    },
+    {
+      "symbol": "TestOnboardAutoInstall_async",
+      "answer": "",
+      "arms": {
+        "B": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.2,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "NOT FOUND"
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.2,
+          "had_context": false,
+          "meta": {
+            "status": "empty",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "NOT FOUND"
+        },
+        "BC": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.1,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "NOT FOUND"
+        }
+      }
+    },
+    {
+      "symbol": "_safe_unlink_impl",
+      "answer": "",
+      "arms": {
+        "B": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.2,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "NOT FOUND"
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.8,
+          "had_context": false,
+          "meta": {
+            "status": "empty",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "I don't have access to any specific code repository to search through. To find the file that defines `_safe_unlink_impl`, I would need you to either:\n\n1. Provid"
+        },
+        "BC": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.1,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "NOT FOUND"
+        }
+      }
+    },
+    {
+      "symbol": "_extract_hint_impl",
+      "answer": "",
+      "arms": {
+        "B": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.2,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "NOT FOUND"
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.2,
+          "had_context": false,
+          "meta": {
+            "status": "empty",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "NOT FOUND"
+        },
+        "BC": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.1,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "NOT FOUND"
+        }
+      }
+    },
+    {
+      "symbol": "TestShortCodeFollowup_internal",
+      "answer": "",
+      "arms": {
+        "B": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.2,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "NOT FOUND"
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.7,
+          "had_context": false,
+          "meta": {
+            "status": "empty",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "I don't have access to any project files or repositories to search for the definition of `TestShortCodeFollowup_internal`. Without being able to examine actual "
+        },
+        "BC": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.1,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "NOT FOUND"
+        }
+      }
+    },
+    {
+      "symbol": "should_judge_inline_legacy",
+      "answer": "",
+      "arms": {
+        "B": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.2,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "NOT FOUND"
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.8,
+          "had_context": false,
+          "meta": {
+            "status": "empty",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "I don't have access to any specific code repository to search for the definition of `should_judge_inline_legacy`. Without being able to examine actual files fro"
+        },
+        "BC": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.1,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "NOT FOUND"
+        }
+      }
+    },
+    {
+      "symbol": "capability_routing_enabled_for_batch",
+      "answer": "",
+      "arms": {
+        "B": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.2,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "NOT FOUND"
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.8,
+          "had_context": false,
+          "meta": {
+            "status": "empty",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "I don't have access to any specific code repository to search for the definition of `capability_routing_enabled_for_batch`. To find this function, I would need "
+        },
+        "BC": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.1,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "NOT FOUND"
+        }
+      }
+    },
+    {
+      "symbol": "_api_provider_state_internal",
+      "answer": "",
+      "arms": {
+        "B": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.2,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "NOT FOUND"
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.2,
+          "had_context": false,
+          "meta": {
+            "status": "empty",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "NOT FOUND"
+        },
+        "BC": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.1,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "NOT FOUND"
+        }
+      }
+    },
+    {
+      "symbol": "ollama_tags_legacy",
+      "answer": "",
+      "arms": {
+        "B": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.2,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "NOT FOUND"
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.2,
+          "had_context": false,
+          "meta": {
+            "status": "empty",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "NOT FOUND"
+        },
+        "BC": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.1,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "NOT FOUND"
+        }
+      }
+    },
+    {
+      "symbol": "TestWriteFile_cached",
+      "answer": "",
+      "arms": {
+        "B": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.2,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "NOT FOUND"
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.7,
+          "had_context": false,
+          "meta": {
+            "status": "empty",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "I don't have access to any project files or repositories to search for the specific function `TestWriteFile_cached`. Without being able to examine actual code f"
+        },
+        "BC": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.1,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "NOT FOUND"
+        }
+      }
+    },
+    {
+      "symbol": "_flatten_legacy",
+      "answer": "",
+      "arms": {
+        "B": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.2,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "NOT FOUND"
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.7,
+          "had_context": false,
+          "meta": {
+            "status": "empty",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "I don't have access to any specific code repository to search for the `_flatten_legacy` function definition. Without being able to examine actual files from a p"
+        },
+        "BC": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.1,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "NOT FOUND"
+        }
+      }
+    },
+    {
+      "symbol": "TestCollapseStackTraces_v2",
+      "answer": "",
+      "arms": {
+        "B": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.2,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "NOT FOUND"
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.2,
+          "had_context": false,
+          "meta": {
+            "status": "empty",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "NOT FOUND"
+        },
+        "BC": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.1,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "NOT FOUND"
+        }
+      }
+    },
+    {
+      "symbol": "reversibility_gate_v2",
+      "answer": "",
+      "arms": {
+        "B": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.2,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "NOT FOUND"
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 1.5,
+          "had_context": false,
+          "meta": {
+            "status": "empty",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "I don't have access to any specific code repository to search through. To find the file that defines `reversibility_gate_v2`, you would need to:\n\n1. Search the "
+        },
+        "BC": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.1,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "NOT FOUND"
+        }
+      }
+    },
+    {
+      "symbol": "HermesAdapter_legacy",
+      "answer": "",
+      "arms": {
+        "B": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.2,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "NOT FOUND"
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.2,
+          "had_context": false,
+          "meta": {
+            "status": "empty",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "NOT FOUND"
+        },
+        "BC": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.1,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "NOT FOUND"
+        }
+      }
+    },
+    {
+      "symbol": "record_loophole_verdict_internal",
+      "answer": "",
+      "arms": {
+        "B": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.2,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "NOT FOUND"
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.2,
+          "had_context": false,
+          "meta": {
+            "status": "empty",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "NOT FOUND"
+        },
+        "BC": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.1,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "NOT FOUND"
+        }
+      }
+    },
+    {
+      "symbol": "TokenRefreshStrategy_impl",
+      "answer": "",
+      "arms": {
+        "B": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.2,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "NOT FOUND"
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.3,
+          "had_context": false,
+          "meta": {
+            "status": "empty",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "NOT FOUND"
+        },
+        "BC": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.1,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "NOT FOUND"
+        }
+      }
+    },
+    {
+      "symbol": "planner_model_internal",
+      "answer": "",
+      "arms": {
+        "B": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.2,
+          "had_context": true,
+          "meta": {
+            "status": "okf"
+          },
+          "answer": "NOT FOUND"
+        },
+        "C": {
+          "strict": true,
+          "lenient": true,
+          "secs": 1.1,
+          "had_context": false,
+          "meta": {
+            "status": "empty",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "NOT FOUND\n\nI don't have access to any specific code repository to analyze. To properly answer which file defines `planner_model_internal`, I would need you to e"
+        },
+        "BC": {
+          "strict": true,
+          "lenient": true,
+          "secs": 0.1,
+          "had_context": true,
+          "meta": {
+            "status": "okf+semantic",
+            "tokens": 0,
+            "evidence": 0,
+            "omissions": 0
+          },
+          "answer": "NOT FOUND"
+        }
+      }
+    }
+  ]
+}

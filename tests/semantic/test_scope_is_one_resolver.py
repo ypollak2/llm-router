@@ -147,7 +147,7 @@ def test_no_module_resolves_project_scope_on_its_own():
     and restores it afterwards, to pass scope into a call it cannot otherwise
     reach. That is a race between concurrent requests, not a resolver, and it
     needs scope threaded through `grounding` as a value. Recorded here rather
-    than fixed here — see Docs/decisions/0002-semantic-layer.md.
+    than fixed here — see docs/decisions/0002-semantic-layer.md.
     """
     import re as _re
 

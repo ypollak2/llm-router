@@ -120,7 +120,7 @@ new package, four new environment variables, one new CLI command. Experience
 records need curation; fifteen seeded honestly is not fifty, and the value of
 the layer is a function of whether people keep filing.
 
-**Measured on retrieval, 18 Sep 2026** (`Docs/measurements/2026-09-18-semantic-arms.md`,
+**Measured on retrieval, 18 Sep 2026** (`docs/measurements/2026-09-18-semantic-arms.md`,
 n=60, paired): the semantic pack beats the corrected OKF baseline 58/60 against
 40/60, +30.0 points, 18 discordant pairs all one way, McNemar exact p=7.6e-06.
 

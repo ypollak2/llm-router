@@ -84,23 +84,51 @@ def test_both_sides_of_a_conflict_are_retrieved(seeded):
     )
 
 
-def test_every_cited_file_exists(seeded):
-    """A record pointing at a file that is gone is worse than no record."""
+def _tracked_paths() -> set[str]:
+    import subprocess
+    out = subprocess.run(["git", "-C", str(REPO), "ls-files"],
+                         capture_output=True, text=True, timeout=60)
+    return set(out.stdout.split())
+
+
+def test_every_cited_file_is_in_the_repository(seeded):
+    """Not "exists on this machine" — IS IN GIT.
+
+    The first version checked `(REPO / rel).exists()` and passed on macOS while
+    failing on both CI runners, for two reasons it could not see:
+
+      * `docs/` is ignore-by-default in .gitignore with an explicit allowlist,
+        so four measurement documents and the vendored research paper had never
+        been committed. `git add -A` skips ignored paths in silence, so every
+        commit "succeeded" and the files lived only on one laptop.
+      * one record cited `CLAUDE.md`, which is private and gitignored on
+        purpose, so it will never be in any clone.
+
+    A record pointing at a file nobody else can open is worse than no record:
+    it looks like evidence and is not. Existence on the author's disk is not
+    the property that matters.
+    """
+    tracked = _tracked_paths()
     missing = []
     for record in seeded.all():
         for rel in record.affected_paths:
-            if not (REPO / rel).exists():
+            if rel.endswith("/"):
+                continue
+            if rel not in tracked and not any(t.startswith(rel) for t in tracked):
                 missing.append(f"{exp.record_id(record)} → {rel}")
-    assert not missing, "seeded records cite files that do not exist: " + \
-        ", ".join(missing)
+    assert not missing, (
+        "seeded records cite files that are not committed, so nobody else can "
+        "open them: " + ", ".join(missing)
+    )
 
 
 def test_every_claimed_check_exists_and_is_a_real_test(seeded):
     """`enforcement=adopted-project-rule` claims something fails. Verify it can."""
+    tracked = _tracked_paths()
     missing = []
     for record in seeded.all():
         for rel in record.check_refs:
-            if not (REPO / rel).exists():
+            if rel not in tracked:
                 missing.append(f"{exp.record_id(record)} → {rel}")
     assert not missing, (
         "records claim prevention checks that do not exist, which is the "

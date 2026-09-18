@@ -128,7 +128,7 @@ def starter_records() -> list:
             affected_paths=["scripts/bench_grounding.py"],
             affected_symbols=["scores", "score"],
             evidence_ids=["commit:84161f1",
-                          "Docs/measurements/2026-09-18-grounding-corrected-baseline.md"],
+                          "docs/measurements/2026-09-18-grounding-corrected-baseline.md"],
             check_refs=["tests/test_bench_grounding_scoring.py"],
             review=Review.REVIEWED,
             validation=Validation.REPRODUCED,
@@ -332,8 +332,13 @@ def starter_records() -> list:
                 "print n beside every rate; below ~50 say 'too few to tell'; "
                 "code regressions do not heal themselves, workload shifts do"
             ),
-            affected_paths=["scripts/bench_grounding.py", "CLAUDE.md"],
-            evidence_ids=["CLAUDE.md"],
+            # CLAUDE.md holds the original incident notes and is private —
+            # gitignored, never in a clone. A record citing it is a record whose
+            # evidence nobody else can open, so the public artifact is the
+            # citation and the private file is not named as a path.
+            affected_paths=["scripts/bench_grounding.py"],
+            evidence_ids=[
+                "docs/measurements/2026-09-18-grounding-corrected-baseline.md"],
             check_refs=["tests/test_bench_grounding_scoring.py"],
             review=Review.REVIEWED,
             validation=Validation.SUPPORTED,
@@ -354,7 +359,8 @@ def starter_records() -> list:
                       "an unattended benchmark run"],
             suggested_action="time.monotonic() for durations, caffeinate -i for runs",
             affected_paths=["scripts/bench_grounding.py"],
-            evidence_ids=["CLAUDE.md"],
+            evidence_ids=[
+                "docs/measurements/2026-09-18-grounding-corrected-baseline.md"],
             check_refs=["tests/test_bench_grounding_scoring.py"],
             review=Review.REVIEWED,
             validation=Validation.REPRODUCED,
@@ -386,9 +392,9 @@ def starter_records() -> list:
                 "beside the number, and prefer an artifact someone can re-run "
                 "to a figure in prose"
             ),
-            affected_paths=["Docs/measurements/2026-09-18-context-pack-shape.md",
+            affected_paths=["docs/measurements/2026-09-18-context-pack-shape.md",
                             "scripts/shadow_diff_router_injection.py"],
-            evidence_ids=["Docs/measurements/2026-09-18-context-pack-shape.md"],
+            evidence_ids=["docs/measurements/2026-09-18-context-pack-shape.md"],
             check_refs=["tests/test_bench_grounding_scoring.py"],
             review=Review.REVIEWED,
             validation=Validation.REPRODUCED,
@@ -487,7 +493,7 @@ def starter_records() -> list:
             affected_paths=["scripts/bench_grounding.py"],
             affected_symbols=["score"],
             evidence_ids=["commit:84161f1",
-                          "Docs/measurements/2026-09-18-grounding-corrected-baseline.md"],
+                          "docs/measurements/2026-09-18-grounding-corrected-baseline.md"],
             check_refs=["tests/test_bench_grounding_scoring.py"],
             contradicts=["basename-is-enough-012a"],
             review=Review.REVIEWED,

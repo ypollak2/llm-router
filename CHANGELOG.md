@@ -107,10 +107,10 @@ OKF context, on questions derived from symbols the repository defines exactly
 once. Strict and lenient scoring agreed exactly (40 = 40). Material was
 retrieved for 41 of 60; on those alone, 0% → 97.6%. Model `qwen3-coder:30b`,
 seed 7. Full provenance and per-question detail in
-`Docs/measurements/2026-09-18-grounding-corrected-baseline.md`.
+`docs/measurements/2026-09-18-grounding-corrected-baseline.md`.
 
 Arms A/B/C/D, same n=60 and same scorer, paired
-(`Docs/measurements/2026-09-18-semantic-arms.md`):
+(`docs/measurements/2026-09-18-semantic-arms.md`):
 
 | arm | | correct |
 |---|---|---|
@@ -128,7 +128,7 @@ graph was +3 points over the corrected baseline; it scored zero, so the
 expansion code, hop caps and high-degree penalty are gone — 97 lines net.
 
 Three harder strata were then derived and run at n=60 each
-(`Docs/measurements/2026-09-18-harder-strata.md`), and they bound the claim:
+(`docs/measurements/2026-09-18-harder-strata.md`), and they bound the claim:
 
 | stratum | B | C | BC |
 |---|---|---|---|
@@ -146,7 +146,7 @@ the correct behaviour for a symbol nobody wrote.
 **It does not show improved task completion**, and the M0/M1/M2 history track
 is still scaffolded and unrun, which is why history and intervention remain off
 while source retrieval does not.
-See `Docs/decisions/0002-semantic-layer.md` for what was deliberately narrowed
+See `docs/decisions/0002-semantic-layer.md` for what was deliberately narrowed
 and what is known to be broken and unfixed.
 
 ## [13.3.2] - 2026-09-16
