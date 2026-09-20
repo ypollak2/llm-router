@@ -17,9 +17,12 @@ A completion route that ran no tools records ``tool_execution_succeeded=None`` �
 Recording is FAIL-OPEN: a ledger write must never raise into the routing path. If the
 ledger can't be written, the route still proceeds — we lose a metric, not a turn.
 
-Schema versioning: v2 rows carry ``schema_version=2``. Legacy v1 rows (written by the
-deprecated :class:`RouteRecord` / :func:`record`) lack it and are read with legacy
-semantics — they NEVER contribute to v2 verification / mis-route / quality metrics.
+Schema versioning: v2 rows carry ``schema_version=2``, v3 rows ``3``. Legacy v1 rows
+(written by the deprecated :class:`RouteRecord` / :func:`record`) lack it and are read
+with legacy semantics — they NEVER contribute to v2+ verification / mis-route / quality
+metrics. Quality denominators test ``>= 2``, not ``== 2``: v3 changed no quality
+semantics, and an equality test would empty every denominator on the next bump while
+still reporting a clean-looking rate.
 """
 from __future__ import annotations
 
@@ -31,7 +34,25 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
-CURRENT_SCHEMA_VERSION = 2
+CURRENT_SCHEMA_VERSION = 3
+
+# ── v3: traceability ─────────────────────────────────────────────────────────
+# v2 recorded what the router DID but not what it did it TO. Audited 2026-09-20:
+# prompt text lived only in conversation transcripts, which carry no route_id,
+# no task_type and no timestamp, so no historical route could be connected to
+# the task that produced it. Ground truth was therefore underivable from 22,356
+# records — not for want of volume, but for want of a join key.
+#
+# v3 adds that key as a HASH, never as text. `routing_quality.jsonl` keeps its
+# existing guarantee that no prompt content is persisted here; the text, when
+# captured at all, lives in the opt-in scrubbed store and is joined on
+# `prompt_sha256`. Reading the ledger therefore reveals nothing it did not
+# already reveal.
+#
+# The contract v3 is required to satisfy:
+#   given route_id       -> exactly one record
+#   given prompt_sha256  -> the captured task text, if capture was enabled
+# with no reliance on timestamp proximity or any other heuristic.
 BASELINE_POLICY_VERSION = "north-star-v1"
 
 FallbackReason = Literal[
@@ -63,7 +84,7 @@ _QUALITY_REASONS: frozenset[str] = frozenset(
 
 @dataclass
 class RouteLedgerRecord:
-    """Exactly one logical route's measured outcome. schema_version=2."""
+    """Exactly one logical route's measured outcome. schema_version=3."""
 
     # --- Identity ---
     schema_version: int = CURRENT_SCHEMA_VERSION
@@ -131,10 +152,100 @@ class RouteLedgerRecord:
 
     ts: float = 0.0                              # unix time; stamped on write if 0
 
+    # ── v3 traceability ──────────────────────────────────────────────────────
+    # Everything below exists so a route can be reconstructed as an evaluation
+    # unit later. None of it is prompt or response CONTENT; see the v3 note at
+    # the top of this module.
+
+    # Groups the routes belonging to one conversation. Present in
+    # auto-route-debug.log since v1 and absent here, which is why the two logs
+    # could never be joined.
+    session_id: str | None = None
+
+    # THE JOIN KEY. sha256 of the exact prompt, via trace_id.hash_prompt().
+    # Not reversible, and stable across restarts, so a replayed call lands on
+    # the same key. Null when the caller did not supply the prompt.
+    prompt_sha256: str | None = None
+
+    # Same treatment for the model's output: enough to tell two responses
+    # apart and to confirm a captured response is the one this route produced.
+    response_sha256: str | None = None
+
+    # Wall-clock for the route. time.monotonic() at the call site, not
+    # time.time(): this machine's sleep advances the latter, and one benchmark
+    # task was recorded at 918s of which 902s was the laptop asleep.
+    latency_ms: float | None = None
+
+    # Decision metadata. Both exist in model_tracking.jsonl, which has no
+    # route_id, so they were unjoinable to the outcome they explain.
+    complexity: str | None = None                # simple | moderate | complex
+    classification_method: str | None = None     # heuristic | semantic | fast-path | …
+
+    # HOW acceptability was decided, not just whether it passed.
+    # verification_attempted/passed above say pass/fail; these say by what.
+    # Kept deliberately parallel to the ground-truth record so a production
+    # verification and an offline one are directly comparable.
+    verification_type: str | None = None         # mechanical | sandbox | judge | human
+    verifier_name: str | None = None             # e.g. "pytest", "words()", "judge:haiku"
+
+    # Pointer into the capture store when prompt text was persisted for this
+    # route. Null means no text was captured — the normal case, since capture
+    # is opt-in. Never a file path outside the capture root.
+    capture_ref: str | None = None
+
 
 def _default_ledger() -> Path:
     return Path(os.environ.get("LLM_ROUTER_ROUTING_LEDGER",
                                str(Path.home() / ".llm-router" / "routing_quality.jsonl")))
+
+
+def stamp_trace(
+    rec: RouteLedgerRecord,
+    *,
+    prompt: str | None = None,
+    response: str | None = None,
+    session_id: str | None = None,
+    latency_ms: float | None = None,
+    complexity: str | None = None,
+    classification_method: str | None = None,
+    capture_ref: str | None = None,
+) -> RouteLedgerRecord:
+    """Fill the v3 traceability fields on *rec*, hashing content rather than storing it.
+
+    This is the only supported way to populate ``prompt_sha256`` /
+    ``response_sha256``, so there is one hash convention rather than the three
+    that already exist in this tree (``trace_id.hash_prompt``,
+    ``result_cache._prompt_hash``, ``semantic`` scope keys). It delegates to
+    :func:`llm_router.trace_id.hash_prompt` — added for audit G-025 and, until
+    now, wired to nothing.
+
+    Note the difference from ``result_cache._prompt_hash``, which lowercases and
+    strips before hashing. That is correct for a cache, where near-identical
+    prompts *should* collide. It is wrong here: an evaluation unit is the exact
+    task the user sent, so the hash is taken over the exact bytes.
+
+    Mutates and returns *rec* for chaining. Never raises.
+    """
+    try:
+        from llm_router.trace_id import hash_prompt  # local: keeps module dep-free
+    except Exception:  # noqa: BLE001 — traceability must not break routing
+        hash_prompt = None  # type: ignore[assignment]
+
+    if prompt is not None and hash_prompt is not None:
+        rec.prompt_sha256 = hash_prompt(prompt)
+    if response is not None and hash_prompt is not None:
+        rec.response_sha256 = hash_prompt(response)
+    if session_id is not None:
+        rec.session_id = session_id
+    if latency_ms is not None:
+        rec.latency_ms = round(float(latency_ms), 3)
+    if complexity is not None:
+        rec.complexity = complexity
+    if classification_method is not None:
+        rec.classification_method = classification_method
+    if capture_ref is not None:
+        rec.capture_ref = capture_ref
+    return rec
 
 
 def record_route(rec: RouteLedgerRecord, path: str | None = None) -> bool:
@@ -242,8 +353,13 @@ def summarize(path: str | None = None) -> dict[str, Any]:
     (not None); legacy v1 rows never enter any v2 quality denominator.
     """
     rows = load_records(path)
+    # `>= 2`, never `== 2`. v3 adds traceability fields and changes no quality
+    # semantics, so a v3 row belongs in exactly the denominators a v2 row does.
+    # An equality test here would have silently emptied every quality
+    # denominator the moment the schema was bumped, and the rate would have
+    # read as a clean 0% rather than as a missing measurement.
     v2 = [r for r in rows
-          if r.get("schema_version", 1) == 2 and r.get("parent_route_id") is None]
+          if r.get("schema_version", 1) >= 2 and r.get("parent_route_id") is None]
     legacy = [r for r in rows if not r.get("_invalid") and r.get("schema_version", 1) == 1]
     invalid = [r for r in rows if r.get("_invalid")]
 

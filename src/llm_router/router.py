@@ -11,6 +11,7 @@ generation APIs directly, because LiteLLM has no media generation support.
 
 from __future__ import annotations
 
+
 import asyncio
 import os
 import platform
@@ -1938,13 +1939,26 @@ async def _finalize_successful_route(
         except Exception as e:
             log.warning("session_spend_tracking_failed", error=str(e))
 
+    # Identity resolution is hoisted above the ledger write (it used to sit just
+    # below, with the context buffers) so `session_id` can go INTO the ledger
+    # row. Without it the routing ledger and auto-route-debug.log had no field in
+    # common and could never be joined — the gap that made historical ground
+    # truth underivable. The fail-open guard is unchanged and still the reason
+    # this is wrapped: a resolution failure here would otherwise propagate into
+    # the primary loop's provider-error handler and discard a billed response.
+    try:
+        _rt_pid, _rt_sid = _resolve_context_identity(None, None)
+    except Exception as _id_err:  # noqa: BLE001 — telemetry never breaks routing
+        log.debug("context identity resolution failed (non-fatal): %s", _id_err)
+        _rt_pid, _rt_sid = None, None
+
     # North Star route-quality ledger (CF-1) — completion route. Skipped on cache
     # hits: the `bypassed` terminal already emitted at the call site is the correct
     # ledger signal; a completion record here would double-signal (CHZ-AUD-B-05).
     if not suppress_ledger and not served_from_cache:
         try:
             from llm_router.routing_quality import (
-                RouteLedgerRecord, derive_fallback_reason, record_route,
+                RouteLedgerRecord, derive_fallback_reason, record_route, stamp_trace,
             )
             _fb_occurred = len(chain_errors) > 0
             _fb_reason, _mis = derive_fallback_reason(chain_errors)
@@ -1961,7 +1975,34 @@ async def _finalize_successful_route(
             _base = _baseline_cost(task_type, profile, _in_tok, _out_tok)
             _final_cost = float(getattr(response, "cost_usd", 0.0) or 0.0)
             _actual = _final_cost + failed_attempt_cost
-            record_route(RouteLedgerRecord(
+            # v3 traceability. The route_id is minted here rather than left to
+            # the dataclass default so the capture record can carry the SAME id
+            # the ledger row will have — without it the capture store could only
+            # be joined by hash, and a route_id lookup would dead-end.
+            _route_id = str(uuid4())
+
+            # Capture is opt-in and returns True only when it actually wrote.
+            # The hashes below are recorded either way, so a route stays
+            # identifiable even with capture off.
+            _capture_ref = None
+            try:
+                from llm_router.prompt_capture import capture as _capture_prompt
+                if _capture_prompt(
+                    prompt,
+                    route_id=_route_id,
+                    session_id=_rt_sid,
+                    task_type=task_type.value,
+                    complexity=effective_complexity,
+                    chosen_model=_first_model,
+                    classification_method=(classification_data or {}).get("method"),
+                ):
+                    from llm_router.trace_id import hash_prompt as _hp
+                    _capture_ref = f"capture:{_hp(prompt)}"
+            except Exception:  # noqa: BLE001 — capture never breaks routing
+                _capture_ref = None
+
+            record_route(stamp_trace(RouteLedgerRecord(
+                route_id=_route_id,
                 route_kind="completion",
                 task_type=task_type.value,
                 chosen_tier=_model_tier(_first_model, profile),
@@ -1990,6 +2031,14 @@ async def _finalize_successful_route(
                 chain_attempts=list(chain_attempts),
                 chain_errors=[{"model": m, "reason": r} for m, r in chain_errors],
                 price_table_version=_price_table_version(),
+            ),
+                prompt=prompt,
+                response=getattr(response, "content", None),
+                session_id=_rt_sid,
+                latency_ms=getattr(response, "latency_ms", None),
+                complexity=effective_complexity,
+                classification_method=(classification_data or {}).get("method"),
+                capture_ref=_capture_ref,
             ))
         except Exception as _ledger_err:  # noqa: BLE001 — telemetry never breaks routing
             log.debug("route ledger emit skipped (non-fatal): %s", _ledger_err)
@@ -2001,11 +2050,6 @@ async def _finalize_successful_route(
     # would propagate out and be misclassified by the primary loop's provider-error
     # handler (writing a contradictory attempt_failed + discarding a billed
     # response) or break the idempotency dedupe path's fail-open guarantee.
-    try:
-        _rt_pid, _rt_sid = _resolve_context_identity(None, None)
-    except Exception as _id_err:  # noqa: BLE001 — telemetry never breaks routing
-        log.debug("context identity resolution failed (non-fatal): %s", _id_err)
-        _rt_pid, _rt_sid = None, None
     try:
         buf = get_session_buffer(_rt_pid, _rt_sid)
         buf.record("user", prompt, task_type=task_type.value)

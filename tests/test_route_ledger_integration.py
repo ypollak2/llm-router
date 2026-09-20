@@ -90,7 +90,7 @@ async def test_route_and_call_emits_one_completion_row(temp_db, tmp_path, monkey
     rows = [r for r in load_records(str(ledger)) if not r.get("_invalid")]
     assert len(rows) == 1, f"expected exactly one ledger row, got {len(rows)}"
     r = rows[0]
-    assert r["schema_version"] == 2
+    assert r["schema_version"] >= 2  # v3 added traceability fields; semantics unchanged
     assert r["route_kind"] == "completion"
     assert r["route_succeeded"] is True
     # honesty: no tools, no verification → None (never True)

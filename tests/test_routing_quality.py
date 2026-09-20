@@ -29,7 +29,7 @@ def test_record_route_appends_v2_row(tmp_path):
                         path=str(ledger)) is True
     rows = [json.loads(ln) for ln in ledger.read_text().splitlines() if ln.strip()]
     assert len(rows) == 1
-    assert rows[0]["schema_version"] == 2
+    assert rows[0]["schema_version"] >= 2  # v3 added traceability fields
     assert rows[0]["route_kind"] == "completion"
     assert rows[0]["route_id"]           # a uuid was stamped
     assert rows[0]["ts"] > 0             # stamped on write
@@ -93,7 +93,7 @@ def test_record_delegation_weak_pass_local_only(tmp_path):
               "savings": {"actual_usd": 0.0, "baseline_usd": 0.4, "saved_usd": 0.4}}
     assert record_delegation(result, path=str(ledger)) is True
     rows = load_records(str(ledger))
-    assert len(rows) == 1 and rows[0]["schema_version"] == 2
+    assert len(rows) == 1 and rows[0]["schema_version"] >= 2
     row = rows[0]
     assert row["route_kind"] == "delegate"
     assert row["weak_pass"] is True
