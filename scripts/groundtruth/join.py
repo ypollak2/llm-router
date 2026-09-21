@@ -21,12 +21,16 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterator
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
+
 LLM_ROUTER_HOME = Path(os.environ.get("LLM_ROUTER_HOME", Path.home() / ".llm-router"))
 
+INCOMPLETE_SYNTHETIC = "synthetic-or-unknown-provenance"
 INCOMPLETE_NO_CAPTURE = "no-captured-prompt"
 INCOMPLETE_NO_HASH = "route-has-no-prompt-sha256"
 INCOMPLETE_LEGACY = "pre-v3-route"
@@ -138,6 +142,18 @@ def join_route(route: dict, capture_index: dict[str, dict]) -> EvaluationUnit:
         schema_version=int(route.get("schema_version", 1) or 1),
         ts=route.get("ts"),
     )
+
+    # Provenance first. A row that cannot prove it came from real usage is not
+    # an evaluation unit, however complete the rest of it looks — and a row
+    # predating the `synthetic` field cannot prove it.
+    try:
+        from llm_router.routing_quality import is_evaluable
+    except Exception:  # noqa: BLE001 — fail CLOSED: unverifiable provenance is excluded
+        def is_evaluable(row: dict) -> bool:  # type: ignore[misc]
+            return "synthetic" in row and not row.get("synthetic")
+    if not is_evaluable(route):
+        unit.incomplete_reasons.append(INCOMPLETE_SYNTHETIC)
+        return unit
 
     if unit.schema_version < 3:
         unit.incomplete_reasons.append(INCOMPLETE_LEGACY)

@@ -47,8 +47,17 @@ PROMPT = "Make the name_contains filter in src/query.py case-insensitive."
 
 
 def write_ledger(tmp_path: Path, *recs: RouteLedgerRecord) -> Path:
+    """Write rows that look like PRODUCTION traffic.
+
+    Under pytest `detect_synthetic()` is True, so a record built here defaults
+    to `synthetic=True` and is excluded from evaluation — which is the correct
+    production behaviour and would make every test below assert nothing. A test
+    that wants a production-shaped row has to say so explicitly, which is the
+    right way round: opting in is visible, opting out would be silent.
+    """
     p = tmp_path / "routing_quality.jsonl"
     for r in recs:
+        r.synthetic = False
         assert record_route(r, path=str(p))
     return p
 
@@ -280,3 +289,42 @@ def test_ledger_metadata_wins_over_capture(tmp_path: Path) -> None:
                           PROMPT, task_type="code", complexity="simple")})
     assert unit.task_type == "analyze"
     assert unit.complexity == "complex"
+
+
+# ── Provenance: test traffic must never become an evaluation unit ───────────
+
+def test_synthetic_row_is_excluded_from_evaluation(tmp_path: Path) -> None:
+    """The guard that keeps fixtures out of Ground Truth."""
+    from groundtruth.join import INCOMPLETE_SYNTHETIC
+    rec = stamp_trace(RouteLedgerRecord(task_type="code"), prompt=PROMPT)
+    rec.synthetic = True                      # a benchmark run
+    ledger = tmp_path / "rq.jsonl"
+    assert record_route(rec, path=str(ledger))
+    capture = write_capture(tmp_path, capture_row(PROMPT))
+    unit = reconstruct(rec.route_id, ledger=ledger, capture=capture)
+    assert unit is not None
+    assert not unit.is_complete
+    assert INCOMPLETE_SYNTHETIC in unit.incomplete_reasons
+    assert unit.prompt is None, "a fixture's prompt must not be attached"
+
+
+def test_row_without_provenance_is_excluded_not_assumed_real(tmp_path: Path) -> None:
+    """A pre-provenance row is UNKNOWN, and unknown is not production."""
+    from groundtruth.join import INCOMPLETE_SYNTHETIC, join_route
+    legacy = {"route_id": "r-old", "schema_version": 3,
+              "prompt_sha256": hash_prompt(PROMPT)}   # no `synthetic` key
+    unit = join_route(legacy, {hash_prompt(PROMPT): capture_row(PROMPT)})
+    assert INCOMPLETE_SYNTHETIC in unit.incomplete_reasons
+
+
+def test_records_written_under_pytest_are_marked_synthetic() -> None:
+    """Defence in depth: the default under a test runner is 'not production'."""
+    assert RouteLedgerRecord().synthetic is True
+
+
+def test_production_row_still_joins(tmp_path: Path) -> None:
+    rec = stamp_trace(RouteLedgerRecord(task_type="code"), prompt=PROMPT)
+    ledger = write_ledger(tmp_path, rec)       # helper marks it production
+    capture = write_capture(tmp_path, capture_row(PROMPT))
+    unit = reconstruct(rec.route_id, ledger=ledger, capture=capture)
+    assert unit is not None and unit.is_complete

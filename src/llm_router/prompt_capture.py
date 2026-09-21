@@ -273,6 +273,15 @@ def capture(
         # envelope captured a week later describes a different repo.
         if accumulation_enabled():
             try:
+                # A test or benchmark run never contributes candidates. Checked
+                # here rather than filtered later: the pool is what a future
+                # Ground Truth v1 is sampled from, so a fixture must not enter
+                # it in the first place.
+                from llm_router.routing_quality import detect_synthetic
+                if detect_synthetic():
+                    _record_outcome(OUTCOME_SKIPPED, "synthetic-run",
+                                    route_id=route_id, task_type=task_type)
+                    return True
                 _scripts_on_path()
                 from groundtruth.accumulate import accumulate as _accumulate
                 admitted, reason, _elig = _accumulate(

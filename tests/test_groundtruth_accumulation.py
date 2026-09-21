@@ -576,6 +576,11 @@ def test_capture_records_an_accumulation_outcome(tmp_path: Path, monkeypatch) ->
     monkeypatch.setenv(pc.ENV_PATH, str(tmp_path / "cap.jsonl"))
     monkeypatch.setenv(pc.ENV_OUTCOME_LOG, str(tmp_path / "out.jsonl"))
     monkeypatch.setenv("LLM_ROUTER_HOME", str(tmp_path))
+    # Pretend to be production: under pytest every run is synthetic, and a
+    # synthetic run skips accumulation entirely, so the rejection path below
+    # would never be reached.
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+    monkeypatch.delenv("LLM_ROUTER_SYNTHETIC", raising=False)
 
     assert pc.capture("commit this and keep going", route_id="r1", task_type="code")
     rows = [json.loads(x) for x in (tmp_path / "out.jsonl").read_text().splitlines()]
@@ -597,3 +602,37 @@ def test_status_exposes_the_outcome_log(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setenv(pc.ENV_OUTCOME_LOG, str(tmp_path / "o.jsonl"))
     st = pc.status()
     assert "outcome_log" in st and "outcome_counters" in st
+
+
+def test_synthetic_run_never_reaches_the_pool(tmp_path: Path, monkeypatch) -> None:
+    """A benchmark must not contribute candidates.
+
+    The pool is what a future Ground Truth v1 is sampled from, so a fixture is
+    kept out at the door rather than filtered later.
+    """
+    from llm_router import prompt_capture as pc
+    monkeypatch.setenv(pc.ENV_FLAG, "1")
+    monkeypatch.setenv(pc.ENV_PATH, str(tmp_path / "cap.jsonl"))
+    monkeypatch.setenv(pc.ENV_OUTCOME_LOG, str(tmp_path / "out.jsonl"))
+    monkeypatch.setenv("LLM_ROUTER_HOME", str(tmp_path))
+    monkeypatch.setenv("LLM_ROUTER_SYNTHETIC", "1")
+
+    assert pc.capture("Make the filter in src/query.py case-insensitive.",
+                      route_id="r-synth", task_type="code")
+    rows = [json.loads(x) for x in (tmp_path / "out.jsonl").read_text().splitlines()]
+    assert rows[-1]["outcome"] == pc.OUTCOME_SKIPPED
+    assert rows[-1]["reason"] == "synthetic-run"
+    assert not (tmp_path / "ground_truth_candidates.jsonl").exists(), (
+        "a synthetic run must create no candidates at all")
+
+
+def test_provenance_marker_is_explicit_not_inferred() -> None:
+    """No model name, session id or token count decides provenance."""
+    import inspect
+
+    from llm_router import routing_quality as rq
+    src = inspect.getsource(rq.detect_synthetic)
+    for smell in ("final_model", "session_id", "mock", "test/", "prompt_tokens"):
+        assert smell not in src, (
+            f"detect_synthetic() inspects {smell!r} — that is an inference, "
+            "and every such inference has needed revising")

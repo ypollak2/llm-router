@@ -31,6 +31,7 @@ Every public guide page, in the order most people need them.
 | Page | What it covers |
 |---|---|
 | [Architecture](ARCHITECTURE.md) | Internal design, module structure, and the routing decision path |
+| [Ground Truth](GROUND_TRUTH.md) | Turning real usage into replayable, verifiable evaluation candidates |
 
 ---
 

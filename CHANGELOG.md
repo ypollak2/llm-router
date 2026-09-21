@@ -10,6 +10,65 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 | [CHANGELOG-ARCHIVE.md](CHANGELOG-ARCHIVE.md) | v10.1.5 back to v6.3.0 |
 | [GitHub Releases](https://github.com/ypollak2/llm-router/releases) | v6.2 and earlier |
 
+## [14.1.0] - 2026-09-21
+
+Ground Truth accumulation: normal routing now produces replayable, verifiable
+evaluation candidates. Adds one environment variable and one ledger field.
+No MCP tool is added or removed, and model-selection policy is unchanged.
+
+### Why this is a minor version
+
+Nothing public was removed or renamed. `RouteLedgerRecord` gains fields and
+`schema_version` moves 2 -> 3; readers already normalise by version, and
+quality denominators test `>= 2` rather than `== 2` so v3 rows are counted
+exactly where v2 rows were.
+
+### Added
+
+- **Ground Truth accumulation**, off by default behind `LLM_ROUTER_GROUND_TRUTH=1`.
+  A routed task is assessed for replayability and verifiability at capture
+  time, its replay envelope is captured, and it is admitted to a candidate pool
+  or rejected with a stated reason. Wired into `_finalize_successful_route`,
+  the single choke point every success path already passes through.
+- **Ledger traceability (schema v3).** `session_id`, `prompt_sha256`,
+  `response_sha256`, `latency_ms`, `complexity`, `classification_method`,
+  `verification_type`, `verifier_name`, `capture_ref`. Content is hashed, never
+  stored: the ledger still persists no prompt or response text. The contract is
+  `route_id -> one record` and `prompt_sha256 -> the captured task`, both exact
+  key lookups, with no timestamp used as a join anywhere.
+- **Explicit provenance.** Every row records whether it came from a test or
+  benchmark run, set from `LLM_ROUTER_SYNTHETIC` or pytest's own marker, never
+  inferred from a model name or session id. Rows predating the field are
+  treated as unknown provenance and excluded from evaluation rather than
+  assumed to be production.
+- **Verifier authoring assistant.** Proposes an acceptance contract and a
+  verifier for a candidate, validates it by mutation, and requires human
+  approval before it can grade anything.
+- `scripts/groundtruth/` — corpus extraction, eligibility, replay envelope,
+  candidate pool, sampling, verifier authoring, and CLI reports.
+
+### Fixed
+
+- `summarize()` filtered `schema_version == 2`. The bump to v3 would have
+  emptied every quality denominator while still reporting a clean-looking 0%
+  instead of a missing measurement. Now `>= 2`, with a test whose only job is
+  to prove an equality filter would have dropped the row.
+
+### Privacy
+
+Prompt text is written only under `LLM_ROUTER_GROUND_TRUTH=1`, and only after
+`secret_scrubber.scrub_text()` — the canonical scrubber — has run. Scrubbing
+fails closed: if that module cannot be imported, nothing is written. Home
+paths, emails and public IPs are additionally scrubbed; person and customer
+names need `LLM_ROUTER_CAPTURE_DENYLIST`, because no regex can detect them.
+
+### Known limitations
+
+- The candidate pool is empty until the flag is enabled; none of this can be
+  backfilled from existing telemetry.
+- The verifier assistant's existing-test search matches on file stem and is
+  noisy on common words. Tracked, not yet fixed.
+
 ## [14.0.0] - 2026-09-18
 
 Five prerequisite defects in project scoping and grounding measurement, and a

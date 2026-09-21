@@ -81,6 +81,43 @@ _QUALITY_REASONS: frozenset[str] = frozenset(
     {"capability_failure", "verification_failure", "quality_failure"}
 )
 
+ENV_SYNTHETIC = "LLM_ROUTER_SYNTHETIC"
+
+
+def detect_synthetic() -> bool:
+    """Is this process a test or benchmark run? Explicit signals only.
+
+    * ``LLM_ROUTER_SYNTHETIC=1`` — what a harness sets deliberately.
+    * ``PYTEST_CURRENT_TEST`` — pytest sets this itself for every test, so it
+      is a statement by the test runner about its own run, not an inference
+      drawn from the data afterwards.
+
+    Nothing here looks at the model name, the session id or the token counts.
+    Each of those has been tried and each has been wrong.
+    """
+    if os.environ.get(ENV_SYNTHETIC, "").strip().lower() in ("1", "true", "yes", "on"):
+        return True
+    return "PYTEST_CURRENT_TEST" in os.environ
+
+
+def is_evaluable(row: dict) -> bool:
+    """May this ledger row feed Ground Truth or a published quality number?
+
+    Three states, and the middle one is the point:
+
+        synthetic=False   production. Usable.
+        synthetic=True    test traffic. Excluded.
+        field absent      UNKNOWN — written before provenance existed.
+
+    Unknown is excluded, not admitted. Treating unknown as production is
+    exactly how 29% test traffic ended up inside every historical figure, and
+    the cost of wrongly excluding an old real row is a smaller sample, while
+    the cost of wrongly including a fixture is a number that is quietly false.
+    """
+    if "synthetic" not in row:
+        return False
+    return not row.get("synthetic")
+
 
 @dataclass
 class RouteLedgerRecord:
@@ -192,6 +229,23 @@ class RouteLedgerRecord:
     # route. Null means no text was captured — the normal case, since capture
     # is opt-in. Never a file path outside the capture root.
     capture_ref: str | None = None
+
+    # ── Provenance ───────────────────────────────────────────────────────────
+    # True when this row was produced by a test, benchmark or harness rather
+    # than by a person using the router. Set from EXPLICIT signals only — an
+    # env var the harness sets, or pytest's own marker — never inferred from
+    # the model name or a suspicious-looking session id.
+    #
+    # Why explicit: 29% of this ledger is test traffic carrying no marker, and
+    # every attempt to identify it after the fact has been a guess that needed
+    # revising. `final_model == "test/mock-model"` catches most of it and
+    # misses a harness pointed at a real model; `session_id == "unknown"` was
+    # 54% of one day's log for unrelated reasons. A flag the writer sets is the
+    # only signal that cannot be wrong about what produced the row.
+    #
+    # Rows written before this field existed carry no value for it. They are
+    # UNKNOWN provenance, not production — see `is_evaluable`.
+    synthetic: bool = field(default_factory=lambda: detect_synthetic())
 
 
 def _default_ledger() -> Path:

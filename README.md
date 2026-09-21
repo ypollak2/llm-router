@@ -487,6 +487,7 @@ export LLM_ROUTER_POLICY="cost_aggressive"        # routing policy
 export LLM_ROUTER_ENFORCE="smart"                 # off | advise | smart | hard
 export LLM_ROUTER_OLLAMA_TIMEOUT=45               # seconds; 45 clears a real local p50
 export LLM_ROUTER_PROJECT_ROOT="$PWD"             # scope the knowledge store explicitly
+export LLM_ROUTER_GROUND_TRUTH=1                  # opt in to Ground Truth accumulation
 ```
 
 `LLM_ROUTER_OLLAMA_TIMEOUT` matters more than it looks. It was 4s before 13.2.0, and
@@ -496,6 +497,46 @@ raise it further rather than wondering why nothing routes.
 
 Full reference, config file schema and per-host overrides:
 **[guide/GETTING_STARTED.md](guide/GETTING_STARTED.md)**
+
+---
+
+## Ground Truth accumulation (14.1.0, opt-in)
+
+Routing decisions can only be judged against tasks somebody can re-run and
+check. Telemetry alone does not provide those: for a long time this repo logged
+the decision and not the task, so 22,356 routing records produced zero evaluable
+examples — not for want of volume, but because prompt text and routing metadata
+lived in separate stores with no shared key.
+
+With `LLM_ROUTER_GROUND_TRUTH=1`, normal usage builds that corpus as it goes:
+
+```
+your task -> routing decision -> eligibility gate -> replay envelope -> candidate pool
+```
+
+Each task is assessed **while it runs**, because the state needed to replay it
+exists only then. A task that needs a repo gets its commit and patch recorded; a
+task that depends on a webpage is either frozen with provenance or marked
+unreplayable; a task like "continue what we were doing" is rejected outright,
+with the reason stored.
+
+```bash
+python3 scripts/groundtruth/accumulate_report.py     # Captured / Eligible / Persisted / Rejected / ...
+python3 scripts/groundtruth/verifier_cli.py suggest  # propose verifiers for candidates
+```
+
+**Off by default.** It is the one part of the system that writes prompt text to
+disk. Scrubbing runs first and fails closed — if the canonical scrubber cannot
+be imported, nothing is written — but that is a reason to let you choose, not to
+choose for you. The routing ledger itself still stores no prompt or response
+text; it holds hashes, and always has.
+
+Every accumulation attempt records one of `persisted` / `rejected` /
+`deduplicated` / `error` to `~/.llm-router/gt_accumulation.jsonl`, so an empty
+pool always has a stated cause. Accumulation is fail-open: a failure loses a
+candidate, never a turn.
+
+Details: **[guide/GROUND_TRUTH.md](guide/GROUND_TRUTH.md)**
 
 ---
 
