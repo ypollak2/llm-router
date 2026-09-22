@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import os
+import stat
 import re
 import subprocess
 from dataclasses import dataclass
@@ -69,20 +70,36 @@ def relative_age(iso_ts: str, now: datetime | None = None) -> str:
 # Secrets scrub — at write time, before anything touches disk
 # ---------------------------------------------------------------------------
 
-_SECRET_PATTERNS = [
-    re.compile(r"\b[A-Z][A-Z0-9_]*_(?:API_)?KEY\s*[=:]\s*\S+"),
-    re.compile(r"\b(?:sk|pk|rk)-[A-Za-z0-9_\-]{16,}"),
-    re.compile(r"\bBearer\s+[A-Za-z0-9._\-]{16,}"),
-    re.compile(r"\bgh[pousr]_[A-Za-z0-9]{20,}"),
-    re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
-    re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----"),
-]
-
-
 def scrub_secrets(text: str) -> str:
-    for pat in _SECRET_PATTERNS:
-        text = pat.sub("[REDACTED-BY-LIBRARY]", text)
-    return text
+    """Delegate to the canonical scrubber. Fails CLOSED.
+
+    T-04 / S-01. This used to carry its own six-pattern list, and the 2026-09-22
+    audit measured what that cost: it missed **Slack tokens, JWTs and Google API
+    keys** that `secret_scrubber` covers, and it never called the canonical
+    scrubber at all.
+
+    That mattered more here than at most call sites. `library-harvest` runs this
+    on `tool_input["command"]` for every Bash and Edit call, and `pack.py` later
+    re-injects the stored text verbatim as `additionalContext` into a future
+    prompt — so an unscrubbed secret does not merely rest on disk, it is replayed
+    to whichever model answers next.
+
+    The previous fix round made `secret_scrubber` a genuine superset of every
+    rival table and wrote a test asserting exactly that. The test never called
+    THIS function, so a live caller kept using a weaker copy for another day.
+    Hence the rule this round: the gate asserts the call site, not the definition.
+
+    Fails closed: if the canonical scrubber cannot be imported or raises, the
+    body is withheld rather than written raw. A memory is not worth a credential.
+    """
+    if not text:
+        return text
+    try:
+        from llm_router.secret_scrubber import scrub_text
+
+        return scrub_text(text)
+    except Exception:  # noqa: BLE001 — see the docstring; never write raw
+        return "[SCRUB-FAILED: content withheld]"
 
 
 # ---------------------------------------------------------------------------
@@ -209,8 +226,25 @@ class LibraryStore:
         path.parent.mkdir(parents=True, exist_ok=True)
         text = emit_frontmatter(meta) + "\n\n" + scrub_secrets(body).strip() + "\n"
         tmp = path.with_suffix(path.suffix + ".tmp")
-        tmp.write_text(text, encoding="utf-8")
+        # T-04 / S-01: created 0600, not created-then-tightened. These documents
+        # hold scrubbed conversation content, and `write_text` makes the file with
+        # the umask default (0644 here), so it was world-readable for the whole
+        # write and stayed that way — permissions are checked at open time, so a
+        # later chmod does not close a handle already taken.
+        try:
+            from llm_router.paths import private_opener
+
+            with open(tmp, "w", encoding="utf-8", opener=private_opener) as fh:
+                fh.write(text)
+        except Exception:  # noqa: BLE001 — a hook must not fail over a mode
+            tmp.write_text(text, encoding="utf-8")
         os.replace(tmp, path)  # atomic — a crashed writer never leaves half a memory
+        # repair a file an older version created at 0644
+        try:
+            if stat.S_IMODE(path.stat().st_mode) != 0o600:
+                os.chmod(path, 0o600)
+        except OSError:
+            pass
         return path
 
     def read_doc(self, rel: str) -> LibraryDoc | None:
