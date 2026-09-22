@@ -1,4 +1,14 @@
-"""Central registry of every environment variable this codebase reads.
+"""Central registry of every environment variable **the package** reads.
+
+SCOPE, stated because it was over-claimed (T-28, audit 2026-09-22). This covers
+`src/llm_router/`. It does NOT cover `scripts/`, where an independent AST scan
+found 18 further variables. The previous first line said "every environment
+variable this codebase reads", which is a larger claim than the registry keeps —
+and a registry that over-states its own coverage is worse than one that does
+not exist, because it stops people looking.
+
+Extending the scan to `scripts/` is a real option; declaring the boundary is the
+minimum. `tests/test_env_registry.py` enforces the boundary as written here.
 
 RED8-10. 195 distinct variables are read across 313 sites, and nothing declared
 them. A config surface nobody has enumerated cannot be documented, cannot be
@@ -49,6 +59,13 @@ ENV_REGISTRY: dict[str, tuple[str, str, int]] = {
     "LLM_ROUTER_AGENT_POLICY_MODE": ("llm_router", "router.py", 1),
     "LLM_ROUTER_AGENT_ROUTE_ALLOW": ("llm_router", "hooks/agent-route.py", 1),
     "LLM_ROUTER_ALERT_WEBHOOK": ("llm_router", "alerts.py", 1),
+    # T-09: the quality/cost exchange rate in the bandit's reward — what one
+    # correct answer is worth, in dollars. 0 makes the bandit rank purely by
+    # cheapness, which is what the old unbounded ratio effectively did.
+    "LLM_ROUTER_ANSWER_VALUE_USD": ("llm_router", "telemetry.py", 1),
+    # T-15: explicit override for the HOST config dir (~/.claude). Distinct from
+    # LLM_ROUTER_HOME, which covers llm-router's own state.
+    "LLM_ROUTER_CLAUDE_DIR": ("llm_router", "install_hooks.py", 1),
     "LLM_ROUTER_ALLOWED_HOSTS": ("llm_router", "route_server.py", 1),
     "LLM_ROUTER_ALLOW_STUBS": ("llm_router", "cost.py", 2),
     "LLM_ROUTER_ALLOW_SUBAGENTS": ("llm_router", "hooks/agent-route.py", 1),

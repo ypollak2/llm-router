@@ -258,9 +258,28 @@ reach disk by default — `LLM_ROUTER_AGENT_WRITES` defaults to `propose`.
   allowlist of inspection programs plus blocked subcommands — and then
   `_BLOCKED_COMMANDS`, a regex over top-level destructive patterns. The table
   below measures only the second layer, so it UNDERSTATES what is blocked in the
-  default configuration: of its twelve commands, six are in fact refused by the
-  allowlist, and `echo $OPENAI_API_KEY` cannot leak a secret because there is no
-  shell to expand it.
+  default configuration: of its twelve commands, **ten are in fact refused by
+  the allowlist** — every row except `cat ../../.ssh/id_rsa` and
+  `echo $OPENAI_API_KEY`. The latter cannot leak a secret anyway, because there
+  is no shell to expand it.
+
+  This count is reproducible rather than remembered (audit 2026-09-22, S-10).
+  Earlier revisions of this file said six; the 2026-09-22 audit reported seven;
+  running the twelve commands through `agent_writes.guard_command` gives ten.
+  Do not edit the number by hand — re-run it:
+
+  ```
+  python3 -c "
+  import importlib.util, shlex, sys; sys.path.insert(0,'src')
+  s = importlib.util.spec_from_file_location('aw','src/llm_router/hooks/agent_writes.py')
+  m = importlib.util.module_from_spec(s); s.loader.exec_module(m)
+  for c in open('docs/security_command_matrix.txt'):
+      c = c.strip()
+      if c:
+          ok, _ = m.guard_command(shlex.split(c))
+          print(('ALLOWED' if ok else 'REFUSED'), c)
+  "
+  ```
 - `LLM_ROUTER_AGENT_COMMANDS=all` skips the allowlist entirely, leaving only the
   regex. `llm_local_task` set that implicitly whenever writes were applied; since
   2026-09-14 it does not, and its `apply_writes` defaults to False.
