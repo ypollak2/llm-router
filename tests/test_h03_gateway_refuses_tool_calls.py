@@ -46,6 +46,37 @@ TOOLS = [{
 LOOPBACK = {"Host": "127.0.0.1:8080"}
 
 
+@pytest.fixture(autouse=True)
+def _no_network(monkeypatch):
+    """T-22: this file must not touch the network.
+
+    Measured during the audit: 14s wall clock, an OpenAI auth error, an Ollama
+    connect attempt, and a LIVE Codex call returning 200 in 8.2s. A test that
+    refuses tool calls should never reach a provider — if it does, either the
+    refusal did not fire or the assertion is measuring the wrong thing, and
+    both look like a pass when the network happens to be up.
+
+    Blocking the socket rather than timing the run: "it was fast" is evidence
+    about this machine, "it could not connect" is evidence about the code.
+    Loopback is left open because `TestClient` uses it in-process.
+    """
+    import socket
+
+    real_connect = socket.socket.connect
+
+    def _blocked(self, address, *a, **kw):
+        host = address[0] if isinstance(address, tuple) else str(address)
+        if host in ("127.0.0.1", "::1", "localhost"):
+            return real_connect(self, address, *a, **kw)
+        raise AssertionError(
+            f"this test reached the network ({host}). The gateway must refuse a "
+            f"tool-call request before any provider is contacted (T-22)."
+        )
+
+    monkeypatch.setattr(socket.socket, "connect", _blocked)
+    yield
+
+
 @pytest.fixture
 def client():
     return TestClient(gateway.app, raise_server_exceptions=False)

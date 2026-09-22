@@ -315,7 +315,8 @@ def _resolve_project_scope(request, body_value: str | None = None) -> str | None
 
 
 async def _route(prompt: str, task_type: str | None, complexity: str | None,
-                 prefer_model: str | None = None, project_root: str | None = None):
+                 prefer_model: str | None = None, project_root: str | None = None,
+                 classify_text: str | None = None):
     """Shared core for every wire-format endpoint: classify (if needed) → route
     through LLM Router's FULL router and adapt the result.
 
@@ -323,11 +324,31 @@ async def _route(prompt: str, task_type: str | None, complexity: str | None,
     gateway traffic gets the same budget caps, caching, paid-spend cap, and cost
     logging as the native ``/route`` endpoint (and the standalone route server).
     ``prefer_model`` (the OpenAI ``model`` field) requests a specific tier.
+
+    ``classify_text`` — WHAT WE CLASSIFY vs WHAT WE SEND (audit 2026-09-22, T-03)
+    ---------------------------------------------------------------------------
+    ``prompt`` is what the model receives and MUST keep the system prompt and the
+    whole history; truncating it would change the answer. ``classify_text`` is
+    what the complexity heuristic reads, and it must not.
+
+    ``_resolve_profile`` thresholds on character length (<600 simple /
+    600-2000 moderate / >2000 complex). Every wire endpoint used to hand it the
+    flattened transcript, so a 1.7KB system preamble pushed ``"hi"`` from SIMPLE
+    to MODERATE and a 2KB one to COMPLEX — measured, not assumed::
+
+        _classify(_flatten([user "hi"]))                  -> ('analyze', 'simple')
+        _classify(_flatten([system <1.7KB>, user "hi"]))  -> ('analyze', 'moderate')
+
+    That is the product's flagship path ("route ANY LLM client, no code change")
+    systematically over-routing trivial turns to expensive models — the exact
+    opposite of what it is for. Passing ``None`` keeps the old behaviour, which
+    is what the native ``/route`` endpoint wants: there, the caller's prompt IS
+    the ask.
     """
     if not prompt.strip():
         raise HTTPException(status_code=400, detail="no prompt content")
     if not task_type or not complexity:
-        _t, _c = _classify(prompt)
+        _t, _c = _classify(classify_text if (classify_text or "").strip() else prompt)
         task_type, complexity = task_type or _t, complexity or _c
 
     from llm_router.route_server import route_payload_async
@@ -344,6 +365,62 @@ async def _route(prompt: str, task_type: str | None, complexity: str | None,
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"LLM Router routing failed: {e}")
     return _RoutedResult(out)
+
+
+def _latest_user_turn_from_responses_input(value) -> str:
+    """``_latest_user_turn`` for the OpenAI Responses ``input`` shape (T-03).
+
+    A bare string input IS the user's ask, so it returns unchanged. A list is
+    scanned for the last ``user`` item; a list of raw content-parts with no
+    roles at all falls back to the flattened text, since there is no system
+    preamble mixed into it to exclude.
+    """
+    if isinstance(value, str):
+        return value
+    if not isinstance(value, list):
+        return str(value or "")
+    saw_role = False
+    for item in reversed(value):
+        if not isinstance(item, dict):
+            continue
+        role = item.get("role")
+        if role is None:
+            continue
+        saw_role = True
+        if role != "user":
+            continue
+        c = item.get("content")
+        if isinstance(c, list):
+            c = " ".join(part.get("text", "") for part in c if isinstance(part, dict))
+        if c:
+            return str(c)
+    return "" if saw_role else _flatten_responses_input(value)
+
+
+def _latest_user_turn(messages: list) -> str:
+    """The text of the most recent ``user`` message — what the caller is ASKING.
+
+    This is the classification input for every wire-format endpoint (T-03). A
+    system preamble is the client's configuration, not the user's request, and a
+    prior assistant turn is history; neither says anything about how hard THIS
+    turn is, but both inflate the character count the complexity heuristic
+    thresholds on.
+
+    Returns ``""`` when there is no user turn at all, which makes the caller fall
+    back to the full flattened prompt rather than classifying nothing — an empty
+    classification input would silently take the ``simple`` branch for every
+    request, which is the same bug pointed the other way.
+    """
+    for m in reversed(messages or []):
+        role = m.get("role", "user") if isinstance(m, dict) else getattr(m, "role", "user")
+        if role != "user":
+            continue
+        c = m.get("content") if isinstance(m, dict) else getattr(m, "content", None)
+        if isinstance(c, list):  # content-parts (OpenAI/Anthropic vision format)
+            c = " ".join(p.get("text", "") for p in c if isinstance(p, dict))
+        if c:
+            return str(c)
+    return ""
 
 
 def _flatten(messages: list) -> str:
@@ -591,7 +668,8 @@ async def openai_chat(req: _OAIRequest, request: Request) -> dict:
     _refuse_tools_if_present(req.tools, req.tool_choice)
     r = await _route(_flatten(req.messages), req.task_type, req.complexity,
                      prefer_model=_qualify_model(req.model, "openai"),
-                     project_root=_resolve_project_scope(request))
+                     project_root=_resolve_project_scope(request),
+                     classify_text=_latest_user_turn(req.messages))
     return {
         "id": f"chatcmpl-{uuid.uuid4().hex[:24]}",
         "object": "chat.completion",
@@ -616,11 +694,15 @@ class _ResponsesRequest(BaseModel):
 @app.post("/v1/responses")
 async def openai_responses(req: _ResponsesRequest, request: Request) -> dict:
     prompt = _flatten_responses_input(req.input)
+    # Classify BEFORE the instructions are prepended: `instructions` is the
+    # Responses API's system prompt, and folding it in is T-03 (see _route).
+    classify_text = _latest_user_turn_from_responses_input(req.input)
     if req.instructions:
         prompt = f"system: {req.instructions}\n{prompt}"
     r = await _route(prompt, req.task_type, req.complexity,
                      prefer_model=_qualify_model(req.model, "openai"),
-                     project_root=_resolve_project_scope(request))
+                     project_root=_resolve_project_scope(request),
+                     classify_text=classify_text)
     output_id = f"msg_{uuid.uuid4().hex[:24]}"
     return {
         "id": f"resp_{uuid.uuid4().hex[:24]}",
@@ -666,10 +748,12 @@ class _AnthropicRequest(BaseModel):
 @app.post("/v1/messages")
 async def anthropic_messages(req: _AnthropicRequest, request: Request) -> dict:
     _refuse_tools_if_present(req.tools, req.tool_choice)
+    # `req.system` is sent to the model but never classified (T-03).
     prompt = (f"system: {req.system}\n" if req.system else "") + _flatten(req.messages)
     r = await _route(prompt, None, None,
                      prefer_model=_qualify_model(req.model, "anthropic"),
-                     project_root=_resolve_project_scope(request))
+                     project_root=_resolve_project_scope(request),
+                     classify_text=_latest_user_turn(req.messages))
     return {
         "id": f"msg_{uuid.uuid4().hex[:24]}",
         "type": "message",
@@ -698,7 +782,8 @@ class _OllamaGenerate(BaseModel):
 async def ollama_chat(req: _OllamaChat, request: Request) -> dict:
     r = await _route(_flatten(req.messages), None, None,
                      prefer_model=_qualify_model(req.model, "ollama"),
-                     project_root=_resolve_project_scope(request))
+                     project_root=_resolve_project_scope(request),
+                     classify_text=_latest_user_turn(req.messages))
     return {
         "model": f"{r.model.provider}/{r.model.model}",
         "message": {"role": "assistant", "content": r.text},
