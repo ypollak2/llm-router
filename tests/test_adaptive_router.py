@@ -334,20 +334,43 @@ class TestAlwaysOnDynamic:
             "is_dynamic_routing_enabled() must be removed — dynamic routing is always on"
 
     def test_router_calls_dynamic_routing_tables(self):
-        """Verify that router uses dynamic routing tables from session startup."""
+        """Verify that router uses dynamic routing tables from session startup.
+
+        Was three `"phrase" in inspect.getsource(...)` substring checks — each
+        satisfiable by a comment naming the function or the word "except"
+        without the real call/handler existing (the exact A-10 evasion this
+        repo's audit reproduced). Converted to AST: `assert_calls` requires a
+        real CALL expression matching each function name, and the `except`
+        check requires a real `ast.Try` node with at least one handler.
+        """
         # v5.4.1+: Router uses pre-built dynamic routing tables instead of per-request
         # discovery. Dynamic tables are built once at session start via
         # initialize_dynamic_routing() in server.py startup sequence.
-        from llm_router import router
+        import ast
         import inspect
+        import sys
+        from pathlib import Path
 
-        source = inspect.getsource(router._build_and_filter_chain)
-        # Should look up dynamic routing tables first
-        assert "get_dynamic_model_chain" in source
-        # Should fall back to static chain if dynamic tables unavailable
-        assert "get_model_chain" in source
-        # Should have try/except for graceful fallback
-        assert "except" in source
+        from llm_router import router
+
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        from _ast_assert import assert_calls
+
+        # Should look up dynamic routing tables first (real call, not a mention).
+        assert_calls(router._build_and_filter_chain, "get_dynamic_model_chain")
+        # Should fall back to static chain if dynamic tables unavailable.
+        assert_calls(router._build_and_filter_chain, "get_model_chain")
+        # Should have try/except for graceful fallback — a real Try node with
+        # a handler, not the word "except" surviving in a comment.
+        tree = ast.parse(inspect.getsource(router._build_and_filter_chain))
+        has_handled_try = any(
+            isinstance(n, ast.Try) and n.handlers for n in ast.walk(tree)
+        )
+        assert has_handled_try, (
+            "_build_and_filter_chain has no try/except around the dynamic "
+            "chain lookup — a lookup failure would propagate instead of "
+            "falling back to the static chain"
+        )
 
 
 # ── Phase 4: Sidecar /score Endpoint ──────────────────────────────────────────

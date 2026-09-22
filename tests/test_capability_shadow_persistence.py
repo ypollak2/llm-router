@@ -42,12 +42,31 @@ CONTROL (re-run if edited)
 
 from __future__ import annotations
 
+import ast
 import inspect
 import json
 
 import pytest
 
 from llm_router.capabilities import detect_capabilities, serialize_capability_decision
+
+
+# R13: these tests used to grep `inspect.getsource(...)` text for a phrase.
+# That is satisfied by the phrase sitting in a COMMENT while the real call
+# site is gone — reproduced by the audit (23 tests stayed green after exactly
+# that mutation). The helper below finds the real AST node — an `ast.Assign`
+# whose value is a `serialize_capability_decision(...)` call — which cannot
+# exist unless the code actually does the assignment; comments are not part
+# of the AST at all.
+def _assigns_capabilities_json_from_serializer(node: ast.AST) -> bool:
+    """True if *node* contains `capabilities_json = serialize_capability_decision(...)`."""
+    return any(
+        isinstance(n, ast.Assign)
+        and any(isinstance(t, ast.Name) and t.id == "capabilities_json" for t in n.targets)
+        and isinstance(n.value, ast.Call)
+        and ast.unparse(n.value.func) == "serialize_capability_decision"
+        for n in ast.walk(node)
+    )
 
 
 class TestSerializer:
@@ -105,11 +124,21 @@ class TestSerializer:
 
 class TestPersistence:
     def test_migration_is_applied(self):
-        """Defined-but-unapplied is a silent no-op; the column never appears."""
+        """Defined-but-unapplied is a silent no-op; the column never appears.
+
+        Was `"+ MIGRATE_ROUTING_DECISIONS_ADD_CAPABILITIES" in
+        inspect.getsource(cost)` — satisfied by the phrase sitting in a
+        comment anywhere in the module. `_get_db` builds `all_migrations` by
+        summing module-level list constants with `+`; walking its AST for an
+        `ast.Name` load of the constant proves the name is really an operand
+        of that expression, which a comment cannot fake (`ast.Name` nodes
+        only exist where the identifier is actually referenced by code).
+        """
         import llm_router.cost as cost
 
-        src = inspect.getsource(cost)
-        assert "+ MIGRATE_ROUTING_DECISIONS_ADD_CAPABILITIES" in src, (
+        tree = ast.parse(inspect.getsource(cost._get_db))
+        referenced_names = {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)}
+        assert "MIGRATE_ROUTING_DECISIONS_ADD_CAPABILITIES" in referenced_names, (
             "MIGRATE_ROUTING_DECISIONS_ADD_CAPABILITIES is defined but never "
             "added to all_migrations — capabilities_json would never exist and "
             "every shadow write would fail into the fail-open path forever."
@@ -118,19 +147,33 @@ class TestPersistence:
     def test_column_is_in_the_insert(self):
         """The write path must actually carry the value.
 
-        Asserted against the INSERT statement rather than by grepping for the
-        symbol: a name can appear in an import or a comment without the column
-        ever being written, which is how the capability came to be missing in
-        the first place.
+        Was sliced out of `inspect.getsource` text on the markers "VALUES"
+        and "INSERT INTO routing_decisions" — a comment quoting either marker
+        ahead of the real SQL could shift the slice and hide a missing
+        column. `string_constants` pulls the literal the way the AST helper
+        does: only STRING CONSTANT nodes the code actually holds, so the text
+        analysed below is guaranteed to be the SQL `db.execute` really runs.
         """
         import llm_router.cost as cost
+        import sys
+        from pathlib import Path
 
-        src = inspect.getsource(cost.log_routing_decision)
-        assert "capabilities_json" in src.split("VALUES")[0], (
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        from _ast_assert import string_constants
+
+        literals = string_constants(cost.log_routing_decision)
+        insert_stmts = [s for s in literals if "INSERT INTO routing_decisions" in s]
+        assert insert_stmts, (
+            "no 'INSERT INTO routing_decisions' string literal found in "
+            "log_routing_decision — the write path may have moved"
+        )
+        insert_sql = insert_stmts[0]
+
+        assert "capabilities_json" in insert_sql.split("VALUES")[0], (
             "capabilities_json is not in the INSERT column list"
         )
-        placeholders = src.split("VALUES")[1].split(")")[0].count("?")
-        columns = src.split("INSERT INTO routing_decisions")[1].split(")")[0]
+        placeholders = insert_sql.split("VALUES")[1].split(")")[0].count("?")
+        columns = insert_sql.split("INSERT INTO routing_decisions")[1].split(")")[0]
         assert placeholders == columns.count(",") + 1, (
             f"INSERT has {columns.count(',') + 1} columns but {placeholders} "
             f"placeholders — adding a column without its ? is a runtime error "
@@ -154,31 +197,70 @@ class TestPersistence:
     def test_flag_off_writes_nothing(self, monkeypatch):
         """The guard, asserted where it lives.
 
-        Without ``if capability_routing_enabled():`` in the logging path, every
-        install would run the detector on every routed call — paying for a
-        feature they never enabled, to fill a column nobody reads.
+        Was `"if capability_routing_enabled():" in inspect.getsource(...)`.
+        A comment repeating that exact line, with the real `if` deleted,
+        would have satisfied it — the audit's own reproduction of A-10.
+        This instead requires an `ast.If` node whose test really CALLS
+        `capability_routing_enabled()` and whose body really contains the
+        `capabilities_json = serialize_capability_decision(...)` assignment,
+        so the guard has to actually gate the write, not just be mentioned
+        near it.
         """
         import llm_router.cost as cost
 
-        src = inspect.getsource(cost.log_routing_decision)
-        assert "if capability_routing_enabled():" in src, (
-            "the shadow write is not gated on capability_routing_enabled() — "
+        tree = ast.parse(inspect.getsource(cost.log_routing_decision))
+        guarded = any(
+            isinstance(n, ast.If)
+            and isinstance(n.test, ast.Call)
+            and ast.unparse(n.test.func) == "capability_routing_enabled"
+            and _assigns_capabilities_json_from_serializer(n)
+            for n in ast.walk(tree)
+        )
+        assert guarded, (
+            "the shadow write is not gated on `if capability_routing_enabled():` — "
             "it would run for every install on every routed call"
         )
 
     def test_serialiser_failure_does_not_lose_the_decision(self):
-        """The try/except around the shadow block, asserted structurally."""
+        """The try/except around the shadow block, asserted structurally.
+
+        Was a TEXT SLICE of `inspect.getsource` between the anchors
+        `"capabilities_json: str | None = None"` and `"await db.execute"` —
+        a comment repeating either anchor could shift or hide the slice
+        entirely. This instead finds the real `ast.AnnAssign` that
+        initialises `capabilities_json = None`, and the real `ast.Try` whose
+        body assigns it from `serialize_capability_decision(...)` and that
+        has at least one `except` handler, then checks the initialisation's
+        line precedes the try's — both properties only exist if the code
+        really has this shape.
+        """
         import llm_router.cost as cost
 
-        src = inspect.getsource(cost.log_routing_decision)
-        shadow = src.split("capabilities_json: str | None = None")[1].split(
-            "await db.execute"
-        )[0]
-        assert "try:" in shadow and "except" in shadow, (
-            "the shadow-detection block is not wrapped — a detector or "
-            "serialiser error would abort logging the routing decision itself"
-        )
-        assert "capabilities_json: str | None = None" in src, (
+        tree = ast.parse(inspect.getsource(cost.log_routing_decision))
+
+        ann_assigns = [
+            n for n in ast.walk(tree)
+            if isinstance(n, ast.AnnAssign)
+            and isinstance(n.target, ast.Name) and n.target.id == "capabilities_json"
+            and isinstance(n.value, ast.Constant) and n.value.value is None
+        ]
+        assert ann_assigns, (
             "capabilities_json must be initialised to None BEFORE the try, or "
             "an early failure leaves it unbound and the INSERT raises NameError"
+        )
+        init_line = ann_assigns[0].lineno
+
+        shadow_tries = [
+            n for n in ast.walk(tree)
+            if isinstance(n, ast.Try) and n.handlers
+            and _assigns_capabilities_json_from_serializer(n)
+        ]
+        assert shadow_tries, (
+            "the shadow-detection block is not wrapped in a try/except — a "
+            "detector or serialiser error would abort logging the routing "
+            "decision itself"
+        )
+        assert shadow_tries[0].lineno > init_line, (
+            "capabilities_json is initialised AFTER the try that can raise "
+            "before assigning it — the INSERT would see an unbound name"
         )

@@ -5,8 +5,44 @@ savings/usage near midnight (same bug class as the test_sidecar tz fix).
 
 from __future__ import annotations
 
-import inspect
+import ast
+import sys
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _ast_assert import (  # noqa: E402
+    assert_in_strings,
+    assert_not_in_strings,
+    string_constants,
+)
+
+# R13. These assertions were `"<sql>" in inspect.getsource(module)`, which a
+# comment or docstring quoting the SQL satisfies just as well as the SQL does —
+# and this file's own module docstring discusses the exact fragments it checks.
+# `string_constants` reads the AST, where comments do not exist and docstrings
+# are excluded, so a match means the text is in a value the program USES.
+
+
+def _read(rel: str) -> str:
+    """Raw text. Kept ONLY for non-Python files.
+
+    A shell script has no AST, so the A-10 evasion this file's other
+    assertions were converted to avoid does not apply: there is no "call site"
+    to break while leaving a matching comment behind. Reading the text is the
+    honest check for `statusline-command.sh`, and using it for a .py file
+    would be the defect coming back.
+    """
+    path = Path(__file__).resolve().parents[1] / "src" / "llm_router" / rel
+    assert not rel.endswith(".py"), (
+        f"{rel} is Python — use _strings(), not _read(). Source-text "
+        "assertions on Python are what R13 removed."
+    )
+    return path.read_text(encoding="utf-8")
+
+
+def _strings(rel: str) -> list[str]:
+    path = Path(__file__).resolve().parents[1] / "src" / "llm_router" / rel
+    return string_constants(ast.parse(path.read_text(encoding="utf-8")))
 
 
 def test_digest_today_period_uses_localtime():
@@ -19,49 +55,51 @@ def test_digest_today_period_uses_localtime():
 
 def test_digest_spike_query_uses_localtime():
     from llm_router import digest
-    src = inspect.getsource(digest)
+
     # the daily-spike "today" comparison must be localtime on both sides
-    assert "date(timestamp,'localtime') = date('now','localtime')" in src
-
-
-def _cost_src() -> str:
-    return (Path(__file__).resolve().parents[1] / "src" / "llm_router" / "cost.py").read_text()
+    assert_in_strings(
+        digest, "date(timestamp,'localtime') = date('now','localtime')"
+    )
 
 
 def test_cost_period_maps_use_localtime():
-    src = _cost_src()
-    # No bare UTC "today" boundary should remain in the period maps.
-    assert '"today": "date(\'now\')"' not in src
-    # The localtime today boundary is present (both period maps).
-    assert src.count('"today": "date(\'now\',\'localtime\')"') >= 2
+    strings = _strings("cost.py")
+    # No bare UTC "today" boundary should remain in the period maps. As a
+    # STRING check this is the real claim: the old form could previously be
+    # "removed" by deleting a comment that mentioned it.
+    assert not [s for s in strings if s == "date('now')"], (
+        "a bare UTC date('now') boundary is still used as a value"
+    )
+    # The localtime today boundary is present in both period maps.
+    n = sum(1 for s in strings if "date('now','localtime')" in s)
+    assert n >= 2, f"only {n} localtime 'today' boundaries in cost.py"
 
 
 def test_cost_where_clauses_convert_column_to_localtime():
-    src = _cost_src()
-    # The savings/usage period WHERE clauses compare the localtime-converted column.
-    assert "date(timestamp,'localtime') >=" in src
-    # And the old bare-UTC column comparison is gone from those clauses.
-    assert "WHERE date(timestamp) >=" not in src
+    strings = _strings("cost.py")
+    assert any("date(timestamp,'localtime') >=" in s for s in strings), (
+        "no period WHERE clause compares the localtime-converted column"
+    )
+    assert not [s for s in strings if "WHERE date(timestamp) >=" in s], (
+        "a bare-UTC column comparison is still used"
+    )
 
 
 # ── Dashboard / statusline / cost "today" & daily follow-ups (localtime) ──────
-def _read(rel: str) -> str:
-    return (Path(__file__).resolve().parents[1] / "src" / "llm_router" / rel).read_text()
-
-
 def test_dashboards_group_daily_by_localtime():
     for rel in ("tools/dashboard.py", "dashboard/server.py", "dashboard/tui.py"):
-        src = _read(rel)
-        assert "date(timestamp) as day" not in src, rel          # bare UTC grouping gone
-        assert "date(timestamp,'localtime') as day" in src, rel  # local grouping present
+        strings = _strings(rel)
+        assert not [s for s in strings if "date(timestamp) as day" in s], rel
+        assert any("date(timestamp,'localtime') as day" in s for s in strings), rel
 
 
 def test_today_filters_no_bare_utc_start_of_day():
     # cost.py + dashboards must not gate "today" on a UTC start-of-day boundary.
     for rel in ("cost.py", "dashboard/server.py", "dashboard/tui.py"):
-        src = _read(rel)
-        assert "datetime('now', 'start of day')" not in src, rel
-        assert "datetime('now','start of day')" not in src, rel
+        strings = _strings(rel)
+        for bad in ("datetime('now', 'start of day')",
+                    "datetime('now','start of day')"):
+            assert not [s for s in strings if bad in s], f"{rel}: {bad}"
 
 
 def test_statusline_today_savings_use_localtime():

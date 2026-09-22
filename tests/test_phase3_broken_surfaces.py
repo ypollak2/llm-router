@@ -17,6 +17,7 @@ every invocation, with no test exercising it.
 
 from __future__ import annotations
 
+import ast
 import pathlib
 import subprocess
 import sys
@@ -24,19 +25,35 @@ import sys
 import pytest
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "scripts"))
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 
 
 # ── T-18 ─────────────────────────────────────────────────────────────────────
 
 def test_profile_imports_a_symbol_that_exists():
-    """The import that raised on every `llm-router profile` invocation."""
+    """The import that raised on every `llm-router profile` invocation.
+
+    Was a text scan (full-comment lines stripped, then a substring check
+    for "PROFILE_PATH") over the raw file. A decoy left in a docstring or
+    an inline `# ... PROFILE_PATH ...` comment survives that filter and
+    would satisfy it while the broken import stayed. This instead walks
+    the AST for any `ast.ImportFrom` alias OR any `ast.Name` load spelled
+    `PROFILE_PATH` — neither can come from a comment, which the AST does
+    not contain at all.
+    """
     from llm_router.auto_profile import _profile_path  # noqa: F401
     from llm_router.commands import profile as cmd
 
-    src = pathlib.Path(cmd.__file__).read_text(encoding="utf-8")
-    code = "\n".join(ln for ln in src.split("\n") if not ln.lstrip().startswith("#"))
-    assert "PROFILE_PATH" not in code.replace("_profile_path", ""), (
-        "commands/profile.py still imports the non-existent PROFILE_PATH"
+    tree = ast.parse(pathlib.Path(cmd.__file__).read_text(encoding="utf-8"))
+    imported_names = {
+        alias.name
+        for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)
+        for alias in node.names
+    }
+    referenced_names = {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)}
+    assert "PROFILE_PATH" not in imported_names | referenced_names, (
+        "commands/profile.py still imports or references the non-existent "
+        "PROFILE_PATH"
     )
 
 
@@ -48,21 +65,30 @@ def test_profile_runs(capsys, monkeypatch, tmp_path):
 
 
 def test_dev_refresh_calls_the_registered_script_name():
-    """`llm_router-install-hooks` (underscores) is not what pyproject registers."""
+    """`llm_router-install-hooks` (underscores) is not what pyproject registers.
+
+    Was two text checks (`'[".."]' in src` / `not in src`) over the raw file.
+    `assert_calls`/`assert_not_calls` match against `ast.unparse` of every
+    CALL EXPRESSION in the function instead — a comment naming either
+    spelling can't satisfy or defeat it; only the string actually passed to
+    the real `subprocess.run([...])` counts. pyproject.toml's `scripts` table
+    is TOML data, not Python source — no AST applies there, so that check
+    stays a plain membership test.
+    """
     import tomllib
 
     from llm_router.commands import dev_refresh
+    from _ast_assert import assert_calls, assert_not_calls
 
     root = pathlib.Path(__file__).resolve().parents[1]
     scripts = tomllib.loads((root / "pyproject.toml").read_text(
         encoding="utf-8"))["project"]["scripts"]
 
-    src = pathlib.Path(dev_refresh.__file__).read_text(encoding="utf-8")
-    assert '["llm-router-install-hooks"]' in src
+    assert_calls(dev_refresh.cmd_dev_refresh, "llm-router-install-hooks")
     assert "llm-router-install-hooks" in scripts, (
         "the hyphenated name is not registered either — check pyproject"
     )
-    assert '["llm_router-install-hooks"]' not in src
+    assert_not_calls(dev_refresh.cmd_dev_refresh, "llm_router-install-hooks")
 
 
 def test_tui_names_its_optional_extra_instead_of_raising(monkeypatch):
@@ -114,12 +140,59 @@ def test_every_registered_gemini_model_is_covered():
 
 
 def test_the_router_does_not_keep_its_own_copy():
+    """`router.py` must delegate to `GOOGLE_PROVIDERS`, not hand-maintain its own set.
+
+    Was a substring check for the literal text `{"gemini", "google",
+    "google_subscription"` — exact-formatting-dependent, and a comment
+    reproducing that spelling would satisfy it either way. This instead
+    walks every `ast.Set` (and `set(...)`/`frozenset(...)` call over a
+    set/list/tuple literal) in the module and fails if any of them holds
+    that family of provider names as real elements — the actual drift this
+    test exists to catch, regardless of how it's spelled or formatted.
+    """
     import inspect
 
     from llm_router import router
 
-    src = inspect.getsource(router)
-    assert '{"gemini", "google", "google_subscription"' not in src
+    tree = ast.parse(inspect.getsource(router))
+    forbidden = {"gemini", "google", "google_subscription"}
+
+    def _offending_sets(node: ast.AST) -> list[set[str]]:
+        hits: list[set[str]] = []
+        for child in ast.walk(node):
+            elts = None
+            if isinstance(child, ast.Set):
+                elts = child.elts
+            elif (isinstance(child, ast.Call)
+                  and isinstance(child.func, ast.Name)
+                  and child.func.id in ("set", "frozenset")
+                  and child.args
+                  and isinstance(child.args[0], (ast.Set, ast.List, ast.Tuple))):
+                elts = child.args[0].elts
+            if elts is None:
+                continue
+            values = {e.value for e in elts if isinstance(e, ast.Constant) and isinstance(e.value, str)}
+            if forbidden <= values:
+                hits.append(values)
+        return hits
+
+    # `_google_providers()`'s own except-branch fallback is a DELIBERATE,
+    # documented copy of the registry's set (see its docstring: "a silent
+    # fall back to a copy is exactly how the two drifted apart (T-20)" — it
+    # exists so a broken import degrades gracefully instead of dropping
+    # Gemini routing outright). That is not the bug this test guards
+    # against; every OTHER function keeping its own inline copy — bypassing
+    # `_google_providers()`/`GOOGLE_PROVIDERS` entirely — is.
+    offenders: list[set[str]] = []
+    for node in tree.body:
+        if isinstance(node, ast.FunctionDef) and node.name == "_google_providers":
+            continue
+        offenders.extend(_offending_sets(node))
+    assert not offenders, (
+        "router.py keeps its own copy of the Google-provider family outside "
+        f"_google_providers(), which is how the registry and the router "
+        f"drifted apart (T-20): {offenders}"
+    )
 
 
 # ── S-07 ─────────────────────────────────────────────────────────────────────

@@ -155,13 +155,55 @@ def test_separate_sessions_do_not_share_a_cached_root(tmp_path):
 # ── precedence, wired into the router ───────────────────────────────────────
 
 def test_route_and_call_prefers_an_explicit_project_root(tmp_path, monkeypatch):
-    """A caller that named a project meant it; roots are the fallback."""
+    """A caller that named a project meant it; roots are the fallback.
+
+    R13/A-10: `"project_root or" in src or "project_root\\n" in src` is a
+    substring scan so loose it matched on the plain assignment
+    `_raw_root = project_root` — either half is satisfiable by a comment with
+    the real precedence removed. This instead walks the AST for the variable
+    that is assigned directly from the `project_root` parameter, then
+    requires the `root_from_ctx` (ctx-roots) lookup to sit inside an
+    `if <that var> is None:` guard — i.e. ctx roots are structurally
+    reachable only when no explicit project_root was given. Comments cannot
+    produce an `ast.If` node.
+    """
+    import ast
     import inspect
+    import textwrap
 
     from llm_router.router import route_and_call
-    src = inspect.getsource(route_and_call)
-    assert "project_root or" in src or "project_root\n" in src, (
-        "explicit project_root must take precedence over ctx roots"
+
+    tree = ast.parse(textwrap.dedent(inspect.getsource(route_and_call)))
+
+    # Find the local variable assigned directly from the `project_root` param
+    # (e.g. `_raw_root = project_root`).
+    raw_root_var = None
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Assign) and len(node.targets) == 1
+                and isinstance(node.targets[0], ast.Name)
+                and isinstance(node.value, ast.Name)
+                and node.value.id == "project_root"):
+            raw_root_var = node.targets[0].id
+            break
+    assert raw_root_var is not None, (
+        "no local variable is assigned directly from the project_root parameter"
+    )
+
+    # That variable's ctx-roots fallback must be guarded by `if <var> is None:`.
+    guarded = False
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.If):
+            continue
+        test_src = ast.unparse(node.test)
+        if not (raw_root_var in test_src and " is None" in test_src):
+            continue
+        for stmt in node.body:
+            for sub in ast.walk(stmt):
+                if isinstance(sub, ast.Call) and "root_from_ctx" in ast.unparse(sub.func):
+                    guarded = True
+    assert guarded, (
+        "explicit project_root must take precedence over ctx roots: no "
+        "`if <raw_root> is None:` guard wraps the root_from_ctx lookup"
     )
 
 

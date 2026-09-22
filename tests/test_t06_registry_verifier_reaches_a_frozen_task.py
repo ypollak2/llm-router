@@ -171,19 +171,39 @@ def test_a_proposed_files_verifier_is_refused_not_silently_skipped():
     """
     from groundtruth import run_matrix
 
-    code = _code_only(run_matrix)
-    assert "unbridgeable" in code, "the refusal counter is gone"
-    # The message itself lives in a string literal, so it is checked in raw source.
+    # R13: `_code_only` strips comments, which was a partial defence — but it
+    # is still a substring scan over text. Both halves are AST now: the counter
+    # is a NAME the code uses, and the message is a STRING VALUE.
+    import ast
     import inspect
-    assert "REFUSED" in inspect.getsource(run_matrix)
+    import sys
+    from pathlib import Path
+
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from _ast_assert import string_constants
+
+    tree = ast.parse(inspect.getsource(run_matrix))
+    names = {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)}
+    names |= {ast.unparse(n) for n in ast.walk(tree) if isinstance(n, ast.Attribute)}
+    assert any("unbridgeable" in n for n in names), "the refusal counter is gone"
+    assert any("REFUSED" in s for s in string_constants(tree)), (
+        "the refusal message is not a string the code emits"
+    )
 
 
 def test_run_matrix_uses_the_bridge():
     """Rule B: the call site, not the helper."""
     from groundtruth import run_matrix
 
-    code = _code_only(run_matrix)
-    assert "_registry_record_for ( reg , t )" in code, (
-        "run_matrix still looks up by the frozen task id alone"
+    import ast
+    import inspect
+
+    tree = ast.parse(inspect.getsource(run_matrix))
+    calls = {ast.unparse(n) for n in ast.walk(tree) if isinstance(n, ast.Call)}
+    assert "_registry_record_for(reg, t)" in calls, (
+        f"run_matrix still looks up by the frozen task id alone; calls: "
+        f"{sorted(c for c in calls if 'registry' in c or 'active_for' in c)}"
     )
-    assert "reg . active_for ( t . task_id )" not in code
+    assert "reg.active_for(t.task_id)" not in calls, (
+        "the un-bridged lookup is still called"
+    )

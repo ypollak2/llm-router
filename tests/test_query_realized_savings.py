@@ -53,8 +53,12 @@ CONTROL (re-run if edited)
 
 from __future__ import annotations
 
+import ast
 import inspect
 import sqlite3
+import sys
+import textwrap
+from pathlib import Path
 
 import pytest
 
@@ -101,6 +105,29 @@ class TestFailOpen:
         assert result.realized_savings_usd == 0.0
 
 
+def _return_realizedsavings_call(func) -> ast.Call:
+    """The AST `Call` node for `return RealizedSavingsTotals(...)` inside *func*.
+
+    R13/A-10: the original form did `inspect.getsource(func).split("return
+    RealizedSavingsTotals(")[-1]` and scanned that TEXT TAIL for operator
+    characters and `field=accounting.field` substrings — a comment anywhere
+    after the split point (including right next to the real return) could
+    satisfy or spuriously fail either check. Isolating the actual `ast.Call`
+    node for the constructor means every check below reads real keyword
+    VALUES, not text near them.
+    """
+    tree = ast.parse(textwrap.dedent(inspect.getsource(func)))
+    calls = [
+        n.value for n in ast.walk(tree)
+        if isinstance(n, ast.Return) and isinstance(n.value, ast.Call)
+        and isinstance(n.value.func, ast.Name) and n.value.func.id == "RealizedSavingsTotals"
+    ]
+    assert len(calls) == 1, (
+        f"expected exactly one `return RealizedSavingsTotals(...)`, found {len(calls)}"
+    )
+    return calls[0]
+
+
 class TestDelegation:
     def test_it_computes_nothing_itself(self):
         """INV-COST-004, asserted structurally rather than numerically.
@@ -110,23 +137,45 @@ class TestDelegation:
         failure mode — three independent savings queries is how the codebase
         got three different answers for one day.
         """
-        src = inspect.getsource(query_realized_savings)
-        body = src.split("return RealizedSavingsTotals(")[-1]
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        from _ast_assert import assert_calls
 
-        for op in ("+", "-", "*", "/", "sum(", "SUM("):
-            assert op not in body, (
-                f"query_realized_savings performs {op!r} on a delegated field. "
-                f"Every figure must come from get_period_accounting unchanged; "
-                f"this is the fourth savings calculation waiting to happen."
-            )
-        assert "get_period_accounting" in src, (
-            "the surface no longer delegates to the accounting function"
+        call = _return_realizedsavings_call(query_realized_savings)
+        for kw in call.keywords:
+            for node in ast.walk(kw.value):
+                if isinstance(node, ast.BinOp):
+                    raise AssertionError(
+                        f"{kw.arg} is computed via {ast.unparse(kw.value)!r} "
+                        f"instead of copied unchanged from accounting; this is "
+                        f"the fourth savings calculation waiting to happen"
+                    )
+                if isinstance(node, ast.Call) and "sum" in ast.unparse(node.func).lower():
+                    raise AssertionError(
+                        f"{kw.arg} calls {ast.unparse(node.func)!r} instead of "
+                        f"delegating to get_period_accounting"
+                    )
+        # And the function must actually delegate somewhere, not just avoid
+        # arithmetic in the return statement itself.
+        assert_calls(
+            query_realized_savings, "get_period_accounting",
+            msg="the surface no longer delegates to the accounting function",
         )
 
     def test_every_field_is_delegated(self):
-        """No field may be defaulted or invented once the accounting is in hand."""
-        src = inspect.getsource(query_realized_savings)
-        final = src.split("return RealizedSavingsTotals(")[-1]
+        """No field may be defaulted or invented once the accounting is in hand.
+
+        R13/A-10: `f"{field}=accounting.{field}" in final` on a text tail is
+        satisfiable by a comment reading e.g. `# realized_routes=accounting.
+        realized_routes` sitting near a return that actually passes a
+        different value. This reads the real keyword VALUE node for each
+        field and requires it to be exactly the attribute access
+        `accounting.<field>` — stronger than the original, which could not
+        tell `accounting.realized_routes` from
+        `some_other_accounting.realized_routes` either, since it only matched
+        a substring.
+        """
+        call = _return_realizedsavings_call(query_realized_savings)
+        passed = {kw.arg: kw.value for kw in call.keywords}
         for field in (
             "potential_savings_usd",
             "realized_savings_usd",
@@ -137,8 +186,15 @@ class TestDelegation:
             "likely_used_routes",
             "cost_unknown_attempts",
         ):
-            assert f"{field}=accounting.{field}" in final, (
-                f"{field} is not delegated to the accounting object"
+            value = passed.get(field)
+            assert value is not None, f"{field} is not passed to RealizedSavingsTotals at all"
+            ok = (
+                isinstance(value, ast.Attribute) and value.attr == field
+                and isinstance(value.value, ast.Name) and value.value.id == "accounting"
+            )
+            assert ok, (
+                f"{field} is not delegated to the accounting object unchanged "
+                f"(got {ast.unparse(value)!r})"
             )
 
 

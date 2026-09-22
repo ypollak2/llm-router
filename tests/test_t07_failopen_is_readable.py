@@ -96,15 +96,30 @@ def test_an_unrecordable_loss_logs_above_debug(monkeypatch):
 
     A fallback nobody can see is not a fallback.
     """
-    import inspect
+    # R13/A-10. This grepped `record()`'s source, so `.warning(` appearing in
+    # a comment satisfied it while the call was gone — and this module's
+    # comments discuss WARNING at length. Asserted on the AST now: calls and
+    # string values, neither of which a comment can provide.
+    import sys
+    from pathlib import Path
 
-    src = inspect.getsource(failopen.record)
-    assert '.warning(\n' in src or ".warning(" in src, (
-        "record() no longer escalates an unrecordable loss above DEBUG"
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from _ast_assert import calls_in, string_constants
+
+    calls = calls_in(failopen.record)
+    # `calls_in` yields whole call expressions, so match on the method being
+    # invoked. Still A-10-proof: this is the UNPARSED AST of a real call, and
+    # a comment cannot put text there.
+    assert any(".warning(" in c for c in calls), (
+        f"record() no longer escalates an unrecordable loss above DEBUG: {calls}"
     )
-    assert "fail_open_unrecorded" in src
+    assert "fail_open_unrecorded" in string_constants(failopen.record), (
+        "the unrecordable-loss event name is not a value record() uses"
+    )
     # And the ordinary path must be above debug too.
-    assert ".debug(" not in src, "the routine fail-open log is still at DEBUG"
+    assert not [c for c in calls if ".debug(" in c], (
+        f"the routine fail-open log is still at DEBUG: {calls}"
+    )
 
 
 # ── the reader that did not exist ────────────────────────────────────────────

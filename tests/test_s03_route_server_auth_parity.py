@@ -123,18 +123,58 @@ def test_health_stays_open(server, monkeypatch):
 # ── one token, not two ───────────────────────────────────────────────────────
 
 def test_it_uses_the_gateway_token_not_a_second_one():
-    """Two token settings means one of them ends up unset."""
-    import inspect
+    """Two token settings means one of them ends up unset.
 
-    src = inspect.getsource(rs)
-    assert "from llm_router.gateway import gateway_token" in src
-    assert "LLM_ROUTER_ROUTE_SERVER_TOKEN" not in src, (
-        "route_server introduced a second, separate token"
+    Was two `"phrase" in inspect.getsource(rs)` substring checks. A comment
+    reproducing either phrase — the import line, or the forbidden env var
+    name — would satisfy or defeat them without the real import existing.
+    The import half is now an `ast.ImportFrom` check (module
+    `llm_router.gateway`, alias `gateway_token`); the "no second token"
+    half uses `assert_not_in_strings`, which only looks at STRING CONSTANTS
+    the module actually holds (e.g. as an `os.environ` key), not comments —
+    a second, separate token would need to appear as a real string the code
+    reads, not prose about not adding one.
+    """
+    import ast
+    import inspect
+    import sys
+    from pathlib import Path
+
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from _ast_assert import assert_not_in_strings
+
+    tree = ast.parse(inspect.getsource(rs))
+    imports_gateway_token = any(
+        isinstance(n, ast.ImportFrom)
+        and n.module == "llm_router.gateway"
+        and any(alias.name == "gateway_token" for alias in n.names)
+        for n in ast.walk(tree)
+    )
+    assert imports_gateway_token, (
+        "route_server no longer imports gateway_token from llm_router.gateway"
+    )
+    assert_not_in_strings(
+        rs, "LLM_ROUTER_ROUTE_SERVER_TOKEN",
+        msg="route_server introduced a second, separate token",
     )
 
 
 def test_the_stale_no_auth_comment_is_gone():
-    """The file said "no auth checks at all". That must not survive the fix."""
+    """The file said "no auth checks at all". That must not survive the fix.
+
+    NOT converted to an AST assertion. The property under test is the
+    CONTENT OF A DOCSTRING — the misleading sentence the file used to carry
+    about itself — and `tests/_ast_assert.py` deliberately EXCLUDES
+    docstrings from `string_constants` (its own docstring: asserting on a
+    docstring "is the same mistake one layer in"). Routing this through the
+    AST helper would make the check vacuously pass regardless of whether the
+    stale sentence is still there, which is strictly WEAKER than the
+    text check it would replace. A plain `inspect.getsource` scan is the
+    correct tool for "was this specific sentence rewritten", and there is no
+    call site, string constant, or attribute access for it to be confused
+    with — the A-10 evasion (a phrase in a comment near unrelated code)
+    doesn't apply to a test that is itself checking documentation prose.
+    """
     import inspect
 
     src = inspect.getsource(rs)

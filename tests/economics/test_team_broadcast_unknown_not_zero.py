@@ -95,13 +95,32 @@ def test_broadcast_line_is_unchanged_for_a_real_zero():
 def test_report_propagates_provenance():
     """build_team_report copies fields explicitly with .get(key, default), so
     a new key is DROPPED unless it is added there too. This is the step that
-    turns a correct source into a silent display."""
-    import inspect
+    turns a correct source into a silent display.
+
+    R13/A-10: `"provenance" in inspect.getsource(...)` is satisfied by the
+    word appearing in a comment (this function's real source already has one
+    explaining why) while the actual `"provenance": data.get(...)` line is
+    deleted. Pulling the STRING CONSTANTS the function actually uses
+    (docstrings excluded) means "provenance" has to be a literal the code
+    evaluates — the dict key and/or the `.get()` argument — not prose near it.
+
+    EXACT match, not substring: an earlier draft used `assert_in_strings`
+    (substring), and the red-check for THIS test caught that it stayed green
+    after deleting the real `"provenance"` key — `"provenance_detail"`, which
+    is untouched by the mutation, contains "provenance" as a substring and
+    satisfied it. Checking for "provenance" as its own string constant closes
+    that hole.
+    """
+    import sys
+    from pathlib import Path
+
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+    from _ast_assert import string_constants
 
     from llm_router import team
 
-    src = inspect.getsource(team.build_team_report)
-    assert "provenance" in src, (
+    consts = string_constants(team.build_team_report)
+    assert "provenance" in consts, (
         "build_team_report does not forward provenance, so the broadcast "
         "cannot distinguish unknown from zero however honest cost.py becomes"
     )

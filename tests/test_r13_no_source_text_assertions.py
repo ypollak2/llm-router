@@ -21,13 +21,18 @@ and have no behavioural equivalent. Lower the number; do not raise it.
 
 from __future__ import annotations
 
+import re
+
 import pathlib
 
 TESTS = pathlib.Path(__file__).resolve().parent
 
 #: Count at the time of writing. LOWER THIS. Raising it needs a reason in the
 #: commit message.
-MAX_SOURCE_TEXT_ASSERTIONS = 62
+#: 62 when R13 started; 1 after the conversion pass. LOWER THIS, never raise
+#: it — the one that remains is deliberate and is named in
+#: `REMAINING_BY_DESIGN` below.
+MAX_SOURCE_TEXT_ASSERTIONS = 1
 
 
 def _source_text_assertions() -> list[str]:
@@ -41,8 +46,12 @@ def _source_text_assertions() -> list[str]:
             s = line.strip()
             if not s.startswith("assert"):
                 continue
-            if any(tok in s for tok in (" in src", " in code", " in source",
-                                        "in inspect.getsource")):
+            # Bare identifiers only. `" in src"` also matched prompt strings
+            # like "Make the filter case-insensitive in src/a.py", so the
+            # ratchet was counting fixtures as violations — a detector that
+            # over-counts invites raising the ceiling for the wrong reason.
+            if re.search(r"\bin\s+(src|code|source)\b(?!/)", s) or \
+                    "in inspect.getsource" in s:
                 hits.append(f"{f.relative_to(TESTS)}:{i}")
     return hits
 
@@ -59,14 +68,82 @@ def test_source_text_assertions_have_not_multiplied():
     )
 
 
-def test_the_scan_still_finds_the_population():
-    """Anti-vacuity: a scan that matches nothing would let the count drop to 0
-    and then permit anything."""
-    found = _source_text_assertions()
-    assert len(found) > 10, (
-        f"the scan found only {len(found)} — it has stopped matching the test "
-        "tree and the ratchet is no longer protecting anything"
+def test_the_detector_fires_on_a_known_positive(tmp_path):
+    """Anti-vacuity, done the right way round.
+
+    This used to assert the repo still CONTAINED more than ten source-text
+    assertions — so the ratchet could not be vacuous. It was a reasonable
+    check when the population was 62 and a wrong one the moment the class was
+    nearly closed: it required the codebase to keep the disease in order to
+    prove the thermometer worked. At 2 remaining, success broke the test.
+
+    The detector is now proved against a SYNTHETIC positive instead. The
+    repo's population is free to reach zero, which is the goal.
+    """
+    probe = tmp_path / "test_probe.py"
+    probe.write_text(
+        "import inspect\n"
+        "def test_x():\n"
+        "    src = inspect.getsource(object)\n"
+        '    assert "foo" in src\n'
+        '    assert "bar" in inspect.getsource(object)\n'
+        "def test_not_a_violation():\n"
+        '    assert "fix the bug in src/a.py" == "fix the bug in src/a.py"\n'
     )
+    hits = []
+    for i, line in enumerate(probe.read_text().split("\n"), 1):
+        t = line.strip()
+        if not t.startswith("assert"):
+            continue
+        if re.search(r"\bin\s+(src|code|source)\b(?!/)", t) or \
+                "in inspect.getsource" in t:
+            hits.append(i)
+    assert hits == [4, 5], (
+        f"the detector matched lines {hits}; it must flag the two real "
+        "source-text assertions and NOT the prompt string containing "
+        "'in src/a.py'"
+    )
+
+
+#: The assertions deliberately left as text, each with the reason. A row here
+#: is a decision, not a backlog item.
+REMAINING_BY_DESIGN = {
+    "test_s03_route_server_auth_parity.py": (
+        "checks a specific DOCSTRING sentence is gone. `_ast_assert."
+        "string_constants` excludes docstrings by design — routing this "
+        "through the helper would make it pass whether the stale sentence "
+        "survived or not, which is strictly weaker than the text check."
+    ),
+    # REMOVED: telemetry/test_m02_benchmarks_declare_themselves.py.
+    #
+    # I excused it here with the reason "the marker is a comment by
+    # construction, so there is no AST node to assert on". That was WRONG —
+    # the declaration is a live `os.environ.setdefault("LLM_ROUTER_SYNTHETIC",
+    # "1")` call, which is exactly the kind of thing an AST assertion is for,
+    # and it has since been converted (and red-checked three ways, including
+    # the case where the call is changed to a hard assignment rather than a
+    # default).
+    #
+    # Kept as a comment rather than deleted: an excuse written from a guess
+    # rather than from reading the file is the same defect as a source-text
+    # assertion — it looks like a decision and is not one.
+}
+
+
+def test_every_remaining_source_text_assertion_is_deliberate():
+    """The two survivors are named, or the count is wrong somewhere."""
+    found = _source_text_assertions()
+    unexplained = [
+        h for h in found
+        if h.rsplit(":", 1)[0] not in REMAINING_BY_DESIGN
+    ]
+    assert not unexplained, (
+        f"source-text assertion(s) with no recorded reason: {unexplained}\n\n"
+        "Convert it, or add its file to REMAINING_BY_DESIGN with why an AST "
+        "assertion would be weaker."
+    )
+    for f, reason in REMAINING_BY_DESIGN.items():
+        assert len(reason) > 60, f"{f}: the reason does not explain itself"
 
 
 def test_the_ast_helper_rejects_a_commented_out_call(tmp_path):

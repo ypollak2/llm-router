@@ -107,12 +107,30 @@ def test_eligibility_agrees_those_are_not_checkable():
 def test_propose_delegates_the_question_shape_to_eligibility():
     """T-17 was two modules disagreeing. A second copy of the rule guarantees
     they drift apart again — which is precisely how the scrubbers drifted four
-    secret classes apart earlier in this audit."""
-    import inspect
+    secret classes apart earlier in this audit.
 
-    src = inspect.getsource(pr._is_reference_checkable)
-    assert "_is_checkable_question" in src
-    assert "re.compile" not in src, "propose has grown its own copy of the shape rule"
+    R13/A-10: `"_is_checkable_question" in inspect.getsource(...)` is
+    satisfied by the name appearing in a comment (or the docstring, which
+    already mentions it) with the real delegating call deleted. `assert_calls`
+    matches an actual Call node via `ast.unparse`, so a comment cannot pass
+    it. Likewise `"re.compile" not in src` would be silently satisfied by
+    deleting a comment that happened to mention it while a real regex crept
+    in some other way (e.g. `re.match`/`re.search`); `assert_not_calls`
+    checks for any call whose unparsed form contains `re.compile` specifically
+    — the actual shape-rule duplication this test forbids — over the real
+    call graph.
+    """
+    import sys
+    from pathlib import Path
+
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from _ast_assert import assert_calls, assert_not_calls
+
+    assert_calls(pr._is_reference_checkable, "_is_checkable_question")
+    assert_not_calls(
+        pr._is_reference_checkable, "re.compile",
+        msg="propose has grown its own copy of the shape rule",
+    )
 
 
 def test_an_explicit_non_mechanical_class_is_not_overruled():

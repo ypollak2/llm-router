@@ -118,20 +118,46 @@ def test_a_wrong_tree_produces_a_different_verdict(tmp_path):
 # ── the call site ────────────────────────────────────────────────────────────
 
 def test_run_matrix_passes_the_cwd():
-    """Rule B. Resolving a path nobody uses is not a fix."""
+    """Rule B. Resolving a path nobody uses is not a fix.
+
+    R13/A-10: this greped the module source, so `cwd=sandbox_cwd` in a comment
+    satisfied it while the argument was gone — and the comment right above the
+    call says exactly that. AST now.
+    """
+    import ast
     import inspect
+
     from groundtruth import run_matrix
 
-    src = inspect.getsource(run_matrix)
-    assert "cwd=sandbox_cwd" in src, "run_matrix still grades in the ambient directory"
-    assert "resolve_sandbox(root, task)" in src
+    tree = ast.parse(inspect.getsource(run_matrix))
+    cwd_values = [
+        ast.unparse(kw.value)
+        for n in ast.walk(tree) if isinstance(n, ast.Call)
+        for kw in n.keywords if kw.arg == "cwd"
+    ]
+    assert "sandbox_cwd" in cwd_values, (
+        f"run_matrix still grades in the ambient directory; cwd= values: {cwd_values}"
+    )
+    calls = {ast.unparse(n) for n in ast.walk(tree) if isinstance(n, ast.Call)}
+    assert "resolve_sandbox(root, task)" in calls, (
+        "the sandbox is never resolved for the task"
+    )
 
 
 def test_a_refused_task_is_never_sampled():
     """Refusing must also stop the model calls — otherwise it costs money to
     produce answers that cannot be graded."""
+    import ast
     import inspect
+
     from groundtruth import run_matrix
 
-    src = inspect.getsource(run_matrix)
-    assert "args.samples if not sandbox_refusal else 0" in src
+    # The refusal must gate the SAMPLE COUNT, as a real conditional expression.
+    tree = ast.parse(inspect.getsource(run_matrix))
+    gates = [
+        ast.unparse(n) for n in ast.walk(tree)
+        if isinstance(n, ast.IfExp) and "sandbox_refusal" in ast.unparse(n)
+    ]
+    assert any("args.samples" in g and "0" in g for g in gates), (
+        f"a refused task is still sampled; sandbox_refusal conditionals: {gates}"
+    )

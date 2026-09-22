@@ -252,6 +252,38 @@ def test_an_unknown_arm_is_refused_rather_than_silently_ignored(project, store,
         modes.apply("fix post_entry", root=repo, base=base, experience=store)
 
 
+def _identifiers_in(module) -> set[str]:
+    """Every identifier the code actually USES — names, attributes, args.
+
+    R13/A-10: `forbidden not in inspect.getsource(modes)` scans the WHOLE
+    module's text — comments, docstrings, everything — so this line itself
+    (which has to name the forbidden identifiers to explain the rule) would
+    make the module fail-open in the other direction, and worse, a comment
+    quoting one of these names would fail a check that should be about real
+    code touching model selection. Collecting identifiers from the parsed AST
+    means only actual `Name`/`Attribute`/`arg`/`keyword` references count —
+    comments and docstrings cannot contribute one.
+    """
+    import ast
+    import inspect
+    import textwrap
+
+    tree = ast.parse(textwrap.dedent(inspect.getsource(module)))
+    out: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name):
+            out.add(node.id)
+        elif isinstance(node, ast.Attribute):
+            out.add(node.attr)
+        elif isinstance(node, ast.arg):
+            out.add(node.arg)
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            out.add(node.name)
+        elif isinstance(node, ast.keyword) and node.arg:
+            out.add(node.arg)
+    return out
+
+
 def test_routing_policy_is_not_something_an_arm_can_change():
     """The document pins it, and this is where someone would forget.
 
@@ -259,11 +291,10 @@ def test_routing_policy_is_not_something_an_arm_can_change():
     both makes neither attributable, which is the one thing the arm structure
     exists to prevent.
     """
-    import inspect
-    src = inspect.getsource(modes)
+    used = _identifiers_in(modes)
     for forbidden in ("models_to_try", "select_model", "routing_profile",
                       "model_chain"):
-        assert forbidden not in src, (
+        assert forbidden not in used, (
             f"modes.py touches {forbidden}: an arm is changing model selection "
             f"in the same experiment as context, so neither result is "
             f"attributable"

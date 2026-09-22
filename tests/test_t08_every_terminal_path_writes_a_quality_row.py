@@ -182,6 +182,34 @@ def test_the_savings_logger_applies_the_same_rule():
 
 # ── T-08: the call sites pass a distinguishing outcome ───────────────────────
 
+def _ledger_outcome_values(module) -> set[str]:
+    """Every `ledger_outcome=<literal>` actually passed to `_finalize_successful_route`.
+
+    R13/A-10: the original form located a call site by finding a COMMENT
+    (`marker`) via `inspect.getsource(module).split("\\n")`, then scanned a
+    40-line TEXT window after it for `f'ledger_outcome="{outcome}"'`. Any of
+    that window's 40 lines could be a comment containing the phrase while the
+    real keyword argument was deleted or changed — the exact A-10 evasion.
+    This instead walks the AST for every `_finalize_successful_route(...)`
+    call and reads the actual `ledger_outcome=` keyword VALUE; comments
+    cannot appear inside a keyword's value node.
+    """
+    import ast
+    import inspect
+    import textwrap
+
+    tree = ast.parse(textwrap.dedent(inspect.getsource(module)))
+    values: set[str] = set()
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                and node.func.id == "_finalize_successful_route"):
+            continue
+        for kw in node.keywords:
+            if kw.arg == "ledger_outcome" and isinstance(kw.value, ast.Constant):
+                values.add(kw.value.value)
+    return values
+
+
 @pytest.mark.parametrize("outcome, marker", [
     ("degraded", "the exhaustion floor is a FOURTH success"),
     ("deduplicated", "idempotency dedupe is also a success path"),
@@ -190,19 +218,16 @@ def test_the_savings_logger_applies_the_same_rule():
 def test_each_terminal_path_names_its_own_outcome(outcome, marker):
     """All three previously wrote nothing. Each must now name what it is.
 
-    Asserted against the source because these paths need a live provider, a
-    populated semantic cache, or an exhausted candidate chain to reach — and a
-    test that mocks all three proves less about the call site than reading it.
+    `marker` is kept only as a human-readable label for which call site this
+    is (it names the comment beside it in router.py); it is no longer used to
+    locate code, so a comment cannot substitute for the real keyword argument.
     """
-    import inspect
     from llm_router import router
 
-    lines = inspect.getsource(router).split("\n")
-    idx = next(i for i, ln in enumerate(lines) if marker in ln)
-    window = "\n".join(lines[idx:idx + 40])
-    assert f'ledger_outcome="{outcome}"' in window, (
-        f"the path at {marker!r} does not pass ledger_outcome={outcome!r}; "
-        "it will write no quality row at all"
+    values = _ledger_outcome_values(router)
+    assert outcome in values, (
+        f"no call to _finalize_successful_route passes ledger_outcome={outcome!r} "
+        f"(the path at {marker!r}); it will write no quality row at all"
     )
 
 
@@ -211,23 +236,49 @@ def test_the_ledger_gate_admits_a_named_outcome():
 
     `served_from_cache` must no longer be sufficient on its own to suppress the
     row — otherwise the three `ledger_outcome=` arguments above are inert.
+
+    R13/A-10: `"not served_from_cache or ledger_outcome" in inspect.getsource(...)`
+    scans the whole function's text, satisfiable by a comment repeating the
+    phrase while the real `if` condition changed. This instead walks the AST
+    for `ast.If` nodes and unparses each `test` expression — comments cannot
+    appear inside a parsed boolean expression.
     """
+    import ast
     import inspect
+    import textwrap
     from llm_router import router
 
-    src = inspect.getsource(router._finalize_successful_route)
-    assert "not served_from_cache or ledger_outcome" in src, (
+    tree = ast.parse(textwrap.dedent(inspect.getsource(router._finalize_successful_route)))
+    conditions = [ast.unparse(n.test) for n in ast.walk(tree) if isinstance(n, ast.If)]
+    assert any("not served_from_cache or ledger_outcome" in c for c in conditions), (
         "the quality-ledger gate still suppresses every served_from_cache turn"
     )
 
 
 def test_a_degraded_outcome_forces_route_succeeded_false():
-    """The two fields must not be able to disagree."""
+    """The two fields must not be able to disagree.
+
+    R13/A-10: the original checked the whole function's TEXT for the exact
+    expression string. This instead finds the actual `RouteLedgerRecord(...)`
+    call and reads the real VALUE of its `route_succeeded` keyword — a
+    comment near the call cannot substitute for the value the constructor is
+    actually given.
+    """
+    import ast
     import inspect
+    import textwrap
     from llm_router import router
 
-    src = inspect.getsource(router._finalize_successful_route)
-    assert "route_succeeded=(ledger_outcome not in _DEGRADED_LEDGER_OUTCOMES)" in src
+    tree = ast.parse(textwrap.dedent(inspect.getsource(router._finalize_successful_route)))
+    expr = None
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and "RouteLedgerRecord" in ast.unparse(node.func):
+            for kw in node.keywords:
+                if kw.arg == "route_succeeded":
+                    expr = ast.unparse(kw.value)
+    assert expr == "ledger_outcome not in _DEGRADED_LEDGER_OUTCOMES", (
+        f"route_succeeded is computed as {expr!r}, not tied to ledger_outcome"
+    )
     assert router._DEGRADED_LEDGER_OUTCOMES == RQ.DEGRADED_OUTCOMES, (
         "router's copy of the degraded-outcome set has drifted from the canonical one"
     )

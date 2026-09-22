@@ -141,13 +141,29 @@ def test_get_trend_pressure_guards_none_explicitly_before_arithmetic():
     refactor deletes the guard, this fails even though the blanket handler
     would still mask the crash from every caller.
     """
+    import ast
     import inspect
+    import textwrap
 
-    src = inspect.getsource(live_tracker.get_trend_pressure)
-    assert "is None" in src, (
-        "no explicit None guard before the accuracy subtraction — behavior "
-        "would again depend entirely on the blanket except-Exception "
-        "fail-open, which is invisible to a black-box test"
+    # R13/A-10: `"is None" in inspect.getsource(...)` is satisfied by that
+    # phrase sitting in a comment (or this very docstring, which says "is
+    # None" itself) with the real guard deleted. This instead walks the AST
+    # for an `ast.If` node whose test actually contains "is None" AND whose
+    # body actually `return`s — i.e. a real early-exit guard, not prose about
+    # one. A comment cannot produce an `ast.If` node.
+    tree = ast.parse(textwrap.dedent(inspect.getsource(live_tracker.get_trend_pressure)))
+    guarded = False
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.If):
+            continue
+        if "is None" not in ast.unparse(node.test):
+            continue
+        if any(isinstance(stmt, ast.Return) for stmt in node.body):
+            guarded = True
+    assert guarded, (
+        "no explicit `if ... is None: return ...` guard before the accuracy "
+        "subtraction — behavior would again depend entirely on the blanket "
+        "except-Exception fail-open, which is invisible to a black-box test"
     )
 
 

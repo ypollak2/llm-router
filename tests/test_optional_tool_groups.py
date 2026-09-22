@@ -92,6 +92,42 @@ def test_optional_group_is_imported_defensively(name: str):
     )
 
 
+def _register_call_is_none_guarded(tree: ast.Module, name: str) -> bool:
+    """True iff an `if <name> is not None:` block's body actually calls `.register()`.
+
+    R13/A-10: `f"if {name} is not None:" in src` is a substring scan over the
+    whole file — satisfied by that exact text sitting in a comment while the
+    real guard (or the call inside it) is gone. Walking `ast.If` nodes and
+    requiring the `.register()` call to live inside the matched guard's own
+    body means a commented-out guard, or a guard with nothing inside it,
+    cannot pass.
+    """
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.If):
+            continue
+        test = node.test
+        if not (
+            isinstance(test, ast.Compare) and len(test.ops) == 1
+            and isinstance(test.ops[0], ast.IsNot)
+            and isinstance(test.left, ast.Name) and test.left.id == name
+            and len(test.comparators) == 1
+            and isinstance(test.comparators[0], ast.Constant)
+            and test.comparators[0].value is None
+        ):
+            continue
+        for stmt in node.body + node.orelse:
+            for sub in ast.walk(stmt):
+                if (
+                    isinstance(sub, ast.Call)
+                    and isinstance(sub.func, ast.Attribute)
+                    and sub.func.attr == "register"
+                    and isinstance(sub.func.value, ast.Name)
+                    and sub.func.value.id == name
+                ):
+                    return True
+    return False
+
+
 @pytest.mark.parametrize("name", OPTIONAL_TOOL_MODULES)
 def test_registration_is_guarded(name: str):
     """`register()` must not be called on a module that may be None.
@@ -100,8 +136,7 @@ def test_registration_is_guarded(name: str):
     then calling ``.register()`` on it moves the failure a few lines later and
     turns a clear ImportError into an AttributeError.
     """
-    src = _SERVER.read_text(encoding="utf-8")
-    assert f"if {name} is not None:" in src, (
+    assert _register_call_is_none_guarded(_server_tree(), name), (
         f"{name}.register(...) is called without a None guard, so a build that "
         f"excludes it fails with AttributeError instead of starting"
     )
@@ -167,9 +202,20 @@ def test_every_optional_group_is_actually_excludable():
     sync = Path(__file__).resolve().parents[1] / "scripts" / "sync_downstream.py"
     if not sync.exists():  # pragma: no cover
         pytest.skip("sync tooling not present")
-    text = sync.read_text(encoding="utf-8")
+    import sys
+
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from _ast_assert import string_constants
+
+    # R13/A-10: `text` was the whole file's raw source, so a comment reading
+    # `# tools/agoragentic.py` would have satisfied this exclusion-set check
+    # with the entry actually removed from the exclusion list. Pulling the
+    # STRING CONSTANTS out of the parsed module (docstrings excluded by the
+    # helper) means the name must be a value the exclusion machinery actually
+    # uses, not prose near it.
+    consts = string_constants(sync)
     for name in OPTIONAL_TOOL_MODULES:
-        assert f"tools/{name}.py" in text or f"tools.{name}" in text, (
+        assert any(f"tools/{name}.py" in s or f"tools.{name}" in s for s in consts), (
             f"{name!r} is treated as optional here but is not in the sync's "
             f"exclusion set — one of the two is wrong"
         )
@@ -181,8 +227,19 @@ def test_mandatory_groups_are_still_mandatory():
     A defensive import around every tool module would pass the tests above and
     turn a missing core tool group into a silently smaller tool list.
     """
-    src = inspect.getsource(__import__("llm_router.server", fromlist=["x"]))
+    import sys
+
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from _ast_assert import assert_calls
+
+    server_mod = __import__("llm_router.server", fromlist=["x"])
+    # R13/A-10: `f"{mandatory}.register(mcp" in inspect.getsource(...)` is the
+    # exact pattern the audit defeated — a comment repeating the call text
+    # satisfies it with the real call site deleted. `assert_calls` matches
+    # against `ast.unparse`'d Call nodes only, so a commented-out call cannot
+    # pass.
     for mandatory in ("routing", "admin", "consolidated"):
-        assert f"{mandatory}.register(mcp" in src, (
-            f"{mandatory} is no longer registered unconditionally"
+        assert_calls(
+            server_mod, f"{mandatory}.register(mcp",
+            msg=f"{mandatory} is no longer registered unconditionally",
         )

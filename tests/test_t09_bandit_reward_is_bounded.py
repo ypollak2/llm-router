@@ -18,6 +18,11 @@ the expected net dollars one call gains.
 
 from __future__ import annotations
 
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
 import pytest
 
 from llm_router.telemetry import ANSWER_VALUE_USD, MIN_JUDGED_FOR_SIGNAL, ModelStats
@@ -81,14 +86,47 @@ def test_the_old_ratio_is_still_available_but_is_not_the_target():
 
 
 def test_the_bandit_ranks_on_expected_value():
-    """Rule B: the call site, not the property in isolation."""
+    """Rule B: the call site, not the property in isolation.
+
+    R13/A-10. This docstring said exactly that and then ran
+    `"s.expected_value" in inspect.getsource(bandit)`, which is satisfied by
+    the phrase appearing in a comment — including the module docstring, which
+    mentions `expected_value` on line 11. The assertion could not distinguish
+    "the bandit ranks on it" from "somebody wrote it down".
+
+    Now asserted on the AST of the `max(..., key=...)` expressions that DO the
+    ranking. Comments are not in the AST, so a phrase left behind cannot
+    satisfy this.
+    """
+    import ast
     import inspect
+
     from llm_router import bandit
 
-    src = inspect.getsource(bandit)
-    assert "s.expected_value" in src
-    assert "success_per_dollar" not in src, (
-        "the bandit is ranking on the old unbounded ratio"
+    tree = ast.parse(inspect.getsource(bandit))
+    ranking_keys = [
+        ast.unparse(kw.value)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and ast.unparse(node.func) == "max"
+        for kw in node.keywords
+        if kw.arg == "key"
+    ]
+    assert ranking_keys, (
+        "the bandit no longer ranks with max(..., key=...) — this assertion "
+        "has stopped looking at the thing that chooses a model"
+    )
+    assert all("expected_value" in k for k in ranking_keys), (
+        f"a ranking key does not use expected_value: {ranking_keys}"
+    )
+    # And the old unbounded ratio is gone from every value the code USES, not
+    # merely from its prose.
+    from _ast_assert import string_constants
+
+    used = {ast.unparse(n) for n in ast.walk(tree)
+            if isinstance(n, ast.Attribute)} | set(string_constants(tree))
+    offenders = [u for u in used if "success_per_dollar" in u]
+    assert not offenders, (
+        f"the bandit is ranking on the old unbounded ratio: {offenders}"
     )
 
 
@@ -125,9 +163,20 @@ def test_too_few_graded_samples_do_not_outrank_the_weak_signal():
 
 def test_the_judge_columns_are_actually_queried():
     """Otherwise judged_samples is always 0 and the upgrade never fires."""
-    import inspect
+    # R13: the SQL is a string the query runs, so assert on the string the
+    # code uses. `"COUNT(judge_score)" in getsource(...)` was satisfied by the
+    # docstring above, which names the column it is checking for.
+    import sys
+    from pathlib import Path
+
     from llm_router import telemetry
 
-    src = inspect.getsource(telemetry.aggregate_stats)
-    assert "COUNT(judge_score)" in src
-    assert "AVG(judge_score)" in src
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from _ast_assert import string_constants
+
+    sql = string_constants(telemetry.aggregate_stats)
+    for needed in ("COUNT(judge_score)", "AVG(judge_score)"):
+        assert any(needed in q for q in sql), (
+            f"{needed} is not in any SQL this function runs, so judged_samples "
+            f"is always 0 and the upgrade never fires"
+        )

@@ -129,14 +129,34 @@ def test_the_compression_stat_reaches_the_database(tmp_path):
 
 
 def test_the_migration_is_actually_applied():
-    """Guards the specific mistake: declared, exported, never added to the list."""
-    from llm_router.cost import MIGRATE_ADD_COMPRESSION_STATS
+    """Guards the specific mistake: declared, exported, never added to the list.
+
+    R13/A-10: `"+ MIGRATE_ADD_COMPRESSION_STATS" in inspect.getsource(cost)`
+    scans the ENTIRE (~5,000-line) module's text, satisfiable by that phrase
+    sitting in a comment anywhere in the file while the real
+    `all_migrations` assignment never references the name. This instead
+    finds the actual `all_migrations = (...)` assignment in the AST and
+    checks the name appears in the unparsed VALUE expression of that specific
+    assignment — narrow enough that a comment elsewhere, or even a comment
+    right next to it, cannot satisfy it.
+    """
+    import ast
     import inspect
+    import textwrap
+    from llm_router.cost import MIGRATE_ADD_COMPRESSION_STATS
     import llm_router.cost as cost
 
-    src = inspect.getsource(cost)
-    assert "+ MIGRATE_ADD_COMPRESSION_STATS" in src, \
-        "MIGRATE_ADD_COMPRESSION_STATS is defined but not in all_migrations"
+    tree = ast.parse(textwrap.dedent(inspect.getsource(cost)))
+    referenced = False
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Assign)
+                and any(isinstance(t, ast.Name) and t.id == "all_migrations" for t in node.targets)
+                and "MIGRATE_ADD_COMPRESSION_STATS" in ast.unparse(node.value)):
+            referenced = True
+    assert referenced, (
+        "MIGRATE_ADD_COMPRESSION_STATS is defined but not referenced in the "
+        "all_migrations assignment"
+    )
     assert MIGRATE_ADD_COMPRESSION_STATS
 
 

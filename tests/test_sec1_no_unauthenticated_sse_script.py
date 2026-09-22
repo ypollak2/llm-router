@@ -53,27 +53,51 @@ def test_nothing_points_at_main_sse():
 
 
 def test_main_sse_defaults_to_localhost():
-    """Condition 3 of the docstring's own re-add checklist."""
-    import inspect
+    """Condition 3 of the docstring's own re-add checklist.
+
+    R13/A-10: `'"0.0.0.0"' not in inspect.getsource(...)` scans the whole
+    function's TEXT, docstring included — a docstring that quotes `"0.0.0.0"`
+    while explaining why it must not be the default would fail this
+    harmlessly, but the same scan run the other way (`in src`, as the sibling
+    test below did) is satisfied by a comment and proves nothing. Pulling the
+    STRING CONSTANTS the function actually uses (docstrings excluded by the
+    helper) means the value has to be a literal the code evaluates, not prose.
+    """
+    import sys
+    from pathlib import Path
+
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from _ast_assert import assert_not_in_strings
 
     from llm_router import server
 
-    src = inspect.getsource(server.main_sse)
-    assert '"0.0.0.0"' not in src, (
-        "main_sse still defaults to 0.0.0.0; the docstring requires 127.0.0.1 "
-        "with 0.0.0.0 behind an explicit opt-in"
+    assert_not_in_strings(
+        server.main_sse, "0.0.0.0",
+        msg="main_sse still defaults to 0.0.0.0; the docstring requires "
+            "127.0.0.1 with 0.0.0.0 behind an explicit opt-in",
     )
 
 
 def test_main_sse_consults_the_public_bind_gate():
-    """`_allow_public_bind()` sits in the same module and was never called."""
-    import inspect
+    """`_allow_public_bind()` sits in the same module and was never called.
+
+    R13/A-10: `"_allow_public_bind" in inspect.getsource(...)` is satisfied by
+    the name appearing in a comment near the socket bind with the real call
+    deleted — exactly the evasion this suite exists to close.
+    `assert_calls` matches against `ast.unparse`'d Call nodes, so a
+    commented-out call cannot pass.
+    """
+    import sys
+    from pathlib import Path
+
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from _ast_assert import assert_calls
 
     from llm_router import server
 
-    src = inspect.getsource(server.main_sse)
-    assert "_allow_public_bind" in src, (
-        "main_sse binds a socket without consulting the shared public-bind gate"
+    assert_calls(
+        server.main_sse, "_allow_public_bind",
+        msg="main_sse binds a socket without consulting the shared public-bind gate",
     )
 
 

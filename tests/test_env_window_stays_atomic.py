@@ -53,8 +53,24 @@ def test_no_await_between_mutating_the_environment_and_restoring_it():
 
 
 def test_the_environment_is_restored_even_when_the_body_raises(monkeypatch):
+    """Was `"finally:" in inspect.getsource(...)` plus a text-slice-after-"finally:"
+    membership check for each var name. A comment saying "finally:" (satisfying
+    the first check) or repeating either var name after it (satisfying the
+    second) would pass with no real restoration — the A-10 evasion again.
+    This instead finds the real `ast.Try` node and requires a non-empty
+    `finalbody`, then unparses ONLY that subtree (comments are not part of
+    the AST, so they cannot appear here) and requires each var name to show
+    up in the code that actually runs on the way out.
+    """
     monkeypatch.setenv("LLM_ROUTER_AGENT_WRITES", "propose")
-    src = inspect.getsource(lt.llm_local_task)
-    assert "finally:" in src, "no finally — an exception would leak the mutated env"
+    tree = ast.parse(inspect.getsource(lt.llm_local_task))
+    fn = _function(tree, "llm_local_task")
+
+    try_nodes = [n for n in ast.walk(fn) if isinstance(n, ast.Try)]
+    assert try_nodes, "no try/finally — an exception would leak the mutated env"
+    finally_nodes = [n for n in try_nodes if n.finalbody]
+    assert finally_nodes, "no finally — an exception would leak the mutated env"
+
+    final_source = "\n".join(ast.unparse(s) for n in finally_nodes for s in n.finalbody)
     for var in ("LLM_ROUTER_AGENT_WRITES", "LLM_ROUTER_AGENT_COMMANDS"):
-        assert var in src.split("finally:", 1)[1], f"{var} is not restored"
+        assert var in final_source, f"{var} is not restored in the finally block"

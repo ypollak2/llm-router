@@ -460,10 +460,29 @@ def test_report_flags_an_empty_pool_as_not_ready(tmp_path: Path) -> None:
 
 def test_nothing_in_accumulation_joins_on_time() -> None:
     """The pool keys on prompt hash and task id, never on proximity in time."""
+    # R13/A-10. A raw-text scan for an ABSENT pattern is the weaker direction
+    # of the same defect: it is satisfied by deleting a COMMENT that mentions
+    # the smell, while the code that joins on time stays. Asserted over the
+    # identifiers and calls the module actually uses.
+    import ast
+    import sys
+
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from _ast_assert import string_constants
+
     for mod in ("pool.py", "eligibility.py", "accumulate.py"):
-        src = (Path(__file__).resolve().parents[1] / "scripts" / "groundtruth" / mod).read_text()
-        for smell in ("nearest_ts", "closest_time", "within_seconds", "abs(ts", "ts_delta"):
-            assert smell not in src, f"{mod} appears to join on time via {smell!r}"
+        path = Path(__file__).resolve().parents[1] / "scripts" / "groundtruth" / mod
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        used = {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)}
+        used |= {ast.unparse(n) for n in ast.walk(tree) if isinstance(n, ast.Attribute)}
+        used |= {ast.unparse(n) for n in ast.walk(tree) if isinstance(n, ast.Call)}
+        used |= set(string_constants(tree))
+        for smell in ("nearest_ts", "closest_time", "within_seconds",
+                      "abs(ts", "ts_delta"):
+            offenders = [u for u in used if smell in u]
+            assert not offenders, (
+                f"{mod} appears to join on time via {smell!r}: {offenders[:2]}"
+            )
 
 
 # ── Part 14: regression against the historical failure categories ───────────
@@ -679,11 +698,24 @@ def test_synthetic_run_never_reaches_the_pool(tmp_path: Path, monkeypatch) -> No
 
 def test_provenance_marker_is_explicit_not_inferred() -> None:
     """No model name, session id or token count decides provenance."""
+    # R13/A-10: same weaker direction. A comment naming `session_id` used to
+    # be enough to fail this, and deleting that comment was enough to pass it,
+    # neither of which says anything about what the function inspects.
+    import ast
     import inspect
+    import sys
+
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from _ast_assert import string_constants
 
     from llm_router import routing_quality as rq
-    src = inspect.getsource(rq.detect_synthetic)
+
+    tree = ast.parse(inspect.getsource(rq.detect_synthetic))
+    used = {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)}
+    used |= {ast.unparse(n) for n in ast.walk(tree) if isinstance(n, ast.Attribute)}
+    used |= set(string_constants(tree))
     for smell in ("final_model", "session_id", "mock", "test/", "prompt_tokens"):
-        assert smell not in src, (
-            f"detect_synthetic() inspects {smell!r} — that is an inference, "
-            "and every such inference has needed revising")
+        offenders = [u for u in used if smell in u]
+        assert not offenders, (
+            f"detect_synthetic() inspects {smell!r} ({offenders[:2]}) — that is "
+            "an inference, and every such inference has needed revising")
