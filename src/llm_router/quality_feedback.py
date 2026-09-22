@@ -447,7 +447,10 @@ def record_loophole_verdict(record: dict) -> bool:
 
 
 def _loophole_jsonl_path() -> str:
-    return os.path.join(os.path.expanduser("~"), ".llm-router", "quality_feedback.jsonl")
+    # R11: escaped LLM_ROUTER_HOME into the operator's real home. Found by the
+    # canonical-source scan on 2026-09-22 -- instance 12 of this class.
+    from llm_router import paths as _paths
+    return str(_paths.state_path("quality_feedback.jsonl"))
 
 
 def ingest_loophole_jsonl(path: str | None = None, since_offset: int = 0) -> tuple[int, int]:

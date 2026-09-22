@@ -300,7 +300,11 @@ def detect_seats(
 # ── persistence ─────────────────────────────────────────────────────────────
 
 def seats_path(home: Path | None = None) -> Path:
-    return (home or Path.home()) / ".llm-router" / SEATS_FILE_NAME
+    # R11: canonical resolver — see direct_diagnostics for the same defect.
+    if home is not None:
+        return Path(home) / ".llm-router" / SEATS_FILE_NAME
+    from llm_router import paths as _paths
+    return _paths.state_path(SEATS_FILE_NAME)
 
 
 def save_seats(seats: Seats, home: Path | None = None) -> Path:

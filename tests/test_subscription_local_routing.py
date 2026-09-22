@@ -60,6 +60,13 @@ def seat_home(monkeypatch, tmp_path):
     import pathlib
     monkeypatch.setattr(pathlib.Path, "home", classmethod(lambda cls: tmp_path))
     monkeypatch.setenv("HOME", str(tmp_path))
+    # R11: `seats.json` is router STATE, so it now resolves through
+    # `paths.state_path()` and therefore honours LLM_ROUTER_HOME — which the
+    # autouse isolation fixture sets. Patching HOME alone no longer redirects
+    # it, and that is the intended contract ("LLM_ROUTER_HOME if set, read at
+    # CALL time" -- paths.py). Point the canonical variable at the same tmp dir
+    # so the test isolates through the mechanism the product documents.
+    monkeypatch.setenv("LLM_ROUTER_HOME", str(tmp_path / ".llm-router"))
     monkeypatch.setenv("LLM_ROUTER_SEATS_AUTO", "on")
     return tmp_path
 

@@ -129,7 +129,12 @@ def test_doctor_surfaces_the_advice(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
     monkeypatch.setenv("LLM_ROUTER_OLLAMA_TIMEOUT", "4")
 
-    advice = _dd.current_advice(timeout_s=4.0)
+    # R11: read from where the samples were written. `record_sample(home=...)`
+    # takes the explicit-override branch; a no-arg read goes through
+    # `paths.state_path()` and therefore follows LLM_ROUTER_HOME, which the
+    # autouse isolation fixture sets elsewhere. Passing `home` to both keeps
+    # the write and the read on the same branch.
+    advice = _dd.current_advice(timeout_s=4.0, home=tmp_path)
     assert advice is not None
     assert "LLM_ROUTER_OLLAMA_TIMEOUT=" in advice.message
     # The number must be actionable, not "increase the timeout".

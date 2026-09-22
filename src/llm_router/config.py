@@ -370,7 +370,50 @@ class RouterConfig(BaseSettings):
     # sandboxed wrote to the operator's live usage.db and destroyed real data
     # (evidence/AUDITOR_INCIDENT.md). Resolved per instantiation through
     # llm_router.paths, which reads LLM_ROUTER_HOME at call time.
-    llm_router_db_path: Path = Field(default_factory=lambda: state_path("usage.db"))
+    # R11 (2026-09-22). The comment above claimed this was resolved. It was
+    # not: `default_factory` runs at INSTANCE construction, and `get_config()`
+    # returns a process-lifetime SINGLETON, so the path still froze — one layer
+    # down from the defect that was fixed. Reproduced:
+    #
+    #   get_config().llm_router_db_path  -> /tmp/A/usage.db
+    #   os.environ["LLM_ROUTER_HOME"] = "/tmp/B"
+    #   get_config().llm_router_db_path  -> /tmp/A/usage.db   (frozen)
+    #
+    # This is the MONEY database. A test or probe that redirects the home after
+    # anything has touched the config writes to the previous location — which
+    # is how a fake $1.25 row reached the operator's live ledger on 2026-09-22.
+    #
+    # Stored as an optional override; the public name is a property that
+    # re-resolves on every access, so all ~40 readers keep working unchanged.
+    llm_router_db_path_override: Path | None = Field(
+        default=None, alias="llm_router_db_path")
+
+    @property
+    def llm_router_db_path(self) -> Path:
+        """The usage database, resolved on EVERY access.
+
+        An explicit override (env `LLM_ROUTER_DB_PATH`, or a constructor
+        argument) wins; otherwise the canonical resolver is consulted afresh so
+        `LLM_ROUTER_HOME` is honoured even when it changes after the singleton
+        was built.
+        """
+        if self.llm_router_db_path_override is not None:
+            return Path(self.llm_router_db_path_override)
+        return state_path("usage.db")
+
+    @llm_router_db_path.setter
+    def llm_router_db_path(self, value) -> None:
+        """Assigning pins the path explicitly, exactly as the env var does.
+
+        Several tests and callers do `config.llm_router_db_path = tmp`. That
+        has to keep working: a property without a setter turns a supported
+        assignment into `AttributeError: has no setter`, which is a louder
+        regression than the freeze it replaced.
+        """
+        object.__setattr__(
+            self, "llm_router_db_path_override",
+            None if value is None else Path(value),
+        )
     llm_router_monthly_budget: float = 20.0  # $20/month default cap
     llm_router_daily_spend_limit: float = 0.0  # 0 = disabled; >0 fires alert when crossed
 

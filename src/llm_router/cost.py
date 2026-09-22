@@ -88,8 +88,23 @@ def _refuse_unisolated_test_write(db_path: Path) -> bool:
         return False
     if not os.environ.get("PYTEST_CURRENT_TEST"):
         return False  # not a test — this is a real user's routing decision
+    if os.environ.get("LLM_ROUTER_HOME", "").strip():
+        # R11. Explicitly isolated: the process has declared where its state
+        # lives, so by construction it is not the operator's database.
+        #
+        # This arm is load-bearing. The comparison below used to be against
+        # `state_path("usage.db")`, which FOLLOWS LLM_ROUTER_HOME — so once the
+        # config stopped freezing that path, "the production database" and
+        # "wherever this isolated run points" became the same value and the
+        # guard refused every test write, silently. A guard that blocks
+        # everything is as useless as one that blocks nothing, and it fails in
+        # the direction that looks like passing tests.
+        return False
     try:
-        return Path(db_path).resolve() == state_path("usage.db").resolve()
+        # PRODUCTION means the operator's real home, not whatever the current
+        # environment resolves to.
+        production = Path.home() / ".llm-router" / "usage.db"
+        return Path(db_path).resolve() == production.resolve()
     except OSError:  # pragma: no cover — an unresolvable path is not the production one
         return False
 
@@ -1638,12 +1653,23 @@ def _validate_routing_insert(
     Raises:
         ValueError: On invalid provider, test-like model, or implausible cost
     """
+    # R11 / T-20 (third instance). This hand-listed 'gemini' and omitted
+    # 'google' -- the name model_registry actually assigns to every Gemini
+    # model. So every real Gemini routing decision raised ValueError below,
+    # was swallowed at router.py's `except Exception: log.warning(...)`, and
+    # never reached routing_decisions.
+    #
+    # The canonical sets were created by the commit that fixed the SECOND
+    # instance of this class, in quota_tracker, and this site was not updated.
+    # Importing beats re-listing: a set that is copied is a set that drifts.
+    from llm_router.model_registry import GOOGLE_PROVIDERS, OPENAI_PROVIDERS
+
     VALID_PROVIDERS = frozenset({
-        'ollama', 'openai', 'gemini', 'codex',
+        'ollama', 'codex',
         'claude_subscription', 'subscription', 'anthropic',
         'perplexity', 'groq', 'deepseek', 'cc',
-        'claude'  # variations
-    })
+        'claude',  # variations
+    }) | GOOGLE_PROVIDERS | OPENAI_PROVIDERS
 
     # Check provider is valid
     if final_provider not in VALID_PROVIDERS:
@@ -2880,7 +2906,6 @@ async def get_savings_summary(period: str = "today", *,
         rows = await cursor.fetchall()
         by_model = {
             model: {
-                "calls": calls,
                 "calls": calls, "tokens": int(tokens),
                 "cost_saved": float(saved), "time_saved": float(tsaved),
             }

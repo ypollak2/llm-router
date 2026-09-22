@@ -159,7 +159,15 @@ _MAX_SAMPLES = 20
 def _samples_path(home=None):
     from pathlib import Path
 
-    return (home or Path.home()) / ".llm-router" / "direct_samples.jsonl"
+    # R11: go through the canonical resolver. `(home or Path.home())` is a
+    # hand-copied resolver that never consults LLM_ROUTER_HOME, so an
+    # "isolated" probe wrote direct_samples.jsonl into the operator's REAL
+    # home. Reproduced 2026-09-22. `home` stays an explicit override for the
+    # callers that pass one.
+    if home is not None:
+        return Path(home) / ".llm-router" / "direct_samples.jsonl"
+    from llm_router import paths as _paths
+    return _paths.state_path("direct_samples.jsonl")
 
 
 def record_sample(elapsed_s: float, timed_out: bool, home=None) -> None:

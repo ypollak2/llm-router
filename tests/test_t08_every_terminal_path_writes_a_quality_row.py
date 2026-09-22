@@ -126,17 +126,29 @@ def test_the_bandit_is_not_fed_success_for_a_degraded_answer():
 
 
 def test_the_router_actually_uses_that_expression():
-    """Rule B: assert the call site, not a re-implementation.
+    """Rule B, enforced over the AST rather than the source text.
 
-    The test above builds the expression itself, which would pass even if
-    router.py never adopted it. This pins the source.
+    The previous form asserted that a string appeared ANYWHERE in a 5,300-line
+    module. The audit defeated it: break the real call site, leave the phrase
+    alive as a comment, and 23 tests passed while the bandit was once again
+    rewarded for gate-rejected answers.
+
+    Comments are not in the AST, so this cannot be satisfied by prose.
     """
-    import inspect
+    import sys
+    from pathlib import Path
+
+    sys.path.insert(0, str(Path(__file__).parent))
+    from _ast_assert import assert_guarded_by
+
     from llm_router import router
 
-    src = inspect.getsource(router)
-    assert 'False if getattr(response, "quality_degraded", False)' in src, (
-        "router.py's bandit feed no longer short-circuits on quality_degraded"
+    # `_finalize_successful_route` is where the bandit feed lives — located by
+    # walking the AST for the attribute, not by trusting a remembered name.
+    assert_guarded_by(
+        router._finalize_successful_route,
+        "quality_degraded",
+        msg="router's bandit feed no longer reads quality_degraded",
     )
 
 
@@ -145,13 +157,11 @@ def test_the_savings_logger_applies_the_same_rule():
 
     One of the two being fixed is how the scrubbers drifted four classes apart.
     """
-    import inspect
     import sys
 
     before = set(vars(sys.modules["llm_router"]))
     try:
         from llm_router.hooks import savings_logger
-        src = inspect.getsource(savings_logger)
     finally:
         # Importing a hooks submodule binds `hooks` on the package as a fileless
         # namespace module, which then answers for the real one in every test
@@ -160,7 +170,14 @@ def test_the_savings_logger_applies_the_same_rule():
         for attr in set(vars(pkg)) - before:
             if getattr(getattr(pkg, attr, None), "__file__", "s") is None:
                 delattr(pkg, attr)
-    assert 'getattr(response, "quality_degraded", False)' in src
+    from pathlib import Path
+    sys.path.insert(0, str(Path(__file__).parent))
+    from _ast_assert import assert_guarded_by
+    assert_guarded_by(
+        savings_logger,
+        "quality_degraded",
+        msg="savings_logger no longer reads quality_degraded",
+    )
 
 
 # ── T-08: the call sites pass a distinguishing outcome ───────────────────────

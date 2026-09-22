@@ -26,7 +26,6 @@ from __future__ import annotations
 
 import inspect
 import sqlite3
-import sys
 
 import pytest
 
