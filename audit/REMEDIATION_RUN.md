@@ -29,7 +29,7 @@ red and looks sound.)
 | R6 | `partial` | One savings number across all surfaces | bypass the accessor in one surface -> test names it |
 | R7 | `partial` | Label every money figure; net not gross | strip one label -> test fails |
 | R9 | `todo` | Hook death visible (start marker + doctor rate) | inject 70s sleep -> doctor reports a kill |
-| R10 | `todo` | Refuse unservable capability (tools/vision/schema/context) | drop refusal from one endpoint -> parametrised test names it |
+| R10 | `partial` | Refuse unservable capability (tools/vision/schema/context) | drop refusal from one endpoint -> parametrised test names it |
 | R3 | `todo` | SECURITY.md honesty + interpreter corpus | add an interpreter to the allowlist -> corpus test fails |
 | R8 | `todo` | Capture ON behind explicit install consent | consent absent -> capture stays off |
 | R16 | `todo` | `capture()` sees cwd/tools, or scope the claim | a repo task reaches a frozen dataset, or docs say it cannot |
@@ -513,3 +513,86 @@ try/except so a broken import cannot take down a statusline; the fallback does
 the same subtraction rather than reverting to `max(0, …)`. A clamp in the error
 path is the defect returning on exactly the machines where something else is
 already wrong, and an AST test fails if any `_net` helper ever calls `max`.
+
+
+## R10 — refuse what cannot be served (PARTIAL — tools done, the rest not)
+
+H-03 found `/v1/chat/completions` accepting a `tools` array, discarding it
+before the handler body ran (the field was not declared, so Pydantic dropped
+it), and returning fluent prose with `finish_reason: "stop"`. It was fixed on
+TWO endpoints. `/v1/responses`, `/api/chat` and `/api/generate` kept the
+defect, because the fix was applied call-site by call-site and nothing
+enumerated the endpoints.
+
+The plan predicted this word for word: *"a new endpoint must be added or the
+test fails — this is precisely how /v1/responses was missed."* It was still
+missed at the time of writing, on three endpoints, including OpenAI's CURRENT
+function-calling surface.
+
+The test DISCOVERS every POST route on the app and requires each to be
+classified: a completion endpoint that must refuse, or an explicitly excused
+non-completion route (`/route` returns a decision and executes nothing;
+`/ground` checks text produced elsewhere). A route added later is unclassified
+and fails.
+
+**Two test bugs caught, both of which would have left the file green:**
+
+1. `TestClient` defaults to Host `testserver`, and `_guard_cross_origin`
+   rejects a non-loopback Host with **403** (CHZ-SEC-04, DNS-rebinding). Every
+   assertion would have been measuring the CSRF guard, not the refusal.
+2. The "an ordinary request is not refused" test proved its point by ACTUALLY
+   ROUTING — a 14.7s live Codex call and a real `routing_decision` row. A test
+   that proves a refusal did not fire by performing the unrefused action
+   spends money to learn nothing. It now asserts the helper directly.
+
+I checked the operator's live ledger afterwards: 0 rows in `usage`,
+`routing_decisions` and `claude_usage` in the window. No contamination.
+
+**Still open under R10:** vision (`images`) silently discarded, structured
+output (`format`/`response_format`) unchecked, and no context-window
+pre-flight. `CapabilityRequirement` still has no structured-output dimension.
+The enumerating harness is in place, so adding each is now a matter of another
+parametrised dimension rather than another endpoint-by-endpoint sweep.
+
+---
+
+## The producer never stamped provenance — found in the live ledger
+
+R6 made the money surfaces filter fail-closed (`COALESCE(is_simulated, 1) = 0`).
+That rule is right: a row written before the column existed had its provenance
+NEVER MEASURED, and counting it asserts production origin on no evidence.
+
+It is also only safe if the producers stamp it. Checking whether the R10 test
+had contaminated the operator's ledger, I read the rows around it instead:
+
+    58 rows in 20 minutes — this session's OWN hook — every one is_simulated = NULL
+
+All four `INSERT INTO savings_stats` sites stamp provenance. `import_savings_log`
+correctly copies an entry's own provenance rather than inventing one
+(`_detect_synthetic()` there would describe the IMPORTING process). But
+`hooks/savings_logger.py` writes the JSONL those rows come from, and its record
+carried no provenance field at all — so there was nothing to copy.
+
+Correct writer, correct importer, correct filter, and a real figure of $0.00,
+because the one link nobody looked at was the producer. Every individual link
+passed its own tests, which is why the new test walks the whole chain:
+record -> JSONL -> import -> filtered query.
+
+**And a ninth and tenth clamp,** in the same file, which the lint still did not
+scan because a producer is not a surface:
+
+    savings_logger.py:201   max(0.0, baseline - external_cost)
+    savings_logger.py:323   max(0.0, float(receipt.savings_usd))
+
+The second is the worse one: `receipt.savings_usd` is computed upstream and can
+legitimately be negative, so the bridge was destroying the information it
+exists to carry. `savings_logger.py` is now in the lint's core list — 23
+modules -> **24**, all clean.
+
+**RED-CHECK:** remove the `is_simulated` key -> the AST test names the record;
+make `_detect_synthetic` fail open -> *"it must return True."*
+
+The suite's own T-01 guard then caught my test importing
+`llm_router.hooks.savings_logger` and leaving a fileless stub on the package —
+the same "a test breaks its neighbours" class fixed two commits earlier, caught
+by the guard that exists because of it.

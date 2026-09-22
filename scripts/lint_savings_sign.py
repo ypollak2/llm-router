@@ -67,6 +67,12 @@ _CORE_MONEY_MODULES = (
     "src/llm_router/team.py",
     "src/llm_router/execution_ledger.py",
     "src/llm_router/hooks/session-end.py",
+    # The PRODUCER of most savings_stats rows. Not a surface, so the registry
+    # does not cover it — and it carried a ninth clamp
+    # (`max(0.0, baseline - external_cost)`) found only by reading the rows it
+    # had just written. A writer whose number is already clamped cannot be
+    # un-clamped by any surface downstream.
+    "src/llm_router/hooks/savings_logger.py",
 )
 
 

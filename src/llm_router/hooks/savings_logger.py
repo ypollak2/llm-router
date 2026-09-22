@@ -143,6 +143,31 @@ def _baseline_cost(complexity: str, input_tokens: int, output_tokens: int) -> fl
     return (input_tokens / 1_000_000) * in_rate + (output_tokens / 1_000_000) * out_rate
 
 
+def _net(baseline_usd: float, actual_usd: float) -> float:
+    """`savings.net_saved`, with a SIGNED fallback. See AUD-06."""
+    try:
+        from llm_router.savings import net_saved
+        return net_saved(baseline_usd, actual_usd)
+    except Exception:  # noqa: BLE001
+        return float(baseline_usd) - float(actual_usd)
+
+
+def _detect_synthetic() -> bool:
+    """Is this process writing test data? Delegates to the canonical detector.
+
+    Fail-CLOSED: if the detector cannot be reached we cannot certify the row as
+    production, so it is stamped synthetic rather than counted as real money.
+    Same rule and same reasoning as `agentic/telemetry._detect_synthetic`; the
+    ANSWER always comes from `routing_quality.detect_synthetic`, never from a
+    second copy of the rules.
+    """
+    try:
+        from llm_router.routing_quality import detect_synthetic
+        return bool(detect_synthetic())
+    except Exception:  # noqa: BLE001
+        return True
+
+
 def _savings_log_path() -> Path:
     """Path is resolved at call time so test fixtures that patch Path.home() work."""
     return _router_home() / _SAVINGS_LOG_FILENAME
@@ -198,7 +223,11 @@ def log_direct_savings(
 
         external_cost = _cost_for(provider, model, input_tokens, output_tokens)
         baseline = _baseline_cost(complexity, input_tokens, output_tokens)
-        estimated_saved = max(0.0, baseline - external_cost) if realized else 0.0
+        # AUD-06: signed. A DIRECT route to a paid external model CAN cost more
+        # than the Claude baseline it replaced — small prompts where the
+        # external per-call minimum exceeds the delta — and clamping here made
+        # that case indistinguishable from a route that broke even.
+        estimated_saved = _net(baseline, external_cost) if realized else 0.0
 
         record = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -212,6 +241,21 @@ def log_direct_savings(
             "input_tokens": input_tokens,
             "output_tokens": output_tokens,
             "host": host,
+            # T-05/R6: provenance stamped BY THE PRODUCER.
+            #
+            # `cost.import_savings_log` copies an entry's own provenance and
+            # correctly refuses to invent one — `_detect_synthetic()` there
+            # would describe the importing process, not the call. But this
+            # record carried no provenance at all, so every row it produced
+            # landed `is_simulated = NULL`.
+            #
+            # That was invisible while nothing filtered. Once the money
+            # surfaces filter fail-closed (`COALESCE(is_simulated, 1) = 0`),
+            # NULL means "never measured" and drops out — and this hook is the
+            # LARGEST producer of savings_stats rows, so genuinely real routing
+            # was about to start reporting $0.00. Found by reading 58 rows this
+            # session's own hook had just written, all NULL.
+            "is_simulated": 1 if _detect_synthetic() else 0,
         }
 
         path = _savings_log_path()
@@ -276,12 +320,20 @@ def log_receipt_savings(
             "session_id": session_id,
             "task_type": receipt.task_type,
             "complexity": receipt.complexity,
-            "estimated_saved": max(0.0, float(receipt.savings_usd)),
+            # AUD-06: pass the receipt's figure through SIGNED. `savings_usd`
+            # is computed upstream by `receipt_store.compute_receipt`, which
+            # can legitimately produce a negative for a route that cost more
+            # than the opus-equivalent baseline. Clamping here discarded a loss
+            # the receipt had correctly recorded — the bridge destroying the
+            # information it exists to carry.
+            "estimated_saved": float(receipt.savings_usd),
             "external_cost": float(receipt.cost_usd),
             "model": receipt.model,
             "input_tokens": int(receipt.input_tokens),
             "output_tokens": int(receipt.output_tokens),
             "host": host,
+            # T-05/R6: same provenance gap as the DIRECT record above.
+            "is_simulated": 1 if _detect_synthetic() else 0,
         }
         path = _savings_log_path()
         path.parent.mkdir(parents=True, exist_ok=True)
