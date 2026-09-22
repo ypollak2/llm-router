@@ -1,0 +1,84 @@
+# K6 — the audit-readiness checks, run nightly against main.
+#
+# The 2026-09-22 audit found defects that had been true for months. Nothing was
+# broken suddenly; the checks that would have caught them did not exist, and
+# once they did exist they only ran when somebody happened to run them.
+#
+# This job runs the three that answer "is the instrumentation still honest?":
+#
+#   K2  every product claim names a test that proves it
+#   K3  every population's parts sum to its whole
+#   K4  the standing adversarial corpus (canary secrets, interpreter escapes,
+#       routing pairs) — DIAGNOSTIC ONLY, never tuned against
+#
+# It runs on a schedule rather than only on PRs because the failures it catches
+# are DRIFT: a claim whose proof was deleted, a denominator that stopped adding
+# up, a scrubber that stopped matching a credential shape. None of those arrive
+# with a commit that looks like they did.
+name: Self-audit
+
+on:
+  schedule:
+    - cron: '0 4 * * *'     # daily 04:00 UTC
+  workflow_dispatch:
+  pull_request:
+    # Also on PRs that touch the mechanisms themselves — the one case where
+    # the drift DOES arrive with a commit.
+    paths:
+      - 'src/llm_router/counter_registry.py'
+      - 'src/llm_router/savings.py'
+      - 'src/llm_router/secret_scrubber.py'
+      - 'src/llm_router/hooks/agent_writes.py'
+      - 'tests/claims_ledger.py'
+      - 'tests/test_k*.py'
+      - 'README.md'
+      - 'SECURITY.md'
+
+permissions:
+  contents: read
+
+jobs:
+  self-audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: astral-sh/setup-uv@38f3f104447c67c051c4a08e39b64a148898af3a # v4
+        with:
+          python-version: "3.12"
+
+      - name: Install
+        run: uv sync --all-extras
+
+      - name: K2 — claims are proven
+        run: uv run pytest tests/test_k2_claims_are_proven.py -q
+
+      - name: K3 — denominators reconcile
+        run: uv run pytest tests/test_k3_denominators_reconcile.py -q
+
+      - name: K4 — adversarial corpus
+        # `-rxX` so an xpass is VISIBLE: a strict xfail that starts passing
+        # means a known gap closed, and the corpus must be updated in the same
+        # breath or it stops recording reality.
+        run: uv run pytest tests/test_k4_adversarial_corpus.py -q -rxX
+
+      - name: K5 — the audit report renders
+        run: uv run pytest tests/test_k5_audit_report.py -q
+
+      - name: K1 — frozen state generates and leaks no personal path
+        run: uv run pytest tests/test_k1_freeze_state.py -q
+
+      - name: Clamp lint (AUD-06) over every registered money surface
+        run: uv run python scripts/lint_savings_sign.py
+
+      - name: Source-text assertion ratchet (A-10)
+        run: uv run pytest tests/test_r13_no_source_text_assertions.py -q
+
+      - name: Silent-write ratchet (T-14)
+        run: uv run pytest tests/test_t14_silent_mutation_ratchet.py -q
+
+      - name: Print the audit report
+        # Not a gate — a record. A failing job above is the signal; this is the
+        # context whoever reads it will want, without needing the machine.
+        if: always()
+        run: uv run llm-router doctor --audit || true

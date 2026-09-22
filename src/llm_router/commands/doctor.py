@@ -1545,6 +1545,116 @@ def _run_doctor(host: Optional[str] = None) -> tuple[int, list[str]]:
     return exit_code, issues
 
 
+def _render_audit_report() -> list[str]:
+    """K5. Every counter, denominator and provenance split, in one place.
+
+    The point is structural, not cosmetic. The recurring CLASS-A defect in this
+    repo is a mechanism that is built, correct, durable — and read by nobody:
+    58 fail-open writers with zero readers, `dropped_event_count` whose
+    docstring claimed a reader it did not have, `query_realized_savings` with
+    no caller at all. Each was found by an auditor reading code, which is the
+    expensive way.
+
+    A single command that prints EVERY registered counter makes the next one
+    visible without anyone going looking, and the R12 registry means a counter
+    reaches this output by being declared rather than by someone remembering to
+    add a section here.
+
+    Everything printed is labelled with its denominator where it has one.
+    "A rate without its denominator is not a measurement" — and a savings total
+    over four calls and over four thousand are different claims rendered
+    identically.
+    """
+    out: list[str] = ["", "=" * 68, "llm-router audit report", "=" * 68, ""]
+
+    out.append("-- Instrumentation counters " + "-" * 40)
+    try:
+        from llm_router import counter_registry
+
+        for counter, reading in counter_registry.readings():
+            if reading.value is None:
+                why = f" ({reading.unknown_reason})" if reading.unknown_reason else ""
+                out.append(f"  {counter.id}: Unknown{why}")
+            else:
+                mark = "  <-- " + counter.makes_visible if reading.alarming else ""
+                out.append(f"  {counter.id}: {int(reading.value)} {counter.unit}{mark}")
+            for d in reading.detail:
+                out.append(f"      {d}")
+    except Exception as exc:  # noqa: BLE001
+        out.append(f"  UNAVAILABLE: {type(exc).__name__}: {exc}")
+
+    out.append("")
+    out.append("-- Savings, canonically " + "-" * 44)
+    try:
+        import asyncio
+
+        from llm_router.savings import SURFACES, canonical_savings
+
+        s = asyncio.run(canonical_savings(period="all"))
+        out.append(f"  {s.headline()}")
+        out.append(f"  source: {s.source} · provenance-filtered: {s.provenance_filtered}")
+        migrated = sum(1 for x in SURFACES if x.canonical)
+        out.append(
+            f"  surfaces reading this figure: {migrated} of {len(SURFACES)}"
+        )
+        for x in SURFACES:
+            if not x.canonical:
+                out.append(f"      NOT canonical: {x.id} ({x.where})")
+    except Exception as exc:  # noqa: BLE001
+        out.append(f"  UNAVAILABLE: {type(exc).__name__}: {exc}")
+
+    out.append("")
+    out.append("-- Provenance split " + "-" * 48)
+    try:
+        import asyncio as _a
+
+        from llm_router.cost import provenance_exclusion_summary
+
+        p = _a.run(provenance_exclusion_summary())
+        counted, unknown, synth = (
+            p["production_rows"], p["unknown_rows"], p["synthetic_rows"]
+        )
+        total = counted + unknown + synth
+        out.append(
+            f"  {counted} counted · {unknown} unknown origin · {synth} synthetic "
+            f"· {total} rows total"
+        )
+        if unknown:
+            out.append(
+                "      rows with UNMEASURED provenance are excluded, not "
+                "assumed production"
+            )
+    except Exception as exc:  # noqa: BLE001
+        out.append(f"  UNAVAILABLE: {type(exc).__name__}: {exc}")
+
+    out.append("")
+    out.append("-- Ground Truth scope " + "-" * 46)
+    try:
+        import sys as _sys
+        from pathlib import Path as _P
+
+        from llm_router import ground_truth_consent as _gt
+
+        _sys.path.insert(0, str(_P(__file__).resolve().parents[3] / "scripts"))
+        from groundtruth.eligibility import replay_available
+
+        c = _gt.read_consent()
+        state = "never asked" if c is None else (
+            f"granted (terms v{c.terms_version}, {c.source})" if c.granted
+            else f"refused ({c.source})"
+        )
+        out.append(f"  capture consent: {state}")
+        out.append(
+            f"  replayer available: {replay_available()} — when False, 100% of "
+            "tasks needing repo state are excluded BY DESIGN"
+        )
+    except Exception as exc:  # noqa: BLE001
+        out.append(f"  UNAVAILABLE: {type(exc).__name__}: {exc}")
+
+    out.append("")
+    return out
+
+
 def cmd_doctor(args: list[str]) -> int:
     """Execute: llm-router doctor [--host H] [--posture] [--explain-host]
 
@@ -1555,6 +1665,10 @@ def cmd_doctor(args: list[str]) -> int:
                         Skips the long general health scan; ideal for
                         a fast in-session "am I configured for max
                         savings?" check.
+        --audit         Print every counter, denominator, provenance split and
+                        the Ground Truth scope. K5 — makes a counter nobody
+                        reads structurally visible instead of findable only by
+                        an auditor reading source.
         --explain-host  Print the always-up-to-date explainer for why
                         the host runs on Opus and what routing can vs
                         can't save. Skips everything else.
@@ -1562,6 +1676,12 @@ def cmd_doctor(args: list[str]) -> int:
     Returns:
         0 if all checks passed, 1 if issues found.
     """
+    if "--audit" in args:
+        # K5: everything an auditor would otherwise reconstruct by hand.
+        for line in _render_audit_report():
+            print(line)
+        return 0
+
     if "--explain-host" in args:
         print(_render_host_explainer())
         return 0

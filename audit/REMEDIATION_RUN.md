@@ -19,7 +19,7 @@ red and looks sound.)
 | ID | Status | Task | Red-check (must be observed failing) |
 |---|---|---|---|
 | R11 | **done** | One canonical source per concept, enforced by AST scan; fixes cost.py `'google'` | add `Path.home()/".llm-router"` anywhere -> scan fails naming it |
-| R13 | **partial** | Ban source-text assertions; convert to behavioural/AST | apply the A-10 comment-evasion -> converted test fails |
+| R13 | **done** | Ban source-text assertions; convert to behavioural/AST | apply the A-10 comment-evasion -> converted test fails |
 | R1 | `done` | Scrub at the write boundary; 0600 at creation | remove scrub from ONE writer -> canary scan names it |
 | R2 | `done` | Nothing leaves the machine unscrubbed; add DSN pattern | remove webhook scrub -> wire-body test fails |
 | R4 | `done` | `agent_loop.run_command` env allowlist + enumerating test | revert one call site -> enumeration names it |
@@ -35,7 +35,7 @@ red and looks sound.)
 | R16 | `done` (finding partly INVALIDATED) | `capture()` sees cwd/tools, or scope the claim | a repo task reaches a frozen dataset, or docs say it cannot |
 | R17 | `done` | Validator must discriminate | `len(answer)>5` -> capped at LOW |
 | R5 | `todo` | Release the fixed HEAD | remove `rich` -> clean-room job fails |
-| K1-K7 | `todo` | Audit-readiness kit | see plan |
+| K1-K7 | **done** | Audit-readiness kit | see below; each red-checked |
 
 ## Sequencing rationale
 P2 (R11, R13) runs FIRST: both change how every later fix and test is written.
@@ -876,3 +876,102 @@ have been a NameError on every capture, landing in the enclosing
 exactly the way the defect it was fixing was. Also: drop `cwd` before
 `accumulate` -> *"accepts 'cwd' and drops it — the same defect with a more
 convincing surface."*
+
+
+## R13 — source-text assertions: 62 -> 2
+
+A-10 was the audit's most uncomfortable finding: 23 tests asserted
+`"foo(bar)" in inspect.getsource(mod)` under docstrings reading *"Rule B: the
+call site, not the property in isolation"*. The evasion was reproduced — phrase
+in a comment, call deleted, 23 tests passed.
+
+`tests/_ast_assert.py` gained `string_constants` / `assert_in_strings` /
+`assert_reads_attribute`, which is what most of the population needed: the
+biggest single category was SQL fragments, and pulling string literals from the
+AST is strictly stronger than grepping the file, because comments are not in
+the AST and docstrings are excluded explicitly.
+
+**The detector had a precision bug.** `" in src"` also matched prompt fixtures
+like `"Make the filter case-insensitive in src/a.py"`, so the ratchet counted
+test data as violations. A detector that over-counts invites raising the
+ceiling for the wrong reason. The real starting population was smaller than 62.
+
+**Two remain, both deliberate and both named in `REMAINING_BY_DESIGN`:**
+
+* `test_s03_route_server_auth_parity.py` checks that a specific DOCSTRING
+  sentence is gone. `string_constants` excludes docstrings BY DESIGN, so
+  converting it would make it pass whether the stale sentence survived or not
+  — strictly weaker than the text check. (Found by a subagent, and it is the
+  right call.)
+* `telemetry/test_m02_benchmarks_declare_themselves.py` scans for a marker
+  that is a comment by construction. There is no AST node to assert on.
+
+**My own anti-vacuity check was wrong, and success is what revealed it.**
+`test_the_scan_still_finds_the_population` asserted the repo still CONTAINED
+more than ten source-text assertions, so the ratchet could not be vacuous. That
+was reasonable at 62 and wrong the moment the class was nearly closed: it
+required the codebase to keep the disease in order to prove the thermometer
+worked. At 2 remaining it FAILED. It now proves the detector against a
+SYNTHETIC positive — including that it does not flag `"in src/a.py"` — so the
+repo's count is free to reach zero, which is the goal.
+
+MAX lowered 62 -> 2. Every conversion was red-checked with the A-10 evasion
+(phrase preserved in a comment, call broken); the subagents' work was
+independently re-red-checked here rather than taken on report.
+
+---
+
+## K1-K7 — the audit-readiness kit
+
+| | what it is | red-check |
+|---|---|---|
+| **K1** | `scripts/audit/freeze_state.py` emits FROZEN_STATE.md | print `sys.executable` again -> *"names the operator's home directory"* |
+| **K2** | `tests/claims_ledger.py` + enforcement: 16 claims, each tagged to the test that proves it | delete a proof test -> named; add a README `95%` claim -> named; **mark the UNPROVEN claim PROVEN -> named** |
+| **K3** | denominator identities: parts sum to whole for capture outcomes, fail-open codes, coverage, routing outcomes, provenance | each identity has a non-empty precondition |
+| **K4** | standing adversarial corpus: 6 canary secrets, 4 interpreter escapes, routing pairs — **diagnostic only, never tuned against** | two strict xfails carry known gaps; an xpass fails the suite |
+| **K5** | `llm-router doctor --audit` renders the whole registry | break one section -> the others still render |
+| **K6** | `.github/workflows/self-audit.yml` runs K1-K5 + the three ratchets nightly | — |
+| **K7** | the narrowest-mutation rule, written into `CLAUDE.md` | — |
+
+### K1 leaked a personal path on its first run
+
+`sys.executable` is `/Users/<name>/...` on a developer machine, and
+FROZEN_STATE.md is committed to a PUBLIC repo. Caught by writing the privacy
+assertion before trusting the generator. All paths are now redacted to `~`, and
+a test fails on any absolute home path in the output.
+
+### K2's one UNPROVEN row is the point of K2
+
+`preserves-task-success` — the product's central claim — is marked UNPROVEN
+with the reason recorded. The only mechanism that could measure it was off by
+default until R8, so there is no dataset, and neither downgrade-regret nor
+upgrade-waste is computed anywhere in the repo.
+
+**My own red-check found a hole in this.** Marking that row PROVEN with a
+loosely-related test PASSED everything — the ledger could be silenced by
+editing the status. Promoting a `KNOWN_UNPROVEN` claim now requires removing it
+from that dict too, which is a deliberate act with a visible diff.
+
+### K4 found a new routing defect on its first run
+
+Finding I-01 ("wording drives the route") was INVALIDATED during the audit as a
+confounded pair. K4's unconfounded pair still routes differently:
+
+    'what is 17 * 3?'                    -> query    (len 15)
+    'Could you tell me: what is 17 * 3?' -> query    (len 34)
+    'tell me what 17 * 3 is'             -> ANALYZE  (len 22)
+    'Could you tell me what 17 * 3 is?'  -> ANALYZE  (len 33)
+
+Not politeness, not length. The classifier matches a literal `what is` bigram;
+inverting to `what <expr> is` loses the signal and the prompt falls through to
+the documented "analyze low-signal default".
+
+**The direction is what makes it cost money:** the fallback is the MORE
+expensive tier, so the failure mode is silently upgrading a trivial question.
+Nothing reports it — from every surface it looks like an ordinary analyze
+route.
+
+Left as `xfail(strict=True)` rather than fixed. Changing it is a routing-
+behaviour change that needs evaluating on the target distribution, and tuning
+the classifier against a corpus row is precisely what K4 forbids. When it is
+fixed the test XPASSes and fails the suite, which is the mechanism working.
