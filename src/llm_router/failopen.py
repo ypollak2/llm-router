@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 from dataclasses import dataclass, field
 
 from llm_router.paths import state_path
@@ -49,6 +50,21 @@ _MAX_EVENTS = 20_000
 
 _cached: FailOpenCounts | None = None
 
+#: T-07 (audit 2026-09-22). Fail-opens whose OWN store write failed.
+#:
+#: The store is on disk, and the condition most likely to cause a burst of
+#: fail-opens — an unwritable or full state directory — is exactly the condition
+#: that stops them being recorded. `record()` swallowed its own write failure
+#: and fell back to `structlog.debug` while the effective level was WARNING, so
+#: the losses were recorded nowhere and printed nowhere. Three call sites were
+#: added on 2026-09-21 believing they made losses visible.
+#:
+#: This counter lives in process memory and needs no filesystem. It cannot
+#: survive a restart, which is the trade: a channel that works when the disk
+#: does not is worth more than one that is durable and silent.
+_unpersisted: dict[str, int] = {}
+_unpersisted_lock = threading.Lock()
+
 
 @dataclass(frozen=True)
 class FailOpenCounts:
@@ -56,6 +72,11 @@ class FailOpenCounts:
 
     by_code: dict[str, int] = field(default_factory=dict)
     readable: bool = True
+    #: Fail-opens this process could not write to the store (T-07). Separate
+    #: from `by_code` because their provenance is different: these are known to
+    #: have happened but are not durable, and merging them would make a restart
+    #: look like the failures stopped.
+    unpersisted_by_code: dict[str, int] = field(default_factory=dict)
 
     @property
     def total(self) -> int | None:
@@ -68,9 +89,52 @@ class FailOpenCounts:
             return None
         return sum(self.by_code.values())
 
+    @property
+    def unpersisted_total(self) -> int:
+        """Fail-opens this process saw but could not record (T-07)."""
+        return sum(self.unpersisted_by_code.values())
+
     def render_total(self) -> str:
+        """The PERSISTED total only: "0", a count, or "Unknown".
+
+        Deliberately does not fold in `unpersisted_total`. The two channels
+        answer different questions — "what did the store record" and "what did
+        this process see but fail to record" — and a caller that wants both
+        asks `render_report()`. Mixing them here broke the contract two callers
+        already relied on, which is its own small lesson about widening the
+        meaning of an existing accessor instead of adding one.
+        """
         t = self.total
         return "Unknown" if t is None else str(t)
+
+    def render_report(self, *, limit: int = 8) -> list[str]:
+        """Human-readable lines for `doctor` / `status`. Never raises.
+
+        T-07: 58 `record()` call sites existed and 0 readers outside tests. A
+        counter nothing reads is not instrumentation.
+        """
+        lines: list[str] = []
+        if not self.readable:
+            lines.append("fail-open counters: UNREADABLE (store present but unparseable)")
+        total = self.total
+        if total:
+            lines.append(f"fail-open events recorded: {total}")
+        elif self.readable and not self.unpersisted_total:
+            lines.append("fail-open events recorded: 0")
+        if self.unpersisted_total:
+            lines.append(
+                f"fail-open events that could NOT be recorded: {self.unpersisted_total} "
+                "(the state store was unwritable — this is the serious case)"
+            )
+        merged: dict[str, int] = dict(self.by_code)
+        for code, n in self.unpersisted_by_code.items():
+            merged[code] = merged.get(code, 0) + n
+        for code, n in sorted(merged.items(), key=lambda kv: -kv[1])[:limit]:
+            mark = " *" if code in self.unpersisted_by_code else ""
+            lines.append(f"  {n:>6}  {code}{mark}")
+        if len(merged) > limit:
+            lines.append(f"  … {len(merged) - limit} more site(s)")
+        return lines
 
 
 def store_path():
@@ -109,29 +173,73 @@ def record(code: str, exc: BaseException | None = None, *, detail: str = "") -> 
             payload["d"] = detail[:200]
         _append(payload)
         _cached = None
-    except Exception:  # noqa: BLE001 — see the module docstring; this must not throw
-        pass
-    # Structured log too, so a live session surfaces it without reading the store.
-    try:
-        import structlog
+        _persisted = True
+    except Exception as store_exc:  # noqa: BLE001 — must not throw
+        # T-07: do not lose the loss. Count it where no filesystem is involved.
+        _persisted = False
+        try:
+            with _unpersisted_lock:
+                _unpersisted[code] = _unpersisted.get(code, 0) + 1
+            _cached = None
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            import structlog
 
-        structlog.get_logger("llm_router.failopen").debug(
-            "fail_open", code=code, exc=type(exc).__name__ if exc else None
-        )
-    except Exception:  # noqa: BLE001
-        pass
+            # WARNING, not debug. A fail-open we could not even record is the
+            # one an operator most needs to see, and DEBUG is below the
+            # effective level in every configuration this ships with.
+            structlog.get_logger("llm_router.failopen").warning(
+                "fail_open_unrecorded", code=code,
+                exc=type(exc).__name__ if exc else None,
+                store_error=type(store_exc).__name__,
+            )
+        except Exception:  # noqa: BLE001
+            pass
+    # Structured log too, so a live session surfaces it without reading the store.
+    if _persisted:
+        try:
+            import structlog
+
+            # T-07: INFO, not DEBUG. `llm-router doctor` and `status` read the
+            # store, but a live session should not need to.
+            structlog.get_logger("llm_router.failopen").info(
+                "fail_open", code=code, exc=type(exc).__name__ if exc else None
+            )
+        except Exception:  # noqa: BLE001
+            pass
 
 
 def clear() -> None:
-    """Delete the store. Test helper; never called in production."""
+    """Delete the store AND the in-process counter. Test helper; never production.
+
+    Both, or a test that forces the unwritable-store path leaks its count into
+    every test that follows and the next assertion on `unpersisted_total` reads
+    someone else's failure.
+    """
     global _cached
     _cached = None
+    with _unpersisted_lock:
+        _unpersisted.clear()
     try:
         store_path().unlink()
     except FileNotFoundError:
         pass
     except Exception:  # noqa: BLE001
         pass
+
+
+def reset_unpersisted() -> None:
+    """Drop the in-process unrecorded counter (T-07). Test helper.
+
+    `record()` increments this when its own store write fails, and the counter
+    is module-global. A test that deliberately forces that path leaks its count
+    into every test that follows unless one of these is called — which is how
+    `test_recording_never_raises_on_a_weird_exception` (whose exception explodes
+    during serialisation) silently changed the next two tests' expectations.
+    """
+    with _unpersisted_lock:
+        _unpersisted.clear()
 
 
 def reset_cache() -> None:
@@ -145,9 +253,12 @@ def snapshot() -> FailOpenCounts:
     if _cached is not None:
         return _cached
 
+    with _unpersisted_lock:
+        unpersisted = dict(_unpersisted)
+
     path = store_path()
     if not path.exists():
-        _cached = FailOpenCounts()
+        _cached = FailOpenCounts(unpersisted_by_code=unpersisted)
         return _cached
 
     by_code: dict[str, int] = {}
@@ -156,7 +267,7 @@ def snapshot() -> FailOpenCounts:
         with path.open("r", encoding="utf-8") as fh:
             lines = fh.readlines()[-_MAX_EVENTS:]
     except Exception:  # noqa: BLE001
-        _cached = FailOpenCounts(readable=False)
+        _cached = FailOpenCounts(readable=False, unpersisted_by_code=unpersisted)
         return _cached
 
     for line in lines:
@@ -174,7 +285,7 @@ def snapshot() -> FailOpenCounts:
         by_code[code] = by_code.get(code, 0) + 1
 
     if malformed and not by_code:
-        _cached = FailOpenCounts(readable=False)
+        _cached = FailOpenCounts(readable=False, unpersisted_by_code=unpersisted)
         return _cached
-    _cached = FailOpenCounts(by_code=by_code)
+    _cached = FailOpenCounts(by_code=by_code, unpersisted_by_code=unpersisted)
     return _cached

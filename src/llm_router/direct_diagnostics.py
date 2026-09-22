@@ -45,9 +45,29 @@ class Sample(NamedTuple):
 
 @dataclass(frozen=True)
 class Advice:
-    kind: Literal["raise_timeout", "too_slow_for_local"]
+    kind: Literal["raise_timeout", "too_slow_for_local", "failing_fast"]
     message: str
-    suggested_timeout_s: float = 0.0
+    #: None, not 0.0 (T-23). A default of 0.0 on advice that is NOT about the
+    #: timeout reads as "set it to zero" — which makes every call fail
+    #: instantly. Only `raise_timeout` carries a number, and only a usable one.
+    suggested_timeout_s: float | None = None
+
+
+#: Below this, a "timeout" is not a timeout (T-23).
+#:
+#: A real timeout takes approximately as long as the timeout. A DIRECT attempt
+#: that returns in under a second failed for some other reason — no free model,
+#: a grounding rejection, an unreachable Ollama — and calling it a timeout sends
+#: the operator to the one setting that cannot help.
+_MIN_TIMEOUT_ELAPSED_S: float = 1.0
+
+
+def looks_like_timeout(elapsed_s: float | None) -> bool:
+    """Could a failure that took `elapsed_s` plausibly have been a timeout?"""
+    try:
+        return float(elapsed_s or 0.0) >= _MIN_TIMEOUT_ELAPSED_S
+    except (TypeError, ValueError):
+        return False
 
 
 def _p90(values: list[float]) -> float:
@@ -73,9 +93,28 @@ def diagnose(
     if len(rows) < _MIN_SAMPLES:
         return None
 
-    timeouts = [s for s in rows if s.timed_out]
+    # T-23. A sample flagged `timed_out` that finished in ~0s did not time out:
+    # it is a "no free model" or a grounding rejection that the hook filed under
+    # the wrong flag. Excluded here as well as fixed at the source, because the
+    # samples already on disk carry the old labelling — 17 of 20 on the audited
+    # machine — and this function has to be right about THAT data too.
+    timeouts = [s for s in rows if s.timed_out and looks_like_timeout(s.elapsed_s)]
+    mislabelled = [s for s in rows if s.timed_out and not looks_like_timeout(s.elapsed_s)]
     if not timeouts or len(timeouts) / len(rows) < _TIMEOUT_SHARE:
-        # Mostly working. A slow outlier is not a broken setup.
+        # Mostly working, or the "timeouts" were instant failures of some other
+        # kind. Either way a longer timeout is not the fix.
+        if mislabelled and len(mislabelled) / len(rows) >= _TIMEOUT_SHARE:
+            return Advice(
+                kind="failing_fast",
+                message=(
+                    f"{len(mislabelled)} of {len(rows)} local attempts failed in "
+                    f"under {_MIN_TIMEOUT_ELAPSED_S:g}s. That is not a timeout — "
+                    f"raising LLM_ROUTER_OLLAMA_TIMEOUT will not help. Check that a "
+                    f"local model is installed and that Ollama is running "
+                    f"(`ollama list`), and see `llm-router doctor` for the "
+                    f"provider section."
+                ),
+            )
         return None
 
     observed = _p90([s.elapsed_s for s in timeouts])
@@ -92,6 +131,11 @@ def diagnose(
         )
 
     suggested = round(observed * _HEADROOM)
+    # T-23, belt and braces: never advise a timeout at or below the current one.
+    # `LLM_ROUTER_OLLAMA_TIMEOUT=0` guarantees every call fails instantly, which
+    # is how a diagnostic came to recommend the failure it was diagnosing.
+    if suggested <= timeout_s:
+        return None
     return Advice(
         kind="raise_timeout",
         message=(
@@ -131,8 +175,16 @@ def record_sample(elapsed_s: float, timed_out: bool, home=None) -> None:
         lines.append(json.dumps({"elapsed_s": round(float(elapsed_s), 3),
                                  "timed_out": bool(timed_out)}))
         path.write_text("\n".join(lines) + "\n")
-    except Exception:
-        pass  # a diagnostic must never break the hook it runs in
+    except Exception as _exc:  # noqa: BLE001 — a diagnostic must never break the hook it runs in
+        # T-14: still fail-open, but no longer SILENT. A failed write here loses
+        # a DIRECT-execution sample, the input to `doctor`'s advice and reported nothing: no error, no log, no counter. 92
+        # persistence sites had this shape; this is one of the ones that loses
+        # data a user would notice missing.
+        try:
+            from llm_router import failopen as _fo
+            _fo.record("CHZ-FO-DIRECT-SAMPLE-WRITE", _exc)
+        except Exception:  # noqa: BLE001
+            pass
 
 
 def load_samples(home=None) -> list:

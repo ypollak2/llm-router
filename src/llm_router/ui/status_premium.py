@@ -196,6 +196,16 @@ class PremiumStatusCommand:
                 expand=False,
             ),
             Text(""),
+        ]
+        # T-07: only when something actually degraded — a panel that is always
+        # there and always empty is furniture, not a signal.
+        _degraded = self.render_degraded_operations()
+        if str(_degraded):
+            panels += [
+                Panel(_degraded, border_style=PALETTE.warning, expand=False),
+                Text(""),
+            ]
+        panels += [
             Panel(
                 Text("🔧  Quick Actions", style=f"bold {PALETTE.accent}")
                 + "\n"
@@ -206,6 +216,31 @@ class PremiumStatusCommand:
         ]
 
         return Group(*panels)
+
+    def render_degraded_operations(self) -> Text:
+        """Fail-open counters (T-07). Empty Text when there is nothing to say.
+
+        58 `failopen.record()` sites, 0 readers outside tests. `doctor` is the
+        full report; `status` shows it only when something HAS degraded, so a
+        healthy install stays quiet and a degraded one cannot be missed.
+        """
+        out = Text()
+        try:
+            from llm_router import failopen
+
+            counts = failopen.snapshot()
+            if counts.readable and not counts.total and not counts.unpersisted_total:
+                return out
+            out.append("⚠️  Degraded operations\n", style=f"bold {PALETTE.warning}")
+            for line in counts.render_report(limit=4):
+                if "could NOT be recorded" in line or "UNREADABLE" in line:
+                    out.append(f"{line}\n", style=f"bold {PALETTE.error}")
+                else:
+                    out.append(f"{line}\n", style=PALETTE.text_dim)
+            out.append("run `llm-router doctor` for the full list", style=PALETTE.text_dim)
+        except Exception:  # noqa: BLE001 — status must still render
+            return Text()
+        return out
 
     def print_status(self) -> None:
         """Print complete status to console."""

@@ -27,12 +27,14 @@ def _isolated_home(tmp_path, monkeypatch):
     """
     monkeypatch.setenv("LLM_ROUTER_HOME", str(tmp_path))
     failopen.reset_cache()
+    failopen.reset_unpersisted()
     resolved = failopen.store_path()
     assert str(resolved).startswith(str(tmp_path)), (
         f"fail-open store escaped the tmpdir: {resolved}"
     )
     yield
     failopen.reset_cache()
+    failopen.reset_unpersisted()
 
 
 def test_records_are_counted_by_code():
@@ -40,6 +42,7 @@ def test_records_are_counted_by_code():
     failopen.record("CHZ-FO-TEST-ALPHA", ValueError("y"))
     failopen.record("CHZ-FO-TEST-BETA")
     failopen.reset_cache()
+    failopen.reset_unpersisted()
 
     snap = failopen.snapshot()
     assert snap.by_code["CHZ-FO-TEST-ALPHA"] == 2
@@ -79,6 +82,7 @@ def test_unreadable_store_is_unknown_not_zero():
     one is the RED2-02 shape that this whole audit keeps finding."""
     failopen.store_path().write_text("{ not json at all\n")
     failopen.reset_cache()
+    failopen.reset_unpersisted()
 
     snap = failopen.snapshot()
     assert snap.readable is False
@@ -93,6 +97,7 @@ def test_partial_corruption_still_reports_what_it_can():
     with failopen.store_path().open("a") as fh:
         fh.write("{ garbage\n")
     failopen.reset_cache()
+    failopen.reset_unpersisted()
 
     snap = failopen.snapshot()
     assert snap.readable is True
@@ -103,6 +108,7 @@ def test_detail_is_bounded():
     """Detail comes from exception text, which is unbounded input."""
     failopen.record("CHZ-FO-TEST-LONG", ValueError("x"), detail="y" * 5000)
     failopen.reset_cache()
+    failopen.reset_unpersisted()
 
     raw = failopen.store_path().read_text()
     assert len(raw) < 1000, f"one event wrote {len(raw)} chars"

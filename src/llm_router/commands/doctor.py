@@ -1436,6 +1436,56 @@ def _run_doctor(host: Optional[str] = None) -> tuple[int, list[str]]:
     else:
         print(_ok("every offered tool resolves to a real implementation"))
 
+    # ── Fail-open accounting (T-07) ────────────────────────────────────────
+    # 58 `failopen.record()` call sites existed in src/ and ZERO readers outside
+    # tests. Every swallowed exception in this codebase was counted into a file
+    # that nothing ever opened — instrumentation that could not inform anyone.
+    # This is that reader.
+    print()
+    print(_bold("  Degraded operations (fail-open counters)"))
+    try:
+        from llm_router import failopen
+
+        counts = failopen.snapshot()
+        for line in counts.render_report():
+            if "could NOT be recorded" in line or "UNREADABLE" in line:
+                print(f"    {_red(line)}")
+                issues.append(line)
+            elif line.startswith("fail-open events recorded: 0"):
+                print(f"    {_ok('no degraded operations recorded')}")
+            else:
+                print(f"    {_dim(line)}")
+        if counts.total:
+            print(_dim("    (each is a place llm-router carried on after an error)"))
+    except Exception as exc:  # noqa: BLE001 — doctor must still finish
+        print(f"    {_red(f'fail-open counters unavailable: {exc}')}")
+        issues.append(f"fail-open counters unavailable: {exc}")
+
+    # ── Provenance exclusions (T-21) ───────────────────────────────────────
+    # The cutover's count was written to `provenance_meta` and read by nothing,
+    # so "my lifetime savings dropped to $0 after upgrading" had no in-product
+    # answer. This is that answer.
+    print()
+    print(_bold("  Savings coverage (provenance)"))
+    try:
+        import asyncio as _asyncio
+
+        from llm_router.cost import provenance_exclusion_summary
+
+        _p = _asyncio.run(provenance_exclusion_summary())
+        _counted = _p["production_rows"]
+        _unknown = _p["unknown_rows"]
+        _synth = _p["synthetic_rows"]
+        _total = _counted + _unknown + _synth
+        print(_dim(f"    {_counted} row(s) counted, {_unknown} excluded "
+                   f"(unknown origin), {_synth} excluded (synthetic), of {_total}"))
+        if _unknown:
+            print(f"    {_yellow(_p['explanation'])}")
+        else:
+            print(f"    {_ok('every usage row carries a recorded origin')}")
+    except Exception as exc:  # noqa: BLE001 — doctor must still finish
+        print(f"    {_dim(f'provenance summary unavailable: {exc}')}")
+
     # ── Summary ────────────────────────────────────────────────────────────
     print()
     print(_bold("  NOT CHECKED by doctor"))
