@@ -45,6 +45,8 @@ from pathlib import Path
 
 from llm_router.logging import get_logger
 
+from llm_router import paths
+
 log = get_logger("llm_router.quota_savings")
 
 
@@ -187,7 +189,7 @@ def _default_db_path() -> Path:
     override = os.environ.get("LLM_ROUTER_USAGE_DB_PATH")
     if override:
         return Path(override)
-    return Path.home() / ".llm-router" / "usage.db"
+    return paths.state_path("usage.db")
 
 
 def _sum_saved_usd_since(db_path: Path, since: datetime) -> float:

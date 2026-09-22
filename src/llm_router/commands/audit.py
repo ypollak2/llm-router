@@ -1,7 +1,7 @@
-"""llm_router audit — post-hoc misroute audit.
+"""llm-router audit — post-hoc misroute audit.
 
-Historically this module also exposed ``llm_router audit verify [--json]``
-and ``llm_router audit export [--format cef|json|csv]``, thin CLI wrappers
+Historically this module also exposed ``llm-router audit verify [--json]``
+and ``llm-router audit export [--format cef|json|csv]``, thin CLI wrappers
 around ``llm_router.enterprise.audit.AuditLog``'s tamper-evident hash chain.
 That module is not shipped in this distribution (``llm_router.enterprise``
 does not exist here), so both subcommands crashed unconditionally —
@@ -11,7 +11,7 @@ rather than reimplemented or papered over with a friendlier error, per the
 same decision that removed ``rbac_routing.py`` / ``audit_routing.py`` /
 ``commands/verify_enterprise.py`` / ``scim_api.py`` (GH#68/#70/#71).
 
-``llm_router audit misroute`` is unrelated and untouched: it re-scores
+``llm-router audit misroute`` is unrelated and untouched: it re-scores
 already-recorded ``routing_decisions`` rows offline (see
 ``llm_router.misroute_audit``, a live, working, non-enterprise feature) and
 has never depended on the enterprise audit log. It stays nested under

@@ -30,6 +30,9 @@ from llm_router.agents.budget import (
     RecursionDepthExceeded,
 )
 
+from llm_router import paths
+from llm_router.sqlite_wal import enable_wal
+
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS sessions (
@@ -211,7 +214,7 @@ class SessionStore:
     ) -> None:
         self.db_path = db_path or Path(
             os.environ.get("LLM_ROUTER_SESSIONS_PATH")
-            or (Path.home() / ".llm-router" / "sessions.db")
+            or (paths.state_path("sessions.db"))
         )
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         # check_same_thread=False lets the admin API share one SessionStore
@@ -223,8 +226,14 @@ class SessionStore:
         # mutators) so concurrent callers on a shared store don't lose updates.
         # In-process guard; WAL + busy_timeout below cover the cross-process case.
         self._lock = threading.RLock()
-        self._conn.execute("PRAGMA journal_mode=WAL")
-        self._conn.execute("PRAGMA busy_timeout=5000")
+        # M-06 / the sqlite_wal adoption gap. `busy_timeout` governs how long the
+        # journal_mode PRAGMA itself waits for its exclusive lock, so setting it
+        # AFTER is the one ordering that leaves that statement on the 5s default.
+        # The PRAGMA also reports failure by RETURNING the mode in effect rather
+        # than raising -- lose the cold-start race and you silently proceed in
+        # rollback-journal mode. `enable_wal` handles both and was adopted by only
+        # 3 of 9 sites.
+        enable_wal(self._conn, busy_timeout_ms=5000, label="agent_sessions")
         self._conn.executescript(_SCHEMA)
         # T3-M3: idempotent ALTER TABLE migration for pre-T3-M3 DBs.
         # Introspect existing columns; add only the missing ones.

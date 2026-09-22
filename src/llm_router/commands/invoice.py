@@ -17,6 +17,8 @@ import sqlite3
 import sys
 from datetime import datetime, timezone
 
+from llm_router import paths
+
 # Provider -> ingestor module attribute. Each exposes pull_monthly_invoice(period=...).
 _PROVIDERS = ("anthropic", "openai", "gemini")
 
@@ -29,7 +31,7 @@ def _default_month() -> str:
 
 
 def _usage_db_path() -> str:
-    return os.environ.get("LLM_ROUTER_USAGE_PATH") or os.path.expanduser("~/.llm-router/usage.db")
+    return os.environ.get("LLM_ROUTER_USAGE_PATH") or str(paths.state_path("usage.db"))
 
 
 def _llm_router_tally(provider: str, month: str) -> tuple[float, int]:

@@ -19,19 +19,21 @@ from pathlib import Path
 
 from llm_router.config import get_config
 
+from llm_router import paths
+
 
 def _snapshot_path() -> Path:
     """Path to the cross-process provider-health snapshot (INV-HEALTH-001)."""
     override = os.environ.get("LLM_ROUTER_HEALTH_SNAPSHOT")
     if override:
         return Path(override)
-    return Path.home() / ".llm-router" / "provider_health.json"
+    return paths.state_path("provider_health.json")
 
 
 def read_health_snapshot(path: Path | None = None) -> dict:
     """Read the router's persisted circuit-breaker snapshot. FAIL-OPEN → {} on any error.
 
-    Lets a separate process (``llm_router doctor``) report the SAME breaker state the
+    Lets a separate process (``llm-router doctor``) report the SAME breaker state the
     router enforces, closing the doctor↔router divergence (audit C10). Returns
     ``{"ts": float, "providers": {name: {...}}}`` or ``{}`` if no snapshot exists.
     """
@@ -74,7 +76,7 @@ class ProviderHealth:
     last_failure_time: float = 0.0
     # Wall-clock (epoch) mirrors of the monotonic timestamps. INV-HEALTH-001: the
     # monotonic clock is process-relative and cannot be shared with another process
-    # (e.g. `llm_router doctor` runs as a separate CLI process); the epoch mirrors let the
+    # (e.g. `llm-router doctor` runs as a separate CLI process); the epoch mirrors let the
     # circuit state be serialized and read cross-process. 0.0 = never.
     last_failure_epoch: float = 0.0
     rate_limit_epoch: float = 0.0

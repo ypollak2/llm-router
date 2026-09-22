@@ -35,6 +35,22 @@ except ImportError:  # pragma: no cover — llm_router not importable from this 
 # so naming one hands the caller "Error: No such tool available" — after which
 # it silently does the work on the expensive model and the savings dashboard
 # cannot distinguish that from "chose not to route".
+def _router_home():
+    """Router state dir, resolved per call so LLM_ROUTER_HOME is honoured.
+
+    M-04: this was a module constant bound at import, so a hook launched with
+    LLM_ROUTER_HOME set still wrote to the operator's real home directory.
+
+    Imports locally: hooks are standalone scripts with varied import headers and
+    several do not import Path or os at module scope.
+    """
+    import os as _os
+    from pathlib import Path as _P
+
+    base = _os.environ.get("LLM_ROUTER_HOME", "").strip()
+    return _P(base).expanduser() if base else _P.home() / ".llm-router"
+
+
 def _load_tool_surface_fns():
     """(route_tool, route_call, route_call_with_complexity) from llm_router.tool_surface.
 
@@ -73,10 +89,14 @@ def _load_tool_surface_fns():
 
 route_tool, route_call, route_call_with_complexity = _load_tool_surface_fns()
 
-STATE_DIR = os.path.expanduser("~/.llm-router")
-STATE_FILE = os.path.join(STATE_DIR, "usage_last_refresh.txt")
-CALL_COUNT_FILE = os.path.join(STATE_DIR, "routed_call_count.txt")
-SAVINGS_LOG_FILE = os.path.join(STATE_DIR, "savings_log.jsonl")
+def _state_dir():
+    return str(_router_home())
+def _state_file():
+    return os.path.join(_state_dir(), "usage_last_refresh.txt")
+def _call_count_file():
+    return os.path.join(_state_dir(), "routed_call_count.txt")
+def _savings_log_file():
+    return os.path.join(_state_dir(), "savings_log.jsonl")
 
 STALE_THRESHOLD_SEC = 15 * 60  # 15 minutes
 SAVINGS_REMINDER_INTERVAL = 5  # Remind every N routed calls
@@ -129,12 +149,12 @@ EST_SAVINGS_PER_CALL = EST_CLAUDE_COST_PER_CALL.get("sonnet", 0.0)
 
 
 def _ensure_state_dir() -> None:
-    os.makedirs(STATE_DIR, exist_ok=True)
+    os.makedirs(_state_dir(), exist_ok=True)
 
 
 def _read_count() -> int:
     try:
-        with open(CALL_COUNT_FILE) as f:
+        with open(_call_count_file()) as f:
             return int(f.read().strip())
     except (FileNotFoundError, ValueError, OSError):
         return 0
@@ -149,7 +169,7 @@ def _write_count(count: int) -> None:
     always either the old or new value — never a half-written intermediate.
     """
     _ensure_state_dir()
-    target = Path(CALL_COUNT_FILE)
+    target = Path(_call_count_file())
     tmp = target.with_suffix(".tmp")
     try:
         tmp.write_text(str(count))
@@ -178,7 +198,7 @@ def _append_savings_log(tool_name: str) -> None:
     else:
         task_type = bare
     # Session ID: read UUID written by session-start hook (never reuses PIDs)
-    session_id_file = os.path.join(STATE_DIR, "session_id.txt")
+    session_id_file = os.path.join(_state_dir(), "session_id.txt")
     try:
         with open(session_id_file) as _f:
             session_id = _f.read().strip() or f"pid-{os.getppid()}"
@@ -195,7 +215,7 @@ def _append_savings_log(tool_name: str) -> None:
         "host": "claude_code",
     }
     try:
-        with open(SAVINGS_LOG_FILE, "a") as f:
+        with open(_savings_log_file(), "a") as f:
             f.write(json.dumps(entry) + "\n")
     except OSError:
         pass
@@ -240,7 +260,7 @@ def _record_refresh_error(kind: str, detail: str, backoff_s: int = 0) -> None:
     """Persist why the refresh could not run, and until when to stop trying."""
     try:
         _ensure_state_dir()
-        path = os.path.join(STATE_DIR, _REFRESH_ERROR_FILE)
+        path = os.path.join(_state_dir(), _REFRESH_ERROR_FILE)
         with open(path, "w") as f:
             json.dump({
                 "kind": kind,
@@ -255,7 +275,7 @@ def _record_refresh_error(kind: str, detail: str, backoff_s: int = 0) -> None:
 def _clear_refresh_error() -> None:
     """Remove the error record after a successful fetch."""
     try:
-        os.unlink(os.path.join(STATE_DIR, _REFRESH_ERROR_FILE))
+        os.unlink(os.path.join(_state_dir(), _REFRESH_ERROR_FILE))
     except OSError:
         pass
 
@@ -263,7 +283,7 @@ def _clear_refresh_error() -> None:
 def _rate_limited() -> bool:
     """True while a server-instructed backoff is still in effect."""
     try:
-        with open(os.path.join(STATE_DIR, _REFRESH_ERROR_FILE)) as f:
+        with open(os.path.join(_state_dir(), _REFRESH_ERROR_FILE)) as f:
             return time.time() < float(json.load(f).get("retry_after_ts", 0))
     except (OSError, ValueError):
         return False
@@ -342,7 +362,7 @@ def _oauth_refresh_and_write() -> None:
         "updated_at": time.time(),
     }
     _ensure_state_dir()
-    usage_path = os.path.join(STATE_DIR, "usage.json")
+    usage_path = os.path.join(_state_dir(), "usage.json")
     tmp = usage_path + ".tmp"
     try:
         with open(tmp, "w") as f:
@@ -378,9 +398,9 @@ def main() -> None:
 
     # ── Stale usage check ────────────────────────────────────────────────
     last_refresh = 0.0
-    if os.path.exists(STATE_FILE):
+    if os.path.exists(_state_file()):
         try:
-            with open(STATE_FILE) as f:
+            with open(_state_file()) as f:
                 last_refresh = float(f.read().strip())
         except (ValueError, OSError):
             pass

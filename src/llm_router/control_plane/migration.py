@@ -17,6 +17,8 @@ from pathlib import Path
 from llm_router.control_plane.policy_bundle import make_payload, normalize_org_policy_yaml, policy_digest
 from llm_router.control_plane.store import ControlPlaneStore
 
+from llm_router import paths
+
 _DEFAULT_PERMISSIVE_YAML = "block_providers: []\nblock_models: []\nallow_models: []\ntask_caps: {}\n"
 
 
@@ -24,7 +26,7 @@ def _local_policy_yaml(policy_path: str | os.PathLike | None) -> str:
     """Return the instance's current local policy YAML text (permissive default
     when no file exists — matching load_org_policy's default-permissive stance)."""
     path = policy_path or os.environ.get("LLM_ROUTER_POLICY_PATH")
-    p = Path(path) if path else Path.home() / ".llm-router" / "org-policy.yaml"
+    p = Path(path) if path else paths.state_path("org-policy.yaml")
     if p.is_file():
         return p.read_text(encoding="utf-8")
     return _DEFAULT_PERMISSIVE_YAML

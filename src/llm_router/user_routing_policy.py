@@ -24,11 +24,14 @@ import threading
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from llm_router import paths
+
 if TYPE_CHECKING:
     pass
 
 _BENCHMARKS_PATH = Path(__file__).parent / "data" / "benchmarks.json"
-_PROFILE_PATH = Path.home() / ".llm-router" / "profile.yaml"
+def _profile_path():
+    return paths.state_path("profile.yaml")
 
 # ── Quality scores ─────────────────────────────────────────────────────────────
 # Loaded once and indexed as {model_id: {task_type: score}} for O(1) lookup.
@@ -62,7 +65,7 @@ def _provider_quota_pressure() -> dict[str, float]:
     """Return quota pressure per provider (0.0=free, 1.0=exhausted) from profile.yaml."""
     try:
         import yaml
-        profile = yaml.safe_load(_PROFILE_PATH.read_text()) if _PROFILE_PATH.exists() else {}
+        profile = yaml.safe_load(_profile_path().read_text()) if _profile_path().exists() else {}
     except Exception:
         return {}
 

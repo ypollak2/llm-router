@@ -20,8 +20,26 @@ _C_LABEL = ""               # Default fg
 _C_MAGENTA = "\033[35m"
 _C_DARK = "\033[90m"
 
-STATE_DIR = Path.home() / ".llm-router"
-DB_PATH = STATE_DIR / "usage.db"
+def _router_home():
+    """Router state dir, resolved per call so LLM_ROUTER_HOME is honoured.
+
+    M-04: this was a module constant bound at import, so a hook launched with
+    LLM_ROUTER_HOME set still wrote to the operator's real home directory.
+
+    Imports locally: hooks are standalone scripts with varied import headers and
+    several do not import Path or os at module scope.
+    """
+    import os as _os
+    from pathlib import Path as _P
+
+    base = _os.environ.get("LLM_ROUTER_HOME", "").strip()
+    return _P(base).expanduser() if base else _P.home() / ".llm-router"
+
+
+def _state_dir():
+    return _router_home()
+def _db_path():
+    return _state_dir() / "usage.db"
 
 
 def _fmt_tok(count: int) -> str:
@@ -55,7 +73,7 @@ def query_session_models(session_start: float | None, db_path: str | Path | None
 
     Returns: {model_name: call_count, ...}
     """
-    resolved = Path(db_path) if db_path else DB_PATH
+    resolved = Path(db_path) if db_path else _db_path()
     if not resolved.exists() or session_start is None:
         return {}
     try:
@@ -82,7 +100,7 @@ def query_last_prompt_model(db_path: str | Path | None = None) -> str | None:
 
     Returns: model name string, or None if no recent call found.
     """
-    resolved = Path(db_path) if db_path else DB_PATH
+    resolved = Path(db_path) if db_path else _db_path()
     if not resolved.exists():
         return None
     try:
@@ -115,7 +133,7 @@ def query_last_prompt_calls(db_path: str | Path | None = None,
 
     Returns: list of {model, provider, task_type, cost, in_tokens, out_tokens}
     """
-    resolved = Path(db_path) if db_path else DB_PATH
+    resolved = Path(db_path) if db_path else _db_path()
     if not resolved.exists():
         return []
     try:

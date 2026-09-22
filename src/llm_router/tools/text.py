@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from llm_router import paths
 import asyncio
 import os
 
@@ -60,14 +61,13 @@ def _read_hook_complexity_hint(max_age_sec: float = 120.0) -> str | None:
     """
     import json
     import os
-    from pathlib import Path
     import time
 
     session_id = os.environ.get("CLAUDE_SESSION_ID", "").strip()
     if not session_id:
         return None
 
-    path = Path.home() / ".llm-router" / f"last_classification_{session_id}.json"
+    path = paths.llm_router_home() / f"last_classification_{session_id}.json"
     try:
         raw = path.read_text(encoding="utf-8")
     except OSError:
@@ -123,14 +123,13 @@ def _read_hook_route_directive(max_age_sec: float = 120.0) -> str | None:
     """
     import json
     import os
-    from pathlib import Path
     import time
 
     session_id = os.environ.get("CLAUDE_SESSION_ID", "").strip()
     if not session_id:
         return None
 
-    path = Path.home() / ".llm-router" / f"last_classification_{session_id}.json"
+    path = paths.llm_router_home() / f"last_classification_{session_id}.json"
     try:
         raw = path.read_text(encoding="utf-8")
     except OSError:
@@ -299,6 +298,7 @@ _COST_PER_1K = {
 # Family-based so the host (Opus) baseline survives version bumps even if the
 # exact id in _COST_PER_1K changes (e.g. opus-4-6 -> opus-4-8 -> opus-5).
 from llm_router.model_aliases import family_lookup  # noqa: E402
+
 _HOST_COST = family_lookup(
     _COST_PER_1K, "anthropic/claude-opus", _pricing.output_per_1k("opus") or 0.0
 )

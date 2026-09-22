@@ -201,7 +201,7 @@ def format_statusline_context(
     - Live routing HUD
     - Session stats (count, cost, savings)
     - Profile indicator (if personalization active)
-    - Link to `llm_router replay` for full transcript
+    - Link to `llm-router replay` for full transcript
 
     Args:
         max_width: Maximum statusline width (typically 80)
@@ -242,7 +242,7 @@ def format_statusline_context(
 
 
 def format_replay_summary() -> str:
-    """Format summary for `llm_router replay` command.
+    """Format summary for `llm-router replay` command.
 
     Shows aggregate stats from statusline state for this session.
 

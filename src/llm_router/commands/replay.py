@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""llm_router replay — Session routing transcript with full context.
+"""llm-router replay — Session routing transcript with full context.
 
-Command: uv run llm_router replay [--session SESSION_ID] [--limit N]
+Command: uv run llm-router replay [--session SESSION_ID] [--limit N]
 
 Prints a formatted transcript of all routing decisions in a session:
   - Timestamps
@@ -45,10 +45,12 @@ from llm_router.terminal_style import (
     ConfidenceLevel,
 )
 
+from llm_router import paths
+
 
 def get_usage_db_path() -> Path:
     """Get path to usage.db."""
-    return Path.home() / ".llm-router" / "usage.db"
+    return paths.state_path("usage.db")
 
 
 def fetch_routing_decisions(

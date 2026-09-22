@@ -6,6 +6,8 @@ import os
 import sys
 from pathlib import Path
 
+from llm_router import paths
+
 
 # ── Formatting utilities ────────────────────────────────────────────────────
 
@@ -129,7 +131,7 @@ def _run_config(flags: list[str]) -> None:
     print(HR)
 
     # Sources
-    user_path = Path.home() / ".llm-router" / "routing.yaml"
+    user_path = paths.state_path("routing.yaml")
     repo_path = find_repo_config_path()
     print(f"  {_bold('User config:')}  {user_path}  {'✓' if user_path.exists() else _dim('(not found)')}")
     print(f"  {_bold('Repo config:')}  {repo_path or _dim('(none — no .llm_router.yml in tree)')}")

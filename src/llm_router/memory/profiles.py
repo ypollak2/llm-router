@@ -15,6 +15,8 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from llm_router import paths
+
 
 @dataclass(frozen=True)
 class LearnedRoute:
@@ -33,8 +35,10 @@ class LearnedRoute:
     """ISO timestamp of the most recent correction for this task"""
 
 
-LEARNED_ROUTES_FILE = Path.home() / ".llm-router" / "learned_routes.json"
-DB_PATH = Path.home() / ".llm-router" / "usage.db"
+def _learned_routes_file():
+    return paths.state_path("learned_routes.json")
+def _db_path():
+    return paths.state_path("usage.db")
 
 # Threshold: require 3 corrections before locking a route
 CONFIDENCE_THRESHOLD = 3
@@ -49,11 +53,11 @@ def fetch_corrections_history(days: int = 30) -> list[dict]:
     Returns:
         List of correction dicts from corrections table
     """
-    if not DB_PATH.exists():
+    if not _db_path().exists():
         return []
 
     try:
-        conn = sqlite3.connect(DB_PATH)
+        conn = sqlite3.connect(_db_path())
         conn.row_factory = sqlite3.Row
 
         cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
@@ -142,7 +146,7 @@ def save_learned_profile(profile: dict[str, LearnedRoute]) -> Path:
     Returns:
         Path to written file
     """
-    LEARNED_ROUTES_FILE.parent.mkdir(parents=True, exist_ok=True)
+    _learned_routes_file().parent.mkdir(parents=True, exist_ok=True)
 
     # Convert dataclasses to dicts for JSON serialization
     data = {
@@ -155,8 +159,8 @@ def save_learned_profile(profile: dict[str, LearnedRoute]) -> Path:
         for task, route in profile.items()
     }
 
-    LEARNED_ROUTES_FILE.write_text(json.dumps(data, indent=2))
-    return LEARNED_ROUTES_FILE
+    _learned_routes_file().write_text(json.dumps(data, indent=2))
+    return _learned_routes_file()
 
 
 def load_learned_profile() -> dict[str, LearnedRoute]:
@@ -165,11 +169,11 @@ def load_learned_profile() -> dict[str, LearnedRoute]:
     Returns:
         Dict mapping task_type → LearnedRoute (empty dict if file not found)
     """
-    if not LEARNED_ROUTES_FILE.exists():
+    if not _learned_routes_file().exists():
         return {}
 
     try:
-        data = json.loads(LEARNED_ROUTES_FILE.read_text())
+        data = json.loads(_learned_routes_file().read_text())
         return {
             task: LearnedRoute(
                 model=route["model"],

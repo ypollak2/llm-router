@@ -23,10 +23,12 @@ from pathlib import Path
 
 from llm_router.migrations import apply, rollback, status
 
+from llm_router import paths
+
 
 def _default_db_path() -> Path:
     """Production DB path; mirrors ``llm_router.config.get_config()``."""
-    return Path.home() / ".llm-router" / "usage.db"
+    return paths.state_path("usage.db")
 
 
 def _open_db(path: Path) -> sqlite3.Connection:

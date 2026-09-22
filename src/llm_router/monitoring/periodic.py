@@ -23,8 +23,11 @@ from llm_router.retrospective import (
     generate_actions,
 )
 
+from llm_router import paths
 
-SNAPSHOT_DIR = Path.home() / ".llm-router" / "session_snapshots"
+
+def _snapshot_dir():
+    return paths.state_path("session_snapshots")
 
 
 def _get_session_hour() -> int:
@@ -34,7 +37,7 @@ def _get_session_hour() -> int:
         Hour number (1-based) since session started
     """
     try:
-        session_start_file = Path.home() / ".llm-router" / "session_start.txt"
+        session_start_file = paths.state_path("session_start.txt")
         if not session_start_file.exists():
             return 1
 
@@ -110,11 +113,11 @@ def save_session_snapshot(snapshot: dict) -> Path:
     Returns:
         Path to saved file
     """
-    SNAPSHOT_DIR.mkdir(parents=True, exist_ok=True)
+    _snapshot_dir().mkdir(parents=True, exist_ok=True)
 
     hour = snapshot.get("hour", 1)
     filename = _get_today_snapshot_filename(hour)
-    filepath = SNAPSHOT_DIR / filename
+    filepath = _snapshot_dir() / filename
 
     filepath.write_text(json.dumps(snapshot, indent=2))
     return filepath
@@ -132,11 +135,11 @@ def load_session_snapshots(date_str: str = "") -> list[dict]:
     if not date_str:
         date_str = datetime.now().strftime("%Y-%m-%d")
 
-    if not SNAPSHOT_DIR.exists():
+    if not _snapshot_dir().exists():
         return []
 
     snapshots = []
-    for snapshot_file in sorted(SNAPSHOT_DIR.glob(f"{date_str}-*.json")):
+    for snapshot_file in sorted(_snapshot_dir().glob(f"{date_str}-*.json")):
         try:
             snapshots.append(json.loads(snapshot_file.read_text()))
         except (json.JSONDecodeError, OSError):
@@ -307,13 +310,13 @@ def cleanup_old_snapshots(keep_days: int = 7) -> int:
     Returns:
         Number of files deleted
     """
-    if not SNAPSHOT_DIR.exists():
+    if not _snapshot_dir().exists():
         return 0
 
     cutoff = datetime.now().timestamp() - (keep_days * 86400)
     deleted = 0
 
-    for snapshot_file in SNAPSHOT_DIR.glob("*.json"):
+    for snapshot_file in _snapshot_dir().glob("*.json"):
         if snapshot_file.stat().st_mtime < cutoff:
             try:
                 snapshot_file.unlink()

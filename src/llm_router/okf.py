@@ -23,9 +23,12 @@ from typing import Any
 
 import yaml
 
+from llm_router import paths
+
 log = logging.getLogger("llm_router")
 
-KNOWLEDGE_DIR = Path.home() / ".llm-router" / "knowledge"
+def _knowledge_dir():
+    return paths.state_path("knowledge")
 
 # ── Project scoping (CHZ-OKF-01) ─────────────────────────────────────────────
 # The store used to be one flat global pile, so a doc extracted while working in
@@ -39,13 +42,13 @@ KNOWLEDGE_DIR = Path.home() / ".llm-router" / "knowledge"
 # from model output, and a store living in the working tree gets swept up by
 # `git add -A` and committed. Nothing llm_router infers should land in someone's
 # history by accident.
-PROJECTS_DIR = KNOWLEDGE_DIR / "projects"
-MODELS_DIR = KNOWLEDGE_DIR / "models"
-QUARANTINE_DIR = KNOWLEDGE_DIR / "quarantine"
+PROJECTS_DIR = _knowledge_dir() / "projects"
+MODELS_DIR = _knowledge_dir() / "models"
+QUARANTINE_DIR = _knowledge_dir() / "quarantine"
 
 # Pre-scoping global docs. Still on disk, no longer auto-injected — that IS the
 # cross-contamination fix. `llm_router okf gc` reports and relocates them.
-LEGACY_SOURCE_DIR = KNOWLEDGE_DIR / "source"
+LEGACY_SOURCE_DIR = _knowledge_dir() / "source"
 
 _SLUG_UNSAFE_RE = re.compile(r"[^\w.-]")
 
@@ -109,7 +112,7 @@ def project_slug(root: "str | Path | None" = None) -> str:
 
 
 def project_knowledge_dir(
-    root: "str | Path | None" = None, base: Path = KNOWLEDGE_DIR
+    root: "str | Path | None" = None, base: Path = _knowledge_dir()
 ) -> Path:
     """Where THIS project's OKF docs live."""
     return base / "projects" / project_slug(root)
@@ -343,7 +346,7 @@ def _parse_okf(text: str, path: Path) -> OKFConcept | None:
 # ---------------------------------------------------------------------------
 
 def _retrieval_roots(
-    base: Path = KNOWLEDGE_DIR, root: Path | None = None
+    base: Path = _knowledge_dir(), root: Path | None = None
 ) -> list[Path]:
     """Directories eligible for INJECTION, most specific first.
 
@@ -377,7 +380,7 @@ def _retrieval_roots(
     return [project_knowledge_dir(root=root, base=base)]
 
 
-def _catalog_root(base: Path = KNOWLEDGE_DIR) -> Path:
+def _catalog_root(base: Path = _knowledge_dir()) -> Path:
     """The shared ModelCapability catalog — read for ROUTING decisions, never
     injected as task context.
 
@@ -412,7 +415,7 @@ def _load_dir_sync(root: Path) -> list[OKFConcept]:
 
 
 def _load_bundle_sync(
-    base: Path = KNOWLEDGE_DIR, root: Path | None = None
+    base: Path = _knowledge_dir(), root: Path | None = None
 ) -> list[OKFConcept]:
     """Scan and parse the OKF concept docs eligible for injection."""
     roots = [r for r in _retrieval_roots(base, root) if r.exists()]
@@ -434,7 +437,7 @@ def _load_bundle_sync(
 
 
 def _get_bundle(
-    base: Path = KNOWLEDGE_DIR, root: Path | None = None
+    base: Path = _knowledge_dir(), root: Path | None = None
 ) -> list[OKFConcept]:
     """Return the cached bundle for this scope, reloading if the TTL expired.
 
@@ -688,7 +691,7 @@ def _keywords_for_retrieval(prompt: str) -> list[str]:
 def find_relevant(
     prompt: str,
     limit: int = 3,
-    base: Path = KNOWLEDGE_DIR,
+    base: Path = _knowledge_dir(),
     root: "str | Path | None" = None,
 ) -> list[OKFConcept]:
     """Find OKF concepts most relevant to prompt via keyword overlap.
@@ -876,7 +879,7 @@ tags: [codex, openai, premium, reasoning]
 }
 
 
-def seed_model_catalog(base: Path = KNOWLEDGE_DIR) -> int:
+def seed_model_catalog(base: Path = _knowledge_dir()) -> int:
     """Write default ModelCapability docs if they don't already exist. Returns count written."""
     models_dir = base / "models"
     models_dir.mkdir(parents=True, exist_ok=True)
@@ -894,7 +897,7 @@ def seed_model_catalog(base: Path = KNOWLEDGE_DIR) -> int:
 
 def load_model_capability(
     model_name: str,
-    base: Path = KNOWLEDGE_DIR,
+    base: Path = _knowledge_dir(),
 ) -> OKFConcept | None:
     """Load the ModelCapability OKF doc for a model. Returns None if not found."""
     safe = re.sub(r'[/:]', '-', model_name)
@@ -1004,7 +1007,7 @@ async def enrich_from_response(
     prompt: str,
     response_text: str,
     model: str,
-    base: Path = KNOWLEDGE_DIR,
+    base: Path = _knowledge_dir(),
     root: "str | Path | None" = None,
 ) -> None:
     """Extract file references from prompt+response and write OKF SourceFile concepts.
@@ -1060,7 +1063,7 @@ async def enrich_from_response(
 # Session context (#2) — per-session, verified-only, cross-session retrievable
 # ---------------------------------------------------------------------------
 
-SESSIONS_DIR = KNOWLEDGE_DIR / "sessions"
+SESSIONS_DIR = _knowledge_dir() / "sessions"
 
 _SID_SAFE_RE = re.compile(r"[^\w.-]")
 
@@ -1074,7 +1077,7 @@ def record_session_turn(
     prompt: str,
     response_text: str,
     model: str,
-    base: Path = KNOWLEDGE_DIR,
+    base: Path = _knowledge_dir(),
     root: "str | Path | None" = None,
 ) -> Path | None:
     """Capture VERIFIED-ONLY context for a turn → ``sessions/<id>/turn-NNNN.md``.
@@ -1164,7 +1167,7 @@ def find_relevant_sessions(
     prompt: str,
     exclude_session: str | None = None,
     limit: int = 3,
-    base: Path = KNOWLEDGE_DIR,
+    base: Path = _knowledge_dir(),
 ) -> list[OKFConcept]:
     """Retrieve SessionNote concepts from PRIOR sessions most relevant to ``prompt``.
 
@@ -1216,7 +1219,7 @@ def find_relevant_sessions(
 
 def index_project(
     root: Path | None = None,
-    base: Path = KNOWLEDGE_DIR,
+    base: Path = _knowledge_dir(),
     limit: int = 2000,
 ) -> dict[str, Any]:
     """Walk a repo's tracked source files and write a SourceFile doc for each.
@@ -1320,7 +1323,7 @@ def classify_concept(c: OKFConcept) -> tuple[str, str]:
     return "quarantine", "free-text prose written before the verified-only policy"
 
 
-def scan_store(base: Path = KNOWLEDGE_DIR) -> dict[str, list[OKFConcept]]:
+def scan_store(base: Path = _knowledge_dir()) -> dict[str, list[OKFConcept]]:
     """Classify every doc in the store, including ones outside retrieval.
 
     Scans the legacy flat `source/` too — those are no longer injected, but they
@@ -1347,7 +1350,7 @@ def scan_store(base: Path = KNOWLEDGE_DIR) -> dict[str, list[OKFConcept]]:
     return out
 
 
-def quarantine_concept(c: OKFConcept, base: Path = KNOWLEDGE_DIR) -> Path:
+def quarantine_concept(c: OKFConcept, base: Path = _knowledge_dir()) -> Path:
     """Move a doc out of retrieval into quarantine/, preserving its relative path.
 
     Never overwrites: a name collision gets a numeric suffix, so quarantining twice
@@ -1370,7 +1373,7 @@ def quarantine_concept(c: OKFConcept, base: Path = KNOWLEDGE_DIR) -> Path:
     return dest
 
 
-def gc_store(base: Path = KNOWLEDGE_DIR, apply: bool = False) -> dict[str, Any]:
+def gc_store(base: Path = _knowledge_dir(), apply: bool = False) -> dict[str, Any]:
     """Report (and optionally apply) quarantine of unverified docs.
 
     Dry-run by default. Moving a user's knowledge is a side effect they should ask

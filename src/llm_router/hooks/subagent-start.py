@@ -28,7 +28,6 @@ from __future__ import annotations
 import json
 import sys
 import time
-from pathlib import Path
 
 
 # ── Registered-tool surface (CHZ-SURF-01) ────────────────────────────────────
@@ -38,6 +37,22 @@ from pathlib import Path
 # so naming one hands the caller "Error: No such tool available" — after which
 # it silently does the work on the expensive model and the savings dashboard
 # cannot distinguish that from "chose not to route".
+def _router_home():
+    """Router state dir, resolved per call so LLM_ROUTER_HOME is honoured.
+
+    M-04: this was a module constant bound at import, so a hook launched with
+    LLM_ROUTER_HOME set still wrote to the operator's real home directory.
+
+    Imports locally: hooks are standalone scripts with varied import headers and
+    several do not import Path or os at module scope.
+    """
+    import os as _os
+    from pathlib import Path as _P
+
+    base = _os.environ.get("LLM_ROUTER_HOME", "").strip()
+    return _P(base).expanduser() if base else _P.home() / ".llm-router"
+
+
 def _load_tool_surface_fns():
     """(route_tool, route_call, route_call_with_complexity) from llm_router.tool_surface.
 
@@ -85,7 +100,7 @@ def _read_pressure() -> dict[str, float]:
     Returns fractions 0.0–1.0 for each bucket. Defaults to 0.0 on any error
     (conservative: assume no pressure when data is missing).
     """
-    usage_path = Path.home() / ".llm-router" / "usage.json"
+    usage_path = _router_home() / "usage.json"
     try:
         data = json.loads(usage_path.read_text())
 
@@ -104,7 +119,7 @@ def _read_pressure() -> dict[str, float]:
 
 def _is_pressure_stale(max_age_seconds: int = 1800) -> bool:
     """Return True if usage.json is missing or older than 30 minutes."""
-    usage_path = Path.home() / ".llm-router" / "usage.json"
+    usage_path = _router_home() / "usage.json"
     if not usage_path.exists():
         return True
     return (time.time() - usage_path.stat().st_mtime) > max_age_seconds

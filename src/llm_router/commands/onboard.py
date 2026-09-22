@@ -7,6 +7,8 @@ import shutil
 import subprocess as sp
 import sys
 
+from llm_router import paths
+
 
 # ── ANSI helpers (respect NO_COLOR / non-tty) ─────────────────────────────────
 
@@ -61,7 +63,7 @@ def cmd_onboard(args: list[str]) -> int:
 
 def _run_onboard() -> None:
     """Zero-friction onboarding: detect capabilities, pick enforcement mode, write config, install."""
-    STATE_DIR = os.path.expanduser("~/.llm-router")
+    STATE_DIR = str(paths.llm_router_home())
 
     print(f"\n{_bold('╔══════════════════════════════════════════╗')}")
     print(f"{_bold('║   LLM Router — Onboarding Wizard          ║')}")

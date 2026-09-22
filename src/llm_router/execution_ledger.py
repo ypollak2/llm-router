@@ -35,6 +35,8 @@ import logging
 
 from llm_router.sqlite_wal import enable_wal
 
+from llm_router import paths
+
 _log = logging.getLogger("llm_router.execution_ledger")
 
 SCHEMA_VERSION = 1
@@ -167,7 +169,7 @@ def _db_path() -> Path:
     override = os.environ.get("LLM_ROUTER_EXECUTION_LEDGER_DB")
     if override:
         return Path(override)
-    return Path.home() / ".llm-router" / "usage.db"
+    return paths.state_path("usage.db")
 
 
 _COLUMNS: tuple[str, ...] = (

@@ -40,6 +40,14 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 import bench_backend_quality as bench  # noqa: E402
 
+# M-02: every row this script causes is benchmark traffic, not usage. Declared
+# here rather than inferred later -- `routing_quality.detect_synthetic` prefers
+# an explicit statement by the harness, and until now no bench script made one,
+# so 1,813 fixture rows were counted as production spend.
+import os as _os
+
+_os.environ.setdefault("LLM_ROUTER_SYNTHETIC", "1")
+
 W = {"input": 1.0, "cw": 1.25, "cr": 0.1, "out": 5.0}
 
 # 3 the local model passes, 2 it fails — the mix that keeps the answer honest.

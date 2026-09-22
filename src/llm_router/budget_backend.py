@@ -51,6 +51,8 @@ from llm_router.budget_key import BudgetKey
 from llm_router.logging import get_logger
 from llm_router.profile import is_enterprise
 
+from llm_router import paths
+
 log = get_logger("llm_router.budget_backend")
 
 # Absolute tolerance for the hard-cap comparison. Budgets and costs are
@@ -249,7 +251,7 @@ class SqliteBudgetBackend:
     def __init__(self, db_path: Path | None = None) -> None:
         self.db_path = db_path or Path(
             os.environ.get("LLM_ROUTER_BUDGETS_DB_PATH")
-            or (Path.home() / ".llm-router" / "budgets.db")
+            or (paths.state_path("budgets.db"))
         )
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         # isolation_level=None puts us in autocommit / manual-transaction

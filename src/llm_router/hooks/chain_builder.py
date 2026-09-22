@@ -17,12 +17,27 @@ from __future__ import annotations
 
 import os
 import json
-from pathlib import Path
 
 from llm_router.hooks.direct_executor import ModelSpec
 
 
 # ── Available Models ──────────────────────────────────────────────────────────
+
+def _router_home():
+    """Router state dir, resolved per call so LLM_ROUTER_HOME is honoured.
+
+    M-04: this was a module constant bound at import, so a hook launched with
+    LLM_ROUTER_HOME set still wrote to the operator's real home directory.
+
+    Imports locally: hooks are standalone scripts with varied import headers and
+    several do not import Path or os at module scope.
+    """
+    import os as _os
+    from pathlib import Path as _P
+
+    base = _os.environ.get("LLM_ROUTER_HOME", "").strip()
+    return _P(base).expanduser() if base else _P.home() / ".llm-router"
+
 
 def _ollama_models() -> list[ModelSpec]:
     """Ollama models actually available right now.
@@ -151,7 +166,7 @@ def get_current_pressure() -> tuple[str, float]:
 
     Returns ("green", 0.0) if usage data unavailable.
     """
-    usage_path = Path.home() / ".llm-router" / "usage.json"
+    usage_path = _router_home() / "usage.json"
     try:
         data = json.loads(usage_path.read_text())
         session_pct = float(data.get("session_pct", 0.0))

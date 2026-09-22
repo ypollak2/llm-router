@@ -76,6 +76,34 @@ LIVECODE_PROMPT = (
     "signature must match the problem statement exactly."
 )
 
+MATH_PROMPT = (
+    "Please solve the following mathematical problem step by step.\n\n"
+    "Context: {Context}\n\n"
+    "Question: {Question}\n\n"
+    "Provide your final answer in \\boxed{{}} format, where the content inside "
+    "the braces is the exact mathematical expression or number. Keep your "
+    "explanation clear, concise, and within 3 sentences."
+)
+
+TRANSLATE_PROMPT = (
+    "Translate the following sentence from English to {Language}.\n\n"
+    "{Question}\n\n"
+    "Provide your final answer in \\boxed{{}} format."
+)
+
+# WMT19 is named <target>-en but Question holds the ENGLISH sentence and Answer
+# the foreign one -- i.e. English -> target. Verified on WMT19-de-en: Question is
+# English, Answer is German. RouterArena's own prompt says "from English to X"
+# for the same reason.
+WMT_LANGUAGES = {
+    "cs": "Czech", "de": "German", "fi": "Finnish", "gu": "Gujarati",
+    "kk": "Kazakh", "lt": "Lithuanian", "ru": "Russian", "zh": "Chinese",
+}
+
+MATH_DATASETS = {"AIME", "MATH", "GSM8K", "AsDiv", "MathQA", "FinQA"}
+FREETEXT_DATASETS = {"GeoGraphyData_100k", "ChessInstruct",
+                     "SuperGLUE-QA", "SuperGLUE-Entailment"}
+
 # Dataset → which template family it belongs to
 MCQ_DATASETS = {
     "ArcMMLU", "PubMedQA", "MedMCQA", "GeoBench", "MusicTheoryBench",
@@ -128,11 +156,24 @@ def render_prompt(row) -> tuple[str, str]:
     if ds in LIVECODE_DATASETS:
         return LIVECODE_PROMPT.format(Question=question), "livecode"
 
-    if ds in QANTA_DATASETS:
-        return QANTA_PROMPT.format(Context=context, Question=question), "qanta"
+    # Machine translation: no Options exist, so the MCQ template asked models to
+    # pick from an empty list. Measured 2026-09-19: 257 WMT19 rows scored ~0 for
+    # EVERY model in the pool -- the models replied "you did not provide the list
+    # of options". Same failure shape as LiveCodeBench-as-MCQ.
+    if ds.startswith("WMT19-"):
+        code = ds.split("-")[1]
+        return (TRANSLATE_PROMPT.format(
+            Question=question,
+            Language=WMT_LANGUAGES.get(code, code)), "translate")
 
-    if ds in NARRATIVE_DATASETS:
-        return NARRATIVE_PROMPT.format(Context=context, Question=question), "narrative"
+    # Maths: the answer is a number or expression, not a letter. 280 rows
+    # (AsDiv/MATH/GSM8K/AIME/FinQA) carry no Options and were being asked for a
+    # letter choice.
+    if ds in MATH_DATASETS:
+        return MATH_PROMPT.format(Context=context, Question=question), "math"
+
+    if ds in FREETEXT_DATASETS:
+        return QANTA_PROMPT.format(Context=context, Question=question), "freetext"
 
     # Default MCQ template — covers everything else we encountered in sub_10.
     return MCQ_PROMPT.format(

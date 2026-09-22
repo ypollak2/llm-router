@@ -9,7 +9,7 @@ from llm_router.ui.status_premium import PremiumStatusCommand
 
 
 def cmd_status(args: list[str]) -> int:
-    """Execute: llm_router status
+    """Execute: llm-router status
 
     Display routing status, savings summary, subscription pressure, and top models.
     Uses premium TUI components for Tokyo Night styled output.

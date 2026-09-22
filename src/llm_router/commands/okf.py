@@ -190,7 +190,7 @@ def cmd_okf(args: list[str]) -> None:
             return
         restored = 0
         for md in sorted(qdir.rglob("*.md")):
-            dest = okf.KNOWLEDGE_DIR / md.relative_to(qdir)
+            dest = okf._knowledge_dir() / md.relative_to(qdir)
             dest.parent.mkdir(parents=True, exist_ok=True)
             if dest.exists():
                 print(_y(f"  skipped {md.name} — {dest} already exists"))

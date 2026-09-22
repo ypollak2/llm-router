@@ -5,6 +5,8 @@ from __future__ import annotations
 import os
 import sys
 
+from llm_router import paths
+
 
 # ── ANSI helpers (respect NO_COLOR / non-tty) ─────────────────────────────────
 
@@ -57,9 +59,8 @@ def cmd_setup(args: list[str]) -> int:
 
 def _run_setup() -> None:
     """Interactive wizard: configure providers and write API keys to ~/.llm-router/.env."""
-    from pathlib import Path
 
-    env_path = Path.home() / ".llm-router" / ".env"
+    env_path = paths.state_path(".env")
     env_path.parent.mkdir(parents=True, exist_ok=True)
 
     print(f"\n{_bold('LLM Router — Setup Wizard')}\n")

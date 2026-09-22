@@ -7,6 +7,8 @@ import shutil
 import sys
 from llm_router.tool_surface import route_tool  # CHZ-SURF-01: never print a raw tool name
 
+from llm_router import paths
+
 
 # ── ANSI helpers (respect NO_COLOR / non-tty) ─────────────────────────────────
 
@@ -460,7 +462,7 @@ def _ensure_toml_table_block(text: str, header: str, block: str) -> str:
 
 def _remove_toml_scalar_if_equals(text: str, key: str, value: str) -> str:
     """Remove a top-level TOML scalar line, but only if it currently equals
-    `value` — used to self-heal a setting a previous llm_router install forced,
+    `value` — used to self-heal a setting a previous llm-router install forced,
     without touching a value the user (or another tool) set independently."""
     import re
 
@@ -480,15 +482,15 @@ def _install_codex_gateway_config(codex_dir) -> list[str]:
     LLM Router gateway. The gateway does not yet speak the exact OpenAI
     "responses" wire shape Codex's client expects, so every such call failed
     with an undecodable-stream error. Concretely: this broke Codex CLI itself
-    for any user who ran `llm_router install --host codex`, independent of
+    for any user who ran `llm-router install --host codex`, independent of
     whether they ever touched LLM Router's own routing.
     We now only REGISTER the provider (so it exists for future opt-in use,
     e.g. `codex -c model_provider=llm_router` once wire compatibility lands) and
-    never force it as the default. If an earlier llm_router install already
+    never force it as the default. If an earlier llm-router install already
     forced it, this run reverts those two lines so Codex falls back to its
     own built-in default — self-healing existing broken installs the next
-    time this function runs (e.g. via `llm_router install --host codex --mode
-    gateway` or `llm_router doctor --fix`).
+    time this function runs (e.g. via `llm-router install --host codex --mode
+    gateway` or `llm-router doctor --fix`).
     """
     import pathlib
     import re
@@ -629,7 +631,7 @@ def _install_codex_files(mode: str = "mcp") -> list[str]:
         actions.append(f"✓ Registered llm_router MCP server in {config_toml} ({command})")
 
     # 2. Hooks ---------------------------------------------------------------
-    hooks_dir = home / ".llm-router" / "hooks"
+    hooks_dir = paths.state_path("hooks")
     hooks_dir.mkdir(parents=True, exist_ok=True)
     pkg_hooks = pathlib.Path(__file__).parent.parent / "hooks"
     our_commands: set[str] = set()
@@ -986,7 +988,7 @@ def _remove_toml_table_block(text: str, header: str) -> str:
 
 
 def uninstall_host_integrations() -> list[str]:
-    """RED2-8-01: remove the live MCP registrations that `llm_router install --host
+    """RED2-8-01: remove the live MCP registrations that `llm-router install --host
     <codex|cursor|gemini-cli|vscode|copilot-cli|openclaw|trae>` wrote, so a
     `llm_router uninstall` does not leave dangling `llm_router` entries that break those
     tools after `pip uninstall`. Each remover is home-scoped and defensive — a
@@ -1198,7 +1200,7 @@ def _install_opencode_files() -> list[str]:
 
     # 2. Hook script
     hook_dest, hook_actions = _copy_hook_script(
-        "opencode-post-tool.py", home / ".llm-router" / "hooks"
+        "opencode-post-tool.py", paths.state_path("hooks")
     )
     actions += hook_actions
 
@@ -1248,27 +1250,27 @@ def _install_gemini_cli_files() -> list[str]:
 
     # 3. Hook scripts
     post_hook_dest, hook_actions = _copy_hook_script(
-        "gemini-cli-post-tool.py", home / ".llm-router" / "hooks"
+        "gemini-cli-post-tool.py", paths.state_path("hooks")
     )
     actions += hook_actions
 
     auto_hook_dest, hook_actions = _copy_hook_script(
-        "gemini-cli-auto-route.py", home / ".llm-router" / "hooks"
+        "gemini-cli-auto-route.py", paths.state_path("hooks")
     )
     actions += hook_actions
 
     status_hook_dest, hook_actions = _copy_hook_script(
-        "status-bar.py", home / ".llm-router" / "hooks"
+        "status-bar.py", paths.state_path("hooks")
     )
     actions += hook_actions
 
     end_hook_dest, hook_actions = _copy_hook_script(
-        "gemini-cli-session-end.py", home / ".llm-router" / "hooks"
+        "gemini-cli-session-end.py", paths.state_path("hooks")
     )
     actions += hook_actions
 
     start_hook_dest, hook_actions = _copy_hook_script(
-        "session-start.py", home / ".llm-router" / "hooks"
+        "session-start.py", paths.state_path("hooks")
     )
     actions += hook_actions
 
@@ -1450,7 +1452,7 @@ def _install_vscode_files() -> list[str]:
 def _install_windsurf_files() -> list[str]:
     """Write Windsurf MCP config (project-scoped .windsurf/mcp.json). RED2-10-03:
     windsurf is documented in README/--help but had no installer, so
-    `llm_router install --host windsurf` was rejected as an unknown host."""
+    `llm-router install --host windsurf` was rejected as an unknown host."""
     import pathlib
 
     actions: list[str] = []

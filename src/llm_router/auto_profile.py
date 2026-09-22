@@ -20,10 +20,14 @@ from llm_router.gemini_cli_agent import is_gemini_cli_available
 from llm_router.claude_usage import get_claude_pressure
 from llm_router.logging import get_logger
 
+from llm_router import paths
+
 log = get_logger("llm_router.auto_profile")
 
-PROFILE_PATH = Path.home() / ".llm-router" / "profile.yaml"
-PROFILE_CACHE_PATH = Path.home() / ".llm-router" / "profile_cache.json"
+def _profile_path():
+    return paths.state_path("profile.yaml")
+def _profile_cache_path():
+    return paths.state_path("profile_cache.json")
 SCAN_INTERVAL_SECONDS = 3600  # Rescan every hour
 
 
@@ -276,10 +280,10 @@ def save_profile(yaml_content: str) -> Path:
     Returns:
         Path to saved profile file
     """
-    PROFILE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    PROFILE_PATH.write_text(yaml_content)
-    log.info(f"Profile saved to {PROFILE_PATH}")
-    return PROFILE_PATH
+    _profile_path().parent.mkdir(parents=True, exist_ok=True)
+    _profile_path().write_text(yaml_content)
+    log.info(f"Profile saved to {_profile_path()}")
+    return _profile_path()
 
 
 def auto_generate_profile() -> Path:
@@ -299,11 +303,11 @@ def should_rescan() -> bool:
     Returns:
         True if last scan was >1 hour ago, False otherwise
     """
-    if not PROFILE_CACHE_PATH.exists():
+    if not _profile_cache_path().exists():
         return True
 
     try:
-        cache = json.loads(PROFILE_CACHE_PATH.read_text())
+        cache = json.loads(_profile_cache_path().read_text())
         last_scan = cache.get("last_scan", 0)
         now = time.time()
         return (now - last_scan) > SCAN_INTERVAL_SECONDS
@@ -317,12 +321,12 @@ def save_detection_cache(detected: ServiceDetection) -> None:
     Args:
         detected: ServiceDetection from detect_services()
     """
-    PROFILE_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    _profile_cache_path().parent.mkdir(parents=True, exist_ok=True)
     cache = {
         "last_scan": time.time(),
         "detected": dict(detected),
     }
-    PROFILE_CACHE_PATH.write_text(json.dumps(cache, indent=2))
+    _profile_cache_path().write_text(json.dumps(cache, indent=2))
 
 
 def detect_changes() -> tuple[bool, list[str]]:
@@ -331,11 +335,11 @@ def detect_changes() -> tuple[bool, list[str]]:
     Returns:
         (has_changes, list of change descriptions)
     """
-    if not PROFILE_CACHE_PATH.exists():
+    if not _profile_cache_path().exists():
         return False, []
 
     try:
-        cache = json.loads(PROFILE_CACHE_PATH.read_text())
+        cache = json.loads(_profile_cache_path().read_text())
         old_detected = cache.get("detected", {})
     except Exception:
         return False, []

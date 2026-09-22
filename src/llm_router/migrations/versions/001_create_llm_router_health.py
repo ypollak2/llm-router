@@ -4,7 +4,7 @@ This migration is intentionally additive: it doesn't touch any existing
 table, so applying or rolling it back can't lose data. It exists to
 prove the framework end-to-end with a real schema change worth shipping.
 
-``llm_router_health`` records one row per ``llm_router doctor`` run (or any
+``llm_router_health`` records one row per ``llm-router doctor`` run (or any
 caller that wants to log a structured health-check result). Downstream
 dashboards can plot the health timeline without re-parsing logs.
 

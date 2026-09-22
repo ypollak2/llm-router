@@ -7,7 +7,7 @@ responds). It runs a 3-layer complexity classifier to determine if the task is
 simple/moderate/complex, then injects a hint into the system message telling Gemini
 which llm_router MCP tool to call.
 
-Usage: Installed at ~/.llm-router/hooks/gemini-cli-auto-route.py by `llm_router install`.
+Usage: Installed at ~/.llm-router/hooks/gemini-cli-auto-route.py by `llm-router install`.
 Registered in Gemini CLI's hook config to fire on UserPromptSubmit.
 
 Classification layers:

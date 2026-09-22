@@ -28,11 +28,27 @@ import time
 from pathlib import Path
 
 
+def _router_home():
+    """Router state dir, resolved per call so LLM_ROUTER_HOME is honoured.
+
+    M-04: this was a module constant bound at import, so a hook launched with
+    LLM_ROUTER_HOME set still wrote to the operator's real home directory.
+
+    Imports locally: hooks are standalone scripts with varied import headers and
+    several do not import Path or os at module scope.
+    """
+    import os as _os
+    from pathlib import Path as _P
+
+    base = _os.environ.get("LLM_ROUTER_HOME", "").strip()
+    return _P(base).expanduser() if base else _P.home() / ".llm-router"
+
+
 def _get_session_id() -> str:
     env_session = os.environ.get("CLAUDE_CODE_SESSION_ID", "").strip()
     if env_session:
         return env_session
-    session_file = Path.home() / ".llm-router" / "session_id.txt"
+    session_file = _router_home() / "session_id.txt"
     try:
         return session_file.read_text().strip()
     except FileNotFoundError:
@@ -41,7 +57,7 @@ def _get_session_id() -> str:
 
 def _depth_file(session_id: str) -> Path:
     safe = re.sub(r"[^A-Za-z0-9._-]", "_", session_id) or "unknown"
-    return Path.home() / ".llm-router" / f"agent_depth_{safe}.json"
+    return _router_home() / f"agent_depth_{safe}.json"
 
 
 def main() -> None:

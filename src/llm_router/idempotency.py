@@ -35,6 +35,8 @@ from typing import Any
 from llm_router.logging import get_logger
 from llm_router.types import LLMResponse
 
+from llm_router import paths
+
 log = get_logger("llm_router.idempotency")
 
 
@@ -80,7 +82,7 @@ class IdempotencyStore:
     def __init__(self, db_path: Path | None = None) -> None:
         self.db_path = db_path or Path(
             os.environ.get("LLM_ROUTER_IDEMPOTENCY_PATH")
-            or (Path.home() / ".llm-router" / "idempotency.db")
+            or (paths.state_path("idempotency.db"))
         )
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         # CHZ-AUD-D-02 (sibling): the dedupe DB persists LLM responses to disk —

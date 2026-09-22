@@ -27,10 +27,24 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from llm_router.token_budget import estimate_tokens
+from llm_router.sqlite_wal import enable_wal
 
 log = logging.getLogger("llm_router.result_cache")
 
-_ROUTER_DIR = Path.home() / ".llm-router"
+
+def _router_dir() -> Path:
+    """The router state directory, resolved on every call.
+
+    M-04: this was ``_ROUTER_DIR = Path.home() / ".llm-router"`` evaluated at
+    import time, so ``LLM_ROUTER_HOME`` could not move it and any test that did
+    not explicitly monkeypatch the constant read and wrote the operator's real
+    cache. Resolution now goes through `paths.py` (RED2-07) like every other
+    store.
+    """
+    from llm_router import paths
+
+    return paths.llm_router_home()
+
 
 # TTL per task type (seconds)
 _TTL: dict[str, int] = {
@@ -119,10 +133,10 @@ def _get_db_path(project_dir: str | None, task_type: str) -> Path:
         from llm_router.semantic.scope import scope_key
 
         project_hash = scope_key(project_dir, length=12)
-        path = _ROUTER_DIR / "projects" / project_hash / "result_cache.db"
+        path = _router_dir() / "projects" / project_hash / "result_cache.db"
     else:
         # Knowledge tasks use user-level cache
-        path = _ROUTER_DIR / "result_cache.db"
+        path = _router_dir() / "result_cache.db"
     return path
 
 
@@ -147,8 +161,14 @@ def _ensure_db(db_path: Path) -> sqlite3.Connection:
     else:
         _secure_perms(db_path)
     conn = sqlite3.connect(str(db_path), timeout=5)
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA busy_timeout=3000")
+    # M-06 / the sqlite_wal adoption gap. `busy_timeout` governs how long the
+    # journal_mode PRAGMA itself waits for its exclusive lock, so setting it
+    # AFTER is the one ordering that leaves that statement on the 5s default.
+    # The PRAGMA also reports failure by RETURNING the mode in effect rather
+    # than raising -- lose the cold-start race and you silently proceed in
+    # rollback-journal mode. `enable_wal` handles both and was adopted by only
+    # 3 of 9 sites.
+    enable_wal(conn, busy_timeout_ms=3000, label="result_cache")
     # secure_delete: overwrite freed page bytes with zeros immediately on
     # DELETE/UPDATE, so TTL purges (below) physically remove secret bytes
     # from the file rather than leaving them in unallocated pages. This is
@@ -478,7 +498,7 @@ def clear_cache(project_dir: str | None = None) -> int:
     deleted = 0
 
     # Clear user-level cache
-    user_db = _ROUTER_DIR / "result_cache.db"
+    user_db = _router_dir() / "result_cache.db"
     if user_db.exists():
         try:
             conn = sqlite3.connect(str(user_db), timeout=5)
@@ -493,7 +513,7 @@ def clear_cache(project_dir: str | None = None) -> int:
     # Clear project-level cache if specified
     if project_dir:
         project_hash = hashlib.sha256(project_dir.encode()).hexdigest()[:12]
-        proj_db = _ROUTER_DIR / "projects" / project_hash / "result_cache.db"
+        proj_db = _router_dir() / "projects" / project_hash / "result_cache.db"
         if proj_db.exists():
             try:
                 conn = sqlite3.connect(str(proj_db), timeout=5)

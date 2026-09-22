@@ -28,8 +28,11 @@ from typing import Any
 
 from llm_router.hooks.agent_loop import _get_ollama_url, run_agent_loop
 
+from llm_router import paths
 
-CACHE_PATH = Path.home() / ".llm-router" / "agentic_models.json"
+
+def _cache_path():
+    return paths.state_path("agentic_models.json")
 PROBE_PROMPT = (
     "Create a file fib.py with fib(n) returning the nth Fibonacci number "
     "(fib(0)=0, fib(1)=1) and print(fib(10)); then run 'python3 fib.py' "
@@ -112,7 +115,7 @@ def _models_hash(models: list[str]) -> str:
 def _read_cache() -> dict[str, Any] | None:
     """Read the registry cache, returning None if unavailable or invalid."""
     try:
-        with CACHE_PATH.open("r", encoding="utf-8") as handle:
+        with _cache_path().open("r", encoding="utf-8") as handle:
             payload = json.load(handle)
 
         if not isinstance(payload, dict):
@@ -135,19 +138,19 @@ def _read_cache() -> dict[str, Any] | None:
 
 def _write_cache(payload: dict[str, Any]) -> None:
     """Atomically write the registry cache."""
-    CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    _cache_path().parent.mkdir(parents=True, exist_ok=True)
 
     fd, temp_name = tempfile.mkstemp(
-        prefix=f".{CACHE_PATH.name}.",
+        prefix=f".{_cache_path().name}.",
         suffix=".tmp",
-        dir=str(CACHE_PATH.parent),
+        dir=str(_cache_path().parent),
         text=True,
     )
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             json.dump(payload, handle, indent=2, sort_keys=True)
             handle.write("\n")
-        os.replace(temp_name, CACHE_PATH)
+        os.replace(temp_name, _cache_path())
     except Exception:
         try:
             os.unlink(temp_name)

@@ -28,6 +28,7 @@ import json
 import math
 import re
 import zlib
+import os
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
@@ -39,6 +40,15 @@ PRICE_NAME = {
     "stealth/ox-alpha": "stealth/ox-alpha",
 }
 PROVIDER = {"google/gemini-3-flash-preview": "google", "stealth/ox-alpha": "openrouter"}
+
+
+def _router_home():
+    """Router state dir, resolved per call so LLM_ROUTER_HOME is honoured (M-04)."""
+    import os as _os
+    from pathlib import Path as _P
+
+    base = _os.environ.get("LLM_ROUTER_HOME", "").strip()
+    return _P(base).expanduser() if base else _P.home() / ".llm-router"
 
 
 class FrozenNB:
@@ -82,7 +92,18 @@ def main() -> int:
     ap.add_argument("--base-gen", required=True)
     ap.add_argument("--alt-gen", required=True)
     ap.add_argument("--name", default="llm-router-divert")
-    ap.add_argument("--harness", default=str(Path.home() / ".llm-router/harness/RouterArena"))
+    # M-09: the RouterArena checkout is 4.8 GB of vendored eval framework and was
+    # living inside ~/.llm-router, which is runtime STATE -- so `du -sh` on the
+    # state dir read 5.1 GB, 94% of it not state at all. The location is now
+    # explicit: LLM_ROUTER_HARNESS wins, then the state dir for backwards
+    # compatibility with existing checkouts.
+    ap.add_argument(
+        "--harness",
+        default=os.environ.get(
+            "LLM_ROUTER_HARNESS",
+            str(_router_home() / "harness" / "RouterArena"),
+        ),
+    )
     ap.add_argument("--price-alt-as", default=None,
                     help="label alt-model rows with this priced name so the harness will "
                          "grade them at all. For local measurement only: an unpriced model is "

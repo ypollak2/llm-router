@@ -54,6 +54,22 @@ _BRAILLE_DOTS = [
 ]
 
 
+def _router_home():
+    """Router state dir, resolved per call so LLM_ROUTER_HOME is honoured.
+
+    M-04: this was a module constant bound at import, so a hook launched with
+    LLM_ROUTER_HOME set still wrote to the operator's real home directory.
+
+    Imports locally: hooks are standalone scripts with varied import headers and
+    several do not import Path or os at module scope.
+    """
+    import os as _os
+    from pathlib import Path as _P
+
+    base = _os.environ.get("LLM_ROUTER_HOME", "").strip()
+    return _P(base).expanduser() if base else _P.home() / ".llm-router"
+
+
 def _braille_chart(values: list[float], width: int = 30, height: int = 4) -> list[str]:
     """Render values as a Braille dot chart. Returns list of text lines."""
     if not values:
@@ -500,8 +516,7 @@ def _build_models_panel(data: dict) -> Panel | None:
     """Panel showing all models used during the last prompt with tier breakdown."""
     try:
         from llm_router.hooks.dashboard_enhanced import query_last_prompt_calls
-        import os
-        db_path = data.get("db_path") or os.path.expanduser("~/.llm-router/usage.db")
+        db_path = data.get("db_path") or str(_router_home() / "usage.db")
         calls = query_last_prompt_calls(db_path=db_path)
     except Exception:
         return None

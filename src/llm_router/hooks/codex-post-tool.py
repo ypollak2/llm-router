@@ -18,12 +18,31 @@ from __future__ import annotations
 import json
 import sys
 import time
-from pathlib import Path
 
-STATE_DIR        = Path.home() / ".llm-router"
-SESSION_FILE     = STATE_DIR / "codex_session.json"
-SAVINGS_LOG_PATH = STATE_DIR / "savings_log.jsonl"
-LAST_FLUSH_FILE  = STATE_DIR / "codex_last_flush.txt"
+def _router_home():
+    """Router state dir, resolved per call so LLM_ROUTER_HOME is honoured.
+
+    M-04: this was a module constant bound at import, so a hook launched with
+    LLM_ROUTER_HOME set still wrote to the operator's real home directory.
+
+    Imports locally: hooks are standalone scripts with varied import headers and
+    several do not import Path or os at module scope.
+    """
+    import os as _os
+    from pathlib import Path as _P
+
+    base = _os.environ.get("LLM_ROUTER_HOME", "").strip()
+    return _P(base).expanduser() if base else _P.home() / ".llm-router"
+
+
+def _state_dir():
+    return _router_home()
+def _session_file():
+    return _state_dir() / "codex_session.json"
+def _savings_log_path():
+    return _state_dir() / "savings_log.jsonl"
+def _last_flush_file():
+    return _state_dir() / "codex_last_flush.txt"
 
 # Minimum seconds between flushes to avoid hammering the log
 _FLUSH_INTERVAL = 30
@@ -31,21 +50,21 @@ _FLUSH_INTERVAL = 30
 
 def _read_session() -> dict:
     try:
-        return json.loads(SESSION_FILE.read_text())
+        return json.loads(_session_file().read_text())
     except Exception:
         return {}
 
 
 def _last_flush_time() -> float:
     try:
-        return float(LAST_FLUSH_FILE.read_text().strip())
+        return float(_last_flush_file().read_text().strip())
     except Exception:
         return 0.0
 
 
 def _write_flush_time() -> None:
     try:
-        LAST_FLUSH_FILE.write_text(str(time.time()))
+        _last_flush_file().write_text(str(time.time()))
     except OSError:
         pass
 
@@ -66,16 +85,16 @@ def _flush() -> None:
     if not pending:
         return
 
-    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    _state_dir().mkdir(parents=True, exist_ok=True)
     try:
-        with SAVINGS_LOG_PATH.open("a") as f:
+        with _savings_log_path().open("a") as f:
             for record in pending:
                 # Ensure host is tagged as codex
                 record.setdefault("host", "codex")
                 f.write(json.dumps(record) + "\n")
         # Clear pending after successful flush
         session["pending_savings"] = []
-        SESSION_FILE.write_text(json.dumps(session))
+        _session_file().write_text(json.dumps(session))
         _write_flush_time()
     except OSError:
         pass

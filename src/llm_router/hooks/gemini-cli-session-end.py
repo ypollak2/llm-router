@@ -7,7 +7,7 @@ Shows:
 - Savings from routing to free providers (Ollama, Codex, Gemini CLI itself)
 - Recommendations for future usage
 
-Usage: Installed at ~/.llm-router/hooks/gemini-cli-session-end.py by `llm_router install`.
+Usage: Installed at ~/.llm-router/hooks/gemini-cli-session-end.py by `llm-router install`.
 Registered in Gemini CLI's hook config to fire on SessionEnd.
 """
 
@@ -28,7 +28,7 @@ async def get_session_summary() -> dict:
     session_start = 0
     try:
         import os
-        start_file = os.path.expanduser("~/.llm-router/session_start.txt")
+        start_file = str(_router_home() / "session_start.txt")
         if os.path.exists(start_file):
             with open(start_file) as f:
                 session_start = float(f.read().strip())
@@ -101,6 +101,22 @@ async def get_session_summary() -> dict:
         summary["dashboard_url"] = None
 
     return summary
+
+
+def _router_home():
+    """Router state dir, resolved per call so LLM_ROUTER_HOME is honoured.
+
+    M-04: this was a module constant bound at import, so a hook launched with
+    LLM_ROUTER_HOME set still wrote to the operator's real home directory.
+
+    Imports locally: hooks are standalone scripts with varied import headers and
+    several do not import Path or os at module scope.
+    """
+    import os as _os
+    from pathlib import Path as _P
+
+    base = _os.environ.get("LLM_ROUTER_HOME", "").strip()
+    return _P(base).expanduser() if base else _P.home() / ".llm-router"
 
 
 def format_quota_bar(quota: dict) -> str:

@@ -331,7 +331,7 @@ __all__ = [
 
 
 # Public re-export of the cross-profile gate so admin-facing tools
-# (llm_router status / doctor / etc.) can surface whether the extension
+# (llm-router status / doctor / etc.) can surface whether the extension
 # is currently active without parsing the env value themselves.
 def is_cross_profile_extension_enabled() -> bool:
     """Whether option #2 (apply the reorder under any profile when a

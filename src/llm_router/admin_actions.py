@@ -40,6 +40,8 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+from llm_router import paths
+
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS admin_actions (
@@ -68,7 +70,7 @@ class AdminActionLog:
     ) -> None:
         self.db_path = db_path or Path(
             os.environ.get("LLM_ROUTER_ADMIN_ACTIONS_PATH")
-            or (Path.home() / ".llm-router" / "admin_actions.db")
+            or (paths.state_path("admin_actions.db"))
         )
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(

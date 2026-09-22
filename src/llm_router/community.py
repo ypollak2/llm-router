@@ -13,14 +13,16 @@ from __future__ import annotations
 
 import json
 import logging
-from pathlib import Path
 
 from llm_router.cost import _get_db
 from llm_router.tool_surface import route_tool  # CHZ-SURF-01
 
+from llm_router import paths
+
 log = logging.getLogger("llm_router.community")
 
-_COMMUNITY_EXPORT_PATH = Path.home() / ".llm-router" / "community_export.jsonl"
+def _community_export_path():
+    return paths.state_path("community_export.jsonl")
 
 
 async def get_benchmark_stats() -> dict[str, dict]:
@@ -171,9 +173,9 @@ async def prepare_community_export() -> str:
     finally:
         await db.close()
 
-    _COMMUNITY_EXPORT_PATH.parent.mkdir(parents=True, exist_ok=True)
+    _community_export_path().parent.mkdir(parents=True, exist_ok=True)
     count = 0
-    with open(_COMMUNITY_EXPORT_PATH, "w") as f:
+    with open(_community_export_path(), "w") as f:
         for row in rows:
             entry = {
                 "task_type":    row[0],
@@ -188,4 +190,4 @@ async def prepare_community_export() -> str:
             f.write(json.dumps(entry) + "\n")
             count += 1
 
-    return f"{count} decisions exported to {_COMMUNITY_EXPORT_PATH}"
+    return f"{count} decisions exported to {_community_export_path()}"

@@ -13,18 +13,22 @@ import sys
 import time
 from pathlib import Path
 
+from llm_router import paths
+
 logger = logging.getLogger("llm_router.service-manager")
 
-ROUTER_DIR = Path.home() / ".llm-router"
-SERVICE_PID_FILE = ROUTER_DIR / "service.pid"
+def _router_dir():
+    return paths.llm_router_home()
+def _service_pid_file():
+    return _router_dir() / "service.pid"
 SERVICE_PORT = int(os.environ.get("LLM_ROUTER_SERVICE_PORT", "7337"))
 
 
 def _get_service_pid() -> int | None:
     """Read service PID from file."""
     try:
-        if SERVICE_PID_FILE.exists():
-            return int(SERVICE_PID_FILE.read_text().strip())
+        if _service_pid_file().exists():
+            return int(_service_pid_file().read_text().strip())
     except (ValueError, OSError):
         pass
     return None
@@ -32,8 +36,8 @@ def _get_service_pid() -> int | None:
 
 def _write_service_pid(pid: int) -> None:
     """Write service PID to file."""
-    ROUTER_DIR.mkdir(parents=True, exist_ok=True)
-    SERVICE_PID_FILE.write_text(str(pid))
+    _router_dir().mkdir(parents=True, exist_ok=True)
+    _service_pid_file().write_text(str(pid))
 
 
 def _is_process_alive(pid: int) -> bool:
@@ -57,8 +61,8 @@ def start_service() -> bool:
         return True
     
     # Clean up stale PID file
-    if SERVICE_PID_FILE.exists():
-        SERVICE_PID_FILE.unlink()
+    if _service_pid_file().exists():
+        _service_pid_file().unlink()
     
     try:
         # Import here to avoid circular dependency
@@ -103,7 +107,7 @@ def stop_service() -> bool:
         return True
     
     if not _is_process_alive(pid):
-        SERVICE_PID_FILE.unlink(missing_ok=True)
+        _service_pid_file().unlink(missing_ok=True)
         return True
     
     try:
@@ -113,14 +117,14 @@ def stop_service() -> bool:
         # Wait for graceful shutdown
         for _ in range(50):  # 5 seconds
             if not _is_process_alive(pid):
-                SERVICE_PID_FILE.unlink(missing_ok=True)
+                _service_pid_file().unlink(missing_ok=True)
                 logger.info(f"Service stopped gracefully (PID {pid})")
                 return True
             time.sleep(0.1)
         
         # Force kill if needed
         os.kill(pid, signal.SIGKILL)
-        SERVICE_PID_FILE.unlink(missing_ok=True)
+        _service_pid_file().unlink(missing_ok=True)
         logger.info(f"Service force-killed (PID {pid})")
         return True
     

@@ -15,7 +15,6 @@ import json
 import sqlite3
 from dataclasses import dataclass, field
 from datetime import datetime
-from pathlib import Path
 
 from llm_router.claude_jsonl_usage import CCUsageSummary, read_cc_usage
 
@@ -26,13 +25,21 @@ from textual.timer import Timer
 from textual.widgets import Footer, Static
 from llm_router.tool_surface import route_tool  # CHZ-SURF-01
 
+from llm_router import paths
+from llm_router.sqlite_wal import enable_wal
+
 # ── Paths ─────────────────────────────────────────────────────────────────────
 
-STATE_DIR = Path.home() / ".llm-router"
-DB_PATH = STATE_DIR / "usage.db"
-USAGE_JSON = STATE_DIR / "usage.json"
-SAVINGS_LOG = STATE_DIR / "savings_log.jsonl"
-SESSION_SPEND = STATE_DIR / "session_spend.json"
+def _state_dir():
+    return paths.llm_router_home()
+def _db_path():
+    return _state_dir() / "usage.db"
+def _usage_json():
+    return _state_dir() / "usage.json"
+def _savings_log():
+    return _state_dir() / "savings_log.jsonl"
+def _session_spend():
+    return _state_dir() / "session_spend.json"
 
 # ── Tokyo Night Palette (true-color hex) ──────────────────────────────────────
 
@@ -196,7 +203,7 @@ class DashboardData:
 
 def _read_usage_json() -> dict:
     try:
-        return json.loads(USAGE_JSON.read_text())
+        return json.loads(_usage_json().read_text())
     except Exception:
         return {}
 
@@ -212,13 +219,19 @@ def _fetch_data() -> DashboardData:
     d.plan_name = uj.get("plan", "Pro")
     d.model_breakdown = uj.get("model_breakdown", {})
 
-    if not DB_PATH.exists():
+    if not _db_path().exists():
         return d
 
     try:
-        conn = sqlite3.connect(str(DB_PATH), timeout=3)
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA busy_timeout=2000")
+        conn = sqlite3.connect(str(_db_path()), timeout=3)
+        # M-06 / the sqlite_wal adoption gap. `busy_timeout` governs how long the
+        # journal_mode PRAGMA itself waits for its exclusive lock, so setting it
+        # AFTER is the one ordering that leaves that statement on the 5s default.
+        # The PRAGMA also reports failure by RETURNING the mode in effect rather
+        # than raising -- lose the cold-start race and you silently proceed in
+        # rollback-journal mode. `enable_wal` handles both and was adopted by only
+        # 3 of 9 sites.
+        enable_wal(conn, busy_timeout_ms=2000, label="dashboard_tui")
     except Exception:
         return d
 
@@ -322,10 +335,10 @@ def _fetch_data() -> DashboardData:
                 ("month",    "month_saved",    "month_saved_calls"),
                 ("lifetime", "lifetime_saved", "lifetime_saved_calls"),
             ]:
-                _t = _qw(_window, db_path=DB_PATH)
+                _t = _qw(_window, db_path=_db_path())
                 setattr(d, _saved_attr, _t.saved_usd)
                 setattr(d, _calls_attr, _t.calls)
-            d.l14_savings = _qw("14d", db_path=DB_PATH).saved_usd
+            d.l14_savings = _qw("14d", db_path=_db_path()).saved_usd
         except Exception:
             pass
 

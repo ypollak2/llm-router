@@ -15,6 +15,14 @@ from pathlib import Path
 sys.path.insert(0, "/Users/yaliandrona/Projects/llm-router/src")
 from llm_router.hooks.agent_loop import TOOL_DEFINITIONS
 
+# M-02: every row this script causes is benchmark traffic, not usage. Declared
+# here rather than inferred later -- `routing_quality.detect_synthetic` prefers
+# an explicit statement by the harness, and until now no bench script made one,
+# so 1,813 fixture rows were counted as production spend.
+import os as _os
+
+_os.environ.setdefault("LLM_ROUTER_SYNTHETIC", "1")
+
 MODEL = sys.argv[1] if len(sys.argv) > 1 else "qwen3-coder:30b"
 WORK = Path("/Users/yaliandrona/.claude/jobs/82d6664b/tmp/editbench")
 

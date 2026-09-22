@@ -22,6 +22,8 @@ import time
 from pathlib import Path
 from llm_router.tool_surface import localize  # CHZ-SURF-01
 
+from llm_router import paths
+
 
 def is_frozen() -> bool:
     """True when running from a PyInstaller build rather than a Python install."""
@@ -69,7 +71,8 @@ _SETTINGS_PATH = _CLAUDE_DIR / "settings.json"
 # The router's own state lives here, and so — as of the first-run fixes — do the
 # backups. Writing them next to the destination is what let ~/.claude/hooks and
 # ~/.claude/rules grow to 697 files / 17 MB on a real host (issue #94).
-STATE_DIR = Path.home() / ".llm-router"
+def _state_dir():
+    return paths.llm_router_home()
 
 # How many timestamped backups to retain per file. The plain `<name>.bak`, which
 # holds the FIRST captured hand-edit, is kept forever and does not count against
@@ -86,8 +89,8 @@ def seed_usage_json() -> Path:
     'remaining' strings. The `pending` flag lets every reader say "not measured
     yet" instead of inventing a number.
     """
-    STATE_DIR.mkdir(parents=True, exist_ok=True)
-    path = STATE_DIR / "usage.json"
+    _state_dir().mkdir(parents=True, exist_ok=True)
+    path = _state_dir() / "usage.json"
     if path.exists():
         try:
             existing = json.loads(path.read_text())
@@ -112,7 +115,7 @@ def seed_usage_json() -> Path:
 
 def _prune_backups(stem: str) -> None:
     """Keep at most MAX_BACKUPS_PER_FILE timestamped backups for one file."""
-    backups_dir = STATE_DIR / "backups"
+    backups_dir = _state_dir() / "backups"
     try:
         existing = sorted(
             backups_dir.glob(f"{stem}.*.bak"),
@@ -315,7 +318,7 @@ def _backup_before_overwrite(dst: Path) -> Path | None:
             shutil.copy2(dst, primary)
             return primary
 
-        backups_dir = STATE_DIR / "backups"
+        backups_dir = _state_dir() / "backups"
         backups_dir.mkdir(parents=True, exist_ok=True)
         ts = time.strftime("%Y%m%d-%H%M%S")
         alt = backups_dir / f"{dst.name}.{ts}.bak"

@@ -19,18 +19,37 @@ import sys
 import time
 from pathlib import Path
 
-_ROUTER_DIR = Path.home() / ".llm-router"
-_LOG_PATH = _ROUTER_DIR / "enforcement.log"
+def _router_home():
+    """Router state dir, resolved per call so LLM_ROUTER_HOME is honoured.
+
+    M-04: this was a module constant bound at import, so a hook launched with
+    LLM_ROUTER_HOME set still wrote to the operator's real home directory.
+
+    Imports locally: hooks are standalone scripts with varied import headers and
+    several do not import Path or os at module scope.
+    """
+    import os as _os
+    from pathlib import Path as _P
+
+    base = _os.environ.get("LLM_ROUTER_HOME", "").strip()
+    return _P(base).expanduser() if base else _P.home() / ".llm-router"
+
+
+def _router_dir():
+    return _router_home()
+def _log_path():
+    return _router_dir() / "enforcement.log"
 _QA_TASK_TYPES = frozenset({"query", "research", "generate", "analyze"})
 
-_ENV_PATHS = [
-    Path.home() / ".llm-router" / ".env",
+def _env_paths():
+    return [
+    _router_home() / ".env",
     Path.home() / ".env",
 ]
 
 
 def _load_dotenv() -> None:
-    for env_path in _ENV_PATHS:
+    for env_path in _env_paths():
         if not env_path.exists():
             continue
         try:
@@ -51,11 +70,11 @@ _load_dotenv()
 
 
 def _pending_path(session_id: str) -> Path:
-    return _ROUTER_DIR / f"pending_route_{session_id}.json"
+    return _router_dir() / f"pending_route_{session_id}.json"
 
 
 def _strikes_path(session_id: str) -> Path:
-    return _ROUTER_DIR / f"direct_answer_strikes_{session_id}.json"
+    return _router_dir() / f"direct_answer_strikes_{session_id}.json"
 
 
 def _read_pending(session_id: str) -> dict | None:
@@ -81,7 +100,7 @@ def _increment_strikes(session_id: str, task_type: str, expected_tool: str) -> i
     data["last_expected_tool"] = expected_tool
     data["last_at"] = time.time()
     try:
-        _ROUTER_DIR.mkdir(parents=True, exist_ok=True)
+        _router_dir().mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(data))
     except OSError:
         pass
@@ -90,9 +109,9 @@ def _increment_strikes(session_id: str, task_type: str, expected_tool: str) -> i
 
 def _log_direct_answer(session_id: str, expected_tool: str, strikes: int) -> None:
     try:
-        _ROUTER_DIR.mkdir(parents=True, exist_ok=True)
+        _router_dir().mkdir(parents=True, exist_ok=True)
         ts = time.strftime("%Y-%m-%d %H:%M:%S")
-        with _LOG_PATH.open("a", encoding="utf-8") as f:
+        with _log_path().open("a", encoding="utf-8") as f:
             # chz-surface-ok: strike LOG record — logical name, tier-independent.
             f.write(
                 f"[{ts}] DIRECT_ANSWER session={session_id[:12]} "

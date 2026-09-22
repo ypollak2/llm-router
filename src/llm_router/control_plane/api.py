@@ -20,6 +20,8 @@ from llm_router.control_plane.policy_bundle import (
 )
 from llm_router.control_plane.store import ControlPlaneStore, SqliteControlPlaneStore
 
+from llm_router import paths
+
 
 class PolicyPushRequest(BaseModel):
     yaml_text: str
@@ -91,7 +93,7 @@ def get_cp_store() -> ControlPlaneStore:
             db_path = Path(
                 os.environ.get(
                     "LLM_ROUTER_CP_STORE_PATH",
-                    str(Path.home() / ".llm-router" / "cp_store.db"),
+                    str(paths.state_path("cp_store.db")),
                 )
             )
             db_path.parent.mkdir(parents=True, exist_ok=True)

@@ -9,6 +9,8 @@ from typing import TYPE_CHECKING
 
 from llm_router.sqlite_wal import enable_wal
 
+from llm_router import paths
+
 if TYPE_CHECKING:
     from llm_router.lineage.decision_logger import RoutingDecision
 
@@ -100,7 +102,7 @@ class LineageStore:
             self.jsonl_file = db_path.with_suffix(".jsonl")
         else:
             if router_dir is None:
-                router_dir = Path.home() / ".llm-router"
+                router_dir = paths.llm_router_home()
             else:
                 router_dir = Path(router_dir)
             router_dir.mkdir(parents=True, exist_ok=True)

@@ -30,10 +30,13 @@ from dataclasses import dataclass
 # by 50%.
 from llm_router import pricing as _pricing  # noqa: E402
 
+from llm_router import paths
+
 _sonnet = _pricing.price_for("sonnet")
 SONNET_IN, SONNET_OUT = (_sonnet.input, _sonnet.output) if _sonnet else (0.0, 0.0)
 FREE_PROVIDERS = {"ollama", "codex", "gemini_cli"}
-DEFAULT_SVG_PATH = os.path.expanduser("~/.llm-router/savings-card.svg")
+def _default_svg_path():
+    return str(paths.state_path("savings-card.svg"))
 REPO = "github.com/ypollak2/llm_router"
 
 
@@ -76,7 +79,7 @@ def _gather_stats(db_path: str | None = None) -> SavingsStats:
     all-zero ``SavingsStats`` rather than raising, so the card always renders.
     """
     if db_path is None:
-        db_path = os.path.join(os.path.expanduser("~/.llm-router"), "usage.db")
+        db_path = os.path.join(str(paths.llm_router_home()), "usage.db")
 
     if not os.path.exists(db_path):
         return SavingsStats()
@@ -144,7 +147,7 @@ def _gather_stats(db_path: str | None = None) -> SavingsStats:
 def cmd_share(args: list[str]) -> int:
     """Entry point for ``llm_router share`` and ``llm_router share --svg [path]``."""
     if args and args[0] == "--svg":
-        out_path = args[1] if len(args) > 1 else DEFAULT_SVG_PATH
+        out_path = args[1] if len(args) > 1 else _default_svg_path()
         return _write_svg(out_path)
     _run_share()
     return 0

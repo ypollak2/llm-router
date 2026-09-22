@@ -605,6 +605,14 @@ SUITES = {"easy": (FILES, TASKS), "hard": (HARD_FILES, HARD_TASKS)}
 # need triple-quoted strings, which do not nest readably inside this file.
 from bench_brutal_suite import FILES as BRUTAL_FILES, TASKS as BRUTAL_TASKS  # noqa: E402
 
+# M-02: every row this script causes is benchmark traffic, not usage. Declared
+# here rather than inferred later -- `routing_quality.detect_synthetic` prefers
+# an explicit statement by the harness, and until now no bench script made one,
+# so 1,813 fixture rows were counted as production spend.
+import os as _os
+
+_os.environ.setdefault("LLM_ROUTER_SYNTHETIC", "1")
+
 SUITES["brutal"] = (BRUTAL_FILES, BRUTAL_TASKS)
 
 

@@ -58,8 +58,9 @@ import subprocess
 import time
 from collections import Counter
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Callable
+
+from llm_router import paths
 
 __all__ = [
     "PreExecutionResult",
@@ -124,7 +125,7 @@ def _handle_routing_distribution(_prompt: str) -> str | None:
     summarises by tier, model, and cost so the user gets the same
     answer they'd otherwise spend several tool calls building.
     """
-    db = Path.home() / ".llm-router" / "usage.db"
+    db = paths.state_path("usage.db")
     if not db.is_file():
         return None
     try:

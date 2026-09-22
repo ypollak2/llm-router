@@ -29,6 +29,8 @@ from typing import TYPE_CHECKING, Any
 
 from llm_router import pricing as _pricing
 
+from llm_router import paths
+
 if TYPE_CHECKING:
     from llm_router.types import RoutingProfile, TaskType
 
@@ -85,7 +87,8 @@ _DEFAULT_COST = 0.005
 _BUNDLED = Path(__file__).parent / "data" / "benchmarks.json"
 
 # User-local copy updated on each pip upgrade + server restart.
-_INSTALLED = Path.home() / ".llm-router" / "benchmarks.json"
+def _installed():
+    return paths.state_path("benchmarks.json")
 
 # Module-level cache so the JSON is only parsed once per process.
 _cache: dict[str, Any] | None = None
@@ -141,13 +144,13 @@ def check_and_update_benchmarks() -> str | None:
         return None
     try:
         bundled_data = _load_json(_BUNDLED)
-        installed_data = _load_json(_INSTALLED)
+        installed_data = _load_json(_installed())
         src_version = _benchmark_version(bundled_data)
         dst_version = _benchmark_version(installed_data)
         if src_version <= dst_version:
             return None
-        _INSTALLED.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(_BUNDLED, _INSTALLED)
+        _installed().parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(_BUNDLED, _installed())
         # Invalidate the module cache so the next call picks up the new file.
         _cache = None
         _cache_loaded = False
@@ -171,7 +174,7 @@ def get_benchmark_data() -> dict[str, Any] | None:
     if _cache_loaded:
         return _cache
     _cache_loaded = True
-    _cache = _load_json(_INSTALLED) or _load_json(_BUNDLED)
+    _cache = _load_json(_installed()) or _load_json(_BUNDLED)
     return _cache
 
 
@@ -499,9 +502,9 @@ def maybe_refresh_benchmarks_background(ttl_days: int = 7) -> bool:
 
     # Check staleness.
     stale = True
-    if _INSTALLED.exists():
+    if _installed().exists():
         try:
-            data = _load_json(_INSTALLED)
+            data = _load_json(_installed())
             generated_at_str = (data or {}).get("generated_at", "")
             if generated_at_str:
                 from datetime import datetime, timezone
@@ -529,11 +532,11 @@ def maybe_refresh_benchmarks_background(ttl_days: int = 7) -> bool:
         global _refresh_in_progress, _cache, _cache_loaded
         try:
             from llm_router.benchmark_fetcher import generate_benchmarks_json
-            generate_benchmarks_json(output_path=_INSTALLED)
+            generate_benchmarks_json(output_path=_installed())
             # Invalidate cache so next get_benchmark_data() picks up the new file.
             _cache = None
             _cache_loaded = False
-            log.info("Background benchmark refresh completed → %s", _INSTALLED)
+            log.info("Background benchmark refresh completed → %s", _installed())
         except Exception as e:
             log.debug("Background benchmark refresh failed: %s", e)
         finally:

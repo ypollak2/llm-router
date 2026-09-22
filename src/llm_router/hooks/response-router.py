@@ -12,12 +12,27 @@ import json
 import os
 import sys
 import time
-from pathlib import Path
+
+
+def _router_home():
+    """Router state dir, resolved per call so LLM_ROUTER_HOME is honoured.
+
+    M-04: this was a module constant bound at import, so a hook launched with
+    LLM_ROUTER_HOME set still wrote to the operator's real home directory.
+
+    Imports locally: hooks are standalone scripts with varied import headers and
+    several do not import Path or os at module scope.
+    """
+    import os as _os
+    from pathlib import Path as _P
+
+    base = _os.environ.get("LLM_ROUTER_HOME", "").strip()
+    return _P(base).expanduser() if base else _P.home() / ".llm-router"
 
 
 def get_usage_json() -> dict:
     """Read cached Claude quota state."""
-    usage_path = Path.home() / ".llm-router" / "usage.json"
+    usage_path = _router_home() / "usage.json"
     if usage_path.exists():
         return json.loads(usage_path.read_text())
     return {"session_pct": 0.5, "weekly_pct": 0.5}
@@ -25,7 +40,7 @@ def get_usage_json() -> dict:
 
 def log_routing_decision(response_tokens: int, routed_tokens: int, saved_tokens: int):
     """Log response routing decision to debug log."""
-    log_path = Path.home() / ".llm-router" / "response-router.log"
+    log_path = _router_home() / "response-router.log"
     log_path.parent.mkdir(parents=True, exist_ok=True)
 
     entry = (

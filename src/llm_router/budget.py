@@ -33,6 +33,8 @@ from llm_router.config import get_config
 from llm_router.types import BudgetState, LOCAL_PROVIDERS
 from llm_router.routing_hints import detect_spend_anomaly, log_routing_decision
 
+from llm_router import paths
+
 # ── Cache ─────────────────────────────────────────────────────────────────────
 # Per-provider cache: {provider: (BudgetState, cached_at)}
 _cache: dict[str, tuple[BudgetState, float]] = {}
@@ -41,8 +43,10 @@ _CACHE_TTL = 60.0  # seconds
 # In-flight token reservations per provider
 _pending_tokens: dict[str, int] = {}
 
-_USAGE_JSON = Path.home() / ".llm-router" / "usage.json"
-_ROUTER_DIR = Path.home() / ".llm-router"
+def _usage_json():
+    return paths.state_path("usage.json")
+def _router_dir():
+    return paths.llm_router_home()
 
 # If usage.json is absent or older than this threshold, treat Claude subscription
 # pressure as _STALE_PRESSURE_FLOOR instead of the optimistic 0.0 default.
@@ -283,7 +287,7 @@ async def _claude_subscription_state() -> BudgetState:
     stale_floor = float(os.environ.get("LLM_ROUTER_STALE_PRESSURE_FLOOR", "0.5"))
     try:
         # Offload synchronous stat() to thread pool to avoid blocking event loop
-        st_mtime = await asyncio.to_thread(lambda: _USAGE_JSON.stat().st_mtime)
+        st_mtime = await asyncio.to_thread(lambda: _usage_json().stat().st_mtime)
         age_sec = time.monotonic() - st_mtime
         if age_sec > _USAGE_STALENESS_LIMIT_SEC:
             return BudgetState(provider="anthropic", pressure=stale_floor, quota_pct=stale_floor)
@@ -292,7 +296,7 @@ async def _claude_subscription_state() -> BudgetState:
         return BudgetState(provider="anthropic", pressure=stale_floor, quota_pct=stale_floor)
 
     try:
-        raw: str = await asyncio.to_thread(_USAGE_JSON.read_text)
+        raw: str = await asyncio.to_thread(_usage_json().read_text)
         data: dict[str, Any] = json.loads(raw)
         # highest_pressure is the authoritative field (pre-computed by the hook)
         if "highest_pressure" in data:

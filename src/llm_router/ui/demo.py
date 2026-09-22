@@ -104,7 +104,7 @@ def demo_session_summary():
 
 
 def demo_status_command():
-    """Demo llm_router status command."""
+    """Demo llm-router status command."""
     console = Console()
 
     console.print("\n[bold cyan]═══ DEMO 3: LLM Router Status Command ═══[/]\n")

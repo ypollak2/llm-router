@@ -21,6 +21,8 @@ from llm_router.edit import build_edit_prompt, format_edit_result, parse_edit_re
 from llm_router.router import route_and_call
 from llm_router.types import TaskType
 
+from llm_router import paths
+
 # Maximum files to process in a single bulk-edit call.
 _MAX_FILES = 20
 
@@ -353,7 +355,7 @@ Return ONLY the JSON object."""
     )
 
     # Parse and persist the context summary
-    summary_path = _Path.home() / ".llm-router" / "context_summary.json"
+    summary_path = paths.state_path("context_summary.json")
     try:
         raw = resp.content.strip()
         # Strip markdown code fences if present

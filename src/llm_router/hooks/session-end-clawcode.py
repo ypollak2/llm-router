@@ -15,10 +15,30 @@ import sys
 import time
 from datetime import datetime, timezone
 
-STATE_DIR            = os.path.expanduser("~/.llm-router")
-SESSION_START_FILE   = os.path.join(STATE_DIR, "session_start.txt")
-DB_PATH              = os.path.join(STATE_DIR, "usage.db")
-STAR_CTA_FILE        = os.path.join(STATE_DIR, "star_cta_shown.txt")
+def _router_home():
+    """Router state dir, resolved per call so LLM_ROUTER_HOME is honoured.
+
+    M-04: this was a module constant bound at import, so a hook launched with
+    LLM_ROUTER_HOME set still wrote to the operator's real home directory.
+
+    Imports locally: hooks are standalone scripts with varied import headers and
+    several do not import Path or os at module scope.
+    """
+    import os as _os
+    from pathlib import Path as _P
+
+    base = _os.environ.get("LLM_ROUTER_HOME", "").strip()
+    return _P(base).expanduser() if base else _P.home() / ".llm-router"
+
+
+def _state_dir():
+    return str(_router_home())
+def _session_start_file():
+    return os.path.join(_state_dir(), "session_start.txt")
+def _db_path():
+    return os.path.join(_state_dir(), "usage.db")
+def _star_cta_file():
+    return os.path.join(_state_dir(), "star_cta_shown.txt")
 
 STAR_CTA_THRESHOLD_USD = 0.50
 
@@ -42,7 +62,7 @@ WIDTH = 64
 
 def _read_session_start() -> float:
     try:
-        with open(SESSION_START_FILE) as f:
+        with open(_session_start_file()) as f:
             return float(f.read().strip())
     except (FileNotFoundError, ValueError, OSError):
         return time.time() - 3600
@@ -57,10 +77,10 @@ _FREE_PROVIDERS = {"ollama", "codex", "gemini_cli"}
 
 def _query_session_data(session_start: float) -> tuple[list[dict], list[dict]]:
     """Return (paid_rows, free_rows) split by provider type."""
-    if not os.path.exists(DB_PATH):
+    if not os.path.exists(_db_path()):
         return [], []
     try:
-        conn = sqlite3.connect(DB_PATH)
+        conn = sqlite3.connect(_db_path())
         conn.row_factory = sqlite3.Row
         rows = conn.execute(
             """
@@ -209,10 +229,10 @@ def _format(tools: dict[str, dict], free_rows: list[dict], paid_rows: list[dict]
 # ── Star CTA ───────────────────────────────────────────────────────────────────
 
 def _lifetime_saved() -> float:
-    if not os.path.exists(DB_PATH):
+    if not os.path.exists(_db_path()):
         return 0.0
     try:
-        conn = sqlite3.connect(DB_PATH)
+        conn = sqlite3.connect(_db_path())
         rows = conn.execute(
             "SELECT provider, input_tokens, output_tokens, cost_usd "
             "FROM usage WHERE success=1"
@@ -234,12 +254,12 @@ def _lifetime_saved() -> float:
 def _should_show_star_cta(session_saved: float) -> bool:
     if session_saved <= 0.0:
         return False
-    if os.path.exists(STAR_CTA_FILE):
+    if os.path.exists(_star_cta_file()):
         return False
     lifetime = _lifetime_saved()
     if lifetime >= STAR_CTA_THRESHOLD_USD:
         try:
-            with open(STAR_CTA_FILE, "w") as f:
+            with open(_star_cta_file(), "w") as f:
                 f.write(f"{lifetime:.4f}")
         except OSError:
             pass

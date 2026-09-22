@@ -29,9 +29,19 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Iterator
 
-LLM_ROUTER_HOME = Path(os.environ.get("LLM_ROUTER_HOME", Path.home() / ".llm-router"))
-CLAUDE_PROJECTS = Path(os.environ.get("CLAUDE_PROJECTS_DIR",
-                                      Path.home() / ".claude" / "projects"))
+def llm_router_home() -> Path:
+    """Router state dir, resolved on every call.
+
+    M-04: this was a module-level constant reading the environment once, at
+    import. That honoured LLM_ROUTER_HOME only if it was already set when the
+    module first loaded, so a caller that set it afterwards — every test, and
+    any process switching profiles — silently read the operator's real state.
+    """
+    return Path(os.environ.get("LLM_ROUTER_HOME", "").strip() or Path.home() / ".llm-router")
+def claude_projects_dir() -> Path:
+    """Claude Code's transcript directory, resolved on every call (M-04)."""
+    return Path(os.environ.get("CLAUDE_PROJECTS_DIR", "").strip()
+                or Path.home() / ".claude" / "projects")
 
 # ── Exclusion reasons. Every dropped record carries one, so the manifest can
 # account for the full funnel rather than just reporting survivors. ──────────
@@ -266,11 +276,12 @@ def classify_drop(text: str, session_id: str | None,
 
 # ── Readers ──────────────────────────────────────────────────────────────────
 
-def read_llm_router_transcripts(root: Path = LLM_ROUTER_HOME) -> Iterator[PromptRecord]:
+def read_llm_router_transcripts(root: Path | None = None) -> Iterator[PromptRecord]:
     """~/.llm-router/transcript_<session>.jsonl — {"role","content"} per line.
 
     The session id is in the filename and nowhere else in the record.
     """
+    root = root if root is not None else llm_router_home()
     for path in sorted(root.glob("transcript_*.jsonl")):
         session = path.stem.replace("transcript_", "")
         for line_no, obj in _iter_jsonl(path):
@@ -288,13 +299,14 @@ def read_llm_router_transcripts(root: Path = LLM_ROUTER_HOME) -> Iterator[Prompt
             )
 
 
-def read_claude_code_transcripts(root: Path = CLAUDE_PROJECTS) -> Iterator[PromptRecord]:
+def read_claude_code_transcripts(root: Path | None = None) -> Iterator[PromptRecord]:
     """~/.claude/projects/<project>/<session>.jsonl.
 
     A user turn is `{"type": "user", "message": {"content": ...}}` where
     content is either a string or a list of blocks; only `type == "text"`
     blocks are human-authored (tool_result blocks are machine output).
     """
+    root = root if root is not None else claude_projects_dir()
     for path in sorted(Path(p) for p in glob.glob(str(root / "*" / "*.jsonl"))):
         sandbox = bool(_SANDBOX_PROJECT.match(path.parent.name))
         for line_no, obj in _iter_jsonl(path):
@@ -332,7 +344,7 @@ def read_claude_code_transcripts(root: Path = CLAUDE_PROJECTS) -> Iterator[Promp
             )
 
 
-def read_captured(root: Path = LLM_ROUTER_HOME) -> Iterator[PromptRecord]:
+def read_captured(root: Path | None = None) -> Iterator[PromptRecord]:
     """~/.llm-router/prompt_capture.jsonl — written by prompt_capture.py.
 
     This is the only source with prompt text AND routing metadata in the same
@@ -340,6 +352,7 @@ def read_captured(root: Path = LLM_ROUTER_HOME) -> Iterator[PromptRecord]:
     has no equivalent; this file starts empty and fills from the day capture
     is switched on.
     """
+    root = root if root is not None else llm_router_home()
     path = root / "prompt_capture.jsonl"
     for line_no, obj in _iter_jsonl(path):
         if not isinstance(obj, dict):

@@ -63,6 +63,8 @@ from llm_router.terminal_style import (
     Symbol,
 )
 
+from llm_router import paths
+
 
 def check_configuration() -> tuple[bool, str]:
     """Check if configuration is properly loaded.
@@ -70,7 +72,7 @@ def check_configuration() -> tuple[bool, str]:
     Returns:
         (success, message)
     """
-    config_path = Path.home() / ".llm-router" / "config.yaml"
+    config_path = paths.state_path("config.yaml")
     if config_path.exists():
         return True, f"Configuration loaded from {config_path}"
     return True, "Using environment variables (no config.yaml)"
@@ -82,7 +84,7 @@ def check_database() -> tuple[bool, str]:
     Returns:
         (success, message)
     """
-    db_path = Path.home() / ".llm-router" / "usage.db"
+    db_path = paths.state_path("usage.db")
     if not db_path.exists():
         return False, f"Database not found: {db_path}"
 
@@ -237,7 +239,7 @@ def check_last_decisions(limit: int = 5) -> list[str]:
     Returns:
         List of decision descriptions
     """
-    db_path = Path.home() / ".llm-router" / "usage.db"
+    db_path = paths.state_path("usage.db")
     if not db_path.exists():
         return []
 

@@ -41,6 +41,14 @@ import sys
 import time
 from pathlib import Path
 
+# M-02: every row this script causes is benchmark traffic, not usage. Declared
+# here rather than inferred later -- `routing_quality.detect_synthetic` prefers
+# an explicit statement by the harness, and until now no bench script made one,
+# so 1,813 fixture rows were counted as production spend.
+import os as _os
+
+_os.environ.setdefault("LLM_ROUTER_SYNTHETIC", "1")
+
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 

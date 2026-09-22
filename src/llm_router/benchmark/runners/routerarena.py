@@ -37,6 +37,8 @@ from llm_router.benchmark import (
     register_runner,
 )
 
+from llm_router import paths
+
 __all__ = ["RouterArenaRunner"]
 
 
@@ -46,7 +48,7 @@ def _default_dataset_root() -> Path:
     Per-user (not per-project) because the same dataset serves every llm_router
     workspace on this machine — no need to re-download or duplicate.
     """
-    return Path.home() / ".llm-router" / "data" / "routerarena"
+    return paths.state_path("data", "routerarena")
 
 
 def _normalize(text: str) -> str:

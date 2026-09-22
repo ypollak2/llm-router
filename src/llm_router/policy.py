@@ -20,6 +20,8 @@ import yaml
 
 from llm_router.types import ClassificationResult
 
+from llm_router import paths
+
 
 @dataclass(frozen=True)
 class RoutingPolicy:
@@ -139,7 +141,7 @@ def _resolve_alias(model: str) -> str:
 class PolicyManager:
     """Manages loading, switching, and persisting routing policies."""
 
-    DEFAULT_POLICY_DIR = Path.home() / ".llm-router" / "policies"
+    DEFAULT_POLICY_DIR = paths.StatePathAttr("policies")
     PRESET_POLICY_DIR = Path(__file__).parent / "policies"
 
     def __init__(self):
@@ -455,7 +457,7 @@ def load_org_policy(path: Path | None = None) -> OrgPolicy | None:
         OrgPolicy if file exists, else default permissive policy
     """
     if path is None:
-        path = Path.home() / ".llm-router" / "org-policy.yaml"
+        path = paths.state_path("org-policy.yaml")
 
     if not path.exists():
         return OrgPolicy(source="default")  # Return default permissive policy

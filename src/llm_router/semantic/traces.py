@@ -45,6 +45,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from llm_router.sqlite_wal import enable_wal
 
 SCHEMA_VERSION = 1
 
@@ -201,7 +202,14 @@ class TraceStore:
         self.root.mkdir(parents=True, exist_ok=True)
         conn = sqlite3.connect(str(self.root / "traces.sqlite"))
         conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode=WAL")
+        # M-06 / the sqlite_wal adoption gap. `busy_timeout` governs how long the
+        # journal_mode PRAGMA itself waits for its exclusive lock, so setting it
+        # AFTER is the one ordering that leaves that statement on the 5s default.
+        # The PRAGMA also reports failure by RETURNING the mode in effect rather
+        # than raising -- lose the cold-start race and you silently proceed in
+        # rollback-journal mode. `enable_wal` handles both and was adopted by only
+        # 3 of 9 sites.
+        enable_wal(conn, label="semantic_traces")
         conn.executescript(_SCHEMA)
         conn.execute(
             "INSERT INTO meta(key, value) VALUES('schema_version', ?) "

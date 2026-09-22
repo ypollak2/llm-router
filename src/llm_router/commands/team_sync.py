@@ -32,13 +32,15 @@ from llm_router.team_sync import (
     write_jsonl,
 )
 
+from llm_router import paths
+
 
 def _default_source_db() -> Path:
-    return Path.home() / ".llm-router" / "usage.db"
+    return paths.state_path("usage.db")
 
 
 def _default_team_db() -> Path:
-    return Path.home() / ".llm-router" / "team.db"
+    return paths.state_path("team.db")
 
 
 def _cmd_export(args: argparse.Namespace) -> int:

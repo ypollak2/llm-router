@@ -5,7 +5,8 @@ from __future__ import annotations
 import os
 import re
 import sys
-from pathlib import Path
+
+from llm_router import paths
 
 
 # ── Constants ────────────────────────────────────────────────────────────────
@@ -96,7 +97,7 @@ def _run_set_enforce(mode: str, _global: bool = False) -> None:
     if session_id and not _SAFE_SESSION_ID.fullmatch(session_id):
         session_id = ""
     if session_id and not _global:
-        sess_dir = Path.home() / ".llm-router" / "sessions" / session_id
+        sess_dir = paths.state_path("sessions") / session_id
         sess_dir.mkdir(parents=True, exist_ok=True)
         (sess_dir / "enforce").write_text(mode + "\n")
         print(f"\n{_green('✓')} Enforcement mode set to {_bold(mode)} "
@@ -108,7 +109,7 @@ def _run_set_enforce(mode: str, _global: bool = False) -> None:
         _warn_if_env_overrides(mode)
         return
 
-    routing_yaml = Path.home() / ".llm-router" / "routing.yaml"
+    routing_yaml = paths.state_path("routing.yaml")
     routing_yaml.parent.mkdir(parents=True, exist_ok=True)
 
     if routing_yaml.exists():
@@ -124,7 +125,7 @@ def _run_set_enforce(mode: str, _global: bool = False) -> None:
     routing_yaml.write_text(content)
 
     # Also write to .env for hooks that read it
-    env_path = Path.home() / ".llm-router" / ".env"
+    env_path = paths.state_path(".env")
     if env_path.exists():
         env_content = env_path.read_text()
         if "LLM_ROUTER_ENFORCE=" in env_content:

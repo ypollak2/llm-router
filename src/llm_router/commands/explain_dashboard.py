@@ -20,11 +20,15 @@ from __future__ import annotations
 import json
 import sqlite3
 from datetime import datetime
-from pathlib import Path
 
-STATE_DIR = Path.home() / ".llm-router"
-DB_PATH = STATE_DIR / "usage.db"
-TRACKING_PATH = STATE_DIR / "model_tracking.jsonl"
+from llm_router import paths
+
+def _state_dir():
+    return paths.llm_router_home()
+def _db_path():
+    return _state_dir() / "usage.db"
+def _tracking_path():
+    return _state_dir() / "model_tracking.jsonl"
 
 
 _PANEL_W = 64
@@ -76,7 +80,7 @@ def _routing_panel_block() -> list[str]:
     out.append(_note("Window:  today (start-of-day local)"))
     out.append(_blank())
 
-    if not TRACKING_PATH.exists():
+    if not _tracking_path().exists():
         out.append(_note("model_tracking.jsonl missing — no routing data."))
         out.append(_panel_footer())
         return out
@@ -85,7 +89,7 @@ def _routing_panel_block() -> list[str]:
     today_methods: dict[str, int] = {}
     today_total = 0
     lifetime_total = 0
-    with TRACKING_PATH.open() as f:
+    with _tracking_path().open() as f:
         for line in f:
             line = line.strip()
             if not line:
@@ -142,13 +146,13 @@ def _savings_panel_block() -> list[str]:
     out.append(_note("Window:  today (start-of-day local)"))
     out.append(_blank())
 
-    if not DB_PATH.exists():
+    if not _db_path().exists():
         out.append(_note("usage.db missing — no savings data."))
         out.append(_panel_footer())
         return out
 
     where = _today_sql_window()
-    conn = sqlite3.connect(str(DB_PATH))
+    conn = sqlite3.connect(str(_db_path()))
     try:
         # usage table — sums input_tokens + output_tokens + cost_usd
         usage_result = _table_count_and_sum(
@@ -234,12 +238,12 @@ def _activity_panel_block() -> list[str]:
     out.append(_note("Window:  rolling 14 days, all sessions"))
     out.append(_blank())
 
-    if not DB_PATH.exists():
+    if not _db_path().exists():
         out.append(_note("usage.db missing."))
         out.append(_panel_footer())
         return out
 
-    conn = sqlite3.connect(str(DB_PATH))
+    conn = sqlite3.connect(str(_db_path()))
     try:
         has_usage = conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND name='usage'"
@@ -269,8 +273,8 @@ def _print_header() -> list[str]:
     return [
         "",
         "LLM Router · Dashboard Explainer",
-        f"DB:       {DB_PATH}",
-        f"Tracking: {TRACKING_PATH}",
+        f"DB:       {_db_path()}",
+        f"Tracking: {_tracking_path()}",
         "",
         "Each panel pulls from different sources and uses a different window.",
         "This is intentional but easy to miss — the panels below tell you",

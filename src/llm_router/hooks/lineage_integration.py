@@ -8,10 +8,26 @@ Provides utilities for SessionStart and SessionEnd hooks to:
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
-STATE_DIR = os.path.expanduser("~/.llm-router")
+def _router_home():
+    """Router state dir, resolved per call so LLM_ROUTER_HOME is honoured.
+
+    M-04: this was a module constant bound at import, so a hook launched with
+    LLM_ROUTER_HOME set still wrote to the operator's real home directory.
+
+    Imports locally: hooks are standalone scripts with varied import headers and
+    several do not import Path or os at module scope.
+    """
+    import os as _os
+    from pathlib import Path as _P
+
+    base = _os.environ.get("LLM_ROUTER_HOME", "").strip()
+    return _P(base).expanduser() if base else _P.home() / ".llm-router"
+
+
+def _state_dir():
+    return str(_router_home())
 
 
 def init_session_lineage() -> None:
@@ -20,7 +36,7 @@ def init_session_lineage() -> None:
     Called at SessionStart to reset lineage databases so session-end report
     only contains decisions from this session.
     """
-    router_dir = Path(STATE_DIR)
+    router_dir = Path(_state_dir())
     router_dir.mkdir(parents=True, exist_ok=True)
 
     # Remove old lineage files so session report is clean

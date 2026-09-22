@@ -11,7 +11,8 @@ from __future__ import annotations
 import argparse
 import os
 import sys
-from pathlib import Path
+
+from llm_router import paths
 
 
 def cmd_cp(argv: list[str] | None = None) -> int:
@@ -32,7 +33,7 @@ def cmd_cp(argv: list[str] | None = None) -> int:
     from llm_router.control_plane.store import SqliteControlPlaneStore
 
     store_path = args.store_path or os.environ.get("LLM_ROUTER_CP_STORE_PATH") or str(
-        Path.home() / ".llm-router" / "cp_store.db"
+        paths.state_path("cp_store.db")
     )
     store = SqliteControlPlaneStore(store_path)
     try:

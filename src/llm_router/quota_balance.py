@@ -18,13 +18,15 @@ from __future__ import annotations
 import json
 import time
 from datetime import datetime, timezone
-from pathlib import Path
 
 from llm_router.logging import get_logger
 
+from llm_router import paths
+
 log = get_logger("llm_router.quota_balance")
 
-_QUOTA_CACHE_FILE = Path.home() / ".llm-router" / "codex_quota.json"
+def _quota_cache_file():
+    return paths.state_path("codex_quota.json")
 _QUOTA_CACHE_TTL = 300  # 5 minutes
 
 
@@ -40,11 +42,11 @@ def get_codex_pressure(daily_limit: int = 1000) -> float:
         Float 0.0–1.0 representing daily quota usage.
         0.0 = unused, 1.0 = limit reached.
     """
-    if not _QUOTA_CACHE_FILE.exists():
+    if not _quota_cache_file().exists():
         return 0.0
 
     try:
-        data = json.loads(_QUOTA_CACHE_FILE.read_text())
+        data = json.loads(_quota_cache_file().read_text())
         today = datetime.now(timezone.utc).date().isoformat()
         cached_date = data.get("date")
 
@@ -68,13 +70,13 @@ def record_codex_request(daily_limit: int = 1000) -> None:
     """
     try:
         today = datetime.now(timezone.utc).date().isoformat()
-        _QUOTA_CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        _quota_cache_file().parent.mkdir(parents=True, exist_ok=True)
 
         # Read current state (or initialize if missing)
         data = {}
-        if _QUOTA_CACHE_FILE.exists():
+        if _quota_cache_file().exists():
             try:
-                data = json.loads(_QUOTA_CACHE_FILE.read_text())
+                data = json.loads(_quota_cache_file().read_text())
                 cached_date = data.get("date")
                 # Reset if day changed
                 if cached_date != today:
@@ -95,7 +97,7 @@ def record_codex_request(daily_limit: int = 1000) -> None:
             "estimated_daily_limit": daily_limit,
             "cached_at": time.time(),
         }
-        _QUOTA_CACHE_FILE.write_text(json.dumps(new_data, indent=2))
+        _quota_cache_file().write_text(json.dumps(new_data, indent=2))
     except Exception:
         pass  # Silently fail — quota tracking is best-effort
 

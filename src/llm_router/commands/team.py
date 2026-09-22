@@ -5,7 +5,8 @@ from __future__ import annotations
 import os
 import re as _re
 import sys
-from pathlib import Path
+
+from llm_router import paths
 
 
 # ── Formatting utilities ────────────────────────────────────────────────────
@@ -141,7 +142,7 @@ def _run_team_setup(config) -> None:
         chat_id = input("  Telegram chat_id (e.g. -1001234567890): ").strip()
 
     # Write to routing.yaml
-    routing_yaml = Path.home() / ".llm-router" / "routing.yaml"
+    routing_yaml = paths.state_path("routing.yaml")
     routing_yaml.parent.mkdir(parents=True, exist_ok=True)
     content = routing_yaml.read_text() if routing_yaml.exists() else ""
 
@@ -159,7 +160,7 @@ def _run_team_setup(config) -> None:
     routing_yaml.write_text(content.strip() + "\n")
 
     # Also write to .env for immediate effect
-    env_path = Path.home() / ".llm-router" / ".env"
+    env_path = paths.state_path(".env")
     env_content = env_path.read_text() if env_path.exists() else ""
     for key, val in [("LLM_ROUTER_TEAM_ENDPOINT", url), ("LLM_ROUTER_TEAM_CHAT_ID", chat_id)]:
         if not val:

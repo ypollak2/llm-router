@@ -62,6 +62,22 @@ except ImportError:
             root.addHandler(_logging.StreamHandler(sys.stderr))
 
 
+def _router_home():
+    """Router state dir, resolved per call so LLM_ROUTER_HOME is honoured.
+
+    M-04: this was a module constant bound at import, so a hook launched with
+    LLM_ROUTER_HOME set still wrote to the operator's real home directory.
+
+    Imports locally: hooks are standalone scripts with varied import headers and
+    several do not import Path or os at module scope.
+    """
+    import os as _os
+    from pathlib import Path as _P
+
+    base = _os.environ.get("LLM_ROUTER_HOME", "").strip()
+    return _P(base).expanduser() if base else _P.home() / ".llm-router"
+
+
 def _init_hook_logging() -> None:
     """Force all hook logging to stderr so stdout carries only the JSON payload."""
     try:
@@ -179,17 +195,18 @@ try:
 except Exception:
     pass
 
-_ENV_PATHS = [
+def _env_paths():
+    return [
     Path.cwd() / ".env",  # CWD .env (hook runs from project root)
     Path(__file__).resolve().parent.parent.parent.parent / ".env",  # dev: src/llm_router/hooks → project root
-    Path.home() / ".llm-router" / ".env",  # user-level config
+    _router_home() / ".env",  # user-level config
     Path.home() / ".env",
 ]
 
 
 def _load_dotenv() -> None:
     """Load key=value pairs from .env files into os.environ (no override)."""
-    for env_path in _ENV_PATHS:
+    for env_path in _env_paths():
         if not env_path.exists():
             continue
         try:
@@ -407,7 +424,7 @@ def _get_pressure() -> dict[str, float]:
     - If cache stale (age >= TTL): attempt inline refresh before routing
     - If no cache or OAuth fails: use conservative fallback (0.0)
     """
-    usage_path = Path.home() / ".llm-router" / "usage.json"
+    usage_path = _router_home() / "usage.json"
     ttl_seconds = int(os.environ.get("LLM_ROUTER_QUOTA_TTL", "300"))
 
     def _frac(d: dict, key: str) -> float:
@@ -440,7 +457,7 @@ def _get_pressure() -> dict[str, float]:
         pass
 
     # SQLite fallback — reads most recent claude_usage row
-    db_path = Path.home() / ".llm-router" / "usage.db"
+    db_path = _router_home() / "usage.db"
     try:
         import sqlite3
         conn = sqlite3.connect(str(db_path), timeout=1)
@@ -486,7 +503,8 @@ def _apply_pressure_downgrade(complexity: str, pressure: dict[str, float]) -> tu
     return complexity, ""
 
 
-_USAGE_JSON = str(Path.home() / ".llm-router" / "usage.json")
+def _usage_json():
+    return str(_router_home() / "usage.json")
 # Inline refresh fires when data is stale AND last known session ≥ this threshold.
 # Below this threshold, stale data is safe to use (pressure is low, risk of hitting
 # limits is small). At 70%+ the window is closing fast enough to justify the ~300ms
@@ -547,12 +565,12 @@ def _fetch_usage_inline() -> dict | None:
             "updated_at":  time.time(),
             "highest_pressure": max(s, w, n),
         }
-        state_dir = str(Path.home() / ".llm-router")
+        state_dir = str(_router_home())
         os.makedirs(state_dir, exist_ok=True)
-        tmp = _USAGE_JSON + ".tmp"
+        tmp = _usage_json() + ".tmp"
         with open(tmp, "w") as f:
             json.dump(result, f)
-        os.replace(tmp, _USAGE_JSON)
+        os.replace(tmp, _usage_json())
         return result
     except Exception:
         return None
@@ -566,7 +584,7 @@ def _is_pressure_stale(max_age_seconds: int = 1800) -> bool:
     (quota refreshed but data says high) or under-routing (quota spiked but data
     says low). A 30-minute threshold balances accuracy vs. noise.
     """
-    usage_path = Path.home() / ".llm-router" / "usage.json"
+    usage_path = _router_home() / "usage.json"
     if not usage_path.exists():
         return True
     return (time.time() - usage_path.stat().st_mtime) > max_age_seconds
@@ -949,7 +967,7 @@ def _is_build_task(prompt: str) -> bool:
 # "coding", enforce-route.py skips all enforcement for the rest of the session.
 
 def _session_type_path(session_id: str) -> "Path":
-    return _ROUTER_DIR / f"session_{_safe_sid(session_id)}.json"
+    return _router_dir() / f"session_{_safe_sid(session_id)}.json"
 
 
 def _write_json_atomic(path: Path, data: dict) -> None:
@@ -1782,8 +1800,10 @@ def _load_task_tool_map():
 
 TOOL_MAP, tool_for_task = _load_task_tool_map()
 
-_ROUTER_DIR = Path.home() / ".llm-router"
-_ENFORCEMENT_LOG_PATH = _ROUTER_DIR / "enforcement.log"
+def _router_dir():
+    return _router_home()
+def _enforcement_log_path():
+    return _router_dir() / "enforcement.log"
 
 
 def _safe_sid(session_id: str) -> str:
@@ -1810,7 +1830,7 @@ def _zero_claude_enabled() -> bool:
     if env_value:
         return env_value in ("1", "true", "yes", "on", "zero_claude", "strict_zero")
 
-    config_path = _ROUTER_DIR / "routing.yaml"
+    config_path = _router_dir() / "routing.yaml"
     try:
         content = config_path.read_text(encoding="utf-8")
     except OSError:
@@ -1957,7 +1977,7 @@ _DISPLAY_INTENT_RE = re.compile(
 
 
 def _pending_state_path(session_id: str) -> Path:
-    return _ROUTER_DIR / f"pending_route_{_safe_sid(session_id)}.json"
+    return _router_dir() / f"pending_route_{_safe_sid(session_id)}.json"
 
 
 def _read_pending_state(session_id: str) -> dict | None:
@@ -1981,9 +2001,9 @@ def _log_unrouted_turn(session_id: str, pending: dict) -> None:
     task_type = pending.get("task_type", "?")
     complexity = pending.get("complexity", "?")
     try:
-        _ROUTER_DIR.mkdir(parents=True, exist_ok=True)
+        _router_dir().mkdir(parents=True, exist_ok=True)
         ts = time.strftime("%Y-%m-%d %H:%M:%S")
-        with _ENFORCEMENT_LOG_PATH.open("a", encoding="utf-8") as f:
+        with _enforcement_log_path().open("a", encoding="utf-8") as f:
             # chz-surface-ok: enforcement LOG record — must keep the LOGICAL name so log
             # analysis groups by task type, not by whichever tier was active.
             f.write(
@@ -2004,11 +2024,11 @@ def _consume_unresolved_pending(session_id: str) -> dict | None:
 
 
 def _last_route_path(session_id: str) -> Path:
-    return _ROUTER_DIR / f"last_route_{_safe_sid(session_id)}.json"
+    return _router_dir() / f"last_route_{_safe_sid(session_id)}.json"
 
 
 def _transcript_shard_path(session_id: str) -> Path:
-    return _ROUTER_DIR / f"transcript_{_safe_sid(session_id)}.jsonl"
+    return _router_dir() / f"transcript_{_safe_sid(session_id)}.jsonl"
 
 
 # CHZ-SEC-01/09: fallback secret patterns used only if the canonical
@@ -2054,12 +2074,12 @@ def _private_opener(path: str, flags: int) -> int:
 def _append_transcript_shard(session_id: str, prompt: str, draft: str) -> None:
     """Audit §2.5/P2: llm_router-answered turns never enter Claude Code's transcript
     (the prompt was blocked), so later routed turns cannot see them. Keep a
-    rolling per-session shard (swept by ``llm_router gc`` via SHARD_PREFIXES) of
+    rolling per-session shard (swept by ``llm-router gc`` via SHARD_PREFIXES) of
     the prompt + delivered draft. Best-effort: never breaks routing."""
     if not session_id or not (prompt or "").strip() or not (draft or "").strip():
         return
     try:
-        _ROUTER_DIR.mkdir(parents=True, exist_ok=True)
+        _router_dir().mkdir(parents=True, exist_ok=True)
         # CHZ-SEC-01: scrub secrets from BOTH the prompt and the delivered draft
         # before persisting, using the canonical shared scrubber, and write at
         # 0600 (was full text at 0644).
@@ -2734,7 +2754,7 @@ def _estimate_prompt_tokens(prompt: str) -> int:
 def _session_paid_spend() -> float:
     """Total paid-API dollars spent this session (from session_spend.json)."""
     try:
-        data = json.loads((Path.home() / ".llm-router" / "session_spend.json").read_text())
+        data = json.loads((_router_home() / "session_spend.json").read_text())
         return float(data.get("total_usd", 0.0) or 0.0)
     except Exception:
         return 0.0
@@ -2937,7 +2957,7 @@ def _load_learned_routes() -> dict[str, dict]:
         Empty dict if file doesn't exist or is invalid.
     """
     try:
-        learned_path = Path.home() / ".llm-router" / "learned_routes.json"
+        learned_path = _router_home() / "learned_routes.json"
         if not learned_path.exists():
             return {}
         return json.loads(learned_path.read_text())
@@ -3063,9 +3083,10 @@ def _debug_log_path() -> Path:
         # looks like a regression. Splitting the file at WRITE time rather than
         # filtering at read time is deliberate: every consumer would otherwise
         # have to remember, and two of them did not.
-        return Path.home() / ".llm-router" / "auto-route-debug.test.log"
-    return Path.home() / ".llm-router" / "auto-route-debug.log"
-_PROMPT_COUNTS = Path.home() / ".llm-router" / "session_prompt_counts.json"
+        return _router_home() / "auto-route-debug.test.log"
+    return _router_home() / "auto-route-debug.log"
+def _prompt_counts():
+    return _router_home() / "session_prompt_counts.json"
 
 
 def _bump_session_prompt_count(session_id: str) -> int:
@@ -3076,8 +3097,8 @@ def _bump_session_prompt_count(session_id: str) -> int:
     silent — a write error here must never block routing.
     """
     try:
-        if _PROMPT_COUNTS.exists():
-            counts = json.loads(_PROMPT_COUNTS.read_text())
+        if _prompt_counts().exists():
+            counts = json.loads(_prompt_counts().read_text())
         else:
             counts = {}
     except Exception:
@@ -3092,7 +3113,7 @@ def _bump_session_prompt_count(session_id: str) -> int:
             counts = dict(sorted(counts.items(), key=lambda kv: kv[1])[-50:])
             if session_id not in counts:
                 counts[session_id] = n
-        _PROMPT_COUNTS.write_text(json.dumps(counts))
+        _prompt_counts().write_text(json.dumps(counts))
     except Exception:
         pass
     return n
@@ -3679,7 +3700,7 @@ def main() -> None:
     if _CC_MODE and session_id:
         try:
             # Increment prompt_sequence in session_spend.json
-            session_spend_path = os.path.expanduser("~/.llm-router/session_spend.json")
+            session_spend_path = str(_router_home() / "session_spend.json")
             prompt_sequence = 0
             if os.path.exists(session_spend_path):
                 try:
@@ -3705,7 +3726,7 @@ def main() -> None:
                     pass
             
             # Log quota snapshot (fire-and-forget)
-            db_path = os.path.expanduser("~/.llm-router/usage.db")
+            db_path = str(_router_home() / "usage.db")
             pressure = _get_pressure() if _CC_MODE else {"session_pct": 0.0, "weekly_pct": 0.0, "sonnet_pct": 0.0}
             was_downgraded = requested_complexity is not None and requested_complexity != complexity
             _log_quota_snapshot_sync(
@@ -4441,8 +4462,8 @@ def main() -> None:
     # enforcement is fresh per-turn (not permanently degraded by earlier turns).
     if session_id:
         try:
-            (_ROUTER_DIR / f"violations_{_safe_sid(session_id)}.json").unlink(missing_ok=True)
-            (_ROUTER_DIR / f"session_{_safe_sid(session_id)}.json").unlink(missing_ok=True)
+            (_router_dir() / f"violations_{_safe_sid(session_id)}.json").unlink(missing_ok=True)
+            (_router_dir() / f"session_{_safe_sid(session_id)}.json").unlink(missing_ok=True)
         except OSError:
             pass
 
@@ -4538,7 +4559,7 @@ def main() -> None:
     if session_id:
         try:
             _write_json_atomic(
-                _ROUTER_DIR / f"last_classification_{_safe_sid(session_id)}.json",
+                _router_dir() / f"last_classification_{_safe_sid(session_id)}.json",
                 {
                     "task_type": task_type,
                     "complexity": complexity,

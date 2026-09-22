@@ -1,4 +1,4 @@
-"""``llm_router benchmark …`` — Plan 07 Cat G operational CLI.
+"""``llm-router benchmark …`` — Plan 07 Cat G operational CLI.
 
 Three subcommands:
 

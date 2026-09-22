@@ -22,6 +22,8 @@ import yaml
 
 from llm_router.types import RoutingProfile
 
+from llm_router import paths
+
 # ── Schema ────────────────────────────────────────────────────────────────────
 
 # Derived from the real routing-tier enum (llm_router.types.RoutingProfile)
@@ -250,7 +252,7 @@ def find_repo_config_path(start: Path | None = None) -> Path | None:
 
 def load_user_config() -> RepoConfig:
     """Load ~/.llm-router/routing.yaml (user-level config)."""
-    path = Path.home() / ".llm-router" / "routing.yaml"
+    path = paths.state_path("routing.yaml")
     if not path.exists():
         return RepoConfig()
     return _dict_to_config(_parse_yaml(path), str(path))

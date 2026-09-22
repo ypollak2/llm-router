@@ -28,13 +28,15 @@ from pathlib import Path
 from typing import Optional
 from llm_router.tool_surface import route_tool  # CHZ-SURF-01
 
+from llm_router import paths
+
 # ── State locations (overridable for tests via LLM_ROUTER_STATE_DIR) ─────────────
 def _state_dir() -> Path:
-    return Path(os.environ.get("LLM_ROUTER_STATE_DIR", str(Path.home() / ".llm-router")))
+    return Path(os.environ.get("LLM_ROUTER_STATE_DIR", str(paths.llm_router_home())))
 
 
 _SAVINGS_LOG = "savings_log.jsonl"
-_HEALTH_SNAPSHOT = "health.json"   # optional; written by a future `llm_router doctor`
+_HEALTH_SNAPSHOT = "health.json"   # optional; written by a future `llm-router doctor`
 
 # Routed within this many seconds → the host is considered actively routing.
 ACTIVE_WINDOW_S = 1800             # 30 min

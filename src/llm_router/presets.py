@@ -24,9 +24,11 @@ from __future__ import annotations
 
 import functools
 import os
-from pathlib import Path
 
-PRESETS_FILE = Path.home() / ".llm-router" / "presets.yaml"
+from llm_router import paths
+
+def _presets_file():
+    return paths.state_path("presets.yaml")
 
 # Built-in fallback so things work with no presets.yaml present.
 _DEFAULTS: dict[str, dict] = {
@@ -43,10 +45,10 @@ _DEFAULTS: dict[str, dict] = {
 @functools.lru_cache(maxsize=1)
 def _load() -> dict[str, dict]:
     presets = {k: dict(v) for k, v in _DEFAULTS.items()}
-    if PRESETS_FILE.exists():
+    if _presets_file().exists():
         try:
             import yaml
-            loaded = yaml.safe_load(PRESETS_FILE.read_text()) or {}
+            loaded = yaml.safe_load(_presets_file().read_text()) or {}
             if isinstance(loaded, dict):
                 for name, cfg in loaded.items():
                     if isinstance(cfg, dict):

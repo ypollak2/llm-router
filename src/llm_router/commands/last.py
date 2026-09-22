@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""llm_router last — Show the most recent routing decisions (real-time feedback).
+"""llm-router last — Show the most recent routing decisions (real-time feedback).
 
-Command: uv run llm_router last [--count N]
+Command: uv run llm-router last [--count N]
 
 Shows the last N routing decisions in reverse chronological order (newest first).
 Useful for checking what model handled your last request.
@@ -20,10 +20,12 @@ from typing import Optional
 
 from llm_router.terminal_style import Color, Symbol
 
+from llm_router import paths
+
 
 def get_usage_db_path() -> Path:
     """Get path to usage.db."""
-    return Path.home() / ".llm-router" / "usage.db"
+    return paths.state_path("usage.db")
 
 
 def fetch_recent_decisions(

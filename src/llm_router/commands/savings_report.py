@@ -7,9 +7,9 @@ double-counting), and the saved amount is the stored ``estimated_claude_cost_sav
 (not a separately-recomputed baseline).
 
 Usage:
-    llm_router savings-report              — full report (all time)
-    llm_router savings-report --period week — weekly report
-    llm_router savings-report --period day  — today only
+    llm-router savings-report              — full report (all time)
+    llm-router savings-report --period week — weekly report
+    llm-router savings-report --period day  — today only
 """
 
 from __future__ import annotations
@@ -18,11 +18,13 @@ import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from llm_router import paths
+
 _FREE_PROVIDERS = {"ollama", "codex", "gemini_cli", "openai_compat"}
 
 
 def _get_db_path() -> Path:
-    return Path.home() / ".llm-router" / "usage.db"
+    return paths.state_path("usage.db")
 
 
 def _get_time_filter(period: str = "all") -> tuple[str, tuple]:

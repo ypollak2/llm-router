@@ -1,4 +1,4 @@
-"""Premium llm_router status command with Tokyo Night styling.
+"""Premium llm-router status command with Tokyo Night styling.
 
 Refactored from commands/status.py to use new UI components.
 """
@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import json
 import os
-from pathlib import Path
 from typing import Optional
 
 from rich.console import Console
@@ -17,14 +16,16 @@ from rich.console import Group
 
 from llm_router.ui.theme import PALETTE, progress_bar
 
+from llm_router import paths
+
 
 class PremiumStatusCommand:
-    """Premium status display for llm_router status command."""
+    """Premium status display for llm-router status command."""
 
     def __init__(self, console: Optional[Console] = None):
         """Initialize status command."""
         self.console = console or Console()
-        self.state_dir = Path.home() / ".llm-router"
+        self.state_dir = paths.llm_router_home()
         self.usage_json = self.state_dir / "usage.json"
         self.db_path = self.state_dir / "usage.db"
 
@@ -213,7 +214,7 @@ class PremiumStatusCommand:
 
 
 def cmd_status_premium() -> int:
-    """Execute: llm_router status (premium version)"""
+    """Execute: llm-router status (premium version)"""
     cmd = PremiumStatusCommand()
     cmd.print_status()
     return 0

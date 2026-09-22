@@ -33,12 +33,26 @@ import sys
 import time
 from pathlib import Path
 
+# M-02: benchmark traffic, declared rather than inferred. This file cannot be
+# parsed by Python < 3.12 (an f-string contains a backslash), so the marker
+# was inserted textually rather than via the AST pass used on its siblings.
+import os as _os
+
+_os.environ.setdefault("LLM_ROUTER_SYNTHETIC", "1")
+
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 HOOK = ROOT / "src/llm_router/hooks/auto-route.py"
 PY_BIN = str(ROOT / ".venv/bin/python")
 TRANSCRIPTS = Path.home() / ".claude/projects/-Users-yaliandrona"
-DEBUG_LOG = Path.home() / ".llm-router/auto-route-debug.log"
+def _debug_log():
+    """M-04: resolved per call. The one-segment spelling
+    `".llm-router/x"` was missed by the repo-wide sweep, which matched
+    only `/ ".llm-router" / "x"`."""
+    import os as _os
+    base = _os.environ.get("LLM_ROUTER_HOME", "").strip()
+    root = Path(base).expanduser() if base else Path.home() / ".llm-router"
+    return root / "auto-route-debug.log"
 
 _spec = importlib.util.spec_from_file_location(
     "_acc", ROOT / "scripts/bench_draft_acceptance.py")
@@ -81,7 +95,7 @@ def user_turns(path: Path) -> list[str]:
 
 def _log_size() -> int:
     try:
-        return DEBUG_LOG.stat().st_size
+        return _debug_log().stat().st_size
     except OSError:
         return 0
 
@@ -107,7 +121,7 @@ _TERMINAL = (
 
 def _reason_since(offset: int) -> str:
     try:
-        with DEBUG_LOG.open() as fh:
+        with _debug_log().open() as fh:
             fh.seek(offset)
             tail = fh.read()
     except OSError:

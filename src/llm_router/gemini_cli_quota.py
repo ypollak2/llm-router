@@ -18,7 +18,8 @@ import json
 import os
 import time
 from datetime import datetime, timezone
-from pathlib import Path
+
+from llm_router import paths
 
 TIER_LIMITS = {
     "gemini_code_assist_individual": 1000,
@@ -33,7 +34,8 @@ TIER_LIMITS = {
 }
 """Known tier → daily request limit mapping."""
 
-_QUOTA_CACHE_FILE = Path.home() / ".llm-router" / "gemini_quota.json"
+def _quota_cache_file():
+    return paths.state_path("gemini_quota.json")
 _QUOTA_CACHE_TTL = 300  # 5 minutes
 
 
@@ -95,11 +97,11 @@ def _load_quota_cache() -> dict | None:
     Returns:
         Cached quota dict if file exists and is <5 min old, else None.
     """
-    if not _QUOTA_CACHE_FILE.exists():
+    if not _quota_cache_file().exists():
         return None
 
     try:
-        data = json.loads(_QUOTA_CACHE_FILE.read_text())
+        data = json.loads(_quota_cache_file().read_text())
         cached_time = data.get("cached_at", 0)
         age_sec = time.time() - cached_time
         if age_sec < _QUOTA_CACHE_TTL:
@@ -112,9 +114,9 @@ def _load_quota_cache() -> dict | None:
 def _save_quota_cache(data: dict) -> None:
     """Save quota data to ~/.llm-router/gemini_quota.json."""
     try:
-        _QUOTA_CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        _quota_cache_file().parent.mkdir(parents=True, exist_ok=True)
         cache = {**data, "cached_at": time.time()}
-        _QUOTA_CACHE_FILE.write_text(json.dumps(cache, indent=2))
+        _quota_cache_file().write_text(json.dumps(cache, indent=2))
     except Exception:
         pass  # Silently fail — quota tracking is best-effort
 
@@ -125,11 +127,11 @@ def _get_local_quota() -> dict | None:
     Local fallback when `gemini /stats` is unavailable.
     Increments count for today, resets if date changed.
     """
-    if not _QUOTA_CACHE_FILE.exists():
+    if not _quota_cache_file().exists():
         return None
 
     try:
-        data = json.loads(_QUOTA_CACHE_FILE.read_text())
+        data = json.loads(_quota_cache_file().read_text())
         today = datetime.now(timezone.utc).date().isoformat()
         cached_date = data.get("date")
 

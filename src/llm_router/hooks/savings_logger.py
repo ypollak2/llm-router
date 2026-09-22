@@ -92,6 +92,22 @@ _PRICING_PER_MTOK: dict[tuple[str, str], tuple[float, float]] = {
 _SAVINGS_LOG_FILENAME = "savings_log.jsonl"
 
 
+def _router_home():
+    """Router state dir, resolved per call so LLM_ROUTER_HOME is honoured.
+
+    M-04: this was a module constant bound at import, so a hook launched with
+    LLM_ROUTER_HOME set still wrote to the operator's real home directory.
+
+    Imports locally: hooks are standalone scripts with varied import headers and
+    several do not import Path or os at module scope.
+    """
+    import os as _os
+    from pathlib import Path as _P
+
+    base = _os.environ.get("LLM_ROUTER_HOME", "").strip()
+    return _P(base).expanduser() if base else _P.home() / ".llm-router"
+
+
 def _lookup_rate(provider: str, model: str) -> tuple[float, float]:
     """Return (input_rate, output_rate) in USD per 1M tokens."""
     key = (provider, model)
@@ -129,7 +145,7 @@ def _baseline_cost(complexity: str, input_tokens: int, output_tokens: int) -> fl
 
 def _savings_log_path() -> Path:
     """Path is resolved at call time so test fixtures that patch Path.home() work."""
-    return Path.home() / ".llm-router" / _SAVINGS_LOG_FILENAME
+    return _router_home() / _SAVINGS_LOG_FILENAME
 
 
 def _response_is_usable(text: str) -> bool:

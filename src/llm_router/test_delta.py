@@ -29,6 +29,7 @@ so a future client can read older snapshots without coercion.
 
 from __future__ import annotations
 
+from llm_router import paths
 import argparse
 import json
 import secrets
@@ -38,8 +39,10 @@ import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
-DEFAULT_DB_PATH = Path.home() / ".llm-router" / "usage.db"
-SNAPSHOT_DIR = Path.home() / ".llm-router" / "test_delta"
+def _default_db_path():
+    return paths.state_path("usage.db")
+def _snapshot_dir():
+    return paths.state_path("test_delta")
 
 # Headline metric: what the same number of input/output tokens would have cost
 # if every routed call had gone to Opus (the host model).
@@ -202,7 +205,7 @@ def _read_usage_table(conn: sqlite3.Connection) -> TableSnapshot:
 
 def snapshot(db_path: Path | None = None) -> Snapshot:
     """Capture a Snapshot of the routing-relevant tables."""
-    db = db_path or DEFAULT_DB_PATH
+    db = db_path or _default_db_path()
     if not db.is_file():
         # Treat missing DB as a fresh state — every diff against this is
         # the full delta of whatever happens next.
@@ -237,7 +240,7 @@ def _new_id() -> str:
 
 def save_snapshot(snap: Snapshot, root: Path | None = None) -> Path:
     """Persist a snapshot under ``~/.llm-router/test_delta/<id>.json``."""
-    root = root or SNAPSHOT_DIR
+    root = root or _snapshot_dir()
     root.mkdir(parents=True, exist_ok=True)
     path = root / f"{snap.id}.json"
     path.write_text(json.dumps(snap.to_dict(), indent=2), encoding="utf-8")
@@ -245,7 +248,7 @@ def save_snapshot(snap: Snapshot, root: Path | None = None) -> Path:
 
 
 def load_snapshot(snap_id: str, root: Path | None = None) -> Snapshot:
-    root = root or SNAPSHOT_DIR
+    root = root or _snapshot_dir()
     path = root / f"{snap_id}.json"
     if not path.is_file():
         raise FileNotFoundError(f"snapshot not found: {path}")
@@ -411,10 +414,10 @@ def _cmd_diff(args: argparse.Namespace) -> int:
 
 
 def _cmd_list(_args: argparse.Namespace) -> int:
-    if not SNAPSHOT_DIR.is_dir():
+    if not _snapshot_dir().is_dir():
         print("(no snapshots yet)")
         return 0
-    files = sorted(SNAPSHOT_DIR.glob("*.json"))
+    files = sorted(_snapshot_dir().glob("*.json"))
     for path in files:
         try:
             snap = Snapshot.from_dict(json.loads(path.read_text()))

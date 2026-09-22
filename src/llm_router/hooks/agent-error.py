@@ -21,7 +21,6 @@ import json
 import re
 import sys
 import time
-from pathlib import Path
 
 
 # ── Registered-tool surface (CHZ-SURF-01) ────────────────────────────────────
@@ -31,6 +30,22 @@ from pathlib import Path
 # so naming one hands the caller "Error: No such tool available" — after which
 # it silently does the work on the expensive model and the savings dashboard
 # cannot distinguish that from "chose not to route".
+def _router_home():
+    """Router state dir, resolved per call so LLM_ROUTER_HOME is honoured.
+
+    M-04: this was a module constant bound at import, so a hook launched with
+    LLM_ROUTER_HOME set still wrote to the operator's real home directory.
+
+    Imports locally: hooks are standalone scripts with varied import headers and
+    several do not import Path or os at module scope.
+    """
+    import os as _os
+    from pathlib import Path as _P
+
+    base = _os.environ.get("LLM_ROUTER_HOME", "").strip()
+    return _P(base).expanduser() if base else _P.home() / ".llm-router"
+
+
 def _load_tool_surface_fns():
     """(route_tool, route_call, route_call_with_complexity) from llm_router.tool_surface.
 
@@ -114,7 +129,7 @@ _REASONING_INTENT = re.compile(
 
 def _read_last_agent_call() -> dict | None:
     """Get the most recent agent call from history."""
-    calls_file = Path.home() / ".llm-router" / "agent_calls.json"
+    calls_file = _router_home() / "agent_calls.json"
     try:
         data = json.loads(calls_file.read_text())
         calls = data.get("calls", [])
@@ -313,7 +328,7 @@ def _reconcile_budget(failure_type: str) -> None:
 
     On success, provisional spend is treated as final (no adjustment).
     """
-    budget_file = Path.home() / ".llm-router" / "session_budget.json"
+    budget_file = _router_home() / "session_budget.json"
 
     try:
         data = json.loads(budget_file.read_text())

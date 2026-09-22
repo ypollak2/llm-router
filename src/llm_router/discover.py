@@ -18,6 +18,8 @@ from llm_router.config import get_config
 from llm_router.logging import get_logger
 from llm_router.profiles import provider_from_model
 
+from llm_router import paths
+
 log = get_logger("llm_router.discover")
 
 # Cache for Ollama reachability (5 second TTL per config probe)
@@ -25,10 +27,12 @@ _ollama_cache: dict[str, tuple[bool, float]] = {}
 _OLLAMA_CACHE_TTL = 5.0
 
 # Discovery cache file path
-_DISCOVERY_CACHE = os.path.expanduser("~/.llm-router/discovery.json")
+def _discovery_cache():
+    return str(paths.state_path("discovery.json"))
 
 # Warm-path tracking — path to file that records last successful Ollama call time
-_OLLAMA_LAST_OK = os.path.expanduser("~/.llm-router/ollama_last_ok.txt")
+def _ollama_last_ok():
+    return str(paths.state_path("ollama_last_ok.txt"))
 _OLLAMA_WARM_TTL = 60  # seconds
 
 
@@ -160,8 +164,8 @@ def _update_discovery_cache(ollama_models: list[dict]) -> None:
     }
 
     try:
-        os.makedirs(os.path.dirname(_DISCOVERY_CACHE), exist_ok=True)
-        with open(_DISCOVERY_CACHE, "w") as f:
+        os.makedirs(os.path.dirname(_discovery_cache()), exist_ok=True)
+        with open(_discovery_cache(), "w") as f:
             json.dump(cache_data, f, indent=2)
     except Exception as e:
         log.debug("Failed to write discovery cache: %s", e)
@@ -387,11 +391,11 @@ def _load_cache(ttl: int = 3600) -> dict | None:
     import time
     from llm_router.types import ProviderTier, TaskType
     
-    if not os.path.exists(_DISCOVERY_CACHE):
+    if not os.path.exists(_discovery_cache()):
         return None
     
     try:
-        with open(_DISCOVERY_CACHE) as f:
+        with open(_discovery_cache()) as f:
             data = json.load(f)
         
         # Check if cache has expired
@@ -512,7 +516,7 @@ def is_ollama_warm() -> bool:
     import time
 
     try:
-        with open(_OLLAMA_LAST_OK) as f:
+        with open(_ollama_last_ok()) as f:
             last_ok = float(f.read().strip())
         return (time.time() - last_ok) < _OLLAMA_WARM_TTL
     except (FileNotFoundError, ValueError, OSError):
@@ -524,8 +528,8 @@ def mark_ollama_ok() -> None:
     import time
 
     try:
-        os.makedirs(os.path.dirname(_OLLAMA_LAST_OK), exist_ok=True)
-        with open(_OLLAMA_LAST_OK, "w") as f:
+        os.makedirs(os.path.dirname(_ollama_last_ok()), exist_ok=True)
+        with open(_ollama_last_ok(), "w") as f:
             f.write(str(time.time()))
     except OSError:
         pass

@@ -29,6 +29,8 @@ from llm_router.paths import state_path
 from llm_router.types import QualityMode, RoutingProfile, Tier
 from llm_router.routing_hints import validate_config_upgrade, log_routing_decision
 
+from llm_router import paths
+
 # ── Ollama reachability cache ─────────────────────────────────────────────────
 # Checked at most once per TTL to avoid a network call on every routing
 # decision. Starts as None so the first call always does a live probe.
@@ -249,7 +251,7 @@ class RouterConfig(BaseSettings):
     # Effect: Ollama is injected at the front of ALL routing chains (not just
     # BUDGET or when Claude quota is high) so free local inference is always
     # tried first before spending money on cloud APIs.
-    # Set automatically by `llm_router install` when ~/.claw-code/ is detected.
+    # Set automatically by `llm-router install` when ~/.claw-code/ is detected.
     llm_router_claw_code: bool = False
 
     # ── pxpipe integration (heavy-model context compression) ──
@@ -540,7 +542,7 @@ class RouterConfig(BaseSettings):
     media_request_timeout: int = 600
 
     model_config = {
-        "env_file": (Path.home() / ".llm-router" / ".env", ".env"),
+        "env_file": (paths.state_path(".env"), ".env"),
         "env_file_encoding": "utf-8",
         "extra": "ignore",
         # GH#69: llm_router_profile sets an explicit validation_alias
@@ -818,7 +820,8 @@ class RouterConfig(BaseSettings):
             os.environ.setdefault("OLLAMA_API_BASE", self.ollama_base_url)
 
 
-STATE_DIR = Path.home() / ".llm-router"
+def _state_dir():
+    return paths.llm_router_home()
 
 # `<provider>.key` files the setup flows write into the state directory, mapped to
 # the environment variable each provider is read from.
@@ -849,7 +852,7 @@ def load_disk_keys() -> dict[str, str]:
 
     found: dict[str, str] = {}
     for stem, env_var in _DISK_KEY_FILES.items():
-        path = STATE_DIR / f"{stem}.key"
+        path = _state_dir() / f"{stem}.key"
         try:
             if not path.is_file():
                 continue

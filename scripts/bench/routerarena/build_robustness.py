@@ -22,6 +22,14 @@ os.environ.setdefault("LLM_ROUTER_POLICY", "routerarena_tuned")
 # Reuse the dataset→subject mapping from the main submission builder
 from build_submission import DATASET_TO_SUBJECT  # noqa: E402
 
+# M-02: every row this script causes is benchmark traffic, not usage. Declared
+# here rather than inferred later -- `routing_quality.detect_synthetic` prefers
+# an explicit statement by the harness, and until now no bench script made one,
+# so 1,813 fixture rows were counted as production spend.
+import os as _os
+
+_os.environ.setdefault("LLM_ROUTER_SYNTHETIC", "1")
+
 
 def _dataset_from_global_index(global_index: str) -> str:
     """Robustness rows leave the ``Dataset name`` column empty, but the

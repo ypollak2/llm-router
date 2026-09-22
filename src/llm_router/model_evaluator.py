@@ -12,16 +12,18 @@ from __future__ import annotations
 import json
 import time
 from dataclasses import dataclass, asdict
-from pathlib import Path
 from typing import Optional
 
 from llm_router.logging import get_logger
 from llm_router.codex_agent import is_codex_available, run_codex
 from llm_router.config import get_config
 
+from llm_router import paths
+
 log = get_logger("llm_router.model_evaluator")
 
-EVAL_CACHE_PATH = Path.home() / ".llm-router" / "model_evals.json"
+def _eval_cache_path():
+    return paths.state_path("model_evals.json")
 EVAL_TTL_DAYS = 7
 EVAL_TTL_SECONDS = EVAL_TTL_DAYS * 86400
 
@@ -162,11 +164,11 @@ async def eval_codex_model(task_type: str = "reasoning") -> Optional[ModelScore]
 
 def load_eval_cache() -> Optional[EvaluationResult]:
     """Load cached evaluation results if fresh (< 7 days old)."""
-    if not EVAL_CACHE_PATH.exists():
+    if not _eval_cache_path().exists():
         return None
     
     try:
-        data = json.loads(EVAL_CACHE_PATH.read_text())
+        data = json.loads(_eval_cache_path().read_text())
         timestamp = data.get("timestamp", 0)
         age_seconds = time.time() - timestamp
         
@@ -191,7 +193,7 @@ def load_eval_cache() -> Optional[EvaluationResult]:
 
 def save_eval_cache(result: EvaluationResult) -> None:
     """Save evaluation results to cache."""
-    EVAL_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    _eval_cache_path().parent.mkdir(parents=True, exist_ok=True)
     
     data = {
         "timestamp": result.timestamp,
@@ -202,8 +204,8 @@ def save_eval_cache(result: EvaluationResult) -> None:
         },
     }
     
-    EVAL_CACHE_PATH.write_text(json.dumps(data, indent=2))
-    log.info(f"Saved model evaluations to {EVAL_CACHE_PATH}")
+    _eval_cache_path().write_text(json.dumps(data, indent=2))
+    log.info(f"Saved model evaluations to {_eval_cache_path()}")
 
 
 async def evaluate_available_models(task_types: list[str] = None) -> EvaluationResult:

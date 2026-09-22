@@ -12,6 +12,7 @@ Stored to ~/.llm-router/model_tracking.jsonl for persistent analysis.
 
 from __future__ import annotations
 
+from llm_router import paths
 import json
 import time
 from dataclasses import dataclass, asdict
@@ -22,7 +23,9 @@ from llm_router.logging import get_logger
 
 log = get_logger("llm_router.model_tracking")
 
-TRACKING_PATH = Path.home() / ".llm-router" / "model_tracking.jsonl"
+
+def _tracking_path():
+    return paths.state_path("model_tracking.jsonl")
 
 
 @dataclass
@@ -89,10 +92,10 @@ def log_routing_decision(
             notes=notes,
         )
         
-        TRACKING_PATH.parent.mkdir(parents=True, exist_ok=True)
+        _tracking_path().parent.mkdir(parents=True, exist_ok=True)
         
         # Append to JSONL file (atomic, append-only)
-        with open(TRACKING_PATH, "a") as f:
+        with open(_tracking_path(), "a") as f:
             f.write(json.dumps(asdict(decision)) + "\n")
         
         log.debug(f"Tracked: {selected_model} for {task_type}/{complexity} ({classification_method})")
@@ -109,13 +112,13 @@ def load_tracking_data(limit: int = 1000) -> list[RoutingDecision]:
     Returns:
         List of RoutingDecision objects, most recent first
     """
-    if not TRACKING_PATH.exists():
+    if not _tracking_path().exists():
         return []
     
     decisions = []
     try:
         # Read file in reverse order for efficiency
-        with open(TRACKING_PATH, "r") as f:
+        with open(_tracking_path(), "r") as f:
             lines = f.readlines()
         
         # Take last N lines, then reverse to get newest first

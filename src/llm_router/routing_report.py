@@ -15,7 +15,10 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Iterable
 
-HOME = Path.home() / ".llm-router"
+from llm_router import paths
+
+def _home():
+    return paths.llm_router_home()
 
 
 def _pctl(vals: list[float], p: float) -> float:
@@ -176,7 +179,7 @@ def _violations(log: Path) -> int:
 
 
 def generate_report() -> str:
-    db = HOME / "usage.db"
+    db = _home() / "usage.db"
     if not db.exists():
         return "# LLM Router routing report\n\n(no usage.db yet — nothing has routed)\n"
 
@@ -225,12 +228,12 @@ def generate_report() -> str:
         L += ["## Routed via", "", "| source | calls |", "|---|--:|"]
         L += [f"| {s} | {n} |" for s, n in srcs] + [""]
 
-    oc = _outcome_counts(HOME / "auto-route-debug.log")
+    oc = _outcome_counts(_home() / "auto-route-debug.log")
     tot = sum(oc.values()) or 1
     L += ["## Routing outcomes (Claude Code hook path)", "",
           "| outcome | count | % |", "|---|--:|--:|"]
     L += [f"| {k} | {v} | {100*v/tot:.0f}% |" for k, v in oc.items()]
-    L += [f"| overrides (model did the work) | {_violations(HOME / 'enforcement.log')} | — |", ""]
+    L += [f"| overrides (model did the work) | {_violations(_home() / 'enforcement.log')} | — |", ""]
 
     if lats:
         slow = len([x for x in lats if x > 15000])
@@ -243,7 +246,7 @@ def generate_report() -> str:
 
 def main() -> None:
     report = generate_report()
-    out = HOME / "routing_report.md"
+    out = _home() / "routing_report.md"
     out.write_text(report)
     print(f"Wrote {out}\n")
     print(report)

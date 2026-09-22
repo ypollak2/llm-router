@@ -40,6 +40,14 @@ import sys
 import time
 from pathlib import Path
 
+# M-02: every row this script causes is benchmark traffic, not usage. Declared
+# here rather than inferred later -- `routing_quality.detect_synthetic` prefers
+# an explicit statement by the harness, and until now no bench script made one,
+# so 1,813 fixture rows were counted as production spend.
+import os as _os
+
+_os.environ.setdefault("LLM_ROUTER_SYNTHETIC", "1")
+
 # Make ``src/`` importable regardless of cwd (works from a plain checkout and
 # from a `git worktree add` checkout that has no editable install of its own).
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent

@@ -42,7 +42,7 @@ so the whole chain either all advances or none does.
 Optional dep
 ------------
 ``psycopg[binary]>=3.2`` is installed via the ``postgres`` extra.
-Import is lazy inside ``__init__`` so the bare llm_router install with the
+Import is lazy inside ``__init__`` so the bare llm-router install with the
 default SQLite backend never imports psycopg.
 """
 from __future__ import annotations

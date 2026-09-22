@@ -41,6 +41,8 @@ from typing import Literal
 
 from llm_router import pricing as _pricing
 
+from llm_router import paths
+
 #: Counterfactual model these savings are computed against. WP-05: projected
 #: from the ONE policy in llm_router.pricing rather than restated here, so this
 #: surface cannot drift from the ledger writer or the session-end hook.
@@ -48,7 +50,8 @@ _BASELINE_MODEL = _pricing.savings_baseline_model()
 
 WindowLiteral = Literal["today", "week", "month", "lifetime", "14d"]
 
-DEFAULT_DB_PATH = Path.home() / ".llm-router" / "usage.db"
+def _default_db_path():
+    return paths.state_path("usage.db")
 
 # Tables this module knows how to UNION. Order is presentation order
 # (legacy first → newer platforms last) so audit output reads naturally.
@@ -282,7 +285,7 @@ def query_window(
       Sonnet-baseline computation for ``usage`` (matching the legacy
       ``_query_cumulative_savings`` logic).
     """
-    db = Path(db_path) if db_path else DEFAULT_DB_PATH
+    db = Path(db_path) if db_path else _default_db_path()
     if not db.exists():
         return WindowTotals(
             window=window, calls=0, tokens=0, saved_usd=0.0, **_coverage_fields()
@@ -401,7 +404,7 @@ def query_daily(
     Daily rollups UNION the same sources as :func:`query_window` so a
     daily chart and a "lifetime" total stay reconcilable when summed.
     """
-    db = Path(db_path) if db_path else DEFAULT_DB_PATH
+    db = Path(db_path) if db_path else _default_db_path()
     if not db.exists():
         return []
 
@@ -552,7 +555,7 @@ def query_model_distribution(
 
     Returns a dict mapping model names to call counts.
     """
-    db = Path(db_path) if db_path else DEFAULT_DB_PATH
+    db = Path(db_path) if db_path else _default_db_path()
     if not db.exists():
         return {}
 
@@ -598,7 +601,7 @@ def audit_sources(
     consumers that opt out of a source can be flagged via
     ``explain-dashboard --check``.
     """
-    db = Path(db_path) if db_path else DEFAULT_DB_PATH
+    db = Path(db_path) if db_path else _default_db_path()
     if not db.exists():
         return []
 
@@ -686,7 +689,7 @@ def query_realized_savings(
     the table as a side effect of connecting — so reading a figure would
     materialise the thing it was reading. Reading must not have side effects.
     """
-    db = Path(db_path) if db_path else DEFAULT_DB_PATH
+    db = Path(db_path) if db_path else _default_db_path()
     empty = RealizedSavingsTotals(
         window=window,
         potential_savings_usd=0.0,
@@ -764,7 +767,7 @@ def session_spend_usd(state_dir: Path | None = None) -> float | None:
     reached no user. Returning None rather than 0.0 keeps "no session yet"
     distinct from "this session spent nothing".
     """
-    base = state_dir or (Path.home() / ".llm-router")
+    base = state_dir or (paths.llm_router_home())
     try:
         import json
 

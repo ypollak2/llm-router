@@ -110,3 +110,29 @@ def private_opener(path: str, flags: int) -> int:
     one is already present, which also fixes files created by older versions.
     """
     return os.open(path, flags, 0o600)
+
+
+class StatePathAttr:
+    """A class attribute holding a state path, resolved on every access.
+
+    M-04. A class attribute spelled ``FOO = state_path("x")`` is still evaluated
+    once, when Python executes the class body at import. Routing it through this
+    resolver fixed the *base* and left the *timing* wrong — which is subtler than
+    the original bug, because the code now looks correct.
+
+    Use this for a class attribute that must follow LLM_ROUTER_HOME:
+
+        class Tracker:
+            USAGE_JSON = StatePathAttr("usage.json")
+
+    Both ``Tracker.USAGE_JSON`` and ``self.USAGE_JSON`` keep working and return a
+    freshly resolved Path.
+    """
+
+    __slots__ = ("_parts",)
+
+    def __init__(self, *parts: str) -> None:
+        self._parts = parts
+
+    def __get__(self, obj: object, owner: type | None = None) -> Path:
+        return state_path(*self._parts)

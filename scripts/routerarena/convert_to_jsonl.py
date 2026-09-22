@@ -17,7 +17,14 @@ import pandas as pd
 from pathlib import Path
 
 SRC = '/tmp/routerarena_sub10.parquet'
-DST = Path.home() / '.llm-router' / 'data' / 'routerarena' / 'sub_10_letters.jsonl'
+def _router_home() -> Path:
+    """Router state dir, resolved per call so LLM_ROUTER_HOME is honoured (M-04)."""
+    import os as _os
+    return Path(_os.environ.get("LLM_ROUTER_HOME", "").strip() or Path.home() / ".llm-router")
+
+
+def _dst() -> Path:
+    return _router_home() / 'data' / 'routerarena' / 'sub_10_letters.jsonl'
 
 SKIP_DATASETS = {'LiveCodeBench', 'NarrativeQA'}
 
@@ -95,7 +102,7 @@ def pick_subject(row) -> str:
 
 def main():
     df = pd.read_parquet(SRC)
-    DST.parent.mkdir(parents=True, exist_ok=True)
+    _dst().parent.mkdir(parents=True, exist_ok=True)
 
     rows_out = []
     skipped = {'dataset': 0, 'reference': 0, 'no_options': 0}
@@ -124,12 +131,12 @@ def main():
 
     random.Random(42).shuffle(rows_out)
 
-    with DST.open('w') as f:
+    with _dst().open('w') as f:
         for r in rows_out:
             f.write(json.dumps(r) + '\n')
 
     from collections import Counter
-    print(f'Wrote {len(rows_out)} prompts to {DST}')
+    print(f'Wrote {len(rows_out)} prompts to {_dst()}')
     print(f'Skipped: {skipped}')
     print(f'\nSubject distribution:')
     for s, n in Counter(r['subject'] for r in rows_out).most_common():

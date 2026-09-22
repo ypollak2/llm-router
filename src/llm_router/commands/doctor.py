@@ -18,6 +18,8 @@ from typing import NamedTuple, Optional
 from llm_router.terminal_style import Color
 from llm_router.tool_surface import route_call, route_tool  # CHZ-SURF-01
 
+from llm_router import paths
+
 
 # ── Formatting utilities ────────────────────────────────────────────────────
 
@@ -174,7 +176,7 @@ def _codex_checks() -> tuple[list[str], list[str]]:
         lines.append(_dim("    codex binary not on PATH — skipped `codex mcp list`"))
 
     # 3. Hooks + trust
-    ours = str(Path.home() / ".llm-router" / "hooks")
+    ours = str(paths.state_path("hooks"))
     if hooks_json.exists():
         try:
             doc = json.loads(hooks_json.read_text())
@@ -376,7 +378,7 @@ def _render_host_explainer() -> str:
     """Always-up-to-date explanation of why the host model (Claude Code,
     Cursor, Codex CLI, ...) runs on a frontier model like Opus 4.7 and
     not on a local one — and what that means for the savings LLM Router can
-    deliver. Surfaced via ``llm_router doctor --explain-host`` so the
+    deliver. Surfaced via ``llm-router doctor --explain-host`` so the
     answer lives next to the savings posture report.
     """
     # chz-surface-ok: explanatory prose about the cost model, not an instruction
@@ -604,7 +606,7 @@ def _check_savings_posture() -> list[str]:
     # 1. OpenRouter key — single biggest unlock.
     if os.environ.get("OPENROUTER_API_KEY"):
         lines.append(_ok("OPENROUTER_API_KEY set — full leaderboard pool reachable"))
-    elif (Path.home() / ".llm-router" / "openrouter-routerarena.env").exists():
+    elif (paths.state_path("openrouter-routerarena.env")).exists():
         lines.append(_warn(
             "OPENROUTER_API_KEY stored at ~/.llm-router/openrouter-routerarena.env "
             "but NOT loaded into env. Source the file before benchmark runs."
@@ -709,7 +711,7 @@ def _check_savings_posture() -> list[str]:
     # the closest proxy for "is any session's hook still firing".
     import glob as _glob
     shard_paths = sorted(
-        _glob.glob(str(Path.home() / ".llm-router" / "last_classification_*.json")),
+        _glob.glob(str(paths.state_path("last_classification_*.json"))),
         key=lambda p: Path(p).stat().st_mtime if Path(p).exists() else 0,
         reverse=True,
     )
@@ -742,7 +744,7 @@ def _check_savings_posture() -> list[str]:
 
     # 7. Today's simple-share — the smoking-gun metric from the
     # earlier diagnostic. Pre-fix: 0/31 simple today. Healthy: > 30%.
-    db = Path.home() / ".llm-router" / "usage.db"
+    db = paths.state_path("usage.db")
     if db.is_file():
         _state = _routing_decision_state(db)
         try:
@@ -1205,7 +1207,7 @@ def _run_doctor(host: Optional[str] = None) -> tuple[int, list[str]]:
 
     # ── 6. Usage data freshness ────────────────────────────────────────────
     print(f"\n{_bold('  Usage data (Claude subscription pressure)')}")
-    usage_path = Path.home() / ".llm-router" / "usage.json"
+    usage_path = paths.state_path("usage.json")
     # Quota pressure IS the headline of subscription mode. When that mode is on
     # and the file is absent, the statusline shows the user nothing and doctor
     # used to still print "all checks passed" — a check that misses the thing the
@@ -1466,7 +1468,7 @@ def _run_doctor(host: Optional[str] = None) -> tuple[int, list[str]]:
 
 
 def cmd_doctor(args: list[str]) -> int:
-    """Execute: llm_router doctor [--host H] [--posture] [--explain-host]
+    """Execute: llm-router doctor [--host H] [--posture] [--explain-host]
 
     Flags:
         --host H        Run host-specific checks (claude|vscode|cursor|codex|all)

@@ -39,7 +39,10 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-SESSION_SPEND_FILE = Path.home() / ".llm-router" / "session_spend.json"
+from llm_router import paths
+
+def _session_spend_file():
+    return paths.state_path("session_spend.json")
 
 # Durable, cross-session routing-outcome ledger. session_spend.json is reset each
 # session, so the deduped override/routed counts it holds vanish — leaving the
@@ -51,7 +54,7 @@ SESSION_SPEND_FILE = Path.home() / ".llm-router" / "session_spend.json"
 # Derived from SESSION_SPEND_FILE.parent (not a fixed path) so a test that
 # isolates SESSION_SPEND_FILE isolates this DB too — same pattern as usage.db.
 def _routing_outcomes_db() -> Path:
-    return SESSION_SPEND_FILE.parent / "routing_outcomes.db"
+    return _session_spend_file().parent / "routing_outcomes.db"
 
 
 def _current_session_key() -> str:
@@ -295,7 +298,7 @@ class SessionSpend:
     ) -> None:
         """Append a row to ~/.llm-router/usage.db claude_usage table."""
         import sqlite3
-        db_path = SESSION_SPEND_FILE.parent / "usage.db"
+        db_path = _session_spend_file().parent / "usage.db"
         if not db_path.exists():
             return  # No DB → no cumulative tracking yet; cost.py creates on first use.
         # Pick the model that took most cost this session as the attribution model
@@ -441,10 +444,10 @@ class SessionSpend:
     def _persist(self) -> None:
         """Write spend data to disk atomically."""
         try:
-            SESSION_SPEND_FILE.parent.mkdir(parents=True, exist_ok=True)
-            tmp = SESSION_SPEND_FILE.with_suffix(".tmp")
+            _session_spend_file().parent.mkdir(parents=True, exist_ok=True)
+            tmp = _session_spend_file().with_suffix(".tmp")
             tmp.write_text(json.dumps(self.get_summary(), indent=2))
-            tmp.replace(SESSION_SPEND_FILE)
+            tmp.replace(_session_spend_file())
         except OSError:
             pass  # Never crash the router due to disk issues
         self._upsert_durable_outcome()
@@ -519,7 +522,7 @@ class SessionSpend:
     def load(cls) -> "SessionSpend":
         """Load existing session spend from disk, or return a fresh instance."""
         try:
-            data = json.loads(SESSION_SPEND_FILE.read_text())
+            data = json.loads(_session_spend_file().read_text())
             obj = cls()
             obj.total_usd = float(data.get("total_usd", 0.0))
             obj.session_start = float(data.get("session_start", time.time()))
@@ -557,7 +560,7 @@ def get_session_spend() -> SessionSpend:
         _spend = SessionSpend.load()
         return _spend
     try:
-        disk_start = float(json.loads(SESSION_SPEND_FILE.read_text()).get("session_start", 0.0))
+        disk_start = float(json.loads(_session_spend_file().read_text()).get("session_start", 0.0))
         # 1s guard against float jitter / same-session re-persists.
         if disk_start > _spend.session_start + 1.0:
             _spend = SessionSpend.load()

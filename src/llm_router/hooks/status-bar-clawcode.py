@@ -16,10 +16,30 @@ import sqlite3
 import sys
 from datetime import datetime, timezone
 
-STATE_DIR = os.path.expanduser("~/.llm-router")
-USAGE_DB = os.path.join(STATE_DIR, "usage.db")
-SESSION_START_FILE = os.path.join(STATE_DIR, "session_start.txt")
-PROMPT_COUNT_FILE = os.path.join(STATE_DIR, "prompt_count.txt")
+def _router_home():
+    """Router state dir, resolved per call so LLM_ROUTER_HOME is honoured.
+
+    M-04: this was a module constant bound at import, so a hook launched with
+    LLM_ROUTER_HOME set still wrote to the operator's real home directory.
+
+    Imports locally: hooks are standalone scripts with varied import headers and
+    several do not import Path or os at module scope.
+    """
+    import os as _os
+    from pathlib import Path as _P
+
+    base = _os.environ.get("LLM_ROUTER_HOME", "").strip()
+    return _P(base).expanduser() if base else _P.home() / ".llm-router"
+
+
+def _state_dir():
+    return str(_router_home())
+def _usage_db():
+    return os.path.join(_state_dir(), "usage.db")
+def _session_start_file():
+    return os.path.join(_state_dir(), "session_start.txt")
+def _prompt_count_file():
+    return os.path.join(_state_dir(), "prompt_count.txt")
 
 STATUS_EVERY = os.environ.get("LLM_ROUTER_STATUS_EVERY", "0")
 
@@ -43,9 +63,9 @@ _FREE_PROVIDERS = {"ollama", "codex", "gemini_cli"}
 def _read_session_stats() -> tuple[int, int, int, float, int]:
     """Return (sub_calls, free_calls, paid_calls, dollars_saved, savings_pct)."""
     try:
-        start = float(open(SESSION_START_FILE).read().strip())
+        start = float(open(_session_start_file()).read().strip())
         start_str = datetime.fromtimestamp(start, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
-        conn = sqlite3.connect(USAGE_DB)
+        conn = sqlite3.connect(_usage_db())
         rows = conn.execute(
             "SELECT provider, input_tokens, output_tokens, cost_usd FROM usage "
             "WHERE timestamp >= ? AND success = 1",
@@ -103,11 +123,11 @@ def _should_show() -> bool:
         return True
 
     try:
-        count = int(open(PROMPT_COUNT_FILE).read().strip()) + 1 if os.path.exists(PROMPT_COUNT_FILE) else 1
+        count = int(open(_prompt_count_file()).read().strip()) + 1 if os.path.exists(_prompt_count_file()) else 1
     except (ValueError, OSError):
         count = 1
     try:
-        with open(PROMPT_COUNT_FILE, "w") as f:
+        with open(_prompt_count_file(), "w") as f:
             f.write(str(count))
     except OSError:
         pass

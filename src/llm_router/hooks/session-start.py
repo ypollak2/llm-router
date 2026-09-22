@@ -38,12 +38,34 @@ except ImportError:
     def http_timeout() -> int:
         return int(os.environ.get("LLM_ROUTER_HTTP_TIMEOUT", "10"))
 
-STATE_DIR              = os.path.expanduser("~/.llm-router")
-SESSION_START_FILE     = os.path.join(STATE_DIR, "session_start.txt")
-SESSION_ID_FILE        = os.path.join(STATE_DIR, "session_id.txt")
-SESSION_SPEND_FILE     = os.path.join(STATE_DIR, "session_spend.json")
-DB_PATH                = os.path.join(STATE_DIR, "usage.db")
-WEEKLY_DIGEST_FILE     = os.path.join(STATE_DIR, "last_weekly_digest.txt")
+def _router_home():
+    """Router state dir, resolved per call so LLM_ROUTER_HOME is honoured.
+
+    M-04: this was a module constant bound at import, so a hook launched with
+    LLM_ROUTER_HOME set still wrote to the operator's real home directory.
+
+    Imports locally: hooks are standalone scripts with varied import headers and
+    several do not import Path or os at module scope.
+    """
+    import os as _os
+    from pathlib import Path as _P
+
+    base = _os.environ.get("LLM_ROUTER_HOME", "").strip()
+    return _P(base).expanduser() if base else _P.home() / ".llm-router"
+
+
+def _state_dir():
+    return str(_router_home())
+def _session_start_file():
+    return os.path.join(_state_dir(), "session_start.txt")
+def _session_id_file():
+    return os.path.join(_state_dir(), "session_id.txt")
+def _session_spend_file():
+    return os.path.join(_state_dir(), "session_spend.json")
+def _db_path():
+    return os.path.join(_state_dir(), "usage.db")
+def _weekly_digest_file():
+    return os.path.join(_state_dir(), "last_weekly_digest.txt")
 
 # Savings baseline = the latest-Opus host rate, the SAME source of truth as
 # cost._OPUS_PRICING / receipt_store / savings_logger. This banner previously
@@ -58,11 +80,12 @@ _FREE_PROVIDERS   = {"ollama", "codex", "gemini_cli"}
 # ── .env loader ───────────────────────────────────────────────────────────────
 # Hooks run outside the MCP server process and don't inherit its env.
 # Load .env so LLM_ROUTER_CLAUDE_SUBSCRIPTION and other settings are available.
-_ENV_PATHS = [
+def _env_paths():
+    return [
     os.path.join(os.getcwd(), ".env"),  # CWD .env (hook runs from project root)
     os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__)))), ".env"),
     os.path.expanduser("~/.env"),
-    os.path.join(STATE_DIR, ".env"),
+    os.path.join(_state_dir(), ".env"),
 ]
 
 
@@ -74,7 +97,7 @@ def _load_dotenv(load_into: "dict[str, str] | None" = None) -> None:
     Existing keys in the target mapping are never overwritten.
     """
     target = os.environ if load_into is None else load_into
-    for env_path in _ENV_PATHS:
+    for env_path in _env_paths():
         if not os.path.exists(env_path):
             continue
         try:
@@ -370,7 +393,7 @@ def _zero_claude_enabled() -> bool:
     if env_value:
         return env_value in ("1", "true", "yes", "on", "zero_claude", "strict_zero")
 
-    config_path = Path(STATE_DIR) / "routing.yaml"
+    config_path = Path(_state_dir()) / "routing.yaml"
     try:
         content = config_path.read_text(encoding="utf-8")
     except OSError:
@@ -397,11 +420,11 @@ def _reset_session_stats() -> None:
     Also resets session_spend.json so per-session cost tracking starts clean.
     Initialize prompt_sequence counter for per-prompt quota audit trail.
     Initialize routing lineage tracking (new decisions only)."""
-    os.makedirs(STATE_DIR, exist_ok=True)
+    os.makedirs(_state_dir(), exist_ok=True)
     try:
-        with open(SESSION_START_FILE, "w") as f:
+        with open(_session_start_file(), "w") as f:
             f.write(str(time.time()))
-        with open(SESSION_ID_FILE, "w") as f:
+        with open(_session_id_file(), "w") as f:
             f.write(str(uuid.uuid4()))
     except OSError:
         pass
@@ -427,10 +450,10 @@ def _reset_session_stats() -> None:
             "gates_passed": 0,
             "gates_failed": 0,
         }
-        tmp = SESSION_SPEND_FILE + ".tmp"
+        tmp = _session_spend_file() + ".tmp"
         with open(tmp, "w") as f:
             json.dump(fresh, f, indent=2)
-        os.replace(tmp, SESSION_SPEND_FILE)
+        os.replace(tmp, _session_spend_file())
     except OSError:
         pass
 
@@ -444,7 +467,7 @@ def _reset_session_stats() -> None:
 
 def _reset_stale_health() -> None:
     """Write a stale-reset marker so the router process resets stale circuit breakers."""
-    reset_file = os.path.join(STATE_DIR, "reset_stale.flag")
+    reset_file = os.path.join(_state_dir(), "reset_stale.flag")
     try:
         with open(reset_file, "w") as f:
             f.write(str(time.time()))
@@ -607,9 +630,9 @@ def _refresh_claude_usage() -> str:
         result = _refresh_claude_usage_attempt()
         if result["success"]:
             # Write both usage.json and session snapshot
-            os.makedirs(STATE_DIR, exist_ok=True)
-            usage_path = os.path.join(STATE_DIR, "usage.json")
-            snap_path = os.path.join(STATE_DIR, "session_start_cc_pct.json")
+            os.makedirs(_state_dir(), exist_ok=True)
+            usage_path = os.path.join(_state_dir(), "usage.json")
+            snap_path = os.path.join(_state_dir(), "session_start_cc_pct.json")
             
             snapshot = {
                 "session_pct": result["session_pct"],
@@ -654,9 +677,9 @@ def _refresh_claude_usage() -> str:
             time.sleep(retry_delay)
     
     # All retries failed — write conservative fallback (50% pressure)
-    os.makedirs(STATE_DIR, exist_ok=True)
-    usage_path = os.path.join(STATE_DIR, "usage.json")
-    snap_path = os.path.join(STATE_DIR, "session_start_cc_pct.json")
+    os.makedirs(_state_dir(), exist_ok=True)
+    usage_path = os.path.join(_state_dir(), "usage.json")
+    snap_path = os.path.join(_state_dir(), "session_start_cc_pct.json")
     
     fallback = {
         "session_pct": 50,
@@ -773,7 +796,7 @@ def _weekly_digest() -> str:
 
     # Check last-shown timestamp
     try:
-        with open(WEEKLY_DIGEST_FILE) as f:
+        with open(_weekly_digest_file()) as f:
             last_ts = float(f.read().strip())
         since_last = time.time() - last_ts
         if since_last < 6 * 86400:     # shown within the last 6 days — skip
@@ -782,11 +805,11 @@ def _weekly_digest() -> str:
         if not is_monday:
             return ""   # First run — only show on Mondays
 
-    if not os.path.exists(DB_PATH):
+    if not os.path.exists(_db_path()):
         return ""
 
     try:
-        conn = sqlite3.connect(DB_PATH)
+        conn = sqlite3.connect(_db_path())
         rows = conn.execute(
             """
             SELECT provider,
@@ -831,7 +854,7 @@ def _weekly_digest() -> str:
 
         # Record shown
         try:
-            with open(WEEKLY_DIGEST_FILE, "w") as f:
+            with open(_weekly_digest_file(), "w") as f:
                 f.write(str(time.time()))
         except OSError:
             pass
@@ -853,10 +876,10 @@ def _latency_hint() -> str:
     Only shown when there is enough data (≥3 models with ≥2 calls each).
     Silent on any error so it never breaks the session start.
     """
-    if not os.path.exists(DB_PATH):
+    if not os.path.exists(_db_path()):
         return ""
     try:
-        conn = sqlite3.connect(DB_PATH)
+        conn = sqlite3.connect(_db_path())
         rows = conn.execute(
             """
             SELECT model, AVG(latency_ms) as p50, COUNT(*) as n
@@ -964,7 +987,7 @@ def _format_learned_memory() -> str:
       ...
     """
     try:
-        learned_path = os.path.join(STATE_DIR, "learned_routes.json")
+        learned_path = os.path.join(_state_dir(), "learned_routes.json")
         if not os.path.exists(learned_path):
             return ""
 
@@ -1071,7 +1094,7 @@ def _maybe_refresh_benchmarks_bg() -> None:
     Only fires when ``~/.llm-router/benchmarks.json`` is missing or older than
     ``LLM_ROUTER_BENCHMARK_TTL_DAYS`` (default 7 days).
     """
-    benchmarks_path = os.path.join(STATE_DIR, "benchmarks.json")
+    benchmarks_path = os.path.join(_state_dir(), "benchmarks.json")
     ttl_days = int(os.environ.get("LLM_ROUTER_BENCHMARK_TTL_DAYS", "7"))
 
     # Check staleness — if file exists, compare generated_at timestamp.
@@ -1158,7 +1181,7 @@ def _maybe_reindex_okf_bg(cwd: str | None = None) -> None:
     # project, so switching repos re-indexes the new one rather than skipping it.
     ttl_h = float(os.environ.get("LLM_ROUTER_OKF_AUTOINDEX_TTL_H", "6") or 6)
     stamp = os.path.join(
-        STATE_DIR, "okf_index_stamp",
+        _state_dir(), "okf_index_stamp",
         hashlib.sha1(os.path.realpath(root).encode()).hexdigest()[:16],
     )
     try:
@@ -1225,7 +1248,7 @@ def _maybe_update_pull_routing_rules() -> None:
     """
     try:
         import time as _time
-        _check_file = Path(STATE_DIR) / "last_rules_check"
+        _check_file = Path(_state_dir()) / "last_rules_check"
         _now = _time.time()
         if _check_file.exists():
             try:
@@ -1280,7 +1303,7 @@ def _maybe_update_pull_routing_rules() -> None:
 
         # Record check time
         try:
-            Path(STATE_DIR).mkdir(parents=True, exist_ok=True)
+            Path(_state_dir()).mkdir(parents=True, exist_ok=True)
             _check_file.write_text(str(_now))
         except OSError:
             pass
@@ -1317,7 +1340,7 @@ def main() -> None:
     import glob as _glob
     _stale_globs = ("pending_route_*.json", "last_classification_*.json")
     for _g in _stale_globs:
-        for _stale in _glob.glob(os.path.join(STATE_DIR, _g)):
+        for _stale in _glob.glob(os.path.join(_state_dir(), _g)):
             try:
                 os.unlink(_stale)
             except OSError:
@@ -1341,7 +1364,7 @@ def main() -> None:
     # Using the cache here keeps the banner print() free of data derived from the
     # live OAuth token, satisfying static-analysis taint tracking.
     try:
-        _usage_path = os.path.join(STATE_DIR, "usage.json")
+        _usage_path = os.path.join(_state_dir(), "usage.json")
         with open(_usage_path) as _uf:
             _cached_usage = json.load(_uf)
         # RED2-10-02: default to NOT-fallback (i.e. success) when the key is

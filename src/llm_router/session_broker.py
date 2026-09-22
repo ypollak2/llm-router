@@ -38,6 +38,8 @@ from pathlib import Path
 
 from llm_router.logging import get_logger
 
+from llm_router import paths
+
 log = get_logger("llm_router.session_broker")
 
 PROTOCOL_VERSION = 1
@@ -50,7 +52,7 @@ Adapter = Callable[[dict], Awaitable[dict]]
 
 
 def _llm_router_dir() -> Path:
-    d = Path.home() / ".llm-router"
+    d = paths.llm_router_home()
     d.mkdir(parents=True, exist_ok=True)
     return d
 

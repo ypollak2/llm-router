@@ -7,7 +7,6 @@ import asyncio
 import json
 import urllib.request
 from datetime import datetime, timezone
-from pathlib import Path
 
 from mcp.server.mcpserver import Context
 
@@ -29,6 +28,8 @@ from llm_router.provider_budget import get_provider_budgets
 from llm_router.types import RoutingProfile, colorize_provider, MODEL_COST_PER_1K
 from llm_router import state as _state
 from llm_router.tool_surface import route_tool  # CHZ-SURF-01
+
+from llm_router import paths
 
 
 async def llm_save_session(ctx: Context) -> str:
@@ -1297,7 +1298,7 @@ async def llm_share_profile() -> str:
         }
 
         # Save to temp location for export
-        export_path = Path.home() / ".llm-router" / "profile_export.json"
+        export_path = paths.state_path("profile_export.json")
         export_path.write_text(json.dumps(export_data, indent=2))
 
         return (
@@ -1574,16 +1575,15 @@ async def llm_model_export(ctx: Context, format: str = "csv") -> str:
         load_tracking_data,
         export_tracking_csv,
     )
-    from pathlib import Path
     import json
 
     if format == "csv":
-        output_path = Path.home() / ".llm-router" / "model_tracking.csv"
+        output_path = paths.state_path("model_tracking.csv")
         count = export_tracking_csv(output_path)
         return f"Exported {count} records to: {output_path}\n\nOpen in Excel/Sheets for analysis."
 
     elif format == "json":
-        output_path = Path.home() / ".llm-router" / "model_tracking.json"
+        output_path = paths.state_path("model_tracking.json")
         decisions = load_tracking_data(limit=100000)
 
         output_path.write_text(json.dumps([

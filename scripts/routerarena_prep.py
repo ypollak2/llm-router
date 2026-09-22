@@ -38,7 +38,14 @@ from pathlib import Path
 from typing import Iterable
 
 REPO_ID = "RouteWorks/RouterArena"
-DEFAULT_OUTPUT_ROOT = Path.home() / ".llm-router" / "data" / "routerarena"
+def _router_home() -> Path:
+    """Router state dir, resolved per call so LLM_ROUTER_HOME is honoured (M-04)."""
+    import os as _os
+    return Path(_os.environ.get("LLM_ROUTER_HOME", "").strip() or Path.home() / ".llm-router")
+
+
+def _default_output_root() -> Path:
+    return _router_home() / "data" / "routerarena"
 
 # Map RouterArena's "9 Domain" Dewey-style labels into terse subject
 # tags LLM Router's classifier already understands. Domains start with a
@@ -206,7 +213,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument(
         "--output-root",
         type=Path,
-        default=DEFAULT_OUTPUT_ROOT,
+        default=_default_output_root(),
         help="Where the JSONL lands (default ~/.llm-router/data/routerarena/).",
     )
     p.add_argument(

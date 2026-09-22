@@ -17,9 +17,14 @@ import os
 from datetime import datetime, timedelta
 from pathlib import Path
 
-_ROUTER_DIR = Path.home() / ".llm-router"
-_HOOK_HEALTH_FILE = _ROUTER_DIR / "hook_health.json"
-_HOOK_LOG_FILE = _ROUTER_DIR / "hook_errors.log"
+from llm_router import paths
+
+def _router_dir():
+    return paths.llm_router_home()
+def _hook_health_file():
+    return _router_dir() / "hook_health.json"
+def _hook_log_file():
+    return _router_dir() / "hook_errors.log"
 
 
 def record_hook_error(hook_name: str, error: str, context: dict | None = None) -> None:
@@ -31,7 +36,7 @@ def record_hook_error(hook_name: str, error: str, context: dict | None = None) -
         context: Optional dict with request/session context for debugging
     """
     try:
-        _ROUTER_DIR.mkdir(parents=True, exist_ok=True)
+        _router_dir().mkdir(parents=True, exist_ok=True)
 
         ts = datetime.now().isoformat()
         entry = {
@@ -44,7 +49,7 @@ def record_hook_error(hook_name: str, error: str, context: dict | None = None) -
                               ("session_id", "tool_name", "task_type", "complexity")}
 
         # Append to log file
-        with _HOOK_LOG_FILE.open("a", encoding="utf-8") as f:
+        with _hook_log_file().open("a", encoding="utf-8") as f:
             f.write(json.dumps(entry) + "\n")
 
         # Update health file
@@ -68,9 +73,9 @@ def _update_hook_health(hook_name: str, success: bool, error: str = "") -> None:
     data = {}
 
     # Read existing health data
-    if _HOOK_HEALTH_FILE.exists():
+    if _hook_health_file().exists():
         try:
-            data = json.loads(_HOOK_HEALTH_FILE.read_text())
+            data = json.loads(_hook_health_file().read_text())
         except (json.JSONDecodeError, OSError):
             data = {}
 
@@ -96,7 +101,7 @@ def _update_hook_health(hook_name: str, success: bool, error: str = "") -> None:
         entry["last_error_msg"] = error
 
     # Write updated health file
-    _HOOK_HEALTH_FILE.write_text(json.dumps(data, indent=2))
+    _hook_health_file().write_text(json.dumps(data, indent=2))
 
 
 def get_hook_health() -> dict:
@@ -111,11 +116,11 @@ def get_hook_health() -> dict:
         - last_error_msg: error message from last failure
         - health_status: 'healthy' (no recent errors), 'degraded' (some errors), or 'failing' (recent errors)
     """
-    if not _HOOK_HEALTH_FILE.exists():
+    if not _hook_health_file().exists():
         return {}
 
     try:
-        data = json.loads(_HOOK_HEALTH_FILE.read_text())
+        data = json.loads(_hook_health_file().read_text())
 
         # Add health status for each hook
         for hook_name, info in data.items():
@@ -154,14 +159,14 @@ def get_recent_hook_errors(hours: int = 24) -> list[dict]:
     Returns:
         List of error entries with timestamp, hook name, and error message
     """
-    if not _HOOK_LOG_FILE.exists():
+    if not _hook_log_file().exists():
         return []
 
     try:
         cutoff = datetime.now() - timedelta(hours=hours)
         errors = []
 
-        for line in _HOOK_LOG_FILE.read_text().splitlines():
+        for line in _hook_log_file().read_text().splitlines():
             if not line.strip():
                 continue
             try:
@@ -216,12 +221,12 @@ def cleanup_old_logs(days: int = 30) -> int:
     Returns:
         Number of old entries removed
     """
-    if not _HOOK_LOG_FILE.exists():
+    if not _hook_log_file().exists():
         return 0
 
     try:
         cutoff = datetime.now() - timedelta(days=days)
-        lines = _HOOK_LOG_FILE.read_text().splitlines()
+        lines = _hook_log_file().read_text().splitlines()
 
         kept_lines = []
         removed_count = 0
@@ -240,7 +245,7 @@ def cleanup_old_logs(days: int = 30) -> int:
                 kept_lines.append(line)  # Keep lines we can't parse
 
         if removed_count > 0:
-            _HOOK_LOG_FILE.write_text("\n".join(kept_lines) + "\n" if kept_lines else "")
+            _hook_log_file().write_text("\n".join(kept_lines) + "\n" if kept_lines else "")
 
         return removed_count
     except OSError:

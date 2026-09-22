@@ -15,7 +15,6 @@ but remove unavailable providers and deprioritize quota-depleted services.
 from __future__ import annotations
 
 import threading
-from pathlib import Path
 
 from llm_router.logging import get_logger
 from llm_router.profiles import (
@@ -26,6 +25,8 @@ from llm_router.profiles import (
 )
 from llm_router.discover import get_available_providers
 
+from llm_router import paths
+
 log = get_logger("llm_router.dynamic_routing")
 
 # Cache for dynamic routing tables (built at session startup)
@@ -34,7 +35,8 @@ _dynamic_routing_table: dict[tuple[RoutingProfile, TaskType], list[str]] | None 
 _discovery_complete = False
 _routing_lock = threading.Lock()  # Protects _dynamic_routing_table and _discovery_complete
 
-PROFILE_PATH = Path.home() / ".llm-router" / "profile.yaml"
+def _profile_path():
+    return paths.state_path("profile.yaml")
 
 
 def _get_available_providers_fast() -> set[str]:
@@ -90,12 +92,12 @@ def _load_user_profile() -> dict | None:
     Returns:
         Dict with detected services and quota info, or None if profile doesn't exist.
     """
-    if not PROFILE_PATH.exists():
+    if not _profile_path().exists():
         return None
     
     try:
         import yaml
-        with open(PROFILE_PATH) as f:
+        with open(_profile_path()) as f:
             profile = yaml.safe_load(f)
         return profile
     except Exception as e:

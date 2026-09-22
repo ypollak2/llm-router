@@ -38,9 +38,11 @@ import os
 import pathlib
 from typing import Any
 
+from llm_router import paths
+
 
 def _manifest_path() -> pathlib.Path:
-    return pathlib.Path.home() / ".llm-router" / "install-manifest.json"
+    return paths.state_path("install-manifest.json")
 
 
 def _load() -> list[dict[str, Any]]:
@@ -268,7 +270,7 @@ def _remove_codex_hooks(path: pathlib.Path) -> list[str]:
         data = json.loads(path.read_text())
     except (OSError, ValueError):
         return []
-    ours = str(pathlib.Path.home() / ".llm-router" / "hooks")
+    ours = str(paths.state_path("hooks"))
     hooks = data.get("hooks") if isinstance(data, dict) else None
     if not isinstance(hooks, dict):
         return []

@@ -29,6 +29,14 @@ sys.path.insert(0, str(REPO / "src"))
 from llm_router.hooks import tool_intercept as ti  # noqa: E402
 from llm_router.vision_registry import best_vision_model  # noqa: E402
 
+# M-02: every row this script causes is benchmark traffic, not usage. Declared
+# here rather than inferred later -- `routing_quality.detect_synthetic` prefers
+# an explicit statement by the harness, and until now no bench script made one,
+# so 1,813 fixture rows were counted as production spend.
+import os as _os
+
+_os.environ.setdefault("LLM_ROUTER_SYNTHETIC", "1")
+
 SHOTS = Path(os.environ.get("LLM_ROUTER_BENCH_SHOTS",
                             "/Users/yaliandrona/.claude/jobs/82d6664b/tmp/bench40/shots"))
 

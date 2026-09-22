@@ -18,14 +18,20 @@ from pathlib import Path
 from typing import Optional
 from llm_router.savings import net_saved
 
+from llm_router import paths
+
 
 
 # ── Constants ──────────────────────────────────────────────────────────────
 
-RETROSPECT_DIR = Path.home() / ".llm-router" / "retrospectives"
-DIRECTIVES_FILE = Path.home() / ".llm-router" / "directives.md"
-SESSION_START_FILE = Path.home() / ".llm-router" / "session_start.txt"
-DB_PATH = Path.home() / ".llm-router" / "usage.db"
+def _retrospect_dir():
+    return paths.state_path("retrospectives")
+def _directives_file():
+    return paths.state_path("directives.md")
+def _session_start_file():
+    return paths.state_path("session_start.txt")
+def _db_path():
+    return paths.state_path("usage.db")
 
 
 # ── Session Window Detection ───────────────────────────────────────────────
@@ -41,9 +47,9 @@ def get_session_window() -> tuple[datetime, datetime]:
     """
     end_dt = datetime.now(timezone.utc)
 
-    if SESSION_START_FILE.exists():
+    if _session_start_file().exists():
         try:
-            ts = float(SESSION_START_FILE.read_text().strip())
+            ts = float(_session_start_file().read_text().strip())
             start_dt = datetime.fromtimestamp(ts, tz=timezone.utc)
             return start_dt, end_dt
         except (ValueError, OSError):
@@ -72,11 +78,11 @@ def fetch_session_decisions(
     Returns:
         List of routing decision dicts from routing_decisions table
     """
-    if not DB_PATH.exists():
+    if not _db_path().exists():
         return []
 
     try:
-        conn = sqlite3.connect(DB_PATH)
+        conn = sqlite3.connect(_db_path())
         conn.row_factory = sqlite3.Row
 
         start_iso = start.isoformat()
@@ -111,11 +117,11 @@ def fetch_session_corrections(
     Returns:
         List of correction dicts with: original_model, corrected_model, reason, timestamp
     """
-    if not DB_PATH.exists():
+    if not _db_path().exists():
         return []
 
     try:
-        conn = sqlite3.connect(DB_PATH)
+        conn = sqlite3.connect(_db_path())
         conn.row_factory = sqlite3.Row
 
         start_iso = start.isoformat()
@@ -538,11 +544,11 @@ def write_retrospective_file(retro: dict, session_id: str = "") -> Path:
     Returns:
         Path to written file
     """
-    RETROSPECT_DIR.mkdir(parents=True, exist_ok=True)
+    _retrospect_dir().mkdir(parents=True, exist_ok=True)
 
     now = datetime.now()
     filename = now.strftime("%Y-%m-%d-%H%M%S") + ".md"
-    filepath = RETROSPECT_DIR / filename
+    filepath = _retrospect_dir() / filename
 
     facts = retro.get("facts", {})
     gaps = retro.get("gaps", [])
@@ -630,7 +636,7 @@ def write_directives(actions: list[dict]) -> None:
     if not actions:
         return
 
-    DIRECTIVES_FILE.parent.mkdir(parents=True, exist_ok=True)
+    _directives_file().parent.mkdir(parents=True, exist_ok=True)
 
     now = datetime.now()
     timestamp = now.strftime("%Y-%m-%d %H:%M")
@@ -647,11 +653,11 @@ def write_directives(actions: list[dict]) -> None:
 
     try:
         # Append to existing or create new
-        if DIRECTIVES_FILE.exists():
-            existing = DIRECTIVES_FILE.read_text()
-            DIRECTIVES_FILE.write_text(existing + "\n".join(entries))
+        if _directives_file().exists():
+            existing = _directives_file().read_text()
+            _directives_file().write_text(existing + "\n".join(entries))
         else:
-            DIRECTIVES_FILE.write_text("\n".join(entries))
+            _directives_file().write_text("\n".join(entries))
     except OSError:
         pass  # Graceful failure — don't break session
 
@@ -753,11 +759,11 @@ async def run_weekly_retrospective() -> dict:
     Returns:
         Aggregated weekly retrospective
     """
-    RETROSPECT_DIR.mkdir(parents=True, exist_ok=True)
+    _retrospect_dir().mkdir(parents=True, exist_ok=True)
     
     # Find retrospective files from the last 7 days
     cutoff = datetime.now(timezone.utc) - timedelta(days=7)
-    all_retros = sorted(RETROSPECT_DIR.glob("session_*.md"), reverse=True)
+    all_retros = sorted(_retrospect_dir().glob("session_*.md"), reverse=True)
     
     recent_retros = []
     for filepath in all_retros:

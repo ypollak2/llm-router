@@ -8,15 +8,17 @@ from __future__ import annotations
 
 import json
 import logging
-from pathlib import Path
 from typing import Any, Optional
 
 import httpx
 
+from llm_router import paths
+
 logger = logging.getLogger(__name__)
 
 # Load API key from secure credentials file
-_CREDENTIALS_FILE = Path.home() / ".llm-router" / "agoragentic.json"
+def _credentials_file():
+    return paths.state_path("agoragentic.json")
 _API_KEY: Optional[str] = None
 _AGENT_ID: Optional[str] = None
 
@@ -28,11 +30,11 @@ def _load_credentials() -> tuple[Optional[str], Optional[str]]:
     if _API_KEY is not None:
         return _API_KEY, _AGENT_ID
     
-    if not _CREDENTIALS_FILE.exists():
+    if not _credentials_file().exists():
         return None, None
     
     try:
-        creds = json.loads(_CREDENTIALS_FILE.read_text())
+        creds = json.loads(_credentials_file().read_text())
         _API_KEY = creds.get("api_key")
         _AGENT_ID = creds.get("id")
         return _API_KEY, _AGENT_ID

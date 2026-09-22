@@ -6,6 +6,8 @@ from llm_router.claude_usage import FETCH_USAGE_JS, parse_api_response
 from llm_router import state as _state
 from llm_router.tool_surface import route_tool  # CHZ-SURF-01
 
+from llm_router import paths
+
 
 async def llm_check_usage() -> str:
     """Check real-time Claude subscription usage (session limits, weekly limits, extra spend).
@@ -63,7 +65,7 @@ async def llm_update_usage(data: dict) -> str:
     import asyncio
     import json as _json
 
-    state_dir = os.path.expanduser("~/.llm-router")
+    state_dir = str(paths.llm_router_home())
     await asyncio.to_thread(os.makedirs, state_dir, None, True)
 
     state_file = os.path.join(state_dir, "usage_last_refresh.txt")
@@ -146,7 +148,7 @@ async def llm_refresh_claude_usage() -> str:
 
     import os
     import time
-    state_dir = os.path.expanduser("~/.llm-router")
+    state_dir = str(paths.llm_router_home())
     os.makedirs(state_dir, exist_ok=True)
 
     with open(os.path.join(state_dir, "usage_last_refresh.txt"), "w") as f:

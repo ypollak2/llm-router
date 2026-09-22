@@ -25,6 +25,8 @@ from typing import Any
 
 from llm_router.routing_hints import detect_sensitive_content_semantic, log_routing_decision
 
+from llm_router import paths
+
 try:
     import yaml
 except ImportError:
@@ -36,7 +38,7 @@ def safe_config_path() -> Path:
 
     Located in ~/.llm-router/ to avoid project-level security restrictions.
     """
-    return Path.home() / ".llm-router" / "config.yaml"
+    return paths.state_path("config.yaml")
 
 
 def load_safe_config() -> dict[str, Any]:

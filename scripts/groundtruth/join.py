@@ -28,7 +28,15 @@ from typing import Iterator
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 
-LLM_ROUTER_HOME = Path(os.environ.get("LLM_ROUTER_HOME", Path.home() / ".llm-router"))
+def llm_router_home() -> Path:
+    """Router state dir, resolved on every call.
+
+    M-04: this was a module-level constant reading the environment once, at
+    import. That honoured LLM_ROUTER_HOME only if it was already set when the
+    module first loaded, so a caller that set it afterwards — every test, and
+    any process switching profiles — silently read the operator's real state.
+    """
+    return Path(os.environ.get("LLM_ROUTER_HOME", "").strip() or Path.home() / ".llm-router")
 
 INCOMPLETE_SYNTHETIC = "synthetic-or-unknown-provenance"
 INCOMPLETE_NO_CAPTURE = "no-captured-prompt"
@@ -98,7 +106,7 @@ def load_capture_index(path: Path | None = None) -> dict[str, dict]:
     A repeated hash is not a conflict: the same prompt asked twice is the same
     task, which is exactly the property that makes the hash a usable key.
     """
-    p = path or (LLM_ROUTER_HOME / "prompt_capture.jsonl")
+    p = path or (llm_router_home() / "prompt_capture.jsonl")
     index: dict[str, dict] = {}
     for rec in _iter_jsonl(p):
         sha = rec.get("prompt_sha256")
@@ -109,7 +117,7 @@ def load_capture_index(path: Path | None = None) -> dict[str, dict]:
 
 def load_routes(path: Path | None = None) -> dict[str, dict]:
     """route_id -> ledger record. Later rows win, matching ledger replay order."""
-    p = path or (LLM_ROUTER_HOME / "routing_quality.jsonl")
+    p = path or (llm_router_home() / "routing_quality.jsonl")
     out: dict[str, dict] = {}
     for rec in _iter_jsonl(p):
         rid = rec.get("route_id")

@@ -15,12 +15,13 @@ import logging
 import os
 import re
 import sys
-from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 import uvicorn
+
+from llm_router import paths
 
 # Import the existing classifier (we'll extend it)
 
@@ -32,7 +33,7 @@ logging.basicConfig(
     handlers=[
         logging.StreamHandler(sys.stderr),
         logging.FileHandler(
-            Path.home() / ".llm-router" / "service.log", mode="a"
+            paths.state_path("service.log"), mode="a"
         ),
     ],
 )

@@ -6,6 +6,8 @@ import os
 import sys
 from pathlib import Path
 
+from llm_router import paths
+
 
 # ── ANSI helpers (respect NO_COLOR / non-tty) ─────────────────────────────────
 
@@ -75,7 +77,7 @@ def _remove_derived_state() -> list[str]:
     actions: list[str] = []
     # Each entry is read through its owning module's attribute rather than
     # rebuilt from Path.home(), so a redirected path stays redirected.
-    targets = [agentic_registry.CACHE_PATH]
+    targets = [agentic_registry._cache_path()]
 
     for target in targets:
         if not target.exists():
@@ -144,7 +146,7 @@ def _run_uninstall(flags: list[str] | None = None) -> None:
         print(f"  {a}")
 
     if purge:
-        state_dir = Path.home() / ".llm-router"
+        state_dir = paths.llm_router_home()
         if state_dir.exists():
             # Warn and confirm before destroying usage history + .env
             print(f"\n  {_red(_bold('⚠  Purge will permanently delete:'))}")

@@ -11,6 +11,8 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+from llm_router import paths
+
 PROVIDERS = {
     "GEMINI_API_KEY": {
         "name": "Google Gemini",
@@ -184,11 +186,10 @@ For non-interactive setup, write ~/.llm-router/.env directly.""",
             print("   Subscription mode enabled — Claude quota will be tracked and saved.")
 
     # G2: Initialize ~/.llm-router/ directory and usage database so the first
-    # `llm_router status` / `llm_router savings-report` command doesn't fail on a
+    # `llm-router status` / `llm-router savings-report` command doesn't fail on a
     # missing directory. Done here so it happens before hooks start writing.
     import sqlite3 as _sqlite3
-    from pathlib import Path as _Path
-    _state_dir = _Path.home() / ".llm-router"
+    _state_dir = paths.llm_router_home()
     try:
         _state_dir.mkdir(parents=True, exist_ok=True)
         _usage_db = _state_dir / "usage.db"
