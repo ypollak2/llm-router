@@ -329,10 +329,31 @@ _AGENT_SECRET_PATTERNS = [
 
 
 def _scrub_agent_prompt(text: str) -> str:
-    """Redact common credential patterns from a prompt before persisting."""
-    for pat in _AGENT_SECRET_PATTERNS:
-        text = pat.sub("[REDACTED]", text)
-    return text
+    """Redact credentials before persisting. Canonical first, local only as fallback.
+
+    T-04 / S-02. This previously used `_AGENT_SECRET_PATTERNS` alone, and the
+    2026-09-22 audit measured the gap: it missed **Slack tokens, JWTs and Google
+    API keys** that `secret_scrubber` covers, while the docstring above it
+    claimed prompts were scrubbed before storage.
+
+    That is not shipped-but-unused code. This hook is registered as a
+    `PreToolUse[Agent]` hook, so it runs on every delegation in a live session,
+    and it writes to a GLOBAL, cross-project `agent_calls.json`.
+
+    The local list is kept — but only as a fallback for the early-boot case where
+    `llm_router` is not importable, which is the reason it exists. It is no longer
+    the primary path, and it no longer silently defines what "scrubbed" means.
+    """
+    if not text:
+        return text
+    try:
+        from llm_router.secret_scrubber import scrub_text
+
+        return scrub_text(text)
+    except Exception:  # noqa: BLE001 — a hook must never fail over redaction
+        for pat in _AGENT_SECRET_PATTERNS:
+            text = pat.sub("[REDACTED]", text)
+        return text
 
 
 def _log_agent_call(subagent_type: str, prompt: str, decision: str) -> None:

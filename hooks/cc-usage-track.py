@@ -219,8 +219,16 @@ def _log_to_db(
                 ),
             )
             db.commit()
-    except Exception:
-        pass  # never let tracking break Claude Code
+    except Exception as _exc:  # noqa: BLE001 — never let tracking break Claude Code
+        # T-14: still fail-open, but no longer SILENT. A failed write here loses
+        # a Claude Code usage row and reported nothing: no error, no log, no counter. 92
+        # persistence sites had this shape; this is one of the ones that loses
+        # data a user would notice missing.
+        try:
+            from llm_router import failopen as _fo
+            _fo.record("CHZ-FO-HOOK-CC-USAGE-WRITE", _exc)
+        except Exception:  # noqa: BLE001
+            pass
 
 
 def main() -> None:
