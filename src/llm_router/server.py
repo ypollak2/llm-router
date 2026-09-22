@@ -106,13 +106,15 @@ except Exception:
 # Reset stale circuit breakers on startup (clears failures older than 30 min)
 try:
     import os as _os
+
+    from llm_router import paths as _paths
     from llm_router.health import get_tracker as _get_tracker
     _reset_tracker = _get_tracker()
     _reset = _reset_tracker.reset_stale(max_age_seconds=1800.0)
     if _reset:
         log.info("circuit_breakers_reset", reset_count=_reset)
     try:
-        _os.unlink(_os.path.expanduser("~/.llm-router/reset_stale.flag"))
+        _os.unlink(str(_paths.state_path("reset_stale.flag")))
     except OSError:
         pass
 except Exception:
@@ -142,6 +144,7 @@ except Exception as _dynroute_err:
 # tool list at all — saving tokens before any request is made.
 
 from llm_router.tool_tiers import make_should_register, tier_summary as _tier_summary  # noqa: E402
+
 
 _slim = get_config().llm_router_slim
 _gate = make_should_register(_slim)
@@ -208,7 +211,7 @@ def router_status() -> str:
     same posture the original audit's SEC-004 row asked for.
 
     Developer profile preserves the full surface so dev workstations
-    and `llm_router doctor` keep working out-of-the-box.
+    and `llm-router doctor` keep working out-of-the-box.
     """
     return _render_router_status()
 
