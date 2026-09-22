@@ -136,8 +136,17 @@ def _run_check(check: str | list[str], cwd: Path, timeout: float) -> tuple[bool,
     if not argv:
         return False, "acceptance check was empty"
     try:
+        # R4: `argv` comes from a caller-supplied `check` string, so this
+        # executes model-influenced commands and must not hand them the
+        # operator's credentials. Same reasoning as agent_loop; fail-closed.
+        try:
+            from llm_router.safe_subprocess import get_delegated_env
+            _child_env = get_delegated_env()
+        except Exception:  # noqa: BLE001
+            _child_env = {"PATH": os.defpath}
         r = subprocess.run(argv, capture_output=True, text=True,
-                           cwd=str(cwd), timeout=max(1.0, timeout))
+                           cwd=str(cwd), timeout=max(1.0, timeout),
+                           env=_child_env)
     except subprocess.TimeoutExpired:
         return False, f"acceptance check timed out after {timeout:.0f}s"
     except Exception as exc:                                   # noqa: BLE001

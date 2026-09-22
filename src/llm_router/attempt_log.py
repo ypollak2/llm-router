@@ -40,18 +40,65 @@ def _path() -> Path:
     return root / name
 
 
+def _scrub(text: str) -> str:
+    """Redact credentials BEFORE they are written. R1.
+
+    `reason` is built from provider exception text — `direct_executor` passes
+    `f"call raised: {exc}"` — and auth failures routinely echo the credential
+    that failed. Measured 2026-09-22 against this file with no scrubbing:
+    a GitHub PAT, an AWS key id, an AWS secret, a Slack token and a bearer
+    token all landed INTACT, in a file created at 0644 (world-readable).
+
+    Truncation is not redaction. `reason[:80]` shortened a 100-char Anthropic
+    key enough to defeat a naive exact-match search while leaving 80 characters
+    of it on disk — which is how a first probe of this defect reported "no
+    leak". Scrub first, truncate second.
+
+    Fail-CLOSED: if the scrubber cannot be reached, withhold the text rather
+    than write it. A reason field is diagnostic; a leaked credential is not
+    recoverable.
+    """
+    if not text:
+        return text
+    try:
+        from llm_router.secret_scrubber import scrub_text
+        return scrub_text(text)
+    except Exception:  # noqa: BLE001
+        return "[SCRUB-UNAVAILABLE: reason withheld]"
+
+
 def record(model: str, outcome: str, latency_ms: int, *, reason: str = "") -> None:
     """Append one attempt. Fail-open: telemetry must never break routing."""
     try:
         p = _path()
         p.parent.mkdir(parents=True, exist_ok=True)
-        with p.open("a") as fh:
+        # R1: 0600 at CREATION. `open` creates with 0666 & ~umask -- 0644 on a
+        # default umask -- so the file was world-readable for the whole write
+        # and a handle opened in that window stays readable afterwards.
+        from llm_router.paths import private_opener
+        with open(p, "a", opener=private_opener) as fh:
             fh.write(json.dumps({
                 "ts": time.time(), "model": model, "outcome": outcome,
-                "latency_ms": int(latency_ms), "reason": reason[:80],
+                "latency_ms": int(latency_ms), "reason": _scrub(reason)[:80],
             }) + "\n")
+        _repair_legacy_mode(p)
         _rotate(p)
     except Exception:                                        # noqa: BLE001
+        pass
+
+
+def _repair_legacy_mode(p: Path) -> None:
+    """An opener only sets the mode when it CREATES the file.
+
+    A file an older version already wrote at 0644 keeps that mode forever
+    otherwise, so the fix would protect new installs and leave existing ones
+    exposed.
+    """
+    try:
+        import stat as _stat
+        if _stat.S_IMODE(p.stat().st_mode) != 0o600:
+            p.chmod(0o600)
+    except OSError:
         pass
 
 

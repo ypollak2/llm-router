@@ -286,9 +286,31 @@ def execute_tool(name: str, args: dict, project_root: Path) -> str:
             if not _allowed:
                 return _refusal
             try:
+                # R4. This inherited the FULL parent environment -- every
+                # provider key, OAuth token and cloud credential in the
+                # process -- to a command chosen by a model. The allowlist
+                # above cannot help: it permits python, node, awk, find, sed,
+                # go, cargo and git, all of which can read os.environ.
+                #
+                # `get_delegated_env` is an ALLOWLIST: nothing crosses unless
+                # it was named, so a credential whose variable name no
+                # denylist has heard of is absent by construction rather than
+                # by recognition. The sibling module
+                # scripts/groundtruth/verifiers.py has used it since
+                # 2026-09-22; this call site was missed.
+                #
+                # Fail-CLOSED: if the allowlist cannot be imported we hand the
+                # child a minimal environment rather than falling back to the
+                # full one. The fallback IS the vulnerability.
+                try:
+                    from llm_router.safe_subprocess import get_delegated_env
+                    _child_env = get_delegated_env()
+                except Exception:  # noqa: BLE001
+                    import os as _os
+                    _child_env = {"PATH": _os.defpath}
                 result = subprocess.run(
                     argv, capture_output=True, text=True,
-                    timeout=30, cwd=str(project_root),
+                    timeout=30, cwd=str(project_root), env=_child_env,
                 )
                 output = result.stdout
                 if result.stderr:

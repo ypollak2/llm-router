@@ -22,6 +22,20 @@ SECRET_PATTERNS = {
     # AWS credentials
     "aws_key_id": re.compile(r"AKIA[0-9A-Z]{16}"),
     "aws_secret": re.compile(r"aws[_-]?secret[_-]?access[_-]?key[\"']?\s*[:=]\s*[\"']?[a-zA-Z0-9/+]{40}", re.IGNORECASE),
+    # Connection URLs carrying inline credentials. Added 2026-09-22 (R1/R2):
+    # `budget_backend`'s Postgres-fallback path stringifies the driver error
+    # into an alert `detail` dict, which `alerts.emit_alert` POSTs to
+    # LLM_ROUTER_ALERT_WEBHOOK. A live capture carried a DSN with a plaintext
+    # password OFF THE MACHINE. No pattern in this table matched it, and the
+    # same string was echoed unredacted in the structlog critical line.
+    #
+    # Redacts the credential portion only; the host and database survive,
+    # because an alert whose whole URL is [REDACTED] cannot be acted on and
+    # an operator who cannot act will turn the scrubbing off.
+    "db_url_credentials": re.compile(
+        r"\b([a-z][a-z0-9+.\-]*)://([^:/@\s]*):([^@/\s]+)@",
+        re.IGNORECASE,
+    ),
     # Other tokens and secrets
     "bearer_token": re.compile(r"bearer\s+[a-zA-Z0-9._\-]+", re.IGNORECASE),
     "authorization": re.compile(r"authorization[\"']?\s*[:=]\s*[\"']?[^\s\"']+", re.IGNORECASE),
