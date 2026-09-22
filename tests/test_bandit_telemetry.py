@@ -56,13 +56,28 @@ class TestModelStats:
         assert ev > 0
         assert ev != float("inf")
 
-    def test_expected_value_zero_when_no_successes(self):
-        """A model with 0% success rate has zero expected value regardless of cost."""
+    def test_expected_value_is_negative_when_a_model_costs_money_and_never_succeeds(self):
+        """T-09: the reward is expected NET value, so a paid flop is worth less than nothing.
+
+        This asserted `== 0.0` under the old ratio (`0.0 / cost`). Zero was the
+        wrong answer: a model that bills $0.01 and never produces a usable
+        response has cost you $0.01, and the bandit should rank it below a free
+        model that also never works. `-0.01` says that; `0.0` does not.
+        """
         flop = ModelStats(
             model="bad/model", n_samples=40, success_rate=0.0,
             avg_cost=0.01, avg_latency_ms=900,
         )
-        assert flop.expected_value == 0.0
+        assert flop.expected_value == pytest.approx(-0.01)
+
+        free_flop = ModelStats(
+            model="free/model", n_samples=40, success_rate=0.0,
+            avg_cost=0.0, avg_latency_ms=900,
+        )
+        assert free_flop.expected_value == pytest.approx(0.0)
+        assert free_flop.expected_value > flop.expected_value, (
+            "a paid model that never works must not rank above a free one that also never works"
+        )
 
 
 # ── Bandit cold-start ────────────────────────────────────────────────────────

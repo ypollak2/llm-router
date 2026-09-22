@@ -37,6 +37,24 @@ from llm_router import pricing as _pricing
 from llm_router.lineage import Tier
 
 
+#: Every `provider` string a Gemini/Google call can be logged under.
+#:
+#: T-20 (audit 2026-09-22). `quota_tracker` queried `provider = 'gemini'`; this
+#: registry tags every Gemini model `provider="google"`, so the only path that
+#: computes real Gemini spend returned $0 BY CONSTRUCTION — a zero that looks
+#: like "you spent nothing" and is really "this query can never match".
+#:
+#: Defined here because this is the module that assigns provider names, and
+#: duplicated nowhere: `router.py` carried the same set inline, which is how the
+#: two drifted apart in the first place.
+GOOGLE_PROVIDERS: frozenset[str] = frozenset({
+    "google", "gemini", "google_subscription", "gemini_cli", "gemini_subscription",
+})
+
+#: Same, for OpenAI-family calls.
+OPENAI_PROVIDERS: frozenset[str] = frozenset({"openai", "azure_openai", "codex"})
+
+
 @dataclass(frozen=True)
 class ModelMetadata:
     """One row of the registry — everything the router needs to decide."""

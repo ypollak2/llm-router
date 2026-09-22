@@ -303,29 +303,30 @@ class QuotaTracker:
             _conn = aiosqlite.connect(str(db_path), timeout=5)
             mark_worker_daemon(_conn)  # CHZ-PY-004: before __aenter__ starts the worker
             async with _conn as db:
-                # OpenAI spend
-                cursor = await db.execute(
-                    """
-                    SELECT COALESCE(SUM(cost_usd), 0)
-                    FROM usage
-                    WHERE provider = 'openai' 
-                    AND timestamp > datetime('now', '-24 hours')
-                    """
+                # T-20: match the provider names the registry actually assigns.
+                # `provider = 'gemini'` matched nothing — every Gemini model is
+                # tagged `google` — so this returned $0 by construction.
+                from llm_router.model_registry import (
+                    GOOGLE_PROVIDERS, OPENAI_PROVIDERS,
                 )
-                row = await cursor.fetchone()
-                openai_spend = row[0] if row else 0.0
 
-                # Gemini spend
-                cursor = await db.execute(
-                    """
-                    SELECT COALESCE(SUM(cost_usd), 0)
-                    FROM usage
-                    WHERE provider = 'gemini'
-                    AND timestamp > datetime('now', '-24 hours')
-                    """
-                )
-                row = await cursor.fetchone()
-                gemini_spend = row[0] if row else 0.0
+                async def _spend(providers) -> float:
+                    names = sorted(providers)
+                    marks = ",".join("?" for _ in names)
+                    cur = await db.execute(
+                        f"""
+                        SELECT COALESCE(SUM(cost_usd), 0)
+                        FROM usage
+                        WHERE provider IN ({marks})
+                          AND timestamp > datetime('now', '-24 hours')
+                        """,
+                        names,
+                    )
+                    r = await cur.fetchone()
+                    return float(r[0]) if r else 0.0
+
+                openai_spend = await _spend(OPENAI_PROVIDERS)
+                gemini_spend = await _spend(GOOGLE_PROVIDERS)
 
                 return float(openai_spend), float(gemini_spend)
         except Exception:

@@ -365,7 +365,14 @@ def log_direct_to_db(
 
         # An empty string used to log success, so a model that returned nothing
         # was reinforced exactly like one that answered.
-        _usable = _response_is_usable(response.content)
+        #
+        # T-10: a floor-served answer is not a success either. Same rule as
+        # router.py's bandit feed — the response's own degradation flag outranks
+        # re-deriving usability from content the router already rejected.
+        _usable = (
+            False if getattr(response, "quality_degraded", False)
+            else _response_is_usable(response.content)
+        )
 
         async def _persist() -> None:
             await _cost_log_usage(

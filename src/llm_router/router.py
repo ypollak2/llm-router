@@ -1533,6 +1533,8 @@ def _enrich_response(
     task_type: TaskType,
     chain_attempts: list[str],
     failed_attempt_cost: float = 0.0,
+    quality_degraded: bool = False,
+    quality_degraded_reason: str = "",
 ) -> LLMResponse:
     """Add explainability fields to a successful LLMResponse.
 
@@ -1549,6 +1551,10 @@ def _enrich_response(
         task_type_str=task_type.value,
         chain_attempts=chain_attempts,
         chain_attempt_cost_usd=float(failed_attempt_cost or 0.0),
+        # T-10: carried through so a floor-served answer is distinguishable by
+        # FIELD, not only by a log line the caller never sees.
+        quality_degraded=quality_degraded,
+        quality_degraded_reason=quality_degraded_reason,
     )
 
 
@@ -1828,6 +1834,35 @@ def _emit_ledger_attempt(
         failopen.record("CHZ-FO-ROUTER-LEDGER-EMIT", exc)
 
 
+#: Ledger outcomes that must never be recorded as a successful route (T-08/T-10).
+#: Mirrors `routing_quality.DEGRADED_OUTCOMES`; imported lazily at the call site
+#: would be a second copy of the rule, so it is resolved once here.
+try:  # pragma: no cover — import shape only
+    from llm_router.routing_quality import DEGRADED_OUTCOMES as _DEGRADED_LEDGER_OUTCOMES
+except Exception:  # noqa: BLE001
+    _DEGRADED_LEDGER_OUTCOMES = frozenset({"degraded"})
+
+
+def _google_providers() -> frozenset[str]:
+    """The Google/Gemini provider names, from the registry that assigns them.
+
+    T-20: this set used to be an inline literal here AND a single string
+    `'gemini'` in `quota_tracker`. They disagreed, and the disagreement made
+    real Gemini spend read as $0.
+    """
+    try:
+        from llm_router.model_registry import GOOGLE_PROVIDERS
+        return GOOGLE_PROVIDERS
+    except Exception as exc:  # noqa: BLE001
+        # CHZ-FO-02: account for the swallow. This fallback is a COPY of the
+        # registry's set, and a silent fall back to a copy is exactly how the
+        # two drifted apart (T-20).
+        from llm_router import failopen as _fo
+        _fo.record("CHZ-FO-ROUTER-PROVIDER-FAMILY", exc)
+        return frozenset({"google", "gemini", "google_subscription",
+                          "gemini_cli", "gemini_subscription"})
+
+
 def _emit_ledger_terminal(
     correlation_id: str | None, terminal_state: str, *, route_succeeded: bool,
     agent_session_id: str | None = None,
@@ -1986,6 +2021,7 @@ async def _finalize_successful_route(
     suppress_ledger: bool = False,
     served_from_cache: bool = False,
     effective_complexity: str = "moderate",
+    ledger_outcome: str | None = None,
 ) -> None:
     """CHZ-AUD-B-05: single source of truth for the post-success finalization
     side-effects, called from EVERY success path: the primary success path, the
@@ -2065,7 +2101,16 @@ async def _finalize_successful_route(
     # North Star route-quality ledger (CF-1) — completion route. Skipped on cache
     # hits: the `bypassed` terminal already emitted at the call site is the correct
     # ledger signal; a completion record here would double-signal (CHZ-AUD-B-05).
-    if not suppress_ledger and not served_from_cache:
+    # T-08 (audit 2026-09-22). `served_from_cache` was doing two jobs: "do not
+    # re-bill" and "do not write a quality row". The first is right; the second
+    # meant three terminal paths returned real content and left no trace in
+    # `routing_quality.jsonl` — including the exhaustion floor, which is exactly
+    # the case `mis_route` / `quality_escalation_occurred` exist to measure.
+    #
+    # `ledger_outcome` separates them: a caller that passes one gets its row,
+    # stamped with an outcome that says what kind of turn it was, so it can
+    # never be read as a clean completion.
+    if not suppress_ledger and (not served_from_cache or ledger_outcome):
         try:
             from llm_router.routing_quality import (
                 RouteLedgerRecord, derive_fallback_reason, record_route, stamp_trace,
@@ -2122,7 +2167,12 @@ async def _finalize_successful_route(
                 final_tier=_model_tier(response.model, profile),
                 chosen_model=_first_model,
                 final_model=response.model,
-                route_succeeded=True,
+                route_outcome=ledger_outcome or "success",
+                # A degraded turn is NOT a success. The router rejected this
+                # content on quality grounds and served it only because there
+                # was nothing else; recording it as succeeded is what let a
+                # rejected answer count as a win (T-10).
+                route_succeeded=(ledger_outcome not in _DEGRADED_LEDGER_OUTCOMES),
                 tool_execution_attempted=False,
                 tool_execution_succeeded=None,
                 verification_attempted=False,
@@ -2251,7 +2301,17 @@ async def _finalize_successful_route(
             final_provider=response.provider,
             # Not "a response object exists" — that was always true, which is why
             # the bandit was optimising a constant. See grounding.response_is_usable.
-            success=_response_is_usable(getattr(response, "content", "") or ""),
+            #
+            # T-10: and never True for a floor-served answer. The router rejected
+            # this content on quality grounds moments ago; re-deriving "usable"
+            # from the text it just refused, and handing that to the bandit as a
+            # win, teaches the bandit to prefer whichever model produces
+            # rejectable output most cheaply. The response's own flag outranks
+            # any re-derivation.
+            success=(
+                False if getattr(response, "quality_degraded", False)
+                else _response_is_usable(getattr(response, "content", "") or "")
+            ),
             input_tokens=response.input_tokens,
             output_tokens=response.output_tokens,
             cost_usd=response.cost_usd,
@@ -2291,7 +2351,7 @@ async def _finalize_successful_route(
                     )
                 except Exception as e:
                     log.debug("Failed to log codex_usage: %s", e)
-            elif response.provider in {"gemini", "google", "google_subscription", "gemini_cli", "gemini_subscription"}:
+            elif response.provider in _google_providers():   # T-20: one definition
                 try:
                     await cost.log_gemini_usage(
                         model=response.model,
@@ -3534,6 +3594,11 @@ async def _dispatch_model_loop(
                 correlation_id=correlation_id, failed_attempt_cost=_floor_extra,
                 config=config, receipt=None, served_from_cache=True,
                 effective_complexity=effective_complexity,
+                # T-08/T-10: EVERY candidate was gate-rejected and the best
+                # rejected answer was served anyway. This row is the only
+                # record that the caller got content the router did not
+                # endorse, and it is stamped route_succeeded=False.
+                ledger_outcome="degraded",
             )
         except Exception as _fin_err:  # noqa: BLE001 — finalize never fails the turn
             log.warning("finalize_successful_route (exhaustion-floor) failed (non-fatal): %s", _fin_err)
@@ -3541,6 +3606,12 @@ async def _dispatch_model_loop(
             _best_rejected, classification_data, effective_complexity,
             task_type, chain_attempts,
             failed_attempt_cost=_floor_extra,
+            # T-10: the caller is getting content this router rejected. Say so.
+            quality_degraded=True,
+            quality_degraded_reason=(
+                "every candidate was rejected by a dispatch gate; "
+                "the best rejected answer was served"
+            ),
         )
 
     _emit_ledger_terminal(correlation_id, "failed", route_succeeded=False)
@@ -3800,6 +3871,9 @@ async def route_and_call(
                     failed_attempt_cost=0.0, config=config, receipt=None,
                     served_from_cache=True,
                     effective_complexity=_pre_profile_complexity,
+                    # T-08: a keyed replay of an earlier answer. Distinct from a
+                    # semantic cache hit — same prompt vs. same idempotency key.
+                    ledger_outcome="deduplicated",
                 )
             except Exception as _fin_err:  # noqa: BLE001 — dedupe fail-open: never break the served turn
                 log.warning("finalize_successful_route (idempotency) failed (non-fatal): %s", _fin_err)
@@ -4246,6 +4320,9 @@ async def route_and_call(
                             failed_attempt_cost=0.0, config=config, receipt=None,
                             served_from_cache=True,
                             effective_complexity=effective_complexity,
+                            # T-08: a cache hit is neither a success nor a failure. It now
+                            # gets its own row rather than none at all.
+                            ledger_outcome="cache_hit",
                         )
                     except Exception as _fin_err:  # noqa: BLE001 — must not fall through to a real call
                         # CHZ-AUD (RED-1): a finalize failure here must NOT be caught

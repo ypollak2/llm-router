@@ -196,7 +196,20 @@ class RouteLedgerRecord:
     # So `route_outcome` is an explicit enum rather than a second boolean —
     # a cache hit is neither a success nor a failure, and a field that can hold
     # only one value is not a measurement.
-    route_outcome: str = "success"              # success | failed | cache_hit
+    # T-08 (audit 2026-09-22) added the last two. Three terminal paths returned
+    # real content to the caller and wrote NO quality row at all, because they
+    # all funnel through `served_from_cache=True`, which the ledger gate skips.
+    # Reproduced: a floor-served route returned 432 chars of content and
+    # `routing_quality.jsonl` was never created.
+    #
+    #   deduplicated — an idempotency-keyed replay of an earlier answer
+    #   degraded     — the exhaustion floor: EVERY candidate was gate-rejected
+    #                  and the best rejected response was served anyway
+    #
+    # `degraded` is the one that matters. The floor is precisely the case
+    # `mis_route` and `quality_escalation_occurred` exist to measure, and it was
+    # the one case the ledger could not see.
+    route_outcome: str = "success"   # success | failed | cache_hit | deduplicated | degraded
     route_succeeded: bool = False               # model returned a usable response
 
     # --- Tool execution (null = not applicable, e.g. completion route) ---
@@ -372,7 +385,16 @@ def stamp_trace(
     return rec
 
 
-ROUTE_OUTCOMES = ("success", "failed", "cache_hit")
+ROUTE_OUTCOMES = ("success", "failed", "cache_hit", "deduplicated", "degraded")
+
+#: Outcomes where the caller got content that the router itself did not endorse.
+#: Kept as a set so a reader computing a success rate can exclude them in one
+#: place rather than re-deciding per consumer.
+DEGRADED_OUTCOMES = frozenset({"degraded"})
+
+#: Outcomes served without a fresh model call. Not failures, and not successes
+#: either — counting them as either is what made the old boolean useless.
+REPLAYED_OUTCOMES = frozenset({"cache_hit", "deduplicated"})
 
 
 def record_route(rec: RouteLedgerRecord, path: str | None = None) -> bool:

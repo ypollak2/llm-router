@@ -510,6 +510,21 @@ class LLMResponse:
     # Claude Code's upstream cost calculation.
     cache_creation_input_tokens: int = 0
     cache_read_input_tokens: int = 0
+    # T-10 (audit 2026-09-22). Set when the EXHAUSTION FLOOR served this
+    # response: every candidate was rejected by a dispatch gate, and the
+    # best-rejected answer was returned anyway because the alternative was
+    # returning nothing.
+    #
+    # Before this, such a response came back through `_enrich_response` with no
+    # marker at all, rendered with the same success tick as a clean answer, and
+    # had `success` RECOMPUTED by `_response_is_usable()` on content the router
+    # had just rejected — so a rejected answer fed the bandit as a win.
+    #
+    # Modelled on `cap_downgraded` above: a boolean the caller can branch on plus
+    # a human reason, because "the answer is worse than usual and here is why" is
+    # information the user is entitled to.
+    quality_degraded: bool = False
+    quality_degraded_reason: str = ""
 
     def summary(self) -> str:
         """Format a compact one-line summary for logging and CLI display.
@@ -526,6 +541,11 @@ class LLMResponse:
         # RED2-2-02 / RED2-3-01: make a daily-cap downgrade visible, and describe
         # it HONESTLY by the actual provider — a smart-mode cap fallthrough routes
         # to Claude (paid), not free-local, so don't claim "free-local" then.
+        if self.quality_degraded:
+            # T-10: never render a floor-served answer with a clean success tick.
+            parts.insert(0, "⚠ DEGRADED")
+            if self.quality_degraded_reason:
+                parts.append(f"({self.quality_degraded_reason})")
         if self.cap_downgraded:
             parts.append(f"⬇ daily cap → {self._cap_downgrade_target()}")
         return " ".join(parts)

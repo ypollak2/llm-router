@@ -28,6 +28,7 @@ Design principles mirror :mod:`llm_router.calibration`:
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass
 
 import aiosqlite
@@ -50,6 +51,21 @@ log = logging.getLogger("llm_router.telemetry")
 MIN_SAMPLES_FOR_SIGNAL = 30
 
 
+#: What one correct answer is worth, in dollars — the exchange rate between
+#: quality and cost in the bandit's reward (T-09).
+#:
+#: Defaults to roughly the cost of having the premium baseline model answer,
+#: which is the honest reference: if routing to a cheaper model cannot beat
+#: "just use the good model", it should not route. Raising it makes the bandit
+#: more quality-seeking, lowering it more cost-seeking; at 0 it ranks purely by
+#: cheapness, which is what the old ratio effectively did.
+#: Graded samples required before `judge_mean` outranks the weak usable-rate
+#: signal. Below this the mean is noise; above it, it is the better measurement.
+MIN_JUDGED_FOR_SIGNAL: int = 20
+
+ANSWER_VALUE_USD: float = float(os.environ.get("LLM_ROUTER_ANSWER_VALUE_USD", "0.05") or 0.05)
+
+
 @dataclass(frozen=True)
 class ModelStats:
     """Empirical performance of a model on (profile, subject) routes.
@@ -58,23 +74,85 @@ class ModelStats:
     ``expected_value`` is the bandit's optimization target — it bakes both
     quality (``success_rate``) and cost into a single comparable scalar so
     candidates with different price points sort correctly.
-
-    The cost denominator is floored at ``1e-9`` so free providers (Ollama,
-    Codex) get a very large but finite ``expected_value`` rather than ``inf``.
-    Without the floor, every successful Ollama call would dominate every
-    rank-by-EV comparison and the bandit would never explore alternatives.
     """
 
     model: str
     n_samples: int
+    #: Share of calls whose response was NON-EMPTY AND NOT A DEFERRAL.
+    #:
+    #: T-09: this is not a quality measurement and the bandit must not be
+    #: described as optimising quality on it. `_response_is_usable` reads the
+    #: text for emptiness and refusal markers; a confident, fluent, entirely
+    #: wrong answer scores 1.0. It rules out the two worst outcomes and says
+    #: nothing about the rest.
     success_rate: float
     avg_cost: float
     avg_latency_ms: float
+    #: How many of `n_samples` carry a judge score, and their mean.
+    #:
+    #: Measured 2026-09-22 on the live ledger: **0 of 1,598**. The judge is
+    #: wired (`judge.evaluate_response_async`) and has never produced a row, so
+    #: ranking on `judge_mean` alone would be a filter that drops everything.
+    #: Carried here so the gap is visible in the data rather than discovered
+    #: again, and so the reward upgrades itself the moment grading starts.
+    judged_samples: int = 0
+    judge_mean: float | None = None
+
+    @property
+    def quality_signal(self) -> tuple[float, str]:
+        """The best available quality estimate, and WHICH one it is.
+
+        Returns `(value, source)` where source is ``"judge"`` or ``"usable"``.
+        The caller gets the number and the provenance together, because a 0.97
+        from a grader and a 0.97 from "it wasn't empty" are not the same claim.
+        """
+        if self.judge_mean is not None and self.judged_samples >= MIN_JUDGED_FOR_SIGNAL:
+            return float(self.judge_mean), "judge"
+        return self.success_rate, "usable"
+
+    @property
+    def success_per_dollar(self) -> float:
+        """The OLD optimisation target. Kept for reporting, not for ranking.
+
+        T-09 (audit 2026-09-22). This was ``success_rate / max(avg_cost, 1e-9)``,
+        and the 1e-9 floor was documented as a feature — "free providers get a
+        very large but finite expected_value". Very large is the problem:
+
+            free,  success 0.50, cost $0        -> 0.50 / 1e-9 = 5.0e8
+            paid,  success 0.99, cost $0.01     -> 0.99 / 0.01 =  99
+
+        A ratio makes price lexicographically dominant. No quality difference
+        that can exist — 0.99 against 0.50, or 1.00 against 0.01 — can close a
+        1e8 gap, so the bandit was not trading quality against cost at all. It
+        was ranking by "is it free", with success_rate as an unreachable
+        tiebreaker, and it ran AFTER the complexity-aware ordering that
+        deliberately puts Ollama last for deep reasoning.
+        """
+        return self.success_rate / max(self.avg_cost, 1e-9)
 
     @property
     def expected_value(self) -> float:
-        """Success-per-dollar — bandit ranks candidates by this."""
-        return self.success_rate / max(self.avg_cost, 1e-9)
+        """Expected net value of one call, in dollars. Bandit ranks by this.
+
+        A DIFFERENCE, not a ratio::
+
+            expected_value = success_rate * ANSWER_VALUE_USD - avg_cost
+
+        Read it as: a correct answer is worth ``ANSWER_VALUE_USD``; a call costs
+        ``avg_cost`` whether or not it succeeds. What is left is what routing
+        actually gained. That is the quantity the product exists to maximise,
+        and unlike a ratio it is bounded, has units, and lets quality win::
+
+            free, 0.50: 0.50*0.05 - 0      = +0.0250
+            paid, 0.99: 0.99*0.05 - 0.0200 = +0.0295   <- paid wins on quality
+            paid, 0.99: 0.99*0.05 - 0.1000 = -0.0505   <- and loses when overpriced
+
+        A free model is still preferred at equal quality (its cost term is 0),
+        which is the behaviour the old formula was reaching for. What changes is
+        that "free" is no longer worth 1e8 times "correct".
+        """
+        quality, _source = self.quality_signal
+        return quality * ANSWER_VALUE_USD - self.avg_cost
 
 
 async def aggregate_stats(
@@ -116,7 +194,12 @@ async def aggregate_stats(
                COUNT(*) AS n,
                AVG(CASE WHEN success = 1 THEN 1.0 ELSE 0.0 END) AS success_rate,
                COALESCE(AVG(cost_usd), 0.0) AS avg_cost,
-               COALESCE(AVG(latency_ms), 0.0) AS avg_latency
+               COALESCE(AVG(latency_ms), 0.0) AS avg_latency,
+               -- T-09: the GRADED signal, and how much of it exists. Pulled
+               -- alongside `success` so a reader can see the difference between
+               -- "models score 0.97" and "0 of 1,598 rows were ever graded".
+               COUNT(judge_score) AS n_judged,
+               AVG(judge_score) AS judge_mean
           FROM routing_decisions
          WHERE profile = ?
            AND (subject = ? OR (subject IS NULL AND ? = 'general'))
@@ -157,6 +240,8 @@ async def aggregate_stats(
             success_rate=float(row[2] or 0.0),
             avg_cost=float(row[3] or 0.0),
             avg_latency_ms=float(row[4] or 0.0),
+            judged_samples=int(row[5] or 0),
+            judge_mean=(None if row[6] is None else float(row[6])),
         )
         for row in rows
     ]

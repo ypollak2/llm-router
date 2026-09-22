@@ -49,12 +49,33 @@ def _rows(path: pathlib.Path) -> list[dict]:
     return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
 
 
-def test_the_record_can_represent_all_three_terminal_states():
-    """Before: one representable outcome. A field with one value is not a measurement."""
-    assert set(ROUTE_OUTCOMES) == {"success", "failed", "cache_hit"}
+def test_the_record_can_represent_every_terminal_state():
+    """Before: one representable outcome. A field with one value is not a measurement.
+
+    Grew from three to five for T-08 (audit 2026-09-22): the idempotency-dedupe
+    path and the exhaustion floor also return content to a caller, and both
+    wrote no row at all. `deduplicated` and `degraded` are what they write now.
+
+    Pinned as an exact set on purpose — a new outcome must be added here
+    deliberately, so nobody widens the enum without deciding what readers
+    computing a success rate should do with it.
+    """
+    assert set(ROUTE_OUTCOMES) == {
+        "success", "failed", "cache_hit", "deduplicated", "degraded",
+    }
 
 
-@pytest.mark.parametrize("outcome", ["success", "failed", "cache_hit"])
+def test_a_degraded_outcome_is_not_counted_as_a_success():
+    """The point of adding it. See routing_quality.DEGRADED_OUTCOMES."""
+    from llm_router.routing_quality import DEGRADED_OUTCOMES, REPLAYED_OUTCOMES
+
+    assert "degraded" in DEGRADED_OUTCOMES
+    assert "success" not in DEGRADED_OUTCOMES | REPLAYED_OUTCOMES
+    assert DEGRADED_OUTCOMES.isdisjoint(REPLAYED_OUTCOMES)
+
+
+@pytest.mark.parametrize(
+    "outcome", ["success", "failed", "cache_hit", "deduplicated", "degraded"])
 def test_every_terminal_outcome_can_be_written_and_read_back(ledger, outcome):
     """The file must be able to hold each state, not just the happy one."""
     assert record_route(RouteLedgerRecord(route_outcome=outcome, task_type="code"))
