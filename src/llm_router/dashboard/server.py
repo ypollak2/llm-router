@@ -28,6 +28,21 @@ log = get_logger("llm_router.dashboard")
 DEFAULT_PORT = 7337
 
 
+def _net(baseline_usd: float, actual_usd: float) -> float:
+    """`savings.net_saved`, with a SIGNED fallback if the import fails.
+
+    The fallback is deliberately the same arithmetic rather than a clamp: a
+    surface that silently reverts to clamping when an import breaks is the
+    defect returning through the error path, which is how it came back four
+    times before.
+    """
+    try:
+        from llm_router.savings import net_saved
+        return net_saved(baseline_usd, actual_usd)
+    except Exception:  # noqa: BLE001
+        return float(baseline_usd) - float(actual_usd)
+
+
 def _token_file():
     # M-04: resolved per call. This held the dashboard AUTH TOKEN at a path
     # bound at import, so an isolated LLM_ROUTER_HOME could not move it.
@@ -154,7 +169,9 @@ async def _get_stats() -> dict:
                 baseline = (row[0] * SONNET_IN + row[1] * SONNET_OUT) / 1_000_000
                 external = row[2]
                 stats["savings"] = {
-                    "total_saved_usd": round(max(0.0, baseline - external), 4),
+                    # AUD-06: signed. A dashboard that cannot show a loss is a dashboard
+        # that tells you routing is always working.
+        "total_saved_usd": round(_net(baseline, external), 4),
                     "total_external_usd": round(external, 4),
                 }
 

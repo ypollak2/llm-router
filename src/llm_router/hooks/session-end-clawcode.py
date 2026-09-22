@@ -130,13 +130,29 @@ def _bar(pct: float, bar_width: int = 20) -> str:
     return "█" * filled + "░" * (bar_width - filled)
 
 
+def _net(baseline_usd: float, actual_usd: float) -> float:
+    """`savings.net_saved`, with a SIGNED fallback if the import fails.
+
+    The fallback is deliberately the same arithmetic rather than a clamp: a
+    surface that silently reverts to clamping when an import breaks is the
+    defect returning through the error path, which is how it came back four
+    times before.
+    """
+    try:
+        from llm_router.savings import net_saved
+        return net_saved(baseline_usd, actual_usd)
+    except Exception:  # noqa: BLE001
+        return float(baseline_usd) - float(actual_usd)
+
+
 def _format_routing_section(tools: dict[str, dict]) -> list[str]:
     total_calls = sum(t["count"] for t in tools.values())
     total_in    = sum(t["in"]    for t in tools.values())
     total_out   = sum(t["out"]   for t in tools.values())
     total_cost  = sum(t["cost"]  for t in tools.values())
     total_base  = _host_baseline(total_in, total_out)
-    total_saved = max(0.0, total_base - total_cost)
+    # AUD-06: signed, never clamped. A loss must reach the user — the clamp is exactly what stopped them finding out. This file was outside the CHZ-SS-01 lint's hand-maintained module list until R6 derived that list from `savings.SURFACES`.
+    total_saved = _net(total_base, total_cost)
     savings_pct = round(total_saved / total_base * 100) if total_base > 0 else 0
 
     lines = [
@@ -161,7 +177,8 @@ def _total_saved(tools: dict[str, dict]) -> float:
     total_out  = sum(t["out"]  for t in tools.values())
     total_cost = sum(t["cost"] for t in tools.values())
     baseline   = _host_baseline(total_in, total_out)
-    return max(0.0, baseline - total_cost)
+    # AUD-06: signed, never clamped. A loss must reach the user — the clamp is exactly what stopped them finding out. This file was outside the CHZ-SS-01 lint's hand-maintained module list until R6 derived that list from `savings.SURFACES`.
+    return _net(baseline, total_cost)
 
 
 def _format_free_section(free_rows: list[dict], paid_rows: list[dict]) -> list[str]:
@@ -195,7 +212,11 @@ def _format_free_section(free_rows: list[dict], paid_rows: list[dict]) -> list[s
             out_t = int(avg_out * d["calls"])
             est   = True
         baseline = _host_baseline(in_t, out_t)
-        saved    = max(0.0, baseline)
+        # Not a clamp: this is the FREE section, where cost is zero by
+        # definition, so the saving IS the baseline and cannot be negative.
+        # Written as `max(0.0, baseline)` it was indistinguishable from the
+        # real clamps three lines away, which is reason enough to drop it.
+        saved    = baseline
         total_saved += saved
         est_tag  = " ~est" if est else ""
         in_k  = f"{in_t  // 1000}k" if in_t  >= 1000 else str(in_t)
@@ -245,7 +266,8 @@ def _lifetime_saved() -> float:
             if provider in _FREE_PROVIDERS:
                 saved += base
             elif provider != "subscription":
-                saved += max(0.0, base - (cost or 0.0))
+                # AUD-06: signed, never clamped. A loss must reach the user — the clamp is exactly what stopped them finding out. This file was outside the CHZ-SS-01 lint's hand-maintained module list until R6 derived that list from `savings.SURFACES`.
+                saved += _net(base, cost or 0.0)
         return saved
     except Exception:
         return 0.0

@@ -1,10 +1,28 @@
 """Detailed savings report command.
 
-Reads the authoritative per-call ledger ``savings_stats`` (written by the
-savings_logger hook) as the SINGLE source of truth, so the report can never
-disagree with the stored stats. Paid vs free is split by ``external_cost`` (no
-double-counting), and the saved amount is the stored ``estimated_claude_cost_saved``
-(not a separately-recomputed baseline).
+R6. This docstring used to claim ``savings_stats`` was "the SINGLE source of
+truth, so the report can never disagree with the stored stats." Both halves
+were wrong in a way worth recording, because the sentence read as a guarantee:
+
+* It is not the single source. The 2026-09-22 audit found TWENTY user-facing
+  savings surfaces across FIVE data sources; this one reads `savings_stats`,
+  `llm-router gain` reads `routing_decisions`, the statuslines read `usage`,
+  and `llm-router status` reads a union of four. A free DIRECT route recorded
+  in one is invisible to the others.
+* "Can never disagree with the stored stats" was true and beside the point. It
+  agreed with its own table and with nothing else, and it applied no provenance
+  filter — so a benchmark run inflated this report and not the eight surfaces
+  that go through `cost.py`.
+
+The HEADLINE now comes from ``savings.canonical_savings()``: provenance
+filtered, net of routing overhead, with its baseline model and its row count
+attached. The per-model free/paid breakdown below still comes from
+`savings_stats`, which is the only table carrying it — but it is filtered the
+same way, so the parts and the whole are computed over the same rows.
+
+Paid vs free is split by ``external_cost`` (no double-counting), and the saved
+amount is the stored ``estimated_claude_cost_saved`` (not a separately
+recomputed baseline).
 
 Usage:
     llm-router savings-report              — full report (all time)
@@ -52,6 +70,12 @@ def _query(db_path: Path, period: str, *, paid: bool) -> dict:
     """Aggregate savings_stats for paid (external_cost>0) or free (==0) routes."""
     tf_sql, tf_params = _get_time_filter(period)
     cond = "external_cost > 0" if paid else "(external_cost = 0 OR external_cost IS NULL)"
+    # R6/T-05: exclude rows a benchmark or test wrote. FAIL-CLOSED — `= 0`, not
+    # `IS NOT 1`: a row written before the column existed has NULL provenance
+    # and was never measured, so counting it asserts production origin on no
+    # evidence. This report had no filter at all, which is why a benchmark run
+    # inflated it and not the surfaces that go through cost.py.
+    cond = f"({cond}) AND COALESCE(is_simulated, 1) = 0"
     stats = {"calls": 0, "saved": 0.0, "cost": 0.0, "by_model": {}}
     try:
         conn = sqlite3.connect(db_path)
@@ -81,6 +105,26 @@ def _query(db_path: Path, period: str, *, paid: bool) -> dict:
     return stats
 
 
+def _canonical_headline(period: str) -> str:
+    """The one savings figure, labelled. R6/R7.
+
+    Degrades to a stated UNAVAILABLE rather than to a number. A report that
+    silently falls back to its own arithmetic when the canonical accessor is
+    unreachable is the twenty-first surface.
+    """
+    try:
+        import asyncio
+
+        from llm_router.savings import canonical_savings
+
+        s = asyncio.run(canonical_savings(period=period))
+        return s.headline()
+    except Exception as exc:  # noqa: BLE001
+        from llm_router import failopen
+        failopen.record("CHZ-FO-SAVINGS-REPORT-CANONICAL", exc)
+        return "canonical savings figure UNAVAILABLE (see llm-router doctor)"
+
+
 def render_savings_report(period: str = "all") -> str:
     db_path = _get_db_path()
     if not db_path.exists():
@@ -97,7 +141,13 @@ def render_savings_report(period: str = "all") -> str:
     total_calls = free["calls"] + paid["calls"]
 
     out = [f"\n╭─ SAVINGS REPORT ─ {label} " + "─" * 34 + "╮", "│"]
-    out.append(f"│  Claude quota saved:  ${total_saved:.4f}   across {total_calls} routed call(s)")
+    out.append(f"│  {_canonical_headline(period)}")
+    # The table's own total, shown BESIDE the canonical figure rather than
+    # instead of it. They are computed over different tables and will not always
+    # match; printing only one and calling it the total is what produced
+    # $73.97, $102.31 and $205.19 for the same day.
+    out.append(f"│  savings_stats ledger: ${total_saved:.4f} across "
+               f"{total_calls} routed call(s)")
     out.append("│")
 
     def section(title: str, s: dict, free_section: bool) -> None:

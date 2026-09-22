@@ -2603,7 +2603,8 @@ async def get_realized_savings(period: str = "today", *, platform: str = "all",
         platform: "claude", "codex", "gemini", or "all".
 
     Returns:
-        Dict with keys: gross_saved_usd, routing_overhead_usd, realized_saved_usd.
+        Dict with keys: gross_saved_usd, routing_overhead_usd, realized_saved_usd,
+        n_rows.
         When platform="all", also includes `by_platform` breakdown dict.
     """
     where_map = {
@@ -2618,71 +2619,89 @@ async def get_realized_savings(period: str = "today", *, platform: str = "all",
     # "all" has no WHERE, so the filter supplies its own keyword.
     where = f"{where} {production_only(include_simulated, prefix='AND' if where else 'WHERE')}".strip()
 
-    async def _query_table(table: str) -> tuple[float, float]:
+    async def _query_table(table: str) -> tuple[float, float, int]:
+        """(gross, overhead, n_rows).
+
+        R6: the ROW COUNT travels with the money. CLAUDE.md — "a rate without
+        its denominator is not a measurement" — and a savings total is the same
+        shape: "$47.20 saved" over four calls and over four thousand are
+        different claims and rendered identically. It was not returned here, so
+        no surface downstream could show it even if it wanted to.
+        """
         try:
             cursor = await db.execute(
                 f"""SELECT
                     COALESCE(SUM(cost_saved_usd), 0),
-                    COALESCE(SUM(routing_overhead_usd), 0)
+                    COALESCE(SUM(routing_overhead_usd), 0),
+                    COUNT(*)
                 FROM {table} {where}"""
             )
             row = await cursor.fetchone()
-            return float(row[0] if row else 0.0), float(row[1] if row else 0.0)
+            if not row:
+                return 0.0, 0.0, 0
+            return float(row[0]), float(row[1]), int(row[2])
         except Exception as exc:
             # Table may not exist on older DBs — treat as zero. But a persistent
             # failure here UNDERSTATES savings without any visible symptom.
             from llm_router import failopen
             failopen.record("CHZ-FO-COST-PLATFORM-TABLE", exc)
-            return 0.0, 0.0
+            return 0.0, 0.0, 0
 
     db = await _get_db()
     try:
         if platform == "claude":
-            gross, overhead = await _query_table("claude_usage")
+            gross, overhead, n = await _query_table("claude_usage")
             return {
                 "gross_saved_usd": gross,
                 "routing_overhead_usd": overhead,
                 "realized_saved_usd": gross - overhead,
+                "n_rows": n,
             }
         if platform == "codex":
-            gross, overhead = await _query_table("codex_usage")
+            gross, overhead, n = await _query_table("codex_usage")
             return {
                 "gross_saved_usd": gross,
                 "routing_overhead_usd": overhead,
                 "realized_saved_usd": gross - overhead,
+                "n_rows": n,
             }
         if platform == "gemini":
-            gross, overhead = await _query_table("gemini_usage")
+            gross, overhead, n = await _query_table("gemini_usage")
             return {
                 "gross_saved_usd": gross,
                 "routing_overhead_usd": overhead,
                 "realized_saved_usd": gross - overhead,
+                "n_rows": n,
             }
         # all
-        claude_gross, claude_overhead = await _query_table("claude_usage")
-        codex_gross, codex_overhead = await _query_table("codex_usage")
-        gemini_gross, gemini_overhead = await _query_table("gemini_usage")
+        claude_gross, claude_overhead, claude_n = await _query_table("claude_usage")
+        codex_gross, codex_overhead, codex_n = await _query_table("codex_usage")
+        gemini_gross, gemini_overhead, gemini_n = await _query_table("gemini_usage")
         gross = claude_gross + codex_gross + gemini_gross
         overhead = claude_overhead + codex_overhead + gemini_overhead
         return {
             "gross_saved_usd": gross,
             "routing_overhead_usd": overhead,
             "realized_saved_usd": gross - overhead,
+            "n_rows": claude_n + codex_n + gemini_n,
             "by_platform": {
                 "claude": {
                     "gross_saved_usd": claude_gross,
                     "routing_overhead_usd": claude_overhead,
                     "realized_saved_usd": claude_gross - claude_overhead,
+                    "n_rows": claude_n,
                 },
                 "codex": {
                     "gross_saved_usd": codex_gross,
                     "routing_overhead_usd": codex_overhead,
                     "realized_saved_usd": codex_gross - codex_overhead,
+                    "n_rows": codex_n,
                 },
                 "gemini": {
                     "gross_saved_usd": gemini_gross,
                     "routing_overhead_usd": gemini_overhead,
                     "realized_saved_usd": gemini_gross - gemini_overhead,
+                    "n_rows": gemini_n,
                 },
             },
         }

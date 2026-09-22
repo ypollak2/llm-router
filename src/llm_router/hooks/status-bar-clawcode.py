@@ -16,6 +16,21 @@ import sqlite3
 import sys
 from datetime import datetime, timezone
 
+def _net(baseline_usd: float, actual_usd: float) -> float:
+    """`savings.net_saved`, with a SIGNED fallback if the import fails.
+
+    The fallback is deliberately the same arithmetic rather than a clamp: a
+    surface that silently reverts to clamping when an import breaks is the
+    defect returning through the error path, which is how it came back four
+    times before.
+    """
+    try:
+        from llm_router.savings import net_saved
+        return net_saved(baseline_usd, actual_usd)
+    except Exception:  # noqa: BLE001
+        return float(baseline_usd) - float(actual_usd)
+
+
 def _router_home():
     """Router state dir, resolved per call so LLM_ROUTER_HOME is honoured.
 
@@ -89,7 +104,8 @@ def _read_session_stats() -> tuple[int, int, int, float, int]:
                 actual += cost
                 baseline += (in_tok * HOST_INPUT_PER_M + out_tok * HOST_OUTPUT_PER_M) / 1_000_000
 
-        saved = max(0.0, baseline - actual)
+        # AUD-06: signed, never clamped. A loss must reach the user — the clamp is exactly what stopped them finding out. This file was outside the CHZ-SS-01 lint's hand-maintained module list until R6 derived that list from `savings.SURFACES`.
+        saved = _net(baseline, actual)
         pct = round(saved / baseline * 100) if baseline > 0 else 0
         return sub_calls, free_calls, paid_calls, saved, pct
     except Exception:

@@ -53,7 +53,9 @@ REPO = Path(__file__).resolve().parent.parent
 #: Modules whose job is to compute or display money. Zero tolerance inside these.
 #: Deliberately a NAMED LIST, not "everything": a wide net produces noise, and a
 #: noisy gate gets disabled, which is worse than a narrow one that is trusted.
-MONEY_MODULES = (
+#: Modules that compute money and are not user-facing surfaces — the accessors
+#: and the router itself. Surfaces are NOT listed here; they are derived below.
+_CORE_MONEY_MODULES = (
     "src/llm_router/cost.py",
     "src/llm_router/router.py",
     "src/llm_router/digest.py",
@@ -66,6 +68,37 @@ MONEY_MODULES = (
     "src/llm_router/execution_ledger.py",
     "src/llm_router/hooks/session-end.py",
 )
+
+
+def _surface_modules() -> tuple[str, ...]:
+    """Every user-facing savings surface, from `llm_router.savings.SURFACES`.
+
+    R6. This list used to be hand-maintained, all eleven entries, and that was
+    the same defect the lint exists to prevent — one level up.
+    `commands/share.py` builds a card meant to be PUBLISHED, computes
+    ``max(0.0, base - cost)`` — AUD-06's sentence verbatim — and was never
+    scanned, because nobody remembered to add it. So were `savings_report.py`,
+    `gain.py`, both statuslines and `observability/surface_status.py`.
+
+    `13_HISTORICAL_DEFECT_PATTERNS.md` records the $15/$75 bug being fixed
+    locally four times because "no fix was ever made structural". A structural
+    fix whose SCOPE is hand-maintained is structural only for the files someone
+    thought of. Deriving from the surface registry means the twenty-first
+    surface is linted by being registered, and the R6 discovery test already
+    fails on a surface that is not registered — so the two close each other's
+    gap rather than each having one.
+    """
+    import sys
+
+    sys.path.insert(0, str(REPO / "src"))
+    from llm_router.savings import SURFACES
+
+    return tuple(
+        f"src/llm_router/{s.where.split(':', 1)[0]}" for s in SURFACES
+    )
+
+
+MONEY_MODULES = tuple(dict.fromkeys(_CORE_MONEY_MODULES + _surface_modules()))
 
 #: (module, line-content substring) pairs allowed to clamp, each with a reason.
 #: An exemption must name a metric that is upside-only BY DEFINITION and has a

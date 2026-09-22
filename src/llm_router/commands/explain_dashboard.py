@@ -280,7 +280,46 @@ def _print_header() -> list[str]:
         "This is intentional but easy to miss — the panels below tell you",
         "exactly what every number in the session-end dashboard represents.",
         "",
-    ]
+        # R6. Every figure below this line is RAW ON PURPOSE — unfiltered, per
+        # table, per window — because this command exists to show WHY the
+        # panels disagree, and filtering it would hide the very rows that cause
+        # the discrepancy. What was missing was something to compare them
+        # against. The canonical figure is that reference line.
+        "Figures in the panels below are RAW: unfiltered, per table, per",
+        "window. That is deliberate — they are what each panel actually",
+        "counts, including benchmark rows. The line below is the canonical",
+        "figure every surface is supposed to agree with.",
+        "",
+    ] + _canonical_reference_block()
+
+
+def _canonical_reference_block() -> list[str]:
+    """The one savings number, printed as the reference. R6.
+
+    Degrades to a stated UNAVAILABLE rather than to a number: a diagnostic that
+    silently substitutes its own arithmetic for the reference it is supposed to
+    compare against is worse than one that says it cannot reach it.
+    """
+    try:
+        import asyncio
+
+        from llm_router.savings import canonical_savings
+
+        s = asyncio.run(canonical_savings(period="today"))
+        return [
+            "CANONICAL (llm_router.savings.canonical_savings, today):",
+            f"  {s.headline()}",
+            f"  source: {s.source} · provenance-filtered: {s.provenance_filtered}",
+            "",
+        ]
+    except Exception as exc:  # noqa: BLE001
+        from llm_router import failopen
+        failopen.record("CHZ-FO-EXPLAIN-DASH-CANONICAL", exc)
+        return [
+            "CANONICAL: UNAVAILABLE "
+            f"({type(exc).__name__}) — run `llm-router doctor`",
+            "",
+        ]
 
 
 def _check_mode_canary() -> int:
