@@ -235,6 +235,29 @@ def _drive_interception_gaps(tmp_home: pathlib.Path) -> None:
     coverage.reset_cache()
 
 
+
+def _drive_hook_kills(tmp_home: pathlib.Path) -> None:
+    """Leave a marker that looks like a killed hook (R9).
+
+    A dead pid is obtained by spawning and reaping a trivial child, so the
+    marker is genuinely orphaned rather than merely old.
+    """
+    import json
+    import subprocess
+    import sys
+    import time
+
+    from llm_router import hook_liveness
+
+    proc = subprocess.Popen([sys.executable, "-c", "pass"])
+    proc.wait()
+    d = tmp_home / hook_liveness.MARKER_DIR
+    d.mkdir(parents=True, exist_ok=True)
+    (d / f"{proc.pid}.json").write_text(
+        json.dumps({"pid": proc.pid, "started_at": time.time() - 300})
+    )
+
+
 #: counter id → the thing that makes its WRITER fire.
 #:
 #: Keyed by id and cross-checked against the registry below, so a counter added
@@ -244,6 +267,7 @@ DRIVERS = {
     "ledger_events_dropped": _drive_dropped_events,
     "session_lock_timeouts": _drive_lock_timeouts,
     "capture_outcomes": _drive_capture_outcomes,
+    "hook_kills": _drive_hook_kills,
     "unterminated_invocations": _drive_unterminated,
     "interception_gaps": _drive_interception_gaps,
 }

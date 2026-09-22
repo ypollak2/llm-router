@@ -254,6 +254,23 @@ def _read_interception_gaps() -> CounterReading:
         return CounterReading(None, unknown_reason=type(exc).__name__)
 
 
+
+def _read_hook_kills() -> CounterReading:
+    """Hooks killed mid-invocation, from markers they could not clear.
+
+    R9. This is the counter that makes "routing stopped working" answerable.
+    Every other signal the hook produces requires the hook to still be running
+    when it produces it.
+    """
+    try:
+        from llm_router import hook_liveness
+
+        n = hook_liveness.orphan_count()
+        return CounterReading(float(n), alarming=n > 0)
+    except Exception as exc:  # noqa: BLE001
+        return CounterReading(None, unknown_reason=type(exc).__name__)
+
+
 REGISTRY: tuple[Counter, ...] = (
     Counter(
         id="fail_open_events",
@@ -286,6 +303,15 @@ REGISTRY: tuple[Counter, ...] = (
         reader=_read_capture_outcomes,
         unit="candidate(s)",
         tags=("denominator",),
+    ),
+    Counter(
+        id="hook_kills",
+        makes_visible="the hook exceeded its budget and was killed, which looks "
+                      "exactly like it choosing not to route",
+        source="llm_router.hook_liveness:orphan_count",
+        reader=_read_hook_kills,
+        unit="killed invocation(s)",
+        tags=("invariant", "liveness"),
     ),
     Counter(
         id="unterminated_invocations",

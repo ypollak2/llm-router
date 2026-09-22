@@ -28,7 +28,7 @@ red and looks sound.)
 | R15 | `done` | Inspect `finish_reason` | force `content_filter` -> recorded, success False |
 | R6 | `partial` | One savings number across all surfaces | bypass the accessor in one surface -> test names it |
 | R7 | `partial` | Label every money figure; net not gross | strip one label -> test fails |
-| R9 | `todo` | Hook death visible (start marker + doctor rate) | inject 70s sleep -> doctor reports a kill |
+| R9 | `partial` | Hook death visible (start marker + doctor rate) | inject 70s sleep -> doctor reports a kill |
 | R10 | `partial` | Refuse unservable capability (tools/vision/schema/context) | drop refusal from one endpoint -> parametrised test names it |
 | R3 | `todo` | SECURITY.md honesty + interpreter corpus | add an interpreter to the allowlist -> corpus test fails |
 | R8 | `todo` | Capture ON behind explicit install consent | consent absent -> capture stays off |
@@ -596,3 +596,81 @@ The suite's own T-01 guard then caught my test importing
 `llm_router.hooks.savings_logger` and leaving a fileless stub on the package —
 the same "a test breaks its neighbours" class fixed two commits earlier, caught
 by the guard that exists because of it.
+
+
+## R9 — make hook death visible (PARTIAL — 2 of 3 criteria)
+
+A killed hook is observably identical to one that chose not to route: both end
+in a turn Claude answered directly. Measured: a 60s timeout, a maximum observed
+duration of 55.3s, and 5.5% of real invocations reaching no terminal outcome.
+
+**Criterion 1 — doctor reports the unterminated rate with its N, as an ISSUE
+above a threshold.** Done by R12's registry. `unterminated_invocations` renders
+"316 of 4551 real invocations (6.9%)" and is `alarming` at >= 2%, which appends
+to doctor's issue list rather than printing a line. A handful is noise (a
+session that ended mid-turn); a systematic rate means a routing branch logs
+nothing at all, which is the bug that hid `ENFORCE=off` for a day.
+
+**Criterion 2 — a start marker, cleared on exit; an orphan is a detected kill.**
+Done. `hook_liveness` writes a marker before the expensive work and clears it
+via `atexit`, so every exit the process CONTROLS — including `sys.exit`, which
+the hook uses on at least five paths, and an unhandled exception — removes it.
+A killed process cannot, so the marker survives and the next invocation counts
+it once and deletes it.
+
+The detection cannot live inside the hook: the condition is "this process
+stopped executing", so nothing in that process can record it. The evidence has
+to be on disk BEFORE the kill.
+
+Surfaced as `hook_kills` in the counter registry, so doctor reports it.
+
+**Direction is chosen deliberately.** A marker is an orphan only when its pid
+is not alive AND it is older than 90s (above the hook's 60s budget). PID reuse,
+`PermissionError` from `os.kill` on another user's process, and any
+undeterminable answer all resolve to NOT-A-KILL. That undercounts; it never
+invents a kill. For a number an operator will act on, undercounting is the safe
+direction, and a kill noticed one invocation late is still noticed.
+
+`orphan_count()` does not reap — "run doctor twice and the number changes" is
+its own kind of broken instrumentation.
+
+**Criterion 3 — hook p50/p95/p99 measured in CI against the installed timeout,
+margin asserted — NOT DONE.** That needs a timing benchmark in CI, not a unit
+test, and a benchmark run on this machine would be untrustworthy anyway
+(CLAUDE.md: macOS Maintenance Sleep advances `time.time()` and not
+`time.monotonic()`; one benchmark task recorded 918.6s of which 902s was the
+laptop asleep). Left explicitly undone rather than approximated.
+
+**RED-CHECK — the plan's, performed with a real SIGKILL:**
+
+    marker survived the kill: True
+    kills detected: 1
+    recorded as: CHZ-HOOK-KILLED = 1
+
+Plus: moving `mark_started` out of `main()` fails the AST assertion, and making
+`orphan_count` reap fails the idempotent-read test.
+
+
+### R9 fallout — three of my own gates caught me, and one was a real defect
+
+The R9 commit failed its first gate on three assertions I had written earlier
+in this same run:
+
+1. `test_failopen_ratchet[hooks/auto-route.py]` — the liveness setup block was
+   wrapped in `except Exception: pass`. Correct to flag: if the marker cannot
+   be written, kill detection is OFF and `hook_kills` reports a confident zero,
+   which is the "empty measurement rendered as healthy" shape R9 exists to
+   remove. Now records `CHZ-FO-HOOK-LIVENESS-SETUP`.
+2. `test_r12_every_counter_has_a_reader::test_every_registered_counter_has_a_driver`
+   — `hook_kills` was registered with no driver. Exactly what that assertion is
+   for: a registry entry whose reader is never exercised against its writer.
+3. `test_t14_silent_mutation_ratchet` — 87 -> 88.
+
+The third was a genuine correctness bug, not bookkeeping. `clear_marker` used
+`except FileNotFoundError: pass`, which reads as harmless — an absent marker is
+the normal outcome when a later process reaped it first. But the handler shape
+hid the case beside it: **a marker we cannot remove becomes an orphan, and an
+orphan is reported as a KILL.** A silent permissions failure would have
+manufactured kills that never happened, in the one counter built to answer
+"is routing actually running". Now `missing_ok=True` for the normal case and a
+counted `CHZ-FO-HOOK-CLEAR-MARKER` for the rest. Census back to 87.

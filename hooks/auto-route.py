@@ -3343,6 +3343,31 @@ def main() -> None:
     invocation_id = time.time()
     _debug_log(f"[INVOCATION START] ID={invocation_id:.3f}")
 
+    # R9. A killed hook is observably identical to "chose not to route": both
+    # end in a turn Claude answered directly. The marker written here survives
+    # a kill (nothing in a killed process gets to run), so the NEXT invocation
+    # can tell the two apart. Registered with atexit so every exit this process
+    # controls — including sys.exit and an unhandled exception — clears it.
+    try:
+        import atexit
+
+        from llm_router import hook_liveness
+
+        hook_liveness.reap_orphans()          # count kills from earlier runs
+        hook_liveness.mark_started(invocation_id)
+        atexit.register(hook_liveness.clear_marker)
+    except Exception as _live_exc:  # noqa: BLE001 — never break a turn
+        # Fail-open, NOT silent. The failopen ratchet flagged the bare `pass`
+        # this started as, and it was right: if the liveness marker cannot be
+        # written then kill detection is OFF, and the counter would report a
+        # confident zero — the exact "empty measurement rendered as healthy"
+        # shape R9 exists to remove.
+        try:
+            from llm_router import failopen as _fo
+            _fo.record("CHZ-FO-HOOK-LIVENESS-SETUP", _live_exc)
+        except Exception:  # noqa: BLE001
+            _debug_log(f"[INVOCATION {invocation_id:.3f}] liveness setup failed")
+
     try:
         hook_input = json.load(sys.stdin)
     except (json.JSONDecodeError, EOFError) as _parse_err:
