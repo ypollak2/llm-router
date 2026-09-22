@@ -3,7 +3,7 @@ subcommand.
 
 The command runs in order:
   1. ``uv tool install --reinstall <source>`` — refreshes the package
-  2. ``llm_router-install-hooks`` — copies updated hooks to ``~/.claude/hooks/``
+  2. ``llm-router-install-hooks`` — copies updated hooks to ``~/.claude/hooks/``
   3. ``kill <mcp-server-pids>`` — sends SIGTERM to stale MCP servers
 
 These tests pin the orchestration without actually running the
@@ -105,8 +105,11 @@ def test_full_refresh_runs_three_steps_in_order(source_tree, capsys) -> None:
     assert run_calls[0][:3] == ["uv", "tool", "install"]
     assert "--reinstall" in run_calls[0]
     assert str(source_tree) in run_calls[0]
-    # Step 2: llm_router-install-hooks
-    assert run_calls[1] == ["llm_router-install-hooks"]
+    # Step 2: llm-router-install-hooks
+    assert run_calls[1] == ["llm-router-install-hooks"], (
+        "T-18: the REGISTERED console script is hyphenated; the underscore\n"
+        "spelling meant `llm-router dev-refresh` was 100% broken."
+    )
     # Step 3: SIGTERM both stale servers
     assert killed == [11111, 22222]
 

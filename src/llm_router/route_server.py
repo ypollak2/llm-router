@@ -195,6 +195,43 @@ def make_handler():
         def _forbidden_cross_origin(self) -> bool:
             return is_forbidden_cross_origin(self.headers)
 
+        def _unauthorised(self) -> dict | None:
+            """The 401 body when auth is configured and not satisfied, else None.
+
+            S-03 (audit 2026-09-22). The gateway grew an opt-in bearer token;
+            this server, which exposes the SAME router and the same paid calls,
+            had no auth check at all — and the file's own comment at
+            `main()` already acknowledged the gap. Same exposure, less
+            mitigation.
+
+            Shares the gateway's token rather than introducing a second one: an
+            operator who sets `LLM_ROUTER_GATEWAY_TOKEN` is protecting "the
+            router over HTTP", and making them configure that twice is how one
+            of the two ends up unset.
+
+            OPT-IN, like the gateway's: no token configured means no check, so
+            an upgrade cannot silently start refusing an operator's own traffic.
+            """
+            import secrets as _secrets
+
+            try:
+                from llm_router.gateway import gateway_token
+                expected = gateway_token()
+            except Exception:  # noqa: BLE001 — never fail closed on an import error
+                return None
+            if not expected:
+                return None
+            supplied = (self.headers.get("Authorization") or "").strip()
+            prefix = "bearer "
+            if supplied[:len(prefix)].lower() != prefix:
+                return {"error": "this server requires Authorization: Bearer <token>"}
+            # Constant-time: a timing oracle on a loopback socket is cheap to
+            # exploit from the same machine, which is the attacker this defends
+            # against.
+            if not _secrets.compare_digest(supplied[len(prefix):].strip(), expected):
+                return {"error": "invalid token"}
+            return None
+
         def do_GET(self):
             if self.path == "/health":
                 self._send(200, {"ok": True})
@@ -204,6 +241,9 @@ def make_handler():
         def do_POST(self):
             if self._forbidden_cross_origin():
                 return self._send(403, {"error": "forbidden: cross-origin request rejected"})
+            unauth = self._unauthorised()
+            if unauth is not None:
+                return self._send(401, unauth)
             if self.path not in ("/route", "/feedback"):
                 return self._send(404, {"error": "not found"})
             try:
@@ -253,8 +293,11 @@ def main(argv=None) -> None:
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=7338)
     args = ap.parse_args(argv)
-    # RED6-04: llm_router-route has no auth checks at all; a public bind exposes the
-    # router -- and the paid calls it makes -- to the network.
+    # RED6-04: a public bind exposes the router -- and the paid calls it makes --
+    # to the network. S-03 (2026-09-22) added the gateway's opt-in bearer token
+    # to `do_POST`, so "no auth checks at all" is no longer true; the bind
+    # refusal stays because an opt-in token that nobody opted into is not a
+    # substitute for not listening on 0.0.0.0.
     from llm_router.net_bind import refuse_public_bind_or_exit
     refuse_public_bind_or_exit(args.host, component="route")
     serve(args.host, args.port)

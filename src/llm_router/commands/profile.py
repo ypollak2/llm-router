@@ -33,8 +33,14 @@ def cmd_profile(args: list[str]) -> int:
 
 def _run_profile(subcmd: str = "show") -> None:
     """Show or auto-generate token-wise routing profile."""
+    # T-18: the old import named a constant that does not exist. `auto_profile`
+    # exposes `_profile_path()`, a FUNCTION, because the repo-wide import-time
+    # path sweep replaced the constant with an access-time resolver. This import
+    # raised on every invocation, so `llm-router profile` was 100% broken — and
+    # nothing noticed, because no test runs the command.
     from llm_router.auto_profile import (
-        auto_generate_profile, detect_services, display_detected_services, PROFILE_PATH
+        _profile_path, auto_generate_profile, detect_services,
+        display_detected_services,
     )
 
     if subcmd == "auto":
@@ -51,9 +57,9 @@ def _run_profile(subcmd: str = "show") -> None:
 
     elif subcmd == "show":
         # Show current profile or auto-detect
-        if PROFILE_PATH.exists():
+        if _profile_path().exists():
             print(f"\n{_bold('📋 Current Profile')}\n")
-            print(PROFILE_PATH.read_text())
+            print(_profile_path().read_text())
         else:
             print(f"\n{_bold('No profile found.')}")
             print(f"Run: {_dim('llm-router profile auto')} to generate one.\n")

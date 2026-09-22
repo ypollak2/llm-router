@@ -6,7 +6,7 @@ the changes take effect end-to-end:
 1. **The installed package** at ``~/.local/share/uv/tools/llm-routing/``
    — refreshed by ``uv tool install --reinstall <source>``.
 2. **The hook scripts** at ``~/.claude/hooks/llm_router-*`` —
-   refreshed by ``llm_router-install-hooks`` (which copies from the
+   refreshed by ``llm-router-install-hooks`` (which copies from the
    installed package, not from source — so step 1 must come first).
 3. **Running llm_router MCP server processes** — long-lived per Claude
    Code session, they load the package once into memory. New code on
@@ -122,14 +122,16 @@ def cmd_dev_refresh(args: list[str]) -> int:
                 break
 
     # ── Step 2: sync hooks to ~/.claude/hooks/ ──────────────────────────
-    print("⚙️  step 2/3: llm_router-install-hooks ...")
+    print("⚙️  step 2/3: llm-router-install-hooks ...")
     if not dry_run:
         result = subprocess.run(
-            ["llm_router-install-hooks"], capture_output=True, text=True,
+            # T-18: the REGISTERED console script is hyphenated; the underscore
+            # spelling here meant dev-refresh was 100% broken.
+            ["llm-router-install-hooks"], capture_output=True, text=True,
         )
         if result.returncode != 0:
             print(
-                f"✗ llm_router-install-hooks failed:\n{result.stderr}",
+                f"✗ llm-router-install-hooks failed:\n{result.stderr}",
                 file=sys.stderr,
             )
             return 1

@@ -51,6 +51,47 @@ Usage:
     llm-router gc [--ttl-days N] [--apply] — sweep stale session shards from ~/.llm-router (dry-run by default)
     llm-router soak [--use-gold-complexity] [--full] [--out PATH] — replay the realized-savings soak corpus and write soak/report.json
     llm-router gain [today|week|month|all] — token-savings analytics for a period
+
+  Setup and hosts
+    llm-router quickstart       — guided first-run: detect hosts, install, verify
+    llm-router welcome          — the post-install orientation screen
+    llm-router onboard          — interactive onboarding walkthrough
+    llm-router update           — re-sync hooks, rules and MCP config from this version
+    llm-router dev-refresh      — reinstall from a source checkout (developers)
+    llm-router init-claude-memory — write CLAUDE.md routing guidance into this repo
+
+  Servers and integrations
+    llm-router serve            — run the HTTP route endpoint (loopback only)
+    llm-router gateway          — run the OpenAI/Anthropic/Ollama-compatible gateway
+    llm-router broker           — run the session broker
+    llm-router cp               — control-plane client commands
+    llm-router run-hook <name>  — execute one installed hook by name (debugging)
+
+  Inspection and reporting
+    llm-router summary          — session summary of routing and savings
+    llm-router routing          — current routing configuration
+    llm-router routing-report   — routing accuracy and share over a window
+    llm-router sessions         — list recorded sessions
+    llm-router config           — show the resolved configuration
+    llm-router profile          — show or auto-generate the routing profile
+    llm-router policy           — inspect or switch the active routing policy
+    llm-router explain-dashboard — explain what each dashboard figure means
+    llm-router invoice          — provider invoice reconciliation
+    llm-router audit            — audit-trail queries
+    llm-router share            — export a shareable savings summary
+    llm-router team-sync        — sync team savings to the configured channel
+    llm-router tui              — full-screen dashboard (needs the `tui` extra)
+
+  Testing and diagnostics
+    llm-router test             — run the routing self-test
+    llm-router test-delta       — compare routing before and after a change
+    llm-router probe            — probe provider reachability
+    llm-router benchmark        — run the routing benchmark suite
+    llm-router migrate          — migrate state from an older layout
+
+  Every command above is dispatchable; `tests/test_f38_every_command_is_documented.py`
+  fails if a new one is added without a line here. (T-19: 28 of 51 subcommands
+  were absent from this text, and 22 appeared in no documentation at all.)
 """
 
 from __future__ import annotations
@@ -1032,7 +1073,25 @@ def main() -> None:
             watch=watch, watch_interval=watch_interval,
         ))
     elif args and args[0] == "tui":
-        from llm_router.dashboard.tui import run as _tui_run
+        # T-18: this raised a raw `ModuleNotFoundError: No module named 'textual'`
+        # traceback at the user. `textual` is a DECLARED optional extra — the
+        # command is absent by design on a default install — so the honest
+        # response names the extra and the command to install it, not a stack
+        # trace that reads like a bug in llm-router.
+        try:
+            from llm_router.dashboard.tui import run as _tui_run
+        except ImportError as exc:
+            missing = getattr(exc, "name", "") or "textual"
+            print(
+                f"llm-router tui needs the optional '{missing}' dependency.\n"
+                f"\n"
+                f"  pip install 'llm-routing[tui]'\n"
+                f"\n"
+                f"Everything else works without it; `llm-router status` and "
+                f"`llm-router dashboard` cover the same data.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
         _tui_run()
     elif args and args[0] == "share":
         from llm_router.commands.share import cmd_share
