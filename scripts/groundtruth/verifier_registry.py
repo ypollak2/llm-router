@@ -31,6 +31,54 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from groundtruth import mutants as mut  # noqa: E402
 from groundtruth import propose as pr  # noqa: E402
 
+# H-10. The human-in-the-loop requirement was enforced far more weakly than it
+# was documented.
+#
+#   approve()   rejected exactly one string: `actor == "assistant"`.
+#               `--by bot`, `--by ci`, `--by x` all passed.
+#   activate()  the APPROVED -> ACTIVE transition, checked NOTHING at all.
+#
+# So an autonomous agent scripting the CLI with any other `--by` value promoted
+# its own verifiers to ACTIVE, where `run_matrix` will execute them and their
+# verdicts become Ground Truth labels.
+#
+# WHAT THIS IS AND IS NOT. It is not authentication -- nothing offline can prove
+# a human typed a string, and pretending otherwise would be worse than the gap it
+# replaces. It is a guardrail sized to the actual failure mode: an agent or CI
+# job driving the CLI without a person in the loop. A determined human can still
+# type a fake name, and that is a decision they made rather than one the system
+# made for them.
+_AUTOMATION_MARKERS = (
+    "assistant", "agent", "bot", "claude", "gpt", "llm", "copilot",
+    "ci", "cron", "runner", "pipeline", "workflow", "automation",
+    "system", "daemon", "service", "script", "auto", "unknown", "none",
+    "test", "fixture", "anonymous", "user", "admin", "root",
+)
+
+
+def require_human_actor(actor: str | None) -> tuple[bool, str]:
+    """Is *actor* plausibly a person, rather than a process?
+
+    Returns (ok, why_not). Applied to BOTH approve and activate, because a
+    promotion chain is only as strong as its weakest transition.
+    """
+    name = (actor or "").strip()
+    if not name:
+        return False, "approval requires a named human actor; none was given"
+    if len(name) < 3:
+        return False, f"{name!r} is too short to identify a person"
+    lowered = name.lower()
+    for marker in _AUTOMATION_MARKERS:
+        if marker in lowered:
+            return False, (
+                f"{name!r} looks like an automated actor ({marker!r}); this "
+                f"transition requires a person who reviewed the verifier"
+            )
+    if not any(ch.isalpha() for ch in lowered):
+        return False, f"{name!r} contains no letters; use an identifiable name"
+    return True, ""
+
+
 SCHEMA_VERSION = 1
 
 PROPOSED = "PROPOSED"
@@ -68,6 +116,7 @@ class VerifierRecord:
     history: list[Transition] = field(default_factory=list)
     created_at: float = 0.0
     approved_by: str | None = None
+    activated_by: str | None = None
 
     @property
     def strategy(self) -> str:
@@ -109,16 +158,26 @@ class VerifierRecord:
         if self.status == PROPOSED:
             return False, ("this verifier has not been validated; approving an "
                            "unrun verifier is how an unusable one becomes trusted")
-        if not actor or actor == "assistant":
-            return False, "approval requires a human actor"
+        ok, why = require_human_actor(actor)
+        if not ok:
+            return False, why
         if not self._move(APPROVED, reason or "approved after review", actor):
             return False, f"cannot approve from status {self.status}"
         self.approved_by = actor
         return True, "approved"
 
     def activate(self, actor: str) -> tuple[bool, str]:
+        """APPROVED -> ACTIVE. The transition that makes a verifier run.
+
+        H-10: this checked nothing at all, which made `approve`'s guard
+        decorative — anything APPROVED could be activated by any caller.
+        """
+        ok, why = require_human_actor(actor)
+        if not ok:
+            return False, why
         if not self._move(ACTIVE, "activated for Ground Truth evaluation", actor):
             return False, f"cannot activate from status {self.status}"
+        self.activated_by = actor
         return True, "active"
 
     def reject(self, actor: str, reason: str) -> tuple[bool, str]:

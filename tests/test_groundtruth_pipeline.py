@@ -24,7 +24,12 @@ TIER_ORDER = ["local", "cheap", "mid", "premium"]
 
 
 def cell(**accepted: bool) -> dict:
+    # `verification_type` is recorded by run_matrix on every real cell, and
+    # policy_score now requires it (T23): a cell whose verification type is
+    # missing or non-deterministic is UNKNOWN and excluded rather than pooled
+    # with mechanically-verified ones.
     return {t: {"model": f"m/{t}", "accepted": accepted.get(t, False),
+                "verification_type": "mechanical",
                 "passes": int(accepted.get(t, False)), "samples": 1,
                 "cost_usd": {"local": 0.0, "cheap": 0.001,
                              "mid": 0.01, "premium": 0.05}[t],

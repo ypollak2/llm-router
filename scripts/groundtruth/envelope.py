@@ -146,10 +146,27 @@ class ReplayEnvelope:
         missing: list[str] = []
         for need in self.required_state:
             if need == "repo":
+                # M-01. This used to test `diff_sha256` -- the HASH -- while
+                # `RepoState.reconstructable` (correctly) requires the PATCH.
+                # So an envelope whose diff was never stored, or was truncated,
+                # reported `completeness() == (True, [])` while
+                # `reconstructable` on the same object returned False.
+                #
+                # That is exactly the "hash treated as reconstructable state"
+                # failure `reconstructable`'s own docstring was written to
+                # prevent, reappearing in the function this module calls "the
+                # load-bearing part". It was masked by a redundant correct check
+                # in accumulate.py -- correct by luck, not by design.
+                #
+                # There is now one definition. A hash proves you have the right
+                # tree; it cannot produce it.
                 if not (self.repo and self.repo.commit):
                     missing.append("repo-commit")
-                elif self.repo.dirty and not self.repo.diff_sha256:
-                    missing.append("repo-dirty-diff")
+                elif not self.repo.reconstructable:
+                    missing.append(
+                        "repo-dirty-diff-truncated" if self.repo.diff_truncated
+                        else "repo-dirty-diff"
+                    )
             elif need == "external-evidence":
                 if not self.external:
                     missing.append("external-evidence")

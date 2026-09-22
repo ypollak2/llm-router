@@ -51,6 +51,11 @@ R_NO_VERIFIER = "no-credible-verifier"
 R_ENVELOPE_INCOMPLETE = "replay-envelope-incomplete"
 R_PRIVACY = "cannot-capture-safely"
 R_TOO_SHORT = "degenerate-too-short"
+# H-08. A task whose replay envelope is COMPLETE but which nothing can execute.
+# Distinct from R_ENVELOPE_INCOMPLETE on purpose: that one says "we failed to
+# capture the state", this one says "we captured it and there is no runner".
+# Conflating them would report a capture problem the operator cannot fix.
+R_NO_REPLAYER = "no-replayer-for-required-state"
 
 # Verifier classes, reusing the repo's existing preference order rather than a
 # parallel vocabulary. `V_NONE` is the honest terminal value.
@@ -126,6 +131,35 @@ _PERSONAL = re.compile(
     r"(?<![\w-])(i|me|my|mine|we|us|our|ours|you|your|yours)(?![\w-])",
     re.I,
 )
+
+
+def replay_available() -> bool:
+    """Can this installation actually replay a task that needs repo state?
+
+    H-08. `scripts/groundtruth/` contains **zero** `git checkout`, `git apply` or
+    worktree call sites. `run_matrix.call_model()` sends the prompt as a
+    single-turn completion and grades the raw text, so a model with no file
+    access cannot satisfy a pytest file importing from a tree that was never
+    checked out.
+
+    Meanwhile the gate below was tuned to ADMIT exactly those tasks: capture the
+    repo state and the task became eligible. The envelope captured everything
+    needed to replay and nothing consumed it, so the pool filled with candidates
+    that could never be labelled — and a gate that admits work the runner cannot
+    execute reports a healthy funnel while producing nothing.
+
+    Tied to the capability rather than to a hand-maintained flag, so that when a
+    replayer is implemented these tasks become eligible automatically and this
+    function cannot drift out of date.
+    """
+    try:
+        from groundtruth import run_matrix
+    except Exception:  # noqa: BLE001 — absence is the answer, not an error
+        return False
+    return any(
+        callable(getattr(run_matrix, name, None))
+        for name in ("replay_in_worktree", "checkout_and_run", "run_with_repo_state")
+    )
 
 
 def _is_checkable_question(prompt: str) -> bool:
@@ -247,6 +281,10 @@ def assess(
     # Repo state is satisfiable by an immutable commit reference.
     if e.requires_repo_state and not has_repo_state:
         e.ineligibility_reasons.append(R_ENVELOPE_INCOMPLETE)
+    # ...and satisfiable ONLY if something can act on that reference. Capturing
+    # the state is necessary, not sufficient; see `replay_available`.
+    elif e.requires_repo_state and not replay_available():
+        e.ineligibility_reasons.append(R_NO_REPLAYER)
 
     e.replayable = not e.ineligibility_reasons
 

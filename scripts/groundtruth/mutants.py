@@ -104,6 +104,11 @@ class Validation:
     rationale: str = ""
     ran_at: float = 0.0
     duration_s: float = 0.0
+    # Why the probe set is (or is not) strong enough to support a confidence
+    # claim. None for the pytest path, whose mutants come from a fixed library
+    # and therefore always meet the floor; set by the snippet path, whose probes
+    # are supplied by the operator. See `_snippet_discrimination_floor`.
+    weak_probe_set: str | None = None
 
     @property
     def applied(self) -> list[MutantResult]:
@@ -165,6 +170,13 @@ def classify(v: Validation, *, strategy_is_mechanical: bool,
     if v.detected < v.total:
         return MEDIUM, (f"detected {v.detected}/{v.total} mutants — real but "
                         "incomplete behavioural coverage")
+    if v.weak_probe_set:
+        # Detecting every probe proves nothing when there were too few, or when
+        # they were the same probe repeated. `detected == total` is a ratio, and
+        # a ratio over a tiny hand-picked denominator is not evidence.
+        return MEDIUM, (f"detected {v.detected}/{v.total} bad answers, but the "
+                        f"probe set is too thin to support a stronger claim: "
+                        f"{v.weak_probe_set}")
     if not contract_complete:
         return MEDIUM, (f"detected {v.detected}/{v.total} mutants, but the "
                         "acceptance contract has unresolved conditions")
@@ -247,6 +259,37 @@ def validate_pytest_verifier(
     return v
 
 
+#: The pytest path applies a fixed, hand-authored mutation library, so the
+#: operator cannot influence how hard the probes are. The snippet path takes its
+#: `bad_answers` from the CLI, ad hoc -- so a rushed operator supplying ONE
+#: trivially-wrong answer reached `detected == total` and, with a complete
+#: contract, HIGH confidence for a check that barely discriminates.
+#:
+#: Three is the floor because one proves almost nothing and two can be the same
+#: mistake twice. This is a floor on the EVIDENCE, not on the verifier: falling
+#: below it caps confidence at MEDIUM rather than rejecting the verifier.
+MIN_BAD_ANSWERS = 3
+
+
+def _snippet_discrimination_floor(good_answer: str, bad_answers: list[str]) -> str | None:
+    """Why this probe set cannot support a HIGH claim, or None if it can.
+
+    Deliberately checks the SHAPE of the probes and never their content: judging
+    whether a bad answer is "wrong enough" is the operator's job, and a rule that
+    tried would be a heuristic pretending to be a measurement.
+    """
+    probes = [b for b in bad_answers if (b or "").strip()]
+    if len(probes) < MIN_BAD_ANSWERS:
+        return (f"only {len(probes)} non-empty bad answer(s); "
+                f"{MIN_BAD_ANSWERS} are needed to demonstrate discrimination")
+    if len({b.strip() for b in probes}) < MIN_BAD_ANSWERS:
+        return (f"the bad answers are not distinct ({len({b.strip() for b in probes})} "
+                f"unique of {len(probes)}); repeating a probe does not add evidence")
+    if any(b.strip() == (good_answer or "").strip() for b in probes):
+        return "a bad answer is identical to the good answer"
+    return None
+
+
 def validate_snippet_verifier(
     *, task_id: str, snippet: str, good_answer: str, bad_answers: list[str],
 ) -> Validation:
@@ -254,11 +297,17 @@ def validate_snippet_verifier(
 
     The `bad_answers` are this strategy's mutants: a schema check must reject a
     missing key the way a test must fail an off-by-one.
+
+    Unlike the pytest path, these probes are chosen by whoever runs the CLI, so
+    the strength of the evidence varies with their care. `weak_probe_set` records
+    when it is too thin to support a HIGH claim; `classify` caps confidence
+    accordingly rather than silently trusting `detected == total`.
     """
     from groundtruth.verifiers import run_verifier
 
     started = time.monotonic()
     v = Validation(task_id=task_id, ran_at=time.time(), executable=True)
+    v.weak_probe_set = _snippet_discrimination_floor(good_answer, bad_answers)
     ok, why = run_verifier(snippet, good_answer)
     v.baseline_passed = ok
     if not ok:

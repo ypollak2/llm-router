@@ -32,14 +32,40 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from groundtruth import dataset as ds  # noqa: E402
 from groundtruth.run_matrix import TIERS  # noqa: E402
 
 
-def policy_score(matrix: dict, choose, tier_order: list[str]) -> tuple[float, float, int]:
-    """Return (accept_rate, total_cost, n)."""
+def policy_score(
+    matrix: dict, choose, tier_order: list[str], *, strict: bool = True
+) -> tuple[float, float, int]:
+    """Return (accept_rate, total_cost, n) over DETERMINISTICALLY verified cells.
+
+    The verification-type filter is the point. This function pooled every cell's
+    `accepted` boolean with no filtering at all and never imported
+    `DETERMINISTIC_METHODS`, so a judge's verdict and a passing assertion would
+    have counted identically toward a published accept rate.
+
+    That was harmless only by accident: `run_matrix` runs
+    `verifier_kind == MECHANICAL` tasks and nothing else, so no judge-verified
+    cell has ever reached this matrix. An accidental barrier is not a designed
+    one -- extending `generate_snippet()` to judges is a natural next step, and it
+    would have silently started pooling subjective verdicts with mechanical ones
+    with no code change here and no signal that anything had altered.
+
+    Fails CLOSED on a cell with no recorded `verification_type`: a matrix written
+    before that field existed is UNKNOWN, not assumed mechanical. Same rule as
+    `is_evaluable`, for the same reason -- the cost of excluding an old real cell
+    is a smaller n, and the cost of admitting a subjective one is a number that
+    is quietly wrong.
+
+    `strict=False` is for inspecting a legacy matrix deliberately. Nothing in the
+    published path passes it.
+    """
     ok = 0
     cost = 0.0
     n = 0
+    excluded = 0
     for _task_id, cell in matrix.items():
         present = [t for t in tier_order if t in cell]
         if not present:
@@ -47,9 +73,17 @@ def policy_score(matrix: dict, choose, tier_order: list[str]) -> tuple[float, fl
         pick = choose(present, cell)
         if pick not in cell:
             continue
+        if strict:
+            vtype = cell[pick].get("verification_type")
+            if vtype not in ds.DETERMINISTIC_METHODS:
+                excluded += 1
+                continue
         n += 1
         ok += bool(cell[pick]["accepted"])
         cost += float(cell[pick].get("cost_usd") or 0.0)
+    if excluded:
+        print(f"  [policy_score] excluded {excluded} cell(s): verification type "
+              f"is not deterministic, or was not recorded", file=sys.stderr)
     return (ok / n if n else 0.0), cost, n
 
 

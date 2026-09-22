@@ -178,6 +178,30 @@ class Pool:
         for c in self._index.values():
             self._dedup_sets.append((c.task_id, frozenset(tokens(c.envelope.get("prompt") or ""))))
 
+    def _lock(self):
+        """H-07. Serialise the read-modify-append on the pool file.
+
+        `duplicate_count += 1` reads a Candidate loaded into memory at
+        construction, increments it, and appends the whole row; `load()` then
+        takes last-wins per task_id. Two admits of the same duplicate therefore
+        both read 1, both write 2, and one increment is lost. Measured: **19
+        recorded where 21 occurred**. `accumulate.py` constructs a fresh `Pool()`
+        per call, so the production path hits this every time.
+
+        `file_lock.exclusive_lock` already exists for exactly this shape -- it
+        was written for `session_store.record_event`, whose append-then-compact
+        critical section lost 22 of 1200 writes under six-process load. Locking a
+        SIBLING file, not the data file, so the JSONL inode stays swappable.
+        """
+        try:
+            from llm_router.file_lock import exclusive_lock
+
+            return exclusive_lock(self.path.with_suffix(self.path.suffix + ".lock"))
+        except Exception:  # noqa: BLE001 — a locking problem must not stop accumulation
+            import contextlib
+
+            return contextlib.nullcontext(False)
+
     def _append(self, c: Candidate) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self.path.open("a", encoding="utf-8") as fh:
@@ -219,9 +243,17 @@ class Pool:
         if dedup:
             dup_id, dup_reason = self.find_duplicate(prompt, threshold=threshold)
             if dup_id:
-                existing = self._index[dup_id]
-                existing.duplicate_count += 1
-                self._append(existing)
+                with self._lock():
+                    # Re-read INSIDE the lock. The in-memory copy was loaded at
+                    # construction and may already be stale; incrementing it is
+                    # what loses the count.
+                    self.load()
+                    existing = self._index.get(dup_id)
+                    if existing is None:
+                        # the duplicate was compacted away between find and lock
+                        return False, dup_reason
+                    existing.duplicate_count += 1
+                    self._append(existing)
                 self._reject(dup_reason, {"task_id": candidate.task_id,
                                           "duplicate_of": dup_id})
                 return False, dup_reason

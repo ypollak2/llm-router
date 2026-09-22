@@ -322,7 +322,11 @@ def test_assistant_cannot_approve() -> None:
     r = _rec()
     r.mark_validated(_good_validation(), contract_complete=True)
     ok, msg = r.approve("assistant")
-    assert not ok and "human" in msg
+    # H-10: the guard now names WHY it refused (an automation marker) rather
+    # than only that a human is required, and covers every automated actor
+    # rather than the single literal "assistant".
+    assert not ok
+    assert "automated" in msg or "human" in msg, msg
 
 
 def test_approval_requires_validation_first() -> None:
