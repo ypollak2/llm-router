@@ -107,14 +107,14 @@ def test_hostile_context_is_logged(caplog):
     with caplog.at_level(logging.WARNING):
         wrap_untrusted_context(HOSTILE, "CONVERSATION CONTEXT")
     assert any(
-        "injection" in r.message.lower() for r in caplog.records
+        "injection" in r.getMessage().lower() for r in caplog.records
     ), "a suspected injection was neutralised without telling anyone"
 
 
 def test_benign_context_is_not_logged_as_an_attack(caplog):
     with caplog.at_level(logging.WARNING):
         wrap_untrusted_context("please add a test for the parser", "CONVERSATION CONTEXT")
-    assert not [r for r in caplog.records if "injection" in r.message.lower()]
+    assert not [r for r in caplog.records if "injection" in r.getMessage().lower()]
 
 
 # ── the blocklist is not the boundary ────────────────────────────────────────

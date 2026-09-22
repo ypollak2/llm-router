@@ -208,7 +208,7 @@ class TestProjectionCheck:
         with caplog.at_level("WARNING"):
             projection_check(predicted=0.01, actual=0.015)
         assert not any(
-            "Cost projection blown" in r.message for r in caplog.records
+            "Cost projection blown" in r.getMessage() for r in caplog.records
         )
 
     def test_warns_when_actual_exceeds_threshold(self, caplog):
@@ -217,10 +217,20 @@ class TestProjectionCheck:
 
         with caplog.at_level("WARNING"):
             projection_check(predicted=0.01, actual=0.05)
-        blown = [r for r in caplog.records if "Cost projection blown" in r.message]
+        blown = [r for r in caplog.records if "Cost projection blown" in r.getMessage()]
         assert len(blown) == 1
-        # The warning must include the ratio for triage
-        msg = blown[0].message
+        # The warning must include the ratio for triage.
+        #
+        # `getMessage()`, not `.message`. `LogRecord.message` is not an
+        # attribute of a LogRecord — it is set as a side effect by
+        # `Formatter.format()`, so it exists only if some handler has already
+        # formatted the record. Under the default handler set it does; after
+        # `test_built_artifact_is_complete.py` runs, it does not, and three
+        # tests across two files failed with `AttributeError: 'LogRecord'
+        # object has no attribute 'message'` — an order-dependent failure that
+        # looked like logging-config pollution and was parked as P-05 for two
+        # sessions. The product was never involved.
+        msg = blown[0].getMessage()
         assert "5" in msg  # ratio ≈ 5.0
 
     def test_custom_threshold(self, caplog):
@@ -230,7 +240,7 @@ class TestProjectionCheck:
         with caplog.at_level("WARNING"):
             projection_check(predicted=0.01, actual=0.02, threshold=3.0)
         assert not any(
-            "Cost projection blown" in r.message for r in caplog.records
+            "Cost projection blown" in r.getMessage() for r in caplog.records
         )
 
     def test_zero_predicted_does_not_divide_by_zero(self, caplog):

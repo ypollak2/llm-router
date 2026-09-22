@@ -2,13 +2,26 @@
 
 from __future__ import annotations
 
-import sys
 from unittest.mock import MagicMock, patch
 
-# Mock structlog before importing routing
-sys.modules["structlog"] = MagicMock()
+from llm_router.commands.routing import cmd_routing, _run_routing
 
-from llm_router.commands.routing import cmd_routing, _run_routing  # noqa: E402
+# This file used to do `sys.modules["structlog"] = MagicMock()` at import time,
+# before importing the module under test, and never put the real module back.
+#
+# `sys.modules` is process-global and import-time code runs at COLLECTION, so
+# every test collected after this file in the same process got a MagicMock in
+# place of structlog — for the rest of the run. `structlog.testing.capture_logs()`
+# then returned a MagicMock instead of a list, and
+# `test_exhaustion_floor.py::test_floor_emits_structured_event` failed with
+# `expected exhaustion_floor_returned event, got: <MagicMock ...>`.
+#
+# It was invisible until a change to file ORDERING moved the two into the same
+# process in the wrong order, which makes it the same family as P-05: a test
+# that breaks its neighbours and is diagnosed as pollution from somewhere else.
+#
+# The mock was never needed. structlog is a real dependency of this suite and
+# `llm_router.commands.routing` imports it exactly as every other module does.
 
 
 class TestCmdRouting:
