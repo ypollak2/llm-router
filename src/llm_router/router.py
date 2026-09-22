@@ -12,6 +12,7 @@ generation APIs directly, because LiteLLM has no media generation support.
 from __future__ import annotations
 
 
+from uuid import uuid4 as _uuid4
 import asyncio
 import os
 import platform
@@ -1858,6 +1859,115 @@ def _emit_ledger_terminal(
         failopen.record("CHZ-FO-ROUTER-LEDGER-TERMINAL", exc)
 
 
+def _classification_method(classification_data: dict | None) -> str | None:
+    """H-04. The key every producer actually writes.
+
+    `classification_method` was 0% populated across all 23,773 ledger rows. The
+    four ledger writers read `.get("method")`; every builder writes
+    `"classifier_type"` (`tools/routing.py:388` and `:573`, and `attribution.py`
+    reads it under that name too). `.get` returns None for a missing key, so the
+    row was written anyway and the mismatch was silent on both sides — the field
+    that would explain WHY a model was chosen was empty for the ledger's entire
+    history, and any analysis of "which classifier routes best" returned an empty
+    result that reads as "no difference found".
+
+    One definition, so the two spellings cannot drift apart again.
+    """
+    if not classification_data:
+        return None
+    value = classification_data.get("classifier_type") or classification_data.get("method")
+    return value or None
+
+
+def _emit_quality_terminal(
+    *,
+    outcome: str,
+    correlation_id: str | None,
+    task_type: "TaskType",
+    profile: "RoutingProfile",
+    chain_attempts: list[str],
+    chain_errors: list,
+    prompt: str = "",
+    session_id: str | None = None,
+    final_model: str | None = None,
+    complexity: str | None = None,
+    classification_method: str | None = None,
+    failed_attempt_cost: float = 0.0,
+) -> None:
+    """C-01. Write the quality-ledger row for a NON-success terminal state.
+
+    `record_route` had exactly one call site — inside `_finalize_successful_route`
+    — so `routing_quality.jsonl` could only ever contain successes. 0 of 16,869
+    real rows had `route_succeeded=False`, not because nothing failed but because
+    failure had no way to be written down. The failure path emitted to the
+    execution ledger (SQLite) instead, and cache hits were skipped by a gate, so
+    two of the three terminal outcomes were absent from the file every quality
+    metric and all of Ground Truth sampling read.
+
+    Fail-open like its sibling: losing a metric must never fail a turn. Unlike its
+    sibling, the loss is COUNTED (see H-09) rather than logged at debug and
+    forgotten.
+    """
+    try:
+        from llm_router.routing_quality import (
+            RouteLedgerRecord, derive_fallback_reason, record_route, stamp_trace,
+        )
+        from llm_router.quality_feedback import is_skip_marker
+
+        _fb_reason, _mis = derive_fallback_reason(chain_errors)
+        _first = next((m for m in chain_attempts if not is_skip_marker(m)), None)
+
+        ok = record_route(stamp_trace(RouteLedgerRecord(
+            route_id=correlation_id or str(_uuid4()),
+            route_kind="completion",
+            task_type=task_type.value,
+            chosen_tier=_model_tier(_first, profile) if _first else None,
+            final_tier=_model_tier(final_model, profile) if final_model else None,
+            chosen_model=_first,
+            final_model=final_model,
+            route_outcome=outcome,
+            # A cache hit answered the turn; a failed route did not. Keeping the
+            # legacy boolean consistent with the enum means existing readers stay
+            # correct instead of silently changing meaning.
+            route_succeeded=(outcome == "cache_hit"),
+            tool_execution_attempted=False,
+            tool_execution_succeeded=None,
+            verification_attempted=False,
+            verification_passed=None,
+            fallback_occurred=len(chain_errors) > 0,
+            fallback_reason=_fb_reason,
+            quality_escalation_occurred=False,
+            quality_escalation_reason=None,
+            mis_route=_mis,
+            actual_cost_usd=0.0,
+            baseline_cost_usd=0.0,
+            saved_usd=0.0,
+            failed_attempt_cost_usd=failed_attempt_cost,
+            prompt_tokens=0,
+            completion_tokens=0,
+            chain_attempts=list(chain_attempts),
+            chain_errors=[{"model": m, "reason": r} for m, r in chain_errors],
+            price_table_version=_price_table_version(),
+        ),
+            prompt=prompt,
+            response=None,
+            session_id=session_id,
+            latency_ms=None,
+            complexity=complexity,
+            classification_method=classification_method,
+            capture_ref=None,
+        ))
+        if not ok:
+            from llm_router import failopen
+            failopen.record(
+                "CHZ-FO-ROUTER-QUALITY-TERMINAL",
+                RuntimeError(f"quality ledger write returned False for outcome={outcome}"),
+            )
+    except Exception as exc:  # noqa: BLE001 — telemetry never breaks routing
+        from llm_router import failopen
+        failopen.record("CHZ-FO-ROUTER-QUALITY-TERMINAL", exc)
+
+
 async def _finalize_successful_route(
     *,
     response,
@@ -1994,14 +2104,17 @@ async def _finalize_successful_route(
                     task_type=task_type.value,
                     complexity=effective_complexity,
                     chosen_model=_first_model,
-                    classification_method=(classification_data or {}).get("method"),
+                    classification_method=_classification_method(classification_data),
                 ):
                     from llm_router.trace_id import hash_prompt as _hp
                     _capture_ref = f"capture:{_hp(prompt)}"
             except Exception:  # noqa: BLE001 — capture never breaks routing
                 _capture_ref = None
 
-            record_route(stamp_trace(RouteLedgerRecord(
+            # H-09: the return value is BOUND, not discarded. record_route is
+            # fail-open and returns False on loss; discarding it is the habit
+            # that produced "66 dropped events, no error, no log, no counter".
+            _quality_ok = record_route(stamp_trace(RouteLedgerRecord(
                 route_id=_route_id,
                 route_kind="completion",
                 task_type=task_type.value,
@@ -2037,11 +2150,24 @@ async def _finalize_successful_route(
                 session_id=_rt_sid,
                 latency_ms=getattr(response, "latency_ms", None),
                 complexity=effective_complexity,
-                classification_method=(classification_data or {}).get("method"),
+                classification_method=_classification_method(classification_data),
                 capture_ref=_capture_ref,
             ))
+            if not _quality_ok:
+                from llm_router import failopen
+                failopen.record(
+                    "CHZ-FO-ROUTER-QUALITY-LEDGER",
+                    RuntimeError("quality ledger write returned False"),
+                )
         except Exception as _ledger_err:  # noqa: BLE001 — telemetry never breaks routing
-            log.debug("route ledger emit skipped (non-fatal): %s", _ledger_err)
+            # H-09: this used to be `log.debug(...)` with the write's return value
+            # discarded. Its sibling `_emit_ledger_attempt` counts losses via
+            # failopen.record, added after a documented incident: "66 dropped
+            # events across 2400 writes produced no error, no log and no counter."
+            # The fix landed on the execution ledger and not on the MEASUREMENT
+            # ledger — the one Ground Truth depends on.
+            from llm_router import failopen
+            failopen.record("CHZ-FO-ROUTER-QUALITY-LEDGER", _ledger_err)
 
     # Context buffers: in-process session buffer + durable session_store mirror,
     # both scoped to the same resolved (project_id, session_id) identity.
@@ -3418,6 +3544,20 @@ async def _dispatch_model_loop(
         )
 
     _emit_ledger_terminal(correlation_id, "failed", route_succeeded=False)
+    # C-01: and the quality ledger, which until now could not represent a failed
+    # route at all. The execution ledger above has always recorded this; the file
+    # every quality metric and Ground Truth sampling reads did not.
+    _emit_quality_terminal(
+        outcome="failed",
+        correlation_id=correlation_id,
+        task_type=task_type,
+        profile=profile,
+        chain_attempts=list(chain_attempts),
+        chain_errors=list(chain_errors),
+        prompt=prompt,
+        complexity=effective_complexity,
+        classification_method=_classification_method(classification_data),
+    )
     raise RuntimeError(
         f"All models failed for {task_type.value}/{profile.value}. "
         f"Last error: {last_error}.{chain_summary}{setup_hint}"
@@ -3977,7 +4117,20 @@ async def route_and_call(
                     subject=_subject,
                 )
             except Exception as _bandit_err:
+                # L-07. This was `log.debug` alone, and the failure is invisible
+                # at any normal log level. The bandit is how routing IMPROVES
+                # itself: if its store corrupts, every subsequent route silently
+                # degrades to the static chain, for the life of the process and
+                # every process after it, with nothing counting the degradation.
+                #
+                # Routing must still proceed -- a self-improvement mechanism is
+                # not worth failing a turn over -- so this stays fail-open. What
+                # changes is that the loss is COUNTED, the same fix applied to
+                # the ledger emits after "66 dropped events produced no error,
+                # no log and no counter".
                 log.debug("Bandit reorder skipped (continuing): %s", _bandit_err)
+                from llm_router import failopen
+                failopen.record("CHZ-FO-ROUTER-BANDIT-REORDER", _bandit_err)
 
         # TQ-007 (applied LAST — RED1-01/RED1-02 fix): a daily spend cap was
         # exceeded → confine the FINAL chain to free-local providers. This runs
@@ -4100,6 +4253,24 @@ async def route_and_call(
                         # real chain dispatch, discarding this cache hit and making a
                         # billed provider call). Swallow it and serve the cached result.
                         log.warning("finalize_successful_route (semantic-cache) failed (non-fatal): %s", _fin_err)
+                    # C-01: a cache hit is the third terminal state, and it was
+                    # absent from the quality ledger entirely. `_finalize_...`
+                    # runs with the cache flag set — which the ledger gate
+                    # skips so spend is not double-counted — correct for spend,
+                    # but it left "how often did we serve from cache?"
+                    # unanswerable from the file that should answer it.
+                    _emit_quality_terminal(
+                        outcome="cache_hit",
+                        correlation_id=correlation_id,
+                        task_type=task_type,
+                        profile=profile,
+                        chain_attempts=[],
+                        chain_errors=[],
+                        prompt=prompt,
+                        final_model=cached.model,
+                        complexity=effective_complexity,
+                        classification_method=_classification_method(classification_data),
+                    )
                     await _release_reservation_if_held()  # RED1-3-02: cache-hit fast path
                     return cached
             except Exception as _sc_err:

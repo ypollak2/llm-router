@@ -75,7 +75,7 @@ def test_scenario1_pure_completion_records_one_unverified_row(tmp_path):
     assert r["tool_execution_attempted"] is False and r["tool_execution_succeeded"] is None
     assert r["verification_attempted"] is False and r["verification_passed"] is None
     assert r["mis_route"] is None
-    s = summarize(str(ledger))
+    s = summarize(str(ledger), include_unevaluable=True)
     # an unverified completion must NOT inflate any verified-quality metric
     assert s["verification_pass_rate"] is None       # no verified rows at all
     assert s["unknown_quality_completion_rate"] == 1.0
@@ -92,7 +92,7 @@ def test_scenario2_timeout_fallback_is_not_a_misroute(tmp_path):
         mis_route=mis, quality_escalation_occurred=(mis is True),
         chosen_model="ollama/x", final_model="openai/gpt-4o",
     ), path=str(ledger))
-    s = summarize(str(ledger))
+    s = summarize(str(ledger), include_unevaluable=True)
     assert s["technical_fallback_rate"] == 1.0
     assert s["quality_escalation_rate"] == 0.0
     # mis_route is UNKNOWN for a timeout, so the inferred-rate denominator is empty
@@ -110,7 +110,7 @@ def test_scenario3_quality_failure_is_escalation_not_technical(tmp_path):
         mis_route=mis, quality_escalation_occurred=(mis is True),
         chosen_tier=0, final_tier=3,
     ), path=str(ledger))
-    s = summarize(str(ledger))
+    s = summarize(str(ledger), include_unevaluable=True)
     assert s["quality_escalation_rate"] == 1.0
     assert s["technical_fallback_rate"] == 0.0     # quality failure ≠ technical fallback
     assert s["mis_route_rate_inferred"] == 1.0
@@ -127,7 +127,7 @@ def test_delegate_substep_rows_excluded_from_default_summary(tmp_path):
                                    parent_route_id="p1", saved_usd=0.3), path=str(ledger))
     record_route(RouteLedgerRecord(route_kind="delegate_substep",
                                    parent_route_id="p1", saved_usd=0.2), path=str(ledger))
-    s = summarize(str(ledger))
+    s = summarize(str(ledger), include_unevaluable=True)
     # default summarize counts the ONE logical work item, not the internal calls
     assert s["schema_v2_rows"] == 1
     assert s["total_saved_usd"] == 0.5

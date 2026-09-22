@@ -63,7 +63,7 @@ async def test_period_aggregate_real_zero_on_subscription(temp_db, monkeypatch):
                        output_tokens=2000, cost_usd=0.0, latency_ms=10, provider="ollama")
     await cost.log_usage(free, TaskType.QUERY, RoutingProfile.BUDGET)
 
-    data = await cost.get_savings_by_period()
+    data = await cost.get_savings_by_period(include_simulated=True)
     wk = data["week"]
     # baseline_avoided > 0 (we routed away from an Opus call) but real $ = 0.
     assert wk["baseline_avoided_usd"] > 0.0
@@ -79,7 +79,7 @@ async def test_period_aggregate_real_positive_when_metered(temp_db, monkeypatch)
                        output_tokens=2000, cost_usd=0.0, latency_ms=10, provider="ollama")
     await cost.log_usage(free, TaskType.QUERY, RoutingProfile.BUDGET)
 
-    wk = (await cost.get_savings_by_period())["week"]
+    wk = (await cost.get_savings_by_period(include_simulated=True))["week"]
     # In metered API mode the avoided Opus call really would have been billed.
     assert wk["real_dollars_avoided_usd"] == wk["baseline_avoided_usd"] > 0.0
 

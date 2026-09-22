@@ -28,13 +28,14 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
 import uuid
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
-CURRENT_SCHEMA_VERSION = 3
+CURRENT_SCHEMA_VERSION = 4
 
 # ── v3: traceability ─────────────────────────────────────────────────────────
 # v2 recorded what the router DID but not what it did it TO. Audited 2026-09-20:
@@ -92,12 +93,57 @@ def detect_synthetic() -> bool:
       is a statement by the test runner about its own run, not an inference
       drawn from the data afterwards.
 
+    * a benchmark SANDBOX working directory — see below.
+
     Nothing here looks at the model name, the session id or the token counts.
     Each of those has been tried and each has been wrong.
+
+    M-02 and why the sandbox check belongs and a session-id check does not.
+    The audit proposed consulting `sources.py`'s fixture-session and hex-stem
+    detectors here. Those are *inferences drawn from data after the fact*, which
+    is the exact class this function's design forbids, and `sources.py` uses them
+    correctly for a different job: sifting a historical corpus where no better
+    signal survives.
+
+    A working directory is a different kind of fact. It describes THIS process,
+    now, in the same way `PYTEST_CURRENT_TEST` does — not a guess about a row.
+    `bench_backend_quality.py` defaults to `BENCH_SANDBOX=/tmp/bq_<backend>`, and
+    on 2026-09-20 twelve such directories put six verbatim fixture prompts into
+    the corpus. So the sandbox is checked and the session id is not.
+
+    The other half of M-02 mattered more: **no `bench_*.py` set
+    `LLM_ROUTER_SYNTHETIC`**, so the deliberate signal this function prefers was
+    never actually sent. They set it now.
     """
     if os.environ.get(ENV_SYNTHETIC, "").strip().lower() in ("1", "true", "yes", "on"):
         return True
-    return "PYTEST_CURRENT_TEST" in os.environ
+    if "PYTEST_CURRENT_TEST" in os.environ:
+        return True
+    return _in_benchmark_sandbox()
+
+
+# A benchmark sandbox root. Matches `bench_backend_quality.py`'s BENCH_SANDBOX
+# default and the macOS temp-dir spelling that `sources.py` already excludes.
+_SANDBOX_CWD = re.compile(r"^/(private/)?(tmp|var/folders)/", re.I)
+
+
+def _in_benchmark_sandbox() -> bool:
+    """Is this process running inside a benchmark scratch directory?
+
+    Deliberately narrow: a bare temp directory is not enough, because plenty of
+    legitimate work happens under one. It must also carry a benchmark marker --
+    either the env var the harness sets, or a `bq_`/`bench` path segment.
+    """
+    if os.environ.get("BENCH_SANDBOX", "").strip():
+        return True
+    try:
+        cwd = os.getcwd()
+    except OSError:
+        return False
+    if not _SANDBOX_CWD.match(cwd):
+        return False
+    tail = cwd.rsplit("/", 1)[-1].lower()
+    return tail.startswith("bq_") or "bench" in tail
 
 
 def is_evaluable(row: dict) -> bool:
@@ -137,6 +183,20 @@ class RouteLedgerRecord:
     final_model: str | None = None
 
     # --- Route outcome ---
+    #
+    # C-01. `route_succeeded` is a boolean, and for the whole history of this
+    # ledger it could only ever be True: `record_route` had exactly one call
+    # site, inside `_finalize_successful_route`. 0 of 16,869 real rows carried
+    # False. Every "success rate" computed from this file was 100% by
+    # construction, and a reader could not distinguish "nothing failed" from
+    # "failure is unrepresentable".
+    #
+    # Two of the three terminal outcomes were missing entirely: the failure path
+    # wrote only to the execution ledger, and cache hits were excluded by a gate.
+    # So `route_outcome` is an explicit enum rather than a second boolean —
+    # a cache hit is neither a success nor a failure, and a field that can hold
+    # only one value is not a measurement.
+    route_outcome: str = "success"              # success | failed | cache_hit
     route_succeeded: bool = False               # model returned a usable response
 
     # --- Tool execution (null = not applicable, e.g. completion route) ---
@@ -249,8 +309,18 @@ class RouteLedgerRecord:
 
 
 def _default_ledger() -> Path:
-    return Path(os.environ.get("LLM_ROUTER_ROUTING_LEDGER",
-                               str(Path.home() / ".llm-router" / "routing_quality.jsonl")))
+    # M-04: the fallback goes through `paths.state_path`, not `Path.home()`.
+    # LLM_ROUTER_ROUTING_LEDGER still wins when set, but a caller that sets only
+    # LLM_ROUTER_HOME — every test, via the autouse isolation fixture — used to
+    # land on the operator's real ledger. That is how seven synthetic rows from
+    # a development session reached production state and had to be removed by
+    # hand on 2026-09-20.
+    from llm_router import paths
+
+    override = os.environ.get("LLM_ROUTER_ROUTING_LEDGER", "").strip()
+    if override:
+        return Path(override).expanduser()
+    return paths.state_path("routing_quality.jsonl")
 
 
 def stamp_trace(
@@ -300,6 +370,9 @@ def stamp_trace(
     if capture_ref is not None:
         rec.capture_ref = capture_ref
     return rec
+
+
+ROUTE_OUTCOMES = ("success", "failed", "cache_hit")
 
 
 def record_route(rec: RouteLedgerRecord, path: str | None = None) -> bool:
@@ -399,22 +472,47 @@ def derive_fallback_reason(
     return classified[-1][0], None
 
 
-def summarize(path: str | None = None) -> dict[str, Any]:
+def summarize(path: str | None = None, *, include_unevaluable: bool = False) -> dict[str, Any]:
     """Read the ledger into HONEST, non-conflating routing-quality metrics.
 
     Denominators are explicit: verification rates are computed ONLY over routes where
     verification was attempted; mis-route rate ONLY over rows where it is inferred
     (not None); legacy v1 rows never enter any v2 quality denominator.
+
+    ``include_unevaluable`` exists for tests that exercise the rate arithmetic
+    itself: every row a test writes is marked ``synthetic`` by ``detect_synthetic``
+    (pytest sets ``PYTEST_CURRENT_TEST``), so such a test would otherwise compute
+    over an empty set and assert against None. It is a deliberate, named escape
+    hatch rather than a softer default -- no production caller passes it, and the
+    returned dict still reports ``excluded_unevaluable_rows`` either way.
     """
     rows = load_records(path)
+
+    # H-01. `is_evaluable` was written to answer exactly one question -- may this
+    # row feed a published quality number? -- and this function, which produces
+    # every published quality number, contained zero references to it. Nor to
+    # `synthetic`. Demonstrated on an isolated ledger: ONE synthetic row, alone,
+    # yielded `quality_escalation_rate: 1.0`.
+    #
+    # Provenance is filtered here, before any denominator is formed, because a
+    # per-metric filter is how four different provenance schemes came to disagree
+    # in the first place. `is_evaluable` fails closed: a row written before the
+    # field existed is UNKNOWN and excluded, not assumed to be production.
+    #
+    # `excluded_unevaluable` is reported rather than dropped silently. A
+    # denominator that shrinks without saying so is the shape of error this
+    # module's own docstring exists to prevent.
+    evaluable = rows if include_unevaluable else [r for r in rows if is_evaluable(r)]
+    excluded_unevaluable = len(rows) - len(evaluable)
+
     # `>= 2`, never `== 2`. v3 adds traceability fields and changes no quality
     # semantics, so a v3 row belongs in exactly the denominators a v2 row does.
     # An equality test here would have silently emptied every quality
     # denominator the moment the schema was bumped, and the rate would have
     # read as a clean 0% rather than as a missing measurement.
-    v2 = [r for r in rows
+    v2 = [r for r in evaluable
           if r.get("schema_version", 1) >= 2 and r.get("parent_route_id") is None]
-    legacy = [r for r in rows if not r.get("_invalid") and r.get("schema_version", 1) == 1]
+    legacy = [r for r in evaluable if not r.get("_invalid") and r.get("schema_version", 1) == 1]
     invalid = [r for r in rows if r.get("_invalid")]
 
     def rate(subset: list[dict], key: str, value: Any = True) -> float | None:
@@ -439,6 +537,11 @@ def summarize(path: str | None = None) -> dict[str, Any]:
 
     return {
         "total_rows": len(rows),
+        # H-01: the denominator must state what it dropped. A subset that shrinks
+        # silently reads as a clean measurement over a population that is not
+        # the one the reader has in mind.
+        "evaluable_rows": len(evaluable),
+        "excluded_unevaluable_rows": excluded_unevaluable,
         "schema_v2_rows": len(v2),
         "legacy_rows": len(legacy),
         "invalid_rows": len(invalid),

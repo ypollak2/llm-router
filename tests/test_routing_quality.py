@@ -2,7 +2,7 @@
 
 "Route to the cheapest capable model, escalate on failure" must be MEASURED, not
 assumed — and measured HONESTLY: verified quality, technical fallback, and quality
-escalation are never conflated. record_route() appends fail-open; summarize() reads
+escalation are never conflated. record_route() appends fail-open; summarize(include_unevaluable=True) reads
 back split metrics with explicit denominators. The deprecated v1 record()/RouteRecord
 remain for backward compat and are read as legacy rows that never pollute v2 metrics.
 """
@@ -53,7 +53,7 @@ def test_summarize_splits_verified_from_unverified(tmp_path):
     record_route(RouteLedgerRecord(
         route_kind="delegate", verification_attempted=True,
         verification_passed=True, saved_usd=0.20), path=str(ledger))
-    s = summarize(path=str(ledger))
+    s = summarize(path=str(ledger), include_unevaluable=True)
     assert s["schema_v2_rows"] == 2
     # pass rate is over VERIFIED rows only (the completion never enters it)
     assert s["verification_pass_rate"] == 1.0
@@ -67,7 +67,7 @@ def test_summarize_splits_verified_from_unverified(tmp_path):
 
 
 def test_summarize_missing_ledger_is_empty(tmp_path):
-    s = summarize(path=str(tmp_path / "nope.jsonl"))
+    s = summarize(path=str(tmp_path / "nope.jsonl"), include_unevaluable=True)
     assert s["total_rows"] == 0 and s["schema_v2_rows"] == 0
 
 
@@ -78,7 +78,7 @@ def test_unknown_quality_completion_rate(tmp_path):
     record_route(RouteLedgerRecord(route_kind="completion",
                                    verification_attempted=True,
                                    verification_passed=True), path=str(ledger))
-    s = summarize(path=str(ledger))
+    s = summarize(path=str(ledger), include_unevaluable=True)
     # half the completion routes are unverified
     assert abs(s["unknown_quality_completion_rate"] - 0.5) < 1e-9
 
@@ -108,7 +108,7 @@ def test_record_delegation_escalation_is_quality_not_technical(tmp_path):
               "milestones": [{"achieved_by": 0}, {"achieved_by": 1}],  # escalated
               "savings": {"saved_usd": 0.2}}
     record_delegation(result, path=str(ledger))
-    s = summarize(path=str(ledger))
+    s = summarize(path=str(ledger), include_unevaluable=True)
     assert s["quality_escalation_rate"] == 1.0
     # an MGEE escalation is quality-driven, NOT a technical fallback
     assert s["technical_fallback_rate"] == 0.0
@@ -140,7 +140,7 @@ def test_legacy_rows_excluded_from_v2_quality(tmp_path):
                                    verification_passed=True), path=str(ledger))
     record_route(RouteLedgerRecord(route_kind="completion",
                                    verification_attempted=False), path=str(ledger))
-    s = summarize(path=str(ledger))
+    s = summarize(path=str(ledger), include_unevaluable=True)
     assert s["total_rows"] == 5
     assert s["legacy_rows"] == 3
     assert s["schema_v2_rows"] == 2
@@ -153,10 +153,10 @@ def test_legacy_rows_excluded_from_v2_quality(tmp_path):
     assert s["mis_route_rate_inferred"] in (None, 0.0)
 
 
-def test_malformed_row_never_crashes_summarize(tmp_path):
+def test_malformed_row_never_crashes_summarize(tmp_path, include_unevaluable=True):
     ledger = tmp_path / "rq.jsonl"
     ledger.write_text('{"schema_version": 2, "route_kind": "completion"}\n'
                       "this is not json\n"
                       "\n")
-    s = summarize(path=str(ledger))
+    s = summarize(path=str(ledger), include_unevaluable=True)
     assert s["invalid_rows"] == 1 and s["schema_v2_rows"] == 1

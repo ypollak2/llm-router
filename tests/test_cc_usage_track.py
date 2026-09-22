@@ -48,6 +48,11 @@ def temp_home(tmp_path, monkeypatch):
     """Redirect ~/.llm-router into a temp dir so the hook can't touch real data."""
     monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
     (tmp_path / ".llm-router").mkdir()
+    # LLM_ROUTER_HOME now takes precedence over HOME/Path.home() (see
+    # _router_home() in the hook), and the autouse isolation fixture in
+    # conftest.py already exports it pointed at a *different* tmp dir. Patch
+    # it here too, or the hook writes to that dir instead of tmp_path/.llm-router.
+    monkeypatch.setenv("LLM_ROUTER_HOME", str(tmp_path / ".llm-router"))
     return tmp_path
 
 

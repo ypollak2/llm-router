@@ -28,6 +28,27 @@ from llm_router.types import (
 )
 from llm_router.savings import net_saved
 
+from llm_router import paths
+
+
+def _detect_synthetic() -> bool:
+    """Is this process a test or benchmark run?
+
+    C-02. Delegates to `routing_quality.detect_synthetic` rather than
+    reimplementing the check: four provenance mechanisms already existed in this
+    codebase and three of them did not work, precisely because each surface
+    decided for itself what counted as real.
+    """
+    try:
+        from llm_router.routing_quality import detect_synthetic
+
+        return detect_synthetic()
+    except Exception:  # noqa: BLE001 -- provenance must never fail a spend write
+        # Fail CLOSED: unknown provenance is marked synthetic rather than
+        # admitted as production, matching `is_evaluable`.
+        return True
+
+
 
 def _refuse_unisolated_test_write(db_path: Path) -> bool:
     """True when a test is about to write into the user's real database.
@@ -273,6 +294,71 @@ MIGRATE_USAGE_ADD_SAVINGS = [
     "ALTER TABLE usage ADD COLUMN saved_usd REAL DEFAULT 0.0",
     "ALTER TABLE usage ADD COLUMN is_simulated INTEGER DEFAULT 0",
 ]
+
+# ── C-02 / Phase 2: the provenance cutover ─────────────────────────────────
+#
+# `is_simulated` was declared with `DEFAULT 0`, and never written. So every one
+# of the ~23,000 historical rows reads as `is_simulated = 0`, which is not a
+# recorded fact about those rows -- it is the column default standing in for a
+# measurement nobody took. 1,813 of them are known fixtures, and they are not
+# separable after the fact because they carry real model names.
+#
+# NULL is the honest value: UNKNOWN provenance. This does not delete anything
+# (the column never held information) and it does not touch the append-only
+# routing ledger, which is a different store. It replaces a default that lies
+# with an absence that is true.
+#
+# Guarded by `provenance_meta` so it runs exactly once. Without that, a second
+# run would blank the provenance of rows written correctly after the cutover --
+# turning a fix into the bug it was fixing.
+MIGRATE_USAGE_PROVENANCE_CUTOVER_TABLE = [
+    """CREATE TABLE IF NOT EXISTS provenance_meta (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL,
+        applied_at TEXT DEFAULT (datetime('now'))
+    )""",
+]
+
+PROVENANCE_CUTOVER_KEY = "usage_is_simulated_cutover"
+
+
+async def _apply_provenance_cutover(db) -> int:
+    """Mark pre-provenance `usage` rows UNKNOWN. Runs once. Returns rows marked.
+
+    Idempotent by construction: the sentinel is written in the same transaction
+    as the update, so an interrupted run either did both or neither.
+    """
+    try:
+        cur = await db.execute(
+            "SELECT value FROM provenance_meta WHERE key = ?", (PROVENANCE_CUTOVER_KEY,)
+        )
+        if await cur.fetchone():
+            return 0  # already applied
+
+        cur = await db.execute(
+            "UPDATE usage SET is_simulated = NULL WHERE is_simulated = 0"
+        )
+        marked = cur.rowcount or 0
+        await db.execute(
+            "INSERT INTO provenance_meta (key, value) VALUES (?, ?)",
+            (PROVENANCE_CUTOVER_KEY, str(marked)),
+        )
+        await db.commit()
+        if marked:
+            import logging as _logging
+
+            _logging.getLogger("llm_router").info(
+                "provenance cutover: %d pre-provenance usage rows marked UNKNOWN. "
+                "They are excluded from savings until superseded by a clean window.",
+                marked,
+            )
+        return marked
+    except Exception as exc:  # noqa: BLE001 — a migration must never break routing
+        import logging as _logging
+
+        _logging.getLogger("llm_router").debug("provenance cutover skipped: %s", exc)
+        return 0
+
 
 MIGRATE_USAGE_ADD_TEAM = [
     "ALTER TABLE usage ADD COLUMN user_id TEXT",
@@ -664,8 +750,34 @@ async def _get_db() -> aiosqlite.Connection:
     # leaked worker can never keep the interpreter alive at exit (the
     # hang-at-exit bug). is_alive() daemon-setting is a no-op if already set.
     _mark_worker_daemon(db)
-    # WAL mode allows concurrent readers while a writer is active
-    await db.execute("PRAGMA journal_mode=WAL")
+    # M-06. WAL mode allows concurrent readers while a writer is active -- but
+    # `busy_timeout` must be set FIRST. It governs how long the journal_mode
+    # PRAGMA itself waits for the exclusive lock it needs, so setting it
+    # afterwards (or not at all, as here) leaves the single statement that most
+    # needs it on SQLite's 5-second default. Measured at 12 concurrent cold
+    # starts: 1 in 12 raised `database is locked` from this line.
+    #
+    # The PRAGMA also reports failure by RETURNING the mode in effect rather
+    # than raising, so losing the race non-exceptionally yields "delete" and the
+    # connection proceeds in rollback-journal mode -- where a writer blocks every
+    # reader -- with nothing logged. `sqlite_wal.enable_wal` handles both, but it
+    # is synchronous; this is the aiosqlite path, so the same ordering and the
+    # same return check are done inline.
+    await db.execute("PRAGMA busy_timeout = 5000")
+    try:
+        _row = await (await db.execute("PRAGMA journal_mode = WAL")).fetchone()
+        _mode = (_row[0] if _row else "") or ""
+        if _mode.lower() != "wal":
+            import logging as _lg
+
+            _lg.getLogger("llm_router").warning(
+                "usage.db: WAL not established (mode=%s); continuing in "
+                "rollback-journal mode with reduced concurrency", _mode or "unknown",
+            )
+    except Exception as _wal_exc:  # noqa: BLE001 — a cold-start race must not break routing
+        from llm_router import failopen
+
+        failopen.record("CHZ-FO-COST-WAL", _wal_exc)
     await db.execute(CREATE_TABLE)
     await db.execute(CREATE_CLAUDE_USAGE_TABLE)
     await db.execute(CREATE_ROUTING_DECISIONS_TABLE)
@@ -725,9 +837,13 @@ async def _get_db() -> aiosqlite.Connection:
         # `except (ImportError, Exception): pass`, so every compression was
         # recorded nowhere and the absence looked like 'nothing compressed'.
         + MIGRATE_ADD_COMPRESSION_STATS
+        + MIGRATE_USAGE_PROVENANCE_CUTOVER_TABLE
     )
     for stmt in all_migrations:
         await _safe_migrate(db, stmt)
+
+    # Phase 2: replace the DEFAULT-0 lie on historical rows with an honest NULL.
+    await _apply_provenance_cutover(db)
 
     # Quality tracking indices for v6.4 (created after migrations so judge_score exists)
     await db.execute(
@@ -845,11 +961,25 @@ async def log_usage(
         saved_usd = potential_cost_usd - cost_usd
 
         await db.execute(
+            # C-02. `is_simulated` was declared (ALTER TABLE, above) and filtered
+            # on (`get_savings_by_period`) but NEVER WRITTEN -- this is the only
+            # INSERT into `usage`, and it omitted the column. The filter
+            # `AND is_simulated IS NOT 1` therefore excluded nothing, ever, while
+            # reading as protective.
+            #
+            # The measured consequence: reported savings +$83.49, actual -$1.15
+            # once fixtures were removed. 1,813 test rows carried REAL model
+            # names, so the name-based `_is_test_model` filter could not see them
+            # -- and applying it moved the figure FURTHER from truth (+$87.96).
+            #
+            # Provenance is stamped here, at write time, by the same
+            # `detect_synthetic()` the routing ledger uses. A name heuristic
+            # applied at read time cannot be made correct; this can.
             """INSERT INTO usage (model, provider, task_type, profile,
                input_tokens, output_tokens, cost_usd, latency_ms, success,
                user_id, project_id, correlation_id, complexity,
-               baseline_model, potential_cost_usd, saved_usd)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               baseline_model, potential_cost_usd, saved_usd, is_simulated)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 response.model,
                 response.provider,
@@ -867,6 +997,7 @@ async def log_usage(
                 baseline_model,
                 potential_cost_usd,
                 saved_usd,
+                1 if _detect_synthetic() else 0,
             ),
         )
         await db.commit()
@@ -1938,7 +2069,7 @@ async def log_claude_usage(
     import sys
     if "pytest" in sys.modules:
         config = get_config()
-        prod_path = Path.home() / ".llm-router" / "usage.db"
+        prod_path = paths.state_path("usage.db")
         if str(config.llm_router_db_path) == str(prod_path):
             raise RuntimeError(
                 "CRITICAL: log_claude_usage is writing to production database in test context!\n"
@@ -2013,7 +2144,7 @@ async def log_codex_usage(
     import sys as _sys
     if "pytest" in _sys.modules:
         config = get_config()
-        prod_path = Path.home() / ".llm-router" / "usage.db"
+        prod_path = paths.state_path("usage.db")
         if str(config.llm_router_db_path) == str(prod_path):
             raise RuntimeError(
                 "CRITICAL: log_codex_usage is writing to production database in test context!\n"
@@ -2116,7 +2247,7 @@ async def log_gemini_usage(
     import sys as _sys
     if "pytest" in _sys.modules:
         config = get_config()
-        prod_path = Path.home() / ".llm-router" / "usage.db"
+        prod_path = paths.state_path("usage.db")
         if str(config.llm_router_db_path) == str(prod_path):
             raise RuntimeError(
                 "CRITICAL: log_gemini_usage is writing to production database in test context!"
@@ -3130,7 +3261,7 @@ def refresh_baseline_pricing_from_api() -> bool:
     return False
 
 
-async def get_savings_by_period() -> dict[str, dict]:
+async def get_savings_by_period(*, include_simulated: bool = False) -> dict[str, dict]:
     """Return time-bucketed savings aggregates for the savings dashboard.
 
     Queries the usage table for four periods: today, this week (Mon–Sun),
@@ -3157,6 +3288,16 @@ async def get_savings_by_period() -> dict[str, dict]:
             "month": "date('now','localtime', 'start of month')",
             "all_time": "'1970-01-01'",
         }
+        # C-02. `include_simulated` mirrors `summarize(include_unevaluable=...)`:
+        # a named escape hatch for tests that exercise the aggregate arithmetic
+        # over rows they wrote themselves (every such row is stamped synthetic,
+        # because pytest sets PYTEST_CURRENT_TEST). No production caller passes
+        # it, and the default stays exclusive.
+        # T13, fail-closed. `IS NOT 1` admits NULL, so an UNKNOWN row counted as
+        # production -- the same defect as `is_evaluable` treating a missing field
+        # as real. Only rows explicitly stamped 0 at write time are production.
+        _sim_clause = "" if include_simulated else "AND is_simulated = 0"
+
         result: dict[str, dict] = {}
         for name, since_expr in periods.items():
             rows = await db.execute_fetchall(
@@ -3164,7 +3305,7 @@ async def get_savings_by_period() -> dict[str, dict]:
                     FROM usage
                     WHERE date(timestamp,'localtime') >= {since_expr}
                       AND success = 1
-                      AND is_simulated IS NOT 1""",
+                      {_sim_clause}""",
             )
             actual = baseline = saved_total = 0.0
             calls = 0
