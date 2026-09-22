@@ -151,15 +151,43 @@ def replay_available() -> bool:
     Tied to the capability rather than to a hand-maintained flag, so that when a
     replayer is implemented these tasks become eligible automatically and this
     function cannot drift out of date.
+
+    T-13. Resolved from the module's own SOURCE, not from an imported object.
+    `from groundtruth import run_matrix` resolves via the package attribute when
+    one exists, so anything that ever sets `groundtruth.run_matrix` -- a test
+    double, a mock, a notebook, a future plugin -- flipped this gate permanently
+    for the rest of the process, with no error, no log and no counter. That is
+    not a hypothetical: it happened, and it masked eight real test failures while
+    the suite reported zero.
+
+    Reading the file means a stub in `sys.modules` cannot answer for it. The
+    tradeoff is that a genuine runner added at runtime rather than in the source
+    would not be seen -- which is the correct direction to fail, because this
+    gate exists to keep ungradable work OUT of the pool.
     """
+    import re as _re
+
+    for name in _REPLAY_RUNNERS:
+        if _re.search(rf"^\s*(async\s+)?def\s+{name}\b", _RUN_MATRIX_SRC(), _re.M):
+            return True
+    return False
+
+
+#: Any one of these, defined at module level in run_matrix.py, means a runner exists.
+_REPLAY_RUNNERS = ("replay_in_worktree", "checkout_and_run", "run_with_repo_state")
+
+
+def _RUN_MATRIX_SRC() -> str:
+    """run_matrix.py's text, or "" if it cannot be read.
+
+    Not cached: the whole point is that this cannot go stale within a process.
+    """
+    from pathlib import Path as _P
+
     try:
-        from groundtruth import run_matrix
-    except Exception:  # noqa: BLE001 — absence is the answer, not an error
-        return False
-    return any(
-        callable(getattr(run_matrix, name, None))
-        for name in ("replay_in_worktree", "checkout_and_run", "run_with_repo_state")
-    )
+        return (_P(__file__).parent / "run_matrix.py").read_text(encoding="utf-8")
+    except OSError:
+        return ""
 
 
 def _is_checkable_question(prompt: str) -> bool:

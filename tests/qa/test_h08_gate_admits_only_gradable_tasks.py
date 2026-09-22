@@ -152,26 +152,75 @@ def test_the_gate_flips_back_automatically_when_replay_lands(E, monkeypatch):
     )
 
 
-def test_replay_detection_looks_for_a_real_runner(E):
+def test_replay_detection_looks_for_a_real_runner(E, monkeypatch, tmp_path):
     """Anti-vacuity: `replay_available` must be capable of returning True.
 
-    A function that always returns False would make every assertion above pass
+    A detector that always returns False would make every assertion above pass
     while proving nothing about the mechanism.
+
+    T-13. The probe now points the detector at a temporary `run_matrix.py`
+    containing a real runner definition, because the detector reads that file's
+    SOURCE rather than an imported module object. The previous version patched
+    `sys.modules` and the `groundtruth` package attribute, and its hand-written
+    cleanup restored only the first -- leaving a stub that flipped the gate open
+    for the rest of the process and masked eight failures elsewhere.
+
+    Patching the source reader is also a more honest probe: it exercises the same
+    code path a real runner would, instead of a channel the detector no longer
+    consults.
+    """
+    fake_src = tmp_path / "run_matrix.py"
+    fake_src.write_text(
+        "def replay_in_worktree(task, commit):\n    return None\n", encoding="utf-8"
+    )
+    monkeypatch.setattr(
+        E, "_RUN_MATRIX_SRC", lambda: fake_src.read_text(encoding="utf-8")
+    )
+    assert E.replay_available() is True, (
+        "replay_available() cannot detect a runner even when one is defined"
+    )
+
+
+def test_a_module_stub_cannot_open_the_gate(E, monkeypatch):
+    """T-13 regression: `sys.modules` is not a channel the detector trusts.
+
+    This is the exact manoeuvre that silently reopened the gate for a whole
+    process. It must now have no effect.
     """
     import types
 
     fake = types.ModuleType("groundtruth.run_matrix")
     fake.replay_in_worktree = lambda *a, **k: None
-    monkey = sys.modules.get("groundtruth.run_matrix")
-    sys.modules["groundtruth.run_matrix"] = fake
-    sys.modules.setdefault("groundtruth", types.ModuleType("groundtruth"))
-    sys.modules["groundtruth"].run_matrix = fake
-    try:
-        assert E.replay_available() is True, (
-            "replay_available() cannot detect a runner even when one is present"
+    monkeypatch.setitem(sys.modules, "groundtruth.run_matrix", fake)
+    pkg = sys.modules.get("groundtruth")
+    if pkg is not None:
+        monkeypatch.setattr(pkg, "run_matrix", fake, raising=False)
+
+    assert E.replay_available() is False, (
+        "a stub in sys.modules opened the H-08 gate -- the detector is trusting "
+        "an object it can be handed rather than the source it should read"
+    )
+
+
+def test_the_replay_probe_leaves_no_trace(E):
+    """T-01 regression: the probe above must not leak into the rest of the run.
+
+    This is the assertion whose absence cost 8 masked failures. It asserts the
+    POST-cleanup state, which the original test never did -- it checked only its
+    own effect inside the `try`.
+
+    Ordered after the probe by name so pytest runs it second within this file.
+    """
+    import types
+
+    pkg = sys.modules.get("groundtruth")
+    if pkg is not None:
+        rm = getattr(pkg, "run_matrix", None)
+        assert not isinstance(rm, types.ModuleType) or hasattr(rm, "call_model"), (
+            "a stub run_matrix survived on the groundtruth package object; "
+            "replay_available() will report True for the rest of this process"
         )
-    finally:
-        if monkey is not None:
-            sys.modules["groundtruth.run_matrix"] = monkey
-        else:
-            sys.modules.pop("groundtruth.run_matrix", None)
+    assert E.replay_available() is False, (
+        "replay_available() is still True after the probe -- the H-08 gate is "
+        "open for every test that follows"
+    )

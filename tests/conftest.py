@@ -1325,7 +1325,155 @@ def pytest_report_header(config):
     excluded = sorted(set(re.findall(r"not\s+([a-z_]+)", expr)))
     if not excluded:
         return None
-    return (
+    lines = [
         "deselected by default: " + ", ".join(excluded)
         + "  — run `pytest -m ''` to include them"
+    ]
+
+    # F05 / T-01: "0 failures" is not "0 known failures". `_quarantined_tests/`
+    # is excluded from collection entirely, and its own dated triage records
+    # roughly 90 failing assertions in there. Saying nothing made a green run
+    # read as a stronger claim than it is.
+    import pathlib as _pl
+
+    root = _pl.Path(__file__).resolve().parents[1]
+    q = root / "_quarantined_tests"
+    if q.is_dir():
+        files = sorted(f for f in q.glob("test_*.py"))
+        triage = next(q.glob("TRIAGE_*.md"), None)
+        lines.append(
+            f"quarantined: {len(files)} file(s) excluded from collection"
+            + (f" — see {triage.relative_to(root)}" if triage else "")
+        )
+    return lines
+
+
+# ── F04 / T-01: no test may leak module state into the next one ─────────────
+@pytest.fixture
+def importing_a_submodule():
+    """Opt-in cleanup for a test that imports `llm_router.<sub>.<mod>`.
+
+    Importing a submodule binds its parent name on the package object. For a
+    namespace package that attribute is a module with `__file__ = None`, and it
+    then answers for the real module in every test that runs afterwards — the
+    T-01 contamination shape that `_no_module_state_leak` (below) catches at
+    teardown.
+
+    The guard is deliberately not relaxed: a test that legitimately needs such
+    an import asks for this fixture and the binding is undone after it, rather
+    than every test silently being allowed to leak.
+    """
+    import sys as _s
+
+    before = {n: set(vars(m)) for n, m in list(_s.modules.items())
+              if n == "llm_router" or n.startswith("llm_router.")}
+    yield
+    for pkg_name, snapshot in before.items():
+        mod = _s.modules.get(pkg_name)
+        if mod is None:
+            continue
+        for attr in [a for a in vars(mod) if a not in snapshot]:
+            sub = getattr(mod, attr, None)
+            if getattr(sub, "__file__", "sentinel") is None:
+                try:
+                    delattr(mod, attr)
+                except Exception:  # noqa: BLE001
+                    pass
+
+
+_LEAK_WATCHED_PACKAGES = ("groundtruth", "llm_router")
+
+
+def _module_state_fingerprint():
+    """A cheap snapshot of the channels a leaking test actually corrupts.
+
+    Not every attribute of every module -- that would be slow and noisy. The two
+    channels that have genuinely caused a masked failure here are `sys.modules`
+    membership and submodule attributes hung on a package object, so those are
+    what is watched.
+    """
+    import sys
+
+    mods = frozenset(sys.modules)
+    attrs = {}
+    for pkg_name in _LEAK_WATCHED_PACKAGES:
+        pkg = sys.modules.get(pkg_name)
+        if pkg is None:
+            continue
+        attrs[pkg_name] = frozenset(
+            k for k, v in vars(pkg).items()
+            if isinstance(v, type(sys)) and not k.startswith("__")
+        )
+    return mods, attrs
+
+
+@pytest.fixture(autouse=True)
+def _no_module_state_leak():
+    """Fail the test that leaves a module stub behind, rather than the one after.
+
+    T-01: `test_replay_detection_looks_for_a_real_runner` patched both
+    `sys.modules["groundtruth.run_matrix"]` and the package attribute
+    `groundtruth.run_matrix`, and restored only the first. The stub survived,
+    `eligibility.replay_available()` returned True for the rest of the process,
+    and eight genuine failures in another file were masked -- the full suite
+    reported 0 while those eight were red.
+
+    The cost of finding that was a bisect across file orderings. The cost of
+    preventing it is this fixture, which names the culprit directly.
+
+    Only ADDED submodule attributes are reported: a test that legitimately
+    imports something new is fine, while one that hangs a fake on a package is
+    not. Cleanup of `sys.modules` membership itself is left to monkeypatch.
+    """
+    before_mods, before_attrs = _module_state_fingerprint()
+    yield
+    after_mods, after_attrs = _module_state_fingerprint()
+
+    leaked = []
+    for pkg_name, after in after_attrs.items():
+        added = after - before_attrs.get(pkg_name, frozenset())
+        for name in sorted(added):
+            import sys as _sys
+
+            mod = getattr(_sys.modules[pkg_name], name, None)
+            origin = getattr(mod, "__file__", None)
+            if origin is None:            # a real import has a file; a stub does not
+                leaked.append(f"{pkg_name}.{name}")
+    assert not leaked, (
+        "this test left a fileless module stub on a package object: "
+        + ", ".join(leaked)
+        + ". It will answer for the real module in every test that follows "
+          "(see T-01). Use monkeypatch.setattr, which restores what it touched."
     )
+
+
+# ── F06 / T-15: no test reads an ambient .env ──────────────────────────────
+@pytest.fixture(autouse=True)
+def _isolate_dotenv(tmp_path, monkeypatch):
+    """Point RouterConfig's `env_file` at the per-test sandbox.
+
+    `config.py`'s `model_config["env_file"]` is `(paths.state_path(".env"),
+    ".env")`, and pydantic-settings evaluates `model_config` when the CLASS BODY
+    executes -- so the path is frozen at import, against whatever
+    `LLM_ROUTER_HOME` was then, and the second entry is resolved relative to the
+    process's cwd.
+
+    Two consequences the suite was exposed to:
+      * the operator's real `~/.llm-router/.env` is read by every
+        `RouterConfig()` no matter how well the test isolates its state dir;
+      * a `.env` in the repo root is read too.
+
+    So a concurrent `llm-router config`/`update` writing either file changes test
+    outcomes. That is what flipped three default-profile assertions during the
+    2026-09-22 audit while a second process was exercising the CLI.
+
+    The class attribute cannot be deferred (pydantic offers no callable
+    `env_file`), so it is redirected per test instead. `monkeypatch.setitem`
+    restores it, and the F04 leak guard would catch it if it did not.
+    """
+    try:
+        from llm_router.config import RouterConfig
+    except Exception:  # noqa: BLE001 — a config import failure is another test's problem
+        return
+    sandbox = tmp_path / "isolated.env"
+    monkeypatch.setitem(RouterConfig.model_config, "env_file", (str(sandbox),))

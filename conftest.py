@@ -41,6 +41,8 @@ from __future__ import annotations
 
 import re
 
+import pathlib
+
 import pytest
 
 _EXCLUDED_MODULE_ROOTS = (
@@ -160,6 +162,72 @@ def _missing_unsynced_artifact(exc: BaseException | None) -> str | None:
     return None
 
 
+def _shipped_module_in_traceback(excinfo) -> str | None:
+    """A SHIPPED `llm_router` file on the failing import's traceback, if any.
+
+    T-11 (audit 2026-09-22). The excluded-module skip below is right for a test
+    that imports an excluded capability directly — that test is not applicable
+    to this distribution. It is WRONG when the thing reaching for the excluded
+    module is shipped code, because then the ImportError is not a property of
+    the test, it is a defect in the wheel.
+
+    That is not hypothetical. `budget_lineage_reconciliation` shipped a public
+    function whose body did `from llm_router.control_plane import audit`, so it
+    raised on every call any installed user could make — and the four tests that
+    would have caught it were rewritten from FAIL to SKIP right here, reading
+    "not applicable here" for months.
+
+    So: walk the traceback. If any frame belongs to a shipped `llm_router`
+    module (one not itself excluded from the wheel), refuse to skip and let the
+    failure stand.
+    """
+    try:
+        import llm_router as _pkg
+        roots = [str(pathlib.Path(pth).resolve()) for pth in _pkg.__path__]
+    except Exception:  # noqa: BLE001
+        return None
+
+    tb = getattr(excinfo, "tb", None)
+    while tb is not None:
+        fname = tb.tb_frame.f_code.co_filename
+        try:
+            resolved = str(pathlib.Path(fname).resolve())
+        except Exception:  # noqa: BLE001
+            resolved = fname
+        if any(resolved.startswith(r) for r in roots):
+            rel = resolved
+            for r in roots:
+                if resolved.startswith(r):
+                    rel = "src/llm_router" + resolved[len(r):]
+                    break
+            if rel not in _WHEEL_EXCLUDED_PATHS:
+                return rel
+        tb = tb.tb_next
+    return None
+
+
+def _wheel_excluded_paths() -> frozenset[str]:
+    """Paths pyproject excludes from the wheel, read from pyproject itself.
+
+    Read rather than restated, so this cannot drift away from what is actually
+    packaged — the drift being the whole subject of the audit this came from.
+    """
+    try:
+        import tomllib
+        cfg = tomllib.loads(
+            (pathlib.Path(__file__).parent / "pyproject.toml").read_text(encoding="utf-8")
+        )
+        return frozenset(
+            cfg.get("tool", {}).get("hatch", {}).get("build", {})
+            .get("targets", {}).get("wheel", {}).get("exclude", [])
+        )
+    except Exception:  # noqa: BLE001
+        return frozenset()
+
+
+_WHEEL_EXCLUDED_PATHS = _wheel_excluded_paths()
+
+
 def _skip(report, reason: str) -> None:
     report.outcome = "skipped"
     report.longrepr = (__file__, 0, reason)
@@ -174,6 +242,16 @@ def pytest_runtest_makereport(item, call):
 
     root = _missing_excluded_module(call.excinfo.value)
     if root is not None:
+        # T-11: never convert a SHIPPED module's failure into a skip.
+        culprit = _shipped_module_in_traceback(call.excinfo)
+        if culprit is not None:
+            report.longrepr = (
+                f"{report.longrepr}\n\n"
+                f"[conftest] NOT skipped: {culprit} is shipped in the wheel and "
+                f"reaches for the excluded module {root!r}. That is a packaging "
+                f"defect, not an inapplicable test (T-11)."
+            )
+            return
         _skip(
             report,
             f"Skipped: {root} is deliberately not shipped in llm-routing "

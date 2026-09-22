@@ -43,6 +43,30 @@ CODE_TASK = ("Make the name_contains filter in src/query.py case-insensitive. "
 
 # ── Eligibility: state requirements ─────────────────────────────────────────
 
+
+@pytest.fixture
+def with_replayer(monkeypatch):
+    """Pretend a replay runner exists, so repo-bound tasks are admissible.
+
+    T-01/H-08. `eligibility.replay_available()` gates repo-bound tasks on whether
+    anything can actually check out the captured commit; today nothing can, so
+    they are correctly refused. Most tests in this file are not about that gate
+    at all -- they exercise pool persistence, dedup and funnel counting, and only
+    need SOME admissible task to work with.
+
+    Patching the capability (rather than asserting the pre-gate contract) keeps
+    those tests about their own subject, and means they start exercising the real
+    path automatically on the day a replayer lands.
+
+    Uses `monkeypatch` so the patch cannot leak: the hand-rolled version of this
+    in tests/qa/ restored only one of the two channels it touched and silently
+    masked eight failures here.
+    """
+    from groundtruth import eligibility as _el
+
+    monkeypatch.setattr(_el, "replay_available", lambda: True)
+    return _el
+
 def test_session_state_task_is_rejected() -> None:
     e = assess("commit this and keep going with the rest of the plan")
     assert not e.ground_truth_candidate
@@ -77,11 +101,39 @@ def test_repo_task_without_captured_repo_state_is_rejected() -> None:
     assert R_ENVELOPE_INCOMPLETE in e.ineligibility_reasons
 
 
-def test_repo_task_WITH_captured_repo_state_becomes_a_candidate() -> None:
+def test_repo_task_with_captured_state_waits_for_a_replayer() -> None:
+    """H-08. Captured state is necessary, not sufficient.
+
+    Before H-08 this asserted that capturing repo state made a task a candidate.
+    It does not: nothing in the tree can check out the captured commit, so
+    admitting the task would fill the pool with work the harness can never grade
+    while the funnel reported a healthy pipeline.
+
+    The refusal reason is deliberately distinct from `replay-envelope-incomplete`
+    -- that one sends an operator to fix capture, which would not help here.
+    """
     e = assess(CODE_TASK, has_repo_state=True)
-    assert e.replayable, e.ineligibility_reasons
-    assert e.verification_candidate
-    assert e.ground_truth_candidate
+    assert e.verification_candidate, "the task is still mechanically checkable"
+    assert e.ground_truth_candidate is False
+    assert "no-replayer-for-required-state" in e.ineligibility_reasons
+
+    # Worth recording: H-08's reason lands in `ineligibility_reasons`, which also
+    # flips `replayable` to False. Arguably "replayable" should mean "the state
+    # was captured" and a separate axis should mean "and something can run it" --
+    # conflating them loses the distinction between a capture failure and a
+    # missing runner, which is exactly the distinction R_NO_REPLAYER exists to
+    # preserve. Asserted as-is rather than silently; see FIX_RUN.md F02.
+    assert e.replayable is False
+
+
+def test_repo_task_becomes_a_candidate_once_a_replayer_exists(with_replayer) -> None:
+    """The other side of the same gate, so the refusal above cannot be permanent.
+
+    If this ever fails, the gate has stopped being tied to the capability and has
+    become a hard-coded no.
+    """
+    e = assess(CODE_TASK, has_repo_state=True)
+    assert e.ground_truth_candidate, e.ineligibility_reasons
     assert e.verifier_class == ds.V_SANDBOX
 
 
@@ -107,7 +159,7 @@ def test_unsafe_to_capture_is_rejected_rather_than_weakening_privacy() -> None:
     assert R_PRIVACY in e.ineligibility_reasons
 
 
-def test_incomplete_envelope_overrides_a_clean_assessment() -> None:
+def test_incomplete_envelope_overrides_a_clean_assessment(with_replayer) -> None:
     """Content can look perfect and the state still be missing."""
     ok = assess(CODE_TASK, has_repo_state=True, envelope_complete=True)
     bad = assess(CODE_TASK, has_repo_state=True, envelope_complete=False)
@@ -295,7 +347,7 @@ def _make(prompt: str, **over):
         envelope={"prompt": prompt, "complete": True}, **over)
 
 
-def test_candidate_persists_across_reload(tmp_path: Path) -> None:
+def test_candidate_persists_across_reload(tmp_path: Path, with_replayer) -> None:
     p = _pool(tmp_path)
     ok, _ = p.admit(_make(CODE_TASK), CODE_TASK)
     assert ok
@@ -304,7 +356,7 @@ def test_candidate_persists_across_reload(tmp_path: Path) -> None:
     assert reloaded.all()[0].state == poolmod.READY_FOR_REPLAY
 
 
-def test_history_survives_a_reload(tmp_path: Path) -> None:
+def test_history_survives_a_reload(tmp_path: Path, with_replayer) -> None:
     p = _pool(tmp_path)
     p.admit(_make(CODE_TASK), CODE_TASK)
     c = _pool(tmp_path).all()[0]
@@ -320,7 +372,7 @@ def test_exact_duplicate_is_rejected_with_attribution(tmp_path: Path) -> None:
     assert poolmod.DUP_EXACT in funnel and "duplicate_of" in funnel
 
 
-def test_near_duplicate_is_rejected(tmp_path: Path) -> None:
+def test_near_duplicate_is_rejected(tmp_path: Path, with_replayer) -> None:
     p = _pool(tmp_path)
     p.admit(_make(CODE_TASK, task_id="a"), CODE_TASK)
     # Near, not exact: stemming already collapses inflection and punctuation,
@@ -331,7 +383,7 @@ def test_near_duplicate_is_rejected(tmp_path: Path) -> None:
     assert not ok and reason == poolmod.DUP_NEAR
 
 
-def test_distinct_task_is_not_a_duplicate(tmp_path: Path) -> None:
+def test_distinct_task_is_not_a_duplicate(tmp_path: Path, with_replayer) -> None:
     p = _pool(tmp_path)
     p.admit(_make(CODE_TASK, task_id="a"), CODE_TASK)
     other = ("Add a retry with exponential backoff to src/client.py for 5xx "
@@ -360,7 +412,7 @@ def test_ineligible_task_is_recorded_not_dropped(tmp_path: Path) -> None:
         "a rejected task stays in the pool as evidence")
 
 
-def test_stats_counts_and_rejection_funnel(tmp_path: Path) -> None:
+def test_stats_counts_and_rejection_funnel(tmp_path: Path, with_replayer) -> None:
     p = _pool(tmp_path)
     p.admit(_make(CODE_TASK, task_id="a"), CODE_TASK)
     bad = "commit this and keep going"
@@ -531,7 +583,7 @@ def test_real_command_invocation_implies_tool_state(prompt: str) -> None:
     assert assess(prompt, has_repo_state=True).requires_tool_state
 
 
-def test_same_shaped_code_tasks_get_the_same_verdict() -> None:
+def test_same_shaped_code_tasks_get_the_same_verdict(with_replayer) -> None:
     """The bug this guards: two equivalent tasks split by their opening verb."""
     a = assess("Make the name_contains filter in src/query.py case-insensitive.",
                has_repo_state=True, envelope_complete=True)
