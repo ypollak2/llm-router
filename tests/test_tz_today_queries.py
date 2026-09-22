@@ -12,7 +12,6 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _ast_assert import (  # noqa: E402
     assert_in_strings,
-    assert_not_in_strings,
     string_constants,
 )
 

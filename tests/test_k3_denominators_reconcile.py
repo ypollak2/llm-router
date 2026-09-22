@@ -27,7 +27,6 @@ this file would otherwise be the thing it exists to prevent.
 
 from __future__ import annotations
 
-import json
 
 import pytest
 

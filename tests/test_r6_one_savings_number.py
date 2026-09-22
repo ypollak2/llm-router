@@ -158,7 +158,7 @@ def test_a_file_computing_its_own_savings_figure_is_registered():
     )
     assert not unaccounted, (
         "file(s) computing their own savings figure with no entry in "
-        f"savings.SURFACES:\n  " + "\n  ".join(unaccounted)
+        "savings.SURFACES:\n  " + "\n  ".join(unaccounted)
         + "\n\nThis is how three surfaces became twenty. Either call "
         "`savings.canonical_savings()`, or add the file to SURFACES with the "
         "exact way its number differs."

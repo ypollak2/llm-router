@@ -166,7 +166,10 @@ def test_the_hook_marks_before_the_work_and_registers_a_cleanup():
                    "atexit.register"):
         assert needed in names, f"main() does not call {needed}"
 
-    mark_line = min(l for n, l in calls if n == "hook_liveness.mark_started")
+    mark_line = min(
+        lineno for name, lineno in calls
+        if name == "hook_liveness.mark_started"
+    )
     # `_route`/`classify` are the expensive part; the marker must precede the
     # bulk of main() rather than sit near its end.
     assert mark_line < main.lineno + 60, (

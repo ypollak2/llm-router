@@ -21,7 +21,10 @@ import aiosqlite
 
 from llm_router import pricing as _pricing
 from llm_router.provenance import Measured
-from llm_router.config import get_config, state_path
+# R11: `state_path` comes from `llm_router.paths`, the canonical resolver.
+# The import from `config` here was unused and shadowed by the in-function
+# import below — two names for one concept is the class R11 removed.
+from llm_router.config import get_config
 from llm_router.types import (
     LLMResponse, MODEL_COST_PER_1K, MODEL_SPEED_TPS,
     RoutingProfile, TaskType, colorize_model,
