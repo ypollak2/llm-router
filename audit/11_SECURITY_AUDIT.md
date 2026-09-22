@@ -1,6 +1,6 @@
 # Security Audit — Phase 25 (Red Team)
 
-Subject: `/Users/yaliandrona/Projects/llm-router` @ `357a402e8f462f913cf9368244557eaaf7711beb`
+Subject: `~/Projects/llm-router` @ `357a402e8f462f913cf9368244557eaaf7711beb`
 (branch `fix/audit-2026-09-22`). See `audit/FROZEN_STATE.md` for platform/ambient
 state. All probes ran under `export LLM_ROUTER_HOME=$(mktemp -d)`, prefixed
 `LLM_ROUTER_BASH_INTERCEPT=off`, using `.venv/bin/python`, synthetic canary

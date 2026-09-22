@@ -7,7 +7,7 @@ the audit, the change and its reason are appended at the bottom of this file.
 
 | | |
 |---|---|
-| Repository | `/Users/yaliandrona/Projects/llm-router` |
+| Repository | `~/Projects/llm-router` |
 | Remote | `https://github.com/ypollak2/llm-router` (public) |
 | Branch | `fix/audit-2026-09-22` |
 | HEAD | `357a402e8f462f913cf9368244557eaaf7711beb` |

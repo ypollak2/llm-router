@@ -1,6 +1,6 @@
 # Phase 7/8/11/12 — Provider Semantics, Capability Matrix, Context Integrity, Cache Red Team
 
-Specialist: Provider Semantics. Subject: `/Users/yaliandrona/Projects/llm-router` @
+Specialist: Provider Semantics. Subject: `~/Projects/llm-router` @
 `357a402e8f462f913cf9368244557eaaf7711beb`. All probes run under
 `LLM_ROUTER_HOME=$(mktemp -d)`, `LLM_ROUTER_BASH_INTERCEPT=off`, `.venv/bin/python`.
 No writes to `~/.llm-router`, no deletes. **Money spent: $0.00** — `XAI_API_KEY` is

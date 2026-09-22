@@ -48,12 +48,29 @@ Any finding that exists only because the orchestrator asserted it is marked
 | `19_FAILURE_MODE_MATRIX.md` | 46 | reconciliation |
 | `20_SIMPLICITY_AUDIT.md` | 47 | wave 2 |
 | `21_INVALIDATED_FINDINGS.md` | 48 | reconciliation |
+| `21_INVALIDATED_FINDINGS.md` | 48 | reconciliation |
 | `22_REMEDIATION_PLAN.md` | — | reconciliation |
+| `23_UNKNOWN_UNKNOWNS.md` | 49 | reconciliation (post-remediation) |
+| `24_CLEAN_ROOM_REPRODUCTION.md` | 50 | orchestrator, on PUBLISHED 15.0.0 |
+| `25_REMEDIATION_PLAN_2.md` | — | reconciliation |
 
 Phases still unassigned after wave 1: 9 (fallback attribution), 10 (agentic
-trajectory), 33, 35, 36, 46, 47, 49 (unknown unknowns). These go to wave 2,
-informed by what wave 1 finds — deliberately, so the second wave can chase
-what the first wave could not see.
+trajectory), 33, 35, 36, 46, 47. These go to wave 2, informed by what wave 1
+finds — deliberately, so the second wave can chase what the first wave could
+not see.
+
+## Phases 48-50, completed after the v15.0.0 release
+
+Deliberately run AFTER remediation, which changes what they can do: Phase 48
+can attack the remediation as well as the findings, and Phase 50 can reproduce
+against the PUBLISHED ARTIFACT rather than the tree — the audit's own
+completion criterion 4, and the only form of "fixed" that reaches users.
+
+Phase 50 found three defects that reading the repository did not, one of which
+(`doctor --audit` inflating the counter it reports) invalidates figures the
+remediation itself published. Phases 42-45 and Phase 50 are the two phases that
+INSTALLED the product; between them they produced the finding that caused the
+release and the finding that most damages its claims.
 
 ## Standing rules given to every specialist
 

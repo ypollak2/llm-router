@@ -196,10 +196,10 @@ Reproduced:
 export LLM_ROUTER_HOME=$(mktemp -d)
 python -c '
 from llm_router import install_hooks as ih
-print(ih._CLAUDE_JSON_PATH)                      # /Users/yaliandrona/.claude.json
+print(ih._CLAUDE_JSON_PATH)                      # ~/.claude.json
 os.environ["LLM_ROUTER_CLAUDE_DIR"] = "/tmp/audit-instance-claude"
 os.environ["HOME"] = "/tmp/audit-instance-home"
-print(ih._CLAUDE_JSON_PATH)                      # STILL /Users/yaliandrona/.claude.json
+print(ih._CLAUDE_JSON_PATH)                      # STILL ~/.claude.json
 print(ih.claude_dir())                           # /tmp/audit-instance-claude (correct, for comparison)
 '
 ```

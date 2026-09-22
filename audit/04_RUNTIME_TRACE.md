@@ -13,7 +13,7 @@ Command:
 export LLM_ROUTER_HOME=$(mktemp -d)
 .venv/bin/python - <<'EOF'
 import asyncio, sys
-sys.path.insert(0, "/Users/yaliandrona/Projects/llm-router/src")
+sys.path.insert(0, "~/Projects/llm-router/src")
 from llm_router.router import route_and_call, TaskType
 
 async def main():

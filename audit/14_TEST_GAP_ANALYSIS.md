@@ -15,7 +15,7 @@ much of the suite has to run before it notices?**
 All mutations were applied in an isolated `git worktree` at `/tmp/audit-mut`
 (`git worktree add /tmp/audit-mut HEAD`), never in the real repo. Because the
 project is an **editable install** (`.venv/lib/.../_editable_impl_llm_routing.pth`
-points at `/Users/yaliandrona/Projects/llm-router/src`), running pytest from
+points at `~/Projects/llm-router/src`), running pytest from
 inside the worktree with the *default* venv would silently exercise the real
 repo's unmutated source — this was caught and worked around by exporting
 `PYTHONPATH=/tmp/audit-mut/src` to shadow the editable install. Each run used
@@ -24,7 +24,7 @@ repo's unmutated source — this was caught and worked around by exporting
 "how long to notice" is measured in real suite percentage/seconds, not a
 targeted subset. Every mutation was reverted with `git checkout --` and
 confirmed via `git status --porcelain` before the next one; the worktree was
-removed at the end. **The real repo `/Users/yaliandrona/Projects/llm-router`
+removed at the end. **The real repo `~/Projects/llm-router`
 was never edited by this phase** — see "Repo cleanliness" at the bottom.
 
 ## Phase 29 — mutation-kill results
@@ -234,7 +234,7 @@ that broader claim honestly.
 ## Repo cleanliness
 
 All 12 mutations were made and reverted inside `/tmp/audit-mut` (a `git
-worktree`), never in `/Users/yaliandrona/Projects/llm-router`. Confirmed via
+worktree`), never in `~/Projects/llm-router`. Confirmed via
 `git status --porcelain` in the worktree after each revert (empty) and in the
 real repo before and after this phase. The worktree was removed with `git
 worktree remove /tmp/audit-mut --force` on completion. The real repo's only

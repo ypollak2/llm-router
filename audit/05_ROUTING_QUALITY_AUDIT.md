@@ -1,6 +1,6 @@
 # Routing Quality Audit — Phases 4, 5, 6, 38, 39
 
-Subject: `/Users/yaliandrona/Projects/llm-router` @ `357a402e8f462f913cf9368244557eaaf7711beb`
+Subject: `~/Projects/llm-router` @ `357a402e8f462f913cf9368244557eaaf7711beb`
 (see `audit/FROZEN_STATE.md`). All probes below ran with
 `LLM_ROUTER_BASH_INTERCEPT=off` and an isolated `export LLM_ROUTER_HOME=$(mktemp -d)`.
 No files under `src/`, `scripts/`, `tests/`, `config/` were modified. Provider
