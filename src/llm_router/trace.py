@@ -48,15 +48,41 @@ def trace_path() -> Path:
     return root / "trace.jsonl"
 
 
+def _scrub(text: str) -> str:
+    """C-04. Route every traced value through the canonical scrubber.
+
+    `secret_scrubber.scrub_text` calls itself "the single source of truth every
+    content store should call". This module had **zero** references to it, and an
+    injection test drove an Anthropic key, an AWS key id, a `password=`, a home
+    path, an email and a public IP through `emit()` — all six landed on disk in
+    full plaintext.
+
+    Fails CLOSED. If the scrubber cannot be imported or raises, the value is
+    withheld rather than written raw: a trace is a debugging aid, and a debugging
+    aid is not worth a credential on disk.
+    """
+    try:
+        from llm_router.secret_scrubber import scrub_text
+
+        return scrub_text(text)
+    except Exception:                                        # noqa: BLE001
+        return "[SCRUB-FAILED: value withheld]"
+
+
 def _clip(value, limit: int = 600):
     """Bound a field. A trace that is too big to read is not evidence."""
+    # Scrub BEFORE clipping. Clipping first can sever a secret mid-token, so the
+    # pattern that would have matched it no longer does and the prefix is written
+    # out anyway — a truncated key is still a leaked key.
     if isinstance(value, str):
+        value = _scrub(value)
         return value if len(value) <= limit else value[:limit] + f"…<+{len(value) - limit}>"
     if isinstance(value, (dict, list)):
         try:
             text = json.dumps(value, default=str)
         except Exception:                                    # noqa: BLE001
             text = repr(value)
+        text = _scrub(text)
         return text if len(text) <= limit else text[:limit] + f"…<+{len(text) - limit}>"
     return value
 
@@ -78,7 +104,12 @@ def emit(event: str, **fields) -> None:
         record.update({k: _clip(v) for k, v in fields.items()})
         path = trace_path()
         path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("a") as fh:
+        # C-04: created 0600 by the opener, not 0644-then-chmod. The established
+        # idiom in this repo left the file world-readable for the whole first
+        # write; `paths.private_opener` documents the measurement.
+        from llm_router.paths import private_opener
+
+        with open(path, "a", encoding="utf-8", opener=private_opener) as fh:
             fh.write(json.dumps(record, default=str) + "\n")
     except Exception:                                        # noqa: BLE001
         pass

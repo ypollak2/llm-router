@@ -33,6 +33,36 @@ SECRET_PATTERNS = {
     # module is the single superset). GitHub tokens, generic UPPER_KEY=value
     # assignments, and PEM private-key blocks.
     "github_token": re.compile(r"\bgh[pousr]_[A-Za-z0-9]{20,}"),
+    # ── Added 2026-09-21. This module calls itself the single source of truth
+    # that every content store delegates to. Checking that claim against the
+    # FIVE other secret-pattern tables in this same repository showed it was not
+    # a superset: it missed 5 of 7 shapes they already carried.
+    #
+    #   org_policy._PLAINTEXT_SECRET_PATTERNS   had slack + jwt
+    #   signals/pii._SECRET_PATTERNS            had slack + bare aws secret
+    #   library/store._SECRET_PATTERNS          had pk-/rk- prefixes
+    #   hooks/agent-route._AGENT_SECRET_PATTERNS  (byte-identical to the above)
+    #
+    # Six stores delegate here -- result_cache, semantic_cache, session_store,
+    # context, envelope, prompt_capture -- so a Slack token reaching any of them
+    # was persisted in plaintext while a weaker, unused module knew the pattern.
+    "slack_token": re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{10,}"),
+    # `sk-` is already covered above; `pk-`/`rk-` are the publishable/restricted
+    # siblings that the other tables matched and this one did not.
+    "prefixed_key": re.compile(r"\b(?:pk|rk)-[A-Za-z0-9_\-]{16,}"),
+    #
+    # DELIBERATELY NOT ADDED: signals/pii's bare 40-char base64 rule for an AWS
+    # secret. That belongs in a DETECTOR, which flags, and not in a SCRUBBER,
+    # which rewrites: any 40-char base64 run matches it, so a git SHA, a hash or
+    # an embedding fragment in a cached response would be silently replaced with
+    # [REDACTED]. The named `aws_secret` key=value rule above stays.
+    # Added 2026-09-21 while deleting the orphaned `error_sanitization`
+    # module. That module was listed as "misses JWT"; checking the claim
+    # showed the CANONICAL scrubber missed JWTs too, so the comparison had
+    # been measuring a gap both scrubbers shared. Three base64url segments
+    # separated by dots, anchored on the "eyJ" that every JSON header
+    # encodes to, so ordinary dotted identifiers are not swept up.
+    "jwt": re.compile(r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}"),
     "env_key_assignment": re.compile(r"\b[A-Z][A-Z0-9_]*_(?:API_)?KEY\s*[=:]\s*\S+"),
     "private_key": re.compile(
         r"-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----"

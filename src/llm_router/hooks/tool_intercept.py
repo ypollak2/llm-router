@@ -26,6 +26,7 @@ import base64
 import json
 import os
 import subprocess
+import stat
 import time
 import urllib.request
 from pathlib import Path
@@ -160,16 +161,43 @@ def _log_intercept(kind: str, detail: str, before_tokens: int,
         base = os.environ.get("LLM_ROUTER_HOME", "").strip()
         root = Path(base).expanduser() if base else Path.home() / ".llm-router"
         root.mkdir(parents=True, exist_ok=True)
+        # C-04: `detail` is a raw shell command. This file had zero scrubber
+        # references and was found at mode 644 with 177 live rows and no TTL --
+        # nothing would have stopped a `curl -H "Authorization: Bearer ..."` from
+        # landing world-readable and staying there. Scrub BEFORE truncating, so a
+        # secret cannot be cut mid-token past the pattern that matches it.
+        try:
+            from llm_router.secret_scrubber import scrub_text
+
+            safe_detail = scrub_text(detail)[:200]
+        except Exception:                                    # noqa: BLE001
+            safe_detail = "[SCRUB-FAILED: command withheld]"
         record = {
             "at": time.time(),
             "kind": kind,
-            "detail": detail[:200],
+            "detail": safe_detail,
             "before_tokens": int(before_tokens),
             "after_tokens": int(after_tokens),
             "saved_tokens": int(before_tokens) - int(after_tokens),
         }
-        with (root / "intercepts.jsonl").open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(record) + "\n")
+        # C-04: create at 0600 rather than inheriting the umask (0644).
+        try:
+            from llm_router.paths import private_opener
+        except Exception:                                    # noqa: BLE001
+            private_opener = None
+        target = root / "intercepts.jsonl"
+        if private_opener is not None:
+            with open(target, "a", encoding="utf-8", opener=private_opener) as handle:
+                handle.write(json.dumps(record) + "\n")
+        else:
+            with target.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(record) + "\n")
+        # repair an already-existing file created by an older version at 0644
+        try:
+            if stat.S_IMODE(target.stat().st_mode) != 0o600:
+                os.chmod(target, 0o600)
+        except OSError:
+            pass
     except Exception:
         pass
 

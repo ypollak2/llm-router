@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""llm_router gc — TTL-sweep stale per-session shards from ~/.llm-router.
+"""llm-router gc — TTL-sweep stale per-session shards from ~/.llm-router.
 
-Command: uv run llm_router gc [--ttl-days N] [--apply] [--root PATH]
+Command: uv run llm-router gc [--ttl-days N] [--apply] [--root PATH]
 
 LLM Router's hooks write small per-session shard files (`last_route_<id>.json`,
 `tool_history_<id>.json`, `turn_blocks_<id>.json`, `violations_<id>.json`,
@@ -19,6 +19,8 @@ import sys
 import time
 from pathlib import Path
 
+from llm_router import paths
+
 # Shard filename prefixes that are safe to TTL-sweep. Anything not matching
 # one of these (or the *.bak* rule) is left alone.
 SHARD_PREFIXES = (
@@ -31,6 +33,20 @@ SHARD_PREFIXES = (
     "transcript_",
 )
 
+# C-04: whole-file debug logs, swept by exact name rather than prefix.
+#
+# Both carry raw-ish operational content (traced values and intercepted shell
+# commands) and neither had any retention at all -- `intercepts.jsonl` was found
+# with 177 live rows, mode 644 and no expiry. They are now scrubbed and 0600 at
+# write time, but a debugging artefact should not accumulate indefinitely either.
+#
+# Their mtime advances on every append, so an actively-used log is never stale;
+# sweeping only starts once tracing or interception is switched off.
+SWEEPABLE_LOGS = frozenset({
+    "trace.jsonl",
+    "intercepts.jsonl",
+})
+
 DEFAULT_TTL_DAYS = 7
 
 
@@ -39,6 +55,8 @@ def _is_shard(p: Path) -> bool:
     if not p.is_file():
         return False
     name = p.name
+    if name in SWEEPABLE_LOGS:
+        return True
     if name.startswith(SHARD_PREFIXES):
         return True
     # backup litter: foo.json.bak, foo.bak2, ...
@@ -82,7 +100,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--root",
         type=Path,
-        default=Path.home() / ".llm-router",
+        default=paths.llm_router_home(),
         help="directory to sweep (default: ~/.llm-router)",
     )
     args = parser.parse_args(argv)

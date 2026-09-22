@@ -25,6 +25,8 @@ from pathlib import Path
 from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel
 
+from llm_router import paths
+
 
 
 def _load_dotenv() -> None:
@@ -33,7 +35,7 @@ def _load_dotenv() -> None:
     A launchd/systemd-spawned gateway has a bare environment, so without this it
     has no GEMINI_API_KEY/etc. and every cloud-model route fails. Mirrors the
     hook's loader (no override of existing env)."""
-    for env_path in (Path.home() / ".llm-router" / ".env", Path.home() / ".env"):
+    for env_path in (paths.state_path(".env"), Path.home() / ".env"):
         if not env_path.exists():
             continue
         try:
@@ -52,6 +54,84 @@ def _load_dotenv() -> None:
 _load_dotenv()  # at import, before any routing
 
 app = FastAPI(title="LLM Router Gateway", version="2")
+
+
+# ── M-08: per-request authentication ────────────────────────────────────────
+#
+# Every route here can trigger a real, billed model call, and the audit found no
+# per-request auth at all -- one grep hit, a comment acknowledging the gap. The
+# bind IS gated (`net_bind.refuse_public_bind_or_exit`, loopback by default) and
+# `_guard_cross_origin` above blocks browser CSRF and DNS rebinding, so this is
+# not an open port. But any OTHER LOCAL PROCESS -- a malicious dependency,
+# another user on a shared box, a compromised extension -- can still spend money
+# through it.
+#
+# WHY THIS IS OPT-IN. Making a token mandatory would break every existing user on
+# upgrade: clients set OPENAI_BASE_URL / ANTHROPIC_BASE_URL and send no
+# Authorization header. A remediation that silently stops working traffic is a
+# worse outcome than the gap it closes, so enforcement turns on when an operator
+# provides a token and stays off otherwise -- with the exposure logged once at
+# startup rather than left unsaid.
+#
+# `commands/sse.py` already requires Bearer on every request; this is the same
+# contract, applied to the surface that actually spends money.
+# Read as a LITERAL below, not through this constant. `env_registry`'s
+# validation deliberately scans the AST for `os.environ.get("NAME")` as
+# INDEPENDENT ground truth against the hand-written registry -- a name passed as
+# a variable is invisible to it and reads as "declared but never read".
+# `hooks/tool_intercept.py` records the same requirement.
+_GATEWAY_TOKEN_ENV = "LLM_ROUTER_GATEWAY_TOKEN"
+
+
+def _gateway_token_file():
+    from llm_router import paths
+
+    return paths.state_path("gateway.token")
+
+
+def gateway_token() -> str | None:
+    """The configured gateway token, or None when auth is not enabled.
+
+    Env wins over the file so a container can inject one without writing state.
+    Never creates the file: a token that appears by itself would enable auth on
+    upgrade and break the traffic this is careful not to break.
+    """
+    import os as _os
+
+    env = _os.environ.get("LLM_ROUTER_GATEWAY_TOKEN", "").strip()
+    if env:
+        return env
+    try:
+        f = _gateway_token_file()
+        if f.exists():
+            tok = f.read_text(encoding="utf-8").strip()
+            return tok or None
+    except OSError:
+        return None
+    return None
+
+
+def _check_gateway_auth(headers) -> None:
+    """401 unless the request carries the configured bearer token.
+
+    No-op when no token is configured. Constant-time comparison: a timing oracle
+    on a loopback socket is cheap to exploit from the same machine, which is
+    exactly the attacker this defends against.
+    """
+    import secrets as _secrets
+
+    expected = gateway_token()
+    if not expected:
+        return
+    supplied = (headers.get("authorization") or "").strip()
+    prefix = "bearer "
+    if supplied[:len(prefix)].lower() != prefix:
+        raise HTTPException(
+            status_code=401,
+            detail="this gateway requires Authorization: Bearer <token>",
+        )
+    if not _secrets.compare_digest(supplied[len(prefix):].strip(), expected):
+        raise HTTPException(status_code=401, detail="invalid gateway token")
 
 
 @app.middleware("http")
@@ -74,6 +154,12 @@ async def _guard_cross_origin(request, call_next):
         return JSONResponse(
             {"error": "forbidden: cross-origin request rejected"}, status_code=403
         )
+    # M-08. Applied in the middleware so it covers EVERY route, including ones
+    # added later. A per-handler check is how a new endpoint ships unguarded.
+    try:
+        _check_gateway_auth(request.headers)
+    except HTTPException as exc:
+        return JSONResponse({"error": exc.detail}, status_code=exc.status_code)
     return await call_next(request)
 
 
@@ -311,7 +397,7 @@ def _flatten_responses_input(value) -> str:
 
 # ── health / discovery ───────────────────────────────────────────────────────
 def _runtime_python() -> dict:
-    """Interpreter identity of the *running* daemon — lets ``llm_router doctor``
+    """Interpreter identity of the *running* daemon — lets ``llm-router doctor``
     detect an orphaned interpreter (venv rebuilt under a different Python
     while the daemon kept running; lazy imports then 500)."""
     v = sys.version_info
@@ -444,15 +530,65 @@ def ollama_tags() -> dict:
 
 
 # ── OpenAI: POST /v1/chat/completions ────────────────────────────────────────
+# H-03. A client sending `tools` got a plausible prose reply and no error.
+#
+# `_OAIRequest` had no `tools` field, so Pydantic discarded it before the handler
+# body ran -- no code path could even have logged it. `finish_reason` was the
+# literal "stop", so a client could never observe `tool_use` either. An
+# OpenAI-compatible client doing function calling therefore received a
+# well-formed answer to a question it had not asked, with nothing to indicate
+# that its tool definitions had been thrown away.
+#
+# WHY THIS REFUSES RATHER THAN IMPLEMENTS. The router returns text: `route_and_call`
+# has no tool-call channel, and no backend in the chain is wired for one. Building
+# that is a feature, not a remediation, and half-building it would produce the
+# same silent wrongness in a new place. Refusing is the honest behaviour -- the
+# client learns immediately, in its own protocol, that this gateway cannot serve
+# the request.
+_TOOLS_UNSUPPORTED = (
+    "This gateway routes to a text-completion backend and cannot execute tool "
+    "or function calls. The request included tool definitions, which would have "
+    "been silently ignored, so it is refused instead. Remove `tools` to route "
+    "this prompt as a text completion, or call the provider directly for "
+    "function calling."
+)
+
+
+def _refuse_tools_if_present(tools, tool_choice=None) -> None:
+    """Raise 400 when a request asks for something this gateway cannot do."""
+    if tools:
+        raise HTTPException(status_code=400, detail=_TOOLS_UNSUPPORTED)
+    if tool_choice not in (None, "none"):
+        raise HTTPException(status_code=400, detail=_TOOLS_UNSUPPORTED)
+
+
+def _finish_reason(result) -> str:
+    """The real reason, where the backend reports one.
+
+    Still "stop" for an ordinary completion -- which is correct -- but derived
+    rather than asserted, so a truncated answer is not reported as a complete
+    one.
+    """
+    raw = getattr(result, "finish_reason", None) or getattr(result, "stop_reason", None)
+    if isinstance(raw, str) and raw:
+        return {"max_tokens": "length", "end_turn": "stop"}.get(raw, raw)
+    return "stop"
+
+
 class _OAIRequest(BaseModel):
     model: str | None = None
     messages: list
     task_type: str | None = None
     complexity: str | None = None
+    # H-03: declared so the field is VISIBLE to the handler. Previously absent,
+    # so Pydantic dropped it and the request looked like an ordinary completion.
+    tools: list | None = None
+    tool_choice: object | None = None
 
 
 @app.post("/v1/chat/completions")
 async def openai_chat(req: _OAIRequest, request: Request) -> dict:
+    _refuse_tools_if_present(req.tools, req.tool_choice)
     r = await _route(_flatten(req.messages), req.task_type, req.complexity,
                      prefer_model=_qualify_model(req.model, "openai"),
                      project_root=_resolve_project_scope(request))
@@ -462,7 +598,7 @@ async def openai_chat(req: _OAIRequest, request: Request) -> dict:
         "created": int(time.time()),
         "model": f"{r.model.provider}/{r.model.model}",
         "choices": [{"index": 0, "message": {"role": "assistant", "content": r.text},
-                     "finish_reason": "stop"}],
+                     "finish_reason": _finish_reason(r)}],
         "usage": {"prompt_tokens": r.input_tokens, "completion_tokens": r.output_tokens,
                   "total_tokens": r.input_tokens + r.output_tokens},
     }
@@ -522,10 +658,14 @@ class _AnthropicRequest(BaseModel):
     messages: list
     system: str | None = None
     max_tokens: int | None = None
+    # H-03: same gap on the Anthropic wire format.
+    tools: list | None = None
+    tool_choice: object | None = None
 
 
 @app.post("/v1/messages")
 async def anthropic_messages(req: _AnthropicRequest, request: Request) -> dict:
+    _refuse_tools_if_present(req.tools, req.tool_choice)
     prompt = (f"system: {req.system}\n" if req.system else "") + _flatten(req.messages)
     r = await _route(prompt, None, None,
                      prefer_model=_qualify_model(req.model, "anthropic"),
@@ -536,7 +676,9 @@ async def anthropic_messages(req: _AnthropicRequest, request: Request) -> dict:
         "role": "assistant",
         "model": f"{r.model.provider}/{r.model.model}",
         "content": [{"type": "text", "text": r.text}],
-        "stop_reason": "end_turn",
+        # H-03: derived where the backend reports one, so a truncated answer is
+        # not returned as a completed turn.
+        "stop_reason": {"length": "max_tokens"}.get(_finish_reason(r), "end_turn"),
         "usage": {"input_tokens": r.input_tokens, "output_tokens": r.output_tokens},
     }
 
