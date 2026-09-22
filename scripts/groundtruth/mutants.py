@@ -109,6 +109,12 @@ class Validation:
     # and therefore always meet the floor; set by the snippet path, whose probes
     # are supplied by the operator. See `_snippet_discrimination_floor`.
     weak_probe_set: str | None = None
+    #: R17. Universal decoys this verifier ACCEPTED — answers that are wrong for
+    #: every task by construction. A non-empty list means the verifier is not
+    #: measuring the task, whatever it scored against the operator's own probes.
+    #: Empty list = ran and rejected all. None = the decoy probe did not run
+    #: (the pytest path, where verifiers grade code rather than answers).
+    accepted_decoys: list[str] | None = None
 
     @property
     def applied(self) -> list[MutantResult]:
@@ -139,6 +145,7 @@ class Validation:
             "rationale": self.rationale,
             "ran_at": self.ran_at,
             "duration_s": round(self.duration_s, 2),
+            "accepted_decoys": self.accepted_decoys,
             "results": [m.to_json() for m in self.mutants],
         }
 
@@ -170,6 +177,19 @@ def classify(v: Validation, *, strategy_is_mechanical: bool,
     if v.detected < v.total:
         return MEDIUM, (f"detected {v.detected}/{v.total} mutants — real but "
                         "incomplete behavioural coverage")
+    if v.accepted_decoys:
+        # R17. Ahead of every probe-set rule below, because it invalidates them:
+        # a verifier that accepts an answer to a different question is not
+        # measuring this task, and "detected 3/3 of the operator's bad answers"
+        # is then a statement about the operator's imagination, not about the
+        # verifier. LOW rather than UNUSABLE — the verifier may still be a
+        # useful weak signal, and calling it unusable would invite deleting it
+        # instead of strengthening it.
+        return LOW, (
+            f"accepts {len(v.accepted_decoys)} answer(s) that are wrong for "
+            f"every task (e.g. {v.accepted_decoys[0]!r}); it is discriminating "
+            "on something other than the task"
+        )
     if v.weak_probe_set:
         # Detecting every probe proves nothing when there were too few, or when
         # they were the same probe repeated. `detected == total` is a ratio, and
@@ -290,6 +310,81 @@ def _snippet_discrimination_floor(good_answer: str, bad_answers: list[str]) -> s
     return None
 
 
+#: R17. Answers that are wrong for EVERY task, by construction.
+#:
+#: The probe-set floor above checks the shape of the operator's bad answers —
+#: how many, whether distinct, whether one equals the good answer. It cannot
+#: check the thing that actually went wrong: `len(answer) > 5` caught three
+#: short bad answers, scored `detected == total`, reached HIGH, and then
+#: accepted a confidently wrong long answer. Real kill rate on the corpus: 0%.
+#:
+#: The operator's probes can only ever show that a verifier rejects the wrong
+#: answers the operator THOUGHT OF. These show whether it rejects an answer it
+#: has no reason to accept — unrelated prose, a refusal, a different task's
+#: output. A verifier that accepts any of them is discriminating on some
+#: property that is not the task, and its score against hand-picked probes is
+#: not evidence of anything.
+#:
+#: Chosen to be content-free rather than clever: no rule here judges whether an
+#: answer is "wrong enough", which would be a heuristic pretending to be a
+#: measurement. They are simply answers to OTHER questions.
+UNIVERSAL_DECOYS: tuple[tuple[str, str], ...] = (
+    (
+        "The mitochondria is the powerhouse of the cell. It generates most of "
+        "the chemical energy needed to power the cell's biochemical reactions.",
+        "fluent, well-formed prose answering a different question entirely — "
+        "defeats any length or non-emptiness check",
+    ),
+    (
+        "I'm sorry, but I can't help with that request.",
+        "a refusal. Accepting it means the verifier counts a non-answer as an "
+        "answer, which is the failure mode that matters most in routing",
+    ),
+    (
+        "42",
+        "a bare token with no relation to the task — defeats a check that only "
+        "requires SOMETHING to be present",
+    ),
+    (
+        "Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do "
+        "eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim "
+        "ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut.",
+        "long filler. A verifier keyed to length or word count accepts this; "
+        "one keyed to the task's content cannot",
+    ),
+)
+
+
+def _probe_universal_decoys(snippet: str, good_answer: str) -> list[str]:
+    """Which universal decoys this verifier wrongly ACCEPTED.
+
+    A decoy that happens to contain the good answer is skipped rather than
+    counted: rejecting it would be the correct behaviour and flagging it would
+    punish an honest verifier. This cannot currently happen with the fixed set
+    above, and the guard is here so that adding a decoy later cannot introduce
+    a false positive silently.
+
+    An error running a decoy counts as REJECTED, not accepted. A verifier that
+    throws on unexpected input is not thereby proven worthless, and the
+    alternative — treating a crash as acceptance — would cap honest verifiers
+    at LOW for being strict.
+    """
+    from groundtruth.verifiers import run_verifier
+
+    good = (good_answer or "").strip()
+    accepted: list[str] = []
+    for decoy, _why in UNIVERSAL_DECOYS:
+        if good and good in decoy:
+            continue
+        try:
+            ok, _ = run_verifier(snippet, decoy)
+        except Exception:  # noqa: BLE001
+            continue
+        if ok:
+            accepted.append(decoy[:60])
+    return accepted
+
+
 def validate_snippet_verifier(
     *, task_id: str, snippet: str, good_answer: str, bad_answers: list[str],
 ) -> Validation:
@@ -308,6 +403,7 @@ def validate_snippet_verifier(
     started = time.monotonic()
     v = Validation(task_id=task_id, ran_at=time.time(), executable=True)
     v.weak_probe_set = _snippet_discrimination_floor(good_answer, bad_answers)
+    v.accepted_decoys = _probe_universal_decoys(snippet, good_answer)
     ok, why = run_verifier(snippet, good_answer)
     v.baseline_passed = ok
     if not ok:
