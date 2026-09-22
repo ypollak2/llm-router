@@ -632,7 +632,18 @@ _TOOLS_UNSUPPORTED = (
 
 
 def _refuse_tools_if_present(tools, tool_choice=None) -> None:
-    """Raise 400 when a request asks for something this gateway cannot do."""
+    """Raise 400 when a request asks for something this gateway cannot do.
+
+    R10. This helper existed and was called from TWO of the five completion
+    endpoints. `/v1/responses`, `/api/chat` and `/api/generate` kept the H-03
+    defect for the same reason it existed in the first place: the fix was
+    applied at call sites rather than enumerated over the surface.
+
+    `tests/test_r10_refuse_what_cannot_be_served.py` now DISCOVERS every POST
+    route on the app and requires each to be classified — a completion endpoint
+    that must refuse, or an explicitly excused non-completion route. A route
+    added later is unclassified and fails.
+    """
     if tools:
         raise HTTPException(status_code=400, detail=_TOOLS_UNSUPPORTED)
     if tool_choice not in (None, "none"):
@@ -699,10 +710,17 @@ class _ResponsesRequest(BaseModel):
     instructions: str | None = None
     task_type: str | None = None
     complexity: str | None = None
+    # R10. H-03 was fixed on /v1/chat/completions and /v1/messages and NOT
+    # here, because the fix was applied endpoint by endpoint and nothing
+    # enumerated the endpoints. The Responses API is OpenAI's current function-
+    # calling surface, so this was the likeliest of the three to be hit.
+    tools: list | None = None
+    tool_choice: object | None = None
 
 
 @app.post("/v1/responses")
 async def openai_responses(req: _ResponsesRequest, request: Request) -> dict:
+    _refuse_tools_if_present(req.tools, req.tool_choice)
     prompt = _flatten_responses_input(req.input)
     # Classify BEFORE the instructions are prepended: `instructions` is the
     # Responses API's system prompt, and folding it in is T-03 (see _route).
@@ -781,15 +799,27 @@ async def anthropic_messages(req: _AnthropicRequest, request: Request) -> dict:
 class _OllamaChat(BaseModel):
     model: str | None = None
     messages: list
+    # R10. Ollama has supported `tools` on /api/chat since 0.3, and a client
+    # pointed at this gateway instead of at Ollama gets prose back with
+    # `done: true` and nothing to say its tool definitions were dropped.
+    tools: list | None = None
+    tool_choice: object | None = None
 
 
 class _OllamaGenerate(BaseModel):
     model: str | None = None
     prompt: str
+    # /api/generate has no `tools` in Ollama's own API. Declared anyway: a
+    # client that sends one is asking for something this gateway cannot do, and
+    # silently accepting the request is the defect regardless of whether the
+    # upstream API would have accepted it either.
+    tools: list | None = None
+    tool_choice: object | None = None
 
 
 @app.post("/api/chat")
 async def ollama_chat(req: _OllamaChat, request: Request) -> dict:
+    _refuse_tools_if_present(req.tools, req.tool_choice)
     r = await _route(_flatten(req.messages), None, None,
                      prefer_model=_qualify_model(req.model, "ollama"),
                      project_root=_resolve_project_scope(request),
@@ -804,6 +834,7 @@ async def ollama_chat(req: _OllamaChat, request: Request) -> dict:
 
 @app.post("/api/generate")
 async def ollama_generate(req: _OllamaGenerate, request: Request) -> dict:
+    _refuse_tools_if_present(req.tools, req.tool_choice)
     r = await _route(req.prompt, None, None,
                      prefer_model=_qualify_model(req.model, "ollama"),
                      project_root=_resolve_project_scope(request))

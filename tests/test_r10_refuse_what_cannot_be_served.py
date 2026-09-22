@@ -36,7 +36,13 @@ fastapi_testclient = pytest.importorskip("fastapi.testclient")
 def client():
     from llm_router.gateway import app
 
-    return fastapi_testclient.TestClient(app, raise_server_exceptions=False)
+    # base_url matters: TestClient defaults to Host "testserver", and
+    # `_guard_cross_origin` rejects a non-loopback Host with 403 (CHZ-SEC-04,
+    # DNS-rebinding). A 403 would mask whether the capability refusal fired at
+    # all, so the client has to look like a legitimate local SDK caller.
+    return fastapi_testclient.TestClient(
+        app, base_url="http://127.0.0.1", raise_server_exceptions=False
+    )
 
 
 def _post_routes():
@@ -122,21 +128,37 @@ def test_a_tool_request_is_refused_not_silently_dropped(client, path):
     )
 
 
-@pytest.mark.parametrize("path", sorted(COMPLETION_ENDPOINTS))
-def test_an_ordinary_request_is_not_refused(client, path):
-    """The other half. A refusal rule that refuses everything is not a fix.
+def test_the_refusal_does_not_fire_on_an_ordinary_request():
+    """The other half. A rule that refuses everything is not a fix.
 
-    Routing is not exercised here — no provider is configured in the test
-    environment — so anything except the 400 is acceptable. What must not
-    happen is the capability refusal firing on a request that asks for nothing
-    unservable.
+    Asserted against the helper, NOT by POSTing a plain prompt to each
+    endpoint. The first draft did that, and it worked exactly as designed: the
+    request was not refused, so it ROUTED — 14.7s to a live Codex call, a real
+    routing_decision row, and a write to the operator's own usage.db. A test
+    that proves a refusal did not fire by performing the unrefused action is a
+    test that spends money to learn nothing.
     """
-    resp = client.post(path, json=dict(COMPLETION_ENDPOINTS[path]))
-    if resp.status_code == 400:
-        detail = str(resp.json().get("detail", ""))
-        assert "tool" not in detail.lower(), (
-            f"{path} refused a plain prompt as if it carried tools: {detail!r}"
-        )
+    from llm_router.gateway import _refuse_tools_if_present
+
+    # No tools, no tool_choice, and the explicit "none" clients send.
+    _refuse_tools_if_present(None, None)
+    _refuse_tools_if_present([], None)
+    _refuse_tools_if_present(None, "none")
+
+
+def test_the_refusal_fires_on_each_unservable_shape():
+    """Directly, so the parametrised endpoint tests above are the only place
+    that needs a request at all."""
+    from fastapi import HTTPException
+
+    from llm_router.gateway import _refuse_tools_if_present
+
+    for tools, choice in ((_TOOLS, None), (None, "required"), (None, "auto"),
+                          (_TOOLS, "required")):
+        with pytest.raises(HTTPException) as exc:
+            _refuse_tools_if_present(tools, choice)
+        assert exc.value.status_code == 400
+        assert "tool" in str(exc.value.detail).lower()
 
 
 @pytest.mark.parametrize("path", ["/v1/chat/completions", "/v1/messages", "/v1/responses"])
