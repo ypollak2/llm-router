@@ -92,6 +92,84 @@ def call_model(model: str, prompt: str, *, timeout: int) -> tuple[str, float, st
         return "", 0.0, f"{type(exc).__name__}: {exc}"
 
 
+#: A `sandbox` value that means "nobody has authored a fixture tree yet".
+#: `author_tasks.py` writes this literal for every EDIT task it scaffolds.
+_SANDBOX_PLACEHOLDER = "TODO"
+
+
+def resolve_sandbox(root, task) -> tuple[object | None, str]:
+    """Where this task's verifier must run, or why it cannot run at all.
+
+    Returns `(cwd, refusal_reason)`. Exactly one is meaningful: a path and an
+    empty reason, or `None` and a stated reason.
+
+    T-06/F31 (audit 2026-09-22). `run_verifier` takes a `cwd`, and `run_matrix`
+    never passed one. `sandbox` is documented as "fixture tree name for
+    EDIT/repo-bound tasks", `author_tasks.py` writes the literal "TODO" into it,
+    and nothing in the pipeline ever resolved it to a directory. So a repo-bound
+    task's verifier ran in whatever directory the operator happened to be in —
+    grading a claim about repo state against an unrelated tree, and reporting
+    the verdict as a Ground Truth label.
+
+    That is the same rule eligibility already applies as
+    `no-replayer-for-required-state`: a task that needs repo state it cannot be
+    given is REFUSED, not guessed at. Refusing produces an AMBIGUOUS row with a
+    reason; grading in the wrong tree produces a confident lie.
+    """
+    name = (getattr(task, "sandbox", None) or "").strip()
+    if not name:
+        return None, ""          # not repo-bound; the CWD is irrelevant to it
+    if name == _SANDBOX_PLACEHOLDER:
+        return None, (f"sandbox fixture not authored (still {_SANDBOX_PLACEHOLDER!r}) "
+                      f"— refusing rather than grading against an unrelated tree")
+    tree = root / "sandboxes" / name
+    if not tree.is_dir():
+        return None, (f"sandbox fixture {name!r} not found at {tree} "
+                      f"— refusing rather than grading against an unrelated tree")
+    return tree, ""
+
+
+def _content_task_id(prompt: str) -> str | None:
+    """The pool's id for this prompt, or None if it cannot be derived.
+
+    T-06 (audit 2026-09-22). Pool candidates are keyed `gtc-<content-hash>`;
+    frozen dataset tasks are keyed `gt-<seq>` by `author_tasks.py`. The two
+    namespaces never intersect, so `reg.active_for(t.task_id)` returned None for
+    every pool-authored verifier — a candidate could pass eligibility, envelope,
+    pool, propose, MUTATION VALIDATION and HUMAN SIGN-OFF and still never grade
+    anything. The rigorous half of the subsystem was decorative.
+
+    Both ids are derivable from the same place: `accumulate._task_id` is
+    `gtc-{exact_key(prompt)}`. So a frozen task's prompt re-derives the pool id
+    exactly, with no mapping table to drift.
+    """
+    if not prompt:
+        return None
+    try:
+        from groundtruth.extract_corpus import exact_key
+        return f"gtc-{exact_key(prompt)}"
+    except Exception:  # noqa: BLE001 — a missing helper must not break the run
+        return None
+
+
+def _registry_record_for(reg, task):
+    """ACTIVE verifier for *task*, looked up by BOTH identities (T-06)."""
+    rec = reg.active_for(task.task_id)
+    if rec:
+        return rec
+    alt = _content_task_id(getattr(task, "prompt", ""))
+    return reg.active_for(alt) if alt else None
+
+
+def _registry_any_for(reg, task):
+    """Any verifier record for *task*, ACTIVE or not, under either identity."""
+    rec = reg.get(task.task_id)
+    if rec:
+        return rec
+    alt = _content_task_id(getattr(task, "prompt", ""))
+    return reg.get(alt) if alt else None
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -138,14 +216,23 @@ def main() -> int:
         from groundtruth.verifier_registry import Registry
         reg = Registry(args.registry)
         adopted = 0
+        unbridgeable = 0
         for t in tasks:
             if t.verifier:
                 continue
-            rec = reg.active_for(t.task_id)
+            rec = _registry_record_for(reg, t)
             if not rec:
                 continue
             snippet = (rec.proposal or {}).get("verifier_snippet")
             if not snippet:
+                # T-06. The pytest and mutation-tested strategies populate
+                # `proposed_files`, not `verifier_snippet`, and adopting those
+                # means EXECUTING generated files against the repo. That is a
+                # decision about trust, not a missing line of plumbing, so it is
+                # refused out loud rather than skipped in silence — a candidate
+                # that passed mutation validation and human sign-off and then
+                # vanished here is exactly what made this subsystem decorative.
+                unbridgeable += 1
                 continue
             t.verifier = snippet
             t.verifier_kind = ds.MECHANICAL
@@ -154,8 +241,13 @@ def main() -> int:
             adopted += 1
         if adopted:
             print(f"registry  adopted {adopted} ACTIVE verifier(s)")
+        if unbridgeable:
+            print(f"registry  {unbridgeable} ACTIVE verifier(s) REFUSED: they carry "
+                  f"proposed_files (pytest/mutation strategy), which this runner "
+                  f"does not execute. Not a silent skip — see T-06.")
         non_active = sum(1 for t in tasks if not t.verifier
-                         and reg.get(t.task_id) and not reg.active_for(t.task_id))
+                         and _registry_any_for(reg, t)
+                         and not _registry_record_for(reg, t))
         if non_active:
             print(f"registry  {non_active} verifier(s) exist but are NOT ACTIVE — "
                   f"not used")
@@ -190,7 +282,11 @@ def main() -> int:
             errors: list[str] = []
             answers: list[str] = []
             t0 = time.monotonic()
-            for _ in range(args.samples):
+            sandbox_cwd, sandbox_refusal = resolve_sandbox(root, task)
+            if sandbox_refusal:
+                # F31: stated reason, never a silent grade in the wrong tree.
+                errors.append(sandbox_refusal)
+            for _ in range(args.samples if not sandbox_refusal else 0):
                 answer, c, err = call_model(model, task.prompt, timeout=args.timeout)
                 cost += c
                 if err:
@@ -200,7 +296,7 @@ def main() -> int:
                     errors.append(err)
                     continue
                 answers.append(answer)
-                ok, why = run_verifier(task.verifier or "", answer)
+                ok, why = run_verifier(task.verifier or "", answer, cwd=sandbox_cwd)
                 if why.startswith(("verifier timeout", "verifier crashed")):
                     # The verifier could not decide. Also not the model's fault.
                     errors.append(why)

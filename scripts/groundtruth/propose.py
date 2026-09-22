@@ -206,10 +206,60 @@ def find_existing_tests(task: TaskInput, repo_root: Path) -> tuple[list[str], st
 
 # ── Part 3: strategy selection ───────────────────────────────────────────────
 
+def _is_reference_checkable(task: TaskInput) -> bool:
+    """Does this task have a single stable answer that a frozen reference can check?
+
+    Delegates the QUESTION-SHAPE judgement to `eligibility._is_checkable_question`
+    rather than re-deciding it. T-17 was the two modules disagreeing about what
+    is verifiable; a second copy of the rule here would guarantee they drift
+    apart again.
+
+    Prefers the class eligibility already recorded on the candidate
+    (`expected_verification_class`) when there is one, because that value was
+    computed from the full envelope, not from the prompt alone.
+    """
+    if (task.expected_verification_class or "") in (ds.V_MECHANICAL, ds.V_PROGRAMMATIC):
+        pass  # eligibility already judged it checkable; fall through to the shape test
+    elif task.expected_verification_class:
+        return False    # eligibility judged it something else; do not overrule
+    try:
+        from groundtruth.eligibility import _is_checkable_question
+    except Exception:  # noqa: BLE001 — a missing helper must not crash proposal
+        return False
+    return bool(task.task) and _is_checkable_question(task.task)
+
+
 def select_strategy(task: TaskInput, contract: ct.Contract,
                     existing: list[str]) -> tuple[str, list[str]]:
     """(strategy, blockers). Strongest the captured state can actually support."""
     blockers: list[str] = []
+
+    # T-17 (audit 2026-09-22). This MUST come before the actionability gate.
+    #
+    # A FACTUAL checkable question — "What is the capital of Portugal?" — is the
+    # shape `eligibility` is PROUDEST of admitting: it sets
+    # `verifier_class = V_MECHANICAL` and `needs_reference_answer = True`, and
+    # the corpus work found these to be the most gradable population in real
+    # traffic. `select_strategy` then returned `no_reliable_verifier` for every
+    # one of them, so the two modules disagreed about the same task.
+    #
+    # The reason is one level up from where it looks. `contract.is_actionable`
+    # is False for a bare question — no required condition can be derived from
+    # "What is the capital of Portugal?" — and the gate returned S_NONE before
+    # any strategy branch ran. But for THIS class the required condition is not
+    # in the task text at all: it is "the answer matches the frozen reference".
+    # Asking the prompt to contain its own acceptance criterion is the wrong
+    # question for a question.
+    #
+    # `S_REFERENCE` already IS this strategy; it was simply unreachable except
+    # via `external_evidence`. A missing reference answer is a BLOCKER —
+    # something to capture — not a different strategy, and losing that
+    # distinction is what turned "we need an answer key" into "ungradable".
+    if _is_reference_checkable(task):
+        blockers.append(
+            "reference answer not yet captured — freeze one before this verifier "
+            "can be validated")
+        return S_REFERENCE, blockers
 
     if not contract.is_actionable:
         blockers.extend(contract.unclear or ["contract has no required condition"])

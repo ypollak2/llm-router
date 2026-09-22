@@ -169,10 +169,26 @@ def run_verifier(verifier: str, answer: str, *, cwd: Path | None = None,
                  timeout: int = 120) -> tuple[bool, str]:
     """Return (accepted, reason). Never raises."""
     script = preamble() + "\n" + verifier + "\nprint('VERIFIED')\n"
-    env = dict(os.environ)
-    env["BENCH_ANSWER"] = answer or ""
+    # S-07 (audit 2026-09-22). This runs a GENERATED verifier snippet — code the
+    # authoring assistant wrote — and it was handed `dict(os.environ)`: every
+    # provider key, OAuth token and cloud credential in the parent process.
+    #
+    # `safe_subprocess.get_delegated_env` exists for exactly this and is an
+    # ALLOWLIST, not another denylist: nothing crosses unless it was named, so a
+    # key the denylist has never heard of is absent by construction rather than
+    # by recognition. `BENCH_ANSWER` and `PYTHONPATH` are passed through `extra`,
+    # which is the caller stating what it needs on purpose.
+    extra = {"BENCH_ANSWER": answer or ""}
     if cwd:
-        env["PYTHONPATH"] = str(cwd)
+        extra["PYTHONPATH"] = str(cwd)
+    try:
+        from llm_router.safe_subprocess import get_delegated_env
+        env = get_delegated_env(extra)
+    except Exception:  # noqa: BLE001
+        # Fail CLOSED. If the allowlist cannot be reached we hand the child a
+        # minimal environment rather than falling back to the full one — the
+        # fallback IS the vulnerability.
+        env = {"PATH": os.defpath, **extra}
     try:
         proc = subprocess.run(
             [sys.executable, "-c", script], capture_output=True, text=True,

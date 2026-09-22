@@ -240,40 +240,57 @@ class Pool:
         can always answer "why are tasks not accumulating" rather than only
         "how many did".
         """
-        if dedup:
-            dup_id, dup_reason = self.find_duplicate(prompt, threshold=threshold)
-            if dup_id:
-                with self._lock():
-                    # Re-read INSIDE the lock. The in-memory copy was loaded at
-                    # construction and may already be stale; incrementing it is
-                    # what loses the count.
-                    self.load()
+        # T-12 (audit 2026-09-22). The H-07 fix locked ONLY the
+        # duplicate-increment branch. `find_duplicate` still ran outside the
+        # lock, and so did both append branches — so two threads admitting the
+        # SAME NEW prompt each saw no duplicate, each fell through, and each
+        # appended a canonical row. Measured: 20 threads, one prompt, **2
+        # canonical rows where 1 was correct**.
+        #
+        # Locking only the increment fixes the second arrival and leaves the
+        # first-arrival race wide open, which is the subtler half: a duplicate
+        # miscount is a wrong number, but two canonical rows are two different
+        # tasks claiming to be the same one.
+        #
+        # The whole decision — look for a duplicate, decide, append — is now one
+        # critical section over a freshly loaded index. `_reject` writes to the
+        # funnel, a different file, and takes no lock, so calling it in here
+        # cannot deadlock.
+        with self._lock():
+            # Re-read INSIDE the lock. The in-memory copy was loaded at
+            # construction and may already be stale; deciding on it is what
+            # loses the count and duplicates the row.
+            self.load()
+
+            if dedup:
+                dup_id, dup_reason = self.find_duplicate(prompt, threshold=threshold)
+                if dup_id:
                     existing = self._index.get(dup_id)
                     if existing is None:
-                        # the duplicate was compacted away between find and lock
+                        # compacted away between load and lookup
                         return False, dup_reason
                     existing.duplicate_count += 1
                     self._append(existing)
-                self._reject(dup_reason, {"task_id": candidate.task_id,
-                                          "duplicate_of": dup_id})
-                return False, dup_reason
+                    self._reject(dup_reason, {"task_id": candidate.task_id,
+                                              "duplicate_of": dup_id})
+                    return False, dup_reason
 
-        if not candidate.eligibility.get("ground_truth_candidate"):
-            reasons = candidate.eligibility.get("ineligibility_reasons") or ["unknown"]
-            candidate.advance(INELIGIBLE, f"gate: {reasons[0]}")
-            self._append(candidate)
+            if not candidate.eligibility.get("ground_truth_candidate"):
+                reasons = candidate.eligibility.get("ineligibility_reasons") or ["unknown"]
+                candidate.advance(INELIGIBLE, f"gate: {reasons[0]}")
+                self._append(candidate)
+                self._index[candidate.task_id] = candidate
+                self._reject(reasons[0], {"task_id": candidate.task_id})
+                return False, reasons[0]
+
+            candidate.advance(ELIGIBLE, "passed the eligibility gate")
+            if candidate.required_state_complete:
+                candidate.advance(READY_FOR_REPLAY, "replay envelope is complete")
+                candidate.replay_ready = True
             self._index[candidate.task_id] = candidate
-            self._reject(reasons[0], {"task_id": candidate.task_id})
-            return False, reasons[0]
-
-        candidate.advance(ELIGIBLE, "passed the eligibility gate")
-        if candidate.required_state_complete:
-            candidate.advance(READY_FOR_REPLAY, "replay envelope is complete")
-            candidate.replay_ready = True
-        self._index[candidate.task_id] = candidate
-        self._dedup_sets.append((candidate.task_id, frozenset(tokens(prompt))))
-        self._append(candidate)
-        return True, candidate.state
+            self._dedup_sets.append((candidate.task_id, frozenset(tokens(prompt))))
+            self._append(candidate)
+            return True, candidate.state
 
     # ── queries ──────────────────────────────────────────────────────────────
     def all(self) -> list[Candidate]:
