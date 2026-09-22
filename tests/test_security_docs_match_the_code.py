@@ -56,20 +56,74 @@ def test_the_allowlist_layer_is_documented(name):
     )
 
 
-def test_the_allowlist_blocks_what_the_old_table_called_unblocked():
-    from llm_router.hooks import agent_writes
-    import os
+def test_the_allowlist_blocks_what_the_old_table_called_unblocked(monkeypatch):
+    """Two bugs fixed here, both found while doing R3.
 
-    os.environ.pop("LLM_ROUTER_AGENT_COMMANDS", None)
-    for cmd in ("git push --force", "npm install", "pip install requests",
-                "rm -rf ./src", "git reset --hard"):
-        allowed, _ = agent_writes.guard_command(cmd)
-        assert not allowed, f"{cmd!r} is not actually blocked; the docs now claim it is"
+    1. It passed a STRING to `guard_command`, which takes an argv LIST.
+       `argv[0]` was therefore `"g"`, and every command was refused on
+       *"'g' is not in the inspection allowlist"* — the right answer for
+       entirely the wrong reason. It would have passed unchanged if `git push`
+       had been explicitly allowed. Measured:
+
+           as a string:  REFUSED: 'g' is not in the inspection allowlist
+           as an argv:   REFUSED: 'git push' changes state rather than reading it
+
+       The refusal REASON is now asserted, not just the boolean, so the test
+       cannot go on being satisfied by an accident of input shape.
+
+    2. `from llm_router.hooks import agent_writes` leaves a fileless module
+       stub on the `llm_router.hooks` package, which the suite's own T-01 guard
+       rejects — it answers for the real module in every test that follows.
+       Loaded by path instead.
+    """
+    import importlib.util
+
+    monkeypatch.delenv("LLM_ROUTER_AGENT_COMMANDS", raising=False)
+    path = DOCS["SECURITY.md"].parent / "src/llm_router/hooks/agent_writes.py"
+    spec = importlib.util.spec_from_file_location("_aw_docs_probe", path)
+    agent_writes = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(agent_writes)
+
+    for argv, because in (
+        (["git", "push", "--force"], "changes state"),
+        (["npm", "install"], "not in the inspection allowlist"),
+        (["pip", "install", "requests"], "not in the inspection allowlist"),
+        (["rm", "-rf", "./src"], "not in the inspection allowlist"),
+        (["git", "reset", "--hard"], "changes state"),
+    ):
+        allowed, msg = agent_writes.guard_command(argv)
+        assert not allowed, f"{argv!r} is not actually blocked; the docs claim it is"
+        assert because in msg, (
+            f"{argv!r} was refused, but for the wrong reason: {msg!r}. Expected "
+            f"a refusal mentioning {because!r}."
+        )
 
 
-def test_security_md_says_its_table_measures_only_one_layer():
+def test_security_md_names_the_population_its_table_measures():
+    """R3 replaced this test's original contract, and why is worth keeping.
+
+    It used to require SECURITY.md to say the twelve-command table
+    "UNDERSTATES" the real protection — i.e. that the allowlist blocks MORE
+    than the table shows. That was true and it was the misleading half. The
+    table's twelve commands are all obviously destructive, so a high refusal
+    rate over them says nothing about what an agent can actually do; measured
+    against the same capabilities reached through allowlisted interpreters,
+    10 of 10 are ALLOWED.
+
+    So the contract is now the opposite: the document must name BOTH
+    populations, because the difference between them is the finding. Asking it
+    to advertise that the allowlist blocks more than the table shows is asking
+    it to undersell nothing and oversell the boundary.
+
+    `tests/test_r3_allowlist_is_not_containment.py` owns the numbers; this
+    asserts the framing survives.
+    """
     text = DOCS["SECURITY.md"].read_text()
-    assert "UNDERSTATES" in text or "understates" in text, (
-        "the twelve-command table measures the regex only; without saying so it "
-        "reads as the complete picture and undersells the real protection"
+    assert "10 of 12" in text, "the obvious-destructive population is not stated"
+    assert "10 of 10" in text, (
+        "the interpreter population is not stated. Quoting only the flattering "
+        "row is what made an accurate number misleading."
+    )
+    assert "not a containment" in text.lower(), (
+        "SECURITY.md no longer says what the allowlist is NOT"
     )

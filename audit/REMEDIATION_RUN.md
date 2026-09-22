@@ -30,7 +30,7 @@ red and looks sound.)
 | R7 | `partial` | Label every money figure; net not gross | strip one label -> test fails |
 | R9 | `partial` | Hook death visible (start marker + doctor rate) | inject 70s sleep -> doctor reports a kill |
 | R10 | `partial` | Refuse unservable capability (tools/vision/schema/context) | drop refusal from one endpoint -> parametrised test names it |
-| R3 | `todo` | SECURITY.md honesty + interpreter corpus | add an interpreter to the allowlist -> corpus test fails |
+| R3 | `done` | SECURITY.md honesty + interpreter corpus | add an interpreter to the allowlist -> corpus test fails |
 | R8 | `todo` | Capture ON behind explicit install consent | consent absent -> capture stays off |
 | R16 | `todo` | `capture()` sees cwd/tools, or scope the claim | a repo task reaches a frozen dataset, or docs say it cannot |
 | R17 | `done` | Validator must discriminate | `len(answer)>5` -> capped at LOW |
@@ -674,3 +674,88 @@ orphan is reported as a KILL.** A silent permissions failure would have
 manufactured kills that never happened, in the one counter built to answer
 "is routing actually running". Now `missing_ok=True` for the normal case and a
 counted `CHZ-FO-HOOK-CLEAR-MARKER` for the rest. Census back to 87.
+
+
+## R3 — stop calling the allowlist a security control (done, option (a))
+
+Decision taken: **honesty now, containment later.**
+
+SECURITY.md said, correctly and reproducibly, that **10 of 12** corpus commands
+are refused by `guard_command`. The number was right. The audit's
+self-indictment was that it is WORSE than a wrong number, and building the
+corpus test proved why.
+
+The corpus measured the wrong population. All twelve entries are obviously
+destructive or exfiltrating — `rm -rf /`, `git push --force`, `curl -d @.env`.
+It measures how well the allowlist stops a command you would have caught by
+reading it.
+
+Measured against the real `guard_command`, same capabilities via programs the
+allowlist PERMITS:
+
+    python3 -c "print(open('~/.ssh/id_rsa').read())"   ALLOWED
+    python -c  urllib.request.urlopen(...)            ALLOWED
+    node -e    child_process.execSync('curl ...')     ALLOWED
+    awk        BEGIN{ "cat ~/.ssh/id_rsa" | getline } ALLOWED
+    sed -e     1e cat ~/.ssh/id_rsa                   ALLOWED
+    find       -exec curl ... {} ;                    ALLOWED
+    git -c     core.pager=curl ...                    ALLOWED
+    pytest     -p evil_plugin                         ALLOWED
+    go run / cargo run                                ALLOWED
+
+    10 of 10 ALLOWED
+
+`cat ../../.ssh/id_rsa` is refused. `python3 -c` reading the same file is not.
+
+**The corpus file was read by nothing.** `grep -rln security_command_matrix
+tests/ scripts/` returned empty — the 10/12 figure came from running the file
+by hand. It is now `VERDICT<TAB>command` and a parametrised test re-derives
+every verdict from the code, so the numbers in SECURITY.md cannot be
+hand-edited or go stale.
+
+Both counts now appear in SECURITY.md side by side, because the difference
+between them IS the finding.
+
+**RED-CHECK — three, all fire:**
+
+1. add `ruby` and `perl` to `_ALLOWED_PROGRAMS`
+   -> *"allowlisted program(s) with no classification: ['perl', 'ruby']"*
+   (the plan's red-check, and the mechanism that stops an eleventh interpreter
+   arriving unnoticed)
+2. restore the flattering claim to SECURITY.md
+   -> *"contains claim(s) the allowlist does not support"* AND *"does not state
+   'not a containment'"* — removing a false claim without stating the true one
+   leaves the reader with the same impression and no sentence to argue with,
+   so both directions are asserted
+3. delete the interpreter block from the corpus -> *"corpus has only 12 rows"*
+
+**Not done, by decision:** option (b), real containment via `sandbox-exec` /
+namespaces / a container. SECURITY.md now recommends it for untrusted repos
+rather than implying the allowlist substitutes for it.
+
+
+### R3 fallout — two pre-existing test defects, both about the same framing
+
+**`test_security_md_says_its_table_measures_only_one_layer` was enforcing the
+misleading claim.** It required SECURITY.md to say the twelve-command table
+"UNDERSTATES" the real protection — that the allowlist blocks MORE than the
+table shows. True, and the misleading half: a high refusal rate over twelve
+obviously-destructive commands says nothing about what an agent can do.
+Rewritten to require BOTH populations be named (10 of 12 and 10 of 10), because
+the difference between them is the finding.
+
+**`test_the_allowlist_blocks_what_the_old_table_called_unblocked` passed for the
+wrong reason.** It handed `guard_command` a STRING where the function takes an
+argv LIST, so `argv[0]` was `"g"` and every command was refused on *"'g' is not
+in the inspection allowlist"*:
+
+    as a string:  REFUSED: 'g' is not in the inspection allowlist
+    as an argv:   REFUSED: 'git push' changes state rather than reading it
+
+It would have passed unchanged if `git push` had been explicitly allowed. The
+refusal REASON is now asserted, not just the boolean, so an accident of input
+shape cannot satisfy it. The same file also leaked a module stub (T-01); loaded
+by path now.
+
+Both are the recurring lesson in a new place: a test that passes tells you
+nothing until you know WHY it passes.

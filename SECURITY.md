@@ -256,30 +256,60 @@ reach disk by default — `LLM_ROUTER_AGENT_WRITES` defaults to `propose`.
   opposite; the code has never matched that claim.)
 - `run_command` passes two independent layers: `agent_writes.guard_command` — an
   allowlist of inspection programs plus blocked subcommands — and then
-  `_BLOCKED_COMMANDS`, a regex over top-level destructive patterns. The table
-  below measures only the second layer, so it UNDERSTATES what is blocked in the
-  default configuration: of its twelve commands, **ten are in fact refused by
-  the allowlist** — every row except `cat ../../.ssh/id_rsa` and
-  `echo $OPENAI_API_KEY`. The latter cannot leak a secret anyway, because there
-  is no shell to expand it.
+  `_BLOCKED_COMMANDS`, a regex over top-level destructive patterns.
 
-  This count is reproducible rather than remembered (audit 2026-09-22, S-10).
-  Earlier revisions of this file said six; the 2026-09-22 audit reported seven;
-  running the twelve commands through `agent_writes.guard_command` gives ten.
-  Do not edit the number by hand — re-run it:
+  **The allowlist is a typo-and-footgun guardrail. It is not a containment
+  boundary, and it does not prevent arbitrary code execution.** An agent with
+  `run_command` can execute arbitrary code as the operator, with the operator's
+  files, credentials and network access.
 
-  ```
-  python3 -c "
-  import importlib.util, shlex, sys; sys.path.insert(0,'src')
-  s = importlib.util.spec_from_file_location('aw','src/llm_router/hooks/agent_writes.py')
-  m = importlib.util.module_from_spec(s); s.loader.exec_module(m)
-  for c in open('docs/security_command_matrix.txt'):
-      c = c.strip()
-      if c:
-          ok, _ = m.guard_command(shlex.split(c))
-          print(('ALLOWED' if ok else 'REFUSED'), c)
-  "
-  ```
+  That is not a defect to be patched. The design goal — let a local model run
+  the repo's own dev tools — and the security goal — constrain what it can do —
+  are in direct conflict, and the allowlist resolves that conflict toward
+  capability. **10** of its 28 permitted programs are general-purpose
+  interpreters, and each one is a complete bypass of every rule the list
+  expresses:
+
+  | program | how it executes caller-supplied code |
+  |---|---|
+  | `python`, `python3` | `-c` runs arbitrary source |
+  | `node` | `-e` runs arbitrary source |
+  | `awk` | `BEGIN` blocks run; `\|getline` spawns a shell |
+  | `sed` | GNU `e` executes its argument |
+  | `find` | `-exec` runs any program with any arguments |
+  | `git` | `-c core.pager=…` and the alias mechanism both execute |
+  | `pytest` | loads plugins and runs the repo's own code, by design |
+  | `go` | `go run` compiles and executes a file in the repo |
+  | `cargo` | `cargo run` compiles and executes the crate |
+
+  Blocking one of these closes one door of eleven, so none is blocked.
+
+  **What the numbers mean.** `docs/security_command_matrix.txt` carries two
+  populations, and the difference between them is the point:
+
+  | population | result |
+  |---|---|
+  | twelve obviously destructive commands (`rm -rf /`, `git push --force`, `curl -d @.env`) | **10 of 12 refused** |
+  | the same capabilities via allowlisted interpreters | **10 of 10 ALLOWED** |
+
+  Earlier revisions of this file quoted only the first row. That number was
+  accurate, reproducible, and more misleading than a wrong one would have been,
+  because it invited the reader to conclude the allowlist constrains an agent.
+  `cat ../../.ssh/id_rsa` is refused; `python3 -c` reading the same file is not.
+
+  Both numbers are derived by `tests/test_r3_allowlist_is_not_containment.py`,
+  which re-runs every corpus row through `guard_command` and fails if a verdict
+  drifts. Do not edit them by hand. Adding an eleventh interpreter to the
+  allowlist also fails that test, by name.
+
+  **What to do about it.** For a repository you trust, the allowlist does the
+  job it is good at: it stops a model from casually running something
+  destructive, and it makes the intent of a command reviewable. For an
+  untrusted repository, or any context where the agent's input is not yours,
+  use OS-level containment — a container, a VM, or macOS `sandbox-exec` — or
+  set `LLM_ROUTER_AGENT_COMMANDS=off` and drop `run_command` from the tool set.
+  The allowlist is not a substitute for either.
+
 - `LLM_ROUTER_AGENT_COMMANDS=all` skips the allowlist entirely, leaving only the
   regex. `llm_local_task` set that implicitly whenever writes were applied; since
   2026-09-14 it does not, and its `apply_writes` defaults to False.
