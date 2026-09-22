@@ -1,5 +1,18 @@
 """Tests for llm_router sidecar service."""
 
+import os
+from pathlib import Path
+
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def _ensure_llm_router_home_exists():
+    """llm_router.service opens a FileHandler on the state dir at import time,
+    so the directory must exist before the first `from llm_router.service import
+    ...` in the process. LLM_ROUTER_HOME now takes precedence (see conftest's
+    `_isolate_llm_router_writes`) and points at a tmp dir pytest never creates."""
+    Path(os.environ["LLM_ROUTER_HOME"]).mkdir(parents=True, exist_ok=True)
 
 
 def test_service_modules_exist():

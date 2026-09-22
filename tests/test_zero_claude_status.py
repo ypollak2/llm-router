@@ -41,6 +41,10 @@ def test_one_percent_session_usage_is_not_read_as_one_hundred_percent(
     router_dir.mkdir()
     (router_dir / "usage.json").write_text(json.dumps({"session_pct": 1.0}), encoding="utf-8")
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    # `get_current_pressure` resolves via `_router_home()`, which prefers
+    # `LLM_ROUTER_HOME` over `Path.home()`, so patching `Path.home()` alone no
+    # longer redirects it.
+    monkeypatch.setenv("LLM_ROUTER_HOME", str(router_dir))
 
     assert get_current_pressure() == ("green", 1.0)
 
@@ -50,8 +54,7 @@ def test_zero_claude_banner_overrides_detected_subscription(tmp_path: Path) -> N
     state_dir = tmp_path / ".llm-router"
     state_dir.mkdir()
     (state_dir / "routing.yaml").write_text("mode: zero_claude\n", encoding="utf-8")
-    session_start.STATE_DIR = str(state_dir)
-
+    session_start._state_dir = lambda: str(state_dir)
     banner = session_start._select_banner(is_subscription=True)
 
     assert "strict zero-Claude routing" in banner

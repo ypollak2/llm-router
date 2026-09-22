@@ -23,7 +23,7 @@ def _run(agent_type: str, usage_json: dict | None = None, tmp_path: Path | None 
         llmr_dir = tmp_path / ".llm-router"
         llmr_dir.mkdir(parents=True, exist_ok=True)
         (llmr_dir / "usage.json").write_text(json.dumps(usage_json))
-        env = {**os.environ, "HOME": str(tmp_path)}
+        env = {**os.environ, "HOME": str(tmp_path), "LLM_ROUTER_HOME": str(llmr_dir)}
 
     result = subprocess.run(
         [sys.executable, str(HOOK_PATH)],
@@ -131,7 +131,8 @@ class TestMissingUsageData:
         """When usage.json is missing, hook runs with 0% pressure (LOW)."""
         import os
         # Point HOME at empty tmp_path (no .llm_router dir)
-        env = {**os.environ, "HOME": str(tmp_path)}
+        env = {**os.environ, "HOME": str(tmp_path),
+               "LLM_ROUTER_HOME": str(tmp_path / ".llm-router")}
         payload = json.dumps({"hook_event_name": "SubagentStart", "agent_id": "x", "agent_type": "general"})
         result = subprocess.run(
             [sys.executable, str(HOOK_PATH)],
@@ -148,7 +149,8 @@ class TestMissingUsageData:
         llmr_dir = tmp_path / ".llm-router"
         llmr_dir.mkdir()
         (llmr_dir / "usage.json").write_text("not valid json {{{")
-        env = {**os.environ, "HOME": str(tmp_path)}
+        env = {**os.environ, "HOME": str(tmp_path),
+               "LLM_ROUTER_HOME": str(tmp_path / ".llm-router")}
         payload = json.dumps({"hook_event_name": "SubagentStart", "agent_id": "x", "agent_type": "general"})
         result = subprocess.run(
             [sys.executable, str(HOOK_PATH)],

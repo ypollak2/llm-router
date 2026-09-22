@@ -3,7 +3,6 @@ counts to the dashboard totals. Before the v7.4 fix, savings_stats had no token
 columns, so the dashboard under-counted tokens for Ollama/Codex routing.
 """
 import json
-import pathlib
 import sqlite3
 import types
 from datetime import datetime, timezone
@@ -49,12 +48,15 @@ def test_old_schema_without_token_columns_is_graceful(tmp_path):
 
 
 def test_savings_logger_persists_token_counts(monkeypatch, tmp_path):
-    monkeypatch.setattr(pathlib.Path, "home", staticmethod(lambda: tmp_path))
+    # M-04: log_direct_savings resolves its path via LLM_ROUTER_HOME first,
+    # ahead of Path.home() — patching Path.home() alone no longer redirects it.
+    home = tmp_path / ".llm-router"
+    monkeypatch.setenv("LLM_ROUTER_HOME", str(home))
     fake = types.SimpleNamespace(
         model=types.SimpleNamespace(provider="ollama", model="hermes3:8b"),
         input_tokens=350, output_tokens=480,
     )
     sl.log_direct_savings(fake, "query", "simple", "sess1")
-    rec = json.loads((tmp_path / ".llm-router" / "savings_log.jsonl").read_text().strip())
+    rec = json.loads((home / "savings_log.jsonl").read_text().strip())
     assert rec["input_tokens"] == 350
     assert rec["output_tokens"] == 480

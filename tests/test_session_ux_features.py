@@ -113,7 +113,7 @@ def auto_route_module(monkeypatch, tmp_path: Path):
         f"_ar_hook_{tmp_path.name}", _HOOKS_SRC / "auto-route.py"
     )
     # Re-bind the module-level Path that captured the *real* HOME at import.
-    mod._PROMPT_COUNTS = tmp_path / ".llm-router" / "session_prompt_counts.json"
+    mod._prompt_counts = lambda: tmp_path / ".llm-router" / "session_prompt_counts.json"
     return mod
 
 
@@ -128,7 +128,7 @@ def test_prompt_counter_increments_per_session(auto_route_module, tmp_path) -> N
     # session-A continues from where it left off.
     assert bump("session-A") == 6
     # State persisted to disk.
-    persisted = json.loads(auto_route_module._PROMPT_COUNTS.read_text())
+    persisted = json.loads(auto_route_module._prompt_counts().read_text())
     assert persisted == {"session-A": 6, "session-B": 1}
 
 

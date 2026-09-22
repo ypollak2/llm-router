@@ -102,7 +102,7 @@ def test_get_session_window_with_valid_file(tmp_path, monkeypatch):
     session_file.write_text(str(ts))
 
     monkeypatch.setattr(
-        "llm_router.retrospective.SESSION_START_FILE", session_file
+        "llm_router.retrospective._session_start_file", lambda: session_file
     )
 
     start, end = get_session_window()
@@ -115,7 +115,7 @@ def test_get_session_window_fallback(tmp_path, monkeypatch):
     """Test session window detection falls back to 2 hours if file missing."""
     fake_file = tmp_path / "nonexistent.txt"
     monkeypatch.setattr(
-        "llm_router.retrospective.SESSION_START_FILE", fake_file
+        "llm_router.retrospective._session_start_file", lambda: fake_file
     )
 
     start, end = get_session_window()

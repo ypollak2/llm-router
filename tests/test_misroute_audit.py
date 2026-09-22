@@ -126,7 +126,7 @@ def audit_db(tmp_path, monkeypatch):
     import llm_router.cost as cost
 
     db_path = tmp_path / "usage.db"
-    monkeypatch.setattr(cost, "DB_PATH", db_path, raising=False)
+    monkeypatch.setattr(cost, "_db_path", lambda: db_path, raising=False)
     monkeypatch.setenv("LLM_ROUTER_DB_PATH", str(db_path))
     monkeypatch.delenv("LLM_ROUTER_AUDIT_DISABLED", raising=False)
 
@@ -269,7 +269,7 @@ class TestRunAudit:
 
         broken = tmp_path / "not-a-database.db"
         broken.write_text("this is not sqlite")
-        monkeypatch.setattr(cost, "DB_PATH", broken, raising=False)
+        monkeypatch.setattr(cost, "_db_path", lambda: broken, raising=False)
         monkeypatch.setenv("LLM_ROUTER_DB_PATH", str(broken))
         monkeypatch.delenv("LLM_ROUTER_AUDIT_DISABLED", raising=False)
 

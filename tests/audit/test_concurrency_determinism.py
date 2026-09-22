@@ -61,7 +61,7 @@ async def test_concurrent_calls_cannot_exceed_monthly_budget_cap(
     # Redirect the constant directly so this test can't write to the
     # operator's real ~/.llm-router/session_spend.json.
     import llm_router.session_spend as session_spend_module
-    monkeypatch.setattr(session_spend_module, "SESSION_SPEND_FILE", tmp_path / "session_spend.json")
+    monkeypatch.setattr(session_spend_module, "_session_spend_file", lambda: tmp_path / "session_spend.json")
 
     # Reset the module-global pending-spend counter so state from any earlier
     # test in this process can't bleed into this one.

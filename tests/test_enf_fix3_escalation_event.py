@@ -28,6 +28,7 @@ def _ledger_db(home) -> Path:
 def _run(payload, home):
     e = {k: v for k, v in os.environ.items() if k not in ("LLM_ROUTER_ENFORCE", "LLM_ROUTER_SLIM")}
     e["HOME"] = str(home)
+    e["LLM_ROUTER_HOME"] = str(home / ".llm-router")
     e["LLM_ROUTER_ENFORCE"] = "hard"
     # Pin the ledger db to this test's home so a session-level
     # LLM_ROUTER_EXECUTION_LEDGER_DB / LLM_ROUTER_DB_PATH can't redirect the write.

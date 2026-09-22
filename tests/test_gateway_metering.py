@@ -27,6 +27,7 @@ def _fake_resp():
 
 def test_route_payload_writes_host_tagged_savings(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("LLM_ROUTER_HOME", str(tmp_path / ".llm-router"))
     (tmp_path / ".llm-router").mkdir(parents=True)
 
     import llm_router.router as R
@@ -51,6 +52,7 @@ def test_route_payload_writes_host_tagged_savings(tmp_path, monkeypatch):
 
 def test_route_payload_honors_host_override(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("LLM_ROUTER_HOME", str(tmp_path / ".llm-router"))
     (tmp_path / ".llm-router").mkdir(parents=True)
     import llm_router.router as R
     monkeypatch.setattr(R, "route_and_call", lambda *a, **k: _fake_resp())

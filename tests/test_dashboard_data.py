@@ -178,7 +178,7 @@ def test_session_end_cumulative_matches_query_window(fake_db, monkeypatch):
     from llm_router.dashboard_data import query_window
 
     se = _load_session_end_module()
-    monkeypatch.setattr(se, "DB_PATH", str(fake_db))
+    monkeypatch.setattr(se, "_db_path", lambda: str(fake_db))
 
     cumulative = se._query_cumulative_savings()
     today_row = next((r for r in cumulative if r[0] == "today"), None)
@@ -197,7 +197,7 @@ def test_session_end_daily_matches_query_daily(fake_db, monkeypatch):
     from llm_router.dashboard_data import query_daily
 
     se = _load_session_end_module()
-    monkeypatch.setattr(se, "DB_PATH", str(fake_db))
+    monkeypatch.setattr(se, "_db_path", lambda: str(fake_db))
 
     legacy = se._query_daily_14d()
     canonical = query_daily(14, db_path=fake_db)
@@ -218,7 +218,7 @@ def test_canary_returns_zero_on_clean_db(fake_db, monkeypatch):
     """explain-dashboard --check must exit 0 when all sources are read."""
     # Point the canary at our test DB by patching DEFAULT_DB_PATH.
     from llm_router import dashboard_data as dd
-    monkeypatch.setattr(dd, "DEFAULT_DB_PATH", fake_db)
+    monkeypatch.setattr(dd, "_default_db_path", lambda: fake_db)
 
     from llm_router.commands.explain_dashboard import _check_mode_canary
     rc = _check_mode_canary()
@@ -231,6 +231,6 @@ def test_canary_via_cli(fake_db, monkeypatch):
     # module constant rather than relocating $HOME for the subprocess.
     from llm_router import dashboard_data as dd
     from llm_router.commands.explain_dashboard import cmd_explain_dashboard
-    monkeypatch.setattr(dd, "DEFAULT_DB_PATH", fake_db)
+    monkeypatch.setattr(dd, "_default_db_path", lambda: fake_db)
     rc = cmd_explain_dashboard(["--check"])
     assert rc == 0

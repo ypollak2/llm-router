@@ -160,7 +160,7 @@ class TestTeamSetup:
         """team setup with URL should save configuration."""
         with tempfile.TemporaryDirectory() as tmpdir:
             home = Path(tmpdir)
-            monkeypatch.setattr(Path, "home", lambda: home)
+            monkeypatch.setenv("LLM_ROUTER_HOME", str(home / ".llm-router"))
 
             # Mock inputs: choice 1 (Slack), URL
             inputs = iter(["1", "https://hooks.slack.com/services/T000/B000/XX"])
@@ -179,7 +179,7 @@ class TestTeamSetup:
         """team setup with Telegram should save chat ID."""
         with tempfile.TemporaryDirectory() as tmpdir:
             home = Path(tmpdir)
-            monkeypatch.setattr(Path, "home", lambda: home)
+            monkeypatch.setenv("LLM_ROUTER_HOME", str(home / ".llm-router"))
 
             # Mock inputs: choice 3 (Telegram), URL, chat ID
             inputs = iter(["3", "https://api.telegram.org/bot123/sendMessage", "-1001234567890"])

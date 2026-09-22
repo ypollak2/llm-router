@@ -125,6 +125,11 @@ class TestRunDoctorHost:
     def _codex_home(self, tmp_path, monkeypatch, toml: str, hooks: dict | None = None):
         monkeypatch.setattr(pathlib.Path, "home", classmethod(lambda cls: tmp_path))
         monkeypatch.setenv("HOME", str(tmp_path))
+        # LLM_ROUTER_HOME now takes precedence over HOME (see paths.py), and the
+        # doctor's hook-trust check matches hook commands against
+        # paths.state_path("hooks") — it must resolve to the same
+        # `{tmp_path}/.llm-router/hooks/...` the test's hook_cmd points at.
+        monkeypatch.setenv("LLM_ROUTER_HOME", str(tmp_path / ".llm-router"))
         monkeypatch.setattr("llm_router.commands.doctor.shutil.which", lambda name: None)
         codex = tmp_path / ".codex"
         codex.mkdir()

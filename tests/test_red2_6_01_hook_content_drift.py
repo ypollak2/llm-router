@@ -108,7 +108,7 @@ def test_second_drift_does_not_clobber_first_bak(tmp_path, monkeypatch):
     # live under STATE_DIR/backups rather than beside the destination, so both
     # locations count as "preserved".
     others = [p for p in dst.parent.glob(dst.name + ".*bak") if p != bak]
-    others += list((ih.STATE_DIR / "backups").glob(dst.name + ".*bak"))
+    others += list((ih._state_dir() / "backups").glob(dst.name + ".*bak"))
     assert any(p.read_text() == edit2 for p in others), "second edit not preserved"
 
 

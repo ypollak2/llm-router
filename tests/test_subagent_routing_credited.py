@@ -31,7 +31,7 @@ def test_subagent_direct_routing_writes_credited_savings(tmp_path, monkeypatch):
     monkeypatch.setattr(sl, "_savings_log_path", lambda: log_path)
     # Isolate the session-spend mirror so it can't touch the real ~/.llm-router.
     from llm_router import session_spend as ss
-    monkeypatch.setattr(ss, "SESSION_SPEND_FILE", tmp_path / "session_spend.json")
+    monkeypatch.setattr(ss, "_session_spend_file", lambda: tmp_path / "session_spend.json")
 
     sl.log_direct_savings(
         _DirectResult(),

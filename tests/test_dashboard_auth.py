@@ -11,7 +11,7 @@ import pytest
 
 def test_get_or_create_token_creates_file(tmp_path):
     token_file = tmp_path / "dashboard.token"
-    with patch("llm_router.dashboard.server._TOKEN_FILE", token_file):
+    with patch("llm_router.dashboard.server._token_file", lambda: token_file):
         from llm_router.dashboard.server import _get_or_create_token
 
         token = _get_or_create_token()
@@ -24,7 +24,7 @@ def test_get_or_create_token_returns_existing(tmp_path):
     token_file = tmp_path / "dashboard.token"
     expected = "existing-token-abc123"
     token_file.write_text(expected)
-    with patch("llm_router.dashboard.server._TOKEN_FILE", token_file):
+    with patch("llm_router.dashboard.server._token_file", lambda: token_file):
         from llm_router.dashboard.server import _get_or_create_token
 
         assert _get_or_create_token() == expected
@@ -32,7 +32,7 @@ def test_get_or_create_token_returns_existing(tmp_path):
 
 def test_get_or_create_token_sets_permissions(tmp_path):
     token_file = tmp_path / "dashboard.token"
-    with patch("llm_router.dashboard.server._TOKEN_FILE", token_file):
+    with patch("llm_router.dashboard.server._token_file", lambda: token_file):
         from llm_router.dashboard.server import _get_or_create_token
 
         _get_or_create_token()

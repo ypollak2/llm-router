@@ -114,8 +114,8 @@ async def test_take_session_snapshot_basic(sample_decisions, sample_corrections)
 def test_save_session_snapshot(tmp_path, monkeypatch):
     """Test snapshot file persistence."""
     monkeypatch.setattr(
-        "llm_router.monitoring.periodic.SNAPSHOT_DIR",
-        tmp_path / "snapshots",
+        "llm_router.monitoring.periodic._snapshot_dir",
+        lambda: tmp_path / "snapshots",
     )
 
     snapshot = {
@@ -148,8 +148,8 @@ def test_save_session_snapshot(tmp_path, monkeypatch):
 def test_load_session_snapshots_empty(tmp_path, monkeypatch):
     """Test loading snapshots when none exist."""
     monkeypatch.setattr(
-        "llm_router.monitoring.periodic.SNAPSHOT_DIR",
-        tmp_path / "snapshots",
+        "llm_router.monitoring.periodic._snapshot_dir",
+        lambda: tmp_path / "snapshots",
     )
 
     snapshots = load_session_snapshots()
@@ -162,8 +162,8 @@ def test_load_session_snapshots_multiple(tmp_path, monkeypatch):
     snapshot_dir.mkdir(parents=True, exist_ok=True)
 
     monkeypatch.setattr(
-        "llm_router.monitoring.periodic.SNAPSHOT_DIR",
-        snapshot_dir,
+        "llm_router.monitoring.periodic._snapshot_dir",
+        lambda: snapshot_dir,
     )
 
     # Create multiple snapshots
@@ -343,8 +343,8 @@ def test_get_current_snapshot_with_existing(tmp_path, monkeypatch):
     snapshot_dir.mkdir(parents=True, exist_ok=True)
 
     monkeypatch.setattr(
-        "llm_router.monitoring.periodic.SNAPSHOT_DIR",
-        snapshot_dir,
+        "llm_router.monitoring.periodic._snapshot_dir",
+        lambda: snapshot_dir,
     )
 
     # Create a snapshot
@@ -367,8 +367,8 @@ def test_get_current_snapshot_with_existing(tmp_path, monkeypatch):
 def test_get_current_snapshot_empty(tmp_path, monkeypatch):
     """Test retrieving current snapshot when none exist."""
     monkeypatch.setattr(
-        "llm_router.monitoring.periodic.SNAPSHOT_DIR",
-        tmp_path / "snapshots",
+        "llm_router.monitoring.periodic._snapshot_dir",
+        lambda: tmp_path / "snapshots",
     )
 
     current = get_current_snapshot()
@@ -388,8 +388,8 @@ def test_cleanup_old_snapshots(tmp_path, monkeypatch):
     snapshot_dir.mkdir(parents=True, exist_ok=True)
 
     monkeypatch.setattr(
-        "llm_router.monitoring.periodic.SNAPSHOT_DIR",
-        snapshot_dir,
+        "llm_router.monitoring.periodic._snapshot_dir",
+        lambda: snapshot_dir,
     )
 
     # Create an old snapshot file

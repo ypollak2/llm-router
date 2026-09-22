@@ -66,7 +66,11 @@ def _run(
 
     env = None
     if tmp_path is not None:
-        env = {**os.environ, "HOME": str(tmp_path)}
+        env = {
+            **os.environ,
+            "HOME": str(tmp_path),
+            "LLM_ROUTER_HOME": str(tmp_path / ".llm-router"),
+        }
 
     result = subprocess.run(
         [sys.executable, str(HOOK_PATH)],
@@ -398,7 +402,8 @@ class TestEdgeCases:
             "tool_name": "Read",  # Not Agent
             "tool_result": "Error: file not found",
         })
-        env = {**os.environ, "HOME": str(tmp_path)}
+        env = {**os.environ, "HOME": str(tmp_path),
+               "LLM_ROUTER_HOME": str(tmp_path / ".llm-router")}
         result = subprocess.run(
             [sys.executable, str(HOOK_PATH)],
             input=payload,
@@ -411,7 +416,8 @@ class TestEdgeCases:
 
     def test_malformed_hook_input(self, tmp_path):
         """Malformed hook input is ignored gracefully."""
-        env = {**os.environ, "HOME": str(tmp_path)}
+        env = {**os.environ, "HOME": str(tmp_path),
+               "LLM_ROUTER_HOME": str(tmp_path / ".llm-router")}
         result = subprocess.run(
             [sys.executable, str(HOOK_PATH)],
             input="not valid json {{{",

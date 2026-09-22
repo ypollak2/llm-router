@@ -54,7 +54,7 @@ def test_rank_orders_pass_unknown_fail():
 def test_cache_roundtrip_and_reprobe_on_model_change(monkeypatch, tmp_path):
     """Cache is reused when the model set is unchanged, re-probed when it changes."""
     cache = tmp_path / "agentic_models.json"
-    monkeypatch.setattr(reg, "CACHE_PATH", cache)
+    monkeypatch.setattr(reg, "_cache_path", lambda: cache)
 
     installed = ["hermes3:8b"]
     probe_calls = {"n": 0}

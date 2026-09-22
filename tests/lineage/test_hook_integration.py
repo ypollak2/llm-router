@@ -33,9 +33,8 @@ class TestSessionStartIntegration:
             # Monkey-patch STATE_DIR
             import llm_router.hooks.lineage_integration as li
 
-            original_state_dir = li.STATE_DIR
-            li.STATE_DIR = tmpdir
-
+            original_state_dir = li._state_dir()
+            li._state_dir = lambda: tmpdir
             try:
                 init_session_lineage()
 
@@ -43,8 +42,7 @@ class TestSessionStartIntegration:
                 assert marker.exists(), "Marker file should exist after init"
                 assert marker.read_text() == "1"
             finally:
-                li.STATE_DIR = original_state_dir
-
+                li._state_dir = lambda: original_state_dir
     def test_init_session_lineage_cleans_old_files(self):
         """init_session_lineage should remove old lineage files for session isolation."""
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -59,9 +57,8 @@ class TestSessionStartIntegration:
             # Monkey-patch STATE_DIR
             import llm_router.hooks.lineage_integration as li
 
-            original_state_dir = li.STATE_DIR
-            li.STATE_DIR = str(router_dir)
-
+            original_state_dir = li._state_dir()
+            li._state_dir = lambda: str(router_dir)
             try:
                 init_session_lineage()
 
@@ -69,9 +66,7 @@ class TestSessionStartIntegration:
                 assert not old_jsonl.exists(), "Old JSONL should be deleted"
                 assert not old_db.exists(), "Old DB should be deleted"
             finally:
-                li.STATE_DIR = original_state_dir
-
-
+                li._state_dir = lambda: original_state_dir
 class TestSessionEndIntegration:
     """Test SessionEnd hook integration."""
 
@@ -264,8 +259,8 @@ class TestEndToEndSessionLifecycle:
             import llm_router.hooks.lineage_integration as li
 
             # Simulate SessionStart with monkeypatch
-            original_state_dir = li.STATE_DIR
-            li.STATE_DIR = tmpdir
+            original_state_dir = li._state_dir()
+            li._state_dir = lambda: tmpdir
             try:
                 init_session_lineage()
                 assert (Path(tmpdir) / ".lineage_active").exists()
@@ -325,4 +320,4 @@ class TestEndToEndSessionLifecycle:
                 assert "ROUTING EFFICIENCY REPORT" in section
                 assert "✅ No wasteful" in section  # Should show clean slate
             finally:
-                li.STATE_DIR = original_state_dir
+                li._state_dir = lambda: original_state_dir

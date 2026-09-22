@@ -67,7 +67,7 @@ def test_install_seeds_usage_json(tmp_path, monkeypatch):
     from llm_router import install_hooks as ih
 
     state = tmp_path / ".llm-router"
-    monkeypatch.setattr(ih, "STATE_DIR", state, raising=False)
+    monkeypatch.setattr(ih, "_state_dir", lambda: state, raising=False)
 
     written = ih.seed_usage_json()
 
@@ -86,7 +86,7 @@ def test_backups_are_bounded(tmp_path, monkeypatch):
     """Repeated drift must not grow ~/.claude without limit."""
     from llm_router import install_hooks as ih
 
-    monkeypatch.setattr(ih, "STATE_DIR", tmp_path / ".llm-router", raising=False)
+    monkeypatch.setattr(ih, "_state_dir", lambda: tmp_path / ".llm-router", raising=False)
 
     dst = tmp_path / "hooks" / "a-hook.py"
     dst.parent.mkdir(parents=True)
@@ -112,7 +112,7 @@ def test_first_backup_is_still_never_clobbered(tmp_path, monkeypatch):
     """RED1-8-03 must survive the bounding change: the first capture is sacred."""
     from llm_router import install_hooks as ih
 
-    monkeypatch.setattr(ih, "STATE_DIR", tmp_path / ".llm-router", raising=False)
+    monkeypatch.setattr(ih, "_state_dir", lambda: tmp_path / ".llm-router", raising=False)
 
     dst = tmp_path / "hooks" / "a-hook.py"
     dst.parent.mkdir(parents=True)
@@ -164,7 +164,7 @@ def test_on_disk_provider_keys_are_loaded(tmp_path, monkeypatch):
     state.mkdir()
     (state / "openrouter.key").write_text("FAKE-KEY-FOR-TEST-ONLY\n")
 
-    monkeypatch.setattr(cfg, "STATE_DIR", state, raising=False)
+    monkeypatch.setattr(cfg, "_state_dir", lambda: state, raising=False)
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
 
     loaded = cfg.load_disk_keys()
@@ -181,7 +181,7 @@ def test_disk_keys_never_override_the_environment(tmp_path, monkeypatch):
     state.mkdir()
     (state / "openrouter.key").write_text("FAKE-KEY-STALE-ON-DISK\n")
 
-    monkeypatch.setattr(cfg, "STATE_DIR", state, raising=False)
+    monkeypatch.setattr(cfg, "_state_dir", lambda: state, raising=False)
     monkeypatch.setenv("OPENROUTER_API_KEY", "FAKE-KEY-FROM-ENVIRONMENT")
 
     cfg.load_disk_keys()

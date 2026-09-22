@@ -20,6 +20,12 @@ from llm_router.commands import install
 def home(monkeypatch, tmp_path):
     monkeypatch.setattr(pathlib.Path, "home", classmethod(lambda cls: tmp_path))
     monkeypatch.setenv("HOME", str(tmp_path))
+    # LLM_ROUTER_HOME now takes precedence over HOME/Path.home() (paths.py),
+    # and the autouse isolation fixture exports it to a different tmp dir.
+    # install_manifest.py resolves state via paths.state_path(), so it must
+    # agree with the Path.home() patch above or uninstall can't find what
+    # install wrote.
+    monkeypatch.setenv("LLM_ROUTER_HOME", str(tmp_path / ".llm-router"))
     monkeypatch.setattr(
         "llm_router.install_hooks._build_mcp_entry",
         lambda: ({"command": "/opt/llm/bin/llm-router", "args": []}, []),

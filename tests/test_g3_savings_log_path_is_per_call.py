@@ -1,4 +1,4 @@
-"""``cost.SAVINGS_LOG_PATH`` must follow the state dir, not freeze at import.
+"""``cost._savings_log_path()`` must follow the state dir, not freeze at import.
 
 Same defect class as receipt_store: a module-level
 

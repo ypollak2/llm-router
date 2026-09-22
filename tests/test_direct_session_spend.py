@@ -22,10 +22,10 @@ from llm_router.hooks.direct_executor import DirectResult
 @pytest.fixture
 def isolated_ledger(tmp_path, monkeypatch):
     """Point both ledgers at a tmp dir and reset the in-process singleton."""
-    monkeypatch.setattr(SS, "SESSION_SPEND_FILE", tmp_path / "session_spend.json")
+    monkeypatch.setattr(SS, "_session_spend_file", lambda: tmp_path / "session_spend.json")
     monkeypatch.setattr(SL, "_savings_log_path", lambda: tmp_path / "savings_log.jsonl")
     SS.reset_session_spend()
-    yield SS.SESSION_SPEND_FILE
+    yield SS._session_spend_file()
 
 
 def _route(complexity, itok, otok, monkeypatch):

@@ -81,6 +81,7 @@ def _run_zero_claude_hook(
     env.update(
         {
             "HOME": str(home_dir),
+            "LLM_ROUTER_HOME": str(router_dir),
             "PYTHONPATH": str(ROOT / "src"),
             "LLM_ROUTER_DISABLE_LLM_CLASSIFIERS": "1",
             "OLLAMA_BUDGET_MODELS": "scenario-model",

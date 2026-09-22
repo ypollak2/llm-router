@@ -89,6 +89,10 @@ def _run_hook(prompt: str, home: Path, ollama_url: str, extra_env=None):
     (home / ".llm-router").mkdir(parents=True, exist_ok=True)
     env = os.environ.copy()
     env["HOME"] = str(home)
+    # M-04: LLM_ROUTER_HOME now takes precedence over HOME, and the
+    # autouse isolation fixture exports it. Pin it to the same sandbox
+    # or the subprocess writes to the fixture's dir, not this one.
+    env["LLM_ROUTER_HOME"] = str(home) + "/.llm-router"
     env["LLM_ROUTER_OLLAMA_URL"] = ollama_url
     # Force the *direct-execution* path (the one that logs a routing decision).
     env.pop("LLM_ROUTER_DIRECT_EXECUTION", None)

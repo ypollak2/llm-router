@@ -41,9 +41,8 @@ def isolated_llm_router_dir():
 
         # Patch SESSION_SPEND_FILE to use isolated directory
         import llm_router.session_spend
-        original_llm_router_path = llm_router.session_spend.SESSION_SPEND_FILE
-        llm_router.session_spend.SESSION_SPEND_FILE = fake_home / ".llm-router" / "session_spend.json"
-
+        original_llm_router_path = llm_router.session_spend._session_spend_file()
+        llm_router.session_spend._session_spend_file = lambda: fake_home / ".llm-router" / "session_spend.json"
         yield fake_home / ".llm-router"
 
     finally:
@@ -52,7 +51,7 @@ def isolated_llm_router_dir():
             os.environ["HOME"] = original_home
         if original_llm_router_path:
             import llm_router.session_spend
-            llm_router.session_spend.SESSION_SPEND_FILE = original_llm_router_path
+            llm_router.session_spend._session_spend_file = lambda: original_llm_router_path
         shutil.rmtree(tmpdir, ignore_errors=True)
 
 

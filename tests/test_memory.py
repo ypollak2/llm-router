@@ -25,8 +25,8 @@ class TestFetchCorrectionsHistory:
     def test_fetch_no_db(self, monkeypatch):
         """Test behavior when database doesn't exist."""
         monkeypatch.setattr(
-            "llm_router.memory.profiles.DB_PATH",
-            Path("/nonexistent/usage.db")
+            "llm_router.memory.profiles._db_path",
+            lambda: Path("/nonexistent/usage.db")
         )
         history = fetch_corrections_history()
         assert history == []
@@ -58,18 +58,15 @@ class TestFetchCorrectionsHistory:
 
         # Monkeypatch to use temp db
         import llm_router.memory.profiles as mp
-        original_db = mp.DB_PATH
-        mp.DB_PATH = db_path
-
+        original_db = mp._db_path()
+        mp._db_path = lambda: db_path
         try:
             history = fetch_corrections_history(days=1)
             assert len(history) == 1
             assert history[0]["original_tool"] == "code"
             assert history[0]["corrected_model"] == "claude-opus-4-6"
         finally:
-            mp.DB_PATH = original_db
-
-
+            mp._db_path = lambda: original_db
 class TestBuildLearnedProfile:
     """Test learned profile builder."""
 
@@ -105,16 +102,14 @@ class TestBuildLearnedProfile:
         conn.close()
 
         import llm_router.memory.profiles as mp
-        original_db = mp.DB_PATH
-        mp.DB_PATH = db_path
-
+        original_db = mp._db_path()
+        mp._db_path = lambda: db_path
         try:
             profile = build_learned_profile()
             # Should be empty because 2 < 3
             assert profile == {}
         finally:
-            mp.DB_PATH = original_db
-
+            mp._db_path = lambda: original_db
     def test_build_at_threshold(self, temp_router_dir):
         """Test profile building at confidence threshold."""
         db_path = temp_router_dir / "usage.db"
@@ -141,9 +136,8 @@ class TestBuildLearnedProfile:
         conn.close()
 
         import llm_router.memory.profiles as mp
-        original_db = mp.DB_PATH
-        mp.DB_PATH = db_path
-
+        original_db = mp._db_path()
+        mp._db_path = lambda: db_path
         try:
             profile = build_learned_profile()
             assert "security_review" in profile
@@ -151,8 +145,7 @@ class TestBuildLearnedProfile:
             assert profile["security_review"].model == "claude-opus-4-6"
             assert profile["security_review"].source == "corrections"
         finally:
-            mp.DB_PATH = original_db
-
+            mp._db_path = lambda: original_db
     def test_build_multiple_routes(self, temp_router_dir):
         """Test building profile with multiple task types."""
         db_path = temp_router_dir / "usage.db"
@@ -190,9 +183,8 @@ class TestBuildLearnedProfile:
         conn.close()
 
         import llm_router.memory.profiles as mp
-        original_db = mp.DB_PATH
-        mp.DB_PATH = db_path
-
+        original_db = mp._db_path()
+        mp._db_path = lambda: db_path
         try:
             profile = build_learned_profile()
             assert len(profile) == 2
@@ -201,32 +193,27 @@ class TestBuildLearnedProfile:
             assert profile["code"].model == "claude-opus-4-6"
             assert profile["analyze"].model == "claude-sonnet-4-6"
         finally:
-            mp.DB_PATH = original_db
-
-
+            mp._db_path = lambda: original_db
 class TestSaveAndLoadLearnedProfile:
     """Test persistence of learned profiles."""
 
     def test_save_empty_profile(self, temp_router_dir):
         """Test saving empty profile."""
         import llm_router.memory.profiles as mp
-        original_file = mp.LEARNED_ROUTES_FILE
-        mp.LEARNED_ROUTES_FILE = temp_router_dir / "learned_routes.json"
-
+        original_file = mp._learned_routes_file()
+        mp._learned_routes_file = lambda: temp_router_dir / "learned_routes.json"
         try:
             path = save_learned_profile({})
             assert path.exists()
             data = json.loads(path.read_text())
             assert data == {}
         finally:
-            mp.LEARNED_ROUTES_FILE = original_file
-
+            mp._learned_routes_file = lambda: original_file
     def test_save_and_load_profile(self, temp_router_dir):
         """Test round-trip persistence."""
         import llm_router.memory.profiles as mp
-        original_file = mp.LEARNED_ROUTES_FILE
-        mp.LEARNED_ROUTES_FILE = temp_router_dir / "learned_routes.json"
-
+        original_file = mp._learned_routes_file()
+        mp._learned_routes_file = lambda: temp_router_dir / "learned_routes.json"
         try:
             profile = {
                 "security_review": LearnedRoute(
@@ -253,30 +240,26 @@ class TestSaveAndLoadLearnedProfile:
             assert loaded["security_review"].model == "claude-opus-4-6"
             assert loaded["security_review"].confidence == 3
         finally:
-            mp.LEARNED_ROUTES_FILE = original_file
-
+            mp._learned_routes_file = lambda: original_file
     def test_load_nonexistent_file(self, temp_router_dir):
         """Test loading when file doesn't exist."""
         import llm_router.memory.profiles as mp
-        original_file = mp.LEARNED_ROUTES_FILE
-        mp.LEARNED_ROUTES_FILE = temp_router_dir / "nonexistent.json"
-
+        original_file = mp._learned_routes_file()
+        mp._learned_routes_file = lambda: temp_router_dir / "nonexistent.json"
         try:
             loaded = load_learned_profile()
             assert loaded == {}
         finally:
-            mp.LEARNED_ROUTES_FILE = original_file
-
+            mp._learned_routes_file = lambda: original_file
     def test_load_invalid_json(self, temp_router_dir):
         """Test loading corrupted JSON file."""
         import llm_router.memory.profiles as mp
-        original_file = mp.LEARNED_ROUTES_FILE
+        original_file = mp._learned_routes_file()
         learned_file = temp_router_dir / "learned_routes.json"
-        mp.LEARNED_ROUTES_FILE = learned_file
-
+        mp._learned_routes_file = lambda: learned_file
         try:
             learned_file.write_text("{ INVALID JSON")
             loaded = load_learned_profile()
             assert loaded == {}
         finally:
-            mp.LEARNED_ROUTES_FILE = original_file
+            mp._learned_routes_file = lambda: original_file

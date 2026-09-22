@@ -66,6 +66,10 @@ def test_free_draft_providers_are_only_free(ar):
 # ── session paid spend + cap ─────────────────────────────────────────────────
 def test_session_paid_spend_reads_total_usd(ar, tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path))
+    # M-04: LLM_ROUTER_HOME now takes precedence over HOME, and the autouse
+    # isolation fixture already exports it (to a different tmp dir) — pin it
+    # to this sandbox or _session_paid_spend() reads the wrong directory.
+    monkeypatch.setenv("LLM_ROUTER_HOME", str(tmp_path / ".llm-router"))
     (tmp_path / ".llm-router").mkdir(parents=True)
     (tmp_path / ".llm-router" / "session_spend.json").write_text(json.dumps({"total_usd": 0.1132}))
     # Path.home() honors $HOME on POSIX.
@@ -93,6 +97,10 @@ def _run_hook(prompt: str, home: Path, spend: float | None) -> str:
         (home / ".llm-router" / "session_spend.json").write_text(json.dumps({"total_usd": spend}))
     env = {k: v for k, v in os.environ.items() if k != "LLM_ROUTER_ENFORCE"}
     env["HOME"] = str(home)
+    # M-04: LLM_ROUTER_HOME now takes precedence over HOME, and the
+    # autouse isolation fixture exports it. Pin it to the same sandbox
+    # or the subprocess writes to the fixture's dir, not this one.
+    env["LLM_ROUTER_HOME"] = str(home) + "/.llm-router"
     env["LLM_ROUTER_ENFORCE"] = "suggest"
     env["LLM_ROUTER_DIRECT_EXECUTION"] = "off"   # deterministic directive JSON
     result = subprocess.run(

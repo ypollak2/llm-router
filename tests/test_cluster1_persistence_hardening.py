@@ -113,7 +113,7 @@ def _reset_persistence_config(monkeypatch):
 # ═════════════════════════════════════════════════════════════════════════
 
 def test_result_cache_redacts_secrets_on_write(tmp_path, monkeypatch):
-    monkeypatch.setattr("llm_router.result_cache._ROUTER_DIR", tmp_path)
+    monkeypatch.setenv("LLM_ROUTER_HOME", str(tmp_path))
     from llm_router import result_cache as rc
 
     rc.store_result(
@@ -157,7 +157,7 @@ def test_result_cache_redacts_secrets_on_write(tmp_path, monkeypatch):
 
 
 def test_result_cache_db_created_with_0600(tmp_path, monkeypatch):
-    monkeypatch.setattr("llm_router.result_cache._ROUTER_DIR", tmp_path)
+    monkeypatch.setenv("LLM_ROUTER_HOME", str(tmp_path))
     from llm_router import result_cache as rc
 
     rc.store_result("prompt one", "a response that is plenty long enough", "query", "simple", "m")
@@ -166,7 +166,7 @@ def test_result_cache_db_created_with_0600(tmp_path, monkeypatch):
 
 
 def test_result_cache_repairs_unsafe_perms_on_existing_file(tmp_path, monkeypatch):
-    monkeypatch.setattr("llm_router.result_cache._ROUTER_DIR", tmp_path)
+    monkeypatch.setenv("LLM_ROUTER_HOME", str(tmp_path))
     from llm_router import result_cache as rc
 
     db_path = rc._get_db_path(None, "query")
@@ -180,7 +180,7 @@ def test_result_cache_repairs_unsafe_perms_on_existing_file(tmp_path, monkeypatc
 
 
 def test_result_cache_ttl_physically_deletes_expired_rows(tmp_path, monkeypatch):
-    monkeypatch.setattr("llm_router.result_cache._ROUTER_DIR", tmp_path)
+    monkeypatch.setenv("LLM_ROUTER_HOME", str(tmp_path))
     monkeypatch.setenv("LLM_ROUTER_PERSIST_TTL_DAYS", "30")
     import llm_router.config as cfg_mod
     cfg_mod._config = None
@@ -215,7 +215,7 @@ def test_result_cache_ttl_physically_deletes_expired_rows(tmp_path, monkeypatch)
 
 
 def test_result_cache_persist_raw_opt_in_retains_verbatim(tmp_path, monkeypatch):
-    monkeypatch.setattr("llm_router.result_cache._ROUTER_DIR", tmp_path)
+    monkeypatch.setenv("LLM_ROUTER_HOME", str(tmp_path))
     monkeypatch.setenv("LLM_ROUTER_PERSIST_RAW", "1")
     import llm_router.config as cfg_mod
     cfg_mod._config = None
@@ -232,7 +232,7 @@ def test_result_cache_persist_raw_opt_in_retains_verbatim(tmp_path, monkeypatch)
 
 
 def test_result_cache_safe_failure_never_persists_raw_on_redaction_error(tmp_path, monkeypatch):
-    monkeypatch.setattr("llm_router.result_cache._ROUTER_DIR", tmp_path)
+    monkeypatch.setenv("LLM_ROUTER_HOME", str(tmp_path))
     from llm_router import result_cache as rc
 
     def _boom(_text):

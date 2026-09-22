@@ -88,6 +88,10 @@ def _run(prompt: str, home: Path, ollama_url: str, extra_env=None) -> dict | Non
     env = {k: os.environ[k] for k in ("PATH", "LANG", "LC_ALL", "TMPDIR")
            if k in os.environ}
     env["HOME"] = str(home)
+    # M-04: LLM_ROUTER_HOME now takes precedence over HOME, and the
+    # autouse isolation fixture exports it. Pin it to the same sandbox
+    # or the subprocess writes to the fixture's dir, not this one.
+    env["LLM_ROUTER_HOME"] = str(home) + "/.llm-router"
     env["LLM_ROUTER_OLLAMA_URL"] = ollama_url
     env["LLM_ROUTER_OLLAMA_MODEL"] = STUB_MODEL   # matches /api/tags → passes §2.4 gate
     env["LLM_ROUTER_DISABLE_LLM_CLASSIFIERS"] = "1"

@@ -11,14 +11,13 @@ def _isolate_result_cache(tmp_path, monkeypatch):
     """Isolate the BM25 result cache to an empty tmp dir.
 
     prepare_prompt() retrieves context from ~/.llm-router/result_cache.db via
-    result_cache._ROUTER_DIR (bound at import). Without isolation, a developer
+    result_cache._router_dir() (resolved per call). Without isolation, a developer
     with a populated cache gets real context injected, so token-estimate
     assertions that assume "empty context" fail (283 vs <200) — while CI's empty
-    cache passes. Point _ROUTER_DIR at a fresh tmp dir so every test here is
+    cache passes. Point LLM_ROUTER_HOME at a fresh tmp dir so every test here is
     hermetic regardless of the machine's cache.
     """
-    import llm_router.result_cache as rc
-    monkeypatch.setattr(rc, "_ROUTER_DIR", tmp_path / ".llm-router")
+    monkeypatch.setenv("LLM_ROUTER_HOME", str(tmp_path / ".llm-router"))
 
 
 class TestPreparePrompt:

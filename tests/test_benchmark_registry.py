@@ -152,7 +152,7 @@ class TestMaybeRefreshBenchmarks:
         benchmarks_file.write_text(json.dumps(fresh_data))
 
         with (
-            patch("llm_router.benchmarks._INSTALLED", benchmarks_file),
+            patch("llm_router.benchmarks._installed", lambda: benchmarks_file),
             patch("llm_router.benchmarks._refresh_in_progress", False),
         ):
             result = maybe_refresh_benchmarks_background(ttl_days=7)
@@ -167,7 +167,7 @@ class TestMaybeRefreshBenchmarks:
         benchmarks_file.write_text(json.dumps(old_data))
 
         with (
-            patch("llm_router.benchmarks._INSTALLED", benchmarks_file),
+            patch("llm_router.benchmarks._installed", lambda: benchmarks_file),
             patch("llm_router.benchmarks._refresh_in_progress", False),
             patch("llm_router.benchmarks._refresh_lock", threading.Lock()),
             patch("llm_router.benchmarks.threading") as mock_threading,
@@ -190,7 +190,7 @@ class TestMaybeRefreshBenchmarks:
         """Missing benchmarks.json should trigger a refresh."""
         missing_path = tmp_path / "benchmarks.json"  # does not exist
         with (
-            patch("llm_router.benchmarks._INSTALLED", missing_path),
+            patch("llm_router.benchmarks._installed", lambda: missing_path),
             patch("llm_router.benchmarks._refresh_in_progress", False),
             patch("llm_router.benchmarks._refresh_lock", threading.Lock()),
             patch("llm_router.benchmark_fetcher.generate_benchmarks_json"),
@@ -222,7 +222,7 @@ class TestMaybeRefreshBenchmarks:
             bm._refresh_lock = threading.Lock()
 
         with (
-            patch("llm_router.benchmarks._INSTALLED", benchmarks_file),
+            patch("llm_router.benchmarks._installed", lambda: benchmarks_file),
             patch("llm_router.benchmarks._refresh_in_progress", False),
             patch("llm_router.benchmarks._refresh_lock", original_lock),
             patch("llm_router.benchmark_fetcher.generate_benchmarks_json", side_effect=swap_global_lock),

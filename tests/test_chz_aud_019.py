@@ -41,6 +41,10 @@ def _run(script: Path, stdin_data: str = "", extra_env: dict | None = None, tmp_
     # Isolate from real ~/.llm-router so hooks don't read/write production state
     if tmp_path is not None:
         env["HOME"] = str(tmp_path)
+        # M-04: LLM_ROUTER_HOME now takes precedence over HOME, and the
+        # autouse isolation fixture exports it. Pin it to the same sandbox
+        # or the subprocess writes to the fixture's dir, not this one.
+        env["LLM_ROUTER_HOME"] = str(tmp_path) + "/.llm-router"
         (tmp_path / ".llm-router").mkdir(parents=True, exist_ok=True)
     # Disable paid API keys so hooks don't accidentally call real providers
     for key in ("OPENAI_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY", "ANTHROPIC_API_KEY"):

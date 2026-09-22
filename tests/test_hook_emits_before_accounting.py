@@ -91,6 +91,10 @@ def _run(env_extra: dict[str, str], tmp_home: Path, timeout: float):
     payload = json.dumps({"prompt": "refactor the parser", "session_id": "emit-order"})
     env = os.environ.copy()
     env["HOME"] = str(tmp_home)
+    # M-04: LLM_ROUTER_HOME now takes precedence over HOME, and the
+    # autouse isolation fixture exports it. Pin it to the same sandbox
+    # or the subprocess writes to the fixture's dir, not this one.
+    env["LLM_ROUTER_HOME"] = str(tmp_home) + "/.llm-router"
     env["LLM_ROUTER_DISABLE_LLM_CLASSIFIERS"] = "1"
     env["LLM_ROUTER_DIRECT_EXECUTION"] = "0"
     for k in ("OPENAI_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY"):

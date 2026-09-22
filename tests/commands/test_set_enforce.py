@@ -56,7 +56,7 @@ class TestSetEnforceCommand:
         """set-enforce with valid mode should create config files."""
         with tempfile.TemporaryDirectory() as tmpdir:
             home = Path(tmpdir)
-            monkeypatch.setattr(Path, "home", lambda: home)
+            monkeypatch.setenv("LLM_ROUTER_HOME", str(home / ".llm-router"))
 
             _run_set_enforce("soft")
 
@@ -70,7 +70,7 @@ class TestSetEnforceCommand:
         """set-enforce should update existing routing.yaml."""
         with tempfile.TemporaryDirectory() as tmpdir:
             home = Path(tmpdir)
-            monkeypatch.setattr(Path, "home", lambda: home)
+            monkeypatch.setenv("LLM_ROUTER_HOME", str(home / ".llm-router"))
 
             # Create existing routing.yaml
             routing_yaml = home / ".llm-router" / "routing.yaml"
@@ -87,7 +87,7 @@ class TestSetEnforceCommand:
         """set-enforce should create .env file."""
         with tempfile.TemporaryDirectory() as tmpdir:
             home = Path(tmpdir)
-            monkeypatch.setattr(Path, "home", lambda: home)
+            monkeypatch.setenv("LLM_ROUTER_HOME", str(home / ".llm-router"))
 
             _run_set_enforce("soft")
 
@@ -100,7 +100,7 @@ class TestSetEnforceCommand:
         """set-enforce should update existing .env file."""
         with tempfile.TemporaryDirectory() as tmpdir:
             home = Path(tmpdir)
-            monkeypatch.setattr(Path, "home", lambda: home)
+            monkeypatch.setenv("LLM_ROUTER_HOME", str(home / ".llm-router"))
 
             # Create existing .env
             env_path = home / ".llm-router" / ".env"

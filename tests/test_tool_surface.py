@@ -253,7 +253,15 @@ def test_usage_refresh_counts_the_consolidated_door(tmp_path):
     import os as _os
 
     hook = REPO / "src" / "llm_router" / "hooks" / "usage-refresh.py"
-    env = {**_os.environ, "HOME": str(tmp_path), "LLM_ROUTER_SLIM": "consolidated"}
+    # LLM_ROUTER_HOME now takes precedence over HOME, and the autouse isolation
+    # fixture exports it; pin it to the same sandbox or the hook writes its
+    # savings log somewhere this test never looks.
+    env = {
+        **_os.environ,
+        "HOME": str(tmp_path),
+        "LLM_ROUTER_HOME": str(tmp_path / ".llm-router"),
+        "LLM_ROUTER_SLIM": "consolidated",
+    }
     for tool in ("mcp__llm_router__llm", "llm_query"):
         subprocess.run([sys.executable, str(hook)], input=_json.dumps({"toolName": tool}),
                        capture_output=True, text=True, env=env)

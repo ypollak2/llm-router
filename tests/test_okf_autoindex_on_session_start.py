@@ -35,7 +35,7 @@ def repo(tmp_path, monkeypatch):
     import subprocess
     subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=False)
     (tmp_path / "a.py").write_text("def f():\n    return 1\n")
-    monkeypatch.setattr(sshook, "STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setattr(sshook, "_state_dir", lambda: str(tmp_path / "state"))
     monkeypatch.delenv("LLM_ROUTER_OKF_AUTOINDEX", raising=False)
     return tmp_path
 
@@ -79,7 +79,7 @@ def test_it_detaches_so_the_first_prompt_is_not_delayed(repo, monkeypatch):
 
 
 def test_a_non_repo_is_left_alone(tmp_path, monkeypatch):
-    monkeypatch.setattr(sshook, "STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setattr(sshook, "_state_dir", lambda: str(tmp_path / "state"))
     calls = _spawned(monkeypatch)
     sshook._maybe_reindex_okf_bg(str(tmp_path))
     assert not calls, "indexed a directory that is not a project"

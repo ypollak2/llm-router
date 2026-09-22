@@ -54,7 +54,7 @@ def test_discovery_cache_excludes_embedding_models(tmp_path, monkeypatch):
     model; a real generation model alongside it must remain."""
     import json
     cache = tmp_path / "discovery.json"
-    monkeypatch.setattr("llm_router.discover._DISCOVERY_CACHE", str(cache))
+    monkeypatch.setattr("llm_router.discover._discovery_cache", lambda: str(cache))
     _update_discovery_cache([
         {"name": "nomic-embed-text:latest"},
         {"name": "qwen3:32b"},
@@ -86,7 +86,7 @@ def test_read_path_filters_embedding_from_stale_cache(tmp_path, monkeypatch):
             "ollama/qwen3:32b": _entry("ollama/qwen3:32b"),
         },
     }))
-    monkeypatch.setattr("llm_router.discover._DISCOVERY_CACHE", str(cache))
+    monkeypatch.setattr("llm_router.discover._discovery_cache", lambda: str(cache))
     got = get_cached_ollama_models()
     assert "ollama/qwen3:32b" in got
     assert "ollama/nomic-embed-text:latest" not in got, \

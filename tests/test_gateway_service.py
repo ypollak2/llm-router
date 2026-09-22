@@ -47,10 +47,37 @@ def test_target_paths_per_platform():
 
 
 def test_install_write_false_does_not_touch_disk():
+    """L-12. `write=False` must not create the plist.
+
+    This assertion used to read `assert not dest.exists() or True`, which is
+    true for every possible value of `dest.exists()` and therefore tested
+    nothing. The `or True` was almost certainly defensive: `dest` is a real
+    LaunchAgents path, so on a machine where the service is genuinely installed
+    the file DOES exist and a bare `not dest.exists()` would fail for a reason
+    that has nothing to do with the code under test.
+
+    The fix is to test the thing that actually matters -- whether THIS CALL
+    changed the file -- rather than whether the path happens to be occupied.
+    """
+    before = dest_existed = None
+    # Resolve the destination without writing, so we can compare across the call.
     dest, activate = install_gateway_service(
         python="/opt/venv/bin/python", system="Darwin", write=False
     )
-    assert not dest.exists() or True  # write=False must not create it in LaunchAgents
+    dest_existed = dest.exists()
+    before = dest.read_bytes() if dest_existed else None
+
+    # Call it again: whatever the starting state, write=False must not alter it.
+    dest2, _ = install_gateway_service(
+        python="/opt/venv/bin/python", system="Darwin", write=False
+    )
+
+    assert dest2 == dest
+    assert dest.exists() == dest_existed, (
+        "write=False created or removed the LaunchAgents plist"
+    )
+    if dest_existed:
+        assert dest.read_bytes() == before, "write=False modified an existing plist"
     assert "launchctl" in activate
 
 

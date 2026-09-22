@@ -110,6 +110,10 @@ def _run(
             (llmr_dir / "session_id.txt").write_text(session_id)
 
         env["HOME"] = str(tmp_path)
+        # M-04: LLM_ROUTER_HOME now takes precedence over HOME, and the
+        # autouse isolation fixture exports it. Pin it to the same sandbox
+        # or the subprocess writes to the fixture's dir, not this one.
+        env["LLM_ROUTER_HOME"] = str(tmp_path) + "/.llm-router"
         env.pop("CLAUDE_CODE_SESSION_ID", None)
 
     if max_depth is not None:

@@ -75,7 +75,7 @@ class TestToolTiers:
 class TestSessionSpend:
     def test_record_accumulates_cost(self, tmp_path, monkeypatch):
         from llm_router import session_spend as ss
-        monkeypatch.setattr(ss, "SESSION_SPEND_FILE", tmp_path / "session_spend.json")
+        monkeypatch.setattr(ss, "_session_spend_file", lambda: tmp_path / "session_spend.json")
         monkeypatch.setattr(ss, "_spend", None)
 
         spend = ss.SessionSpend()
@@ -89,7 +89,7 @@ class TestSessionSpend:
 
     def test_per_model_and_per_tool_tracked(self, tmp_path, monkeypatch):
         from llm_router import session_spend as ss
-        monkeypatch.setattr(ss, "SESSION_SPEND_FILE", tmp_path / "session_spend.json")
+        monkeypatch.setattr(ss, "_session_spend_file", lambda: tmp_path / "session_spend.json")
 
         spend = ss.SessionSpend()
         spend.record("openai/gpt-4o", "llm_code", 100, 200, 0.01)
@@ -102,7 +102,7 @@ class TestSessionSpend:
 
     def test_anomaly_fires_above_threshold(self, tmp_path, monkeypatch):
         from llm_router import session_spend as ss
-        monkeypatch.setattr(ss, "SESSION_SPEND_FILE", tmp_path / "session_spend.json")
+        monkeypatch.setattr(ss, "_session_spend_file", lambda: tmp_path / "session_spend.json")
         monkeypatch.setenv("LLM_ROUTER_ANOMALY_THRESHOLD", "0.10")
 
         spend = ss.SessionSpend()
@@ -114,7 +114,7 @@ class TestSessionSpend:
 
     def test_anomaly_not_fired_for_long_session(self, tmp_path, monkeypatch):
         from llm_router import session_spend as ss
-        monkeypatch.setattr(ss, "SESSION_SPEND_FILE", tmp_path / "session_spend.json")
+        monkeypatch.setattr(ss, "_session_spend_file", lambda: tmp_path / "session_spend.json")
         monkeypatch.setenv("LLM_ROUTER_ANOMALY_THRESHOLD", "0.10")
 
         spend = ss.SessionSpend()
@@ -127,7 +127,7 @@ class TestSessionSpend:
     def test_persist_writes_to_disk(self, tmp_path, monkeypatch):
         from llm_router import session_spend as ss
         spend_file = tmp_path / "session_spend.json"
-        monkeypatch.setattr(ss, "SESSION_SPEND_FILE", spend_file)
+        monkeypatch.setattr(ss, "_session_spend_file", lambda: spend_file)
 
         spend = ss.SessionSpend()
         spend.record("gpt-4o", "llm_code", 100, 200, 0.01)
@@ -140,7 +140,7 @@ class TestSessionSpend:
     def test_load_from_disk(self, tmp_path, monkeypatch):
         from llm_router import session_spend as ss
         spend_file = tmp_path / "session_spend.json"
-        monkeypatch.setattr(ss, "SESSION_SPEND_FILE", spend_file)
+        monkeypatch.setattr(ss, "_session_spend_file", lambda: spend_file)
 
         spend = ss.SessionSpend()
         spend.record("gpt-4o", "llm_code", 100, 200, 0.05)
@@ -152,7 +152,7 @@ class TestSessionSpend:
 
     def test_reset_clears_data(self, tmp_path, monkeypatch):
         from llm_router import session_spend as ss
-        monkeypatch.setattr(ss, "SESSION_SPEND_FILE", tmp_path / "session_spend.json")
+        monkeypatch.setattr(ss, "_session_spend_file", lambda: tmp_path / "session_spend.json")
 
         spend = ss.SessionSpend()
         spend.record("gpt-4o", "llm_code", 100, 200, 0.05)
@@ -170,7 +170,7 @@ class TestSessionSpend:
 
     def test_get_summary_structure(self, tmp_path, monkeypatch):
         from llm_router import session_spend as ss
-        monkeypatch.setattr(ss, "SESSION_SPEND_FILE", tmp_path / "session_spend.json")
+        monkeypatch.setattr(ss, "_session_spend_file", lambda: tmp_path / "session_spend.json")
 
         spend = ss.SessionSpend()
         spend.record("gpt-4o", "llm_code", 100, 200, 0.05)
@@ -446,7 +446,7 @@ class TestLlmSessionSpend:
         from llm_router import session_spend as ss
         from llm_router.tools.admin import llm_session_spend
 
-        monkeypatch.setattr(ss, "SESSION_SPEND_FILE", tmp_path / "session_spend.json")
+        monkeypatch.setattr(ss, "_session_spend_file", lambda: tmp_path / "session_spend.json")
         monkeypatch.setattr(ss, "_spend", None)
 
         # Prime the spend singleton with some data
@@ -467,7 +467,7 @@ class TestLlmSessionSpend:
         from llm_router import session_spend as ss
         from llm_router.tools.admin import llm_session_spend
 
-        monkeypatch.setattr(ss, "SESSION_SPEND_FILE", tmp_path / "session_spend.json")
+        monkeypatch.setattr(ss, "_session_spend_file", lambda: tmp_path / "session_spend.json")
         monkeypatch.setattr(ss, "_spend", None)
 
         spend = ss.get_session_spend()

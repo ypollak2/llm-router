@@ -37,6 +37,10 @@ def _run_hook(
     # the real resolver DEFAULT (now "smart") pass inject_default_mode=None.
     env = {k: v for k, v in os.environ.items() if k != "LLM_ROUTER_ENFORCE"}
     env["HOME"] = str(home)
+    # M-04: LLM_ROUTER_HOME now takes precedence over HOME, and the
+    # autouse isolation fixture exports it. Pin it to the same sandbox
+    # or the subprocess writes to the fixture's dir, not this one.
+    env["LLM_ROUTER_HOME"] = str(home) + "/.llm-router"
     _yaml_present = (home / ".llm-router" / "routing.yaml").exists()
     _explicit_mode = bool(extra_env and "LLM_ROUTER_ENFORCE" in extra_env)
     if inject_default_mode is not None and not _yaml_present and not _explicit_mode:

@@ -48,6 +48,10 @@ def _seed_pending(home: Path, sid: str, *, route_id: str | None = None) -> None:
 def _env(home: Path, ledger_db: Path) -> dict:
     env = os.environ.copy()
     env["HOME"] = str(home)
+    # M-04: LLM_ROUTER_HOME now takes precedence over HOME, and the
+    # autouse isolation fixture exports it. Pin it to the same sandbox
+    # or the subprocess writes to the fixture's dir, not this one.
+    env["LLM_ROUTER_HOME"] = str(home) + "/.llm-router"
     env["LLM_ROUTER_ENFORCE"] = "hard"
     env["LLM_ROUTER_EXECUTION_LEDGER_DB"] = str(ledger_db)
     env["OPENAI_API_KEY"] = ""

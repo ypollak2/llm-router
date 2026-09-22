@@ -84,6 +84,10 @@ def _run_agent_route(
                 }))
 
         env["HOME"] = str(tmp_path)
+        # M-04: LLM_ROUTER_HOME now takes precedence over HOME, and the
+        # autouse isolation fixture exports it. Pin it to the same sandbox
+        # or the subprocess writes to the fixture's dir, not this one.
+        env["LLM_ROUTER_HOME"] = str(tmp_path) + "/.llm-router"
 
     result = subprocess.run(
         [sys.executable, str(AGENT_ROUTE_HOOK)],
@@ -114,6 +118,11 @@ def _run_agent_error(
     env = None
     if tmp_path is not None:
         env = {**os.environ, "HOME": str(tmp_path)}
+        # M-04: LLM_ROUTER_HOME now takes precedence over HOME, and the
+        # autouse isolation fixture exports it. Pin it to the same sandbox
+        # or the subprocess reconciles a different session_budget.json than
+        # the one the test asserts against.
+        env["LLM_ROUTER_HOME"] = str(tmp_path) + "/.llm-router"
 
     result = subprocess.run(
         [sys.executable, str(AGENT_ERROR_HOOK)],

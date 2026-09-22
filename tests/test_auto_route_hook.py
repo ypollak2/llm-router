@@ -34,6 +34,10 @@ HOOK_PATH = ROOT / "src" / "llm_router" / "hooks" / "auto-route.py"
 def _hook_env(home_dir: Path, extra_env: dict[str, str] | None = None) -> dict[str, str]:
     env = os.environ.copy()
     env["HOME"] = str(home_dir)
+    # M-04: LLM_ROUTER_HOME now takes precedence over HOME, and the
+    # autouse isolation fixture exports it. Pin it to the same sandbox
+    # or the subprocess writes to the fixture's dir, not this one.
+    env["LLM_ROUTER_HOME"] = str(home_dir) + "/.llm-router"
     env["LLM_ROUTER_DISABLE_LLM_CLASSIFIERS"] = "1"
     env["LLM_ROUTER_DIRECT_EXECUTION"] = "0"  # Disable direct execution — test classification only
     env["OPENAI_API_KEY"] = ""

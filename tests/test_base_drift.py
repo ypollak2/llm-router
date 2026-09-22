@@ -16,7 +16,7 @@ from llm_router import session_spend as ss
 
 def _isolate(tmp_path: Path, monkeypatch, session_key: str):
     # Isolating SESSION_SPEND_FILE also relocates routing_outcomes.db (derived).
-    monkeypatch.setattr(ss, "SESSION_SPEND_FILE", tmp_path / "session_spend.json")
+    monkeypatch.setattr(ss, "_session_spend_file", lambda: tmp_path / "session_spend.json")
     monkeypatch.setenv("CLAUDE_SESSION_ID", session_key)
 
 
@@ -79,7 +79,7 @@ def test_drift_aggregates_across_sessions(tmp_path, monkeypatch):
 def test_persist_never_raises_on_durable_error(monkeypatch):
     # Un-creatable parent → both the json write and the durable upsert must be
     # swallowed; spend tracking never crashes on disk issues.
-    monkeypatch.setattr(ss, "SESSION_SPEND_FILE", Path("/proc/nonexistent/session_spend.json"))
+    monkeypatch.setattr(ss, "_session_spend_file", lambda: Path("/proc/nonexistent/session_spend.json"))
     monkeypatch.setenv("CLAUDE_SESSION_ID", "sess-A")
     s = ss.SessionSpend()
     s.call_count = 1

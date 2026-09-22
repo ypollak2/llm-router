@@ -58,7 +58,7 @@ def ar(monkeypatch, tmp_path):
     # real ~/.llm-router, regardless of when each constant was first computed.
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
-    monkeypatch.setattr(module, "_ROUTER_DIR", tmp_path / ".llm-router", raising=False)
+    monkeypatch.setattr(module, "_router_dir", lambda: tmp_path / ".llm-router", raising=False)
     monkeypatch.setattr(module, "log_routing_decision", lambda **kw: None, raising=False)
 
     import llm_router.hooks.savings_logger as savings_logger

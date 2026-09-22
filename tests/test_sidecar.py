@@ -19,7 +19,6 @@ Pins four contracts:
 from __future__ import annotations
 
 import sqlite3
-from pathlib import Path
 
 import pytest
 
@@ -104,7 +103,7 @@ def test_execute_returns_none_for_unknown_handler():
 def test_execute_routing_distribution_empty_db(monkeypatch, tmp_path):
     """When the usage DB exists but has no rows today, return an honest
     'no decisions' marker rather than a stack trace."""
-    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.setenv("LLM_ROUTER_HOME", str(tmp_path / ".llm-router"))
     # Create empty DB with the right table
     db_dir = tmp_path / ".llm-router"
     db_dir.mkdir(parents=True, exist_ok=True)
@@ -127,7 +126,7 @@ def test_execute_routing_distribution_empty_db(monkeypatch, tmp_path):
 def test_execute_routing_distribution_with_data(monkeypatch, tmp_path):
     """Populate the DB with two rows and verify the markdown body lists
     both tiers + costs."""
-    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.setenv("LLM_ROUTER_HOME", str(tmp_path / ".llm-router"))
     db_dir = tmp_path / ".llm-router"
     db_dir.mkdir(parents=True, exist_ok=True)
     db = db_dir / "usage.db"

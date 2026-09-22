@@ -46,6 +46,10 @@ def test_suggest_directive_shows_estimated_tokens(tmp_path):
     (tmp_path / ".llm-router").mkdir(parents=True, exist_ok=True)
     env = {k: v for k, v in os.environ.items() if k != "LLM_ROUTER_ENFORCE"}
     env["HOME"] = str(tmp_path)
+    # M-04: LLM_ROUTER_HOME now takes precedence over HOME, and the
+    # autouse isolation fixture exports it. Pin it to the same sandbox
+    # or the subprocess writes to the fixture's dir, not this one.
+    env["LLM_ROUTER_HOME"] = str(tmp_path) + "/.llm-router"
     env["LLM_ROUTER_ENFORCE"] = "suggest"
     env["LLM_ROUTER_DIRECT_EXECUTION"] = "off"
     out = subprocess.run(

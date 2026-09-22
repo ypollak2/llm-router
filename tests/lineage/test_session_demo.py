@@ -34,9 +34,8 @@ def test_full_session_lifecycle_with_report():
         print("\n📍 PHASE 1: SESSION START")
         print("-" * 70)
 
-        original_state_dir = li.STATE_DIR
-        li.STATE_DIR = tmpdir
-
+        original_state_dir = li._state_dir()
+        li._state_dir = lambda: tmpdir
         try:
             # Initialize session (what SessionStart hook does)
             init_session_lineage()
@@ -249,8 +248,7 @@ def test_full_session_lifecycle_with_report():
             print("✅ Report shows clean status")
 
         finally:
-            li.STATE_DIR = original_state_dir
-
+            li._state_dir = lambda: original_state_dir
     print("\n" + "=" * 70)
     print("✅ FULL SESSION TEST PASSED")
     print("=" * 70)

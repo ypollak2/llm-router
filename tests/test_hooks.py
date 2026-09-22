@@ -53,6 +53,7 @@ def test_auto_route_atomic_write_preserves_existing_target_until_swap(tmp_path, 
 
 def test_enforce_route_retries_partial_pending_state_reads(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("LLM_ROUTER_HOME", str(tmp_path / ".llm-router"))
     enforce_route = _load_hook_module(ENFORCE_ROUTE_HOOK, "enforce_route_hook")
 
     session_id = "sess-retry"

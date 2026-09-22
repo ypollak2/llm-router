@@ -329,6 +329,10 @@ def _run_router_isolated(prompt: str, isolation_dir: Path, run_id: str = "test")
     # Prepare a clean environment for this subprocess
     env = os.environ.copy()
     env["HOME"] = str(isolation_dir)
+    # M-04: LLM_ROUTER_HOME now takes precedence over HOME, and the
+    # autouse isolation fixture exports it. Pin it to the same sandbox
+    # or the subprocess writes to the fixture's dir, not this one.
+    env["LLM_ROUTER_HOME"] = str(isolation_dir) + "/.llm-router"
     env["LLM_ROUTER_DB"] = str(isolation_dir / "router.db")
     env["LLM_ROUTER_CACHE"] = str(isolation_dir / "cache")
 

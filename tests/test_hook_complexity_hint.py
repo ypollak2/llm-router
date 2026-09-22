@@ -44,6 +44,10 @@ def hint_file(monkeypatch, tmp_path):
     monkeypatch.setenv("CLAUDE_SESSION_ID", "test")
     llm_router_dir = tmp_path / ".llm-router"
     llm_router_dir.mkdir(parents=True, exist_ok=True)
+    # `_read_hook_complexity_hint` resolves via `paths.llm_router_home()`, which
+    # prefers `LLM_ROUTER_HOME` over `Path.home()`, so patching `Path.home()`
+    # alone no longer redirects it.
+    monkeypatch.setenv("LLM_ROUTER_HOME", str(llm_router_dir))
     return llm_router_dir / "last_classification_test.json"
 
 

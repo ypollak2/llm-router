@@ -47,7 +47,7 @@ def test_safe_sid_neutralizes_traversal(evil: str) -> None:
     assert "\x00" not in safe, "NUL byte survived sanitization"
     # The built path must stay inside the router dir.
     p = hook._last_route_path(evil).resolve()
-    assert str(p).startswith(str(hook._ROUTER_DIR.resolve()) + os.sep), (
+    assert str(p).startswith(str(hook._router_dir().resolve()) + os.sep), (
         f"CHZ-ST-001 regression: session_id {evil!r} escaped the state dir → {p}"
     )
 

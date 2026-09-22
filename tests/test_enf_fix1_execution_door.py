@@ -26,6 +26,7 @@ HOOK = ROOT / "src" / "llm_router" / "hooks" / "enforce-route.py"
 def _run(payload, home, env):
     e = {k: v for k, v in os.environ.items() if k not in ("LLM_ROUTER_ENFORCE", "LLM_ROUTER_SLIM", "LLM_ROUTER_DELEGATE")}
     e["HOME"] = str(home)
+    e["LLM_ROUTER_HOME"] = str(home / ".llm-router")
     e.update(env)
     return subprocess.run([sys.executable, str(HOOK)], input=json.dumps(payload),
                           capture_output=True, text=True, env=e)

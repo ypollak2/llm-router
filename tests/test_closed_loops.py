@@ -98,7 +98,7 @@ class TestLoop2WeeklyRetrospective:
             retro_dir = Path(tmpdir) / "retrospectives"
             retro_dir.mkdir()
 
-            with mock.patch("llm_router.retrospective.RETROSPECT_DIR", retro_dir):
+            with mock.patch("llm_router.retrospective._retrospect_dir", lambda: retro_dir):
                 result = await run_weekly_retrospective()
 
                 assert result["period"] == "weekly"

@@ -140,6 +140,10 @@ def test_debug_log_path_is_resolved_per_call(hook, monkeypatch, tmp_path):
     # path, so it opts out of the split explicitly rather than asserting
     # whichever branch happens to be active.
     monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+    # `_router_home()` prefers `LLM_ROUTER_HOME` over `$HOME`/`Path.home()`; the
+    # conftest autouse isolation fixture exports it, so it must be cleared here
+    # to actually exercise the $HOME/Path.home() fallback this test targets.
+    monkeypatch.delenv("LLM_ROUTER_HOME", raising=False)
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
     assert hook._debug_log_path() == tmp_path / ".llm-router" / "auto-route-debug.log"
@@ -147,6 +151,7 @@ def test_debug_log_path_is_resolved_per_call(hook, monkeypatch, tmp_path):
 
 def test_debug_log_writes_under_the_patched_home(hook, monkeypatch, tmp_path):
     monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)   # assert the production path
+    monkeypatch.delenv("LLM_ROUTER_HOME", raising=False)
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
     (tmp_path / ".llm-router").mkdir(parents=True)
     hook._debug_log("STAGE0 PROBE")

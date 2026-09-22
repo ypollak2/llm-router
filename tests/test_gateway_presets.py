@@ -145,7 +145,7 @@ def test_preset_from_yaml_and_env_override(tmp_path, monkeypatch):
     (tmp_path / "presets.yaml").write_text(
         "team:\n  gateway: http://10.0.0.5:17900/v1\n  host: 0.0.0.0\n  port: 18000\n")
     from llm_router import presets
-    monkeypatch.setattr(presets, "PRESETS_FILE", tmp_path / "presets.yaml")
+    monkeypatch.setattr(presets, "_presets_file", lambda: tmp_path / "presets.yaml")
     presets.reload()
     monkeypatch.setenv("LLM_ROUTER_PRESET", "team")
     monkeypatch.delenv("LLM_ROUTER_GATEWAY_HOST", raising=False)

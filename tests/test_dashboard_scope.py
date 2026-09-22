@@ -127,8 +127,8 @@ def test_cumulative_rolls_claude_usage_tokens(fake_state_dir, monkeypatch):
     monkeypatch.setattr(spec.loader, "exec_module", spec.loader.exec_module)
     spec.loader.exec_module(se_mod)
 
-    monkeypatch.setattr(se_mod, "DB_PATH", str(db))
-    monkeypatch.setattr(se_mod, "STATE_DIR", str(state))
+    monkeypatch.setattr(se_mod, "_db_path", lambda: str(db))
+    monkeypatch.setattr(se_mod, "_state_dir", lambda: str(state))
 
     result = se_mod._query_cumulative_savings()
     today = [r for r in result if r[0] == "today"]
@@ -192,8 +192,8 @@ def test_routing_logic_uses_today_cutoff(fake_state_dir, monkeypatch):
     )
     se_mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(se_mod)
-    monkeypatch.setattr(se_mod, "DB_PATH", str(_db))
-    monkeypatch.setattr(se_mod, "STATE_DIR", str(state))
+    monkeypatch.setattr(se_mod, "_db_path", lambda: str(_db))
+    monkeypatch.setattr(se_mod, "_state_dir", lambda: str(state))
 
     # Pass an arbitrary session_start far in the past — the function should
     # IGNORE it now and use start-of-day instead.
@@ -251,7 +251,7 @@ def test_daily_14d_includes_v93_tables(fake_state_dir, monkeypatch):
     )
     se_mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(se_mod)
-    monkeypatch.setattr(se_mod, "DB_PATH", str(db))
+    monkeypatch.setattr(se_mod, "_db_path", lambda: str(db))
 
     rows = se_mod._query_daily_14d()
     assert rows, "expected at least one day of activity"
@@ -279,9 +279,9 @@ def test_explain_dashboard_prints_sources(fake_state_dir, monkeypatch, capsys):
 
     # Patch the module's path constants.
     from llm_router.commands import explain_dashboard as ed
-    monkeypatch.setattr(ed, "DB_PATH", db)
-    monkeypatch.setattr(ed, "TRACKING_PATH", tracking)
-    monkeypatch.setattr(ed, "STATE_DIR", state)
+    monkeypatch.setattr(ed, "_db_path", lambda: db)
+    monkeypatch.setattr(ed, "_tracking_path", lambda: tracking)
+    monkeypatch.setattr(ed, "_state_dir", lambda: state)
 
     rc = ed.cmd_explain_dashboard()
     assert rc == 0

@@ -45,6 +45,11 @@ def fake_home(monkeypatch, tmp_path):
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     llm_router_dir = tmp_path / ".llm-router"
     llm_router_dir.mkdir(parents=True, exist_ok=True)
+    # M-04: paths.llm_router_home() reads LLM_ROUTER_HOME (which the autouse
+    # isolation fixture already exports) BEFORE it falls back to Path.home(),
+    # so patching Path.home() alone no longer redirects _check_savings_posture's
+    # paths.state_path(...) reads/writes.
+    monkeypatch.setenv("LLM_ROUTER_HOME", str(llm_router_dir))
     return tmp_path
 
 

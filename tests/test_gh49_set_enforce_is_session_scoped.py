@@ -122,7 +122,7 @@ def test_set_enforce_writes_the_session_file_not_the_global_one(home, monkeypatc
     """E2E over the real command: default write must be session-scoped."""
     from llm_router.commands import set_enforce as se
 
-    monkeypatch.setattr(se.Path, "home", classmethod(lambda cls: home))
+    monkeypatch.setenv("LLM_ROUTER_HOME", str(home / ".llm-router"))
     monkeypatch.setenv("CLAUDE_SESSION_ID", "sess-E2E")
     _write_global(home, "smart")
 
@@ -139,7 +139,7 @@ def test_set_enforce_writes_the_session_file_not_the_global_one(home, monkeypatc
 def test_global_flag_still_writes_machine_wide(home, monkeypatch):
     from llm_router.commands import set_enforce as se
 
-    monkeypatch.setattr(se.Path, "home", classmethod(lambda cls: home))
+    monkeypatch.setenv("LLM_ROUTER_HOME", str(home / ".llm-router"))
     monkeypatch.setenv("CLAUDE_SESSION_ID", "sess-E2E")
     se.cmd_set_enforce(["off", "--global"])
 
@@ -151,7 +151,7 @@ def test_no_session_id_still_writes_globally(home, monkeypatch):
     """A shell with no CLAUDE_SESSION_ID keeps the old, documented behaviour."""
     from llm_router.commands import set_enforce as se
 
-    monkeypatch.setattr(se.Path, "home", classmethod(lambda cls: home))
+    monkeypatch.setenv("LLM_ROUTER_HOME", str(home / ".llm-router"))
     se.cmd_set_enforce(["soft"])
     assert "enforce: soft" in (home / ".llm-router" / "routing.yaml").read_text()
 
@@ -174,7 +174,7 @@ def test_set_enforce_is_session_scoped_for_either_session_env_var(home, monkeypa
     before the GH#59 fix, that case silently fell through to a global write."""
     from llm_router.commands import set_enforce as se
 
-    monkeypatch.setattr(se.Path, "home", classmethod(lambda cls: home))
+    monkeypatch.setenv("LLM_ROUTER_HOME", str(home / ".llm-router"))
     monkeypatch.setenv(env_var, "sess-GH59")
 
     se.cmd_set_enforce(["soft"])
@@ -201,7 +201,7 @@ def test_neither_session_env_var_set_writes_globally_and_says_so(home, monkeypat
     never claim session-only scope for a write that wasn't."""
     from llm_router.commands import set_enforce as se
 
-    monkeypatch.setattr(se.Path, "home", classmethod(lambda cls: home))
+    monkeypatch.setenv("LLM_ROUTER_HOME", str(home / ".llm-router"))
     # `home` fixture already deleted CLAUDE_SESSION_ID and CLAUDE_CODE_SESSION_ID
     # and pointed LLM_ROUTER_HOME at an empty tmp dir, so no pointer-file
     # fallback can resolve a session id here either.
@@ -247,7 +247,7 @@ def test_set_enforce_never_crashes_if_resolver_raises(home, monkeypatch):
         raise RuntimeError("boom")
 
     monkeypatch.setattr(session_store, "resolve_session_id", _boom)
-    monkeypatch.setattr(se.Path, "home", classmethod(lambda cls: home))
+    monkeypatch.setenv("LLM_ROUTER_HOME", str(home / ".llm-router"))
     monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sess-boom")
 
     se.cmd_set_enforce(["hard"])  # must not raise

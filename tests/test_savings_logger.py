@@ -25,7 +25,11 @@ from llm_router.hooks.direct_executor import DirectResult, ModelSpec
 
 
 @pytest.fixture
-def savings_log_path(temp_router_dir):
+def savings_log_path(temp_router_dir, monkeypatch):
+    # M-04: log_direct_savings resolves its path via _savings_log_path() ->
+    # _router_home(), which reads LLM_ROUTER_HOME first — so temp_router_dir's
+    # Path.home() patch alone no longer redirects the write.
+    monkeypatch.setenv("LLM_ROUTER_HOME", str(temp_router_dir))
     return temp_router_dir / "savings_log.jsonl"
 
 

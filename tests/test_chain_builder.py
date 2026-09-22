@@ -251,7 +251,7 @@ class TestDiscoverCacheCorruption:
             },
         }))
 
-        with patch("llm_router.discover._DISCOVERY_CACHE", cache_file):
+        with patch("llm_router.discover._discovery_cache", lambda: cache_file):
             result = _load_cache(ttl=3600)
 
         assert result is None, "corrupted cache should return None, not raise ValueError"
@@ -275,7 +275,7 @@ class TestDiscoverCacheCorruption:
             },
         }))
 
-        with patch("llm_router.discover._DISCOVERY_CACHE", cache_file):
+        with patch("llm_router.discover._discovery_cache", lambda: cache_file):
             result = _load_cache(ttl=3600)
 
         assert result is None
@@ -303,7 +303,7 @@ class TestDiscoverCacheCorruption:
             },
         }))
 
-        with patch("llm_router.discover._DISCOVERY_CACHE", cache_file):
+        with patch("llm_router.discover._discovery_cache", lambda: cache_file):
             result = _load_cache(ttl=3600)
 
         assert result is None
@@ -331,7 +331,7 @@ class TestDiscoverCacheCorruption:
             },
         }))
 
-        with patch("llm_router.discover._DISCOVERY_CACHE", cache_file):
+        with patch("llm_router.discover._discovery_cache", lambda: cache_file):
             result = _load_cache(ttl=3600)
 
         assert result is not None

@@ -1,7 +1,7 @@
 """Regression: GH#45 — uninstall left the probe cache behind.
 
 `~/.llm-router/agentic_models.json` is written by the background
-model-capability probe install kicks off (`agentic_registry.CACHE_PATH`).
+model-capability probe install kicks off (`agentic_registry._cache_path()`).
 Nothing in `uninstall()` or the install manifest removed it, so a plain
 `llm-router uninstall` left it on disk. Only `--purge` cleared it, and that
 deletes the whole state directory.
@@ -34,7 +34,7 @@ def state_dir(tmp_path, monkeypatch):
     (d / "usage.db").write_bytes(b"SQLite format 3\x00")
     (d / ".env").write_text("OPENAI_API_KEY=sk-not-a-real-key\n")
 
-    monkeypatch.setattr(ar, "CACHE_PATH", cache)
+    monkeypatch.setattr(ar, "_cache_path", lambda: cache)
     # Keep the run hermetic: only the state-dir behaviour is under test.
     monkeypatch.setattr(un, "_run_uninstall_surfaces", lambda: [], raising=False)
     return d

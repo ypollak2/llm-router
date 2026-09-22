@@ -44,8 +44,8 @@ def routing_env(tmp_path, monkeypatch):
     # A dummy DB so _query_routing_logic's os.path.exists(DB_PATH) gate passes.
     db = tmp_path / "usage.db"
     sqlite3.connect(str(db)).close()
-    monkeypatch.setattr(se, "DB_PATH", str(db))
-    monkeypatch.setattr(se, "STATE_DIR", str(tmp_path))
+    monkeypatch.setattr(se, "_db_path", lambda: str(db))
+    monkeypatch.setattr(se, "_state_dir", lambda: str(tmp_path))
     # Seed the classifier log with a few of today's decisions.
     now = time.time()
     lines = [

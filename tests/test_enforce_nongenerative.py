@@ -44,6 +44,10 @@ def _run(home: Path, session_id: str, tool_name: str, mode: str,
          tool_input: dict | None = None) -> subprocess.CompletedProcess[str]:
     env = {k: v for k, v in os.environ.items() if k != "LLM_ROUTER_ENFORCE"}
     env["HOME"] = str(home)
+    # M-04: LLM_ROUTER_HOME now takes precedence over HOME, and the
+    # autouse isolation fixture exports it. Pin it to the same sandbox
+    # or the subprocess writes to the fixture's dir, not this one.
+    env["LLM_ROUTER_HOME"] = str(home) + "/.llm-router"
     env["LLM_ROUTER_ENFORCE"] = mode
     payload = {"session_id": session_id, "tool_name": tool_name}
     if tool_input is not None:

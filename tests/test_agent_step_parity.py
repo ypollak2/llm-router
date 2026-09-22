@@ -25,6 +25,10 @@ _OP_PROMPT = "Fix the failing test in parser.py and make it pass."
 def _run_hook(payload: dict, *, home: Path, extra_env: dict) -> subprocess.CompletedProcess:
     env = {k: v for k, v in os.environ.items() if k != "LLM_ROUTER_ENFORCE"}
     env["HOME"] = str(home)
+    # M-04: LLM_ROUTER_HOME now takes precedence over HOME, and the
+    # autouse isolation fixture exports it. Pin it to the same sandbox
+    # or the subprocess writes to the fixture's dir, not this one.
+    env["LLM_ROUTER_HOME"] = str(home) + "/.llm-router"
     env.update(extra_env)
     return subprocess.run(
         [sys.executable, str(ENFORCE_ROUTE_HOOK)],

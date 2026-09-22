@@ -34,6 +34,7 @@ def _load_hook_module():
 @pytest.fixture()
 def _isolated_home(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("LLM_ROUTER_HOME", str(tmp_path / ".llm-router"))
     monkeypatch.delenv("CLAUDE_SESSION_ID", raising=False)
     monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
     yield tmp_path

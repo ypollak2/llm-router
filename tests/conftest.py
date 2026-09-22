@@ -2,6 +2,7 @@
 
 import json
 import os
+import re
 import socket as _socket
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -319,9 +320,9 @@ def temp_router_dir(tmp_path, monkeypatch):
 
     # Patch module-level variables that were evaluated at import time
     import llm_router.hook_health
-    monkeypatch.setattr(llm_router.hook_health, "_ROUTER_DIR", router_dir)
-    monkeypatch.setattr(llm_router.hook_health, "_HOOK_HEALTH_FILE", router_dir / "hook_health.json")
-    monkeypatch.setattr(llm_router.hook_health, "_HOOK_LOG_FILE", router_dir / "hook_errors.log")
+    monkeypatch.setattr(llm_router.hook_health, "_router_dir", lambda: router_dir)
+    monkeypatch.setattr(llm_router.hook_health, "_hook_health_file", lambda: router_dir / "hook_health.json")
+    monkeypatch.setattr(llm_router.hook_health, "_hook_log_file", lambda: router_dir / "hook_errors.log")
     # Also patch Path.home for any runtime calls
     monkeypatch.setattr("pathlib.Path.home", lambda: temp_home)
 
@@ -1299,5 +1300,32 @@ def _isolate_router_state_dir(monkeypatch, tmp_path):
     import llm_router.install_hooks as _ih
 
     state = tmp_path / "_router_state"
-    monkeypatch.setattr(_ih, "STATE_DIR", state, raising=False)
-    monkeypatch.setattr(_cfg, "STATE_DIR", state, raising=False)
+    monkeypatch.setattr(_ih, "_state_dir", lambda: state, raising=False)
+    monkeypatch.setattr(_cfg, "_state_dir", lambda: state, raising=False)
+
+
+# ── L-13: say what this run is NOT covering ────────────────────────────────
+def pytest_report_header(config):
+    """Print the markers excluded by default, and how many tests that hides.
+
+    `addopts` in pyproject deselects `slow`, `requires_ollama`,
+    `requires_api_keys` and `requires_codex` on every run. That is a sensible
+    default -- those need a local model, live keys or minutes -- but it makes a
+    green local run NARROWER than it looks, and nothing said so. The audit found
+    live provider failure/timeout/retry coverage exists only behind those
+    markers, so "the suite is green" and "the failure paths were exercised" were
+    two different statements that read as one.
+
+    Printed at the top of every run rather than documented somewhere, because a
+    caveat nobody sees is not a caveat.
+    """
+    expr = (config.getoption("-m") or "").strip()
+    if not expr or "not " not in expr:
+        return None
+    excluded = sorted(set(re.findall(r"not\s+([a-z_]+)", expr)))
+    if not excluded:
+        return None
+    return (
+        "deselected by default: " + ", ".join(excluded)
+        + "  — run `pytest -m ''` to include them"
+    )

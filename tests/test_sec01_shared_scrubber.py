@@ -62,7 +62,7 @@ def test_session_store_scrubber_catches_password_drift() -> None:
 
 
 def test_transcript_writer_scrubs_and_is_0600(tmp_path, monkeypatch) -> None:
-    monkeypatch.setattr(hook, "_ROUTER_DIR", tmp_path)
+    monkeypatch.setattr(hook, "_router_dir", lambda: tmp_path)
     prompt = "deploy with " + BATTERY["anthropic"]
     draft = "sure, also " + BATTERY["aws"] + " and " + BATTERY["github"]
     hook._append_transcript_shard("sess-scrub", prompt, draft)

@@ -41,7 +41,7 @@ def running_dashboard(tmp_path, monkeypatch):
 
     from llm_router.dashboard import server as dash
     importlib.reload(dash)
-    monkeypatch.setattr(dash, "_TOKEN_FILE", tmp_path / ".llm-router" / "dashboard.token")
+    monkeypatch.setattr(dash, "_token_file", lambda: tmp_path / ".llm-router" / "dashboard.token")
 
     port = _free_port()
     token = dash._get_or_create_token()

@@ -62,7 +62,7 @@ def usage_db(tmp_path, monkeypatch):
     )
     conn.commit()
     conn.close()
-    monkeypatch.setattr(se, "DB_PATH", str(db))
+    monkeypatch.setattr(se, "_db_path", lambda: str(db))
     return db
 
 

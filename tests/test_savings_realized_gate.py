@@ -36,8 +36,11 @@ class _Result:
 
 @pytest.fixture
 def savings_log(tmp_path, monkeypatch):
-    monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
-    return tmp_path / ".llm-router" / "savings_log.jsonl"
+    # M-04: log_direct_savings resolves its path via LLM_ROUTER_HOME first,
+    # ahead of Path.home() — patching Path.home() alone no longer redirects it.
+    home = tmp_path / ".llm-router"
+    monkeypatch.setenv("LLM_ROUTER_HOME", str(home))
+    return home / "savings_log.jsonl"
 
 
 def _rows(path):

@@ -69,7 +69,10 @@ def _write_shard(home: Path, file_session_id: str, **overrides) -> Path:
 def fake_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """Point ``Path.home()`` at a per-test tmp dir so shards stay sandboxed."""
     monkeypatch.setenv("HOME", str(tmp_path))
-    # `pathlib.Path.home()` honours $HOME on POSIX.
+    # `pathlib.Path.home()` honours $HOME on POSIX. `_read_hook_complexity_hint`
+    # resolves via `paths.llm_router_home()`, which prefers `LLM_ROUTER_HOME` over
+    # `$HOME`, so both must point at the same sandboxed directory.
+    monkeypatch.setenv("LLM_ROUTER_HOME", str(tmp_path / ".llm-router"))
     return tmp_path
 
 

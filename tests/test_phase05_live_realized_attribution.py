@@ -307,6 +307,10 @@ async def test_verified_overridden_never_counts_as_realized(temp_db, tmp_path, m
 def _run_advise_hook(payload: dict, *, home: Path, extra_env: dict[str, str] | None = None):
     env = {k: v for k, v in os.environ.items() if k != "LLM_ROUTER_ENFORCE"}
     env["HOME"] = str(home)
+    # M-04: LLM_ROUTER_HOME now takes precedence over HOME, and the
+    # autouse isolation fixture exports it. Pin it to the same sandbox
+    # or the subprocess writes to the fixture's dir, not this one.
+    env["LLM_ROUTER_HOME"] = str(home) + "/.llm-router"
     env["LLM_ROUTER_ENFORCE"] = "advise"
     if extra_env:
         env.update(extra_env)

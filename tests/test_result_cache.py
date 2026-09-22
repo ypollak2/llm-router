@@ -18,7 +18,7 @@ from llm_router.result_cache import (
 @pytest.fixture(autouse=True)
 def isolate_cache(tmp_path, monkeypatch):
     """Redirect cache DBs to temp directory for test isolation."""
-    monkeypatch.setattr("llm_router.result_cache._ROUTER_DIR", tmp_path)
+    monkeypatch.setenv("LLM_ROUTER_HOME", str(tmp_path))
 
 
 class TestStoreResult:

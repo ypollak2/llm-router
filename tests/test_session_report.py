@@ -186,7 +186,7 @@ class TestMockModelFiltering:
             {"timestamp": ts, "model": "gemma4:latest", "provider": "ollama"},
             {"timestamp": ts, "model": "test-model", "provider": "ollama"},
         ])
-        with patch.object(se, "DB_PATH", str(temp_db)):
+        with patch.object(se, "_db_path", lambda: str(temp_db)):
             paid, cc, free = se._query_session_data(session_start - 120)
         # mock-model and test-model should be excluded
         paid_models = [r["model"] for r in paid]
@@ -205,7 +205,7 @@ class TestMockModelFiltering:
             {"timestamp": ts, "model": "mock-model", "provider": "openai",
              "complexity": "moderate"},
         ])
-        with patch.object(se, "DB_PATH", str(temp_db)):
+        with patch.object(se, "_db_path", lambda: str(temp_db)):
             result = se._query_session_complexity_breakdown(session_start - 120)
         if "moderate" in result:
             model_names = [m for m, _, _, _ in result["moderate"]]
@@ -269,7 +269,7 @@ class TestCallReconciliation:
             {"timestamp": ts, "model": "gpt-4o-mini", "provider": "openai",
              "complexity": "moderate", "cost_usd": 0.001},
         ])
-        with patch.object(se, "DB_PATH", str(temp_db)):
+        with patch.object(se, "_db_path", lambda: str(temp_db)):
             paid, cc, free = se._query_session_data(session_start - 120)
             complexity, filtered = se._query_session_complexity_breakdown(session_start - 120)
 
@@ -290,7 +290,7 @@ class TestCallReconciliation:
             {"timestamp": ts, "model": "gpt-4o-mini", "provider": "openai",
              "complexity": "moderate", "cost_usd": 0.001},
         ])
-        with patch.object(se, "DB_PATH", str(temp_db)):
+        with patch.object(se, "_db_path", lambda: str(temp_db)):
             lines = se._format_complexity_breakdown(session_start - 120)
         text = "\n".join(lines)
         assert "routed" in text
@@ -426,7 +426,7 @@ class TestRouterEfficiencyWording:
         conn.commit()
         conn.close()
 
-        with patch.object(se, "DB_PATH", str(temp_db)):
+        with patch.object(se, "_db_path", lambda: str(temp_db)):
             efficiency = se._query_router_efficiency()
 
         # Verify the data
@@ -467,7 +467,7 @@ class TestRouterEfficiencyWording:
         conn.commit()
         conn.close()
 
-        with patch.object(se, "DB_PATH", str(temp_db)):
+        with patch.object(se, "_db_path", lambda: str(temp_db)):
             efficiency = se._query_router_efficiency()
         assert efficiency["total"] == 10
         assert efficiency["on_target"] == 8
@@ -492,7 +492,7 @@ class TestProductionPolish:
             {"timestamp": ts, "model": "test-model", "provider": "codex",
              "complexity": "simple", "cost_usd": 0.0},
         ])
-        with patch.object(se, "DB_PATH", str(temp_db)):
+        with patch.object(se, "_db_path", lambda: str(temp_db)):
             paid, cc, free = se._query_session_data(session_start - 120)
             tools = se._aggregate(paid)
             output = se._format(
@@ -530,7 +530,7 @@ class TestProductionPolish:
             {"timestamp": ts, "model": "gpt-4o-mini", "provider": "openai",
              "complexity": "moderate", "cost_usd": 0.001},
         ])
-        with patch.object(se, "DB_PATH", str(temp_db)):
+        with patch.object(se, "_db_path", lambda: str(temp_db)):
             lines = se._format_complexity_breakdown(session_start - 120)
         text = "\n".join(lines)
         assert "local" in text
@@ -602,7 +602,7 @@ class TestEnhancedDashboard:
             {"timestamp": ts, "model": "gpt-4o-mini", "provider": "openai",
              "complexity": "moderate", "cost_usd": 0.001},
         ])
-        with patch.object(se, "DB_PATH", str(temp_db)):
+        with patch.object(se, "_db_path", lambda: str(temp_db)):
             paid, cc, free = se._query_session_data(session_start - 120)
             tools = se._aggregate(paid)
             output = se._format(
