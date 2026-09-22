@@ -159,7 +159,14 @@ def main() -> None:
     # ── Step 3: Install ────────────────────────────────────────────────────────
     _print_step(3, total_steps, "Installing for your hosts")
 
-    from llm_router.cli import _install_host, _run_install
+    # `_run_install` lives in commands/install.py, not cli.py. Importing it from
+    # cli raised ImportError, and the `except Exception` below turned that into
+    # "Could not auto-install for claude — Manual: llm-router install", so
+    # quickstart's primary host quietly degraded to a manual instruction on
+    # every run. Found by test_shipped_modules_import's function-level import
+    # scan (F21), not by the audit.
+    from llm_router.cli import _install_host
+    from llm_router.commands.install import _run_install
 
     for host in target_hosts:
         print(f"\n  Installing for: {host}")

@@ -88,57 +88,26 @@ def reconcile_budget_lineage(
     }
 
 
-def reconcile_budget_lineage_audited(
-    backend,
-    *,
-    scope: str = "global",
-    audit: bool = True,
-) -> dict:
-    """Reconcile a backend's budget lineage **against the control-plane audit
-    log** (#70): run the subtree-conservation check over
-    ``backend.iter_lineage_consumed()``, record the result as a tamper-evident
-    row in the control-plane audit log, and report that log's chain integrity —
-    the same treatment policy reconciliation (#60) gets.
-
-    Returns the reconciliation summary plus ``audit_chain_status``
-    (``"ok"`` / ``"tampered"``). Reports rather than raises, so monitoring can
-    alert on either ``converged is False`` (a lineage leak) or
-    ``audit_chain_status == "tampered"`` (the attestation log was altered).
-
-    ``backend`` must expose ``iter_lineage_consumed()`` (SqliteBudgetBackend
-    does). ``audit=False`` skips the append — used by tamper tests that must not
-    extend a chain they have deliberately broken.
-    """
-    from llm_router.control_plane import audit as cpa
-
-    summary = reconcile_budget_lineage(backend.iter_lineage_consumed())
-
-    try:
-        cpa.verify_cp_audit_chain()
-        audit_chain_status = "ok"
-    except cpa.TamperDetected:
-        audit_chain_status = "tampered"
-
-    result = {**summary, "scope": scope, "audit_chain_status": audit_chain_status}
-
-    if audit:
-        cpa.audit_budget_lineage_reconciliation(
-            scope=scope,
-            summary={
-                "envelope_count": summary["envelope_count"],
-                "parent_count": summary["parent_count"],
-                "violation_count": summary["violation_count"],
-                "converged": summary["converged"],
-                "audit_chain_status": audit_chain_status,
-            },
-        )
-
-    return result
+# `reconcile_budget_lineage_audited` was removed here (T-11, audit 2026-09-22).
+#
+# It did `from llm_router.control_plane import audit` inside its body, and
+# `control_plane/audit.py` has never existed in this repository. So it shipped
+# in the wheel, was importable, and raised `ImportError` on every call any
+# installed user could make — for every version.
+#
+# Nothing in `src/` called it. The only callers were four tests, and those were
+# converted from FAIL to SKIP by the root `conftest.py` excluded-module hook,
+# which is why a function that could not run looked healthy for months.
+#
+# Removed rather than stubbed, following the M-10 precedent recorded in
+# pyproject.toml: a stub would silently disable audit logging in a control
+# plane, which is the opposite of what an audit module is for. Writing the
+# missing module is feature work, not remediation. `reconcile_budget_lineage`
+# (unaudited) is unaffected and is what every real caller uses.
 
 
 __all__ = [
     "reconcile_budget_lineage",
-    "reconcile_budget_lineage_audited",
     "KIND_UNDERDEBITED",
     "KIND_UNREGISTERED",
     "LineageRow",
