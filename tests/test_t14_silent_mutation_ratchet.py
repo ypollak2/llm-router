@@ -27,7 +27,14 @@ ROOT = Path(__file__).resolve().parents[1]
 
 #: Sites counted at the time of the fix. LOWER THIS; do not raise it without a
 #: reason in the commit message. 92 before the T-14 pass, 88 after.
-MAX_SILENT_PERSISTENCE_SITES = 88
+#:
+#: 87 after R14. The ratchet earned its keep on the way: making `attempt_log`
+#: rotation atomic replaced one silent `write_text` with TWO silent sites
+#: (`os.replace` plus the `except OSError: pass` around the temp-file cleanup),
+#: so a change that was entirely an improvement still went 88 -> 89. Restruct-
+#: uring the cleanup to run only on failure and having the outer handler record
+#: `CHZ-FO-ATTEMPTLOG-ROTATE` took it to 87.
+MAX_SILENT_PERSISTENCE_SITES = 87
 
 
 def _census_count() -> int:

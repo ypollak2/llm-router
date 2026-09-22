@@ -67,24 +67,83 @@ def _scrub(text: str) -> str:
         return "[SCRUB-UNAVAILABLE: reason withheld]"
 
 
+def _lock_path(p: Path) -> Path:
+    """The sibling lock, never the data file itself.
+
+    Same reasoning as :mod:`llm_router.file_lock`: rotation swaps the data
+    file's inode via ``os.replace``, and a lock held on the replaced inode
+    stops meaning anything the moment the swap lands. The lock file's identity
+    has to outlive the thing it protects.
+    """
+    return p.with_suffix(p.suffix + ".lock")
+
+
 def record(model: str, outcome: str, latency_ms: int, *, reason: str = "") -> None:
-    """Append one attempt. Fail-open: telemetry must never break routing."""
+    """Append one attempt. Fail-open: telemetry must never break routing.
+
+    R14. The append and the rotation are ONE critical section.
+
+    ``_rotate`` was a `read_text` / `write_text` pair with no coordination, so
+    any record appended between the read and the write was erased by the write.
+    Measured under 8 concurrent processes: **0.6–5.3% of records lost**, varying
+    run to run, and silently — the file stayed well-formed, `summary()` returned
+    plausible numbers, and the only evidence was a total that did not add up.
+    The same defect in `session_store` (1.83% at 6 processes) is what
+    :mod:`llm_router.file_lock` was written for; this file never got it.
+
+    Locking only the rotation is NOT enough and was the first thing tried: an
+    unlocked append still lands inside a locked rotator's read-write window and
+    is still lost. The lock has to cover both.
+
+    When the lock cannot be taken, the two halves are treated differently,
+    because they fail in opposite directions:
+
+    * the append happens ANYWAY — an unlocked append is atomic under ``O_APPEND``
+      for a write this small, and refusing it would lose the record for certain
+      in order to avoid losing it by chance;
+    * the rotation is SKIPPED — it is the only destructive step, and an
+      oversized log is a cost, while a truncated one is missing evidence.
+
+    That case is counted rather than swallowed (`counter_registry` renders it
+    under `fail_open_events`), because "rotation has not run for a week" is
+    otherwise indistinguishable from "the log is simply not large yet".
+    """
     try:
         p = _path()
         p.parent.mkdir(parents=True, exist_ok=True)
-        # R1: 0600 at CREATION. `open` creates with 0666 & ~umask -- 0644 on a
-        # default umask -- so the file was world-readable for the whole write
-        # and a handle opened in that window stays readable afterwards.
-        from llm_router.paths import private_opener
-        with open(p, "a", opener=private_opener) as fh:
-            fh.write(json.dumps({
-                "ts": time.time(), "model": model, "outcome": outcome,
-                "latency_ms": int(latency_ms), "reason": _scrub(reason)[:80],
-            }) + "\n")
-        _repair_legacy_mode(p)
-        _rotate(p)
+        from llm_router.file_lock import exclusive_lock
+
+        # Short timeout: this is on the routing path and every holder does one
+        # small write. A long wait here would trade a telemetry gap for user
+        # latency, which is the wrong way round.
+        with exclusive_lock(_lock_path(p), timeout=5.0) as locked:
+            _append(p, model, outcome, latency_ms, reason)
+            if locked:
+                _rotate(p)
+            else:
+                try:
+                    from llm_router import failopen
+                    failopen.record(
+                        "CHZ-FO-ATTEMPTLOG-ROTATE-UNLOCKED",
+                        detail="append kept, rotation skipped",
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
     except Exception:                                        # noqa: BLE001
         pass
+
+
+def _append(p: Path, model: str, outcome: str, latency_ms: int, reason: str) -> None:
+    # R1: 0600 at CREATION. `open` creates with 0666 & ~umask -- 0644 on a
+    # default umask -- so the file was world-readable for the whole write
+    # and a handle opened in that window stays readable afterwards.
+    from llm_router.paths import private_opener
+    with open(p, "a", opener=private_opener) as fh:
+        fh.write(json.dumps({
+            "ts": time.time(), "model": model, "outcome": outcome,
+            "latency_ms": int(latency_ms), "reason": _scrub(reason)[:80],
+        }) + "\n")
+    _repair_legacy_mode(p)
 
 
 def _repair_legacy_mode(p: Path) -> None:
@@ -103,14 +162,49 @@ def _repair_legacy_mode(p: Path) -> None:
 
 
 def _rotate(p: Path) -> None:
+    """Trim the log to the most recent `_KEEP_LINES`. CALLER MUST HOLD THE LOCK.
+
+    Two changes from the version that lost records:
+
+    * the caller serialises it (see `record`), which closes the read-write
+      window that was erasing concurrent appends;
+    * the write goes to a temp file and lands with `os.replace`, so a READER
+      never sees a half-written log. `write_text` truncated in place, which
+      meant `summary()` running at the wrong moment read a file with the old
+      content gone and the new content not yet there, and reported a model as
+      having no evidence when it had thousands of records.
+
+    `os.replace` is atomic within a filesystem; the temp file is created beside
+    the target for that reason, not in the system temp directory.
+    """
     try:
         if p.stat().st_size < 400_000:
             return
         lines = p.read_text(errors="replace").splitlines()
-        if len(lines) > _MAX_LINES:
-            p.write_text("\n".join(lines[-_KEEP_LINES:]) + "\n")
-    except Exception:                                        # noqa: BLE001
-        pass
+        if len(lines) <= _MAX_LINES:
+            return
+        from llm_router.paths import private_opener
+        tmp = p.with_suffix(p.suffix + f".rot{os.getpid()}")
+        try:
+            with open(tmp, "w", opener=private_opener) as fh:
+                fh.write("\n".join(lines[-_KEEP_LINES:]) + "\n")
+            os.replace(tmp, p)
+        except BaseException:
+            # Only on failure. `os.replace` consumes the temp file on success,
+            # so a `finally` cleanup would be unlinking something that is not
+            # there — and the `except OSError: pass` it needed was a SECOND
+            # silent persistence site, which is how the T-14 census caught this
+            # going from 88 to 89 while the change was supposed to be an
+            # improvement.
+            tmp.unlink(missing_ok=True)
+            raise
+    except Exception as exc:                                 # noqa: BLE001
+        # Fail-open, NOT silent. A rotation that stops working leaves the log
+        # growing without bound and nothing says so; `record()` above already
+        # counts the case where the lock was unavailable, and this counts the
+        # case where the rotation itself broke.
+        from llm_router import failopen
+        failopen.record("CHZ-FO-ATTEMPTLOG-ROTATE", exc)
 
 
 def summary(window: int = 200) -> dict[str, dict]:
