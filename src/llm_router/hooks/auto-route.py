@@ -644,8 +644,16 @@ def _log_quota_snapshot_sync(
             conn.commit()
         finally:
             conn.close()
-    except Exception:
-        pass  # Silent failure — quota snapshot is optional enhancement
+    except Exception as _exc:  # noqa: BLE001 — a quota snapshot must never break routing
+        # T-14: still fail-open, but no longer SILENT. A failed write here loses
+        # a quota snapshot and reported nothing: no error, no log, no counter. 92
+        # persistence sites had this shape; this is one of the ones that loses
+        # data a user would notice missing.
+        try:
+            from llm_router import failopen as _fo
+            _fo.record("CHZ-FO-HOOK-QUOTA-SNAPSHOT-WRITE", _exc)
+        except Exception:  # noqa: BLE001
+            pass
 
 
 # ── Skip Patterns (truly local operations) ───────────────────────────────────
@@ -2031,9 +2039,20 @@ def _transcript_shard_path(session_id: str) -> Path:
     return _router_dir() / f"transcript_{_safe_sid(session_id)}.jsonl"
 
 
-# CHZ-SEC-01/09: fallback secret patterns used only if the canonical
-# secret_scrubber import is unavailable in an early-boot hook environment. Kept
-# in sync with secret_scrubber.SECRET_PATTERNS (the single source of truth).
+# CHZ-SEC-01/09: fallback secret patterns, used ONLY when the canonical
+# secret_scrubber import is unavailable in an early-boot hook environment.
+#
+# T-16 / S-08. This comment used to claim the list was "kept in sync with
+# secret_scrubber.SECRET_PATTERNS". It was not, and the claim was the damaging
+# part: it told a maintainer there was nothing to check. Measured 2026-09-22, the
+# fallback missed Slack tokens, JWTs, pk-/rk- prefixes and PEM blocks — three of
+# which drifted because a previous fix widened the canonical table and left this
+# copy alone.
+#
+# It is no longer maintained by hand. `_load_fallback_patterns()` below derives
+# it from the canonical table when that is importable, and this literal is the
+# last-resort floor for the case where it is not.
+# `tests/security/test_m07_no_second_scrubber.py` asserts the two agree.
 _FALLBACK_SECRET_RES = [
     re.compile(r"sk-ant-[a-zA-Z0-9_-]{20,}"),
     re.compile(r"sk-(?:proj-)?[a-zA-Z0-9_-]{20,}"),
@@ -2055,9 +2074,23 @@ def _scrub_secrets_text(text: str) -> str:
         from llm_router.secret_scrubber import scrub_text
         return scrub_text(text)
     except Exception:
-        for _re in _FALLBACK_SECRET_RES:
+        # T-16: prefer the canonical PATTERNS even when the canonical FUNCTION
+        # could not be imported — the two failure modes are not the same, and
+        # falling all the way back to a hand-maintained literal is what let the
+        # copy drift four classes behind.
+        for _re in _load_fallback_patterns():
             text = _re.sub("[REDACTED]", text)
         return text
+
+
+def _load_fallback_patterns():
+    """Canonical patterns if reachable, else the local floor. Never raises."""
+    try:
+        from llm_router.secret_scrubber import SECRET_PATTERNS
+
+        return list(SECRET_PATTERNS.values())
+    except Exception:  # noqa: BLE001 — the literal below is the point of a floor
+        return _FALLBACK_SECRET_RES
 
 
 def _private_opener(path: str, flags: int) -> int:
@@ -4276,8 +4309,17 @@ def main() -> None:
                 # Routing still works here (it falls through to Claude), which is
                 # exactly why nobody noticed the local path never succeeded.
                 try:
-                    from llm_router.direct_diagnostics import record_sample as _rec
-                    _rec(_direct_elapsed_s, timed_out=True)
+                    from llm_router.direct_diagnostics import (
+                        looks_like_timeout as _looks, record_sample as _rec,
+                    )
+                    # T-23: this passed `timed_out=True` unconditionally, for
+                    # EVERY direct failure — "no free model" and a grounding
+                    # rejection both take ~0s and were filed as timeouts. 17 of
+                    # 20 live samples read `elapsed_s: 0.0, timed_out: true`, so
+                    # the p90 of "timeout durations" was ~0 and `doctor` advised
+                    # LLM_ROUTER_OLLAMA_TIMEOUT=0 — which makes every call fail
+                    # instantly. Advice that causes the problem it diagnoses.
+                    _rec(_direct_elapsed_s, timed_out=_looks(_direct_elapsed_s))
                 except Exception as _exc:
                     from llm_router import failopen as _fo
                     _fo.record("CHZ-FO-HOOK-DIRECT-SAMPLE", _exc)
