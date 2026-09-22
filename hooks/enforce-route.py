@@ -60,8 +60,26 @@ import tempfile
 import time
 from pathlib import Path
 
-_ROUTER_DIR = Path.home() / ".llm-router"
-_LOG_PATH = _ROUTER_DIR / "enforcement.log"
+def _router_home():
+    """Router state dir, resolved per call so LLM_ROUTER_HOME is honoured.
+
+    M-04: this was a module constant bound at import, so a hook launched with
+    LLM_ROUTER_HOME set still wrote to the operator's real home directory.
+
+    Imports locally: hooks are standalone scripts with varied import headers and
+    several do not import Path or os at module scope.
+    """
+    import os as _os
+    from pathlib import Path as _P
+
+    base = _os.environ.get("LLM_ROUTER_HOME", "").strip()
+    return _P(base).expanduser() if base else _P.home() / ".llm-router"
+
+
+def _router_dir():
+    return _router_home()
+def _log_path():
+    return _router_dir() / "enforcement.log"
 _PENDING_TTL = 3600  # seconds — 1h TTL; survives context compaction; auto-route resets on each new prompt
 
 # Base blocklist: blocked in explicit opt-in blocking modes (smart/hard/strict)
@@ -189,7 +207,7 @@ def _looks_like_edit_task(prompt: str) -> bool:
     * ``add|update|modify|...`` + ``to <file.ext>`` / ``in <file.ext>``
       (the most common shape: "add a section to README.md")
     * The same verbs targeting a LLM Router subcommand label
-      ("add ... to llm_router doctor", "update llm_router team-sync")
+      ("add ... to llm-router doctor", "update llm_router team-sync")
     * Inverted: file-path first, then verb
       ("in CHANGELOG.md, add a release note")
 
@@ -489,7 +507,7 @@ def _is_local_only_bash(command: str) -> bool:
 # a session is detected. Once marked "coding", enforcement downgrades to soft.
 
 def _session_type_path(session_id: str) -> Path:
-    return _ROUTER_DIR / f"session_{session_id}.json"
+    return _router_dir() / f"session_{session_id}.json"
 
 
 def _is_coding_session(session_id: str) -> bool:
@@ -535,7 +553,7 @@ def _mark_session_coding(session_id: str) -> None:
 
 
 def _pending_path(session_id: str) -> Path:
-    return _ROUTER_DIR / f"pending_route_{session_id}.json"
+    return _router_dir() / f"pending_route_{session_id}.json"
 
 
 def _read_json_retry(path: Path, retries: int = 3, retry_delay_sec: float = 0.01) -> dict | None:
@@ -566,9 +584,9 @@ def _read_pending(session_id: str) -> dict | None:
         if remaining <= 0:
             # Log expiration for visibility
             try:
-                _ROUTER_DIR.mkdir(parents=True, exist_ok=True)
+                _router_dir().mkdir(parents=True, exist_ok=True)
                 ts = time.strftime("%Y-%m-%d %H:%M:%S")
-                with _LOG_PATH.open("a", encoding="utf-8") as f:
+                with _log_path().open("a", encoding="utf-8") as f:
                     f.write(
                         f"[{ts}] PENDING EXPIRED session={session_id[:12]} "
                         f"ttl={_PENDING_TTL}s\n"
@@ -680,9 +698,9 @@ def _log_violation(
     "the bypass succeeded" or "the host attempted a bypass and got blocked".
     """
     try:
-        _ROUTER_DIR.mkdir(parents=True, exist_ok=True)
+        _router_dir().mkdir(parents=True, exist_ok=True)
         ts = time.strftime("%Y-%m-%d %H:%M:%S")
-        with _LOG_PATH.open("a", encoding="utf-8") as f:
+        with _log_path().open("a", encoding="utf-8") as f:
             # chz-surface-ok: violation LOG record — logical names keep history comparable.
             f.write(
                 f"[{ts}] VIOLATION session={session_id[:12]} "
@@ -717,7 +735,7 @@ def _record_escalation(session_id: str, turn_id, task_type: str,
 
 def _violation_counter_path(session_id: str) -> Path:
     """Path to violation counter file for this session."""
-    return _ROUTER_DIR / f"violations_{session_id}.json"
+    return _router_dir() / f"violations_{session_id}.json"
 
 
 def _read_violation_count(session_id: str) -> int:
@@ -755,7 +773,7 @@ def _read_pressure() -> dict[str, float]:
     Returns: Dict with 'sonnet' and 'weekly' keys as fractions 0.0–1.0.
     """
     try:
-        data = json.loads((Path.home() / ".llm-router" / "usage.json").read_text())
+        data = json.loads((_router_home() / "usage.json").read_text())
 
         def _frac(k: str) -> float:
             v = float(data.get(k, 0.0))
@@ -801,7 +819,7 @@ def _downgrade_pending_for_pressure(pending: dict) -> dict:
 
 def _tool_history_path(session_id: str) -> Path:
     """Path to tool call history for loop detection."""
-    return _ROUTER_DIR / f"tool_history_{session_id}.json"
+    return _router_dir() / f"tool_history_{session_id}.json"
 
 
 def _record_tool_call(session_id: str, tool_name: str) -> None:
@@ -860,7 +878,7 @@ def _turn_block_counter_path(session_id: str) -> Path:
     2-minutes, which is too slow to feel responsive — by the time it
     fires the agent has visibly stalled.
     """
-    return _ROUTER_DIR / f"turn_blocks_{session_id}.json"
+    return _router_dir() / f"turn_blocks_{session_id}.json"
 
 
 def _record_turn_block(session_id: str, tool_name: str, turn_id: int) -> int:
@@ -934,7 +952,7 @@ def main() -> None:
         enforce = os.environ.get("LLM_ROUTER_ENFORCE", "").strip().lower()
         if not enforce:
             try:
-                for _line in (_ROUTER_DIR / "routing.yaml").read_text().splitlines():
+                for _line in (_router_dir() / "routing.yaml").read_text().splitlines():
                     if _line.strip().startswith("enforce:"):
                         enforce = _line.split(":", 1)[1].strip().strip("'\"").lower()
                         break
@@ -1068,9 +1086,9 @@ def main() -> None:
                 and not (_delegate_route_enabled() and _is_operational_prompt(_original_prompt))):
             enforce = "soft"
             try:
-                _ROUTER_DIR.mkdir(parents=True, exist_ok=True)
+                _router_dir().mkdir(parents=True, exist_ok=True)
                 ts = time.strftime("%Y-%m-%d %H:%M:%S")
-                with _LOG_PATH.open("a", encoding="utf-8") as f:
+                with _log_path().open("a", encoding="utf-8") as f:
                     f.write(
                         f"[{ts}] SHAPE_OVERRIDE session={session_id[:12]} "
                         f"method={pending.get('method')} task={pending.get('task_type')} "
@@ -1103,9 +1121,9 @@ def main() -> None:
             ):
                 enforce = "soft"
                 try:
-                    _ROUTER_DIR.mkdir(parents=True, exist_ok=True)
+                    _router_dir().mkdir(parents=True, exist_ok=True)
                     ts = time.strftime("%Y-%m-%d %H:%M:%S")
-                    with _LOG_PATH.open("a", encoding="utf-8") as f:
+                    with _log_path().open("a", encoding="utf-8") as f:
                         f.write(
                             f"[{ts}] FS_EXEMPT session={session_id[:12]} "
                             f"task={_fs_task} reason=needs_local_tools\n"
@@ -1149,9 +1167,9 @@ def main() -> None:
         if _bash_exempt_from_hold(_lb_task, _bash_cmd, _lb_redirect):
             enforce = "soft"
             try:
-                _ROUTER_DIR.mkdir(parents=True, exist_ok=True)
+                _router_dir().mkdir(parents=True, exist_ok=True)
                 ts = time.strftime("%Y-%m-%d %H:%M:%S")
-                with _LOG_PATH.open("a", encoding="utf-8") as f:
+                with _log_path().open("a", encoding="utf-8") as f:
                     f.write(
                         f"[{ts}] LOCAL_BASH_EXEMPT session={session_id[:12]} "
                         f"task={_lb_task} reason=non_routable_local_command\n"
@@ -1183,9 +1201,9 @@ def main() -> None:
         if _em_task not in _QA_TASK_TYPES and _em_task != "code" and not _em_operational:
             enforce = "soft"
             try:
-                _ROUTER_DIR.mkdir(parents=True, exist_ok=True)
+                _router_dir().mkdir(parents=True, exist_ok=True)
                 ts = time.strftime("%Y-%m-%d %H:%M:%S")
-                with _LOG_PATH.open("a", encoding="utf-8") as f:
+                with _log_path().open("a", encoding="utf-8") as f:
                     f.write(
                         f"[{ts}] NATIVE_LOCAL_EXEMPT session={session_id[:12]} "
                         f"task={_em_task} tool={tool_name} reason=local_file_op\n"
@@ -1201,7 +1219,7 @@ def main() -> None:
     # Check if this session has exceeded its LLM spend budget.
     # If so, hard-block all non-file tools to prevent runaway costs.
     session_budget_limit = float(os.environ.get("LLM_ROUTER_SESSION_BUDGET", "5.00"))
-    session_spend_path = _ROUTER_DIR / f"session_{session_id}_spend.json"
+    session_spend_path = _router_dir() / f"session_{session_id}_spend.json"
     try:
         spend_data = _read_json_retry(session_spend_path) or {"total_usd": 0.0}
         session_spend = spend_data.get("total_usd", 0.0)
@@ -1300,9 +1318,9 @@ def main() -> None:
             _route_reason = "bounded_execution" if _bounded else "execution_intent"
             _why = f"verb={_exec_sig.verb!r} obj={_exec_sig.obj!r}"
         try:
-            _ROUTER_DIR.mkdir(parents=True, exist_ok=True)
+            _router_dir().mkdir(parents=True, exist_ok=True)
             ts = time.strftime("%Y-%m-%d %H:%M:%S")
-            with _LOG_PATH.open("a", encoding="utf-8") as f:
+            with _log_path().open("a", encoding="utf-8") as f:
                 # Record WHY it fired (verb + cue/obj) for post-incident audit.
                 f.write(
                     f"[{ts}] DELEGATE_ROUTE session={session_id[:12]} "
@@ -1459,9 +1477,9 @@ def main() -> None:
     # Strict mode disables this escape valve.
     if loop_detected and not _strict:
         try:
-            _ROUTER_DIR.mkdir(parents=True, exist_ok=True)
+            _router_dir().mkdir(parents=True, exist_ok=True)
             ts = time.strftime("%Y-%m-%d %H:%M:%S")
-            with _LOG_PATH.open("a", encoding="utf-8") as f:
+            with _log_path().open("a", encoding="utf-8") as f:
                 f.write(
                     f"[{ts}] AUTO-PIVOT (loop) session={session_id[:12]} "
                     f"tool={tool_name} count={loop_detected['count']}\n"
@@ -1484,9 +1502,9 @@ def main() -> None:
     _same_tool_blocks = _record_turn_block(session_id, tool_name, _turn_id)
     if _same_tool_blocks >= 2 and not _strict:
         try:
-            _ROUTER_DIR.mkdir(parents=True, exist_ok=True)
+            _router_dir().mkdir(parents=True, exist_ok=True)
             ts = time.strftime("%Y-%m-%d %H:%M:%S")
-            with _LOG_PATH.open("a", encoding="utf-8") as f:
+            with _log_path().open("a", encoding="utf-8") as f:
                 f.write(
                     f"[{ts}] AUTO-PIVOT (trap) session={session_id[:12]} "
                     f"tool={tool_name} same_turn_blocks={_same_tool_blocks}\n"
@@ -1506,9 +1524,9 @@ def main() -> None:
     # Strict mode disables this escape valve too.
     if violation_count >= 4 and not _strict:
         try:
-            _ROUTER_DIR.mkdir(parents=True, exist_ok=True)
+            _router_dir().mkdir(parents=True, exist_ok=True)
             ts = time.strftime("%Y-%m-%d %H:%M:%S")
-            with _LOG_PATH.open("a", encoding="utf-8") as f:
+            with _log_path().open("a", encoding="utf-8") as f:
                 f.write(
                     f"[{ts}] AUTO-PIVOT (count) session={session_id[:12]} "
                     f"violations={violation_count}\n"
@@ -1617,7 +1635,7 @@ def main() -> None:
         f"  • Loop detection: same tool blocked 3+ times in 2 minutes → auto-pivot\n"
         f"  • Or hit violation 4 → auto-pivot\n\n"
         f"Debug options:\n"
-        f"  • View compliance log: {_LOG_PATH}\n"
+        f"  • View compliance log: {_log_path()}\n"
         f"  • Soft-fail for testing: export LLM_ROUTER_ENFORCE=soft\n"
         f"  • Disable entirely: export LLM_ROUTER_ENFORCE=off"
     )

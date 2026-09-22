@@ -33,15 +33,40 @@ except ImportError:
     def http_timeout() -> int:
         return int(os.environ.get("LLM_ROUTER_HTTP_TIMEOUT", "10"))
 
-STATE_DIR            = os.path.expanduser("~/.llm-router")
-SESSION_START_FILE   = os.path.join(STATE_DIR, "session_start.txt")
-SESSION_ID_FILE      = os.path.join(STATE_DIR, "session_id.txt")
-SESSION_CC_SNAP_FILE = os.path.join(STATE_DIR, "session_start_cc_pct.json")
-DB_PATH              = os.path.join(STATE_DIR, "usage.db")
-USAGE_JSON           = os.path.join(STATE_DIR, "usage.json")
-STAR_CTA_FILE        = os.path.join(STATE_DIR, "star_cta_shown.txt")
-SAVINGS_LOG_PATH     = os.path.join(STATE_DIR, "savings_log.jsonl")
-SESSION_SPEND_FILE   = os.path.join(STATE_DIR, "session_spend.json")
+def _router_home():
+    """Router state dir, resolved per call so LLM_ROUTER_HOME is honoured.
+
+    M-04: this was a module constant bound at import, so a hook launched with
+    LLM_ROUTER_HOME set still wrote to the operator's real home directory.
+
+    Imports locally: hooks are standalone scripts with varied import headers and
+    several do not import Path or os at module scope.
+    """
+    import os as _os
+    from pathlib import Path as _P
+
+    base = _os.environ.get("LLM_ROUTER_HOME", "").strip()
+    return _P(base).expanduser() if base else _P.home() / ".llm-router"
+
+
+def _state_dir():
+    return str(_router_home())
+def _session_start_file():
+    return os.path.join(_state_dir(), "session_start.txt")
+def _session_id_file():
+    return os.path.join(_state_dir(), "session_id.txt")
+def _session_cc_snap_file():
+    return os.path.join(_state_dir(), "session_start_cc_pct.json")
+def _db_path():
+    return os.path.join(_state_dir(), "usage.db")
+def _usage_json():
+    return os.path.join(_state_dir(), "usage.json")
+def _star_cta_file():
+    return os.path.join(_state_dir(), "star_cta_shown.txt")
+def _savings_log_path():
+    return os.path.join(_state_dir(), "savings_log.jsonl")
+def _session_spend_file():
+    return os.path.join(_state_dir(), "session_spend.json")
 
 # Show star CTA once the user has saved at least this much (lifetime)
 STAR_CTA_THRESHOLD_USD = 0.50
@@ -139,8 +164,8 @@ def _fetch_live_usage() -> dict | None:
         # Writing the snapshot from _fetch_live_usage() causes mid-session usage-refresh
         # calls to clobber the session-start baseline, making start == end (delta = 0).
         # SESSION_CC_SNAP_FILE is updated only once: in main(), after the delta is computed.
-        os.makedirs(STATE_DIR, exist_ok=True)
-        with open(USAGE_JSON, "w") as f:
+        os.makedirs(_state_dir(), exist_ok=True)
+        with open(_usage_json(), "w") as f:
             json.dump({**result, "highest_pressure": max(s, w, n) / 100.0}, f)
         return result
     except Exception:
@@ -157,11 +182,11 @@ def _read_json(path: str) -> dict | None:
 
 def _get_cc_usage() -> tuple[dict | None, dict | None, bool]:
     """Return (start_snapshot, current_usage, is_live)."""
-    start  = _read_json(SESSION_CC_SNAP_FILE)
+    start  = _read_json(_session_cc_snap_file())
     live   = _fetch_live_usage()
     if live:
         return start, live, True
-    cached = _read_json(USAGE_JSON)
+    cached = _read_json(_usage_json())
     # A snapshot flagged is_fallback is the placeholder session-start.py writes
     # when the OAuth fetch fails: session, weekly and sonnet all set to 50. The
     # session summary reported "quota used 5h 50%/wk 50%" from it, which is not
@@ -242,7 +267,7 @@ def _render_quota_timeline(session_id: str | None, db_path: str) -> str:
 
 def _read_session_start() -> float:
     try:
-        with open(SESSION_START_FILE) as f:
+        with open(_session_start_file()) as f:
             return float(f.read().strip())
     except (FileNotFoundError, ValueError, OSError):
         return time.time() - 3600
@@ -264,10 +289,10 @@ _DEDICATED_PANEL_PROVIDERS = {"codex"}
 
 def _query_session_data(session_start: float) -> tuple[list[dict], list[dict], list[dict]]:
     """Return (paid_rows, cc_rows, free_rows) split by provider type."""
-    if not os.path.exists(DB_PATH):
+    if not os.path.exists(_db_path()):
         return [], [], []
     try:
-        conn = sqlite3.connect(DB_PATH)
+        conn = sqlite3.connect(_db_path())
         conn.row_factory = sqlite3.Row
         rows = conn.execute(
             """
@@ -319,11 +344,11 @@ def _sync_import_savings_log() -> None:
     get ``FileNotFoundError`` and no-op), then process and delete the claimed copy
     — or append it back on failure so nothing is lost.
     """
-    if not os.path.exists(SAVINGS_LOG_PATH) or not os.path.exists(DB_PATH):
+    if not os.path.exists(_savings_log_path()) or not os.path.exists(_db_path()):
         return
-    claim = f"{SAVINGS_LOG_PATH}.{os.getpid()}.{uuid.uuid4().hex[:8]}.claim"
+    claim = f"{_savings_log_path()}.{os.getpid()}.{uuid.uuid4().hex[:8]}.claim"
     try:
-        os.replace(SAVINGS_LOG_PATH, claim)  # atomic claim — serializes drainers
+        os.replace(_savings_log_path(), claim)  # atomic claim — serializes drainers
     except OSError:
         return  # no live log, or another drainer claimed it first
     try:
@@ -366,7 +391,7 @@ def _sync_import_savings_log() -> None:
             pass
         return
     try:
-        conn = sqlite3.connect(DB_PATH)
+        conn = sqlite3.connect(_db_path())
         conn.execute("""
             CREATE TABLE IF NOT EXISTS savings_stats (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -406,7 +431,7 @@ def _sync_import_savings_log() -> None:
         # Insert failed — append the claimed rows back to the live log for a
         # later retry (append, never clobber newly-arrived lines), then drop it.
         try:
-            with open(claim) as _cf, open(SAVINGS_LOG_PATH, "a") as _lf:
+            with open(claim) as _cf, open(_savings_log_path(), "a") as _lf:
                 _lf.write(_cf.read())
         except OSError:
             pass
@@ -426,7 +451,7 @@ def _query_cumulative_savings() -> list[tuple[str, int, int, int, float]]:
     tuple shape is preserved so downstream renderers don't break — total
     tokens are folded into ``total_in`` (renderer only uses ``ti+to``).
     """
-    if not os.path.exists(DB_PATH):
+    if not os.path.exists(_db_path()):
         return []
     try:
         from llm_router.dashboard_data import query_window
@@ -446,7 +471,7 @@ def _query_cumulative_savings() -> list[tuple[str, int, int, int, float]]:
         if window is None:
             continue
         try:
-            totals = query_window(window, db_path=DB_PATH)
+            totals = query_window(window, db_path=_db_path())
         except Exception:
             continue
         results.append((label, totals.calls, totals.tokens, 0, totals.saved_usd))
@@ -848,10 +873,10 @@ def _fmt_tok(n: int) -> str:
 
 def _query_router_efficiency() -> dict:
     """Query routing_decisions: return {total, on_target, efficiency_pct}."""
-    if not os.path.exists(DB_PATH):
+    if not os.path.exists(_db_path()):
         return {}
     try:
-        conn = sqlite3.connect(DB_PATH)
+        conn = sqlite3.connect(_db_path())
         cursor = conn.execute("""
             SELECT
                 COUNT(*) as total,
@@ -890,10 +915,10 @@ def _query_router_efficiency() -> dict:
 
 def _query_classifier_overhead() -> dict:
     """Query classifier_latency_ms: return {count, avg_ms, min_ms, max_ms}."""
-    if not os.path.exists(DB_PATH):
+    if not os.path.exists(_db_path()):
         return {}
     try:
-        conn = sqlite3.connect(DB_PATH)
+        conn = sqlite3.connect(_db_path())
         cursor = conn.execute("""
             SELECT
                 COUNT(*) as count,
@@ -972,12 +997,12 @@ def _query_routing_logic(session_start: float | None = None) -> list[dict]:
     windows (session vs day) without any label saying so. `session_start`
     arg kept for back-compat but no longer used.
     """
-    if not os.path.exists(DB_PATH):
+    if not os.path.exists(_db_path()):
         return []
     try:
         import json as _json
         import datetime as _dt
-        tracking_path = os.path.join(STATE_DIR, "model_tracking.jsonl")
+        tracking_path = os.path.join(_state_dir(), "model_tracking.jsonl")
         if not os.path.exists(tracking_path):
             return []
 
@@ -1034,10 +1059,10 @@ def _query_routing_logic(session_start: float | None = None) -> list[dict]:
 
 def _query_cache_hit_stats() -> dict:
     """Query semantic_cache: return {total_requests, cache_hits, hit_rate_pct, estimated_saved_usd}."""
-    if not os.path.exists(DB_PATH):
+    if not os.path.exists(_db_path()):
         return {}
     try:
-        conn = sqlite3.connect(DB_PATH)
+        conn = sqlite3.connect(_db_path())
         cursor = conn.execute("""
             SELECT
                 COUNT(*) as total_requests,
@@ -1068,11 +1093,11 @@ def _query_session_metrics(session_start: float) -> dict:
         fallback_pct, escalation_pct, p95_latency (dict by tier in seconds),
         routing_effectiveness_pct, session_cost_ratio, session_calls_ratio
     """
-    if not os.path.exists(DB_PATH):
+    if not os.path.exists(_db_path()):
         return {}
     try:
         session_iso = _session_start_iso(session_start)
-        conn = sqlite3.connect(DB_PATH)
+        conn = sqlite3.connect(_db_path())
 
         rows = conn.execute(
             """
@@ -1172,10 +1197,10 @@ def _query_session_metrics(session_start: float) -> dict:
 
 def _query_daily_cache_trend() -> list[float]:
     """Return up to 14 days of daily cache hit rates as % [oldest→newest]."""
-    if not os.path.exists(DB_PATH):
+    if not os.path.exists(_db_path()):
         return []
     try:
-        conn = sqlite3.connect(DB_PATH)
+        conn = sqlite3.connect(_db_path())
         rows = conn.execute(
             """
             SELECT date(timestamp, 'localtime') as day,
@@ -1196,10 +1221,10 @@ def _query_daily_cache_trend() -> list[float]:
 
 def _query_savings_by_task_type() -> list[dict]:
     """Query savings_stats and usage: return list of {task_type, calls, saved} sorted by saved DESC."""
-    if not os.path.exists(DB_PATH):
+    if not os.path.exists(_db_path()):
         return []
     try:
-        conn = sqlite3.connect(DB_PATH)
+        conn = sqlite3.connect(_db_path())
         cursor = conn.execute("""
             SELECT
                 task_type,
@@ -1228,11 +1253,11 @@ def _query_daily_14d() -> list[tuple[str, int, int, float, int]]:
     lives in the data module so any future schema addition only requires
     updating that module — not every consumer surface.
     """
-    if not os.path.exists(DB_PATH):
+    if not os.path.exists(_db_path()):
         return []
     try:
         from llm_router.dashboard_data import query_daily
-        rows = query_daily(14, db_path=DB_PATH)
+        rows = query_daily(14, db_path=_db_path())
         return [(r.day, r.calls, r.tokens, r.saved_usd, r.tokens_saved) for r in rows]
     except Exception:
         return []
@@ -1426,10 +1451,10 @@ def _query_session_complexity_breakdown(session_start: float) -> tuple[dict, int
 
     Returns ({complexity: [(short_model, count, cost, provider), ...]}, filtered_test_count)
     """
-    if not os.path.exists(DB_PATH):
+    if not os.path.exists(_db_path()):
         return {}, 0
     try:
-        conn = sqlite3.connect(DB_PATH)
+        conn = sqlite3.connect(_db_path())
         conn.row_factory = sqlite3.Row
         rows = conn.execute(
             """
@@ -1533,10 +1558,10 @@ def _format_provider_section(table: str, title: str, emoji: str) -> list[str]:
     (gemini_usage). Stays invisible if the table has no rows for today.
     v9.3.1.
     """
-    if not os.path.exists(DB_PATH):
+    if not os.path.exists(_db_path()):
         return []
     try:
-        conn = sqlite3.connect(DB_PATH)
+        conn = sqlite3.connect(_db_path())
         if not conn.execute(
             f"SELECT name FROM sqlite_master WHERE type='table' AND name='{table}'"
         ).fetchone():
@@ -1589,10 +1614,10 @@ def _format_codex_section() -> list[str]:
     table populated by log_codex_usage. Always reads "today" window since the
     dashboard always shows today by default; bigger reports come from other tools.
     """
-    if not os.path.exists(DB_PATH):
+    if not os.path.exists(_db_path()):
         return []
     try:
-        conn = sqlite3.connect(DB_PATH)
+        conn = sqlite3.connect(_db_path())
         # Confirm the table exists before SELECTing
         if not conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND name='codex_usage'"
@@ -1729,7 +1754,7 @@ def _format(tools: dict[str, dict], cc_rows: list[dict], free_rows: list[dict],
                 lines += sparkline_block.split("\n")
 
         # Last routed model
-        last_model = query_last_prompt_model(db_path=DB_PATH)
+        last_model = query_last_prompt_model(db_path=_db_path())
         if last_model:
             lines.append("")
             lines.append(f"  {_BOLD}Last Routed Model{_RESET}  {last_model}")
@@ -1752,10 +1777,10 @@ def _format(tools: dict[str, dict], cc_rows: list[dict], free_rows: list[dict],
 
 def _lifetime_saved() -> float:
     """Return total lifetime savings (USD) across all providers."""
-    if not os.path.exists(DB_PATH):
+    if not os.path.exists(_db_path()):
         return 0.0
     try:
-        conn = sqlite3.connect(DB_PATH)
+        conn = sqlite3.connect(_db_path())
         rows = conn.execute(
             "SELECT provider, input_tokens, output_tokens, cost_usd "
             "FROM usage WHERE success=1"
@@ -1781,13 +1806,13 @@ def _should_show_star_cta(session_saved: float) -> bool:
     """Return True the first time lifetime savings crosses STAR_CTA_THRESHOLD_USD."""
     if session_saved <= 0.0:
         return False
-    if os.path.exists(STAR_CTA_FILE):
+    if os.path.exists(_star_cta_file()):
         return False
     lifetime = _lifetime_saved()
     if lifetime >= STAR_CTA_THRESHOLD_USD:
         # Mark as shown so it only fires once
         try:
-            with open(STAR_CTA_FILE, "w") as f:
+            with open(_star_cta_file(), "w") as f:
                 f.write(f"{lifetime:.4f}")
         except OSError:
             pass
@@ -1811,7 +1836,7 @@ def _collect_report_data(
     """Gather all metrics into a single data dict for the renderer."""
     session_id = None
     try:
-        with open(SESSION_ID_FILE) as f:
+        with open(_session_id_file()) as f:
             session_id = f.read().strip()
     except Exception:
         pass
@@ -1819,7 +1844,7 @@ def _collect_report_data(
     return {
         "session_id": session_id,
         "session_start": session_start,
-        "db_path": DB_PATH,
+        "db_path": _db_path(),
         "duration_secs": time.time() - session_start,
         "cc_start": start,
         "cc_current": current,
@@ -1854,7 +1879,7 @@ def _flush_session_spend_from_mcp() -> None:
     then read the freshly-flushed file.
     """
     try:
-        flush_flag = os.path.join(STATE_DIR, "session_spend_flush_request.txt")
+        flush_flag = os.path.join(_state_dir(), "session_spend_flush_request.txt")
         with open(flush_flag, "w") as f:
             f.write(str(time.time()))
         time.sleep(0.2)  # Brief delay for MCP server to react
@@ -1875,7 +1900,7 @@ def _read_session_spend() -> dict | None:
     """
     _flush_session_spend_from_mcp()  # Ensure file is up-to-date
     try:
-        with open(SESSION_SPEND_FILE) as f:
+        with open(_session_spend_file()) as f:
             return json.load(f)
     except (FileNotFoundError, json.JSONDecodeError, OSError):
         return None
@@ -2151,8 +2176,8 @@ def main() -> None:
             model_breakdown: dict[str, float] = {}
             model_breakdown_note = ""
             try:
-                if os.path.exists(DB_PATH):
-                    _mb_conn = sqlite3.connect(DB_PATH)
+                if os.path.exists(_db_path()):
+                    _mb_conn = sqlite3.connect(_db_path())
                     _mb_rows = _mb_conn.execute(
                         "SELECT final_model, COUNT(*) AS cnt "
                         "FROM routing_decisions "
@@ -2278,8 +2303,7 @@ def main() -> None:
             # colors, but the user can view it with: cat ~/.llm-router/last_summary.ansi
             import re as _re
             try:
-                import pathlib
-                _llm_router_dir = pathlib.Path.home() / ".llm-router"
+                _llm_router_dir = _router_home()
                 _llm_router_dir.mkdir(parents=True, exist_ok=True)
                 (_llm_router_dir / "last_summary.ansi").write_text(colored_output, encoding="utf-8")
             except Exception:
@@ -2411,13 +2435,13 @@ def main() -> None:
     try:
         session_id = None
         try:
-            with open(SESSION_ID_FILE) as f:
+            with open(_session_id_file()) as f:
                 session_id = f.read().strip()
         except Exception:
             pass
 
         if session_id:
-            quota_timeline = _render_quota_timeline(session_id, DB_PATH)
+            quota_timeline = _render_quota_timeline(session_id, _db_path())
             if quota_timeline:
                 final_summary_output = final_summary_output.rstrip("  " + "═" * (WIDTH - 2)) + quota_timeline + "\n" + "  " + "═" * (WIDTH - 2)
     except Exception:
@@ -2449,7 +2473,7 @@ def main() -> None:
     # so the NEXT session starts from today's end-of-session baseline.
     if current and is_live:
         try:
-            with open(SESSION_CC_SNAP_FILE, "w") as f:
+            with open(_session_cc_snap_file(), "w") as f:
                 json.dump(current, f)
         except OSError:
             pass

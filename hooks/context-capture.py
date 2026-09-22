@@ -174,7 +174,7 @@ def main() -> None:
             # while the unit tests around the function itself went green.
             okf._write_source_concept(
                 files[0], "Defines: " + ", ".join(symbols), symbols, "",
-                okf.KNOWLEDGE_DIR, root=okf.project_root(),
+                okf._knowledge_dir(), root=okf.project_root(),
             )
             okf.invalidate_cache()
     except Exception:

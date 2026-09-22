@@ -28,6 +28,22 @@ from datetime import datetime, timezone
 # so naming one hands the caller "Error: No such tool available" — after which
 # it silently does the work on the expensive model and the savings dashboard
 # cannot distinguish that from "chose not to route".
+def _router_home():
+    """Router state dir, resolved per call so LLM_ROUTER_HOME is honoured.
+
+    M-04: this was a module constant bound at import, so a hook launched with
+    LLM_ROUTER_HOME set still wrote to the operator's real home directory.
+
+    Imports locally: hooks are standalone scripts with varied import headers and
+    several do not import Path or os at module scope.
+    """
+    import os as _os
+    from pathlib import Path as _P
+
+    base = _os.environ.get("LLM_ROUTER_HOME", "").strip()
+    return _P(base).expanduser() if base else _P.home() / ".llm-router"
+
+
 def _load_tool_surface_fns():
     """(route_tool, route_call, route_call_with_complexity) from llm_router.tool_surface.
 
@@ -67,12 +83,18 @@ def _load_tool_surface_fns():
 route_tool, route_call, route_call_with_complexity = _load_tool_surface_fns()
 
 # ── Paths ──────────────────────────────────────────────────────────────────
-STATE_DIR = os.path.expanduser("~/.llm-router")
-USAGE_JSON = os.path.join(STATE_DIR, "usage.json")
-USAGE_DB = os.path.join(STATE_DIR, "usage.db")
-HEALTH_JSON = os.path.join(STATE_DIR, "health.json")
-SESSION_START_FILE = os.path.join(STATE_DIR, "session_start.txt")
-PROMPT_COUNT_FILE = os.path.join(STATE_DIR, "prompt_count.txt")
+def _state_dir():
+    return str(_router_home())
+def _usage_json():
+    return os.path.join(_state_dir(), "usage.json")
+def _usage_db():
+    return os.path.join(_state_dir(), "usage.db")
+def _health_json():
+    return os.path.join(_state_dir(), "health.json")
+def _session_start_file():
+    return os.path.join(_state_dir(), "session_start.txt")
+def _prompt_count_file():
+    return os.path.join(_state_dir(), "prompt_count.txt")
 
 # ── Config ─────────────────────────────────────────────────────────────────
 STATUS_EVERY = os.environ.get("LLM_ROUTER_STATUS_EVERY", "0")
@@ -118,7 +140,7 @@ _FREE_PROVIDERS = {"ollama", "codex", "gemini_cli"}
 def _read_claude_credits() -> tuple[float | None, float | None, float | None, bool]:
     """Return (session_pct, weekly_pct, sonnet_pct, is_stale)."""
     try:
-        with open(USAGE_JSON) as f:
+        with open(_usage_json()) as f:
             data = json.load(f)
         stale = (time.time() - data.get("updated_at", 0)) > 1800
         return (
@@ -141,7 +163,7 @@ def _read_provider_health() -> dict[str, str] | None:
     visible automatically once the background health checker writes this file.
     """
     try:
-        with open(HEALTH_JSON) as f:
+        with open(_health_json()) as f:
             data = json.load(f)
         if time.time() - data.get("updated_at", 0) > 300:
             return None  # stale — checker may have stopped
@@ -228,13 +250,13 @@ def _read_savings() -> dict[str, tuple[float, float]]:
     }
     try:
         buckets = _time_bucket_starts()
-        conn = sqlite3.connect(USAGE_DB, timeout=2)
+        conn = sqlite3.connect(_usage_db(), timeout=2)
         for key, since in buckets.items():
             result[key] = _savings_for_period(conn, since)
 
         # Session savings (since session start file)
         try:
-            start_ts = float(open(SESSION_START_FILE).read().strip())
+            start_ts = float(open(_session_start_file()).read().strip())
             start_str = datetime.fromtimestamp(start_ts, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
             result["session"] = _savings_for_period(conn, start_str)
         except (OSError, ValueError):
@@ -249,9 +271,9 @@ def _read_savings() -> dict[str, tuple[float, float]]:
 def _read_session_calls() -> tuple[int, int, int]:
     """Return (sub_calls, free_calls, paid_calls) for this session."""
     try:
-        start = float(open(SESSION_START_FILE).read().strip())
+        start = float(open(_session_start_file()).read().strip())
         start_str = datetime.fromtimestamp(start, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
-        conn = sqlite3.connect(USAGE_DB, timeout=2)
+        conn = sqlite3.connect(_usage_db(), timeout=2)
         rows = conn.execute(
             "SELECT provider FROM usage WHERE timestamp >= ? AND success = 1",
             (start_str,),
@@ -446,11 +468,11 @@ def _should_show() -> bool:
         return True
 
     try:
-        count = int(open(PROMPT_COUNT_FILE).read().strip()) + 1 if os.path.exists(PROMPT_COUNT_FILE) else 1
+        count = int(open(_prompt_count_file()).read().strip()) + 1 if os.path.exists(_prompt_count_file()) else 1
     except (ValueError, OSError):
         count = 1
     try:
-        with open(PROMPT_COUNT_FILE, "w") as f:
+        with open(_prompt_count_file(), "w") as f:
             f.write(str(count))
     except OSError:
         pass

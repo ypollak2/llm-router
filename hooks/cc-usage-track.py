@@ -79,9 +79,39 @@ _PRICES: dict[str, tuple[float, float]] = (
 )
 
 
+def _is_synthetic_run() -> bool:
+    """C-02. Is this a test or benchmark process? Explicit signals only.
+
+    Inlined rather than imported: hooks are standalone scripts that must keep
+    working when llm_router is not importable. Mirrors
+    `routing_quality.detect_synthetic` exactly; a test pins them together.
+    """
+    import os as _os
+
+    if _os.environ.get("LLM_ROUTER_SYNTHETIC", "").strip().lower() in ("1", "true", "yes", "on"):
+        return True
+    return "PYTEST_CURRENT_TEST" in _os.environ
+
+
+def _router_home():
+    """Router state dir, resolved per call so LLM_ROUTER_HOME is honoured.
+
+    M-04: this was a module constant bound at import, so a hook launched with
+    LLM_ROUTER_HOME set still wrote to the operator's real home directory.
+
+    Imports locally: hooks are standalone scripts with varied import headers and
+    several do not import Path or os at module scope.
+    """
+    import os as _os
+    from pathlib import Path as _P
+
+    base = _os.environ.get("LLM_ROUTER_HOME", "").strip()
+    return _P(base).expanduser() if base else _P.home() / ".llm-router"
+
+
 def _db_path() -> Path:
     """Resolve the canonical usage DB lazily so tests that patch Path.home() work."""
-    return Path.home() / ".llm-router" / "usage.db"
+    return _router_home() / "usage.db"
 
 
 def _infer_model(subagent_type: str) -> str:
@@ -132,7 +162,11 @@ def _ensure_table(db: sqlite3.Connection) -> None:
             baseline_model TEXT,
             potential_cost_usd REAL DEFAULT 0.0,
             saved_usd REAL DEFAULT 0.0,
-            complexity TEXT DEFAULT 'moderate'
+            complexity TEXT DEFAULT 'moderate',
+            -- C-02: this hook creates its own compatible subset of the schema,
+            -- so the column has to exist here too or the stamped INSERT fails
+            -- against a table this hook created first.
+            is_simulated INTEGER DEFAULT 0
         )"""
     )
 
@@ -150,6 +184,9 @@ def _log_to_db(
         return
     try:
         with sqlite3.connect(str(db_path), timeout=5) as db:
+            # M-06: busy_timeout BEFORE journal_mode -- it governs how long the
+            # journal_mode PRAGMA waits for its own exclusive lock.
+            db.execute("PRAGMA busy_timeout = 5000")
             db.execute("PRAGMA journal_mode=WAL")
             _ensure_table(db)
             potential = _estimate_cost(model, input_tokens, output_tokens)
@@ -160,11 +197,15 @@ def _log_to_db(
             # cost_usd = 0 (subscription), so saved_usd = potential − 0 = potential.
             saved = potential
             db.execute(
+                # C-02: the SECOND writer to `usage`. The audit named only
+                # cost.py's insert as "the single INSERT"; this one omitted
+                # `is_simulated` too, so a benchmark run through the Claude Code
+                # tracker was recorded as production spend.
                 """INSERT INTO usage
                    (model, provider, task_type, profile,
                     input_tokens, output_tokens, cost_usd, latency_ms, success,
-                    baseline_model, potential_cost_usd, saved_usd)
-                   VALUES (?, 'cc', 'code', 'balanced', ?, ?, 0.0, ?, ?, ?, ?, ?)""",
+                    baseline_model, potential_cost_usd, saved_usd, is_simulated)
+                   VALUES (?, 'cc', 'code', 'balanced', ?, ?, 0.0, ?, ?, ?, ?, ?, ?)""",
                 (
                     model,
                     input_tokens,
@@ -174,6 +215,7 @@ def _log_to_db(
                     baseline_model,
                     potential,
                     saved,
+                    1 if _is_synthetic_run() else 0,
                 ),
             )
             db.commit()

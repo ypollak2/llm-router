@@ -43,6 +43,22 @@ from pathlib import Path
 # so naming one hands the caller "Error: No such tool available" — after which
 # it silently does the work on the expensive model and the savings dashboard
 # cannot distinguish that from "chose not to route".
+def _router_home():
+    """Router state dir, resolved per call so LLM_ROUTER_HOME is honoured.
+
+    M-04: this was a module constant bound at import, so a hook launched with
+    LLM_ROUTER_HOME set still wrote to the operator's real home directory.
+
+    Imports locally: hooks are standalone scripts with varied import headers and
+    several do not import Path or os at module scope.
+    """
+    import os as _os
+    from pathlib import Path as _P
+
+    base = _os.environ.get("LLM_ROUTER_HOME", "").strip()
+    return _P(base).expanduser() if base else _P.home() / ".llm-router"
+
+
 def _load_tool_surface_fns():
     """(route_tool, route_call, route_call_with_complexity, call_parts, tool_for_task).
 
@@ -99,17 +115,18 @@ def _load_tool_surface_fns():
 # them. Without this, build_chain() falls back to its hardcoded default model
 # (often not pulled) and DIRECT routing silently degrades to paid/Claude tiers.
 
-_ENV_PATHS = [
+def _env_paths():
+    return [
     Path.cwd() / ".env",
     Path(__file__).resolve().parent.parent.parent.parent / ".env",  # dev: repo root
-    Path.home() / ".llm-router" / ".env",
+    _router_home() / ".env",
     Path.home() / ".env",
 ]
 
 
 def _load_dotenv() -> None:
     """Load key=value pairs from .env files into os.environ (no override)."""
-    for env_path in _ENV_PATHS:
+    for env_path in _env_paths():
         if not env_path.exists():
             continue
         try:
@@ -254,7 +271,7 @@ def _get_session_id() -> str:
     env_session = os.environ.get("CLAUDE_CODE_SESSION_ID", "").strip()
     if env_session:
         return env_session
-    session_file = Path.home() / ".llm-router" / "session_id.txt"
+    session_file = _router_home() / "session_id.txt"
     try:
         return session_file.read_text().strip()
     except FileNotFoundError:
@@ -270,7 +287,7 @@ def _depth_file(session_id: str) -> Path:
     comparison that both processes could pass at once.
     """
     safe = re.sub(r"[^A-Za-z0-9._-]", "_", session_id) or "unknown"
-    return Path.home() / ".llm-router" / f"agent_depth_{safe}.json"
+    return _router_home() / f"agent_depth_{safe}.json"
 
 
 def _read_agent_depth(session_id: str) -> int:
@@ -327,7 +344,7 @@ def _log_agent_call(subagent_type: str, prompt: str, decision: str) -> None:
     Secrets in the prompt are scrubbed before storage and the file is written
     owner-only (0o600) so pasted credentials can't leak to other local users.
     """
-    calls_file = Path.home() / ".llm-router" / "agent_calls.json"
+    calls_file = _router_home() / "agent_calls.json"
 
     # Read existing history
     history = []
@@ -428,7 +445,7 @@ def _initialize_session_budget() -> float:
 
     Returns the initial budget in USD.
     """
-    budget_file = Path.home() / ".llm-router" / "session_budget.json"
+    budget_file = _router_home() / "session_budget.json"
 
     # If already initialized this session, return existing
     if budget_file.exists():
@@ -464,7 +481,7 @@ def _decrement_budget_provisional(estimated_cost: float) -> None:
     This prevents multiple agents from each thinking they have budget available.
     Provisional spend will be reconciled against actual cost when agent completes.
     """
-    budget_file = Path.home() / ".llm-router" / "session_budget.json"
+    budget_file = _router_home() / "session_budget.json"
 
     try:
         data = json.loads(budget_file.read_text())
@@ -497,7 +514,7 @@ def _get_remaining_budget() -> float:
     Returns a float >= 0.0 representing remaining budget in USD.
     """
     # Layer 1: Session budget file (tracking provisional spend)
-    budget_file = Path.home() / ".llm-router" / "session_budget.json"
+    budget_file = _router_home() / "session_budget.json"
     try:
         data = json.loads(budget_file.read_text())
         if "remaining" in data:
@@ -528,7 +545,7 @@ def _get_claude_pressure() -> float:
     Returns a fraction 0.0–1.0.
     """
     # Layer 1: fast JSON cache
-    usage_path = Path.home() / ".llm-router" / "usage.json"
+    usage_path = _router_home() / "usage.json"
     try:
         data = json.loads(usage_path.read_text())
         if "highest_pressure" in data:
@@ -540,7 +557,7 @@ def _get_claude_pressure() -> float:
         pass
 
     # Layer 2: SQLite fallback — reads most recent claude_usage row
-    db_path = Path.home() / ".llm-router" / "usage.db"
+    db_path = _router_home() / "usage.db"
     try:
         import sqlite3
         conn = sqlite3.connect(str(db_path), timeout=1)
@@ -560,7 +577,7 @@ def _get_claude_pressure() -> float:
 
 def _is_pressure_stale(max_age_seconds: int = 1800) -> bool:
     """Return True if usage.json is missing or older than 30 minutes."""
-    usage_path = Path.home() / ".llm-router" / "usage.json"
+    usage_path = _router_home() / "usage.json"
     if not usage_path.exists():
         return True
     return (time.time() - usage_path.stat().st_mtime) > max_age_seconds
@@ -632,7 +649,7 @@ def _route_allowlist() -> set[str]:
     vals = os.environ.get("LLM_ROUTER_AGENT_ROUTE_ALLOW", "").strip()
     if not vals:
         try:
-            for line in (Path.home() / ".llm-router" / ".env").read_text().splitlines():
+            for line in (_router_home() / ".env").read_text().splitlines():
                 line = line.strip()
                 if line.startswith("LLM_ROUTER_AGENT_ROUTE_ALLOW="):
                     vals = line.split("=", 1)[1].strip().strip('"').strip("'")
@@ -1100,7 +1117,7 @@ def main() -> None:
 
     # Read per-bucket pressure from usage.json for accurate threshold decisions
     _p = {"session": raw_pressure, "sonnet": raw_pressure, "weekly": raw_pressure}
-    _usage_path = Path.home() / ".llm-router" / "usage.json"
+    _usage_path = _router_home() / "usage.json"
     try:
         _data = json.loads(_usage_path.read_text())
         def _f(k: str) -> float:
