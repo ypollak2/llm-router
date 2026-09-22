@@ -63,10 +63,132 @@ _HOOKS_SRC = _PACKAGE_DIR / "hooks"
 _RULES_SRC = _PACKAGE_DIR / "rules"
 
 # Global Claude Code directories
-_CLAUDE_DIR = Path.home() / ".claude"
-_HOOKS_DST = _CLAUDE_DIR / "hooks"
-_RULES_DST = _CLAUDE_DIR / "rules"
-_SETTINGS_PATH = _CLAUDE_DIR / "settings.json"
+def claude_dir() -> Path:
+    """The host config directory, resolved on EVERY call.
+
+    T-15 (audit 2026-09-22). This was four module-level constants built from
+    `Path.home()` at import time — the same import-time path binding the T00b
+    sweep removed everywhere else. It survived because that sweep targeted
+    `~/.llm-router` STATE paths, and this is host CONFIG.
+
+    The consequence was measured, not theorised: `llm-router update` wrote 15
+    hook files, a rules file and a statusline script into the operator's real
+    `~/.claude/` while `LLM_ROUTER_HOME` pointed at a tmp directory. Content was
+    byte-identical, so nothing broke loudly — but any isolated test or CI job
+    running `install` / `update` / `dev-refresh` touches the real config, and
+    that is what flipped three config tests during the audit.
+
+    Resolution order:
+
+    1. ``LLM_ROUTER_CLAUDE_DIR`` — explicit, wins outright.
+    2. ``LLM_ROUTER_HOME`` — if the process declared itself sandboxed for state,
+       it is sandboxed for host config too. A safety mechanism that covers some
+       of the writes is the kind that gets relied on and then surprises someone.
+    3. ``~/.claude`` — the real thing.
+    """
+    patched = globals().get("_CLAUDE_DIR")
+    if isinstance(patched, Path):
+        return patched
+    override = os.environ.get("LLM_ROUTER_CLAUDE_DIR", "").strip()
+    if override:
+        return Path(override).expanduser()
+    from llm_router import paths as _paths
+    if _paths.is_isolated():
+        return _paths.state_path("claude-home")
+    return Path.home() / ".claude"
+
+
+#: Access-time resolution for the four names this module has always exported.
+#:
+#: PEP 562 module `__getattr__`, so all ~118 existing references — including the
+#: ones in tests that monkeypatch these names — keep working unchanged, while
+#: each read re-resolves. Rewriting every call site to a function call would
+#: have been the same fix with a much larger diff and more places to get wrong.
+def _override(name: str) -> Path | None:
+    """A real ``Path`` a caller has monkeypatched onto this module, or None.
+
+    Dozens of tests do `monkeypatch.setattr(install_hooks, "_HOOKS_DST", tmp)`,
+    and that is the supported way to point an install at a scratch directory.
+    The resolvers check it first so the module attribute and the in-module call
+    sites cannot disagree — a disagreement here means an "isolated" install
+    writes to the real `~/.claude` anyway, which is T-15 wearing a different hat.
+
+    The `isinstance` check is what distinguishes a patch from the module's own
+    `_LazyHostPath` placeholder, which would otherwise recurse.
+    """
+    v = globals().get(name)
+    return v if isinstance(v, Path) else None
+
+
+def hooks_dst() -> Path:
+    return _override("_HOOKS_DST") or (claude_dir() / "hooks")
+
+
+def rules_dir() -> Path:
+    return _override("_RULES_DST") or (claude_dir() / "rules")
+
+
+def settings_path() -> Path:
+    return _override("_SETTINGS_PATH") or (claude_dir() / "settings.json")
+
+
+class _LazyHostPath(os.PathLike):
+    """A ``Path`` that re-resolves every time it is used.
+
+    T-15. `_CLAUDE_DIR` and its three derivatives were plain module constants
+    built from `Path.home()` at import, so `LLM_ROUTER_HOME` could not redirect
+    them and a "sandboxed" install wrote to the operator's real `~/.claude`.
+
+    A module-level `__getattr__` fixes the timing but not the tests: dozens of
+    them do `monkeypatch.setattr(install_hooks, "_HOOKS_DST", tmp)`, and
+    monkeypatch's undo does `setattr(module, name, old_value)` — which, for a
+    name served by `__getattr__`, BINDS a real global frozen at whatever it
+    resolved to during that test, often a tmp_path that is then deleted. The
+    leak outlives the test.
+
+    A proxy round-trips safely: monkeypatch saves and restores this object
+    unchanged, and every read of it still resolves afresh. Attribute access,
+    `/`, `str()` and `os.fspath()` all delegate to the current real Path, so the
+    ~118 existing call sites and every existing patch keep working.
+    """
+
+    __slots__ = ("_resolve",)
+
+    def __init__(self, resolve) -> None:
+        object.__setattr__(self, "_resolve", resolve)
+
+    def _now(self) -> Path:
+        return object.__getattribute__(self, "_resolve")()
+
+    def __getattr__(self, name: str):
+        return getattr(self._now(), name)
+
+    def __truediv__(self, other):
+        return self._now() / other
+
+    def __rtruediv__(self, other):
+        return other / self._now()
+
+    def __fspath__(self) -> str:
+        return str(self._now())
+
+    def __str__(self) -> str:
+        return str(self._now())
+
+    def __repr__(self) -> str:
+        return f"<lazy {self._now()}>"
+
+    def __eq__(self, other) -> bool:
+        return self._now() == (other._now() if isinstance(other, _LazyHostPath) else other)
+
+    def __hash__(self) -> int:
+        return hash(self._now())
+
+
+_CLAUDE_DIR = _LazyHostPath(claude_dir)
+_HOOKS_DST = _LazyHostPath(hooks_dst)
+_RULES_DST = _LazyHostPath(rules_dir)
+_SETTINGS_PATH = _LazyHostPath(settings_path)
 
 # The router's own state lives here, and so — as of the first-run fixes — do the
 # backups. Writing them next to the destination is what let ~/.claude/hooks and
@@ -136,8 +258,8 @@ def _legacy_llm_router_paths() -> list[Path]:
     llm_router.md (it declares routing a HARD CONSTRAINT / forbids using your own
     tools), so it must be removed on install (migration) and uninstall. Never
     referenced by the current codebase; safe to delete."""
-    paths = [_RULES_DST / "llm-router.md"]
-    hooks_dir = _HOOKS_DST
+    paths = [rules_dir() / "llm-router.md"]
+    hooks_dir = hooks_dst()
     if hooks_dir.exists():
         paths.extend(sorted(hooks_dir.glob("llm-router-*.py")))
     return paths
@@ -156,13 +278,13 @@ def _orphaned_managed_hooks() -> list[Path]:
     Only files this installer owns are considered. A hook belonging to another
     product is never a candidate, no matter how similar its name.
     """
-    if not _HOOKS_DST.exists():
+    if not hooks_dst().exists():
         return []
     current = {installed for _src, installed, _ev, _m in _HOOK_DEFS}
     current |= {dst for _src, dst in _HOOK_SUPPORT_FILES}
     current |= {"llm_router-statusline.sh"}
     orphans = []
-    for path in sorted(_HOOKS_DST.glob("llm_router-*")):
+    for path in sorted(hooks_dst().glob("llm_router-*")):
         if path.name not in current and path.suffix in {".py", ".sh"}:
             orphans.append(path)
     return orphans
@@ -355,13 +477,13 @@ def _sync_hook_support_files() -> list[str]:
     msgs: list[str] = []
     for src_name, dst_name in _HOOK_SUPPORT_FILES:
         src = _PACKAGE_DIR / src_name
-        dst = _HOOKS_DST / dst_name
+        dst = hooks_dst() / dst_name
         if not src.exists():
             continue
         try:
             if dst.exists() and not _files_differ(src, dst):
                 continue
-            _HOOKS_DST.mkdir(parents=True, exist_ok=True)
+            hooks_dst().mkdir(parents=True, exist_ok=True)
             shutil.copy2(src, dst)
             msgs.append(f"Synced hook support module {dst_name}")
         except OSError as e:
@@ -389,14 +511,14 @@ def check_and_update_hooks() -> list[str]:
     settings = _load_settings()
     for src_name, dst_name, _event, _matcher in _HOOK_DEFS:
         src = _HOOKS_SRC / src_name
-        dst = _HOOKS_DST / dst_name
+        dst = hooks_dst() / dst_name
         if not src.exists():
             continue
 
         src_v = _hook_version(src)
         if not dst.exists():
             try:
-                _HOOKS_DST.mkdir(parents=True, exist_ok=True)
+                hooks_dst().mkdir(parents=True, exist_ok=True)
                 shutil.copy2(src, dst)
                 if sys.platform != "win32":
                     dst.chmod(0o755)
@@ -430,7 +552,7 @@ def check_and_update_hooks() -> list[str]:
                     except OSError as e:
                         updates.append(f"Failed to update {dst_name}: {e}")
 
-        legacy_msg = _sync_legacy_hook_alias(_HOOKS_DST, settings, src_name, dst_name, src)
+        legacy_msg = _sync_legacy_hook_alias(hooks_dst(), settings, src_name, dst_name, src)
         if legacy_msg:
             updates.append(legacy_msg)
     return updates
@@ -472,7 +594,7 @@ def check_and_update_rules() -> str | None:
     after ``pip install --upgrade llm-routing`` without re-running install.
     """
     rules_src = _RULES_SRC / "llm_router.md"
-    rules_dst = _RULES_DST / "llm_router.md"
+    rules_dst = rules_dir() / "llm_router.md"
 
     if not rules_src.exists():
         return None
@@ -490,7 +612,7 @@ def check_and_update_rules() -> str | None:
     if src_version == dst_version and not _drifted:
         return None
 
-    _RULES_DST.mkdir(parents=True, exist_ok=True)
+    rules_dir().mkdir(parents=True, exist_ok=True)
     # RED1-7-02 / RED1-8-02: back up a possibly hand-edited rules file before
     # overwriting; if the backup cannot be written, skip the overwrite so the
     # user's content is never destroyed without a recovery path.
@@ -558,9 +680,9 @@ _CLAW_CODE_HOOK_DEFS = [
 
 def _load_settings() -> dict:
     """Load ~/.claude/settings.json or return empty dict."""
-    if _SETTINGS_PATH.exists():
+    if settings_path().exists():
         try:
-            return json.loads(_SETTINGS_PATH.read_text())
+            return json.loads(settings_path().read_text())
         except (json.JSONDecodeError, OSError):
             pass
     return {}
@@ -577,21 +699,21 @@ def _save_settings(settings: dict) -> None:
     """
     import time
 
-    _SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
-    if _SETTINGS_PATH.exists():
+    settings_path().parent.mkdir(parents=True, exist_ok=True)
+    if settings_path().exists():
         try:
-            json.loads(_SETTINGS_PATH.read_text())
+            json.loads(settings_path().read_text())
         except (json.JSONDecodeError, OSError):
             try:
-                backup = _SETTINGS_PATH.with_name(
+                backup = settings_path().with_name(
                     f"settings.json.corrupt.{int(time.time())}.bak"
                 )
-                backup.write_bytes(_SETTINGS_PATH.read_bytes())
+                backup.write_bytes(settings_path().read_bytes())
             except OSError:
                 pass
-    tmp = _SETTINGS_PATH.with_name("settings.json.tmp")
+    tmp = settings_path().with_name("settings.json.tmp")
     tmp.write_text(json.dumps(settings, indent=2) + "\n")
-    os.replace(tmp, _SETTINGS_PATH)
+    os.replace(tmp, settings_path())
 
 
 def _legacy_alias_path(hooks_dir: Path, src_name: str, dst_name: str) -> Path | None:
@@ -1013,17 +1135,17 @@ def install(force: bool = False) -> list[str]:
     # .bak, so the first capture is preserved and later runs get timestamped
     # copies.
     _settings_backup: Path | None = None
-    if _SETTINGS_PATH.exists():
-        _settings_backup = _backup_before_overwrite(_SETTINGS_PATH)
+    if settings_path().exists():
+        _settings_backup = _backup_before_overwrite(settings_path())
 
     # ── Copy hook scripts ────────────────────────────────────────────────
-    _HOOKS_DST.mkdir(parents=True, exist_ok=True)
+    hooks_dst().mkdir(parents=True, exist_ok=True)
     actions.extend(_sync_hook_support_files())  # CHZ-SURF-01
     settings = _load_settings()
 
     for src_name, dst_name, event, matcher in _HOOK_DEFS:
         src = _HOOKS_SRC / src_name
-        dst = _HOOKS_DST / dst_name
+        dst = hooks_dst() / dst_name
 
         if not src.exists():
             actions.append(f"SKIP {src_name}: source not found at {src}")
@@ -1067,7 +1189,7 @@ def install(force: bool = False) -> list[str]:
         else:
             actions.append(f"Hook already registered: {dst_name}")
 
-        legacy_msg = _sync_legacy_hook_alias(_HOOKS_DST, settings, src_name, dst_name, src)
+        legacy_msg = _sync_legacy_hook_alias(hooks_dst(), settings, src_name, dst_name, src)
         if legacy_msg:
             actions.append(legacy_msg)
 
@@ -1075,7 +1197,7 @@ def install(force: bool = False) -> list[str]:
     # session-start.py shells out to) ──────────────────────────────────────
     for name in _SIDECAR_SCRIPTS:
         src = _HOOKS_SRC / name
-        dst = _HOOKS_DST / name
+        dst = hooks_dst() / name
         if not src.exists():
             actions.append(f"SKIP {name}: source not found at {src}")
             continue
@@ -1113,10 +1235,10 @@ def install(force: bool = False) -> list[str]:
         actions.extend(_install_claude_code_cli(mcp_entry))
 
     # ── Copy routing rules ───────────────────────────────────────────────
-    _RULES_DST.mkdir(parents=True, exist_ok=True)
+    rules_dir().mkdir(parents=True, exist_ok=True)
 
     rules_src = _RULES_SRC / "llm_router.md"
-    rules_dst = _RULES_DST / "llm_router.md"
+    rules_dst = rules_dir() / "llm_router.md"
 
     if rules_src.exists():
         # RED1-11-01: back up a hand-edited rules file before overwriting; if the
@@ -1149,7 +1271,7 @@ def install(force: bool = False) -> list[str]:
 
     # ── Install statusLine command ──────────────────────────────────────
     statusline_src = _HOOKS_SRC / "statusline-command.sh"
-    statusline_dst = _HOOKS_DST / "llm_router-statusline.sh"
+    statusline_dst = hooks_dst() / "llm_router-statusline.sh"
     if statusline_src.exists():
         shutil.copy2(statusline_src, statusline_dst)
         if sys.platform != "win32":
@@ -1186,7 +1308,7 @@ def install(force: bool = False) -> list[str]:
                 _is_ours = isinstance(current_sl, dict) and "llm_router-statusline.sh" in str(
                     current_sl.get("command", "")
                 )
-                if not _is_ours and _im.find("json_key", _SETTINGS_PATH, key="statusLine") is None:
+                if not _is_ours and _im.find("json_key", settings_path(), key="statusLine") is None:
                     # Captured once, by the first install that sees a foreign
                     # value. A re-install finds llm_router's own command in the key,
                     # and re-capturing would overwrite the user's original with
@@ -1194,7 +1316,7 @@ def install(force: bool = False) -> list[str]:
                     # exists to preserve.
                     _im.record(
                         "json_key",
-                        _SETTINGS_PATH,
+                        settings_path(),
                         key="statusLine",
                         had_key=current_sl is not None,
                         previous=current_sl,
@@ -1273,7 +1395,7 @@ def uninstall() -> list[str]:
 
     # Remove hook files and settings entries
     for src_name, dst_name, event, _ in _HOOK_DEFS:
-        dst = _HOOKS_DST / dst_name
+        dst = hooks_dst() / dst_name
 
         if dst.exists():
             # GH#42: this unlink was unguarded. A single OSError here — a
@@ -1288,7 +1410,7 @@ def uninstall() -> list[str]:
             except OSError as e:
                 actions.append(f"WARN could not remove {dst}: {e}")
 
-        legacy_msg = _remove_legacy_hook_alias(_HOOKS_DST, src_name, dst_name)
+        legacy_msg = _remove_legacy_hook_alias(hooks_dst(), src_name, dst_name)
         if legacy_msg:
             actions.append(legacy_msg)
 
@@ -1337,7 +1459,7 @@ def uninstall() -> list[str]:
     actions.extend(_uninstall_claude_code_cli())
 
     # Remove rules
-    rules_dst = _RULES_DST / "llm_router.md"
+    rules_dst = rules_dir() / "llm_router.md"
     if rules_dst.exists():
         # GH#42: unguarded, same as the hook unlink above — one OSError here
         # aborted every remaining cleanup step.
@@ -1366,7 +1488,7 @@ def uninstall() -> list[str]:
     # install() copies llm_router-statusline.sh and registers a `bash <path>`
     # statusLine command; uninstall previously left both, so Claude Code kept
     # executing the llm_router script on every render after the user uninstalled.
-    statusline_dst = _HOOKS_DST / "llm_router-statusline.sh"
+    statusline_dst = hooks_dst() / "llm_router-statusline.sh"
     if statusline_dst.exists():
         try:
             statusline_dst.unlink()
@@ -1387,10 +1509,10 @@ def uninstall() -> list[str]:
         # defect — just discovered at uninstall instead of install.
         from llm_router import install_manifest as _im
 
-        _rec = _im.find("json_key", _SETTINGS_PATH, key="statusLine")
+        _rec = _im.find("json_key", settings_path(), key="statusLine")
         if _rec is not None:
             actions += _im._restore_json_key(
-                _SETTINGS_PATH, "statusLine", bool(_rec.get("had_key")), _rec.get("previous")
+                settings_path(), "statusLine", bool(_rec.get("had_key")), _rec.get("previous")
             )
         else:
             del settings_sl["statusLine"]
@@ -1401,7 +1523,7 @@ def uninstall() -> list[str]:
     # carry no event/matcher, so the _HOOK_DEFS removal loop never saw them and
     # they were left behind in ~/.claude/hooks/ after uninstall.
     for _src_name, _dst_name in _HOOK_SUPPORT_FILES:
-        _support = _HOOKS_DST / _dst_name
+        _support = hooks_dst() / _dst_name
         if _support.exists():
             try:
                 _support.unlink()
@@ -1413,7 +1535,7 @@ def uninstall() -> list[str]:
     # hooks dir. They carry no event/matcher so the _HOOK_DEFS removal loop above
     # never touched them, leaving them orphaned on disk after uninstall.
     for _name in _SIDECAR_SCRIPTS:
-        _sidecar = _HOOKS_DST / _name
+        _sidecar = hooks_dst() / _name
         if _sidecar.exists():
             try:
                 _sidecar.unlink()

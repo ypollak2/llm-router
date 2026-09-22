@@ -595,7 +595,16 @@ def record_event(
                 "content": text,
                 "h": content_hash,
             }
-            with path.open("a", encoding="utf-8") as fh:
+            # S-09: create at 0600, not 0644-then-chmod. `open` creates with
+            # `0666 & ~umask`, so on FIRST creation this file — which holds
+            # scrubbed prompt transcripts — is world-readable for the whole
+            # write, and anything that opens it inside that window keeps a
+            # readable handle after the chmod. The chmod below stays: an opener
+            # only sets the mode when it CREATES, so it is not a repair for a
+            # file an older version already wrote at 0644.
+            # NB: the BUILTIN open, not Path.open — Path.open takes no opener.
+            from llm_router.paths import private_opener
+            with open(path, "a", encoding="utf-8", opener=private_opener) as fh:
                 # NB: `text` is secret-scrubbed by _scrub_secrets() above
                 # (~L309) and the file is chmod 0600 / local-only. Storing
                 # scrubbed session context in clear text is the
