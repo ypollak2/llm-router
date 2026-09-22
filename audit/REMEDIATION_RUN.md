@@ -32,7 +32,7 @@ red and looks sound.)
 | R10 | `partial` | Refuse unservable capability (tools/vision/schema/context) | drop refusal from one endpoint -> parametrised test names it |
 | R3 | `done` | SECURITY.md honesty + interpreter corpus | add an interpreter to the allowlist -> corpus test fails |
 | R8 | `partial` | Capture ON behind explicit install consent | consent absent -> capture stays off |
-| R16 | `todo` | `capture()` sees cwd/tools, or scope the claim | a repo task reaches a frozen dataset, or docs say it cannot |
+| R16 | `done` (finding partly INVALIDATED) | `capture()` sees cwd/tools, or scope the claim | a repo task reaches a frozen dataset, or docs say it cannot |
 | R17 | `done` | Validator must discriminate | `len(answer)>5` -> capped at LOW |
 | R5 | `todo` | Release the fixed HEAD | remove `rich` -> clean-room job fails |
 | K1-K7 | `todo` | Audit-readiness kit | see plan |
@@ -817,3 +817,62 @@ Recorded here rather than approximated. A regret number computed over a handful
 of tasks would be exactly the kind of figure this audit exists to stop, and
 CLAUDE.md already fixes the rule: below ~50 real prompts, say "too few to tell"
 instead of a number.
+
+
+## R16 — the audit's own diagnosis was wrong, and a premise assertion caught it
+
+The finding said: `capture()` has no `cwd`/`tools`/`external` parameters, so
+repo- and tool-bound tasks are permanently ineligible — **"a missing signature,
+not a policy."**
+
+The second half is false. Writing the premise assertion for the fix disproved
+it in one line:
+
+    envelope.build(..., cwd=None)  ->  RepoState(commit=..., reconstructable=True)
+
+`envelope.build` already falls back to `os.getcwd()`. A repo reference was
+being captured all along; the parameter was never the blocker.
+
+**The real blocker is `eligibility.replay_available()` returning False:**
+
+    assess(repo task, has_repo_state=True, envelope_complete=True)
+      -> replayable=False, reasons=['no-replayer-for-required-state']
+
+That is H-08, and it IS a policy — a deliberate, documented refusal to admit
+work the runner cannot execute. `scripts/groundtruth/` has zero `git checkout`
+/ `git apply` / worktree call sites, so a captured repo task could never be
+graded, and a gate that admitted them would report a healthy funnel while
+producing nothing. The gate is tied to the CAPABILITY, not a flag, so repo
+tasks become eligible automatically the day a replayer exists — pinned by a
+test that monkeypatches `replay_available` and asserts the refusal disappears.
+
+I would have "fixed" a non-defect and reported it as unblocking repo tasks.
+What stopped that was asserting the premise rather than the conclusion — the
+same discipline that caught the R14 rotation fixture and the R17 verifier
+fixtures in this same run.
+
+### What was actually delivered
+
+**Acceptance criteria branch 2**, which is now the applicable one: the docs
+state Ground Truth covers **state-free prompts only**, say why, and say what
+would change it.
+
+The signature fix is KEPT, described accurately: an explicit `cwd` beats the
+process working directory (which is not reliably the task's repo), and
+`tool_names`/`external` have no fallback at all. It is independently correct
+and it is not what unblocks anything — the test file says so explicitly, so
+nobody re-reads the commit and concludes otherwise.
+
+**The gap is NOT quantified as a share of traffic, deliberately.** There is one
+captured prompt on this machine and no pool, because capture has been off. A
+percentage from n=1 is precisely the figure this audit exists to stop. What is
+exact: 100% of tasks requiring repo state are excluded until a replayer exists.
+
+**RED-CHECK:** restore `project_root` (the first draft's expression) -> *"uses
+name(s) not bound in the function: ['project_root', 'str']"*. That one matters:
+`_finalize_successful_route` does not receive a `project_root`, so it would
+have been a NameError on every capture, landing in the enclosing
+`except Exception: capture never breaks routing` — the feature silently dead in
+exactly the way the defect it was fixing was. Also: drop `cwd` before
+`accumulate` -> *"accepts 'cwd' and drops it — the same defect with a more
+convincing surface."*

@@ -17,7 +17,35 @@ Privacy posture: scrub-at-write-time. `scrub()` runs before the record is
 serialised, so unscrubbed prompt text never reaches disk. There is no "raw"
 mode and adding one should be treated as a change of policy, not a flag.
 
-Off by default. `LLM_ROUTER_GROUND_TRUTH=1` turns the whole path on.
+On by default AFTER EXPLICIT CONSENT at install (R8). `LLM_ROUTER_GROUND_TRUTH=1`
+turns the path on; `llm_router.ground_truth_consent` is what asks, records the
+answer, and refuses to assume one in a non-interactive install.
+
+WHAT GROUND TRUTH ACTUALLY COVERS — the scope, stated rather than implied
+--------------------------------------------------------------------------
+**State-free prompts only.** A task that needs repo state to be answered — "fix
+the off-by-one in cost.py line 42" — is captured, admitted to the pool, and
+then refused by the eligibility gate with `no-replayer-for-required-state`.
+
+That refusal is correct and deliberate (H-08): `scripts/groundtruth/` contains
+zero `git checkout`, `git apply` or worktree call sites, so a captured repo
+task could never be graded. A gate that admitted them would report a healthy
+funnel while producing nothing. `eligibility.replay_available()` is tied to the
+CAPABILITY rather than a flag, so these tasks become eligible automatically the
+day a replayer exists.
+
+**The consequence for any quality claim made from this data:** it is a claim
+about state-free prompts, and must say so. R16's original diagnosis — that a
+missing `cwd` parameter was what excluded repo tasks — is INVALIDATED:
+`envelope.build` already falls back to `os.getcwd()` and was capturing a usable
+repo reference all along. The parameter was missing (and is now present,
+because an explicit cwd beats the process working directory and
+`tool_names`/`external` have no fallback at all), but it was never the blocker.
+
+**How large is the gap?** Not quantifiable as a share of traffic today, and a
+number here would be worse than none: capture has been off, so there is one
+captured prompt on this machine and no pool. What is exact is the rule —
+100% of tasks requiring repo state are excluded until a replayer exists.
 """
 
 from __future__ import annotations
@@ -197,6 +225,22 @@ def capture(
     chosen_model: str | None = None,
     classification_method: str | None = None,
     extra: dict[str, Any] | None = None,
+    # R16. These did not exist, and their absence — not any policy — is why
+    # every repo- and tool-bound task was permanently ineligible.
+    #
+    # `accumulate` has always accepted them and built a real envelope from
+    # them. `capture()` is what the router calls, and it had no way to pass
+    # them, so `env.repo` was empty on every candidate and `assess` recorded
+    # ENVELOPE_INCOMPLETE. The T-06 id-bridge downstream works and was inert,
+    # because nothing upstream could produce a frozen task that matched a pool
+    # candidate.
+    #
+    # A missing parameter had been read as a deliberate scope decision. It was
+    # a signature.
+    cwd: str | None = None,
+    tool_names: list[str] | None = None,
+    external: dict[str, Any] | None = None,
+    test_command: str | None = None,
 ) -> bool:
     """Append one scrubbed capture record. Returns True if a record was written.
 
@@ -290,6 +334,13 @@ def capture(
                     prompt_sha256=prompt_sha, task_type=task_type,
                     complexity=complexity,
                     model_config={"chosen_model": chosen_model},
+                    # R16: thread the state through. Without these the envelope
+                    # is empty for every repo task and the gate correctly —
+                    # and permanently — refuses it.
+                    cwd=cwd,
+                    tool_names=tool_names,
+                    external=external,
+                    test_command=test_command,
                 )
                 if admitted:
                     out = OUTCOME_PERSISTED

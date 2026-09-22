@@ -2141,6 +2141,8 @@ async def _finalize_successful_route(
             # identifiable even with capture off.
             _capture_ref = None
             try:
+                import os as _os
+
                 from llm_router.prompt_capture import capture as _capture_prompt
                 if _capture_prompt(
                     prompt,
@@ -2150,6 +2152,20 @@ async def _finalize_successful_route(
                     complexity=effective_complexity,
                     chosen_model=_first_model,
                     classification_method=_classification_method(classification_data),
+                    # R16: the working directory is what makes a repo task
+                    # replayable — the envelope resolves it to an immutable
+                    # commit. Its absence was the whole reason every repo-bound
+                    # task was ineligible, and it read as a policy rather than
+                    # the missing argument it was.
+                    #
+                    # `os.getcwd()` and not a `project_root` parameter: this
+                    # function does not receive one. The first version of this
+                    # line used `project_root` anyway, which would have raised
+                    # NameError on every capture — straight into the enclosing
+                    # `except Exception: capture never breaks routing`, so the
+                    # feature would have been silently dead exactly like the
+                    # defect it was fixing.
+                    cwd=_os.getcwd(),
                 ):
                     from llm_router.trace_id import hash_prompt as _hp
                     _capture_ref = f"capture:{_hp(prompt)}"
