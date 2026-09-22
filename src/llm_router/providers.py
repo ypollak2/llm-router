@@ -276,6 +276,12 @@ async def call_llm(
     cache_creation = int(getattr(usage, "cache_creation_input_tokens", 0) or 0)
     cache_read = int(getattr(usage, "cache_read_input_tokens", 0) or 0)
 
+    # R15: carry the backend's own stop reason. Normalised to OpenAI's
+    # vocabulary because that is what the gateway speaks; Anthropic's
+    # `end_turn`/`max_tokens` arrive here through LiteLLM already translated,
+    # but the mapping is applied anyway rather than assumed.
+    finish_reason = _normalise_finish_reason(response)
+
     return LLMResponse(
         content=content,
         model=model,
@@ -287,7 +293,38 @@ async def call_llm(
         citations=citations,
         cache_creation_input_tokens=cache_creation,
         cache_read_input_tokens=cache_read,
+        finish_reason=finish_reason,
     )
+
+
+
+#: R15. Backend stop reasons normalised to OpenAI's vocabulary.
+_FINISH_REASON_ALIASES = {
+    "end_turn": "stop",
+    "stop_sequence": "stop",
+    "max_tokens": "length",
+    "tool_use": "tool_calls",
+}
+
+
+def _normalise_finish_reason(response) -> str:
+    """The backend's stop reason, or "" when it did not report one.
+
+    Returns "" rather than "stop" for a backend that says nothing. Ollama and
+    the CLI-backed providers report no reason at all, and defaulting them to
+    "stop" would assert a clean completion on no evidence — which is precisely
+    what `gateway._finish_reason` did for every response ever returned.
+    """
+    try:
+        choices = getattr(response, "choices", None) or []
+        raw = getattr(choices[0], "finish_reason", None) if choices else None
+        if not raw:
+            raw = getattr(response, "stop_reason", None)
+        if not isinstance(raw, str) or not raw:
+            return ""
+        return _FINISH_REASON_ALIASES.get(raw, raw)
+    except Exception:  # noqa: BLE001 — a missing field must not fail the call
+        return ""
 
 
 async def call_llm_stream_events(

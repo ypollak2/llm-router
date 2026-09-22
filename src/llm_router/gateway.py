@@ -649,6 +649,16 @@ def _finish_reason(result) -> str:
     raw = getattr(result, "finish_reason", None) or getattr(result, "stop_reason", None)
     if isinstance(raw, str) and raw:
         return {"max_tokens": "length", "end_turn": "stop"}.get(raw, raw)
+    # R15: this claim — "derived rather than asserted" — was false for every
+    # response, because `LLMResponse` carried no `finish_reason` field at all
+    # and this line was the only branch that ever ran. `providers.call_llm`
+    # now populates it, so the derivation is real.
+    #
+    # The fallback stays "stop" ONLY because the OpenAI schema has no way to
+    # say "the backend did not tell us": `finish_reason` is not nullable in
+    # any client that parses it, and emitting "" or null breaks them. It is a
+    # protocol obligation, not an assertion of success — and it is why the
+    # bandit reads `response.finish_reason` directly rather than this function.
     return "stop"
 
 

@@ -510,6 +510,26 @@ class LLMResponse:
     # Claude Code's upstream cost calculation.
     cache_creation_input_tokens: int = 0
     cache_read_input_tokens: int = 0
+    # R15 (audit 2026-09-22). WHY the generation stopped, as the backend
+    # reported it: "stop", "length", "content_filter", "tool_calls", ...
+    #
+    # This field did not exist. `gateway._finish_reason` read it with
+    # `getattr(result, "finish_reason", None)` and fell through to the literal
+    # "stop" on every single response — its docstring says "derived rather than
+    # asserted, so a truncated answer is not reported as a complete one", and
+    # for `LLMResponse` that was never true, because there was nothing to
+    # derive from.
+    #
+    # The consequence is not cosmetic. A `content_filter` stop returns the
+    # PARTIAL text generated before the filter fired. That text is usually
+    # long enough and fluent enough to pass `response_is_usable`, so the
+    # bandit recorded it as a win — rewarding whichever model gets censored
+    # most cheaply.
+    #
+    # EMPTY MEANS THE BACKEND DID NOT SAY, and is treated as unknown, never as
+    # "stop". Ollama and the CLI-backed providers report nothing, and inferring
+    # success from silence is the substitution this audit keeps finding.
+    finish_reason: str = ""
     # T-10 (audit 2026-09-22). Set when the EXHAUSTION FLOOR served this
     # response: every candidate was rejected by a dispatch gate, and the
     # best-rejected answer was returned anyway because the alternative was

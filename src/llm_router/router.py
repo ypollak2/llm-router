@@ -2308,8 +2308,21 @@ async def _finalize_successful_route(
             # win, teaches the bandit to prefer whichever model produces
             # rejectable output most cheaply. The response's own flag outranks
             # any re-derivation.
+            # R15: a stop reason the backend reported as anything but "stop"
+            # is not a success, whatever the text looks like. A
+            # `content_filter` stop returns the partial text generated before
+            # the filter fired — long, fluent, and routinely passing
+            # `response_is_usable`, so the bandit was rewarding whichever model
+            # gets censored most cheaply. `length` is the same shape: a
+            # truncated answer that reads like a complete one.
+            #
+            # An EMPTY reason is not penalised. Ollama and the CLI-backed
+            # providers report none, and treating silence as a failure would
+            # put every local model at a permanent disadvantage on no evidence
+            # — the mirror image of the bug being fixed.
             success=(
                 False if getattr(response, "quality_degraded", False)
+                else False if _finish_reason_is_failure(response)
                 else _response_is_usable(getattr(response, "content", "") or "")
             ),
             input_tokens=response.input_tokens,
@@ -3633,6 +3646,38 @@ async def _dispatch_model_loop(
         f"All models failed for {task_type.value}/{profile.value}. "
         f"Last error: {last_error}.{chain_summary}{setup_hint}"
     )
+
+
+#: R15. Reported stop reasons that mean the generation did not complete
+#: normally. Anything the backend does NOT report ("") is unknown, not failure.
+_FAILED_FINISH_REASONS = frozenset({"content_filter", "length"})
+
+
+def _finish_reason_is_failure(response) -> bool:
+    """Did the backend say this generation did not finish cleanly?
+
+    Kept as a named predicate rather than inlined at the one call site, so the
+    set of reasons is greppable and so the accompanying counter has something
+    to attach to. `tool_calls` is deliberately NOT here: the gateway refuses
+    tool requests outright (H-03), so it cannot arrive on this path, and
+    listing it would imply a handling that does not exist.
+    """
+    reason = getattr(response, "finish_reason", "") or ""
+    if reason not in _FAILED_FINISH_REASONS:
+        return False
+    # No try/except. `failopen.record` never raises BY CONSTRUCTION — it runs
+    # inside handlers that exist because propagating was unacceptable, and
+    # `test_recording_never_raises_on_a_weird_exception` pins that. Wrapping it
+    # was reflex, and the T-14 ratchet was right to flag it: a silent handler
+    # in this module is indistinguishable from the ones this audit spent its
+    # time removing, and a reader cannot tell a redundant one from a real one.
+    from llm_router import failopen
+    failopen.record(
+        f"CHZ-FINISH-{reason.upper().replace('_', '-')}",
+        detail=f"{getattr(response, 'provider', '?')}/"
+               f"{getattr(response, 'model', '?')}",
+    )
+    return True
 
 
 def _response_is_usable(text: str) -> bool:
