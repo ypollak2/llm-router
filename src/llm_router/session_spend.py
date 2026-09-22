@@ -41,6 +41,22 @@ from pathlib import Path
 
 from llm_router import paths
 
+def _detect_synthetic() -> bool:
+    """Is this process writing test data? Delegates to the canonical detector.
+
+    T-05. Local to this module because it runs in contexts where importing the
+    full cost module is not guaranteed; the ANSWER still comes from
+    `routing_quality.detect_synthetic`, never from a second copy of the rules.
+    Fail-closed: if the detector cannot be reached we cannot certify the row as
+    production, so it is stamped synthetic rather than counted as real money.
+    """
+    try:
+        from llm_router.routing_quality import detect_synthetic
+        return bool(detect_synthetic())
+    except Exception:  # noqa: BLE001
+        return True
+
+
 def _session_spend_file():
     return paths.state_path("session_spend.json")
 
@@ -310,10 +326,12 @@ class SessionSpend:
         )
         with sqlite3.connect(str(db_path), timeout=2.0) as conn:
             conn.execute(
+                # T-05: provenance stamped at write time.
                 "INSERT INTO claude_usage "
-                "(model, tokens_used, complexity, cost_saved_usd) "
-                "VALUES (?, ?, ?, ?)",
-                (attribution_model, tokens_reclaimed, "auto", opus_equivalent_usd),
+                "(model, tokens_used, complexity, cost_saved_usd, is_simulated) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (attribution_model, tokens_reclaimed, "auto", opus_equivalent_usd,
+                 1 if _detect_synthetic() else 0),
             )
             conn.commit()
 

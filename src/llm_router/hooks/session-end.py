@@ -380,6 +380,11 @@ def _sync_import_savings_log() -> None:
                 r.get("host", "claude_code"),
                 int(r.get("input_tokens", 0) or 0),
                 int(r.get("output_tokens", 0) or 0),
+                # T-05. The entry's OWN provenance if the writer recorded one —
+                # detecting it here would describe this flush, not the call.
+                # Absent stays NULL = unknown, which drops out of money figures.
+                (None if r.get("is_simulated") is None
+                 else (1 if r.get("is_simulated") else 0)),
             ))
         except (json.JSONDecodeError, KeyError, ValueError):
             continue
@@ -403,7 +408,8 @@ def _sync_import_savings_log() -> None:
                 model_used TEXT NOT NULL,
                 host TEXT NOT NULL DEFAULT 'claude_code',
                 input_tokens INTEGER NOT NULL DEFAULT 0,
-                output_tokens INTEGER NOT NULL DEFAULT 0
+                output_tokens INTEGER NOT NULL DEFAULT 0,
+                is_simulated INTEGER
             )
         """)
         # Idempotent migration for DBs created before token columns existed.
@@ -412,11 +418,22 @@ def _sync_import_savings_log() -> None:
                 conn.execute(f"ALTER TABLE savings_stats ADD COLUMN {_col} INTEGER NOT NULL DEFAULT 0")
             except sqlite3.OperationalError:
                 pass  # column already present
+        # T-05. Separate because it must have NO DEFAULT: a pre-existing row's
+        # provenance was never measured, and `DEFAULT 0` would assert that it
+        # was production — the exact lie C-02 was raised over. This hook runs as
+        # its own process and may reach the DB before the package migration, so
+        # it carries its own copy of the ALTER rather than failing the insert
+        # into an `except Exception` that puts the rows back and looks like a
+        # retry.
+        try:
+            conn.execute("ALTER TABLE savings_stats ADD COLUMN is_simulated INTEGER")
+        except sqlite3.OperationalError:
+            pass  # column already present
         conn.executemany(
             "INSERT INTO savings_stats "
             "(timestamp, session_id, task_type, estimated_claude_cost_saved, external_cost, "
-            "model_used, host, input_tokens, output_tokens) "
-            "VALUES (?,?,?,?,?,?,?,?,?)",
+            "model_used, host, input_tokens, output_tokens, is_simulated) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?)",
             records,
         )
         conn.commit()

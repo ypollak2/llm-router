@@ -322,6 +322,77 @@ MIGRATE_USAGE_PROVENANCE_CUTOVER_TABLE = [
 PROVENANCE_CUTOVER_KEY = "usage_is_simulated_cutover"
 
 
+async def provenance_exclusion_summary() -> dict:
+    """How many historical rows are excluded from savings, and why. T-21.
+
+    The cutover writes its count into `provenance_meta` and NOTHING has ever
+    read it back. The user-visible consequence is a support ticket shaped like
+    "my lifetime savings dropped to $0 after upgrading" with no in-product
+    answer — the figure is correct (those rows' provenance was never measured,
+    so counting them as real money was the lie), but a correct number that
+    appears without explanation is indistinguishable from a bug.
+
+    F16 widened this: `claude_usage`, `codex_usage`, `gemini_usage` and
+    `savings_stats` gained the same column, so the same drop now happens across
+    four more ledgers.
+
+    Returns keys: `cutover_rows`, `unknown_rows`, `production_rows`,
+    `synthetic_rows`, `explanation`. Fail-open — returns zeros with an
+    `explanation` saying so, never raises into a savings command.
+    """
+    out = {"cutover_rows": 0, "unknown_rows": 0, "production_rows": 0,
+           "synthetic_rows": 0, "explanation": ""}
+    try:
+        db = await _get_db()
+    except Exception as exc:  # noqa: BLE001
+        # CHZ-FO-02: a function that returns live data must account for the
+        # swallow, or the zeros it returns read as a measurement.
+        from llm_router import failopen as _fo
+        _fo.record("CHZ-FO-COST-PROVENANCE-SUMMARY-OPEN", exc)
+        out["explanation"] = f"ledger unreadable: {type(exc).__name__}"
+        return out
+    try:
+        try:
+            cur = await db.execute(
+                "SELECT value FROM provenance_meta WHERE key = ?",
+                (PROVENANCE_CUTOVER_KEY,),
+            )
+            row = await cur.fetchone()
+            out["cutover_rows"] = int(row[0]) if row and str(row[0]).isdigit() else 0
+        except Exception as _meta_exc:  # noqa: BLE001 — table may predate the migration
+            from llm_router import failopen as _fo
+            _fo.record("CHZ-FO-COST-PROVENANCE-META", _meta_exc)
+        cur = await db.execute(
+            "SELECT COALESCE(SUM(is_simulated IS NULL), 0), "
+            "       COALESCE(SUM(is_simulated = 0), 0), "
+            "       COALESCE(SUM(is_simulated = 1), 0) FROM usage"
+        )
+        row = await cur.fetchone()
+        if row:
+            out["unknown_rows"] = int(row[0] or 0)
+            out["production_rows"] = int(row[1] or 0)
+            out["synthetic_rows"] = int(row[2] or 0)
+    except Exception as exc:  # noqa: BLE001
+        from llm_router import failopen as _fo
+        _fo.record("CHZ-FO-COST-PROVENANCE-COUNT", exc)
+        out["explanation"] = f"count failed: {type(exc).__name__}"
+        return out
+    finally:
+        await db.close()
+
+    if out["unknown_rows"]:
+        out["explanation"] = (
+            f"{out['unknown_rows']} usage row(s) predate provenance tracking and "
+            f"are excluded from savings totals. Their origin — real traffic or a "
+            f"test run — was never recorded, and counting an unmeasured row as "
+            f"money is the defect this excludes them to avoid. Totals will rebuild "
+            f"from new, stamped calls."
+        )
+    else:
+        out["explanation"] = "no rows are excluded for missing provenance."
+    return out
+
+
 async def _apply_provenance_cutover(db) -> int:
     """Mark pre-provenance `usage` rows UNKNOWN. Runs once. Returns rows marked.
 
@@ -370,6 +441,30 @@ MIGRATE_USAGE_ADD_COMPLEXITY = [
     "ALTER TABLE usage ADD COLUMN complexity TEXT DEFAULT 'moderate'",
 ]
 """Idempotent migration to track task complexity in usage table (v7.3)."""
+
+MIGRATE_SIBLING_TABLES_ADD_PROVENANCE = [
+    "ALTER TABLE claude_usage ADD COLUMN is_simulated INTEGER",
+    "ALTER TABLE codex_usage ADD COLUMN is_simulated INTEGER",
+    "ALTER TABLE gemini_usage ADD COLUMN is_simulated INTEGER",
+    "ALTER TABLE savings_stats ADD COLUMN is_simulated INTEGER",
+]
+"""T-05: give the four sibling ledgers the provenance column `usage` already has.
+
+DELIBERATELY NO DEFAULT, and this is the entire lesson of C-02. `usage.is_simulated`
+shipped as `INTEGER DEFAULT 0`, so all ~23,000 historical rows read as "production"
+— a value nobody ever measured, asserted by the schema. The filter built on top of
+it looked protective and excluded nothing.
+
+Without a default, every pre-existing row is NULL = *unknown*, which is the truth:
+these tables were written for months with no provenance recorded, and no amount of
+backfill can recover it. `production_only()` is fail-closed (`= 0`), so unknown rows
+drop out of money figures rather than being counted as real.
+
+CONSEQUENCE, stated rather than discovered later: on an existing install every
+historical row in these four tables leaves the savings totals the moment this
+migration runs. The figures will read low until new, stamped rows accumulate. That
+is a correction, not a regression — the previous totals included an unmeasured
+population."""
 
 MIGRATE_SAVINGS_STATS_ADD_HOST = [
     "ALTER TABLE savings_stats ADD COLUMN host TEXT NOT NULL DEFAULT 'claude_code'",
@@ -619,9 +714,28 @@ MIGRATE_ROUTING_DECISIONS_MARK_CONTAMINATED = [
 """One-time fixup to mark contaminated routing records with is_real=0 (v7.5).
 
 Marks 1,974 test/demo records as contaminated but retains them for audit trail.
-All downstream analytics queries use "WHERE is_real = 1" to filter them out.
 This migration runs idempotently — subsequent runs are no-ops after first execution.
-"""
+
+DO NOT RELY ON `is_real` AS A PROVENANCE FILTER (T-05, audit 2026-09-22).
+
+This docstring used to claim *"All downstream analytics queries use
+`WHERE is_real = 1` to filter them out."* That was false, and it was load-bearing
+false: it is the sentence that made five money surfaces look already-protected.
+What `grep` actually shows, at the time of writing:
+
+* **No query in this module** mentions `is_real` at all — the column is written
+  by the migration above and read nowhere in `cost.py`.
+* Four queries elsewhere use it: `tools/dashboard.py:236` and
+  `commands/verify.py:251` with a real `= 1`, and `hooks/session-end.py:1124`
+  and `:1137` as `(is_real = 1 OR is_real IS NULL)` — which admits every
+  unmarked row and so filters nothing on a column that is NULL by default.
+
+`is_real` also carries `DEFAULT 1`, the same defect `provenance` was introduced
+to avoid: a column named "is real" that asserts 1 about rows nobody measured.
+
+The supported filters are :func:`production_only` for the money tables and
+:func:`routing_production_only` for `routing_decisions`. If you are about to add
+`is_real` to a WHERE clause, use one of those instead."""
 
 MIGRATE_ADD_QUOTA_SNAPSHOTS_TABLE = [
     """CREATE TABLE IF NOT EXISTS quota_snapshots (
@@ -818,6 +932,7 @@ async def _get_db() -> aiosqlite.Connection:
         + MIGRATE_SAVINGS_STATS_ADD_HOST
         + MIGRATE_SAVINGS_STATS_ADD_TOKENS
         + MIGRATE_SAVINGS_STATS_ADD_MODE
+        + MIGRATE_SIBLING_TABLES_ADD_PROVENANCE
         + MIGRATE_ROUTING_DECISIONS_ADD_POLICY
         + MIGRATE_ADD_CORRELATION_ID
         + MIGRATE_ADD_CACHE_METRICS
@@ -1083,7 +1198,102 @@ def format_spend_for_display(spend_usd: float) -> str:
     return f"${spend_usd:.2f}" if spend_usd >= 1.0 else f"${spend_usd:.4f}"
 
 
-async def get_monthly_spend() -> float:
+# ── Provenance: the one clause every money surface must carry ────────────────
+#
+# T-05 (audit 2026-09-22). The 2026-09-21 C-02 fix added write-time provenance
+# to `usage` and a filter to ONE reader, `get_savings_by_period`. Five sibling
+# surfaces read the same rows with no filter at all, including the one that
+# broadcasts to a shared Slack/Discord channel — a synthetic $3.00 went out
+# under the same code path that correctly reported $0.00 on the dashboard.
+#
+# The fix is a shared fragment rather than six hand-written copies, because six
+# copies is how the first five came to disagree. `tests/test_t05_money_surfaces
+# _are_provenance_filtered.py` enumerates the surfaces and fails when a new one
+# appears without this clause.
+
+PROVENANCE_COLUMN = "is_simulated"
+
+
+def production_only(include_simulated: bool = False, *, prefix: str = "AND",
+                    table: str = "") -> str:
+    """WHERE fragment that keeps synthetic rows out of a money figure.
+
+    FAIL-CLOSED, and the `= 0` is the whole point. `IS NOT 1` admits NULL, so a
+    row whose provenance was never established counts as production — the same
+    defect as `is_evaluable` treating a missing field as real. Only a row
+    explicitly stamped 0 at write time is production data.
+
+    `include_simulated` is the named escape hatch for tests that exercise the
+    aggregate arithmetic over rows they wrote themselves (pytest stamps every
+    such row synthetic). No production caller passes it, and the default stays
+    exclusive.
+    """
+    if include_simulated:
+        # An empty string is only safe where the caller APPENDS the fragment
+        # (`f"{where} {production_only(...)}"`). Five callers instead EMBED it
+        # (`f"WHERE {production_only(..., prefix='')} AND date(...)"`), and there
+        # an empty fragment composes to the literal `WHERE  AND date(...)` —
+        # `sqlite3.OperationalError: near "AND": syntax error`. So a caller that
+        # supplies no prefix is embedding, and gets a predicate that is always
+        # true rather than nothing at all.
+        #
+        # Found by the agent updating the tests for this change, on the first
+        # call that passed `include_simulated=True`. The escape hatch had never
+        # been exercised on these five surfaces.
+        return "" if prefix else "1=1"
+    col = f"{table}.{PROVENANCE_COLUMN}" if table else PROVENANCE_COLUMN
+    return f"{prefix} {col} = 0".strip()
+
+
+async def _count_unknown_provenance(db, where: str) -> int:
+    """How many rows in this window predate the provenance writer.
+
+    Reported alongside every routing_decisions figure so the denominator is
+    visible. A number quoted without saying how much of its population has
+    unrecorded origin is a rate without its denominator (repo CLAUDE.md).
+    Returns 0 on failure rather than raising — this is disclosure, and it must
+    never be the reason a report cannot render.
+    """
+    try:
+        cur = await db.execute(f"SELECT COUNT(*) FROM routing_decisions {where}")
+        row = await cur.fetchone()
+        return int(row[0]) if row else 0
+    except Exception:  # noqa: BLE001
+        return 0
+
+
+def routing_production_only(include_synthetic: bool = False, *, prefix: str = "AND") -> str:
+    """WHERE fragment excluding `routing_decisions` rows that SAY they are synthetic.
+
+    NOT symmetric with :func:`production_only`, and the asymmetry is the point.
+
+    `usage.is_simulated` is a money column: an unmeasured row counted as dollars
+    is the C-02 failure, so NULL is excluded and the filter is fail-closed.
+    `routing_decisions.provenance` is a three-state attribution column
+    (`llm_router.attribution`): `runtime` = real traffic, `unattributed`/`test` =
+    synthetic, NULL = written before the writer existed. There are thousands of
+    those NULL rows and they are genuinely UNKNOWN, not genuinely synthetic;
+    dropping them would silently shrink every share denominator — "a filter that
+    drops nothing has not been shown to work" has a twin, which is a filter that
+    drops everything and reports a clean zero.
+
+    So this excludes only what is explicitly marked, and every caller that turns
+    these rows into a number ALSO reports `unknown_provenance_rows`, so the
+    denominator is visible rather than assumed.
+    """
+    if include_synthetic:
+        return ""
+    from llm_router.attribution import UNATTRIBUTED_PROVENANCE
+    marked = ", ".join(f"'{v}'" for v in sorted(UNATTRIBUTED_PROVENANCE))
+    return f"{prefix} (provenance IS NULL OR provenance NOT IN ({marked}))".strip()
+
+
+ROUTING_UNKNOWN_PROVENANCE_SQL = "provenance IS NULL"
+"""Rows whose origin predates the provenance writer. Counted and disclosed, never
+promoted into either bucket — see `llm_router.attribution.Attribution.UNKNOWN`."""
+
+
+async def get_monthly_spend(*, include_simulated: bool = False) -> float:
     """Get total USD spent on external LLMs in the current calendar month.
 
     RED1-07: uses a LOCAL-time month boundary to match get_daily_spend* (both
@@ -1104,8 +1314,12 @@ async def get_monthly_spend() -> float:
         # identical to the daily function (which does date(timestamp,'localtime')
         # = date('now','localtime')), so daily-today is always inside monthly-now.
         cursor = await db.execute(
-            "SELECT COALESCE(SUM(cost_usd), 0) FROM usage "
-            "WHERE strftime('%Y-%m', timestamp, 'localtime') = "
+            # T-05. This gates a REAL budget cap. A benchmark run's synthetic
+            # dollars could trip it and throttle legitimate routing — the T-05
+            # failure pointed the opposite way from the broadcast one.
+            f"SELECT COALESCE(SUM(cost_usd), 0) FROM usage "
+            f"WHERE {production_only(include_simulated, prefix='')} AND "
+            "strftime('%Y-%m', timestamp, 'localtime') = "
             "strftime('%Y-%m', 'now', 'localtime')"
         )
         row = await cursor.fetchone()
@@ -1184,7 +1398,7 @@ async def _rejected_attempt_spend_today(db, task_type: str | None = None) -> flo
     return await _rejected_attempt_spend(db, "day", task_type)
 
 
-async def get_daily_spend() -> float:
+async def get_daily_spend(*, include_simulated: bool = False) -> float:
     """Get total USD spent on external LLMs today (local calendar day).
 
     Includes both winning calls (``usage`` table) and billable-but-rejected
@@ -1197,8 +1411,10 @@ async def get_daily_spend() -> float:
     db = await _get_db()
     try:
         cursor = await db.execute(
-            "SELECT COALESCE(SUM(cost_usd), 0) FROM usage "
-            "WHERE date(timestamp,'localtime') = date('now','localtime')"
+            # T-05: gates a real daily cap — see get_monthly_spend.
+            f"SELECT COALESCE(SUM(cost_usd), 0) FROM usage "
+            f"WHERE {production_only(include_simulated, prefix='')} AND "
+            "date(timestamp,'localtime') = date('now','localtime')"
         )
         row = await cursor.fetchone()
         winning = float(row[0]) if row else 0.0
@@ -1207,7 +1423,8 @@ async def get_daily_spend() -> float:
         await db.close()
 
 
-async def get_daily_spend_by_task_type(task_type: str) -> float:
+async def get_daily_spend_by_task_type(task_type: str, *,
+                                       include_simulated: bool = False) -> float:
     """Get total USD spent on external LLMs today for a specific task type.
 
     Args:
@@ -1219,8 +1436,10 @@ async def get_daily_spend_by_task_type(task_type: str) -> float:
     db = await _get_db()
     try:
         cursor = await db.execute(
-            "SELECT COALESCE(SUM(cost_usd), 0) FROM usage "
-            "WHERE date(timestamp,'localtime') = date('now','localtime') AND task_type = ?",
+            # T-05: gates a real per-task cap — see get_monthly_spend.
+            f"SELECT COALESCE(SUM(cost_usd), 0) FROM usage "
+            f"WHERE {production_only(include_simulated, prefix='')} AND "
+            "date(timestamp,'localtime') = date('now','localtime') AND task_type = ?",
             (task_type,),
         )
         row = await cursor.fetchone()
@@ -1646,7 +1865,7 @@ async def log_routing_decision(
         await db.close()
 
 
-async def get_quality_report(days: int = 7) -> dict:
+async def get_quality_report(days: int = 7, *, include_synthetic: bool = False) -> dict:
     """Build a quality analytics report from routing decision history.
 
     Aggregates routing decisions over the given time window into a summary
@@ -1661,7 +1880,13 @@ async def get_quality_report(days: int = 7) -> dict:
         ``total_cost_usd``, ``total_tokens``, ``success_rate``, ``by_model``.
         Returns zeroed values if no data exists.
     """
-    where = f"WHERE timestamp >= datetime('now', '-{days} days')"
+    # T-05. `where` feeds EVERY query in this function, so the provenance filter
+    # goes here once rather than being re-decided per query — six hand-written
+    # copies is how the surfaces came to disagree in the first place.
+    where = (f"WHERE timestamp >= datetime('now', '-{days} days') "
+             f"{routing_production_only(include_synthetic)}")
+    unknown_where = (f"WHERE timestamp >= datetime('now', '-{days} days') "
+                     f"AND {ROUTING_UNKNOWN_PROVENANCE_SQL}")
 
     db = await _get_db()
     try:
@@ -1687,6 +1912,7 @@ async def get_quality_report(days: int = 7) -> dict:
                 "total_tokens": 0,
                 "success_rate": 0.0,
                 "by_model": {},
+                "unknown_provenance_rows": await _count_unknown_provenance(db, unknown_where),
             }
 
         total, avg_conf, downshift_rate, avg_lat, total_cost, total_tok, success_rate = row
@@ -1773,6 +1999,11 @@ async def get_quality_report(days: int = 7) -> dict:
             "unattributed_decisions": unattributed_total,
             "unattributed_by_model": unattributed_by_model,
             "unattributed_reason": "classifier did not run (classifier_type='unknown')",
+            # T-05. Rows marked synthetic are already excluded by `where`; these
+            # are the ones whose origin was never recorded. Disclosed rather than
+            # dropped: they are UNKNOWN, not proven fake, and silently deleting
+            # them would shrink the denominator behind every rate above.
+            "unknown_provenance_rows": await _count_unknown_provenance(db, unknown_where),
         }
     finally:
         await db.close()
@@ -2099,19 +2330,23 @@ async def log_claude_usage(
     db = await _get_db()
     try:
         await db.execute(
+            # T-05: provenance stamped at write time, by the same
+            # `_detect_synthetic()` the `usage` ledger uses. A read-time
+            # name heuristic cannot be made correct; this can.
             "INSERT INTO claude_usage ("
             "  model, tokens_used, complexity,"
             "  cost_saved_usd, time_saved_sec,"
             "  input_tokens, output_tokens,"
             "  cache_creation_input_tokens, cache_read_input_tokens,"
-            "  routing_overhead_usd"
-            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "  routing_overhead_usd, is_simulated"
+            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 model, tokens_used, complexity,
                 cost_saved, time_saved,
                 input_tokens, output_tokens,
                 cache_creation_input_tokens, cache_read_input_tokens,
                 routing_overhead_usd,
+                1 if _detect_synthetic() else 0,
             ),
         )
         await db.commit()
@@ -2202,19 +2437,21 @@ async def log_codex_usage(
     db = await _get_db()
     try:
         await db.execute(
+            # T-05: provenance stamped at write time (see log_claude_usage).
             "INSERT INTO codex_usage ("
             "  model, tokens_used, complexity,"
             "  cost_saved_usd, time_saved_sec,"
             "  input_tokens, output_tokens,"
             "  cache_creation_input_tokens, cache_read_input_tokens,"
-            "  routing_overhead_usd"
-            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "  routing_overhead_usd, is_simulated"
+            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 model, tokens_used, complexity,
                 cost_saved, time_saved,
                 input_tokens, output_tokens,
                 cache_creation_input_tokens, cache_read_input_tokens,
                 routing_overhead_usd,
+                1 if _detect_synthetic() else 0,
             ),
         )
         await db.commit()
@@ -2300,19 +2537,21 @@ async def log_gemini_usage(
     db = await _get_db()
     try:
         await db.execute(
+            # T-05: provenance stamped at write time (see log_claude_usage).
             "INSERT INTO gemini_usage ("
             "  model, tokens_used, complexity,"
             "  cost_saved_usd, time_saved_sec,"
             "  input_tokens, output_tokens,"
             "  cache_creation_input_tokens, cache_read_input_tokens,"
-            "  routing_overhead_usd"
-            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "  routing_overhead_usd, is_simulated"
+            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 model, tokens_used, complexity,
                 cost_saved, time_saved,
                 input_tokens, output_tokens,
                 cache_creation_input_tokens, cache_read_input_tokens,
                 routing_overhead_usd,
+                1 if _detect_synthetic() else 0,
             ),
         )
         await db.commit()
@@ -2322,7 +2561,8 @@ async def log_gemini_usage(
     return {"cost_saved_usd": cost_saved, "time_saved_sec": time_saved}
 
 
-async def get_realized_savings(period: str = "today", *, platform: str = "all") -> dict:
+async def get_realized_savings(period: str = "today", *, platform: str = "all",
+                               include_simulated: bool = False) -> dict:
     """Honest savings number: gross_saved - routing_overhead.
 
     Unlike `get_savings_summary`, this surfaces the case where routing
@@ -2347,6 +2587,10 @@ async def get_realized_savings(period: str = "today", *, platform: str = "all") 
         "all":   "",
     }
     where = where_map.get(period, "")
+    # T-05. `where` feeds every platform table (claude_usage / codex_usage /
+    # gemini_usage), none of which HAD a provenance column before this audit.
+    # "all" has no WHERE, so the filter supplies its own keyword.
+    where = f"{where} {production_only(include_simulated, prefix='AND' if where else 'WHERE')}".strip()
 
     async def _query_table(table: str) -> tuple[float, float]:
         try:
@@ -2511,7 +2755,7 @@ async def log_quota_snapshot(
         await db.close()
 
 
-async def get_daily_claude_tokens() -> int:
+async def get_daily_claude_tokens(*, include_simulated: bool = False) -> int:
     """Get the total number of Claude Code tokens consumed today (UTC).
 
     Returns:
@@ -2520,8 +2764,9 @@ async def get_daily_claude_tokens() -> int:
     db = await _get_db()
     try:
         cursor = await db.execute(
-            "SELECT COALESCE(SUM(tokens_used), 0) FROM claude_usage "
-            "WHERE date(timestamp, 'localtime') = date('now', 'localtime')"
+            f"SELECT COALESCE(SUM(tokens_used), 0) FROM claude_usage "  # T-05
+            f"WHERE {production_only(include_simulated, prefix='')} AND "
+            "date(timestamp, 'localtime') = date('now', 'localtime')"
         )
         row = await cursor.fetchone()
         return int(row[0]) if row else 0
@@ -2529,7 +2774,7 @@ async def get_daily_claude_tokens() -> int:
         await db.close()
 
 
-async def get_daily_claude_breakdown() -> dict[str, int]:
+async def get_daily_claude_breakdown(*, include_simulated: bool = False) -> dict[str, int]:
     """Get today's Claude Code token usage broken down by model.
 
     Returns:
@@ -2539,8 +2784,9 @@ async def get_daily_claude_breakdown() -> dict[str, int]:
     db = await _get_db()
     try:
         cursor = await db.execute(
-            "SELECT model, SUM(tokens_used) FROM claude_usage "
-            "WHERE date(timestamp, 'localtime') = date('now', 'localtime') GROUP BY model"
+            f"SELECT model, SUM(tokens_used) FROM claude_usage "  # T-05
+            f"WHERE {production_only(include_simulated, prefix='')} AND "
+            "date(timestamp, 'localtime') = date('now', 'localtime') GROUP BY model"
         )
         rows = await cursor.fetchall()
         return {model: int(tokens) for model, tokens in rows}
@@ -2548,7 +2794,8 @@ async def get_daily_claude_breakdown() -> dict[str, int]:
         await db.close()
 
 
-async def get_savings_summary(period: str = "today") -> dict:
+async def get_savings_summary(period: str = "today", *,
+                              include_simulated: bool = False) -> dict:
     """Get cumulative savings for a given time period.
 
     Queries the ``claude_usage`` table for aggregate savings and a per-model
@@ -2571,6 +2818,11 @@ async def get_savings_summary(period: str = "today") -> dict:
         "month": "WHERE timestamp >= datetime('now', '-30 days')",
         "all": "",
     }.get(period, "")
+    # T-05. Found by `test_the_surface_list_is_complete`, not by the audit — the
+    # audit's own table of unfiltered surfaces missed this one and
+    # `get_cache_savings`. Which is the argument for the enumerating test over a
+    # hand-written list.
+    where = f"{where} {production_only(include_simulated, prefix='AND' if where else 'WHERE')}".strip()
 
     db = await _get_db()
     try:
@@ -2628,6 +2880,7 @@ async def get_savings_summary(period: str = "today") -> dict:
         rows = await cursor.fetchall()
         by_model = {
             model: {
+                "calls": calls,
                 "calls": calls, "tokens": int(tokens),
                 "cost_saved": float(saved), "time_saved": float(tsaved),
             }
@@ -2714,7 +2967,8 @@ def _coverage_counts() -> dict:
         return {"observed_n": 0, "unobserved_n": 0}
 
 
-async def get_router_efficiency(period: str = "today") -> dict:
+async def get_router_efficiency(period: str = "today", *,
+                                include_synthetic: bool = False) -> dict:
     """Get router efficiency score: what % of routing decisions matched recommendations.
     
     Analyzes routing_decisions table to compute on-target selection rate.
@@ -2733,7 +2987,12 @@ async def get_router_efficiency(period: str = "today") -> dict:
         "all": "",
     }
     where = where_map.get(period, "")
-    
+    # T-05. `all` has no WHERE at all, so the provenance filter needs its own
+    # keyword — appending "AND ..." to an empty string is a syntax error, and a
+    # broken query here fails into a caller that renders zeros as data.
+    _prov = routing_production_only(include_synthetic, prefix="AND" if where else "WHERE")
+    where = f"{where} {_prov}".strip()
+
     db = await _get_db()
     try:
         # Count total decisions and on-target decisions
@@ -2904,9 +3163,11 @@ async def log_savings(
     db = await _get_db()
     try:
         await db.execute(
+            # T-05: provenance stamped at write time (see log_claude_usage).
             "INSERT INTO savings_stats "
-            "(timestamp, session_id, task_type, estimated_claude_cost_saved, external_cost, model_used) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
+            "(timestamp, session_id, task_type, estimated_claude_cost_saved, external_cost, "
+            "model_used, is_simulated) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
             (
                 datetime.now(timezone.utc).isoformat(),
                 session_id,
@@ -2914,6 +3175,7 @@ async def log_savings(
                 estimated_saved,
                 external_cost,
                 model,
+                1 if _detect_synthetic() else 0,
             ),
         )
         await db.commit()
@@ -2921,7 +3183,8 @@ async def log_savings(
         await db.close()
 
 
-async def get_lifetime_savings_summary(days: int = 30) -> dict:
+async def get_lifetime_savings_summary(days: int = 30, *,
+                                       include_simulated: bool = False) -> dict:
     """Return aggregate routing savings over the last *days* days.
 
     Queries the ``savings_stats`` table for totals and a per-session breakdown.
@@ -2938,6 +3201,8 @@ async def get_lifetime_savings_summary(days: int = 30) -> dict:
         if days > 0
         else ""
     )
+    # T-05: savings_stats had no provenance column at all until this audit.
+    where = f"{where} {production_only(include_simulated, prefix='AND' if where else 'WHERE')}".strip()
     empty: dict = {
         "total_saved": 0.0,
         "total_external_cost": 0.0,
@@ -3066,10 +3331,16 @@ async def import_savings_log() -> int:
             except json.JSONDecodeError:
                 continue
             await db.execute(
+                # T-05. An imported entry carries its OWN provenance when the
+                # writer recorded one; `_detect_synthetic()` here would describe
+                # the importing process, not the call. Absent, it stays NULL =
+                # unknown and drops out of money figures — never a default 0,
+                # which is the lie C-02 was raised over.
                 "INSERT INTO savings_stats "
                 "(timestamp, session_id, task_type, estimated_claude_cost_saved, "
-                "external_cost, model_used, host, input_tokens, output_tokens, mode) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "external_cost, model_used, host, input_tokens, output_tokens, mode, "
+                "is_simulated) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     entry.get("timestamp", datetime.now(timezone.utc).isoformat()),
                     entry.get("session_id", "unknown"),
@@ -3083,6 +3354,8 @@ async def import_savings_log() -> int:
                     # None for a record written before the field existed: absent
                     # is not the same as echo, and must not read as one.
                     entry.get("mode"),
+                    (None if entry.get("is_simulated") is None
+                     else (1 if entry.get("is_simulated") else 0)),
                 ),
             )
             imported += 1
@@ -3309,13 +3582,21 @@ async def get_savings_by_period(*, include_simulated: bool = False) -> dict[str,
             )
             actual = baseline = saved_total = 0.0
             calls = 0
+            subscription_calls = 0   # T-26: counted, not silently merged
             for provider, in_tok, out_tok, cost, saved_col in rows:
                 in_tok = in_tok or 0
                 out_tok = out_tok or 0
                 cost = cost or 0.0
-                calls += 1
+                # T-26 (audit 2026-09-22). `calls` was incremented BEFORE the
+                # subscription skip, so `calls` counted rows the dollar figures
+                # then ignored: a period's "N calls, $X saved" quoted two
+                # different populations, and the efficiency multiplier divided
+                # one by the other. Both now describe the same rows, and the
+                # skipped ones are reported separately rather than folded in.
                 if provider == "subscription":
+                    subscription_calls += 1
                     continue  # CC subscription rows have no token cost data
+                calls += 1
                 # Always recalculate from actual in/out counts at Opus rates.
                 # Stored saved_col used a blended $0.045/1K estimate; accurate
                 # pricing requires separate input/output rates ($5/M and $25/M
@@ -3342,6 +3623,11 @@ async def get_savings_by_period(*, include_simulated: bool = False) -> dict[str,
                 "actual_usd": round(actual, 4),
                 "baseline_usd": round(baseline, 4),
                 "calls": calls,
+                # T-26: rows the dollar figures deliberately exclude,
+                # reported rather than merged into `calls`. "12 calls, $0
+                # saved" with no explanation is how a working install reads
+                # as idle.
+                "subscription_calls": subscription_calls,
                 "efficiency": round(efficiency, 1),
             }
         return result
@@ -3440,6 +3726,8 @@ async def get_team_savings(
     user_id: str = "",
     project_id: str = "",
     period: str = "week",
+    *,
+    include_simulated: bool = False,
 ) -> dict:
     """Return aggregated savings for the team dashboard.
 
@@ -3464,7 +3752,11 @@ async def get_team_savings(
     }
     since = period_map.get(period, period_map["week"])
 
-    where_parts = [f"date(timestamp,'localtime') >= {since}"]
+    # T-05. This is the surface team.py broadcasts to Slack/Discord, and it was
+    # the one with no provenance filter. Reproduced before the fix: a single
+    # synthetic row produced a $3.00 team-savings broadcast.
+    where_parts = [f"date(timestamp,'localtime') >= {since}",
+                   production_only(include_simulated, prefix="").strip() or "1=1"]
     params: list = []
     if user_id:
         where_parts.append("user_id = ?")
@@ -3556,7 +3848,8 @@ async def get_team_savings(
 # _HOST_INPUT_PER_M and _HOST_OUTPUT_PER_M are already defined above
 
 
-async def get_routing_savings_vs_sonnet(days: int = 0) -> dict:
+async def get_routing_savings_vs_sonnet(days: int = 0, *,
+                                        include_synthetic: bool = False) -> dict:
     """Compute savings by comparing actual cost vs the latest-Opus host baseline.
 
     Uses the routing_decisions table (populated by the router on every call).
@@ -3573,11 +3866,12 @@ async def get_routing_savings_vs_sonnet(days: int = 0) -> dict:
         Dict with ``total_calls``, ``actual_cost``, ``baseline_cost``,
         ``saved``, ``input_tokens``, ``output_tokens``, and ``by_model``.
     """
+    # T-05: routing_decisions side.
     where = (
         f"WHERE timestamp >= datetime('now', '-{days} days') AND success = 1"
         if days > 0
         else "WHERE success = 1"
-    )
+    ) + f" {routing_production_only(include_synthetic)}"
     empty: dict = {
         "total_calls": 0,
         "actual_cost": 0.0,
@@ -3640,7 +3934,8 @@ async def get_routing_savings_vs_sonnet(days: int = 0) -> dict:
         await db.close()
 
 
-async def get_cache_savings(period: str = "today") -> dict[str, float]:
+async def get_cache_savings(period: str = "today", *,
+                            include_simulated: bool = False) -> dict[str, float]:
     """Get prompt caching savings for the period.
 
     Queries the usage table for rows where cache_hit=1 and sums cache_savings_usd.
@@ -3671,13 +3966,17 @@ async def get_cache_savings(period: str = "today") -> dict[str, float]:
         # Get cache hit stats
         cursor = await db.execute(
             f"""SELECT COUNT(*), COALESCE(SUM(cache_savings_usd), 0)
-                FROM usage WHERE {time_filter} AND cache_hit = 1"""
+                FROM usage WHERE {time_filter} AND cache_hit = 1
+                  {production_only(include_simulated)}"""
         )
         cached_row = await cursor.fetchone()
         cached_calls, cached_savings = cached_row if cached_row else (0, 0.0)
 
         # Get total calls for hit rate
-        cursor = await db.execute(f"SELECT COUNT(*) FROM usage WHERE {time_filter}")
+        # T-05: the cache-hit RATE's denominator. Filtering the numerator and not
+        # this would invent a rate above 100%.
+        cursor = await db.execute(
+            f"SELECT COUNT(*) FROM usage WHERE {time_filter} {production_only(include_simulated)}")
         total_row = await cursor.fetchone()
         total_calls = total_row[0] if total_row else 0
 

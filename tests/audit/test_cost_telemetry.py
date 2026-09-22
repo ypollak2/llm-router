@@ -293,7 +293,8 @@ async def test_quality_report_by_model_excludes_never_recorded_models(temp_db, m
         latency_ms=80.0,
     )
 
-    report = await cost.get_quality_report(days=7)
+    # T-05: pytest stamps these rows provenance="test"; the hatch reads them back.
+    report = await cost.get_quality_report(days=7, include_synthetic=True)
 
     assert report["total_decisions"] == 2
     recorded_models = set(report["by_model"].keys())

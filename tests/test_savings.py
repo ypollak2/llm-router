@@ -85,7 +85,8 @@ class TestSavingsSummary:
         await log_claude_usage("sonnet", 10000, "moderate")
         await log_claude_usage("opus", 8000, "complex")
 
-        summary = await get_savings_summary("today")
+        # T-05: pytest stamps these rows synthetic; the hatch reads them back.
+        summary = await get_savings_summary("today", include_simulated=True)
         assert summary["total_calls"] == 3
         assert summary["total_tokens"] == 23000
         assert summary["cost_saved_usd"] > 0
@@ -100,7 +101,8 @@ class TestSavingsSummary:
         await log_claude_usage("haiku", 10000, "simple")
         await log_claude_usage("sonnet", 10000, "moderate")
 
-        summary = await get_savings_summary("today")
+        # T-05: pytest stamps these rows synthetic; the hatch reads them back.
+        summary = await get_savings_summary("today", include_simulated=True)
         haiku_saved = summary["by_model"]["haiku"]["cost_saved"]
         sonnet_saved = summary["by_model"]["sonnet"]["cost_saved"]
         assert haiku_saved > sonnet_saved
@@ -139,7 +141,8 @@ class TestLogSavingsPersistence:
             model="gemini/flash",
             session_id="test-session",
         )
-        summary = await cost.get_lifetime_savings_summary(days=0)
+        # T-05: pytest stamps this row synthetic; the hatch reads it back.
+        summary = await cost.get_lifetime_savings_summary(days=0, include_simulated=True)
         assert summary["tasks_routed"] == 1
         assert summary["total_saved"] == pytest.approx(0.033)
         assert summary["total_external_cost"] == pytest.approx(0.001)
@@ -152,7 +155,8 @@ class TestLogSavingsPersistence:
         await cost.log_savings("code", 0.05, 0.002, "gpt-4o-mini", "session-1")
         await cost.log_savings("research", 0.10, 0.005, "sonar", "session-2")
 
-        summary = await cost.get_lifetime_savings_summary(days=0)
+        # T-05: pytest stamps these rows synthetic; the hatch reads them back.
+        summary = await cost.get_lifetime_savings_summary(days=0, include_simulated=True)
         assert summary["tasks_routed"] == 3
         assert len(summary["by_session"]) == 2
         session_ids = {s["session_id"] for s in summary["by_session"]}
@@ -173,7 +177,8 @@ class TestLifetimeSavingsSummary:
         await cost.log_savings("query", 0.10, 0.03, "model", "s1")
         await cost.log_savings("code", 0.20, 0.05, "model", "s1")
 
-        summary = await cost.get_lifetime_savings_summary(days=0)
+        # T-05: pytest stamps these rows synthetic; the hatch reads them back.
+        summary = await cost.get_lifetime_savings_summary(days=0, include_simulated=True)
         assert summary["net_savings"] == pytest.approx(0.22)
 
 
@@ -198,7 +203,8 @@ class TestImportSavingsLog:
         # the live log no longer holds the imported rows.
         assert not log_path.exists() or log_path.read_text() == ""
 
-        summary = await cost.get_lifetime_savings_summary(days=0)
+        # T-05: pytest stamps these rows synthetic; the hatch reads them back.
+        summary = await cost.get_lifetime_savings_summary(days=0, include_simulated=True)
         assert summary["tasks_routed"] == 2
 
     @pytest.mark.asyncio
@@ -542,7 +548,8 @@ class TestDualPlatformRealizedSavings:
             "gpt-5-mini", tokens_used=1000, complexity="complex",
             task_type="code", input_tokens=500, output_tokens=500,
         )
-        result = await get_realized_savings(period="all", platform="all")
+        # T-05: pytest stamps these rows synthetic; the hatch reads them back.
+        result = await get_realized_savings(period="all", platform="all", include_simulated=True)
         assert "by_platform" in result
         assert result["by_platform"]["claude"]["gross_saved_usd"] > 0
         assert result["by_platform"]["codex"]["gross_saved_usd"] > 0
@@ -560,7 +567,8 @@ class TestDualPlatformRealizedSavings:
             "gpt-5-mini", tokens_used=1000, complexity="complex",
             task_type="code", input_tokens=500, output_tokens=500,
         )
-        result = await get_realized_savings(period="all", platform="codex")
+        # T-05: pytest stamps these rows synthetic; the hatch reads them back.
+        result = await get_realized_savings(period="all", platform="codex", include_simulated=True)
         assert "by_platform" not in result  # single-platform doesn't include breakdown
         assert result["gross_saved_usd"] > 0
 
@@ -639,7 +647,8 @@ class TestTriPlatformRealizedSavings:
             "gemini-2.0-flash", tokens_used=0, complexity="complex",
             task_type="code", input_tokens=500, output_tokens=500,
         )
-        result = await get_realized_savings(period="all", platform="all")
+        # T-05: pytest stamps these rows synthetic; the hatch reads them back.
+        result = await get_realized_savings(period="all", platform="all", include_simulated=True)
         assert "by_platform" in result
         bp = result["by_platform"]
         assert set(bp.keys()) == {"claude", "codex", "gemini"}
@@ -660,7 +669,8 @@ class TestTriPlatformRealizedSavings:
             "gemini-2.0-flash", tokens_used=0, complexity="complex",
             task_type="code", input_tokens=500, output_tokens=500,
         )
-        result = await get_realized_savings(period="all", platform="gemini")
+        # T-05: pytest stamps this row synthetic; the hatch reads it back.
+        result = await get_realized_savings(period="all", platform="gemini", include_simulated=True)
         assert "by_platform" not in result
         assert result["gross_saved_usd"] > 0
 

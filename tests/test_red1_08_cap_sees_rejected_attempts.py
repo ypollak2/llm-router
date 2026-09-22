@@ -41,6 +41,9 @@ async def _seed_usage_winner(db_path, cost_usd, task_type="code"):
         cost_usd=cost_usd, latency_ms=12.0, provider="openai",
     )
     await cost.log_usage(resp, TaskType(task_type), RoutingProfile.BALANCED)
+    # T-05: pytest stamps these rows synthetic, so the reader excludes them.
+    # `include_simulated=True` is the documented way to read back rows the
+    # test wrote itself.
 
 
 def test_rejected_paid_attempt_counts_toward_daily_spend(isolated_db, monkeypatch):
@@ -62,8 +65,8 @@ def test_rejected_paid_attempt_counts_toward_daily_spend(isolated_db, monkeypatc
             provider="ollama", model="ollama/x",
             measured_cost_usd=0.10, rejected=False, accepted=True,
         ))
-        total = await cost.get_daily_spend()
-        by_task = await cost.get_daily_spend_by_task_type("code")
+        total = await cost.get_daily_spend(include_simulated=True)
+        by_task = await cost.get_daily_spend_by_task_type("code", include_simulated=True)
         return total, by_task
 
     total, by_task = asyncio.run(go())
@@ -78,7 +81,7 @@ def test_no_rejected_attempts_is_unchanged(isolated_db):
 
     async def go():
         await _seed_usage_winner(isolated_db, 0.20, "query")
-        return await cost.get_daily_spend()
+        return await cost.get_daily_spend(include_simulated=True)
 
     total = asyncio.run(go())
     assert abs(total - 0.20) < 1e-9, f"with no rejected attempts, spend must equal usage: {total}"
@@ -96,7 +99,7 @@ def test_monthly_spend_also_counts_rejected_attempts(isolated_db, monkeypatch):
             provider="openai", model="openai/gpt-4o",
             measured_cost_usd=50.0, rejected=True, accepted=False,
         ))
-        return await cost.get_daily_spend(), await cost.get_monthly_spend()
+        return await cost.get_daily_spend(include_simulated=True), await cost.get_monthly_spend(include_simulated=True)
 
     daily, monthly = asyncio.run(go())
     # Both ceilings must see the $50 rejected attempt (+ $0.10 winner).

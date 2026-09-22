@@ -109,7 +109,8 @@ class TestSavingsStatsHostColumn:
         imported = await cost.import_savings_log()
         assert imported == 3
 
-        summary = await cost.get_lifetime_savings_summary(days=0)
+        # T-05: pytest stamps these rows synthetic; the hatch reads them back.
+        summary = await cost.get_lifetime_savings_summary(days=0, include_simulated=True)
         assert summary["tasks_routed"] == 3
 
 
@@ -193,7 +194,8 @@ class TestLlmAutoSavingsEnvelope:
             )
 
         from llm_router.cost import get_lifetime_savings_summary
-        summary = await get_lifetime_savings_summary(days=0)
+        # T-05: pytest stamps these rows synthetic; the hatch reads them back.
+        summary = await get_lifetime_savings_summary(days=0, include_simulated=True)
         assert summary["tasks_routed"] == 5
         # 5 % 5 == 0, so a savings message would be shown
 
@@ -204,7 +206,8 @@ class TestLlmAutoSavingsEnvelope:
             await cost.log_savings("query", 0.03, 0.001, "flash", f"s{i}")
 
         from llm_router.cost import get_lifetime_savings_summary
-        summary = await get_lifetime_savings_summary(days=0)
+        # T-05: pytest stamps these rows synthetic; the hatch reads them back.
+        summary = await get_lifetime_savings_summary(days=0, include_simulated=True)
         assert summary["tasks_routed"] % 5 != 0
 
 

@@ -56,7 +56,8 @@ async def test_by_model_excludes_rows_where_the_classifier_never_ran(temp_db):
         success=True, input_tokens=62, output_tokens=164, cost_usd=0.000108, latency_ms=9.0,
     )
 
-    report = await cost.get_quality_report(days=7)
+    # T-05: pytest stamps these rows provenance="test"; the hatch reads them back.
+    report = await cost.get_quality_report(days=7, include_synthetic=True)
 
     assert "hermes3:8b" in report["by_model"], "an attributed decision vanished"
     assert "openai/gpt-4o-mini" not in report["by_model"], (
@@ -77,7 +78,8 @@ async def test_unattributed_rows_are_surfaced_not_hidden(temp_db):
         success=True, input_tokens=62, output_tokens=164, cost_usd=0.000108, latency_ms=9.0,
     )
 
-    report = await cost.get_quality_report(days=7)
+    # T-05: pytest stamps this row provenance="test"; the hatch reads it back.
+    report = await cost.get_quality_report(days=7, include_synthetic=True)
 
     assert report["unattributed_decisions"] == 1
     assert "openai/gpt-4o-mini" in report["unattributed_by_model"]
@@ -98,7 +100,8 @@ async def test_totals_still_account_for_every_row(temp_db):
             success=True, input_tokens=10, output_tokens=10, cost_usd=0.0, latency_ms=1.0,
         )
 
-    report = await cost.get_quality_report(days=7)
+    # T-05: pytest stamps these rows provenance="test"; the hatch reads them back.
+    report = await cost.get_quality_report(days=7, include_synthetic=True)
 
     assert (
         report["attributed_decisions"] + report["unattributed_decisions"]

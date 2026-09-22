@@ -26,13 +26,55 @@ CREATE TABLE IF NOT EXISTS savings_stats (
     model_used TEXT NOT NULL,
     host TEXT NOT NULL DEFAULT 'claude_code',
     input_tokens INTEGER NOT NULL DEFAULT 0,
-    output_tokens INTEGER NOT NULL DEFAULT 0
+    output_tokens INTEGER NOT NULL DEFAULT 0,
+    -- T-05. NO DEFAULT, matching cost.py's migration: a pre-existing row's
+    -- provenance was never measured, and `DEFAULT 0` would assert that it was
+    -- production.
+    --
+    -- This module creates the table itself on a fresh DB, so the column has to
+    -- be here as well as in the migration. It was missed on the first pass, and
+    -- the consequence was not a visible error: `_default_recorder` is
+    -- deliberately fail-open, so `table savings_stats has no column named
+    -- is_simulated` went straight into `except: pass` and EVERY agentic
+    -- delegation savings row was silently dropped on any fresh install.
+    is_simulated INTEGER
 )
 """
 
 
+def _detect_synthetic() -> bool:
+    """Is this process writing test data? Delegates to the canonical detector.
+
+    T-05. Local to this module because it runs in contexts where importing the
+    full cost module is not guaranteed; the ANSWER still comes from
+    `routing_quality.detect_synthetic`, never from a second copy of the rules.
+    Fail-closed: if the detector cannot be reached we cannot certify the row as
+    production, so it is stamped synthetic rather than counted as real money.
+    """
+    try:
+        from llm_router.routing_quality import detect_synthetic
+        return bool(detect_synthetic())
+    except Exception:  # noqa: BLE001
+        return True
+
+
 def _db_path() -> Path:
-    return Path(os.environ.get("LLM_ROUTER_DB_PATH") or (Path(os.path.expanduser("~")) / ".llm-router" / "usage.db"))
+    """The usage ledger, resolved on every call through the canonical resolver.
+
+    This composed `~/.llm-router/usage.db` directly and so did NOT honour
+    `LLM_ROUTER_HOME`. A test or probe that believed it was sandboxed wrote a
+    savings row into the operator's real ledger — which is exactly the incident
+    recorded in `evidence/AUDITOR_INCIDENT.md`, and it happened again here while
+    verifying this very module (a fake $1.25 row, stamped `is_simulated=0`,
+    landed in the live DB and had to be deleted by hand).
+
+    `LLM_ROUTER_DB_PATH` is still honoured first for the callers that set it.
+    """
+    override = (os.environ.get("LLM_ROUTER_DB_PATH") or "").strip()
+    if override:
+        return Path(override)
+    from llm_router import paths
+    return paths.state_path("usage.db")
 
 
 def savings_payload(
@@ -59,9 +101,12 @@ async def _default_recorder(payload: dict[str, Any]) -> None:
         try:
             conn.execute(_SAVINGS_DDL)
             conn.execute(
+                # T-05: provenance stamped at write time. Without it this row
+                # lands NULL and silently leaves every savings figure.
                 "INSERT INTO savings_stats "
                 "(timestamp, session_id, task_type, estimated_claude_cost_saved, "
-                " external_cost, model_used, host) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                " external_cost, model_used, host, is_simulated) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     time.strftime("%Y-%m-%d %H:%M:%S"),
                     payload.get("session_id", ""),
@@ -70,13 +115,22 @@ async def _default_recorder(payload: dict[str, Any]) -> None:
                     payload.get("actual_usd", 0.0),
                     payload.get("model", "llm_router-agentic-router"),
                     "claude_code",
+                    1 if _detect_synthetic() else 0,
                 ),
             )
             conn.commit()
         finally:
             conn.close()
-    except Exception:  # noqa: S110, BLE001 — telemetry is fail-open; must never break a delegation
-        pass
+    except Exception as _exc:  # noqa: BLE001 — telemetry is fail-open; must never break a delegation
+        # T-14: still fail-open, but no longer SILENT. A failed write here loses
+        # an agentic delegation's savings row and reported nothing: no error, no log, no counter. 92
+        # persistence sites had this shape; this is one of the ones that loses
+        # data a user would notice missing.
+        try:
+            from llm_router import failopen as _fo
+            _fo.record("CHZ-FO-AGENTIC-TELEMETRY-WRITE", _exc)
+        except Exception:  # noqa: BLE001
+            pass
 
 
 async def record_delegation_savings(

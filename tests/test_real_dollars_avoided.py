@@ -95,7 +95,8 @@ async def test_team_savings_real_zero_on_subscription(temp_db, monkeypatch):
                        output_tokens=2000, cost_usd=0.0, latency_ms=10, provider="ollama")
     await cost.log_usage(free, TaskType.QUERY, RoutingProfile.BUDGET)
 
-    data = await cost.get_team_savings(period="week")
+    # T-05: pytest stamps this row synthetic; the hatch reads it back.
+    data = await cost.get_team_savings(period="week", include_simulated=True)
     assert data["baseline_equivalent_avoided_usd"] > 0.0        # counterfactual is real
     assert data["real_dollars_avoided_usd"] == 0.0             # but no cash on subscription
     assert data["saved_usd"] == data["baseline_equivalent_avoided_usd"]  # back-compat alias
@@ -109,5 +110,6 @@ async def test_team_savings_real_positive_when_metered(temp_db, monkeypatch):
                        output_tokens=2000, cost_usd=0.0, latency_ms=10, provider="ollama")
     await cost.log_usage(free, TaskType.QUERY, RoutingProfile.BUDGET)
 
-    data = await cost.get_team_savings(period="week")
+    # T-05: pytest stamps this row synthetic; the hatch reads it back.
+    data = await cost.get_team_savings(period="week", include_simulated=True)
     assert data["real_dollars_avoided_usd"] == data["baseline_equivalent_avoided_usd"] > 0.0

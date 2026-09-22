@@ -39,7 +39,8 @@ async def _log_decision(prompt: str = "test prompt", **overrides) -> None:
 async def test_log_routing_decision_persists(temp_db):
     """A logged decision should be retrievable via quality report."""
     await _log_decision()
-    report = await cost.get_quality_report(days=7)
+    # T-05: pytest stamps this row provenance="test"; the hatch reads it back.
+    report = await cost.get_quality_report(days=7, include_synthetic=True)
     assert report["total_decisions"] == 1
     assert report["success_rate"] == 1.0
 
@@ -61,7 +62,8 @@ async def test_quality_report_by_classifier(temp_db):
     await _log_decision(prompt="b", classifier_type="heuristic")
     await _log_decision(prompt="c", classifier_type="ollama")
 
-    report = await cost.get_quality_report(days=7)
+    # T-05: pytest stamps these rows provenance="test"; the hatch reads them back.
+    report = await cost.get_quality_report(days=7, include_synthetic=True)
     assert report["by_classifier"]["heuristic"] == 2
     assert report["by_classifier"]["ollama"] == 1
 
@@ -73,7 +75,8 @@ async def test_quality_report_by_task_type(temp_db):
     await _log_decision(prompt="b", task_type="code")
     await _log_decision(prompt="c", task_type="code")
 
-    report = await cost.get_quality_report(days=7)
+    # T-05: pytest stamps these rows provenance="test"; the hatch reads them back.
+    report = await cost.get_quality_report(days=7, include_synthetic=True)
     assert report["by_task_type"]["code"] == 2
     assert report["by_task_type"]["query"] == 1
 
@@ -85,7 +88,8 @@ async def test_quality_report_by_model(temp_db):
     await _log_decision(prompt="b", final_model="openai/gpt-4o", cost_usd=0.02, latency_ms=300)
     await _log_decision(prompt="c", final_model="gemini/flash", cost_usd=0.001, latency_ms=100)
 
-    report = await cost.get_quality_report(days=7)
+    # T-05: pytest stamps these rows provenance="test"; the hatch reads them back.
+    report = await cost.get_quality_report(days=7, include_synthetic=True)
     gpt = report["by_model"]["openai/gpt-4o"]
     assert gpt["count"] == 2
     assert gpt["total_cost"] == pytest.approx(0.03)
@@ -98,7 +102,8 @@ async def test_quality_report_downshift_rate(temp_db):
     await _log_decision(prompt="a", was_downshifted=True)
     await _log_decision(prompt="b", was_downshifted=False)
 
-    report = await cost.get_quality_report(days=7)
+    # T-05: pytest stamps these rows provenance="test"; the hatch reads them back.
+    report = await cost.get_quality_report(days=7, include_synthetic=True)
     assert report["downshift_rate"] == pytest.approx(0.5)
 
 
@@ -114,7 +119,8 @@ async def test_quality_report_aggregates(temp_db):
         cost_usd=0.02, latency_ms=400, classifier_confidence=1.0,
     )
 
-    report = await cost.get_quality_report(days=7)
+    # T-05: pytest stamps these rows provenance="test"; the hatch reads them back.
+    report = await cost.get_quality_report(days=7, include_synthetic=True)
     assert report["total_decisions"] == 2
     assert report["total_cost_usd"] == pytest.approx(0.03)
     assert report["total_tokens"] == 450  # 100+50+200+100
@@ -166,5 +172,8 @@ async def test_get_daily_spend_with_usage(temp_db):
             cost_usd=0.002, latency_ms=100.0, provider="openai",
         )
         await cost.log_usage(resp, TaskType.QUERY, RoutingProfile.BUDGET)
-    spend = await cost.get_daily_spend()
+    # T-05: pytest stamps these rows synthetic, so the reader excludes them.
+    # `include_simulated=True` is the documented way to read back rows the
+    # test wrote itself.
+    spend = await cost.get_daily_spend(include_simulated=True)
     assert spend == pytest.approx(0.006)
