@@ -10,6 +10,102 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 | [CHANGELOG-ARCHIVE.md](CHANGELOG-ARCHIVE.md) | v10.1.5 back to v6.3.0 |
 | [GitHub Releases](https://github.com/ypollak2/llm-router/releases) | v6.2 and earlier |
 
+## [15.0.0] - 2026-09-22
+
+Remediation of the 2026-09-22 adversarial audit. Security fixes that need no
+attacker and no unusual input, money figures that now mean what they say, and
+the instrumentation that makes the next audit cheaper.
+
+### Why this is a MAJOR version
+
+Three user-visible behaviours change, and one of them will look like a
+regression until you read the reason.
+
+**Your reported savings will DROP, possibly to near zero.** Money surfaces now
+exclude rows whose provenance was never measured, fail-closed
+(`COALESCE(is_simulated, 1) = 0`). A row written before provenance existed was
+never certified as production, and counting it asserts that it was on no
+evidence. On the development machine this took the counted set from 285 rows
+to 23. **Nothing was lost and no routing got worse** — the old number included
+rows nobody could vouch for. `llm-router doctor --audit` prints the split so
+you can see exactly how many rows are excluded and why. New rows carry
+provenance from the moment they are written.
+
+**Savings can now be NEGATIVE.** Ten clamped subtractions were removed,
+including one in the shareable savings card and one in the web dashboard's
+headline tile. Routing that cost more than the baseline now renders as a loss.
+The clamp is precisely what stopped anyone finding out.
+
+**The gateway now refuses requests it used to answer.** `/v1/responses`,
+`/api/chat` and `/api/generate` return 400 for a request carrying `tools` or
+`tool_choice`, matching `/v1/chat/completions` and `/v1/messages`. Previously
+they discarded the tool definitions and returned fluent prose with
+`finish_reason: "stop"` — a well-formed answer to a question the client had not
+asked. If you were relying on that 200, you were getting the wrong answer.
+
+### Security
+
+- **Credentials no longer reach disk in the clear.** `attempt_log` is written
+  through the canonical scrubber and created at `0600` rather than
+  `0644`-then-chmod. Measured against the previous code, a GitHub PAT, an AWS
+  key id, an AWS secret, a Slack token and a bearer token all landed intact in
+  a world-readable file. Existing files are repaired on next write.
+  **Truncation is not redaction** — `reason[:80]` previously shortened a
+  100-character key enough to defeat an exact-match search while leaving 80
+  characters on disk.
+- **Nothing leaves the machine unscrubbed.** `alerts.emit_alert` POSTs its
+  detail dict to a webhook; a live capture carried a Postgres DSN with a
+  plaintext password off the host. Scrubbed at one chokepoint, with a new
+  pattern covering `postgres`/`mysql`/`mongodb`/`redis` URLs that preserves
+  host and port so the alert stays actionable.
+- **A model-chosen command no longer inherits your environment.**
+  `agent_loop.run_command` and `tools/local_task` now use an env ALLOWLIST. A
+  denylist strips only names it knows; an allowlist carries nothing that was
+  not named.
+- **SECURITY.md stops calling the allowlist a security control.** It is a
+  typo-and-footgun guardrail. 10 of its 28 permitted programs are
+  general-purpose interpreters and each is a complete bypass: `cat
+  ../../.ssh/id_rsa` is refused, `python3 -c` reading the same file is not.
+  Use OS-level containment for untrusted repositories.
+
+### Added
+
+- `llm-router doctor --audit` — every instrumentation counter, the canonical
+  savings figure with its baseline and denominator, the provenance split, and
+  the Ground Truth scope.
+- **Ground Truth consent.** Capture is on after an explicit prompt at install
+  and stays OFF in a non-interactive install — CI cannot agree to anything.
+  Revocation is `llm-router gt-consent --revoke` and is recorded as a refusal
+  rather than a deletion.
+- `hook_liveness` — a killed hook is now distinguishable from one that chose
+  not to route, via a marker that outlives the process.
+
+### Fixed
+
+- **`attempt_log` rotation erased concurrent records** — 0.6–5.3% loss under 8
+  processes, silently, in valid JSONL.
+- **A censored or truncated answer counted as a routing win.** `LLMResponse`
+  had no `finish_reason` field at all, so a `content_filter` stop returned
+  fluent partial text that passed the bandit's success check.
+- **Verifier validation accepted worthless verifiers.** `len(answer) > 5`
+  reached HIGH confidence with a 0% real kill rate.
+
+### Known and stated, rather than fixed
+
+- **"Routing preserves task success" is UNPROVEN.** The only mechanism that
+  could measure it was off by default, so there is no dataset, and neither
+  downgrade-regret nor upgrade-waste is computed anywhere. Recorded in the
+  machine-checked claims ledger; it fails CI if anyone marks it proven without
+  evidence.
+- **17 of 20 savings surfaces still compute their own figure.** All are
+  individually named with their exact divergence, and a 21st cannot be added
+  without joining the registry.
+- **Word order changes the route.** `what is 17 * 3?` classifies as `query`;
+  `tell me what 17 * 3 is` falls through to `analyze` — the more expensive
+  tier. Found by the new adversarial corpus and carried as a strict xfail.
+- **Ground Truth covers state-free prompts only**, because no replayer exists
+  for repo-bound tasks.
+
 ## [14.1.0] - 2026-09-21
 
 Ground Truth accumulation: normal routing now produces replayable, verifiable
