@@ -17,8 +17,9 @@ from llm_router.storage.models import AuditEvent, Budget, ConfigSnapshot
 from llm_router.storage.routing.validators import (
     classify_event_severity,
     validate_budget_before_write,
-    validate_config_migration_path,
 )
+
+from llm_router import paths
 
 
 class StorageService:
@@ -36,7 +37,7 @@ class StorageService:
         Args:
             router_dir: Override ~/.llm-router directory (for testing)
         """
-        self._router_dir = router_dir or (Path.home() / ".llm-router")
+        self._router_dir = router_dir or (paths.llm_router_home())
         self._router_dir.mkdir(parents=True, exist_ok=True)
 
         # Initialize adapters
@@ -233,56 +234,6 @@ class StorageService:
         return ConfigSnapshot(
             version=data.get("version", 1),
             data={k: v for k, v in data.items() if k != "version"},
-            updated_at=time.time(),
-        )
-
-    def migrate_config(self, target_version: int) -> ConfigSnapshot:
-        """Migrate config to new version.
-
-        Integrates Routing Point 3.3: Compatibility validation via llm_query.
-
-        Args:
-            target_version: Target version number
-
-        Returns:
-            ConfigSnapshot after migration
-
-        Raises:
-            ValueError: If migration is unsafe
-        """
-        current = self.read_config()
-
-        if current.version == target_version:
-            return current  # Already at target
-
-        # Routing Point 3.3: Validate migration
-        try:
-            old_keys = set(current.data.keys())
-            # TODO: Define target schema (mocked here)
-            new_keys = set(current.data.keys()) | {"new_field_v3"}
-
-            can_migrate, reasoning = asyncio.run(
-                validate_config_migration_path(
-                    old_version=current.version,
-                    new_version=target_version,
-                    old_keys=old_keys,
-                    new_keys=new_keys,
-                )
-            )
-            if not can_migrate:
-                raise ValueError(f"Migration validation failed: {reasoning}")
-        except Exception as e:
-            if "validation failed" in str(e):
-                raise
-            # Graceful degradation: allow migration if routing unavailable
-
-        # Perform migration (add new fields, preserve old)
-        migrated_data = {**current.data, "version": target_version}
-        self._config_adapter.write(migrated_data, atomic=True)
-
-        return ConfigSnapshot(
-            version=target_version,
-            data={k: v for k, v in migrated_data.items() if k != "version"},
             updated_at=time.time(),
         )
 

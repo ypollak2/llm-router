@@ -1207,6 +1207,8 @@ dependencies = [
     { name = "mcp" },
     { name = "pydantic" },
     { name = "pydantic-settings" },
+    { name = "requests" },
+    { name = "rich" },
     { name = "structlog" },
     { name = "uvicorn" },
 ]
@@ -1266,6 +1268,8 @@ requires-dist = [
     { name = "pytest-timeout", marker = "extra == 'test'", specifier = ">=2.3" },
     { name = "pytest-xdist", marker = "extra == 'dev'", specifier = ">=3.5" },
     { name = "pyyaml", marker = "extra == 'scripts'", specifier = ">=6.0" },
+    { name = "requests", specifier = ">=2.31.0" },
+    { name = "rich", specifier = ">=13.0.0" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.4" },
     { name = "structlog", specifier = ">=24.4.0" },
     { name = "textual", marker = "extra == 'tui'", specifier = ">=0.80.0" },

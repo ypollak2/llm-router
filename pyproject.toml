@@ -38,6 +38,16 @@ dependencies = [
     "structlog>=24.4.0",
     "fastapi>=0.100.0",
     "uvicorn>=0.24.0",
+    # M-11. `llm-router status` -- the flagship savings command -- is
+    # `commands/status.py` -> `ui/status_premium.py` -> `rich`, so a clean
+    # `pip install llm-routing` crashed with ModuleNotFoundError on the first
+    # command most people run. Eight modules import it, including the
+    # session-end summary. Guarded by tests/test_m11_declared_dependencies.py.
+    "rich>=13.0.0",
+    # Same class as rich, found by the gate that rich prompted. `stats.py` and
+    # `local_platforms.py` import it unguarded; it resolved only because litellm
+    # happens to pull it in transitively, which is not a dependency declaration.
+    "requests>=2.31.0",
 ]
 
 [project.optional-dependencies]
@@ -95,6 +105,22 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/llm_router"]
+# M-10. These two modules do `from llm_router.control_plane import audit`
+# unconditionally, and `control_plane/audit.py` has never existed in this
+# repository -- so they shipped in a state where importing them raises
+# ImportError, for every installed user, on every version.
+#
+# Nothing in `src/` imports either of them, so excluding them removes no
+# functionality. The alternative was writing the missing audit module, which is
+# feature work, not remediation; stubbing the import was never an option,
+# because a stub would silently disable audit logging in a control plane, which
+# is the opposite of what an audit module is for.
+#
+# Guarded by tests/test_shipped_modules_import.py.
+exclude = [
+    "src/llm_router/control_plane/api.py",
+    "src/llm_router/control_plane/reconciliation.py",
+]
 
 [tool.hatch.build.targets.sdist]
 # Only ship: src/, pyproject.toml, LICENSE, README.md, CHANGELOG.md,

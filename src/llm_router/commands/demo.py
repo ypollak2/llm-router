@@ -6,6 +6,8 @@ import os
 import sqlite3
 import sys
 
+from llm_router import paths
+
 
 # ── ANSI helpers (respect NO_COLOR / non-tty) ─────────────────────────────────
 
@@ -92,7 +94,7 @@ def _load_real_routing_history(db_path: str, limit: int = 8) -> list[tuple]:
 def _run_demo() -> None:
     """Show routing decisions — real history if available, examples otherwise."""
 
-    db_path = os.path.expanduser("~/.llm-router/usage.db")
+    db_path = str(paths.state_path("usage.db"))
     real_rows = _load_real_routing_history(db_path)
     using_real = bool(real_rows)
 
@@ -195,5 +197,5 @@ def _run_demo() -> None:
             print(f"    {_yellow('→')} Set {_bold('LLM_ROUTER_CLAUDE_SUBSCRIPTION=true')} to use subscription models")
     else:
         print(f"\n  {_yellow('Your routing history:')}")
-    print(f"  {_yellow('→')} Check savings: {_bold('llm_router gain')}")
+    print(f"  {_yellow('→')} Check savings: {_bold('llm-router gain')}")
     print(f"  {_yellow('→')} View dashboard: {_bold('llm-router dashboard')}\n")

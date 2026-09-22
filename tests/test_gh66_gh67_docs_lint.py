@@ -76,6 +76,14 @@ _EXCLUDED_FILES = {
     # (e.g. `llm_router install` from cli.py's --help) in its findings table.
     # Sanitising the quotes would destroy the report's value as a record.
     _REPO_ROOT / "docs" / "AUDIT_2026-08-30.md",
+    # Same category again, and it surfaced in an instructive way. This lint
+    # builds its pattern from `_KNOWN_SUBCOMMANDS`, so the day `gain` was
+    # actually registered in the CLI (M-12 — `commands/gain.py` was a complete
+    # implementation that had never been wired up), the lint could suddenly SEE
+    # `llm_router gain` in a research record that had been quoting it as a
+    # defect since August. The report is right, the lint is right about the
+    # string, and rewriting the quotes would destroy the record.
+    _REPO_ROOT / "docs" / "RESEARCH_FIRSTRUN.md",
 }
 # A design proposal names the configuration it would ADD
 # (LLM_ROUTER_EXECUTION_MODE, LLM_ROUTER_LOCAL_TASK_BUDGET_S, ...). Those

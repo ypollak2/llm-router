@@ -50,6 +50,7 @@ Usage:
     llm-router verify                — end-to-end health check (30 seconds)
     llm-router gc [--ttl-days N] [--apply] — sweep stale session shards from ~/.llm-router (dry-run by default)
     llm-router soak [--use-gold-complexity] [--full] [--out PATH] — replay the realized-savings soak corpus and write soak/report.json
+    llm-router gain [today|week|month|all] — token-savings analytics for a period
 """
 
 from __future__ import annotations
@@ -58,6 +59,8 @@ import json
 import sys
 from pathlib import Path
 from llm_router.tool_surface import localize# CHZ-SURF-01
+
+from llm_router import paths
 
 
 # ── Helper functions: JSON MCP config management ────────────────────────────────
@@ -728,7 +731,7 @@ def isolation_test_command() -> None:
         # Run via bash script if available
         result = subprocess.run(
             ["bash", str(script_path)] + sys.argv[1:],
-            cwd=Path.home() / ".llm-router"
+            cwd=paths.llm_router_home()
         )
         sys.exit(result.returncode)
 
@@ -756,7 +759,7 @@ def isolation_test_command() -> None:
 def _make_output_encoding_safe() -> None:
     """Stop the CLI dying on Windows because its own output has emoji in it.
 
-    CHZ-WIN-01. `llm_router doctor` prints ✓ / ✗ / ⚡ / 💰. On Windows the console
+    CHZ-WIN-01. `llm-router doctor` prints ✓ / ✗ / ⚡ / 💰. On Windows the console
     default is cp1252, which cannot encode any of them, so the first status glyph
     raises UnicodeEncodeError and the command exits non-zero with a traceback —
     on a machine where nothing is actually wrong.
@@ -832,6 +835,7 @@ _KNOWN_SUBCOMMANDS = frozenset(
         "replay",
         "gc",
         "soak",
+        "gain",
         "retrospect",
         "snapshot",
         "stats",
@@ -1076,6 +1080,20 @@ def main() -> None:
     elif args and args[0] == "soak":
         from llm_router.commands.soak import cmd_soak
         sys.exit(cmd_soak(args[1:]))
+    elif args and args[0] == "gain":
+        # M-12. `commands/gain.py` has been a complete implementation
+        # (`show_gain`) the whole time and was never wired to the CLI, while
+        # `commands/demo.py` told users to run it. A command that is advertised
+        # and unreachable is worse than one that does not exist: the user
+        # concludes the tool is broken rather than that the docs are.
+        from llm_router.commands.gain import show_gain
+        _period = args[1] if len(args) > 1 and not args[1].startswith("-") else "week"
+        if _period not in ("today", "week", "month", "all"):
+            print(f"unknown period {_period!r}; expected today|week|month|all",
+                  file=sys.stderr)
+            sys.exit(2)
+        print(show_gain(_period))
+        sys.exit(0)
     elif args and args[0] == "retrospect":
         from llm_router.commands.retrospect import main as _retrospect_main
         _retrospect_main(args[1:])

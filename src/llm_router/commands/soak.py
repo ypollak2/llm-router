@@ -1,4 +1,4 @@
-"""``llm_router soak`` -- Phase 0 Step 8 CLI: run the realized-savings soak
+"""``llm-router soak`` -- Phase 0 Step 8 CLI: run the realized-savings soak
 corpus end-to-end and write ``soak/report.json``.
 
 Thin wrapper around ``soak.report.run_soak_n`` + ``write_report``. All the
@@ -36,12 +36,49 @@ import asyncio
 import sys
 from pathlib import Path
 
-from soak.report import DEFAULT_N_SOAK_RUNS, DEFAULT_REPORT_PATH, run_soak_n, write_report
+# M-11b. This was a module-level `from soak.report import ...`, and `soak` is
+# `tests/soak` -- present only when running from a source checkout with tests/ on
+# sys.path. `tests/` is not in the wheel (`packages = ["src/llm_router"]`), so
+# `llm-router soak` raised a raw ModuleNotFoundError traceback for every
+# installed user, while every test run passed because pytest puts tests/ on the
+# path. That is exactly why it survived: the one environment that exercises this
+# module is the one environment where the import works.
+#
+# `llm-router soak` is advertised in the CLI help, so it must fail
+# comprehensibly rather than crash. Imported lazily, inside the command.
+
+
+_SOAK_UNAVAILABLE = (
+    "`llm-router soak` replays the realized-savings corpus, which lives in the "
+    "repository's test tree and is not shipped in the installed package.\n"
+    "Run it from a source checkout:\n"
+    "    git clone https://github.com/ypollak2/llm-router && cd llm-router\n"
+    "    uv run llm-router soak"
+)
+
+
+def _load_soak_report():
+    """Import the soak harness, or explain why it is not there."""
+    try:
+        from soak.report import (  # noqa: PLC0415
+            DEFAULT_N_SOAK_RUNS, DEFAULT_REPORT_PATH, run_soak_n, write_report,
+        )
+    except ModuleNotFoundError as exc:
+        if exc.name and exc.name.split(".")[0] != "soak":
+            raise
+        return None
+    return DEFAULT_N_SOAK_RUNS, DEFAULT_REPORT_PATH, run_soak_n, write_report
 
 __all__ = ["cmd_soak"]
 
 
 def cmd_soak(args: list[str]) -> int:
+    _loaded = _load_soak_report()
+    if _loaded is None:
+        print(_SOAK_UNAVAILABLE, file=sys.stderr)
+        return 2
+    DEFAULT_N_SOAK_RUNS, DEFAULT_REPORT_PATH, run_soak_n, write_report = _loaded
+
     parser = argparse.ArgumentParser(prog="llm-router soak")
     parser.add_argument(
         "--use-gold-complexity",

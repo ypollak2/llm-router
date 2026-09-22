@@ -8,6 +8,8 @@ from typing import Optional
 from llm_router.terminal_style import Color
 from llm_router.tool_surface import route_tool  # CHZ-SURF-01: never print a raw tool name
 
+from llm_router import paths
+
 
 def bold(text: str) -> str:
     """Make text bold with color."""
@@ -85,7 +87,7 @@ class SavingsAnalytics:
     """Compute and display token savings metrics."""
 
     def __init__(self, db_path: Optional[Path] = None):
-        self.db_path = db_path or Path.home() / ".llm-router" / "usage.db"
+        self.db_path = db_path or paths.state_path("usage.db")
 
     def get_routing_decisions(self, days: int = 7) -> list[dict]:
         """Fetch routing decisions from the last N days."""

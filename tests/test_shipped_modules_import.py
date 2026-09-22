@@ -34,11 +34,21 @@ OPTIONAL = {
 
 # Shipped but un-importable, with the reason. Lower this list; never extend it
 # without recording why the module ships in a state where it cannot be used.
-KNOWN_BROKEN = {
+# M-10, resolved 2026-09-22: both are now EXCLUDED FROM THE WHEEL
+# (`[tool.hatch.build.targets.wheel] exclude`), so they are no longer shipped in
+# a state where they cannot be imported. They remain in the source tree for
+# whoever writes `control_plane/audit.py`, and nothing in `src/` imports them.
+#
+# They still fail to import from a source checkout, which is correct and is not
+# what this test is for: the invariant is "every SHIPPED module imports".
+KNOWN_BROKEN: dict[str, str] = {}
+
+#: Present in src/ but deliberately not packaged. Each needs a reason.
+NOT_SHIPPED = {
     "llm_router.control_plane.api":
-        "imports control_plane.audit, the enterprise module excluded downstream",
+        "M-10 — needs control_plane/audit.py, which has never existed",
     "llm_router.control_plane.reconciliation":
-        "same",
+        "M-10 — same",
 }
 
 
@@ -59,9 +69,14 @@ def _import_failures() -> dict[str, str]:
 
 def test_no_new_module_fails_to_import():
     failures = _import_failures()
+    # NOT_SHIPPED modules are excluded from the wheel, so they are outside this
+    # invariant by construction: "every SHIPPED module imports". They still fail
+    # from a source checkout, which is correct and is the reason they are not
+    # packaged. `test_unshipped_modules_are_actually_excluded_from_the_wheel`
+    # keeps that claim honest.
     unexpected = {
         n: e for n, e in failures.items()
-        if n not in KNOWN_BROKEN and not any(
+        if n not in KNOWN_BROKEN and n not in NOT_SHIPPED and not any(
             dep in e for dep in OPTIONAL.values())
     }
     assert not unexpected, (
@@ -94,3 +109,28 @@ def test_optional_extras_fail_only_on_their_own_dependency(mod, dep):
         )
     except Exception:
         pass
+
+
+def test_unshipped_modules_are_actually_excluded_from_the_wheel():
+    """A module listed as not-shipped must really be excluded.
+
+    Otherwise this list becomes a comfortable fiction: the modules keep going
+    out in the wheel, and the record says they do not.
+    """
+    import pathlib as _pl
+    import tomllib
+
+    root = _pl.Path(__file__).resolve().parents[1]
+    cfg = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
+    excluded = set(
+        cfg.get("tool", {}).get("hatch", {}).get("build", {})
+        .get("targets", {}).get("wheel", {}).get("exclude", [])
+    )
+    missing = []
+    for dotted in NOT_SHIPPED:
+        rel = "src/" + dotted.replace(".", "/") + ".py"
+        if rel not in excluded:
+            missing.append(rel)
+    assert not missing, (
+        f"listed as not shipped but still packaged: {missing}"
+    )

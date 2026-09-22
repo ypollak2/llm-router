@@ -21,8 +21,8 @@
   as an unverified hint, and Claude decides whether to use it. A draft being produced does
   <i>not</i> by itself mean a Claude turn was skipped or quota was saved — Claude still takes the
   turn. Only the explicit turn-replacement modes (<code>LLM_ROUTER_ZERO_CLAUDE=1</code>) substitute
-  the routed answer outright. Measured on 105 real prompts from this author's own sessions,
-  76% produced a draft and 72% produced one worth relaying.</sub>
+  the routed answer outright. Draft-rate and acceptance figures for this mode are reported in
+  <a href="docs/MEASUREMENT.md">docs/MEASUREMENT.md</a> with their n, window and conditions.</sub>
 </p>
 
 <p align="center">
@@ -186,7 +186,7 @@ Works with **zero API keys** on Claude Code Pro/Max subscriptions — routing us
 ### 3. Verify
 
 ```bash
-llm-router health            # Check provider connectivity
+llm-router doctor            # Check provider connectivity and diagnose setup
 ```
 
 If you already use Claude Code, Codex, or Gemini CLI, keep your existing workflow and let `llm-router` choose models underneath it.
@@ -309,9 +309,9 @@ Beyond "send cheap prompts to cheap models":
 
 ```bash
 llm-router install      # wire up your host (Claude Code by default)
-llm-router health       # provider connectivity
 llm-router status       # savings + quota at a glance
-llm-router doctor       # diagnose a broken setup
+llm-router gain         # token-savings analytics by period
+llm-router doctor       # provider connectivity and setup diagnosis
 
 llm-router okf index    # index this repo so routed models can see your code
 llm-router okf status   # what is in the knowledge store, per project
@@ -341,8 +341,10 @@ Every provider, its models, cost tier and env var: **[guide/PROVIDERS.md](guide/
 ## Routing Policies
 
 A policy sets how eagerly the router routes away from your premium model —
-`conservative` (10–15% savings) through `balanced` (the default, 35–45%) to
-`cost_aggressive` (70–85%, needs `OPENROUTER_API_KEY`).
+`conservative` (routes only the clearest cases) through `balanced` (the default) to
+`cost_aggressive` (routes most work away from the premium model, needs
+`OPENROUTER_API_KEY`). Run `llm-router summary` to see what your own traffic did —
+the saving depends on your workload, not on the policy alone.
 
 ```bash
 llm-router policy set cost_aggressive
@@ -368,7 +370,7 @@ Every tool with its signature: **[guide/TOOLS.md](guide/TOOLS.md)**
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="assets/readme/savings-dark.svg">
     <source media="(prefers-color-scheme: light)" srcset="assets/readme/savings-light.svg">
-    <img src="assets/readme/savings-light.svg" alt="Animated savings breakdown showing 35-80% observed cost reduction with token distribution across free, budget, and premium tiers." width="100%"/>
+    <img src="assets/readme/savings-light.svg" alt="Animated savings breakdown showing token distribution across free, budget, and premium tiers." width="100%"/>
   </picture>
 </p>
 
