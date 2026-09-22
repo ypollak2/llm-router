@@ -18,22 +18,27 @@ from __future__ import annotations
 import json
 import os
 import secrets
-from pathlib import Path
 
 from llm_router.logging import configure_logging, get_logger
+from llm_router import paths
 from llm_router.paths import private_opener
 
 log = get_logger("llm_router.dashboard")
 
 DEFAULT_PORT = 7337
-_TOKEN_FILE = Path.home() / ".llm-router" / "dashboard.token"
+
+
+def _token_file():
+    # M-04: resolved per call. This held the dashboard AUTH TOKEN at a path
+    # bound at import, so an isolated LLM_ROUTER_HOME could not move it.
+    return paths.state_path("dashboard.token")
 
 
 def _get_or_create_token() -> str:
     """Return the persistent dashboard auth token, creating it on first call."""
-    _TOKEN_FILE.parent.mkdir(parents=True, exist_ok=True)
-    if _TOKEN_FILE.exists():
-        return _TOKEN_FILE.read_text().strip()
+    _token_file().parent.mkdir(parents=True, exist_ok=True)
+    if _token_file().exists():
+        return _token_file().read_text().strip()
     token = secrets.token_urlsafe(32)
     # Created at 0600, not created-then-tightened. `write_text` would make the
     # file with the umask default (0644 typically), put the AUTH TOKEN in it,
@@ -41,9 +46,9 @@ def _get_or_create_token() -> str:
     # keeps a readable handle, since permissions are checked at open time.
     # The chmod stays for files written by older versions, which an opener
     # cannot fix because it only applies on creation.
-    with open(_TOKEN_FILE, "w", encoding="utf-8", opener=private_opener) as fh:
+    with open(_token_file(), "w", encoding="utf-8", opener=private_opener) as fh:
         fh.write(token)
-    os.chmod(_TOKEN_FILE, 0o600)
+    os.chmod(_token_file(), 0o600)
     return token
 
 
@@ -165,7 +170,7 @@ async def _get_stats() -> dict:
     except Exception as exc:
         log.warning("Dashboard DB read failed: %s", exc)
 
-    usage_path = Path.home() / ".llm-router" / "usage.json"
+    usage_path = paths.state_path("usage.json")
     try:
         stats["usage"] = json.loads(usage_path.read_text())
     except Exception:
