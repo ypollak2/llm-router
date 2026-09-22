@@ -31,7 +31,7 @@ red and looks sound.)
 | R9 | `partial` | Hook death visible (start marker + doctor rate) | inject 70s sleep -> doctor reports a kill |
 | R10 | `partial` | Refuse unservable capability (tools/vision/schema/context) | drop refusal from one endpoint -> parametrised test names it |
 | R3 | `done` | SECURITY.md honesty + interpreter corpus | add an interpreter to the allowlist -> corpus test fails |
-| R8 | `todo` | Capture ON behind explicit install consent | consent absent -> capture stays off |
+| R8 | `partial` | Capture ON behind explicit install consent | consent absent -> capture stays off |
 | R16 | `todo` | `capture()` sees cwd/tools, or scope the claim | a repo task reaches a frozen dataset, or docs say it cannot |
 | R17 | `done` | Validator must discriminate | `len(answer)>5` -> capped at LOW |
 | R5 | `todo` | Release the fixed HEAD | remove `rich` -> clean-room job fails |
@@ -759,3 +759,61 @@ by path now.
 
 Both are the recurring lesson in a new place: a test that passes tells you
 nothing until you know WHY it passes.
+
+
+## R8 — capture on, behind explicit consent (PARTIAL — consent done, measurement not)
+
+Decision taken: **(a) default capture ON with explicit consent at install** —
+not the recommended option, chosen deliberately, with the note that the consent
+flow is load-bearing.
+
+The finding was never that capture is dangerous. It was that the product
+CLAIMED to preserve task success while the only mechanism that could measure
+that was off by default, so the claim rested on nothing.
+
+### What was built
+
+`ground_truth_consent` — consent as a recorded event, not a flag:
+
+* **Silence is refusal.** A non-interactive install (CI, a Dockerfile,
+  `yes |` piped into onboarding) records NO consent and capture stays off.
+  Defaulting to on when nobody could answer is consent manufactured by the
+  absence of a human.
+* **The record answers "did anyone actually agree to this?"** — when, which
+  terms version, and what was said. A bare flag cannot, and that is the only
+  question that matters if it turns out they did not.
+* **Terms are versioned.** Changing what is captured changes what was agreed
+  to; prior consent stops matching and the operator is asked again.
+* **Revocation records a refusal rather than deleting the record.** "They said
+  no" and "they were never asked" are different facts.
+* **Unreadable fails closed.** The cost of asking again is a prompt; the cost
+  of assuming yes is capturing someone's prompts without agreement.
+
+Onboarding writes `LLM_ROUTER_GROUND_TRUTH` on BOTH branches, so an existing
+`=1` from a previous install is turned OFF by a later refusal instead of
+silently surviving it. A test asserts the ternary via AST, because writing it
+only in the granted branch is the natural mistake.
+
+**RED-CHECK — three, all fire:** non-interactive defaults to yes -> refused;
+revocation deletes the record -> *"'they said no' and 'they were never asked'
+are different facts"*; the flag written unconditionally as `=1` -> *"not
+written from a conditional expression"*.
+
+### NOT done — acceptance criterion 1
+
+*"a report showing downgrade-regret and upgrade-waste SEPARATELY on >= N real
+tasks, with N stated."*
+
+**Neither metric is computed anywhere in the repo.** `grep -rn "regret\|upgrade_waste"`
+over `src/` and `scripts/groundtruth/` returns only unrelated uses of the word
+"downgrade" (budget pressure, capability downgrade, complexity downgrade). The
+metric R8 names has never existed.
+
+It also cannot be produced today: the dataset it would run over is empty,
+because capture has been off. The consent flow is the precondition, and it is
+now in place — the measurement follows once real captured tasks accumulate.
+
+Recorded here rather than approximated. A regret number computed over a handful
+of tasks would be exactly the kind of figure this audit exists to stop, and
+CLAUDE.md already fixes the rule: below ~50 real prompts, say "too few to tell"
+instead of a number.

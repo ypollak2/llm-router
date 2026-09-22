@@ -128,12 +128,31 @@ def _run_onboard() -> None:
                   "suggest": _yellow("suggest  (hints, no blocking)"),
                   "hard": _green("enforce  (maximum savings)")}.get(enforce, enforce)
 
+    # ── 5b. Ground Truth consent (R8) ─────────────────────────────────────────
+    # The audit found llm-router claiming it preserves task success while the
+    # only mechanism that could measure that was off by default. The decision
+    # was to turn it on — but it reads the operator's prompts, so it is asked
+    # for rather than assumed. `ask()` records a REFUSAL when the session is
+    # not interactive: a CI run or a Dockerfile cannot agree to anything.
+    gt_enabled = False
+    try:
+        from llm_router import ground_truth_consent
+
+        consent = ground_truth_consent.ask(interactive=sys.stdin.isatty())
+        gt_enabled = consent.granted
+    except Exception as exc:  # noqa: BLE001
+        from llm_router import failopen
+        failopen.record("CHZ-FO-ONBOARD-GT-CONSENT", exc)
+
     # ── 6. Write config to ~/.llm-router/.env ────────────────────────────────
     env_path = os.path.join(STATE_DIR, ".env")
     os.makedirs(STATE_DIR, exist_ok=True)
     env_lines = [
         f"LLM_ROUTER_ENFORCE={enforce}",
         f"LLM_ROUTER_PROFILE={profile}",
+        # Written either way, so an existing `=1` from a previous install is
+        # turned OFF by a later refusal rather than silently surviving it.
+        f"LLM_ROUTER_GROUND_TRUTH={'1' if gt_enabled else '0'}",
     ]
     try:
         # Merge with any existing .env (preserve user keys)
