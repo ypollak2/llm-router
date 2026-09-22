@@ -123,7 +123,12 @@ def test_doctor_reports_the_counters(monkeypatch):
         _run_doctor()
     out = buf.getvalue()
 
-    assert "fail-open counters" in out
+    # R12 moved this from a hand-written doctor block to the counter registry,
+    # which doctor renders for every registered counter. The contract T-07 cares
+    # about is unchanged and is asserted here, not the section's heading: the
+    # total is right, and the SITE is named — a count with no site tells an
+    # operator that something degraded and nothing about what.
+    assert "fail_open_events: 3 event(s)" in out
     assert "CHZ-FO-PROBE-ALPHA" in out, "doctor does not name the site that degraded"
     assert "fail-open events recorded: 3" in out
 

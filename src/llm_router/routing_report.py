@@ -152,6 +152,37 @@ def summarise(records: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
     return days
 
 
+def unterminated_invocations(log: Path | None = None) -> tuple[int, int]:
+    """(invocations with no terminal outcome, real invocations) over the log.
+
+    R12. The CLAUDE.md invariant — every invocation logging ``prompt_len=`` logs
+    exactly one of ``DIRECT:``, ``DIRECT SKIP:``, ``BYPASS`` or ``CONTINUATION``
+    — has been enforced by a unit test since ``ENFORCE=off`` cost a day of
+    investigation by skipping the DIRECT block while logging nothing. That test
+    proves the code CAN log an outcome on the branches it knows about. It cannot
+    see a branch nobody thought to test, which is what the original defect was.
+
+    This computes the invariant on the traffic that actually happened, which is
+    the only form of it with any evidential weight. `summarise` already buckets
+    an invocation with no terminal line into ``other``; it had no caller.
+
+    Returns a PAIR, never a bare rate: the denominator is the whole point in
+    this repo (see CLAUDE.md, "A rate without its denominator is not a
+    measurement"), and a rate over 20 prompts is noise reported as a collapse.
+    Real user prompts only — `summarise` drops the test suite's sessions, which
+    were 54% of this file once.
+    """
+    log = log or (_home() / "auto-route-debug.log")
+    if not log.exists():
+        return (0, 0)
+    with log.open(encoding="utf-8", errors="ignore") as fh:
+        days = summarise(parse_log(fh))
+    return (
+        sum(d["other"] for d in days.values()),
+        sum(d["prompts"] for d in days.values()),
+    )
+
+
 def _outcome_counts(log: Path) -> dict[str, int]:
     """Outcome matrix over REAL user prompts, one outcome per invocation.
 

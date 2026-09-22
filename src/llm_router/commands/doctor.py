@@ -1436,30 +1436,58 @@ def _run_doctor(host: Optional[str] = None) -> tuple[int, list[str]]:
     else:
         print(_ok("every offered tool resolves to a real implementation"))
 
-    # ── Fail-open accounting (T-07) ────────────────────────────────────────
+    # ── Instrumentation counters (T-07, R12) ───────────────────────────────
     # 58 `failopen.record()` call sites existed in src/ and ZERO readers outside
     # tests. Every swallowed exception in this codebase was counted into a file
     # that nothing ever opened — instrumentation that could not inform anyone.
-    # This is that reader.
+    # T-07 made that one counter readable HERE; R12 found three more with the
+    # same shape (`dropped_event_count`, `lock_timeout_count`,
+    # `prompt_capture.counters`) plus an invariant nobody computed, and replaced
+    # the hand-written section with the registry, so the next counter is read by
+    # being declared instead of by someone remembering to add a block here.
     print()
-    print(_bold("  Degraded operations (fail-open counters)"))
+    print(_bold("  Instrumentation counters (what degraded, and was it seen)"))
     try:
-        from llm_router import failopen
+        from llm_router import counter_registry
 
-        counts = failopen.snapshot()
-        for line in counts.render_report():
-            if "could NOT be recorded" in line or "UNREADABLE" in line:
-                print(f"    {_red(line)}")
-                issues.append(line)
-            elif line.startswith("fail-open events recorded: 0"):
-                print(f"    {_ok('no degraded operations recorded')}")
+        _any_alarm = False
+        for _counter, _reading in counter_registry.readings():
+            # A counter's own words first. `issues` carries lines whose exact
+            # wording is what an operator acts on (T-07: "the state store was
+            # unwritable" is a different emergency from a large count).
+            for _i in _reading.issues:
+                issues.append(_i)
+                _any_alarm = True
+            if _reading.value is None:
+                _why = f" ({_reading.unknown_reason})" if _reading.unknown_reason else ""
+                # Unknown is not zero. An unreadable counter is reported as
+                # unreadable — rendering it as 0 is the exact substitution that
+                # made a dropped ledger look like a quiet day.
+                _line = f"{_counter.id}: Unknown{_why}"
+                if _reading.alarming:
+                    print(f"    {_red(_line)}")
+                    issues.append(_line)
+                    _any_alarm = True
+                else:
+                    print(f"    {_dim(_line)}")
             else:
-                print(f"    {_dim(line)}")
-        if counts.total:
-            print(_dim("    (each is a place llm-router carried on after an error)"))
+                _n = int(_reading.value)
+                if _reading.alarming:
+                    print(f"    {_red(f'{_counter.id}: {_n} {_counter.unit}')}")
+                    print(f"      {_dim(_counter.makes_visible)}")
+                    issues.append(
+                        f"{_counter.id}={_n} — {_counter.makes_visible}"
+                    )
+                    _any_alarm = True
+                else:
+                    print(f"    {_dim(f'{_counter.id}: {_n} {_counter.unit}')}")
+            for _d in _reading.detail:
+                print(f"      {_dim(_d)}")
+        if not _any_alarm:
+            print(f"    {_ok('no counter is reporting a degradation')}")
     except Exception as exc:  # noqa: BLE001 — doctor must still finish
-        print(f"    {_red(f'fail-open counters unavailable: {exc}')}")
-        issues.append(f"fail-open counters unavailable: {exc}")
+        print(f"    {_red(f'instrumentation counters unavailable: {exc}')}")
+        issues.append(f"instrumentation counters unavailable: {exc}")
 
     # ── Provenance exclusions (T-21) ───────────────────────────────────────
     # The cutover's count was written to `provenance_meta` and read by nothing,

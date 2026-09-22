@@ -343,7 +343,14 @@ _dropped_events = 0
 
 
 def dropped_event_count() -> int:
-    """Events this process failed to persist. Surfaced by `doctor` and telemetry."""
+    """Events this process failed to persist.
+
+    This docstring said "Surfaced by `doctor` and telemetry" while doctor did
+    not import this module and no telemetry path called it — a claim about a
+    reader that did not exist, which is a worse failure than silence because it
+    stops anyone looking. R12 registered it in `counter_registry`, which doctor
+    renders; that is the one surface, and this line now names only it.
+    """
     return _dropped_events
 
 
