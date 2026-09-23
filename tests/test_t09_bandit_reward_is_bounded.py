@@ -115,9 +115,43 @@ def test_the_bandit_ranks_on_expected_value():
         "the bandit no longer ranks with max(..., key=...) — this assertion "
         "has stopped looking at the thing that chooses a model"
     )
-    assert all("expected_value" in k for k in ranking_keys), (
-        f"a ranking key does not use expected_value: {ranking_keys}"
+
+    # S4b introduced an indirection: the key is now `_rank`, which returns
+    # `(expected_value, -avg_latency_ms)`. FOLLOW the indirection rather than
+    # loosening the assertion — a key function that stopped using
+    # expected_value would otherwise pass simply by being a named function.
+    def _key_ranks_on_expected_value(key_src: str) -> bool:
+        if "expected_value" in key_src:
+            return True
+        named = key_src.strip()
+        if not named.isidentifier():
+            return False
+        fn = next(
+            (n for n in ast.walk(tree)
+             if isinstance(n, ast.FunctionDef) and n.name == named),
+            None,
+        )
+        return fn is not None and "expected_value" in ast.unparse(fn)
+
+    bad = [k for k in ranking_keys if not _key_ranks_on_expected_value(k)]
+    assert not bad, (
+        f"a ranking key does not rank on expected_value, directly or through "
+        f"a named function: {bad}"
     )
+
+    # And the tie-break must be LOWER latency, not higher.
+    rank_fn = next(
+        (n for n in ast.walk(tree)
+         if isinstance(n, ast.FunctionDef) and n.name == "_rank"),
+        None,
+    )
+    if rank_fn is not None:
+        body = ast.unparse(rank_fn)
+        assert "avg_latency_ms" in body, "_rank no longer breaks ties on latency"
+        assert "-float(" in body or "-s.avg_latency" in body, (
+            "_rank's latency term is not negated, so `max` would prefer the "
+            "SLOWER model — the exact defect S4b fixed, inverted"
+        )
     # And the old unbounded ratio is gone from every value the code USES, not
     # merely from its prose.
     from _ast_assert import string_constants

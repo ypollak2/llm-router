@@ -45,6 +45,53 @@ log = logging.getLogger("llm_router.bandit")
 DEFAULT_EPSILON = 0.10
 
 
+def _rank(s) -> tuple[float, float]:
+    """Expected value, then LOWER LATENCY as the tie-break. S4b.
+
+    `expected_value` is `success_rate * ANSWER_VALUE_USD - avg_cost`. For free
+    models the cost term is zero, so any two free models with the same success
+    rate score IDENTICALLY — and `max()` then returns whichever the iteration
+    order happens to reach first.
+
+    That is not hypothetical. Measured on the development ledger, restricted to
+    rows with recorded provenance (S4a):
+
+        ollama/qwen3.8:latest    n=8    54.3s   EV=+0.05000   <- max() picked
+        ollama/lfm2.5:8b         n=99   10.1s   EV=+0.05000
+        codex/gpt-5.5            n=8    49.2s   EV=+0.05000
+        ollama/qwen3-coder:30b   n=96   13.6s   EV=+0.04583
+
+    A three-way tie, resolved arbitrarily onto the SLOWEST of the three — a
+    54-second model over a 10-second one, on identical evidence.
+
+    WHY A TIE-BREAK AND NOT A COST TERM. Charging latency as dollars needs a
+    $/second rate, and no rate can be justified from this data: every trusted
+    row is free or subscription, so there is no paid/free trade-off to
+    calibrate against. A rate chosen anyway would be a guess embedded in the
+    routing policy — and the repo's own rule is that a one-point calibration is
+    a guess.
+
+    A tie-break needs no rate. It cannot reorder any pair whose expected values
+    differ, so it changes nothing the reward already decides — it replaces
+    "arbitrary" with "faster" only where the reward is silent. That is the
+    smallest change that fixes the observed defect.
+
+    Latency is negated because `max()` ranks descending and lower is better.
+    `avg_latency_ms` is already collected and already SELECTed by
+    `aggregate_stats`; nothing new is measured for this.
+    """
+    # ABSENT LATENCY SORTS LAST, not first. The obvious default of 0.0 makes
+    # an unrecorded latency read as "instantaneous", so a row with no
+    # measurement would win every tie — unknown rendered as the most
+    # favourable answer, which is the defect class this whole remediation has
+    # been removing (unknown provenance as production, unknown table as
+    # missing column, unreadable counter as zero).
+    ms = getattr(s, "avg_latency_ms", None)
+    if ms is None:
+        ms = float("inf")
+    return (s.expected_value, -float(ms))
+
+
 @dataclass(frozen=True)
 class EpsilonGreedyBandit:
     """Stateless epsilon-greedy reorderer over candidate model lists.
@@ -116,7 +163,7 @@ class EpsilonGreedyBandit:
             # Explore: pick a candidate other than the current empirical best
             # to surface new evidence. We pick from ``candidates`` (not just
             # ``eligible``) so under-sampled models also get exploration calls.
-            best_model = max(eligible, key=lambda s: s.expected_value).model
+            best_model = max(eligible, key=_rank).model
             explore_pool = [m for m in candidates if m != best_model]
             if not explore_pool:
                 return list(candidates)
@@ -124,7 +171,7 @@ class EpsilonGreedyBandit:
             reason = "explore"
         else:
             # Exploit: best empirical EV first.
-            chosen = max(eligible, key=lambda s: s.expected_value).model
+            chosen = max(eligible, key=_rank).model
             reason = "exploit"
 
         if chosen == candidates[0]:

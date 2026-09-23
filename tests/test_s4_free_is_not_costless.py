@@ -1,33 +1,55 @@
-"""S4 / U-04 — a local model's cost is memory and latency, not dollars.
+"""S4 / U-04 — the reward's inputs, and a correction to my own claim.
 
-Observed on 2026-09-22. The enforcement hook's documented escape valve is
-"call ANY llm_* tool (even a trivial `llm(task="query")`) — clears the lock for
-this turn". Taking it verbatim with the prompt "Reply with the single word:
-acknowledged" routed to **qwen3-coder:30b**, which then held **42.6% of system
-memory** and OOM-killed three background jobs, including the pre-release
-verification.
+Observed 2026-09-22: the enforcement hook's documented escape valve ("call ANY
+llm_* tool, even a trivial one") routed a one-word prompt to qwen3-coder:30b,
+which held 42.6% of system memory and OOM-killed three background jobs.
 
-That is not a misconfiguration. It is the reward function doing its job:
+I diagnosed that as: `expected_value = success_rate * ANSWER_VALUE_USD -
+avg_cost`, `avg_cost` is zero for every local model, so the comparison
+collapses to success rate, and a bigger model has a better success rate —
+therefore **"pick the largest free model is exactly what this formula
+maximises."**
 
-    expected_value = success_rate * ANSWER_VALUE_USD - avg_cost
+THAT CLAIM IS FALSE, and the data refutes it. Measured on
+`routing_decisions`, the table `aggregate_stats` actually reads:
 
-`avg_cost` is DOLLARS. Every local model costs zero dollars, so the cost term
-vanishes for all of them and the comparison collapses to success rate alone —
-and a 30B model has a higher success rate than a 6.6B one. **"Pick the largest
-free model" is precisely what this formula maximises.**
+    final_model                   n   succ    avg_$   avg_ms        EV
+    openai/gpt-4o              1057  1.000  0.01000      500   0.04000
+    anthropic/claude-opus       330  1.000  0.01000      500   0.04000
+    ollama/lfm2.5:8b             99  1.000  0.00000    10111   0.05000  <- wins
+    ollama/qwen3-coder:30b       95  0.926  0.00000    13674   0.04632
 
-The machine had a 6.6 GB model available, and the routing hook's own drafting
-path uses it. The escape valve took the 18.6 GB one.
+The **8B** model wins. The cost term does vanish for free models, so success
+rate decides — and here that favours the SMALLER one, because the 30B's
+success rate is 0.926 against the 8B's 1.000. The prediction was backwards.
 
-WHAT THIS FILE DOES NOT DO. It does not change the reward. Adding a
-memory or latency term changes which model every route picks, which is a
-routing-behaviour change that needs evaluating on the target distribution —
-not on the one anecdote that exposed it. CLAUDE.md: a proxy split has already
-misled by 4.25 points, and a one-point calibration is a guess.
+Two further errors in the same analysis, recorded because the habit that
+produced them matters more than the conclusion:
 
-What it does is pin the MECHANISM, so the finding cannot be misremembered as
-"the escape valve is badly configured" when it is the reward being
-dollar-only.
+  * I read the `usage` table (286 rows, all success=1, all cost 0) and
+    concluded the reward was a CONSTANT. The bandit does not read that table.
+    I checked the wrong source and generalised from it.
+  * I wrote that `avg_latency_ms` is "collected and unread". It is already
+    SELECTed in `aggregate_stats`'s query — collected, surfaced, and unused by
+    `expected_value` only. Less wrong, still wrong.
+
+WHAT SURVIVED, and it is worse than what I claimed:
+
+    openai/gpt-4o           latency: 1 distinct [500.0..500.0]  cost: 1 [0.01..0.01]
+    anthropic/claude-opus   latency: 1 distinct [500.0..500.0]  cost: 1 [0.01..0.01]
+    ollama/lfm2.5:8b        latency: 99 distinct [1384..55437]  cost: 1 [0.0..0.0]
+
+**1,387 paid-model rows carry identical placeholder values.** Exactly 500 ms,
+exactly $0.01. Those are not measurements. The local model has 99 distinct real
+latencies.
+
+So the reward compares MEASURED local models against CONSTANT-STAMPED paid
+ones, and adding a latency term now would let a 500 ms placeholder beat a
+10-second measurement — optimising a recording defect. S4a (fix the recording)
+strictly precedes S4b (use the measurement).
+
+This file pins the MECHANISM — that the reward reads only success and dollars —
+without repeating the prediction I got wrong.
 """
 
 from __future__ import annotations
@@ -72,19 +94,21 @@ def test_latency_is_already_collected_and_the_reward_ignores_it():
 
 
 def test_the_reward_is_blind_to_everything_but_dollars():
-    """Two free models differing only in size rank purely on success rate."""
-    small = _stats("ollama/qwen3.5:latest", success_rate=0.80, avg_cost=0.0)
-    large = _stats("ollama/qwen3-coder:30b", success_rate=0.85, avg_cost=0.0)
+    """Two free models rank purely on success rate — size is not an input."""
+    # Named for what actually decides it: success rate, NOT size. On the real
+    # data the 8B model outranks the 30B because its success rate is higher.
+    worse = _stats("ollama/some-free-model", success_rate=0.80, avg_cost=0.0)
+    better = _stats("ollama/other-free-model", success_rate=0.85, avg_cost=0.0)
 
-    assert large.expected_value > small.expected_value, (
-        "the premise has changed: the larger free model no longer wins on "
-        "expected value, so this finding needs re-deriving"
+    assert better.expected_value > worse.expected_value, (
+        "between two FREE models the higher success rate no longer wins, so "
+        "the mechanism this file documents has changed"
     )
     # And the margin is ENTIRELY the success-rate difference — the cost term
     # contributed nothing, because both are zero dollars.
     from llm_router.telemetry import ANSWER_VALUE_USD
 
-    assert large.expected_value - small.expected_value == pytest.approx(
+    assert better.expected_value - worse.expected_value == pytest.approx(
         (0.85 - 0.80) * ANSWER_VALUE_USD
     ), (
         "the gap between two free models is not purely their success-rate "
@@ -101,6 +125,8 @@ def test_an_18gb_model_and_a_300mb_model_are_priced_identically():
     """
     tiny = _stats("ollama/nomic-embed-text:latest", success_rate=0.70, avg_cost=0.0)
     huge = _stats("ollama/qwen3-coder:30b", success_rate=0.70, avg_cost=0.0)
+    # Equal success, wildly unequal resource cost -> the reward cannot tell
+    # them apart. THIS is the real finding; "bigger always wins" was not.
 
     assert tiny.expected_value == huge.expected_value, (
         "a memory or latency term has entered the reward. That is the fix S4 "

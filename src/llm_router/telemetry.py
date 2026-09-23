@@ -201,7 +201,31 @@ async def aggregate_stats(
                COUNT(judge_score) AS n_judged,
                AVG(judge_score) AS judge_mean
           FROM routing_decisions
-         WHERE profile = ?
+         -- S4a: only rows whose origin was RECORDED train the bandit.
+         --
+         -- `provenance` is written by `_write_provenance()` at insert time and
+         -- deliberately has NO DEFAULT, because (in cost.py's own words) a
+         -- default "asserts the very thing it should be recording". NULL means
+         -- "written before this column existed" and is excluded, fail-closed,
+         -- exactly as the money surfaces exclude unmeasured provenance.
+         --
+         -- Measured on the development ledger when this filter was added:
+         --
+         --     NULL      1387 rows, 1 distinct latency value   (placeholders:
+         --                                                      500ms, $0.01)
+         --     runtime    214 rows, 214 distinct latencies      (measured)
+         --
+         -- 87% of what trained the bandit was placeholder data from a period
+         -- when latency and cost were not being recorded. The column that
+         -- identifies it has existed all along and nothing read it.
+         --
+         -- Excluding them does NOT remove a model from routing: `reorder()`
+         -- explores from `candidates`, not from `eligible`, so a model with no
+         -- trusted rows becomes under-sampled and still gets exploration
+         -- calls. Measured delta on that ledger: the top pick was unchanged;
+         -- the two models dropped were already ranked last on placeholder data.
+         WHERE provenance = 'runtime'
+           AND profile = ?
            AND (subject = ? OR (subject IS NULL AND ? = 'general'))
            AND final_model IN ({placeholders})
            AND timestamp >= datetime('now', ?)
