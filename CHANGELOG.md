@@ -10,6 +10,81 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 | [CHANGELOG-ARCHIVE.md](CHANGELOG-ARCHIVE.md) | v10.1.5 back to v6.3.0 |
 | [GitHub Releases](https://github.com/ypollak2/llm-router/releases) | v6.2 and earlier |
 
+## [15.0.1] - 2026-09-23
+
+Remediation plan II — what attacking the 15.0.0 release found. Patch release:
+no routing behaviour changes, no money-figure changes.
+
+### Fixed
+
+- **`llm-router doctor --audit` no longer inflates the counter it reports.**
+  Measured on a clean install of 15.0.0, three consecutive runs of a read-only
+  diagnostic against unchanged state:
+
+      fail_open_events: 4  ->  8  ->  12
+
+  An operator investigating a high count was making it higher. Root cause:
+  `_column_exists` consulted a hand-maintained allowlist of nine table names
+  that had drifted — `codex_usage`, `gemini_usage` and `migrations` were all
+  migrated by the module and none was on the list. An unmatched table returned
+  `False`, meaning "the column does not exist", when the truth was "I cannot
+  tell", so the `ALTER` ran, hit `duplicate column name`, and the failure was
+  recorded as a swallowed exception.
+
+  Two fixes, independently sufficient: the allowlist is replaced by a strict
+  identifier pattern plus a parameterised `sqlite_master` lookup (neither can
+  drift), and `_safe_migrate` treats `duplicate column name` as SUCCESS,
+  because an idempotent migration that no-ops is the migration working.
+
+  **If you have been reading `fail_open_events`, the figure included your own
+  `doctor` runs.** Reset and re-measure.
+
+- **`CHZ-FO-COST-MIGRATE-ALTER` is no longer the loudest code in the
+  fail-open counter.** It was counting normal operation. A counter whose
+  baseline is normal operation cannot signal abnormal operation.
+
+- **`llm-router status` renders its markup instead of printing it.**
+  `rich.text.Text(...)` does not parse markup; `Text.from_markup(...)` does.
+  Four call sites in `ui/status_premium.py` built a markup string and passed
+  it to the constructor that renders it literally — on the first command the
+  README sends a new user to. The header was the visible one; fixing it
+  exposed 30 more tokens from three other sites.
+
+### Privacy
+
+- **83 occurrences of a developer's home directory removed from committed
+  documents** across `audit/` and `Docs/`, 63 of them in one archived file.
+  An audit artifact should record the shape of a machine, never whose machine
+  it was. Enforced by a test that scans every committed markdown file.
+
+### Added — tests that pin what was found
+
+- Every registered counter is asserted to read the same value twice in a row,
+  and to read zero on a fresh database. Both properties existed for exactly
+  one counter (`hook_liveness.orphan_count`) and were never generalised.
+- The routing layers' agreement contract is pinned: a context-dependent prompt
+  must write no pending enforcement state, so a tool no routed model can use
+  is never held.
+
+### Known, recorded, not fixed
+
+Three findings are carried as `xfail(strict=True)` rather than fixed, because
+each changes which prompts route or which model answers — and that is measured
+on the target distribution or not at all:
+
+- **The context-dependence detector over-fires** on incidental deictics
+  ("write a regex **that** validates emails"). `enforce-route.py` removed its
+  own re-check for exactly this reason; the detector itself was never fixed,
+  so every remaining consumer still over-fires.
+- **The routing reward is blind to everything but dollars.**
+  `expected_value = success_rate * ANSWER_VALUE_USD - avg_cost`, and every
+  local model costs zero dollars — so between two free models the reward picks
+  the higher success rate, which is the larger model. A local model's real
+  cost is memory and latency; `avg_latency_ms` is already collected on every
+  stats row and the reward does not read it.
+- **Word order changes the route.** `what is 17 * 3?` classifies as `query`;
+  `tell me what 17 * 3 is` falls to `analyze` — the more expensive tier.
+
 ## [15.0.0] - 2026-09-22
 
 Remediation of the 2026-09-22 adversarial audit. Security fixes that need no

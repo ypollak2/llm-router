@@ -99,7 +99,9 @@ class PremiumStatusCommand:
                 PALETTE.success if pct < 70 else PALETTE.warning if pct < 90 else PALETTE.error
             )
             line = f"  {label:<20} {bar}  [{pct_color}]{pct:.0f}%[/]  ·  {window}"
-            lines.append(Text(line))
+            # S7: markup in the string, so it must be PARSED, not rendered
+            # literally. `Text(...)` does the latter.
+            lines.append(Text.from_markup(line))
 
         return Group(*lines)
 
@@ -132,7 +134,7 @@ class PremiumStatusCommand:
                 any_data = True
                 saved = totals.saved_usd
                 line = f"  [{PALETTE.success}]{label:<15}[/]  [{PALETTE.success}]${saved:.2f} saved[/]  ·  {totals.calls} routed calls"
-                lines.append(Text(line))
+                lines.append(Text.from_markup(line))
 
             if not any_data:
                 lines.append(Text("  No external routing yet — route some tasks first"))
@@ -179,7 +181,12 @@ class PremiumStatusCommand:
         """Render complete premium status display."""
         panels = [
             Panel(
-                Text(self.render_header(), justify="center"),
+                # S7: `Text(...)` does NOT interpret markup — it renders the
+                # literal characters. `render_header()` returns a markup
+                # string, so the first command the README sends a new user to
+                # printed `[bold #7aa2f7]⚡ LLM_ROUTER Status …[/]` verbatim on
+                # a clean install of 15.0.0. `from_markup` is what parses it.
+                Text.from_markup(self.render_header(), justify="center"),
                 border_style=PALETTE.muted_border,
                 expand=False,
             ),

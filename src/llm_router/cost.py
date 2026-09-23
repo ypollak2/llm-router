@@ -15,6 +15,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
 
 import aiosqlite
@@ -783,20 +784,46 @@ MIGRATE_ADD_QUOTA_SNAPSHOTS_TABLE = [
 async def _column_exists(db: aiosqlite.Connection, table: str, column: str) -> bool:
     """Return True if *column* exists in *table* (uses SQLite PRAGMA, no exceptions).
     
-    SECURITY: Table name is validated against allowlist before SQL execution
-    to prevent SQL injection. Column name is parameterized.
+    SECURITY: the identifier is pattern-checked AND confirmed against
+    `sqlite_master` with a bound parameter before any interpolation.
+
+    S6 (remediation II). This used a HAND-MAINTAINED allowlist of nine table
+    names, and it had drifted: `codex_usage`, `gemini_usage` and `migrations`
+    are all migrated by this module and none was on the list.
+
+    The consequence was not a security hole — it was the opposite direction.
+    An unmatched table returned False, meaning "the column does not exist",
+    when the truth was "I cannot tell". `_safe_migrate` then ran the ALTER, it
+    failed with `duplicate column name`, and the failure was recorded as a
+    swallowed exception. Two such statements fired on EVERY database open and
+    became the loudest code in the fail-open counter.
+
+    Returning "I don't know" as "no" is the same defect class this audit kept
+    finding in the money surfaces, in the opposite polarity: there, unknown
+    provenance had to not count as production; here, an unknown table must not
+    count as a missing column.
+
+    The list is gone. Injection safety now comes from two checks that cannot
+    drift: the identifier must match a strict pattern, and the table must
+    actually exist in `sqlite_master` — confirmed with a PARAMETERISED query
+    before the name is ever interpolated.
     """
-    # Allowlist of valid tables — prevents SQL injection via table parameter
-    allowed_tables = {
-        "usage", "claude_usage", "routing_decisions", "savings_stats",
-        "semantic_cache", "corrections", "compression_stats", "model_quality_trends",
-        "quota_snapshots"
-    }
-    
-    # Validate table parameter against allowlist
-    if table not in allowed_tables:
-        return False  # Invalid table name — return False rather than raise
-    
+    # A SQLite identifier, and nothing else. This is stricter than the old
+    # allowlist for anything that is not a plain table name.
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", table or ""):
+        return False
+
+    # Confirm the table exists, with the name as a BOUND PARAMETER. After this
+    # returns a row, `table` is a real table name from this database's own
+    # schema rather than a string someone passed in.
+    cursor = await db.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name = ?", (table,)
+    )
+    if await cursor.fetchone() is None:
+        # The table does not exist yet, so the column cannot. This is a real
+        # "no", unlike the old unknown-table "no".
+        return False
+
     cursor = await db.execute(
         f"SELECT name FROM pragma_table_info('{table}') WHERE name = ?", (column,)
     )
@@ -822,7 +849,17 @@ async def _safe_migrate(db: aiosqlite.Connection, stmt: str) -> None:
     try:
         await db.execute(stmt)
     except Exception as exc:
-        # Non-standard ALTER forms. Benign individually; a spike means schema
+        # S2 (remediation II). "The column is already there" is the migration
+        # SUCCEEDING at being idempotent. Recording it as a swallowed failure
+        # made the counter's baseline 4-per-database-open instead of zero, and
+        # a counter whose zero is unreachable cannot signal anything.
+        #
+        # Worse, it made the counter self-inflating: `doctor --audit` opens the
+        # database, so READING the fail-open count raised it by 4, and figures
+        # published from it were partly measuring the diagnostic.
+        if "duplicate column name" in str(exc).lower():
+            return
+        # Anything else is a real migration failure: a spike means schema
         # migration is silently not happening, and every later query then fails
         # on a missing column somewhere far from here.
         from llm_router import failopen

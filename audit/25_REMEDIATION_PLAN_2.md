@@ -245,3 +245,131 @@ justify the other tasks — is suspect.
 - **It does not tune the classifier against K4.** S8 requires evaluation on the
   target distribution. Tuning against the corpus row that found the defect is
   what K4 exists to forbid.
+
+
+---
+
+# Implementation record — what doing it found
+
+Written after implementing S1, S2, S3, S5, S6 and S7. Shipped as v15.0.1.
+
+## S1/S2/S6 — DONE. The root cause was narrower and worse than described.
+
+`_column_exists` consulted a HAND-MAINTAINED allowlist of nine table names that
+had drifted: `codex_usage`, `gemini_usage` and `migrations` were all migrated by
+the module and none was on the list. An unmatched table returned **False** —
+"the column does not exist" — when the truth was "I cannot tell", so the ALTER
+ran, hit `duplicate column name`, and was recorded as a swallowed failure.
+
+That is the same polarity error as the money surfaces, inverted: there, unknown
+provenance must not count as production; here, an unknown table must not count
+as a missing column. Both are "I don't know" rendered as a confident answer.
+
+The allowlist is gone. Injection safety now comes from a strict identifier
+pattern plus a PARAMETERISED `sqlite_master` lookup — neither of which can
+drift, because neither is a list.
+
+Measured: **2 fail-open events per database open → 0 across three opens.**
+
+**The red-check taught something.** Removing the S2 guard alone left the
+counter at zero; removing the S6 fix alone did too. Only removing BOTH produced
+4 events and failed the test. The two fixes are independently sufficient —
+genuine defence in depth, not redundancy — and that is now recorded in the test
+so neither is deleted as surplus.
+
+### S2's criterion was imprecise, and its own test caught it
+
+"A fresh database reads zero" is the wrong frame for two of the seven
+counters. `capture_outcomes` and `ledger_events_dropped` live in
+PROCESS-GLOBAL memory, not on disk — a new database says nothing about them,
+and in a long-lived pytest process they legitimately carry whatever earlier
+tests recorded. The test passed alone and failed after the suite.
+
+The property S2 actually wants is **"zero when nothing has happened yet"**, and
+what "yet" means depends on where the counter lives: a fresh STORE for the
+persistent ones, a fresh PROCESS for the in-memory ones. Both are now reset
+before the assertion, so it means the same thing for all seven.
+
+Worth recording because the criterion is carried forward as a completion
+condition for the next audit. Stated as "a fresh database reads zero" it would
+have been satisfiable by a counter that never resets at all.
+
+## S3 — parity test DONE, behaviour change DEFERRED, and a new defect found.
+
+The contract already existed: `auto-route.py` sets `write_pending = False` for a
+context-dependent prompt, with a comment naming the exact failure observed
+("the throwaway-llm_query dance … then Claude did the real work anyway — double
+cost"). Somebody found and fixed it; nothing asserted it, so nothing noticed
+when a turn produced two verdicts anyway. Now pinned by AST.
+
+**NEW FINDING — the detector over-fires, and the workaround hid it.**
+`is_context_dependent("write a regex that validates an email address")` returns
+True. `enforce-route.py` deleted its own re-check for precisely this reason
+("over-fired on incidental deictics"). **The consumer was removed; the detector
+was never fixed**, so every remaining consumer still over-fires — including the
+`write_pending = False` suppression, which now suppresses enforcement for
+prompts a routed model could answer.
+
+Opposite polarity to the bug that motivated S3, same root cause: one detector,
+two consumers, no shared test. Carried as `xfail(strict=True)`.
+
+`research` stays a QA task type. `_bash_exempt_from_hold`'s docstring is right
+that the fix belongs in the classifier, and that is a routing-behaviour change.
+
+## S4 — MECHANISM IDENTIFIED. Not fixed, deliberately.
+
+The escape valve is not misconfigured. The reward is doing its job:
+
+    expected_value = success_rate * ANSWER_VALUE_USD - avg_cost
+
+`avg_cost` is DOLLARS. Every local model costs zero dollars, so the cost term
+vanishes for all of them and the comparison collapses to success rate alone.
+A 30B model has a higher success rate than a 6.6B one, so **"pick the largest
+free model" is exactly what this formula maximises.** The machine had a 6.6 GB
+model that the hook's own drafting path uses; the escape valve took the 18.6 GB
+one, which then held 42.6% of memory.
+
+A local model's real cost is MEMORY and LATENCY. The reward models neither.
+
+**And the cheap half is already measured:** `avg_latency_ms` is a REQUIRED field
+on every `ModelStats` row, and `expected_value` does not read it. Data
+collected, nothing reading it — the CLASS-A shape R12 was built for, sitting in
+the reward function.
+
+Not fixed here: adding a term changes which model every route picks, and that
+needs evaluating on the target distribution rather than on one anecdote.
+
+## S5 — DONE, and it was live.
+
+Testing for it found **83 occurrences of the operator's real home directory**
+across `audit/` and `Docs/` in a public repository, 63 in one archived file.
+All redacted. Enforced by `tests/test_s5_audit_output_carries_no_identity.py`.
+
+## S7 — DONE, and the reported instance was one of four.
+
+`rich.text.Text(...)` does not parse markup; `Text.from_markup(...)` does.
+Fixing the header exposed **30 more literal tokens** from three other call
+sites in the same file. The test asserts on the whole rendered output and on
+the AST of every `Text(` call, because the reported line was the visible
+symptom of a class.
+
+## S8 — unchanged, still `xfail(strict=True)` in the K4 corpus.
+
+---
+
+# Status
+
+| ID | State |
+|---|---|
+| S1 | **done** — reading a counter is idempotent, enforced for all 7 |
+| S2 | **done** — fresh-database baseline is zero, enforced for all 7 |
+| S3 | **partial** — parity pinned; detector over-firing carried as xfail |
+| S4 | **deferred** — mechanism identified and pinned; reward unchanged |
+| S5 | **done** — 83 leaks redacted, enforced |
+| S6 | **done** — allowlist replaced by pattern + parameterised lookup |
+| S7 | **done** — 4 call sites, whole-output and AST assertions |
+| S8 | **deferred** — xfail(strict) stands |
+
+Three deferrals, all for the same stated reason: they change which prompts
+route or which model answers, and that is measured on the target distribution
+or not at all.
