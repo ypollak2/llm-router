@@ -262,55 +262,63 @@ def test_savings_consistency():
         "Savings report missing expected metrics"
 
 
-def test_database_persistence():
-    """ADVANCED: Verify that routing decisions are being persisted.
+def test_database_persistence(tmp_path, monkeypatch):
+    """Routing persistence CREATES its storage — asserted on a CLEAN home.
 
-    Checks that llm_router storage is initialized and accessible.
-    Note: v10.1.2 uses usage.db + receipts.db, not router.db
+    This test used to read the operator's real ``~/.llm-router`` and assert that
+    somebody had used the router before::
+
+        router_dir = Path.home() / ".llm-router"
+        assert router_dir.exists(), "Run: llm_router install"
+
+    That passes on any developer machine that has ever routed anything and fails
+    on every clean one. It was red on CI from 15.0.1 through 15.1.0 — two
+    releases — while passing locally, because this machine's `~/.llm-router`
+    holds 298MB of accumulated history. A test that passes because of state
+    nobody in the test created is not testing the product.
+
+    It also contradicted this module's own docstring, which promises "completely
+    isolated environments" and "a clean environment".
+
+    What it asserts now is what the name claims: against an EMPTY home, the cost
+    layer creates its database and that database is queryable. The premise —
+    that the home really is empty first — is asserted, so a pass can never again
+    come from pre-existing state.
     """
-    from pathlib import Path
+    import asyncio
+    import sqlite3
 
-    router_dir = Path.home() / ".llm-router"
+    monkeypatch.setenv("LLM_ROUTER_HOME", str(tmp_path))
+    monkeypatch.setenv("LLM_ROUTER_DB_PATH", str(tmp_path / "usage.db"))
 
-    # Check that router directory exists (created on first use)
-    assert router_dir.exists(), \
-        f"Router data directory not found at {router_dir}. " \
-        f"Run: llm_router install"
+    # Premise. Without this, every assertion below could be satisfied by a file
+    # the test never caused to exist — which is exactly how the old version
+    # passed for two releases while being wrong.
+    pre_existing = sorted(p.name for p in tmp_path.iterdir())
+    assert not pre_existing, f"home was not clean to begin with: {pre_existing}"
 
-    # Check for storage files (at least one should exist)
-    storage_files = [
-        router_dir / "usage.db",      # v10.1.2 usage tracking
-        router_dir / "receipts.db",   # cost receipts
-        router_dir / "usage.json",    # usage summary
-    ]
+    from llm_router import cost
 
-    exists = [f for f in storage_files if f.exists()]
-    assert exists, \
-        f"No router storage files found in {router_dir}. " \
-        f"Expected one of: usage.db, receipts.db, usage.json. " \
-        f"Router may not be properly initialized."
+    async def _open_once():
+        db = await cost._get_db()
+        await db.close()
 
-    # Try to query the usage database if it exists
-    usage_db = router_dir / "usage.db"
-    if usage_db.exists():
-        try:
-            import sqlite3
-            conn = sqlite3.connect(str(usage_db))
-            cursor = conn.cursor()
+    asyncio.run(_open_once())
 
-            # Check that we can query the database
-            cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
-            tables = cursor.fetchall()
-            conn.close()
+    usage_db = tmp_path / "usage.db"
+    assert usage_db.exists(), (
+        f"opening the cost database against an empty home did not create "
+        f"{usage_db}. Contents: {sorted(p.name for p in tmp_path.iterdir())}"
+    )
 
-            assert tables, "Usage database exists but has no tables"
-
-        except sqlite3.Error as e:
-            raise AssertionError(
-                f"Database error: {e}. "
-                f"Usage database may be corrupted. "
-                f"Fix with: rm ~/.llm-router/usage.db && llm_router status"
-            ) from e
+    conn = sqlite3.connect(str(usage_db))
+    try:
+        tables = [r[0] for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        )]
+    finally:
+        conn.close()
+    assert tables, "the database was created but carries no tables"
 
 
 # ── Helper Functions ──────────────────────────────────────────────────────

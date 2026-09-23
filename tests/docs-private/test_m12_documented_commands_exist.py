@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import pathlib
 import re
+import os
 import subprocess
 import sys
 
@@ -137,11 +138,30 @@ def test_nothing_suggests_a_command_that_cannot_be_run():
 
 
 @pytest.mark.parametrize("host", sorted(_documented_hosts()))
-def test_every_documented_host_is_accepted(host):
-    """The half of M-12 that did not reproduce, pinned so a regression shows."""
+def test_every_documented_host_is_accepted(host, tmp_path):
+    """The half of M-12 that did not reproduce, pinned so a regression shows.
+
+    The installer writes into ``Path.home()`` — `~/.cursor/mcp.json` for cursor,
+    `~/.gemini/settings.json` for gemini-cli. This ran it against the REAL home,
+    and the sandbox guard failed the test in teardown for writing outside its
+    sandbox. It passed locally only because those files already existed on this
+    machine, so nothing was newly created; on a clean runner they are, and CI was
+    red on it from 15.0.1 through 15.1.0.
+
+    The installer runs in a SUBPROCESS, so `monkeypatch.setenv` in this process
+    does not reach it and a patched `Path.home` does not either — the child reads
+    its own environment. The home has to be handed over as an env var, which is
+    what the guard's advice ("isolate BOTH") means on this side of a fork.
+    """
+    home = tmp_path / "home"
+    home.mkdir()
+    env = {**os.environ, "HOME": str(home), "USERPROFILE": str(home)}
+    # Point the router's own state at the sandbox too, so the install does not
+    # touch the operator's real ledger while proving it accepts the host.
+    env["LLM_ROUTER_HOME"] = str(home / ".llm-router")
     r = subprocess.run(
         [sys.executable, "-m", "llm_router.cli", "install", "--host", host],
-        capture_output=True, text=True, timeout=90, cwd=str(REPO),
+        capture_output=True, text=True, timeout=90, cwd=str(tmp_path), env=env,
     )
     assert r.returncode == 0, (
         f"`install --host {host}` is documented but exited {r.returncode}: "
