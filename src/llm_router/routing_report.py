@@ -152,6 +152,45 @@ def summarise(records: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
     return days
 
 
+def draft_acceptance(log: Path | None = None) -> tuple[int, int]:
+    """(drafts RELAYED as the answer, drafts OFFERED) over the log.
+
+    audit/28. `hooks/draft_usage.py` already decides this correctly — it looks
+    for the `🎯 LLM Router routed` marker on the first line of the next
+    assistant turn — and writes its verdict only to the debug log. Nothing
+    tallied it, so the verdict was computed, correct, and read by nobody: the
+    CLASS-A shape R12 exists to stop.
+
+    Why it matters more than the routing rate: `DIRECT SUCCESS` counts drafts
+    PRODUCED. `draft_usage.py`'s own docstring records a session whose log
+    "showed successful routing throughout" while it "drove subscription quota
+    from 49% to 79%, because every draft in it was discarded."
+
+    Measured on this machine 2026-09-23: **0 used of 44 offered**, for 773
+    seconds of local model time and ~18.7s of added latency on the median
+    prompt.
+
+    Returns a PAIR, never a bare rate — the denominator is the whole point in
+    this repo, and an acceptance rate over 3 drafts is noise.
+
+    Counted from the log rather than a new writer, exactly as
+    `unterminated_invocations` is: the data already exists, and a second writer
+    is a second thing that can disagree.
+    """
+    log = log or (_home() / "auto-route-debug.log")
+    if not log.exists():
+        return (0, 0)
+    used = offered = 0
+    with log.open(encoding="utf-8", errors="ignore") as fh:
+        for line in fh:
+            if "DRAFT UNUSED:" in line:
+                offered += 1
+            elif "DRAFT USED:" in line or "relayed as the answer" in line:
+                used += 1
+                offered += 1
+    return (used, offered)
+
+
 def unterminated_invocations(log: Path | None = None) -> tuple[int, int]:
     """(invocations with no terminal outcome, real invocations) over the log.
 

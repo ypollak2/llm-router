@@ -303,6 +303,45 @@ def _read_low_signal_classifications() -> CounterReading:
         return CounterReading(None, unknown_reason=type(exc).__name__)
 
 
+def _read_draft_acceptance() -> CounterReading:
+    """Drafts the assistant actually RELAYED, out of drafts offered (audit/28).
+
+    The counter that distinguishes "a local model ran" from "a local model
+    helped". `DIRECT SUCCESS` — and therefore the routing rate built on it —
+    counts drafts PRODUCED; this counts the ones that became the answer.
+
+    Alarming on a LOW share, which is the opposite of most counters here: a
+    draft nobody uses is pure cost — local compute, plus latency on every
+    prompt before the assistant starts, for no token saving.
+
+    Zero drafts offered reads UNKNOWN, not a clean 0% — a machine that has
+    never drafted and a machine whose every draft was discarded are different
+    facts, and only one of them is a problem.
+    """
+    try:
+        from llm_router.routing_report import draft_acceptance
+
+        used, offered = draft_acceptance()
+        if not offered:
+            return CounterReading(
+                None, unknown_reason="no drafts offered yet on this machine"
+            )
+        share = used / offered
+        return CounterReading(
+            float(used),
+            # Below a fifth, the drafting is costing more than it returns.
+            # Needs volume before it means anything: 0 of 3 is a quiet morning.
+            alarming=offered >= 20 and share < 0.20,
+            detail=(
+                f"of {offered} offered ({share:.0%} relayed as the answer)",
+                "a draft that is produced and discarded costs local compute and "
+                "latency and saves no tokens",
+            ),
+        )
+    except Exception as exc:  # noqa: BLE001
+        return CounterReading(None, unknown_reason=type(exc).__name__)
+
+
 REGISTRY: tuple[Counter, ...] = (
     Counter(
         id="fail_open_events",
@@ -372,6 +411,16 @@ REGISTRY: tuple[Counter, ...] = (
         reader=_read_low_signal_classifications,
         unit="classification(s)",
         tags=("denominator", "invariant"),
+    ),
+    Counter(
+        id="draft_acceptance",
+        makes_visible="drafts produced and thrown away — the routing rate counts "
+                      "them as work routed, and they cost latency on every prompt "
+                      "while saving no tokens",
+        source="llm_router.routing_report:draft_acceptance",
+        reader=_read_draft_acceptance,
+        unit="draft(s) relayed",
+        tags=("denominator", "value"),
     ),
 )
 

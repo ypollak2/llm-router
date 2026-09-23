@@ -3166,10 +3166,16 @@ def _build_mini_summary() -> str | None:
     """
     try:
         from llm_router.lineage import LineageStore
-        rows = LineageStore().recent(limit=200)
+        _LIMIT = 200
+        rows = LineageStore().recent(limit=_LIMIT)
         if not rows:
             return None
+        # audit/28: `n = len(rows)` reported the QUERY LIMIT as a count. Once
+        # the store held >=200 rows this line read "routes: 200" forever —
+        # measured at 9,015 rows while the banner said 200. A number that is
+        # actually its own cap, printed to the user every 10 prompts.
         n = len(rows)
+        _capped = n >= _LIMIT
         # Tier mix
         from collections import Counter
         tiers = Counter(r.get("model_tier", "unknown") for r in rows)
@@ -3177,12 +3183,29 @@ def _build_mini_summary() -> str | None:
         # Task mix
         tasks = Counter(r.get("task_type", "unknown") for r in rows)
         top_task, top_task_n = tasks.most_common(1)[0]
-        # Cumulative savings (best-effort — fields may be missing)
-        savings = sum(float(r.get("cost_usd") or 0.0) for r in rows)
+        # audit/28: "recorded cost" was removed from this banner. It summed
+        # `cost_usd` over the lineage rows and printed "$0.0000" on every
+        # render, because 1387 of 1601 routing_decisions carry a flat $0.01
+        # placeholder and the trusted rows are all free/local/subscription.
+        # A money figure that is structurally always zero is not a measurement,
+        # and printing it every 10 prompts taught the reader to ignore the line
+        # that matters.
+        # audit/28: the acceptance rate, not just the offer rate. DIRECT
+        # SUCCESS counts drafts PRODUCED; this says how many became the answer.
+        # Measured on this machine when the counter was added: 0 of 1130.
+        _accept = ""
+        try:
+            from llm_router.routing_report import draft_acceptance
+            _used, _offered = draft_acceptance()
+            if _offered:
+                _accept = f"  ·  drafts used: {_used}/{_offered}"
+        except Exception:  # noqa: BLE001 — the banner must never break a prompt
+            _accept = ""
+        _scope = f"last {n}" if _capped else f"{n}"
         return (
             "📊 llm_router session check (every 10 prompts):\n"
-            f"   routes: {n}  ·  top tier: {top_tier} ({top_tier_n})  ·  "
-            f"top task: {top_task} ({top_task_n})  ·  recorded cost: ${savings:.4f}\n"
+            f"   routes: {_scope}  ·  top tier: {top_tier} ({top_tier_n})  ·  "
+            f"top task: {top_task} ({top_task_n}){_accept}\n"
             "   run `llm-router summary` for the full dashboard."
         )
     except Exception as _exc:
