@@ -138,23 +138,23 @@ def test_local_state_prompts_are_detected_as_context_dependent(prompt):
 
 
 @pytest.mark.parametrize("prompt", [
-    pytest.param(
-        "write a regex that validates an email address",
-        marks=pytest.mark.xfail(
-            strict=True,
-            reason="S3 FINDING: the deictic 'that' triggers the detector. "
-                   "Known since the enforce-route re-check was removed for "
-                   "exactly this case; the detector itself was never fixed, "
-                   "so every remaining consumer still over-fires.",
-        ),
-    ),
+    # FIXED by S3b (2026-09-23). This carried an xfail(strict=True) recording
+    # that the deictic 'that' over-fired; the marker XPASSed the moment
+    # `_mask_relative_pronouns` landed, which failed the suite and forced this
+    # file and the corpus to be updated together. That is the mechanism
+    # working as designed.
+    "write a regex that validates an email address",
     "what is the capital of Portugal?",
 ])
 def test_genuinely_routable_prompts_are_not_over_detected(prompt):
     """The other half. A detector that fires on everything suppresses all
     enforcement, which is the same as turning routing off.
 
-    THIS IS A LIVE DEFECT, not a hypothetical. `enforce-route.py` deleted its
+    FIXED by S3b. Retained because the reasoning is the record of why the
+    detector is grammatical rather than lexical, and because this is the
+    consumer that proves the fix reaches enforcement.
+
+    It WAS a live defect. `enforce-route.py` deleted its
     own `is_context_dependent()` re-check because it "over-fired on incidental
     deictics ('Generate a regex THAT validates emails')". The CONSUMER was
     removed; the DETECTOR was not fixed.
@@ -166,10 +166,9 @@ def test_genuinely_routable_prompts_are_not_over_detected(prompt):
     well, which costs routing rather than correctness. Both are the same root
     cause: one detector, two consumers, no shared test.
 
-    Carried as `xfail(strict=True)`. Fixing the detector changes which prompts
-    route, which needs evaluating on the target distribution rather than on the
-    one phrase that exposed it — CLAUDE.md: a proxy split has already misled by
-    4.25 points. When it is fixed this XPASSes and fails the suite.
+    It was carried as `xfail(strict=True)` until a corpus existed to measure
+    against. `tests/test_s3b_relative_that_is_not_a_deixis.py` is that corpus:
+    26 labelled prompts, false positives 5/12 -> 0/12 with recall unchanged.
     """
     from llm_router.context_signal import is_context_dependent
 

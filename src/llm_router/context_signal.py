@@ -55,10 +55,91 @@ _DEICTIC_RE = re.compile(r"\b(it|this|that|these|those|here|them)\b", re.IGNOREC
 _ANAPHORA_RE = re.compile(r"\bthe\s+(rest|remaining|others?|ones?)\b", re.IGNORECASE)
 
 
+
+# S3b. A RELATIVE `that`/`which` is not a deixis.
+#
+# `_DEICTIC_RE` treats a bare "that" as pointing at something in the user's
+# local state ("fix THAT bug"). But "that" is also a relative pronoun
+# introducing a clause — "a regex THAT validates emails" — where it points at
+# nothing outside the sentence.
+#
+# Measured on a labelled corpus of 24 prompts, before this rule:
+#
+#     context-dependent correctly detected  11/12
+#     FALSE POSITIVES on stateless prompts   5/12   (42%)
+#
+# and every false positive had the same shape: `a <noun> that <verb>`.
+#
+#     "write a regex that validates an email address"
+#     "write a function that reverses a string"
+#     "write a SQL query that counts rows by day"
+#     "describe an algorithm that sorts in O(n log n)"
+#     "name a language that has pattern matching"
+#
+# This mattered beyond classification. `auto-route.py` suppresses enforcement
+# for a context-dependent prompt (it would otherwise hold a tool no routed
+# model can use), so a false positive here silently turns routing OFF for a
+# prompt a routed model could answer perfectly well.
+#
+# `enforce-route.py` removed its OWN call to this function for exactly this
+# reason — "over-fired on incidental deictics" — which fixed one consumer and
+# left the detector, and every other consumer, unchanged.
+#
+# The distinction is grammatical, not semantic: a relative `that` is followed
+# by a VERB, a demonstrative one is not. Verb-like is approximated by an -s /
+# -ed ending or a small auxiliary set — deliberately a heuristic, and a
+# conservative one: it only ever REMOVES a deixis signal, so a miss leaves the
+# previous (over-firing) behaviour rather than inventing a new one.
+_RELATIVE_RE = re.compile(r"\b(that|which)\s+(\w+)\b", re.IGNORECASE)
+
+_AUXILIARIES = frozenset({
+    "is", "are", "was", "were", "has", "have", "had", "can", "could", "will",
+    "would", "should", "must", "does", "do", "did", "may", "might",
+})
+
+
+def _looks_verbal(word: str) -> bool:
+    """-s / -ed / auxiliary. Deliberately NOT -ing.
+
+    "-ing" was in the first version and cost recall: "that THING works" has a
+    noun ending in -ing, so the demonstrative was masked and a genuinely
+    context-dependent prompt stopped being detected. The same trap holds for
+    "string", "nothing", "something", "setting", "warning", "meeting".
+
+    Measured on the 26-prompt corpus in
+    `tests/test_s3b_relative_that_is_not_a_deixis.py`:
+
+        -s -ed -ing   recall 11/13   false positives 0/13
+        -s -ed        recall 12/13   false positives 0/13   <- chosen
+
+    A relative clause in a prompt of this kind almost always takes -s ("that
+    validates") or an auxiliary ("that has"); a bare "-ing" form needs an
+    auxiliary before it anyway ("that IS validating"), which the auxiliary set
+    already catches.
+    """
+    w = word.lower()
+    return w in _AUXILIARIES or w.endswith(("s", "ed"))
+
+
+def _mask_relative_pronouns(prompt: str) -> str:
+    """Blank out `that`/`which` used as relative pronouns, keeping offsets."""
+    out = prompt
+    for m in _RELATIVE_RE.finditer(prompt):
+        if _looks_verbal(m.group(2)):
+            a, b = m.span(1)
+            out = out[:a] + "_" * (b - a) + out[b:]
+    return out
+
+
 def is_context_dependent(prompt: str) -> bool:
     """True when the prompt references the user's local code/files/history/state."""
     p = prompt or ""
     if _CONTEXT_DEP_RE.search(p):
         return True
     words = p.split()
-    return len(words) <= 12 and bool(_DEICTIC_RE.search(p) or _ANAPHORA_RE.search(p))
+    # S3b: a relative `that`/`which` points inside the sentence, not at the
+    # user's state. Masked before the deixis check; see _mask_relative_pronouns.
+    masked = _mask_relative_pronouns(p)
+    return len(words) <= 12 and bool(
+        _DEICTIC_RE.search(masked) or _ANAPHORA_RE.search(masked)
+    )
