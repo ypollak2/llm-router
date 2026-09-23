@@ -73,8 +73,46 @@ jobs:
           echo "✅ Distributions signed with GPG"
           ls -la dist/
 
+      # OIDC trusted publishing. The `id-token: write` permission above has
+      # been here all along, but this step also passed `password:`, and the
+      # action uses the token when one is given — so the permission was
+      # decorative and CLAUDE.md's claim that this publishes "via an OIDC
+      # trusted publisher" was read off the permissions block rather than off
+      # the step that actually authenticates. No `password` here is what makes
+      # it true. Requires the publisher to be registered on PyPI for this
+      # repo + workflow + environment (pypi).
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # release/v1
         with:
-          password: ${{ secrets.PYPI_TOKEN }}
-          skip_existing: true
+          # kebab-case: `skip_existing` is deprecated and warns on every run.
+          skip-existing: true
+
+      # `skip-existing: true` means a publish that uploaded NOTHING also
+      # reports success. On 2026-09-23 the workflow went green and the version
+      # was absent from the simple index and the JSON endpoint, and the project
+      # page 503'd, for several minutes — the only way to tell a real upload
+      # from a skipped one was to read the step log by hand.
+      #
+      # A check reporting success has to be shown to have done something.
+      # Resolving and installing the exact version is that proof: it is what a
+      # user will actually do, and it succeeded today while both index reads
+      # still showed the previous release.
+      - name: Verify the version is installable from PyPI
+        env:
+          TAG_REF: ${{ github.ref_name }}
+        run: |
+          VERSION="${TAG_REF#v}"
+          uv venv /tmp/pypi-verify
+          for attempt in 1 2 3 4 5 6 7 8 9 10; do
+            if uv pip install --python /tmp/pypi-verify/bin/python \
+                 --no-deps "llm-routing==${VERSION}" 2>/dev/null; then
+              echo "✅ llm-routing==${VERSION} installed from PyPI (attempt ${attempt})"
+              exit 0
+            fi
+            echo "attempt ${attempt}: not resolvable yet, waiting 30s"
+            sleep 30
+          done
+          echo "ERROR: llm-routing==${VERSION} was not installable from PyPI"
+          echo "after 5 minutes. The publish step reported success; with"
+          echo "skip-existing that can mean it uploaded nothing."
+          exit 1
