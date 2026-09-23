@@ -146,3 +146,73 @@ already meets it. The gap is entirely in usefulness: 56.2% offloaded, 0% used.
 A rate target is satisfiable by drafting more, which is precisely what happened
 here. **The target should be stated on accepted drafts, not offered ones** —
 and that cannot be measured until the acceptance signal above exists.
+
+---
+
+## Addendum — D-1 measured, and the "~60%" figure examined
+
+`hooks/auto-route.py:2811` asserts a rate and cites nothing:
+
+> "This makes `_is_context_dependent`'s **~60% false-negative rate** irrelevant
+> to the fabrication risk."
+
+Measured 2026-09-23 over n=1610 real prompts. A single global number turns out
+to be the wrong shape — **the detector's failure is concentrated in one class**:
+
+| Objectively context-dependent class | n | `_is_context_dependent` misses |
+|---|---|---|
+| Names a file path with a slash (`src/x/y.py`) | 114 | **0 = 0.0%** |
+| Names any filename (`router.py`) | 222 | **0 = 0.0%** |
+| **Short imperative continuation** (`go on more`, `yes, repoint both`) | 45 | **19 = 42.2%** |
+
+The detector is excellent at what a regex is good at — a prompt naming a file is
+caught every time — and fails on prompts that name nothing and mean nothing
+without the previous turn. Those are the majority of a working session's traffic.
+
+### What this does NOT show
+
+`_is_context_dependent` is only half the gate:
+
+```python
+if _direct_enabled and not zero_claude and (
+    _is_context_dependent(prompt) or _inherits_context
+):
+```
+
+`_inherits_context` is `method in ("context-inherit", "code-context-inherit")` —
+a *classifier* state, not a property of the prompt text, so a static probe
+cannot see it. It demonstrably fires (today's banners show `via:
+context-inherit` repeatedly). **The 42.2% therefore overstates the end-to-end
+gap and must not be quoted as the gate's miss rate.**
+
+The end-to-end number is the one already in this document, taken from the live
+log rather than a probe: **22 of today's 45 drafts** had no rescue and were not
+flagged — the OR missed them, start to finish.
+
+### The figure was measured against the wrong harm
+
+The docstring's point is that the false-negative rate is *"irrelevant to the
+fabrication risk"*, and for fabrication that is correct: outside zero-Claude a
+draft is advisory context, never a turn replacement.
+
+But that is not the only harm. Every false negative produces a draft that is
+generated, injected and discarded — **~18.7 s of added latency on the median
+prompt and 773 s of local compute today, for zero token saving.** The rate was
+assessed against fabrication, found harmless, and never assessed against cost,
+which is where it lands.
+
+That is the same shape as the rest of this document: a number that was computed,
+recorded, and evaluated against the wrong question.
+
+### Consequence for D-1
+
+Do not "fix the detector" as a single number. Two separate questions:
+
+1. **Continuations** — is the `_inherits_context` half already covering them? It
+   is a classifier state and can only be measured live, by counting drafts
+   produced for prompts matching the continuation shape. The `draft_acceptance`
+   counter added alongside this document makes that measurable for the first
+   time.
+2. **Everything else** — the file-naming class needs no work at 0/222.
+
+Until (1) has a number, widening the regex is tuning against examples.
