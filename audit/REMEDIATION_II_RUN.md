@@ -358,3 +358,83 @@ here: it changes the live hook, which is the one component the shared
 classifier deliberately does not touch (Option B), and it belongs with the
 consolidation of the hook's duplicated classifier rather than bolted on before
 it. **PARKED** as a plan item.
+
+---
+
+## S9b — the lint, and what it found
+
+Your call: build the lint rather than sweep the 217 sites by hand.
+
+`scripts/lint_unknown_as_number.py` lints the **flow**, not the pattern. A
+coercion only matters where "absent" and "zero" mean different things:
+
+1. **compared-directly** — the coercion is an operand of a `Compare`.
+2. **compared-via-name** — assigned to a local, that local is compared later.
+3. **averaged** — collected into a name that is both `sum()`-ed and divided by
+   its `len()`. Matching `sum` alone would flag every token tally.
+
+Shapes 2 and 3 are the two S9 sites exactly.
+
+**Proven on a positive before being believed.** A lint reporting zero and a
+lint that is broken produce identical output, and this repo has already shipped
+a near-duplicate stage that reported "0 collapses" while comparing raw
+whitespace splits. So the detector is tested against a **synthetic copy of the
+pre-fix S9 source**, not against `src/` — the repo is not required to keep the
+disease for the test to mean anything. It catches both S9 sites and does not
+flag the benign `sum(d.get("input_tokens", 0) or 0 ...)` control.
+
+### Result: 113 sites, and the precision is not 100%
+
+    compared-directly   43
+    compared-via-name   70
+    averaged             0   (S9 was the only one, and it is fixed)
+
+A sample of four, read by hand:
+
+| site | verdict |
+|---|---|
+| `user_routing_policy._policy_quota_exhaustion` | **REAL** |
+| `tools/admin.llm_quality_guard` | PLAUSIBLE — absent `avg_score` compares as 0.0 against a quality threshold |
+| `streaming_judge.observe` | INTENTIONAL — an absent threshold disables the judge; the conservative reading, and named `"no_threshold"` |
+| `ui/session_summary.render_main_panel` | BENIGN — display code, a missing count really is zero |
+
+**A pass/fail gate at that precision is a gate people learn to ignore.** So it
+ships as a **ratchet** (`tests/test_lint_unknown_as_number.py`, `BASELINE =
+113`): the count may only go down, a new coercion into a comparison fails
+immediately, and `test_the_baseline_is_not_stale` forces the constant down when
+a site is fixed — a baseline left above the real number is a ratchet with slack
+in it, and the next regression fits underneath.
+
+### The REAL one, measured and NOT fixed
+
+`_policy_quota_exhaustion` deprioritises providers whose quota is >85%
+consumed:
+
+```python
+normal   = [m for m in chain if pressure.get(_provider_from_model(m), 0.0) <  0.85]
+depleted = [m for m in chain if pressure.get(_provider_from_model(m), 0.0) >= 0.85]
+```
+
+A provider with no measured pressure reads as **0.0 consumed** and keeps full
+priority. Unknown as the favourable answer, in routing.
+
+Measured on this machine — `_provider_quota_pressure()` returns:
+
+```
+{'anthropic': 0.0}
+```
+
+so three of four providers resolve ABSENT → 0.0. **It is latent, not active:**
+for `ollama` 0.0 is semantically correct (local, no quota), and openai/google
+are not configured here, so they never reach a chain.
+
+It bites when a provider that *is* measured fails its fetch. That is not
+hypothetical — `ui/status_premium.load_pressure()` carries a comment about
+exactly this: a failed OAuth fetch writes `is_fallback` with session, weekly
+and sonnet all at 50, and treating that as measured was observed rendering
+"50%/5h" while the API returned 2%. `_provider_quota_pressure` has no
+equivalent guard.
+
+**PARKED** rather than fixed, for the same reason as S8: changing it changes
+which model answers, and this release already shipped three measured routing
+changes. It is recorded with its numbers so the next plan starts from them.
