@@ -435,7 +435,8 @@ _BASH_LOCAL_TOOL_RE = re.compile(
         mkdir|rmdir|rm|mv|cp|cd|chmod|chown|chgrp|ln|touch|# filesystem
         docker|docker-compose|kubectl|helm|terraform|ansible| # infra (local CLI)
         sed|awk|sort|uniq|cut|tr|xargs|tee|jq|             # local text pipelines
-        python|python3                                     # local script runner
+        python|python3|                                    # local script runner
+        llm-router|llm_router                              # the router's OWN cli
     )(?:\s|$|;|\||&)""",
     re.VERBOSE | re.IGNORECASE,
 )
@@ -452,6 +453,54 @@ _BASH_ROUTABLE_ESCAPE_RE = re.compile(
     )""",
     re.VERBOSE | re.IGNORECASE,
 )
+
+
+# ── The router's own CLI is never held ────────────────────────────────────────
+# F-1 (audit/27, 2026-09-23). The block message this hook prints ends with
+# "Run `llm_router set-enforce off` to disable enforcement" — and that command
+# was itself blocked. Clearing the hold required spending a routed model call on
+# a throwaway prompt, twice, because the lock is per-turn.
+#
+# `_BASH_LOCAL_TOOL_RE` exists for exactly this ("no routed model can perform
+# it ... it just traps the user") and listed git, npm, pytest, docker, mkdir and
+# python while omitting the router's own CLI — the most inherently-local tool on
+# the machine.
+#
+# This is a SEPARATE valve from the local-tool one because that valve is gated
+# off for QA task types and under strict, and both of those are precisely when
+# the trap closes:
+#   * QA — the misclassification that causes the trap lands in `research`
+#     (F-2: 49.8% of real prompts are decided by a default, not a score), and
+#     `_bash_exempt_from_hold` returns False for every QA type.
+#   * strict — disables every other escape valve by design. Without this one,
+#     strict cannot be exited except by editing a file.
+#
+# NOT a routing bypass: no routed model can execute the router's own CLI, and
+# none of its ~40 subcommands is LLM reasoning — they are control and
+# diagnostics (status, doctor, set-enforce, gc, stats, …). Network fetches and
+# shell-driven LLM calls remain route-eligible via _BASH_ROUTABLE_ESCAPE_RE,
+# which is checked first, so `llm-router … | curl https://…` is still held.
+_ROUTER_SELF_CLI_RE = re.compile(
+    r"(?:^|[;&|])\s*"          # start of line, or a COMMAND position only
+    r"(?:\w+=[^\s]*\s+)*"      # env-var prefixes: LLM_ROUTER_HOME=/tmp llm-router
+    r"(?:[\w./-]*/)?"          # an absolute or venv path is fine
+    r"llm[-_]router"
+    r"(?=\s|$|;|\||&)",        # and nothing may follow it in the same word
+    re.IGNORECASE,
+)
+
+
+def _is_router_self_command(command: str) -> bool:
+    """True when the command drives llm-router's own CLI.
+
+    Held by nothing: it is the escape hatch, and an escape hatch behind the
+    thing it escapes is not one.
+    """
+    if not command or not command.strip():
+        return False
+    if _BASH_ROUTABLE_ESCAPE_RE.search(command):
+        return False
+    return bool(_ROUTER_SELF_CLI_RE.search(command))
 
 
 def _bash_exempt_from_hold(task_type: str, command: str, redirect_fires: bool) -> bool:
@@ -1136,6 +1185,31 @@ def main() -> None:
     # pending). A redundant is_context_dependent() re-check here was REMOVED: it
     # over-fired on incidental deictics ("Generate a regex THAT validates emails")
     # and wrongly exempted genuinely-routable prompts from hard enforcement.
+
+    # F-1 (audit/27): the router's own CLI is NEVER held.
+    #
+    # Placed before the local-tool valve below, and deliberately NOT gated by
+    # `_strict` or by task type, because those two gates are exactly when the
+    # trap closes: a misclassification into a QA type (F-2) turns off the
+    # local-tool valve, and strict turns off every valve. The block message
+    # this hook prints tells the user to run `llm-router set-enforce off`, and
+    # that command was itself blocked.
+    if (pending is not None and enforce in ("hard", "smart", "strict")
+            and tool_name == "Bash"
+            and _is_router_self_command(
+                hook_input.get("tool_input", {}).get("command", ""))):
+        enforce = "soft"
+        try:
+            _router_dir().mkdir(parents=True, exist_ok=True)
+            ts = time.strftime("%Y-%m-%d %H:%M:%S")
+            with _log_path().open("a", encoding="utf-8") as f:
+                f.write(
+                    f"[{ts}] ROUTER_CLI_EXEMPT session={session_id[:12]} "
+                    f"task={pending.get('task_type', '')} "
+                    f"reason=the_escape_hatch_is_not_held\n"
+                )
+        except OSError:
+            pass
 
     # Local-tool Bash exemption (v0.8.3): a Bash command that runs an inherently
     # local dev operation (git/gh, package managers, build/test, filesystem,
