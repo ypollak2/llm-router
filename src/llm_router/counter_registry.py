@@ -271,6 +271,38 @@ def _read_hook_kills() -> CounterReading:
         return CounterReading(None, unknown_reason=type(exc).__name__)
 
 
+def _read_low_signal_classifications() -> CounterReading:
+    """Prompts routed by `low_signal_default` because nothing scored (S8).
+
+    Alarming on the SHARE, not the count: a default firing is normal, a default
+    deciding a quarter of everything means the classifier is not classifying.
+
+    Zero prompts classified reads as UNKNOWN, not as a clean 0% — a process that
+    has classified nothing and a process whose every prompt scored confidently
+    are different facts, and the second is the one worth celebrating.
+    """
+    try:
+        from llm_router import classify
+
+        low, total = classify.low_signal_classifications()
+        if not total:
+            return CounterReading(
+                None, unknown_reason="no prompt classified in this process yet"
+            )
+        share = low / total
+        return CounterReading(
+            float(low),
+            alarming=share >= 0.25,
+            detail=(
+                f"of {total} classified in this process ({share:.0%} decided by "
+                f"the default, not by a score)",
+                "baseline measured 2026-09-23 over n=1571 real prompts: 49.8%",
+            ),
+        )
+    except Exception as exc:  # noqa: BLE001
+        return CounterReading(None, unknown_reason=type(exc).__name__)
+
+
 REGISTRY: tuple[Counter, ...] = (
     Counter(
         id="fail_open_events",
@@ -330,6 +362,16 @@ REGISTRY: tuple[Counter, ...] = (
         reader=_read_interception_gaps,
         unit="observation(s)",
         tags=("denominator",),
+    ),
+    Counter(
+        id="low_signal_classifications",
+        makes_visible="a prompt nothing could classify, routed by whichever "
+                      "default its door happens to carry — the gateway and the "
+                      "hook disagree on half of real traffic because of it",
+        source="llm_router.classify:low_signal_classifications",
+        reader=_read_low_signal_classifications,
+        unit="classification(s)",
+        tags=("denominator", "invariant"),
     ),
 )
 

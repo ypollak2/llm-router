@@ -72,13 +72,19 @@ def _isolated(tmp_path, monkeypatch):
     """
     monkeypatch.setenv("LLM_ROUTER_HOME", str(tmp_path))
     monkeypatch.setenv("LLM_ROUTER_DB_PATH", str(tmp_path / "usage.db"))
-    from llm_router import execution_ledger, failopen, prompt_capture, session_store
+    from llm_router import execution_ledger, failopen, prompt_capture, session_store  # noqa: F401
 
     failopen.clear()
     # Process-local counters: a fresh database does not clear them.
     monkeypatch.setattr(prompt_capture, "_counters", {}, raising=False)
     monkeypatch.setattr(session_store, "_lock_timeouts", 0, raising=False)
     execution_ledger.reset_dropped_event_count()
+    # S8's low-signal counter is the third of this kind: it counts in module
+    # globals inside `classify`, so every prompt any earlier test classified is
+    # still on the tally. Same reasoning as the two above.
+    from llm_router import classify as _classify
+
+    _classify.reset_low_signal_counters()
     yield
 
 

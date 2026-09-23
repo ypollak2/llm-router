@@ -218,10 +218,30 @@ def test_word_order_does_not_change_the_classification():
     signal and the prompt falls through to the "analyze low-signal default"
     that `gateway._classify` documents.
 
-    THE DIRECTION IS WHAT MAKES IT COST MONEY: the fallback is the MORE
-    expensive tier, so the failure mode is silently upgrading a trivial
-    question, not downgrading a hard one. Nothing reports it, because from
-    every surface it looks like an ordinary analyze route.
+    THE DIRECTION IS WHAT MAKES IT COST MONEY *AT THIS DOOR*: the gateway's
+    fallback is the MORE expensive tier, so the failure mode here is silently
+    upgrading a trivial question, not downgrading a hard one. Nothing reports
+    it, because from every surface it looks like an ordinary analyze route.
+
+    Scoped to the gateway on purpose — an earlier version of this docstring
+    said "the classifier", which is wrong. `ROUTER_POLICY` and `HOOK_POLICY`
+    carry `low_signal_default="query"` and get the cheap answer for the same
+    prompt. Neither door measured anything; they disagree because their
+    defaults differ.
+
+    S8 (2026-09-23) measured how big that is over n=1571 real prompts, with
+    the CLAUDE.md drop rules applied via `scripts/groundtruth/sources.py`:
+
+        score == 0, nothing scored at all ......... 651/1571 = 41.4%
+        weak (0 < score < threshold) .............. 132/1571 =  8.4%
+        gateway and hook return different types ... 783/1571 = 49.8%
+
+    So this row is not an odd pair. It is one visible instance of half of all
+    traffic being routed by whichever default its door happens to carry.
+    `llm_router.classify.low_signal_classifications()` now counts the
+    fall-through and `llm-router doctor` renders it, so the share is
+    observable in production instead of waiting for the next audit — but the
+    ROUTE is deliberately unchanged, which is why this test still xfails.
 
     Left as xfail(strict) deliberately. Fixing it means changing routing
     behaviour, which needs evaluating on the target distribution rather than

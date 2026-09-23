@@ -262,6 +262,24 @@ def _drive_hook_kills(tmp_home: pathlib.Path) -> None:
 #:
 #: Keyed by id and cross-checked against the registry below, so a counter added
 #: without a driver fails rather than quietly going unexercised.
+def _drive_low_signal_classifications(tmp_path):
+    """Classify a prompt that scores NOTHING, so the default decides it.
+
+    The premise matters more than the call: if this prompt ever starts scoring,
+    the driver stops driving and the counter would look broken. Asserted here
+    rather than left to chance — a driver that no longer drives is how a
+    registered reader goes quietly unverified.
+    """
+    from llm_router import classify
+
+    prompt = "tell me what the capital of Portugal is"
+    assert max(classify._score_categories(prompt).values()) == 0, (
+        f"{prompt!r} now scores — pick another prompt that scores nothing, or "
+        "this driver is no longer exercising the low-signal path"
+    )
+    classify.classify_signals(prompt)
+
+
 DRIVERS = {
     "fail_open_events": _drive_fail_open,
     "ledger_events_dropped": _drive_dropped_events,
@@ -270,6 +288,7 @@ DRIVERS = {
     "hook_kills": _drive_hook_kills,
     "unterminated_invocations": _drive_unterminated,
     "interception_gaps": _drive_interception_gaps,
+    "low_signal_classifications": _drive_low_signal_classifications,
 }
 
 
@@ -326,6 +345,7 @@ def test_the_driven_value_reaches_the_rendered_report(counter_id, tmp_path, monk
 
 def _reset_process_counters(monkeypatch, tmp_path) -> None:
     from llm_router import (
+        classify,
         coverage,
         execution_ledger,
         failopen,
@@ -334,6 +354,7 @@ def _reset_process_counters(monkeypatch, tmp_path) -> None:
     )
 
     execution_ledger.reset_dropped_event_count()
+    classify.reset_low_signal_counters()
     monkeypatch.setattr(session_store, "_lock_timeouts", 0, raising=False)
     monkeypatch.setattr(prompt_capture, "_counters", {}, raising=False)
     failopen.clear()

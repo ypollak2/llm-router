@@ -518,6 +518,70 @@ def complexity_for(
     return _complexity(prompt, task_type, policy)
 
 
+# ── S8: how often nothing was classified ──────────────────────────────────────
+#
+# Audit 2026-09-22, S8. The finding entered the plan as "word order changes the
+# route": `what is the capital of Portugal?` routes to query, `tell me what the
+# capital of Portugal is` routes to analyze. It is not about word order. Both
+# score ZERO in every category, and the answer is then decided entirely by
+# `policy.low_signal_default` — which is "query" for the hook and router and
+# "analyze" for the gateway. The hook is right by luck, not by measurement.
+#
+# Measured 2026-09-23 over n=1571 real prompts (the CLAUDE.md drop rules, via
+# `scripts/groundtruth/sources.py`, removed 1389 system-noise / test-session /
+# benchmark-sandbox records first):
+#
+#     score == 0, no signal at all .................... 651/1571 = 41.4%
+#     0 < score < _CONFIDENCE_THRESHOLD, weak .........  132/1571 =  8.4%
+#     decided by low_signal_default, not by scoring ...          = 49.8%
+#     gateway and hook return a DIFFERENT task_type ... 783/1571 = 49.8%
+#
+# Half of all real traffic is routed by a default. `ClassifySignal.confident`
+# has recorded this since it was introduced and had ZERO readers in src/ — the
+# CLASS-A shape R12 exists to stop: a number written for nobody. These two ints
+# give it a reader, so the share is observable in `llm-router doctor` instead of
+# waiting for the next audit to notice it.
+#
+# Deliberately NOT fixed here: which task_type those prompts should get. There
+# is no labelled set to answer it on, and per CLAUDE.md a one-point calibration
+# is a guess — a proxy split has already misled this project by 4.25 points.
+_low_signal_classifications = 0
+_total_classifications = 0
+
+
+def low_signal_classifications() -> tuple[int, int]:
+    """``(decided_by_default, total)`` classified by THIS process.
+
+    In-process, like `execution_ledger.dropped_event_count()`: it reports what
+    this process has seen, not what the machine has seen since install.
+
+    Returns the denominator with the numerator on purpose. 12 low-signal
+    classifications is a healthy hook that ran 12 times and a catastrophe in a
+    gateway that served 12,000 requests, and a bare numerator cannot tell the
+    two apart.
+
+    Reading does not reset. S1: an instrumentation counter that is consumed by
+    being read makes the second reader see zero and the first reader unable to
+    check its own work.
+
+    NOT thread-safe, deliberately. `+=` on a module global is load-add-store,
+    so concurrent classification can lose an increment. A lock on the hot
+    classification path would cost more than the counter is worth, and the
+    failure mode is benign in the one direction that matters: a lost increment
+    under-reports the low-signal share, so this number is a FLOOR. It cannot
+    manufacture an alarm, only miss one. `execution_ledger` makes the same
+    trade for the same reason.
+    """
+    return _low_signal_classifications, _total_classifications
+
+
+def reset_low_signal_counters() -> None:
+    """Test seam. Never call this to make a number look better."""
+    global _low_signal_classifications, _total_classifications
+    _low_signal_classifications = 0
+    _total_classifications = 0
+
+
 def classify_signals(prompt: str, policy: ClassifyPolicy = HOOK_POLICY) -> ClassifySignal:
     """Deterministic task_type + complexity. Never raises, never blocks.
 
@@ -531,6 +595,12 @@ def classify_signals(prompt: str, policy: ClassifyPolicy = HOOK_POLICY) -> Class
     best_score = scores[best]
     confident = best_score >= _CONFIDENCE_THRESHOLD
     task = best if confident else policy.low_signal_default
+    # S8: count the fall-through. Two int increments on the hot path; the
+    # alternative is that half of all routing stays unattributable.
+    global _low_signal_classifications, _total_classifications
+    _total_classifications += 1
+    if not confident:
+        _low_signal_classifications += 1
     try:
         task_type = TaskType(task)
     except ValueError:
