@@ -210,9 +210,25 @@ def analyze_facts(
         tasks[task] = tasks.get(task, 0) + 1
         models[model] = models.get(model, 0) + 1
 
-    # Average confidence
-    confidences = [d.get("classifier_confidence", 0) or 0 for d in decisions]
-    avg_conf = sum(confidences) / len(confidences) if confidences else 0.0
+    # Average confidence — over the decisions that HAVE one.
+    #
+    # S9 (audit 2026-09-22). This was `d.get("classifier_confidence", 0) or 0`,
+    # which turns a NULL into a hard 0.0 and averages it in. Measured on the
+    # live ledger: `classifier_confidence` is NULL for **213 of the 214** rows
+    # with trusted provenance, so the reported "avg confidence" was very nearly
+    # the fraction of rows that happened to carry a number — a statistic about
+    # schema coverage wearing the name of a quality measurement.
+    #
+    # Denominator disappearance, the same shape as the savings surfaces: an
+    # empty measurement must not render as a confident zero. The count of
+    # decisions that carried a confidence now travels with the mean so a reader
+    # can tell "models are unsure" from "nobody wrote it down".
+    _measured = [
+        float(d["classifier_confidence"])
+        for d in decisions
+        if d.get("classifier_confidence") is not None
+    ]
+    avg_conf = sum(_measured) / len(_measured) if _measured else 0.0
 
     # Classification accuracy (based on correction ratio)
     accuracy = 1.0 - (len(corrections) / len(decisions)) if decisions else 1.0
@@ -227,6 +243,10 @@ def analyze_facts(
         "task_distribution": tasks,
         "model_distribution": models,
         "avg_confidence": avg_conf,
+        # S9: the denominator behind avg_confidence. 0 measured means the mean
+        # above is not a measurement of anything, whatever its value.
+        "confidence_measured": len(_measured),
+        "confidence_unmeasured": len(decisions) - len(_measured),
         "classification_accuracy": accuracy,
         # GH#56: the counterpart of the unmeasured flag above — these numbers
         # came from real decisions.
@@ -258,9 +278,22 @@ def analyze_gaps(decisions: list[dict], corrections: list[dict]) -> list[dict]:
         gap_flags = []
         reason = ""
 
-        # Check confidence
-        conf = d.get("classifier_confidence", 0) or 0
-        if conf < 0.70:
+        # Check confidence.
+        #
+        # S9: `d.get("classifier_confidence", 0) or 0` coerced an unrecorded
+        # confidence to 0.0, which is below every threshold, so every decision
+        # that never had one was flagged LOW_CONFIDENCE and then promoted to a
+        # CLASSIFIER_ERROR root cause at confidence "High", with the evidence
+        # string "Classifier confidence 0%". On the live ledger that is 213 of
+        # the 214 trusted rows: a root-cause analysis inventing a certain
+        # finding out of a missing column.
+        #
+        # Unknown gets its own flag and is never the unfavourable answer either.
+        conf = d.get("classifier_confidence")
+        if conf is None:
+            gap_flags.append("CONFIDENCE_UNMEASURED")
+            reason = "classifier confidence was never recorded for this decision"
+        elif conf < 0.70:
             gap_flags.append("LOW_CONFIDENCE")
             reason = f"classifier confidence only {conf*100:.0f}%"
 
@@ -573,7 +606,7 @@ type: feedback
 - **Cost**: ${facts.get('total_cost', 0.0):.4f}
 - **Saved**: ${facts.get('total_saved', 0.0):.4f}
 - **Manual corrections**: {facts.get('correction_count', 0)}
-- **Avg confidence**: {facts.get('avg_confidence', 0)*100:.0f}%
+- **Avg confidence**: {facts.get('avg_confidence', 0)*100:.0f}% (over {facts.get('confidence_measured', 0)} of {facts.get('total_calls', 0)} decisions that recorded one)
 - **Accuracy**: {accuracy_str}
 
 ### Task Distribution
