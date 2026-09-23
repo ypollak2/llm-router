@@ -490,6 +490,47 @@ _ROUTER_SELF_CLI_RE = re.compile(
 )
 
 
+def _prompt_needs_an_action(prompt: str, task_type: str) -> bool:
+    """True when the PROMPT asks for a write, a command run, or a git operation.
+
+    F-2 (audit/27, Phase 0.5b). `capabilities.detect_capabilities()` is
+    documented as "the shared predicate for ALL routing / exemption /
+    provisioning / permission decisions" — and this hook had never imported it.
+    Both halves of capability-awareness existed and nothing joined them.
+
+    Measured over n=1594 real prompts (`scripts/measure_capability_mismatch.py`,
+    CLAUDE.md drop rules applied):
+
+        need an ACTION (write / run / git) ............ 337/1594 = 21.1%
+        need reads only .............................. 41/1594  =  2.6%
+
+    The distinction is the whole point, and getting it wrong in the permissive
+    direction would gut enforcement. A prompt that needs to READ the repo is
+    perfectly routable — the router reads the file and passes it as `context`,
+    which the advisory banner already tells callers to do. A prompt that needs
+    to WRITE, RUN or COMMIT is not: `_call_text` returns plain text, and
+    `gateway._refuse_tools_if_present` returns HTTP 400 for anything carrying
+    tools. No model choice changes that.
+
+    86 of the action-needing prompts classify as `query` — "commit this",
+    "commit the symlink fix", "ship llm_local_task and commit". `query` is a QA
+    type, which is exactly where the hold is strictest and where
+    `_bash_exempt_from_hold` switches the local-tool valve off. So the prompts
+    least servable by routing were the ones held hardest.
+
+    Fail-open: a detector failure returns False and changes nothing.
+    """
+    if not prompt or not prompt.strip():
+        return False
+    try:
+        from llm_router.capabilities import detect_capabilities
+
+        req = detect_capabilities(prompt, task_type).required
+    except Exception:  # noqa: BLE001 — a detector failure must never block a tool call
+        return False
+    return bool(req.write_files or req.run_commands or req.git_operations)
+
+
 def _is_router_self_command(command: str) -> bool:
     """True when the command drives llm-router's own CLI.
 
@@ -1185,6 +1226,37 @@ def main() -> None:
     # pending). A redundant is_context_dependent() re-check here was REMOVED: it
     # over-fired on incidental deictics ("Generate a regex THAT validates emails")
     # and wrongly exempted genuinely-routable prompts from hard enforcement.
+
+    # F-2 (audit/27): a prompt that needs an ACTION is not held.
+    #
+    # No text-only routed door can write a file, run a command or commit, so
+    # holding a tool call to force routing there saves nothing — the same
+    # reasoning the local-tool valve below already applies to commands, applied
+    # to the prompt instead.
+    #
+    # Deliberately NOT exempted when `_delegate_redirect_fires`: that redirect
+    # sends the work to llm_act, a door that CAN perform it, which is strictly
+    # better than letting Claude do it natively. Exempting there would silently
+    # defeat the redirect — the #29 reasoning, one level up.
+    if (pending is not None and enforce in ("hard", "smart", "strict")
+            and tool_name in ("Bash", "Edit", "Write", "MultiEdit", "NotebookEdit")
+            and _prompt_needs_an_action(
+                pending.get("original_prompt", ""), pending.get("task_type", ""))
+            and not _delegate_redirect_fires(
+                pending.get("original_prompt", ""),
+                pending.get("complexity", "simple"))):
+        enforce = "soft"
+        try:
+            _router_dir().mkdir(parents=True, exist_ok=True)
+            ts = time.strftime("%Y-%m-%d %H:%M:%S")
+            with _log_path().open("a", encoding="utf-8") as f:
+                f.write(
+                    f"[{ts}] ACTION_EXEMPT session={session_id[:12]} "
+                    f"task={pending.get('task_type', '')} "
+                    f"reason=no_text_door_can_write_run_or_commit\n"
+                )
+        except OSError:
+            pass
 
     # F-1 (audit/27): the router's own CLI is NEVER held.
     #
