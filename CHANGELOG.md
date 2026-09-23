@@ -10,6 +10,112 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 | [CHANGELOG-ARCHIVE.md](CHANGELOG-ARCHIVE.md) | v10.1.5 back to v6.3.0 |
 | [GitHub Releases](https://github.com/ypollak2/llm-router/releases) | v6.2 and earlier |
 
+## [15.1.0] - 2026-09-23
+
+Remediation plan II, the half that needed measuring before it could be fixed.
+A minor release: routing behaviour changes in three places, each measured
+before and after on the population it affects, plus one root-cause analysis
+that was inventing findings out of a NULL column.
+
+Every number below carries its n and the file that produces it.
+`scripts/measure_low_signal_rate.py` re-derives the headline 49.8%.
+
+### Changed — routing behaviour
+
+- **S3b · A relative `that`/`which` is no longer read as a deixis.**
+  "write a regex **that** validates emails" was classified context-dependent
+  because `that` matched the anaphora pattern. A relative pronoun points inside
+  its own sentence, not at the user's state, so it is masked before the deixis
+  check when followed by something verbal. Measured on a 13-prompt labelled
+  set: false positives **5/12 → 0/12**, recall **11/13 → 12/13**. The
+  `xfail(strict=True)` carrying this in the S3 parity test is removed.
+- **S4a · The bandit trains only on rows whose origin was recorded.**
+  `aggregate_stats` now filters `provenance = 'runtime'`. On the development
+  ledger, **1387 of 1601** rows were pre-provenance placeholders carrying a
+  single latency value (500ms) and a flat $0.01 — 87% of what the bandit
+  learned from was not measurement. Excluding them does not remove a model
+  from routing (`reorder()` explores from `candidates`, not `eligible`).
+  Measured delta: the top pick was unchanged; the two models dropped were
+  already ranked last on the placeholder data.
+- **S4b · A tie in the reward breaks toward the faster model.**
+  Three free local models tied at identical expected value and `max()` resolved
+  it by iteration order, landing on `qwen3.8:latest` at **54.3s** over
+  `lfm2.5:8b` at **10.1s**. Latency is a **tie-break, not a cost term** — a
+  cost term needs a $/second rate and no trusted row is paid, so any rate would
+  be a guess embedded in routing policy. A tie-break cannot reorder any pair
+  whose expected values differ. An unrecorded latency sorts **last**, never
+  first.
+
+### Fixed
+
+- **A classifier confidence that was never recorded was reported as 0%.**
+  `routing_decisions.classifier_confidence` is NULL for **213 of the 214** rows
+  with trusted provenance. `retrospective.py` coerced that NULL to `0.0`, which
+  is below every threshold, so each of those decisions was flagged
+  `LOW_CONFIDENCE` and promoted by `classify_root_causes` to a
+  `CLASSIFIER_ERROR` at confidence "High" with the evidence string
+  *"Classifier confidence 0%"* — 213 certain findings manufactured from a
+  missing column. The same coercion averaged NULLs into `avg_confidence`,
+  making it roughly *the share of rows that recorded one*. An unrecorded
+  confidence now gets its own `CONFIDENCE_UNMEASURED` flag and is counted
+  separately; `avg_confidence` is computed over the decisions that have one and
+  ships with its denominator. A genuinely measured `0.0` is still
+  `LOW_CONFIDENCE`.
+
+### Added
+
+- **The low-signal fall-through is counted and read.**
+  `classify.low_signal_classifications()` returns `(decided_by_default, total)`
+  — the numerator with its denominator, because 12 fall-throughs is a healthy
+  hook and a catastrophe in a gateway that served 12,000 requests. Registered
+  in `counter_registry` and rendered by `llm-router doctor`, alarming on the
+  *share* (≥25%); `0 of 0` reads as Unknown, never as a clean 0%.
+- **`scripts/measure_low_signal_rate.py`** — the script every published form of
+  the 49.8% came from, committed so the figure can be re-derived rather than
+  believed. It reuses `scripts/groundtruth/sources.py` for the drop rules;
+  two ad-hoc parsers of this repo's traffic have already disagreed.
+
+### Measured, and deliberately not fixed
+
+- **Half of all traffic is routed by a default, not by a classification.**
+  Entered the plan as "word order changes the route" (`what is 17 * 3?` →
+  `query`, `tell me what 17 * 3 is` → `analyze`). Measuring it first showed the
+  framing was wrong. Only the **gateway** is order-sensitive (10/14 on a
+  14-pair paraphrase corpus); the router and hook are 0/14. Both prompts score
+  **zero in every category**, so `policy.low_signal_default` decides — `query`
+  for the hook and router, `analyze` for the gateway, which is right by luck
+  rather than by measurement.
+
+  Over **n=1571 real prompts** (the CLAUDE.md drop rules applied first, which
+  removed 1389 records): **41.4%** score zero, **49.8%** are decided by a
+  default, and the gateway and hook return a **different** task type for
+  **49.8%** of them.
+
+  `ClassifySignal.confident` had recorded this since it was introduced and had
+  **zero readers in `src/`**.
+
+  **The route is unchanged.** Both candidate fixes were measured and refused:
+  adding `(?:tell|show) me (?:what|how|…)` to the query intent takes gateway
+  order-sensitivity 10/14 → 2/14 but pulls genuine analyze/code work into
+  `query` 0/8 → 2/8 (gateway) and 2/8 → 4/8 (router and hook); flipping the
+  gateway default re-routes half its traffic on no evidence that `query` is
+  right for it. A labelled target-distribution set does not exist, and a
+  proxy split has already misled this project by 4.25 points. The K4
+  `xfail(strict=True)` therefore stands.
+
+- **The `or 0` coercion class is sized but not swept.** 217 matches in
+  `src/llm_router`. Most are benign sums; the dangerous ones are those compared
+  to a threshold or averaged, which is what S9 was. A 217-site sweep is a
+  refactor, not a remediation — the right shape is a lint, and that is its own
+  task with its own red-check.
+
+- **The low-signal counter is in-process.** `llm-router doctor` classifies
+  nothing, so it renders `Unknown` there — honest, but it means the counter is
+  load-bearing only where writer and reader share a process (the hook, and the
+  gateway). Closing it properly means logging the outcome on the hook's
+  existing `prompt_len=` line, which belongs with consolidating the hook's
+  duplicated classifier rather than bolted on before it.
+
 ## [15.0.1] - 2026-09-23
 
 Remediation plan II — what attacking the 15.0.0 release found. Patch release:
@@ -76,14 +182,22 @@ on the target distribution or not at all:
   ("write a regex **that** validates emails"). `enforce-route.py` removed its
   own re-check for exactly this reason; the detector itself was never fixed,
   so every remaining consumer still over-fires.
+  **FIXED in 15.1.0** — see S3b below.
 - **The routing reward is blind to everything but dollars.**
   `expected_value = success_rate * ANSWER_VALUE_USD - avg_cost`, and every
   local model costs zero dollars — so between two free models the reward picks
-  the higher success rate, which is the larger model. A local model's real
-  cost is memory and latency; `avg_latency_ms` is already collected on every
-  stats row and the reward does not read it.
+  the higher success rate. **CORRECTED 2026-09-23:** the 15.0.1 text said
+  "which is the larger model". That is wrong — measured on the table the
+  bandit actually reads, the 8B model outranks the 30B (EV 0.05000 vs
+  0.04632), because the 30B's success rate is lower. The mechanism was right;
+  the example was backwards. A local model's real cost is memory and latency;
+  `avg_latency_ms` is already collected on every stats row and the reward does
+  not read it. **PARTIALLY ADDRESSED in 15.1.0** — latency is now a tie-break,
+  not a cost term; see S4b below.
 - **Word order changes the route.** `what is 17 * 3?` classifies as `query`;
   `tell me what 17 * 3 is` falls to `analyze` — the more expensive tier.
+  **REFRAMED in 15.1.0:** measured, this is not about word order and it is not
+  a small finding; see "Half of all traffic is routed by a default" below.
 
 ## [15.0.0] - 2026-09-22
 
@@ -178,6 +292,10 @@ asked. If you were relying on that 200, you were getting the wrong answer.
 - **Word order changes the route.** `what is 17 * 3?` classifies as `query`;
   `tell me what 17 * 3 is` falls through to `analyze` — the more expensive
   tier. Found by the new adversarial corpus and carried as a strict xfail.
+  **SCOPED 2026-09-23:** true at the *gateway*, which is what the corpus row
+  exercises; the hook and router fall through to `query`, the cheaper tier.
+  And the cause is not word order — neither prompt scores anything, so the
+  door's default decides. See 49.8% measurement above.
 - **Ground Truth covers state-free prompts only**, because no replayer exists
   for repo-bound tasks.
 

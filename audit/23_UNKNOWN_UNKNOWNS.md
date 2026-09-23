@@ -92,7 +92,25 @@ system memory** and OOM-killed three background jobs, including the
 pre-release verification.
 
 A cost-saving product whose escape hatch loads a 30B model for a throwaway
-query has an escape hatch that costs more than the thing it is escaping. No
+query has an escape hatch that costs more than the thing it is escaping.
+
+**CORRECTION (2026-09-23).** The sentence above — that the reward maximises
+"pick the largest free model" — is FALSE, and measuring it is what showed that.
+On `routing_decisions`, the table the bandit actually reads:
+
+    ollama/lfm2.5:8b          n=99  succ 1.000  $0  10111ms  EV 0.05000  <- wins
+    ollama/qwen3-coder:30b    n=95  succ 0.926  $0  13674ms  EV 0.04632
+
+The 8B model wins; the cost term vanishing means SUCCESS RATE decides, and here
+that favours the smaller model. The mechanism was right, the prediction was
+backwards.
+
+What survived, and is worse: **1,387 paid-model rows carry identical
+placeholder values** — exactly 500 ms and exactly $0.01, one distinct value
+each — while the local model has 99 distinct real latencies. The reward
+compares measured local models against constant-stamped paid ones, so a
+latency term would optimise a recording defect. See S4a.
+ No
 phase examined the enforcement mechanism's own resource cost.
 
 ## U-05 — Nobody ran the product on its own release

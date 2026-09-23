@@ -24,7 +24,7 @@ failing (CLAUDE.md, K7).
 | S5 | Audit output is an unguarded data surface | MEDIUM | Already leaked once |
 | S6 | Migration duplication | MEDIUM | Cause of S1/S2 |
 | S7 | Markup leaks to the terminal | LOW | First command a new user runs |
-| S8 | Word order changes the route | LOW-MED | Costs money, silently |
+| S8 | ~~Word order changes the route~~ → **half of traffic is routed by a default** | **HIGH** | 49.8% of n=1571 real prompts |
 
 ---
 
@@ -325,11 +325,43 @@ The escape valve is not misconfigured. The reward is doing its job:
 `avg_cost` is DOLLARS. Every local model costs zero dollars, so the cost term
 vanishes for all of them and the comparison collapses to success rate alone.
 A 30B model has a higher success rate than a 6.6B one, so **"pick the largest
-free model" is exactly what this formula maximises.** The machine had a 6.6 GB
-model that the hook's own drafting path uses; the escape valve took the 18.6 GB
-one, which then held 42.6% of memory.
+free model" is exactly what this formula maximises.**
 
-A local model's real cost is MEMORY and LATENCY. The reward models neither.
+**CORRECTION (2026-09-23) — the sentence above is FALSE.** Measuring it is what
+showed that. On `routing_decisions`, the table `aggregate_stats` actually
+reads:
+
+    ollama/lfm2.5:8b          n=99  succ 1.000  $0  10111ms  EV 0.05000  <- wins
+    ollama/qwen3-coder:30b    n=95  succ 0.926  $0  13674ms  EV 0.04632
+
+The **8B model wins.** The cost term vanishing means SUCCESS RATE decides, and
+on this machine that favours the smaller model, because the 30B's success rate
+is 0.926 against the 8B's 1.000. The mechanism was right; the prediction was
+backwards.
+
+Two further errors in the same analysis, recorded because the habit matters
+more than the conclusion: I read the `usage` table (286 rows, all success=1,
+all cost 0) and concluded the reward was a CONSTANT — the bandit does not read
+that table. And `avg_latency_ms` is not "collected and unread"; it is already
+SELECTed in the aggregate query, unused by `expected_value` only.
+
+### S4a — what survived, and it is worse
+
+    openai/gpt-4o           latency: 1 distinct [500.0..500.0]  cost: 1 [0.01..0.01]
+    anthropic/claude-opus   latency: 1 distinct [500.0..500.0]  cost: 1 [0.01..0.01]
+    ollama/lfm2.5:8b        latency: 99 distinct [1384..55437]  cost: 1 [0.0..0.0]
+
+**1,387 paid-model rows carry identical placeholder values** — exactly 500 ms,
+exactly $0.01. Those are not measurements. The local model has 99 distinct real
+latencies.
+
+The reward therefore compares MEASURED local models against CONSTANT-STAMPED
+paid ones. Adding a latency term now would let a 500 ms placeholder beat a
+10-second measurement — optimising a recording defect rather than a model.
+
+**S4a (fix the recording) strictly precedes S4b (use the measurement).** This
+is the same ordering S1/S2 established: until the instrument is trustworthy,
+nothing computed from it is evidence.
 
 **And the cheap half is already measured:** `avg_latency_ms` is a REQUIRED field
 on every `ModelStats` row, and `expected_value` does not read it. Data
@@ -353,7 +385,32 @@ sites in the same file. The test asserts on the whole rendered output and on
 the AST of every `Text(` call, because the reported line was the visible
 symptom of a class.
 
-## S8 — unchanged, still `xfail(strict=True)` in the K4 corpus.
+## S8 — the framing was wrong; the defect is ~100x bigger than the row.
+
+Measured before fixing. Only the **gateway** is order-sensitive (10/14 on a
+14-pair paraphrase corpus); `ROUTER_POLICY` and `HOOK_POLICY` are already 0/14.
+
+The prompts score **zero in every category**, so `policy.low_signal_default`
+decides — `"query"` for hook/router, `"analyze"` for the gateway. The hook is
+right by luck, not by measurement.
+
+Over **n=1571** real prompts (CLAUDE.md drop rules first): **41.4%** score 0,
+**49.8%** are decided by the default, and the gateway and hook return a
+**different** task type for **49.8%** of them.
+
+`ClassifySignal.confident` recorded this from the day it was added and had
+**zero readers in `src/`** — the CLASS-A shape, in a ninth place.
+
+**Fixed:** `classify.low_signal_classifications()` → `(decided_by_default,
+total)`, registered in `counter_registry`, rendered by `doctor`, alarming on
+the *share*, and `0 of 0` reads as Unknown rather than a clean 0%.
+
+**Parked, with numbers:** both candidate routing fixes were measured and
+refused. Adding `(?:tell|show) me (?:what|how|…)` to the query intent takes
+gateway order-sensitivity 10/14 → 2/14 but pulls negatives into `query` 0/8 →
+2/8 (gateway) and 2/8 → **4/8** (router/hook). Flipping the gateway default
+re-routes half its traffic on no evidence. The route is unchanged, so the K4
+`xfail(strict=True)` **stands**.
 
 ---
 
@@ -363,13 +420,22 @@ symptom of a class.
 |---|---|
 | S1 | **done** — reading a counter is idempotent, enforced for all 7 |
 | S2 | **done** — fresh-database baseline is zero, enforced for all 7 |
-| S3 | **partial** — parity pinned; detector over-firing carried as xfail |
+| S3 | **done** — parity pinned; S3b fixed the over-firing (relative `that`/`which` masked before the deixis check: false positives 5/12 → 0/12, recall 11/13 → 12/13) and its xfail was removed |
 | S4 | **deferred** — mechanism identified and pinned; reward unchanged |
 | S5 | **done** — 83 leaks redacted, enforced |
 | S6 | **done** — allowlist replaced by pattern + parameterised lookup |
 | S7 | **done** — 4 call sites, whole-output and AST assertions |
-| S8 | **deferred** — xfail(strict) stands |
+| S8 | **partial** — reframed and measured (49.8% of traffic); fall-through now counted and read; the ROUTE is deferred and xfail(strict) stands |
+| S9 | **done** — NOT in this plan; found while measuring S8. An unrecorded classifier confidence was reported as a measured 0%, manufacturing 213 "High"-confidence CLASSIFIER_ERROR root causes out of a NULL column |
 
 Three deferrals, all for the same stated reason: they change which prompts
 route or which model answers, and that is measured on the target distribution
 or not at all.
+
+**One finding the plan did not contain.** S9 was reached only by following S8
+into the ledger looking for a cross-process source. That is the second time in
+this remediation that measuring a small finding produced a larger one — S8
+itself arrived as a one-row curiosity about word order and turned out to be a
+property of half the traffic. The pattern is worth naming: *the finding as
+written is a sample, not the population*. Measuring it before fixing it is
+what separates the two, and it cost less than either fix would have.
