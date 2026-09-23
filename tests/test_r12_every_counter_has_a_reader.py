@@ -228,6 +228,24 @@ def _drive_unterminated(tmp_home: pathlib.Path) -> None:
     )
 
 
+def _drive_draft_acceptance(tmp_home: pathlib.Path) -> None:
+    """Write a log containing one draft that WAS relayed as the answer.
+
+    The counter reports `used`, so the driver has to produce a USED line — a
+    discarded draft moves only the denominator and would leave the value at 0,
+    which is indistinguishable from the reader being broken.
+    """
+    log = tmp_home / "auto-route-debug.log"
+    log.write_text(
+        "[2026-09-23 10:00:00] [INVOCATION 1.0] DRAFT USED: the draft from "
+        "invocation 0.5 (ollama/qwen3.5:latest) was relayed as the answer\n"
+        "[2026-09-23 10:00:01] [INVOCATION 2.0] DRAFT UNUSED: the draft from "
+        "invocation 1.5 (ollama/qwen3.5:latest) was discarded; Claude answered "
+        "instead\n",
+        encoding="utf-8",
+    )
+
+
 def _drive_interception_gaps(tmp_home: pathlib.Path) -> None:
     from llm_router import coverage
 
@@ -289,6 +307,7 @@ DRIVERS = {
     "unterminated_invocations": _drive_unterminated,
     "interception_gaps": _drive_interception_gaps,
     "low_signal_classifications": _drive_low_signal_classifications,
+    "draft_acceptance": _drive_draft_acceptance,
 }
 
 
