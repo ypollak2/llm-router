@@ -301,7 +301,7 @@ class TestInstallSidecarScripts:
     real bug: start-ollama.sh was never wired into install() at all, so a
     fresh install left _ensure_ollama_running() unable to find it."""
 
-    def test_sidecar_scripts_copied_on_install(self, tmp_path, monkeypatch):
+    def test_sidecar_scripts_copied_on_install(self, tmp_path, monkeypatch, importing_a_submodule):
         import llm_router.install_hooks as ih
 
         hooks_dst = tmp_path / ".claude" / "hooks"
@@ -318,7 +318,7 @@ class TestInstallSidecarScripts:
             assert dst.read_bytes() == (ih._HOOKS_SRC / name).read_bytes()
             assert os.access(dst, os.X_OK)
 
-    def test_sidecar_scripts_not_re_copied_when_unchanged(self, tmp_path, monkeypatch):
+    def test_sidecar_scripts_not_re_copied_when_unchanged(self, tmp_path, monkeypatch, importing_a_submodule):
         """Second install() run is a no-op for unchanged sidecar files —
         mirrors the same-content skip the hook-script loop already does.
         Checked via the returned action log rather than mtime: shutil.copy2

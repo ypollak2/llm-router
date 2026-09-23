@@ -132,6 +132,62 @@ def settings_path() -> Path:
     return _override("_SETTINGS_PATH") or (claude_dir() / "settings.json")
 
 
+def claude_json_path() -> Path:
+    """`~/.claude.json`, resolved on EVERY call.
+
+    T-15 made four host-config constants lazy and MISSED this one, because it is
+    a sibling of `~/.claude` rather than a child of it, so the sweep that found
+    the others walked straight past. `_CLAUDE_JSON_PATH = Path.home() /
+    ".claude.json"` stayed frozen at import, and `_install_claude_code_cli()`
+    merged into the operator's real file even with `LLM_ROUTER_HOME` pointing at
+    a sandbox.
+
+    Found 2026-09-23 by gating the suite under an empty HOME: three tests
+    reported writing `home:.claude.json` outside their sandbox, one of them the
+    very test written to prove install() does not escape (`T-15`). Its
+    parametrised list covers exactly the four names the original fix touched,
+    which is why it could not see the fifth.
+
+    Same resolution order as `claude_dir()`, deliberately: a sandbox that covers
+    some of the writes is the kind that gets relied on and then surprises
+    someone.
+    """
+    patched = _override("_CLAUDE_JSON_PATH")
+    if patched is not None:
+        return patched
+    base = _sandbox_claude_dir()
+    return (base.parent / ".claude.json") if base else (Path.home() / ".claude.json")
+
+
+def _sandbox_claude_dir() -> Path | None:
+    """The sandboxed host-config dir, or None when this process is not sandboxed.
+
+    "Sandboxed" is broader than the environment, and that breadth is the point.
+    Dozens of tests isolate an install by monkeypatching `_HOOKS_DST` /
+    `_SETTINGS_PATH` / `_RULES_DST` and never touch `LLM_ROUTER_HOME` — that is
+    the supported idiom, documented in `_override()`. Checking only the env vars
+    left those tests writing the operator's real `~/.claude.json`, which is the
+    exact shape of T-15: a sandbox that covers some of the writes.
+
+    The dir is derived from whichever name the caller actually patched, so
+    siblings land beside it rather than beside the real `~/.claude`.
+    """
+    for name, is_dir in (
+        ("_CLAUDE_DIR", True),
+        ("_SETTINGS_PATH", False),
+        ("_HOOKS_DST", False),
+        ("_RULES_DST", False),
+    ):
+        v = _override(name)
+        if v is not None:
+            return v if is_dir else v.parent
+    if os.environ.get("LLM_ROUTER_CLAUDE_DIR", "").strip():
+        return claude_dir()
+    from llm_router import paths as _paths
+
+    return claude_dir() if _paths.is_isolated() else None
+
+
 class _LazyHostPath(os.PathLike):
     """A ``Path`` that re-resolves every time it is used.
 
@@ -874,7 +930,17 @@ def _register_hook(settings: dict, event: str, matcher: str, command: str) -> st
 
 
 def claude_desktop_config_path() -> Path | None:
-    """Return the Claude Desktop config path for the current OS, or None."""
+    """Return the Claude Desktop config path for the current OS, or None.
+
+    Honours the sandbox for the same reason `claude_json_path()` does — this was
+    the other writer T-15 missed. On macOS it resolves under
+    `~/Library/Application Support/`, which no `~/.claude`-shaped check covers,
+    so an isolated `install()` wrote the operator's real Claude Desktop config.
+    That is also why CI never caught it: the path only exists on darwin.
+    """
+    base = _sandbox_claude_dir()
+    if base is not None:
+        return base.parent / "claude-desktop" / "claude_desktop_config.json"
     if sys.platform == "darwin":
         return Path.home() / "Library" / "Application Support" / "Claude" / "claude_desktop_config.json"
     if sys.platform == "win32":
@@ -897,8 +963,9 @@ def _load_desktop_config(path: Path) -> dict:
     return {}
 
 
-# Path that `claude mcp add --scope user` writes to (Claude Code CLI global config)
-_CLAUDE_JSON_PATH = Path.home() / ".claude.json"
+# Path that `claude mcp add --scope user` writes to (Claude Code CLI global config).
+# Lazy, like the four T-15 converted — see `claude_json_path()`.
+_CLAUDE_JSON_PATH = _LazyHostPath(claude_json_path)
 
 
 def _install_claude_code_cli(mcp_entry: dict) -> list[str]:
@@ -911,8 +978,22 @@ def _install_claude_code_cli(mcp_entry: dict) -> list[str]:
     """
     import subprocess as _sp
 
-    # Try `claude mcp add --scope user` first
-    claude_bin = shutil.which("claude")
+    # A sandboxed install must not shell out to the real `claude` binary.
+    #
+    # `claude mcp add --scope user` writes ITS OWN `~/.claude.json`, resolved
+    # from the subprocess's HOME. No path constant on this side can redirect
+    # that — the child reads its own environment, the same reason
+    # test_m12_documented_commands_exist had to hand HOME over as env.
+    #
+    # Found 2026-09-23 gating the suite under an empty HOME: with every host
+    # path correctly sandboxed, `install()` still produced `.claude.json` in the
+    # operator's home, because a subprocess put it there. The direct JSON merge
+    # below honours `claude_json_path()` and needs no external binary, so a
+    # sandboxed install takes that path and touches nothing global.
+    #
+    # Unsandboxed installs are unaffected: `_sandbox_claude_dir()` is None for a
+    # real install and the CLI is still preferred.
+    claude_bin = None if _sandbox_claude_dir() is not None else shutil.which("claude")
     if claude_bin:
         cmd_str = mcp_entry["command"]
         args = mcp_entry.get("args", [])

@@ -226,7 +226,23 @@ class TestWindowsBashDetection:
 # ─── C2: Windows APPDATA fallback ─────────────────────────────────────────────
 
 class TestWindowsAPPDATAFallback:
-    """C2: When APPDATA is unset on Windows, LOCALAPPDATA must be used."""
+    """C2: When APPDATA is unset on Windows, LOCALAPPDATA must be used.
+
+    These test the OS MAPPING, not the sandbox. `claude_desktop_config_path()`
+    checks `_sandbox_claude_dir()` first and returns a sandboxed path when the
+    process has declared itself isolated — which conftest does for every test by
+    setting `LLM_ROUTER_HOME`. That precedence is deliberate: an isolated
+    install must not write the operator's real Claude Desktop config on ANY
+    platform, so the sandbox has to win before the platform branch is reached.
+
+    So each test below opts out of the sandbox explicitly. Saying it here rather
+    than letting the tests quietly depend on the absence of a feature.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _unsandboxed(self, monkeypatch):
+        monkeypatch.delenv("LLM_ROUTER_HOME", raising=False)
+        monkeypatch.delenv("LLM_ROUTER_CLAUDE_DIR", raising=False)
 
     def test_claude_desktop_config_path_uses_localappdata_fallback(self, monkeypatch):
         """claude_desktop_config_path() must return LOCALAPPDATA path when APPDATA is absent."""
