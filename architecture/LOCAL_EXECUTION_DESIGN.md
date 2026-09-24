@@ -219,3 +219,22 @@ Changed, before scoring anything:
 Unchanged: sample, ground truth, scoring, decision rule. A real local
 continuation would face the same limit — a turn that spends ten minutes
 reading before acting is not usable — so the cap is also the realistic setting.
+
+### 8.2 Run 1 result, and run 2 after a tool fix (2026-09-25)
+
+**Run 1 (§8.1 settings): PASS 0/20; 0 of 20 moments changed any file.**
+13 ended at the 15-step cap, 4 stopped on a repeated identical command, 3
+returned nothing. By the §8 rule that is "< 40% — not viable", *for the loop as
+it stood*. Harness checked before believing the zero: a known-positive
+("create hello.txt") was written and detected.
+
+A trace of one moment ("Great, go on") showed the model orienting as Claude
+would — reading the backlog, then `git log --oneline -12 && git status --short
+| head -20` — and the loop's shell-free `run_command` passing `&&` and `|` to
+git as literal arguments, and refusing read-only `git branch --show-current`.
+It retried variants until the 15 steps were gone. That is a tool defect, fixed
+in S (PR #149): sequences and pipes are tokenized and chained without a shell.
+
+**Run 2**: identical sample, context cap, budget, 15-step cap, scoring and
+decision rule; the only change is S. Reported separately from run 1; neither
+replaces the other.
