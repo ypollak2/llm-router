@@ -131,7 +131,7 @@ The v2 corrections were re-checked by hand at `benchmarks.py:177`, `judge.py:60-
 
 ## Small
 
-- **Q15 (point 19):** add a CHANGELOG bullet and a `docs/BACKEND-QUALITY.md` line for `7b393fe`: delegated plan+hard runs passed 0/21 at 0.98× Claude tokens.
+- **Q15 (point 19):** add a CHANGELOG bullet and a `docs/BACKEND-QUALITY.md` line for `7b393fe`: plan (9/9) and hard (12/12) runs all passed, with 0 of those 21 runs delegating at all; the 2 of 26 easy-suite runs that did delegate cost 0.98× Claude's own tokens (n=2; non-delegated 0.95×, n=24).
 
 ## Not covered: needs an explicit park or a fix (v2)
 
