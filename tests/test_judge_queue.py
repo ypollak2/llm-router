@@ -509,3 +509,54 @@ def test_enqueue_for_grading_no_cap_drop_when_under_limit(judge_home, monkeypatc
         )
 
     assert len(_queue_lines(judge_home)) == 3
+
+
+# ── T-14: neither cleanup failure may go silent ─────────────────────────────
+
+
+def test_claim_queue_cleanup_failure_is_recorded_via_failopen(judge_home, monkeypatch):
+    """`_claim_queue`'s `os.remove(work_path)` used to be a bare
+    `except OSError: pass` — T-14 census flagged it as a new silent
+    persistence site. It must now record via failopen when cleanup fails."""
+    from llm_router import judge
+
+    queue_path = judge_home / "judge_queue.jsonl"
+    queue_path.parent.mkdir(parents=True, exist_ok=True)
+    queue_path.write_text('{"id": "A"}\n')
+
+    with patch("llm_router.judge.os.remove", side_effect=OSError("simulated cleanup failure")), \
+         patch("llm_router.failopen.record") as mock_record:
+        items = judge._claim_queue(queue_path)
+
+    assert items == [{"id": "A"}], "cleanup failing must not lose the already-read rows"
+    codes = [c.args[0] for c in mock_record.call_args_list]
+    assert "CHZ-FO-JUDGE-QUEUE-CLAIM-CLEANUP" in codes, (
+        f"expected CHZ-FO-JUDGE-QUEUE-CLAIM-CLEANUP to be recorded, got: {codes!r}"
+    )
+
+
+def test_recover_orphaned_claims_unlink_failure_is_recorded_via_failopen(judge_home):
+    """`_recover_orphaned_claims`'s `entry.unlink()` used to be a bare
+    `except OSError: pass` — T-14 census flagged it as a new silent
+    persistence site. It must now record via failopen when cleanup fails."""
+    from llm_router.judge import _recover_orphaned_claims, _work_path
+
+    queue_path = judge_home / "judge_queue.jsonl"
+    queue_path.parent.mkdir(parents=True, exist_ok=True)
+
+    orphan_path = _work_path(queue_path)
+    with open(orphan_path, "w") as f:
+        f.write('{"id": "stranded"}\n')
+    old = os.path.getmtime(orphan_path) - 999
+    os.utime(orphan_path, (old, old))
+
+    with patch("pathlib.Path.unlink", side_effect=OSError("simulated cleanup failure")), \
+         patch("llm_router.failopen.record") as mock_record:
+        recovered = _recover_orphaned_claims(queue_path)
+
+    assert recovered == 1, "cleanup failing must not lose the already-requeued row"
+    codes = [c.args[0] for c in mock_record.call_args_list]
+    assert "CHZ-FO-JUDGE-QUEUE-ORPHAN-CLEANUP" in codes, (
+        f"expected CHZ-FO-JUDGE-QUEUE-ORPHAN-CLEANUP to be recorded, got: {codes!r}"
+    )
+    os.remove(orphan_path)

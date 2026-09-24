@@ -349,8 +349,15 @@ def _recover_orphaned_claims(path) -> int:
                 recovered += len(items)
             try:
                 entry.unlink()
-            except OSError:
-                pass
+            except OSError as exc:
+                # The rows are already safely requeued at this point — a
+                # failed cleanup only leaves a stale orphan file behind, it
+                # does not lose data. Still recorded: an orphan that never
+                # gets removed is otherwise a silent, permanent leak, and
+                # this repo's rule is that a swallowed exception must leave
+                # a trace (see llm_router.failopen's module docstring).
+                from llm_router import failopen
+                failopen.record("CHZ-FO-JUDGE-QUEUE-ORPHAN-CLEANUP", exc)
     except Exception as exc:
         from llm_router import failopen
         failopen.record("CHZ-FO-JUDGE-QUEUE-RECOVER", exc)
@@ -381,8 +388,14 @@ def _claim_queue(path) -> list[dict]:
     finally:
         try:
             os.remove(work_path)
-        except OSError:
-            pass
+        except OSError as exc:
+            # Already read at this point — a failed cleanup leaves a stale
+            # work file behind (which _recover_orphaned_claims will requeue
+            # and clean up later), it does not lose the rows. Recorded so a
+            # cleanup that always fails on some filesystem is discoverable
+            # instead of silently leaking `.draining.*` files forever.
+            from llm_router import failopen
+            failopen.record("CHZ-FO-JUDGE-QUEUE-CLAIM-CLEANUP", exc)
 
     items = []
     for line in lines:
