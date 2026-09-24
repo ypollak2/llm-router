@@ -199,3 +199,23 @@ miss a right edit to an equivalent file. Reported with that caveat.
 continuation into the `@local` path (still opt-in). 40-70% -> report where it
 breaks, no build. < 40% -> not viable with this model. Every number is
 reported with n.
+
+### 8.1 Amendment before any scored run (2026-09-24)
+
+The first moment exposed a harness limit, not a result: moment 1's
+conversation was 64,749 tokens, and qwen3.8 took **572 s to read it once**
+(113 tok/s at that length; ~200 tok/s had been measured at 24K). With a 600 s
+budget every moment would fail on reading time alone, measuring the hardware
+rather than the model. (Its reply to "yes, do it" did name the right next
+steps from the conversation — "N1, N4, N6, then the six gated ones … merge
+PR #138" — which is why the test is worth running properly.)
+
+Changed, before scoring anything:
+- conversation cap **20K tokens** (80,000 chars): the first user prompt plus
+  the most recent prose, oldest dropped first (~3 min to read);
+- budget **900 s**;
+- moment 1's run is void (harness-limited) and is re-run under these settings.
+
+Unchanged: sample, ground truth, scoring, decision rule. A real local
+continuation would face the same limit — a turn that spends ten minutes
+reading before acting is not usable — so the cap is also the realistic setting.
