@@ -95,3 +95,18 @@ user's work, even though the local agent does most spec-shaped tasks well.
 
 The plausible lever is the opposite direction: the strong model, which has the context, writes a
 precise named edit and delegates it (`llm_local_task`). It is not built or measured.
+
+## Delegation A/B: pre-registered decision rule (written 2026-09-24, BEFORE any run)
+
+Question: does Claude **delegating** named sub-edits to a local agent (`llm_local_task`, writes applied,
+an acceptance check run by the supervisor) save Claude tokens at equal verified completion?
+
+- Arm A: backend `claude` (Opus 5.5, works directly); baseline results/q15/ (plan 9/9, hard 27/30).
+- Arm B: backend `claude_delegate`: the same CLI and model, the llm-router MCP server with only
+  `llm_local_task` allowed, and an appended instruction to delegate named edits with an acceptance check
+  and to trust only `status=verified_complete`.
+- Suites plan + hard + easy, 3 runs each, with the same hidden verifiers.
+- **Ship rule:** per suite, B's verified completion ≥ A's − 1 task, AND overall B's median Claude
+  tokens/task ≤ 0.8 × A's. Anything else: do not wire delegation. The report states the numbers either way.
+- Claude tokens = input + cache_creation + cache_read + output from `--output-format json`. The
+  cache-read share is reported separately because it prices at 0.1×.
