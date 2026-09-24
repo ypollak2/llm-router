@@ -2435,6 +2435,24 @@ def _rescue_is_relevant(prompt: str, context: str) -> bool:
     return len(prompt_terms & ctx_terms) >= _RESCUE_MIN_SHARED_TERMS
 
 
+# P (2026-09-24): build_chain returns [] for "research" — web research belongs to
+# Perplexity — so a research-TAGGED prompt never reached a local model. Replayed
+# over 186 real prompts, 18 ended there and only one needed the web (current
+# OpenRouter prices); the rest were repo questions and briefs. A draft goes to
+# the web-only chain only when the prompt carries a web signal.
+_WEB_SIGNAL_RE = re.compile(
+    # Not "today"/"current"/years: in this workload they mostly point at local
+    # state ("only 4 routings today") and dated file names, not the web.
+    r"https?://|\b(latest|newest|news|price[sd]?|pricing|cost of|search the web|"
+    r"web search|google|look up online|release notes|released|announce[sd]?)\b",
+    re.IGNORECASE,
+)
+
+
+def _needs_web(prompt: str) -> bool:
+    return bool(_WEB_SIGNAL_RE.search(prompt or ""))
+
+
 def _local_agent_loop_enabled() -> bool:
     """Is the local tool-calling loop allowed to answer context-dependent prompts?
 
@@ -4142,7 +4160,11 @@ def main() -> None:
             from llm_router.hooks.direct_executor import execute_chain as _execute_chain
 
             _zone, _raw_pct = _get_direct_pressure()
-            _direct_chain = _build_direct_chain(complexity, _zone, task_type)
+            # P: the DRAFT chain for a research-tagged prompt without a web signal
+            # is built as a question; the routing hint below is unchanged.
+            _draft_task = ("query" if task_type == "research" and not _needs_web(prompt)
+                           else task_type)
+            _direct_chain = _build_direct_chain(complexity, _zone, _draft_task)
 
             # #3: a DRAFT must NEVER hit a paid API. build_chain can include paid
             # externals (gemini/openai); routing a pre-generated draft there is
