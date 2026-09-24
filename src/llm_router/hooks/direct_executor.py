@@ -542,6 +542,39 @@ def _okf_enrich(prompt: str, response: str, model: str) -> None:
         pass
 
 
+# RTE-004 (audit/forensic_2026-09-24): this chain is used by the auto-route
+# hook, agent-route.py and sdk.py, and paid providers (gemini, openai) are
+# reachable through it — yet it consulted no budget and sent prompts unscrubbed,
+# while router.py does both. The hook's own scrubber only ran before LOCAL disk
+# writes, never before these HTTP calls.
+_FREE_PROVIDERS = frozenset({"ollama", "codex", "gemini_cli"})
+
+
+def _paid_budget_exhausted(provider: str) -> bool:
+    """router.py's per-provider check (pressure >= 1.0 skips the provider).
+
+    Fails CLOSED: an unreadable budget, or a caller already inside an event loop
+    (where this sync path cannot await), skips the paid call rather than
+    making it. Unknown must not render as the favourable answer (CLAUDE.md S9).
+    """
+    try:
+        import asyncio
+        from llm_router.budget import get_budget_state
+        try:
+            asyncio.get_running_loop()
+            return True
+        except RuntimeError:
+            pass
+        return asyncio.run(get_budget_state(provider)).pressure >= 1.0
+    except Exception:                                        # noqa: BLE001
+        return True
+
+
+def _scrub(text):
+    from llm_router.secret_scrubber import scrub_text
+    return scrub_text(text) if isinstance(text, str) and text else text
+
+
 def execute_chain(
     prompt: str,
     chain: list[ModelSpec],
@@ -584,6 +617,14 @@ def execute_chain(
     # Ollama was down, the model was not pulled, the call raised, or the answer
     # was rejected by the quality gate. Those need four different fixes and the
     # log could not tell them apart.
+    # RTE-004: nothing leaves the process unscrubbed — prompt, relayed history,
+    # and the system prompt. Placed AFTER prompt assembly: OKF injection rewrites
+    # `prompt` above, and injected repository text must be scrubbed too.
+    prompt = _scrub(prompt)
+    system_prompt = _scrub(system_prompt)
+    if history:
+        history = [{**m, "content": _scrub(m.get("content"))} for m in history]
+
     def _give_up(model_name: str, reason: str, latency_ms: int = 0) -> None:
         try:
             from llm_router import trace as _t
@@ -647,6 +688,10 @@ def execute_chain(
             elif not _ollama_model_available(model.model, _ollama_installed):
                 _give_up(model.model, "model not pulled")
                 continue
+
+        if model.provider not in _FREE_PROVIDERS and _paid_budget_exhausted(model.provider):
+            _give_up(f"{model.provider}/{model.model}", "budget exhausted or unreadable")
+            continue
 
         call_fn = _PROVIDER_CALLS.get(model.provider)
         if not call_fn:
