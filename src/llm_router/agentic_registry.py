@@ -62,6 +62,12 @@ def probe_model(model: str, timeout: int = 90) -> bool:
     temp_dir = tempfile.mkdtemp(prefix="llm_router-agentic-probe-")
     project_root = Path(temp_dir)
 
+    # J: the probe passes only if the model CREATES fib.py, and agent writes
+    # default to `propose` (nothing lands) — so every model failed, including
+    # ones that work live. Writes are applied for the probe's own fresh temp dir
+    # only, and the previous mode is restored whatever happens.
+    prev_writes = os.environ.get("LLM_ROUTER_AGENT_WRITES")
+    os.environ["LLM_ROUTER_AGENT_WRITES"] = "apply"
     try:
         run_agent_loop(
             PROBE_PROMPT,
@@ -87,6 +93,10 @@ def probe_model(model: str, timeout: int = 90) -> bool:
     except Exception:
         return False
     finally:
+        if prev_writes is None:
+            os.environ.pop("LLM_ROUTER_AGENT_WRITES", None)
+        else:
+            os.environ["LLM_ROUTER_AGENT_WRITES"] = prev_writes
         shutil.rmtree(temp_dir, ignore_errors=True)
 
 
