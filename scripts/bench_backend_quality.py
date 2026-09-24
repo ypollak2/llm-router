@@ -38,6 +38,7 @@ import argparse
 import asyncio
 import hashlib
 import json
+import re
 import os
 import shutil
 import subprocess
@@ -702,10 +703,13 @@ def _cli(args: list[str], sandbox: Path, timeout: int,
     return out, None
 
 
-def run_claude(prompt: str, sandbox: Path, model: str, timeout: int):
+def run_claude(prompt: str, sandbox: Path, model: str, timeout: int,
+               *, allowed_extra: str = "", mcp_config: str = '{"mcpServers":{}}',
+               append_system: str | None = None):
     """Returns (answer, error, usage). `--output-format json` carries the token
     usage, turns, cost and a per-model breakdown (Claude Code may call side
     models), which Q15 compares against the graph arm."""
+    extra = ["--append-system-prompt", append_system] if append_system else []
     raw, err = _cli([
         "claude", "-p", prompt,
         "--output-format", "json",
@@ -717,10 +721,11 @@ def run_claude(prompt: str, sandbox: Path, model: str, timeout: int):
         # commands inside the working dir; this is the matching grant, written
         # as an explicit allowlist rather than a blanket bypass.
         "--permission-mode", "acceptEdits",
-        "--allowedTools", "Read,Edit,Write,Glob,Grep,Bash(python3 -m pytest:*)",
+        "--allowedTools", "Read,Edit,Write,Glob,Grep,Bash(python3 -m pytest:*)" + allowed_extra,
         "--add-dir", str(sandbox),
         "--settings", '{"hooks":{}}',
-        "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}',
+        "--strict-mcp-config", "--mcp-config", mcp_config,
+        *extra,
     ], sandbox, timeout, check=False)
     if raw is None:
         return None, err, None
@@ -735,6 +740,66 @@ def run_claude(prompt: str, sandbox: Path, model: str, timeout: int):
         "num_turns": d.get("num_turns"), "total_cost_usd": d.get("total_cost_usd"),
     }
     return answer, ("claude reported is_error" if d.get("is_error") else None), usage
+
+
+# Q15 delegation arm (architecture/Q15_HARNESS_PLAN.md, pre-registered rule).
+# Claude keeps every native tool; it may additionally hand a precise named edit
+# to a local agent that applies it and runs an acceptance check itself.
+DELEGATE_NOTE = (
+    "You may delegate work to a local model with the tool "
+    "mcp__llm_router__llm_local_task. When a change is a named edit you can state "
+    "precisely (target file/function and the exact change), call it with "
+    "objective=<that precise instruction>, workdir=<the absolute path of the current "
+    "directory>, acceptance_check=<ONE command that proves THIS change: a specific test "
+    "(python3 -m pytest tests/x.py::test_y -q) or a short python3 -c assertion — not the "
+    "whole suite if it has unrelated failures>, apply_writes=true. Trust ONLY "
+    "status=verified_complete, and when you get it do not re-read or re-review the "
+    "files it changed. On any other status, do the work yourself. Questions and "
+    "finding the cause of a bug: do those yourself."
+)
+_DELEGATE_TOOL = "mcp__llm_router__llm_local_task"
+
+
+def _delegation_statuses(sandbox: Path, since: float) -> list[str]:
+    """Statuses llm_local_task returned in this run, read from the transcript."""
+    slug = re.sub(r"[^A-Za-z0-9]", "-", str(sandbox.resolve()))
+    root = Path.home() / ".claude" / "projects" / slug
+    ids, out = set(), []
+    for f in sorted(root.glob("*.jsonl")) if root.is_dir() else []:
+        if f.stat().st_mtime < since:
+            continue
+        for line in f.read_text(errors="ignore").splitlines():
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            content = ((rec.get("message") or {}).get("content")) or []
+            for c in content if isinstance(content, list) else []:
+                if c.get("type") == "tool_use" and c.get("name") == _DELEGATE_TOOL:
+                    ids.add(c.get("id"))
+                elif c.get("type") == "tool_result" and c.get("tool_use_id") in ids:
+                    body = c.get("content")
+                    if isinstance(body, list):  # [{"type": "text", "text": "<json>"}]
+                        body = " ".join(str(b.get("text", "")) for b in body if isinstance(b, dict))
+                    # The payload is JSON inside a JSON string: quotes arrive escaped.
+                    m = re.search(r'"status"\s*:\s*"(\w+)"', str(body).replace("\\", ""))
+                    out.append(m.group(1) if m else "unparsed")
+    return out
+
+
+def run_claude_delegate(prompt: str, sandbox: Path, model: str, timeout: int):
+    mcp = json.dumps({"mcpServers": {"llm_router": {
+        "command": str(ROOT / ".venv" / "bin" / "llm-router"), "args": [],
+        "env": {"LLM_ROUTER_SYNTHETIC": "1", "LLM_ROUTER_ENFORCE": "off",
+                "LLM_ROUTER_DIRECT_EXECUTION": "off", "LLM_ROUTER_SLIM": "consolidated"},
+    }}})
+    t0 = time.time()
+    answer, err, usage = run_claude(prompt, sandbox, model, timeout,
+                                    allowed_extra="," + _DELEGATE_TOOL,
+                                    mcp_config=mcp, append_system=DELEGATE_NOTE)
+    if usage is not None:
+        usage["delegations"] = _delegation_statuses(sandbox, t0)
+    return answer, err, usage
 
 
 def run_noop(prompt: str, sandbox: Path, model: str, timeout: int):
@@ -812,6 +877,7 @@ BACKENDS = {
     "claude": (run_claude, os.environ.get("BENCH_CLAUDE_MODEL", "sonnet"), 300),
     "codex":  (run_codex,  os.environ.get("BENCH_CODEX_MODEL", "gpt-5.5"), 300),
     "noop":   (run_noop,   "none", 5),
+    "claude_delegate": (run_claude_delegate, os.environ.get("BENCH_CLAUDE_MODEL", "sonnet"), 900),
 }
 
 
