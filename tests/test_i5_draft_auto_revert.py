@@ -120,10 +120,11 @@ def _run_hook(monkeypatch, tmp_path):
 
 def test_the_hook_stops_drafting_once_reverted(monkeypatch, tmp_path):
     monkeypatch.setenv("LLM_ROUTER_DRAFT_REVERT_AFTER", "2")
-    _judge("no"); _judge("no")
+    _judge("no")
+    _judge("no")
     drafted, log = _run_hook(monkeypatch, tmp_path)
     assert drafted == [], "a reverted hook must not spend the user's time drafting"
-    skips = [l for l in log if "DIRECT SKIP:" in l]
+    skips = [line for line in log if "DIRECT SKIP:" in line]
     assert len(skips) == 1 and "auto-revert" in skips[0], skips
 
 
@@ -132,4 +133,4 @@ def test_below_the_threshold_the_hook_still_drafts(monkeypatch, tmp_path):
     _judge("no")
     drafted, log = _run_hook(monkeypatch, tmp_path)
     assert drafted, "premise: this prompt drafts when not reverted"
-    assert not any("auto-revert" in l for l in log)
+    assert not any("auto-revert" in line for line in log)

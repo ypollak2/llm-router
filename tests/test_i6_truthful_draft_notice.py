@@ -30,7 +30,7 @@ def test_a_draft_that_read_files_is_not_described_as_blind():
     assert "read_file(src/pkg/draft_usage.py)" in ctx
     assert "🎯 LLM Router routed" in ctx, "the relay line must still be offered"
     # The rule may still exclude what the draft could NOT see — but not the repo.
-    ignore_rule = next(l for l in ctx.splitlines() if "IGNORE the draft" in l)
+    ignore_rule = next(line for line in ctx.splitlines() if "IGNORE the draft" in line)
     assert "repo" not in ignore_rule and "files" not in ignore_rule, ignore_rule
 
 
