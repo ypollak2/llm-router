@@ -65,7 +65,7 @@ savings comes from the 15.2.0 correction (`CHANGELOG.md:45`, `CHANGELOG.md:83-88
 
 | Metric | Role | Today |
 |---|---|---|
-| Verified share of eligible Claude turns replaced or shortened, on real workload | **Primary**: the North Star number | ~0.66%: 7 of 1,066 gated rows, `usage.db` 2026-09-24 ([audit](AUDIT-2026-09-24.md)); earlier 0 of 1,185 drafts (`CHANGELOG.md:45`) |
+| Verified share of eligible Claude turns replaced or shortened, on real workload | **Primary**: the North Star number | **Not computable yet**: production rows don't record whether the draft was used (`mode` NULL; see [audit](AUDIT-2026-09-24.md)). Last direct measure: 0 of 1,185 audited drafts used (`CHANGELOG.md:45`) |
 | Verified quota saved, with its n | Reported to each user | $0.11 verified (n=7) vs $483.14 unverified (n=46,099), maintainer ledger 2026-09-24 (`CHANGELOG.md:86-88`) |
 | Quality of routed answers vs Claude on the same tasks | Guardrail: must not drop | RouterArena and `docs/BACKEND-QUALITY.md` |
 
