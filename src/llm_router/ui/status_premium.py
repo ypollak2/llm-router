@@ -135,6 +135,11 @@ class PremiumStatusCommand:
                 saved = totals.saved_usd
                 line = f"  [{PALETTE.success}]{label:<15}[/]  [{PALETTE.success}]${saved:.2f} saved[/]  ·  {totals.calls} routed calls"
                 lines.append(Text.from_markup(line))
+                from llm_router.savings import unverified_note
+                note = unverified_note(totals.unverified_saved_usd, totals.unverified_calls)
+                if note:
+                    # Text(), not from_markup: the note is data, not markup.
+                    lines.append(Text(f"  {'':<15}  {note}", style=PALETTE.text_dim))
 
             if not any_data:
                 lines.append(Text("  No external routing yet — route some tasks first"))

@@ -197,8 +197,9 @@ def _savings_panel_block() -> list[str]:
                 out.append(_blank())
 
         # savings_stats — no token columns
+        from llm_router.savings import UNVERIFIED_SAVED_SQL, VERIFIED_SAVED_SQL
         ss_result = _table_count_and_sum(
-            conn, "savings_stats", ["estimated_claude_cost_saved"], where
+            conn, "savings_stats", [VERIFIED_SAVED_SQL, UNVERIFIED_SAVED_SQL], where
         )
         ss_calls = 0
         ss_saved = 0.0
@@ -208,7 +209,8 @@ def _savings_panel_block() -> list[str]:
             if ss_calls > 0:
                 out.append(_note("savings_stats (no token column):"))
                 out.append(_kv("  rows:", str(ss_calls)))
-                out.append(_kv("  estimated_saved:", f"${ss_saved:.4f}"))
+                out.append(_kv("  estimated_saved (verified):", f"${ss_saved:.4f}"))
+                out.append(_kv("  unverified (not in total):", f"${sums[1]:.4f}"))
                 out.append(_blank())
 
         total_calls = usage_calls + plat_calls + ss_calls

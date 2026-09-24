@@ -40,7 +40,85 @@ __all__ = [
     "SURFACES",
     "Surface",
     "label_money",
+    "VERIFIED_HOSTS",
+    "VERIFIED_SAVED_SQL",
+    "UNVERIFIED_SAVED_SQL",
+    "UNVERIFIED_CALLS_SQL",
+    "REALIZED_GATE_SINCE",
+    "unverified_note",
+    "savings_split_sql",
+    "is_verified_saving",
 ]
+
+
+# ── Verified vs unverified savings_stats rows ─────────────────────────────
+#
+# A saving is VERIFIED only when the writer observed that the routed answer
+# REPLACED Claude's turn. One writer can: the UserPromptSubmit hook, whose
+# `realized` gate (ec0d23e, 2026-09-13T17:57:16Z) writes a discarded draft at $0.
+# Everything else is kept but reported as UNVERIFIED, never in a headline:
+#
+#   * host 'router' / 'gateway' / 'sdk' — `log_receipt_savings` credits every
+#     MCP/gateway call as a replaced Claude answer; on 2026-09-23 that included
+#     two 2-token "ok" pings.
+#   * agentic delegations — `agentic/telemetry.py` wrote host 'claude_code'
+#     until 2026-09-24 and credits a flat estimate whatever the outcome
+#     (517 rows, $103.40, all exactly $0.20).
+#   * hook rows written before the gate existed ($1.13).
+#
+# Measured 2026-09-24 over all 8,969 savings_stats rows: verified $0.00 — no
+# gated hook row has ever been realized — and unverified $110.91 (n=7,958). Unknown host/model/timestamp is
+# unverified: unknown must not render as the favourable answer (S9) — every
+# comparison below is NULL-false, so a NULL lands in the ELSE branch.
+#
+# Every SUM over `savings_stats.estimated_claude_cost_saved` goes through these
+# expressions; tests/test_a31_router_savings_unverified.py fails on a raw one.
+VERIFIED_HOSTS: tuple[str, ...] = ("claude_code",)
+REALIZED_GATE_SINCE = "2026-09-13T17:57:16"
+_VERIFIED_PRED = (
+    "(host IN (" + ", ".join(f"'{h}'" for h in VERIFIED_HOSTS) + ")"
+    " AND model_used NOT LIKE 'llm_router-agentic%'"
+    f" AND timestamp >= '{REALIZED_GATE_SINCE}')"
+)
+VERIFIED_SAVED_SQL = (
+    f"CASE WHEN {_VERIFIED_PRED} THEN estimated_claude_cost_saved ELSE 0 END"
+)
+UNVERIFIED_SAVED_SQL = (
+    f"CASE WHEN {_VERIFIED_PRED} THEN 0 ELSE estimated_claude_cost_saved END"
+)
+UNVERIFIED_CALLS_SQL = f"CASE WHEN {_VERIFIED_PRED} THEN 0 ELSE 1 END"
+
+
+def is_verified_saving(host, model, timestamp) -> bool:
+    """Python twin of VERIFIED_SAVED_SQL for records summed outside SQL (the
+    JSONL buffer before import). Must agree with the SQL row-for-row —
+    tests/test_a31_router_savings_unverified.py pins the parity. Unknown -> False.
+    """
+    if host not in VERIFIED_HOSTS or model is None or timestamp is None:
+        return False
+    # SQLite LIKE is case-insensitive for ASCII; match it.
+    if str(model).lower().startswith("llm_router-agentic"):
+        return False
+    return str(timestamp) >= REALIZED_GATE_SINCE
+
+
+def savings_split_sql(columns) -> tuple[str, str, str]:
+    """(verified, unverified, unverified_calls) expressions for a savings_stats
+    table with these columns. A table predating `host`/`model_used` cannot say
+    who wrote a row, so every row is unverified — not an error, and not verified."""
+    if {"host", "model_used", "timestamp"} <= set(columns):
+        return VERIFIED_SAVED_SQL, UNVERIFIED_SAVED_SQL, UNVERIFIED_CALLS_SQL
+    return "0", "estimated_claude_cost_saved", "1"
+
+def unverified_note(usd: float, n: int) -> str:
+    """The label every surface prints beside a verified figure. "" when nothing
+    is unverified, so a surface never shows a "+ $0.00" line."""
+    if not usd:
+        return ""
+    amount = f"${usd:.2f}" if abs(usd) >= 0.01 else f"${usd:.4f}"
+    # "unverified" = MCP/gateway/sdk/agentic or pre-gate: nobody observed the
+    # output replace a Claude turn. Short, because it sits inside status panels.
+    return f"+ {amount} unverified, n={n}"
 
 
 def net_saved(baseline_usd: float, actual_usd: float) -> float:

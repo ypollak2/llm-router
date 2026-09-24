@@ -3287,29 +3287,36 @@ async def get_lifetime_savings_summary(days: int = 30, *,
     )
     # T-05: savings_stats had no provenance column at all until this audit.
     where = f"{where} {production_only(include_simulated, prefix='AND' if where else 'WHERE')}".strip()
+    from llm_router.savings import (
+        UNVERIFIED_CALLS_SQL, UNVERIFIED_SAVED_SQL, VERIFIED_SAVED_SQL,
+    )
     empty: dict = {
         "total_saved": 0.0,
         "total_external_cost": 0.0,
         "net_savings": 0.0,
         "tasks_routed": 0,
+        "unverified_saved": 0.0,
+        "unverified_tasks": 0,
         "by_session": [],
     }
 
     db = await _get_db()
     try:
         cursor = await db.execute(
-            f"SELECT COUNT(*), COALESCE(SUM(estimated_claude_cost_saved), 0), "
-            f"COALESCE(SUM(external_cost), 0) FROM savings_stats {where}"
+            f"SELECT COUNT(*), COALESCE(SUM({VERIFIED_SAVED_SQL}), 0), "
+            f"COALESCE(SUM(external_cost), 0), "
+            f"COALESCE(SUM({UNVERIFIED_SAVED_SQL}), 0), "
+            f"COALESCE(SUM({UNVERIFIED_CALLS_SQL}), 0) FROM savings_stats {where}"
         )
         row = await cursor.fetchone()
         if not row or row[0] == 0:
             return empty
 
-        tasks_routed, total_saved, total_external = row
+        tasks_routed, total_saved, total_external, unverified, unverified_n = row
 
         cursor = await db.execute(
             f"SELECT session_id, COUNT(*), "
-            f"COALESCE(SUM(estimated_claude_cost_saved), 0), "
+            f"COALESCE(SUM({VERIFIED_SAVED_SQL}), 0), "
             f"COALESCE(SUM(external_cost), 0), "
             f"MIN(timestamp), MAX(timestamp) "
             f"FROM savings_stats {where} "
@@ -3333,6 +3340,8 @@ async def get_lifetime_savings_summary(days: int = 30, *,
             "total_external_cost": float(total_external),
             "net_savings": float(total_saved) - float(total_external),
             "tasks_routed": int(tasks_routed),
+            "unverified_saved": float(unverified),
+            "unverified_tasks": int(unverified_n),
             "by_session": by_session,
         }
     finally:

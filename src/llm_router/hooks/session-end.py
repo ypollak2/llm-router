@@ -1241,12 +1241,13 @@ def _query_savings_by_task_type() -> list[dict]:
     if not os.path.exists(_db_path()):
         return []
     try:
+        from llm_router.savings import VERIFIED_SAVED_SQL
         conn = sqlite3.connect(_db_path())
-        cursor = conn.execute("""
+        cursor = conn.execute(f"""
             SELECT
                 task_type,
                 COUNT(*) as calls,
-                SUM(estimated_claude_cost_saved) as saved
+                SUM({VERIFIED_SAVED_SQL}) as saved
             FROM savings_stats
             WHERE date(timestamp, 'localtime') = date('now', 'localtime')
             GROUP BY task_type
@@ -2339,6 +2340,18 @@ def main() -> None:
     else:
         # Rich dashboard not available, use legacy ANSI formatting
         final_summary_output = _format(tools, cc_rows, free_rows, paid_rows, start, current, is_live, cumulative, session_start)
+
+    # savings_stats money nobody observed being used is kept OUT of the figures
+    # above (savings.VERIFIED_SAVED_SQL) and shown here, labelled, instead.
+    try:
+        from llm_router.dashboard_data import query_window as _qw
+        from llm_router.savings import unverified_note
+        _lt = _qw("lifetime")
+        _note = unverified_note(_lt.unverified_saved_usd, _lt.unverified_calls)
+        if _note:
+            final_summary_output += f"\n  lifetime {_note}\n"
+    except Exception:
+        pass
 
     # Append session spend + real savings panel (v8.8.0)
     spend = _read_session_spend()

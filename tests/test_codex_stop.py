@@ -46,9 +46,13 @@ def run_stop(env):
 def test_stop_reports_distinct_windows_and_preserves_session_on_repeated_turns(stop_env):
     db = Path(stop_env["LLM_ROUTER_DB_PATH"])
     with sqlite3.connect(db) as conn:
-        conn.execute("CREATE TABLE savings_stats (timestamp TEXT, estimated_claude_cost_saved REAL)")
-        conn.execute("INSERT INTO savings_stats VALUES (datetime('now'), 1.25)")
-        conn.execute("INSERT INTO savings_stats VALUES (datetime('now','-2 days'), 3.5)")
+        # Hook-written (realized-gated) rows: the only VERIFIED savings (A31).
+        conn.execute("CREATE TABLE savings_stats (timestamp TEXT, "
+                     "estimated_claude_cost_saved REAL, host TEXT, model_used TEXT)")
+        conn.execute("INSERT INTO savings_stats VALUES (strftime('%Y-%m-%dT%H:%M:%S','now'), "
+                     "1.25, 'claude_code', 'ollama/qwen3.5:latest')")
+        conn.execute("INSERT INTO savings_stats VALUES (strftime('%Y-%m-%dT%H:%M:%S','now','-2 days'), "
+                     "3.5, 'claude_code', 'ollama/qwen3.5:latest')")
     session = db.parent / "sessions" / "project" / "ongoing-session.jsonl"
     session.parent.mkdir(parents=True)
     session.write_text('{"content":"keep this conversation"}\n')
@@ -68,8 +72,11 @@ def test_pending_savings_are_imported_once(stop_env):
         "host": "codex", "session_id": "ongoing-session", "mode": "realized",
     }) + "\n")
     first = run_stop(stop_env)
-    assert "saved today ~$0.1250" in first
-    assert "lifetime ~$0.1250" in first
+    # A31: a Codex pending saving comes from an MCP call nobody observed being
+    # used — imported once, kept out of the headline, labelled beside it.
+    assert "saved today ~$0.0000" in first
+    assert "lifetime ~$0.0000" in first
+    assert "+ $0.12 unverified, n=1" in first
     assert run_stop(stop_env) == first
     assert not (state / "savings_log.jsonl").exists()
 

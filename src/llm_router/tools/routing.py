@@ -618,9 +618,13 @@ async def llm_auto(
     lifetime = await get_lifetime_savings_summary(days=0)
     tasks_routed = lifetime["tasks_routed"]
     if tasks_routed > 0 and tasks_routed % 5 == 0:
+        from llm_router.savings import unverified_note
         net = lifetime["net_savings"]
+        note = unverified_note(lifetime.get("unverified_saved", 0.0),
+                               lifetime.get("unverified_tasks", 0))
         lines.append(
-            f"\n📊 **{tasks_routed} tasks routed** — ~${net:.2f} net saved lifetime. "
+            f"\n📊 **{tasks_routed} tasks routed** — ~${net:.2f} net saved lifetime"
+            f"{' ' + note if note else ''}. "
             f"Run `{route_tool('llm_savings')}` for the full breakdown."
         )
 

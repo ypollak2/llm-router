@@ -114,7 +114,10 @@ async def _default_recorder(payload: dict[str, Any]) -> None:
                     payload.get("saved_usd", 0.0),
                     payload.get("actual_usd", 0.0),
                     payload.get("model", "llm_router-agentic-router"),
-                    "claude_code",
+                    # Not 'claude_code': that host is how savings.VERIFIED_SAVED_SQL
+                    # recognises the hook's realized-gated rows, and this saving
+                    # is a flat estimate recorded whatever the outcome.
+                    "agentic",
                     1 if _detect_synthetic() else 0,
                 ),
             )

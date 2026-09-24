@@ -76,13 +76,19 @@ def _query(db_path: Path, period: str, *, paid: bool) -> dict:
     # evidence. This report had no filter at all, which is why a benchmark run
     # inflated it and not the surfaces that go through cost.py.
     cond = f"({cond}) AND COALESCE(is_simulated, 1) = 0"
-    stats = {"calls": 0, "saved": 0.0, "cost": 0.0, "by_model": {}}
+    from llm_router.savings import (
+        UNVERIFIED_CALLS_SQL, UNVERIFIED_SAVED_SQL, VERIFIED_SAVED_SQL,
+    )
+    stats = {"calls": 0, "saved": 0.0, "cost": 0.0, "by_model": {},
+             "unverified": 0.0, "unverified_calls": 0}
     try:
         conn = sqlite3.connect(db_path)
         conn.row_factory = sqlite3.Row
         rows = conn.execute(  # nosec B608 — cond is a hardcoded literal, not user input
             f"""SELECT COUNT(*) AS calls,
-                       COALESCE(SUM(estimated_claude_cost_saved), 0) AS saved,
+                       COALESCE(SUM({VERIFIED_SAVED_SQL}), 0) AS saved,
+                       COALESCE(SUM({UNVERIFIED_SAVED_SQL}), 0) AS unverified,
+                       COALESCE(SUM({UNVERIFIED_CALLS_SQL}), 0) AS unverified_calls,
                        COALESCE(SUM(external_cost), 0) AS cost,
                        model_used AS model
                 FROM savings_stats
@@ -98,6 +104,8 @@ def _query(db_path: Path, period: str, *, paid: bool) -> dict:
         stats["calls"] += r["calls"]
         stats["saved"] += r["saved"] or 0.0
         stats["cost"] += r["cost"] or 0.0
+        stats["unverified"] += r["unverified"] or 0.0
+        stats["unverified_calls"] += r["unverified_calls"] or 0
         stats["by_model"][r["model"] or "unknown"] = {
             "calls": r["calls"], "saved": r["saved"] or 0.0, "cost": r["cost"] or 0.0,
             "provider": _provider_of(r["model"] or "unknown"),
@@ -146,8 +154,13 @@ def render_savings_report(period: str = "all") -> str:
     # instead of it. They are computed over different tables and will not always
     # match; printing only one and calling it the total is what produced
     # $73.97, $102.31 and $205.19 for the same day.
-    out.append(f"│  savings_stats ledger: ${total_saved:.4f} across "
+    out.append(f"│  savings_stats ledger: ${total_saved:.4f} verified across "
                f"{total_calls} routed call(s)")
+    from llm_router.savings import unverified_note
+    note = unverified_note(free["unverified"] + paid["unverified"],
+                           free["unverified_calls"] + paid["unverified_calls"])
+    if note:
+        out.append(f"│  {note}")
     out.append("│")
 
     def section(title: str, s: dict, free_section: bool) -> None:

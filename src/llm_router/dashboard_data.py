@@ -42,6 +42,7 @@ from typing import Literal
 from llm_router import pricing as _pricing
 
 from llm_router import paths
+from llm_router.savings import savings_split_sql
 
 #: Counterfactual model these savings are computed against. WP-05: projected
 #: from the ONE policy in llm_router.pricing rather than restated here, so this
@@ -156,6 +157,12 @@ class WindowTotals:
     cost_usd: float = 0.0
     uncosted_sources: tuple[str, ...] = ()
 
+    # savings_stats rows whose saving nobody observed being used (router/MCP,
+    # gateway, sdk, agentic, pre-gate hook rows — see savings.VERIFIED_SAVED_SQL).
+    # Kept OUT of `saved_usd`; shown beside it, labelled, never as a headline.
+    unverified_saved_usd: float = 0.0
+    unverified_calls: int = 0
+
     # WP-07 / I-1: `calls` counts traffic LLM Router OBSERVED. Without a count of
     # what it missed, every rate derived from `calls` silently redefines its own
     # denominator -- "100% of the calls we saw" is not "100% of the calls", and
@@ -197,6 +204,7 @@ class DailyRow:
     tokens: int
     saved_usd: float
     tokens_saved: int = 0   # tokens handled by cheap providers (not burned on premium)
+    unverified_saved_usd: float = 0.0  # kept out of saved_usd; see WindowTotals
 
 
 @dataclass(frozen=True)
@@ -297,6 +305,8 @@ def query_window(
     total_calls = total_tokens = 0
     total_saved = 0.0
     total_cost = 0.0
+    unverified_saved = 0.0
+    unverified_calls = 0
     uncosted: list[str] = []
     try:
         # Legacy ``usage`` table — recalculate savings from in/out at Opus rates.
@@ -363,18 +373,25 @@ def query_window(
         # added in v7.4; older DBs lack them, so sum defensively.
         if _table_exists(conn, _JSONL_TABLE):
             cols = _columns(conn, _JSONL_TABLE)
+            verified_sql, unverified_sql, unverified_n_sql = savings_split_sql(cols)
             row = conn.execute(  # nosec B608 — table/where are module constants & validated enum, not user input
                 f"SELECT COUNT(*), "
-                f"COALESCE(SUM(estimated_claude_cost_saved),0), "
+                f"COALESCE(SUM({verified_sql}),0), "
                 f"{_sum_if_present(cols, 'input_tokens')}, "
-                f"{_sum_if_present(cols, 'output_tokens')} "
+                f"{_sum_if_present(cols, 'output_tokens')}, "
+                f"COALESCE(SUM({unverified_sql}),0), "
+                f"COALESCE(SUM({unverified_n_sql}),0) "
                 f"FROM {_JSONL_TABLE} WHERE {where}"
             ).fetchone()
             calls = int(row[0])
             saved = float(row[1])
             tokens = int(row[2]) + int(row[3])
+            unverified_saved = float(row[4])
+            unverified_calls = int(row[5])
             by_source[_JSONL_TABLE] = {
                 "calls": calls, "tokens": tokens, "saved_usd": saved,
+                "unverified_saved_usd": unverified_saved,
+                "unverified_calls": unverified_calls,
             }
             total_calls += calls
             total_tokens += tokens
@@ -390,6 +407,8 @@ def query_window(
         cost_usd=total_cost,
         uncosted_sources=tuple(uncosted),
         by_source=by_source,
+        unverified_saved_usd=unverified_saved,
+        unverified_calls=unverified_calls,
         **_coverage_fields(),
     )
 
@@ -415,7 +434,8 @@ def query_daily(
 
     def _bucket(day: str) -> dict:
         if day not in daily:
-            daily[day] = {"calls": 0, "tokens": 0, "saved": 0.0, "tokens_saved": 0}
+            daily[day] = {"calls": 0, "tokens": 0, "saved": 0.0, "tokens_saved": 0,
+                          "unverified": 0.0}
         return daily[day]
 
     conn = sqlite3.connect(str(db))
@@ -467,17 +487,21 @@ def query_daily(
                 b["saved"] += float(saved)
 
         if _table_exists(conn, _JSONL_TABLE):
+            verified_sql, unverified_sql, _ = savings_split_sql(
+                _columns(conn, _JSONL_TABLE))
             rows = conn.execute(
                 f"SELECT date(timestamp,'localtime'), "
                 f"COUNT(*), "
-                f"COALESCE(SUM(estimated_claude_cost_saved),0) "
+                f"COALESCE(SUM({verified_sql}),0), "
+                f"COALESCE(SUM({unverified_sql}),0) "
                 f"FROM {_JSONL_TABLE} WHERE {where} "
                 f"GROUP BY date(timestamp,'localtime')"
             ).fetchall()
-            for day, calls, saved in rows:
+            for day, calls, saved, unverified in rows:
                 b = _bucket(day)
                 b["calls"] += int(calls)
                 b["saved"] += float(saved)
+                b["unverified"] += float(unverified)
 
         # Tokens routed to cheap providers per day (not burned on premium quota).
         if _table_exists(conn, _LEGACY_TABLE):
@@ -504,6 +528,7 @@ def query_daily(
             tokens=d["tokens"],
             saved_usd=d["saved"],
             tokens_saved=d["tokens_saved"],
+            unverified_saved_usd=d["unverified"],
         )
         for day, d in sorted(daily.items())
     ]

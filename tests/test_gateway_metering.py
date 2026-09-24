@@ -131,7 +131,9 @@ def test_surface_status_reads_durable_savings_stats(tmp_path, monkeypatch):
     assert s.last_model == "ollama/hermes3:8b"   # durable read worked
     assert s.last_tokens == 500
     assert s.active is True
-    assert s.saved_total == pytest.approx(0.02)
+    # A31: a gateway saving is not observed being used -> unverified, not headline.
+    assert s.saved_total == 0.0
+    assert s.unverified_total == pytest.approx(0.02)
 
 
 def test_stats_and_log_combine_by_timestamp(tmp_path, monkeypatch):

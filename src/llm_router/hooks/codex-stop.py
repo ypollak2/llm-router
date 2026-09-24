@@ -26,10 +26,15 @@ def _summary() -> str:
     def money(value: float) -> str:
         return f"~${value:,.2f}" if abs(value) >= 1 else f"~${value:.4f}"
 
+    # Unverified money (MCP/gateway/agentic, incl. this host's pending_savings)
+    # stays out of both figures and is labelled beside them (savings.py).
+    from llm_router.savings import unverified_note
+    note = unverified_note(lifetime.unverified_saved_usd, lifetime.unverified_calls)
     return (
         f"⚡ llm-router · saved today {money(today.saved_usd)}"
         f" · lifetime {money(lifetime.saved_usd)}"
         " · estimated, all hosts"
+        + (f" · lifetime {note}" if note else "")
     )
 
 

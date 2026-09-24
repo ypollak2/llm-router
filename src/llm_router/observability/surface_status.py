@@ -87,9 +87,13 @@ class SurfaceStatus:
     last_age_s: Optional[float]       # seconds since last route, or None
     last_tokens: Optional[int]        # input+output tokens of the last route
     routed_count_session: int         # routes for this host today (UTC day)
-    saved_session: float              # $ saved for this host today
-    saved_total: float                # $ saved for this host, all-time in the log
+    saved_session: float              # $ saved for this host today (VERIFIED only)
+    saved_total: float                # $ saved for this host, all-time in the log (VERIFIED only)
     tokens_session: int               # input+output tokens routed for this host today
+    # Savings nobody observed being used (savings.is_verified_saving) — kept
+    # out of saved_* and shown beside them, labelled. A31.
+    unverified_session: float = 0.0
+    unverified_total: float = 0.0
 
     def short_model(self) -> str:
         """``ollama/hermes3:8b`` → ``hermes3:8b`` (drop the provider prefix)."""
@@ -162,9 +166,13 @@ def _read_stats_records(max_rows: int = 2000) -> list[dict]:
         except sqlite3.Error:
             pass
     out: list[dict] = []
+    from llm_router.savings import is_verified_saving
     for ts, host, model, task, saved, in_tok, out_tok in rows:
         out.append({
             "timestamp": ts,
+            # Decided on the RAW host: the "claude_code" default below is for
+            # per-host grouping only and must not make an unknown row verified.
+            "verified": is_verified_saving(host, model, ts),
             "host": host or "claude_code",
             "model": model,
             "task_type": task,
@@ -274,18 +282,30 @@ def compute_status(host: str, now: Optional[float] = None) -> SurfaceStatus:
     routed_today = 0
     saved_today = 0.0
     saved_total = 0.0
+    unverified_today = 0.0
+    unverified_total = 0.0
     tokens_today = 0
+    from llm_router.savings import is_verified_saving
     for rec in host_recs:
         try:
             saved = float(rec.get("estimated_saved", 0.0) or 0.0)
         except (ValueError, TypeError):
             saved = 0.0
-        saved_total += saved
+        verified = rec["verified"] if "verified" in rec else is_verified_saving(
+            rec.get("host"), rec.get("model"), rec.get("timestamp"))
         ts = _parse_ts(rec)
-        if ts is not None and ts >= day_start:
+        today = ts is not None and ts >= day_start
+        if verified:
+            saved_total += saved
+        else:
+            unverified_total += saved
+        if today:
             routed_today += 1
-            saved_today += saved
             tokens_today += _rec_tokens(rec)
+            if verified:
+                saved_today += saved
+            else:
+                unverified_today += saved
 
     active = last_age is not None and last_age <= ACTIVE_WINDOW_S
     health, reason = _compute_health(now, records, last_age)
@@ -303,6 +323,8 @@ def compute_status(host: str, now: Optional[float] = None) -> SurfaceStatus:
         saved_session=round(saved_today, 4),
         saved_total=round(saved_total, 4),
         tokens_session=tokens_today,
+        unverified_session=round(unverified_today, 4),
+        unverified_total=round(unverified_total, 4),
     )
 
 
@@ -389,6 +411,8 @@ def compact_line(status: SurfaceStatus, color: Optional[bool] = None) -> str:
 
     if status.saved_session > 0:
         parts.append(f"💰 ${status.saved_session:.2f} saved")
+    if status.unverified_session > 0:
+        parts.append(c(f"+${status.unverified_session:.2f} unverified", "dim"))
 
     glyph = c(status.health_glyph(), _HEALTH_COLOR.get(status.health, "dim"))
     if status.health != HEALTH_OK:

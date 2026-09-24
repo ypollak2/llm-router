@@ -123,6 +123,12 @@ def _files_summing_savings() -> set[str]:
     """
     wanted = ("sum(cost_saved_usd", "sum(saved_usd",
               "sum(estimated_claude_cost_saved")
+    # A31: savings_stats sums now go through savings.VERIFIED_SAVED_SQL /
+    # UNVERIFIED_SAVED_SQL, so the literal needle is gone from those files. A
+    # reference to either constant is the same shape — an independent SUM over
+    # the savings column — and must stay visible to this scan.
+    predicate_names = {"VERIFIED_SAVED_SQL", "UNVERIFIED_SAVED_SQL",
+                       "savings_split_sql"}
     found: set[str] = set()
     for path in sorted(SRC.rglob("*.py")):
         rel = str(path.relative_to(SRC))
@@ -136,6 +142,9 @@ def _files_summing_savings() -> set[str]:
                 if any(w in low for w in wanted):
                     found.add(rel)
                     break
+            if isinstance(node, ast.Name) and node.id in predicate_names:
+                found.add(rel)
+                break
     return found
 
 

@@ -149,6 +149,18 @@ escape-valve "ok" pings credited $0.0146. That is the real open question: **the
 router path credits every call as a replaced Claude answer** — a different
 decision from the one recorded here.
 
+**DONE 2026-09-24 — router-path and other unobserved savings are now "unverified".**
+Only the hook's realized-gated rows count as VERIFIED (`savings.VERIFIED_SAVED_SQL` +
+`is_verified_saving`, one rule, SQL/Python parity-tested). Excluded, and shown
+labelled as `+ $X unverified, n=N`: router/gateway/sdk/codex hosts, agentic
+delegations (flat $0.20, host was hardcoded `claude_code` → now `agentic`), and
+hook rows written before the gate (`ec0d23e`). Measured on the live ledger, all
+8,969 savings_stats rows: verified **$0.00** (no gated row has ever been realized),
+unverified **$110.91** (n=7,958). `llm-router status` all-time went $483.49 →
+$372.58 + $110.91 unverified. The remaining $372.58 comes from the legacy `usage`
+table recomputed at Opus rates. That is NOT addressed and is the next honest-number
+problem.
+
 ### 1.3 `.gitignore:111` — `/docs/*` leaves the whole planning corpus untracked
 
 `git ls-files Docs/` returns **0 files**; `audit/` has 50+. So

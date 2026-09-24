@@ -98,8 +98,27 @@ def test_today_aggregates_vs_total(state_dir):
     ])
     s = ss.compute_status("codex", now=now)
     assert s.routed_count_session == 2
-    assert s.saved_session == pytest.approx(0.05)
-    assert s.saved_total == pytest.approx(0.10)
+    # A31: a codex-host saving is not observed being used -> unverified,
+    # kept out of saved_* and aggregated beside it.
+    assert (s.saved_session, s.saved_total) == (0.0, 0.0)
+    assert s.unverified_session == pytest.approx(0.05)
+    assert s.unverified_total == pytest.approx(0.10)
+
+
+def test_only_realized_gated_hook_savings_are_headline(state_dir):
+    now = 1_790_000_000.0  # 2026-09, after savings.REALIZED_GATE_SINCE
+    day_start = now - (now % 86400)
+    _write_log(state_dir, [
+        _rec(host="claude_code", saved=0.02, ts=day_start + 100),
+        _rec(host="claude_code", model="llm_router-agentic-router",
+             saved=0.2, ts=day_start + 200),                       # agentic
+        _rec(host="claude_code", saved=0.05, ts=1_700_000_000.0),  # pre-gate
+    ])
+    s = ss.compute_status("claude_code", now=now)
+    assert s.saved_session == pytest.approx(0.02)
+    assert s.saved_total == pytest.approx(0.02)
+    assert s.unverified_session == pytest.approx(0.2)
+    assert s.unverified_total == pytest.approx(0.25)
 
 
 # ── health axis ──────────────────────────────────────────────────────────────
@@ -176,7 +195,8 @@ def test_compact_line_with_route(state_dir):
     assert "⚡ llm_router" in line
     assert "hermes3:8b" in line
     assert "code/moderate" in line
-    assert "$0.03 saved" in line
+    assert "+$0.03 unverified" in line
+    assert "saved" not in line  # a codex-host saving is never the headline (A31)
 
 
 def test_compact_line_no_route_is_honest(state_dir):
@@ -322,3 +342,25 @@ def test_terminal_title_shows_tokens(state_dir):
     _write_log(state_dir, [_rec(in_tok=500, out_tok=500, ts=now - 30)])
     title = ss.terminal_title(ss.compute_status("codex", now=now))
     assert "1.0k tok" in title
+
+
+def test_an_unknown_host_in_the_ledger_is_not_verified(state_dir):
+    """The ledger maps a NULL host to "claude_code" for per-host grouping. That
+    default must not make the row VERIFIED (A31, S9)."""
+    import sqlite3
+    now = 1_790_000_000.0
+    conn = sqlite3.connect(state_dir / "usage.db")
+    conn.execute("CREATE TABLE savings_stats (id INTEGER PRIMARY KEY, timestamp TEXT, "
+                 "host TEXT, model_used TEXT, task_type TEXT, "
+                 "estimated_claude_cost_saved REAL, input_tokens INTEGER, "
+                 "output_tokens INTEGER)")
+    conn.execute("INSERT INTO savings_stats (timestamp, host, model_used, task_type, "
+                 "estimated_claude_cost_saved, input_tokens, output_tokens) "
+                 "VALUES (?, NULL, 'ollama/qwen3.5:latest', 'query', 0.07, 1, 1)",
+                 (_iso(now - 30),))
+    conn.commit()
+    conn.close()
+    s = ss.compute_status("claude_code", now=now)
+    assert s.routed_count_session == 1, "premise: the NULL-host row was grouped here"
+    assert s.saved_session == 0.0
+    assert s.unverified_session == pytest.approx(0.07)
