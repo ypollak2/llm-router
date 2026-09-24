@@ -615,6 +615,12 @@ _os.environ.setdefault("LLM_ROUTER_SYNTHETIC", "1")
 
 SUITES["brutal"] = (BRUTAL_FILES, BRUTAL_TASKS)
 
+# Q15's §28-shaped suite (architecture/Q15_HARNESS_PLAN.md). Each task carries
+# its own fixture (task[6]) and a reference solution (task[7]) for --self-test.
+from bench_plan_suite import FILES as PLAN_FILES, TASKS as PLAN_TASKS  # noqa: E402
+
+SUITES["plan"] = (PLAN_FILES, PLAN_TASKS)
+
 
 # ── Backends ─────────────────────────────────────────────────────────────────
 
@@ -678,7 +684,8 @@ def _check_usable(text: str) -> None:
         raise BackendUnavailable(text.strip()[:200])
 
 
-def _cli(args: list[str], sandbox: Path, timeout: int) -> tuple[str | None, str | None]:
+def _cli(args: list[str], sandbox: Path, timeout: int,
+         check: bool = True) -> tuple[str | None, str | None]:
     try:
         r = subprocess.run(args, capture_output=True, text=True, cwd=str(sandbox),
                            env=_child_env(), stdin=subprocess.DEVNULL, timeout=timeout)
@@ -687,14 +694,18 @@ def _cli(args: list[str], sandbox: Path, timeout: int) -> tuple[str | None, str 
     out = (r.stdout or "").strip()
     if not out:
         return None, f"exit {r.returncode}: {(r.stderr or '')[-300:]}"
-    _check_usable(out)
+    if check:
+        _check_usable(out)
     return out, None
 
 
 def run_claude(prompt: str, sandbox: Path, model: str, timeout: int):
-    return _cli([
+    """Returns (answer, error, usage). `--output-format json` carries the token
+    usage, turns, cost and a per-model breakdown (Claude Code may call side
+    models), which Q15 compares against the graph arm."""
+    raw, err = _cli([
         "claude", "-p", prompt,
-        "--output-format", "text",
+        "--output-format", "json",
         "--model", model,
         # acceptEdits permits file edits but NOT shell commands, so Claude could
         # not run pytest and answered "I need your approval to run the test
@@ -707,7 +718,26 @@ def run_claude(prompt: str, sandbox: Path, model: str, timeout: int):
         "--add-dir", str(sandbox),
         "--settings", '{"hooks":{}}',
         "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}',
-    ], sandbox, timeout)
+    ], sandbox, timeout, check=False)
+    if raw is None:
+        return None, err, None
+    try:
+        d = json.loads(raw)
+    except json.JSONDecodeError:
+        return None, f"non-JSON output: {raw[:200]}", None
+    answer = d.get("result") or ""
+    _check_usable(answer)
+    usage = {
+        "usage": d.get("usage"), "model_usage": d.get("modelUsage"),
+        "num_turns": d.get("num_turns"), "total_cost_usd": d.get("total_cost_usd"),
+    }
+    return answer, ("claude reported is_error" if d.get("is_error") else None), usage
+
+
+def run_noop(prompt: str, sandbox: Path, model: str, timeout: int):
+    """Does nothing. Every EDIT verifier must fail against it; one that passes
+    is vacuous (a check that accepts the untouched fixture checks nothing)."""
+    return "", None
 
 
 def run_codex(prompt: str, sandbox: Path, model: str, timeout: int):
@@ -778,6 +808,7 @@ BACKENDS = {
     "local":  (run_local,  os.environ.get("BENCH_LOCAL_MODEL", "qwen3-coder:30b"), 300),
     "claude": (run_claude, os.environ.get("BENCH_CLAUDE_MODEL", "sonnet"), 300),
     "codex":  (run_codex,  os.environ.get("BENCH_CODEX_MODEL", "gpt-5.5"), 300),
+    "noop":   (run_noop,   "none", 5),
 }
 
 
@@ -804,7 +835,11 @@ def verify(sandbox: Path, verifier: str, answer: str | None, orig_test: Path,
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--backend", choices=sorted(BACKENDS))
-    ap.add_argument("--suite", choices=("easy", "hard", "brutal"), default="easy")
+    ap.add_argument("--suite", choices=("easy", "hard", "brutal", "plan"), default="easy")
+    ap.add_argument("--repeat", type=int, default=1, help="runs per task (pass@k)")
+    ap.add_argument("--self-test", action="store_true",
+                    help="plan suite: every verifier must FAIL on the fixture and "
+                         "PASS on the reference solution")
     ap.add_argument("--tasks", type=int, default=0, help="0 = all")
     ap.add_argument("--only", help="comma-separated task ids")
     ap.add_argument("--report", action="store_true", help="merge result files into a table")
@@ -813,11 +848,14 @@ def main() -> int:
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     if args.report:
         return report()
+    if args.self_test:
+        return self_test(args.suite)
     if not args.backend:
         ap.error("--backend is required unless --report")
 
     files, tasks = SUITES[args.suite]
     fn, model, timeout = BACKENDS[args.backend]
+    timeout = int(os.environ.get("BENCH_TIMEOUT", timeout))
     sandbox = Path(os.environ.get("BENCH_SANDBOX",
                                   f"/tmp/bq_{args.backend}")).resolve()
     orig_test = OUT_DIR / "orig_test_parser.py"
@@ -833,10 +871,11 @@ def main() -> int:
     rows = []
     suffix = "" if args.suite == "easy" else f"-{args.suite}"
     res_path = OUT_DIR / f"{args.backend}{suffix}.json"
-    for task in selected:
+    runs = [(task, r) for task in selected for r in range(args.repeat)]
+    for task, rep_i in runs:
         tid, kind, prompt, allowed, verifier = task[:5]
         extra = task[5] if len(task) > 5 else {}
-        build(sandbox, files)
+        build(sandbox, task[6] if len(task) > 6 else files)
         for rel, body in extra.items():
             q = sandbox / rel
             q.parent.mkdir(parents=True, exist_ok=True)
@@ -849,7 +888,8 @@ def main() -> int:
         # a measurement of the laptop's power management, not of the model.
         t0 = time.monotonic()
         try:
-            answer, err = fn(prompt, sandbox, model, timeout)
+            answer, err, *more = fn(prompt, sandbox, model, timeout)
+            usage = more[0] if more else None
         except BackendUnavailable as e:
             print(f"\nABORT at task {tid}: {args.backend} is not answering — {e}\n"
                   f"{len(rows)} task(s) completed before this point are in "
@@ -860,15 +900,18 @@ def main() -> int:
         dt = time.monotonic() - t0
         after = snapshot(sandbox)
         touched = changed_files(before, after)
-        stray = [f for f in touched if f not in allowed]
+        # An allowed entry ending in "/" is a prefix (plan tasks may add tests).
+        stray = [f for f in touched
+                 if not any(f == a or (a.endswith("/") and f.startswith(a)) for a in allowed)]
         ok, why = verify(sandbox, verifier, answer, orig_test, stale_test)
         rows.append({
-            "task": tid, "kind": kind, "suite": args.suite,
+            "task": tid, "rep": rep_i, "kind": kind, "suite": args.suite,
             "backend": args.backend, "model": model,
             "correct": ok, "clean": not stray, "stray_files": stray,
             "touched": touched, "seconds": round(dt, 1),
             "error": err, "why_failed": why,
             "answer": (answer or "")[:400],
+            "usage": usage,
         })
         flag = "PASS" if ok else "FAIL"
         dirty = f"  +{len(stray)} stray" if stray else ""
@@ -881,6 +924,34 @@ def main() -> int:
           f"{sum(r['clean'] for r in rows)}/{n} clean, "
           f"{sum(r['seconds'] for r in rows):.0f}s total")
     return 0
+
+
+def self_test(suite: str) -> int:
+    """Check the checks: each verifier must FAIL on the untouched fixture and
+    PASS on the reference solution. Only tasks that carry both are tested."""
+    _, tasks = SUITES[suite]
+    sandbox = Path(os.environ.get("BENCH_SANDBOX", "/tmp/bq_selftest")).resolve()
+    bad = 0
+    checked = 0
+    for task in tasks:
+        if len(task) < 8:
+            continue
+        tid, verifier, fixture, reference = task[0], task[4], task[6], task[7]
+        checked += 1
+        build(sandbox, fixture)
+        ok_before, _ = verify(sandbox, verifier, "", sandbox / "_none")
+        build(sandbox, {**fixture, **reference})
+        ok_after, why = verify(sandbox, verifier, "", sandbox / "_none")
+        good = (not ok_before) and ok_after
+        bad += not good
+        print(f"{tid:18s} fixture={'PASS' if ok_before else 'fail'} "
+              f"reference={'PASS' if ok_after else 'fail'}  "
+              f"{'OK' if good else 'BROKEN VERIFIER ' + why}")
+    if not checked:
+        print(f"suite {suite!r} has no tasks with a reference solution — nothing checked")
+        return 1
+    print(f"\n{checked - bad}/{checked} verifiers discriminate")
+    return 1 if bad else 0
 
 
 def report() -> int:
