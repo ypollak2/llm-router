@@ -110,3 +110,26 @@ an acceptance check run by the supervisor) save Claude tokens at equal verified 
   tokens/task ≤ 0.8 × A's. Anything else: do not wire delegation. The report states the numbers either way.
 - Claude tokens = input + cache_creation + cache_read + output from `--output-format json`. The
   cache-read share is reported separately because it prices at 0.1×.
+
+## Delegation A/B: result (2026-09-24) — ship rule FAILS; delegation not wired
+
+The run hit the Claude monthly spend limit partway through: arm B finished plan (9) and the first 4 hard
+tasks (12), then easy with 1 run (26, a user-approved reduction from 3).
+
+| Scope | Verified A | Verified B | Runs where B delegated | Token ratio B/A |
+|---|---|---|---|---|
+| plan (3×3) | 9/9 | 9/9 | 0/9 | per task 0.66–1.14 |
+| hard, 4 tasks (4×3) | 12/12 | 12/12 | 0/12 | per task 0.50–1.20 |
+| easy (26×1 vs 26×3) | 77/78 | 26/26 | **2/26** (1 verified_complete, 1 incomplete) | delegated runs **0.98** (n=2); non-delegated 0.95 (n=24) |
+
+**Reading.** Given the option, Opus 5.5 almost never delegated. It kept plans and bug hunts (as instructed)
+and did most named edits itself. Where it did delegate, Claude tokens were unchanged (0.98×). The B-vs-A
+token differences in runs with no delegation are run-to-run variance, not an effect.
+
+**Why delegation cannot move the number.** A Claude Code session costs a fixed ~110–150k tokens (about 90%
+of them cache reads: system prompt, tool schemas, context) before the task's own work. A delegated edit
+removes only the task slice, and Claude still runs the session to write the spec and read the result.
+Claude quota is saved only when Claude is not invoked for a turn at all. That points back at the draft /
+turn-replacement path (full context and tools for the local model), not at partial offload.
+
+Per the pre-registered rule (000acf8): **do not wire delegation guidance.** Raw data: results/q15_delegate/.
