@@ -128,6 +128,30 @@ def _benchmark_version(data: dict[str, Any] | None) -> int:
         return 0
 
 
+def _benchmark_generated_at(data: dict[str, Any] | None):
+    """Parse the ``generated_at`` timestamp from benchmark data.
+
+    Returns ``None`` when the field is absent or unparseable — never a
+    sentinel date. An unknown timestamp must not silently compare as older
+    (and lose) or newer (and win); the caller has to treat "unknown" as its
+    own case rather than let it fall out of a plain comparison (CLAUDE.md
+    "Unknown must not be the unfavourable answer either").
+    """
+    if not isinstance(data, dict):
+        return None
+    raw = data.get("generated_at")
+    if not raw or not isinstance(raw, str):
+        return None
+    try:
+        from datetime import datetime, timezone
+        dt = datetime.fromisoformat(raw)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
+    except (TypeError, ValueError):
+        return None
+
+
 def check_and_update_benchmarks() -> str | None:
     """Copy the bundled benchmarks file to ``~/.llm-router/`` if it is newer.
 
@@ -163,8 +187,20 @@ def check_and_update_benchmarks() -> str | None:
 def get_benchmark_data() -> dict[str, Any] | None:
     """Return the cached benchmark data dict, loading it on first call.
 
-    Load order: ``~/.llm-router/benchmarks.json`` (user-local, may be newer
-    than bundled), falling back to ``data/benchmarks.json`` (bundled in wheel).
+    Compares ``~/.llm-router/benchmarks.json`` (user-local, previously
+    fetched) against the bundled ``data/benchmarks.json`` and returns
+    whichever is actually NEWER by ``generated_at``. This matters now that
+    the background fetch that used to keep the installed copy fresh is
+    opt-in (``LLM_ROUTER_AUTO_BENCHMARK_FETCH``, off by default) — without
+    this comparison, a stale installed file fetched once years ago would
+    permanently shadow a newer bundled file shipped in a later release.
+
+    Tie-break when a date is missing or unparseable on one side: prefer the
+    side whose date IS known — an unknown timestamp must not win by default.
+    If BOTH are unknown, fall back to the historical behaviour of preferring
+    the installed copy (documented here, not left implicit): the installed
+    file is still more likely to reflect this machine's own fetch history
+    than the version frozen at wheel-build time.
 
     Returns:
         The parsed benchmark dict, or ``None`` if neither file exists or
@@ -174,7 +210,23 @@ def get_benchmark_data() -> dict[str, Any] | None:
     if _cache_loaded:
         return _cache
     _cache_loaded = True
-    _cache = _load_json(_installed()) or _load_json(_BUNDLED)
+
+    installed_data = _load_json(_installed())
+    bundled_data = _load_json(_BUNDLED)
+    installed_dt = _benchmark_generated_at(installed_data)
+    bundled_dt = _benchmark_generated_at(bundled_data)
+
+    if installed_dt is not None and bundled_dt is not None:
+        _cache = installed_data if installed_dt >= bundled_dt else bundled_data
+    elif installed_dt is not None:
+        _cache = installed_data
+    elif bundled_dt is not None:
+        _cache = bundled_data
+    else:
+        # Both unknown — documented fallback, not a default that happens to
+        # look reasonable: keep the pre-existing installed-first preference.
+        _cache = installed_data or bundled_data
+
     return _cache
 
 
