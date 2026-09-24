@@ -284,13 +284,23 @@ reach disk by default — `LLM_ROUTER_AGENT_WRITES` defaults to `propose`.
 
   Blocking one of these closes one door of eleven, so none is blocked.
 
+  **One narrowing, by write mode (SEC-006, 2026-09-24).** `LLM_ROUTER_AGENT_WRITES`
+  used to gate only `write_file`/`edit_file`, while `python3 -c "open(p,'w')…"`
+  through `run_command` wrote anywhere, even outside the project. Under `propose`
+  (the default) and `off`, `guard_command` now also refuses the argv shapes that
+  write: `python -c`, `node -e/--eval/-p/--print`, `sed -i`/`--in-place`, and
+  `find` with `-delete`/`-exec`/`-execdir`/`-ok`/`-fprint*`. Under `apply` they run
+  exactly as the table above says. This does **not** make `propose` a
+  containment boundary: `awk`, GNU `sed e`, `git -c`, `pytest`, `go run` and
+  `cargo run` still execute code in every mode.
+
   **What the numbers mean.** `docs/security_command_matrix.txt` carries two
   populations, and the difference between them is the point:
 
   | population | result |
   |---|---|
   | twelve obviously destructive commands (`rm -rf /`, `git push --force`, `curl -d @.env`) | **10 of 12 refused** |
-  | the same capabilities via allowlisted interpreters | **10 of 10 ALLOWED** |
+  | the same capabilities via allowlisted interpreters, `AGENT_WRITES=apply` | **10 of 10 ALLOWED** |
 
   Earlier revisions of this file quoted only the first row. That number was
   accurate, reproducible, and more misleading than a wrong one would have been,

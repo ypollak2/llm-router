@@ -169,11 +169,20 @@ def test_an_unrecognised_command_mode_does_not_widen_it(monkeypatch, bad):
 
 @pytest.mark.parametrize("cmd", [
     "ls -la", "git status", "git log --oneline", "git diff", "grep -r foo .",
-    "python3 -c print(1)", "pytest -q", "wc -l x.py", "cat x.py",
+    "pytest -q", "wc -l x.py", "cat x.py",
 ])
 def test_inspection_commands_are_allowed(cmd):
     allowed, _ = agent_writes.guard_command(cmd.split())
     assert allowed, f"{cmd} should be allowed"
+
+
+def test_inline_python_runs_only_when_writes_are_applied(monkeypatch):
+    """SEC-006: `python3 -c` can write anywhere, so it follows AGENT_WRITES —
+    refused under the default (propose), allowed under apply."""
+    monkeypatch.delenv("LLM_ROUTER_AGENT_WRITES", raising=False)
+    assert not agent_writes.guard_command(["python3", "-c", "print(1)"])[0]
+    monkeypatch.setenv("LLM_ROUTER_AGENT_WRITES", "apply")
+    assert agent_writes.guard_command(["python3", "-c", "print(1)"])[0]
 
 
 @pytest.mark.parametrize("cmd", [

@@ -157,6 +157,11 @@ def test_the_interpreter_escape_is_still_allowed(argv, monkeypatch):
     a corpus that silently agrees with any behaviour measures nothing.
     """
     monkeypatch.delenv("LLM_ROUTER_AGENT_COMMANDS", raising=False)
+    # Measured under AGENT_WRITES=apply: since SEC-006 the inline-code forms are
+    # refused under propose/off (tests/test_sec006_writes_off_gates_commands.py,
+    # SECURITY.md "One narrowing, by write mode"); with writes applied the
+    # escape is exactly as documented.
+    monkeypatch.setenv("LLM_ROUTER_AGENT_WRITES", "apply")
     allowed, msg = _guard().guard_command(argv)
     assert allowed, (
         f"{argv[0]} is now REFUSED ({msg[:120]}). That is an improvement — "

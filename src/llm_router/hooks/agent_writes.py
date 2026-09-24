@@ -66,6 +66,32 @@ _BLOCKED_SUBCOMMANDS = {
 _BLOCKED_MODULES = frozenset({"pip", "ensurepip", "venv", "http.server"})
 
 
+# SEC-006 (audit/forensic_2026-09-24): AGENT_WRITES=off/propose used to gate
+# only write_file/edit_file, while `python3 -c "open(p,'w')…"` through
+# run_command wrote anywhere, even outside the project. When writes are not
+# applied, the argv shapes that write are refused too. This is not a sandbox
+# (SEC-001, SECURITY.md): with writes applied they run exactly as before.
+_INLINE_CODE_FLAGS = {
+    "python": {"-c"}, "node": {"-e", "--eval", "-p", "--print"},
+}
+_FIND_ACTIONS = {"-delete", "-exec", "-execdir", "-ok", "-okdir", "-fprint",
+                 "-fprint0", "-fprintf", "-fls"}
+
+
+def _writes_through_command(argv: list[str]) -> str | None:
+    """Why this argv can write files, or None if it cannot (by shape)."""
+    program = Path(argv[0]).name
+    base = "python" if program.startswith("python") else program
+    flags = _INLINE_CODE_FLAGS.get(base)
+    if flags and any(a in flags for a in argv[1:]):
+        return f"'{program}' with inline code can write anywhere"
+    if program == "sed" and any(a == "--in-place" or a.startswith("-i") for a in argv[1:]):
+        return "'sed -i' edits files in place"
+    if program == "find" and any(a in _FIND_ACTIONS for a in argv[1:]):
+        return "'find' with an action flag can delete or run commands"
+    return None
+
+
 def command_mode() -> str:
     raw = os.environ.get("LLM_ROUTER_AGENT_COMMANDS", "").strip().lower()
     return raw if raw in _VALID_CMD else CMD_ALLOWLIST
@@ -80,10 +106,18 @@ def guard_command(argv: list[str]) -> tuple[bool, str]:
     if current == CMD_OFF:
         return False, ("REFUSED: running commands is disabled "
                        "(LLM_ROUTER_AGENT_COMMANDS=off). Nothing was executed.")
-    if current == CMD_ALL:
-        return True, ""
     if not argv:
         return False, "REFUSED: empty command."
+    if mode() != MODE_APPLY:
+        why = _writes_through_command(argv)
+        if why:
+            return False, (
+                f"REFUSED: {why}, and writing is not enabled "
+                f"(LLM_ROUTER_AGENT_WRITES={mode()}). Nothing was executed. "
+                f"Use the file tools, which propose the change as a diff."
+            )
+    if current == CMD_ALL:
+        return True, ""
 
     program = Path(argv[0]).name
     if program not in _ALLOWED_PROGRAMS:

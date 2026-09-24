@@ -90,8 +90,16 @@ def test_the_corpus_covers_both_populations():
 
 
 @pytest.mark.parametrize("verdict,cmd", _corpus(), ids=lambda x: str(x)[:40])
-def test_every_corpus_verdict_is_what_the_code_actually_does(verdict, cmd):
-    """The numbers in SECURITY.md are derived here, never hand-edited."""
+def test_every_corpus_verdict_is_what_the_code_actually_does(verdict, cmd, monkeypatch):
+    """The numbers in SECURITY.md are derived here, never hand-edited.
+
+    Measured with LLM_ROUTER_AGENT_WRITES=apply: the corpus documents what the
+    allowlist does NOT contain once the agent may write (SEC-001). Under the
+    default `propose`, the interpreter rows are refused since SEC-006
+    (tests/test_sec006_writes_off_gates_commands.py) — pinning the mode keeps
+    this file measuring the population it exists for.
+    """
+    monkeypatch.setenv("LLM_ROUTER_AGENT_WRITES", "apply")
     aw = _guard()
     try:
         argv = shlex.split(cmd)
