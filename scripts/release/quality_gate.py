@@ -73,16 +73,36 @@ Round 1 checked only `is_ollama_available()` (`discover.py:39`), which probes
 `/api/tags` — server-up, nothing more. Reproduced as a HIGH defect: Ollama can
 be reachable while its one model slot is held by a different model, in which
 case the gate ran, got empty answers at ~90-115s each, and reported "This is a
-quality regression" — a false diagnosis of a resource-contention problem. Two
-checks now run before the bench, in order:
+quality regression" — a false diagnosis of a resource-contention problem.
 
-1. `_resident_model_conflict()` — `GET /api/ps`. If a DIFFERENT model is
-   resident, don't even try; contention is already visible.
+Round 1's FIX over-corrected, per the same reviewer, round 2: it treated ANY
+other resident model as contention by itself, via `_resident_model_conflict()
+or _warm_up_probe()`. That is a false positive — Ollama's single-slot cap
+means a request for the pinned model simply evicts whatever is idly resident
+and loads its own; an idle different model costs at most one swap, not a
+stalled answer. As written, the gate refused a release whenever some other
+model merely happened to be loaded, which trains people to pass
+`--skip-quality` by reflex on a machine that was never actually contended.
+
+The check now runs two functions with different jobs, in order:
+
+1. `_resident_model_note()` — `GET /api/ps`. If a DIFFERENT model is resident,
+   this is CONTEXT, not a verdict: printed as a note (visible either way) and
+   folded into the contention message if the probe below fails, but it never
+   blocks a release by itself.
 2. `_warm_up_probe()` — a short, cheap `/api/generate` call (8 tokens) to the
-   pinned model. Catches contention that starts between check 1 and the real
-   run, or a model that is resident-but-stalled.
+   pinned model, bounded by `WARMUP_TIMEOUT_S = 45`. THIS is what decides
+   contention: an empty answer or a timeout. The bound is 45s because the
+   model file is ~17GB (`qwen3-coder:30b`), so a genuinely idle slot being
+   evicted and reloaded from disk is dominated by I/O and comfortably fits
+   inside 45s even on a slow disk — Ollama can only run one generation per
+   slot, so if something else is ACTIVELY generating, the probe queues behind
+   it rather than getting evicted-and-served, and that queue is what the
+   timeout catches. A resident-different-model note with a probe that still
+   answers promptly means "proceed" — that is exactly the "idle, not
+   contended" case this round's fix exists for.
 
-Either one firing is treated exactly like "unavailable": fail loud unless
+A failing probe is treated exactly like "unavailable": fail loud unless
 `--skip-quality "<reason>"` is given. Separately, if contention starts AFTER
 both checks pass (during the actual bench), each task's answer is inspected:
 an EMPTY answer with no recorded error is classified as a backend failure
@@ -128,7 +148,12 @@ OLLAMA_BASE_URL = "http://localhost:11434"  # discover.py's own fallback default
 # the same env var, so the contention pre-check watches the model the bench
 # would actually request, not a guess.
 TARGET_MODEL = os.environ.get("BENCH_LOCAL_MODEL", "qwen3-coder:30b")
-WARMUP_TIMEOUT_S = 45  # generous enough for a cold model load, not a stall
+# 45s: qwen3-coder:30b is an ~17GB model file, so an idle-slot evict+reload is
+# I/O-bound and comfortably fits in 45s; a slot that's ACTIVELY generating for
+# another caller queues our probe behind it (Ollama runs one generation per
+# slot), which is exactly what this bound is meant to catch. See "Detecting
+# contention" above.
+WARMUP_TIMEOUT_S = 45
 
 # Pinned pair — see "Why an easy task AND a hard task" above.
 EASY_TASK = "qa-max-value"
@@ -150,17 +175,20 @@ def _pinned_str() -> str:
     return ", ".join(f"{suite}/{task}" for suite, task in PINNED)
 
 
-def _resident_model_conflict() -> str | None:
-    """`GET /api/ps`: is Ollama's one model slot held by something other than
-    the model this bench would ask for? Ollama.app caps at one loaded model
-    (this project's own notes) — a different resident model means a request
-    would contend for the slot rather than get a clean answer, which is
-    exactly the condition measured live while authoring this gate: 90-115s
-    per task, every answer empty, a different model resident throughout.
+def _resident_model_note() -> str | None:
+    """`GET /api/ps`: is a DIFFERENT model currently resident in Ollama's one
+    model slot? This is CONTEXT, not a verdict — Ollama evicts an idle
+    resident model and loads the requested one on the next call, so a
+    different model being loaded costs at most one swap, not a stalled
+    answer. (Round 1 of this gate treated this by itself as contention, a
+    false positive the reviewer caught: it refused a release whenever some
+    OTHER model merely happened to be loaded, which trains people to reach
+    for `--skip-quality` on a machine that was never actually contended.)
 
-    Returns None on any probe failure — reachability is `is_ollama_available`'s
-    job, not this one's; this function only ever adds a reason to refuse, never
-    a reason to proceed past an unreachable server.
+    Returns None on any probe failure, or when the resident model already
+    matches `TARGET_MODEL`, or when nothing is loaded — "nothing to report",
+    not "clean". Whether this is actually contention is `_warm_up_probe`'s
+    call, not this function's.
     """
     try:
         req = urllib.request.Request(f"{OLLAMA_BASE_URL}/api/ps")
@@ -171,16 +199,16 @@ def _resident_model_conflict() -> str | None:
     resident = [m.get("model") or m.get("name") for m in data.get("models", [])]
     others = sorted({m for m in resident if m and m != TARGET_MODEL})
     if others:
-        return (f"Ollama's one model slot is held by {', '.join(others)}, not "
-                f"{TARGET_MODEL} — a request would contend for it rather than "
-                "get a clean answer.")
+        return (f"Ollama's one model slot is currently held by "
+                f"{', '.join(others)}, not {TARGET_MODEL}")
     return None
 
 
 def _warm_up_probe() -> str | None:
-    """A short, cheap generation against the pinned model. Catches contention
-    that starts AFTER `_resident_model_conflict` checks (another process can
-    start between the two calls) and a model that is resident but stalled."""
+    """A short, cheap generation against the pinned model. THIS is what
+    decides contention (see "Detecting contention" in the module docstring)
+    — an empty answer or a timeout means the slot is actually busy, not just
+    holding a different, idle model. Bounded by `WARMUP_TIMEOUT_S`."""
     payload = json.dumps({
         "model": TARGET_MODEL,
         "prompt": "Reply with the single word: ready",
@@ -284,6 +312,13 @@ def main(argv: list[str] | None = None) -> int:
                          "recorded, not silent")
     args = ap.parse_args(argv)
 
+    # Printed on EVERY run, pass or fail, so a releaser sees it in the terminal
+    # output and not only in a comment they may never open. See "The threshold"
+    # above for the reasoning.
+    print(f"note: BASELINE_CORRECT ({BASELINE_CORRECT}/{N_TASKS}) is pinned from "
+          "docs/BACKEND-QUALITY.md's 2026-09-12 measurement, not a fresh run on "
+          "this machine — fresh baseline pending.")
+
     if not is_ollama_available():
         if args.skip_quality:
             return _skip(args.skip_quality,
@@ -293,8 +328,17 @@ def main(argv: list[str] | None = None) -> int:
             "did not run.",
         ])
 
-    contention = _resident_model_conflict() or _warm_up_probe()
-    if contention:
+    # A different resident model is CONTEXT, not a verdict — see
+    # _resident_model_note's docstring and "Detecting contention" above. It is
+    # printed either way and folded into the message only if the probe fails.
+    resident_note = _resident_model_note()
+    if resident_note:
+        print(f"note: {resident_note} — not contention by itself; only a "
+              "failed/empty/slow warm-up probe is.")
+
+    probe_failure = _warm_up_probe()
+    if probe_failure:
+        contention = probe_failure + (f" ({resident_note})" if resident_note else "")
         if args.skip_quality:
             return _skip(args.skip_quality,
                         f"Local backend is CONTENDED, treated as unavailable: {contention}")
