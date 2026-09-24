@@ -34,7 +34,7 @@ If it goes green, commit it. If it does not, the change is self-contained and
 |---|---|---|
 | The uncommitted Codex fix | **Wait for the gate, then commit** | gate re-running after an identity-gate failure — see below |
 | Savings credited to discarded drafts | **Condition on acceptance — a discarded draft credits nothing** | NOT IMPLEMENTED, see §1.2 |
-| `.gitignore` `/docs/*` | **Un-ignore** — but see the contradiction below | NOT DONE |
+| `.gitignore` `/docs/*` | **Keep ignored** — reversed 2026-09-24 after the contradiction below | **CLOSED — accepted**, §1.3 |
 | What to start next | **The falsifying experiment (§5)** | — |
 
 ### The identity gate caught a leak I introduced
@@ -133,6 +133,22 @@ Expect the headline to fall by roughly an order of magnitude — today $0.0928 �
 about $0.015 — and lifetime $110.91 to fall similarly. That drop is the point:
 it is the first defensible version of the number.
 
+**CORRECTION 2026-09-24 (later) — the premise above is false; nothing to implement.**
+Re-measured from `savings_stats` (window `timestamp >= 2026-09-23`, n=64):
+
+| host | writer | rows | saved |
+|---|---|---|---|
+| `claude_code` | hook `log_direct_savings`, echo drafts | 59 | **$0.0000** |
+| `router` | `router.py:3166` `log_receipt_savings` (MCP/gateway calls) | 5 | **$0.0928** |
+
+Discarded hook drafts ALREADY credit $0: `realized=_turn_blocked` gates it
+(`auto-route.py` ~4320, fixed 2026-09-12). The $0.0773 "qwen3.5 drafts" is ONE
+router-path row (686 in / 2954 out). The table above mislabelled it by model
+name, not by writer. The two qwen3-coder rows (2 output tokens each) are
+escape-valve "ok" pings credited $0.0146. That is the real open question: **the
+router path credits every call as a replaced Claude answer** — a different
+decision from the one recorded here.
+
 ### 1.3 `.gitignore:111` — `/docs/*` leaves the whole planning corpus untracked
 
 `git ls-files Docs/` returns **0 files**; `audit/` has 50+. So
@@ -141,7 +157,10 @@ it is the first defensible version of the number.
 filesystem `/docs/*` swallows `Docs/`.
 
 Architecture docs were filed under `architecture/` and `audit/` to avoid it.
-Decide whether that ignore is intentional.
+**CLOSED 2026-09-24 — accepted as intended.** `Docs/` stays a local scratchpad;
+the one-disk, no-backup risk is accepted. Anything that must survive goes in
+`audit/` or `architecture/` (tracked), and a bug record goes in its regression
+test's docstring, since `docs/BUGS.md` is ignored too.
 
 ### 1.4 The two remaining architecture decisions
 
