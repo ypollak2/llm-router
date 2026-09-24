@@ -135,7 +135,9 @@ def _reason_since(offset: int) -> str:
                 # first version used [0-9.]+ and turned ".claude/settings.json"
                 # into "Nclaude/settingsNjson", destroying exactly the filename a
                 # reader needs to judge whether the rejection was correct.
-                return f"{marker.rstrip(':').lower()}: {re.sub(r'\d[\d.]*', 'N', reason)}"[:70]
+                # Python 3.11 forbids backslashes inside f-string expressions.
+                masked = re.sub(r'\d[\d.]*', 'N', reason)
+                return f"{marker.rstrip(':').lower()}: {masked}"[:70]
     if "DIRECT SUCCESS" in tail:
         return "drafted then discarded downstream"
     return "no reason logged"

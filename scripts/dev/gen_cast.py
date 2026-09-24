@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Generate an asciinema v2 .cast file for the llm-router demo SVG."""
 
+Q = '"'  # py3.11 forbids backslashes inside f-string expressions
 import json
 import sys
 from pathlib import Path
@@ -28,13 +29,13 @@ DEMO_LINES = [
     "",
     f"  {'Prompt':<46}  {'Task':<8}  {'Complexity':<12}  {'Model':<19}  Cost",
     "  " + "─" * 101,
-    f"  {'\"what does os.path.join do?\"':<46}  {'query':<8}  {G}{'simple':<12}{R}  {'Claude Haiku':<19}  {G}$0.00001{R}",
-    f"  {'\"why is my async code slow?\"':<46}  {'analyze':<8}  {Y}{'moderate':<12}{R}  {'Claude Sonnet':<19}  {Y}$0.003{R}",
-    f"  {'\"implement a Redis-backed rate limiter\"':<46}  {'code':<8}  {RE}{'complex':<12}{R}  {'Claude Opus':<19}  {Y}$0.015{R}",
-    f"  {'\"prove the halting problem is undecidable\"':<46}  {'analyze':<8}  {RE}{'deep_reason':<12}{R}  {'Opus+thinking':<19}  {RE}$0.030{R}",
-    f"  {'\"research latest Gemini 2.5 benchmarks\"':<46}  {'research':<8}  {Y}{'moderate':<12}{R}  {'Perplexity Sonar':<19}  {Y}$0.002{R}",
-    f"  {'\"write a hero section for a SaaS landing\"':<46}  {'generate':<8}  {Y}{'moderate':<12}{R}  {'Claude Sonnet':<19}  {Y}$0.001{R}",
-    f"  {'\"generate a dashboard screenshot mockup\"':<46}  {'image':<8}  {'—':<12}  {'Flux Pro':<19}  {RE}$0.040{R}",
+    f"  {Q + 'what does os.path.join do?' + Q:<46}  {'query':<8}  {G}{'simple':<12}{R}  {'Claude Haiku':<19}  {G}$0.00001{R}",
+    f"  {Q + 'why is my async code slow?' + Q:<46}  {'analyze':<8}  {Y}{'moderate':<12}{R}  {'Claude Sonnet':<19}  {Y}$0.003{R}",
+    f"  {Q + 'implement a Redis-backed rate limiter' + Q:<46}  {'code':<8}  {RE}{'complex':<12}{R}  {'Claude Opus':<19}  {Y}$0.015{R}",
+    f"  {Q + 'prove the halting problem is undecidable' + Q:<46}  {'analyze':<8}  {RE}{'deep_reason':<12}{R}  {'Opus+thinking':<19}  {RE}$0.030{R}",
+    f"  {Q + 'research latest Gemini 2.5 benchmarks' + Q:<46}  {'research':<8}  {Y}{'moderate':<12}{R}  {'Perplexity Sonar':<19}  {Y}$0.002{R}",
+    f"  {Q + 'write a hero section for a SaaS landing' + Q:<46}  {'generate':<8}  {Y}{'moderate':<12}{R}  {'Claude Sonnet':<19}  {Y}$0.001{R}",
+    f"  {Q + 'generate a dashboard screenshot mockup' + Q:<46}  {'image':<8}  {'—':<12}  {'Flux Pro':<19}  {RE}$0.040{R}",
     "  " + "─" * 101,
     "",
     f"  {B}Savings vs always-Opus:{R}  {G}$0.105 → $0.091  (13% cheaper){R}",
