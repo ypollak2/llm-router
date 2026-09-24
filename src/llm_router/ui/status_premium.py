@@ -144,13 +144,19 @@ class PremiumStatusCommand:
                 # R7: no bare `$` — every money figure carries the subscription
                 # caveat (label_money), so "$0.20 saved" cannot be shown when
                 # under a subscription no cash actually changed hands.
+                # Reviewer-01 (live-reproduced): `n_rows` MUST be the row count
+                # BEHIND `saved` — savings_stats rows passing the verified
+                # predicate — never `totals.calls`, which is raw activity
+                # volume (unfiltered COUNT(*) across all five UNION'd
+                # sources). That mismatch is how "$0.00 … (n=47260)" happened
+                # with verified_n actually 0.
                 money_ctx = CanonicalSavings(
                     window=window,
                     baseline_equivalent_avoided_usd=saved,
                     routing_overhead_usd=0.0,
                     real_dollars_avoided_usd=saved,
                     baseline_model=_dd._BASELINE_MODEL,
-                    n_rows=totals.calls,
+                    n_rows=totals.verified_calls,
                     provenance_filtered=True,
                     under_subscription=sub,
                     source="dashboard_data.query_window",
@@ -163,17 +169,23 @@ class PremiumStatusCommand:
                     # Text(), not from_markup: the note is data, not markup.
                     lines.append(Text(f"  {'':<15}  {note}", style=PALETTE.text_dim))
 
-                if window == "today":
-                    # North Star (points 8+12): verified share of eligible
-                    # Claude turns, numerator and denominator from the SAME
-                    # table and window — see PrimaryMetric's docstring.
-                    metric = query_primary_metric(window, db_path=str(self.db_path))
-                    rendered = metric.render()
-                    if rendered:
-                        lines.append(Text(f"  {'':<15}  {rendered}", style=PALETTE.text_dim))
-
             if not any_data:
                 lines.append(Text("  No external routing yet — route some tasks first"))
+
+            # North Star (points 8+12): verified share of eligible Claude
+            # turns, numerator and denominator from the SAME table and
+            # window (savings_stats, see PrimaryMetric's docstring).
+            # Reviewer-01: rendered ONCE, independent of the per-window
+            # money loop above — that loop `continue`s past any window
+            # with zero activity in the five UNION'd tables, which on real
+            # installs is "Today" more often than not, and the North Star
+            # line must not disappear along with it. "All-time" so it
+            # still has something to say when today is empty.
+            metric = query_primary_metric("lifetime", db_path=str(self.db_path))
+            rendered = metric.render()
+            if rendered:
+                lines.append(Text(""))
+                lines.append(Text(rendered, style=PALETTE.text_dim))
 
             # Top models inline
             top_models_text = "  Top models:  "

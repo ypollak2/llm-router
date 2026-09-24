@@ -28,13 +28,24 @@ This file pins:
      `savings_stats` alone, in the SAME window — seeded alongside a
      differently-sized `usage` table so a cross-table bug would give a
      different (and wrong) answer.
+
+Reviewer-01 (live-reproduced) added two more, both fixed here:
+
+  7. the `n` printed beside the VERIFIED `$` figure is the row count BEHIND
+     it (savings_stats rows passing the verified predicate) — never raw
+     call volume across the five UNION'd tables. Live output read
+     "$0.00 … (n=47260)" with verified_n actually 0.
+  8. the North Star primary-metric line renders on its own, independent of
+     the per-window money loop — which `continue`s past any window with
+     zero activity, "Today" most days on a real install — so it must not
+     vanish along with an empty Today.
 """
 from __future__ import annotations
 
 import io
 import re
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from llm_router import dashboard_data
 
@@ -193,20 +204,140 @@ def test_primary_metric_ignores_other_tables(tmp_path):
 
 
 def test_primary_metric_render_too_few():
-    m = dashboard_data.PrimaryMetric(window="today", verified_n=3, eligible_n=10, unmeasured_n=0)
-    assert m.render() == "Verified share of eligible Claude turns: too few to tell (n=10)"
+    m = dashboard_data.PrimaryMetric(window="lifetime", verified_n=3, eligible_n=10, unmeasured_n=0)
+    assert m.render() == (
+        "Verified share of eligible Claude turns (all-time): too few to tell (n=10)"
+    )
 
 
 def test_primary_metric_render_percentage():
-    m = dashboard_data.PrimaryMetric(window="today", verified_n=40, eligible_n=80, unmeasured_n=5)
+    m = dashboard_data.PrimaryMetric(window="lifetime", verified_n=40, eligible_n=80, unmeasured_n=5)
     text = m.render()
+    assert "(all-time)" in text, "the rendered line must state which window it covers"
     assert "40 of 80 (50%)" in text
     assert "unmeasured n=5" in text
+    assert "mode not recorded" in text, "the NULL handling must be stated in the line"
 
 
 def test_primary_metric_render_nothing_to_show():
     m = dashboard_data.PrimaryMetric(window="today", verified_n=0, eligible_n=0, unmeasured_n=0)
     assert m.render() == ""
+
+
+# ── 7. verified `n` is the verified ROW COUNT, never raw call volume ─────────
+
+
+def test_window_totals_verified_calls_is_the_verified_row_count(tmp_path):
+    """`WindowTotals.verified_calls` must count ONLY savings_stats rows
+    passing the verified predicate — not `calls` (raw activity across all
+    five UNION'd tables) and not derivable from `saved_usd` alone (a
+    genuinely verified row can itself have saved $0.00)."""
+    db = tmp_path / "usage.db"
+    conn = sqlite3.connect(db)
+    _usage_ddl(conn)
+    for _ in range(10):
+        _usage_row(conn, is_simulated=0)  # 10 real rows, never verified
+    _savings_stats_ddl(conn)
+    _stats_row(conn, saved=2.0, mode="block")   # the one verified row
+    _stats_row(conn, saved=1.0, mode="echo")    # eligible, not verified
+    conn.commit()
+    conn.close()
+
+    t = dashboard_data.query_window("today", db_path=db)
+    assert t.calls == 12, "premise: raw activity volume across every table"
+    assert t.verified_calls == 1, (
+        f"verified_calls must count ONLY the mode='block' row, got {t.verified_calls}"
+    )
+
+
+def test_status_verified_line_n_is_verified_rows_not_call_volume(
+    tmp_path, importing_a_submodule
+):
+    """Reviewer-01, live-reproduced: status_premium's verified `$` line
+    showed "$0.00 … (n=47260)" — raw call volume across five UNION'd
+    tables — while the actual verified-row count was 0. Seed 10
+    never-verified platform rows plus exactly 1 verified savings_stats row
+    and assert the verified line says n=1, not n=11/n=10."""
+    db = tmp_path / "usage.db"
+    conn = sqlite3.connect(db)
+    _usage_ddl(conn)
+    for _ in range(10):
+        _usage_row(conn, is_simulated=0)
+    _savings_stats_ddl(conn)
+    _stats_row(conn, saved=2.0, mode="block")
+    conn.commit()
+    conn.close()
+
+    from llm_router.ui import status_premium as sp
+
+    cmd = sp.PremiumStatusCommand()
+    cmd.db_path = db
+    group = cmd.render_routing_savings()
+
+    from rich.console import Console
+
+    buf = io.StringIO()
+    Console(file=buf, width=120, force_terminal=False).print(group)
+    text = buf.getvalue()
+
+    assert "(n=1)" in text, (
+        f"the verified figure's n must be 1 (verified rows only), got: {text!r}"
+    )
+    # The VERIFIED $ line ("real/baseline-equivalent ... avoided") must say
+    # n=1. Its own "n=10"/"n=11" would be the bug; the UNVERIFIED note is a
+    # DIFFERENT, correctly-labelled n (10 unverified rows) and must not be
+    # mistaken for it — check the verified line in isolation.
+    verified_lines = [ln for ln in text.splitlines() if "avoided vs" in ln]
+    assert verified_lines, f"no verified money line found: {text!r}"
+    for ln in verified_lines:
+        assert "(n=1)" in ln and "n=10" not in ln and "n=11" not in ln, (
+            f"verified line must say n=1 (verified rows), not call volume: {ln!r}"
+        )
+
+
+# ── 8. the primary metric renders independent of the per-window money loop ──
+
+
+def test_primary_metric_renders_even_when_today_is_empty(tmp_path, importing_a_submodule):
+    """Reviewer-01, live-reproduced: on a real install "Today" is empty most
+    of the time, and the per-window money loop `continue`s straight past an
+    empty window — the North Star line must not be gated behind it."""
+    db = tmp_path / "usage.db"
+    conn = sqlite3.connect(db)
+    _savings_stats_ddl(conn)
+    # Dated yesterday, NOT today — the "Today" window must be genuinely empty.
+    yesterday = (datetime.now(timezone.utc) - timedelta(days=1)).strftime(
+        "%Y-%m-%dT%H:%M:%S"
+    )
+    _stats_row(conn, saved=2.0, mode="block", ts=yesterday)
+    _stats_row(conn, saved=1.0, mode="echo", ts=yesterday)
+    conn.commit()
+    conn.close()
+
+    # Premise: Today really is empty.
+    today_totals = dashboard_data.query_window("today", db_path=db)
+    assert today_totals.calls == 0, "premise: today has no activity anywhere"
+
+    from llm_router.ui import status_premium as sp
+
+    cmd = sp.PremiumStatusCommand()
+    cmd.db_path = db
+    group = cmd.render_routing_savings()
+
+    from rich.console import Console
+
+    buf = io.StringIO()
+    Console(file=buf, width=120, force_terminal=False).print(group)
+    text = buf.getvalue()
+
+    assert "Verified share of eligible Claude turns" in text, (
+        f"the North Star line must render even when Today is empty: {text!r}"
+    )
+    # n=2 is below TOO_FEW_THRESHOLD (50), so it prints "too few to tell" —
+    # the point here is that it renders AT ALL, picking up yesterday's rows
+    # via the "all-time" window despite Today being empty, not the exact
+    # percentage wording (covered by test_primary_metric_render_percentage).
+    assert "too few to tell (n=2)" in text, text
 
 
 # ── 5. subscription: `llm-router status`'s savings panel has no bare `$` ─────

@@ -47,6 +47,7 @@ __all__ = [
     "REALIZED_GATE_SINCE",
     "REALIZED_MODE",
     "ELIGIBLE_TURN_PRED_SQL",
+    "VERIFIED_CALLS_SQL",
     "unverified_note",
     "savings_split_sql",
     "is_verified_saving",
@@ -96,11 +97,22 @@ REALIZED_GATE_SINCE = "2026-09-13T17:57:16"
 #: The one string value `mode` takes for a row the writer observed replacing
 #: Claude's turn. Everything else — "echo", NULL, any other value — is not.
 REALIZED_MODE = "block"
-#: host/model/timestamp only — the population a row must belong to before
-#: `mode` even gets asked. PR6's North Star primary metric (verified share of
-#: ELIGIBLE Claude turns) needs this population as its OWN denominator — any
-#: `mode`, not just 'block' — so it is exported rather than folded silently
-#: into `_VERIFIED_PRED`, where only the mode='block' subset was visible.
+#: host/model/timestamp only — every row it takes to even ASK "was this
+#: used", before `mode` is looked at. Every `mode` value, INCLUDING NULL,
+#: satisfies this predicate by itself — that is the "any mode" this name
+#: describes, and it is exactly why this constant does NOT by itself mean
+#: "eligible" for PR6's North Star primary metric (verified share of
+#: eligible Claude turns). The primary metric's actual eligible population
+#: is narrower and is built at the call site
+#: (dashboard_data.query_primary_metric): this predicate AND `mode IS NOT
+#: NULL` — i.e. mode IN ('block', 'echo'), a row where a writer recorded
+#: SOME outcome, whichever it was. A row with `mode IS NULL` passes THIS
+#: constant but is neither eligible nor verified nor unverified for the
+#: primary metric — it is UNMEASURED (nobody recorded an outcome at all),
+#: counted apart from both sides (S9: unknown must not silently join
+#: either the favourable or the unfavourable count). Exported so
+#: dashboard_data doesn't re-derive the host/model/timestamp fragment
+#: `_VERIFIED_PRED` already owns.
 ELIGIBLE_TURN_PRED_SQL = (
     "(host IN (" + ", ".join(f"'{h}'" for h in VERIFIED_HOSTS) + ")"
     " AND model_used NOT LIKE 'llm_router-agentic%'"
@@ -114,6 +126,13 @@ UNVERIFIED_SAVED_SQL = (
     f"CASE WHEN {_VERIFIED_PRED} THEN 0 ELSE estimated_claude_cost_saved END"
 )
 UNVERIFIED_CALLS_SQL = f"CASE WHEN {_VERIFIED_PRED} THEN 0 ELSE 1 END"
+#: Row COUNT behind `VERIFIED_SAVED_SQL`'s dollar figure — NOT derivable from
+#: summing `VERIFIED_SAVED_SQL` and checking for zero, because a genuinely
+#: verified row can itself have saved $0.00 (equal-cost routing). A `$` figure
+#: printed with the wrong `n` beside it — e.g. total row/call volume across
+#: five UNION'd tables — is the exact defect this constant exists to prevent
+#: (live-reproduced: "$0.00 … (n=47260)" while verified_n was actually 0).
+VERIFIED_CALLS_SQL = f"CASE WHEN {_VERIFIED_PRED} THEN 1 ELSE 0 END"
 
 
 def is_verified_saving(host, model, timestamp, mode) -> bool:

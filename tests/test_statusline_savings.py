@@ -240,12 +240,12 @@ def test_reads_v93_per_platform_tables(fake_home):
 
     PR6: `claude_usage`/`codex_usage`/`gemini_usage` carry no "used" column,
     so a row here can never say the draft replaced Claude's turn — it is
-    UNVERIFIED (dashboard_data.query_window), and `render_money` only prints
-    the verified figure (no unverified display on this surface yet — a
-    follow-up, not this PR's scope). So the previously-asserted "$0.70" no
-    longer appears; the money segment is correctly silent rather than
-    presenting unconfirmed savings as certain. What this test still pins:
-    the read does not crash and does not fabricate a figure.
+    UNVERIFIED (dashboard_data.query_window). Reviewer-01 (North Star point
+    13): unverified money is shown BELOW verified, not deleted — silence
+    reads as "nothing happened" when the honest answer is "$0.70 happened,
+    nobody confirmed it replaced Claude's turn". So the previously-asserted
+    "$0.70 saved" (bare, as though certain) is correctly gone, replaced by
+    a labelled "+$0.70 unverified".
     """
     _seed_platform_tables(
         fake_home,
@@ -278,12 +278,14 @@ def test_reads_v93_per_platform_tables(fake_home):
         },
     )
     out = _run_statusline(fake_home)
-    # PR6: none of this money is verified (see docstring), so render_money
-    # returns "" and the 💰 segment does not appear — that is correct, not a
-    # crash. What actually regressed before v10.1.3 was silent failure to
-    # even READ these tables; assert the read path still runs cleanly.
-    assert "💰" not in out, f"unverified platform-table money must not render as certain: {out!r}"
-    assert "Traceback" not in out and "Error" not in out, f"read path crashed: {out!r}"
+    # 0.50 + 0.15 + 0.05 = 0.70, all unverified (see docstring).
+    assert "💰" in out, f"expected a money segment (unverified), got: {out!r}"
+    assert "$0.70 unverified" in out, (
+        f"expected a labelled unverified figure, not a bare/missing one: {out!r}"
+    )
+    assert "$0.70 saved" not in out, (
+        f"unconfirmed platform-table money must never render as certain 'saved': {out!r}"
+    )
 
 
 def test_last_route_uses_per_session_glob(fake_home):
