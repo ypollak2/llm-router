@@ -16,7 +16,7 @@ Security fixes and honest numbers, from a forensic audit whose every CRITICAL
 and HIGH finding was re-checked by an independent verifier
 (`audit/forensic_2026-09-24/`). Each fix below landed with a test that failed
 before it and a red-check reverting only that fix; the full suite ran under a
-clean HOME for every commit (final: 9,910 tests, 0 failures, 0 errors).
+clean HOME for every commit (final: 9,956 tests, 0 failures, 0 errors).
 
 ### Security
 
@@ -39,6 +39,44 @@ clean HOME for every commit (final: 9,910 tests, 0 failures, 0 errors).
   `find` actions are refused. **Behaviour change:** `python -c` / `node -e` no
   longer run in the local agent loop unless writes are `apply`. This is not a
   sandbox — see SECURITY.md.
+
+### Local drafts can read the repo
+
+Measured before this release on the maintainer's machine: 0 of 1,185 audited
+local drafts were used and verified savings were $0.00. The causes found and
+fixed below are why. **Whether drafts now get used is not yet measured** — no
+savings claim is made for this release.
+
+- **Drafts get the conversation and the files the session touched.** The draft
+  path now passes the session id and project root to context injection, and
+  semantic retrieval is seeded with the session's recent file paths (code was
+  retrieved for 0.9% of 456 replayed real prompts from the prompt alone, 98.9%
+  with the seeds; a hit is not proof of relevance).
+- **Every local draft may open files, read-only.** With the local agent loop on
+  (the default), a draft runs the loop with `read_file`, `list_files` and
+  `search_files` only; other tools are refused. Questions that name a file also
+  draft read-only. If the loop produces nothing in time, the text chain runs.
+- **The notice to Claude says what the draft read.** It used to say every draft
+  was produced "WITHOUT access to your files" and to discard any answer that
+  depends on the repo — true for blind drafts, false for these, and a rule no
+  grounded draft could pass.
+- **Drafting turns itself off after 50 unused drafts in a row**
+  (`LLM_ROUTER_DRAFT_REVERT_AFTER`, `0` disables; delete
+  `~/.llm-router/draft_streak.json` to resume).
+- **The local context window is sized per model.** `qwen3.5`/`qwen3.8` get
+  131072; everything else 32768 (`qwen3-coder:30b` at 131072 loaded at 70 GB,
+  45% on CPU, on a 52 GB Mac). `LLM_ROUTER_LOCAL_NUM_CTX` overrides.
+
+### Fixed — local models
+
+- `search_files` scoped to a single file searched nothing and reported
+  "(no matches)"; a draft then told the user a name did not exist.
+- The capability probe marked every model incapable (it required a write while
+  writes default to `propose`); it now writes inside its own temp dir, and no
+  longer indexes that dir into the knowledge store.
+- The knowledge store path was frozen at import, so tests wrote into the real
+  `~/.llm-router/knowledge` (5,457 leftover project dirs on the maintainer's
+  machine). New: `llm-router okf prune` lists them; `--apply` moves them aside.
 
 ### Changed — what the numbers mean
 
