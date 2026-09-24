@@ -75,12 +75,55 @@ DEFAULT_PRIMARY = "ollama/qwen2.5:7b"
 DEFAULT_SECONDARY = "ollama/qwen2.5-coder:32b"
 
 
+# L (2026-09-24): a default that is not installed fails on every classify and
+# falls back silently — Claude Desktop's server logged "model 'qwen2.5:7b' not
+# found" on every start for days. When the default is missing, use the first
+# installed match below; the order mirrors the maintainer's measured Claude Code
+# config (PRIMARY=qwen3.8, SECONDARY=qwen3-coder). An explicit env var wins.
+_PRIMARY_FALLBACKS = ("qwen3.8", "qwen3.5", "qwen3-coder", "qwen2.5", "llama3")
+_SECONDARY_FALLBACKS = ("qwen3-coder", "qwen2.5-coder", "qwen3.8", "qwen3.5", "llama3")
+
+
+def _installed_local_models() -> list[str]:
+    """Installed Ollama chat models as ``ollama/<name>``, from the discovery CACHE
+    only — never a live probe: this runs on every classification, and a network
+    call here would also make the result depend on whether Ollama is up."""
+    try:
+        from llm_router.discover import _is_embedding_model, _load_cache
+        cached = _load_cache(ttl=86400) or {}
+        return [m for m, d in cached.items()
+                if isinstance(d, dict) and d.get("provider") == "ollama"
+                and not _is_embedding_model(m.split("/", 1)[-1], d)]
+    except Exception:  # noqa: BLE001 — unknown means "keep the default"
+        return []
+
+
+def _resolve(explicit: str, default: str, prefs: tuple[str, ...],
+             avoid: str | None = None) -> str:
+    explicit = explicit.strip()
+    if explicit:
+        return explicit
+    installed = _installed_local_models()
+    bare = [m.removeprefix("ollama/") for m in installed]
+    if not installed or model_installed(default, bare):
+        return default
+    for pref in prefs:
+        for m in installed:
+            if pref in m and m != avoid:
+                return m
+    others = [m for m in installed if m != avoid]
+    return others[0] if others else installed[0]
+
+
 def _primary_model() -> str:
-    return os.environ.get("LLM_ROUTER_ENSEMBLE_PRIMARY", DEFAULT_PRIMARY)
+    # Names spelled out at the read: test_env_registry scans for literal reads.
+    return _resolve(os.environ.get("LLM_ROUTER_ENSEMBLE_PRIMARY", ""),
+                    DEFAULT_PRIMARY, _PRIMARY_FALLBACKS)
 
 
 def _secondary_model() -> str:
-    return os.environ.get("LLM_ROUTER_ENSEMBLE_SECONDARY", DEFAULT_SECONDARY)
+    return _resolve(os.environ.get("LLM_ROUTER_ENSEMBLE_SECONDARY", ""),
+                    DEFAULT_SECONDARY, _SECONDARY_FALLBACKS, avoid=_primary_model())
 
 
 def primary_model() -> str:
