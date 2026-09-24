@@ -211,7 +211,9 @@ def _seed_platform_tables(home: Path, rows: dict[str, list[dict]]) -> None:
                 tokens_used INTEGER NOT NULL DEFAULT 0,
                 complexity TEXT NOT NULL DEFAULT 'moderate',
                 cost_saved_usd REAL NOT NULL DEFAULT 0,
-                routing_overhead_usd REAL NOT NULL DEFAULT 0
+                routing_overhead_usd REAL NOT NULL DEFAULT 0,
+                -- production rows: ACC-01 counts only is_simulated = 0 in headlines
+                is_simulated INTEGER DEFAULT 0
             )"""
         )
         for r in table_rows:

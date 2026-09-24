@@ -61,7 +61,9 @@ def _seed_claude_usage(db: Path, *, tokens: int, saved: float) -> None:
             complexity TEXT NOT NULL,
             cost_saved_usd REAL NOT NULL DEFAULT 0,
             input_tokens INTEGER NOT NULL DEFAULT 0,
-            output_tokens INTEGER NOT NULL DEFAULT 0
+            output_tokens INTEGER NOT NULL DEFAULT 0,
+            -- production rows: ACC-01 counts only is_simulated = 0 in headlines
+            is_simulated INTEGER DEFAULT 0
         )"""
     )
     conn.execute(

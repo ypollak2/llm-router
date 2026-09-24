@@ -44,6 +44,23 @@ from llm_router import pricing as _pricing
 from llm_router import paths
 from llm_router.savings import savings_split_sql
 
+
+def _production_pred(cols) -> str:
+    """ACC-01: the canonical provenance predicate (cost.production_only) for a
+    money table, or a constant-false one when the table has no provenance
+    column. A row whose provenance was never established is UNVERIFIED — kept
+    out of the headline, reported beside it (S9: unknown is not favourable)."""
+    if "is_simulated" not in cols:
+        return "0"
+    from llm_router.cost import production_only
+    return production_only(prefix="")
+
+
+def _sum_where(cols, col: str, pred: str) -> str:
+    if col not in cols:
+        return "0"
+    return f"COALESCE(SUM(CASE WHEN {pred} THEN {col} ELSE 0 END),0)"
+
 #: Counterfactual model these savings are computed against. WP-05: projected
 #: from the ONE policy in llm_router.pricing rather than restated here, so this
 #: surface cannot drift from the ledger writer or the session-end hook.
@@ -321,11 +338,16 @@ def query_window(
         _OPUS_OUT_PER_M = _pricing.output_rate(_BASELINE_MODEL)
         if _table_exists(conn, _LEGACY_TABLE):
             cols = _columns(conn, _LEGACY_TABLE)
+            prod = _production_pred(cols)
             row = conn.execute(  # nosec B608 — table/where are module constants & validated enum, not user input
                 f"SELECT COUNT(*), "
                 f"{_sum_if_present(cols, 'input_tokens')}, "
                 f"{_sum_if_present(cols, 'output_tokens')}, "
-                f"{_sum_if_present(cols, 'cost_usd')} "
+                f"{_sum_if_present(cols, 'cost_usd')}, "
+                f"{_sum_where(cols, 'input_tokens', prod)}, "
+                f"{_sum_where(cols, 'output_tokens', prod)}, "
+                f"{_sum_where(cols, 'cost_usd', prod)}, "
+                f"COALESCE(SUM(CASE WHEN {prod} THEN 0 ELSE 1 END),0) "
                 f"FROM {_LEGACY_TABLE} "
                 f"WHERE success=1 AND (provider IS NULL OR provider != 'subscription') AND {where}"
             ).fetchone()
@@ -333,9 +355,14 @@ def query_window(
             in_tok = int(row[1])
             out_tok = int(row[2])
             cost = float(row[3])
-            opus_baseline = (in_tok * _OPUS_IN_PER_M + out_tok * _OPUS_OUT_PER_M) / 1_000_000
+
+            def _baseline(i, o):
+                return (int(i) * _OPUS_IN_PER_M + int(o) * _OPUS_OUT_PER_M) / 1_000_000
             # AUD-06: signed. Clamping here made the aggregate a sum of wins.
-            saved = opus_baseline - cost
+            all_saved = _baseline(in_tok, out_tok) - cost
+            saved = _baseline(row[4], row[5]) - float(row[6])
+            unverified_saved += all_saved - saved
+            unverified_calls += int(row[7])
             by_source[_LEGACY_TABLE] = {
                 "calls": calls, "tokens": in_tok + out_tok,
                 "cost_usd": cost, "saved_usd": saved,
@@ -349,15 +376,20 @@ def query_window(
         for table in _PLATFORM_TABLES:
             if not _table_exists(conn, table):
                 continue
+            prod = _production_pred(_columns(conn, table))
             row = conn.execute(
                 f"SELECT COUNT(*), "
                 f"COALESCE(SUM(tokens_used),0), "
-                f"COALESCE(SUM(cost_saved_usd),0) "
+                f"COALESCE(SUM(CASE WHEN {prod} THEN cost_saved_usd ELSE 0 END),0), "
+                f"COALESCE(SUM(CASE WHEN {prod} THEN 0 ELSE cost_saved_usd END),0), "
+                f"COALESCE(SUM(CASE WHEN {prod} THEN 0 ELSE 1 END),0) "
                 f"FROM {table} WHERE {where}"
             ).fetchone()
             calls = int(row[0])
             tokens = int(row[1])
             saved = float(row[2])
+            unverified_saved += float(row[3])
+            unverified_calls += int(row[4])
             by_source[table] = {
                 "calls": calls, "tokens": tokens, "saved_usd": saved,
             }
@@ -386,12 +418,14 @@ def query_window(
             calls = int(row[0])
             saved = float(row[1])
             tokens = int(row[2]) + int(row[3])
-            unverified_saved = float(row[4])
-            unverified_calls = int(row[5])
+            jsonl_unverified_saved = float(row[4])
+            jsonl_unverified_calls = int(row[5])
+            unverified_saved += jsonl_unverified_saved
+            unverified_calls += jsonl_unverified_calls
             by_source[_JSONL_TABLE] = {
                 "calls": calls, "tokens": tokens, "saved_usd": saved,
-                "unverified_saved_usd": unverified_saved,
-                "unverified_calls": unverified_calls,
+                "unverified_saved_usd": jsonl_unverified_saved,
+                "unverified_calls": jsonl_unverified_calls,
             }
             total_calls += calls
             total_tokens += tokens
@@ -448,43 +482,54 @@ def query_daily(
         _OPUS_OUT_PER_M = _pricing.output_rate(_BASELINE_MODEL)
         if _table_exists(conn, _LEGACY_TABLE):
             cols = _columns(conn, _LEGACY_TABLE)
+            prod = _production_pred(cols)
             rows = conn.execute(
                 f"SELECT date(timestamp,'localtime'), "
                 f"COUNT(*), "
                 f"{_sum_if_present(cols, 'input_tokens')}, "
                 f"{_sum_if_present(cols, 'output_tokens')}, "
-                f"{_sum_if_present(cols, 'cost_usd')} "
+                f"{_sum_if_present(cols, 'cost_usd')}, "
+                f"{_sum_where(cols, 'input_tokens', prod)}, "
+                f"{_sum_where(cols, 'output_tokens', prod)}, "
+                f"{_sum_where(cols, 'cost_usd', prod)} "
                 f"FROM {_LEGACY_TABLE} "
                 f"WHERE success=1 "
                 f"AND (provider IS NULL OR provider != 'subscription') "
                 f"AND {where} "
                 f"GROUP BY date(timestamp,'localtime')"
             ).fetchall()
-            for day, calls, in_tok, out_tok, cost in rows:
+            for day, calls, in_tok, out_tok, cost, v_in, v_out, v_cost in rows:
                 b = _bucket(day)
                 b["calls"] += int(calls)
                 b["tokens"] += int(in_tok) + int(out_tok)
-                opus_baseline = (int(in_tok) * _OPUS_IN_PER_M + int(out_tok) * _OPUS_OUT_PER_M) / 1_000_000
+
+                def _baseline(i, o):
+                    return (int(i) * _OPUS_IN_PER_M + int(o) * _OPUS_OUT_PER_M) / 1_000_000
                 # AUD-06: `+=` on a clamped term is the exact defect — a loss
                 # on one item could never offset a gain on another.
-                b["saved"] += opus_baseline - float(cost)
+                verified = _baseline(v_in, v_out) - float(v_cost)
+                b["saved"] += verified
+                b["unverified"] += (_baseline(in_tok, out_tok) - float(cost)) - verified
 
         for table in _PLATFORM_TABLES:
             if not _table_exists(conn, table):
                 continue
+            prod = _production_pred(_columns(conn, table))
             rows = conn.execute(
                 f"SELECT date(timestamp,'localtime'), "
                 f"COUNT(*), "
                 f"COALESCE(SUM(tokens_used),0), "
-                f"COALESCE(SUM(cost_saved_usd),0) "
+                f"COALESCE(SUM(CASE WHEN {prod} THEN cost_saved_usd ELSE 0 END),0), "
+                f"COALESCE(SUM(CASE WHEN {prod} THEN 0 ELSE cost_saved_usd END),0) "
                 f"FROM {table} WHERE {where} "
                 f"GROUP BY date(timestamp,'localtime')"
             ).fetchall()
-            for day, calls, tokens, saved in rows:
+            for day, calls, tokens, saved, unverified in rows:
                 b = _bucket(day)
                 b["calls"] += int(calls)
                 b["tokens"] += int(tokens)
                 b["saved"] += float(saved)
+                b["unverified"] += float(unverified)
 
         if _table_exists(conn, _JSONL_TABLE):
             verified_sql, unverified_sql, _ = savings_split_sql(
