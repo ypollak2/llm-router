@@ -216,6 +216,7 @@ def apply(
     base: Path | None = None,
     experience: Any | None = None,
     budget_tokens: int = spack.DEFAULT_BUDGET_TOKENS,
+    seed_query: str | None = None,
 ) -> Applied:
     """Build a pack if this configuration says to, and attach it if allowed.
 
@@ -241,7 +242,9 @@ def apply(
 
     started = time.monotonic()
     built = spack.build(
-        prompt,
+        # I3b: retrieval may search on more than the prompt (e.g. the files the
+        # session just touched); the prompt that is SENT is never changed.
+        seed_query or prompt,
         root=root,
         base=base,
         # History off means no experience store is consulted at all, rather
