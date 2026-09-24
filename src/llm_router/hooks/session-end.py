@@ -380,6 +380,19 @@ def _sync_import_savings_log() -> None:
                 r.get("host", "claude_code"),
                 int(r.get("input_tokens", 0) or 0),
                 int(r.get("output_tokens", 0) or 0),
+                # PR5 follow-up (external review, 2026-09-24): this drainer used
+                # to DROP `mode` entirely, even though hooks/savings_logger.py's
+                # log_direct_savings always writes it ("block"=realized,
+                # "echo"=discarded draft, kept at savings=0). Every row THIS
+                # drainer imported therefore landed mode=NULL in savings_stats —
+                # "realized-ness unknown" — which is why the live DB's 122
+                # confirmed-production rows were all NULL despite most being
+                # genuinely realized hook rows: this drainer, not
+                # cost.import_savings_log() (which already persisted mode
+                # correctly), was the one draining them. None stays NULL for a
+                # record written before the field existed — absent is not the
+                # same as "echo" and must not read as one.
+                r.get("mode"),
                 # T-05. The entry's OWN provenance if the writer recorded one —
                 # detecting it here would describe this flush, not the call.
                 # Absent stays NULL = unknown, which drops out of money figures.
@@ -409,6 +422,7 @@ def _sync_import_savings_log() -> None:
                 host TEXT NOT NULL DEFAULT 'claude_code',
                 input_tokens INTEGER NOT NULL DEFAULT 0,
                 output_tokens INTEGER NOT NULL DEFAULT 0,
+                mode TEXT,
                 is_simulated INTEGER
             )
         """)
@@ -429,11 +443,20 @@ def _sync_import_savings_log() -> None:
             conn.execute("ALTER TABLE savings_stats ADD COLUMN is_simulated INTEGER")
         except sqlite3.OperationalError:
             pass  # column already present
+        # PR5 follow-up: same reasoning as is_simulated above — this hook's own
+        # copy of the migration, no DEFAULT (a pre-existing row's realized-ness
+        # was never recorded; NULL says that honestly, "block" would assert it).
+        # cost.py's _get_db() already carries this ALTER (MIGRATE_SAVINGS_STATS_
+        # ADD_MODE); this hook can still reach the DB first.
+        try:
+            conn.execute("ALTER TABLE savings_stats ADD COLUMN mode TEXT")
+        except sqlite3.OperationalError:
+            pass  # column already present
         conn.executemany(
             "INSERT INTO savings_stats "
             "(timestamp, session_id, task_type, estimated_claude_cost_saved, external_cost, "
-            "model_used, host, input_tokens, output_tokens, is_simulated) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?)",
+            "model_used, host, input_tokens, output_tokens, mode, is_simulated) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
             records,
         )
         conn.commit()

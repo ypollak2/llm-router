@@ -47,12 +47,16 @@ def test_stop_reports_distinct_windows_and_preserves_session_on_repeated_turns(s
     db = Path(stop_env["LLM_ROUTER_DB_PATH"])
     with sqlite3.connect(db) as conn:
         # Hook-written (realized-gated) rows: the only VERIFIED savings (A31).
+        # PR5 follow-up: mode="block" is now also required — host+timestamp
+        # alone is what an external review found reading a discarded echo
+        # draft as verified.
         conn.execute("CREATE TABLE savings_stats (timestamp TEXT, "
-                     "estimated_claude_cost_saved REAL, host TEXT, model_used TEXT)")
+                     "estimated_claude_cost_saved REAL, host TEXT, model_used TEXT, "
+                     "mode TEXT)")
         conn.execute("INSERT INTO savings_stats VALUES (strftime('%Y-%m-%dT%H:%M:%S','now'), "
-                     "1.25, 'claude_code', 'ollama/qwen3.5:latest')")
+                     "1.25, 'claude_code', 'ollama/qwen3.5:latest', 'block')")
         conn.execute("INSERT INTO savings_stats VALUES (strftime('%Y-%m-%dT%H:%M:%S','now','-2 days'), "
-                     "3.5, 'claude_code', 'ollama/qwen3.5:latest')")
+                     "3.5, 'claude_code', 'ollama/qwen3.5:latest', 'block')")
     session = db.parent / "sessions" / "project" / "ongoing-session.jsonl"
     session.parent.mkdir(parents=True)
     session.write_text('{"content":"keep this conversation"}\n')

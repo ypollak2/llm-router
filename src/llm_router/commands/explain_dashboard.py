@@ -123,7 +123,15 @@ def _table_count_and_sum(
     sum_cols: list[str],
     where: str,
 ) -> tuple[int, list[float]] | None:
-    """Return (count, [sums]) for the given table+window, or None if absent."""
+    """Return (count, [sums]) for the given table+window, or None if absent.
+
+    PR5 follow-up: ``sum_cols`` can be ``savings.VERIFIED_SAVED_SQL`` /
+    ``UNVERIFIED_SAVED_SQL``, which now reference a `mode` column a table
+    predating that migration doesn't have. This is a diagnostic command
+    ("explain why the panels disagree") — a table it can't fully query yet is
+    a panel with nothing to show, not a crash. ``None`` means "can't answer
+    for this table", same as the "table absent" case above.
+    """
     exists = conn.execute(
         "SELECT name FROM sqlite_master WHERE type='table' AND name=?", (table,)
     ).fetchone()
@@ -131,7 +139,10 @@ def _table_count_and_sum(
         return None
     sums_sql = ", ".join(f"COALESCE(SUM({c}),0)" for c in sum_cols) if sum_cols else ""
     sql = f"SELECT COUNT(*){', ' + sums_sql if sums_sql else ''} FROM {table} WHERE {where}"
-    row = conn.execute(sql).fetchone()
+    try:
+        row = conn.execute(sql).fetchone()
+    except sqlite3.OperationalError:
+        return None
     if not row:
         return 0, [0.0] * len(sum_cols)
     return int(row[0]), [float(x) for x in row[1:]]

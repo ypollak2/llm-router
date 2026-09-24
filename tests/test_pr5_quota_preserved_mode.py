@@ -112,3 +112,56 @@ class TestNonSubscriptionUnaffected:
         text = _strip("\n".join(se._format_routing_section(tools, subscription=False)))
         assert "1 calls" in text
         assert "1.5k tokens" in text
+
+
+class TestSyncImportPersistsMode:
+    """External review, point (b): the SYNC savings_stats importer
+    (session-end.py's own _sync_import_savings_log, distinct from
+    cost.import_savings_log) dropped `mode` on write, so every row it
+    imported landed mode=NULL in savings_stats — "realized-ness unknown" —
+    which is why the live DB's confirmed-production rows were all NULL. This
+    proves the writer now persists it, end to end: JSONL -> savings_stats.
+    """
+
+    def test_mode_is_persisted_block_and_echo_and_missing(self, monkeypatch, tmp_path):
+        import json
+        import sqlite3
+
+        monkeypatch.setenv("LLM_ROUTER_HOME", str(tmp_path))
+
+        db_path = tmp_path / "usage.db"
+        # _sync_import_savings_log no-ops unless BOTH the log and the db
+        # already exist (session-end.py:347) — seed an empty db file.
+        sqlite3.connect(db_path).close()
+
+        log_path = tmp_path / "savings_log.jsonl"
+        entries = [
+            {"timestamp": "2026-09-14T00:00:00+00:00", "session_id": "s1",
+             "task_type": "query", "estimated_saved": 0.05, "external_cost": 0.0,
+             "model": "ollama/x", "host": "claude_code", "mode": "block"},
+            {"timestamp": "2026-09-14T00:00:01+00:00", "session_id": "s1",
+             "task_type": "query", "estimated_saved": 0.0, "external_cost": 0.0,
+             "model": "ollama/x", "host": "claude_code", "mode": "echo"},
+            {"timestamp": "2026-09-01T00:00:00+00:00", "session_id": "s1",
+             "task_type": "query", "estimated_saved": 0.02, "external_cost": 0.0,
+             "model": "ollama/x", "host": "claude_code"},  # pre-mode record
+        ]
+        log_path.write_text("\n".join(json.dumps(e) for e in entries) + "\n")
+
+        se._sync_import_savings_log()
+
+        conn = sqlite3.connect(db_path)
+        try:
+            rows = conn.execute(
+                "SELECT timestamp, mode FROM savings_stats ORDER BY timestamp"
+            ).fetchall()
+        finally:
+            conn.close()
+        modes = {ts: m for ts, m in rows}
+        assert modes["2026-09-14T00:00:00+00:00"] == "block"
+        assert modes["2026-09-14T00:00:01+00:00"] == "echo"
+        assert modes["2026-09-01T00:00:00+00:00"] is None, (
+            "a record written before `mode` existed must import as NULL, "
+            "not as 'echo' or any other guessed value"
+        )
+        assert not log_path.exists(), "the claimed log must be fully drained"

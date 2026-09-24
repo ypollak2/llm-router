@@ -57,11 +57,13 @@ _TIER_COLOR = {
 _LLM_ROUTER_WORDMARK = "⚡ L L M · R O U T E R ⚡"
 _LLM_ROUTER_TAGLINE = "routing intelligence · cost savings · safety telemetry"
 _LLM_ROUTER_PANEL_PREFIX = "◆ LLM Router · "
+# PR5 follow-up: this was a hand-drawn figlet block spelling "CHUZOM" — the
+# same wrong-product defect the wordmark fix addressed, missed here because
+# it lives as its own constant rather than reusing _LLM_ROUTER_WORDMARK.
+# Kept deliberately plain (no hand-crafted block-letter art) rather than
+# risk a second silently-wrong figlet rendering.
 _LLM_ROUTER_LOGO_ASCII = r"""
-   ___ _  _ _   _ _____ ___  __  __
-  / __| || | | | |_  / / _ \|  \/  |
- | (__| __ | |_| |/ /_| (_) | |\/| |
-  \___|_||_|\___//___|\___/|_|  |_|
+⚡  L L M   R O U T E R  ⚡
 """
 
 
@@ -168,25 +170,39 @@ def _lineage_verified_state(row: dict) -> str:
     bucket without being counted separately).
 
     Why this never returns "verified" today, and why that is NOT a bug in
-    this function: ``savings.VERIFIED_HOSTS`` is ``("claude_code",)`` — the
-    literal host string hooks/savings_logger.py stamps on ONLY the rows where
-    it observed the routed answer replace Claude's turn (mode="block").
-    Lineage rows never carry that string: the JSONL-backed rows written via
+    this function: TWO independent conditions both fail for every lineage row.
+
+    (1) ``savings.VERIFIED_HOSTS`` is ``("claude_code",)``. hooks/
+    savings_logger.py's ``log_direct_savings`` stamps host="claude_code" by
+    DEFAULT on every DIRECT-hook row — realized ("block") AND discarded
+    ("echo") alike; host alone never said which. [CORRECTED: an earlier
+    version of this docstring claimed host was stamped "only on the rows
+    where it observed the routed answer replace Claude's turn" — that was
+    false, and a 2026-09-24 external review reproduced it live by seeding a
+    mode="echo", host="claude_code" row that read as verified. `mode` is the
+    field that actually carries the realized signal, and
+    ``is_verified_saving`` now requires it.] Lineage rows never carry
+    host="claude_code" regardless: the JSONL-backed rows written via
     ``LineageStore.append()`` have no ``host`` field at all (RoutingDecision
     has none), and the legacy ``model_tracking.jsonl`` adapter stamps
-    ``host=provider`` (e.g. "ollama", "codex", "google") — never
-    "claude_code". More fundamentally, no LineageRecord field records
-    "the writer observed this answer replace Claude's turn" — ``outcome`` is
-    hardcoded to "success" by both writers regardless of realized-ness
-    (lineage_store.py:359 and the LineageRecord default). Lineage answers a
-    different question ("what did the router decide") than savings_stats
-    ("was the decision's output actually used instead of Claude's").
-    That is why ``collect()`` sources ``verified_usd``/``verified_n`` from
-    savings_stats (``_verified_savings_window``) rather than from this
-    per-row classification — this function still exists and is exercised
-    (not hardcoded to return "unverified") so a future writer that DOES stamp
-    host="claude_code" onto a lineage row is picked up correctly instead of
-    being silently swallowed by a shortcut.
+    ``host=provider`` (e.g. "ollama", "codex", "google").
+
+    (2) No LineageRecord field records "the writer observed this answer
+    replace Claude's turn" at all — ``outcome`` is hardcoded to "success" by
+    both writers regardless of realized-ness (lineage_store.py:359 and the
+    LineageRecord default), so even a row that DID somehow carry
+    host="claude_code" would still fail here: this function passes
+    ``row.get("mode")`` through, which is always ``None`` for a lineage row,
+    and ``None != "block"``.
+
+    Lineage answers a different question ("what did the router decide") than
+    savings_stats ("was the decision's output actually used instead of
+    Claude's"). That is why ``collect()`` sources ``verified_usd``/
+    ``verified_n`` from savings_stats (``_verified_savings_window``) rather
+    than from this per-row classification — this function still exists and is
+    exercised (not hardcoded to return "unverified") so a future writer that
+    DOES stamp both host="claude_code" AND mode="block" onto a lineage row is
+    picked up correctly instead of being silently swallowed by a shortcut.
     """
     host = row.get("host")
     ts = row.get("timestamp")
@@ -197,7 +213,10 @@ def _lineage_verified_state(row: dict) -> str:
     except (TypeError, ValueError, OSError, OverflowError):
         return "unmeasured"
     model = row.get("model_chosen")
-    return "verified" if is_verified_saving(host, model, ts_iso) else "unverified"
+    mode = row.get("mode")
+    return (
+        "verified" if is_verified_saving(host, model, ts_iso, mode) else "unverified"
+    )
 
 
 def _usage_db_path() -> Path:
@@ -814,11 +833,15 @@ def render(data: SessionSummaryData, *, console=None) -> None:
             f"caught {data.pii_catches} PII leak(s) → forced local"
         )
     if data.savings_usd > 0:
-        # Point 12: baseline-equivalent COUNTERFACTUAL, not a verified saving —
-        # see the headline panel above for the actually-observed figure.
+        # Point 8/12: baseline-equivalent COUNTERFACTUAL, not a verified saving
+        # — see the headline panel above for the actually-observed figure. n
+        # is the row count this estimate was computed over (CLAUDE.md: "a rate
+        # without its denominator is not a measurement" applies to a dollar
+        # estimate the same way).
         punch_parts.append(
             f"≈{_fmt_cost(data.savings_usd)} "
-            f"({data.savings_pct * 100:.0f}%) vs always-premium baseline (unverified)"
+            f"({data.savings_pct * 100:.0f}%) vs always-premium baseline "
+            f"(unverified, n={data.total_decisions})"
         )
     punchline = "  ·  ".join(punch_parts) + "."
     punchline_panel = Panel(
@@ -913,7 +936,8 @@ def render_markdown(data: SessionSummaryData) -> str:
         f"_(baseline {_fmt_cost(data.baseline_cost_usd)})_"
     )
     out.append(
-        f"- **Savings vs always-premium (unverified, baseline-equivalent):** "
+        f"- **Savings vs always-premium (unverified, baseline-equivalent, "
+        f"n={data.total_decisions}):** "
         f"**{_fmt_cost(data.savings_usd)} ({data.savings_pct * 100:.0f}%)**"
     )
     out.append(f"- **Routing decisions:** {data.total_decisions}")
