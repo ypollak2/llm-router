@@ -1,0 +1,187 @@
+{
+ "qa-defines-clamp": {
+  "suite": "easy",
+  "eligible": false,
+  "reason": "question"
+ },
+ "qa-count-importers": {
+  "suite": "easy",
+  "eligible": false,
+  "reason": "question"
+ },
+ "qa-max-value": {
+  "suite": "easy",
+  "eligible": false,
+  "reason": "question"
+ },
+ "qa-func-count": {
+  "suite": "easy",
+  "eligible": false,
+  "reason": "question"
+ },
+ "qa-failing-test": {
+  "suite": "easy",
+  "eligible": false,
+  "reason": "question"
+ },
+ "qa-timeout-default": {
+  "suite": "easy",
+  "eligible": false,
+  "reason": "question"
+ },
+ "qa-imports-util": {
+  "suite": "easy",
+  "eligible": false,
+  "reason": "question"
+ },
+ "qa-defaults-keys": {
+  "suite": "easy",
+  "eligible": false,
+  "reason": "question"
+ },
+ "qa-report-imports": {
+  "suite": "easy",
+  "eligible": false,
+  "reason": "question"
+ },
+ "qa-clamp-lower": {
+  "suite": "easy",
+  "eligible": false,
+  "reason": "question"
+ },
+ "qa-unused-import": {
+  "suite": "easy",
+  "eligible": false,
+  "reason": "question"
+ },
+ "qa-report-output": {
+  "suite": "easy",
+  "eligible": false,
+  "reason": "question"
+ },
+ "qa-report-output-v2": {
+  "suite": "easy",
+  "eligible": false,
+  "reason": "question"
+ },
+ "ed-raise-limit": {
+  "suite": "easy",
+  "eligible": false,
+  "reason": "no named target"
+ },
+ "ed-add-offset": {
+  "suite": "easy",
+  "eligible": true,
+  "reason": "named edit"
+ },
+ "ed-docstring": {
+  "suite": "easy",
+  "eligible": true,
+  "reason": "named edit"
+ },
+ "ed-fix-parser": {
+  "suite": "easy",
+  "eligible": false,
+  "reason": "cause-hunting"
+ },
+ "ed-clamp-lower": {
+  "suite": "easy",
+  "eligible": true,
+  "reason": "named edit"
+ },
+ "ed-rename-scale": {
+  "suite": "easy",
+  "eligible": true,
+  "reason": "named edit"
+ },
+ "ed-average": {
+  "suite": "easy",
+  "eligible": true,
+  "reason": "named edit"
+ },
+ "ed-add-retries": {
+  "suite": "easy",
+  "eligible": true,
+  "reason": "named edit"
+ },
+ "ed-drop-unused": {
+  "suite": "easy",
+  "eligible": false,
+  "reason": "no named target"
+ },
+ "ed-new-test": {
+  "suite": "easy",
+  "eligible": false,
+  "reason": "cause-hunting"
+ },
+ "ed-type-hints": {
+  "suite": "easy",
+  "eligible": true,
+  "reason": "named edit"
+ },
+ "ed-safe-get": {
+  "suite": "easy",
+  "eligible": true,
+  "reason": "named edit"
+ },
+ "ed-extract-const": {
+  "suite": "easy",
+  "eligible": false,
+  "reason": "no stated change"
+ },
+ "br-lru-use-order": {
+  "suite": "brutal",
+  "eligible": false,
+  "reason": "cause-hunting"
+ },
+ "br-money-total": {
+  "suite": "brutal",
+  "eligible": false,
+  "reason": "cause-hunting"
+ },
+ "br-stable-rank": {
+  "suite": "brutal",
+  "eligible": false,
+  "reason": "cause-hunting"
+ },
+ "br-retry-contract": {
+  "suite": "brutal",
+  "eligible": false,
+  "reason": "cause-hunting"
+ },
+ "br-dedupe-order": {
+  "suite": "brutal",
+  "eligible": false,
+  "reason": "cause-hunting"
+ },
+ "br-append-only": {
+  "suite": "brutal",
+  "eligible": false,
+  "reason": "cause-hunting"
+ },
+ "br-collect-errors": {
+  "suite": "brutal",
+  "eligible": true,
+  "reason": "named edit"
+ },
+ "br-use-the-index": {
+  "suite": "brutal",
+  "eligible": false,
+  "reason": "cause-hunting"
+ },
+ "br-shadowed-rename": {
+  "suite": "brutal",
+  "eligible": true,
+  "reason": "named edit"
+ },
+ "br-weak-test": {
+  "suite": "brutal",
+  "eligible": false,
+  "reason": "cause-hunting"
+ },
+ "br-trace-today": {
+  "suite": "brutal",
+  "eligible": false,
+  "reason": "question"
+ }
+}
