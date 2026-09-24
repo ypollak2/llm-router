@@ -48,6 +48,7 @@ __all__ = [
     "unverified_note",
     "savings_split_sql",
     "is_verified_saving",
+    "under_subscription",
 ]
 
 
@@ -275,7 +276,7 @@ async def canonical_savings(
     overhead = float(raw.get("routing_overhead_usd", 0.0))
     n = int(raw.get("n_rows", 0) or 0)
 
-    sub = _under_subscription()
+    sub = under_subscription()
     return CanonicalSavings(
         window=period,
         baseline_equivalent_avoided_usd=gross,
@@ -292,8 +293,14 @@ async def canonical_savings(
     )
 
 
-def _under_subscription() -> bool:
-    """Is Claude being paid for by a flat subscription rather than per token?"""
+def under_subscription() -> bool:
+    """Is Claude being paid for by a flat subscription rather than per token?
+
+    Public (PR5/summary.py, and PR6's status surface, both need the SAME
+    subscription framing this module already applies to CanonicalSavings —
+    a second env-var read here would be the same drift twenty independent
+    baseline computations already produced once, see the module docstring).
+    """
     import os
 
     raw = os.environ.get("LLM_ROUTER_CLAUDE_SUBSCRIPTION", "").strip().lower()
@@ -388,6 +395,18 @@ SURFACES: tuple[Surface, ...] = (
             "against spend, not overhead"),
     Surface("cli_team", "commands/team.py:69", False,
             "cost.get_team_savings — filtered, gross; broadcast to Slack"),
+    Surface("terminal_session_summary", "observability/summary.py:218", False,
+            "PR5: does not call canonical_savings() (that reads claude_usage/"
+            "codex_usage/gemini_usage, a DIFFERENT table with no realized-vs-"
+            "discarded provenance). Reads savings_stats directly via this "
+            "module's own VERIFIED_SAVED_SQL/UNVERIFIED_SAVED_SQL/"
+            "savings_split_sql — sync stdlib sqlite3, read-only, no DB-creation "
+            "side effect (an aiosqlite connection via cost._get_db() would "
+            "create ~/.llm-router/usage.db on every `llm-router summary`). "
+            "Shown beside the lineage-derived baseline-equivalent estimate "
+            "(a routing-decision counterfactual, not a verified saving), "
+            "never instead of it — see summary._verified_savings_window and "
+            "summary._lineage_verified_state"),
 )
 
 

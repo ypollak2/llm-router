@@ -18,12 +18,23 @@ basic `llm_router --help` stays snappy.
 """
 from __future__ import annotations
 
+import sqlite3
 import time
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from pathlib import Path
 
 from llm_router.lineage import Inversion, LineageStore, Tier
 from llm_router.agents import SessionStore
+from llm_router.savings import (
+    CanonicalSavings,
+    is_verified_saving,
+    label_money,
+    savings_split_sql,
+    under_subscription,
+    unverified_note,
+)
 
 
 # Premium baseline pricing — for the "vs always-premium" savings number.
@@ -43,7 +54,7 @@ _TIER_COLOR = {
 
 # LLM Router brand identity — used across both the terminal dashboard and the
 # markdown export so the surface feels like one product, not two skins.
-_LLM_ROUTER_WORDMARK = "⚡ C H U Z O M ⚡"
+_LLM_ROUTER_WORDMARK = "⚡ L L M · R O U T E R ⚡"
 _LLM_ROUTER_TAGLINE = "routing intelligence · cost savings · safety telemetry"
 _LLM_ROUTER_PANEL_PREFIX = "◆ LLM Router · "
 _LLM_ROUTER_LOGO_ASCII = r"""
@@ -92,6 +103,32 @@ class SessionSummaryData:
     success_count: int = 0
     fail_count: int = 0
 
+    # Point 6/8/12/13 — verified vs unverified savings, shown separately with
+    # their own n. Lineage rows (baseline_cost_usd / savings_usd above) carry
+    # no field recording whether a routed answer actually REPLACED Claude's
+    # turn — LineageRecord.outcome and the legacy model_tracking adapter both
+    # hardcode "success" regardless (lineage_store.py:359). That estimate is
+    # therefore a baseline-EQUIVALENT counterfactual, not an observed saving,
+    # and this module no longer renders it as a bare headline dollar figure.
+    #
+    # The verified figure comes from ``savings_stats`` instead (see
+    # ``_verified_savings_window``), which DOES carry the realized signal —
+    # written by hooks/savings_logger.py's mode="block" (realized) vs
+    # mode="echo" (discarded draft) split — via savings.py's own
+    # VERIFIED_SAVED_SQL/is_verified_saving predicate.
+    verified_usd: float = 0.0
+    verified_n: int = 0
+    unverified_usd: float = 0.0
+    unverified_n: int = 0
+    # Per-row classification of the LINEAGE rows themselves (not the savings_
+    # stats window above) — diagnostic, not a dollar source. See
+    # ``_lineage_verified_state``: every real lineage row classifies as
+    # "unverified" (host never matches savings.VERIFIED_HOSTS), which is WHY
+    # the verified figure above is sourced from savings_stats instead.
+    lineage_verified_count: int = 0
+    lineage_unverified_count: int = 0
+    lineage_unmeasured_count: int = 0
+
     @property
     def health(self) -> str:
         """Coarse one-glyph health: 🟢 / 🟡 / 🔴 based on inversion + failure rates."""
@@ -110,6 +147,157 @@ class SessionSummaryData:
         if self.earliest_ts and self.latest_ts:
             return max(0.0, self.latest_ts - self.earliest_ts)
         return 0.0
+
+
+def _lineage_verified_state(row: dict) -> str:
+    """Classify one lineage row as "verified" / "unverified" / "unmeasured".
+
+    TRAP (this is the fix for it): ``savings.is_verified_saving`` compares its
+    REALIZED_GATE_SINCE gate as an ISO-8601 string, but a lineage row's
+    ``timestamp`` is a UNIX epoch float (lineage/types.py:83 —
+    ``LineageRecord.timestamp: float``). A naive ``timestamp >= GATE`` string
+    compare against a float — or against ``str(float)`` — never matches an
+    ISO string and marks every row unverified for the wrong reason (a silent
+    zero that LOOKS like "nothing has been verified yet" instead of "this
+    comparison is broken"). Convert epoch -> ISO UTC first, THEN apply the
+    real predicate, so the classification is correct even though (see below)
+    it is structurally always "unverified" for the data this store holds.
+
+    A row missing ``host`` or ``timestamp`` cannot be evaluated at all — it is
+    "unmeasured", not "unverified" (S9: unknown must not collapse into either
+    bucket without being counted separately).
+
+    Why this never returns "verified" today, and why that is NOT a bug in
+    this function: ``savings.VERIFIED_HOSTS`` is ``("claude_code",)`` — the
+    literal host string hooks/savings_logger.py stamps on ONLY the rows where
+    it observed the routed answer replace Claude's turn (mode="block").
+    Lineage rows never carry that string: the JSONL-backed rows written via
+    ``LineageStore.append()`` have no ``host`` field at all (RoutingDecision
+    has none), and the legacy ``model_tracking.jsonl`` adapter stamps
+    ``host=provider`` (e.g. "ollama", "codex", "google") — never
+    "claude_code". More fundamentally, no LineageRecord field records
+    "the writer observed this answer replace Claude's turn" — ``outcome`` is
+    hardcoded to "success" by both writers regardless of realized-ness
+    (lineage_store.py:359 and the LineageRecord default). Lineage answers a
+    different question ("what did the router decide") than savings_stats
+    ("was the decision's output actually used instead of Claude's").
+    That is why ``collect()`` sources ``verified_usd``/``verified_n`` from
+    savings_stats (``_verified_savings_window``) rather than from this
+    per-row classification — this function still exists and is exercised
+    (not hardcoded to return "unverified") so a future writer that DOES stamp
+    host="claude_code" onto a lineage row is picked up correctly instead of
+    being silently swallowed by a shortcut.
+    """
+    host = row.get("host")
+    ts = row.get("timestamp")
+    if not host or ts is None:
+        return "unmeasured"
+    try:
+        ts_iso = datetime.fromtimestamp(float(ts), tz=timezone.utc).isoformat()
+    except (TypeError, ValueError, OSError, OverflowError):
+        return "unmeasured"
+    model = row.get("model_chosen")
+    return "verified" if is_verified_saving(host, model, ts_iso) else "unverified"
+
+
+def _usage_db_path() -> Path:
+    """Resolve ``usage.db`` the same way cost.py / savings_report.py do.
+
+    ``LLM_ROUTER_DB_PATH`` wins when set (tests isolate on it); otherwise
+    ``paths.state_path`` (which itself honours ``LLM_ROUTER_HOME``).
+    """
+    import os
+
+    override = os.environ.get("LLM_ROUTER_DB_PATH", "").strip()
+    if override:
+        return Path(override)
+    from llm_router import paths
+    return paths.state_path("usage.db")
+
+
+def _verified_savings_window(
+    since_seconds: float | None,
+) -> tuple[float, int, float, int]:
+    """(verified_usd, verified_n, unverified_usd, unverified_n) from
+    ``savings_stats`` for rows newer than ``since_seconds`` (None = all-time).
+
+    Reuses savings.py's own SQL predicate (``savings_split_sql`` ->
+    VERIFIED_SAVED_SQL / UNVERIFIED_SAVED_SQL / UNVERIFIED_CALLS_SQL) rather
+    than a second copy of it — the same constants
+    ``commands/savings_report.py`` and ``cost.get_lifetime_savings_summary``
+    already query with. Excludes ``is_simulated`` rows the same way those two
+    surfaces do (a benchmark run inflating an unlabelled "verified" figure is
+    the exact incident savings.py's module docstring records).
+
+    Read-only, sync, stdlib ``sqlite3`` — same connection shape as
+    ``observability.surface_status._read_stats_records`` — so ``collect()``
+    stays synchronous, touches no network, and never CREATES
+    ``~/.llm-router/usage.db`` as a side effect of a status read (an
+    ``aiosqlite`` connection via ``cost._get_db()`` would). Missing db/table
+    -> all zeros, not an exception: a summary with nothing routed yet is not
+    a failure.
+    """
+    db_path = _usage_db_path()
+    if not db_path.is_file():
+        return 0.0, 0, 0.0, 0
+    try:
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=1.0)
+    except sqlite3.Error:
+        return 0.0, 0, 0.0, 0
+    try:
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(savings_stats)")}
+        if not cols:
+            return 0.0, 0, 0.0, 0
+        verified_sql, unverified_sql, unverified_n_sql = savings_split_sql(cols)
+        where, params = "", ()
+        has_is_simulated = "is_simulated" in cols
+        if has_is_simulated:
+            where = "WHERE COALESCE(is_simulated, 1) = 0"
+        if since_seconds is not None and "timestamp" in cols:
+            cutoff_iso = datetime.fromtimestamp(
+                time.time() - since_seconds, tz=timezone.utc
+            ).isoformat()
+            where = f"{where} {'AND' if where else 'WHERE'} timestamp >= ?"
+            params = (cutoff_iso,)
+        row = conn.execute(
+            f"SELECT COUNT(*), COALESCE(SUM({verified_sql}), 0), "
+            f"COALESCE(SUM({unverified_sql}), 0), "
+            f"COALESCE(SUM({unverified_n_sql}), 0) "
+            f"FROM savings_stats {where}",
+            params,
+        ).fetchone()
+    finally:
+        conn.close()
+    if not row:
+        return 0.0, 0, 0.0, 0
+    total_n, verified_usd, unverified_usd, unverified_n = row
+    unverified_n = int(unverified_n or 0)
+    verified_n = max(0, int(total_n or 0) - unverified_n)
+    return float(verified_usd or 0.0), verified_n, float(unverified_usd or 0.0), unverified_n
+
+
+def _verified_and_unverified_strings(data: SessionSummaryData) -> tuple[str, str]:
+    """(verified_label, unverified_note_or_empty) for the headline. Point 2/13:
+    no bare-$ headline, verified first via ``savings.label_money``, unverified
+    shown via ``savings.unverified_note`` (empty string when there is
+    nothing unverified — a surface must never print "+ $0.00 unverified").
+    """
+    from llm_router.pricing import savings_baseline_model
+
+    cs = CanonicalSavings(
+        window="session",
+        baseline_equivalent_avoided_usd=data.verified_usd,
+        routing_overhead_usd=0.0,
+        real_dollars_avoided_usd=data.verified_usd,
+        baseline_model=savings_baseline_model(),
+        n_rows=data.verified_n,
+        provenance_filtered=True,
+        under_subscription=under_subscription(),
+        source="savings_stats (VERIFIED_SAVED_SQL)",
+    )
+    return label_money(data.verified_usd, cs), unverified_note(
+        data.unverified_usd, data.unverified_n
+    )
 
 
 def collect(
@@ -192,6 +380,14 @@ def collect(
         notes = (row.get("notes") or "").lower()
         if "pii" in notes or "secret" in notes:
             data.pii_catches += 1
+
+        state = _lineage_verified_state(row)
+        if state == "verified":
+            data.lineage_verified_count += 1
+        elif state == "unmeasured":
+            data.lineage_unmeasured_count += 1
+        else:
+            data.lineage_unverified_count += 1
 
     # Baseline cost: the counterfactual "what if a premium host did every row".
     # #28 (Gate 7): use the ACTUAL measured token counts recorded in lineage
@@ -280,6 +476,22 @@ def collect(
         # "you ran none" -- the RED2-02 shape on a different surface.
         from llm_router import failopen
         failopen.record("CHZ-FO-SUMMARY-AGENT-SESSIONS", exc)
+
+    # Point 6/8/12/13 — the verified figure comes from savings_stats, not from
+    # the lineage-derived baseline_cost_usd/savings_usd above (see the
+    # SessionSummaryData docstring comment on verified_usd for why). Never
+    # let a DB read turn a summary command into a crash.
+    try:
+        verified_usd, verified_n, unverified_usd, unverified_n = (
+            _verified_savings_window(since_seconds)
+        )
+        data.verified_usd = verified_usd
+        data.verified_n = verified_n
+        data.unverified_usd = unverified_usd
+        data.unverified_n = unverified_n
+    except Exception as exc:
+        from llm_router import failopen
+        failopen.record("CHZ-FO-SUMMARY-VERIFIED-WINDOW", exc)
 
     return data
 
@@ -398,16 +610,23 @@ def render(data: SessionSummaryData, *, console=None) -> None:
         padding=(0, 2),
     )
 
-    # ── HEADLINE — savings vs baseline ─────────────────────────────────
+    # ── HEADLINE — verified savings first, unverified below (point 6/8/13) ──
+    _verified_label, _unverified_str = _verified_and_unverified_strings(data)
     headline_text = Text.assemble(
-        ("Session savings  ", "bold"),
-        (_fmt_cost(data.savings_usd), "bold green" if data.savings_usd > 0 else "white"),
-        (f"  ({data.savings_pct * 100:.0f}% vs always-premium)", "dim"),
+        ("Verified savings  ", "bold"),
+        (_verified_label, "bold green" if data.verified_usd > 0 else "white"),
     )
+    headline_lines = [headline_text]
+    if _unverified_str:
+        headline_lines.append(Text(_unverified_str, style="dim yellow"))
+    # baseline_cost_usd/savings_usd below are a routing-decision COUNTERFACTUAL
+    # ("what if every prompt had gone to always-premium instead") — never a
+    # dollar figure anyone was actually charged or credited — so it stays out
+    # of the headline and is labelled as vs-baseline, not as "saved".
     spend_line = Text.assemble(
         ("Spent ", "dim"),
         (_fmt_cost(data.total_cost_usd), "bold"),
-        ("  ·  baseline ", "dim"),
+        ("  ·  vs always-premium baseline ", "dim"),
         (_fmt_cost(data.baseline_cost_usd), "dim"),
     )
     decisions_line = Text.assemble(
@@ -418,7 +637,7 @@ def render(data: SessionSummaryData, *, console=None) -> None:
         (f"{data.total_latency_ms / max(1, data.total_decisions):.0f} ms avg", "dim"),
     )
     headline = Panel(
-        Group(headline_text, spend_line, decisions_line),
+        Group(*headline_lines, spend_line, decisions_line),
         title=f"{_LLM_ROUTER_PANEL_PREFIX}Headline",
         border_style="bright_blue",
         padding=(1, 2),
@@ -595,9 +814,11 @@ def render(data: SessionSummaryData, *, console=None) -> None:
             f"caught {data.pii_catches} PII leak(s) → forced local"
         )
     if data.savings_usd > 0:
+        # Point 12: baseline-equivalent COUNTERFACTUAL, not a verified saving —
+        # see the headline panel above for the actually-observed figure.
         punch_parts.append(
-            f"saved {_fmt_cost(data.savings_usd)} "
-            f"({data.savings_pct * 100:.0f}%) vs always-premium"
+            f"≈{_fmt_cost(data.savings_usd)} "
+            f"({data.savings_pct * 100:.0f}%) vs always-premium baseline (unverified)"
         )
     punchline = "  ·  ".join(punch_parts) + "."
     punchline_panel = Panel(
@@ -680,12 +901,19 @@ def render_markdown(data: SessionSummaryData) -> str:
     ]
 
     out.append("## Headline\n")
+    # Point 6/8/13: verified figure first, no bare-$ headline. See
+    # _verified_and_unverified_strings' docstring for what "verified" means
+    # here (savings_stats, not the lineage-derived baseline estimate below).
+    _verified_label, _unverified_str = _verified_and_unverified_strings(data)
+    out.append(f"- **Verified savings:** {_verified_label}")
+    if _unverified_str:
+        out.append(f"  {_unverified_str}")
     out.append(
         f"- **Session cost:** {_fmt_cost(data.total_cost_usd)}  "
         f"_(baseline {_fmt_cost(data.baseline_cost_usd)})_"
     )
     out.append(
-        f"- **Savings vs always-premium:** "
+        f"- **Savings vs always-premium (unverified, baseline-equivalent):** "
         f"**{_fmt_cost(data.savings_usd)} ({data.savings_pct * 100:.0f}%)**"
     )
     out.append(f"- **Routing decisions:** {data.total_decisions}")

@@ -509,7 +509,10 @@ def _aggregate(rows: list[dict]) -> dict[str, dict]:
             continue
         if tool not in tools:
             tools[tool] = {"count": 0, "in": 0, "out": 0, "cost": 0.0,
-                           "models": {}, "model_totals": {}}
+                           "models": {}, "model_totals": {},
+                           "realized_count": 0, "realized_in": 0,
+                           "realized_out": 0, "realized_cost": 0.0,
+                           "unmeasured_count": 0}
         tools[tool]["count"]  += 1
         tools[tool]["in"]     += in_tok
         tools[tool]["out"]    += out_tok
@@ -528,6 +531,27 @@ def _aggregate(rows: list[dict]) -> dict[str, dict]:
         mt["in"]    += in_tok
         mt["out"]   += out_tok
         mt["cost"]  += cost
+
+        # Point 6/13 — "realized" means the writer observed this row's routed
+        # answer REPLACE Claude's turn: hooks/savings_logger.py's
+        # log_direct_to_db stamps mode="block" for exactly that case and
+        # mode="echo" for a discarded draft Claude still answered at full
+        # price (auto-route.py). A row with no "mode" key at all — every row
+        # the `usage` table's current SQL SELECT returns, since the column
+        # doesn't exist there yet — is neither: S9, unknown must not become
+        # the favourable answer, so it is "unmeasured", counted separately,
+        # not folded into "realized".
+        mode = r.get("mode")
+        if mode == "block":
+            tools[tool]["realized_count"] += 1
+            tools[tool]["realized_in"]    += in_tok
+            tools[tool]["realized_out"]   += out_tok
+            tools[tool]["realized_cost"]  += cost
+        elif mode is None:
+            tools[tool]["unmeasured_count"] += 1
+        # mode == "echo" (or any other explicit non-"block" value): excluded
+        # from both buckets on purpose — it IS measured, and measured as not
+        # realized, which is different from "we don't know".
     return tools
 
 
@@ -695,12 +719,14 @@ def _format_routing_section(
     total_tokens = total_in + total_out
 
     # Format token count (human-readable)
-    if total_tokens >= 1_000_000:
-        tokens_str = f"{total_tokens / 1_000_000:.1f}M"
-    elif total_tokens >= 1_000:
-        tokens_str = f"{total_tokens / 1_000:.1f}k"
-    else:
-        tokens_str = str(total_tokens)
+    def _fmt_tok(n: int) -> str:
+        if n >= 1_000_000:
+            return f"{n / 1_000_000:.1f}M"
+        if n >= 1_000:
+            return f"{n / 1_000:.1f}k"
+        return str(n)
+
+    tokens_str = _fmt_tok(total_tokens)
 
     pct_color = _C_GREEN if savings_pct >= 80 else (_C_YELLOW if savings_pct >= 50 else _C_ORANGE)
     provenance = _baseline_provenance()
@@ -713,12 +739,31 @@ def _format_routing_section(
         # contradict it by printing dollars to everyone. The benefit is still
         # reported, in the unit that is actually real for this user: tokens
         # kept off the Claude quota.
+        #
+        # Point 6/13: "quota preserved" counts only mode="block" (realized)
+        # rows — see _aggregate. It used to reuse `tokens_str` (every paid
+        # row, unconditionally), which credited a discarded echo draft's
+        # tokens as quota the user never actually spent. `tokens_str` above
+        # stays the raw "N calls / M tokens" activity count; only the
+        # preserved-quota figure is realized-only.
+        total_realized_tokens = sum(
+            t.get("realized_in", 0) + t.get("realized_out", 0)
+            for t in tools.values()
+        )
+        total_unmeasured = sum(
+            t.get("unmeasured_count", 0) for t in tools.values()
+        )
+        realized_tokens_str = _fmt_tok(total_realized_tokens)
+        unmeasured_note = (
+            f"  {_C_MUTED}({total_unmeasured} unmeasured, not counted){_RESET}"
+            if total_unmeasured else ""
+        )
         lines = [
             f"    {_C_WHITE}{total_calls}{_RESET} calls  "
             f"{tokens_str} tokens  "
-            f"{pct_color}{tokens_str} quota preserved{_RESET}  "
+            f"{pct_color}{realized_tokens_str} quota preserved{_RESET}  "
             f"{_C_MUTED}({savings_pct}% of baseline, {provenance}){_RESET}  "
-            f"{_C_MUTED}this session{_RESET}",
+            f"{_C_MUTED}this session{_RESET}{unmeasured_note}",
         ]
     else:
         # AUD-06: a loss is reported in DOLLARS, not as a negative percentage.
