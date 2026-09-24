@@ -64,7 +64,10 @@ class _Doc:
     "go on more",
     "yes, repoint both",
     "yes, file both",
-    "continue, remember to use Chuzom all along",
+    # Shape taken from a real corpus prompt; the project name it carried is
+    # removed — check_identity.py blocks private project names in this repo,
+    # and the test asserts the SHAPE ("continue, remember to ...") not the name.
+    "continue, remember to use the local model all along",
     # And the shapes the same class takes.
     "do them both",
     "push it",

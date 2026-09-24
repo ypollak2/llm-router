@@ -28,6 +28,58 @@ If it goes green, commit it. If it does not, the change is self-contained and
 
 ---
 
+## 0b. DECISIONS TAKEN AT SESSION CLOSE (2026-09-24)
+
+| Question | Decision | State |
+|---|---|---|
+| The uncommitted Codex fix | **Wait for the gate, then commit** | gate re-running after an identity-gate failure — see below |
+| Savings credited to discarded drafts | **Condition on acceptance — a discarded draft credits nothing** | NOT IMPLEMENTED, see §1.2 |
+| `.gitignore` `/docs/*` | **Un-ignore** — but see the contradiction below | NOT DONE |
+| What to start next | **The falsifying experiment (§5)** | — |
+
+### The identity gate caught a leak I introduced
+
+`test_identity_gate` failed on `9a370e6`, which is **already on main**:
+
+    tests/test_a28_d1_d2_context_gate.py:67:
+        "continue, remember to use <a private project name> all along"
+
+A real corpus prompt carrying a private project name. **The name is redacted
+even here**: the first version of this checkpoint quoted the offending string
+verbatim while documenting it, and the gate failed a second time on the
+documentation of the leak. Writing about a leak can recreate it. Fixed by replacing the
+name (the test asserts the SHAPE, "continue, remember to ...", not the name),
+**not** by extending the allowlist — `check_identity.py` says runtime hits must
+be fixed. No other file in `audit/` or `architecture/` carries it.
+
+Worth noting for future corpus work: **pulling real prompts into tests can
+carry identifying material.** The gate caught this one; it is the only thing
+standing between a corpus-derived fixture and the public repo.
+
+### The `/docs/*` decision rests on a premise that turned out false
+
+The rule is **deliberate**, with a stated rationale and carve-outs:
+
+    # Docs are local working notes — never commit (except the CI-generated
+    # benchmark page and versioned release-evidence packs, ...)
+    /docs/*
+    !/docs/BENCHMARKS.md
+    !/docs/releases/
+
+"Un-ignore" was chosen against the option "intentional — leave it", and that
+comment is evidence it WAS intentional. **Not changed unilaterally**, because
+the new fact contradicts the basis of the choice. 24 markdown files, 1.3 MB.
+
+Two coherent positions, both defensible:
+* the comment is stale and the planning corpus should be backed up (the risk in
+  §1.3 is real: one disk, no copy);
+* the comment stands and `Docs/` is a scratchpad by design — in which case §1.3
+  should be closed as accepted rather than left open.
+
+One `.gitignore` line either way. It needs your call with this fact in hand.
+
+---
+
 ## 1. NEEDS A DECISION FROM YOU
 
 ### 1.1 PyPI trusted publisher — **the next release fails without this**
@@ -64,9 +116,22 @@ credits a saving whenever a local model emitted tokens, regardless of whether
 the output was used — which contradicts CLAUDE.md's own rule, *"'A local model
 ran' is not a saving."*
 
-`routing_report.draft_acceptance()` now makes this conditionable. Not changed
-unilaterally: it would cut the headline savings figure by roughly an order of
-magnitude, and that is a product decision.
+`routing_report.draft_acceptance()` now makes this conditionable.
+
+**DECIDED 2026-09-24: condition on acceptance — a discarded draft credits
+nothing. NOT YET IMPLEMENTED.**
+
+Scope when picked up: `savings_stats.estimated_claude_cost_saved` is written on
+every routed call. The acceptance verdict arrives ONE INVOCATION LATER (the
+marker is only visible in the next assistant turn — see `hooks/draft_usage.py`),
+so the saving cannot be decided at write time. Either write it as provisional
+and settle it on the next prompt, or compute the reported figure as a JOIN at
+read time and leave the row alone. **The second is far less invasive** and does
+not require a second writer, which this repo has twice paid for.
+
+Expect the headline to fall by roughly an order of magnitude — today $0.0928 →
+about $0.015 — and lifetime $110.91 to fall similarly. That drop is the point:
+it is the first defensible version of the number.
 
 ### 1.3 `.gitignore:111` — `/docs/*` leaves the whole planning corpus untracked
 

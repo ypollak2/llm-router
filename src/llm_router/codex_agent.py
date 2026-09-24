@@ -368,6 +368,8 @@ async def run_codex(
 
         text_chunks: list[str] = []
         stderr_buf: list[bytes] = []
+        cli_noise: list[str] = []      # non-JSON stdout: CLI chatter, not output
+        codex_errors: list[str] = []   # item.type == "error" messages
 
         async def _drain_stderr() -> None:
             assert proc.stderr is not None
@@ -394,12 +396,30 @@ async def run_codex(
             try:
                 ev = json.loads(line)
             except json.JSONDecodeError:
-                text_chunks.append(line)
+                # `codex exec --json` emits JSONL. A non-JSON line on stdout is
+                # the CLI talking, not the model answering — and treating it as
+                # content is how "Reading additional input from stdin..." was
+                # returned to the caller AS THE ANSWER. Observed twice on
+                # 2026-09-23, ~20s each, reported as a successful 70-token
+                # completion when the turn used 0 input and 0 output tokens.
+                #
+                # Kept, not dropped: it is the only diagnostic when nothing else
+                # arrives, which is exactly the failing case. Used solely as a
+                # last-resort fallback below, never mixed into real output.
+                cli_noise.append(line)
                 continue
 
             ev_type = ev.get("type", "")
             if ev_type == "item.completed":
-                text = ev.get("item", {}).get("text", "")
+                item = ev.get("item", {}) or {}
+                # An error item carries `message`, not `text`, so the old code
+                # read "" and dropped it in silence. That is how
+                # `codex/gpt-4o-mini` — a model this CLI does not know — looked
+                # like an empty success instead of a routing error.
+                if item.get("type") == "error":
+                    codex_errors.append(str(item.get("message", "")).strip())
+                    continue
+                text = item.get("text", "")
                 if text:
                     text_chunks.append(text)
                     if on_event:
@@ -429,8 +449,19 @@ async def run_codex(
         duration = time.monotonic() - start
 
         output = "\n".join(text_chunks).strip()
+        # An error the CLI reported is a FAILURE, not an empty success. Without
+        # this the caller cannot tell "the model said nothing" from "the model
+        # does not exist", and the router records the second as a completion.
+        if not output and codex_errors:
+            return CodexResult(
+                content="codex: " + "; ".join(e for e in codex_errors if e),
+                model=model, exit_code=proc.returncode or 1,
+                duration_sec=duration,
+            )
         if not output and stderr_buf:
             output = b"".join(stderr_buf).decode("utf-8", errors="replace").strip()
+        if not output and cli_noise:
+            output = "\n".join(cli_noise).strip()
 
         return CodexResult(
             content=output, model=model,
