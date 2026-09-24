@@ -134,7 +134,7 @@ def test_records_user_prompt_before_draft(ar, monkeypatch):
 
     import llm_router.hooks.direct_executor as direct_executor
 
-    def fake_execute_chain(prompt, chain, task_type, timeout=4, history=None, context=None, deadline_s=None):
+    def fake_execute_chain(prompt, chain, task_type, timeout=4, history=None, context=None, deadline_s=None, session_id=None, root=None):
         return direct_executor.DirectResult(
             text="os.path.join joins path components.",
             model=chain[0],
@@ -164,7 +164,7 @@ def test_builds_and_threads_session_context_into_execute_chain(ar, monkeypatch):
     import llm_router.hooks.direct_executor as direct_executor
     captured = {}
 
-    def fake_execute_chain(prompt, chain, task_type, timeout=4, history=None, context=None, deadline_s=None):
+    def fake_execute_chain(prompt, chain, task_type, timeout=4, history=None, context=None, deadline_s=None, session_id=None, root=None):
         captured["context"] = context
         captured["prompt"] = prompt
         return direct_executor.DirectResult(
@@ -193,7 +193,7 @@ def test_records_routed_qa_on_success(ar, monkeypatch):
 
     import llm_router.hooks.direct_executor as direct_executor
 
-    def fake_execute_chain(prompt, chain, task_type, timeout=4, history=None, context=None, deadline_s=None):
+    def fake_execute_chain(prompt, chain, task_type, timeout=4, history=None, context=None, deadline_s=None, session_id=None, root=None):
         return direct_executor.DirectResult(
             # A realistic draft, not a 15-char placeholder: since 2026-09-14 a
             # draft is only written to session memory if it is worth being the
@@ -227,7 +227,7 @@ def test_fail_open_when_record_event_raises(ar, monkeypatch):
 
     import llm_router.hooks.direct_executor as direct_executor
 
-    def fake_execute_chain(prompt, chain, task_type, timeout=4, history=None, context=None, deadline_s=None):
+    def fake_execute_chain(prompt, chain, task_type, timeout=4, history=None, context=None, deadline_s=None, session_id=None, root=None):
         return direct_executor.DirectResult(
             text="answer despite store failure", model=chain[0], latency_ms=1,
             input_tokens=1, output_tokens=1,
@@ -253,7 +253,7 @@ def test_fail_open_when_build_session_context_raises(ar, monkeypatch):
     import llm_router.hooks.direct_executor as direct_executor
     captured = {}
 
-    def fake_execute_chain(prompt, chain, task_type, timeout=4, history=None, context=None, deadline_s=None):
+    def fake_execute_chain(prompt, chain, task_type, timeout=4, history=None, context=None, deadline_s=None, session_id=None, root=None):
         captured["context"] = context
         return direct_executor.DirectResult(
             text="answer despite context-build failure", model=chain[0], latency_ms=1,
@@ -285,7 +285,7 @@ def test_empty_context_is_passed_through_not_fabricated(ar, monkeypatch):
     import llm_router.hooks.direct_executor as direct_executor
     captured = {}
 
-    def fake_execute_chain(prompt, chain, task_type, timeout=4, history=None, context=None, deadline_s=None):
+    def fake_execute_chain(prompt, chain, task_type, timeout=4, history=None, context=None, deadline_s=None, session_id=None, root=None):
         captured["context"] = context
         return direct_executor.DirectResult(
             text="answer", model=chain[0], latency_ms=1, input_tokens=1, output_tokens=1,
@@ -310,7 +310,7 @@ def test_no_session_id_skips_all_session_store_calls(ar, monkeypatch):
     import llm_router.hooks.direct_executor as direct_executor
     captured = {}
 
-    def fake_execute_chain(prompt, chain, task_type, timeout=4, history=None, context=None, deadline_s=None):
+    def fake_execute_chain(prompt, chain, task_type, timeout=4, history=None, context=None, deadline_s=None, session_id=None, root=None):
         captured["context"] = context
         return direct_executor.DirectResult(
             text="answer", model=chain[0], latency_ms=1, input_tokens=1, output_tokens=1,

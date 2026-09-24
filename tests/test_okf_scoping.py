@@ -215,7 +215,16 @@ def test_direct_executor_injects_and_enriches(tmp_path, monkeypatch):
     assert hasattr(de, "_okf_enrich"), "direct path does not contribute to the store"
 
     src = (Path(spec.origin)).read_text()
-    assert "prompt = _okf_inject(prompt)" in src, "injection not applied to the prompt"
+    # AST, not source text (R13): the injected result must be assigned back to
+    # `prompt`, and — since I1 — carry the session and scope.
+    import ast
+    calls = [n for n in ast.walk(ast.parse(src))
+             if isinstance(n, ast.Assign) and isinstance(n.value, ast.Call)
+             and getattr(n.value.func, "id", "") == "_okf_inject"
+             and any(getattr(t, "id", "") == "prompt" for t in n.targets)]
+    assert calls, "injection not applied to the prompt"
+    assert {"root", "session_id"} <= {k.arg for k in calls[0].value.keywords}, \
+        "injection is not scoped to the project and session (I1)"
     assert "_okf_enrich(prompt, response," in src, "enrichment not applied to the response"
 
 

@@ -89,7 +89,7 @@ def test_text_injected_after_assembly_is_scrubbed_too(monkeypatch):
         seen.append(prompt)
         return LONG, {}
 
-    monkeypatch.setattr(de, "_okf_inject", lambda p: p + "\n\nREPO NOTE: " + SECRET)
+    monkeypatch.setattr(de, "_okf_inject", lambda p, **kw: p + "\n\nREPO NOTE: " + SECRET)
     with patch.dict(de._PROVIDER_CALLS, {"openai": fake}), \
          patch.object(de, "_paid_budget_exhausted", return_value=False, create=True):
         execute_chain("plain question", [ModelSpec("openai", "gpt-4o-mini")], "query")

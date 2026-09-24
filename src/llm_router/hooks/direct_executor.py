@@ -262,6 +262,15 @@ def _num_predict_for(timeout: float) -> int:
     return max(_NUM_PREDICT_FLOOR, min(_NUM_PREDICT_CEILING, budget))
 
 
+def _local_num_ctx() -> int | None:
+    """The shared local context window (see agent_loop._num_ctx)."""
+    try:
+        from llm_router.hooks.agent_loop import _num_ctx
+        return _num_ctx()
+    except Exception:                                        # noqa: BLE001
+        return None
+
+
 def call_ollama(
     prompt: str, model: str, timeout: int = 4,
     history: list[dict] | None = None, system_prompt: str | None = None,
@@ -272,7 +281,9 @@ def call_ollama(
         "messages": _chat_messages(prompt, history, system_prompt),
         "stream": True,
         "think": False,
-        "options": {"temperature": 0.3, "num_predict": _num_predict_for(timeout)},
+        "options": {"temperature": 0.3, "num_predict": _num_predict_for(timeout),
+                    # I2: the same window as the agent loop (no reload thrash).
+                    **({"num_ctx": _local_num_ctx()} if _local_num_ctx() else {})},
     }).encode()
     ollama_url = _get_ollama_url()
     req = urllib.request.Request(
@@ -510,7 +521,9 @@ def _log_direct_reason(msg: str) -> None:
         pass
 
 
-def _okf_inject(prompt: str) -> str:
+def _okf_inject(prompt: str, *, root: str | None = None,
+                session_id: str | None = None,
+                target_provider: str | None = None) -> str:
     """Delegate to the shared choke point.
 
     This used to hold its own copy of find_relevant + inject_context. Two
@@ -519,7 +532,11 @@ def _okf_inject(prompt: str) -> str:
     function because callers here read better for it.
     """
     from llm_router.context_injection import inject
-    return inject(prompt)
+    # I1 (2026-09-24): scope + session were never passed, so the session store
+    # (conversation + tool facts) never reached a draft and the semantic layer
+    # ran unscoped — the exact "forgot a scope argument" this helper exists for.
+    return inject(prompt, root=root, session_id=session_id,
+                  target_provider=target_provider)
 
 
 def _okf_enrich(prompt: str, response: str, model: str) -> None:
@@ -583,6 +600,8 @@ def execute_chain(
     history: list[dict] | None = None,
     context: str | None = None,
     deadline_s: float | None = None,
+    session_id: str | None = None,
+    root: str | None = None,
 ) -> DirectResult | None:
     """Try each model in the chain until one returns a quality response.
 
@@ -609,7 +628,11 @@ def execute_chain(
     # entirely — it calls providers over raw HTTP from the hook process. So the
     # majority of routed traffic neither received stored context nor contributed
     # to the store, and OKF looked enabled while doing nothing for most calls.
-    prompt = _okf_inject(prompt)
+    # The privacy gate needs the MOST external provider this prompt may reach.
+    _target = next((m.provider for m in chain if m.provider not in _FREE_PROVIDERS),
+                   "ollama")
+    prompt = _okf_inject(prompt, root=root, session_id=session_id,
+                         target_provider=_target)
 
     # Every abandonment below says WHY. It used to say nothing: six `continue`
     # paths all surfaced as one line, "DIRECT FAILED: falling through to

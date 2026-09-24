@@ -4223,6 +4223,9 @@ def main() -> None:
                     prompt, _direct_chain, task_type,
                     timeout=OLLAMA_TIMEOUT, history=_history, context=_session_ctx,
                     deadline_s=_hook_deadline(),
+                    # I1: the session store and a scoped semantic index.
+                    session_id=session_id,
+                    root=hook_input.get("cwd") or os.getcwd(),
                 )
 
             # S2-6: a draft that cites a file nobody mentioned and that does not
