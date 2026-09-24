@@ -779,6 +779,17 @@ def execute_agent(
         if model.provider != "ollama":
             continue  # Only Ollama supports tool calling from the hook (for now)
 
+        # `deadline_s` here is an ABSOLUTE monotonic instant (as in
+        # execute_chain); run_agent_loop's `deadline_s` is a DURATION. Passing
+        # the instant through unconverted made the loop's cap ~monotonic()
+        # seconds (5.2M on this machine), so it never fired and Claude Code
+        # killed the hook at 60s holding nothing.
+        left = None
+        if deadline_s is not None:
+            left = deadline_s - time.monotonic()
+            if left <= _MIN_CALL_S:
+                break
+
         ollama_attempted += 1
         t0 = time.monotonic()
         # run_agent_loop might need to return usage as well
@@ -789,7 +800,7 @@ def execute_agent(
             project_root=root,
             timeout_per_call=timeout,
             system_prompt=_agent_system_prompt(context),
-            deadline_s=deadline_s,
+            deadline_s=left,
         )
 
         if response and quality_ok(response, "code"):

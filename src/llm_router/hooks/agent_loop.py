@@ -732,8 +732,13 @@ def run_agent_loop(
         _trace.emit("llm.request", iteration=iteration, model=model,
                     n_messages=len(messages), payload_bytes=len(body))
         _t0 = time.monotonic()
+        # A call that starts inside the budget must also END inside it: a 60s
+        # per-call timeout begun at second 50 of a 55s hook overruns by 55s.
+        call_timeout = float(timeout_per_call)
+        if deadline_s is not None:
+            call_timeout = max(0.1, min(call_timeout, deadline_s - (_t0 - started)))
         try:
-            with urllib.request.urlopen(req, timeout=timeout_per_call) as resp:
+            with urllib.request.urlopen(req, timeout=call_timeout) as resp:
                 result = json.loads(resp.read())
         except Exception as _exc:
             _trace.emit("llm.error", iteration=iteration,
