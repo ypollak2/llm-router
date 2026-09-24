@@ -170,9 +170,9 @@ _README_NOISE = re.compile(
 #: labels, prices quoted as illustration. Each is listed individually — a
 #: pattern would drift into excusing real claims.
 _NOT_A_CLAIM = {
-    262: "ASCII architecture diagram label, not an assertion about savings",
-    284: "carries its own '~' qualifier inline",
-    389: "carries its own '~' qualifier inline",
+    268: "ASCII architecture diagram label, not an assertion about savings",
+    290: "carries its own '~' qualifier inline",
+    395: "carries its own '~' qualifier inline",
 }
 
 

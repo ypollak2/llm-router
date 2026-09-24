@@ -6,7 +6,8 @@ Welcome! This guide will help you get **smart LLM routing** running in your envi
 
 **llm-router** automatically routes your AI tasks to the cheapest capable model. Simple questions go to Gemini Flash or Haiku ($0.001). Complex reasoning goes to o3 or Opus only when needed.
 
-**Result: 60–80% cost reduction** vs using Opus for everything.
+**Result:** cost reduction depends on your workload; not measured — see
+[audit/CRITICAL_2026-09-24_local_models_do_no_work.md](../audit/CRITICAL_2026-09-24_local_models_do_no_work.md).
 
 ---
 
@@ -85,7 +86,7 @@ Is it complex? → Claude Opus / o3 ($0.015)
 - "Debug why Y is slow" → Sonnet ($0.003)
 - "Implement feature Z" → Opus ($0.015)
 
-**Total:** $0.018 (vs $0.045 if all went to Opus) = **60% savings**
+**Total:** $0.018 (vs $0.045 if all went to Opus) — a hypothetical illustration, not measured
 
 ---
 
@@ -129,10 +130,10 @@ chmod 600 ~/.llm-router/config.yaml
 
 | Host | Cost Savings | Setup Friction | Best For |
 |------|:------------:|:--------------:|----------|
-| **Claude Code** | 60–80% | Low | Maximum savings (recommended) |
+| **Claude Code** | — | Low | Maximum savings (recommended) |
 | **Codex CLI** | Opt-in | Medium | OpenAI users using explicit MCP routing |
-| **Gemini CLI** | 50–70% | Medium | Gemini free tier users |
-| **VS Code** | 30–50% | Low | Lightweight editors |
+| **Gemini CLI** | — | Medium | Gemini free tier users |
+| **VS Code** | — | Low | Lightweight editors |
 
 **TL;DR:** Claude Code is best. Use what you already have.
 
@@ -147,11 +148,11 @@ Start free. Add keys later if you want more models.
 ### "How much will I save?"
 
 On typical usage:
-- 80% of tasks are simple → Gemini Flash/Haiku ($0.0001 vs $0.015) = **99% savings**
-- 15% are moderate → Sonnet ($0.003 vs $0.015) = **80% savings**
+- 80% of tasks are simple → Gemini Flash/Haiku ($0.0001 vs $0.015)
+- 15% are moderate → Sonnet ($0.003 vs $0.015)
 - 5% are complex → Opus ($0.015 = baseline)
 
-**Average: 60–80% savings across all tasks**
+Actual savings depend on your own task mix — not measured as a general average.
 
 ### "Does it affect quality?"
 
@@ -230,7 +231,7 @@ llm-router verify     # Full system health check
 
 You now have:
 - ✅ Automatic or explicit model routing, depending on host
-- ✅ 60–80% cost reduction
+- ✅ Cost optimization (not measured)
 - ✅ Usage analytics and cost tracking
 - ✅ Hook-based automation (Claude Code / Gemini)
 - ✅ Explicit MCP routing (Codex / VS Code)

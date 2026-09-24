@@ -143,7 +143,8 @@ Complex? → Opus / o3 ($0.01)
 💰 Cost Tracked & Reported
 ```
 
-**Result: 60–80% cost reduction vs Opus-everywhere.**
+**Result:** cost reduction depends on your workload; not measured — see
+[audit/CRITICAL_2026-09-24_local_models_do_no_work.md](../audit/CRITICAL_2026-09-24_local_models_do_no_work.md).
 
 ---
 
@@ -209,7 +210,7 @@ llm-router gain             # View cumulative savings
 
 You now have:
 - ✅ Automatic or explicit model routing, depending on host
-- ✅ Cost optimization (60–80% savings)
+- ✅ Cost optimization (not measured)
 - ✅ Usage analytics
 - ✅ Hook-based automation (Claude Code / Gemini)
 - ✅ Explicit MCP routing (Codex / VS Code)

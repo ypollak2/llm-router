@@ -59,10 +59,10 @@ LEDGER: tuple[Claim, ...] = (
         id="secrets-never-leave",
         text="Secrets never leave your machine. A prompt containing an API key, "
              "token or private material is scrubbed before it is written or sent.",
-        source="README.md:292",
+        source="README.md:298",
         status=PROVEN,
         proof="tests/test_r2_nothing_leaves_unscrubbed.py",
-        readme_lines=(292,),
+        readme_lines=(298,),
     ),
     Claim(
         id="scrub-before-persistence",
@@ -136,14 +136,17 @@ LEDGER: tuple[Claim, ...] = (
     Claim(
         id="savings-percentages-per-host",
         text="60–80% savings on Claude Code, 30–50% on Codex CLI, etc.",
-        source="README.md:212-215",
+        source="README.md (removed 2026-09-24)",
         status=SCOPED,
         note="README already states these are 'single-user observations over "
              "particular workloads' (L394). The scoping sentence IS the proof: "
              "there is no test, and there cannot be one, because the numbers "
              "are observations rather than a property of the code. Remove the "
-             "scoping sentence and this becomes UNPROVEN.",
-        readme_lines=(212, 213, 214, 215),
+             "scoping sentence and this becomes UNPROVEN. REMOVED from the "
+             "README 2026-09-24: unmeasured, and verified savings on the "
+             "maintainer's machine are $0.00 (audit/CRITICAL_2026-09-24_"
+             "local_models_do_no_work.md); the row stays so the history reads.",
+        readme_lines=(),
     ),
     Claim(
         id="censored-answers-not-counted-as-wins",

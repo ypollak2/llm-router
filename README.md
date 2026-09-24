@@ -209,11 +209,14 @@ The exact chain depends on your configured providers, budget profile, and routin
 
 | Tool | Mode | Savings (this host) |
 |------|------|-----------------|
-| **Claude Code** | Full auto-routing via hooks | 60–80% |
-| **Codex CLI** | Prompt-routing hook + MCP tools · no tool-call enforcement | 30–50% |
-| **Gemini CLI** | Full auto-routing via hooks | 50–70% |
-| **VS Code / Cursor** | Manual MCP tools · hooks 🔜 | 30–50% |
-| **Any MCP client** | Manual MCP tools | Varies |
+| **Claude Code** | Full auto-routing via hooks | — |
+| **Codex CLI** | Prompt-routing hook + MCP tools · no tool-call enforcement | — |
+| **Gemini CLI** | Prompt-routing hook + MCP tools · no tool-call enforcement | — |
+| **VS Code / Cursor** | Manual MCP tools · hooks 🔜 | — |
+| **Any MCP client** | Manual MCP tools | — |
+
+Savings (this host) is not measured — see
+[audit/CRITICAL_2026-09-24_local_models_do_no_work.md](audit/CRITICAL_2026-09-24_local_models_do_no_work.md).
 
 <p align="center">
   <picture>
@@ -229,6 +232,9 @@ The exact chain depends on your configured providers, budget profile, and routin
   it cannot be done. Codex CLI ships `UserPromptSubmit` (enabled by default, and its `PreToolUse`
   can even rewrite arguments); Cursor ships `beforeSubmitPrompt`. Both can block a prompt before
   the model sees it, which is the same mechanism Claude Code uses today.
+- **Claude Code's local drafting is advisory**, and it is currently switched off on the maintainer's
+  machine (the direct-execution setting below) because drafted answers were never used — see
+  [audit/CRITICAL_2026-09-24_local_models_do_no_work.md](audit/CRITICAL_2026-09-24_local_models_do_no_work.md).
 
 The full picture, including what each host genuinely cannot do and which payload fields have been
 verified against a real run rather than read off a docs page, is in

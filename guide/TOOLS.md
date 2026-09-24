@@ -254,7 +254,8 @@ Bulk code edits with smart diff generation.
 1. Cheap model reads files
 2. Generates exact edit instructions
 3. You apply mechanically with Edit tool
-4. 50-90% cost savings vs manual edits
+4. Cost savings vs manual edits not measured — see
+   [audit/CRITICAL_2026-09-24_local_models_do_no_work.md](../audit/CRITICAL_2026-09-24_local_models_do_no_work.md)
 
 ---
 

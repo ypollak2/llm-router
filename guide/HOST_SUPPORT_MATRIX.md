@@ -6,11 +6,11 @@ This page documents **exactly which features work where**, without sugar-coating
 
 | Feature | Claude Code | Codex CLI | Gemini CLI | Pi (pi.dev) | VS Code/Cursor | Browser | Local CLI |
 |---------|:-----------:|:---------:|:----------:|:-----------:|:--------------:|:-------:|:---------:|
-| **Auto-Routing Hooks** | ✅ Full | ⚠️ Prompt hook only | ✅ Full | ❌ Not installable | 🔜 Not yet | ❌ No | ✅ Limited |
+| **Auto-Routing Hooks** | ✅ Full | ⚠️ Prompt hook only | ⚠️ Prompt hook only | ❌ Not installable | 🔜 Not yet | ❌ No | ✅ Limited |
 | **Session-End Tracking** | ✅ Yes | ❌ No | ✅ Yes | ✅ Yes | ❌ No | ❌ No | ✅ Manual |
 | **Quota Pressure Display** | ✅ Yes | ❌ No | ✅ Yes | ❌ No | ❌ No | ❌ No | ❌ No |
 | **60 MCP Tools (Direct)** | ✅ Yes | ✅ Yes | ✅ Yes | ✅ Yes | ✅ Yes | ✅ Yes | ✅ Yes |
-| **Cost Optimization** | ✅ 60–80% | ⚠️ Opt-in* | ✅ 50–70% | ✅ 50–70% | ⚠️ Partial* | ❌ No | ✅ Manual |
+| **Cost Optimization** | ✅ — | ⚠️ Opt-in* | ✅ — | ✅ — | ⚠️ Partial* | ❌ No | ✅ Manual |
 | **Free-First Routing** | ✅ Yes | ⚠️ Opt-in | ✅ Yes | ✅ Yes | ⚠️ Opt-in | ❌ No | ⚠️ Opt-in |
 | **Saved Usage Analytics** | ✅ Yes | ⚠️ Routed calls only | ✅ Yes | ✅ Yes | ⚠️ Manual** | ❌ No | ✅ Yes |
 | **Decision Replay** | ✅ Yes | ⚠️ Routed calls only | ✅ Yes | ✅ Yes | ❌ No | ❌ No | ✅ Yes |
@@ -21,6 +21,7 @@ This page documents **exactly which features work where**, without sugar-coating
 - 🔜 **Not yet** — *the host supports this; llm-router has not shipped it*
 - ❌ **No** — Not possible on this host
 - *Codex: the prompt-routing hook (`UserPromptSubmit`) is installed and on by default; tool-call enforcement (`PreToolUse`) is not — `hosts/events.py:routing_ready("codex")` is False until its payload keys are verified*
+- *Gemini CLI: the prompt-routing hook (`UserPromptSubmit`) is installed and on by default; tool-call enforcement (`PreToolUse`) is not implemented — `hosts/events.py:routing_ready("gemini-cli")` is False*
 - *VS Code/Cursor: Manual routing via MCP tools, no automatic native-turn hooks
 - **Manual analytics requires running `llm-router snapshot` periodically
 
@@ -71,7 +72,8 @@ llm-router install
 - ✅ Hook health checks (auto-restart if needed)
 - ✅ Decision replay (re-run past prompts with different models)
 
-**Cost savings:** 60–80% vs Opus-everywhere
+**Cost savings:** not measured — see
+[audit/CRITICAL_2026-09-24_local_models_do_no_work.md](../audit/CRITICAL_2026-09-24_local_models_do_no_work.md).
 
 **Why it's best:**
 - Hooks have full access to Claude Code's runtime
@@ -123,11 +125,13 @@ and `instructions.md`. Codex reads none of them; install removes ours.
 - Gateway mode (`--mode gateway`) is opt-in: the gateway does not yet speak
   Codex's "responses" wire format
 
-### 🟡 Gemini CLI (Strong)
+### 🟡 Gemini CLI (prompt-routing hook; no tool-call enforcement)
 
-**Tier: Full Cost Optimization**
+**Tier: Automatic Routing (push) + MCP**
 
-Google's agent runner. Hooks work well, Gemini models available in chains.
+Google's agent runner. `llm-router install --host gemini-cli` wires the same
+push-routing hook Claude Code gets; the tool-call enforcement hook does not
+exist for this host (`hosts/events.py:routing_ready("gemini-cli")` is False).
 
 **Activation:**
 ```bash
@@ -135,13 +139,13 @@ llm-router install --host gemini-cli
 ```
 
 **Features:**
-- ✅ Auto-routing hooks (gemini-cli-auto-route.py installed)
+- ✅ Push routing: the prompt hook (`gemini-cli-auto-route.py`) is installed and on by default
 - ✅ Session tracking (cost breakdown logged)
 - ✅ Gemini models in primary chains
 - ✅ Free-first routing (Ollama → Gemini Flash → GPT-4o)
 - ✅ Budget tracking
 
-**Cost savings:** 50–70% vs Opus-everywhere
+**Cost savings:** not measured (see the Claude Code section above).
 
 **Why it's good:**
 - Gemini CLI runtime is stable and fast
@@ -150,6 +154,7 @@ llm-router install --host gemini-cli
 - Good for cost-conscious teams
 
 **Limitations:**
+- Tool-call enforcement (`PreToolUse`) is not implemented for Gemini CLI, so `enforce-route` is Claude Code only
 - Gemini Free tier has daily limits
 - No real-time quota display
 - Requires Gemini account setup
@@ -178,7 +183,7 @@ llm-router install --host pi
 - ✅ Budget tracking
 - ✅ Lazy lifecycle (connects on first tool call, auto-disconnects)
 
-**Cost savings:** 50–70% vs single-model usage
+**Cost savings:** not measured (see the Claude Code section above).
 
 **Why it's good:**
 - Pi's MCP adapter supports importing configs from other agents
@@ -210,7 +215,7 @@ llm-router install --host vscode  # or --host cursor
 - ⚠️ No session tracking (unless you invoke tools)
 - ⚠️ Analytics require manual snapshots
 
-**Cost savings:** 30–50% (depends on how often you use routing)
+**Cost savings:** not measured (see the Claude Code section above).
 
 **Why you might use it:**
 - VS Code and Cursor are lighter weight than Claude Code
@@ -222,7 +227,7 @@ llm-router install --host vscode  # or --host cursor
 - No auto-routing (you manually invoke `llm_route`)
 - No session tracking unless you run `llm-router snapshot` manually
 - Higher cognitive load (you pick tools, not automatic)
-- Best case: 30–50% savings (worse than Claude Code)
+- Lower savings than Claude Code (not measured)
 
 **Recommendation:**
 If you're already in VS Code/Cursor and want to try llm-router: use it. But for maximum cost savings, switch to Claude Code.
@@ -275,19 +280,19 @@ Already installed with `pip install llm-routing`
 ## Honest Comparison: Which Host for You?
 
 ### "I want maximum cost savings"
-→ **Claude Code** (auto-hooks, 60–80% savings)
+→ **Claude Code** (auto-hooks; savings not measured)
 
 ### "I'm already in Codex"
 → **Codex CLI** (the prompt hook routes automatically; tool calls are not enforced; native turns are not tracked)
 
 ### "I want to use Gemini for free tier"
-→ **Gemini CLI** (free tier included, 50–70% savings)
+→ **Gemini CLI** (free tier included; prompt hook only, no tool-call enforcement)
 
 ### "I want to use Pi's coding agent"
 → **Pi** — not installable via `llm-router install` today (see the Pi section)
 
 ### "I prefer VS Code"
-→ **VS Code MCP** (manual routing, 30–50% savings, but low friction)
+→ **VS Code MCP** (manual routing, low friction; savings not measured)
 
 ### "I want to check costs after work"
 → **Web Dashboard** (read-only analytics)
@@ -304,7 +309,7 @@ Already installed with `pip install llm-routing`
 **Supported on:**
 - Claude Code ✅
 - Codex CLI ⚠️ (prompt hook only; no tool-call enforcement)
-- Gemini CLI ✅
+- Gemini CLI ⚠️ (prompt hook only; no tool-call enforcement)
 - Pi (pi.dev) ❌ (not installable today)
 - VS Code/Cursor ❌
 - Browser ❌
@@ -327,17 +332,17 @@ Automatic session tracking logs every routing decision for analytics. Manual tra
 
 ### Cost Optimization Quality
 
-**Savings by host:**
+**Savings by host:** not measured (see the Claude Code section above).
 
 | Host | Best Case | Typical | Worst Case | Notes |
 |------|-----------|---------|-----------|-------|
-| Claude Code | 80% | 70% | 50% | Optimal—hooks catch every decision |
-| Codex CLI | 80% | Varies | 0% | Prompt hook routes; tool calls not enforced |
-| Gemini CLI | 70% | 55% | 40% | Good—Gemini Free tier included |
+| Claude Code | — | — | — | Hooks catch every decision |
+| Codex CLI | — | — | — | Prompt hook routes; tool calls not enforced |
+| Gemini CLI | — | — | — | Prompt hook installed; tool-call enforcement not implemented |
 | Pi (pi.dev) | — | — | — | Not installable today |
-| VS Code/Cursor | 50% | 35% | 15% | Lower—only when you invoke tools |
-| Browser | 0% | 0% | 0% | Read-only—no active routing |
-| Local CLI | 60% | 40% | 20% | Scripting only—not continuous |
+| VS Code/Cursor | — | — | — | Only when you invoke tools |
+| Browser | — | — | — | Read-only—no active routing |
+| Local CLI | — | — | — | Scripting only—not continuous |
 
 ---
 
@@ -356,23 +361,19 @@ llm-router install
 # Also install for Codex
 llm-router install --host codex
 
-# Also install for Pi
-llm-router install --host pi
-
 # Metrics are shared across all hosts
 llm-router snapshot  # Shows combined stats
 ```
 
 ### "Which host should I use if I care about cost savings?"
 
-**Claude Code > Gemini CLI / Pi > Codex CLI / VS Code/Cursor**
+**Claude Code > Gemini CLI > Codex CLI / VS Code/Cursor**
 
-Ranking by cost optimization:
-1. **Claude Code** — Automatic hooks, 70–80% savings
-2. **Gemini CLI** — Automatic hooks, 50–70% savings
-3. **Pi (pi.dev)** — MCP tools, 50–70% savings
-4. **Codex CLI** — Explicit MCP routing only
-5. **VS Code/Cursor** — Manual routing, 30–50% savings
+Ranking by cost optimization (savings not measured — see the Claude Code section above):
+1. **Claude Code** — Automatic hooks
+2. **Gemini CLI** — Prompt hook only, no tool-call enforcement
+3. **Codex CLI** — Explicit MCP routing only
+4. **VS Code/Cursor** — Manual routing
 
 ### "Do hooks ever break things?"
 
@@ -408,9 +409,9 @@ llm-router install --host <new-host>
 
 | Dimension | Claude Code | Codex CLI | Gemini CLI | Pi (pi.dev) | VS Code | Browser | CLI |
 |-----------|:-----------:|:---------:|:----------:|:-----------:|:-------:|:-------:|:---:|
-| Cost savings | 🟢 80% | ⚠️ Opt-in | 🟡 70% | 🟡 70% | 🟠 35% | ⚪ 0% | 🟡 40% |
+| Cost savings | 🟢 — | ⚠️ Opt-in | 🟡 — | 🟡 — | 🟠 — | ⚪ — | 🟡 — |
 | Setup friction | 🟢 Low | 🟡 Med | 🟡 Med | 🟢 Low | 🟢 Low | 🟢 Low | 🟡 Med |
-| Auto-routing | ✅ Yes | ❌ No | ✅ Yes | ✅ Yes | ❌ No | ❌ No | ⚠️ Partial |
-| Recommend | **🥇 Gold** | ⚠️ Manual | **🥈 Silver** | **🥉 Bronze** | ⚠️ Manual | 📊 Analytics | 🔧 Advanced |
+| Auto-routing | ✅ Yes | ❌ No | ⚠️ Prompt only | ✅ Yes | ❌ No | ❌ No | ⚠️ Partial |
+| Recommend | **🥇 Gold** | ⚠️ Manual | **🥈 Silver** | ⛔ Not installable | ⚠️ Manual | 📊 Analytics | 🔧 Advanced |
 
 **TL;DR:** Want max savings? Use Claude Code. Want flexibility? Pick your editor, use MCP tools manually. Want analytics? Check the dashboard.
