@@ -1,20 +1,12 @@
-"""Cache layer — two caches with different keys + use cases.
+"""Classification cache: SHA-256 exact-match LRU of ClassificationResult.
 
-Two independent caches live here:
+Keys = (prompt, quality_mode, min_model), so the router doesn't re-classify
+identical prompts. Imported as `from llm_router.cache import get_cache`.
 
-1. **ClassificationCache** (legacy, ported from llm-router):
-       SHA-256 exact-match LRU. Keys = (prompt, quality_mode, min_model).
-       Caches ClassificationResult so the router doesn't re-classify
-       identical prompts. Imported as `from llm_router.cache import get_cache`.
-
-2. **SemanticCache** (v0.0.2 stub, sqlite-vec backend in v0.0.2 impl):
-       Embedding-similarity lookup. Reuses *responses* across
-       semantically-equivalent prompts (paraphrases, near-duplicates).
-       Imported as `from llm_router.cache import SemanticCache`.
-
-The two coexist because they answer different questions:
-    - ClassificationCache: "did we already classify this exact prompt?"
-    - SemanticCache: "did we already answer something semantically similar?"
+The response-reuse cache is `llm_router.semantic_cache`. A same-named
+`SemanticCache` stub lived here (cache/store.py) whose get() always returned
+None, with zero callers; removed per audit 2026-09-24 (04_structure_duplication,
+confirmed in 13_verify_structure_docs).
 """
 from llm_router.cache.classification import (
     CacheEntry,
@@ -22,7 +14,6 @@ from llm_router.cache.classification import (
     ClassificationCache,
     get_cache,
 )
-from llm_router.cache.store import SemanticCache, SemanticCacheEntry
 
 __all__ = [
     # Legacy classification cache
@@ -30,7 +21,4 @@ __all__ = [
     "CacheStats",
     "ClassificationCache",
     "get_cache",
-    # New semantic response cache
-    "SemanticCache",
-    "SemanticCacheEntry",
 ]
