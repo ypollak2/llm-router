@@ -114,7 +114,7 @@ class ProviderStreamEvent(TypedDict, total=False):
     usage: ProviderUsageInfo
 
 
-def _ollama_num_ctx() -> int | None:
+def _ollama_num_ctx(model: str | None = None) -> int | None:
     """Configured Ollama context window (LLM_ROUTER_OLLAMA_NUM_CTX), or None.
 
     Returns None when unset or invalid so callers keep Ollama's own default —
@@ -131,7 +131,7 @@ def _ollama_num_ctx() -> int | None:
         # num_ctx that differs between calls reloads the model (3-6s).
         try:
             from llm_router.hooks.agent_loop import _num_ctx
-            return _num_ctx()
+            return _num_ctx(model.split("/", 1)[-1] if model else None)
         except Exception:                                    # noqa: BLE001
             return None
     try:
@@ -218,7 +218,7 @@ async def call_llm(
         # (surfaced downstream as EmptyResponseError → chain failover). Let
         # operators raise it via LLM_ROUTER_OLLAMA_NUM_CTX so large generations
         # don't empty out. Unset = keep Ollama's own default (no change).
-        _num_ctx = _ollama_num_ctx()
+        _num_ctx = _ollama_num_ctx(model)
         if _num_ctx:
             kwargs["num_ctx"] = _num_ctx
 

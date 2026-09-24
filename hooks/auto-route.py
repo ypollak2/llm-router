@@ -4219,14 +4219,32 @@ def main() -> None:
                         hook_input.get("transcript_path", ""), prompt,
                         session_id=session_id,
                     )
-                _direct_result = _execute_chain(
-                    prompt, _direct_chain, task_type,
-                    timeout=OLLAMA_TIMEOUT, history=_history, context=_session_ctx,
-                    deadline_s=_hook_deadline(),
-                    # I1: the session store and a scoped semantic index.
-                    session_id=session_id,
-                    root=hook_input.get("cwd") or os.getcwd(),
-                )
+                _draft_root = hook_input.get("cwd") or os.getcwd()
+                # I4: the draft may open files. Read-only — it answers before
+                # Claude sees the prompt, so it may look at the repo, never
+                # change it. A loop that produces nothing in time falls through
+                # to the text chain below, inside the same hook deadline.
+                if _local_agent_loop_enabled():
+                    from llm_router.hooks.direct_executor import execute_agent as _execute_agent
+                    _direct_result = _execute_agent(
+                        prompt, _direct_chain, project_root=_draft_root,
+                        timeout=OLLAMA_TIMEOUT, context=_session_ctx,
+                        deadline_s=_hook_deadline(), read_only=True,
+                        session_id=session_id,
+                    )
+                    _debug_log(
+                        f"[INVOCATION {invocation_id:.3f}] READ-ONLY DRAFT LOOP: "
+                        f"{'answered' if _direct_result else 'nothing, text chain next'}"
+                    )
+                if not _direct_result:
+                    _direct_result = _execute_chain(
+                        prompt, _direct_chain, task_type,
+                        timeout=OLLAMA_TIMEOUT, history=_history, context=_session_ctx,
+                        deadline_s=_hook_deadline(),
+                        # I1: the session store and a scoped semantic index.
+                        session_id=session_id,
+                        root=_draft_root,
+                    )
 
             # S2-6: a draft that cites a file nobody mentioned and that does not
             # exist is not a weak answer, it is a fabricated one — and Stage 2 made

@@ -262,11 +262,11 @@ def _num_predict_for(timeout: float) -> int:
     return max(_NUM_PREDICT_FLOOR, min(_NUM_PREDICT_CEILING, budget))
 
 
-def _local_num_ctx() -> int | None:
-    """The shared local context window (see agent_loop._num_ctx)."""
+def _local_num_ctx(model: str | None = None) -> int | None:
+    """The shared local context window for *model* (see agent_loop._num_ctx)."""
     try:
         from llm_router.hooks.agent_loop import _num_ctx
-        return _num_ctx()
+        return _num_ctx(model)
     except Exception:                                        # noqa: BLE001
         return None
 
@@ -283,7 +283,7 @@ def call_ollama(
         "think": False,
         "options": {"temperature": 0.3, "num_predict": _num_predict_for(timeout),
                     # I2: the same window as the agent loop (no reload thrash).
-                    **({"num_ctx": _local_num_ctx()} if _local_num_ctx() else {})},
+                    **({"num_ctx": _local_num_ctx(model)} if _local_num_ctx(model) else {})},
     }).encode()
     ollama_url = _get_ollama_url()
     req = urllib.request.Request(
@@ -775,8 +775,12 @@ def execute_agent(
     timeout: int = 60,
     context: str | None = None,
     deadline_s: float | None = None,
+    read_only: bool = False,
+    session_id: str | None = None,
 ) -> DirectResult | None:
     """Run a tool-calling agent loop for tasks that need file operations.
+
+    ``read_only=True`` is the draft mode (I4): read/list/search only.
 
     Unlike execute_chain (text-in/text-out), this gives the model access to
     read_file, edit_file, write_file, search_files, list_files, and run_command.
@@ -869,6 +873,8 @@ def execute_agent(
             timeout_per_call=timeout,
             system_prompt=_agent_system_prompt(context),
             deadline_s=left,
+            read_only=read_only,
+            session_id=session_id,
         )
 
         if response and quality_ok(response, "code"):

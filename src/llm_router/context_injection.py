@@ -152,7 +152,8 @@ def inject(prompt: str, *, root: str | None = None, limit: int = 3,
 
 
 def inject_system_prompt(system_prompt: str | None, objective: str,
-                         *, root: str | None = None) -> str | None:
+                         *, root: str | None = None,
+                         session_id: str | None = None) -> str | None:
     """Attach knowledge to a SYSTEM prompt instead of a user prompt.
 
     The agent loop and the CLI agents carry the task in a system prompt and the
@@ -164,7 +165,7 @@ def inject_system_prompt(system_prompt: str | None, objective: str,
     if not enabled():
         return system_prompt
     try:
-        enriched = inject(objective, root=root)
+        enriched = inject(objective, root=root, session_id=session_id)
         if enriched == objective:
             return system_prompt
         block = enriched[: enriched.index(objective)].strip() if objective in enriched else enriched

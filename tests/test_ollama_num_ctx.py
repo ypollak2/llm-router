@@ -18,11 +18,11 @@ from llm_router.providers import _ollama_num_ctx, call_llm
 
 def test_num_ctx_unset_uses_the_shared_local_window(monkeypatch):
     """I2: every local path requests the same window, or Ollama reloads the
-    model between calls. Unset = the shared default (131072)."""
+    model between calls. Unset = the per-model default (I2b; 32768 when no model is named)."""
     for k in ("LLM_ROUTER_OLLAMA_NUM_CTX", "LLM_ROUTER_LOCAL_NUM_CTX", "LLM_ROUTER_AGENT_NUM_CTX"):
         monkeypatch.delenv(k, raising=False)
     from llm_router.hooks.agent_loop import _num_ctx
-    assert _ollama_num_ctx() == _num_ctx() == 131072
+    assert _ollama_num_ctx() == _num_ctx() == 32768
 
 
 def test_num_ctx_parses_positive_int(monkeypatch):
@@ -72,7 +72,7 @@ async def test_num_ctx_is_the_shared_window_for_ollama_when_unset(monkeypatch):
     for k in ("LLM_ROUTER_OLLAMA_NUM_CTX", "LLM_ROUTER_LOCAL_NUM_CTX", "LLM_ROUTER_AGENT_NUM_CTX"):
         monkeypatch.delenv(k, raising=False)
     await call_llm("ollama/qwen2.5:7b", [{"role": "user", "content": "hi"}])
-    assert captured.get("num_ctx") == 131072
+    assert captured.get("num_ctx") == 32768  # qwen2.5 is unmeasured → the safe window (I2b)
 
 
 @pytest.mark.asyncio

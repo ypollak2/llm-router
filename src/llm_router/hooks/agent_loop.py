@@ -374,14 +374,26 @@ def execute_tool(name: str, args: dict, project_root: Path) -> str:
 FINISH_TOOL = "finish"
 
 
-def _tool_call_schema() -> dict:
+# I4 (2026-09-24): the tools a DRAFT may use. A draft answers the user's
+# prompt before Claude sees it; it may look at the repo, never change it.
+READ_ONLY_TOOLS = ("read_file", "list_files", "search_files")
+
+
+def _tool_definitions(read_only: bool = False) -> list[dict]:
+    if not read_only:
+        return TOOL_DEFINITIONS
+    return [t for t in TOOL_DEFINITIONS if t["function"]["name"] in READ_ONLY_TOOLS]
+
+
+def _tool_call_schema(read_only: bool = False) -> dict:
     """JSON Schema for one tool call, built from the live tool definitions."""
     return {
         "type": "object",
         "properties": {
             "tool": {
                 "type": "string",
-                "enum": [t["function"]["name"] for t in TOOL_DEFINITIONS] + [FINISH_TOOL],
+                "enum": [t["function"]["name"] for t in _tool_definitions(read_only)]
+                        + [FINISH_TOOL],
             },
             "arguments": {"type": "object"},
             # Retained so a model that volunteers `done` is not punished for it.
@@ -400,7 +412,19 @@ def constrained_decoding_enabled() -> bool:
     )
 
 
-def _num_ctx() -> int | None:
+# I2b (2026-09-24): families measured to hold 131072 on the GPU of this 52 GB
+# Mac (resident 32K/64K/128K: qwen3.5 6.6/8.1/10 GB, qwen3.8 18/18/17 GB).
+# qwen3-coder:30b is NOT here: 64K spilled 11% and 128K 45% of it to CPU
+# (49 / 70 GB), and every draft timed out. Unmeasured models get 32768.
+_LARGE_WINDOW_FAMILIES = ("qwen3.5", "qwen3.8")
+
+
+def _default_num_ctx(model: str | None) -> int:
+    name = (model or "").lower()
+    return 131072 if any(f in name for f in _LARGE_WINDOW_FAMILIES) else 32768
+
+
+def _num_ctx(model: str | None = None) -> int | None:
     """Context window to request, or None to accept the server's default.
 
     Left unset, llama.cpp runs with whatever the daemon was started with and
@@ -413,7 +437,7 @@ def _num_ctx() -> int | None:
     # 8192, which a draft with session context overflows (oldest tokens — the
     # system prompt — silently dropped), and a num_ctx that differs between
     # calls forces a 3-6s model reload each time (measured on qwen3.8). So the
-    # draft path and this loop share LLM_ROUTER_LOCAL_NUM_CTX, default 131072;
+    # draft path and this loop share LLM_ROUTER_LOCAL_NUM_CTX, default per model (I2b);
     # the older agent-only override still wins when set.
     #
     # 131072 measured 2026-09-24 on qwen3.8 (52 GB Mac, 24k-token real prompt):
@@ -424,12 +448,12 @@ def _num_ctx() -> int | None:
     raw = (os.environ.get("LLM_ROUTER_AGENT_NUM_CTX", "").strip()
            or os.environ.get("LLM_ROUTER_LOCAL_NUM_CTX", "").strip())
     if not raw:
-        return 131072
+        return _default_num_ctx(model)
     try:
         value = int(raw)
         return value if value > 0 else None
     except ValueError:
-        return 131072
+        return _default_num_ctx(model)
 
 
 def _agent_temperature() -> float:
@@ -637,8 +661,15 @@ def run_agent_loop(
     timeout_per_call: int = 60,
     system_prompt: str | None = None,
     deadline_s: float | None = None,
+    read_only: bool = False,
+    session_id: str | None = None,
 ) -> str | None:
     """Run a tool-calling agent loop with an Ollama model.
+
+    ``read_only`` (I4) is the draft mode: only READ_ONLY_TOOLS are offered, any
+    other call is refused, and a direct answer without opening a file is a valid
+    result — a draft for a general question has nothing to read.
+    ``session_id`` seeds retrieval from the files the session recently touched.
 
     Sends the prompt with tool definitions, executes any tool calls,
     feeds results back, and repeats until the model returns a final
@@ -652,7 +683,8 @@ def run_agent_loop(
     try:
         from llm_router.context_injection import inject_system_prompt
         system_prompt = inject_system_prompt(system_prompt, prompt,
-                                             root=str(project_root))
+                                             root=str(project_root),
+                                             session_id=session_id)
     except Exception:                                        # noqa: BLE001
         pass
 
@@ -724,14 +756,14 @@ def run_agent_loop(
         payload = {
             "model": model,
             "messages": messages,
-            "tools": TOOL_DEFINITIONS,
+            "tools": _tool_definitions(read_only),
             "stream": False,
             "think": False,
             "options": {"temperature": _agent_temperature()},
         }
         if constrained_decoding_enabled():
-            payload["format"] = _tool_call_schema()
-        _ctx = _num_ctx()
+            payload["format"] = _tool_call_schema(read_only)
+        _ctx = _num_ctx(model)
         if _ctx:
             payload["options"]["num_ctx"] = _ctx
         body = json.dumps(payload).encode()
@@ -778,7 +810,7 @@ def run_agent_loop(
             if _final is not None:
                 # The model declared itself done. Same guard as below: a loop that
                 # ran no tool has not done the work it was entered for.
-                return _final if (_final and tools_used) else None
+                return _final if (_final and (tools_used or read_only)) else None
 
         # Repair shim (Fix #2): recover a tool call the model dumped into text
         # instead of the structured tool_calls field. No-op for good models.
@@ -792,7 +824,7 @@ def run_agent_loop(
             # response WITHOUT ever executing a tool, it only chatted — return
             # None so the caller's fallback ladder tries the next model, rather
             # than passing off a plausible-looking no-op as success.
-            if tools_used == 0:
+            if tools_used == 0 and not read_only:
                 _trace.emit("loop.end", reason="final_text_without_any_tool_call",
                             iteration=iteration, tools_used=0, content=content)
                 return None
@@ -837,7 +869,11 @@ def run_agent_loop(
                 _trace.emit("tool.call", iteration=iteration, tool=tool_name,
                             args=tool_args)
                 _tt0 = time.monotonic()
-                tool_result = execute_tool(tool_name, tool_args, project_root)
+                if read_only and tool_name not in READ_ONLY_TOOLS:
+                    tool_result = (f"Refused: {tool_name} is not available — this "
+                                   f"draft is read-only. Answer from what you have read.")
+                else:
+                    tool_result = execute_tool(tool_name, tool_args, project_root)
                 _trace.emit("tool.result", iteration=iteration, tool=tool_name,
                             ms=int((time.monotonic() - _tt0) * 1000),
                             result_len=len(tool_result or ""),
