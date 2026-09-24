@@ -51,7 +51,12 @@ def format_direct_response(result: DirectResult, task_type: str, complexity: str
     metadata = f"[{model_label}] {tier} | {task_type}/{complexity} | {latency} | {tokens}"
 
     # §2.5 honesty: only claim "context-free" when the call really was.
-    if getattr(result, "history_turns", 0) > 0:
+    if getattr(result, "files_read", ()):
+        ctx_note = (
+            f"⚠ Draft from a local model that read the repo (read-only: "
+            f"{_reads_label(result)}) — verify the key claim before trusting:\n\n"
+        )
+    elif getattr(result, "history_turns", 0) > 0:
         ctx_note = (
             f"⚠ Unverified draft from a routed model (saw the last "
             f"{result.history_turns} conversation turn(s), but NO access to your "
@@ -109,6 +114,9 @@ def format_echo_context(result: DirectResult, task_type: str, complexity: str) -
             route_prefix = f"{route_prefix} · {_hint}"
     except Exception:
         pass
+    if getattr(result, "files_read", ()):
+        return _format_grounded_echo(result, task_type, complexity, model_label, tier,
+                                     latency, tokens, metadata, route_prefix)
     return (
         f"ROUTING NOTICE — this prompt was classified as {task_type}/{complexity}. A cheap "
         f"model ({model_label}, {tier}, {latency}, {tokens}) drafted a candidate answer to "
@@ -136,6 +144,43 @@ def format_echo_context(result: DirectResult, task_type: str, complexity: str) -
         "───── UNVERIFIED DRAFT (no context — verify or discard) ─────\n"
         f"{result.text}\n"
         "───── END UNVERIFIED DRAFT ─────\n"
+        f"Source: {metadata}"
+    )
+
+
+def _reads_label(result: DirectResult, limit: int = 8) -> str:
+    reads = list(result.files_read)
+    more = f", +{len(reads) - limit} more" if len(reads) > limit else ""
+    return ", ".join(reads[:limit]) + more
+
+
+def _format_grounded_echo(result, task_type, complexity, model_label, tier, latency,
+                          tokens, metadata, route_prefix) -> str:
+    """I6: the notice for a draft that READ the repo.
+
+    The blind-draft notice says the draft had no file access and tells Claude to
+    discard any answer that depends on the repo. For a draft that read files both
+    halves are wrong, and together they guarantee the draft is never used.
+    """
+    return (
+        f"ROUTING NOTICE — this prompt was classified as {task_type}/{complexity}. A local "
+        f"model ({model_label}, {tier}, {latency}, {tokens}) drafted an answer to conserve "
+        f"your Claude subscription quota.\n\n"
+        f"This draft was produced by a local model that READ the repo (read-only) before "
+        f"answering: {_reads_label(result)}. It did NOT see your shell, tool output, or the "
+        f"full conversation. Treat it as a claim to check, not as fact. Decide:\n"
+        "  - If the answer is a fact about the code or general knowledge AND you can confirm "
+        "its key claim (one read of the place it cites is enough): deliver it (lightly "
+        "corrected), and begin your reply with this exact line then a blank line:\n"
+        f"      {route_prefix}\n"
+        "  - If the answer depends on something the draft could not see — earlier turns, "
+        "current state, shell or tool output — IGNORE the draft entirely and answer normally. "
+        "Do NOT relay it, and do NOT prefix the routed line (you did not route).\n"
+        "  - If the key claim does not check out, discard it. Correctness outranks the token "
+        "saving.\n\n"
+        "───── DRAFT (read-only repo access — check the key claim) ─────\n"
+        f"{result.text}\n"
+        "───── END DRAFT ─────\n"
         f"Source: {metadata}"
     )
 

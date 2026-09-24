@@ -663,6 +663,7 @@ def run_agent_loop(
     deadline_s: float | None = None,
     read_only: bool = False,
     session_id: str | None = None,
+    read_log: list[str] | None = None,
 ) -> str | None:
     """Run a tool-calling agent loop with an Ollama model.
 
@@ -670,6 +671,8 @@ def run_agent_loop(
     other call is refused, and a direct answer without opening a file is a valid
     result — a draft for a general question has nothing to read.
     ``session_id`` seeds retrieval from the files the session recently touched.
+    ``read_log`` (I6), when given, receives one ``tool(target)`` entry per read
+    tool that ran, so the caller can tell Claude what the draft actually saw.
 
     Sends the prompt with tool definitions, executes any tool calls,
     feeds results back, and repeats until the model returns a final
@@ -874,6 +877,9 @@ def run_agent_loop(
                                    f"draft is read-only. Answer from what you have read.")
                 else:
                     tool_result = execute_tool(tool_name, tool_args, project_root)
+                    if read_log is not None and tool_name in READ_ONLY_TOOLS:
+                        _a = tool_args if isinstance(tool_args, dict) else {}
+                        read_log.append(f"{tool_name}({_a.get('path') or _a.get('pattern') or ''})")
                 _trace.emit("tool.result", iteration=iteration, tool=tool_name,
                             ms=int((time.monotonic() - _tt0) * 1000),
                             result_len=len(tool_result or ""),

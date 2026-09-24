@@ -4206,11 +4206,18 @@ def main() -> None:
                 # make. Falls through to Claude (which has context + tools).
                 _debug_log(f"[INVOCATION {invocation_id:.3f}] DIRECT SKIP: no free-tier model available")
             elif _needs_claude_tools(prompt, task_type):
-                # File-op task — use agent loop (Ollama with tool calling)
+                # File-op task — use agent loop (Ollama with tool calling).
+                # I4c: a QUESTION that names a file is still a question — it
+                # drafts read-only, where an answer from the injected context is
+                # allowed. Live, the write loop (which must call a tool) spent
+                # the whole 55s wandering on one.
                 from llm_router.hooks.direct_executor import execute_agent as _execute_agent
                 _direct_result = _execute_agent(
                     prompt, _direct_chain, timeout=60, context=_session_ctx,
                     deadline_s=_loop_deadline(),
+                    project_root=hook_input.get("cwd") or os.getcwd(),
+                    session_id=session_id,
+                    read_only=task_type in ("query", "research", "analyze"),
                 )
                 if _direct_result:
                     _debug_log(f"[INVOCATION {invocation_id:.3f}] AGENT LOOP SUCCESS")

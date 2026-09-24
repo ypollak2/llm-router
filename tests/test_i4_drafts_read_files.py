@@ -185,3 +185,41 @@ def test_loop_off_means_text_chain_only(ar, monkeypatch, tmp_path):
     calls = _wire(monkeypatch, agent_result="x" * 40)
     _run(ar, monkeypatch, tmp_path)
     assert calls["agent"] == [] and len(calls["chain"]) == 1, calls
+
+
+# ── I4c: a QUESTION flagged tool-shaped still drafts read-only ───────────────
+# Live 2026-09-24: "What is the default value of _REVERT_DEFAULT in
+# hooks/draft_usage.py?" was classified query/simple but needs_tools=True (it
+# names a file), so it went to the write-capable loop — which must call a tool,
+# got no session or cwd, wandered 4 calls at ~10s each and hit the 55s deadline.
+
+def _wire_tools(monkeypatch, *, needs_tools):
+    calls = _wire(monkeypatch, agent_result="The default value is 50, set in draft_usage.py.")
+    import llm_router.hooks.chain_builder as chain_builder
+    monkeypatch.setattr(chain_builder, "needs_claude_tools", lambda p, t: needs_tools)
+    return calls
+
+
+def test_a_tool_shaped_question_drafts_read_only(ar, monkeypatch, tmp_path):
+    calls = _wire_tools(monkeypatch, needs_tools=True)
+    _run(ar, monkeypatch, tmp_path)   # SAFE_PROMPT classifies as query
+    assert len(calls["agent"]) == 1, calls
+    kw = calls["agent"][0]
+    assert kw.get("read_only") is True
+    assert kw.get("session_id") == "sess-i4a1b2"
+    assert kw.get("project_root") == str(tmp_path)
+
+
+def test_a_tool_shaped_code_task_keeps_the_write_loop(ar, monkeypatch, tmp_path):
+    calls = _wire_tools(monkeypatch, needs_tools=True)
+    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps({
+        "prompt": "Refactor the parse_config function in config.py to use a dataclass",
+        "session_id": "sess-i4a1b2", "cwd": str(tmp_path)})))
+    monkeypatch.setattr(sys, "stdout", io.StringIO())
+    with pytest.raises(SystemExit):
+        ar.main()
+    assert calls["agent"], "premise: the code task reached the agent loop"
+    kw = calls["agent"][0]
+    assert not kw.get("read_only")
+    assert kw.get("session_id") == "sess-i4a1b2"
+    assert kw.get("project_root") == str(tmp_path)

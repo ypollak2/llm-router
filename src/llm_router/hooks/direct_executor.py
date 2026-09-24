@@ -41,6 +41,10 @@ class DirectResult:
     # 0 = the call was context-free; >0 = history was included (§2.5), and
     # display banners must not claim "no access to history".
     history_turns: int = 0
+    # I6: the read tools a local agent-loop draft ran ("read_file(a.py)", ...).
+    # Non-empty means the draft saw those parts of the repo, and the notice to
+    # Claude must say so rather than call it context-free.
+    files_read: tuple[str, ...] = ()
 
 
 # ── System Prompts ────────────────────────────────────────────────────────────
@@ -866,6 +870,7 @@ def execute_agent(
         t0 = time.monotonic()
         # run_agent_loop might need to return usage as well
         # For now, we'll just capture the response
+        _reads: list[str] = []
         response = run_agent_loop(
             prompt=prompt,
             model=model.model,
@@ -875,6 +880,7 @@ def execute_agent(
             deadline_s=left,
             read_only=read_only,
             session_id=session_id,
+            read_log=_reads,
         )
 
         if response and quality_ok(response, "code"):
@@ -883,6 +889,7 @@ def execute_agent(
                 text=response,
                 model=model,
                 latency_ms=latency_ms,
+                files_read=tuple(dict.fromkeys(_reads)),
             )
 
     # Loud failure (Fix #4): the whole chain drifted/failed. Surface it on
