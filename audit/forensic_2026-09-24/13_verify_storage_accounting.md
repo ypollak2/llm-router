@@ -2,7 +2,7 @@
 
 Verifier: independent pass, no prior context from the original auditors. Baseline: worktree
 `llm-router-forensic` @ `3c96d23` (confirmed via `git log -1`). All Python run via
-`HOME=$(mktemp -d) PYTHONPATH=.../src /Users/yaliandrona/Projects/llm-router/.venv/bin/python`.
+`HOME=$(mktemp -d) PYTHONPATH=.../src <repo>/.venv/bin/python`.
 All `~/.llm-router/*.db` reads were done against copies in a scratch dir; no write ever touched
 the real files. No paid APIs, no ollama, no full pytest run.
 

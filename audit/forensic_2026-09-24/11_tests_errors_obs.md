@@ -4,7 +4,7 @@ Auditor: Domain 11 (TST- / ERR- / OBS-). Baseline: worktree `llm-router-forensic
 All commands run with `HOME=$(mktemp -d) PYTHONPATH=src <venv>/python ...`; no full-suite run
 performed (baseline: `00_baseline_pytest.log`, 9,640 tests, 0 failed, 0 errors, 200 skipped —
 independently corroborated by domain-12's `12_docs_claims.md`). Targeted file/pair runs only.
-`/Users/yaliandrona/Projects/llm-router/CLAUDE.md` (git-ignored, read per coordinator instruction)
+`<repo>/CLAUDE.md` (git-ignored, read per coordinator instruction)
 supplied the measurement discipline this domain leans on throughout: denominators, "unknown ≠
 favourable", narrowest-mutation red-checks, and the R13/S9/S9b ratchet pattern.
 

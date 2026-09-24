@@ -5,7 +5,7 @@ All evidence below is read directly from that worktree, `~/.claude/settings.json
 (the live Claude Code hook registration on this machine), `~/.claude/hooks/`
 (the live installed hooks), and read-only copies of `~/.llm-router/*.db` (copied to
 a scratchpad before querying, per instruction, never queried live). The main
-checkout's `CLAUDE.md` (`/Users/yaliandrona/Projects/llm-router/CLAUDE.md`, git-
+checkout's `CLAUDE.md` (`<repo>/CLAUDE.md`, git-
 ignored there, read on explicit instruction) independently corroborates several
 findings below (§S8, §S9) and its measurement-methodology warnings are applied
 throughout — rates are never quoted without a denominator, and "this machine, this
@@ -238,7 +238,7 @@ covered.**
 `src/llm_router/install_hooks.py` copies `hooks/*.py` into
 `claude_dir()/hooks` — confirmed to be `~/.claude/hooks/` (global, per-user), NOT
 the repo-local `.claude/hooks/`: live evidence, `~/.claude/settings.json:49`
-registers `/Users/yaliandrona/.claude/hooks/llm_router-auto-route.py` (prefixed
+registers `~/.claude/hooks/llm_router-auto-route.py` (prefixed
 `llm_router-`, not the bare `auto-route.py` name found in the repo's own
 `.claude/hooks/`), and that installed copy IS version 35 — current, matching
 canonical. `install_hooks.py` also has `_competing_router_hooks(settings)`
@@ -421,7 +421,7 @@ against the main checkout's `CLAUDE.md`):
 5. **This worktree's own `.claude/hooks/auto-route.py` (v18, 1,212 lines) does
    NOT run** — corrected this pass. Live verification:
    `~/.claude/settings.json:49` registers
-   `/Users/yaliandrona/.claude/hooks/llm_router-auto-route.py` (note the
+   `~/.claude/hooks/llm_router-auto-route.py` (note the
    `llm_router-` filename prefix — a different name, not just a different path),
    confirmed to be hook-version 35 (current, matches canonical). The plugin
    manifest (`.claude-plugin/plugin.json:38`, `"hooks": "hooks/hooks.json"`)
@@ -436,8 +436,8 @@ against the main checkout's `CLAUDE.md`):
    tracked DESPITE the ignore rule (added, presumably, before that gitignore
    line existed, then never removed). One of the three,
    `.claude/hooks/version-guard.py`, hardcodes
-   `ROOT = "/Users/yali.pollak/projects/llm-router"` — a path that does not
-   exist on this machine (`yaliandrona`, not `yali.pollak`) — so even if
+   `ROOT = "<another-home>/projects/llm-router"` — a path that does not
+   exist on this machine (this machine has a different username) — so even if
    something did wire it up, it silently no-ops (`FileNotFoundError → exit 0`).
    **Reclassified from a runtime safety gap to a repository-hygiene finding**
    (RTE-001, revised).
@@ -605,11 +605,11 @@ several of which (§13) are not guaranteed to be edited consistently today.
   (`.claude-plugin/plugin.json:38` points `${CLAUDE_PLUGIN_ROOT}/hooks/` at the
   repo-root `hooks/` directory, not `.claude/hooks/`). The hook Claude Code
   actually runs, confirmed live via `~/.claude/settings.json:49`, is
-  `/Users/yaliandrona/.claude/hooks/llm_router-auto-route.py` — a differently
+  `~/.claude/hooks/llm_router-auto-route.py` — a differently
   named file at a different path, independently confirmed to be hook-version 35
   (current). A sibling file in the same stale directory,
   `.claude/hooks/version-guard.py`, hardcodes
-  `ROOT = "/Users/yali.pollak/projects/llm-router"`, a path that does not exist
+  `ROOT = "<another-home>/projects/llm-router"`, a path that does not exist
   on this machine — further evidence the directory is dead weight, possibly
   copied from another developer's checkout, not a functioning local override.
 - **Evidence**: `git log -1 --format="%H %ai %s" -- .claude/hooks/` →
@@ -684,7 +684,7 @@ adds that a pinning test now exists)*
 - **Category**: Routing engine / low-signal default
 - **Severity**: CRITICAL
 - **Confidence**: HIGH — independently corroborated in TWO places
-  (`classify.py:521-547` and `/Users/yaliandrona/Projects/llm-router/CLAUDE.md`
+  (`classify.py:521-547` and `<repo>/CLAUDE.md`
   §"A default is not a classification").
 - **Location**: `src/llm_router/classify.py:521-547` (measurement),
   `:585-608` (`classify_signals`), `:430/445-450/454-461` (the differing

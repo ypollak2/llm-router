@@ -3,7 +3,7 @@
 This session is running under a subagent task ("auditor 08 — Context/knowledge/memory and
 persisted state") for a forensic llm-router audit. The task required writing the deliverable to:
 
-    /Users/yaliandrona/Projects/llm-router-forensic/audit/forensic_2026-09-24/08_context_storage.md
+    <worktree>/audit/forensic_2026-09-24/08_context_storage.md
 
 Partway through the investigation, a system-reminder announced Plan Mode is active for this
 session, restricting me to read-only tools plus writes to this plan file only. Per the standing
@@ -15,7 +15,7 @@ designated path (or I can be un-blocked to write it directly).
 Methodology note: `sqlite3 -readonly` fails to open any `~/.llm-router/*.db` file in this sandboxed
 bash environment (confirmed even against a plain `/tmp` copy — likely a sandbox syscall
 restriction, not a repo defect). Workaround used throughout: copy each db file into the scratchpad
-(`/private/tmp/claude-501/.../scratchpad/dbcopies/`) and query the copy without `-readonly`. No
+(`<scratch>`) and query the copy without `-readonly`. No
 write ever targeted the real `~/.llm-router` files. No CLAUDE.md exists in the forensic worktree
 root (checked; only a Trae-IDE `.rules` file exists there, unrelated) — proceeded without it.
 
@@ -179,7 +179,7 @@ ongoing guarantee, rather than restating a fixed bug as current. Trivial edit, z
 **Category**: Context/Performance · **Severity**: INFORMATIONAL · **Confidence**: HIGH (for the
 number produced), MEDIUM for real-world generalization (see gap below)
 **Method**: `HOME=$(mktemp -d) PYTHONPATH=.../src python3 -c "context_injection.inject(prompt,
-root='/Users/yaliandrona/Projects/llm-router-forensic')"` with prompt = "How do I add a new
+root='<worktree>')"` with prompt = "How do I add a new
 provider to the router and wire up its pricing?" (66 chars).
 **Result**: output grew from 66 → 349 chars (≈70 tokens added at 4 chars/token), consisting entirely
 of a `<repo_state>` block (git head/last_commit/uncommitted/changed files) rendered by

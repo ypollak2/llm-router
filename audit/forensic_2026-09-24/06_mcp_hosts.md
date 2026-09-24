@@ -2,7 +2,7 @@
 
 > **STATUS NOTE:** Plan Mode activated mid-task and blocked writing to the
 > designated deliverable path
-> `/Users/yaliandrona/Projects/llm-router-forensic/audit/forensic_2026-09-24/06_mcp_hosts.md`.
+> `<worktree>/audit/forensic_2026-09-24/06_mcp_hosts.md`.
 > All research below is complete and evidence-backed (read-only Bash/Read/Grep against
 > the forensic worktree at commit 3c96d23, plus two sandboxed Python runs with
 > `HOME=$(mktemp -d)`, no paid APIs called). This file contains the full deliverable

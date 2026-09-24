@@ -7,7 +7,7 @@ attacker host, with a dummy canary credential (`sk-test-DUMMY-CANARY-...`). No p
 was called, no ollama was started, no repo file was modified.
 
 Interpreter used throughout:
-`HOME=$(mktemp -d) PYTHONPATH=.../llm-router-forensic/src /Users/yaliandrona/Projects/llm-router/.venv/bin/python`
+`HOME=$(mktemp -d) PYTHONPATH=.../llm-router-forensic/src <repo>/.venv/bin/python`
 
 ---
 

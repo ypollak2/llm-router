@@ -2,7 +2,7 @@
 
 Verifier: independent pass, did not write the original findings. Baseline: worktree
 `llm-router-forensic`, detached at `3c96d23` (confirmed via `git rev-parse HEAD`). All
-Python run with `HOME=$(mktemp -d) PYTHONPATH=.../src /Users/yaliandrona/Projects/llm-router/.venv/bin/python`
+Python run with `HOME=$(mktemp -d) PYTHONPATH=.../src <repo>/.venv/bin/python`
 against the baseline. No full test suite run; no Ollama/paid APIs invoked. No repo file
 modified.
 
@@ -159,7 +159,7 @@ verification.**
   "any Claude Code session opened at this repo's root." This is the exact premise
   the task brief asked to check, and it does not hold:
   - No `.claude/settings.json` exists anywhere relevant — not in this worktree,
-    not in the main checkout (`/Users/yaliandrona/Projects/llm-router/.claude/`
+    not in the main checkout (`<repo>/.claude/`
     has only `settings.local.json`, a 3-line permissions file with no `hooks`
     key).
   - Claude Code hooks are only invoked when explicitly registered in a

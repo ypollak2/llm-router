@@ -1,11 +1,11 @@
 # Domain 07 — Providers, caches, performance, async/concurrency
 
-Auditor: 07/12. Baseline: worktree `/Users/yaliandrona/Projects/llm-router-forensic`,
+Auditor: 07/12. Baseline: worktree `<worktree>`,
 detached at `3c96d23`. All file:line references are against that commit unless noted.
 Note on process: this run was interrupted mid-task by a harness plan-mode activation
 (no writes made during the interruption) and resumed per coordinator instruction; the
 worktree's `CLAUDE.md` is git-ignored and was read from the sibling checkout at
-`/Users/yaliandrona/Projects/llm-router/CLAUDE.md` as instructed (read-only, its
+`<repo>/CLAUDE.md` as instructed (read-only, its
 measurement-methodology rules applied throughout — see especially the WAL/busy_timeout
 and "unknown-as-favourable-answer" lessons, both directly relevant to findings below).
 The one live-DB query below was run against a **copy** of `~/.llm-router/usage.db`

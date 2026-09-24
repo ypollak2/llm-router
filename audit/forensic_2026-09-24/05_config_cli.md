@@ -5,7 +5,7 @@ precedence, boolean explosion), §27 (API surface: imports, env vars, YAML, hook
 contracts), §28 (CLI hierarchy/help/consistency vs docs), §73 (one source of truth for
 env vars and CLI commands). Baseline: git worktree `llm-router-forensic`, detached at
 `3c96d23`. All Python execution below used
-`HOME=$(mktemp -d) PYTHONPATH=.../src /Users/yaliandrona/Projects/llm-router/.venv/bin/python`
+`HOME=$(mktemp -d) PYTHONPATH=.../src <repo>/.venv/bin/python`
 against the baseline; no full test suite was run (targeted files only); no Ollama/paid
 APIs were invoked.
 

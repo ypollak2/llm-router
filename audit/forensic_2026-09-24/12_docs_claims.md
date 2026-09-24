@@ -65,7 +65,7 @@ allow-list of exceptions. Verified via `git ls-files docs/`:
 `PROPOSAL_LOCAL_EXECUTION.md`, `RESEARCH_LANDSCAPE.md`,
 `RESEARCH_SEMANTIC_LAYER.md`, `ROUTERARENA.md`, `security_command_matrix.txt`,
 `decisions/0001-package-name.md`, `decisions/0002-semantic-layer.md`,
-`measurements/*.md,*.json` (9 files), `releases/v11.1.0-chuzom-migration-evidence.md`,
+`measurements/*.md,*.json` (9 files), `releases/v11.1.0-upstream-migration-evidence.md`,
 `archive/*.md` (9 files, including `PLAN_LOCAL_EXECUTION_ROADMAP.md`,
 `PLAN_ROUTING_OBSERVABILITY.md`, `PLAN_SAVINGS_ATTRIBUTION.md`).
 

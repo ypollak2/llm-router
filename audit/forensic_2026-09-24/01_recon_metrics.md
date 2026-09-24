@@ -1,7 +1,7 @@
 # 01 — Recon, Repository Map, Metrics, Versioning/Release, Repository Hygiene
 
 Auditor: domain 01 (Recon/Metrics). Baseline: worktree
-`/Users/yaliandrona/Projects/llm-router-forensic`, detached HEAD `3c96d23`
+`<worktree>`, detached HEAD `3c96d23`
 (`v15.1.0-23-g3c96d23` — 23 commits past the last version tag). All commands
 below were run read-only against this worktree; nothing in it was modified.
 `LLM_ROUTER_BASH_INTERCEPT=off` was set for every shell command in this
@@ -13,7 +13,7 @@ Note on scope: the brief asked me to also read this worktree's `CLAUDE.md`.
 No such file exists here — it is deliberately gitignored
 (`0754cc9 chore: gitignore CLAUDE.md (local AI instructions, not for repo)`),
 confirmed absent by a full-tree `find`. Per the coordinator, I instead read it
-read-only from the live repo at `/Users/yaliandrona/Projects/llm-router/CLAUDE.md`.
+read-only from the live repo at `<repo>/CLAUDE.md`.
 It documents this project's own measurement failures (denominator errors on
 routing-rate claims, benchmark traffic contaminating the ground-truth corpus,
 `x or 0` turning "unknown" into a comparable number, `release.sh`'s dead PyPI
@@ -122,7 +122,7 @@ opinion.** They are concentrated in three files:
 project's own pinned interpreter:
 
 ```
-$ HOME=$(mktemp -d) /Users/yaliandrona/Projects/llm-router/.venv/bin/python -m py_compile scripts/gen_cast.py
+$ HOME=$(mktemp -d) <repo>/.venv/bin/python -m py_compile scripts/gen_cast.py
   File "scripts/gen_cast.py", line 31
     f"  {'\"what does os.path.join do?\"':<46}  ...
 SyntaxError: f-string expression part cannot include a backslash
