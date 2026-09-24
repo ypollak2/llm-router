@@ -72,6 +72,11 @@ ENV_REGISTRY: dict[str, tuple[str, str, int]] = {
     "LLM_ROUTER_ANOMALY_THRESHOLD": ("llm_router", "session_spend.py", 1),
     "LLM_ROUTER_AUDIT_DISABLED": ("llm_router", "misroute_audit.py", 1),
     "LLM_ROUTER_AUDIT_PATH": ("llm_router", "enterprise/audit.py", 1),
+    # PR2 follow-up (2026-09-24): opt-in gate for the background benchmark
+    # fetch, shared by benchmarks.py's benchmark_auto_fetch_enabled() and
+    # hooks/session-start.py's ImportError fallback of the same check — off
+    # by default (North Star #5, local-first).
+    "LLM_ROUTER_AUTO_BENCHMARK_FETCH": ("llm_router", "benchmarks.py", 2),
     "LLM_ROUTER_BANDIT": ("llm_router", "router.py", 1),
     "LLM_ROUTER_BASH_COMPRESS": ("llm_router", "hooks/bash-compress.py", 1),
     "LLM_ROUTER_BENCHMARK_TTL_DAYS": ("llm_router", "hooks/session-start.py", 1),

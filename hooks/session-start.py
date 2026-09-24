@@ -38,6 +38,19 @@ except ImportError:
     def http_timeout() -> int:
         return int(os.environ.get("LLM_ROUTER_HTTP_TIMEOUT", "10"))
 
+# Shared gate for the opt-in background benchmark fetch (LLM_ROUTER_AUTO_BENCHMARK_FETCH,
+# off by default — North Star #5, local-first). llm_router.benchmarks.maybe_refresh_
+# benchmarks_background() is the OTHER trigger that can launch this fetch; importing
+# the same check here means the two triggers can't drift on what "opt-in" means.
+try:
+    from llm_router.benchmarks import benchmark_auto_fetch_enabled
+except ImportError:
+    # Fallback if llm_router not installed — same values as benchmarks.py.
+    def benchmark_auto_fetch_enabled() -> bool:
+        return os.environ.get("LLM_ROUTER_AUTO_BENCHMARK_FETCH", "").strip().lower() in (
+            "1", "on", "true", "yes",
+        )
+
 def _router_home():
     """Router state dir, resolved per call so LLM_ROUTER_HOME is honoured.
 
@@ -1090,10 +1103,22 @@ def _warm_ollama_bg() -> None:
 def _maybe_refresh_benchmarks_bg() -> None:
     """Trigger a background benchmark refresh if the local file is stale.
 
-    Detaches a subprocess immediately so the session-start hook returns in < 1ms.
-    Only fires when ``~/.llm-router/benchmarks.json`` is missing or older than
-    ``LLM_ROUTER_BENCHMARK_TTL_DAYS`` (default 7 days).
+    Opt-in only (North Star #5, local-first): off unless
+    ``LLM_ROUTER_AUTO_BENCHMARK_FETCH=1`` is set. Without it, llm-router would
+    reach out to huggingface.co / github / litellm on every session whose
+    ``~/.llm-router/benchmarks.json`` is missing or stale, with no consent —
+    the bundled copy in ``data/benchmarks.json`` is always enough to route.
+
+    When enabled, detaches a subprocess immediately so the session-start hook
+    returns in < 1ms. Only fires when ``~/.llm-router/benchmarks.json`` is
+    missing or older than ``LLM_ROUTER_BENCHMARK_TTL_DAYS`` (default 7 days).
     """
+    if not benchmark_auto_fetch_enabled():
+        return  # opt-in only — no network fetch without explicit consent (no
+        # debug log here: this hook, unlike auto-route.py, does not write to
+        # auto-route-debug.log; skipped branches elsewhere in this file
+        # follow the same silent-return convention, e.g. _warm_ollama_bg and
+        # _maybe_reindex_okf_bg's own env-gate checks above)
     benchmarks_path = os.path.join(_state_dir(), "benchmarks.json")
     ttl_days = int(os.environ.get("LLM_ROUTER_BENCHMARK_TTL_DAYS", "7"))
 
@@ -1394,7 +1419,9 @@ def main() -> None:
     hints += _preflight_check()
 
     # 5. Trigger benchmark refresh in background if stale (v5.0 adaptive router).
-    # Runs as a detached subprocess so the session start is never blocked.
+    # Opt-in via LLM_ROUTER_AUTO_BENCHMARK_FETCH=1 (default off — local-first,
+    # no network fetch without consent). Runs as a detached subprocess so the
+    # session start is never blocked when it does run.
     _maybe_refresh_benchmarks_bg()
 
     # 5b. Refresh this project's OKF index in the background. A stale index does
