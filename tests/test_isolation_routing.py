@@ -181,10 +181,20 @@ def test_dashboard_savings_accuracy(isolated_env: Path):
     assert status, "Failed to get router status"
     assert "usage" in status.lower() or "%" in status, "Status missing usage info"
 
-    # Check recent routing decisions
-    last = _run_llm_router_cmd(["last", "--count", "3"])
-    assert last, "Failed to get recent decisions"
-    assert len(last.split("\n")) > 0, "Last decisions empty"
+    # Check recent routing decisions — in the SAME isolated home the prompts
+    # were routed in. This used to run `last` against the real HOME, where its
+    # "Error: … not found" printed with exit 0 (CFG-010) and passed as
+    # "got decisions". Now: exit 0 with rows, or exit 1 naming the missing
+    # ledger — never an error that reports success.
+    env = os.environ.copy()
+    env["HOME"] = str(isolated_env)
+    env["LLM_ROUTER_HOME"] = str(isolated_env) + "/.llm-router"
+    r = subprocess.run([_llm_router_binary(), "last", "--count", "3"],
+                       capture_output=True, text=True, timeout=30, env=env)
+    if r.returncode == 0:
+        assert r.stdout.strip(), "exit 0 but no decisions printed"
+    else:
+        assert r.returncode == 1 and "not found" in r.stdout, (r.returncode, r.stdout[-300:])
 
 
 def test_dashboard_cost_tracking_fresh(isolated_env: Path):

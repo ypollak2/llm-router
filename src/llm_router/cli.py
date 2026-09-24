@@ -1119,7 +1119,7 @@ def main() -> None:
         sys.exit(cmd_budget(args[1:]))
     elif args and args[0] == "replay":
         from llm_router.commands.replay import main as _replay_main
-        _replay_main(args[1:])
+        sys.exit(_replay_main(args[1:]))  # CFG-010: propagate the exit code
     elif args and args[0] == "verify":
         # CHZ-PKG-005: propagate verify's exit code. main() returns 1 when any
         # health check fails; discarding it made `llm_router verify` always exit 0,
@@ -1132,7 +1132,7 @@ def main() -> None:
         sys.exit(_audit_main(args[1:]))
     elif args and args[0] == "last":
         from llm_router.commands.last import main as _last_main
-        _last_main(args[1:])
+        sys.exit(_last_main(args[1:]))  # CFG-010: propagate the exit code
     elif args and args[0] == "gc":
         from llm_router.commands.gc import main as _gc_main
         sys.exit(_gc_main(args[1:]))
@@ -1155,10 +1155,10 @@ def main() -> None:
         sys.exit(0)
     elif args and args[0] == "retrospect":
         from llm_router.commands.retrospect import main as _retrospect_main
-        _retrospect_main(args[1:])
+        sys.exit(_retrospect_main(args[1:]))  # CFG-010: propagate the exit code
     elif args and args[0] == "snapshot":
         from llm_router.commands.snapshot import main as _snapshot_main
-        _snapshot_main(args[1:])
+        sys.exit(_snapshot_main(args[1:]))  # CFG-010: propagate the exit code
     elif args and args[0] == "stats":
         from llm_router.commands.stats import cmd_stats
         sys.exit(cmd_stats(args[1:]))
