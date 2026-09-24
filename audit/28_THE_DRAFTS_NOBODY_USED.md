@@ -216,3 +216,75 @@ Do not "fix the detector" as a single number. Two separate questions:
 2. **Everything else** — the file-naming class needs no work at 0/222.
 
 Until (1) has a number, widening the regex is tuning against examples.
+
+---
+
+## Addendum 2 — D-2 measured, and it is not a rescue problem
+
+Lifetime, over the whole of `auto-route-debug.log`:
+
+| | count |
+|---|---|
+| Drafts produced (`DIRECT SUCCESS`) | **3,122** |
+| …of which a **rescue** overrode the context-dependent gate | **746** |
+|   · `SESSION RESCUE` | 674 |
+|   · `OKF RESCUE` | 67 |
+|   · `TOOL LOOP RESCUE` | 5 |
+| Gate correctly closed (`DIRECT SKIP: context-dependent`) | 713 |
+| Drafts audited for use (since `draft_usage.py` was added) | **1,132** |
+| **Drafts ever relayed as the answer** | **0** |
+
+The rescues do what they were built to do: they convert roughly half of what
+the gate would have blocked (746 against 713 skips) into drafts. The yield on
+those 746 is zero.
+
+**But singling out the rescues would be wrong.** No draft has ever been used —
+rescued or not, 0 of 1,132. The rescues are not underperforming the baseline;
+there is no baseline to underperform.
+
+### The statistic that matters
+
+0 successes in 1,132 trials. By the rule of three, the 95% upper bound on the
+true acceptance rate is **3/1132 ≈ 0.27%**.
+
+So the honest claim is not "drafts are rarely used". It is:
+
+> With 95% confidence, fewer than 1 in 370 drafts is relayed as the answer.
+
+The mechanism has ~3,122 productions on record and no demonstrated success.
+
+### What this does and does not license
+
+**Does not license** "local routing is worthless". The MCP `llm()` path is a
+different mechanism and is not measured here. Nor does it license a claim about
+other users or other workloads — this is one machine, one user, whose work is
+overwhelmingly repo-bound. A support-inbox or general-Q&A workload could look
+entirely different, and nothing here measures that.
+
+**Does license** stating that on THIS machine the pre-draft path has a measured
+cost (773 s of local compute and ~18.7 s of median added latency in a single
+day) and an unmeasurable benefit, and that the burden of proof has flipped.
+
+### Why "fix the rescues" is the wrong next move
+
+The rescues ask *"can I find material related to this prompt?"*. That question
+has been answered "yes" 746 times and has never once produced a usable draft, so
+improving its precision cannot be evaluated: every arm of the experiment reads
+zero. **A change to a mechanism with no successes has no measurable effect** —
+which is the definition of unfalsifiable.
+
+The options that ARE evaluable:
+
+1. **Turn the pre-draft path off** and measure what changes — latency per prompt,
+   local compute, and whether anything is lost. With acceptance at 0, the
+   expected loss is zero and the expected saving is 18.7 s per prompt. This is
+   the only one of the three that produces a number quickly.
+2. **Route WITH context instead of drafting blind** — the advisory banner
+   already tells callers to do this (`llm(task=…, context=…)`), and the 4 MCP
+   calls made this way are outside the 0-of-1,132.
+3. **Leave it and re-measure in a week** on a less repo-bound workload, to test
+   whether this is a property of the mechanism or of this fortnight's work.
+
+Recommending (1), gated behind a flag so it is one command to reverse, with (3)
+as the check. Not doing it unilaterally: it changes the product's most visible
+behaviour, and that is a product decision rather than a correctness one.
