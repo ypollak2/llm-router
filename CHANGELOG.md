@@ -10,6 +10,71 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 | [CHANGELOG-ARCHIVE.md](CHANGELOG-ARCHIVE.md) | v10.1.5 back to v6.3.0 |
 | [GitHub Releases](https://github.com/ypollak2/llm-router/releases) | v6.2 and earlier |
 
+## [15.2.0] - 2026-09-24
+
+Security fixes and honest numbers, from a forensic audit whose every CRITICAL
+and HIGH finding was re-checked by an independent verifier
+(`audit/forensic_2026-09-24/`). Each fix below landed with a test that failed
+before it and a red-check reverting only that fix; the full suite ran under a
+clean HOME for every commit (final: 9,910 tests, 0 failures, 0 errors).
+
+### Security
+
+- **A cloned repository can no longer receive your provider API key.** A
+  project `.env` setting `OPENAI_COMPAT_BASE_URL` made `call_llm` send the real
+  `OPENAI_API_KEY` to that host (reproduced end to end against a local
+  listener with a canary key). The openai-compatible provider now sends its own
+  `OPENAI_COMPAT_API_KEY` or a placeholder; a project `.env` can no longer set
+  endpoint-shaped keys (`…_URL/_BASE/_HOST/_ENDPOINT/_WEBHOOK`, proxies), and
+  the hook injects only API keys and non-endpoint `LLM_ROUTER_*` settings from
+  it — not `PYTHONPATH`, `NODE_OPTIONS` or `DYLD_*`. The pxpipe URL must be
+  loopback. Your own `$LLM_ROUTER_HOME/.env` is unaffected.
+- **The direct-execution chain is budget-gated and scrubbed.** It reached paid
+  providers with no budget check and sent prompts unscrubbed. Paid providers
+  now pass the router's own budget check (fails closed when unreadable), and
+  prompt, history and system prompt are scrubbed after assembly.
+- **`LLM_ROUTER_AGENT_WRITES=off/propose` now also covers `run_command`.**
+  `python3 -c "open(p,'w')…"` wrote outside the project with writes off. Under
+  `propose` (the default) and `off`, inline interpreter code, `sed -i` and
+  `find` actions are refused. **Behaviour change:** `python -c` / `node -e` no
+  longer run in the local agent loop unless writes are `apply`. This is not a
+  sandbox — see SECURITY.md.
+
+### Changed — what the numbers mean
+
+- **Savings nobody observed being used are "unverified", never a headline.**
+  Only the hook's realized-gated rows count as verified; MCP/gateway/agentic
+  credits and rows of unknown provenance are shown beside the headline,
+  labelled `+ $X unverified, n=N`. On the maintainer's ledger (2026-09-24),
+  `llm-router status` all-time went from **$372.58 "saved"** to **$0.47 saved +
+  $483.14 unverified (n=46,099)**; the canonical accessor reports $0.11 (n=7).
+- Docs state the tool counts the server registers: **70** (`LLM_ROUTER_SLIM=off`)
+  and **12** in the default surface, including `llm_local_task`, which can edit
+  and run commands. A test ties the docs to the registration code.
+- Host docs: Codex has the prompt-routing hook but **no** tool-call
+  enforcement; Pi is **not installable** today (`install --host pi` fails).
+
+### Fixed
+
+- The local agent loop's wall-clock cap never fired (an absolute deadline read
+  as a duration), so the hook could be killed at 60s holding nothing.
+- The Codex adapter no longer returns the CLI's stdin banner as the answer.
+- `last`, `retrospect`, `replay` and `snapshot` exit non-zero on failure.
+- The service `/health` reports the package version (was a hardcoded 5.3.0).
+- Three scripts that could not compile on Python 3.11; CI now compiles `scripts/`.
+
+### Removed
+
+- `llm_router.cache.SemanticCache`: a stub whose `get()` always returned None,
+  with no callers. The working cache is `llm_router.semantic_cache`.
+
+### Measured, not shipped
+
+- A local agent (qwen3-coder:30b) passes spec-shaped edits reliably, and a
+  pre-registered rule selecting them held out at precision 10/10 tasks — but it
+  admits 1 of 708 real prompts on the maintainer's machine, so prompt-level
+  local routing was **not** wired. `architecture/Q15_HARNESS_PLAN.md`.
+
 ## [15.1.0] - 2026-09-23
 
 Remediation plan II, the half that needed measuring before it could be fixed.
