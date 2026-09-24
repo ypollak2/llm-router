@@ -162,3 +162,40 @@ Ship-to-default rule (decided now, before data):
 1. Prefix name (`@local`) and whether it also accepts a slash command.
 2. Default acceptance check per repo (§3.2 step 2).
 3. Whether `git commit` (local, reversible) is allowed in the pilot; push stays out.
+
+## 8. Pre-registered test: can a local model continue a real conversation? (2026-09-24)
+
+Requested by the user: for "keep going", "continue" and mechanical steps that
+belong to a longer conversation, pass the conversation and its context to the
+local model and let it do the work. Measured before building.
+
+**Sample.** From the 108 real instructions (§4), the continuation (C) and
+conversation-dependent mechanical/edit (A, B) moments whose session worked in
+this repo and whose next Claude window changed at least one tracked file.
+Up to 20, taken in time order; the selection is recorded before any run.
+
+**What the local model gets** (per moment):
+- the conversation up to that prompt, compressed: every user prompt and every
+  assistant text block (tool output omitted), trimmed from the oldest end to
+  fit 60K tokens, first user prompt always kept;
+- a sandbox worktree of this repo at the last commit before the prompt;
+- the agent loop with read/list/search/edit/write and the command allowlist,
+  writes applied inside the sandbox only; model qwen3.8 (131072 window),
+  budget 600 s.
+
+**Ground truth.** What Claude did in the window between that prompt and the
+next user prompt: the set of repo files it changed (Edit/Write targets and
+files in commits made in the window), and the test commands it ran that passed.
+
+**Scoring (mechanical, no model judge, no Claude quota).** A moment PASSES if
+- file-set F1 between the local agent's changed files and Claude's is >= 0.5, and
+- every pytest command Claude ran successfully in the window also passes in
+  the local sandbox after the local agent's changes (moments with none: the
+  F1 condition alone).
+File overlap is a proxy — it can credit a wrong edit to the right file and
+miss a right edit to an equivalent file. Reported with that caveat.
+
+**Decision rule.** PASS rate >= 70% over >= 15 scored moments -> build local
+continuation into the `@local` path (still opt-in). 40-70% -> report where it
+breaks, no build. < 40% -> not viable with this model. Every number is
+reported with n.
