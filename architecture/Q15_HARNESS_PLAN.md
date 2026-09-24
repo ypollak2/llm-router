@@ -64,3 +64,34 @@ What this means for Q15: on these suites one strong model is at or near the ceil
 completion, so a graph can only win on tokens (the plan suite needs 235k–348k per task) or on the
 cleanliness failures. To separate the arms on completion, the task set needs harder, multi-layer tasks.
 Raw results: `results/q15/` (not committed).
+
+## Local agent arm and the eligibility rule (2026-09-24)
+
+Same harness and hidden verifiers; backend `local` = `run_agent_loop` with qwen3-coder:30b,
+`AGENT_WRITES=apply` inside the sandbox, `BENCH_TIMEOUT=600`, this machine, $0.
+
+| Suite | Local (verified, runs) | Opus 5.5 | Notes |
+|---|---|---|---|
+| plan (3 × 3) | 3/9 | 9/9 | passes plan-retry 3/3; ttl-cache, todo-cli 0/3 |
+| hard (10 × 3) | 16/30 | 27/30 | reliable on 5 tasks, incl. strict-validate (Opus 0/3: edited the test) |
+| easy (26 × 3, held-out) | 72/78 | — | |
+| brutal (11 × 3, held-out) | 24/33 | — | |
+
+Local was 2–6× faster in wall-clock where it passed.
+
+**Eligibility rule (`scripts/local_eligibility.py`), pre-registered in 56c7764 before the held-out run:**
+an edit that names its target and states the change; questions, cause-hunting and
+"implement the plan" are excluded. Held-out: it admitted 10 of 37 tasks, **precision 10/10 tasks
+(30/30 runs)** and recall 10/32 (the local agent was reliable on 32/37 held-out tasks). With n=10,
+the true failure rate on admitted tasks could still be up to ~30% (rule of three).
+
+**On the population it would actually face, the rule does not transfer.** Applied to 708 real
+prompts from this machine's Claude Code history (deduped; benchmark sessions and sandboxes
+excluded via `scripts/groundtruth/sources.py`), it admits **1 (0.1%)**, and that one is a false
+admission. 60% of real prompts name no target ("keep going", "push both"), 27% are questions and
+9% are cause-hunts. Real prompts are short directions to an agent that already has the context,
+not self-contained edit specs. So prompt-level routing to a local agent would move ~0% of this
+user's work, even though the local agent does most spec-shaped tasks well.
+
+The plausible lever is the opposite direction: the strong model, which has the context, writes a
+precise named edit and delegates it (`llm_local_task`). It is not built or measured.
