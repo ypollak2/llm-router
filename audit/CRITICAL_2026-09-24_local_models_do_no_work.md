@@ -12,7 +12,7 @@ verified savings, lifetime: **$0.00**).
 |---|---|---|
 | Real prompts seen by the hook | 3,405 | `scripts/routing_rate.py` (real sessions only) |
 | … reached a local model ("routed") | 1,432 (42.1%) | same |
-| Local drafts produced (`DIRECT SUCCESS`) | 3,176 | `auto-route-debug.log`, raw lines |
+| Local drafts produced (`DIRECT SUCCESS`, real models) | ~1,424 (qwen3.8 743, qwen3.5 528, qwen3-coder 152) | `auto-route-debug.log`; **corrected**: the first count (3,176) included ~1,490 lines from a test fixture model (`ollama/fake-model`) that leaks into the production log under real-looking session ids |
 | Drafts **used** by Claude | **0 of 1,185 audited** | `routing_report.draft_acceptance()` |
 | Turns **replaced** by local output | **0** | no substitution/block line ever logged |
 | Local agent-loop runs that finished | 53 | debug log; writes default to `propose`, so no edit ever landed |
@@ -22,6 +22,17 @@ verified savings, lifetime: **$0.00**).
 
 Cost of the machinery that produced this: median **+12.7 s before every drafted prompt**
 (43 drafts on 2026-09-24), plus forced routing calls whose output is discarded.
+
+## Corrections after review (same day)
+
+- The local models are **capable when given the repository**: on the held-out easy suite the local
+  agent passed 33/39 questions and 39/39 edits. The binding constraint is not model ability but
+  that the hook path gives the draft model no tools, and the tool loop's edits stay proposals.
+- Local MCP calls (Claude calling `llm`/routing tools that landed on Ollama) were 10–19/day on
+  Sep 10–14 and 0–3/day on Sep 15–24 (`usage` table). Answers relayed with a "🎯 routed" line: 10 ever.
+  The cause of the drop is not yet traced.
+- The semantic layer is not in main (branch `feat/semantic-layer`, off by default, unmeasured); OKF
+  injects lesson documents, not code or session state.
 
 ## Why (root causes, each with its evidence)
 
