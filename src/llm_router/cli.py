@@ -71,6 +71,7 @@ Usage:
     llm-router summary          — session summary of routing and savings
     llm-router routing          — current routing configuration
     llm-router routing-report   — routing accuracy and share over a window
+    llm-router routing-health   — reach, context, USED and latency per day, with n
     llm-router sessions         — list recorded sessions
     llm-router config           — show the resolved configuration
     llm-router profile          — show or auto-generate the routing profile
@@ -856,6 +857,7 @@ _KNOWN_SUBCOMMANDS = frozenset(
         "profile",
         "routing",
         "routing-report",
+        "routing-health",
         "broker",
         "gateway",
         "invoice",
@@ -993,6 +995,10 @@ def main() -> None:
             _asyncio.run(run_broker_server())
         except KeyboardInterrupt:
             print("\nsession broker stopped.")
+    elif args and args[0] == "routing-health":
+        # Is local routing doing work: reach, context, USED, latency — with n.
+        from llm_router.routing_health import main as health_main
+        sys.exit(health_main(args[1:]))
     elif args and args[0] == "routing-report":
         # Observability: deep-dive report of what routed (tokens / latency / savings).
         from llm_router.routing_report import main as report_main

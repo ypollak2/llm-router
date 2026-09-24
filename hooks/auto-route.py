@@ -2435,6 +2435,24 @@ def _rescue_is_relevant(prompt: str, context: str) -> bool:
     return len(prompt_terms & ctx_terms) >= _RESCUE_MIN_SHARED_TERMS
 
 
+# P (2026-09-24): build_chain returns [] for "research" — web research belongs to
+# Perplexity — so a research-TAGGED prompt never reached a local model. Replayed
+# over 186 real prompts, 18 ended there and only one needed the web (current
+# OpenRouter prices); the rest were repo questions and briefs. A draft goes to
+# the web-only chain only when the prompt carries a web signal.
+_WEB_SIGNAL_RE = re.compile(
+    # Not "today"/"current"/years: in this workload they mostly point at local
+    # state ("only 4 routings today") and dated file names, not the web.
+    r"https?://|\b(latest|newest|news|price[sd]?|pricing|cost of|search the web|"
+    r"web search|google|look up online|release notes|released|announce[sd]?)\b",
+    re.IGNORECASE,
+)
+
+
+def _needs_web(prompt: str) -> bool:
+    return bool(_WEB_SIGNAL_RE.search(prompt or ""))
+
+
 def _local_agent_loop_enabled() -> bool:
     """Is the local tool-calling loop allowed to answer context-dependent prompts?
 
@@ -3518,7 +3536,15 @@ def main() -> None:
         sys.exit(0)
 
     prompt = hook_input.get("prompt", "")
-    _debug_log(f"[INVOCATION {invocation_id:.3f}] prompt_len={len(prompt)} session_id={hook_input.get('session_id', 'unknown')[:8]}")
+    # Tags for llm_router.routing_log.is_human: a benchmark session in a /tmp
+    # sandbox and a sub-agent's report both carry a real-looking session id.
+    _cwd_seen = str(hook_input.get("cwd") or os.getcwd())
+    _tags = ""
+    if re.match(r"^/(private/)?(tmp|var/folders)/", _cwd_seen):
+        _tags += " sandbox=1"
+    if prompt.lstrip().startswith(("Another Claude session sent a message", "<agent-message")):
+        _tags += " kind=agent-report"
+    _debug_log(f"[INVOCATION {invocation_id:.3f}] prompt_len={len(prompt)} session_id={hook_input.get('session_id', 'unknown')[:8]}{_tags}")
     try:
         from llm_router import trace as _t
         _t.emit("route.prompt", invocation=f"{invocation_id:.3f}",
@@ -3545,6 +3571,13 @@ def main() -> None:
         _debug_log(f"[INVOCATION {invocation_id:.3f}] SYSTEM_NOTIFICATION_BYPASS — "
                    f"background-task notification, not a user prompt")
         _coverage_unobserved("SYSTEM_NOTIFICATION_BYPASS")
+        sys.exit(0)
+    # R: a sub-agent's report reaches the hook the same way — 34 of 186 real
+    # prompts (18%) in a 10-day replay; its draft can never be relayed.
+    if prompt.lstrip().startswith(("Another Claude session sent a message", "<agent-message")):
+        _debug_log(f"[INVOCATION {invocation_id:.3f}] SUBAGENT_REPORT_BYPASS — "
+                   f"a sub-agent's report, not a user prompt")
+        _coverage_unobserved("SUBAGENT_REPORT_BYPASS")
         sys.exit(0)
 
     # Self-reference bypass: skip routing when the user is debugging llm_router
@@ -4142,7 +4175,11 @@ def main() -> None:
             from llm_router.hooks.direct_executor import execute_chain as _execute_chain
 
             _zone, _raw_pct = _get_direct_pressure()
-            _direct_chain = _build_direct_chain(complexity, _zone, task_type)
+            # P: the DRAFT chain for a research-tagged prompt without a web signal
+            # is built as a question; the routing hint below is unchanged.
+            _draft_task = ("query" if task_type == "research" and not _needs_web(prompt)
+                           else task_type)
+            _direct_chain = _build_direct_chain(complexity, _zone, _draft_task)
 
             # #3: a DRAFT must NEVER hit a paid API. build_chain can include paid
             # externals (gemini/openai); routing a pre-generated draft there is
@@ -4318,7 +4355,8 @@ def main() -> None:
                 _debug_log(
                     f"[INVOCATION {invocation_id:.3f}] DIRECT SUCCESS: "
                     f"model={_direct_result.model.provider}/{_direct_result.model.model} "
-                    f"latency={_direct_result.latency_ms}ms"
+                    f"latency={_direct_result.latency_ms}ms "
+                    f"files_read={len(getattr(_direct_result, 'files_read', ()) or ())}"
                 )
                 # DIRECT SUCCESS says a draft was PRODUCED, not that it was used.
                 # Note it so the next invocation can judge it against the reply
