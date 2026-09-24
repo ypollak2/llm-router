@@ -45,6 +45,8 @@ __all__ = [
     "UNVERIFIED_SAVED_SQL",
     "UNVERIFIED_CALLS_SQL",
     "REALIZED_GATE_SINCE",
+    "REALIZED_MODE",
+    "ELIGIBLE_TURN_PRED_SQL",
     "unverified_note",
     "savings_split_sql",
     "is_verified_saving",
@@ -94,12 +96,17 @@ REALIZED_GATE_SINCE = "2026-09-13T17:57:16"
 #: The one string value `mode` takes for a row the writer observed replacing
 #: Claude's turn. Everything else — "echo", NULL, any other value — is not.
 REALIZED_MODE = "block"
-_VERIFIED_PRED = (
+#: host/model/timestamp only — the population a row must belong to before
+#: `mode` even gets asked. PR6's North Star primary metric (verified share of
+#: ELIGIBLE Claude turns) needs this population as its OWN denominator — any
+#: `mode`, not just 'block' — so it is exported rather than folded silently
+#: into `_VERIFIED_PRED`, where only the mode='block' subset was visible.
+ELIGIBLE_TURN_PRED_SQL = (
     "(host IN (" + ", ".join(f"'{h}'" for h in VERIFIED_HOSTS) + ")"
     " AND model_used NOT LIKE 'llm_router-agentic%'"
-    f" AND timestamp >= '{REALIZED_GATE_SINCE}'"
-    f" AND mode = '{REALIZED_MODE}')"
+    f" AND timestamp >= '{REALIZED_GATE_SINCE}')"
 )
+_VERIFIED_PRED = f"({ELIGIBLE_TURN_PRED_SQL} AND mode = '{REALIZED_MODE}')"
 VERIFIED_SAVED_SQL = (
     f"CASE WHEN {_VERIFIED_PRED} THEN estimated_claude_cost_saved ELSE 0 END"
 )

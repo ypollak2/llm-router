@@ -177,7 +177,10 @@ def test_uncosted_sources_are_named_not_counted_as_free():
     conn.close()
 
     totals = query_window("today", db_path=db)
-    assert totals.saved_usd == pytest.approx(1.5)
+    # PR6: `claude_usage` has no "used" column, so its saving can never be
+    # verified — it lands in `unverified_saved_usd`, not the headline.
+    assert totals.saved_usd == 0.0
+    assert totals.unverified_saved_usd == pytest.approx(1.5)
     assert totals.cost_usd == 0.0
     assert "claude_usage" in totals.uncosted_sources, (
         "a table contributing calls but no cost must be named, so a $0.00 total "

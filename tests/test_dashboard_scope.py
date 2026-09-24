@@ -147,7 +147,11 @@ def test_cumulative_rolls_claude_usage_tokens(fake_state_dir, monkeypatch):
         f"expected 1500 rolled tokens, got in={total_in} out={total_out}"
     )
     assert calls == 1
-    assert saved == pytest.approx(0.42, abs=0.0001)
+    # PR6: `claude_usage` has no "used" column, so it can never say a draft
+    # REPLACED Claude's turn — its money is always UNVERIFIED, never rolled
+    # into `saved_usd` (only savings_stats's mode='block' predicate can be).
+    # This row's $0.42 lives in `unverified_saved_usd`, not here.
+    assert saved == 0.0
 
 
 # ── 2. ROUTING window = today ────────────────────────────────────────────────

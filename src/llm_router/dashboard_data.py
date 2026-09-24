@@ -19,6 +19,9 @@ API surface
 * ``query_window(window, ...)``        — calls + tokens + savings for a window
 * ``query_daily(days=14)``             — per-day breakdown for chart rendering
 * ``query_by_platform(window)``        — per-platform attribution
+* ``query_primary_metric(window, ...)`` — North Star: verified share of
+  eligible Claude turns, numerator and denominator both from
+  ``savings_stats`` in the same window (see :class:`PrimaryMetric`).
 * ``DataSourceAudit``                  — diagnostic record used by
   ``explain-dashboard --check`` to surface tables that have rows but
   aren't being read.
@@ -42,7 +45,11 @@ from typing import Literal
 from llm_router import pricing as _pricing
 
 from llm_router import paths
-from llm_router.savings import savings_split_sql
+from llm_router.savings import (
+    ELIGIBLE_TURN_PRED_SQL,
+    REALIZED_MODE,
+    savings_split_sql,
+)
 
 
 def _production_pred(cols) -> str:
@@ -287,6 +294,62 @@ class RealizedSavingsTotals:
     cost_unknown_attempts: int
 
 
+@dataclass(frozen=True)
+class PrimaryMetric:
+    """North Star (points 8+12): verified share of ELIGIBLE Claude turns.
+
+    Numerator and denominator come from the SAME table (``savings_stats``) and
+    the SAME window, on purpose — a status line that read one number from
+    ``savings_stats`` and the other from ``usage`` would repeat the exact drift
+    class this module exists to prevent (three hand-rolled queries, three
+    different dollar answers, see the module docstring).
+
+    ``eligible_n`` is every row in the base population (host='claude_code',
+    production, post-gate, non-agentic — ``savings.ELIGIBLE_TURN_PRED_SQL``)
+    whose ``mode`` is NOT NULL — i.e. a writer actually recorded whether the
+    draft was used, whatever the answer. ``verified_n`` is the subset with
+    ``mode='block'`` (``savings.REALIZED_MODE``). Rows in the base population
+    with ``mode IS NULL`` are neither verified nor unverified turns — nobody
+    recorded an outcome at all — so they are pulled out into
+    ``unmeasured_n`` rather than silently counted against the denominator
+    (S9: unknown must not be the favourable answer, and must not be the
+    unfavourable one either).
+    """
+
+    window: str
+    verified_n: int
+    eligible_n: int
+    unmeasured_n: int
+
+    #: CLAUDE.md: "a rate without its denominator is not a measurement." Below
+    #: this, noise produced rates from 0% to 4.3% on nothing (21-64 samples).
+    TOO_FEW_THRESHOLD = 50
+
+    @property
+    def too_few(self) -> bool:
+        return self.eligible_n < self.TOO_FEW_THRESHOLD
+
+    @property
+    def pct(self) -> float | None:
+        if self.eligible_n == 0:
+            return None
+        return 100.0 * self.verified_n / self.eligible_n
+
+    def render(self) -> str:
+        """"" when there is nothing to report — the caller decides whether an
+        empty primary-metric line is worth a placeholder."""
+        if self.eligible_n == 0 and self.unmeasured_n == 0:
+            return ""
+        if self.too_few:
+            body = f"too few to tell (n={self.eligible_n})"
+        else:
+            body = f"{self.verified_n} of {self.eligible_n} ({self.pct:.0f}%)"
+        line = f"Verified share of eligible Claude turns: {body}"
+        if self.unmeasured_n:
+            line += f" · unmeasured n={self.unmeasured_n}"
+        return line
+
+
 # ── Core queries ─────────────────────────────────────────────────────────────
 
 
@@ -309,6 +372,13 @@ def query_window(
       ``estimated_claude_cost_saved`` for ``savings_stats``, and the
       Sonnet-baseline computation for ``usage`` (matching the legacy
       ``_query_cumulative_savings`` logic).
+    * PR6: ``saved_usd`` (the VERIFIED figure) is populated ONLY from
+      ``savings_stats`` via ``savings.savings_split_sql`` (PR #147's
+      mode='block' predicate). ``usage``/``claude_usage``/``codex_usage``/
+      ``gemini_usage`` carry no "used" signal, so their money always lands
+      in ``unverified_saved_usd`` — ``_production_pred`` only drops rows
+      whose provenance isn't established production traffic; it no longer
+      promotes a row to verified.
     """
     db = Path(db_path) if db_path else _default_db_path()
     if not db.exists():
@@ -347,7 +417,7 @@ def query_window(
                 f"{_sum_where(cols, 'input_tokens', prod)}, "
                 f"{_sum_where(cols, 'output_tokens', prod)}, "
                 f"{_sum_where(cols, 'cost_usd', prod)}, "
-                f"COALESCE(SUM(CASE WHEN {prod} THEN 0 ELSE 1 END),0) "
+                f"COALESCE(SUM(CASE WHEN {prod} THEN 1 ELSE 0 END),0) "
                 f"FROM {_LEGACY_TABLE} "
                 f"WHERE success=1 AND (provider IS NULL OR provider != 'subscription') AND {where}"
             ).fetchone()
@@ -355,21 +425,28 @@ def query_window(
             in_tok = int(row[1])
             out_tok = int(row[2])
             cost = float(row[3])
+            prod_calls = int(row[7])
 
             def _baseline(i, o):
                 return (int(i) * _OPUS_IN_PER_M + int(o) * _OPUS_OUT_PER_M) / 1_000_000
-            # AUD-06: signed. Clamping here made the aggregate a sum of wins.
-            all_saved = _baseline(in_tok, out_tok) - cost
+            # PR6 / North Star 8+12: `usage` carries no "used" column, so it can
+            # never say the draft REPLACED Claude's turn — only savings_stats's
+            # mode='block' (savings.VERIFIED_SAVED_SQL, PR #147) can. A production
+            # row here is therefore UNVERIFIED, never added to `total_saved`.
+            # `_production_pred` is now purely a drop filter: non-production rows
+            # (ACC-01's sentinel/unknown-provenance rows) are excluded from the
+            # money figure entirely rather than folded into "unverified" — a
+            # fixture row counted as a real, if unconfirmed, user saving would be
+            # the same defect ACC-01 fixed for the verified headline.
             saved = _baseline(row[4], row[5]) - float(row[6])
-            unverified_saved += all_saved - saved
-            unverified_calls += int(row[7])
+            unverified_saved += saved
+            unverified_calls += prod_calls
             by_source[_LEGACY_TABLE] = {
                 "calls": calls, "tokens": in_tok + out_tok,
-                "cost_usd": cost, "saved_usd": saved,
+                "cost_usd": cost, "saved_usd": 0.0,
             }
             total_calls += calls
             total_tokens += in_tok + out_tok
-            total_saved += saved
             total_cost += cost  # the one table with a genuine cost column
 
         # Per-platform tables — tokens_used + cost_saved_usd.
@@ -381,21 +458,23 @@ def query_window(
                 f"SELECT COUNT(*), "
                 f"COALESCE(SUM(tokens_used),0), "
                 f"COALESCE(SUM(CASE WHEN {prod} THEN cost_saved_usd ELSE 0 END),0), "
-                f"COALESCE(SUM(CASE WHEN {prod} THEN 0 ELSE cost_saved_usd END),0), "
-                f"COALESCE(SUM(CASE WHEN {prod} THEN 0 ELSE 1 END),0) "
+                f"COALESCE(SUM(CASE WHEN {prod} THEN 1 ELSE 0 END),0) "
                 f"FROM {table} WHERE {where}"
             ).fetchone()
             calls = int(row[0])
             tokens = int(row[1])
             saved = float(row[2])
-            unverified_saved += float(row[3])
-            unverified_calls += int(row[4])
+            prod_calls = int(row[3])
+            # Same reasoning as the legacy `usage` table above: no "used" column,
+            # so a production row's saving is UNVERIFIED, never verified.
+            # Non-production rows are dropped, not folded into "unverified".
+            unverified_saved += saved
+            unverified_calls += prod_calls
             by_source[table] = {
-                "calls": calls, "tokens": tokens, "saved_usd": saved,
+                "calls": calls, "tokens": tokens, "saved_usd": 0.0,
             }
             total_calls += calls
             total_tokens += tokens
-            total_saved += saved
             # `cost_saved_usd` is a SAVINGS column. This table records no spend,
             # so it contributes none — and says so rather than implying $0.00.
             if calls:
@@ -444,6 +523,60 @@ def query_window(
         unverified_saved_usd=unverified_saved,
         unverified_calls=unverified_calls,
         **_coverage_fields(),
+    )
+
+
+def query_primary_metric(
+    window: WindowLiteral,
+    *,
+    db_path: Path | str | None = None,
+) -> PrimaryMetric:
+    """North Star (points 8+12): verified share of eligible Claude turns.
+
+    ONE query, ONE table (``savings_stats``), ONE window — see
+    :class:`PrimaryMetric`'s docstring for why the numerator and denominator
+    must never come from different tables. Returns an all-zero metric (which
+    :meth:`PrimaryMetric.render` renders as nothing) when the table, or the
+    columns its predicate needs, don't exist yet — the same fallback
+    :func:`llm_router.savings.savings_split_sql` uses for a table predating
+    ``host``/``model_used``/``mode``.
+    """
+    db = Path(db_path) if db_path else _default_db_path()
+    empty = PrimaryMetric(window=window, verified_n=0, eligible_n=0, unmeasured_n=0)
+    if not db.exists():
+        return empty
+
+    conn = sqlite3.connect(str(db))
+    try:
+        if not _table_exists(conn, _JSONL_TABLE):
+            return empty
+        cols = _columns(conn, _JSONL_TABLE)
+        if not {"host", "model_used", "timestamp", "mode"} <= cols:
+            return empty
+        # `_production_pred` here plays the same "drop test traffic" role as
+        # in query_window — it does not decide verified-ness, only whether a
+        # row is even eligible to be measured.
+        prod = _production_pred(cols)
+        eligible = f"({ELIGIBLE_TURN_PRED_SQL} AND {prod})"
+        where = _window_sql(window)
+        row = conn.execute(  # nosec B608 — table/where are module constants & validated enum, not user input
+            f"SELECT "
+            f"COALESCE(SUM(CASE WHEN {eligible} AND mode = '{REALIZED_MODE}' "
+            f"THEN 1 ELSE 0 END),0), "
+            f"COALESCE(SUM(CASE WHEN {eligible} AND mode IS NOT NULL "
+            f"THEN 1 ELSE 0 END),0), "
+            f"COALESCE(SUM(CASE WHEN {eligible} AND mode IS NULL "
+            f"THEN 1 ELSE 0 END),0) "
+            f"FROM {_JSONL_TABLE} WHERE {where}"
+        ).fetchone()
+    finally:
+        conn.close()
+
+    return PrimaryMetric(
+        window=window,
+        verified_n=int(row[0]),
+        eligible_n=int(row[1]),
+        unmeasured_n=int(row[2]),
     )
 
 
@@ -505,11 +638,10 @@ def query_daily(
 
                 def _baseline(i, o):
                     return (int(i) * _OPUS_IN_PER_M + int(o) * _OPUS_OUT_PER_M) / 1_000_000
-                # AUD-06: `+=` on a clamped term is the exact defect — a loss
-                # on one item could never offset a gain on another.
-                verified = _baseline(v_in, v_out) - float(v_cost)
-                b["saved"] += verified
-                b["unverified"] += (_baseline(in_tok, out_tok) - float(cost)) - verified
+                # PR6: `usage` has no "used" column — always UNVERIFIED, never
+                # "saved" (see query_window). Non-production rows are dropped,
+                # not folded into "unverified".
+                b["unverified"] += _baseline(v_in, v_out) - float(v_cost)
 
         for table in _PLATFORM_TABLES:
             if not _table_exists(conn, table):
@@ -519,17 +651,16 @@ def query_daily(
                 f"SELECT date(timestamp,'localtime'), "
                 f"COUNT(*), "
                 f"COALESCE(SUM(tokens_used),0), "
-                f"COALESCE(SUM(CASE WHEN {prod} THEN cost_saved_usd ELSE 0 END),0), "
-                f"COALESCE(SUM(CASE WHEN {prod} THEN 0 ELSE cost_saved_usd END),0) "
+                f"COALESCE(SUM(CASE WHEN {prod} THEN cost_saved_usd ELSE 0 END),0) "
                 f"FROM {table} WHERE {where} "
                 f"GROUP BY date(timestamp,'localtime')"
             ).fetchall()
-            for day, calls, tokens, saved, unverified in rows:
+            for day, calls, tokens, saved in rows:
                 b = _bucket(day)
                 b["calls"] += int(calls)
                 b["tokens"] += int(tokens)
-                b["saved"] += float(saved)
-                b["unverified"] += float(unverified)
+                # No "used" column — always unverified, never "saved" (query_window).
+                b["unverified"] += float(saved)
 
         if _table_exists(conn, _JSONL_TABLE):
             verified_sql, unverified_sql, _ = savings_split_sql(

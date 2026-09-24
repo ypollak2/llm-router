@@ -116,7 +116,14 @@ class PremiumStatusCommand:
             return Group(*lines)
 
         try:
-            from llm_router.dashboard_data import query_window
+            from llm_router import dashboard_data as _dd
+            from llm_router.dashboard_data import query_primary_metric, query_window
+            from llm_router.savings import (
+                CanonicalSavings,
+                label_money,
+                under_subscription,
+                unverified_note,
+            )
 
             windows = [
                 ("Today", "today"),
@@ -125,6 +132,7 @@ class PremiumStatusCommand:
                 ("All time", "lifetime"),
             ]
 
+            sub = under_subscription()
             any_data = False
             for label, window in windows:
                 totals = query_window(window, db_path=str(self.db_path))
@@ -133,13 +141,36 @@ class PremiumStatusCommand:
 
                 any_data = True
                 saved = totals.saved_usd
-                line = f"  [{PALETTE.success}]{label:<15}[/]  [{PALETTE.success}]${saved:.2f} saved[/]  ·  {totals.calls} routed calls"
+                # R7: no bare `$` — every money figure carries the subscription
+                # caveat (label_money), so "$0.20 saved" cannot be shown when
+                # under a subscription no cash actually changed hands.
+                money_ctx = CanonicalSavings(
+                    window=window,
+                    baseline_equivalent_avoided_usd=saved,
+                    routing_overhead_usd=0.0,
+                    real_dollars_avoided_usd=saved,
+                    baseline_model=_dd._BASELINE_MODEL,
+                    n_rows=totals.calls,
+                    provenance_filtered=True,
+                    under_subscription=sub,
+                    source="dashboard_data.query_window",
+                )
+                money = label_money(saved, money_ctx)
+                line = f"  [{PALETTE.success}]{label:<15}[/]  [{PALETTE.success}]{money}[/]"
                 lines.append(Text.from_markup(line))
-                from llm_router.savings import unverified_note
                 note = unverified_note(totals.unverified_saved_usd, totals.unverified_calls)
                 if note:
                     # Text(), not from_markup: the note is data, not markup.
                     lines.append(Text(f"  {'':<15}  {note}", style=PALETTE.text_dim))
+
+                if window == "today":
+                    # North Star (points 8+12): verified share of eligible
+                    # Claude turns, numerator and denominator from the SAME
+                    # table and window — see PrimaryMetric's docstring.
+                    metric = query_primary_metric(window, db_path=str(self.db_path))
+                    rendered = metric.render()
+                    if rendered:
+                        lines.append(Text(f"  {'':<15}  {rendered}", style=PALETTE.text_dim))
 
             if not any_data:
                 lines.append(Text("  No external routing yet — route some tasks first"))
