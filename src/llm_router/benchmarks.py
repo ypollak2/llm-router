@@ -118,6 +118,24 @@ def _load_json(path: Path) -> dict[str, Any] | None:
         return None
 
 
+def benchmark_auto_fetch_enabled() -> bool:
+    """Whether the opt-in background benchmark fetch may run.
+
+    Single source of truth for ``LLM_ROUTER_AUTO_BENCHMARK_FETCH`` (off by
+    default — North Star #5, local-first). There are two independent triggers
+    that can launch the fetch: the session-start hook's
+    ``_maybe_refresh_benchmarks_bg()`` and this module's own
+    ``maybe_refresh_benchmarks_background()``. Both call this function rather
+    than re-checking the env var themselves, so the two can't drift on what
+    "opt-in" means — a fix applied to one and not the other is exactly how the
+    uninvited fetch would come back.
+    """
+    import os
+    return os.environ.get("LLM_ROUTER_AUTO_BENCHMARK_FETCH", "").strip().lower() in (
+        "1", "on", "true", "yes",
+    )
+
+
 def _benchmark_version(data: dict[str, Any] | None) -> int:
     """Extract the integer version from benchmark data, or 0 on failure."""
     if not isinstance(data, dict):
@@ -541,6 +559,13 @@ def maybe_refresh_benchmarks_background(ttl_days: int = 7) -> bool:
         ``True`` if a background refresh was started, ``False`` otherwise.
     """
     global _refresh_in_progress
+
+    if not benchmark_auto_fetch_enabled():
+        # Opt-in only (North Star #5, local-first) — no production caller sets
+        # this today, but that is exactly why the gate has to live here too:
+        # whatever eventually wires this in inherits the guard for free rather
+        # than needing to remember it.
+        return False
 
     try:
         from llm_router.config import get_config

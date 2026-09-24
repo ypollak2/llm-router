@@ -38,6 +38,19 @@ except ImportError:
     def http_timeout() -> int:
         return int(os.environ.get("LLM_ROUTER_HTTP_TIMEOUT", "10"))
 
+# Shared gate for the opt-in background benchmark fetch (LLM_ROUTER_AUTO_BENCHMARK_FETCH,
+# off by default — North Star #5, local-first). llm_router.benchmarks.maybe_refresh_
+# benchmarks_background() is the OTHER trigger that can launch this fetch; importing
+# the same check here means the two triggers can't drift on what "opt-in" means.
+try:
+    from llm_router.benchmarks import benchmark_auto_fetch_enabled
+except ImportError:
+    # Fallback if llm_router not installed — same values as benchmarks.py.
+    def benchmark_auto_fetch_enabled() -> bool:
+        return os.environ.get("LLM_ROUTER_AUTO_BENCHMARK_FETCH", "").strip().lower() in (
+            "1", "on", "true", "yes",
+        )
+
 def _router_home():
     """Router state dir, resolved per call so LLM_ROUTER_HOME is honoured.
 
@@ -1100,9 +1113,7 @@ def _maybe_refresh_benchmarks_bg() -> None:
     returns in < 1ms. Only fires when ``~/.llm-router/benchmarks.json`` is
     missing or older than ``LLM_ROUTER_BENCHMARK_TTL_DAYS`` (default 7 days).
     """
-    if os.environ.get("LLM_ROUTER_AUTO_BENCHMARK_FETCH", "").strip().lower() not in (
-        "1", "on", "true", "yes",
-    ):
+    if not benchmark_auto_fetch_enabled():
         return  # opt-in only — no network fetch without explicit consent (no
         # debug log here: this hook, unlike auto-route.py, does not write to
         # auto-route-debug.log; skipped branches elsewhere in this file

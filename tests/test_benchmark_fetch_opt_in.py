@@ -7,7 +7,7 @@ detached fetch from huggingface.co / github / litellm whenever
 a user never asked for, made from every session that happens to have a stale
 or absent benchmark file.
 
-This pins two things:
+This pins three things:
 
 1. The fetch itself is gated on ``LLM_ROUTER_AUTO_BENCHMARK_FETCH=1``
    (default off) — mirrors ``test_okf_autoindex_on_session_start.py``'s
@@ -18,10 +18,18 @@ This pins two things:
    later release. It picks whichever file is actually newer by
    ``generated_at``, falling back to the documented "prefer installed when
    both are unknown" rule only when neither side can be dated.
+3. A SECOND trigger — ``benchmarks.maybe_refresh_benchmarks_background()`` —
+   can launch the same network fetch from a thread and was found (2026-09-24
+   independent review of this PR) to have no gate of its own. It has no
+   production caller today, but nothing stops one being added later, so it
+   is gated too: both triggers call the same
+   ``benchmarks.benchmark_auto_fetch_enabled()`` helper rather than each
+   re-checking the env var, so they cannot drift on what "opt-in" means.
 """
 from __future__ import annotations
 
 import importlib.util
+import threading
 from pathlib import Path
 
 import pytest
@@ -194,3 +202,75 @@ def test_both_dates_unknown_keeps_the_documented_installed_first_fallback(benchm
         "when neither side can be dated, the documented fallback keeps the "
         "historical installed-first preference"
     )
+
+
+# ---------------------------------------------------------------------------
+# 3. The SECOND trigger, benchmarks.maybe_refresh_benchmarks_background(),
+#    shares the same gate via benchmark_auto_fetch_enabled() and cannot drift.
+# ---------------------------------------------------------------------------
+
+class _CapturedThread:
+    """Stand-in for threading.Thread that records construction but never
+    actually runs the worker — even if the gate under test fails to hold,
+    this must not let a real fetch thread start during the test."""
+
+    def __init__(self, target=None, name=None, daemon=None) -> None:
+        self.target = target
+        self.name = name
+        self.daemon = daemon
+
+    def start(self) -> None:
+        pass
+
+
+@pytest.fixture
+def registry_trigger(tmp_path, monkeypatch):
+    missing = tmp_path / "benchmarks.json"  # absent == stale
+    monkeypatch.setattr(bm, "_installed", lambda: missing)
+    monkeypatch.setattr(bm, "_refresh_in_progress", False)
+    monkeypatch.setattr(bm, "_refresh_lock", threading.Lock())
+    calls: list[_CapturedThread] = []
+    monkeypatch.setattr(
+        bm.threading, "Thread",
+        lambda *a, **k: calls.append(_CapturedThread(*a, **k)) or calls[-1],
+    )
+    return calls
+
+
+def test_registry_trigger_does_not_start_a_thread_when_env_unset(registry_trigger, monkeypatch):
+    monkeypatch.delenv("LLM_ROUTER_AUTO_BENCHMARK_FETCH", raising=False)
+    result = bm.maybe_refresh_benchmarks_background(ttl_days=7)
+    assert result is False
+    assert not registry_trigger, (
+        "maybe_refresh_benchmarks_background has no production caller today, "
+        "but it must not start a fetch thread without opt-in either — it "
+        "shares benchmark_auto_fetch_enabled() with the session-start hook "
+        "precisely so it can't independently regress"
+    )
+
+
+def test_registry_trigger_starts_a_thread_when_env_on(registry_trigger, monkeypatch):
+    monkeypatch.setenv("LLM_ROUTER_AUTO_BENCHMARK_FETCH", "1")
+    result = bm.maybe_refresh_benchmarks_background(ttl_days=7)
+    assert result is True
+    assert registry_trigger, "opted in, and the file is missing (stale) — a fetch thread must start"
+
+
+def test_both_triggers_share_one_env_check_helper():
+    """Both call sites must go through the same helper, not two copies of the
+    same env-var check that could later be edited independently."""
+    import ast
+    import inspect
+
+    hook_src = inspect.getsource(sshook._maybe_refresh_benchmarks_bg)
+    registry_src = inspect.getsource(bm.maybe_refresh_benchmarks_background)
+    for src, label in ((hook_src, "session-start hook"), (registry_src, "benchmarks.py")):
+        tree = ast.parse(src.lstrip())
+        calls = {
+            node.func.id
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+        }
+        assert "benchmark_auto_fetch_enabled" in calls, (
+            f"{label} does not call the shared benchmark_auto_fetch_enabled() helper"
+        )
