@@ -24,6 +24,7 @@ judge model — never the model that answered — and leaves a row ungraded
 from __future__ import annotations
 
 import json
+import os
 from datetime import datetime
 from unittest.mock import AsyncMock, patch
 
@@ -346,3 +347,165 @@ async def test_drain_queue_bounds_batch_size_and_requeues_overflow(
     # the next drain to pick up.
     remaining = _queue_lines(judge_home)
     assert len(remaining) == 1
+
+
+# ── Concurrency: two claims must never overwrite each other's rows ─────────
+
+
+def test_claim_queue_work_files_are_unique_per_call(judge_home, monkeypatch):
+    """CHZ-JUDGE-QUEUE-CONCURRENCY unit test. `_claim_queue` renames the
+    queue file to a work-file name before reading it; that name must be
+    unique per call, or a second concurrent claim's `os.replace` silently
+    overwrites the first claim's still-unread file (os.replace gives no
+    warning when it clobbers an existing destination)."""
+    from llm_router.judge import _work_path
+
+    queue_path = judge_home / "judge_queue.jsonl"
+    first = _work_path(queue_path)
+    second = _work_path(queue_path)
+    assert first != second, (
+        f"two calls to _work_path produced the SAME name ({first!r}) — a "
+        "second concurrent claim would overwrite the first's in-flight file"
+    )
+
+
+@pytest.mark.asyncio
+async def test_two_overlapping_claims_lose_no_rows(judge_home, monkeypatch):
+    """Reproduces the actual interleaving: claim 1 renames the queue aside
+    (leaving it "in flight" — not yet read+deleted), and BEFORE it gets to
+    read its own work file, claim 2 runs start-to-finish against freshly
+    appended items. With a fixed work-file name, claim 2's `os.replace`
+    would land on the exact same path as claim 1's un-read file and destroy
+    it. With a unique name per call, claim 1's rows must survive untouched.
+    """
+    from llm_router import judge
+
+    monkeypatch.setenv("LLM_ROUTER_JUDGE_SAMPLE_RATE", "1.0")
+    queue_path = judge_home / "judge_queue.jsonl"
+    queue_path.parent.mkdir(parents=True, exist_ok=True)
+    queue_path.write_text('{"id": "A"}\n')
+
+    real_replace = os.replace
+    interleaved: dict = {}
+
+    def replace_then_interleave(src, dst):
+        real_replace(src, dst)
+        if "ran" not in interleaved:
+            interleaved["ran"] = True
+            # A second, independent claim starts and finishes entirely
+            # while claim 1 is still holding its own (unique) work file,
+            # unread.
+            queue_path.write_text('{"id": "B"}\n')
+            interleaved["items"] = judge._claim_queue(queue_path)
+
+    monkeypatch.setattr(judge.os, "replace", replace_then_interleave)
+
+    items_first = judge._claim_queue(queue_path)
+
+    assert interleaved.get("items") == [{"id": "B"}]
+    assert items_first == [{"id": "A"}], (
+        f"claim 1's rows were lost to the interleaved claim 2 — got "
+        f"{items_first!r} (expected [{{'id': 'A'}}])"
+    )
+
+
+def test_recover_orphaned_claims_requeues_old_draining_files(judge_home):
+    """A `.draining.*` file left behind by a crashed drain (old enough that
+    it can't plausibly still be in flight) must be requeued, not dropped."""
+    from llm_router.judge import _recover_orphaned_claims, _work_path
+
+    queue_path = judge_home / "judge_queue.jsonl"
+    queue_path.parent.mkdir(parents=True, exist_ok=True)
+
+    orphan_path = _work_path(queue_path)
+    with open(orphan_path, "w") as f:
+        f.write('{"id": "stranded"}\n')
+    # Back-date it well past the recovery age threshold so it reads as a
+    # genuinely crashed drain, not one still in flight.
+    old = os.path.getmtime(orphan_path) - 999
+    os.utime(orphan_path, (old, old))
+
+    recovered = _recover_orphaned_claims(queue_path)
+
+    assert recovered == 1
+    assert not os.path.exists(orphan_path), "the orphan file must be cleaned up after recovery"
+    entries = _queue_lines(judge_home)
+    assert entries == [{"id": "stranded"}]
+
+
+def test_recover_orphaned_claims_leaves_fresh_files_alone(judge_home):
+    """A `.draining.*` file that is still young must NOT be swept up — it
+    plausibly belongs to a drain that is still actively reading it right
+    now, and recovering it would grade the same rows twice."""
+    from llm_router.judge import _recover_orphaned_claims, _work_path
+
+    queue_path = judge_home / "judge_queue.jsonl"
+    queue_path.parent.mkdir(parents=True, exist_ok=True)
+
+    fresh_path = _work_path(queue_path)
+    with open(fresh_path, "w") as f:
+        f.write('{"id": "still-in-flight"}\n')
+
+    recovered = _recover_orphaned_claims(queue_path)
+
+    assert recovered == 0
+    assert os.path.exists(fresh_path), "a fresh (not stale) claim file must be left alone"
+    assert _queue_lines(judge_home) == []
+
+
+# ── Bounded queue size ───────────────────────────────────────────────────
+
+
+def test_enqueue_for_grading_caps_queue_size_and_drops_oldest(judge_home, monkeypatch):
+    """A queue nobody drains must still stay bounded — the cap is enforced
+    at enqueue time, not only at drain time."""
+    monkeypatch.setenv("LLM_ROUTER_JUDGE_SAMPLE_RATE", "1.0")
+    monkeypatch.setenv("LLM_ROUTER_JUDGE_QUEUE_MAX_ENTRIES", "3")
+    from llm_router.judge import enqueue_for_grading
+
+    for i in range(5):
+        enqueue_for_grading(
+            routing_decision_id=i, prompt=f"p{i}", response=f"r{i}",
+            task_type="query", answering_model="m",
+        )
+
+    entries = _queue_lines(judge_home)
+    assert len(entries) == 3, f"queue must be capped at 3 entries, got {len(entries)}"
+    # Oldest dropped first; newest kept.
+    assert [e["routing_decision_id"] for e in entries] == [2, 3, 4]
+
+
+def test_enqueue_for_grading_records_dropped_count_via_failopen(judge_home, monkeypatch):
+    monkeypatch.setenv("LLM_ROUTER_JUDGE_SAMPLE_RATE", "1.0")
+    monkeypatch.setenv("LLM_ROUTER_JUDGE_QUEUE_MAX_ENTRIES", "2")
+    from llm_router.judge import enqueue_for_grading
+
+    with patch("llm_router.failopen.record") as mock_record:
+        for i in range(4):
+            enqueue_for_grading(
+                routing_decision_id=i, prompt="p", response="r",
+                task_type="query", answering_model="m",
+            )
+
+    drop_calls = [
+        c for c in mock_record.call_args_list
+        if c.args[0] == "CHZ-FO-JUDGE-QUEUE-CAP-DROPPED"
+    ]
+    assert drop_calls, (
+        "expected at least one CHZ-FO-JUDGE-QUEUE-CAP-DROPPED failopen "
+        f"record so the drop is visible, got calls: {mock_record.call_args_list!r}"
+    )
+
+
+def test_enqueue_for_grading_no_cap_drop_when_under_limit(judge_home, monkeypatch):
+    monkeypatch.setenv("LLM_ROUTER_JUDGE_SAMPLE_RATE", "1.0")
+    monkeypatch.setenv("LLM_ROUTER_JUDGE_QUEUE_MAX_ENTRIES", "10")
+    from llm_router.judge import enqueue_for_grading
+
+    for i in range(3):
+        enqueue_for_grading(
+            routing_decision_id=i, prompt="p", response="r",
+            task_type="query", answering_model="m",
+        )
+
+    assert len(_queue_lines(judge_home)) == 3

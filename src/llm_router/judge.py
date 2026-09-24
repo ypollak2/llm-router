@@ -161,11 +161,67 @@ def enqueue_for_grading(
         path.parent.mkdir(parents=True, exist_ok=True)
         with open(path, "a") as f:
             f.write(json.dumps(entry) + "\n")
+        _enforce_queue_cap(path)
         return True
     except Exception as exc:
         from llm_router import failopen
         failopen.record("CHZ-FO-JUDGE-QUEUE-WRITE", exc)
         return False
+
+
+#: Hard cap on the number of queued (undrained) entries. Enforced at ENQUEUE
+#: time, not only at drain — an operator who never runs `llm-router judge
+#: drain` and has LLM_ROUTER_JUDGE_AUTODRAIN=0 (or whose session-start drain
+#: never fires) must still get bounded disk growth, not an unbounded log.
+#: Overridable via LLM_ROUTER_JUDGE_QUEUE_MAX_ENTRIES.
+_DEFAULT_QUEUE_MAX_ENTRIES = 2000
+
+
+def _queue_max_entries() -> int:
+    raw = os.environ.get("LLM_ROUTER_JUDGE_QUEUE_MAX_ENTRIES", "")
+    try:
+        return int(raw) if raw else _DEFAULT_QUEUE_MAX_ENTRIES
+    except ValueError:
+        return _DEFAULT_QUEUE_MAX_ENTRIES
+
+
+def _enforce_queue_cap(path) -> int:
+    """Keep at most `_queue_max_entries()` newest lines in the queue file.
+
+    Drops the OLDEST entries first — a queue nobody has drained in a while
+    should still prefer grading recent traffic once something finally does
+    drain it. Runs on every enqueue (not just at drain time) so growth stays
+    bounded even if nothing ever drains the queue.
+
+    Never raises — a failure here must not break the enqueue that triggered
+    it. Returns the number of entries dropped (0 if already within cap).
+    """
+    cap = _queue_max_entries()
+    if cap <= 0:
+        return 0
+    dropped = 0
+    try:
+        with open(path) as f:
+            lines = [line for line in f.readlines() if line.strip()]
+        if len(lines) <= cap:
+            return 0
+        dropped = len(lines) - cap
+        kept = lines[-cap:]
+        tmp_path = f"{path}.capping.{os.getpid()}.{time.monotonic_ns()}"
+        with open(tmp_path, "w") as f:
+            f.writelines(kept)
+        os.replace(tmp_path, str(path))
+    except Exception as exc:
+        from llm_router import failopen
+        failopen.record("CHZ-FO-JUDGE-QUEUE-CAP", exc)
+        return 0
+
+    # Visible, not silent (per this repo's failopen convention): the count
+    # itself lives in the `detail` string since failopen.record's own
+    # counters are per-CODE occurrence counts, not accumulators.
+    from llm_router import failopen
+    failopen.record("CHZ-FO-JUDGE-QUEUE-CAP-DROPPED", detail=f"dropped={dropped}")
+    return dropped
 
 
 def _select_judge_model(answering_model: str) -> str | None:
@@ -207,6 +263,101 @@ def _select_judge_model(answering_model: str) -> str | None:
     return None
 
 
+#: Marker inserted into every claim's work-file name, so orphan recovery can
+#: find them by prefix (`_recover_orphaned_claims`) without also picking up
+#: unrelated files.
+_DRAINING_MARKER = ".draining."
+
+#: An orphaned `.draining.*` file (left by a drain that crashed between the
+#: rename and the read+delete) is only recovered once it's older than this —
+#: comfortably longer than drain_queue's own default time budget plus
+#: grading latency, so a recovery pass never steals a claim a LIVE drain is
+#: still actively reading. Wall-clock, deliberately: file mtimes are
+#: wall-clock timestamps, so this must compare against time.time(), not
+#: time.monotonic() (see this repo's CLAUDE.md on the two clocks — that rule
+#: is about measuring a DURATION across a possible sleep, not about matching
+#: an mtime's own clock domain).
+_ORPHAN_RECOVERY_AGE_S = 120.0
+
+
+def _work_path(path) -> str:
+    """A claim work-file name unique to THIS call, THIS process.
+
+    CHZ-JUDGE-QUEUE-CONCURRENCY. This used to be a fixed `<queue>.draining`
+    name shared by every claim. Two drains running at once (two
+    `llm-router judge drain` invocations, or a manual run racing the
+    session-start auto-drain) could then interleave: drain A renames the
+    queue aside, the hot path writes a fresh queue file, drain B renames
+    THAT aside to the SAME work path — silently overwriting drain A's
+    still-unread claim. `os.replace` provides no warning when it clobbers an
+    existing destination. Including the pid and a monotonic-nanosecond
+    timestamp makes every claim's work file unique, so two concurrent claims
+    can only ever land on disjoint sets of items, never overwrite each
+    other's.
+    """
+    return f"{path}{_DRAINING_MARKER}{os.getpid()}.{time.monotonic_ns()}"
+
+
+def _recover_orphaned_claims(path) -> int:
+    """Requeue any `.draining.*` files stranded by a crashed drain.
+
+    `_claim_queue` renames the queue aside before reading it; if the process
+    is killed between that rename and the read+delete, the claimed items are
+    stranded in a uniquely-named work file forever — invisible to the next
+    drain unless something looks for them. Called at the start of every
+    `drain_queue()` so a crash loses no rows, only delays them.
+
+    Skips anything younger than `_ORPHAN_RECOVERY_AGE_S` — a fresh
+    `.draining.*` file most likely belongs to a drain that is still running
+    right now, not a crashed one, and recovering it out from under a live
+    claim would grade the same rows twice.
+
+    Never raises. Returns the number of rows recovered.
+    """
+    recovered = 0
+    try:
+        parent = path.parent
+        if not parent.is_dir():
+            return 0
+        prefix = path.name + _DRAINING_MARKER
+        now = time.time()
+        for entry in parent.iterdir():
+            if not entry.name.startswith(prefix):
+                continue
+            try:
+                age_s = now - entry.stat().st_mtime
+            except OSError:
+                continue
+            if age_s < _ORPHAN_RECOVERY_AGE_S:
+                continue  # plausibly still in flight — leave it alone
+            try:
+                with open(entry) as f:
+                    lines = f.readlines()
+            except OSError:
+                continue
+            items = []
+            for line in lines:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    items.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+            if items:
+                _requeue(path, items)
+                recovered += len(items)
+            try:
+                entry.unlink()
+            except OSError:
+                pass
+    except Exception as exc:
+        from llm_router import failopen
+        failopen.record("CHZ-FO-JUDGE-QUEUE-RECOVER", exc)
+        return recovered
+    return recovered
+
+
 def _claim_queue(path) -> list[dict]:
     """Atomically claim every entry currently in the queue file.
 
@@ -214,9 +365,11 @@ def _claim_queue(path) -> list[dict]:
     reading it, so a concurrent hot-path append lands in a fresh file rather
     than racing a reader that is also truncating. Malformed lines are
     dropped rather than aborting the whole claim — one bad line must not cost
-    every other queued item its grade.
+    every other queued item its grade. The work-file name is unique per call
+    (`_work_path`) so a second, concurrent claim can never collide with —
+    and overwrite — this one's still-unread file.
     """
-    work_path = str(path) + ".draining"
+    work_path = _work_path(path)
     try:
         os.replace(str(path), work_path)
     except OSError:
@@ -300,6 +453,7 @@ async def drain_queue(batch_size: int = 50, time_budget_s: float = 20.0) -> dict
         dict with counts: graded, ungraded, failed, requeued.
     """
     path = _queue_path()
+    _recover_orphaned_claims(path)
     items = _claim_queue(path)
     to_process, overflow = items[:batch_size], items[batch_size:]
     _requeue(path, overflow)
