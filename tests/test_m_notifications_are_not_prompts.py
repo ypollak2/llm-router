@@ -118,3 +118,25 @@ def test_drafting_off_by_env_still_says_so(monkeypatch, tmp_path):
         pass
     skips = [line for line in log if "DIRECT SKIP:" in line]
     assert len(skips) == 1 and "disabled by env" in skips[0], skips
+
+
+# ── R: a sub-agent's report is not a user prompt either ──────────────────────
+# Replay of 186 real prompts (2026-09-14..24): 34 (18%) were sub-agent reports
+# ("Another Claude session sent a message: <agent-message …>"). Seen live the
+# same day: a 23.6s qwen3-coder draft that restated one — never relayable.
+
+AGENT_REPORT = ("Another Claude session sent a message:\n<agent-message from=\"a1b2\">\n"
+                "[Subagent hand-back] The text below is the final report …\n</agent-message>")
+
+
+def test_a_subagent_report_is_not_drafted_and_says_why(monkeypatch, tmp_path):
+    drafted, log, _ = _run(monkeypatch, tmp_path, AGENT_REPORT)
+    assert drafted == []
+    outcomes = [line for line in log
+                if any(t in line for t in ("DIRECT:", "DIRECT SKIP:", "BYPASS", "CONTINUATION"))]
+    assert len(outcomes) == 1 and "SUBAGENT_REPORT_BYPASS" in outcomes[0], outcomes
+
+
+def test_zero_claude_does_not_block_a_subagent_report(monkeypatch, tmp_path):
+    _, _, out = _run(monkeypatch, tmp_path, AGENT_REPORT, zero_claude="on")
+    assert '"block"' not in out

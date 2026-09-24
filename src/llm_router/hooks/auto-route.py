@@ -3572,6 +3572,13 @@ def main() -> None:
                    f"background-task notification, not a user prompt")
         _coverage_unobserved("SYSTEM_NOTIFICATION_BYPASS")
         sys.exit(0)
+    # R: a sub-agent's report reaches the hook the same way — 34 of 186 real
+    # prompts (18%) in a 10-day replay; its draft can never be relayed.
+    if prompt.lstrip().startswith(("Another Claude session sent a message", "<agent-message")):
+        _debug_log(f"[INVOCATION {invocation_id:.3f}] SUBAGENT_REPORT_BYPASS — "
+                   f"a sub-agent's report, not a user prompt")
+        _coverage_unobserved("SUBAGENT_REPORT_BYPASS")
+        sys.exit(0)
 
     # Self-reference bypass: skip routing when the user is debugging llm_router
     # itself, to avoid the circular dependency where llm_router blocks its own
