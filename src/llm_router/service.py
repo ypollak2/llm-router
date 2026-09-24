@@ -21,7 +21,7 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 import uvicorn
 
-from llm_router import paths
+from llm_router import __version__, paths
 
 # Import the existing classifier (we'll extend it)
 
@@ -39,7 +39,8 @@ logging.basicConfig(
 )
 logger = logging.getLogger("llm_router.service")
 
-app = FastAPI(title="llm_router-service", version="5.3.0")
+# REC-001: was a hardcoded "5.3.0" long after 15.x shipped.
+app = FastAPI(title="llm_router-service", version=__version__)
 
 # ────────────────────────────────────────────────────────────────────────────
 # Models
@@ -326,7 +327,7 @@ async def health_check():
     """Health check endpoint."""
     return {
         "status": "ok",
-        "version": "5.3.0",
+        "version": __version__,
         "pid": os.getpid(),
     }
 
