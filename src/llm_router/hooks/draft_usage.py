@@ -46,12 +46,66 @@ UNUSED = "unused"
 _PENDING_TTL_S = 3600.0
 
 
-def _pending_dir() -> Path:
+def _root() -> Path:
     """Resolved per call. A module-level Path.home() freezes $HOME at import,
     which is the defect class that has bitten this tree four times."""
     base = os.environ.get("LLM_ROUTER_HOME", "").strip()
-    root = Path(base).expanduser() if base else Path.home() / ".llm-router"
-    return root / "pending_drafts"
+    return Path(base).expanduser() if base else Path.home() / ".llm-router"
+
+
+def _pending_dir() -> Path:
+    return _root() / "pending_drafts"
+
+
+# ── I5: auto-revert ──────────────────────────────────────────────────────────
+# Drafting costs the user wall-clock before Claude sees the prompt. After
+# LLM_ROUTER_DRAFT_REVERT_AFTER (default 50) drafts in a row judged UNUSED the
+# hook stops drafting; one USED draft resets the count. 50 is about a day of
+# drafts here, and at a true use rate of 10% fifty straight misses happen with
+# probability 0.9^50 = 0.5%. Delete draft_streak.json to start drafting again.
+
+_REVERT_DEFAULT = 50
+
+
+def _streak_path() -> Path:
+    return _root() / "draft_streak.json"
+
+
+def unused_streak() -> int:
+    try:
+        return int(json.loads(_streak_path().read_text(encoding="utf-8"))["unused_in_a_row"])
+    except Exception:  # noqa: BLE001 — absent or unreadable: no evidence yet
+        return 0
+
+
+def _note_verdict(outcome: str) -> None:
+    try:
+        n = 0 if outcome == USED else unused_streak() + 1
+        path = _streak_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"unused_in_a_row": n, "at": time.time()}),
+                        encoding="utf-8")
+    except Exception as exc:  # noqa: BLE001 — must never break the prompt
+        # Counted, not swallowed: a streak that stops persisting would leave the
+        # auto-revert silently unable to fire.
+        try:
+            from llm_router import failopen
+            failopen.record("CHZ-FO-DRAFT-STREAK-WRITE", exc)
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def drafting_reverted() -> int | None:
+    """The unused streak when drafting should stop, else None."""
+    raw = os.environ.get("LLM_ROUTER_DRAFT_REVERT_AFTER", "").strip()
+    try:
+        limit = int(raw) if raw else _REVERT_DEFAULT
+    except ValueError:
+        limit = _REVERT_DEFAULT
+    if limit <= 0:
+        return None
+    n = unused_streak()
+    return n if n >= limit else None
 
 
 def _pending_path(session_id: str) -> Path:
@@ -124,4 +178,6 @@ def audit(session_id: str, last_assistant_text: str) -> tuple[str, dict] | None:
     pending = take_pending(session_id)
     if pending is None:
         return None
-    return (USED if draft_was_relayed(last_assistant_text) else UNUSED), pending
+    outcome = USED if draft_was_relayed(last_assistant_text) else UNUSED
+    _note_verdict(outcome)
+    return outcome, pending

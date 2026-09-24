@@ -104,6 +104,7 @@ ENV_REGISTRY: dict[str, tuple[str, str, int]] = {
     "LLM_ROUTER_DEPLOYMENT_PROFILE": ("llm_router", "hooks/auto-route.py", 1),
     "LLM_ROUTER_DEV_SRC": ("llm_router", "commands/dev_refresh.py", 1),
     "LLM_ROUTER_DIRECT_EXECUTION": ("llm_router", "hooks/auto-route.py", 1),
+    "LLM_ROUTER_DRAFT_REVERT_AFTER": ("llm_router", "hooks/draft_usage.py", 1),
     "LLM_ROUTER_DISABLE_CONTINUATION_BYPASS": ("llm_router", "hooks/auto-route.py", 1),
     "LLM_ROUTER_DISABLE_LLM_CLASSIFIERS": ("llm_router", "hooks/auto-route.py", 1),
     "LLM_ROUTER_DISABLE_SUBPROCESS_BACKENDS": ("llm_router", "router.py", 1),

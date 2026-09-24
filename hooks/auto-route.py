@@ -4090,6 +4090,16 @@ def main() -> None:
     # all four modes side by side. The invariant, enforced by
     # tests/test_routing_outcome_logged.py: an invocation that logs
     # `prompt_len=` logs exactly one terminal outcome.
+    # I5: drafting reverts itself after a streak of unused drafts
+    # (hooks/draft_usage.py). Checked only where a draft would otherwise run.
+    _reverted = None
+    if _direct_enabled and _enforce_mode not in ("shadow", "off"):
+        try:
+            from llm_router.hooks import draft_usage as _draft_usage
+            _reverted = _draft_usage.drafting_reverted()
+        except Exception:
+            _reverted = None
+
     if not _direct_enabled:
         _debug_log(
             f"[INVOCATION {invocation_id:.3f}] DIRECT SKIP: direct execution "
@@ -4100,8 +4110,13 @@ def main() -> None:
             f"[INVOCATION {invocation_id:.3f}] DIRECT SKIP: enforcement "
             f"disabled (mode={_enforce_mode})"
         )
+    elif _reverted:
+        _debug_log(
+            f"[INVOCATION {invocation_id:.3f}] DIRECT SKIP: auto-revert — the last "
+            f"{_reverted} drafts were all unused (delete draft_streak.json to resume)"
+        )
 
-    if _direct_enabled and _enforce_mode not in ("shadow", "off"):
+    if _direct_enabled and _enforce_mode not in ("shadow", "off") and not _reverted:
         try:
             from llm_router.hooks.chain_builder import (
                 build_chain as _build_direct_chain,
