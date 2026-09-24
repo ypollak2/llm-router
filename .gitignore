@@ -164,3 +164,6 @@ npm/vendor/
 /data/
 /experiments/
 /scripts/backend_quality_out/
+
+# Q15 benchmark raw output (architecture/Q15_HARNESS_PLAN.md: "not committed")
+results/
