@@ -2828,6 +2828,78 @@ def _resolve_auto_render_mode(render_mode: str, zero_claude: bool) -> str:
     return "echo"
 
 
+# D-1 (audit/28). A bare imperative continuation — "go on more", "yes, repoint
+# both", "fix it too" — names nothing and means nothing without the previous
+# turn, yet carries no deictic pronoun for `_DEICTIC_RE` and no definite
+# anaphora for `_ANAPHORA_RE`. Measured over n=1610 real prompts: the detector
+# missed **19 of 45** of them (42.2%), while missing **0 of 222** prompts that
+# name a file. The failure was concentrated in one class, not spread evenly,
+# which is why the "~60% false-negative rate" recorded at :2811 was the wrong
+# SHAPE of number rather than merely the wrong value.
+#
+# Anchored at the start on purpose. "continue" mid-sentence ("the script should
+# continue on error") is ordinary English; opening with it is a reply to
+# something. The length gate is applied by the caller, as for the deictic test.
+_CONTINUATION_RE = re.compile(
+    r"^\s*(?:and\s+)?(?:"
+    r"continue|carry on|go on|go ahead|keep going|proceed|resume|"
+    r"do (?:it|that|them|both|this|those)|"
+    r"fix (?:it|that|them|those)|"
+    r"(?:push|ship|commit|run|try|check) (?:it|that|them)|"
+    r"yes|yep|yeah|ok|okay|sure|"
+    r"again|once more|next|both|all of them|the rest|same|"
+    r"redo|retry|revert (?:it|that)"
+    r")\b",
+    re.IGNORECASE,
+)
+
+
+# D-2 (audit/28). The OKF rescue fires when `find_relevant()` returns ANY doc,
+# and `find_relevant` matches by keyword overlap. That answers "is there related
+# material?" when the question the gate needs answered is "is there ENOUGH to
+# answer THIS?".
+#
+# Measured lifetime: the rescues overrode the gate 746 times (674 session, 67
+# OKF, 5 tool-loop) and produced 0 accepted drafts out of 1,132 audited. The
+# rescue was doing its job — retrieving related docs — and its job was the wrong
+# one.
+#
+# Coverage is the cheapest honest proxy: if the prompt names something
+# distinctive (an identifier, a dotted path, a CamelCase symbol) and NONE of the
+# retrieved material mentions it, the retrieval did not reach the subject and
+# the model would still be answering blind.
+_DISTINCTIVE_RE = re.compile(
+    r"\b(?:"
+    r"[A-Za-z_][A-Za-z0-9_]*_[A-Za-z0-9_]+"      # snake_case identifier
+    r"|[A-Za-z][a-z0-9]*(?:[A-Z][a-z0-9]+)+"     # camelCase AND CamelCase
+    r"|[\w-]+\.[a-z]{2,4}\b"                    # a filename
+    r"|[\w-]+/[\w./-]+"                          # a path
+    r")"
+)
+
+
+def _okf_covers_prompt(prompt: str, docs) -> bool:
+    """Did the retrieved material actually reach the prompt's subject?
+
+    Fail-CLOSED: a prompt with nothing distinctive to match on cannot be shown
+    to be covered, so the rescue does not fire. The gate stays shut, which costs
+    a draft that — measured at 0 accepted in 1,132 — has no demonstrated value
+    to lose.
+    """
+    if not docs:
+        return False
+    tokens = {t.lower() for t in _DISTINCTIVE_RE.findall(prompt or "")}
+    if not tokens:
+        return False
+    try:
+        haystack = " ".join(
+            f"{getattr(d, 'title', '')} {getattr(d, 'body', '')}" for d in docs
+        ).lower()
+    except Exception:  # noqa: BLE001 — retrieval shapes must never break the hook
+        return False
+    return any(t in haystack for t in tokens)
+
+
 def _is_context_dependent(prompt: str) -> bool:
     """True when the prompt references the user's local code/files/history/state —
     things a stateless routed model cannot see, so a pre-generated draft would be
@@ -2848,6 +2920,10 @@ def _is_context_dependent(prompt: str) -> bool:
     # general-knowledge prompt that merely contains "this"/"the rest" isn't caught.
     words = p.split()
     if len(words) <= 12 and (_DEICTIC_RE.search(p) or _ANAPHORA_RE.search(p)):
+        return True
+    # D-1: a short prompt that OPENS as a continuation. Same length gate, same
+    # reasoning, different surface — this class carries no pronoun to catch.
+    if len(words) <= 12 and _CONTINUATION_RE.match(p):
         return True
     return False
 
@@ -3936,6 +4012,14 @@ def main() -> None:
         except Exception as _exc:  # noqa: BLE001 — retrieval must never break routing
             _okf_docs = []
             _debug_log(f"[INVOCATION {invocation_id:.3f}] OKF LOOKUP FAILED: {_exc}")
+        if _okf_docs and not _okf_covers_prompt(prompt, _okf_docs):
+            # D-2: retrieved, but nothing in it mentions what the prompt names.
+            _debug_log(
+                f"[INVOCATION {invocation_id:.3f}] OKF RESCUE DECLINED: "
+                f"{len(_okf_docs)} doc(s) retrieved but none covers the prompt's "
+                f"subject — retrieval found related material, not an answer"
+            )
+            _okf_docs = []
         if _okf_docs:
             _debug_log(
                 f"[INVOCATION {invocation_id:.3f}] OKF RESCUE: context-dependent but "
