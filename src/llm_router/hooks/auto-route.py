@@ -3536,7 +3536,15 @@ def main() -> None:
         sys.exit(0)
 
     prompt = hook_input.get("prompt", "")
-    _debug_log(f"[INVOCATION {invocation_id:.3f}] prompt_len={len(prompt)} session_id={hook_input.get('session_id', 'unknown')[:8]}")
+    # Tags for llm_router.routing_log.is_human: a benchmark session in a /tmp
+    # sandbox and a sub-agent's report both carry a real-looking session id.
+    _cwd_seen = str(hook_input.get("cwd") or os.getcwd())
+    _tags = ""
+    if re.match(r"^/(private/)?(tmp|var/folders)/", _cwd_seen):
+        _tags += " sandbox=1"
+    if prompt.lstrip().startswith(("Another Claude session sent a message", "<agent-message")):
+        _tags += " kind=agent-report"
+    _debug_log(f"[INVOCATION {invocation_id:.3f}] prompt_len={len(prompt)} session_id={hook_input.get('session_id', 'unknown')[:8]}{_tags}")
     try:
         from llm_router import trace as _t
         _t.emit("route.prompt", invocation=f"{invocation_id:.3f}",
@@ -4340,7 +4348,8 @@ def main() -> None:
                 _debug_log(
                     f"[INVOCATION {invocation_id:.3f}] DIRECT SUCCESS: "
                     f"model={_direct_result.model.provider}/{_direct_result.model.model} "
-                    f"latency={_direct_result.latency_ms}ms"
+                    f"latency={_direct_result.latency_ms}ms "
+                    f"files_read={len(getattr(_direct_result, 'files_read', ()) or ())}"
                 )
                 # DIRECT SUCCESS says a draft was PRODUCED, not that it was used.
                 # Note it so the next invocation can judge it against the reply
