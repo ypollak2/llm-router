@@ -134,10 +134,11 @@ def test_matrix_no_longer_claims_hooks_are_impossible_elsewhere():
             "ships UserPromptSubmit and Cursor ships beforeSubmitPrompt, both "
             f"able to block. Cell: {by_host[host]!r}"
         )
-        assert "🔜" in by_host[host], (
-            f"{host} should read 'not yet' — we have not built it, which is a "
-            f"different claim from the host being unable. Cell: {by_host[host]!r}"
-        )
+    # Cursor: not built yet. Codex: the prompt hook IS built (install wires it,
+    # on by default) but tool-call enforcement is not — routing_ready("codex")
+    # is False (audit 2026-09-24, HOST-03/DOC-03). The cell must say both.
+    assert "🔜" in by_host["VS Code/Cursor"], by_host["VS Code/Cursor"]
+    assert "Prompt hook" in by_host["Codex CLI"], by_host["Codex CLI"]
 
     assert "❌" in by_host["Browser"], (
         "Browser genuinely cannot run local hooks; that ❌ is correct and "

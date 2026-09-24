@@ -6,7 +6,7 @@ This page documents **exactly which features work where**, without sugar-coating
 
 | Feature | Claude Code | Codex CLI | Gemini CLI | Pi (pi.dev) | VS Code/Cursor | Browser | Local CLI |
 |---------|:-----------:|:---------:|:----------:|:-----------:|:--------------:|:-------:|:---------:|
-| **Auto-Routing Hooks** | ✅ Full | 🔜 Not yet | ✅ Full | ✅ Full | 🔜 Not yet | ❌ No | ✅ Limited |
+| **Auto-Routing Hooks** | ✅ Full | ⚠️ Prompt hook only | ✅ Full | ❌ Not installable | 🔜 Not yet | ❌ No | ✅ Limited |
 | **Session-End Tracking** | ✅ Yes | ❌ No | ✅ Yes | ✅ Yes | ❌ No | ❌ No | ✅ Manual |
 | **Quota Pressure Display** | ✅ Yes | ❌ No | ✅ Yes | ❌ No | ❌ No | ❌ No | ❌ No |
 | **60 MCP Tools (Direct)** | ✅ Yes | ✅ Yes | ✅ Yes | ✅ Yes | ✅ Yes | ✅ Yes | ✅ Yes |
@@ -20,7 +20,8 @@ This page documents **exactly which features work where**, without sugar-coating
 - ⚠️ **Partial** — Limited or requires configuration
 - 🔜 **Not yet** — *the host supports this; llm-router has not shipped it*
 - ❌ **No** — Not possible on this host
-- *Codex/VS Code/Cursor: Manual routing via MCP tools, no automatic native-turn hooks
+- *Codex: the prompt-routing hook (`UserPromptSubmit`) is installed and on by default; tool-call enforcement (`PreToolUse`) is not — `hosts/events.py:routing_ready("codex")` is False until its payload keys are verified*
+- *VS Code/Cursor: Manual routing via MCP tools, no automatic native-turn hooks
 - **Manual analytics requires running `llm-router snapshot` periodically
 
 ### Why "not yet" is a separate row from "no"
@@ -83,7 +84,7 @@ llm-router install
 
 ---
 
-### 🟢 Codex CLI (Full)
+### 🟡 Codex CLI (prompt-routing hook; no tool-call enforcement)
 
 **Tier: Automatic Routing (push) + MCP**
 
@@ -155,7 +156,11 @@ llm-router install --host gemini-cli
 
 ---
 
-### 🟡 Pi Coding Agent (Strong)
+### ⚪ Pi Coding Agent (not installable today)
+
+> **Status 2026-09-24:** `llm-router install --host pi` fails with `Unknown host(s): pi`.
+> Pi wiring exists only in a legacy code path the documented command never reaches, so
+> everything below describes the intended integration, not something you can install.
 
 **Tier: Full Cost Optimization**
 
@@ -167,7 +172,7 @@ llm-router install --host pi
 ```
 
 **Features:**
-- ✅ All 60 MCP tools available (via MCP proxy or directTools)
+- ✅ All 70 MCP tools available (via MCP proxy or directTools)
 - ✅ Session tracking (cost breakdown logged)
 - ✅ Free-first routing (Ollama → Gemini Flash → GPT-4o)
 - ✅ Budget tracking
@@ -199,7 +204,7 @@ llm-router install --host vscode  # or --host cursor
 ```
 
 **Features:**
-- ✅ All 60 MCP tools available (llm_route, llm_query, llm_code, etc.)
+- ✅ All 70 MCP tools available (llm_route, llm_query, llm_code, etc.)
 - ✅ Manual invocation of routing tools
 - ⚠️ No automatic hook-based routing
 - ⚠️ No session tracking (unless you invoke tools)
@@ -273,13 +278,13 @@ Already installed with `pip install llm-routing`
 → **Claude Code** (auto-hooks, 60–80% savings)
 
 ### "I'm already in Codex"
-→ **Codex CLI** (invoke MCP routing explicitly; native turns are not tracked)
+→ **Codex CLI** (the prompt hook routes automatically; tool calls are not enforced; native turns are not tracked)
 
 ### "I want to use Gemini for free tier"
 → **Gemini CLI** (free tier included, 50–70% savings)
 
 ### "I want to use Pi's coding agent"
-→ **Pi** (MCP tools, 50–70% savings, lazy lifecycle)
+→ **Pi** — not installable via `llm-router install` today (see the Pi section)
 
 ### "I prefer VS Code"
 → **VS Code MCP** (manual routing, 30–50% savings, but low friction)
@@ -298,9 +303,9 @@ Already installed with `pip install llm-routing`
 
 **Supported on:**
 - Claude Code ✅
-- Codex CLI ❌ (explicit MCP calls only)
+- Codex CLI ⚠️ (prompt hook only; no tool-call enforcement)
 - Gemini CLI ✅
-- Pi (pi.dev) ✅
+- Pi (pi.dev) ❌ (not installable today)
 - VS Code/Cursor ❌
 - Browser ❌
 - Local CLI ⚠️ (manual only)
@@ -313,7 +318,7 @@ Hooks run **before** Claude's tool calls, analyzing the prompt to decide if rout
 - Claude Code ✅ (automatic)
 - Codex CLI ⚠️ (routed MCP calls only)
 - Gemini CLI ✅ (automatic)
-- Pi (pi.dev) ✅ (automatic)
+- Pi (pi.dev) ❌ (not installable today)
 - VS Code/Cursor ❌ (would need manual invocation)
 - Browser ❌
 - Local CLI ✅ (manual `llm-router snapshot`)
@@ -327,9 +332,9 @@ Automatic session tracking logs every routing decision for analytics. Manual tra
 | Host | Best Case | Typical | Worst Case | Notes |
 |------|-----------|---------|-----------|-------|
 | Claude Code | 80% | 70% | 50% | Optimal—hooks catch every decision |
-| Codex CLI | 80% | Varies | 0% | Savings only for explicitly routed calls |
+| Codex CLI | 80% | Varies | 0% | Prompt hook routes; tool calls not enforced |
 | Gemini CLI | 70% | 55% | 40% | Good—Gemini Free tier included |
-| Pi (pi.dev) | 70% | 55% | 40% | Good—lazy lifecycle, MCP proxy |
+| Pi (pi.dev) | — | — | — | Not installable today |
 | VS Code/Cursor | 50% | 35% | 15% | Lower—only when you invoke tools |
 | Browser | 0% | 0% | 0% | Read-only—no active routing |
 | Local CLI | 60% | 40% | 20% | Scripting only—not continuous |
