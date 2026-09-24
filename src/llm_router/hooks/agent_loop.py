@@ -409,14 +409,27 @@ def _num_ctx() -> int | None:
     is not a hypothetical: measured here, a 33k-token prompt came back with
     prompt_eval_count=16386 and the canary planted in the system prompt gone.
     """
-    raw = os.environ.get("LLM_ROUTER_AGENT_NUM_CTX", "").strip()
+    # I2 (2026-09-24): one window for EVERY local call. The server default is
+    # 8192, which a draft with session context overflows (oldest tokens — the
+    # system prompt — silently dropped), and a num_ctx that differs between
+    # calls forces a 3-6s model reload each time (measured on qwen3.8). So the
+    # draft path and this loop share LLM_ROUTER_LOCAL_NUM_CTX, default 131072;
+    # the older agent-only override still wins when set.
+    #
+    # 131072 measured 2026-09-24 on qwen3.8 (52 GB Mac, 24k-token real prompt):
+    # 32K/64K/128K run with ~0 swap (+0.6 GB at 128K); 256K adds +5.5 GB swap.
+    # Prompt reading is ~200 tok/s at every size, so a 55s draft can use only
+    # ~10k tokens of context anyway; the large window serves long-budget work
+    # (llm_local_task). 262144 stays available via LLM_ROUTER_LOCAL_NUM_CTX.
+    raw = (os.environ.get("LLM_ROUTER_AGENT_NUM_CTX", "").strip()
+           or os.environ.get("LLM_ROUTER_LOCAL_NUM_CTX", "").strip())
     if not raw:
-        return None
+        return 131072
     try:
         value = int(raw)
         return value if value > 0 else None
     except ValueError:
-        return None
+        return 131072
 
 
 def _agent_temperature() -> float:

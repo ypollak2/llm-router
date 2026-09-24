@@ -16,9 +16,13 @@ from llm_router.providers import _ollama_num_ctx, call_llm
 
 # ── pure config helper ───────────────────────────────────────────────────────
 
-def test_num_ctx_unset_returns_none(monkeypatch):
-    monkeypatch.delenv("LLM_ROUTER_OLLAMA_NUM_CTX", raising=False)
-    assert _ollama_num_ctx() is None
+def test_num_ctx_unset_uses_the_shared_local_window(monkeypatch):
+    """I2: every local path requests the same window, or Ollama reloads the
+    model between calls. Unset = the shared default (131072)."""
+    for k in ("LLM_ROUTER_OLLAMA_NUM_CTX", "LLM_ROUTER_LOCAL_NUM_CTX", "LLM_ROUTER_AGENT_NUM_CTX"):
+        monkeypatch.delenv(k, raising=False)
+    from llm_router.hooks.agent_loop import _num_ctx
+    assert _ollama_num_ctx() == _num_ctx() == 131072
 
 
 def test_num_ctx_parses_positive_int(monkeypatch):
@@ -26,7 +30,7 @@ def test_num_ctx_parses_positive_int(monkeypatch):
     assert _ollama_num_ctx() == 8192
 
 
-@pytest.mark.parametrize("bad", ["0", "-1", "abc", ""])
+@pytest.mark.parametrize("bad", ["0", "-1", "abc"])
 def test_num_ctx_invalid_returns_none(monkeypatch, bad):
     monkeypatch.setenv("LLM_ROUTER_OLLAMA_NUM_CTX", bad)
     assert _ollama_num_ctx() is None
@@ -59,13 +63,16 @@ async def test_num_ctx_passed_for_ollama_when_set(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_num_ctx_absent_for_ollama_when_unset(monkeypatch):
+async def test_num_ctx_is_the_shared_window_for_ollama_when_unset(monkeypatch):
+    """I2: unset used to mean 'no num_ctx' (server default 8192); it now means
+    the shared local window, so MCP calls don't reload the model."""
     import litellm
     captured: dict = {}
     monkeypatch.setattr(litellm, "acompletion", _fake_litellm(captured))
-    monkeypatch.delenv("LLM_ROUTER_OLLAMA_NUM_CTX", raising=False)
+    for k in ("LLM_ROUTER_OLLAMA_NUM_CTX", "LLM_ROUTER_LOCAL_NUM_CTX", "LLM_ROUTER_AGENT_NUM_CTX"):
+        monkeypatch.delenv(k, raising=False)
     await call_llm("ollama/qwen2.5:7b", [{"role": "user", "content": "hi"}])
-    assert "num_ctx" not in captured
+    assert captured.get("num_ctx") == 131072
 
 
 @pytest.mark.asyncio

@@ -126,7 +126,14 @@ def _ollama_num_ctx() -> int | None:
 
     raw = os.environ.get("LLM_ROUTER_OLLAMA_NUM_CTX", "").strip()
     if not raw:
-        return None
+        # I2 (2026-09-24): unset now means the SHARED local window, not the
+        # server default — the draft path and agent loop use it too, and a
+        # num_ctx that differs between calls reloads the model (3-6s).
+        try:
+            from llm_router.hooks.agent_loop import _num_ctx
+            return _num_ctx()
+        except Exception:                                    # noqa: BLE001
+            return None
     try:
         val = int(raw)
     except ValueError:

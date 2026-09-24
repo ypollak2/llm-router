@@ -131,6 +131,7 @@ ENV_REGISTRY: dict[str, tuple[str, str, int]] = {
     "LLM_ROUTER_HOOK_BUDGET_S": ("llm_router", "hooks/auto-route.py", 1),
     "LLM_ROUTER_CONSTRAINED_TOOLS": ("llm_router", "hooks/agent_loop.py", 1),
     "LLM_ROUTER_AGENT_NUM_CTX": ("llm_router", "hooks/agent_loop.py", 1),
+    "LLM_ROUTER_LOCAL_NUM_CTX": ("llm_router", "hooks/agent_loop.py", 1),
     "LLM_ROUTER_AGENT_TEMPERATURE": ("llm_router", "hooks/agent_loop.py", 1),
     "LLM_ROUTER_AGENT_WINDOW": ("llm_router", "hooks/context_budget.py", 1),
     "LLM_ROUTER_MAX_TOOL_RESULT_CHARS": ("llm_router", "hooks/context_budget.py", 1),
