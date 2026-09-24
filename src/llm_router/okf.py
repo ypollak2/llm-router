@@ -112,9 +112,10 @@ def project_slug(root: "str | Path | None" = None) -> str:
 
 
 def project_knowledge_dir(
-    root: "str | Path | None" = None, base: Path = _knowledge_dir()
+    root: "str | Path | None" = None, base: "Path | None" = None
 ) -> Path:
     """Where THIS project's OKF docs live."""
+    base = _knowledge_dir() if base is None else base  # resolved per call, not at import
     return base / "projects" / project_slug(root)
 
 
@@ -346,7 +347,7 @@ def _parse_okf(text: str, path: Path) -> OKFConcept | None:
 # ---------------------------------------------------------------------------
 
 def _retrieval_roots(
-    base: Path = _knowledge_dir(), root: Path | None = None
+    base: "Path | None" = None, root: Path | None = None
 ) -> list[Path]:
     """Directories eligible for INJECTION, most specific first.
 
@@ -377,10 +378,11 @@ def _retrieval_roots(
     guard in ``find_relevant_sessions`` is simply unused. Both behaviours are
     pinned in tests/okf/test_cross_model_context.py.
     """
+    base = _knowledge_dir() if base is None else base  # resolved per call, not at import
     return [project_knowledge_dir(root=root, base=base)]
 
 
-def _catalog_root(base: Path = _knowledge_dir()) -> Path:
+def _catalog_root(base: "Path | None" = None) -> Path:
     """The shared ModelCapability catalog — read for ROUTING decisions, never
     injected as task context.
 
@@ -393,6 +395,7 @@ def _catalog_root(base: Path = _knowledge_dir()) -> Path:
     to pick is input to the router, not background for the task, so it is no
     longer reachable from ``find_relevant``.
     """
+    base = _knowledge_dir() if base is None else base  # resolved per call, not at import
     return base / "models"
 
 
@@ -415,9 +418,10 @@ def _load_dir_sync(root: Path) -> list[OKFConcept]:
 
 
 def _load_bundle_sync(
-    base: Path = _knowledge_dir(), root: Path | None = None
+    base: "Path | None" = None, root: Path | None = None
 ) -> list[OKFConcept]:
     """Scan and parse the OKF concept docs eligible for injection."""
+    base = _knowledge_dir() if base is None else base  # resolved per call, not at import
     roots = [r for r in _retrieval_roots(base, root) if r.exists()]
     if not roots:
         return []
@@ -437,7 +441,7 @@ def _load_bundle_sync(
 
 
 def _get_bundle(
-    base: Path = _knowledge_dir(), root: Path | None = None
+    base: "Path | None" = None, root: Path | None = None
 ) -> list[OKFConcept]:
     """Return the cached bundle for this scope, reloading if the TTL expired.
 
@@ -452,6 +456,7 @@ def _get_bundle(
     explicit per-request root was correct at the retrieval call and then ignored by
     a cache that had computed its key from the cwd.
     """
+    base = _knowledge_dir() if base is None else base  # resolved per call, not at import
     now = time.monotonic()
     scope = (base, project_knowledge_dir(root=root, base=base))
     hit = _BUNDLE_CACHE.get(scope)
@@ -691,7 +696,7 @@ def _keywords_for_retrieval(prompt: str) -> list[str]:
 def find_relevant(
     prompt: str,
     limit: int = 3,
-    base: Path = _knowledge_dir(),
+    base: "Path | None" = None,
     root: "str | Path | None" = None,
 ) -> list[OKFConcept]:
     """Find OKF concepts most relevant to prompt via keyword overlap.
@@ -707,6 +712,7 @@ def find_relevant(
     Passing the root pins the answer to the asker's project instead of the server's
     accident of a working directory.
     """
+    base = _knowledge_dir() if base is None else base  # resolved per call, not at import
     if not _okf_enabled():
         return []  # opt-in; see _okf_enabled() — off by default to avoid contamination
     concepts = _get_bundle(base, _as_root(root))
@@ -879,8 +885,9 @@ tags: [codex, openai, premium, reasoning]
 }
 
 
-def seed_model_catalog(base: Path = _knowledge_dir()) -> int:
+def seed_model_catalog(base: "Path | None" = None) -> int:
     """Write default ModelCapability docs if they don't already exist. Returns count written."""
+    base = _knowledge_dir() if base is None else base  # resolved per call, not at import
     models_dir = base / "models"
     models_dir.mkdir(parents=True, exist_ok=True)
     written = 0
@@ -897,9 +904,10 @@ def seed_model_catalog(base: Path = _knowledge_dir()) -> int:
 
 def load_model_capability(
     model_name: str,
-    base: Path = _knowledge_dir(),
+    base: "Path | None" = None,
 ) -> OKFConcept | None:
     """Load the ModelCapability OKF doc for a model. Returns None if not found."""
+    base = _knowledge_dir() if base is None else base  # resolved per call, not at import
     safe = re.sub(r'[/:]', '-', model_name)
     short = model_name.split("/")[-1]
     for name in (safe, short):
@@ -1007,7 +1015,7 @@ async def enrich_from_response(
     prompt: str,
     response_text: str,
     model: str,
-    base: Path = _knowledge_dir(),
+    base: "Path | None" = None,
     root: "str | Path | None" = None,
 ) -> None:
     """Extract file references from prompt+response and write OKF SourceFile concepts.
@@ -1015,6 +1023,7 @@ async def enrich_from_response(
     Designed as a fire-and-forget asyncio.create_task so it never blocks the
     response path. Failures are silently swallowed — enrichment is best-effort.
     """
+    base = _knowledge_dir() if base is None else base  # resolved per call, not at import
     if not _okf_enabled():
         return  # opt-in; see _okf_enabled()
     try:
@@ -1077,7 +1086,7 @@ def record_session_turn(
     prompt: str,
     response_text: str,
     model: str,
-    base: Path = _knowledge_dir(),
+    base: "Path | None" = None,
     root: "str | Path | None" = None,
 ) -> Path | None:
     """Capture VERIFIED-ONLY context for a turn → ``sessions/<id>/turn-NNNN.md``.
@@ -1089,6 +1098,7 @@ def record_session_turn(
     asked for. A turn with no verifiable structure (no file, no symbol) is skipped
     as chatter. Returns the written path, or None when disabled/skipped/failed.
     """
+    base = _knowledge_dir() if base is None else base  # resolved per call, not at import
     if not _okf_enabled() or not session_id:
         return None
     try:
@@ -1167,13 +1177,14 @@ def find_relevant_sessions(
     prompt: str,
     exclude_session: str | None = None,
     limit: int = 3,
-    base: Path = _knowledge_dir(),
+    base: "Path | None" = None,
 ) -> list[OKFConcept]:
     """Retrieve SessionNote concepts from PRIOR sessions most relevant to ``prompt``.
 
     Same keyword-overlap scoring as ``find_relevant``, restricted to SessionNotes
     and excluding the caller's own session so a session never just echoes itself.
     """
+    base = _knowledge_dir() if base is None else base  # resolved per call, not at import
     if not _okf_enabled():
         return []
     # Loaded directly, NOT via _get_bundle: sessions are excluded from the
@@ -1219,7 +1230,7 @@ def find_relevant_sessions(
 
 def index_project(
     root: Path | None = None,
-    base: Path = _knowledge_dir(),
+    base: "Path | None" = None,
     limit: int = 2000,
 ) -> dict[str, Any]:
     """Walk a repo's tracked source files and write a SourceFile doc for each.
@@ -1234,6 +1245,7 @@ def index_project(
 
     Returns a summary dict: ``{indexed, skipped, scanned, store}``.
     """
+    base = _knowledge_dir() if base is None else base  # resolved per call, not at import
     root = (root or project_root()).resolve()
     store = project_knowledge_dir(root=root, base=base)
     result: dict[str, Any] = {"indexed": 0, "skipped": 0, "scanned": 0, "store": store}
@@ -1323,12 +1335,13 @@ def classify_concept(c: OKFConcept) -> tuple[str, str]:
     return "quarantine", "free-text prose written before the verified-only policy"
 
 
-def scan_store(base: Path = _knowledge_dir()) -> dict[str, list[OKFConcept]]:
+def scan_store(base: "Path | None" = None) -> dict[str, list[OKFConcept]]:
     """Classify every doc in the store, including ones outside retrieval.
 
     Scans the legacy flat `source/` too — those are no longer injected, but they
     are still on disk and the user deserves to be told what is in them.
     """
+    base = _knowledge_dir() if base is None else base  # resolved per call, not at import
     out: dict[str, list[OKFConcept]] = {"keep": [], "quarantine": []}
     roots = [
         base / "projects", base / "models", base / "source",
@@ -1350,12 +1363,13 @@ def scan_store(base: Path = _knowledge_dir()) -> dict[str, list[OKFConcept]]:
     return out
 
 
-def quarantine_concept(c: OKFConcept, base: Path = _knowledge_dir()) -> Path:
+def quarantine_concept(c: OKFConcept, base: "Path | None" = None) -> Path:
     """Move a doc out of retrieval into quarantine/, preserving its relative path.
 
     Never overwrites: a name collision gets a numeric suffix, so quarantining twice
     cannot destroy the first copy.
     """
+    base = _knowledge_dir() if base is None else base  # resolved per call, not at import
     quarantine = base / "quarantine"
     try:
         rel = c.path.relative_to(base)
@@ -1373,13 +1387,14 @@ def quarantine_concept(c: OKFConcept, base: Path = _knowledge_dir()) -> Path:
     return dest
 
 
-def gc_store(base: Path = _knowledge_dir(), apply: bool = False) -> dict[str, Any]:
+def gc_store(base: "Path | None" = None, apply: bool = False) -> dict[str, Any]:
     """Report (and optionally apply) quarantine of unverified docs.
 
     Dry-run by default. Moving a user's knowledge is a side effect they should ask
     for explicitly, so `apply` has to be set — `llm_router okf gc` reports, and
     `llm_router okf gc --apply` acts.
     """
+    base = _knowledge_dir() if base is None else base  # resolved per call, not at import
     scanned = scan_store(base)
     moved: list[tuple[str, str]] = []
     if apply:
@@ -1395,3 +1410,40 @@ def gc_store(base: Path = _knowledge_dir(), apply: bool = False) -> dict[str, An
             (str(c.path), c.title, classify_concept(c)[1]) for c in scanned["quarantine"]
         ],
     }
+
+
+# ── D (CTX-04): prune test/sandbox debris from the project store ─────────────
+# Measured 2026-09-24: 5,469 project dirs (307 MB), almost all created by test
+# runs and the capability probe before their paths stopped being frozen at
+# import. Classified by the naming those sources use; everything else is kept.
+# `apply` MOVES to a dated folder rather than deleting — reversible by `mv`.
+_DEBRIS_SLUG_RE = re.compile(
+    r"^(test_|tmp|pytest|llm_router-agentic-probe-|bq_|bqh_|repo-[0-9a-f]{8}$)"
+)
+
+
+def prune_projects(apply: bool = False, current: "str | Path | None" = None) -> dict[str, Any]:
+    """Report (and with ``apply`` move aside) fixture-made project dirs."""
+    import datetime
+    import shutil
+
+    projects = _knowledge_dir() / "projects"
+    keep_slug = project_slug(current) if current is not None else None
+    debris: list[str] = []
+    kept: list[str] = []
+    for d in sorted(projects.iterdir()) if projects.is_dir() else []:
+        if not d.is_dir():
+            continue
+        if d.name != keep_slug and _DEBRIS_SLUG_RE.match(d.name):
+            debris.append(d.name)
+        else:
+            kept.append(d.name)
+    moved_to = None
+    if apply and debris:
+        stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+        moved_to = _knowledge_dir() / f"pruned-projects-{stamp}"
+        moved_to.mkdir(parents=True, exist_ok=True)
+        for name in debris:
+            shutil.move(str(projects / name), str(moved_to / name))
+        invalidate_cache()
+    return {"debris": debris, "kept": kept, "applied": apply, "moved_to": moved_to}

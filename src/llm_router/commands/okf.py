@@ -48,6 +48,8 @@ def _print_help() -> None:
   {_b('llm-router okf index <path>')}  index another repo instead
   {_b('llm-router okf gc')}            report docs that are model prose rather than verified structure
   {_b('llm-router okf gc --apply')}    move those to knowledge/quarantine/ (recoverable, never deleted)
+  {_b('llm-router okf prune')}         list project dirs made by tests/sandboxes (dry run)
+  {_b('llm-router okf prune --apply')} move them to knowledge/pruned-projects-<date>/ (recoverable)
   {_b('llm-router okf adopt')}         move VERIFIED legacy docs into this project's store
   {_b('llm-router okf restore')}       move everything in quarantine/ back into retrieval
 
@@ -181,6 +183,23 @@ def cmd_okf(args: list[str]) -> None:
         if skipped:
             print(_dim(f"  Left {skipped} unverified doc(s) where they are — quarantine them with `okf gc --apply`."))
         print()
+        return
+
+    if sub == "prune":
+        # D (CTX-04): fixture-made project dirs. Dry-run unless --apply; moves,
+        # never deletes, and never touches the current project.
+        apply = "--apply" in args[1:]
+        r = okf.prune_projects(apply=apply, current=okf.project_root())
+        print(f"\n  {len(r['debris'])} fixture/sandbox project dir(s), {len(r['kept'])} kept.")
+        for name in r["debris"][:10]:
+            print(_dim(f"    {name}"))
+        if len(r["debris"]) > 10:
+            print(_dim(f"    … and {len(r['debris']) - 10} more"))
+        print("  Kept: " + ", ".join(r["kept"][:40]) + (" …" if len(r["kept"]) > 40 else ""))
+        if apply and r["moved_to"]:
+            print(_g(f"\n  Moved to {r['moved_to']} (delete it when satisfied).\n"))
+        elif r["debris"]:
+            print(_y("\n  Dry run — nothing moved. Re-run with --apply to move them aside.\n"))
         return
 
     if sub == "restore":

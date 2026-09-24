@@ -66,8 +66,12 @@ def probe_model(model: str, timeout: int = 90) -> bool:
     # default to `propose` (nothing lands) — so every model failed, including
     # ones that work live. Writes are applied for the probe's own fresh temp dir
     # only, and the previous mode is restored whatever happens.
-    prev_writes = os.environ.get("LLM_ROUTER_AGENT_WRITES")
-    os.environ["LLM_ROUTER_AGENT_WRITES"] = "apply"
+    # D: nor does it index its temp dir into the user's knowledge store — the
+    # probe tests tool-calling, not retrieval.
+    probe_env = {"LLM_ROUTER_AGENT_WRITES": "apply",
+                 "LLM_ROUTER_CONTEXT_INJECTION": "off"}
+    prev_env = {k: os.environ.get(k) for k in probe_env}
+    os.environ.update(probe_env)
     try:
         run_agent_loop(
             PROBE_PROMPT,
@@ -93,10 +97,11 @@ def probe_model(model: str, timeout: int = 90) -> bool:
     except Exception:
         return False
     finally:
-        if prev_writes is None:
-            os.environ.pop("LLM_ROUTER_AGENT_WRITES", None)
-        else:
-            os.environ["LLM_ROUTER_AGENT_WRITES"] = prev_writes
+        for k, v in prev_env.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
         shutil.rmtree(temp_dir, ignore_errors=True)
 
 
