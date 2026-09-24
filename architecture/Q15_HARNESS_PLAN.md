@@ -41,3 +41,26 @@ gives the baseline the graph must beat. When Phase 2 lands, the comparison becom
 ## Validation of the harness itself
 - A known-bad backend, the empty answer `noop`, must score 0/N. If it doesn't, a verifier is vacuous.
 - One task is red-checked by hand: break the reference solution and the verifier must fail.
+
+## Baseline results: single-model arm (2026-09-24)
+
+Conditions: `claude -p` 2.1.281, `--model claude-opus-5-5`, with llm-router hooks and MCP off; the
+permission grant is edits plus `python3 -m pytest`; each run starts in a fresh sandbox; this machine.
+Claude Code also made side calls to `claude-sonnet-5`, which are counted in the tokens below. Tokens
+are input + cache-create + cache-read + output; about 90% are cache reads.
+
+| Suite | n (tasks × runs) | Verified (correct AND clean) | Median tokens/task | Median turns | Median $ |
+|---|---|---|---|---|---|
+| plan (§28-shaped) | 3 × 3 | **9/9** | 235k–348k | 13–15 | 0.32–0.40 |
+| hard (cross-file) | 10 × 3 | **27/30** | 108k–305k | 3–14 | 0.03–0.24 |
+
+- `hd-strict-validate` scored 0/3 verified. It was correct 3/3, but every run edited
+  `tests/test_pipeline.py`, which the task forbids. That is a real result.
+- `hd-stale-index` first scored 0/3 because of a HARNESS bug: a relative `BENCH_OUT` broke the
+  verifier's path. OUT_DIR is now resolved to an absolute path. A re-run with the fix scored 3/3,
+  and the table uses the re-run.
+
+What this means for Q15: on these suites one strong model is at or near the ceiling on verified
+completion, so a graph can only win on tokens (the plan suite needs 235k–348k per task) or on the
+cleanliness failures. To separate the arms on completion, the task set needs harder, multi-layer tasks.
+Raw results: `results/q15/` (not committed).

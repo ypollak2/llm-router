@@ -49,7 +49,10 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-OUT_DIR = Path(os.environ.get("BENCH_OUT", ROOT / "scripts" / "backend_quality_out"))
+# resolve(): verifiers run with cwd=sandbox and read files under OUT_DIR, so a
+# relative BENCH_OUT broke them. Q15's first hard run scored hd-stale-index 0/3
+# on FileNotFoundError '../results/q15/orig_test_pipeline.py', not on the model.
+OUT_DIR = Path(os.environ.get("BENCH_OUT", ROOT / "scripts" / "backend_quality_out")).resolve()
 
 # ── The sandbox project ──────────────────────────────────────────────────────
 # Small enough that every task has one unambiguous right answer, layered enough
