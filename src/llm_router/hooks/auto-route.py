@@ -3536,6 +3536,17 @@ def main() -> None:
         _coverage_unobserved("EMPTY_PROMPT")
         sys.exit(0)
 
+    # M (2026-09-24): Claude Code delivers background-task notifications through
+    # UserPromptSubmit like a typed prompt — 190 of 733 user-turn prompts (25.9%)
+    # over 7 days of transcripts. A draft for one can never be relayed, costs up
+    # to the hook deadline, and counts as UNUSED toward the I5 auto-revert. Not a
+    # user turn, so zero-Claude has nothing to refuse either.
+    if prompt.lstrip().startswith("<task-notification>"):
+        _debug_log(f"[INVOCATION {invocation_id:.3f}] SYSTEM_NOTIFICATION_BYPASS — "
+                   f"background-task notification, not a user prompt")
+        _coverage_unobserved("SYSTEM_NOTIFICATION_BYPASS")
+        sys.exit(0)
+
     # Self-reference bypass: skip routing when the user is debugging llm_router
     # itself, to avoid the circular dependency where llm_router blocks its own
     # repair. See _SELF_REFERENCE_RE above for the match criteria.
@@ -3984,6 +3995,9 @@ def main() -> None:
     # Standard mode falls through to contextForAgent if external execution
     # cannot complete. Strict zero-Claude mode blocks instead.
     _direct_enabled = os.environ.get("LLM_ROUTER_DIRECT_EXECUTION", "true").lower() in ("1", "true", "yes", "on")
+    # O: remembered separately — gates below also clear _direct_enabled, and each
+    # logs its own reason; only THIS one may be reported as "disabled by env".
+    _direct_env_on = _direct_enabled
     
     # v2.6.1 disabled direct execution outright here, on the premise that "the
     # direct hook is stateless". That premise expired: the hook now relays
@@ -4100,11 +4114,13 @@ def main() -> None:
         except Exception:
             _reverted = None
 
-    if not _direct_enabled:
+    if not _direct_env_on:
         _debug_log(
             f"[INVOCATION {invocation_id:.3f}] DIRECT SKIP: direct execution "
             f"disabled by env (LLM_ROUTER_DIRECT_EXECUTION)"
         )
+    elif not _direct_enabled:
+        pass  # a gate above cleared it and already logged its own DIRECT SKIP
     elif _enforce_mode in ("shadow", "off"):
         _debug_log(
             f"[INVOCATION {invocation_id:.3f}] DIRECT SKIP: enforcement "

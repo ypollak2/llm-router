@@ -9,6 +9,19 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+# N (2026-09-24): the suite must not inherit the operator's llm-router settings.
+# The routing hook runs `_load_dotenv()` at IMPORT and copies
+# $LLM_ROUTER_HOME/.env into os.environ for the rest of the process, and an
+# exported LLM_ROUTER_* variable does the same — so ordinary settings
+# (SEMANTIC_HISTORY=shadow, ENFORCE=soft) failed seven tests under the real
+# HOME. Done here, at conftest import, because it must happen before any test
+# module imports the hook; per-test fixtures below still set what they need.
+import tempfile as _tempfile  # noqa: E402
+
+for _k in [k for k in os.environ if k.startswith("LLM_ROUTER_")]:
+    del os.environ[_k]
+os.environ["LLM_ROUTER_HOME"] = _tempfile.mkdtemp(prefix="llm_router-suite-home-")
+
 
 # ── G-D: prove the wheel is what is under test ──────────────────────────────
 def pytest_configure(config):
