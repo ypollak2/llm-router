@@ -16,6 +16,7 @@ Configuration is organized into five sections:
 
 from __future__ import annotations
 
+import re
 import threading
 import time
 import urllib.request
@@ -23,7 +24,7 @@ from pathlib import Path
 from typing import Literal
 
 from pydantic import AliasChoices, Field, field_validator
-from pydantic_settings import BaseSettings
+from pydantic_settings import BaseSettings, DotEnvSettingsSource
 
 from llm_router.paths import state_path
 from llm_router.types import QualityMode, RoutingProfile, Tier
@@ -190,6 +191,66 @@ def _reset_llm_router_profile_fallback_warning_latch() -> None:
     _llm_router_profile_fallback_warning_emitted = False
 
 
+
+# ── SEC-002/003: repository content must not choose where data is sent ─────
+#
+# A project's `.env` is part of whatever repository the user just cloned. It used
+# to be trusted exactly like the user's own config, so a hostile repo could set
+# OPENAI_COMPAT_BASE_URL and receive the real OPENAI_API_KEY (reproduced end to
+# end, audit/forensic_2026-09-24/13_verify_security_deps.md). From a project
+# `.env`, endpoint-shaped keys are ignored; API keys still load, since they only
+# spend the file author's own money. The user's own `$LLM_ROUTER_HOME/.env` and
+# the process environment are unaffected. The auto-route hook applies the same
+# rule to its own `.env` reader.
+_ENDPOINT_KEY = re.compile(
+    r"(_URL|_BASE|_HOST|_ENDPOINT|_WEBHOOK)$|^(HTTPS?_PROXY|ALL_PROXY|NO_PROXY)$",
+    re.IGNORECASE,
+)
+
+
+def is_endpoint_key(name: str) -> bool:
+    """True for a variable that decides WHERE requests go, not who pays."""
+    return bool(_ENDPOINT_KEY.search(name.strip()))
+
+
+_PROJECT_ENV_ALLOWED = re.compile(r"(_API_KEY|_API_TOKEN)$|^LLM_ROUTER_", re.IGNORECASE)
+
+
+def project_env_may_set(name: str) -> bool:
+    """What a project `.env` may inject into a PROCESS environment (the hook).
+
+    An allowlist, not the endpoint denylist: the hook copies these into
+    os.environ, which every child process inherits, so PYTHONPATH, NODE_OPTIONS,
+    DYLD_INSERT_LIBRARIES or a CA bundle from a cloned repo would run or
+    intercept code. Provider API keys and non-endpoint LLM_ROUTER_* settings
+    are all a project legitimately needs.
+    """
+    n = name.strip()
+    return bool(_PROJECT_ENV_ALLOWED.search(n)) and not is_endpoint_key(n)
+
+
+class _ProjectDotEnvSource(DotEnvSettingsSource):
+    """The working directory's `.env`, minus endpoint-shaped keys."""
+
+    def _load_env_vars(self):
+        return {k: v for k, v in super()._load_env_vars().items()
+                if not is_endpoint_key(k)}
+
+
+def _is_loopback_url(url: str) -> bool:
+    from urllib.parse import urlparse
+    import ipaddress
+    try:
+        host = urlparse(url).hostname or ""
+    except ValueError:
+        return False
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
 class RouterConfig(BaseSettings):
     """Central configuration for the LLM Router.
 
@@ -270,6 +331,14 @@ class RouterConfig(BaseSettings):
     # Local pxpipe proxy endpoint. Matches pxpipe's own default port.
     llm_router_pxpipe_url: str = "http://127.0.0.1:47821"
 
+    @field_validator("llm_router_pxpipe_url")
+    @classmethod
+    def _validate_pxpipe_url(cls, v: str) -> str:
+        # SEC-002: pxpipe forwards to the real provider WITH the real key, so a
+        # non-local pxpipe URL is a credential sink by design. Loopback only;
+        # anything else disables it ("" -> the quirk is a no-op).
+        return v if (v and _is_loopback_url(v)) else ""
+
     # Comma-separated model names (bare, no provider prefix) to route through
     # pxpipe when llm_router_pxpipe_enabled is True. Deliberately mirrors
     # pxpipe's own conservative default (PXPIPE_MODELS=claude-fable-5,gpt-5.6)
@@ -303,6 +372,10 @@ class RouterConfig(BaseSettings):
     # Example: openai_compat_base_url="http://localhost:8080/v1"
     #          openai_compat_models="llama-3.2-8b,mistral-7b"
     openai_compat_base_url: str = ""        # empty = disabled
+    # The key sent to that server. Never the provider's own key: without an
+    # explicit value LiteLLM fell back to OPENAI_API_KEY and sent it to whatever
+    # host openai_compat_base_url named (SEC-002).
+    openai_compat_api_key: str = ""
     openai_compat_models: str = ""          # comma-separated model names
 
     # ── Agentic model routing (v0.5.5) ──
@@ -583,6 +656,23 @@ class RouterConfig(BaseSettings):
     # Media generation (especially video) can take several minutes; separate
     # timeout prevents premature cancellation of long-running generation jobs.
     media_request_timeout: int = 600
+
+    @classmethod
+    def settings_customise_sources(cls, settings_cls, init_settings, env_settings,
+                                   dotenv_settings, file_secret_settings):
+        # Same precedence as the old env_file=(state .env, ./.env) — the project
+        # file still beats the user's for ordinary keys — but the project file
+        # is filtered (SEC-003), and the state path is resolved per construction
+        # rather than frozen at import time.
+        enc = "utf-8"
+        return (
+            init_settings,
+            env_settings,
+            _ProjectDotEnvSource(settings_cls, env_file=".env", env_file_encoding=enc),
+            DotEnvSettingsSource(settings_cls, env_file=paths.state_path(".env"),
+                                 env_file_encoding=enc),
+            file_secret_settings,
+        )
 
     model_config = {
         "env_file": (paths.state_path(".env"), ".env"),

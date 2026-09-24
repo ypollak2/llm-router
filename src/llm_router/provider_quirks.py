@@ -233,6 +233,16 @@ class OpenAICompatQuirks:
             return payload
         out = dict(payload)
         out["api_base"] = base_url.rstrip("/")
+        # SEC-002: always name the key. Without one LiteLLM falls back to
+        # OPENAI_API_KEY and sends the user's real OpenAI key to this server.
+        # Local servers ignore the placeholder; ones that need a key get
+        # openai_compat_api_key.
+        if "api_key" not in out:
+            try:
+                key = get_config().openai_compat_api_key
+            except Exception:
+                key = ""
+            out["api_key"] = key or "sk-no-key-required"
         return out
 
     def transform_response(self, raw: dict[str, Any]) -> dict[str, Any]:

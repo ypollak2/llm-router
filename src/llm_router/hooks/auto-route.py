@@ -205,9 +205,25 @@ def _env_paths():
 
 
 def _load_dotenv() -> None:
-    """Load key=value pairs from .env files into os.environ (no override)."""
+    """Load key=value pairs from .env files into os.environ (no override).
+
+    SEC-002/003: the working directory's .env is repository content. From it,
+    only provider API keys and non-endpoint LLM_ROUTER_* settings are loaded
+    (`llm_router.config.project_env_may_set`) — it must not choose where
+    prompts and keys are sent, nor inject PYTHONPATH/NODE_OPTIONS/DYLD_* into
+    this process and its children. If that rule cannot be imported, the
+    project file is skipped entirely rather than trusted.
+    """
+    try:
+        from llm_router.config import project_env_may_set
+    except Exception:
+        project_env_may_set = None
+    project_env = Path.cwd() / ".env"
     for env_path in _env_paths():
         if not env_path.exists():
+            continue
+        untrusted = env_path == project_env
+        if untrusted and project_env_may_set is None:
             continue
         try:
             for line in env_path.read_text().splitlines():
@@ -217,6 +233,8 @@ def _load_dotenv() -> None:
                 key, _, value = line.partition("=")
                 key = key.strip()
                 value = value.strip().strip("\"'")
+                if untrusted and not project_env_may_set(key):
+                    continue
                 if key and key not in os.environ:
                     os.environ[key] = value
         except OSError:
