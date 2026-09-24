@@ -16,7 +16,7 @@ Every public guide page, in the order most people need them.
 |---|---|
 | [Providers](PROVIDERS.md) | Provider setup, API keys, and model recommendations per tier |
 | [Routing Policies](POLICIES.md) | The `routing.yaml` schema and how to author your own policy |
-| [Tool Reference](TOOLS.md) | All 60 MCP tools with arguments and examples |
+| [Tool Reference](TOOLS.md) | All 70 MCP tools with arguments and examples |
 
 ## Operate
 

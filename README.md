@@ -210,7 +210,7 @@ The exact chain depends on your configured providers, budget profile, and routin
 | Tool | Mode | Savings (this host) |
 |------|------|-----------------|
 | **Claude Code** | Full auto-routing via hooks | 60–80% |
-| **Codex CLI** | Manual MCP tools · hooks 🔜 | 30–50% |
+| **Codex CLI** | Prompt-routing hook + MCP tools · no tool-call enforcement | 30–50% |
 | **Gemini CLI** | Full auto-routing via hooks | 50–70% |
 | **VS Code / Cursor** | Manual MCP tools · hooks 🔜 | 30–50% |
 | **Any MCP client** | Manual MCP tools | Varies |
@@ -356,8 +356,8 @@ All six policies, thresholds and the YAML schema: **[guide/POLICIES.md](guide/PO
 
 ## MCP Tools
 
-60 tools across routing, analysis, code, media, budget and diagnostics — exposed to any
-MCP host. The default `consolidated` surface shows 11 front-door tools; set
+70 tools across routing, analysis, code, media, budget and diagnostics — exposed to any
+MCP host. The default `consolidated` surface shows 12 front-door tools; set
 `LLM_ROUTER_SLIM=full` for all 60.
 
 Every tool with its signature: **[guide/TOOLS.md](guide/TOOLS.md)**
@@ -553,7 +553,7 @@ Full index: **[guide/README.md](guide/README.md)**
 | [Host Support Matrix](guide/HOST_SUPPORT_MATRIX.md) | Per-host feature comparison |
 | [Providers](guide/PROVIDERS.md) | Provider setup and model recommendations |
 | [Routing Policies](guide/POLICIES.md) | `routing.yaml` schema and authoring your own policy |
-| [Tool Reference](guide/TOOLS.md) | All 60 MCP tools with examples |
+| [Tool Reference](guide/TOOLS.md) | All 70 MCP tools with examples |
 | [Architecture](guide/ARCHITECTURE.md) | Internal design and module structure |
 | [Troubleshooting](guide/TROUBLESHOOTING.md) | Common issues and fixes |
 | [Testing the Router](guide/TESTING.md) | Isolation suite for verifying routing health |

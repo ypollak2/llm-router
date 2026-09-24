@@ -1,6 +1,6 @@
 """MCPServer server — MCP entry point for llm_router.
 
-All 60 tools are registered by modules in llm_router/tools/:
+All 70 tools are registered by modules in llm_router/tools/:
 - routing.py  — llm_classify, llm_track_usage, llm_route, llm_auto, llm_stream,
                 llm_select_agent, llm_reroute
 - text.py     — llm_query, llm_research, llm_generate, llm_analyze, llm_reason, llm_code, llm_edit

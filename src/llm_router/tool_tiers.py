@@ -1,6 +1,6 @@
 """Tool slim mode — tiered tool registration for token budget management.
 
-Registering all 41 tools injects ~8,000 tokens into every Claude session,
+Registering all 70 tools injects ~14,700 tokens (measured 2026-09-24) into every Claude session,
 degrading routing accuracy past 20–30K context tokens. Slim mode solves
 this by registering only the tools appropriate for the active tier.
 

@@ -1,11 +1,12 @@
 # LLM Router Tools Reference
 
-Complete documentation of all 60 MCP tools provided by llm-router for Claude Code, Cursor, VS Code, Codex, and other AI development environments.
+Complete documentation of all 70 MCP tools provided by llm-router for Claude Code, Cursor, VS Code, Codex, and other AI development environments.
 
-> **Default install note**: by default (`LLM_ROUTER_SLIM=consolidated`), only 11 front-door
+> **Default install note**: by default (`LLM_ROUTER_SLIM=consolidated`), only 12 front-door
 > tools are registered — `llm(task=..., tier=...)`, `llm_act`, `llm_route`, `llm_router_status`,
-> `llm_router_admin`, `llm_router_session`, `llm_image`, `llm_audio`, `llm_edit`, and the two
-> `llm_router_agent_*` session tools. Every tool below still exists as an implementation
+> `llm_router_admin`, `llm_router_session`, `llm_image`, `llm_audio`, `llm_edit`,
+> `llm_local_task` — the one default tool that can edit files and run commands through
+> the local agent loop (see SECURITY.md) — and the two `llm_router_agent_*` session tools. Every tool below still exists as an implementation
 > function and becomes directly callable with `LLM_ROUTER_SLIM=off` (full legacy surface) or
 > `=routing`/`=core` for the subsets those tiers cover — see `tool_surface.py` for exactly
 > which tier registers which name. Where a tool isn't registered under the default tier, its
