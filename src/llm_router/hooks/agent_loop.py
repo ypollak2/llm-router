@@ -247,7 +247,11 @@ def execute_tool(name: str, args: dict, project_root: Path) -> str:
             pattern = args["pattern"]
             regex = re.compile(pattern, re.IGNORECASE)
             results = []
-            for fpath in search_path.rglob(file_pattern):
+            # K: rglob on a FILE yields nothing, so a search narrowed to one file
+            # reported "(no matches)" for text that was in it — and the model
+            # believed it. A named file is searched as-is, whatever its suffix.
+            candidates = [search_path] if search_path.is_file() else search_path.rglob(file_pattern)
+            for fpath in candidates:
                 if not fpath.is_file():
                     continue
                 try:
