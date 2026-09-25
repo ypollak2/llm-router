@@ -123,6 +123,11 @@ tests/hook_rendering/
 !/docs/GROUNDING_API.md
 !/docs/decisions/
 !/docs/decisions/**
+# The North Star, its audit and the fix plan that comes out of it. Same
+# category as /docs/decisions/ above: a permanent record of what the repo
+# is supposed to do and where it currently doesn't, not a working note.
+!/docs/repo_goals/
+!/docs/repo_goals/**
 # Measurement evidence. Same category as /docs/releases/ above — a permanent
 # record, not a working note. Every number this project publishes is supposed
 # to carry the file it came from, and a file no clone contains cannot be that

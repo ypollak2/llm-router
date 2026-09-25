@@ -84,6 +84,13 @@ _EXCLUDED_FILES = {
     # defect since August. The report is right, the lint is right about the
     # string, and rewriting the quotes would destroy the record.
     _REPO_ROOT / "docs" / "RESEARCH_FIRSTRUN.md",
+    # Same shape as the PROPOSAL_ prefix below, for a file whose name the
+    # source plan fixes: fix item 7 proposes gating the session-start
+    # benchmark fetch behind a new `LLM_ROUTER_AUTO_BENCHMARK_FETCH`, not yet
+    # implemented (PR2 in the plan's own execution tracker). The variable not
+    # existing in src/ is the point of the proposal, not a doc drifted from
+    # the code.
+    _REPO_ROOT / "docs" / "repo_goals" / "PLAN-fixes.md",
 }
 # A design proposal names the configuration it would ADD
 # (LLM_ROUTER_EXECUTION_MODE, LLM_ROUTER_LOCAL_TASK_BUDGET_S, ...). Those

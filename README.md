@@ -397,9 +397,9 @@ Savings are calculated by comparing actual spend against a baseline of routing e
 **On savings figures.** Percentages quoted anywhere in this project are a *counterfactual* —
 what the same tokens would have cost at API list price, against what was actually spent. On a
 flat-rate subscription that is not money saved; it is quota preserved, and the two are not
-interchangeable. The "35–80%" and "87%" figures are single-user observations over particular
-development periods, with no stated denominator, and should be read as anecdotes rather than
-as a range you can expect. `llm-router summary` reports what your own usage actually did.
+interchangeable. This project does not publish a general savings percentage or range — any
+number depends heavily on your own workload. Run `llm-router savings-report` to see what your
+own usage actually did, with its own n and window.
 
 ---
 
