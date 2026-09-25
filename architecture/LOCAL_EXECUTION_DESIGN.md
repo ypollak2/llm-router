@@ -257,3 +257,23 @@ Everything else as §8.1.
 **Run 3's score is the answer.** No further harness changes after it: whatever
 it scores is reported against the §8 rule, with the traces that explain it.
 Changing the setup until something passes would make the number meaningless.
+
+### 8.4 Result (final, run 3): PASS 0/20 — not viable as the loop stands
+
+**Run 3: 0/20; 1 of 20 moments changed a file (a scratch script, not Claude's
+files).** 16 ended at the 15-step cap, 2 on a repeated command, 2 returned
+nothing. By the §8 rule (< 40%): **not viable with qwen3.8 and the current loop.**
+
+What the traces show, now that the harness is clean (moment 6, "Great, go on"):
+the model oriented itself in ~5 steps, located the right code (`HOOK_POLICY` in
+`classify.py` — the file Claude changed), and was still reading it when the
+15-step cap ended the turn. It was not lost; it ran out of steps.
+
+Why 15 steps cannot hold these turns: Claude used a **median of 20 tool calls**
+in the same 20 windows (range 1–90); 13 of 20 needed more than 15. Claude also
+starts each turn holding the tool output of earlier turns; the local model gets
+prose only and spends ~5 steps re-orienting. Of the 7 windows Claude finished
+within 15 calls, 2 were `git push`, which the local agent may not run.
+
+Not tested (a new pre-registration would be needed): a Claude-comparable step
+budget (~60) — at ~20 s per local step that is a 20-minute "keep going" turn.
