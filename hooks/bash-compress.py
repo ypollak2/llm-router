@@ -196,14 +196,20 @@ def main() -> None:
         strategy=compression["strategy"],
     ))
 
-    # Format output
+    # Format output. `compression["output"]` is compressed COMMAND output —
+    # untrusted file/log content the model never asked to see raw — so it is
+    # neutralised and fenced before landing in additionalContext. Same defect
+    # class, same fix, as tool_intercept.py's PreToolUse deny path.
     compressed_lines = compression["output"].count("\n") + 1
+    block, neutralized = _payload.untrusted_block(
+        "COMMAND OUTPUT (RTK-compressed)", compression["output"])
+    _payload.log_neutralize("bash-compress", len(compression["output"]), neutralized)
     context = (
         f"[LLM-Router RTK] Command output compressed via {compression['strategy']}:\n"
         f"  {original_lines} → {compressed_lines} lines | "
         f"{compression['original_tokens']:,} → {compression['compressed_tokens']:,} tokens | "
         f"{compression_pct:.0f}% reduction\n"
-        f"\n{compression['output']}\n"
+        f"\n{block}\n"
         f"\n⚡ {tokens_saved:,} tokens saved via RTK compression. "
         f"Full output available if needed."
     )

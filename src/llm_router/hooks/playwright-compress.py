@@ -237,10 +237,18 @@ def main() -> None:
     # Free-first compression chain
     compressed = _try_ollama(snapshot) or _try_gemini(snapshot) or _rule_based(snapshot)
 
+    # `compressed` is derived from a live page's DOM — content the site
+    # author controls, not this hook. A page could legitimately render text
+    # shaped like `<system-reminder>...</system-reminder>` and have it echoed
+    # straight into additionalContext. Neutralise and fence it before that
+    # happens, same fix as tool_intercept.py's PreToolUse deny path.
     compressed_lines = compressed.count("\n") + 1
+    block, neutralized = _payload.untrusted_block(
+        "DOM SNAPSHOT SUMMARY (from the page, not from you)", compressed)
+    _payload.log_neutralize("playwright-compress", len(compressed), neutralized)
     context = (
         f"[LLM-Router] DOM snapshot compressed {original_lines}→{compressed_lines} lines:\n"
-        f"{compressed}\n"
+        f"{block}\n"
         "⚡ Use the refs above directly — avoid re-snapshot unless page state changes."
     )
 

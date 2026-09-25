@@ -4137,6 +4137,20 @@ def main() -> None:
     # all four modes side by side. The invariant, enforced by
     # tests/test_routing_outcome_logged.py: an invocation that logs
     # `prompt_len=` logs exactly one terminal outcome.
+    # U (2026-09-25): drafts only for QUESTIONS. The hook drafted for every task
+    # type and Claude used 0 of 1,191 drafts; for a code or instruction turn a
+    # draft only adds latency, since Claude does the work either way. The
+    # quota-saving path is Claude calling llm(...) itself (smart enforcement).
+    # Zero-Claude still drafts everything — there the draft IS the answer.
+    _draft_tasks = os.environ.get("LLM_ROUTER_DRAFT_TASKS", "query,research").strip().lower()
+    if (_direct_enabled and _draft_tasks != "all" and not _zero_claude_enabled()
+            and task_type not in {t.strip() for t in _draft_tasks.split(",")}):
+        _direct_enabled = False
+        _debug_log(
+            f"[INVOCATION {invocation_id:.3f}] DIRECT SKIP: drafts only for questions "
+            f"(task={task_type}; LLM_ROUTER_DRAFT_TASKS=all drafts everything)"
+        )
+
     # I5: drafting reverts itself after a streak of unused drafts
     # (hooks/draft_usage.py). Checked only where a draft would otherwise run.
     _reverted = None
@@ -4720,13 +4734,29 @@ def main() -> None:
         # route SUGGESTION is preserved (advisory, still names the tool) so the
         # caller may route WITH context if useful — it just isn't forced. Keeping
         # the tool in the directive also keeps the routing display consistent.
-        write_pending = False
-        directive = _context_note + (
-            f"⚡ ROUTE (advisory): {task_type}/{complexity} → {_ctx_disp} [via {method}] — but "
-            f"this prompt is context-dependent, so a stateless routed model can't see your "
-            f"repo. Nothing is blocked; prefer handling it DIRECTLY with your tools, or "
-            f"route WITH context via {_ctx_call}. Never relay a context-free draft."
-        )
+        # V (2026-09-25): that premise is gone — llm(context=…) now carries OKF,
+        # semantic and session context — and the exemption covered 51% of the
+        # user's real prompts (10-day replay, n=142), so routing almost never
+        # happened in a repo. Enforce them, telling Claude to route WITH the
+        # excerpts. LLM_ROUTER_ENFORCE_CONTEXT=off restores the exemption.
+        if os.environ.get("LLM_ROUTER_ENFORCE_CONTEXT", "on").strip().lower() not in (
+                "0", "off", "false", "no"):
+            directive = (
+                "🧠 CONTEXT PROMPT — this refers to your repo / session. Gather the few "
+                "files or excerpts it needs, then route WITH them: "
+                f"{_ctx_call} (OKF, semantic and session context are added "
+                "automatically). Use the answer after checking its key claim; do the "
+                "work yourself only if it needs edits or commands in the repo.\n\n"
+                f"⚡ ROUTE: {task_type}/{complexity} → {_ctx_disp} [via {method}]"
+            )
+        else:
+            write_pending = False
+            directive = _context_note + (
+                f"⚡ ROUTE (advisory): {task_type}/{complexity} → {_ctx_disp} [via {method}] — but "
+                f"this prompt is context-dependent, so a stateless routed model can't see your "
+                f"repo. Nothing is blocked; prefer handling it DIRECTLY with your tools, or "
+                f"route WITH context via {_ctx_call}. Never relay a context-free draft."
+            )
         indicator = f"🧠 {task_type}/{complexity} → {_ctx_disp} · context-dependent [via {method}]"
 
     # ── Per-session paid-API spend cap (#3) ──────────────────────────────────────

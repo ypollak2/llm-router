@@ -107,3 +107,21 @@ def test_the_hook_logs_how_many_files_a_draft_read(monkeypatch, tmp_path):
     log = _hook_log(monkeypatch, tmp_path, "What does os.path.join do?", "/Users/someone/project")
     ok = [x for x in log if "DIRECT SUCCESS:" in x]
     assert ok and "files_read=2" in ok[0], ok
+
+
+# ── U2: the llm(...) path — calls Claude routed, by where they ran ───────────
+
+def test_routed_calls_split_local_claude_other_and_skip_simulated(tmp_path):
+    import sqlite3
+    db = tmp_path / "usage.db"
+    con = sqlite3.connect(db)
+    con.execute("CREATE TABLE usage (timestamp TEXT, provider TEXT, is_simulated INTEGER)")
+    rows = [(f"{D} 10:00:00", "ollama", 0), (f"{D} 10:01:00", "ollama", 0),
+            (f"{D} 10:02:00", "cc", 0), (f"{D} 10:03:00", "codex", 0),
+            (f"{D} 10:04:00", "ollama", 1)]            # simulated: excluded
+    con.executemany("INSERT INTO usage VALUES (?,?,?)", rows)
+    con.commit()
+    con.close()
+    out = routing_health.routed_calls(days=1, db=db, today=dt.date.fromisoformat(D))
+    # 'cc' = a Claude Code sub-agent finishing (cc-usage-track.py), not routing
+    assert (out[D]["calls"], out[D]["local"], out[D]["other"], out[D]["subagents"]) == (3, 2, 1, 1)
