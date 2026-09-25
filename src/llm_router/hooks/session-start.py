@@ -1100,6 +1100,38 @@ def _warm_ollama_bg() -> None:
         pass
 
 
+def _drain_judge_queue_bg() -> None:
+    """Detach a background drain of the judge grading queue.
+
+    CHZ-JUDGE-QUEUE. The hot path only enqueues sampled responses
+    (`judge.enqueue_for_grading`) — it never calls a judge model itself, so
+    grading has to happen somewhere out of band. This spawns exactly the way
+    `_warm_ollama_bg` and `_maybe_reindex_okf_bg` already do: a detached
+    subprocess so session start is never delayed by it, and a failure here is
+    invisible to (and never blocks) the user's turn. The same drain is also
+    reachable directly via `llm-router judge drain` for anyone who wants to
+    run it on a schedule instead of piggybacking on session start.
+
+    Opt-out: LLM_ROUTER_JUDGE_AUTODRAIN=0.
+    """
+    if os.environ.get("LLM_ROUTER_JUDGE_AUTODRAIN", "").strip().lower() in ("0", "off", "false", "no"):
+        return
+    script = (
+        "import asyncio; from llm_router.judge import drain_queue; "
+        "asyncio.run(drain_queue())"
+    )
+    try:
+        subprocess.Popen(
+            [sys.executable, "-c", script],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except Exception:
+        pass  # never block session start
+
+
 def _maybe_refresh_benchmarks_bg() -> None:
     """Trigger a background benchmark refresh if the local file is stale.
 
@@ -1438,6 +1470,11 @@ def main() -> None:
     # prompt of the new session doesn't pay model-load latency on its
     # classification call. Detached, never blocks session start.
     _warm_ollama_bg()
+
+    # 6b. Drain the judge grading queue in the background — the hot path only
+    # enqueues, so something has to grade sampled responses out of band.
+    # Detached, never blocks session start.
+    _drain_judge_queue_bg()
 
     # Visible UI signal — Claude Code surfaces stderr as
     # "SessionStart:startup hook success: <msg>". Print the BANNER box first

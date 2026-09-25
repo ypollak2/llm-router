@@ -282,3 +282,56 @@ def test_log_direct_to_db_never_raises_on_bad_task_type(temp_db):
         complexity="moderate",
         profile="not-a-real-profile",
     )
+
+
+def test_log_direct_to_db_passes_response_to_the_judge_queue(temp_db, tmp_path, monkeypatch):
+    """CHZ-JUDGE-QUEUE cause (a) regression test.
+
+    `log_direct_to_db` used to call `cost.log_routing_decision` WITHOUT
+    `response=`, so the judge queue's `if success and response:` trigger
+    never fired for a single DIRECT/hook-routed turn — the judge graded 0 of
+    1,608 routing decisions, and this path (real answers, never enqueued)
+    was one of the three causes. This exercises the real hook function
+    end-to-end and asserts an entry lands in judge_queue.jsonl with the
+    actual response text, not a mock of the internal call.
+    """
+    monkeypatch.setenv("LLM_ROUTER_HOME", str(tmp_path))
+    monkeypatch.setenv("LLM_ROUTER_JUDGE_SAMPLE_RATE", "1.0")
+
+    from llm_router.hooks.direct_executor import DirectResult, ModelSpec
+    from llm_router.hooks.savings_logger import log_direct_to_db
+
+    # `success` (and therefore the judge-queue trigger) is gated on
+    # `_response_is_usable`, which requires more than the generic
+    # `_ollama_result()` fixture's "some answer" — a real, substantive reply.
+    result = DirectResult(
+        text="The capital of France is Paris, a city on the Seine river.",
+        model=ModelSpec(provider="ollama", model="qwen3.5:latest"),
+        latency_ms=6500,
+        input_tokens=100,
+        output_tokens=50,
+    )
+
+    log_direct_to_db(
+        result,
+        prompt="what is the capital of France",
+        task_type="query",
+        complexity="simple",
+        classifier_type="heuristic",
+    )
+
+    # LLM_ROUTER_HOME points directly at the state dir (paths.llm_router_home
+    # returns it unmodified when the override is set) — no extra ".llm-router"
+    # segment.
+    queue_path = tmp_path / "judge_queue.jsonl"
+    assert queue_path.exists(), (
+        "no judge_queue.jsonl written — log_direct_to_db is still omitting "
+        "response= from log_routing_decision"
+    )
+    entries = [json.loads(line) for line in queue_path.read_text().splitlines() if line.strip()]
+    assert len(entries) == 1
+    entry = entries[0]
+    assert entry["prompt"] == "what is the capital of France"
+    assert entry["response"] == result.text
+    assert entry["task_type"] == "query"
+    assert entry["answering_model"] == "qwen3.5:latest"

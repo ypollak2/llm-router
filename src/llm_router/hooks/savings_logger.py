@@ -456,6 +456,12 @@ def log_direct_to_db(
                 cost_usd=cost_usd,
                 latency_ms=latency_ms,
                 reason_code="direct",
+                # CHZ-JUDGE-QUEUE cause (a): this call used to omit `response=`
+                # entirely, so cost.log_routing_decision's `if success and
+                # response:` judge-queue trigger never fired for a single
+                # DIRECT/hook-routed turn — a real, non-empty answer existed
+                # (`response` below) but was never handed to the judge queue.
+                response=response.content,
             )
 
         # Persist. The standalone UserPromptSubmit hook is synchronous with no
