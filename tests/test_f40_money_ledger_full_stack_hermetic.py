@@ -42,15 +42,21 @@ async def _seed_savings_jsonl(home, rows):
 
 @pytest.mark.asyncio
 async def test_the_ledger_chain_carries_a_call_all_the_way_to_the_totals(home):
-    """route-shaped row → JSONL → importer → savings_stats → aggregate."""
+    """route-shaped row → JSONL → importer → savings_stats → aggregate.
+
+    PR5 follow-up: `mode="block"` joined host/model/timestamp in the verified
+    predicate — these rows are meant to be REALIZED (the writer observed the
+    routed answer replace Claude's turn), which is exactly what mode="block"
+    means, so they say so explicitly rather than relying on host alone.
+    """
     rows = [
         {"timestamp": "2026-09-22T10:00:00+00:00", "session_id": "s1",
          "task_type": "code", "estimated_saved": 0.30, "external_cost": 0.01,
-         "model": "ollama/qwen", "host": "claude_code",
+         "model": "ollama/qwen", "host": "claude_code", "mode": "block",
          "input_tokens": 100, "output_tokens": 50, "is_simulated": 0},
         {"timestamp": "2026-09-22T10:01:00+00:00", "session_id": "s1",
          "task_type": "query", "estimated_saved": 0.20, "external_cost": 0.00,
-         "model": "ollama/qwen", "host": "claude_code",
+         "model": "ollama/qwen", "host": "claude_code", "mode": "block",
          "input_tokens": 60, "output_tokens": 20, "is_simulated": 0},
     ]
     await _seed_savings_jsonl(home, rows)
@@ -107,7 +113,7 @@ async def test_the_importer_is_idempotent(home):
     await _seed_savings_jsonl(home, [
         {"timestamp": "2026-09-22T10:00:00+00:00", "session_id": "s4",
          "task_type": "code", "estimated_saved": 0.25, "external_cost": 0.0,
-         "model": "ollama/qwen", "host": "claude_code",
+         "model": "ollama/qwen", "host": "claude_code", "mode": "block",
          "input_tokens": 1, "output_tokens": 1, "is_simulated": 0},
     ])
     first = await cost.import_savings_log()

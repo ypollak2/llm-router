@@ -154,11 +154,14 @@ def _read_stats_records(max_rows: int = 2000) -> list[dict]:
     try:
         rows = conn.execute(
             "SELECT timestamp, host, model_used, task_type, "
-            "       estimated_claude_cost_saved, input_tokens, output_tokens "
+            "       estimated_claude_cost_saved, input_tokens, output_tokens, mode "
             "FROM savings_stats ORDER BY id DESC LIMIT ?",
             (max_rows,),
         ).fetchall()
     except sqlite3.Error:
+        # Includes a table predating the `mode` column — fail-soft to no
+        # records rather than a half-classified list (S9: unknown must not
+        # be silently treated as verified by skipping the mode check).
         return []
     finally:
         try:
@@ -167,18 +170,19 @@ def _read_stats_records(max_rows: int = 2000) -> list[dict]:
             pass
     out: list[dict] = []
     from llm_router.savings import is_verified_saving
-    for ts, host, model, task, saved, in_tok, out_tok in rows:
+    for ts, host, model, task, saved, in_tok, out_tok, mode in rows:
         out.append({
             "timestamp": ts,
             # Decided on the RAW host: the "claude_code" default below is for
             # per-host grouping only and must not make an unknown row verified.
-            "verified": is_verified_saving(host, model, ts),
+            "verified": is_verified_saving(host, model, ts, mode),
             "host": host or "claude_code",
             "model": model,
             "task_type": task,
             "estimated_saved": saved or 0.0,
             "input_tokens": in_tok or 0,
             "output_tokens": out_tok or 0,
+            "mode": mode,
         })
     return out
 
@@ -292,7 +296,7 @@ def compute_status(host: str, now: Optional[float] = None) -> SurfaceStatus:
         except (ValueError, TypeError):
             saved = 0.0
         verified = rec["verified"] if "verified" in rec else is_verified_saving(
-            rec.get("host"), rec.get("model"), rec.get("timestamp"))
+            rec.get("host"), rec.get("model"), rec.get("timestamp"), rec.get("mode"))
         ts = _parse_ts(rec)
         today = ts is not None and ts >= day_start
         if verified:
