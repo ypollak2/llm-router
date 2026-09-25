@@ -224,6 +224,19 @@ def _enforce_queue_cap(path) -> int:
     return dropped
 
 
+#: Preference order for the LOCAL judge model, most-preferred first, matched
+#: by substring against whatever `discover.get_cached_ollama_models` reports
+#: installed. feat/judge-discrimination (2026-09-25): measured on a 50-item
+#: hand-labelled discrimination set (tests/fixtures/judge_eval_set.py) — a
+#: judge model that reasons more carefully catches a wrong arithmetic/factual
+#: answer more reliably than a smaller, faster one. This is a PREFERENCE, not
+#: a requirement: `_select_judge_model` still falls back to "first available
+#: candidate that differs from the answering model" (the pre-existing
+#: behaviour) when none of these substrings match what's actually installed,
+#: so an operator with a different local model set still gets *a* judge.
+_JUDGE_MODEL_PREFERENCE: tuple[str, ...] = ("qwen3-coder", "qwen3.8", "qwen3.5")
+
+
 def _select_judge_model(answering_model: str) -> str | None:
     """Pick an INDEPENDENT judge model — one that never matches the model
     that answered.
@@ -235,6 +248,10 @@ def _select_judge_model(answering_model: str) -> str | None:
     Prefers what's available with zero API keys: a locally installed Ollama
     model (via :mod:`llm_router.discover`, the same module the router uses to
     find what's actually reachable) that differs from the answering model.
+    Among independent candidates, prefers `_JUDGE_MODEL_PREFERENCE` order
+    (see its docstring); falls back to the first available independent
+    candidate, in whatever order discovery reports, if none of the preferred
+    names are installed.
 
     Returns:
         A judge model id, or None if no independent judge is available —
@@ -257,10 +274,19 @@ def _select_judge_model(answering_model: str) -> str | None:
         return m.split("/", 1)[-1] if "/" in m else m
 
     answering_norm = _norm(answering_model or "")
-    for candidate in candidates:
-        if _norm(candidate) != answering_norm:
-            return candidate
-    return None
+    independent = [c for c in candidates if _norm(c) != answering_norm]
+    if not independent:
+        return None
+
+    for preferred in _JUDGE_MODEL_PREFERENCE:
+        for candidate in independent:
+            if preferred in _norm(candidate).lower():
+                return candidate
+
+    # No preferred name installed — keep the original behaviour (first
+    # independent candidate in discovery order) rather than leaving the row
+    # ungraded when a perfectly usable local judge is available.
+    return independent[0]
 
 
 #: Marker inserted into every claim's work-file name, so orphan recovery can
@@ -550,56 +576,161 @@ async def _evaluate_background(
 def _build_judge_prompt(prompt: str, response: str, task_type: str) -> str:
     """Build prompt for LLM judge evaluation.
 
-    Returns JSON with relevance, completeness, correctness scores (0–1).
+    Returns JSON with correctness, relevance, completeness scores and a short
+    rationale.
+
+    feat/judge-discrimination (2026-09-25). The original three-field, evenly
+    averaged 0–1 prompt scored a wrong arithmetic answer ("17*23" -> "400")
+    at 0.667 and the right one ("391") at 1.0 — it discriminated in the right
+    DIRECTION but too weakly to be a useful quality signal, because a fluent,
+    on-topic, complete-looking WRONG answer still earned full credit on two
+    of the three dimensions. This version fixes three things, each measured
+    on a 50-item hand-labelled set (tests/fixtures/judge_eval_set.py) before
+    and after:
+
+      1. VERIFY-FIRST instruction — tells the judge to work out the right
+         answer itself before scoring, instead of pattern-matching on
+         fluency. Kept as a best-practice instruction (a judge that
+         doesn't verify is a worse bet on models/tasks this set doesn't
+         cover), but the red-check run (scripts/judge_discrimination_eval.py
+         --red-check-no-verify-first, holdout split, qwen3.5:latest judge)
+         found NO measurable drop from removing just this line — mean(wrong)
+         stayed at 0.4 and threshold accuracy stayed at 1.0. Reported
+         honestly in the PR description rather than claimed as evidence this
+         line alone helps; qwen3.5 is a hybrid-reasoning model that appears
+         to "think" through arithmetic/fact checks in its own chain-of-thought
+         regardless of whether the prompt asks it to, which likely explains
+         why an explicit instruction added nothing further for THIS judge
+         model on THIS set. It may still matter for a non-reasoning judge
+         model — untested here.
+      2. Explicit, per-dimension correctness criteria that name the failure
+         mode directly: "a confident, well-written WRONG answer still scores
+         0 on correctness". This is the exact case the old prompt missed.
+      3. A coarse {0, 0.5, 1} scale instead of an unconstrained 0.X float —
+         less room for arbitrary, non-reproducible granularity on a
+         dimension that is really "wrong / partially right / right".
+
+    Items 2 and 3, together with the correctness-dominant composite weights
+    below, are what the red-check isolates as actually carrying the
+    separation gain for this judge model (see the PR description's
+    before/after table).
+
+    The composite is no longer an even average (see `_parse_judge_score`):
+    correctness is weighted far more heavily than relevance/completeness,
+    because a relevant, complete, WRONG answer is still a bad answer for
+    the router's quality signal — averaging it with two high, easy-to-earn
+    scores was exactly what diluted the old judge's separation.
     """
-    return f"""You are an expert quality evaluator. Rate this response on three dimensions:
+    return f"""You are a strict, independent verifier grading another model's answer. Your \
+job is to catch a wrong answer that a careless reviewer would miss — a fluent, \
+on-topic, well-formatted response that gets the actual answer wrong is a BAD response.
+
+STEP 1 — VERIFY FIRST, SILENTLY. Before scoring, work out the correct answer or the \
+correct facts yourself (recompute arithmetic, recall the fact, re-derive the code's \
+behaviour). Do this internally — do not show your work in the output.
+
+STEP 2 — SCORE each dimension using ONLY 0, 0.5, or 1:
+
+  correctness — 1 if the core claim/answer/result is factually and computationally \
+right. 0.5 if it is genuinely partially right (e.g. right on one sub-part of a \
+multi-part question, or right approach with a wrong final number). 0 if the final \
+answer is wrong. A confident, well-written WRONG answer still scores 0 on \
+correctness — fluency and completeness do not earn correctness credit.
+  relevance — 1 if it addresses what was actually asked, 0.5 if only partially \
+on-topic, 0 if it answers a different question.
+  completeness — 1 if nothing material requested is missing, 0.5 if it is a \
+reasonable but incomplete attempt, 0 if it is a non-answer.
 
 USER PROMPT:
 {prompt}
 
-RESPONSE:
+RESPONSE TO GRADE:
 {response}
 
 TASK TYPE: {task_type}
 
-Evaluate on:
-1. Relevance (0–1): Does response address the prompt?
-2. Completeness (0–1): Is response sufficiently thorough?
-3. Correctness (0–1): Is factual content accurate?
+Respond ONLY with valid JSON (no markdown, no text outside the JSON):
+{{"correctness": 0|0.5|1, "relevance": 0|0.5|1, "completeness": 0|0.5|1, "rationale": "<one short sentence citing the specific error, or confirming correctness>"}}"""
 
-Respond ONLY with valid JSON (no markdown, no explanation):
-{{"relevance": 0.X, "completeness": 0.X, "correctness": 0.X}}"""
+
+#: Composite weights. Correctness dominates deliberately — see
+#: `_build_judge_prompt`'s docstring for the measured reason. Must sum to 1.0
+#: (asserted by test_judge.py) so a response scored 1/1/1 on every dimension
+#: still composes to exactly 1.0.
+_CORRECTNESS_WEIGHT = 0.6
+_RELEVANCE_WEIGHT = 0.25
+_COMPLETENESS_WEIGHT = 0.15
+
+
+def _coerce_dimension(value, default: float) -> float:
+    """Best-effort float coercion for a non-load-bearing dimension.
+
+    Used for relevance/completeness only — a bad or missing value there
+    degrades gracefully to `default` rather than voiding the whole grade,
+    because correctness (see `_parse_judge_score`) is the dimension that
+    actually has to be trustworthy or absent.
+    """
+    try:
+        return max(0.0, min(1.0, float(value)))
+    except (TypeError, ValueError):
+        return default
 
 
 def _parse_judge_score(response_text: str) -> float | None:
-    """Parse composite score from judge response.
+    """Parse a weighted composite score from the judge's response.
 
-    Expects JSON with relevance, completeness, correctness (0–1 each).
-    Returns average of three scores, or None if parsing fails.
+    Expects JSON with correctness, relevance, completeness (0/0.5/1 each,
+    though any float in range is accepted) and a rationale string.
+
+    `correctness` is load-bearing: a reply that omits it, or whose value
+    can't be read as a number, is treated the same as a reply that isn't
+    valid JSON at all — this function returns None and the caller
+    (`_evaluate_background`) leaves the row ungraded rather than writing a
+    score built on a dimension the judge never actually answered. This is a
+    behaviour change from the original judge, which silently defaulted
+    every missing field to 0.5 — a default correctness score is exactly the
+    kind of "plausible-sounding score from a broken read" this repo's
+    failopen convention says must be visible, not silent.
+
+    `relevance`/`completeness` are not load-bearing: a missing or malformed
+    value there degrades to a neutral 0.5 rather than voiding the grade,
+    since they are secondary to correctness in the composite (see
+    `_CORRECTNESS_WEIGHT`).
+
+    Returns:
+        Weighted composite in [0, 1], or None if parsing failed or
+        correctness itself couldn't be read.
     """
     import json
 
     try:
-        # Extract JSON from response (may contain extra text)
+        # Extract JSON from response (may contain extra text around it).
         response_text = response_text.strip()
         start = response_text.find("{")
         end = response_text.rfind("}") + 1
         if start == -1 or end == 0:
             return None
-
         json_str = response_text[start:end]
         data = json.loads(json_str)
-
-        # Average the three scores
-        relevance = float(data.get("relevance", 0.5))
-        completeness = float(data.get("completeness", 0.5))
-        correctness = float(data.get("correctness", 0.5))
-
-        composite = (relevance + completeness + correctness) / 3.0
-        # Clamp to [0, 1]
-        return max(0.0, min(1.0, composite))
     except (json.JSONDecodeError, ValueError, TypeError):
         return None
+
+    if not isinstance(data, dict) or "correctness" not in data:
+        return None
+    try:
+        correctness = max(0.0, min(1.0, float(data["correctness"])))
+    except (TypeError, ValueError):
+        return None
+
+    relevance = _coerce_dimension(data.get("relevance"), default=0.5)
+    completeness = _coerce_dimension(data.get("completeness"), default=0.5)
+
+    composite = (
+        _CORRECTNESS_WEIGHT * correctness
+        + _RELEVANCE_WEIGHT * relevance
+        + _COMPLETENESS_WEIGHT * completeness
+    )
+    return max(0.0, min(1.0, composite))
 
 
 async def _store_judge_score(routing_decision_id: int, score: float) -> None:
