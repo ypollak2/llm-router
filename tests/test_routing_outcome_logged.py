@@ -34,6 +34,11 @@ def _run_hook(prompt: str, home: Path, **env_extra) -> str:
     env = dict(os.environ)
     env.update({"HOME": str(home), "LLM_ROUTER_HOME": str(home / ".llm-router")})
     env.pop("PYTEST_CURRENT_TEST", None)      # we want the production path here
+    # These tests check LOGGING, never drafting. Without this the hook drafted
+    # against the developer's real Ollama, and a model loaded at a 128K window
+    # (2026-09-25) made a draft outlast the 30 s test timeout — on main too. A
+    # closed port refuses at once; the hook still logs its terminal outcome.
+    env.setdefault("LLM_ROUTER_OLLAMA_URL", "http://127.0.0.1:9")
     env.update(env_extra)
     payload = json.dumps({"session_id": "outcometest", "prompt": prompt,
                           "cwd": str(ROOT), "transcript_path": ""})
