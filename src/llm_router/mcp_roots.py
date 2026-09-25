@@ -72,7 +72,7 @@ async def root_from_ctx(ctx: Any) -> Path | None:
     """
     session = getattr(ctx, "session", None)
     if session is None:
-        return None
+        return _root_from_session_pointer()
 
     key = id(session)
     now = time.monotonic()
@@ -80,7 +80,7 @@ async def root_from_ctx(ctx: Any) -> Path | None:
     if hit is not None and (now - hit[0]) < _TTL_S:
         # Only a hit if the entry still belongs to THIS session object.
         if hit[2]() is session:
-            return hit[1]
+            return hit[1] if hit[1] is not None else _root_from_session_pointer()
         _CACHE.pop(key, None)
 
     resolved: Path | None = None
@@ -120,4 +120,25 @@ async def root_from_ctx(ctx: Any) -> Path | None:
         # Not weak-referenceable: skip the cache rather than risk an id()
         # collision serving another session's root.
         pass
-    return resolved
+    # X4: no roots from the client (Claude Code sends none) → the caller's cwd as
+    # the prompt hook recorded it. Not cached: the session's cwd moves.
+    return resolved if resolved is not None else _root_from_session_pointer()
+
+
+def _root_from_session_pointer() -> Path | None:
+    """X4 (2026-09-25): the caller's cwd as the prompt hook recorded it.
+
+    Claude Code sends no MCP roots and starts this server in $HOME, but it does
+    set CLAUDE_CODE_SESSION_ID in the server's environment, and the hook records
+    each session's cwd on every prompt — an exact match, never another session's.
+    """
+    import os
+    sid = os.environ.get("CLAUDE_CODE_SESSION_ID", "").strip()
+    if not sid:
+        return None
+    try:
+        from llm_router.session_store import read_session_cwd
+        cwd = read_session_cwd(sid)
+    except Exception:  # noqa: BLE001
+        return None
+    return Path(cwd) if cwd else None

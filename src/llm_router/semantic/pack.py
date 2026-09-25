@@ -115,6 +115,11 @@ def build(
     # would produce a span the index has not re-extracted, which is a different
     # kind of stale.
     full_tokens = 0
+    # X2 (2026-09-25): a function the question NAMES comes with its code. Evidence
+    # was signature-only, so "what does X write?" reached the model as a name and
+    # it guessed. Bodies only for exact seed matches, capped, and only after the
+    # hash check below confirms the file still matches what was indexed.
+    _named = set(retrieve.seeds_from(query)[0])
     for position, entity in enumerate(result.entities, 1):
         item = {
             # A handle the consumer can cite back. Path+span identifies it, but
@@ -145,6 +150,11 @@ def build(
                 f"budget of {budget_tokens} tokens reached"
             )
             continue
+        if entity.name in _named:
+            body = _read_body(scope, entity)
+            if body and pack.retrieved_tokens + _tokens(rendered) + _tokens(body) <= budget_tokens:
+                item["body"] = body
+                rendered = _render_evidence(item)
         pack.evidence.append(item)
         pack.retrieved_tokens += _tokens(rendered)
 
@@ -229,9 +239,27 @@ def _snapshot_id(scope: Path) -> str:
         return "unknown"
 
 
+_BODY_MAX_LINES = 80
+
+
+def _read_body(scope, entity) -> str:
+    """The entity's source lines (capped). Empty when unreadable."""
+    try:
+        lines = (Path(scope) / entity.relative_path).read_text(
+            encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return ""
+    span = lines[entity.start_line - 1: entity.end_line]
+    cut = len(span) > _BODY_MAX_LINES
+    text = "\n".join(span[:_BODY_MAX_LINES])
+    return text + (f"\n… ({len(span) - _BODY_MAX_LINES} more lines)" if cut else "")
+
+
 def _render_evidence(item: dict[str, Any]) -> str:
     span = item["span"]
     head = f"{item['path']}:{span['start_line']}-{span['end_line']} ({item['kind']})"
+    if item.get("body"):
+        return head + "\n" + "\n".join("    " + ln for ln in item["body"].splitlines())
     return f"{head}\n  {item['signature'] or item['symbol']}"
 
 

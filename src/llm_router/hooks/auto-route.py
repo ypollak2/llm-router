@@ -3609,7 +3609,9 @@ def main() -> None:
     if session_id:
         try:
             from llm_router.session_store import write_pointer as _write_pointer
-            _write_pointer(session_id)
+            # X4: with the session's cwd, so llm(...) calls retrieve from the
+            # caller's project (the MCP server's own cwd is $HOME).
+            _write_pointer(session_id, cwd=hook_input.get("cwd") or None)
         except Exception as _exc:                                    # noqa: BLE001
             from llm_router import failopen as _fo
             _fo.record("CHZ-FO-HOOK-SESSION-POINTER", _exc)
@@ -4383,9 +4385,6 @@ def main() -> None:
                     )
                 except Exception:
                     pass
-                # Rolling per-session transcript shard (audit §2.5/P2): record
-                # this llm_router-answered turn so later routed turns can see it.
-                _append_transcript_shard(session_id, prompt, _direct_result.text)
                 # Visible UI signal — Claude Code surfaces stderr from
                 # UserPromptSubmit hooks under "UserPromptSubmit:hook success:",
                 # giving the user a real-time view of which model handled each
@@ -4435,6 +4434,12 @@ def main() -> None:
                 # also set — bypassing Claude with an unverified draft in exactly the
                 # advisory-only config the operator opted into. "echo" never blocks.
                 _turn_blocked = _render_mode != "echo"
+                # Rolling per-session transcript shard (audit §2.5/P2) — ONLY for a
+                # turn the hook ANSWERED. W (2026-09-25): writing it for every draft
+                # recorded discarded echo-mode hints as assistant turns; they were
+                # persisted as `claude_answer` and fed to later drafts as fact.
+                if _turn_blocked:
+                    _append_transcript_shard(session_id, prompt, _direct_result.text)
                 try:
                     from llm_router import trace as _t
                     _t.emit("route.outcome", invocation=f"{invocation_id:.3f}",

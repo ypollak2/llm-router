@@ -81,6 +81,11 @@ _PATHISH = re.compile(r"[\w./-]+\.(?:py|pyi|ts|js|go|rs|java)")
 _QUOTED = re.compile(r"[`'\"]([A-Za-z_][A-Za-z0-9_.]*)[`'\"]")
 _SNAKE = re.compile(r"\b[A-Za-z][A-Za-z0-9]*(?:_[A-Za-z0-9]+)+\b")
 _CAMEL = re.compile(r"\b[A-Z][a-z0-9]*[A-Z][A-Za-z0-9]*\b")
+# X1 (2026-09-25): `_SNAKE` needs a leading letter, and `\b` cannot sit between
+# `_` and a letter, so every `_private` name — most of a Python codebase's
+# helpers — was dropped as a seed. One or two leading underscores, then a
+# letter; `_` alone and dunders like `__init__` still only match as words.
+_PRIVATE = re.compile(r"(?<![A-Za-z0-9_])_{1,2}[A-Za-z][A-Za-z0-9_]*[A-Za-z0-9](?<!__)(?![A-Za-z0-9_])")
 _DOTTED = re.compile(r"\b[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)+\b")
 
 
@@ -120,7 +125,7 @@ def seeds_from(query: str) -> tuple[list[str], list[str]]:
         scannable = scannable.replace(path, " ")
 
     idents: list[str] = []
-    for pattern in (_QUOTED, _DOTTED, _SNAKE, _CAMEL):
+    for pattern in (_QUOTED, _DOTTED, _PRIVATE, _SNAKE, _CAMEL):
         for match in pattern.finditer(scannable):
             token = match.group(1) if pattern is _QUOTED else match.group(0)
             # A dotted reference is looked up by its last segment, which is what
