@@ -59,6 +59,13 @@ _EXEC_OBJECT_RE = re.compile(
 )
 
 
+# Double-quoted spans are text the user is naming, not an instruction they are
+# giving: in `fix the hook blocking prompts like "merge them"` the verb is inside
+# the quotes. Single quotes and backticks are left alone — apostrophes, and
+# `run `pytest`` names a command to run.
+_QUOTED_RE = re.compile(r'"[^"\n]*"|“[^”\n]*”')
+
+
 @dataclass(frozen=True)
 class ExecutionSignal:
     """Result of execution-need detection, with the matched axes for transparency
@@ -78,8 +85,16 @@ def detect_execution(prompt: str) -> ExecutionSignal:
         return ExecutionSignal(False, reason="explanatory/interrogative lead")
     if _CONTENT_OBJECT_RE.search(p):
         return ExecutionSignal(False, reason="prose/content deliverable, not execution")
+    p = _QUOTED_RE.sub(" ", p)
     verb_m = _EXEC_VERB_RE.search(p)
-    obj_m = _EXEC_OBJECT_RE.search(p)
+    # The object must be a different word from the verb: "merge" is in both
+    # lists, so "merge them" matched verb='merge' obj='merge' and hijacked a
+    # context-dependent follow-up into the delegate loop.
+    obj_m = next(
+        (m for m in _EXEC_OBJECT_RE.finditer(p)
+         if not verb_m or m.end() <= verb_m.start() or m.start() >= verb_m.end()),
+        None,
+    )
     if verb_m and obj_m:
         verb, obj = verb_m.group(0), obj_m.group(0)
         return ExecutionSignal(
