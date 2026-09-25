@@ -28,6 +28,17 @@ Reports, for the requested split(s):
     - separation: correct>wrong pair rate (= AUC / Mann-Whitney U / n1*n2,
       ties counted as 0.5)
     - accuracy of a 0.5 threshold classifier (correct/wrong only)
+
+Headline result (n=22 holdout, untouched during tuning; partial-credit items
+excluded from accuracy/AUC): correctness-dominant scoring raised threshold=0.5
+accuracy from 58.8% (10/17, Wilson 95% CI 36-79%) to 100% (18/18, CI 82-100%)
+with judge=qwen3.5:latest, and from 66.7% (12/18, CI 44-84%) to 100%
+(18/18, CI 82-100%) with the production judge qwen3-coder:30b. AUC was
+already 1.0 both before and after in both cases — the fix is absolute
+separation (mean(wrong) 0.64->0.40 qwen3.5, 0.55->0.38 qwen3-coder;
+mean(correct) held at ~1.00), not ranking. With qwen3.5 every wrong item
+scored exactly 0.40 (a binary correctness gate for that judge); qwen3-coder
+varies on completeness instead.
 """
 
 from __future__ import annotations

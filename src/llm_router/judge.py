@@ -586,7 +586,22 @@ def _build_judge_prompt(prompt: str, response: str, task_type: str) -> str:
     on-topic, complete-looking WRONG answer still earned full credit on two
     of the three dimensions. This version fixes three things, each measured
     on a 50-item hand-labelled set (tests/fixtures/judge_eval_set.py) before
-    and after:
+    and after, on the n=22 holdout half (untouched during tuning):
+
+      Correctness-dominant scoring raised holdout threshold=0.5 accuracy from
+      58.8% (10/17, Wilson 95% CI 36-79%) to 100% (18/18, CI 82-100%) with
+      judge=qwen3.5:latest, and from 66.7% (12/18, CI 44-84%) to 100%
+      (18/18, CI 82-100%) with the production judge qwen3-coder:30b (n=22
+      holdout each; AUC was already 1.0 both before and after — the fix is
+      absolute separation, not ranking). mean(wrong) fell to 0.40 (qwen3.5)
+      and 0.38 (qwen3-coder); mean(correct) held at ~1.00 (1.000 qwen3.5,
+      0.970->1.000 qwen3-coder). The 4 holdout partial-credit items are
+      reported separately and excluded from accuracy/AUC. With qwen3.5,
+      every wrong item scored EXACTLY 0.40 (correctness 0, full marks on the
+      two secondary dimensions) — for that judge the gain is effectively a
+      binary correctness gate, not a graded one. qwen3-coder:30b varies on
+      completeness (wrong-item scores of 0.4 and 0.325 both occur), so the
+      same weighting produces a genuinely graded signal there.
 
       1. VERIFY-FIRST instruction — tells the judge to work out the right
          answer itself before scoring, instead of pattern-matching on
@@ -595,10 +610,10 @@ def _build_judge_prompt(prompt: str, response: str, task_type: str) -> str:
          cover), but the red-check run (scripts/judge_discrimination_eval.py
          --red-check-no-verify-first, holdout split, qwen3.5:latest judge)
          found NO measurable drop from removing just this line — mean(wrong)
-         stayed at 0.4 and threshold accuracy stayed at 1.0. Reported
-         honestly in the PR description rather than claimed as evidence this
-         line alone helps; qwen3.5 is a hybrid-reasoning model that appears
-         to "think" through arithmetic/fact checks in its own chain-of-thought
+         stayed at 0.4 and threshold accuracy stayed at 100% (18/18).
+         Reported honestly rather than claimed as evidence this line alone
+         helps; qwen3.5 is a hybrid-reasoning model that appears to "think"
+         through arithmetic/fact checks in its own chain-of-thought
          regardless of whether the prompt asks it to, which likely explains
          why an explicit instruction added nothing further for THIS judge
          model on THIS set. It may still matter for a non-reasoning judge

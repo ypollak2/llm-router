@@ -590,5 +590,4 @@ assert sum(1 for i in ITEMS if i["label"] == "wrong") == 20
 assert sum(1 for i in ITEMS if i["label"] == "partial") == 8
 assert sum(1 for i in ITEMS if i["split"] == "tune") == 28
 assert sum(1 for i in ITEMS if i["split"] == "holdout") == 22
-assert {i["id"] for i in ITEMS} == {i["id"] for i in ITEMS}, "ids must be present"
 assert len({i["id"] for i in ITEMS}) == 50, "ids must be unique"
