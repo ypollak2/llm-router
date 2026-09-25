@@ -37,7 +37,12 @@ def run(cmd, root):
 
 def test_a_pipeline_runs(repo):
     out = run("git log --oneline | head -2", repo)
-    assert "c2" in out and "c1" in out and "c0" not in out, out
+    # Compare commit *subjects* (the last token of each `--oneline` line), not
+    # raw substrings of `out`: an abbreviated hash is hex and can coincidentally
+    # contain "c0" (e.g. "c0d84a2"), which would fail this assertion for a
+    # reason that has nothing to do with the pipeline under test.
+    subjects = {ln.rsplit(None, 1)[-1] for ln in out.strip().splitlines() if ln}
+    assert subjects == {"c2", "c1"}, out
 
 
 def test_a_sequence_runs_both(repo):

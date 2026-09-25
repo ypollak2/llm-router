@@ -409,28 +409,35 @@ def _run_command_line(cmd: str, project_root: Path) -> str:
     for op, segments in parsed:
         if (op == "&&" and not last_ok) or (op == "||" and last_ok):
             continue
-        procs, prev_stdout = [], None
+        # Pipeline stages run ONE AT A TIME, feeding each stage's fully-drained
+        # output into the next stage's stdin, instead of chaining live OS pipes
+        # (`stdin=prev.stdout`) between concurrently-running processes. The
+        # concurrent-pipe form raced: a downstream reader (e.g. `head -N`) can
+        # exit — and close its read end — the instant it has its N lines,
+        # which can deliver SIGPIPE/EOF to the upstream writer before the
+        # parent has actually finished draining what the upstream already
+        # wrote, occasionally truncating captured output on a slow/loaded
+        # runner. `communicate()`-then-feed makes each stage's output final
+        # and complete before the next stage ever starts, so there is nothing
+        # left to race. Pipelines here are short developer commands (git log,
+        # ls, grep, ...), not multi-GB streams, so buffering each stage's
+        # output in memory is the right trade for determinism.
+        procs, data = [], None
         try:
+            errs, out = [], ""
             for n, seg in enumerate(segments):
                 last = n == len(segments) - 1
                 p = subprocess.Popen(
                     seg["argv"], cwd=str(project_root), env=child_env, text=True,
-                    stdin=prev_stdout,
+                    stdin=subprocess.PIPE if data is not None else None,
                     stdout=subprocess.DEVNULL if seg["stdout_null"] else subprocess.PIPE,
                     stderr=(subprocess.DEVNULL if seg["stderr_null"] else
                             subprocess.STDOUT if seg.get("stderr_to_stdout") else subprocess.PIPE),
                 )
-                if prev_stdout is not None:
-                    prev_stdout.close()
-                prev_stdout = None if (last or seg["stdout_null"]) else p.stdout
                 procs.append(p)
-            out, err_last = procs[-1].communicate(timeout=max(0.1, deadline - time.monotonic()))
-            errs = []
-            for p in procs[:-1]:
-                p.wait(timeout=max(0.1, deadline - time.monotonic()))
-                if p.stderr is not None:
-                    errs.append(p.stderr.read())
-            errs.append(err_last or "")
+                out, err = p.communicate(input=data, timeout=max(0.1, deadline - time.monotonic()))
+                errs.append(err or "")
+                data = None if (last or seg["stdout_null"]) else (out or "")
         except subprocess.TimeoutExpired:
             for p in procs:
                 p.kill()
