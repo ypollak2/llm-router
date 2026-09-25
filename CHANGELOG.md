@@ -12,6 +12,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **`llm-router install` now auto-enables Claude subscription mode when it
+  detects a logged-in Claude seat.** Previously a Pro/Max subscriber had to
+  hand-set `LLM_ROUTER_CLAUDE_SUBSCRIPTION=true` (`src/llm_router/discover.py`
+  `get_available_providers()`) even after the installer's own seat probe
+  (`seats.py`) had already found the seat — flat-rate subscribers were not
+  getting zero-workflow-change routing by default. The installer now writes
+  `LLM_ROUTER_CLAUDE_SUBSCRIPTION=true` to `~/.llm-router/.env` (the same file
+  `llm-router setup`/`onboard` manage) the first time it sees a Claude seat,
+  and prints one line saying so and how to turn it off
+  (`LLM_ROUTER_CLAUDE_SUBSCRIPTION=false`). **Behaviour change for existing
+  subscribers:** re-running `llm-router install` (e.g. `--force`, an upgrade,
+  or reinstalling for a second host) now enables subscription mode
+  automatically if you never set the variable yourself — an explicit `true` or
+  `false` you already set, in the shell environment or in `~/.llm-router/.env`,
+  is left untouched, and a failed or inconclusive seat probe never enables it.
+
 ### Docs
 
 - **Published the failed Q15 delegation A/B negative result.** Claude
