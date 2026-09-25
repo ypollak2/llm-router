@@ -84,3 +84,11 @@ def test_read_only_git_branch_is_allowed_but_creating_one_is_not(repo):
     assert "REFUSED" in out
     assert "newbranch" not in subprocess.run(["git", "branch"], cwd=repo,
                                              capture_output=True, text=True).stdout
+
+
+def test_stderr_merged_into_stdout(repo):
+    """`2>&1` — the second idiom the run-2 trace hit ("'>&' needs a shell")."""
+    out = run("git log --oneline -1 2>&1 | head -1", repo)
+    assert "c2" in out and "REFUSED" not in out, out
+    out = run("ls no-such-file 2>&1", repo)
+    assert "No such file" in out and "STDERR" not in out, out

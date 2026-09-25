@@ -328,7 +328,7 @@ FINISH_TOOL = "finish"
 # — and with no shell, `&&` and `|` reached git as literal arguments. It retried
 # variants until its 15 steps were gone (0/20 moments reached an edit). Still no
 # shell: the line is tokenized, EVERY segment passes the allowlist before ANY
-# runs, and pipes are chained here. Only `>/dev/null` / `2>/dev/null` redirects
+# runs, and pipes are chained here. Only `>/dev/null`, `2>/dev/null` and `2>&1`
 # are honoured; a redirect into a file is refused in favour of write_file.
 _SEQ_OPS = ("&&", "||", ";")
 
@@ -355,6 +355,11 @@ def _parse_command_line(cmd: str):
             if tok != "|":
                 pipelines.append((op, current))
                 current, op = [], tok
+        elif tok == ">&" and seg["argv"] and seg["argv"][-1] == "2" \
+                and i + 1 < len(tokens) and tokens[i + 1] == "1":
+            seg["argv"].pop()                      # `2>&1`: stderr joins stdout
+            seg["stderr_to_stdout"] = True
+            i += 1
         elif tok in (">", ">>"):
             target = tokens[i + 1] if i + 1 < len(tokens) else ""
             to_stderr = bool(seg["argv"]) and seg["argv"][-1] == "2"
@@ -412,7 +417,8 @@ def _run_command_line(cmd: str, project_root: Path) -> str:
                     seg["argv"], cwd=str(project_root), env=child_env, text=True,
                     stdin=prev_stdout,
                     stdout=subprocess.DEVNULL if seg["stdout_null"] else subprocess.PIPE,
-                    stderr=subprocess.DEVNULL if seg["stderr_null"] else subprocess.PIPE,
+                    stderr=(subprocess.DEVNULL if seg["stderr_null"] else
+                            subprocess.STDOUT if seg.get("stderr_to_stdout") else subprocess.PIPE),
                 )
                 if prev_stdout is not None:
                     prev_stdout.close()
