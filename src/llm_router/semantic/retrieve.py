@@ -85,6 +85,11 @@ _CAMEL = re.compile(r"\b[A-Z][a-z0-9]*[A-Z][A-Za-z0-9]*\b")
 # `_` and a letter, so every `_private` name — most of a Python codebase's
 # helpers — was dropped as a seed. One or two leading underscores, then a
 # letter; `_` alone and dunders like `__init__` still only match as words.
+# X5 (2026-09-25): a one-word name written as a call — `mode()` — is an
+# identifier. No other pattern takes a bare lowercase word, so the held-out
+# question naming mode() retrieved only its signature. The paren must follow the
+# name directly: "the default (when unset)" is prose.
+_CALLED = re.compile(r"(?<![A-Za-z0-9_.])([A-Za-z_][A-Za-z0-9_]*)\(")
 _PRIVATE = re.compile(r"(?<![A-Za-z0-9_])_{1,2}[A-Za-z][A-Za-z0-9_]*[A-Za-z0-9](?<!__)(?![A-Za-z0-9_])")
 _DOTTED = re.compile(r"\b[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)+\b")
 
@@ -125,9 +130,9 @@ def seeds_from(query: str) -> tuple[list[str], list[str]]:
         scannable = scannable.replace(path, " ")
 
     idents: list[str] = []
-    for pattern in (_QUOTED, _DOTTED, _PRIVATE, _SNAKE, _CAMEL):
+    for pattern in (_QUOTED, _CALLED, _DOTTED, _PRIVATE, _SNAKE, _CAMEL):
         for match in pattern.finditer(scannable):
-            token = match.group(1) if pattern is _QUOTED else match.group(0)
+            token = match.group(1) if pattern in (_QUOTED, _CALLED) else match.group(0)
             # A dotted reference is looked up by its last segment, which is what
             # the index stores as a name; the qualified form is kept too.
             for candidate in ({token, token.rsplit(".", 1)[-1]}
