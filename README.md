@@ -496,6 +496,7 @@ export LLM_ROUTER_ENFORCE="smart"                 # off | advise | smart | hard
 export LLM_ROUTER_OLLAMA_TIMEOUT=45               # seconds; 45 clears a real local p50
 export LLM_ROUTER_PROJECT_ROOT="$PWD"             # scope the knowledge store explicitly
 export LLM_ROUTER_GROUND_TRUTH=1                  # opt in to Ground Truth accumulation
+export LLM_ROUTER_AUTO_BENCHMARK_FETCH=1          # opt in to background benchmark refetch (off = local-first)
 ```
 
 `LLM_ROUTER_OLLAMA_TIMEOUT` matters more than it looks. It was 4s before 13.2.0, and
