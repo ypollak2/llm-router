@@ -52,6 +52,11 @@ def _signature(node: ast.AST) -> str:
     return ""
 
 
+# Z (2026-09-25): bump when extraction changes, so an existing index re-extracts
+# unchanged files once (indexer compares it with meta.extractor_version).
+EXTRACTOR_VERSION = "2"
+
+
 def extract(
     source: str,
     relative_path: str,
@@ -92,6 +97,30 @@ def extract(
                 walk(child, scope)
 
     walk(tree, [])
+
+    # Z: module-level constants. A 14-question pilot missed every question about a
+    # constant's value because only functions and classes were indexed.
+    lines = source.splitlines()
+    for node in tree.body:
+        if isinstance(node, ast.Assign):
+            targets = [t for t in node.targets if isinstance(t, ast.Name)]
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            targets = [node.target]
+        else:
+            continue
+        end = getattr(node, "end_lineno", node.lineno) or node.lineno
+        first = lines[node.lineno - 1].strip() if node.lineno <= len(lines) else ""
+        for target in targets:
+            entities.append(Entity(
+                relative_path=relative_path,
+                kind="constant",
+                name=target.id,
+                qualified_name=target.id,
+                start_line=node.lineno,
+                end_line=end,
+                signature=first[:200],
+                source_hash=source_hash,
+            ))
 
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
