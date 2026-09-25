@@ -102,12 +102,19 @@ def test_route_payload_does_not_touch_session_spend(tmp_path, monkeypatch):
 
 # ── Part B ───────────────────────────────────────────────────────────────────
 def _seed_stats(state_dir, ts_iso, host, model, task, saved, in_tok, out_tok):
+    # PR5 follow-up: `_read_stats_records` now SELECTs `mode` too (the
+    # verified predicate requires it) — a table predating the column makes
+    # that SELECT raise, and this module fails soft to an empty read rather
+    # than crash. The column exists here so these tests still read real rows;
+    # these gateway routes are meant to stay UNVERIFIED anyway (host != "claude_code"
+    # already excludes them, mode is just left NULL like the real writer does).
     conn = sqlite3.connect(state_dir / "usage.db")
     conn.execute(
         "CREATE TABLE IF NOT EXISTS savings_stats ("
         "id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp TEXT, session_id TEXT, "
         "task_type TEXT, estimated_claude_cost_saved REAL, external_cost REAL, "
-        "model_used TEXT, host TEXT, input_tokens INTEGER, output_tokens INTEGER)"
+        "model_used TEXT, host TEXT, input_tokens INTEGER, output_tokens INTEGER, "
+        "mode TEXT)"
     )
     conn.execute(
         "INSERT INTO savings_stats (timestamp, host, model_used, task_type, "

@@ -76,6 +76,11 @@ def _seed_claude_usage(db: Path, *, tokens: int, saved: float) -> None:
 
 
 def _seed_savings_stats(db: Path, *, count: int, total_saved: float) -> None:
+    """PR5 follow-up: `mode` joined the verified predicate alongside host/
+    model/timestamp — a table predating it (or a row that doesn't set it)
+    reads as unverified. This helper's rows are meant to be the REALIZED
+    figure the explain-dashboard panel shows, so they carry mode="block"
+    like a real gated hook row does."""
     conn = sqlite3.connect(str(db))
     conn.execute(
         """CREATE TABLE IF NOT EXISTS savings_stats (
@@ -86,7 +91,8 @@ def _seed_savings_stats(db: Path, *, count: int, total_saved: float) -> None:
             estimated_claude_cost_saved REAL NOT NULL,
             external_cost REAL NOT NULL,
             model_used TEXT NOT NULL,
-            host TEXT NOT NULL DEFAULT 'claude_code'
+            host TEXT NOT NULL DEFAULT 'claude_code',
+            mode TEXT
         )"""
     )
     from datetime import datetime, timezone
@@ -95,9 +101,9 @@ def _seed_savings_stats(db: Path, *, count: int, total_saved: float) -> None:
     for _ in range(count):
         conn.execute(
             "INSERT INTO savings_stats (timestamp, session_id, task_type, "
-            "estimated_claude_cost_saved, external_cost, model_used) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            (now, "s1", "code", per_row, 0.0, "ollama/qwen2.5:7b"),
+            "estimated_claude_cost_saved, external_cost, model_used, mode) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (now, "s1", "code", per_row, 0.0, "ollama/qwen2.5:7b", "block"),
         )
     conn.commit()
     conn.close()
@@ -141,7 +147,11 @@ def test_cumulative_rolls_claude_usage_tokens(fake_state_dir, monkeypatch):
         f"expected 1500 rolled tokens, got in={total_in} out={total_out}"
     )
     assert calls == 1
-    assert saved == pytest.approx(0.42, abs=0.0001)
+    # PR6: `claude_usage` has no "used" column, so it can never say a draft
+    # REPLACED Claude's turn — its money is always UNVERIFIED, never rolled
+    # into `saved_usd` (only savings_stats's mode='block' predicate can be).
+    # This row's $0.42 lives in `unverified_saved_usd`, not here.
+    assert saved == 0.0
 
 
 # ── 2. ROUTING window = today ────────────────────────────────────────────────

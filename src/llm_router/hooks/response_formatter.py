@@ -114,7 +114,7 @@ def format_echo_context(result: DirectResult, task_type: str, complexity: str) -
             route_prefix = f"{route_prefix} · {_hint}"
     except Exception:
         pass
-    if getattr(result, "files_read", ()):
+    if getattr(result, "files_read", ()) or getattr(result, "context_chars", 0):
         return _format_grounded_echo(result, task_type, complexity, model_label, tier,
                                      latency, tokens, metadata, route_prefix)
     return (
@@ -166,8 +166,11 @@ def _format_grounded_echo(result, task_type, complexity, model_label, tier, late
         f"ROUTING NOTICE — this prompt was classified as {task_type}/{complexity}. A local "
         f"model ({model_label}, {tier}, {latency}, {tokens}) drafted an answer to conserve "
         f"your Claude subscription quota.\n\n"
-        f"This draft was produced by a local model that READ the repo (read-only) before "
-        f"answering: {_reads_label(result)}. It did NOT see your shell, tool output, or the "
+        + (f"This draft was produced by a local model that READ the repo (read-only) before "
+           f"answering: {_reads_label(result)}. " if result.files_read else
+           f"This draft was produced by a local model that saw a summary of this session "
+           f"({result.context_chars:,} chars) and retrieved repo excerpts, but opened no files. ")
+        + "It did NOT see your shell, tool output, or the "
         f"full conversation. Treat it as a claim to check, not as fact. Decide:\n"
         "  - If the answer is a fact about the code or general knowledge AND you can confirm "
         "its key claim (one read of the place it cites is enough): deliver it (lightly "

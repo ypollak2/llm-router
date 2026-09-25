@@ -237,6 +237,15 @@ def test_reads_v93_per_platform_tables(fake_home):
 
     Regression for a real bug where the statusline only queried the legacy
     `usage` table and reported $0 on days with v9.3+ routing decisions.
+
+    PR6: `claude_usage`/`codex_usage`/`gemini_usage` carry no "used" column,
+    so a row here can never say the draft replaced Claude's turn — it is
+    UNVERIFIED (dashboard_data.query_window). Reviewer-01 (North Star point
+    13): unverified money is shown BELOW verified, not deleted — silence
+    reads as "nothing happened" when the honest answer is "$0.70 happened,
+    nobody confirmed it replaced Claude's turn". So the previously-asserted
+    "$0.70 saved" (bare, as though certain) is correctly gone, replaced by
+    a labelled "+$0.70 unverified".
     """
     _seed_platform_tables(
         fake_home,
@@ -269,8 +278,14 @@ def test_reads_v93_per_platform_tables(fake_home):
         },
     )
     out = _run_statusline(fake_home)
-    # 0.50 + 0.15 + 0.05 = 0.70 → "💰 $0.70"
-    assert "$0.70" in out, f"expected $0.70 in savings segment, got: {out!r}"
+    # 0.50 + 0.15 + 0.05 = 0.70, all unverified (see docstring).
+    assert "💰" in out, f"expected a money segment (unverified), got: {out!r}"
+    assert "$0.70 unverified" in out, (
+        f"expected a labelled unverified figure, not a bare/missing one: {out!r}"
+    )
+    assert "$0.70 saved" not in out, (
+        f"unconfirmed platform-table money must never render as certain 'saved': {out!r}"
+    )
 
 
 def test_last_route_uses_per_session_glob(fake_home):
