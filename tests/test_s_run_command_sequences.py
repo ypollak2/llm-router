@@ -14,6 +14,7 @@ passes the allowlist before ANY runs, and pipes are chained in Python.
 from __future__ import annotations
 
 import subprocess
+import time
 
 import pytest
 
@@ -37,7 +38,35 @@ def run(cmd, root):
 
 def test_a_pipeline_runs(repo):
     out = run("git log --oneline | head -2", repo)
-    assert "c2" in out and "c1" in out and "c0" not in out, out
+    # Compare commit *subjects* (the last token of each `--oneline` line), not
+    # raw substrings of `out`: an abbreviated hash is hex and can coincidentally
+    # contain "c0" (e.g. "c0d84a2"), which would fail this assertion for a
+    # reason that has nothing to do with the pipeline under test.
+    subjects = {ln.rsplit(None, 1)[-1] for ln in out.strip().splitlines() if ln}
+    assert subjects == {"c2", "c1"}, out
+
+
+def test_yes_pipeline_terminates_early(repo, monkeypatch):
+    """`head` must bound an UNBOUNDED upstream by exiting the moment it has
+    its line(s) — not after the producer finishes. If the pipeline stages
+    were run sequentially (drain stage 1 fully, then feed stage 2), `yes`
+    never finishes and this would hang until the 30s command timeout instead
+    of returning almost instantly.
+
+    `yes` is not on the inspection allowlist (R3's
+    test_every_allowlisted_program_is_classified would then require it be
+    declared an interpreter or not) and isn't worth adding there just to
+    reach it from this test. LLM_ROUTER_AGENT_COMMANDS=all bypasses only the
+    allowlist GATE, still going through the same guard_command/write-mode
+    checks and the exact pipe-chaining code under test — so this exercises
+    the pipe logic, not a change to what a real agent session can run.
+    """
+    monkeypatch.setenv("LLM_ROUTER_AGENT_COMMANDS", "all")
+    start = time.monotonic()
+    out = run("yes | head -1", repo)
+    elapsed = time.monotonic() - start
+    assert out.strip() == "y", out
+    assert elapsed < 5, f"took {elapsed:.1f}s — upstream was not bounded by head"
 
 
 def test_a_sequence_runs_both(repo):

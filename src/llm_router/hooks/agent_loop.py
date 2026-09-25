@@ -409,6 +409,15 @@ def _run_command_line(cmd: str, project_root: Path) -> str:
     for op, segments in parsed:
         if (op == "&&" and not last_ok) or (op == "||" and last_ok):
             continue
+        # Stages run concurrently, chained by real OS pipes (not buffered and
+        # replayed): `head -1` on an unbounded producer (`yes | head -1`) must
+        # exit as soon as it has its line, not after the producer finishes —
+        # see test_yes_pipeline_terminates_early. The standard recipe for
+        # this: close the PARENT's copy of a stage's stdout immediately after
+        # handing it to the next stage's stdin (so the writer gets SIGPIPE,
+        # and no stray fd keeps the pipe artificially alive), read the final
+        # stage fully via communicate(), then wait() on every earlier stage
+        # bounded by the same deadline.
         procs, prev_stdout = [], None
         try:
             for n, seg in enumerate(segments):
@@ -421,7 +430,7 @@ def _run_command_line(cmd: str, project_root: Path) -> str:
                             subprocess.STDOUT if seg.get("stderr_to_stdout") else subprocess.PIPE),
                 )
                 if prev_stdout is not None:
-                    prev_stdout.close()
+                    prev_stdout.close()          # let the upstream get SIGPIPE, no stray fd
                 prev_stdout = None if (last or seg["stdout_null"]) else p.stdout
                 procs.append(p)
             out, err_last = procs[-1].communicate(timeout=max(0.1, deadline - time.monotonic()))
