@@ -238,3 +238,22 @@ in S (PR #149): sequences and pipes are tokenized and chained without a shell.
 **Run 2**: identical sample, context cap, budget, 15-step cap, scoring and
 decision rule; the only change is S. Reported separately from run 1; neither
 replaces the other.
+
+### 8.3 Run 2 result, and run 3 — the last harness-only change (2026-09-25)
+
+**Run 2 (after S): PASS 0/20; 1 of 20 moments changed a file (the wrong one).**
+16 ended at the 15-step cap, 2 on a repeated command. The command tool now
+worked; a trace showed the next defect was the harness's: each sandbox was a
+`git worktree` of the live repo, so `git log main` showed commits made AFTER the
+moment (e.g. today's PR #141 merge). The model paged back through history
+(-8, -20 … -200) reconciling the conversation with a repo it could not match.
+It also hit `2>&1`, now supported (S, 2dc87ae).
+
+**Run 3**: each moment runs in a clean-room clone whose only ref is `main` at
+the base commit, reflog expired and unreachable objects pruned (verified on
+moment 6: 868 reachable commits = the base's history; today's merge absent).
+Everything else as §8.1.
+
+**Run 3's score is the answer.** No further harness changes after it: whatever
+it scores is reported against the §8 rule, with the traces that explain it.
+Changing the setup until something passes would make the number meaningless.
