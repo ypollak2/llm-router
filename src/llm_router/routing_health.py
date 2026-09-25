@@ -70,6 +70,53 @@ def summarize(log: Path | None = None, days: int = 7,
     return dict(out)
 
 
+_CLAUDE_PROVIDERS = ("anthropic", "claude")
+# provider 'cc' rows are written by hooks/cc-usage-track.py when a Claude Code
+# SUB-AGENT finishes (estimated tokens, ~ms latency) — Claude doing work, not a
+# call routed through llm(...). Shown in their own column, never as routing.
+_SUBAGENT_PROVIDER = "cc"
+
+
+def routed_calls(days: int = 7, db: Path | None = None,
+                 today: _dt.date | None = None) -> dict[str, dict]:
+    """Per day: calls Claude sent through llm(...) (the usage ledger), by where
+    they ran. This is the path that saves quota — Claude hands work to a
+    cheaper model — as opposed to hook drafts, which Claude ignored 1,191 times.
+    Simulated rows (tests, benches) are excluded. Whether Claude USED each
+    result is not recorded; the table says so rather than guessing."""
+    import sqlite3
+    if db is None:
+        try:
+            from llm_router.config import get_config
+            db = get_config().llm_router_db_path
+        except Exception:  # noqa: BLE001
+            from llm_router import paths
+            db = paths.state_path("usage.db")
+    if not Path(db).exists():
+        return {}
+    since = ((today or _dt.date.today()) - _dt.timedelta(days=days - 1)).isoformat()
+    out: dict[str, dict] = {}
+    con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+    try:
+        rows = con.execute(
+            "SELECT date(timestamp), provider, COUNT(*) FROM usage "
+            "WHERE date(timestamp) >= ? AND COALESCE(is_simulated, 0) = 0 "
+            "GROUP BY 1, 2", (since,)).fetchall()
+    finally:
+        con.close()
+    for day, provider, n in rows:
+        r = out.setdefault(day, {"calls": 0, "local": 0, "claude": 0, "other": 0,
+                                 "subagents": 0})
+        if provider == _SUBAGENT_PROVIDER:
+            r["subagents"] += n
+            continue
+        r["calls"] += n
+        key = ("local" if provider == "ollama" else
+               "claude" if provider in _CLAUDE_PROVIDERS else "other")
+        r[key] += n
+    return out
+
+
 def _rate(k: int, n: int, min_n: int) -> str:
     if n == 0:
         return "—"
@@ -97,7 +144,8 @@ def main(argv: list[str] | None = None) -> int:
             return 2
     rows = summarize(days=days)
     if "--json" in argv:
-        print(json.dumps(rows, indent=2, sort_keys=True))
+        print(json.dumps({"hook": rows, "llm_calls": routed_calls(days=days)},
+                         indent=2, sort_keys=True))
         return 0
     if not rows:
         print("no routing log yet — nothing to report")
@@ -120,6 +168,15 @@ def main(argv: list[str] | None = None) -> int:
     print(f"{'total':10s} {tot['prompts']:7d}  {_rate(tot['drafted'], tot['prompts'], MIN_SAMPLE):>17s}  "
           f"{_rate(tot['read_files'], tot['drafted'], 1):>21s}  "
           f"{_rate(tot['used'], tot['judged'], 1):>16s}  {p50:>9s}")
+    calls = routed_calls(days=days)
+    if calls:
+        print("\nClaude → llm(...) calls (the quota-saving path; 'used' is not recorded)\n")
+        print(f"{'day':10s} {'calls':>6s}  {'local':>6s}  {'claude':>6s}  {'other':>6s}"
+              f"   {'(Claude sub-agents, not routed)':>31s}")
+        for day in sorted(calls):
+            c = calls[day]
+            print(f"{day:10s} {c['calls']:6d}  {c['local']:6d}  {c['claude']:6d}  {c['other']:6d}"
+                  f"   {c['subagents']:31d}")
     print(f"\nauto-revert: {_streak()}")
     print("USED is what saves Claude quota; reach without use is only added latency.")
     return 0
