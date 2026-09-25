@@ -287,7 +287,7 @@ User prompt
       Response + cost logged to local SQLite
 ```
 
-Classification is free for many tasks (regex heuristics catch ~70%) or near-free for ambiguous prompts when using local Ollama or Gemini Flash.
+Classification is free for many tasks (regex heuristics score about half of real prompts: 788 of 1,571 measured, the rest fall back to a default; see `scripts/measure_low_signal_rate.py`) or near-free for ambiguous prompts when using local Ollama or Gemini Flash.
 
 ---
 
