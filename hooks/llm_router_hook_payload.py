@@ -170,15 +170,27 @@ def log_neutralize(hook: str, chars: int, neutralized: bool) -> None:
     Shares ``~/.llm-router/intercepts.jsonl`` — tool_intercept.py's own
     "bash"/"image" records already carry this same neutralized/chars pair —
     so there is one audit file to check, not one per hook.
+
+    Resolved through ``llm_router.paths.state_path`` (R11: one canonical
+    state-path resolver), not a hand-composed ``Path.home() / ".llm-router"``
+    — this module is a plain package import for tool_intercept.py and
+    response_formatter.py, so the resolver is reliably importable there.
+    It is ALSO loaded standalone (via the sibling-file loader in
+    bash-compress.py / playwright-compress.py) for a bundled plugin with no
+    installed package, where the resolver genuinely may not be importable;
+    that case is a silent no-op rather than a guess at where state should
+    live, same as ``private_opener`` below.
     """
-    import os
     import time
-    from pathlib import Path
 
     try:
-        base = os.environ.get("LLM_ROUTER_HOME", "").strip()
-        root = Path(base).expanduser() if base else Path.home() / ".llm-router"
-        root.mkdir(parents=True, exist_ok=True)
+        from llm_router.paths import state_path
+    except Exception:                                        # noqa: BLE001
+        return
+
+    try:
+        target = state_path("intercepts.jsonl")
+        target.parent.mkdir(parents=True, exist_ok=True)
         record = {
             "at": time.time(),
             "kind": f"neutralize:{hook}",
@@ -189,7 +201,6 @@ def log_neutralize(hook: str, chars: int, neutralized: bool) -> None:
             from llm_router.paths import private_opener
         except Exception:                                    # noqa: BLE001
             private_opener = None
-        target = root / "intercepts.jsonl"
         if private_opener is not None:
             with open(target, "a", encoding="utf-8", opener=private_opener) as handle:
                 handle.write(json.dumps(record) + "\n")
