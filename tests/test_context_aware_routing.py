@@ -183,3 +183,12 @@ def test_self_contained_routable_prompt_still_writes_pending_state(tmp_path):
     assert _pending_path(tmp_path).exists(), (
         "context-free routable prompt should still write pending state"
     )
+
+
+@pytest.fixture(autouse=True)
+def _exemption_path(monkeypatch):
+    """V (2026-09-25): context-dependent prompts are now ENFORCED by default
+    (tests/test_v_enforce_context_prompts.py). These tests guard the exemption
+    path, which still exists behind LLM_ROUTER_ENFORCE_CONTEXT=off. Set in the
+    environment so subprocess-run hooks inherit it."""
+    monkeypatch.setenv("LLM_ROUTER_ENFORCE_CONTEXT", "off")

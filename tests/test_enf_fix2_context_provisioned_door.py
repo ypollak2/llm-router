@@ -15,6 +15,7 @@ Two things must hold for a prompt that references the user's local repo/state:
 """
 from __future__ import annotations
 
+import pytest
 import json
 import os
 import subprocess
@@ -77,3 +78,12 @@ def test_context_dependent_nonexecution_prompt_keeps_text_only_suggestion():
     hint = _hint("summarize what my repo's README currently says about setup")
     assert "context-dependent" in hint.lower()
     assert "llm_act(context=" not in hint, f"non-execution context prompt must not name llm_act: {hint!r}"
+
+
+@pytest.fixture(autouse=True)
+def _exemption_path(monkeypatch):
+    """V (2026-09-25): context-dependent prompts are now ENFORCED by default
+    (tests/test_v_enforce_context_prompts.py). These tests guard the exemption
+    path, which still exists behind LLM_ROUTER_ENFORCE_CONTEXT=off. Set in the
+    environment so subprocess-run hooks inherit it."""
+    monkeypatch.setenv("LLM_ROUTER_ENFORCE_CONTEXT", "off")
