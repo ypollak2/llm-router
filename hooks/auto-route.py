@@ -4734,13 +4734,29 @@ def main() -> None:
         # route SUGGESTION is preserved (advisory, still names the tool) so the
         # caller may route WITH context if useful — it just isn't forced. Keeping
         # the tool in the directive also keeps the routing display consistent.
-        write_pending = False
-        directive = _context_note + (
-            f"⚡ ROUTE (advisory): {task_type}/{complexity} → {_ctx_disp} [via {method}] — but "
-            f"this prompt is context-dependent, so a stateless routed model can't see your "
-            f"repo. Nothing is blocked; prefer handling it DIRECTLY with your tools, or "
-            f"route WITH context via {_ctx_call}. Never relay a context-free draft."
-        )
+        # V (2026-09-25): that premise is gone — llm(context=…) now carries OKF,
+        # semantic and session context — and the exemption covered 51% of the
+        # user's real prompts (10-day replay, n=142), so routing almost never
+        # happened in a repo. Enforce them, telling Claude to route WITH the
+        # excerpts. LLM_ROUTER_ENFORCE_CONTEXT=off restores the exemption.
+        if os.environ.get("LLM_ROUTER_ENFORCE_CONTEXT", "on").strip().lower() not in (
+                "0", "off", "false", "no"):
+            directive = (
+                "🧠 CONTEXT PROMPT — this refers to your repo / session. Gather the few "
+                "files or excerpts it needs, then route WITH them: "
+                f"{_ctx_call} (OKF, semantic and session context are added "
+                "automatically). Use the answer after checking its key claim; do the "
+                "work yourself only if it needs edits or commands in the repo.\n\n"
+                f"⚡ ROUTE: {task_type}/{complexity} → {_ctx_disp} [via {method}]"
+            )
+        else:
+            write_pending = False
+            directive = _context_note + (
+                f"⚡ ROUTE (advisory): {task_type}/{complexity} → {_ctx_disp} [via {method}] — but "
+                f"this prompt is context-dependent, so a stateless routed model can't see your "
+                f"repo. Nothing is blocked; prefer handling it DIRECTLY with your tools, or "
+                f"route WITH context via {_ctx_call}. Never relay a context-free draft."
+            )
         indicator = f"🧠 {task_type}/{complexity} → {_ctx_disp} · context-dependent [via {method}]"
 
     # ── Per-session paid-API spend cap (#3) ──────────────────────────────────────
