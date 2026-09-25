@@ -12,7 +12,69 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Changed
+## [15.3.0] - 2026-09-25
+
+Local routing, rebuilt around what was measured. Before this release, on the
+maintainer's machine, 0 of 1,191 local drafts were ever used and verified
+savings were $0.00. No savings claim is made for this release either; use
+`llm-router routing-health` to see your own numbers.
+
+### Changed — routing
+
+- **Smart enforcement now covers prompts that refer to your repo or session.**
+  They were exempt ("context-dependent"): 51% of 142 real prompts in a 10-day
+  replay, so routing almost never happened in a repo. They now get a directive
+  to route WITH the relevant excerpts (`llm(..., context=...)`; OKF, semantic
+  and session context are added automatically). **Behaviour change:** in smart
+  mode Claude's Q&A tools are held on these prompts until it routes.
+  `LLM_ROUTER_ENFORCE_CONTEXT=off` restores the exemption.
+- **Hook drafts only for questions** (query, research). Claude used 0 of 1,191
+  drafts; for code/instruction turns a draft only added latency.
+  `LLM_ROUTER_DRAFT_TASKS=all` restores drafting everything.
+- Background-task notifications and sub-agent reports are no longer drafted
+  (25.9% and 18% of prompts in real traffic; neither is a user question).
+- Repo questions tagged "research" draft locally unless the prompt carries a
+  web signal (they used to get an empty local chain).
+
+### Fixed — quality of local answers
+
+- **Discarded drafts no longer become "what Claude said".** A draft offered
+  as a hint was written to the session history as an assistant turn and fed to
+  later drafts as fact. Only a turn the hook actually answered is recorded.
+- **`llm(...)` retrieves from the caller's project.** Claude Code starts the
+  MCP server in `$HOME` and sends no MCP roots, so retrieval used the wrong
+  project; the server now finds its session's working directory via
+  `CLAUDE_CODE_SESSION_ID`.
+- Retrieval: private (`_name`) and call-written (`name()`) identifiers are
+  search seeds; a function the question names comes with its code and up to 3
+  call sites (with the lines above each); module-level constants are indexed
+  and shown whole; the search uses the question, not the prepended knowledge.
+  Held-out check (14 fresh questions, local qwen3-coder:30b, independent
+  judge): 12/14 correct with context vs 0/14 without; both misses are fixed in
+  this release but not yet re-measured on a new set.
+- The draft notice says what the draft saw (files read, or a session summary)
+  instead of "produced WITHOUT access", which told Claude to discard it.
+- The local agent's `run_command` accepts `&&`, `;`, `||`, pipes and `2>&1`
+  (still without a shell; every segment is allowlist-checked first) and
+  read-only `git branch`.
+
+### Added
+
+- `llm-router routing-health [--days N] [--json]`: per day, over prompts you
+  typed — reach, context (draft read files), USED by Claude, draft latency,
+  and the `llm(...)` calls Claude routed (local / Claude / other), each with n.
+
+### Also in this release
+
+- #143 local-first: the background benchmark fetch is opt-in.
+- #145 / #153 answer-quality judge: queue-and-grade-later with an independent
+  judge model; correctness-dominant weighted scoring.
+- #146 release gates for classifier and answer-quality regressions.
+- #147 / #148 `summary` and `status` show verified vs unverified savings.
+- #155 security: tag-shaped text in intercepted tool output is neutralised.
+- #157 `run_command` drains each pipeline stage before feeding the next.
+
+### Changed — installer
 
 - **`llm-router install` now auto-enables Claude subscription mode when it
   detects a logged-in Claude seat.** Previously a Pro/Max subscriber had to
@@ -52,6 +114,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   disabled since July (`workflow_dispatch`/schedule only; last scheduled run
   before today: 2026-07-06). `docs/BENCHMARKS.md` is auto-generated and will
   pick up a current "Last updated" date on the next run.
+
 
 ## [15.2.0] - 2026-09-24
 
