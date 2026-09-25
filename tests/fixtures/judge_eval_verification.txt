@@ -1,0 +1,26 @@
+Arithmetic cross-check for tests/fixtures/judge_eval_set.py
+=============================================================
+Ran independently of any judge/LLM output, before labelling, via:
+
+    python3 -c "
+    import math
+    print('17*23=', 17*23)
+    print('144/12=', 144/12)
+    print('15% of 240=', 0.15*240)
+    print('sqrt169=', math.isqrt(169))
+    print('7+8*2=', 7+8*2)
+    print('123-47=', 123-47)
+    "
+
+Output:
+    17*23= 391
+    144/12= 12.0
+    15% of 240= 36.0
+    sqrt169= 13
+    7+8*2= 23
+    123-47= 76
+
+These values are the ground truth behind the "correct" labels for arith-01,
+arith-03, arith-05, arith-07, arith-09, and the numeric parts of arith-11/12
+and fact-12 (76 is even, so "odd" in arith-12's response is wrong; 1789 is
+the year Washington took office, so "1788" in fact-12's response is wrong).
