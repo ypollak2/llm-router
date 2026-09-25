@@ -95,3 +95,29 @@ def test_reason_and_axes_are_recorded_on_every_non_firing_branch():
     s = detect_execution("The test suite is comprehensive and well organized.")
     assert s.fires is False
     assert s.verb is None and s.obj is not None
+
+
+# ── Regression: one word must not satisfy both axes; quoted text is not a verb ──
+# 2026-09-25 enforcement.log: "merge them" logged verb='merge' obj='merge' and
+# `fix the hook blocking action prompts like "merge them"` logged verb='merge'
+# obj='hook'; both held Bash behind llm_act.
+
+@pytest.mark.parametrize("prompt", [
+    "merge them",
+    "merge",
+    "yes, merge it",
+    'fix the hook blocking action prompts like "merge them"',
+    "fix the hook blocking action prompts like \u201cmerge them\u201d",
+])
+def test_silent_on_self_overlap_and_quoted_verb(prompt):
+    sig = detect_execution(prompt)
+    assert sig.fires is False, f"should not fire: {prompt!r} — {sig.reason}"
+
+
+@pytest.mark.parametrize("prompt", [
+    "merge the branch into main",
+    "merge PR 134",
+    'run "pytest" and commit the fix',
+])
+def test_still_fires_with_a_distinct_object(prompt):
+    assert detect_execution(prompt).fires is True, prompt
