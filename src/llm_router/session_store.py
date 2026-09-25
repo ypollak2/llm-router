@@ -371,7 +371,7 @@ def _read_pointer(ptr: Path) -> str | None:
     return None
 
 
-def write_pointer(session_id: str | None) -> None:
+def write_pointer(session_id: str | None, cwd: str | None = None) -> None:
     """Write the ``current_session.json`` pointer file (best-effort).
 
     A defensive fallback only — distinct from and independent of LLM Router's
@@ -388,8 +388,36 @@ def write_pointer(session_id: str | None) -> None:
         # cwd is $HOME — can actually find.
         _write_json_atomic(_pointer_path(), payload)
         _write_json_atomic(_global_pointer_path(), payload)
+        # X4: the session's cwd, keyed by session id. The MCP server's own cwd
+        # is $HOME (or /), and Claude Code sends no MCP roots, so this is how an
+        # llm(...) call finds the project the caller is working in.
+        if cwd:
+            _write_json_atomic(_session_cwd_path(session_id), {"cwd": cwd, "ts": time.time()})
     except Exception:
         pass
+
+
+_SESSION_CWD_MAX_AGE_S = 12 * 3600
+
+
+def _session_cwd_path(session_id: str) -> Path:
+    return _global_pointer_path().parent / f"session_cwd_{_sanitize(session_id)}.json"
+
+
+def read_session_cwd(session_id: str | None) -> str | None:
+    """The cwd the hook last saw for *session_id*, if recent and still a dir."""
+    if not session_id:
+        return None
+    try:
+        data = json.loads(_session_cwd_path(session_id).read_text(encoding="utf-8"))
+        ts = data.get("ts")
+        # A missing timestamp is unknown, not zero — and unknown is not fresh.
+        if not isinstance(ts, (int, float)) or time.time() - ts > _SESSION_CWD_MAX_AGE_S:
+            return None
+        cwd = str(data.get("cwd") or "")
+        return cwd if cwd and Path(cwd).is_dir() else None
+    except Exception:  # noqa: BLE001 — absent or unreadable: no answer
+        return None
 
 
 # ── Privacy mode ────────────────────────────────────────────────────────────

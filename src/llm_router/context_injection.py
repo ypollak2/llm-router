@@ -132,8 +132,13 @@ def inject(prompt: str, *, root: str | None = None, limit: int = 3,
     try:
         from llm_router.semantic import modes as _semantic_modes
 
-        applied = _semantic_modes.apply(body, root=root,
-                                        seed_query=_session_seed_query(body, session_id))
+        # X3 (2026-09-25): retrieval searches with the user's QUESTION (plus the
+        # session's recent files), never with `body` — by now `body` carries the
+        # OKF knowledge block and repo-state, and every name in them became a
+        # seed, crowding out the function the user actually asked about.
+        applied = _semantic_modes.apply(
+            body, root=root,
+            seed_query=_session_seed_query(prompt, session_id) or prompt)
         body = applied.prompt
     except Exception:                                        # noqa: BLE001
         pass  # retrieval is an improvement to a call, never a precondition
