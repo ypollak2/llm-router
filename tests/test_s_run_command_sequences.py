@@ -14,6 +14,7 @@ passes the allowlist before ANY runs, and pipes are chained in Python.
 from __future__ import annotations
 
 import subprocess
+import time
 
 import pytest
 
@@ -43,6 +44,19 @@ def test_a_pipeline_runs(repo):
     # reason that has nothing to do with the pipeline under test.
     subjects = {ln.rsplit(None, 1)[-1] for ln in out.strip().splitlines() if ln}
     assert subjects == {"c2", "c1"}, out
+
+
+def test_yes_pipeline_terminates_early(repo):
+    """`head` must bound an UNBOUNDED upstream by exiting the moment it has
+    its line(s) — not after the producer finishes. If the pipeline stages
+    were run sequentially (drain stage 1 fully, then feed stage 2), `yes`
+    never finishes and this would hang until the 30s command timeout instead
+    of returning almost instantly."""
+    start = time.monotonic()
+    out = run("yes | head -1", repo)
+    elapsed = time.monotonic() - start
+    assert out.strip() == "y", out
+    assert elapsed < 5, f"took {elapsed:.1f}s — upstream was not bounded by head"
 
 
 def test_a_sequence_runs_both(repo):
