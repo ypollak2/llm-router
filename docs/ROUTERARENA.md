@@ -108,9 +108,12 @@ attempts that failed are the more useful record:
 ## How this relates to the savings claim
 
 RouterArena measures routing *quality* on a fixed public dataset. It does **not**
-measure the 35–80% savings figure quoted elsewhere in this project's docs — that
-comes from local usage aggregation on real sessions, is estimated against an
-all-premium baseline, and is not independently verified.
+measure quota or dollar savings. A savings-percentage figure used to be quoted
+elsewhere in this project's docs; it was a local usage aggregation over real
+sessions, estimated against an all-premium baseline and not independently
+verified, and has since been withdrawn as unsourced (see the CHANGELOG's
+`[Unreleased]` section). Run `llm-router savings-report` for your own
+measured number instead.
 
 Two different claims, two different evidence bases. Neither should be used to
 support the other.

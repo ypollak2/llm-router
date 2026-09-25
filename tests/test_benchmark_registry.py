@@ -199,8 +199,14 @@ class TestMaybeRefreshBenchmarks:
         # Should attempt to start (file is missing = stale)
         assert isinstance(result, bool)
 
-    def test_worker_releases_original_lock_when_global_lock_changes(self, tmp_path):
-        """Worker should release the lock it acquired, not whatever is later in the global."""
+    def test_worker_releases_original_lock_when_global_lock_changes(self, tmp_path, monkeypatch):
+        """Worker should release the lock it acquired, not whatever is later in the global.
+
+        Needs the fetch to actually fire (asserts ``result is True``), so it
+        opts in explicitly — this repo gates the fetch behind
+        LLM_ROUTER_AUTO_BENCHMARK_FETCH (default off, PR2 follow-up).
+        """
+        monkeypatch.setenv("LLM_ROUTER_AUTO_BENCHMARK_FETCH", "1")
         import llm_router.benchmarks as bm
 
         benchmarks_file = tmp_path / "benchmarks.json"

@@ -89,6 +89,7 @@ Usage:
     llm-router probe            — probe provider reachability
     llm-router benchmark        — run the routing benchmark suite
     llm-router migrate          — migrate state from an older layout
+    llm-router judge drain      — grade queued responses with an independent judge model
 
   Every command above is dispatchable; `tests/test_f38_every_command_is_documented.py`
   fails if a new one is added without a line here. (T-19: 28 of 51 subcommands
@@ -889,6 +890,7 @@ _KNOWN_SUBCOMMANDS = frozenset(
         "team-sync",
         "policy",
         "explain-dashboard",
+        "judge",
     }
 )
 
@@ -1177,6 +1179,9 @@ def main() -> None:
     elif args and args[0] == "test-delta":
         from llm_router.test_delta import main as _td_main
         sys.exit(_td_main(args[1:]))
+    elif args and args[0] == "judge":
+        from llm_router.commands.judge import main as _judge_main
+        sys.exit(_judge_main(args[1:]))
     elif args and args[0] == "migrate":
         from llm_router.commands.migrate import main as _migrate_main
         sys.exit(_migrate_main(args[1:]))

@@ -259,6 +259,16 @@ LLM_ROUTER_ENFORCE=off|soft|smart|hard     # Hook enforcement level
 OLLAMA_BASE_URL=http://localhost:11434    # Enable local Ollama — also activates
                                            # semantic cache (no separate on/off toggle)
 
+# Local-first: network fetches are opt-in, never on by default
+LLM_ROUTER_AUTO_BENCHMARK_FETCH=1         # Off by default. On: session-start
+                                           # refreshes ~/.llm-router/benchmarks.json
+                                           # from huggingface.co/github/litellm in
+                                           # the background when it's missing or
+                                           # older than LLM_ROUTER_BENCHMARK_TTL_DAYS
+                                           # (default 7d). Off: routing always uses
+                                           # whichever of the installed/bundled
+                                           # benchmark file is actually newer.
+
 # API Keys (required for external providers)
 OPENAI_API_KEY=sk-...
 GEMINI_API_KEY=...

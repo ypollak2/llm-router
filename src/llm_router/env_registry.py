@@ -72,6 +72,11 @@ ENV_REGISTRY: dict[str, tuple[str, str, int]] = {
     "LLM_ROUTER_ANOMALY_THRESHOLD": ("llm_router", "session_spend.py", 1),
     "LLM_ROUTER_AUDIT_DISABLED": ("llm_router", "misroute_audit.py", 1),
     "LLM_ROUTER_AUDIT_PATH": ("llm_router", "enterprise/audit.py", 1),
+    # PR2 follow-up (2026-09-24): opt-in gate for the background benchmark
+    # fetch, shared by benchmarks.py's benchmark_auto_fetch_enabled() and
+    # hooks/session-start.py's ImportError fallback of the same check — off
+    # by default (North Star #5, local-first).
+    "LLM_ROUTER_AUTO_BENCHMARK_FETCH": ("llm_router", "benchmarks.py", 2),
     "LLM_ROUTER_BANDIT": ("llm_router", "router.py", 1),
     "LLM_ROUTER_BASH_COMPRESS": ("llm_router", "hooks/bash-compress.py", 1),
     "LLM_ROUTER_BENCHMARK_TTL_DAYS": ("llm_router", "hooks/session-start.py", 1),
@@ -165,9 +170,11 @@ ENV_REGISTRY: dict[str, tuple[str, str, int]] = {
     "LLM_ROUTER_IDENTITY_PATH": ("llm_router", "enterprise/identity.py", 1),
     "LLM_ROUTER_INDICATOR": ("llm_router", "surface_status.py", 1),
     "LLM_ROUTER_INVOICE_DISCREPANCY_PCT": ("llm_router", "invoice_reconciliation/__init__.py", 1),
+    "LLM_ROUTER_JUDGE_AUTODRAIN": ("llm_router", "hooks/session-start.py", 1),
     "LLM_ROUTER_JUDGE_CASCADE_SAMPLE_RATE": ("llm_router", "judge_cascade.py", 1),
     "LLM_ROUTER_JUDGE_CASCADE_THRESHOLD": ("llm_router", "judge_cascade.py", 1),
     "LLM_ROUTER_JUDGE_MODEL": ("llm_router", "judge_cascade.py", 1),
+    "LLM_ROUTER_JUDGE_QUEUE_MAX_ENTRIES": ("llm_router", "judge.py", 1),
     "LLM_ROUTER_JUDGE_SAMPLE_RATE": ("llm_router", "judge.py", 1),
     "LLM_ROUTER_LIBRARIAN_MODEL": ("llm_router", "library/sealer.py", 1),
     "LLM_ROUTER_LOG_JSON": ("llm_router", "logging.py", 1),

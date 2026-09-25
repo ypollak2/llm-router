@@ -133,7 +133,7 @@ _BLOCKED_COMMANDS = re.compile(
     r"rm\s+-rf\s+\.\.|"
     r"mkfs|"
     r"dd\s+if=|"
-    r">\s*/dev/|"
+    r">\s*/dev/(?!null\b)|"   # a device, but not the discard sink (S)
     r"chmod\s+-R\s+777\s+/|"
     r"curl.*\|\s*(?:ba)?sh|"
     r"wget.*\|\s*(?:ba)?sh",
@@ -270,63 +270,7 @@ def execute_tool(name: str, args: dict, project_root: Path) -> str:
             return _budget.truncate_tool_result("\n".join(results))
 
         elif name == "run_command":
-            import shlex
-
-            cmd = args["command"]
-            if _BLOCKED_COMMANDS.search(cmd):
-                return f"Error: Command blocked for safety: {cmd}"
-            # 🥷 Backslash-security: Avoid the shell — parse into an argv list and
-            # run without a shell so command metacharacters can't inject. The
-            # blocklist above stays as defense-in-depth. Note: this intentionally
-            # drops shell features (pipes/redirects/globs); run_command executes a
-            # single program with arguments, not a shell pipeline.
-            try:
-                argv = shlex.split(cmd)
-            except ValueError as exc:
-                return f"Error: could not parse command: {exc}"
-            if not argv:
-                return "Error: empty command"
-            _allowed, _refusal = _writes.guard_command(argv)
-            if not _allowed:
-                return _refusal
-            try:
-                # R4. This inherited the FULL parent environment -- every
-                # provider key, OAuth token and cloud credential in the
-                # process -- to a command chosen by a model. The allowlist
-                # above cannot help: it permits python, node, awk, find, sed,
-                # go, cargo and git, all of which can read os.environ.
-                #
-                # `get_delegated_env` is an ALLOWLIST: nothing crosses unless
-                # it was named, so a credential whose variable name no
-                # denylist has heard of is absent by construction rather than
-                # by recognition. The sibling module
-                # scripts/groundtruth/verifiers.py has used it since
-                # 2026-09-22; this call site was missed.
-                #
-                # Fail-CLOSED: if the allowlist cannot be imported we hand the
-                # child a minimal environment rather than falling back to the
-                # full one. The fallback IS the vulnerability.
-                try:
-                    from llm_router.safe_subprocess import get_delegated_env
-                    _child_env = get_delegated_env()
-                except Exception:  # noqa: BLE001
-                    import os as _os
-                    _child_env = {"PATH": _os.defpath}
-                result = subprocess.run(
-                    argv, capture_output=True, text=True,
-                    timeout=30, cwd=str(project_root), env=_child_env,
-                )
-                output = result.stdout
-                if result.stderr:
-                    output += f"\nSTDERR:\n{result.stderr}"
-                if result.returncode != 0:
-                    output += f"\n(exit code: {result.returncode})"
-                # Truncate long output
-                return _budget.truncate_tool_result(output) if output else "(no output)"
-            except subprocess.TimeoutExpired:
-                return "Error: Command timed out after 30s"
-            except FileNotFoundError:
-                return f"Error: command not found: {argv[0]}"
+            return _run_command_line(args["command"], project_root)
 
         elif name == FINISH_TOOL:
             # Never dispatched by the loop, but a model can name it through the
@@ -376,6 +320,138 @@ def execute_tool(name: str, args: dict, project_root: Path) -> str:
 # stopping required volunteering a key the model never volunteered. Making
 # `finish` an enum member puts the two on equal terms — one token either way.
 FINISH_TOOL = "finish"
+
+
+# ── run_command: sequences and pipelines without a shell (S) ─────────────────
+# A trace of the 2026-09-24 continuation replay: the local model oriented itself
+# the way Claude does — `git log --oneline -12 && git status --short | head -20`
+# — and with no shell, `&&` and `|` reached git as literal arguments. It retried
+# variants until its 15 steps were gone (0/20 moments reached an edit). Still no
+# shell: the line is tokenized, EVERY segment passes the allowlist before ANY
+# runs, and pipes are chained here. Only `>/dev/null`, `2>/dev/null` and `2>&1`
+# are honoured; a redirect into a file is refused in favour of write_file.
+_SEQ_OPS = ("&&", "||", ";")
+
+
+def _parse_command_line(cmd: str):
+    """[(op_before, [segment, ...]), ...] or an error string. A segment is
+    {"argv": [...], "stdout_null": bool, "stderr_null": bool}."""
+    import shlex
+    lex = shlex.shlex(cmd, posix=True, punctuation_chars=True)
+    lex.whitespace_split = True
+    try:
+        tokens = list(lex)
+    except ValueError as exc:
+        return f"Error: could not parse command: {exc}"
+    pipelines, current, seg, op = [], [], {"argv": [], "stdout_null": False, "stderr_null": False}, None
+    i = 0
+    while i < len(tokens):
+        tok = tokens[i]
+        if tok in _SEQ_OPS or tok == "|":
+            if not seg["argv"]:
+                return f"Error: empty command around '{tok}'"
+            current.append(seg)
+            seg = {"argv": [], "stdout_null": False, "stderr_null": False}
+            if tok != "|":
+                pipelines.append((op, current))
+                current, op = [], tok
+        elif tok == ">&" and seg["argv"] and seg["argv"][-1] == "2" \
+                and i + 1 < len(tokens) and tokens[i + 1] == "1":
+            seg["argv"].pop()                      # `2>&1`: stderr joins stdout
+            seg["stderr_to_stdout"] = True
+            i += 1
+        elif tok in (">", ">>"):
+            target = tokens[i + 1] if i + 1 < len(tokens) else ""
+            to_stderr = bool(seg["argv"]) and seg["argv"][-1] == "2"
+            if target != "/dev/null":
+                return ("REFUSED: redirecting output into a file is not supported, so "
+                        "nothing was executed. Use write_file to create or change files.")
+            if to_stderr:
+                seg["argv"].pop()
+                seg["stderr_null"] = True
+            else:
+                seg["stdout_null"] = True
+            i += 1
+        elif tok and set(tok) <= set("();<>|&"):
+            return (f"REFUSED: '{tok}' needs a shell, and run_command has none, so "
+                    f"nothing was executed. Run one command at a time.")
+        else:
+            seg["argv"].append(tok)
+        i += 1
+    if not seg["argv"]:
+        return "Error: empty command"
+    current.append(seg)
+    pipelines.append((op, current))
+    return pipelines
+
+
+def _run_command_line(cmd: str, project_root: Path) -> str:
+    if _BLOCKED_COMMANDS.search(cmd):
+        return f"Error: Command blocked for safety: {cmd}"
+    parsed = _parse_command_line(cmd)
+    if isinstance(parsed, str):
+        return parsed
+    for _op, segments in parsed:                       # check ALL before running ANY
+        for seg in segments:
+            allowed, refusal = _writes.guard_command(seg["argv"])
+            if not allowed:
+                return refusal
+    # R4: the child gets an ALLOWLISTED environment, never the parent's — the
+    # allowlist above permits programs that can read os.environ. Fail-closed.
+    try:
+        from llm_router.safe_subprocess import get_delegated_env
+        child_env = get_delegated_env()
+    except Exception:  # noqa: BLE001
+        import os as _os
+        child_env = {"PATH": _os.defpath}
+    deadline = time.monotonic() + 30
+    outputs, last_ok = [], True
+    for op, segments in parsed:
+        if (op == "&&" and not last_ok) or (op == "||" and last_ok):
+            continue
+        procs, prev_stdout = [], None
+        try:
+            for n, seg in enumerate(segments):
+                last = n == len(segments) - 1
+                p = subprocess.Popen(
+                    seg["argv"], cwd=str(project_root), env=child_env, text=True,
+                    stdin=prev_stdout,
+                    stdout=subprocess.DEVNULL if seg["stdout_null"] else subprocess.PIPE,
+                    stderr=(subprocess.DEVNULL if seg["stderr_null"] else
+                            subprocess.STDOUT if seg.get("stderr_to_stdout") else subprocess.PIPE),
+                )
+                if prev_stdout is not None:
+                    prev_stdout.close()
+                prev_stdout = None if (last or seg["stdout_null"]) else p.stdout
+                procs.append(p)
+            out, err_last = procs[-1].communicate(timeout=max(0.1, deadline - time.monotonic()))
+            errs = []
+            for p in procs[:-1]:
+                p.wait(timeout=max(0.1, deadline - time.monotonic()))
+                if p.stderr is not None:
+                    errs.append(p.stderr.read())
+            errs.append(err_last or "")
+        except subprocess.TimeoutExpired:
+            for p in procs:
+                p.kill()
+            outputs.append("Error: Command timed out after 30s")
+            last_ok = False
+            break
+        except FileNotFoundError:
+            outputs.append(f"Error: command not found: {segments[0]['argv'][0]}")
+            last_ok = False
+            continue
+        text = out or ""
+        err = "".join(e for e in errs if e)
+        if err:
+            text += f"\nSTDERR:\n{err}"
+        rc = procs[-1].returncode
+        if rc != 0:
+            text += f"\n(exit code: {rc})"
+        last_ok = rc == 0
+        outputs.append(text)
+    output = "\n".join(o for o in outputs if o)
+    return _budget.truncate_tool_result(output) if output else "(no output)"
 
 
 # I4 (2026-09-24): the tools a DRAFT may use. A draft answers the user's

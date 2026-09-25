@@ -38,6 +38,19 @@ except ImportError:
     def http_timeout() -> int:
         return int(os.environ.get("LLM_ROUTER_HTTP_TIMEOUT", "10"))
 
+# Shared gate for the opt-in background benchmark fetch (LLM_ROUTER_AUTO_BENCHMARK_FETCH,
+# off by default — North Star #5, local-first). llm_router.benchmarks.maybe_refresh_
+# benchmarks_background() is the OTHER trigger that can launch this fetch; importing
+# the same check here means the two triggers can't drift on what "opt-in" means.
+try:
+    from llm_router.benchmarks import benchmark_auto_fetch_enabled
+except ImportError:
+    # Fallback if llm_router not installed — same values as benchmarks.py.
+    def benchmark_auto_fetch_enabled() -> bool:
+        return os.environ.get("LLM_ROUTER_AUTO_BENCHMARK_FETCH", "").strip().lower() in (
+            "1", "on", "true", "yes",
+        )
+
 def _router_home():
     """Router state dir, resolved per call so LLM_ROUTER_HOME is honoured.
 
@@ -1087,13 +1100,57 @@ def _warm_ollama_bg() -> None:
         pass
 
 
+def _drain_judge_queue_bg() -> None:
+    """Detach a background drain of the judge grading queue.
+
+    CHZ-JUDGE-QUEUE. The hot path only enqueues sampled responses
+    (`judge.enqueue_for_grading`) — it never calls a judge model itself, so
+    grading has to happen somewhere out of band. This spawns exactly the way
+    `_warm_ollama_bg` and `_maybe_reindex_okf_bg` already do: a detached
+    subprocess so session start is never delayed by it, and a failure here is
+    invisible to (and never blocks) the user's turn. The same drain is also
+    reachable directly via `llm-router judge drain` for anyone who wants to
+    run it on a schedule instead of piggybacking on session start.
+
+    Opt-out: LLM_ROUTER_JUDGE_AUTODRAIN=0.
+    """
+    if os.environ.get("LLM_ROUTER_JUDGE_AUTODRAIN", "").strip().lower() in ("0", "off", "false", "no"):
+        return
+    script = (
+        "import asyncio; from llm_router.judge import drain_queue; "
+        "asyncio.run(drain_queue())"
+    )
+    try:
+        subprocess.Popen(
+            [sys.executable, "-c", script],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except Exception:
+        pass  # never block session start
+
+
 def _maybe_refresh_benchmarks_bg() -> None:
     """Trigger a background benchmark refresh if the local file is stale.
 
-    Detaches a subprocess immediately so the session-start hook returns in < 1ms.
-    Only fires when ``~/.llm-router/benchmarks.json`` is missing or older than
-    ``LLM_ROUTER_BENCHMARK_TTL_DAYS`` (default 7 days).
+    Opt-in only (North Star #5, local-first): off unless
+    ``LLM_ROUTER_AUTO_BENCHMARK_FETCH=1`` is set. Without it, llm-router would
+    reach out to huggingface.co / github / litellm on every session whose
+    ``~/.llm-router/benchmarks.json`` is missing or stale, with no consent —
+    the bundled copy in ``data/benchmarks.json`` is always enough to route.
+
+    When enabled, detaches a subprocess immediately so the session-start hook
+    returns in < 1ms. Only fires when ``~/.llm-router/benchmarks.json`` is
+    missing or older than ``LLM_ROUTER_BENCHMARK_TTL_DAYS`` (default 7 days).
     """
+    if not benchmark_auto_fetch_enabled():
+        return  # opt-in only — no network fetch without explicit consent (no
+        # debug log here: this hook, unlike auto-route.py, does not write to
+        # auto-route-debug.log; skipped branches elsewhere in this file
+        # follow the same silent-return convention, e.g. _warm_ollama_bg and
+        # _maybe_reindex_okf_bg's own env-gate checks above)
     benchmarks_path = os.path.join(_state_dir(), "benchmarks.json")
     ttl_days = int(os.environ.get("LLM_ROUTER_BENCHMARK_TTL_DAYS", "7"))
 
@@ -1394,7 +1451,9 @@ def main() -> None:
     hints += _preflight_check()
 
     # 5. Trigger benchmark refresh in background if stale (v5.0 adaptive router).
-    # Runs as a detached subprocess so the session start is never blocked.
+    # Opt-in via LLM_ROUTER_AUTO_BENCHMARK_FETCH=1 (default off — local-first,
+    # no network fetch without consent). Runs as a detached subprocess so the
+    # session start is never blocked when it does run.
     _maybe_refresh_benchmarks_bg()
 
     # 5b. Refresh this project's OKF index in the background. A stale index does
@@ -1411,6 +1470,11 @@ def main() -> None:
     # prompt of the new session doesn't pay model-load latency on its
     # classification call. Detached, never blocks session start.
     _warm_ollama_bg()
+
+    # 6b. Drain the judge grading queue in the background — the hot path only
+    # enqueues, so something has to grade sampled responses out of band.
+    # Detached, never blocks session start.
+    _drain_judge_queue_bg()
 
     # Visible UI signal — Claude Code surfaces stderr as
     # "SessionStart:startup hook success: <msg>". Print the BANNER box first

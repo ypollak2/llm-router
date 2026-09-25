@@ -35,7 +35,7 @@ def test_run_command_really_does_not_use_a_shell():
            for kw in n.keywords
            if kw.arg == "shell" and getattr(kw.value, "value", False) is True]
     assert not bad, f"agent_loop.py now uses a shell at line(s) {bad}"
-    assert "shlex.split" in AGENT_LOOP.read_text()
+    assert _tokenizes_with_shlex(AGENT_LOOP.read_text())
 
 
 @pytest.mark.parametrize("name", sorted(DOCS))
@@ -127,3 +127,14 @@ def test_security_md_names_the_population_its_table_measures():
     assert "not a containment" in text.lower(), (
         "SECURITY.md no longer says what the allowlist is NOT"
     )
+
+
+def _tokenizes_with_shlex(src: str) -> bool:
+    """AST, not text (K7): a call to shlex.split or shlex.shlex exists. S
+    (2026-09-24) moved run_command to a shlex.shlex tokenizer so `&&`/`|` are
+    split and chained without a shell; either form keeps the argv guarantee."""
+    import ast as _ast
+    return any(isinstance(n, _ast.Call) and isinstance(n.func, _ast.Attribute)
+               and n.func.attr in ("split", "shlex")
+               and getattr(n.func.value, "id", "") == "shlex"
+               for n in _ast.walk(_ast.parse(src)))

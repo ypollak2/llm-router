@@ -1906,21 +1906,30 @@ async def log_routing_decision(
         )
         await db.commit()
 
-        # Fire-and-forget judge evaluation for successful calls with response
+        # CHZ-JUDGE-QUEUE: queue-and-grade-later. This used to call
+        # judge.evaluate_response_async directly from the hot path, which (1)
+        # made a live call to a hardcoded PAID judge model and (2) scheduled
+        # an asyncio task that a synchronous `asyncio.run(...)` caller (the
+        # hooks) cancels on return before it can run. Net effect measured on
+        # the live ledger: 0 of 1,608 routing decisions graded. The hot path
+        # now only enqueues — a local file append, no network call, no task —
+        # and an out-of-band drain (`llm-router judge drain`, also spawned
+        # detached from session start) does the actual grading with an
+        # independent judge model. See llm_router.judge module docstring.
         if success and response:
             try:
-                from llm_router.judge import evaluate_response_async
+                from llm_router.judge import enqueue_for_grading
                 # Get the ID of the row we just inserted
                 cursor = await db.execute("SELECT last_insert_rowid()")
                 row_id_result = await cursor.fetchone()
                 routing_decision_id = row_id_result[0] if row_id_result else None
 
-                # Trigger background judge evaluation (non-blocking)
-                await evaluate_response_async(
+                enqueue_for_grading(
+                    routing_decision_id=routing_decision_id,
                     prompt=prompt,
                     response=response,
                     task_type=task_type,
-                    routing_decision_id=routing_decision_id,
+                    answering_model=final_model,
                 )
             except Exception as exc:
                 # The judge is optional, but a permanently failing judge means

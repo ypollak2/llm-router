@@ -92,16 +92,26 @@ _CHUZOM_RE = re.compile(r"chuzom", re.IGNORECASE)
 #   "ported from chuzom" header applies — it is new dashboard code that
 #   briefly carried the wrong brand string as a defect, not ported code), so
 #   this is provenance-of-a-guard, not brand leakage.
-#: Whole DIRECTORIES where "chuzom" may appear. Currently one, and it is not a
-#: convenience: tests/_downstream_legacy/ holds test modules quarantined by the
-#: 13.0.0 sync (see its README). Several are brand-leak regression tests whose
-#: entire job is to assert `"chuzom" not in ...`, so they must contain the
-#: string — the same category already allowlisted file-by-file below, applied to
-#: a directory because the quarantine moved them out of their listed paths.
+#: Whole DIRECTORIES where "chuzom" may appear.
 #:
-#: They are excluded from pytest collection (`norecursedirs`) and are not
-#: runtime code. A runtime-code hit is still never allowlistable.
-ALLOW_DIRS: tuple[str, ...] = ("_quarantined_tests/",)
+#: - _quarantined_tests/: test modules quarantined by the 13.0.0 sync (see its
+#:   README). Several are brand-leak regression tests whose entire job is to
+#:   assert `"chuzom" not in ...`, so they must contain the string — the same
+#:   category already allowlisted file-by-file below, applied to a directory
+#:   because the quarantine moved them out of their listed paths. Excluded
+#:   from pytest collection (`norecursedirs`) and not runtime code.
+#: - docs/repo_goals/: the North Star, its 2026-09-24 audit and the fix plan
+#:   that comes out of it (PR1, #144). Chuzom is the separate product the
+#:   README's enterprise section points org users to, and the audit's job is
+#:   to record the banner_art.txt brand-leak bug it found
+#:   (AUDIT-2026-09-24.md) and the plan to fix it (PLAN-fixes.md) —
+#:   provenance/documentation describing a bug and a decision, not a runtime
+#:   or public surface. Same category as
+#:   docs/releases/v11.1.0-chuzom-migration-evidence.md above, allowlisted by
+#:   directory because this one holds three files rather than one.
+#:
+#: A runtime-code hit is still never allowlistable.
+ALLOW_DIRS: tuple[str, ...] = ("_quarantined_tests/", "docs/repo_goals/")
 
 ALLOW_FILES: frozenset[str] = frozenset(
     {

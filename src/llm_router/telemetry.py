@@ -72,29 +72,39 @@ class ModelStats:
 
     Computed by :func:`aggregate_stats` from rows in ``routing_decisions``.
     ``expected_value`` is the bandit's optimization target — it bakes both
-    quality (``success_rate``) and cost into a single comparable scalar so
-    candidates with different price points sort correctly.
+    liveness (``success_rate`` — non-empty, non-refusal; see the field's own
+    docstring for why this is not called "quality") and cost into a single
+    comparable scalar so candidates with different price points sort
+    correctly.
     """
 
     model: str
     n_samples: int
-    #: Share of calls whose response was NON-EMPTY AND NOT A DEFERRAL.
+    #: Share of calls whose response was NON-EMPTY AND NOT A DEFERRAL —
+    #: call this LIVENESS, not quality.
     #:
     #: T-09: this is not a quality measurement and the bandit must not be
     #: described as optimising quality on it. `_response_is_usable` reads the
     #: text for emptiness and refusal markers; a confident, fluent, entirely
     #: wrong answer scores 1.0. It rules out the two worst outcomes and says
-    #: nothing about the rest.
+    #: nothing about the rest. "Liveness" names what it actually measures —
+    #: the model produced *something*, not that the something was right.
+    #: Real quality lives in `judge_mean` below, once the judge queue
+    #: (`llm_router.judge`) has graded enough rows to outrank this signal.
     success_rate: float
     avg_cost: float
     avg_latency_ms: float
     #: How many of `n_samples` carry a judge score, and their mean.
     #:
-    #: Measured 2026-09-22 on the live ledger: **0 of 1,598**. The judge is
-    #: wired (`judge.evaluate_response_async`) and has never produced a row, so
-    #: ranking on `judge_mean` alone would be a filter that drops everything.
-    #: Carried here so the gap is visible in the data rather than discovered
-    #: again, and so the reward upgrades itself the moment grading starts.
+    #: Measured 2026-09-22 on the live ledger: **0 of 1,598**. The judge WAS
+    #: wired (`judge.evaluate_response_async`) but had never produced a row —
+    #: fixed 2026-09-24 (CHZ-JUDGE-QUEUE): the hot path now enqueues sampled
+    #: responses and `judge.drain_queue` grades them out of band with an
+    #: independent model. Until enough rows accumulate, ranking on
+    #: `judge_mean` alone would still be a filter that drops nearly
+    #: everything. Carried here so the gap is visible in the data rather than
+    #: discovered again, and so the reward upgrades itself as grading catches
+    #: up.
     judged_samples: int = 0
     judge_mean: float | None = None
 

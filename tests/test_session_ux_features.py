@@ -99,6 +99,55 @@ def test_warm_ollama_bg_respects_opt_out_env_var(monkeypatch) -> None:
     assert called["n"] == 0
 
 
+# ── CHZ-JUDGE-QUEUE: judge grading queue background drain ──────────────────
+
+
+def test_drain_judge_queue_bg_spawns_detached_subprocess(monkeypatch) -> None:
+    """SessionStart must spawn `judge.drain_queue` detached, the same way
+    `_warm_ollama_bg` spawns the Ollama warm-up curl — the hot path only
+    enqueues, so something has to grade sampled responses out of band, and
+    it must never block or delay session start doing it."""
+    mod = _load_hook_module(
+        "_ss_hook_judge_drain", _HOOKS_SRC / "session-start.py"
+    )
+    monkeypatch.delenv("LLM_ROUTER_JUDGE_AUTODRAIN", raising=False)
+
+    captured: dict = {}
+
+    def fake_popen(argv, **kwargs):
+        captured["argv"] = list(argv)
+        captured["kwargs"] = kwargs
+        return type("FakeProc", (), {"pid": 12345})()
+
+    monkeypatch.setattr(mod.subprocess, "Popen", fake_popen)
+    mod._drain_judge_queue_bg()
+
+    assert "argv" in captured, "expected subprocess.Popen to be called"
+    argv = captured["argv"]
+    assert argv[0] == mod.sys.executable
+    assert "drain_queue" in argv[-1]
+    # Detached: session start can't be blocked by the drain.
+    assert captured["kwargs"].get("start_new_session") is True
+
+
+def test_drain_judge_queue_bg_respects_opt_out_env_var(monkeypatch) -> None:
+    """Setting LLM_ROUTER_JUDGE_AUTODRAIN=0 must suppress the spawn."""
+    mod = _load_hook_module(
+        "_ss_hook_judge_drain_off", _HOOKS_SRC / "session-start.py"
+    )
+    monkeypatch.setenv("LLM_ROUTER_JUDGE_AUTODRAIN", "0")
+
+    called = {"n": 0}
+
+    def fake_popen(argv, **kwargs):
+        called["n"] += 1
+        return type("FakeProc", (), {"pid": 0})()
+
+    monkeypatch.setattr(mod.subprocess, "Popen", fake_popen)
+    mod._drain_judge_queue_bg()
+    assert called["n"] == 0
+
+
 # ── Feature 2: Mini-summary widget every N prompts ──────────────────────────
 
 
