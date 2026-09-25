@@ -195,6 +195,41 @@ def test_select_judge_model_returns_none_when_ollama_unavailable():
     assert picked is None
 
 
+def test_select_judge_model_prefers_a_stronger_judge_when_installed():
+    """feat/judge-discrimination: among several independent candidates, prefer
+    the ones in `_JUDGE_MODEL_PREFERENCE` order rather than whatever happens
+    to come first from discovery — measured to separate correct/wrong answers
+    better on tests/fixtures/judge_eval_set.py."""
+    from llm_router.judge import _select_judge_model
+
+    with patch("llm_router.discover.is_ollama_available", return_value=True), \
+         patch(
+             "llm_router.discover.get_cached_ollama_models",
+             # Discovery order deliberately puts the LEAST-preferred model
+             # first, so this only passes if preference order is honoured.
+             return_value=["ollama/qwen3.5:latest", "ollama/qwen3-coder:30b"],
+         ):
+        picked = _select_judge_model("ollama/some-other-answering-model")
+
+    assert picked == "ollama/qwen3-coder:30b"
+
+
+def test_select_judge_model_falls_back_when_no_preferred_name_installed():
+    """No installed candidate matches the preference list -> falls back to
+    the original "first independent candidate" behaviour, never returns
+    None just because none of the preferred names are present."""
+    from llm_router.judge import _select_judge_model
+
+    with patch("llm_router.discover.is_ollama_available", return_value=True), \
+         patch(
+             "llm_router.discover.get_cached_ollama_models",
+             return_value=["ollama/some-random-model", "ollama/another-random-model"],
+         ):
+        picked = _select_judge_model("ollama/answering-model")
+
+    assert picked == "ollama/some-random-model"
+
+
 # ── drain_queue: the grader ─────────────────────────────────────────────────
 
 

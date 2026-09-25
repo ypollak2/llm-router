@@ -111,7 +111,10 @@ async def test_evaluate_background_writes_judge_score(temp_db, monkeypatch):
         await db.close()
 
     # Mock call_llm to return a deterministic judge score JSON
-    judge_json = '{"relevance": 0.9, "completeness": 0.85, "correctness": 0.95}'
+    judge_json = (
+        '{"correctness": 0.95, "relevance": 0.9, "completeness": 0.85, '
+        '"rationale": "matches expected answer"}'
+    )
     mock_llm_resp = LLMResponse(
         content=judge_json,
         model="claude-haiku-4-5-20251001",
@@ -144,9 +147,10 @@ async def test_evaluate_background_writes_judge_score(temp_db, monkeypatch):
     assert stored[0] is not None, (
         "judge_score is still NULL after _evaluate_background ran — score was not stored"
     )
-    expected = (0.9 + 0.85 + 0.95) / 3.0
+    # Weighted composite (correctness dominates) — see judge._CORRECTNESS_WEIGHT.
+    expected = 0.6 * 0.95 + 0.25 * 0.9 + 0.15 * 0.85
     assert abs(float(stored[0]) - expected) < 0.01, (
-        f"judge_score={stored[0]!r} does not match expected avg {expected:.3f}"
+        f"judge_score={stored[0]!r} does not match expected weighted composite {expected:.3f}"
     )
 
 
@@ -171,9 +175,9 @@ def test_build_judge_prompt():
     prompt = "What is the capital of France?"
     response = "The capital of France is Paris."
     task_type = "query"
-    
+
     judge_prompt = _build_judge_prompt(prompt, response, task_type)
-    
+
     # Verify prompt contains all required elements
     assert prompt in judge_prompt
     assert response in judge_prompt
@@ -182,18 +186,22 @@ def test_build_judge_prompt():
     assert "completeness" in judge_prompt
     assert "correctness" in judge_prompt
     assert "{" in judge_prompt  # JSON format
+    # feat/judge-discrimination: verify-first + explicit correctness criteria
+    # are the two prompt changes the eval showed actually move separation —
+    # assert they're really in the prompt, not just claimed in the docstring.
+    assert "VERIFY FIRST" in judge_prompt
+    assert "still scores 0 on correctness" in judge_prompt
 
 
 def test_parse_judge_score_valid_json():
-    """Test parsing valid judge scores from JSON response."""
-    response = '{"relevance": 0.9, "completeness": 0.8, "correctness": 0.95}'
-    
+    """Test parsing valid judge scores from JSON response — weighted composite,
+    correctness dominant (see judge._CORRECTNESS_WEIGHT)."""
+    response = '{"correctness": 0.95, "relevance": 0.9, "completeness": 0.8, "rationale": "ok"}'
+
     score = _parse_judge_score(response)
-    
+
     assert score is not None
-    assert 0.8 <= score <= 1.0
-    # Should be average of three scores
-    expected = (0.9 + 0.8 + 0.95) / 3.0
+    expected = 0.6 * 0.95 + 0.25 * 0.9 + 0.15 * 0.8
     assert abs(score - expected) < 0.01
 
 
@@ -201,14 +209,14 @@ def test_parse_judge_score_with_markdown():
     """Test parsing scores from response with markdown formatting."""
     response = """
     ```json
-    {"relevance": 0.85, "completeness": 0.75, "correctness": 0.9}
+    {"correctness": 0.9, "relevance": 0.85, "completeness": 0.75, "rationale": "ok"}
     ```
     """
-    
+
     score = _parse_judge_score(response)
-    
+
     assert score is not None
-    expected = (0.85 + 0.75 + 0.9) / 3.0
+    expected = 0.6 * 0.9 + 0.25 * 0.85 + 0.15 * 0.75
     assert abs(score - expected) < 0.01
 
 
@@ -216,59 +224,107 @@ def test_parse_judge_score_with_extra_text():
     """Test parsing scores when response contains explanatory text."""
     response = """
     The response is good. Here's the evaluation:
-    {"relevance": 0.92, "completeness": 0.88, "correctness": 0.96}
+    {"correctness": 0.96, "relevance": 0.92, "completeness": 0.88, "rationale": "ok"}
     Let me know if you need more.
     """
-    
+
     score = _parse_judge_score(response)
-    
+
     assert score is not None
-    expected = (0.92 + 0.88 + 0.96) / 3.0
+    expected = 0.6 * 0.96 + 0.25 * 0.92 + 0.15 * 0.88
     assert abs(score - expected) < 0.01
 
 
 def test_parse_judge_score_clamping():
-    """Test that scores are clamped to [0, 1]."""
-    # Test out-of-bounds scores
-    response = '{"relevance": 1.5, "completeness": -0.2, "correctness": 0.5}'
-    
+    """Test that out-of-range dimension values are clamped to [0, 1] before
+    being composed, and that the final composite is also clamped."""
+    response = '{"correctness": 0.5, "relevance": 1.5, "completeness": -0.2, "rationale": "ok"}'
+
     score = _parse_judge_score(response)
-    
+
     assert score is not None
     assert 0.0 <= score <= 1.0
+    expected = 0.6 * 0.5 + 0.25 * 1.0 + 0.15 * 0.0  # relevance/completeness clamped first
+    assert abs(score - expected) < 0.01
 
 
 def test_parse_judge_score_invalid_json():
     """Test parsing with invalid JSON returns None."""
     response = "This is not JSON at all"
-    
+
     score = _parse_judge_score(response)
-    
+
     assert score is None
 
 
-def test_parse_judge_score_missing_fields():
-    """Test parsing with missing score fields."""
-    response = '{"relevance": 0.8}'  # Missing completeness and correctness
-    
+def test_parse_judge_score_missing_correctness_is_ungraded():
+    """correctness is load-bearing: a reply that omits it must be treated as
+    unparseable (None -> caller leaves the row ungraded), never silently
+    defaulted to 0.5. This is a deliberate behaviour change from the
+    original judge (see judge._parse_judge_score's docstring) — a fabricated
+    correctness score is worse than no score."""
+    response = '{"relevance": 0.8, "completeness": 0.9, "rationale": "ok"}'
+
     score = _parse_judge_score(response)
-    
-    # Should use 0.5 as default for missing fields
-    assert score is not None
-    expected = (0.8 + 0.5 + 0.5) / 3.0
-    assert abs(score - expected) < 0.01
+
+    assert score is None
+
+
+def test_parse_judge_score_non_numeric_correctness_is_ungraded():
+    """A correctness value that can't be read as a number is the same as a
+    missing one — ungraded, not defaulted."""
+    response = '{"correctness": "high", "relevance": 0.8, "completeness": 0.8}'
+
+    score = _parse_judge_score(response)
+
+    assert score is None
 
 
 def test_parse_judge_score_empty_json():
-    """Test parsing empty JSON object."""
+    """An empty JSON object has no correctness field -> ungraded."""
     response = "{}"
-    
+
     score = _parse_judge_score(response)
-    
-    # Should use defaults for all missing fields
+
+    assert score is None
+
+
+def test_parse_judge_score_missing_secondary_fields_defaults_to_neutral():
+    """relevance/completeness are NOT load-bearing: missing them degrades to
+    a neutral 0.5 rather than voiding the whole grade, since correctness
+    dominates the composite anyway."""
+    response = '{"correctness": 1.0}'
+
+    score = _parse_judge_score(response)
+
     assert score is not None
-    expected = (0.5 + 0.5 + 0.5) / 3.0
+    expected = 0.6 * 1.0 + 0.25 * 0.5 + 0.15 * 0.5
     assert abs(score - expected) < 0.01
+
+
+def test_parse_judge_score_composite_of_all_ones_is_exactly_one():
+    """Weights must sum to 1.0 so a perfect response composes to exactly 1.0."""
+    response = '{"correctness": 1, "relevance": 1, "completeness": 1}'
+
+    score = _parse_judge_score(response)
+
+    assert score is not None
+    assert abs(score - 1.0) < 1e-9
+
+
+def test_parse_judge_score_wrong_answer_scores_far_below_perfect():
+    """Regression guard for the exact bug this PR fixes: a fluent, relevant,
+    complete but factually WRONG answer must score meaningfully lower than a
+    correct one — not just marginally lower. correctness=0 dominates the
+    composite even with relevance/completeness both at 1."""
+    wrong = _parse_judge_score('{"correctness": 0, "relevance": 1, "completeness": 1}')
+    correct = _parse_judge_score('{"correctness": 1, "relevance": 1, "completeness": 1}')
+
+    assert wrong is not None and correct is not None
+    assert correct - wrong >= 0.5, (
+        f"separation too weak: correct={correct} wrong={wrong} — this is the exact "
+        "failure mode (0.667 vs 1.0) the discrimination eval was built to catch"
+    )
 
 
 @pytest.mark.asyncio

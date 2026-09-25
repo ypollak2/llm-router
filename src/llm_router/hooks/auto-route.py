@@ -4137,6 +4137,20 @@ def main() -> None:
     # all four modes side by side. The invariant, enforced by
     # tests/test_routing_outcome_logged.py: an invocation that logs
     # `prompt_len=` logs exactly one terminal outcome.
+    # U (2026-09-25): drafts only for QUESTIONS. The hook drafted for every task
+    # type and Claude used 0 of 1,191 drafts; for a code or instruction turn a
+    # draft only adds latency, since Claude does the work either way. The
+    # quota-saving path is Claude calling llm(...) itself (smart enforcement).
+    # Zero-Claude still drafts everything — there the draft IS the answer.
+    _draft_tasks = os.environ.get("LLM_ROUTER_DRAFT_TASKS", "query,research").strip().lower()
+    if (_direct_enabled and _draft_tasks != "all" and not _zero_claude_enabled()
+            and task_type not in {t.strip() for t in _draft_tasks.split(",")}):
+        _direct_enabled = False
+        _debug_log(
+            f"[INVOCATION {invocation_id:.3f}] DIRECT SKIP: drafts only for questions "
+            f"(task={task_type}; LLM_ROUTER_DRAFT_TASKS=all drafts everything)"
+        )
+
     # I5: drafting reverts itself after a streak of unused drafts
     # (hooks/draft_usage.py). Checked only where a draft would otherwise run.
     _reverted = None
