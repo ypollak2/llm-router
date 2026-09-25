@@ -57,11 +57,11 @@ _TIER_COLOR = {
 _LLM_ROUTER_WORDMARK = "⚡ L L M · R O U T E R ⚡"
 _LLM_ROUTER_TAGLINE = "routing intelligence · cost savings · safety telemetry"
 _LLM_ROUTER_PANEL_PREFIX = "◆ LLM Router · "
-# PR5 follow-up: this was a hand-drawn figlet block spelling "CHUZOM" — the
-# same wrong-product defect the wordmark fix addressed, missed here because
-# it lives as its own constant rather than reusing _LLM_ROUTER_WORDMARK.
-# Kept deliberately plain (no hand-crafted block-letter art) rather than
-# risk a second silently-wrong figlet rendering.
+# PR5 follow-up: this was a hand-drawn figlet block spelling out another
+# product's name — the same wrong-product defect the wordmark fix addressed,
+# missed here because it lives as its own constant rather than reusing
+# _LLM_ROUTER_WORDMARK. Kept deliberately plain (no hand-crafted block-letter
+# art) rather than risk a second silently-wrong figlet rendering.
 _LLM_ROUTER_LOGO_ASCII = r"""
 ⚡  L L M   R O U T E R  ⚡
 """

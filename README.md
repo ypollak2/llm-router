@@ -397,9 +397,9 @@ Savings are calculated by comparing actual spend against a baseline of routing e
 **On savings figures.** Percentages quoted anywhere in this project are a *counterfactual* —
 what the same tokens would have cost at API list price, against what was actually spent. On a
 flat-rate subscription that is not money saved; it is quota preserved, and the two are not
-interchangeable. The "35–80%" and "87%" figures are single-user observations over particular
-development periods, with no stated denominator, and should be read as anecdotes rather than
-as a range you can expect. `llm-router summary` reports what your own usage actually did.
+interchangeable. This project does not publish a general savings percentage or range — any
+number depends heavily on your own workload. Run `llm-router savings-report` to see what your
+own usage actually did, with its own n and window.
 
 ---
 
@@ -496,6 +496,7 @@ export LLM_ROUTER_ENFORCE="smart"                 # off | advise | smart | hard
 export LLM_ROUTER_OLLAMA_TIMEOUT=45               # seconds; 45 clears a real local p50
 export LLM_ROUTER_PROJECT_ROOT="$PWD"             # scope the knowledge store explicitly
 export LLM_ROUTER_GROUND_TRUTH=1                  # opt in to Ground Truth accumulation
+export LLM_ROUTER_AUTO_BENCHMARK_FETCH=1          # opt in to background benchmark refetch (off = local-first)
 ```
 
 `LLM_ROUTER_OLLAMA_TIMEOUT` matters more than it looks. It was 4s before 13.2.0, and

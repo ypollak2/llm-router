@@ -10,6 +10,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 | [CHANGELOG-ARCHIVE.md](CHANGELOG-ARCHIVE.md) | v10.1.5 back to v6.3.0 |
 | [GitHub Releases](https://github.com/ypollak2/llm-router/releases) | v6.2 and earlier |
 
+## [Unreleased]
+
+### Docs
+
+- **Published the failed Q15 delegation A/B negative result.** Claude
+  delegating named sub-edits to a local agent (`llm_local_task`) does not save
+  Claude quota: 0/9 plan runs and 0/12 hard runs delegated at all, and the
+  2 delegated easy-suite runs cost 0.98× Claude's own tokens against a
+  pre-registered ship rule of ≤0.8×. Not wired. See
+  `architecture/Q15_HARNESS_PLAN.md` and `docs/BACKEND-QUALITY.md`.
+- Added `docs/repo_goals/` (`NORTH_STAR.md`, `AUDIT-2026-09-24.md`,
+  `PLAN-fixes.md`) documenting the 2026-09-24 North Star audit and the plan
+  to close its gaps.
+- Removed the README's unsourced "35–80%" and "87%" savings figures; the
+  README now points to `llm-router savings-report` for a user's own measured
+  number instead of a general anecdote.
+- Replaced the leftover "C H U Z O M" brand text baked into
+  `src/llm_router/banner_art.txt`'s painted ASCII art with the llm-router
+  brand (the separately-rendered wordmark below the painting already said
+  `LLM_ROUTER`; this was a second, stale occurrence inside the art itself).
+- `.github/workflows/benchmarks.yml` was re-enabled today after being
+  disabled since July (`workflow_dispatch`/schedule only; last scheduled run
+  before today: 2026-07-06). `docs/BENCHMARKS.md` is auto-generated and will
+  pick up a current "Last updated" date on the next run.
+
 ## [15.2.0] - 2026-09-24
 
 Security fixes and honest numbers, from a forensic audit whose every CRITICAL

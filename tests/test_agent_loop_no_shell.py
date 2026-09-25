@@ -28,4 +28,15 @@ def test_subprocess_run_calls_never_pass_shell_true():
 
 def test_run_command_parses_with_shlex():
     """The command is split into an argv list before execution."""
-    assert "shlex.split" in _SRC.read_text()
+    assert _tokenizes_with_shlex(_SRC.read_text())
+
+
+def _tokenizes_with_shlex(src: str) -> bool:
+    """AST, not text (K7): a call to shlex.split or shlex.shlex exists. S
+    (2026-09-24) moved run_command to a shlex.shlex tokenizer so `&&`/`|` are
+    split and chained without a shell; either form keeps the argv guarantee."""
+    import ast as _ast
+    return any(isinstance(n, _ast.Call) and isinstance(n.func, _ast.Attribute)
+               and n.func.attr in ("split", "shlex")
+               and getattr(n.func.value, "id", "") == "shlex"
+               for n in _ast.walk(_ast.parse(src)))

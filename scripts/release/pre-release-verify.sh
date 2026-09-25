@@ -1,6 +1,12 @@
 #!/bin/bash
 # Pre-release verification checklist
 # Prevents common issues before releasing new versions
+#
+# Usage: bash scripts/release/pre-release-verify.sh [--skip-quality "<reason>"]
+#
+# --skip-quality is forwarded to step 12 (the answer-quality bench). It is
+# NOT a way to skip step 11 (the classifier regression gate) -- that one runs
+# offline with no model calls and has no reason to ever be skipped.
 
 set -e
 
@@ -8,6 +14,24 @@ RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
+
+SKIP_QUALITY_REASON=""
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --skip-quality)
+            SKIP_QUALITY_REASON="${2:-}"
+            if [[ -z "$SKIP_QUALITY_REASON" ]]; then
+                echo -e "${RED}--skip-quality requires a reason${NC}"
+                exit 1
+            fi
+            shift 2
+            ;;
+        *)
+            echo -e "${RED}Unknown argument: $1${NC}"
+            exit 1
+            ;;
+    esac
+done
 
 echo "🚀 Pre-Release Verification Checklist"
 echo "===================================="
@@ -153,6 +177,34 @@ echo "🔟 Checking the version bump against the public surface..."
 if ! python3 scripts/release/semver_gate.py --check; then
     echo -e "${RED}The version bump is smaller than the public surface change.${NC}"
     echo "Bump the version, or record the override deliberately in CHANGELOG.md."
+    exit 1
+fi
+echo ""
+
+# 11. Classifier regression gate (North Star point 7: "a quality regression
+# blocks a release"). Deterministic, offline, no model calls -- see
+# scripts/release/classifier_gate.py for why the fixture set is hand-labelled
+# rather than drawn from real traffic.
+echo "1️⃣1️⃣ Checking the classifier hasn't regressed..."
+if ! uv run python scripts/release/classifier_gate.py; then
+    echo -e "${RED}❌ Classifier regression gate failed${NC}"
+    exit 1
+fi
+echo ""
+
+# 12. Answer-quality bench (the other half of point 7): a pinned subset of
+# scripts/bench_backend_quality.py against the local backend. Unlike step 11
+# this calls a real model and can be genuinely unavailable -- --skip-quality
+# is the explicit, recorded override for that case; see
+# scripts/release/quality_gate.py for the pinned threshold and why.
+echo "1️⃣2️⃣ Running the answer-quality bench (pinned subset, local backend)..."
+QUALITY_ARGS=()
+if [[ -n "$SKIP_QUALITY_REASON" ]]; then
+    QUALITY_ARGS+=(--skip-quality "$SKIP_QUALITY_REASON")
+fi
+if ! uv run python scripts/release/quality_gate.py "${QUALITY_ARGS[@]}"; then
+    echo -e "${RED}❌ Answer-quality bench failed, or the local backend is "
+    echo -e "   unavailable and no --skip-quality reason was given.${NC}"
     exit 1
 fi
 echo ""

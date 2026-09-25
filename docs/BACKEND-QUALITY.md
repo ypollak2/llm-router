@@ -224,6 +224,20 @@ Correctness figures are unaffected — a sleeping Mac does not change an answer.
    collapse and neither was one. The harness now detects quota, auth and
    approval refusals and aborts the run instead of scoring them.
 
+## Delegating named sub-edits does not save Claude quota either
+
+A pre-registered A/B (2026-09-24, `7b393fe`) asked whether Claude *delegating*
+named sub-edits to a local agent (`llm_local_task`, with an acceptance check)
+saves Claude tokens at equal verified completion. Given the option, Claude
+almost never delegated: 0/9 plan runs and 0/12 hard runs used delegation at
+all; in the 26-run easy suite it delegated twice, at 0.98× the tokens of doing
+the edit itself (non-delegated runs: 0.95×). The pre-registered ship rule
+needed ≤0.8× — it failed, and delegation guidance was not wired. A Claude Code
+session pays a fixed ~110-150k-token floor (mostly cache reads) before the
+task's own work, so offloading one edit's slice doesn't remove a turn; only
+not invoking Claude for the turn at all does. Full numbers and the
+pre-registered rule: `architecture/Q15_HARNESS_PLAN.md`.
+
 ## How to read this for routing policy
 
 Local is not worse at *doing* the work. It is worse at *finding* the work.

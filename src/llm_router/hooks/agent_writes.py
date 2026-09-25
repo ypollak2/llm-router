@@ -61,6 +61,9 @@ _BLOCKED_SUBCOMMANDS = {
     "npm": frozenset({"install", "publish", "run"}),
 }
 
+_GIT_BRANCH_READ_FLAGS = frozenset({"--show-current", "-a", "--all", "-r", "--remotes",
+                                    "-v", "-vv", "--verbose", "--list", "-l"})
+
 # pip/uv install reaches the network and mutates the environment, and `python -m`
 # is the usual way in.
 _BLOCKED_MODULES = frozenset({"pip", "ensurepip", "venv", "http.server"})
@@ -133,6 +136,12 @@ def guard_command(argv: list[str]) -> tuple[bool, str]:
     # at position two. Being strict costs a false refusal on a branch literally
     # named `push`; being positional costs an unreviewed force-push.
     blocked = _BLOCKED_SUBCOMMANDS.get(program)
+    # S: `git branch` only READS when it carries nothing but listing flags —
+    # `--show-current` is how a model orients itself; any name creates/deletes.
+    if program == "git" and "branch" in argv[1:]:
+        rest = argv[argv.index("branch") + 1:]
+        if all(a in _GIT_BRANCH_READ_FLAGS for a in rest):
+            blocked = blocked - {"branch"}
     if blocked:
         hit = next((a for a in argv[1:] if a in blocked), None)
         if hit:
