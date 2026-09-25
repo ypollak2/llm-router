@@ -91,3 +91,18 @@ def test_prepended_knowledge_does_not_become_the_query(repo, monkeypatch):
     assert "see unrelated_helper" in out, "premise: the knowledge block was prepended"
     assert "SETTLED_MARKER" in out
     assert "UNRELATED_BODY_MARKER" not in out, "a name from the knowledge block became a seed"
+
+
+# ── X5: a one-word name written as a call is a seed ──────────────────────────
+# Held-out miss d3 (2026-09-25): "what write mode does mode() resolve to by
+# default…" — `mode` has no underscore, capital or dot, so no pattern took it,
+# and the model saw mode()'s signature only and invented MODE_OFF.
+
+def test_a_call_written_name_is_a_seed():
+    idents, _ = seeds_from("what does mode() resolve to, and what about run(x)?")
+    assert "mode" in idents and "run" in idents, idents
+
+
+def test_ordinary_parentheses_are_not_seeds():
+    idents, _ = seeds_from("the default (when unset) is safe")
+    assert "default" not in idents and "when" not in idents, idents
