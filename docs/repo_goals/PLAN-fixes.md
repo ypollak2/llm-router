@@ -166,15 +166,29 @@ D1 and D4 are owner actions and come before the next release.
 | D7 | Installer auto-enables subscription mode on a detected Claude seat |
 | — | Points 4 and `control_plane/`: parked |
 
-## Execution tracker
+## Execution tracker — round 1 (final)
 
-| ID | Status | Task | Gate |
+| ID | Status | PR | Merge commit |
 |---|---|---|---|
-| PR1 | running | Docs: repo_goals files, Q15 note, drop README 35–80%/87%, BENCHMARKS.md line, banner_art brand; re-enable benchmarks.yml | `gh workflow view benchmarks.yml` state active; `grep -c "35–80\|87%" README.md` = 0; PR open |
-| PR2 | running | Benchmark fetch opt-in + newest-copy preference | 2 new tests pass, red-check fails on guard removal |
-| PR3 | running | Judge: response=, queue + deferred independent grading, failopen, liveness wording | new tests pass; red-checks fail as named |
-| PR4 | running | Classifier gate + fail-loud quality bench in pre-release-verify.sh | gate passes on HEAD, fails on mutated rule; no-Ollama run exits non-zero |
-| PR5 | running | summary split/labels/brand + session-end block filter | new tests pass; live `llm-router summary` has split with n, no CHUZOM |
-| PR6 | todo (after PR5) | status: unverified=not used, primary metric, labelled $ | new tests pass; red-check fails |
-| D1 | parked | Register PyPI trusted publisher | owner, PyPI web UI |
-| D4 | parked | Remove admin bypass on main | owner, GitHub settings |
+| PR1 | done (3 repairs) | #144 | cf17df0 |
+| PR2 | done (2 repairs) | #143 | e8d1e6f |
+| PR3 | done (2 repairs) | #145 | d1ba112 |
+| PR4 | done (2 repairs) | #146 | 2170916 |
+| PR5 | done (3 repairs) | #147 | 3f5004c |
+| PR6 | done (1 repair; one flaky CI re-run) | #148 | 47ba17d |
+| D1 | parked (owner) | Register the PyPI trusted publisher | — |
+| D4 | parked (owner) | Remove the admin bypass on main | — |
+
+## Execution tracker — round 2 (owner decisions 2026-09-25, final)
+
+Decisions: merge in order · record the quality-gate baseline now · CLAUDE.md stays ignored · follow-ups: stronger judge, installer sets subscription mode, re-audit after merge.
+
+| ID | Status | Result |
+|---|---|---|
+| M1-M6 | done | All 6 merged; #148 needed a merge from main plus one flaky re-run (#149's `test_a_pipeline_runs` on 3.11) |
+| B1 | done, PR #150 open | Quality gate 3/3 PASS per task on idle Ollama (qa-max-value 6.3s, hd-last-page 5.2s median) |
+| F2 | done (1 repair), PR #151 open | Installer writes LLM_ROUTER_CLAUDE_SUBSCRIPTION=true to ~/.llm-router/.env; explicit values incl. `export …=false` respected; hook reads it (tested) |
+| F1 | done (1 repair), PR #153 open | Holdout threshold accuracy 100% (18/18, Wilson 95% CI 82–100%) on qwen3.5 and on qwen3-coder:30b; previously 58.8% / 66.7% |
+| F3 | done | [AUDIT-2026-09-25.md](AUDIT-2026-09-25.md): 13 met · 6 partial · 1 not met; code-level only, because the live install is still 15.2.0 |
+
+This tracker was reset once by a concurrent session's `git pull` in this checkout (2026-09-25 09:54) and rebuilt from the session record.
