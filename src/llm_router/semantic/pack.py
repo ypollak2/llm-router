@@ -150,6 +150,14 @@ def build(
                 f"budget of {budget_tokens} tokens reached"
             )
             continue
+        # Z2: a constant IS its assignment — show it whole (capped) even when the
+        # question did not name it. Held-out miss: a two-line frozenset shown as
+        # its first line, and the model invented the missing member.
+        if entity.kind == "constant" and entity.name not in _named:
+            whole = _read_body(scope, entity, max_lines=_CONSTANT_MAX_LINES)
+            if whole and pack.retrieved_tokens + _tokens(whole) <= budget_tokens:
+                item["body"] = whole
+                rendered = _render_evidence(item)
         if entity.name in _named:
             body = _read_body(scope, entity)
             if body and pack.retrieved_tokens + _tokens(rendered) + _tokens(body) <= budget_tokens:
@@ -245,9 +253,10 @@ def _snapshot_id(scope: Path) -> str:
 
 
 _BODY_MAX_LINES = 80
+_CONSTANT_MAX_LINES = 12
 
 
-def _read_body(scope, entity) -> str:
+def _read_body(scope, entity, max_lines: int = _BODY_MAX_LINES) -> str:
     """The entity's source lines (capped). Empty when unreadable."""
     try:
         lines = (Path(scope) / entity.relative_path).read_text(
@@ -255,9 +264,9 @@ def _read_body(scope, entity) -> str:
     except OSError:
         return ""
     span = lines[entity.start_line - 1: entity.end_line]
-    cut = len(span) > _BODY_MAX_LINES
-    text = "\n".join(span[:_BODY_MAX_LINES])
-    return text + (f"\n… ({len(span) - _BODY_MAX_LINES} more lines)" if cut else "")
+    cut = len(span) > max_lines
+    text = "\n".join(span[:max_lines])
+    return text + (f"\n… ({len(span) - max_lines} more lines)" if cut else "")
 
 
 _CALLERS_MAX = 3

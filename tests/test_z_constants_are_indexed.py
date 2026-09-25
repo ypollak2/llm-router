@@ -54,3 +54,22 @@ def test_an_index_built_before_constants_existed_is_re_extracted(repo):
     indexer.index(repo)
     con = sqlite3.connect(store.index_path(root=repo))
     assert con.execute("SELECT count(*) FROM entity WHERE kind='constant'").fetchone()[0] == 3
+
+
+# ── Z2: a constant shows its whole assignment even when not named ────────────
+# Held-out pilot (2026-09-25, 12/14 correct): one miss was a two-line frozenset
+# shown as its first line only (constants unnamed in the question render as a
+# signature), and the model invented a member for the missing line.
+
+def test_an_unnamed_multiline_constant_is_shown_whole(repo, monkeypatch):
+    from llm_router.semantic import indexer
+    (repo / "pkg" / "flags.py").write_text(
+        "_READ_FLAGS = frozenset({'--show-current', '-a',\n"
+        "                         '-v', 'SECOND_LINE_MEMBER'})\n\n"
+        "def read_only(flag):\n    return flag in _READ_FLAGS\n")
+    subprocess.run(["git", "add", "-A"], cwd=repo, check=True)   # the indexer reads tracked files
+    indexer.index(repo)
+    from llm_router.context_injection import inject
+    out = inject("what does read_only in pkg/flags.py accept?", root=str(repo))
+    assert "_READ_FLAGS = frozenset" in out, "premise: the constant was retrieved"
+    assert "SECOND_LINE_MEMBER" in out, "the continuation line of the constant is missing"
