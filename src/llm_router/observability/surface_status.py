@@ -141,6 +141,17 @@ def _read_stats_records(max_rows: int = 2000) -> list[dict]:
     indicators blind after any import. Reading ``savings_stats`` gives the durable,
     host-tagged history (and captures gateway/external traffic once it's imported).
     Mapped to the same record shape as the jsonl. Never raises.
+
+    PR6 audit note: this reader already calls ``savings.is_verified_saving``
+    per row (below) rather than re-deriving verified-ness from provenance —
+    it predates and already agrees with PR #147's mode='block' predicate, so
+    it is NOT the ``_production_pred``-as-verified-axis bug ``dashboard_data.
+    query_window`` had. Left as its own row-shaped reader rather than
+    consolidated onto ``dashboard_data.query_window``/``query_primary_metric``:
+    it reads the last N raw rows (for "last route" / health, not a window
+    aggregate) plus the still-unflushed ``savings_log.jsonl`` buffer, which
+    ``query_window`` never reads. Sharing a query shape would require either
+    surface to give up something it needs.
     """
     import sqlite3
 
