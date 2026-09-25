@@ -48,8 +48,6 @@ _ALLOWED_PROGRAMS = frozenset({
     "ls", "cat", "head", "tail", "wc", "file", "stat", "du", "find",
     "grep", "rg", "ag", "sed", "awk", "sort", "uniq", "cut", "diff", "tree",
     "git", "python", "python3", "pytest", "node", "go", "cargo", "which", "echo",
-    "yes",  # no side effects, no reads beyond argv — the unbounded producer
-            # used to test that a pipeline's downstream stage can bound it
 })
 
 # Subcommands of an allowed program that are NOT read-only. `git` is on the list

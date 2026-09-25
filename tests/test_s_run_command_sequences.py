@@ -46,12 +46,22 @@ def test_a_pipeline_runs(repo):
     assert subjects == {"c2", "c1"}, out
 
 
-def test_yes_pipeline_terminates_early(repo):
+def test_yes_pipeline_terminates_early(repo, monkeypatch):
     """`head` must bound an UNBOUNDED upstream by exiting the moment it has
     its line(s) — not after the producer finishes. If the pipeline stages
     were run sequentially (drain stage 1 fully, then feed stage 2), `yes`
     never finishes and this would hang until the 30s command timeout instead
-    of returning almost instantly."""
+    of returning almost instantly.
+
+    `yes` is not on the inspection allowlist (R3's
+    test_every_allowlisted_program_is_classified would then require it be
+    declared an interpreter or not) and isn't worth adding there just to
+    reach it from this test. LLM_ROUTER_AGENT_COMMANDS=all bypasses only the
+    allowlist GATE, still going through the same guard_command/write-mode
+    checks and the exact pipe-chaining code under test — so this exercises
+    the pipe logic, not a change to what a real agent session can run.
+    """
+    monkeypatch.setenv("LLM_ROUTER_AGENT_COMMANDS", "all")
     start = time.monotonic()
     out = run("yes | head -1", repo)
     elapsed = time.monotonic() - start
