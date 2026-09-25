@@ -81,6 +81,17 @@ _CHUZOM_RE = re.compile(r"chuzom", re.IGNORECASE)
 #   applies — the audit tooling is new CLI wiring, not ported code), so the
 #   same rationale as the WS7/WS8 entries above governs: this is
 #   provenance-of-a-guard, not brand leakage.
+# - tests/test_pr5_verified_savings_summary.py: PR5 (observability/summary.py's
+#   verified-savings headline + wordmark) is a brand-leak regression test in
+#   the same shape as the WS7/WS8/WS9 entries above —
+#   `test_wordmark_is_llm_router_not_chuzom` and
+#   `test_markdown_logo_ascii_is_llm_router_not_chuzom` assert
+#   `"chuzom" not in ...` against the module's wordmark/logo constants (by
+#   value, not source text), plus a docstring line naming what they guard
+#   against. `observability/summary.py` is not a documented Chuzom port (no
+#   "ported from chuzom" header applies — it is new dashboard code that
+#   briefly carried the wrong brand string as a defect, not ported code), so
+#   this is provenance-of-a-guard, not brand leakage.
 #: Whole DIRECTORIES where "chuzom" may appear.
 #:
 #: - _quarantined_tests/: test modules quarantined by the 13.0.0 sync (see its
@@ -118,6 +129,7 @@ ALLOW_FILES: frozenset[str] = frozenset(
         "tests/commands/test_team.py",
         "tests/test_contracts.py",
         "tests/commands/test_audit.py",
+        "tests/test_pr5_verified_savings_summary.py",
     }
 )
 

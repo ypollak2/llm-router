@@ -77,3 +77,37 @@ def test_execute_agent_carries_the_reads_onto_the_result(monkeypatch, tmp_path):
     monkeypatch.setattr(agent_loop, "run_agent_loop", fake_loop)
     r = de.execute_agent("q", [M], project_root=str(tmp_path), read_only=True)
     assert r is not None and r.files_read == ("read_file(a.py)",)
+
+
+# ── T: a draft that saw the session but opened no files ─────────────────────
+# Live 2026-09-24 21:31: the read-only loop answered the user's message from the
+# session summary and repo excerpts it was given, without opening a file
+# (files_read=0). The notice then fell back to the BLIND wording — "WITHOUT
+# access to … this conversation's history" — false, and a rule that discards
+# every conversation-dependent answer.
+
+def test_a_draft_that_saw_the_session_is_not_described_as_blind():
+    r = DirectResult(text="Yes — pass the conversation.", model=M, latency_ms=900,
+                     context_chars=5200)
+    ctx = format_echo_context(r, "query", "simple")
+    assert "WITHOUT access to your files, codebase, tools, shell, or this conversation" not in ctx
+    assert "summary of this session" in ctx and "opened no files" in ctx
+    assert "🎯 LLM Router routed" in ctx
+
+
+def test_execute_agent_records_the_context_it_was_given(monkeypatch, tmp_path):
+    from llm_router.hooks import direct_executor as de
+    monkeypatch.setattr(agent_loop, "run_agent_loop", lambda **kw: "an answer from the summary alone")
+    r = de.execute_agent("q", [M], project_root=str(tmp_path), read_only=True,
+                         context="SESSION SUMMARY " * 20)
+    assert r is not None and r.context_chars == len("SESSION SUMMARY " * 20)
+
+
+def test_the_text_chain_records_the_context_it_was_given(monkeypatch):
+    from llm_router.hooks import direct_executor as de
+    answer = "os.path.join joins path components into a single path using the OS separator."
+    monkeypatch.setitem(de._PROVIDER_CALLS, "ollama", lambda *a, **k: (answer, {}))
+    monkeypatch.setattr(de, "available_ollama_models", lambda timeout=0.5: [M.model])
+    monkeypatch.setattr(de, "_okf_inject", lambda prompt, **kw: prompt, raising=False)
+    r = de.execute_chain("q", [M], "query", timeout=5, context="SESSION SUMMARY " * 10)
+    assert r is not None and r.context_chars == len("SESSION SUMMARY " * 10)

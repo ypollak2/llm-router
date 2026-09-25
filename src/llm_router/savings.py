@@ -45,41 +45,80 @@ __all__ = [
     "UNVERIFIED_SAVED_SQL",
     "UNVERIFIED_CALLS_SQL",
     "REALIZED_GATE_SINCE",
+    "REALIZED_MODE",
+    "ELIGIBLE_TURN_PRED_SQL",
+    "VERIFIED_CALLS_SQL",
     "unverified_note",
     "savings_split_sql",
     "is_verified_saving",
+    "under_subscription",
 ]
 
 
 # ── Verified vs unverified savings_stats rows ─────────────────────────────
 #
 # A saving is VERIFIED only when the writer observed that the routed answer
-# REPLACED Claude's turn. One writer can: the UserPromptSubmit hook, whose
-# `realized` gate (ec0d23e, 2026-09-13T17:57:16Z) writes a discarded draft at $0.
-# Everything else is kept but reported as UNVERIFIED, never in a headline:
+# REPLACED Claude's turn. host/model/timestamp alone never said this — they
+# say WHO wrote the row and WHEN, not WHETHER the row's own draft was used.
+# `mode` is the field that says that: hooks/savings_logger.py's
+# log_direct_savings stamps "block" when the draft replaced Claude's turn and
+# "echo" when Claude answered anyway and the draft was discarded (at $0). A
+# 2026-09-24 external review reproduced this LIVE: a mode="echo",
+# host="claude_code" row with a nonzero `estimated_claude_cost_saved` passed
+# the pre-mode predicate as "verified" — the exact S9 shape ("unknown treated
+# as favourable") this module exists to prevent, since a host+timestamp match
+# with no mode check means "realized-ness unknown", not "realized".
 #
 #   * host 'router' / 'gateway' / 'sdk' — `log_receipt_savings` credits every
 #     MCP/gateway call as a replaced Claude answer; on 2026-09-23 that included
-#     two 2-token "ok" pings.
+#     two 2-token "ok" pings. These writers never set `mode` at all (NULL),
+#     so they fail the mode check regardless of host.
 #   * agentic delegations — `agentic/telemetry.py` wrote host 'claude_code'
 #     until 2026-09-24 and credits a flat estimate whatever the outcome
-#     (517 rows, $103.40, all exactly $0.20).
-#   * hook rows written before the gate existed ($1.13).
+#     (517 rows, $103.40, all exactly $0.20). Also never sets `mode`.
+#   * hook rows written before the gate existed ($1.13), and hook rows written
+#     before `mode` existed as a column at all — both NULL, both unverified.
 #
-# Measured 2026-09-24 over all 8,969 savings_stats rows: verified $0.00 — no
-# gated hook row has ever been realized — and unverified $110.91 (n=7,958). Unknown host/model/timestamp is
-# unverified: unknown must not render as the favourable answer (S9) — every
-# comparison below is NULL-false, so a NULL lands in the ELSE branch.
+# Measured 2026-09-24 over all 8,969 savings_stats rows, pre-mode-fix: verified
+# $0.00 — no gated hook row had a nonzero SUM either way — and unverified
+# $110.91 (n=7,958). That number did NOT change once `mode` joined the
+# predicate on this machine's live data: every one of the confirmed-production
+# rows carries `mode = NULL` (hooks/session-end.py's sync savings_stats
+# importer dropped the column on write — see its own fix note), so verified
+# stayed $0.00 for a DIFFERENT, now-correct reason: NULL != 'block'. Unknown
+# host/model/timestamp/mode is unverified: unknown must not render as the
+# favourable answer (S9) — every comparison below is NULL-false, so a NULL
+# lands in the ELSE branch.
 #
 # Every SUM over `savings_stats.estimated_claude_cost_saved` goes through these
 # expressions; tests/test_a31_router_savings_unverified.py fails on a raw one.
 VERIFIED_HOSTS: tuple[str, ...] = ("claude_code",)
 REALIZED_GATE_SINCE = "2026-09-13T17:57:16"
-_VERIFIED_PRED = (
+#: The one string value `mode` takes for a row the writer observed replacing
+#: Claude's turn. Everything else — "echo", NULL, any other value — is not.
+REALIZED_MODE = "block"
+#: host/model/timestamp only — every row it takes to even ASK "was this
+#: used", before `mode` is looked at. Every `mode` value, INCLUDING NULL,
+#: satisfies this predicate by itself — that is the "any mode" this name
+#: describes, and it is exactly why this constant does NOT by itself mean
+#: "eligible" for PR6's North Star primary metric (verified share of
+#: eligible Claude turns). The primary metric's actual eligible population
+#: is narrower and is built at the call site
+#: (dashboard_data.query_primary_metric): this predicate AND `mode IS NOT
+#: NULL` — i.e. mode IN ('block', 'echo'), a row where a writer recorded
+#: SOME outcome, whichever it was. A row with `mode IS NULL` passes THIS
+#: constant but is neither eligible nor verified nor unverified for the
+#: primary metric — it is UNMEASURED (nobody recorded an outcome at all),
+#: counted apart from both sides (S9: unknown must not silently join
+#: either the favourable or the unfavourable count). Exported so
+#: dashboard_data doesn't re-derive the host/model/timestamp fragment
+#: `_VERIFIED_PRED` already owns.
+ELIGIBLE_TURN_PRED_SQL = (
     "(host IN (" + ", ".join(f"'{h}'" for h in VERIFIED_HOSTS) + ")"
     " AND model_used NOT LIKE 'llm_router-agentic%'"
     f" AND timestamp >= '{REALIZED_GATE_SINCE}')"
 )
+_VERIFIED_PRED = f"({ELIGIBLE_TURN_PRED_SQL} AND mode = '{REALIZED_MODE}')"
 VERIFIED_SAVED_SQL = (
     f"CASE WHEN {_VERIFIED_PRED} THEN estimated_claude_cost_saved ELSE 0 END"
 )
@@ -87,26 +126,43 @@ UNVERIFIED_SAVED_SQL = (
     f"CASE WHEN {_VERIFIED_PRED} THEN 0 ELSE estimated_claude_cost_saved END"
 )
 UNVERIFIED_CALLS_SQL = f"CASE WHEN {_VERIFIED_PRED} THEN 0 ELSE 1 END"
+#: Row COUNT behind `VERIFIED_SAVED_SQL`'s dollar figure — NOT derivable from
+#: summing `VERIFIED_SAVED_SQL` and checking for zero, because a genuinely
+#: verified row can itself have saved $0.00 (equal-cost routing). A `$` figure
+#: printed with the wrong `n` beside it — e.g. total row/call volume across
+#: five UNION'd tables — is the exact defect this constant exists to prevent
+#: (live-reproduced: "$0.00 … (n=47260)" while verified_n was actually 0).
+VERIFIED_CALLS_SQL = f"CASE WHEN {_VERIFIED_PRED} THEN 1 ELSE 0 END"
 
 
-def is_verified_saving(host, model, timestamp) -> bool:
+def is_verified_saving(host, model, timestamp, mode) -> bool:
     """Python twin of VERIFIED_SAVED_SQL for records summed outside SQL (the
     JSONL buffer before import). Must agree with the SQL row-for-row —
     tests/test_a31_router_savings_unverified.py pins the parity. Unknown -> False.
+
+    ``mode`` is REQUIRED, not defaulted: a caller that forgets to pass it fails
+    loudly (TypeError) at the call site instead of silently reproducing the
+    2026-09-24 defect, where a host+timestamp match with no mode check read
+    "realized-ness unknown" as "realized". Pass the row's own `mode` value
+    (None/NULL when the row or table doesn't carry one — that correctly
+    returns False, it does not mean "skip the check").
     """
     if host not in VERIFIED_HOSTS or model is None or timestamp is None:
         return False
     # SQLite LIKE is case-insensitive for ASCII; match it.
     if str(model).lower().startswith("llm_router-agentic"):
         return False
+    if mode != REALIZED_MODE:
+        return False
     return str(timestamp) >= REALIZED_GATE_SINCE
 
 
 def savings_split_sql(columns) -> tuple[str, str, str]:
     """(verified, unverified, unverified_calls) expressions for a savings_stats
-    table with these columns. A table predating `host`/`model_used` cannot say
-    who wrote a row, so every row is unverified — not an error, and not verified."""
-    if {"host", "model_used", "timestamp"} <= set(columns):
+    table with these columns. A table predating `host`/`model_used`/`mode`
+    cannot say who wrote a row or whether it was realized, so every row is
+    unverified — not an error, and not verified."""
+    if {"host", "model_used", "timestamp", "mode"} <= set(columns):
         return VERIFIED_SAVED_SQL, UNVERIFIED_SAVED_SQL, UNVERIFIED_CALLS_SQL
     return "0", "estimated_claude_cost_saved", "1"
 
@@ -275,7 +331,7 @@ async def canonical_savings(
     overhead = float(raw.get("routing_overhead_usd", 0.0))
     n = int(raw.get("n_rows", 0) or 0)
 
-    sub = _under_subscription()
+    sub = under_subscription()
     return CanonicalSavings(
         window=period,
         baseline_equivalent_avoided_usd=gross,
@@ -292,8 +348,14 @@ async def canonical_savings(
     )
 
 
-def _under_subscription() -> bool:
-    """Is Claude being paid for by a flat subscription rather than per token?"""
+def under_subscription() -> bool:
+    """Is Claude being paid for by a flat subscription rather than per token?
+
+    Public (PR5/summary.py, and PR6's status surface, both need the SAME
+    subscription framing this module already applies to CanonicalSavings —
+    a second env-var read here would be the same drift twenty independent
+    baseline computations already produced once, see the module docstring).
+    """
     import os
 
     raw = os.environ.get("LLM_ROUTER_CLAUDE_SUBSCRIPTION", "").strip().lower()
@@ -388,6 +450,18 @@ SURFACES: tuple[Surface, ...] = (
             "against spend, not overhead"),
     Surface("cli_team", "commands/team.py:69", False,
             "cost.get_team_savings — filtered, gross; broadcast to Slack"),
+    Surface("terminal_session_summary", "observability/summary.py:218", False,
+            "PR5: does not call canonical_savings() (that reads claude_usage/"
+            "codex_usage/gemini_usage, a DIFFERENT table with no realized-vs-"
+            "discarded provenance). Reads savings_stats directly via this "
+            "module's own VERIFIED_SAVED_SQL/UNVERIFIED_SAVED_SQL/"
+            "savings_split_sql — sync stdlib sqlite3, read-only, no DB-creation "
+            "side effect (an aiosqlite connection via cost._get_db() would "
+            "create ~/.llm-router/usage.db on every `llm-router summary`). "
+            "Shown beside the lineage-derived baseline-equivalent estimate "
+            "(a routing-decision counterfactual, not a verified saving), "
+            "never instead of it — see summary._verified_savings_window and "
+            "summary._lineage_verified_state"),
 )
 
 

@@ -36,16 +36,23 @@ _DDL = """CREATE TABLE savings_stats (
 _NOW = datetime.now(timezone.utc).isoformat()
 _PRE_GATE = "2026-09-01T12:00:00+00:00"
 
-#: (label, timestamp, host, model, saved) — distinct powers of two so every sum
-#: identifies exactly which rows it included.
+#: (label, timestamp, host, model, saved, mode) — distinct powers of two so
+#: every sum identifies exactly which rows it included. PR5 follow-up
+#: (external review, 2026-09-24): `mode` joined host/model/timestamp in the
+#: verified predicate — a mode="echo"/NULL row is a discarded draft or an
+#: unmeasured one, never verified regardless of host. Only "hook, gated" was
+#: ever meant to represent a REALIZED hook row, so it is the only one that
+#: carries mode="block"; every other writer here (router/gateway/sdk/
+#: agentic-as-hook/pre-gate) never stamps mode at all in production, so NULL
+#: is the honest value for them, not a test simplification.
 _ROWS = [
-    ("hook, gated",        _NOW,      "claude_code", "ollama/qwen3.5:latest",     0.5),
-    ("router",             _NOW,      "router",      "ollama/qwen3-coder:30b",    1.0),
-    ("gateway",            _NOW,      "gateway",     "ollama/qwen3.5:latest",     2.0),
-    ("sdk",                _NOW,      "sdk",         "ollama/qwen3.5:latest",     4.0),
-    ("NULL host",          _NOW,      None,          "ollama/qwen3.5:latest",     8.0),
-    ("agentic as hook",    _NOW,      "claude_code", "llm_router-agentic-router", 16.0),
-    ("hook, pre-gate",     _PRE_GATE, "claude_code", "ollama/qwen3.5:latest",     32.0),
+    ("hook, gated",        _NOW,      "claude_code", "ollama/qwen3.5:latest",     0.5,  "block"),
+    ("router",             _NOW,      "router",      "ollama/qwen3-coder:30b",    1.0,  None),
+    ("gateway",            _NOW,      "gateway",     "ollama/qwen3.5:latest",     2.0,  None),
+    ("sdk",                _NOW,      "sdk",         "ollama/qwen3.5:latest",     4.0,  None),
+    ("NULL host",          _NOW,      None,          "ollama/qwen3.5:latest",     8.0,  None),
+    ("agentic as hook",    _NOW,      "claude_code", "llm_router-agentic-router", 16.0, None),
+    ("hook, pre-gate",     _PRE_GATE, "claude_code", "ollama/qwen3.5:latest",     32.0, "block"),
 ]
 
 
@@ -53,11 +60,14 @@ def _db(tmp_path, rows=_ROWS) -> pathlib.Path:
     path = tmp_path / "usage.db"
     conn = sqlite3.connect(path)
     conn.execute(_DDL)
-    for _, ts, host, model, saved in rows:
+    for row in rows:
+        _, ts, host, model, saved = row[:5]
+        mode = row[5] if len(row) > 5 else None
         conn.execute(
             "INSERT INTO savings_stats (timestamp, session_id, task_type, "
-            "estimated_claude_cost_saved, model_used, host, is_simulated) "
-            "VALUES (?, 's1', 'query', ?, ?, ?, 0)", (ts, saved, model, host))
+            "estimated_claude_cost_saved, model_used, host, mode, is_simulated) "
+            "VALUES (?, 's1', 'query', ?, ?, ?, ?, 0)",
+            (ts, saved, model, host, mode))
     conn.commit()
     conn.close()
     return path
@@ -88,7 +98,7 @@ def test_only_the_gated_hook_row_is_verified(tmp_path):
 
 def test_verified_and_unverified_partition_the_ledger(tmp_path):
     verified, unverified, _ = _sums(_db(tmp_path))
-    assert verified + unverified == sum(r[-1] for r in _ROWS)
+    assert verified + unverified == sum(r[4] for r in _ROWS)
 
 
 def test_an_unknown_host_is_unverified_not_dropped_and_not_verified(tmp_path):
@@ -177,21 +187,26 @@ def test_a_table_predating_host_counts_as_unverified_not_as_an_error(tmp_path):
 
 def test_the_python_twin_agrees_with_the_sql_row_for_row(tmp_path):
     """surface_status sums in Python; the rule must not fork. Includes a
-    mixed-case agentic model, because SQLite LIKE is case-insensitive."""
+    mixed-case agentic model, because SQLite LIKE is case-insensitive.
+    mode="block" on both extra rows: each tests a DIFFERENT exclusion (agentic
+    model / NULL model), so mode must not be the confounding reason they
+    fail verification."""
     from llm_router.savings import is_verified_saving
     rows = _ROWS + [("agentic, mixed case", _NOW, "claude_code",
-                     "LLM_Router-Agentic-Router", 64.0),
-                    ("NULL model", _NOW, "claude_code", None, 128.0)]
+                     "LLM_Router-Agentic-Router", 64.0, "block"),
+                    ("NULL model", _NOW, "claude_code", None, 128.0, "block")]
     path = _db(tmp_path, rows)
     conn = sqlite3.connect(path)
     try:
         sql = conn.execute(
-            f"SELECT host, model_used, timestamp, "
+            f"SELECT host, model_used, timestamp, mode, "
             f"CASE WHEN {VERIFIED_SAVED_SQL} > 0 THEN 1 ELSE 0 END "
             f"FROM savings_stats ORDER BY id").fetchall()
     finally:
         conn.close()
     assert len(sql) == len(rows)
-    assert sum(r[3] for r in sql) == 1, "premise: exactly one verified row seeded"
-    for host, model, ts, verified in sql:
-        assert is_verified_saving(host, model, ts) == bool(verified), (host, model, ts)
+    assert sum(r[4] for r in sql) == 1, "premise: exactly one verified row seeded"
+    for host, model, ts, mode, verified in sql:
+        assert is_verified_saving(host, model, ts, mode) == bool(verified), (
+            host, model, ts, mode
+        )

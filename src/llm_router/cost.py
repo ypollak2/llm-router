@@ -3238,11 +3238,15 @@ async def log_savings(
     external_cost: float,
     model: str,
     session_id: str,
+    *,
+    mode: str | None = None,
 ) -> None:
     """Persist a single routing-savings record to the ``savings_stats`` table.
 
-    Called by ``import_savings_log`` after reading lines from the JSONL file
-    written by the PostToolUse hook.
+    NOTE: unlike its docstring used to claim, this is NOT the function
+    ``import_savings_log`` calls — that function does its own direct INSERT
+    (see its source). No src/ code calls ``log_savings`` today; it is kept for
+    tests and as a documented single-row write path.
 
     Args:
         task_type: The classified task type (e.g. "code", "research").
@@ -3250,6 +3254,10 @@ async def log_savings(
         external_cost: Actual cost incurred on the external provider.
         model: The external model that handled the request.
         session_id: Opaque identifier grouping calls within one Claude Code session.
+        mode: "block" if the caller observed this row's routed answer REPLACE
+            Claude's turn, "echo" if it was a discarded draft, or None if the
+            caller cannot say (the default — savings.is_verified_saving then
+            correctly reports this row as unverified rather than assuming).
     """
     from datetime import datetime, timezone
 
@@ -3259,8 +3267,8 @@ async def log_savings(
             # T-05: provenance stamped at write time (see log_claude_usage).
             "INSERT INTO savings_stats "
             "(timestamp, session_id, task_type, estimated_claude_cost_saved, external_cost, "
-            "model_used, is_simulated) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "model_used, mode, is_simulated) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 datetime.now(timezone.utc).isoformat(),
                 session_id,
@@ -3268,6 +3276,7 @@ async def log_savings(
                 estimated_saved,
                 external_cost,
                 model,
+                mode,
                 1 if _detect_synthetic() else 0,
             ),
         )
