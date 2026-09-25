@@ -221,9 +221,15 @@ def main() -> int:
             cwd = hook_input.get("cwd") or os.getcwd()
             store = LibraryStore.for_repo(Path(cwd))
             if store is not None:
+                from llm_router.hooks import hook_payload
                 from llm_router.library.pack import pack_for
                 pack = pack_for(store, _current_book(store))
                 if pack:
+                    # pack is built from commit messages and file names —
+                    # both are attacker-influenceable (a malicious commit
+                    # message or filename could contain a tag-shaped
+                    # sequence) and land straight in additionalContext.
+                    pack = hook_payload.neutralize(pack)
                     print(json.dumps({
                         "hookSpecificOutput": {
                             "hookEventName": "UserPromptSubmit",

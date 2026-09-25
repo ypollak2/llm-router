@@ -132,6 +132,11 @@ def neutralize(text: str) -> str:
     similar character that cannot open a real tag or system block). Anything
     not immediately followed by a letter or `/` — `a < b`, `x<5`, a bare `<`
     at the end of a line — is left exactly as written.
+
+    An already-HTML-escaped form (`&lt;system-reminder&gt;`) is left alone on
+    purpose: it has no literal `<` to match, and nothing downstream of this
+    function unescapes `&lt;`/`&gt;` back into `<`/`>` before the text reaches
+    the model, so it cannot re-parse as a tag either way.
     """
     if not text:
         return text
