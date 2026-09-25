@@ -281,15 +281,21 @@ def test_quality_gate_contention_with_skip_flag_records_reason_and_exits_clean(
     assert "CONTENDED" in note
 
 
-def test_quality_gate_prints_fresh_baseline_pending_note_on_every_run(monkeypatch, capsys):
-    """The "fresh baseline pending" status must be visible on every run, not
-    only in a docstring a releaser may never open -- checked on both the
-    unavailable path and the passing path."""
+def test_quality_gate_prints_the_dated_baseline_note_on_every_run(monkeypatch, capsys):
+    """The baseline provenance must be visible on every run, not only in a
+    docstring a releaser may never open -- checked on both the unavailable
+    path and the passing path. Confirmed 2026-09-25 (n=3/3 clean runs against
+    qwen3-coder:30b, see "The threshold" in the module docstring), so this no
+    longer says "pending"."""
     gate = _load("scripts/release/quality_gate.py", "_quality_gate_baseline_note")
+    assert gate.FRESH_BASELINE_DATE == "2026-09-25"
+    assert gate.FRESH_BASELINE_N == 3
+
     monkeypatch.setattr(gate, "is_ollama_available", lambda: False)
     gate.main([])
     unavailable_out = capsys.readouterr().out
-    assert "fresh baseline pending" in unavailable_out
+    assert gate.FRESH_BASELINE_DATE in unavailable_out
+    assert "fresh baseline pending" not in unavailable_out
 
     monkeypatch.setattr(gate, "is_ollama_available", lambda: True)
     monkeypatch.setattr(gate, "_resident_model_note", lambda: None)
@@ -297,7 +303,8 @@ def test_quality_gate_prints_fresh_baseline_pending_note_on_every_run(monkeypatc
     _mock_clean_pass(gate, monkeypatch)
     gate.main([])
     passing_out = capsys.readouterr().out
-    assert "fresh baseline pending" in passing_out
+    assert gate.FRESH_BASELINE_DATE in passing_out
+    assert "fresh baseline pending" not in passing_out
 
 
 def test_quality_gate_empty_answer_mid_run_is_reported_as_no_answer_not_regression(

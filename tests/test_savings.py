@@ -133,6 +133,10 @@ def temp_savings_db(tmp_path, monkeypatch):
 class TestLogSavingsPersistence:
     @pytest.mark.asyncio
     async def test_log_savings_persists(self, temp_savings_db):
+        """PR5: `total_saved` is savings.VERIFIED_SAVED_SQL, which requires
+        mode="block" (the writer observed this row's answer REPLACE Claude's
+        turn) as well as host/model/timestamp. This test's caller knows that
+        for certain, so it says so explicitly."""
         db_path, _ = temp_savings_db
         await cost.log_savings(
             task_type="query",
@@ -140,6 +144,7 @@ class TestLogSavingsPersistence:
             external_cost=0.001,
             model="gemini/flash",
             session_id="test-session",
+            mode="block",
         )
         # T-05: pytest stamps this row synthetic; the hatch reads it back.
         summary = await cost.get_lifetime_savings_summary(days=0, include_simulated=True)
@@ -151,9 +156,9 @@ class TestLogSavingsPersistence:
     @pytest.mark.asyncio
     async def test_log_savings_multiple_sessions(self, temp_savings_db):
         db_path, _ = temp_savings_db
-        await cost.log_savings("query", 0.03, 0.001, "flash", "session-1")
-        await cost.log_savings("code", 0.05, 0.002, "gpt-4o-mini", "session-1")
-        await cost.log_savings("research", 0.10, 0.005, "sonar", "session-2")
+        await cost.log_savings("query", 0.03, 0.001, "flash", "session-1", mode="block")
+        await cost.log_savings("code", 0.05, 0.002, "gpt-4o-mini", "session-1", mode="block")
+        await cost.log_savings("research", 0.10, 0.005, "sonar", "session-2", mode="block")
 
         # T-05: pytest stamps these rows synthetic; the hatch reads them back.
         summary = await cost.get_lifetime_savings_summary(days=0, include_simulated=True)
@@ -174,8 +179,8 @@ class TestLifetimeSavingsSummary:
     @pytest.mark.asyncio
     async def test_net_savings_calculation(self, temp_savings_db):
         db_path, _ = temp_savings_db
-        await cost.log_savings("query", 0.10, 0.03, "model", "s1")
-        await cost.log_savings("code", 0.20, 0.05, "model", "s1")
+        await cost.log_savings("query", 0.10, 0.03, "model", "s1", mode="block")
+        await cost.log_savings("code", 0.20, 0.05, "model", "s1", mode="block")
 
         # T-05: pytest stamps these rows synthetic; the hatch reads them back.
         summary = await cost.get_lifetime_savings_summary(days=0, include_simulated=True)

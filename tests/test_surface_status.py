@@ -33,7 +33,7 @@ def _write_log(state_dir: Path, records: list[dict]) -> None:
 
 
 def _rec(host="codex", model="ollama/hermes3:8b", task="code", cx="moderate",
-         saved=0.01, ts=None, now=None, in_tok=0, out_tok=0) -> dict:
+         saved=0.01, ts=None, now=None, in_tok=0, out_tok=0, mode=None) -> dict:
     if ts is None:
         ts = now if now is not None else time.time()
     return {
@@ -46,6 +46,7 @@ def _rec(host="codex", model="ollama/hermes3:8b", task="code", cx="moderate",
         "host": host,
         "input_tokens": in_tok,
         "output_tokens": out_tok,
+        "mode": mode,
     }
 
 
@@ -106,10 +107,17 @@ def test_today_aggregates_vs_total(state_dir):
 
 
 def test_only_realized_gated_hook_savings_are_headline(state_dir):
+    """PR5 follow-up: host+timestamp is not enough — mode="block" is required
+    too (a 2026-09-24 external review reproduced a mode="echo"/NULL,
+    host="claude_code" row reading as verified before this). Only the first
+    row below carries mode="block"; the agentic and pre-gate rows are
+    unverified for their OWN stated reason even though they too are
+    mode-less here, matching what those writers do in production (neither
+    stamps mode at all)."""
     now = 1_790_000_000.0  # 2026-09, after savings.REALIZED_GATE_SINCE
     day_start = now - (now % 86400)
     _write_log(state_dir, [
-        _rec(host="claude_code", saved=0.02, ts=day_start + 100),
+        _rec(host="claude_code", saved=0.02, ts=day_start + 100, mode="block"),
         _rec(host="claude_code", model="llm_router-agentic-router",
              saved=0.2, ts=day_start + 200),                       # agentic
         _rec(host="claude_code", saved=0.05, ts=1_700_000_000.0),  # pre-gate
@@ -353,7 +361,7 @@ def test_an_unknown_host_in_the_ledger_is_not_verified(state_dir):
     conn.execute("CREATE TABLE savings_stats (id INTEGER PRIMARY KEY, timestamp TEXT, "
                  "host TEXT, model_used TEXT, task_type TEXT, "
                  "estimated_claude_cost_saved REAL, input_tokens INTEGER, "
-                 "output_tokens INTEGER)")
+                 "output_tokens INTEGER, mode TEXT)")
     conn.execute("INSERT INTO savings_stats (timestamp, host, model_used, task_type, "
                  "estimated_claude_cost_saved, input_tokens, output_tokens) "
                  "VALUES (?, NULL, 'ollama/qwen3.5:latest', 'query', 0.07, 1, 1)",

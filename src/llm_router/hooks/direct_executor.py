@@ -45,6 +45,9 @@ class DirectResult:
     # Non-empty means the draft saw those parts of the repo, and the notice to
     # Claude must say so rather than call it context-free.
     files_read: tuple[str, ...] = ()
+    # T: characters of session context (session-store summary) the draft was
+    # given. A draft can answer from it without opening a file; it is not blind.
+    context_chars: int = 0
 
 
 # ── System Prompts ────────────────────────────────────────────────────────────
@@ -765,6 +768,7 @@ def execute_chain(
                 input_tokens=usage.get("input_tokens", 0),
                 output_tokens=usage.get("output_tokens", 0),
                 history_turns=len(history or []),
+                context_chars=len(context or ""),
             )
 
     return None  # All non-Claude models failed; the caller selects failover policy.
@@ -890,6 +894,7 @@ def execute_agent(
                 model=model,
                 latency_ms=latency_ms,
                 files_read=tuple(dict.fromkeys(_reads)),
+                context_chars=len(context or ""),
             )
 
     # Loud failure (Fix #4): the whole chain drifted/failed. Surface it on
