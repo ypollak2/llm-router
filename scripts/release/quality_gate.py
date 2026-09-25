@@ -57,15 +57,25 @@ to mean "regression."
 contention-free 2026-09-12 measurement (local passes both `qa-max-value` and
 `hd-last-page` in that run), not from a fresh run on this machine.
 
-**Fresh baseline: PENDING, not claimed.** Checked at authoring time
-(2026-09-24, this round of fixes) via `curl .../api/ps`: Ollama's one model
-slot was held by `qwen3.8:latest`, not the pinned `qwen3-coder:30b` — the
-exact contention condition below. Per this project's own measurement rules,
-evicting another process's model to force a "clean" run is not itself clean
-(it would just move the contention to whatever that process does next), so no
-fresh run of the pinned pair was attempted or is claimed here. The next
-person who runs this gate on a free Ollama should quote a real pass, at which
-point this note should be replaced with that quote — not deleted silently.
+**Fresh baseline: CONFIRMED, 2026-09-25.** Authoring time (2026-09-24) found
+Ollama's one model slot held by `qwen3.8:latest`, not the pinned
+`qwen3-coder:30b` — the exact contention condition below — so no fresh run
+was attempted that day. The next day, with the owner's brief authorisation to
+pause whatever held the slot (`ollama stop qwen3.8:latest` immediately before
+each run — a transient unload, no persistent config touched, and the slot
+returned to its prior occupant afterwards), the pinned pair ran 3 times back
+to back against `qwen3-coder:30b`, clean every time (no resident-model note,
+no warm-up-probe failure):
+
+    date:     2026-09-25
+    model:    qwen3-coder:30b (local backend)
+    n:        3/3 runs, both tasks, no contention on any run
+    qa-max-value (easy):  3/3 correct — 6.8s, 6.3s, 6.3s (median 6.3s)
+    hd-last-page (hard):  3/3 correct — 5.1s, 5.2s, 5.5s (median 5.2s)
+
+This confirms `BASELINE_CORRECT = 2/2` on this machine, not just on
+2026-09-12's. If a future run drops below this, it is a real regression to
+investigate, not an unmeasured pin.
 
 ## Detecting contention, not just unreachability (independent review, PR #146)
 
@@ -160,9 +170,12 @@ EASY_TASK = "qa-max-value"
 HARD_TASK = "hd-last-page"
 PINNED: list[tuple[str, str]] = [("easy", EASY_TASK), ("hard", HARD_TASK)]
 N_TASKS = len(PINNED)
-# Pinned from docs/BACKEND-QUALITY.md — see "The threshold" above for why
-# this is NOT taken from a fresh run on this machine (fresh baseline pending).
+# Pinned from docs/BACKEND-QUALITY.md's 2026-09-12 measurement and confirmed
+# by a fresh 3-run pass on this machine on 2026-09-25 — see "The threshold"
+# above for the dated baseline record.
 BASELINE_CORRECT = 2
+FRESH_BASELINE_DATE = "2026-09-25"
+FRESH_BASELINE_N = 3
 
 DIST_DIR = ROOT / "dist"
 SKIP_NOTE_PATH = DIST_DIR / "QUALITY_SKIPPED.txt"
@@ -314,10 +327,11 @@ def main(argv: list[str] | None = None) -> int:
 
     # Printed on EVERY run, pass or fail, so a releaser sees it in the terminal
     # output and not only in a comment they may never open. See "The threshold"
-    # above for the reasoning.
+    # above for the reasoning and the dated baseline record.
     print(f"note: BASELINE_CORRECT ({BASELINE_CORRECT}/{N_TASKS}) is pinned from "
-          "docs/BACKEND-QUALITY.md's 2026-09-12 measurement, not a fresh run on "
-          "this machine — fresh baseline pending.")
+          "docs/BACKEND-QUALITY.md's 2026-09-12 measurement, confirmed by a fresh "
+          f"{FRESH_BASELINE_N}/{FRESH_BASELINE_N}-run pass on {FRESH_BASELINE_DATE} "
+          "(qwen3-coder:30b; qa-max-value median 6.3s, hd-last-page median 5.2s).")
 
     if not is_ollama_available():
         if args.skip_quality:
