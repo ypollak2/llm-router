@@ -90,6 +90,14 @@ def index(
     conn = sstore.connect(scope, base)
     try:
         previous = sstore.known_files(conn)
+        # Z: a changed extractor re-extracts every file once — otherwise files
+        # whose bytes did not change would never gain the new entity kinds.
+        from llm_router.semantic.extractors import python as _py_extractor
+        _stored = conn.execute(
+            "SELECT value FROM meta WHERE key = 'extractor_version'").fetchone()
+        _known_before = dict(previous)
+        if not _stored or _stored[0] != _py_extractor.EXTRACTOR_VERSION:
+            previous = {}
         seen: set[str] = set()
         parsed = skipped = failed = entity_count = 0
 
@@ -133,10 +141,15 @@ def index(
         # gone: deleted, renamed, or newly ignored. All three mean the same
         # thing to a reader asking what the code looks like now.
         forgotten = 0
-        for rel in previous:
+        for rel in _known_before:
             if rel not in seen:
                 sstore.forget_file(conn, rel)
                 forgotten += 1
+        with conn:
+            conn.execute(
+                "INSERT INTO meta(key, value) VALUES('extractor_version', ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                (_py_extractor.EXTRACTOR_VERSION,))
 
         return IndexResult(
             root=str(scope), files_parsed=parsed, files_skipped=skipped,
