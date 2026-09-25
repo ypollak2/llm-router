@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import os
 
+from llm_router.hooks import hook_payload
 from llm_router.hooks.direct_executor import DirectResult
 
 # Render mode: "block" (free, warning-styled), "echo" (1 turn, normal text),
@@ -67,9 +68,15 @@ def format_direct_response(result: DirectResult, task_type: str, complexity: str
             "⚠ Unverified draft from a context-free model (no access to your "
             "files/history) — verify before trusting:\n\n"
         )
+    # result.text is a LOCAL MODEL's raw output — it can contain anything the
+    # model chose to write, including a tag-shaped sequence like
+    # `<system-reminder>...</system-reminder>`. `decision: block` delivers this
+    # `reason` straight into the model's context the same way tool_intercept's
+    # PreToolUse deny does, so it gets the same fix: neutralised before it is
+    # interpolated. See hook_payload.neutralize.
     return (
         f"{ctx_note}"
-        f"{result.text}\n\n"
+        f"{hook_payload.neutralize(result.text)}\n\n"
         f"{metadata}"
     )
 
@@ -141,8 +148,13 @@ def format_echo_context(result: DirectResult, task_type: str, complexity: str) -
         "the routed line (you did not route).\n"
         "  - If unsure whether the draft is trustworthy, discard it and answer from context. "
         "Correctness outranks the token saving.\n\n"
+        # result.text is untrusted for the same reason as in
+        # format_direct_response above: it is a local model's raw output and
+        # can contain a tag-shaped sequence. Neutralised, not re-wrapped —
+        # the "UNVERIFIED DRAFT" delimiters immediately below already are the
+        # untrusted-data label this text needs.
         "───── UNVERIFIED DRAFT (no context — verify or discard) ─────\n"
-        f"{result.text}\n"
+        f"{hook_payload.neutralize(result.text)}\n"
         "───── END UNVERIFIED DRAFT ─────\n"
         f"Source: {metadata}"
     )
@@ -181,8 +193,10 @@ def _format_grounded_echo(result, task_type, complexity, model_label, tier, late
         "Do NOT relay it, and do NOT prefix the routed line (you did not route).\n"
         "  - If the key claim does not check out, discard it. Correctness outranks the token "
         "saving.\n\n"
+        # Same fix, same reason: this is untrusted local-model output, and the
+        # "DRAFT" delimiters already label it as data, not instructions.
         "───── DRAFT (read-only repo access — check the key claim) ─────\n"
-        f"{result.text}\n"
+        f"{hook_payload.neutralize(result.text)}\n"
         "───── END DRAFT ─────\n"
         f"Source: {metadata}"
     )
