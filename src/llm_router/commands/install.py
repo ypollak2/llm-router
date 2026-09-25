@@ -90,6 +90,19 @@ def _maybe_enable_claude_subscription(found) -> None:
         # parsing — no new third-party dependency for one key lookup.
         for line in env_path.read_text().splitlines():
             line = line.strip()
+            # A shell-style `export VAR=value` line still counts as the user
+            # having set VAR. Without stripping this, `export
+            # LLM_ROUTER_CLAUDE_SUBSCRIPTION=false` parsed to a key of
+            # "export LLM_ROUTER_CLAUDE_SUBSCRIPTION" — not the real
+            # variable name — so this check never saw it as set, the
+            # installer appended a contradictory `LLM_ROUTER_CLAUDE_SUBSCRIPTION=true`
+            # line right below it, and the hook's own dotenv loader
+            # (`hooks/auto-route.py::_load_dotenv`, same "export" blind spot)
+            # then read that second, unprefixed line as the real value —
+            # silently overriding the user's explicit false. Reproduced live
+            # by review on PR #151.
+            if line.startswith("export ") or line.startswith("export\t"):
+                line = line[len("export"):].lstrip()
             if line and not line.startswith("#") and "=" in line:
                 existing.add(line.partition("=")[0].strip())
 

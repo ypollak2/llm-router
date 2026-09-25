@@ -21,10 +21,16 @@ real ``~/.llm-router`` or ``~/.claude``.
 
 from __future__ import annotations
 
+import importlib.util
+import os
+import sys
 from pathlib import Path
 
 from llm_router.commands import install
 from llm_router.seats import Seat, Seats
+
+_ROOT = Path(__file__).resolve().parent.parent
+_HOOK_PATH = _ROOT / "src" / "llm_router" / "hooks" / "auto-route.py"
 
 
 def _use_temp_home(monkeypatch, tmp_path: Path) -> Path:
@@ -81,6 +87,27 @@ def test_seat_detected_but_persisted_env_explicitly_false_is_untouched(monkeypat
     assert env_file.read_text() == "LLM_ROUTER_CLAUDE_SUBSCRIPTION=false\n", (
         "an explicit value already persisted to ~/.llm-router/.env must never be "
         "overridden, even when the seat probe finds a seat"
+    )
+
+
+def test_seat_detected_but_persisted_export_false_is_untouched(monkeypatch, tmp_path):
+    """PR #151 review: a shell-style `export VAR=value` line was invisible to
+    the "already set" check, because partitioning on "=" read its key as
+    "export LLM_ROUTER_CLAUDE_SUBSCRIPTION" rather than the real variable
+    name. The installer then appended a contradictory `=true` line below the
+    user's `export …=false`, and the hook's own dotenv loader — which has the
+    same "export" blind spot, so it never resolves the first line at all —
+    picked up the unprefixed second line as the live value, silently flipping
+    an explicit false to true. Reproduced live in review."""
+    env_file = _use_temp_home(monkeypatch, tmp_path)
+    env_file.parent.mkdir(parents=True, exist_ok=True)
+    env_file.write_text("export LLM_ROUTER_CLAUDE_SUBSCRIPTION=false\n")
+
+    install._maybe_enable_claude_subscription(_seat_present())
+
+    assert env_file.read_text() == "export LLM_ROUTER_CLAUDE_SUBSCRIPTION=false\n", (
+        "an explicit `export VAR=false` line must count as already set and "
+        "must never get a contradictory line appended below it"
     )
 
 
@@ -145,3 +172,65 @@ def test_var_already_set_prints_nothing_new(monkeypatch, tmp_path, capsys):
 
     out = capsys.readouterr().out
     assert out == ""
+
+
+# ── runtime read path: what the installer writes, the hook and the router
+#    config both actually pick up ─────────────────────────────────────────────
+
+def test_installed_subscription_mode_is_seen_by_the_hook_and_excludes_anthropic(
+    monkeypatch, tmp_path
+):
+    """End to end: `_maybe_enable_claude_subscription` writes the .env, the
+    UserPromptSubmit hook's own dotenv loader (`hooks/auto-route.py::_load_dotenv`,
+    which every hook process runs at import time) is what actually populates
+    `os.environ` for that process — not the installer's own in-memory state —
+    and `discover.get_available_providers()` must then exclude "anthropic"
+    even though an ANTHROPIC_API_KEY is configured. Never touches the
+    operator's real ~/.llm-router; HOME and LLM_ROUTER_HOME both point at
+    tmp_path for the whole test.
+    """
+    _use_temp_home(monkeypatch, tmp_path)
+    # get_config()'s dotenv source also resolves through LLM_ROUTER_HOME (see
+    # paths.state_path); point it at the same throwaway directory as HOME so
+    # both the hook's loader and RouterConfig read the one .env this test
+    # writes, not the suite-wide autouse sandbox.
+    monkeypatch.setenv("LLM_ROUTER_HOME", str(tmp_path / ".llm-router"))
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+
+    install._maybe_enable_claude_subscription(_seat_present())
+
+    # The var must not already be in this process's environment — otherwise
+    # the hook's loader (which never overrides an existing key) would prove
+    # nothing about reading the file it just wrote.
+    assert "LLM_ROUTER_CLAUDE_SUBSCRIPTION" not in os.environ
+
+    spec = importlib.util.spec_from_file_location(
+        "_subscription_regression_hook", _HOOK_PATH
+    )
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = mod
+    try:
+        try:
+            spec.loader.exec_module(mod)  # runs _load_dotenv() at import time
+        except SystemExit:
+            pass
+
+        assert os.environ.get("LLM_ROUTER_CLAUDE_SUBSCRIPTION") == "true", (
+            "the hook's own dotenv loader did not pick up what the installer wrote"
+        )
+
+        import llm_router.config as _cfg
+        _cfg._config = None  # force a fresh RouterConfig read of the current env
+        from llm_router.discover import get_available_providers
+
+        providers = get_available_providers()
+        assert "anthropic" not in providers, (
+            f"ANTHROPIC_API_KEY is configured but subscription mode should "
+            f"exclude it from routing: {providers}"
+        )
+    finally:
+        sys.modules.pop(spec.name, None)
+        # `_load_dotenv()` writes straight to `os.environ`, bypassing
+        # monkeypatch's own tracking — undo it by hand so this doesn't leak
+        # into later tests.
+        os.environ.pop("LLM_ROUTER_CLAUDE_SUBSCRIPTION", None)
