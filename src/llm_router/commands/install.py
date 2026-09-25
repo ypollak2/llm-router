@@ -51,6 +51,72 @@ def _fail(label: str, fix: str | None = None) -> str:
     return line
 
 
+# ── Subscription mode auto-enable ───────────────────────────────────────────────
+#
+# North Star #2 (flat-rate subscribers first, zero workflow change): a machine
+# that is already logged in to Claude Code should not need to hand-set
+# LLM_ROUTER_CLAUDE_SUBSCRIPTION=true (read by discover.get_available_providers())
+# before subscription mode takes effect. The installer sets it the first time it
+# sees a logged-in Claude seat, but only ever fills an UNSET value — an explicit
+# value, true or false, set either in the process environment or already
+# persisted to the state .env, is never touched. Detection that fails or comes
+# back unknown is not treated as a subscription: unknown must not be the
+# favourable answer.
+_SUBSCRIPTION_ENV_VAR = "LLM_ROUTER_CLAUDE_SUBSCRIPTION"
+
+
+def _maybe_enable_claude_subscription(found) -> None:
+    """``found`` is the detected ``Seats`` (see ``llm_router.seats``), or ``None``
+    when detection itself failed. Writes ``LLM_ROUTER_CLAUDE_SUBSCRIPTION=true``
+    to the state ``.env`` (the same file ``llm-router setup``/``onboard`` manage)
+    exactly once, only when a Claude seat is present and the variable has never
+    been set anywhere. Safe to call on every install — re-running is a no-op
+    once the variable exists, which is what makes the upgrade path idempotent.
+    """
+    if found is None:
+        print(_yellow(
+            f"  Claude subscription status unknown (detection failed) — "
+            f"{_SUBSCRIPTION_ENV_VAR} left unset"
+        ))
+        return
+
+    if not found.claude.present:
+        return  # no seat: nothing to enable
+
+    env_path = paths.state_path(".env")
+    existing: set[str] = set()
+    if env_path.exists():
+        # Hand-rolled on purpose, matching `commands/setup.py`'s existing .env
+        # parsing — no new third-party dependency for one key lookup.
+        for line in env_path.read_text().splitlines():
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                existing.add(line.partition("=")[0].strip())
+
+    # Never override a value the user set explicitly, in the process
+    # environment or already persisted to the state .env — an explicit
+    # LLM_ROUTER_CLAUDE_SUBSCRIPTION=false must stay false.
+    if _SUBSCRIPTION_ENV_VAR in os.environ or _SUBSCRIPTION_ENV_VAR in existing:
+        return
+
+    try:
+        env_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(env_path, "a") as f:
+            f.write(f"\n{_SUBSCRIPTION_ENV_VAR}=true\n")
+    except OSError as exc:
+        from llm_router import failopen
+        failopen.record("CHZ-FO-INSTALL-SUB-ENV-WRITE", exc)
+        print(_yellow(
+            f"  could not write {_SUBSCRIPTION_ENV_VAR}=true to {env_path} — "
+            "subscription mode not enabled automatically"
+        ))
+        return
+    print(_green(
+        f"  ✓ Claude subscription seat detected — {_SUBSCRIPTION_ENV_VAR}=true "
+        f"(set {_SUBSCRIPTION_ENV_VAR}=false to turn off)"
+    ))
+
+
 # ── Command entry point ────────────────────────────────────────────────────────
 
 _INSTALL_HELP = """\
@@ -243,8 +309,12 @@ def _run_install(flags: list[str]) -> None:
             print(f"  free bucket: {', '.join(_bucket)}")
         else:
             print(_yellow("  no seat found — routed calls will bill an API key; log in to Claude Code, Codex, or start Ollama"))
+        _maybe_enable_claude_subscription(_found)
     except Exception:  # noqa: BLE001 -- install must not fail on a probe
-        pass
+        try:
+            _maybe_enable_claude_subscription(None)
+        except Exception:  # noqa: BLE001 -- see above
+            pass
 
     print(f"\n{_green('✓')} {_bold('LLM Router installed globally.')}")
     print(f"  Every {' and '.join(installed_hosts)} session will now auto-route tasks.")
