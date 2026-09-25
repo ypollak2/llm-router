@@ -211,6 +211,9 @@ def test_a_tool_shaped_question_drafts_read_only(ar, monkeypatch, tmp_path):
 
 
 def test_a_tool_shaped_code_task_keeps_the_write_loop(ar, monkeypatch, tmp_path):
+    # U (2026-09-25): code tasks are not drafted by default; the write loop is
+    # still what runs when drafting is widened to everything.
+    monkeypatch.setenv("LLM_ROUTER_DRAFT_TASKS", "all")
     calls = _wire_tools(monkeypatch, needs_tools=True)
     monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps({
         "prompt": "Refactor the parse_config function in config.py to use a dataclass",
