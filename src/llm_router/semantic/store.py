@@ -264,6 +264,30 @@ def find_importers(
             conn.close()
 
 
+def find_call_sites(
+    name: str,
+    root: Path | str | None = None,
+    base: Path | None = None,
+    conn: sqlite3.Connection | None = None,
+) -> list[Relation]:
+    """Y: lines that call *name* (relation.type='call_candidate')."""
+    owned = conn is None
+    conn = conn or connect(root, base)
+    try:
+        rows = conn.execute(
+            "SELECT * FROM relation WHERE type = 'call_candidate' AND target_name = ? "
+            "ORDER BY relative_path, line", (name,),
+        ).fetchall()
+        return [Relation(
+            relative_path=r["relative_path"], type=r["type"],
+            source_name=r["source_name"], target_name=r["target_name"],
+            resolution_status=r["resolution_status"], line=r["line"],
+        ) for r in rows]
+    finally:
+        if owned:
+            conn.close()
+
+
 def file_status(
     relative_path: str,
     root: Path | str | None = None,

@@ -155,6 +155,11 @@ def build(
             if body and pack.retrieved_tokens + _tokens(rendered) + _tokens(body) <= budget_tokens:
                 item["body"] = body
                 rendered = _render_evidence(item)
+            # Y: where it is called, with the lines above each call (the condition).
+            calls = _call_sites(scope, base, entity.name)
+            if calls and pack.retrieved_tokens + _tokens(rendered) + _tokens(calls) <= budget_tokens:
+                item["callers"] = calls
+                rendered = _render_evidence(item)
         pack.evidence.append(item)
         pack.retrieved_tokens += _tokens(rendered)
 
@@ -255,12 +260,49 @@ def _read_body(scope, entity) -> str:
     return text + (f"\n… ({len(span) - _BODY_MAX_LINES} more lines)" if cut else "")
 
 
+_CALLERS_MAX = 3
+_CALLER_CONTEXT_LINES = 3
+
+
+def _call_sites(scope, base, name: str) -> str:
+    """Up to 3 non-test call sites of *name*, each with the lines above it.
+
+    A row whose line no longer mentions the name (the index lags the file) is
+    skipped rather than shown pointing at the wrong code.
+    """
+    try:
+        rows = sstore.find_call_sites(name, root=scope, base=base)
+    except Exception:  # noqa: BLE001 — callers are an improvement, not a need
+        return ""
+    out: list[str] = []
+    seen: set[tuple[str, int]] = set()
+    for rel in rows:
+        path = rel.relative_path
+        if path.startswith(("tests/", "test/")) or "/tests/" in path or (path, rel.line) in seen:
+            continue
+        try:
+            lines = (Path(scope) / path).read_text(encoding="utf-8", errors="replace").splitlines()
+        except OSError:
+            continue
+        if not (0 < rel.line <= len(lines)) or name not in lines[rel.line - 1]:
+            continue
+        seen.add((path, rel.line))
+        start = max(0, rel.line - 1 - _CALLER_CONTEXT_LINES)
+        snippet = "\n".join(f"      {ln}" for ln in lines[start:rel.line])
+        out.append(f"    called at {path}:{rel.line}\n{snippet}")
+        if len(out) >= _CALLERS_MAX:
+            break
+    return "\n".join(out)
+
+
 def _render_evidence(item: dict[str, Any]) -> str:
     span = item["span"]
     head = f"{item['path']}:{span['start_line']}-{span['end_line']} ({item['kind']})"
-    if item.get("body"):
-        return head + "\n" + "\n".join("    " + ln for ln in item["body"].splitlines())
-    return f"{head}\n  {item['signature'] or item['symbol']}"
+    text = (head + "\n" + "\n".join("    " + ln for ln in item["body"].splitlines())
+            if item.get("body") else f"{head}\n  {item['signature'] or item['symbol']}")
+    if item.get("callers"):
+        text += "\n" + item["callers"]
+    return text
 
 
 def _render_lesson(item: applicability.ApplicableLesson) -> str:
