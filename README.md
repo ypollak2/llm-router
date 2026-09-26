@@ -119,7 +119,9 @@ install into another host, see [Works With](#works-with).
 | **Pi (pi.dev)** | `llm-router install --host pi` |
 | **Factory Droid** | `llm-router install --host factory` |
 | **Claude Desktop** | `llm-router install --host desktop` |
-| **VS Code / Copilot** | `llm-router install --host copilot` |
+| **VS Code** (native MCP) | `llm-router install --host vscode` |
+| **Cursor** | `llm-router install --host cursor` |
+| **GitHub Copilot in VS Code** (capability extension, no cost-routing) | `llm-router install --host copilot` |
 | **Windsurf / Cascade** | `llm-router install --host windsurf` |
 | **Kimi Code (Moonshot AI)** | `llm-router install --host kimi` |
 
@@ -169,7 +171,7 @@ shows everything registered.
 | Topic | What | Guide |
 |-------|------|-------|
 | CLI | `install`, `status`, `gain`, `doctor`, `okf index/status`, `sessions status` and more | [guide/GETTING_STARTED.md](guide/GETTING_STARTED.md) |
-| Providers | 20+ providers, free-first — Ollama (local), OpenRouter, Gemini, Groq, your Claude subscription | [guide/PROVIDERS.md](guide/PROVIDERS.md) |
+| Providers | Free-first — Ollama (local), OpenRouter, Gemini, Groq, your Claude subscription | [guide/PROVIDERS.md](guide/PROVIDERS.md) |
 | Routing Policies | `conservative` → `balanced` (default) → `cost_aggressive`; thresholds and YAML schema | [guide/POLICIES.md](guide/POLICIES.md) |
 | MCP Tools | Every tool with its signature | [guide/TOOLS.md](guide/TOOLS.md) |
 
