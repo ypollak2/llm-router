@@ -1,5 +1,3 @@
-
-
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="assets/readme/hero-dark.svg">
@@ -11,113 +9,62 @@
 <h1 align="center">llm-router</h1>
 
 <p align="center">
-  <strong>Spend less of your Claude Pro or Max plan on routine prompts.</strong><br/>
-  llm-router drafts an answer on a free local model first, so the cheap questions can be
-  answered cheaply. No API keys. No change to how you work.
+  <strong>Stop spending your Claude Pro/Max quota on questions a free model can answer.</strong>
 </p>
 
 <p align="center">
-  <sub><b>How the default mode actually works:</b> the draft is injected into Claude's context
-  as an unverified hint, and Claude decides whether to use it. A draft being produced does
-  <i>not</i> by itself mean a Claude turn was skipped or quota was saved — Claude still takes the
-  turn. Only the explicit turn-replacement modes (<code>LLM_ROUTER_ZERO_CLAUDE=1</code>) substitute
-  the routed answer outright. Draft-rate and acceptance figures for this mode are reported in
-  <a href="docs/MEASUREMENT.md">docs/MEASUREMENT.md</a> with their n, window and conditions.</sub>
+  llm-router hooks into your coding tool's own lifecycle, reads each prompt before the
+  model does, and drafts an answer on a free or local model first. Zero API keys needed
+  on a Claude subscription — routing runs through MCP tools and local models.
+</p>
+
+<p align="center">
+  <sub><b>One caveat:</b> routed answers are advisory by default — Claude still takes the
+  turn unless <code>LLM_ROUTER_ZERO_CLAUDE=1</code>. By default some tool calls wait until a
+  prompt is routed; <code>LLM_ROUTER_ENFORCE=off</code> turns that off. Draft-rate and
+  acceptance figures live in <a href="docs/MEASUREMENT.md">docs/MEASUREMENT.md</a>, with
+  their n, window and conditions.</sub>
 </p>
 
 <p align="center">
   <a href="https://pypi.org/project/llm-routing/"><img src="https://img.shields.io/pypi/v/llm-routing?style=flat-square&color=4F46E5" alt="PyPI"></a>
   <a href="https://pepy.tech/projects/llm-routing"><img src="https://static.pepy.tech/personalized-badge/llm-routing?period=total&units=INTERNATIONAL_SYSTEM&left_color=BLACK&right_color=GREEN&left_text=downloads" alt="PyPI Downloads"></a>
-  <a href="https://pepy.tech/projects/claude-code-llm-router"><img src="https://static.pepy.tech/personalized-badge/claude-code-llm-router?period=total&units=INTERNATIONAL_SYSTEM&left_color=GREY&right_color=BLACK&left_text=downloads" alt="PyPI Downloads"></a>
   <a href="https://github.com/ypollak2/llm-router/actions"><img src="https://img.shields.io/github/actions/workflow/status/ypollak2/llm-router/ci.yml?style=flat-square&label=tests" alt="Tests"></a>
   <a href="https://github.com/ypollak2/llm-router/stargazers"><img src="https://img.shields.io/github/stars/ypollak2/llm-router?style=flat-square&color=F59E0B&v=2" alt="Stars"></a>
-  <a href="https://pypi.org/project/llm-routing/"><img src="https://img.shields.io/badge/python-3.11+-3572A5?style=flat-square" alt="Python"></a>
-  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-10B981?style=flat-square" alt="License"></a>
-  <a href="https://github.com/ypollak2/llm-router/discussions"><img src="https://img.shields.io/github/discussions/ypollak2/llm-router?style=flat-square&color=8B5CF6&label=discussions" alt="Discussions"></a>
   <a href="https://github.com/RouteWorks/RouterArena"><img src="https://img.shields.io/badge/RouterArena-listed-F59E0B?style=flat-square&logo=data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCI+PHBhdGggZmlsbD0id2hpdGUiIGQ9Ik0xMiAyTDMgN2w5IDUgOS01LTktNXpNMyAxN2w5IDUgOS01TTMgMTJsOSA1IDktNSIvPjwvc3ZnPg==" alt="Listed on RouterArena"></a>
-  <a href="https://mcptoplist.com/server/glama%2Fypollak2%2Fllm-router"><img src="https://mcptoplist.com/badge/glama%2Fypollak2%2Fllm-router.svg" alt="MCP Toplist: Top 1% of 98,291" /></a>
-</p>
-
-<p align="center">
-  <strong>Install in 30 seconds</strong>
-</p>
-
-<p align="center">
-
-```bash
-pip install llm-routing        # installs the `llm-router` command
-```
-
-</p>
-
-<p align="center">
-  <sub>Works with Claude Code, Codex, and Gemini CLI · No API keys required on Claude Pro/Max</sub>
-</p>
-
-<p align="center">
-  <strong>Local-first.</strong> No hosted proxy. No account required.
-</p>
-
-<p align="center">
-  <a href="https://github.com/ypollak2/llm-router/stargazers">
-    <picture>
-      <source media="(prefers-color-scheme: dark)" srcset="assets/readme/star-cta-dark.svg">
-      <source media="(prefers-color-scheme: light)" srcset="assets/readme/star-cta-light.svg">
-      <img src="assets/readme/star-cta-light.svg" alt="Star llm-router on GitHub" width="420"/>
-    </picture>
-  </a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-10B981?style=flat-square" alt="License"></a>
 </p>
 
 <details>
 <summary><b>📑 Table of Contents</b></summary>
 
-- [Why people install this](#why-people-install-this)
-- [On the RouterArena leaderboard](#on-the-routerarena-leaderboard)
+- [Why install this](#why-install-this)
 - [Quick Start](#quick-start)
-- [Example Routing](#example-routing)
 - [Works With](#works-with)
 - [How It Works](#how-it-works)
 - [Features](#features)
-- [CLI](#cli)
-- [Providers](#providers)
-- [Routing Policies](#routing-policies)
-- [MCP Tools](#mcp-tools)
-- [Savings: How It Works](#savings-how-it-works)
-- [Trust, Privacy, and Local-First Design](#trust-privacy-and-local-first-design)
-- [Configuration](#configuration)
+- [Reference](#reference)
+- [Savings](#savings)
+- [Trust and Security](#trust-and-security)
 - [Documentation](#documentation)
-- [Enterprise](#enterprise)
-- [Contributing](#contributing)
+- [Enterprise, Contributing, License](#enterprise-contributing-license)
 
 </details>
 
 ---
 
-## Why people install this
+## Why install this
 
-You are on a Claude Pro or Max plan. You have not spent a cent beyond the
-subscription. And at 3pm you hit the five-hour limit and stop working.
-
-The cause is not that you asked too much. It is that *every* prompt went to the
-premium model — "what does this error mean", "reformat this JSON", "is the
-service up" — and each one drew down the same quota as the architectural
-question you actually needed it for.
-
-`llm-router` runs inside your coding tool's own lifecycle. It reads each prompt
-before the model does, sends the routine ones to a local or cheap model, and
-leaves your seat for the work that needs it. Same workflow, same commands, same
-transcript — the model choice changes underneath.
+You are on a Claude Pro or Max plan, have not spent a cent beyond it, and still
+hit the five-hour limit — not because you asked too much, but because *every*
+prompt went to the premium model: "what does this error mean", "reformat this
+JSON", "is the service up" drew the same quota as the question that needed it.
 
 ### Why a proxy cannot do this
 
-Most routers in this category are a **proxy**: you point your agent at a
-local endpoint and it forwards requests using *your API keys*. That design has a
-hard limit — **a proxy cannot intercept a session authenticated by a
-subscription, because there is no key to forward.**
-
-If you pay per token, a proxy serves you well and there are good ones. If you pay
-a flat monthly fee and the thing you run out of is *quota*, a proxy has nothing
-to offer, and that is the gap this fills.
+Most routers here are a **proxy**: your agent forwards requests using *your
+API keys*. That has a hard limit — a proxy cannot intercept a session
+authenticated by a subscription, because there is no key to forward.
 
 |  | Pays per token | Pays a subscription |
 |---|---|---|
@@ -126,15 +73,12 @@ to offer, and that is the gap this fills.
 | A proxy can help | yes | **no — nothing to intercept** |
 | llm-router helps | yes | **yes** |
 
-### Two things worth checking before you install
+### Honesty as a feature
 
-- **It works with zero API keys.** On a Claude subscription, routing goes through
-  MCP tools and local models. Adding keys widens the pool; nothing requires them.
-- **The routing quality is measured by someone else.** llm-router is scored on
-  [RouterArena](https://github.com/RouteWorks/RouterArena), a third-party
-  accuracy-versus-cost leaderboard. What was measured, what it cost, and what
-  did *not* work is written up in **[docs/ROUTERARENA.md](docs/ROUTERARENA.md)** —
-  including the negative results.
+`llm-router status` reports **verified** and **unverified** savings
+separately, each with its own n — not a blended percentage. This project does
+not publish a general savings percentage; any number depends on your own
+workload. See [Savings](#savings) below.
 
 <p align="center">
   <picture>
@@ -146,406 +90,121 @@ to offer, and that is the gap this fills.
 
 ---
 
-## On the RouterArena leaderboard
-
-`llm-router` is benchmarked on [RouterArena](https://github.com/RouteWorks/RouterArena),
-a community leaderboard scoring routers on accuracy versus cost, plus optimality,
-robustness and latency.
-
-The claim worth reading is not the badge. **[docs/ROUTERARENA.md](docs/ROUTERARENA.md)**
-states what was measured, on which split, what it cost to reproduce, and what
-failed — including that skill-cluster classification never beat simply always
-picking one model, and that tuning on a proxy split misled by 4.25 points. Rank
-moves as new routers land; see the
-[live leaderboard](https://github.com/RouteWorks/RouterArena#leaderboard) for the
-current standing.
-
----
-
 ## Quick Start
 
-### 1. Install
-
 ```bash
-pip install llm-routing
-llm-router install
+pip install llm-routing        # installs the `llm-router` command
+llm-router install             # wire up Claude Code (default host)
+llm-router doctor               # check provider connectivity and setup
 ```
 
-
-### 2. Add providers (optional)
-
-```bash
-export OPENAI_API_KEY="sk-..."          # GPT-4o, o3
-export GEMINI_API_KEY="AIza..."         # Gemini Flash/Pro (free tier available)
-export OLLAMA_BASE_URL="http://localhost:11434"  # Local models (free)
-export OPENROUTER_API_KEY="sk-or-v1-…"  # 343 OpenRouter models (qwen, deepseek, grok, …)
-```
-
-Works with **zero API keys** on Claude Code Pro/Max subscriptions — routing uses MCP tools that call external models only when beneficial. Add `OPENROUTER_API_KEY` to unlock the open-weight workhorse pool used by the `cost_aggressive` policy.
-
-### 3. Verify
-
-```bash
-llm-router doctor            # Check provider connectivity and diagnose setup
-```
-
-If you already use Claude Code, Codex, or Gemini CLI, keep your existing workflow and let `llm-router` choose models underneath it.
-
----
-
-## Example Routing
-
-| Prompt | Routed to |
-|--------|-----------|
-| "What does this Python error mean?" | Ollama / Gemini Flash / Codex |
-| "Refactor this endpoint" | GPT-4o / Gemini Pro |
-| "Design a distributed tracing strategy" | o3 / Claude Opus |
-
-The exact chain depends on your configured providers, budget profile, and routing policy.
+Works with **zero API keys** on a Claude Pro/Max subscription — routing goes
+through MCP tools and local models. Adding provider keys widens the pool;
+nothing requires them. See **[guide/PROVIDERS.md](guide/PROVIDERS.md)**. To
+install into another host, see [Works With](#works-with).
 
 ---
 
 ## Works With
 
-| Tool | Mode | Savings (this host) |
-|------|------|-----------------|
-| **Claude Code** | Full auto-routing via hooks | — |
-| **Codex CLI** | Prompt-routing hook + MCP tools · no tool-call enforcement | — |
-| **Gemini CLI** | Prompt-routing hook + MCP tools · no tool-call enforcement | — |
-| **VS Code / Cursor** | Manual MCP tools · hooks 🔜 | — |
-| **Any MCP client** | Manual MCP tools | — |
+| Host | Install |
+|------|---------|
+| **Claude Code** (default) | `llm-router install` |
+| **Codex CLI** | `llm-router install --host codex` |
+| **OpenCode** | `llm-router install --host opencode` |
+| **Gemini CLI** | `llm-router install --host gemini-cli` |
+| **GitHub Copilot CLI** | `llm-router install --host copilot-cli` |
+| **OpenClaw** | `llm-router install --host openclaw` |
+| **Trae IDE** | `llm-router install --host trae` |
+| **Pi (pi.dev)** | `llm-router install --host pi` |
+| **Factory Droid** | `llm-router install --host factory` |
+| **Claude Desktop** | `llm-router install --host desktop` |
+| **VS Code / Copilot** | `llm-router install --host copilot` |
+| **Windsurf / Cascade** | `llm-router install --host windsurf` |
+| **Kimi Code (Moonshot AI)** | `llm-router install --host kimi` |
 
-Savings (this host) is not measured — see
-[audit/CRITICAL_2026-09-24_local_models_do_no_work.md](audit/CRITICAL_2026-09-24_local_models_do_no_work.md).
-
-<p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="assets/readme/editors-dark.svg">
-    <source media="(prefers-color-scheme: light)" srcset="assets/readme/editors-light.svg">
-    <img src="assets/readme/editors-light.svg" alt="Animated host support cards for Claude Code, Codex CLI, Gemini CLI, Pi, VS Code, Cursor, and any MCP client." width="100%"/>
-  </picture>
-</p>
-
-- **Full auto-routing** means hooks intercept prompts and route automatically with no workflow change.
-- **Manual MCP tools** means routing is available on demand through tools such as `llm_query`.
-- **🔜** means *the host supports prompt interception and we have not shipped it yet* — not that
-  it cannot be done. Codex CLI ships `UserPromptSubmit` (enabled by default, and its `PreToolUse`
-  can even rewrite arguments); Cursor ships `beforeSubmitPrompt`. Both can block a prompt before
-  the model sees it, which is the same mechanism Claude Code uses today.
-- **Claude Code's local drafting is advisory**, and it is currently switched off on the maintainer's
-  machine (the direct-execution setting below) because drafted answers were never used — see
-  [audit/CRITICAL_2026-09-24_local_models_do_no_work.md](audit/CRITICAL_2026-09-24_local_models_do_no_work.md).
-
-The full picture, including what each host genuinely cannot do and which payload fields have been
-verified against a real run rather than read off a docs page, is in
+`llm-router install --host all` installs or prints every host config in one
+pass. Full per-host detail, including what each host genuinely cannot do:
 **[guide/HOST_SUPPORT_MATRIX.md](guide/HOST_SUPPORT_MATRIX.md)**.
-
-```bash
-llm-router install                    # Claude Code (default)
-llm-router install --host codex       # Codex CLI
-llm-router install --host gemini-cli  # Gemini CLI
-llm-router install --host vscode      # VS Code
-llm-router install --host cursor      # Cursor
-```
-
-See [guide/HOST_SUPPORT_MATRIX.md](guide/HOST_SUPPORT_MATRIX.md) for full details on each host.
-
-### Protect your Claude Code 5-hour quota
-
-`enforce: smart` + `mode: zero_claude` makes prompts either complete externally or stop
-before native Claude runs — see
-**[guide/GETTING_STARTED.md](guide/GETTING_STARTED.md)**.
 
 ---
 
 ## How It Works
 
-```
-User prompt
-    │
-    ▼
-┌──────────────────────┐
-│ Complexity Classifier │  ← Heuristic (free, instant) or Ollama/Flash ($0.0001)
-└──────────┬───────────┘
-           │
-           ▼
-┌──────────────────────┐
-│  Free-First Router   │  ← Tries cheapest model first, walks up the chain
-│                      │
-│  Ollama (free)       │
-│  → Codex (prepaid)   │
-│  → Gemini Flash      │
-│  → GPT-4o / Claude   │
-└──────────┬───────────┘
-           │
-           ▼
-┌──────────────────────┐
-│  Guards (parallel)   │  ← Circuit breaker, budget pressure, quality check
-└──────────┬───────────┘
-           │
-           ▼
-      Response + cost logged to local SQLite
-```
+Hooks intercept the prompt before your coding tool's own model sees it. A free
+regex heuristic classifies it instantly, scoring about half of real prompts
+with confidence — **788 of 1,571 measured** (`scripts/measure_low_signal_rate.py`,
+run 2026-09-23); the rest fall back to a default. A routable prompt gets a
+draft from a free/local model first, then walks up the chain toward paid
+models only if needed.
 
-Classification is free for many tasks (regex heuristics score about half of real prompts: 788 of 1,571 measured, the rest fall back to a default; see `scripts/measure_low_signal_rate.py`) or near-free for ambiguous prompts when using local Ollama or Gemini Flash.
+The draft is **advisory** — handed to Claude as an unverified hint, not a turn
+replacement, unless `LLM_ROUTER_ZERO_CLAUDE=1` is set. Enforcement acts at the
+tool-call level: `smart` (default) holds selected tool calls until the prompt
+is routed; `off` disables that. Full modes and per-host overrides:
+**[guide/GETTING_STARTED.md](guide/GETTING_STARTED.md)**.
 
 ---
 
 ## Features
 
-Beyond "send cheap prompts to cheap models":
-
-- **Secrets never leave your machine.** A prompt containing an API key, token or private
-  key routes to local models only — fail-closed, so it cannot reach an external provider.
-- **Cost-inverted subscription routing.** Free/local first for simple and moderate
-  prompts, your one paid seat first for complex ones, and the seat demoted when its quota
-  is strained. Opt in with `LLM_ROUTER_SUBSCRIPTION_PROVIDER`.
-- **Automatic fallback with circuit breakers.** A provider that fails or rate-limits is
-  skipped, not retried into the ground.
-- **You can see it working.** A status line, terminal title and OS notification show the
-  last model routed, savings and health — for hosts with no native statusline.
-- **Session-end summary.** Savings vs baseline, tier mix, per-provider cost, latency
-  p50/p95/p99 and top routes.
+- **Secrets never leave your machine.** A prompt containing an API key, token
+  or private key routes to local models only — fail-closed.
+- **Automatic fallback with circuit breakers.** A provider that fails or
+  rate-limits is skipped, not retried into the ground.
+- **You can see it working.** A status line, terminal title and OS
+  notification show the last model routed, savings and health.
+- **Session-end summary.** Savings vs baseline, tier mix, per-provider cost,
+  latency p50/p95/p99 and top routes.
 - **Media and pipelines too.** `llm_image` / `llm_video` / `llm_audio`, and
   `llm_orchestrate` for multi-step research.
 
 ---
 
-## CLI
+## Reference
 
-```bash
-llm-router install      # wire up your host (Claude Code by default)
-llm-router status       # savings + quota at a glance
-llm-router gain         # token-savings analytics by period
-llm-router doctor       # provider connectivity and setup diagnosis
+The default MCP surface shows **12 front-door tools**; `LLM_ROUTER_SLIM=off`
+shows everything registered.
 
-llm-router okf index    # index this repo so routed models can see your code
-llm-router okf status   # what is in the knowledge store, per project
-llm-router sessions status   # is any session's context unreadable?
-```
-
-`okf index` is worth running once per repo you work in. Without it the knowledge
-store can only learn from answers that were already routed, which is a deadlock —
-nothing routes because the model has no context, and the store stays empty because
-nothing routed.
-
-Full command reference: **[guide/GETTING_STARTED.md](guide/GETTING_STARTED.md)**
+| Topic | What | Guide |
+|-------|------|-------|
+| CLI | `install`, `status`, `gain`, `doctor`, `okf index/status`, `sessions status` and more | [guide/GETTING_STARTED.md](guide/GETTING_STARTED.md) |
+| Providers | 20+ providers, free-first — Ollama (local), OpenRouter, Gemini, Groq, your Claude subscription | [guide/PROVIDERS.md](guide/PROVIDERS.md) |
+| Routing Policies | `conservative` → `balanced` (default) → `cost_aggressive`; thresholds and YAML schema | [guide/POLICIES.md](guide/POLICIES.md) |
+| MCP Tools | Every tool with its signature | [guide/TOOLS.md](guide/TOOLS.md) |
 
 ---
 
-## Providers
+## Savings
 
-20+ providers, free-first. **Ollama** (local, free) leads the chain; **OpenRouter**
-(hundreds of models behind one key — see the provider reference for the current list) is the biggest single unlock; **Gemini** and **Groq** have
-usable free tiers. Anthropic works via your existing Claude subscription — no API key
-needed.
-
-Every provider, its models, cost tier and env var: **[guide/PROVIDERS.md](guide/PROVIDERS.md)**
-
----
-
-## Routing Policies
-
-A policy sets how eagerly the router routes away from your premium model —
-`conservative` (routes only the clearest cases) through `balanced` (the default) to
-`cost_aggressive` (routes most work away from the premium model, needs
-`OPENROUTER_API_KEY`). Run `llm-router summary` to see what your own traffic did —
-the saving depends on your workload, not on the policy alone.
-
-```bash
-llm-router policy set cost_aggressive
-```
-
-All six policies, thresholds and the YAML schema: **[guide/POLICIES.md](guide/POLICIES.md)**
+Savings figures are a *counterfactual* — what the same tokens would have cost
+at API list price, against what was actually spent — not money saved on a flat
+subscription. `llm-router status` and `llm-router savings-report` split
+**verified** from **unverified** savings, each with its own n. Methodology,
+assumptions and limitations: **[docs/MEASUREMENT.md](docs/MEASUREMENT.md)**.
 
 ---
 
-## MCP Tools
+## Trust and Security
 
-70 tools across routing, analysis, code, media, budget and diagnostics — exposed to any
-MCP host. The default `consolidated` surface shows 12 front-door tools; set
-`LLM_ROUTER_SLIM=full` for all 60.
+llm-router runs entirely on your machine — no hosted proxy, nothing sent to an
+llm-router service, no account required. A **grounding check**
+(`src/llm_router/grounding.py`) discards any draft citing a file or function
+absent from its context and the indexed repo, falling through to Claude.
 
-Every tool with its signature: **[guide/TOOLS.md](guide/TOOLS.md)**
+`LLM_ROUTER_DIRECT_EXECUTION` (on by default) lets a local model propose file
+writes and commands under a confined, allowlisted path — it does not stop
+targeted deletes, `git push --force`, or exfiltration. Full analysis:
+**[SECURITY.md](SECURITY.md)**.
 
----
+Self-audits are published in **[audit/](audit/)** and
+**[docs/repo_goals/AUDIT-2026-09-25.md](docs/repo_goals/AUDIT-2026-09-25.md)**
+(13 met, 6 partial, 1 not met), including negative results.
 
-## Savings: How It Works
-
-<p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="assets/readme/savings-dark.svg">
-    <source media="(prefers-color-scheme: light)" srcset="assets/readme/savings-light.svg">
-    <img src="assets/readme/savings-light.svg" alt="Animated savings breakdown showing token distribution across free, budget, and premium tiers." width="100%"/>
-  </picture>
-</p>
-
-Savings are calculated by comparing actual spend against a baseline of routing every task to Claude Sonnet/Opus.
-
-**Methodology:**
-1. Each routed task logs: model used, tokens consumed, estimated cost
-2. A baseline cost is computed as if the same tokens were processed by the most expensive model in the chain
-3. Savings = `(baseline - actual) / baseline`
-
-**Assumptions and limitations:**
-- Baseline assumes you would have used Opus/Sonnet for everything (worst case)
-- Token estimates use `len(text) / 4` approximation, not exact tokenizer counts
-- Cost data comes from LiteLLM's pricing tables (may lag provider price changes)
-- Savings vary significantly by workload — code-heavy sessions route more to cheap models
-- The router itself adds small overhead (classification costs ~$0.0001 per ambiguous task)
-
-**On savings figures.** Percentages quoted anywhere in this project are a *counterfactual* —
-what the same tokens would have cost at API list price, against what was actually spent. On a
-flat-rate subscription that is not money saved; it is quota preserved, and the two are not
-interchangeable. This project does not publish a general savings percentage or range — any
-number depends heavily on your own workload. Run `llm-router savings-report` to see what your
-own usage actually did, with its own n and window.
-
----
-
-## Trust, Privacy, and Local-First Design
-
-llm-router runs entirely on your machine. There is no hosted proxy, nothing is sent to an
-llm-router service, and no account is required.
-
-It does keep **local** telemetry, and since 2026-09 that telemetry steers routing: every model
-attempt and its outcome is recorded so a chronically slow model can be demoted, and a routed
-answer is marked successful only if it is actually usable. All of it stays in
-`~/.llm-router/` and none of it leaves the machine.
-
-| What | Where | Details |
-|------|-------|---------|
-| **Your prompts** | Sent to configured providers | Exactly like using those providers directly |
-| **API keys** | `.env` or `~/.llm-router/config.yaml` | Local files, never transmitted |
-| **Usage logs** | `~/.llm-router/usage.db` | Unencrypted SQLite (filesystem permissions) |
-| **Classification cache** | In-memory | Cleared on process restart |
-| **Hook scripts** | `~/.claude/hooks/` | Local shell scripts, inspectable |
-| **Model attempts** | `~/.llm-router/attempts.jsonl` | Per-attempt outcome and latency; rotated |
-| **Session context** | `~/.llm-router/projects/<id>/` | Your prompts, tool calls and routed answers, per project |
-| **Repo knowledge (OKF)** | `~/.llm-router/knowledge/` | Symbols and paths from tracked files, never prose |
-
-**What we do:**
-- Scrub API keys from structured logs
-- Detect hook deadlocks before installation
-- Store all data locally in `~/.llm-router/`
-- Respect provider rate limits and TOS
-
-**What you should know:**
-- Prompts are sent to whichever provider the router selects — review your provider's privacy policy
-- Usage logs (SQLite) are not encrypted at rest — use full-disk encryption if needed
-- The router cannot prevent model jailbreaks or prompt injection at the provider level
-
-### `LLM_ROUTER_DIRECT_EXECUTION` — read this before your first run
-
-**This is on by default.** When enabled, `hooks/auto-route.py` tries to answer a prompt
-locally before Claude Code sees it. For prompts it classifies as needing file work, it runs
-a tool-calling agent loop that hands the local model three tools — `write_file`, `edit_file`
-and `run_command` — for up to 15 iterations. Writes do NOT reach disk by default:
-`LLM_ROUTER_AGENT_WRITES` defaults to `propose`, so the loop returns a patch.
-
-What is actually enforced:
-
-- `write_file` / `edit_file` are confined to the project root. This works as described.
-- `run_command` does **not** use a shell. It is `shlex.split` + `subprocess.run(argv)`,
-  so pipes, redirections, `;` and `$(...)` are literal arguments, not operators.
-- `run_command` passes through two independent layers: `agent_writes.guard_command`
-  (an allowlist of inspection programs, plus blocked subcommands) and a regex
-  blocklist of top-level destructive patterns. The allowlist is the stronger of
-  the two and is what blocks `git push --force`, `npm install`, `pip install`
-  and `rm -rf ./src`.
-- Setting `LLM_ROUTER_AGENT_COMMANDS=all` disables the allowlist, leaving only the
-  regex. Nothing sets it for you.
-
-What that blocklist does **not** stop (measured, not estimated): targeted deletes inside the
-project (`rm -rf ./src`), `$HOME` deletes via shell expansion, `git push --force`,
-`git reset --hard`, arbitrary `npm`/`pip install`, reads outside the project
-(`cat ../../.ssh/id_rsa`), network exfiltration (`curl -X POST … -d @.env`), and echoing
-API keys. It stops catastrophic *system* damage — not project damage, credential
-disclosure, or exfiltration.
-
-**Turn it off:**
-
-```bash
-export LLM_ROUTER_DIRECT_EXECUTION=false
-```
-
-Routing still works with it disabled; you lose only the local pre-answer path.
-
-**Since 13.2.0**, a draft that reaches you has passed two grounding checks: it may not
-cite a file, or call a function, that exists neither in the material it was given nor
-in the indexed repo. A draft that does is discarded and the turn falls through to
-Claude. This catches the mechanical way a context-fed answer goes wrong — a confident
-reference to a test that was never written. It does **not** verify that the answer is
-correct, and it cannot see invented prose; `LLM_ROUTER_GROUNDING_CHECK=off` and
-`LLM_ROUTER_SYMBOL_GROUNDING=off` disable them.
-
-See [SECURITY.md](https://github.com/ypollak2/llm-router/blob/main/SECURITY.md) for the full
-analysis and the responsible disclosure policy.
-
----
-
-## Configuration
-
-Everything is environment variables — no config file required to start:
-
-```bash
-export OPENROUTER_API_KEY="sk-or-v1-..."          # biggest single unlock
-export OLLAMA_BASE_URL="http://localhost:11434"   # local, free
-export LLM_ROUTER_POLICY="cost_aggressive"        # routing policy
-export LLM_ROUTER_ENFORCE="smart"                 # off | advise | smart | hard
-export LLM_ROUTER_OLLAMA_TIMEOUT=45               # seconds; 45 clears a real local p50
-export LLM_ROUTER_PROJECT_ROOT="$PWD"             # scope the knowledge store explicitly
-export LLM_ROUTER_GROUND_TRUTH=1                  # opt in to Ground Truth accumulation
-export LLM_ROUTER_AUTO_BENCHMARK_FETCH=1          # opt in to background benchmark refetch (off = local-first)
-```
-
-`LLM_ROUTER_OLLAMA_TIMEOUT` matters more than it looks. It was 4s before 13.2.0, and
-no local model can answer in 4s — measured p50s on an M-series machine are 11-28s, so
-every local attempt aborted and fell through to Claude. If you run larger models,
-raise it further rather than wondering why nothing routes.
-
-Full reference, config file schema and per-host overrides:
-**[guide/GETTING_STARTED.md](guide/GETTING_STARTED.md)**
-
----
-
-## Ground Truth accumulation (14.1.0, opt-in)
-
-Routing decisions can only be judged against tasks somebody can re-run and
-check. Telemetry alone does not provide those: for a long time this repo logged
-the decision and not the task, so 22,356 routing records produced zero evaluable
-examples — not for want of volume, but because prompt text and routing metadata
-lived in separate stores with no shared key.
-
-With `LLM_ROUTER_GROUND_TRUTH=1`, normal usage builds that corpus as it goes:
-
-```
-your task -> routing decision -> eligibility gate -> replay envelope -> candidate pool
-```
-
-Each task is assessed **while it runs**, because the state needed to replay it
-exists only then. A task that needs a repo gets its commit and patch recorded; a
-task that depends on a webpage is either frozen with provenance or marked
-unreplayable; a task like "continue what we were doing" is rejected outright,
-with the reason stored.
-
-```bash
-python3 scripts/groundtruth/accumulate_report.py     # Captured / Eligible / Persisted / Rejected / ...
-python3 scripts/groundtruth/verifier_cli.py suggest  # propose verifiers for candidates
-```
-
-**Off by default.** It is the one part of the system that writes prompt text to
-disk. Scrubbing runs first and fails closed — if the canonical scrubber cannot
-be imported, nothing is written — but that is a reason to let you choose, not to
-choose for you. The routing ledger itself still stores no prompt or response
-text; it holds hashes, and always has.
-
-Every accumulation attempt records one of `persisted` / `rejected` /
-`deduplicated` / `error` to `~/.llm-router/gt_accumulation.jsonl`, so an empty
-pool always has a stated cause. Accumulation is fail-open: a failure loses a
-candidate, never a turn.
-
-Details: **[guide/GROUND_TRUTH.md](guide/GROUND_TRUTH.md)**
+**Ground Truth accumulation** (opt-in, `LLM_ROUTER_GROUND_TRUTH=1`) builds a
+corpus of replayable routing decisions instead of unlinked telemetry; off by
+default since it's the only part that writes prompt text to disk. Details:
+**[guide/GROUND_TRUTH.md](guide/GROUND_TRUTH.md)**.
 
 ---
 
@@ -560,53 +219,41 @@ Full index: **[guide/README.md](guide/README.md)**
 | [Host Support Matrix](guide/HOST_SUPPORT_MATRIX.md) | Per-host feature comparison |
 | [Providers](guide/PROVIDERS.md) | Provider setup and model recommendations |
 | [Routing Policies](guide/POLICIES.md) | `routing.yaml` schema and authoring your own policy |
-| [Tool Reference](guide/TOOLS.md) | All 70 MCP tools with examples |
+| [Tool Reference](guide/TOOLS.md) | All MCP tools with examples |
 | [Architecture](guide/ARCHITECTURE.md) | Internal design and module structure |
 | [Troubleshooting](guide/TROUBLESHOOTING.md) | Common issues and fixes |
 | [Testing the Router](guide/TESTING.md) | Isolation suite for verifying routing health |
+| [Measurement](docs/MEASUREMENT.md) | What "savings" means and how it's computed |
+| [RouterArena](docs/ROUTERARENA.md) | Benchmark methodology, results and negative findings |
+| [Ground Truth](guide/GROUND_TRUTH.md) | Replayable routing corpus, opt-in |
 | [Benchmarks](docs/BENCHMARKS.md) | Model cost/latency/quality table, regenerated by CI |
 | [Changelog](CHANGELOG.md) | Release notes ([archive](CHANGELOG-ARCHIVE.md)) |
 
----
-
-## Enterprise
-
-`llm-router` is built for individual developers and small teams: local cost savings, zero
-ops overhead, no hosted anything. If you need team-wide policy enforcement, audit export,
-SSO or per-org budgets, that is what **[Chuzom](https://github.com/Chuzom/Chuzom)** is for.
+`llm-router` is scored on the [RouterArena](https://github.com/RouteWorks/RouterArena)
+benchmark — full split, 8,400 queries, graded locally with this repo's harness,
+**not yet independently verified**. Current Arena Score: **72.35**. Full
+methodology and negative results (including a proxy split that misled tuning
+by 4.25 points): **[docs/ROUTERARENA.md](docs/ROUTERARENA.md)**.
 
 ---
 
-## Contributing
+## Enterprise, Contributing, License
 
-Contributions welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for full guidelines.
+`llm-router` is built for individual developers and small teams: local cost
+savings, zero ops overhead, no hosted anything. For team-wide policy
+enforcement, audit export, SSO or per-org budgets, see
+**[Chuzom](https://github.com/Chuzom/Chuzom)** — a separate, sibling product.
+
+Contributions welcome — see [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ```bash
 git clone https://github.com/ypollak2/llm-router.git
 cd llm-router
 uv sync --extra dev
-uv run pytest tests/ -q         # Run tests (1900+)
+uv run pytest tests/ -q         # Run tests (10,000+)
 uv run ruff check src/ tests/   # Lint
 ```
 
----
-
-| Name | What it is |
-|------|------------|
-| `llm-routing` | Current PyPI package (`pip install llm-routing`) |
-| `llm-router` | CLI command and GitHub repo name |
-| `claude-code-llm-router` | Deprecated legacy package (redirects to `llm-routing`) |
-
----
-
-<p align="center">
-  <sub>⭐ If llm-router saved you money, star the repo — it helps other developers discover it.</sub>
-</p>
-
----
-
-<p align="center">
-  <a href="https://github.com/ypollak2/llm-router/issues">Issues</a> · <a href="https://github.com/ypollak2/llm-router/discussions">Discussions</a> · <a href="https://pypi.org/project/llm-routing/">PyPI</a> · <a href="CHANGELOG.md">Changelog</a>
-</p>
-
-<p align="center"><sub>MIT License</sub></p>
+MIT License. [Issues](https://github.com/ypollak2/llm-router/issues) ·
+[Discussions](https://github.com/ypollak2/llm-router/discussions) ·
+[PyPI](https://pypi.org/project/llm-routing/) · [Changelog](CHANGELOG.md)
