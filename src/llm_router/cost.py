@@ -508,6 +508,20 @@ never measured — the one thing this column exists to stop. NULL means "not
 recorded"; 'block' means the turn was replaced; 'echo' means it was not, and
 such a row carries estimated_claude_cost_saved = 0."""
 
+MIGRATE_SAVINGS_STATS_ADD_ROUTE_ID = [
+    "ALTER TABLE savings_stats ADD COLUMN route_id TEXT",
+]
+"""Idempotent migration: carry the North Star ledger's route_id onto an
+imported savings_stats row (v?). Nullable, no default — the savings_log/hook
+writers this table has always drained never minted a route_id, so every row
+written before this migration, and every row the hook path writes after it,
+is honestly NULL here. It exists so ``import_routing_quality_ledger`` (see
+below) can import ``routing_quality.jsonl`` rows IDEMPOTENTLY: re-running the
+import checks ``route_id`` first and skips a row already present, whoever
+wrote it. A unique partial index (``idx_savings_stats_route_id``, created once
+this column exists — see ``_get_db``) makes that check a DB invariant rather
+than a hope."""
+
 MIGRATE_ROUTING_DECISIONS_ADD_POLICY = [
     "ALTER TABLE routing_decisions ADD COLUMN policy_applied TEXT",
 ]
@@ -987,6 +1001,7 @@ async def _get_db() -> aiosqlite.Connection:
         + MIGRATE_SAVINGS_STATS_ADD_HOST
         + MIGRATE_SAVINGS_STATS_ADD_TOKENS
         + MIGRATE_SAVINGS_STATS_ADD_MODE
+        + MIGRATE_SAVINGS_STATS_ADD_ROUTE_ID
         + MIGRATE_SIBLING_TABLES_ADD_PROVENANCE
         + MIGRATE_ROUTING_DECISIONS_ADD_POLICY
         + MIGRATE_ADD_CORRELATION_ID
@@ -1014,6 +1029,17 @@ async def _get_db() -> aiosqlite.Connection:
 
     # Phase 2: replace the DEFAULT-0 lie on historical rows with an honest NULL.
     await _apply_provenance_cutover(db)
+
+    # Idempotency guard for import_routing_quality_ledger: a route_id already
+    # present must be rejected at the DB layer too, not just by the importer's
+    # own SELECT-then-INSERT — a UNIQUE index is the invariant, the SELECT is
+    # only the fast path. Partial (WHERE route_id IS NOT NULL) so the many
+    # NULL rows the savings_log/hook path has always written (it never minted
+    # a route_id) never collide with each other or with this.
+    await db.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_savings_stats_route_id "
+        "ON savings_stats(route_id) WHERE route_id IS NOT NULL"
+    )
 
     # Quality tracking indices for v6.4 (created after migrations so judge_score exists)
     await db.execute(
@@ -3480,6 +3506,152 @@ async def import_savings_log() -> int:
     else:
         # Insert failed — return the rows to the live log for a later retry.
         await asyncio.to_thread(_restore_claim, claim, savings_log_path())
+
+    return imported
+
+
+async def import_routing_quality_ledger() -> int:
+    """Import ``routing_quality.jsonl`` rows into ``savings_stats``, idempotently.
+
+    THE GAP THIS CLOSES. Every routed MCP/gateway call (``llm(task=...)`` and
+    friends, via ``router.route_and_call``) appends one ``RouteLedgerRecord`` to
+    ``~/.llm-router/routing_quality.jsonl`` — the North Star ledger, carrying its
+    own ``saved_usd`` estimate. ``llm-router status`` and ``savings-report`` read
+    ONLY ``savings_stats`` (``dashboard_data._JSONL_TABLE``), and nothing drained
+    this ledger into it, so those calls' savings never appeared anywhere — not
+    even in the unverified figure. This is the importer that drains it, following
+    ``import_savings_log``'s shape but NOT its drain-and-delete semantics: this
+    ledger is the permanent record ``routing_quality.summarize()`` and Ground
+    Truth sampling read directly, so it is read-only here and never truncated.
+
+    Three rules, each pinned by a test:
+
+    1. **``mode`` stays NULL, always.** The North Star ledger has no
+       "the caller used this answer" signal the way the hook path's ``mode``
+       ('block'/'echo') does — ``RouteLedgerRecord`` carries no such field at
+       all. Writing anything but NULL here would be inventing a measurement
+       (S9). ``savings.VERIFIED_SAVED_SQL``'s predicate requires
+       ``mode = 'block'``, which a NULL never satisfies, so every row this
+       function imports reads as unverified/unmeasured — never realized —
+       regardless of ``host``.
+    2. **Synthetic/unknown provenance is excluded, not admitted.**
+       ``routing_quality.is_evaluable`` is reused rather than reimplemented —
+       ``synthetic=True`` drops the row, and a row written before the field
+       existed (``synthetic`` absent) is UNKNOWN and drops too (same rule
+       CLAUDE.md documents for this exact ledger: excluding a real old row
+       costs a smaller sample; admitting a fixture costs a false number).
+    3. **``route_id`` is the idempotency key, enforced twice.** A row already
+       present under its ``route_id`` — because this function already
+       imported it, or because some other writer already stamped that id
+       into ``savings_stats`` — is skipped, so re-running the import (a
+       session-end hook, a second MCP call) never double-counts, and a route
+       already reflected via the hook/``savings_log`` path can never be
+       double-counted either PROVIDED it was recorded under the same
+       ``route_id`` (the hook path itself never mints one, so in practice its
+       rows carry ``route_id IS NULL`` and can never collide). The SELECT
+       existence check is the fast path; ``idx_savings_stats_route_id``
+       (a partial UNIQUE index, see ``_get_db``) is the actual invariant, so
+       a race between two importers fails the INSERT rather than duplicates
+       the row.
+
+    Fail-open in spirit like ``routing_quality.record_route``: any row this
+    function cannot safely interpret is skipped, never guessed at.
+
+    Returns:
+        Number of NEW rows inserted into ``savings_stats`` (0 if the ledger is
+        empty, already fully imported, or unreadable).
+    """
+    import asyncio
+
+    from datetime import datetime, timezone
+
+    from llm_router import routing_quality as _rq
+
+    rows = await asyncio.to_thread(_rq.load_records)
+    if not rows:
+        return 0
+
+    candidates = []
+    for row in rows:
+        if not isinstance(row, dict) or row.get("_invalid"):
+            continue
+        route_id = row.get("route_id")
+        if not route_id:
+            # Legacy v1 RouteRecord rows carry no route_id at all — there is
+            # no key to dedup on, so they are not importable here (they also
+            # never went through is_evaluable's synthetic gate).
+            continue
+        if not _rq.is_evaluable(row):
+            continue
+        candidates.append(row)
+
+    if not candidates:
+        return 0
+
+    db = await _get_db()
+    imported = 0
+    try:
+        cursor = await db.execute(
+            "SELECT route_id FROM savings_stats WHERE route_id IS NOT NULL"
+        )
+        existing = {r[0] for r in await cursor.fetchall()}
+
+        for row in candidates:
+            route_id = row["route_id"]
+            if route_id in existing:
+                continue
+
+            ts = row.get("ts")
+            try:
+                timestamp = (
+                    datetime.fromtimestamp(float(ts), tz=timezone.utc).isoformat()
+                    if ts
+                    else datetime.now(timezone.utc).isoformat()
+                )
+            except (TypeError, ValueError, OSError):
+                timestamp = datetime.now(timezone.utc).isoformat()
+
+            try:
+                await db.execute(
+                    "INSERT INTO savings_stats "
+                    "(timestamp, session_id, task_type, estimated_claude_cost_saved, "
+                    "external_cost, model_used, host, input_tokens, output_tokens, "
+                    "mode, is_simulated, route_id) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        timestamp,
+                        row.get("session_id") or "unknown",
+                        row.get("task_type") or "unknown",
+                        float(row.get("saved_usd", 0.0) or 0.0),
+                        float(row.get("actual_cost_usd", 0.0) or 0.0),
+                        row.get("final_model") or row.get("chosen_model") or "unknown",
+                        "routing_quality",
+                        int(row.get("prompt_tokens") or 0),
+                        int(row.get("completion_tokens") or 0),
+                        # Never 'block'/'echo' — see rule 1 above. NULL, always.
+                        None,
+                        # is_evaluable() already excluded synthetic=True and
+                        # synthetic-absent rows above; every candidate here IS
+                        # a measured production row.
+                        0,
+                        route_id,
+                    ),
+                )
+            except Exception as exc:  # noqa: BLE001 — e.g. the unique index
+                # winning a race against a concurrent importer. Not fatal: the
+                # row is already present under this route_id either way.
+                from llm_router import failopen
+
+                failopen.record("CHZ-FO-COST-ROUTING-QUALITY-IMPORT", exc)
+                continue
+
+            existing.add(route_id)
+            imported += 1
+
+        if imported:
+            await db.commit()
+    finally:
+        await db.close()
 
     return imported
 
