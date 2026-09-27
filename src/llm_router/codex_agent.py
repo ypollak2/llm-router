@@ -458,10 +458,31 @@ async def run_codex(
                 model=model, exit_code=proc.returncode or 1,
                 duration_sec=duration,
             )
+        had_real_answer = bool(output)
         if not output and stderr_buf:
             output = b"".join(stderr_buf).decode("utf-8", errors="replace").strip()
         if not output and cli_noise:
             output = "\n".join(cli_noise).strip()
+
+        if not had_real_answer:
+            # No item.completed text ever arrived, so whatever is in `output`
+            # now (stderr, or non-JSON stdout chatter such as "Reading
+            # additional input from stdin...") is CLI status noise, not a
+            # model answer. Keep it in `content` for diagnostics -- dropping
+            # it would replace one wrong answer with no answer at all -- but
+            # never report exit_code 0 for it. Live regression 2026-09-26:
+            # this exact banner came back as a "successful" 205-token
+            # completion because exit_code fell through to
+            # `proc.returncode or 0` (0) even though no answer was ever
+            # produced, so the router accepted it instead of raising and
+            # falling back to the next model in the chain (router.py,
+            # `if not codex_result.success: raise ...`).
+            return CodexResult(
+                content=output or "codex: empty completion (no output)",
+                model=model,
+                exit_code=proc.returncode or 1,
+                duration_sec=duration,
+            )
 
         return CodexResult(
             content=output, model=model,
