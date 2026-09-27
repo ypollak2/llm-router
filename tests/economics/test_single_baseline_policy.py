@@ -126,6 +126,23 @@ def test_dashboard_delegates_to_the_policy():
     assert dashboard_data._BASELINE_MODEL == pricing.savings_baseline_model()
 
 
+def test_savings_module_delegates_to_the_policy():
+    """2026-09-27: `savings._baseline_model()` hardcoded ``"claude-opus-4"``
+    independently of this policy. It was correct the day it was written and
+    frozen the day ``pricing.SAVINGS_BASELINE_MODEL`` moved to
+    ``"claude-opus-5"`` -- after which ``llm-router savings-report`` (which
+    reads this function via ``savings.canonical_savings()``) quoted a
+    different baseline model than ``llm-router status``/the statusline
+    (both of which read ``pricing.savings_baseline_model()`` /
+    ``dashboard_data._BASELINE_MODEL`` directly) for the SAME underlying
+    figure, on the SAME machine, at the SAME instant. This is the test this
+    file's own policy -- "one policy symbol, no surface carries a private
+    copy" -- should have already covered."""
+    from llm_router import savings
+
+    assert savings._baseline_model() == pricing.savings_baseline_model()
+
+
 def test_session_end_hook_delegates_to_the_policy():
     spec = importlib.util.spec_from_file_location(
         "_session_end_wp05", _SRC / "hooks" / "session-end.py"
