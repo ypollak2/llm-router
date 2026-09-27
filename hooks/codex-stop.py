@@ -15,7 +15,7 @@ def _summary() -> str:
     from llm_router.cost import (
         import_routing_quality_ledger, import_savings_log, savings_log_path,
     )
-    from llm_router.dashboard_data import query_window
+    from llm_router.dashboard_data import summary
 
     # Share the existing ledger and atomic importer with the other reporting
     # surfaces. Never maintain a second counter or archive the ongoing session.
@@ -23,25 +23,32 @@ def _summary() -> str:
         asyncio.run(import_savings_log())
     # Same flush for the North Star ledger (routing_quality.jsonl) — MCP/gateway
     # calls write there and were otherwise invisible to every savings_stats
-    # reader, including this summary's own `unverified_saved_usd` figure below.
+    # reader, including this summary's own unverified figure below.
     asyncio.run(import_routing_quality_ledger())
     db = get_config().llm_router_db_path
-    today = query_window("today", db_path=db)
-    lifetime = query_window("lifetime", db_path=db)
 
-    def money(value: float) -> str:
-        return f"~${value:,.2f}" if abs(value) >= 1 else f"~${value:.4f}"
+    # THE canonical dashboard_data.summary() — the same function `llm-router
+    # status`, `savings-report`, `gain`, and the Claude Code Stop hook all
+    # call (PR #173). This used to read `query_window(...).saved_usd` and
+    # print it as plain "lifetime {money}", but `saved_usd` is the
+    # VERIFIED-only figure (PR6): a database with $112.84 of unverified
+    # estimated savings and $0.00 verified printed "lifetime ~$0.00" here
+    # while `llm-router status` on the SAME database showed "+$112.84
+    # unverified (n=9,229)". Both halves are shown now, each labelled, so
+    # neither can be read as the other.
+    today = summary("today", db_path=db)
+    lifetime = summary("lifetime", db_path=db)
 
-    # Unverified money (MCP/gateway/agentic, incl. this host's pending_savings)
-    # stays out of both figures and is labelled beside them (savings.py).
-    from llm_router.savings import unverified_note
-    note = unverified_note(lifetime.unverified_saved_usd, lifetime.unverified_calls)
-    return (
-        f"⚡ llm-router · saved today {money(today.saved_usd)}"
-        f" · lifetime {money(lifetime.saved_usd)}"
-        " · estimated, all hosts"
-        + (f" · lifetime {note}" if note else "")
-    )
+    def period(label: str, s) -> str:
+        # `:,.2f` throughout, matching the Claude Code Stop hook's
+        # `_condense()` — one money format across both surfaces so a screenshot
+        # from either reads the same way.
+        bit = f"{label}: verified ${s.realized_usd:,.2f}"
+        if s.unverified_usd:
+            bit += f" · est +${s.unverified_usd:,.2f} (n={s.unverified_n:,})"
+        return bit
+
+    return f"⚡ llm-router · {period('today', today)} · {period('lifetime', lifetime)}"
 
 
 def main() -> None:

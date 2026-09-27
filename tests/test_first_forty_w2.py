@@ -304,10 +304,20 @@ def test_statusline_reports_today_not_the_session():
 def test_session_summary_labels_money_as_saved():
     """The most-screenshotted line this product produces must not read as spend.
 
-    The condensed summary renders `saved today $X · lifetime $Y · quota used
-    5h N%`. Before this, the money bits were bare (`today $32.85`) and sat
-    inches from a quota percentage — the identical inversion a user hit on the
-    statusline, where an unlabelled figure was read as money spent.
+    The condensed summary renders `today: verified $X · lifetime: verified $Y
+    · quota used 5h N%`. Before this, the money bits were bare (`today
+    $32.85`) and sat inches from a quota percentage — the identical inversion
+    a user hit on the statusline, where an unlabelled figure was read as
+    money spent.
+
+    2026-09-27: the money itself moved from regex-parsing this rendered box
+    to `dashboard_data.summary()` (see `_condense`'s docstring) — a second,
+    real regression of the same shape, where the box's OWN money was VERIFIED
+    only and got printed as if it were the full lifetime figure. Each period
+    is now labelled "verified" (and "est +..." beside it when there is an
+    unverified estimate too), which satisfies this test's actual invariant —
+    a money figure must say what it is — more precisely than the literal
+    string "saved today" ever did.
     """
     import importlib.util
 
@@ -330,8 +340,11 @@ def test_session_summary_labels_money_as_saved():
     )
     line = mod._condense(summary)
 
-    assert "saved today" in line, (
+    assert "today: verified $" in line, (
         f"the money figure is unlabelled and will be read as spend: {line!r}"
+    )
+    assert "lifetime: verified $" in line, (
+        f"the lifetime figure is unlabelled and will be read as spend: {line!r}"
     )
     assert "quota used" in line, "quota label lost"
 
