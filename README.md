@@ -14,7 +14,7 @@
 
 <p align="center">
   llm-router hooks into your coding tool's own lifecycle, reads each prompt before the
-  model does, and drafts an answer on a free or local model first. Zero API keys needed
+  model does, and drafts an answer on a free or local model first. No API keys needed
   on a Claude subscription — routing runs through MCP tools and local models.
 </p>
 
@@ -96,9 +96,10 @@ workload. See [Savings](#savings) below.
 pip install llm-routing        # installs the `llm-router` command
 llm-router install             # wire up Claude Code (default host)
 llm-router doctor               # check provider connectivity and setup
+llm-router status               # verify it's routing — verified vs unverified savings
 ```
 
-Works with **zero API keys** on a Claude Pro/Max subscription — routing goes
+Works with **no API keys** on a Claude Pro/Max subscription — routing goes
 through MCP tools and local models. Adding provider keys widens the pool;
 nothing requires them. See **[guide/PROVIDERS.md](guide/PROVIDERS.md)**. To
 install into another host, see [Works With](#works-with).
@@ -175,6 +176,12 @@ shows everything registered.
 | Routing Policies | `conservative` → `balanced` (default) → `cost_aggressive`; thresholds and YAML schema | [guide/POLICIES.md](guide/POLICIES.md) |
 | MCP Tools | Every tool with its signature | [guide/TOOLS.md](guide/TOOLS.md) |
 
+```bash
+llm-router gain today           # savings so far today
+llm-router okf status           # knowledge base freshness
+llm-router sessions status      # per-session summary
+```
+
 ---
 
 ## Savings
@@ -194,9 +201,10 @@ llm-router service, no account required. A **grounding check**
 (`src/llm_router/grounding.py`) discards any draft citing a file or function
 absent from its context and the indexed repo, falling through to Claude.
 
-`LLM_ROUTER_DIRECT_EXECUTION` (on by default) lets a local model propose file
-writes and commands under a confined, allowlisted path — it does not stop
-targeted deletes, `git push --force`, or exfiltration. Full analysis:
+`LLM_ROUTER_DIRECT_EXECUTION` is default on — a local model gets `write_file`,
+`edit_file` and `run_command` under a confined, allowlisted path, and none of
+that stops targeted deletes, `git push --force`, or exfiltration. Turn it off
+with `LLM_ROUTER_DIRECT_EXECUTION=false`. Full analysis:
 **[SECURITY.md](SECURITY.md)**.
 
 Self-audits are published in **[audit/](audit/)** and

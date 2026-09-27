@@ -59,10 +59,10 @@ LEDGER: tuple[Claim, ...] = (
         id="secrets-never-leave",
         text="Secrets never leave your machine. A prompt containing an API key, "
              "token or private material is scrubbed before it is written or sent.",
-        source="README.md:298",
+        source="README.md:154",
         status=PROVEN,
         proof="tests/test_r2_nothing_leaves_unscrubbed.py",
-        readme_lines=(298,),
+        readme_lines=(154,),
     ),
     Claim(
         id="scrub-before-persistence",
