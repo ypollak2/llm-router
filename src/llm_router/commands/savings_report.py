@@ -1,28 +1,43 @@
 """Detailed savings report command.
 
-R6. This docstring used to claim ``savings_stats`` was "the SINGLE source of
-truth, so the report can never disagree with the stored stats." Both halves
-were wrong in a way worth recording, because the sentence read as a guarantee:
+R6/2026-09-27. This docstring used to claim ``savings_stats`` was "the SINGLE
+source of truth, so the report can never disagree with the stored stats."
+Both halves were wrong in a way worth recording, because the sentence read as
+a guarantee:
 
 * It is not the single source. The 2026-09-22 audit found TWENTY user-facing
-  savings surfaces across FIVE data sources; this one reads `savings_stats`,
-  `llm-router gain` reads `routing_decisions`, the statuslines read `usage`,
-  and `llm-router status` reads a union of four. A free DIRECT route recorded
-  in one is invisible to the others.
+  savings surfaces across FIVE data sources; this one read `savings_stats`,
+  `llm-router gain` read `routing_decisions`, the statuslines read `usage`,
+  and `llm-router status` read a union of four. A free DIRECT route recorded
+  in one was invisible to the others.
 * "Can never disagree with the stored stats" was true and beside the point. It
-  agreed with its own table and with nothing else, and it applied no provenance
-  filter — so a benchmark run inflated this report and not the eight surfaces
-  that go through `cost.py`.
+  agreed with its own table and with nothing else, and it applied no
+  provenance filter — so a benchmark run inflated this report and not the
+  eight surfaces that went through `cost.py`.
 
-The HEADLINE now comes from ``savings.canonical_savings()``: provenance
-filtered, net of routing overhead, with its baseline model and its row count
-attached. The per-model free/paid breakdown below still comes from
-`savings_stats`, which is the only table carrying it — but it is filtered the
-same way, so the parts and the whole are computed over the same rows.
+The 2026-09-27 fix went one step further: this file used to hold TWO
+disagreeing computations of its own — `canonical_savings()` (reading
+`claude_usage`/`codex_usage`/`gemini_usage`, n=20-ish) for the headline, and a
+separately hand-rolled query over `savings_stats` (n=150) for the "ledger"
+line beneath it, with a stale hardcoded baseline (`claude-opus-4`) that had
+drifted from `pricing.SAVINGS_BASELINE_MODEL` (`claude-opus-5`). Both are gone.
+The headline now comes from ``dashboard_data.summary()`` — the SAME function
+`llm-router status`, `llm-router gain`, and the statusline call — so this
+report can no longer print a different verified/unverified figure or a
+different baseline model than any other surface reading the same database.
 
-Paid vs free is split by ``external_cost`` (no double-counting), and the saved
-amount is the stored ``estimated_claude_cost_saved`` (not a separately
-recomputed baseline).
+The per-model free/paid breakdown below still comes from `savings_stats` (the
+only table carrying it), via ``dashboard_data.query_model_savings`` — the
+single implementation shared with `summary()`'s own `by_model`, filtered the
+same way (provenance, verified-vs-unverified) as everything else. Known
+residual: ``query_model_savings`` drops non-production (``is_simulated=1``)
+``savings_stats`` rows; the HEADLINE above (``query_window``, via
+``summary()``) intentionally does not apply that same drop to
+``savings_stats`` — see ``tests/test_acc01_status_headline_provenance.py``'s
+`test_unverified_accumulates_across_every_table`, which pins the headline
+side of this on purpose. On real data this is a single-digit row count; the
+per-model total can therefore differ from the headline by that much and no
+more.
 
 Usage:
     llm-router savings-report              — full report (all time)
@@ -32,30 +47,13 @@ Usage:
 
 from __future__ import annotations
 
-import sqlite3
-from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from llm_router import paths
 
-_FREE_PROVIDERS = {"ollama", "codex", "gemini_cli", "openai_compat"}
-
 
 def _get_db_path() -> Path:
     return paths.state_path("usage.db")
-
-
-def _get_time_filter(period: str = "all") -> tuple[str, tuple]:
-    """Return (sql_fragment, params) for the given period."""
-    if period == "day":
-        cutoff = datetime.now(timezone.utc) - timedelta(days=1)
-    elif period == "week":
-        cutoff = datetime.now(timezone.utc) - timedelta(days=7)
-    elif period == "month":
-        cutoff = datetime.now(timezone.utc) - timedelta(days=30)
-    else:
-        return "", ()
-    return "AND timestamp > ?", (cutoff.isoformat(),)
 
 
 def _provider_of(model: str) -> str:
@@ -67,66 +65,47 @@ def _provider_of(model: str) -> str:
 
 
 def _query(db_path: Path, period: str, *, paid: bool) -> dict:
-    """Aggregate savings_stats for paid (external_cost>0) or free (==0) routes."""
-    tf_sql, tf_params = _get_time_filter(period)
-    cond = "external_cost > 0" if paid else "(external_cost = 0 OR external_cost IS NULL)"
-    # R6/T-05: exclude rows a benchmark or test wrote. FAIL-CLOSED — `= 0`, not
-    # `IS NOT 1`: a row written before the column existed has NULL provenance
-    # and was never measured, so counting it asserts production origin on no
-    # evidence. This report had no filter at all, which is why a benchmark run
-    # inflated it and not the surfaces that go through cost.py.
-    cond = f"({cond}) AND COALESCE(is_simulated, 1) = 0"
-    from llm_router.savings import (
-        UNVERIFIED_CALLS_SQL, UNVERIFIED_SAVED_SQL, VERIFIED_SAVED_SQL,
-    )
-    stats = {"calls": 0, "saved": 0.0, "cost": 0.0, "by_model": {},
-             "unverified": 0.0, "unverified_calls": 0}
-    try:
-        conn = sqlite3.connect(db_path)
-        conn.row_factory = sqlite3.Row
-        rows = conn.execute(  # nosec B608 — cond is a hardcoded literal, not user input
-            f"""SELECT COUNT(*) AS calls,
-                       COALESCE(SUM({VERIFIED_SAVED_SQL}), 0) AS saved,
-                       COALESCE(SUM({UNVERIFIED_SAVED_SQL}), 0) AS unverified,
-                       COALESCE(SUM({UNVERIFIED_CALLS_SQL}), 0) AS unverified_calls,
-                       COALESCE(SUM(external_cost), 0) AS cost,
-                       model_used AS model
-                FROM savings_stats
-                WHERE {cond} {tf_sql}
-                GROUP BY model_used
-                ORDER BY calls DESC""",
-            tf_params,
-        ).fetchall()
-        conn.close()
-    except Exception:
-        return stats
-    for r in rows:
-        stats["calls"] += r["calls"]
-        stats["saved"] += r["saved"] or 0.0
-        stats["cost"] += r["cost"] or 0.0
-        stats["unverified"] += r["unverified"] or 0.0
-        stats["unverified_calls"] += r["unverified_calls"] or 0
-        stats["by_model"][r["model"] or "unknown"] = {
-            "calls": r["calls"], "saved": r["saved"] or 0.0, "cost": r["cost"] or 0.0,
-            "provider": _provider_of(r["model"] or "unknown"),
+    """Per-model free/paid breakdown for `period`, in this report's own field
+    names. Delegates to ``dashboard_data.query_model_savings`` — the ONE
+    implementation of this query — rather than re-running it here.
+    """
+    from llm_router.dashboard_data import _PERIOD_ALIASES, query_model_savings
+
+    window = _PERIOD_ALIASES.get(period, period)
+    raw = query_model_savings(window, paid=paid, db_path=db_path)
+    stats = {
+        "calls": raw["calls"], "saved": raw["verified_saved"],
+        "cost": raw["cost"], "by_model": {},
+        "unverified": raw["unverified_saved"],
+        "unverified_calls": raw["unverified_calls"],
+    }
+    for model, d in raw["by_model"].items():
+        stats["by_model"][model] = {
+            "calls": d["calls"], "saved": d["verified_saved"], "cost": d["cost"],
+            "provider": _provider_of(model),
         }
     return stats
 
 
-def _canonical_headline(period: str) -> str:
+def _canonical_headline(period: str, db_path: Path) -> str:
     """The one savings figure, labelled. R6/R7.
+
+    Takes the ALREADY-RESOLVED ``db_path`` rather than calling
+    ``_get_db_path()`` again — ``render_savings_report`` resolves it once and
+    every helper reuses that value, the same convention the original file
+    used. A second, independent ``_get_db_path()`` call here previously
+    re-ran a test's monkeypatched fixture builder a second time (re-creating
+    an already-existing sqlite table), which is exactly the kind of "two
+    computations of the same thing" this rewrite exists to stop.
 
     Degrades to a stated UNAVAILABLE rather than to a number. A report that
     silently falls back to its own arithmetic when the canonical accessor is
     unreachable is the twenty-first surface.
     """
     try:
-        import asyncio
+        from llm_router.dashboard_data import summary
 
-        from llm_router.savings import canonical_savings
-
-        s = asyncio.run(canonical_savings(period=period))
-        return s.headline()
+        return summary(period, db_path=db_path).headline()
     except Exception as exc:  # noqa: BLE001
         from llm_router import failopen
         failopen.record("CHZ-FO-SAVINGS-REPORT-CANONICAL", exc)
@@ -145,22 +124,12 @@ def render_savings_report(period: str = "all") -> str:
 
     label = {"day": "Last 24 Hours", "week": "Last 7 Days",
              "month": "Last 30 Days", "all": "All Time"}.get(period, "All Time")
-    total_saved = free["saved"] + paid["saved"]
-    total_calls = free["calls"] + paid["calls"]
 
     out = [f"\n╭─ SAVINGS REPORT ─ {label} " + "─" * 34 + "╮", "│"]
-    out.append(f"│  {_canonical_headline(period)}")
-    # The table's own total, shown BESIDE the canonical figure rather than
-    # instead of it. They are computed over different tables and will not always
-    # match; printing only one and calling it the total is what produced
-    # $73.97, $102.31 and $205.19 for the same day.
-    out.append(f"│  savings_stats ledger: ${total_saved:.4f} verified across "
-               f"{total_calls} routed call(s)")
-    from llm_router.savings import unverified_note
-    note = unverified_note(free["unverified"] + paid["unverified"],
-                           free["unverified_calls"] + paid["unverified_calls"])
-    if note:
-        out.append(f"│  {note}")
+    # ONE headline, from dashboard_data.summary() — the same function
+    # `llm-router status`, `llm-router gain` and the statusline call. No
+    # second, disagreeing total is computed here anymore.
+    out.append(f"│  {_canonical_headline(period, db_path)}")
     out.append("│")
 
     def section(title: str, s: dict, free_section: bool) -> None:

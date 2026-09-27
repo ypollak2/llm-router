@@ -129,22 +129,34 @@ def test_query_daily_keeps_unverified_out_of_the_chart(tmp_path):
 
 def test_the_savings_report_labels_unverified_beside_the_verified_total(
         tmp_path, monkeypatch):
+    """2026-09-27: the report used to print TWO disagreeing totals — a
+    `canonical_savings()` headline (a different table subset) and this
+    hand-rolled "savings_stats ledger" line beneath it. Both are gone; the
+    ONE headline now comes from `dashboard_data.summary()` (the same
+    function `llm-router status`/`gain`/the statusline call), which shows
+    verified and unverified side by side always — see
+    `test_r8_one_savings_truth.py` for the cross-surface consistency pin."""
     from llm_router.commands import savings_report
     monkeypatch.setattr(savings_report, "_get_db_path", lambda: _db(tmp_path))
     out = savings_report.render_savings_report("all")
-    assert "savings_stats ledger: $0.5000 verified across 7 routed call(s)" in out
-    assert "+ $63.00 unverified" in out and "n=6" in out
+    assert "verified $0.50 (n=1)" in out
+    assert "unverified estimate $63.00 (n=6)" in out
 
 
-def test_the_savings_report_prints_no_unverified_line_when_there_is_none(
+def test_the_savings_report_still_shows_the_verified_figure_when_nothing_is_unverified(
         tmp_path, monkeypatch):
+    """Superseded by the 2026-09-27 fix: the headline now ALWAYS shows both
+    figures side by side (task: "so routing activity is visible rather than
+    buried under a $0.00 headline") rather than hiding the unverified clause
+    when it is zero — a window with real routing traffic but zero confirmed
+    saving used to render identically to a window with none at all."""
     from llm_router.commands import savings_report
     gated = [r for r in _ROWS if r[0] == "hook, gated"]
     monkeypatch.setattr(savings_report, "_get_db_path",
                         lambda: _db(tmp_path, gated))
     out = savings_report.render_savings_report("all")
-    assert "savings_stats ledger: $0.5000 verified" in out
-    assert "unverified" not in out
+    assert "verified $0.50 (n=1)" in out
+    assert "unverified estimate $0.00 (n=0)" in out
 
 
 def test_unverified_note_is_empty_at_zero_and_keeps_small_amounts_visible():
