@@ -365,11 +365,21 @@ def under_subscription() -> bool:
 def _baseline_model() -> str:
     """The counterfactual this product measures against, named once.
 
-    Hardcoded deliberately: the point of R6 is that the baseline is ONE value,
-    and a configurable one would let two surfaces disagree again while both
-    claiming to be canonical. Changing it is a code change with a test.
+    Delegates to ``pricing.savings_baseline_model()`` — THE one place the
+    baseline model is resolved (``dashboard_data.py``, the statusline, and
+    every other surface already call it). This function used to hardcode
+    ``"claude-opus-4"`` independently: correct the day it was written, but
+    frozen the day ``pricing.SAVINGS_BASELINE_MODEL`` moved to
+    ``"claude-opus-5"`` — after which ``llm-router savings-report`` (which
+    reads THIS function) and ``llm-router status`` (which reads
+    ``pricing.savings_baseline_model()`` directly) quoted two different
+    baseline models for the same underlying figure. R6's point — "the
+    baseline is ONE value" — is honoured by resolving it in one PLACE, not by
+    each caller keeping its own literal in sync by hand.
     """
-    return "claude-opus-4"
+    from llm_router import pricing
+
+    return pricing.savings_baseline_model()
 
 
 @dataclass(frozen=True)

@@ -141,6 +141,33 @@ def _ollama_num_ctx(model: str | None = None) -> int | None:
     return val if val > 0 else None
 
 
+def _ollama_think_enabled() -> bool:
+    """Whether Ollama's native <think> reasoning mode should stay ON.
+
+    Off (``think: false``) by default. Evidence 2026-09-24/27: a hybrid-reasoning
+    model called with default settings (ollama/qwen3.5:latest, via LiteLLM's
+    ``ollama/`` provider -> Ollama's ``/api/generate``) returned
+    ``message.content`` of 0 chars and ``28,663`` chars of chain-of-thought in
+    the field LiteLLM exposes as ``message.reasoning_content``. Through the
+    router that showed up as a 78s call that then hit the fallback
+    (``routing_quality.jsonl`` row ``87a13c87``, ``fallback_reason=timeout``)
+    and, separately, a hard ``litellm.Timeout`` at the 120s ceiling ("All
+    models failed"). With ``"think": false`` the same model answered the same
+    5-line prompt correctly in 3s. Every direct-HTTP Ollama caller in this repo
+    (agent_loop.py, auto-route.py, tool_intercept.py, direct_executor.py,
+    vision_registry.py) already hard-codes ``"think": False`` for exactly this
+    reason; this was the one path (LiteLLM's ``acompletion``, used by the MCP
+    ``llm()`` tool) that did not.
+
+    Set ``LLM_ROUTER_OLLAMA_THINK=1`` to restore Ollama's own default
+    (thinking on) for operators who want it.
+    """
+    import os
+
+    raw = os.environ.get("LLM_ROUTER_OLLAMA_THINK", "").strip().lower()
+    return raw in {"1", "true", "yes", "on"}
+
+
 async def call_llm(
     model: str,
     messages: list[dict[str, str]],
@@ -221,6 +248,10 @@ async def call_llm(
         _num_ctx = _ollama_num_ctx(model)
         if _num_ctx:
             kwargs["num_ctx"] = _num_ctx
+        # See _ollama_think_enabled(): off by default so a hybrid-reasoning
+        # model doesn't burn the call's whole timeout budget on <think>.
+        if not _ollama_think_enabled():
+            kwargs["think"] = False
 
     if extra_params:
         safe = {k: v for k, v in extra_params.items() if k in _ALLOWED_EXTRA_PARAMS}
@@ -242,7 +273,14 @@ async def call_llm(
     content = extract_content(response.choices[0].message)
     # Plan 07 D.3: surface empty-content responses as a routing failure
     # so the router falls through to the next model in the chain instead
-    # of silently returning an empty LLMResponse.
+    # of silently returning an empty LLMResponse. This also covers the
+    # thinking-leak case: a hybrid-reasoning model that ignores `think:
+    # false` (or runs with LLM_ROUTER_OLLAMA_THINK=1) and leaves `content`
+    # empty while `reasoning_content` holds its chain-of-thought is never
+    # treated as an empty *successful* answer — extract_content() does not
+    # promote reasoning/thinking text into `content` (that would silently
+    # return the model's scratch-pad as if it were the response), so an
+    # empty `content` here always raises below rather than returning "".
     content = ensure_non_empty_content(content, model)
     usage = response.usage
 
@@ -395,6 +433,13 @@ async def call_llm_stream_events(
     # 🥷 Backslash-Security: Same Ollama workaround as in call_llm() above.
     if not model.startswith("ollama/"):
         kwargs["max_tokens"] = max_tokens
+    else:
+        _num_ctx = _ollama_num_ctx(model)
+        if _num_ctx:
+            kwargs["num_ctx"] = _num_ctx
+        # See _ollama_think_enabled(): same reasoning as call_llm().
+        if not _ollama_think_enabled():
+            kwargs["think"] = False
 
     if extra_params:
         safe = {k: v for k, v in extra_params.items() if k in _ALLOWED_EXTRA_PARAMS}
@@ -410,6 +455,7 @@ async def call_llm_stream_events(
     response = await litellm.acompletion(**kwargs)  # llm_router: direct-ok (router provider layer)
 
     collected_content: list[str] = []
+    saw_reasoning = False
     input_tokens = 0
     output_tokens = 0
 
@@ -430,6 +476,12 @@ async def call_llm_stream_events(
                     "approx_tokens": approx_tokens,
                 },
             }
+        elif delta is not None and getattr(delta, "reasoning_content", None):
+            # A hybrid-reasoning model (e.g. Ollama qwen3.5) streams its
+            # chain-of-thought as `delta.reasoning_content`, never
+            # `delta.content` — this loop otherwise has no way to tell
+            # "no content yet" from "no content ever came, only thinking".
+            saw_reasoning = True
 
         # The final chunk from most providers carries aggregated usage info
         if hasattr(chunk, "usage") and chunk.usage:
@@ -438,6 +490,21 @@ async def call_llm_stream_events(
 
     elapsed_ms = (time.monotonic() - start) * 1000
     full_content = "".join(collected_content)
+
+    # Plan 07 D.3 parity for the thinking-leak case. Evidence 2026-09-27: a
+    # hybrid-reasoning model can burn the whole call on <think> and stream
+    # ONLY reasoning deltas, never a `delta.content` chunk — this used to
+    # complete as a normal "usage" event with an empty answer, i.e. an
+    # empty response reported as a successful stream. Scoped to the
+    # reasoning-was-seen case (rather than every empty stream) so a
+    # genuinely empty response with no reasoning at all — some providers'
+    # legitimate edge case — is unaffected. Raised before the commit
+    # barrier (no "delta" event was yielded, so `committed` is still False
+    # in router.py's dispatch loop), so it is treated as a failed attempt
+    # and the router falls through to the next model in the chain — same
+    # semantics as call_llm()'s ensure_non_empty_content() for non-streaming.
+    if saw_reasoning and not full_content.strip():
+        ensure_non_empty_content(full_content, model)
 
     # Estimate cost from token counts
     try:

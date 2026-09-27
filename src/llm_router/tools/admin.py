@@ -20,7 +20,7 @@ from llm_router.cost import (
     get_cache_savings, get_model_acceptance_scores, get_model_latency_stats,
     get_monthly_spend, get_quality_report,
     get_routing_savings_vs_sonnet, get_savings_summary,
-    import_savings_log,
+    import_routing_quality_ledger, import_savings_log,
 )
 from llm_router.forecast import get_burn_forecast
 from llm_router.health import get_tracker
@@ -162,6 +162,9 @@ async def llm_usage(period: str = "today") -> str:
     # ── Section 5: Routing Savings ──
     # Flush any pending hook JSONL records into SQLite before querying
     await import_savings_log()
+    # Same flush for the North Star ledger — MCP/gateway calls (llm(task=...))
+    # write there and are otherwise invisible to every savings_stats reader.
+    await import_routing_quality_ledger()
     savings = await get_savings_summary(period)
     if savings["total_calls"] > 0:
         s = savings
@@ -642,6 +645,7 @@ async def llm_savings() -> str:
 
     # Flush any hook-written JSONL records into SQLite before querying
     await import_savings_log()
+    await import_routing_quality_ledger()
     data = await get_savings_by_period()
 
     W = 58
