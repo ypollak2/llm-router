@@ -1,4 +1,4 @@
-<!-- llm_router-rules-version: 9 -->
+<!-- llm_router-rules-version: 10 -->
 # LLM Router — Global Routing Rules
 
 > Installed by llm_router. These rules help you route each task to the cheapest capable
@@ -44,6 +44,21 @@ and is *suggesting* the cheapest model that can likely handle it. Format:
 Gemini, Kimi) can be much cheaper than Claude handling it directly. So when the suggested
 model can clearly do the job, prefer it. That's the whole value of LLM Router.
 
+## Edit-shaped work → `llm_edit` first
+
+Editing a small, known set of files (a refactor, a bug fix, a small feature) is not
+"just do it yourself" work — call **`llm_edit(task, files=[...])`** before reading the
+files and reasoning about the change yourself. It routes to a cheap model that reads
+the files and returns validated `{file, old_string, new_string}` pairs: every
+`old_string` is checked for an exact, unique match and the result is syntax-checked
+before you ever see it, with up to 3 retries (rejection reason fed back to the model)
+baked in. **Apply the returned pairs with your Edit tool exactly as given** — do not
+re-derive or paraphrase them; that throws away the point of routing the reasoning off
+Claude. Prefer it whenever the edit touches ≤3 files you can already name. It still
+does not decide for you: if the result comes back unapplied (validation failed after
+3 tries) or the task genuinely needs exploration across many unknown files, do the
+edit yourself — this is guidance, not enforcement.
+
 ## What to do
 
 1. If the task fits the hint, **call the suggested MCP tool** (`llm_query` / `llm_analyze`
@@ -72,7 +87,8 @@ model can clearly do the job, prefer it. That's the whole value of LLM Router.
 | `research/*` | `llm_research` | Perplexity / web-grounded models |
 | `generate/*` | `llm_generate` | Gemini Flash / Haiku for writing |
 | `analyze/*` | `llm_analyze` | Sonnet-class for deep analysis |
-| `code/*` | `llm_code` | Coder models (Ollama qwen-coder, Codex, etc.) |
+| `code/*` | `llm_code` | Coder models (Ollama qwen-coder, Codex, etc.) — pure code Q&A, not file edits |
+| `code/*` (editing known files) | `llm_edit` | Validated old/new pairs, applied as-is with your Edit tool |
 | `query/*` | `llm_query` | Haiku / Gemini Flash / Kimi for questions |
 | `image/*` | `llm_image` | Image generation models |
 | `auto/*` | `llm_route` | Full re-classification |
@@ -88,10 +104,13 @@ Prefer the cheap tools for offloadable work, but never force it:
 - Writing / content → `llm_generate`
 - Deep analysis → `llm_analyze`
 - Code questions → `llm_code`
+- Editing a small, known set of files → `llm_edit` (see above)
 - Simple questions → `llm_query`
 
-Editing/reading files in the current repo is normal agent work — just do it. LLM Router routes
-the *thinking*, not your file tools.
+Reading files, running commands, and one-off edits you already know the exact change for
+are normal agent work — just do it. LLM Router routes the *thinking*, not your file tools.
+The exception is edit-shaped work on a small known file set — see `llm_edit` above: there
+the "thinking" being routed is figuring out the diff itself.
 
 ---
 

@@ -26,8 +26,11 @@ savings comes from the 15.2.0 correction (`CHANGELOG.md:45`, `CHANGELOG.md:83-88
 7. **Never trade quality for quota.** Routed answers must be as good as Claude's for the
    task. Quality is measured independently (RouterArena, `docs/BACKEND-QUALITY.md`), and
    a quality regression blocks a release.
-8. **Tell each user what it did for them.** `llm-router status` and `summary` report
-   verified and unverified savings separately, each with its n.
+8. **Tell each user what it did for them.** Every savings display shows one figure, labelled
+   as an estimate, with its n: `est. saved $X (n=Y) vs <baseline>` or `~$X est`
+   (`dashboard_data.Summary.display()`/`.compact()`). The verified split is still computed
+   for doctor/debug but is not displayed. (Owner decision 2026-09-27: a structurally-$0
+   verified headline read as "llm-router saved nothing".)
 9. **Fail open to Claude, never to a wrong answer.** If a model is slow, missing or
    unusable, Claude answers. Chronically bad models get demoted. (`README.md:411-413`)
 10. **Stay the right size.** It is built for individual developers and small teams.
@@ -39,8 +42,10 @@ savings comes from the 15.2.0 correction (`CHANGELOG.md:45`, `CHANGELOG.md:83-88
     ship. Leaving the claim out is always an option. (`CLAUDE.md:36`)
 12. **On a subscription, savings are quota, never dollars.** API-price figures are
     labelled as counterfactuals. (`README.md:397-399`)
-13. **Unverified savings are never a headline.** They appear as `+ $X unverified, n=N`,
-    and only below the verified figure. (`CHANGELOG.md:83-88`)
+13. **An estimate is always labelled as one.** The displayed savings figure is an estimate
+    and carries "est." or "~" everywhere; it is never presented as realized money.
+    (Supersedes the 2026-09 rule that unverified savings never headline; owner decision
+    2026-09-27.)
 14. **Measure on real workload.** Exclude test and benchmark traffic, and prove that the
     filter dropped something. (`CLAUDE.md:22`, `:65`, `:90`)
 15. **Claims match the mode.** The default mode is advisory: Claude still takes the turn.
@@ -65,7 +70,8 @@ savings comes from the 15.2.0 correction (`CHANGELOG.md:45`, `CHANGELOG.md:83-88
 
 | Metric | Role | Today |
 |---|---|---|
-| Verified share of eligible Claude turns replaced or shortened, on real workload | **Primary**: the North Star number | **Not computable yet**: production rows don't record whether the draft was used (`mode` NULL; see [audit](AUDIT-2026-09-24.md)). Last direct measure: 0 of 1,185 audited drafts used (`CHANGELOG.md:45`) |
+| **Routed-and-used share per session**: of all user prompts + all LLM calls in a session, the share routed to a non-Claude model AND used as-is (not discarded, not redone by Claude). Target: **every session >=50%, aiming for 70%** (owner, 2026-09-27). Measured by `llm-router northstar` | **Primary**: the North Star number | ~0%: 1/38,721 units used, median session 0%, n=300 sessions, 30 d (2026-09-27); routing attempted on 0.58% |
+| Verified share of eligible Claude turns replaced or shortened, on real workload | Secondary | **Not computable yet**: production rows don't record whether the draft was used (`mode` NULL; see [audit](AUDIT-2026-09-24.md)). Last direct measure: 0 of 1,185 audited drafts used (`CHANGELOG.md:45`) |
 | Verified quota saved, with its n | Reported to each user | $0.11 verified (n=7) vs $483.14 unverified (n=46,099), maintainer ledger 2026-09-24 (`CHANGELOG.md:86-88`) |
 | Quality of routed answers vs Claude on the same tasks | Guardrail: must not drop | RouterArena and `docs/BACKEND-QUALITY.md` |
 

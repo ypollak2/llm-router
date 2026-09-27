@@ -253,22 +253,41 @@ def test_window_totals_verified_calls_is_the_verified_row_count(tmp_path):
 def test_status_verified_line_n_is_verified_rows_not_call_volume(
     tmp_path, importing_a_submodule
 ):
-    """Reviewer-01, live-reproduced: status_premium's verified `$` line
-    showed "$0.00 … (n=47260)" — raw call volume across five UNION'd
-    tables — while the actual verified-row count was 0. Seed 10
-    never-verified platform rows plus exactly 1 verified savings_stats row
-    and assert the verified line says n=1, not n=11/n=10."""
+    """Reviewer-01, live-reproduced: status_premium's money line showed
+    "$0.00 … (n=47260)" — raw call volume across five UNION'd tables — while
+    the actual row count behind the dollar figure was far smaller.
+
+    2026-09-27: the panel now shows ONE merged estimate
+    (`Summary.estimated_n` = `realized_n + unverified_n`), so a fixture
+    where every row carries money (the original 10 usage + 1 savings_stats
+    rows) can no longer discriminate the fix from the bug — both would
+    coincidentally print the same `n`. This fixture adds 5 NON-production
+    usage rows (`is_simulated=1`), which `_production_pred` drops from the
+    money figure ENTIRELY (see `dashboard_data._production_pred`'s
+    docstring) but which still count toward raw `calls` — so the invariant
+    ("the n behind the $ figure, never unfiltered activity volume") stays
+    exercised: `estimated_n` is 11 (10 unverified usage rows + 1 verified
+    savings_stats row), while raw `calls` is 16.
+    """
     db = tmp_path / "usage.db"
     conn = sqlite3.connect(db)
     _usage_ddl(conn)
     for _ in range(10):
         _usage_row(conn, is_simulated=0)
+    for _ in range(5):
+        _usage_row(conn, is_simulated=1)  # dropped from money entirely
     _savings_stats_ddl(conn)
     _stats_row(conn, saved=2.0, mode="block")
     conn.commit()
     conn.close()
 
+    from llm_router import dashboard_data
     from llm_router.ui import status_premium as sp
+
+    canonical = dashboard_data.summary("today", db_path=db)
+    assert canonical.estimated_n == 11, "premise: 10 unverified + 1 verified"
+    totals = dashboard_data.query_window("today", db_path=db)
+    assert totals.calls == 16, "premise: raw activity volume is wider (16)"
 
     cmd = sp.PremiumStatusCommand()
     cmd.db_path = db
@@ -280,18 +299,12 @@ def test_status_verified_line_n_is_verified_rows_not_call_volume(
     Console(file=buf, width=120, force_terminal=False).print(group)
     text = buf.getvalue()
 
-    assert "(n=1)" in text, (
-        f"the verified figure's n must be 1 (verified rows only), got: {text!r}"
-    )
-    # The VERIFIED $ line ("real/baseline-equivalent ... avoided") must say
-    # n=1. Its own "n=10"/"n=11" would be the bug; the UNVERIFIED note is a
-    # DIFFERENT, correctly-labelled n (10 unverified rows) and must not be
-    # mistaken for it — check the verified line in isolation.
-    verified_lines = [ln for ln in text.splitlines() if "avoided vs" in ln]
-    assert verified_lines, f"no verified money line found: {text!r}"
-    for ln in verified_lines:
-        assert "(n=1)" in ln and "n=10" not in ln and "n=11" not in ln, (
-            f"verified line must say n=1 (verified rows), not call volume: {ln!r}"
+    money_lines = [ln for ln in text.splitlines() if "est. saved" in ln]
+    assert money_lines, f"no money line found: {text!r}"
+    for ln in money_lines:
+        assert "(n=11)" in ln and "n=16" not in ln and "n=15" not in ln, (
+            f"the money line must say n=11 (the row count behind the $ "
+            f"figure), not raw call volume: {ln!r}"
         )
 
 
@@ -340,12 +353,65 @@ def test_primary_metric_renders_even_when_today_is_empty(tmp_path, importing_a_s
     assert "too few to tell (n=2)" in text, text
 
 
-# ── 5. subscription: `llm-router status`'s savings panel has no bare `$` ─────
+# ── 5. `llm-router status`'s savings panel has no bare `$` ───────────────────
+#
+# 2026-09-27 SCOPE NOTE: these two tests used to assert R7's subscription-
+# specific wording (`label_money`'s "real dollars avoided" / "subscription:
+# no cash changed hands"). The panel no longer calls `label_money` at all —
+# it renders `Summary.display()`, and `dashboard_data.Summary` has no
+# subscription field (that framing belongs to `savings.CanonicalSavings`,
+# a different, still-unchanged code path used by `doctor`/`explain-dashboard`
+# — see those commands' own `canonical_savings()` calls). The invariant these
+# tests still protect — a bare, unqualified `$X` must never appear beside a
+# quota-style panel — is checked directly below; the subscription-specific
+# half of the original assertions is intentionally dropped, not silently
+# broken, because `Summary.display()` structurally cannot print one (its
+# only qualifier is "est. saved ... vs BASELINE", subscription or not).
 
 
-def test_status_savings_panel_has_no_bare_dollar_under_subscription(
+def test_status_savings_panel_has_no_bare_dollar(tmp_path, importing_a_submodule):
+    db = tmp_path / "usage.db"
+    conn = sqlite3.connect(db)
+    _savings_stats_ddl(conn)
+    _stats_row(conn, saved=3.5, mode="block")
+    conn.commit()
+    conn.close()
+
+    from llm_router.ui import status_premium as sp
+
+    cmd = sp.PremiumStatusCommand()
+    cmd.db_path = db
+    group = cmd.render_routing_savings()
+
+    from rich.console import Console
+
+    buf = io.StringIO()
+    Console(file=buf, width=120, force_terminal=False).print(group)
+    text = buf.getvalue()
+
+    assert "est. saved" in text and "vs claude-opus" in text, (
+        f"the money figure must carry its 'est.'/baseline qualifier: {text!r}"
+    )
+    # The pre-fix line was literally f"${saved:.2f} saved" — a number
+    # immediately followed by the bare word "saved" with no qualifier.
+    assert not re.search(r"\$\d[\d,]*\.\d{2}\s+saved\b", text), (
+        f"found a bare-dollar 'saved' line with no qualifier: {text!r}"
+    )
+    # Scoped to the MONEY lines only — the panel's separate North Star line
+    # ("Verified share of eligible Claude turns", a different metric, out of
+    # this task's scope) legitimately says "verified" and must not trip this.
+    money_lines = [ln for ln in text.splitlines() if "est. saved" in ln]
+    assert money_lines and not any("verified" in ln.lower() for ln in money_lines), (
+        f"'verified'/'unverified' must not reach the money line: {money_lines!r}"
+    )
+
+
+def test_status_savings_panel_labels_money_under_subscription_too(
     tmp_path, monkeypatch, importing_a_submodule
 ):
+    """Control: the qualifier does not depend on subscription state — the
+    figure is an estimate either way, and `Summary.display()` takes no
+    subscription input at all."""
     monkeypatch.setenv("LLM_ROUTER_CLAUDE_SUBSCRIPTION", "1")
     db = tmp_path / "usage.db"
     conn = sqlite3.connect(db)
@@ -366,43 +432,7 @@ def test_status_savings_panel_has_no_bare_dollar_under_subscription(
     Console(file=buf, width=120, force_terminal=False).print(group)
     text = buf.getvalue()
 
-    assert "subscription" in text.lower(), (
-        "under a subscription the money figure must carry the counterfactual "
-        f"qualifier (label_money), got: {text!r}"
-    )
-    # The pre-fix line was literally f"${saved:.2f} saved" — a number
-    # immediately followed by the bare word "saved" with no qualifier.
+    assert "est. saved" in text and "vs claude-opus" in text, text
     assert not re.search(r"\$\d[\d,]*\.\d{2}\s+saved\b", text), (
-        f"found a bare-dollar 'saved' line with no label_money qualifier: {text!r}"
-    )
-
-
-def test_status_savings_panel_labels_money_without_subscription_too(
-    tmp_path, monkeypatch, importing_a_submodule
-):
-    """Control: the qualifier is R7's label_money, not a subscription-only
-    special case — real dollars avoided still names its baseline."""
-    monkeypatch.delenv("LLM_ROUTER_CLAUDE_SUBSCRIPTION", raising=False)
-    db = tmp_path / "usage.db"
-    conn = sqlite3.connect(db)
-    _savings_stats_ddl(conn)
-    _stats_row(conn, saved=3.5, mode="block")
-    conn.commit()
-    conn.close()
-
-    from llm_router.ui import status_premium as sp
-
-    cmd = sp.PremiumStatusCommand()
-    cmd.db_path = db
-    group = cmd.render_routing_savings()
-
-    from rich.console import Console
-
-    buf = io.StringIO()
-    Console(file=buf, width=120, force_terminal=False).print(group)
-    text = buf.getvalue()
-
-    assert "real dollars avoided" in text, text
-    assert not re.search(r"\$\d[\d,]*\.\d{2}\s+saved\b", text), (
-        f"found a bare-dollar 'saved' line with no label_money qualifier: {text!r}"
+        f"found a bare-dollar 'saved' line with no qualifier: {text!r}"
     )
