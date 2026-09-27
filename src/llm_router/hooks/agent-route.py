@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 7
+# llm_router-hook-version: 8
 """PreToolUse[Agent] hook — intercept subagent spawning, route reasoning to cheap models.
 
 When Claude spawns a subagent (Agent tool), this hook intercepts and decides:
@@ -24,6 +24,16 @@ Pressure-aware profile selection (passed to the MCP tool):
 Note: Explore subagent type is always approved (pure retrieval by design).
 Note: Mixed tasks (read files then analyze) are blocked; Claude is instructed
       to read files with local tools then pass content to the MCP tool.
+
+NS3 (2026-09-27): suitable spawns (research / code-reading / analysis that
+does not need the parent's live context and is not a write-heavy multi-file
+edit) are offered to Codex CLI FIRST, ahead of the `_allow_routed_spawn()`
+model-pin path below. Before this change that path ran unconditionally for
+every non-Explore, non-allowlisted spawn (default `LLM_ROUTER_ALLOW_SUBAGENTS
+=on`) and returned immediately, so `_try_cli_delegation` — the only existing
+code that calls Codex — was unreachable in the default configuration. That is
+the root cause `model_tracking.jsonl` showed 0 Codex calls across 30 days
+despite this hook being "on". See `_try_codex_subagent_delegation`.
 """
 
 from __future__ import annotations
@@ -33,6 +43,7 @@ import os
 import re
 import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 
@@ -356,6 +367,104 @@ def _scrub_agent_prompt(text: str) -> str:
         return text
 
 
+_AGENT_CALLS_LEDGER_MAX_AGE_S = 30 * 24 * 3600  # 30 days
+
+
+def _agent_calls_ledger_file() -> Path:
+    return _router_home() / "agent_calls_ledger.jsonl"
+
+
+def _append_agent_calls_ledger(entry: dict) -> None:
+    """Append-only, 30-day-rolling companion to the 50-cap agent_calls.json.
+
+    ``agent_calls.json`` is capped at 50 entries for its one real consumer
+    (``hooks/agent-error.py``, which only ever wants the MOST RECENT call for
+    fallback suggestions) and turns over within hours in an active session —
+    it cannot answer "how much sub-agent traffic went where over the last 30
+    days", which is exactly the question the NS3 Codex-delegation lever needs
+    answered. This ledger keeps every row for 30 days, pruned by AGE instead
+    of COUNT, without changing agent_calls.json's existing cap or behaviour.
+
+    Fire-and-forget: a broken ledger must never break routing.
+    """
+    try:
+        f = _agent_calls_ledger_file()
+        f.parent.mkdir(parents=True, exist_ok=True)
+        cutoff = time.time() - _AGENT_CALLS_LEDGER_MAX_AGE_S
+        kept: list[str] = []
+        if f.exists():
+            for line in f.read_text().splitlines():
+                if not line.strip():
+                    continue
+                try:
+                    row = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                # A row with no readable timestamp is not "0 seconds old" — it is
+                # unmeasured, and the honest behaviour for an unmeasured age is to
+                # let it drop off the 30-day window rather than treating absence
+                # as freshly-written (see lint_unknown_as_number.py: an absent
+                # value compared against a threshold must not silently read as 0).
+                ts = row.get("timestamp")
+                if isinstance(ts, (int, float)) and ts >= cutoff:
+                    kept.append(line)
+        kept.append(json.dumps(entry))
+        f.write_text("\n".join(kept) + "\n")
+        try:
+            os.chmod(f, 0o600)
+        except OSError:
+            pass
+    except Exception as exc:
+        try:
+            from llm_router import failopen
+            failopen.record("CHZ-FO-NS3-AGENT-CALLS-LEDGER", exc)
+        except Exception:
+            pass
+
+
+def _north_star_ledger_file() -> Path:
+    return _router_home() / "north_star_units.jsonl"
+
+
+def _record_north_star_unit(lever: str, *, model: str, outcome: str, **meta) -> None:
+    """Append one North-Star routing unit as a JSON line — the NS1-readable
+    signal for this lever (``lever="agent_route_codex"``).
+
+    Written for every decision this lever makes (delegated / unsuitable /
+    budget_exhausted / codex_unavailable / codex_failed), not only successes,
+    so "0 Codex calls in 30 days" (the NS3 baseline) becomes distinguishable
+    from "the lever ran N times and every one was correctly declined".
+    Fire-and-forget: a broken ledger must never break routing.
+    """
+    try:
+        entry = {
+            "ts": time.time(),
+            "lever": lever,
+            "model": model,
+            "outcome": outcome,
+            **meta,
+        }
+        f = _north_star_ledger_file()
+        f.parent.mkdir(parents=True, exist_ok=True)
+        with f.open("a") as fh:
+            fh.write(json.dumps(entry) + "\n")
+        try:
+            os.chmod(f, 0o600)
+        except OSError:
+            pass
+    except Exception as exc:
+        # This is the NS1-readable signal for the whole lever — a silent loss
+        # here is the exact failure mode this feature exists to avoid (see
+        # llm_router.failopen's own docstring: a caught exception is
+        # information, and discarding it converts a known failure into an
+        # unknown one).
+        try:
+            from llm_router import failopen
+            failopen.record("CHZ-FO-NS3-NORTH-STAR-LEDGER", exc)
+        except Exception:
+            pass
+
+
 def _log_agent_call(subagent_type: str, prompt: str, decision: str) -> None:
     """Log agent call for error recovery tracking.
 
@@ -364,6 +473,10 @@ def _log_agent_call(subagent_type: str, prompt: str, decision: str) -> None:
 
     Secrets in the prompt are scrubbed before storage and the file is written
     owner-only (0o600) so pasted credentials can't leak to other local users.
+
+    Also appends the same (scrubbed) entry to the 30-day append-only ledger
+    (see ``_append_agent_calls_ledger``) so sub-agent routing decisions —
+    including NS3 Codex delegation — stay measurable past the 50-call cap.
     """
     calls_file = _router_home() / "agent_calls.json"
 
@@ -376,13 +489,15 @@ def _log_agent_call(subagent_type: str, prompt: str, decision: str) -> None:
         pass
 
     # Append new call (scrub secrets before truncating/storing)
-    history.append({
+    entry = {
         "timestamp": time.time(),
         "subagent_type": subagent_type,
         "prompt": _scrub_agent_prompt(prompt[:500]),  # scrub + truncate
         "decision": decision,
         "session_id": _get_session_id(),
-    })
+    }
+    history.append(entry)
+    _append_agent_calls_ledger(entry)
 
     # Keep last 50 calls only
     history = history[-50:]
@@ -957,6 +1072,240 @@ def _try_cli_delegation(
     return res.content
 
 
+# ── NS3: suitable sub-agent spawns → Codex CLI, ahead of everything else ────
+# ROOT CAUSE this section fixes: `_allow_routed_spawn()` below defaults to ON
+# (LLM_ROUTER_ALLOW_SUBAGENTS default "on") and, for every non-Explore,
+# non-allowlisted spawn, model-pins and returns UNCONDITIONALLY — before
+# `_try_direct_subagent` or `_try_cli_delegation` (the only existing caller of
+# Codex) are ever reached. That made `_try_cli_delegation` dead code in the
+# default configuration and is why model_tracking.jsonl showed 0 Codex calls
+# across 30 days despite this hook being "on". This section runs BEFORE that
+# branch so a suitable spawn reaches Codex regardless of LLM_ROUTER_ALLOW_SUBAGENTS.
+
+_CODEX_UNSUITABLE_SUBAGENT_TYPES = {
+    # "fork" inherits the CALLER's full conversation context by definition
+    # (see the Agent tool's own description). Codex CLI is a standalone
+    # process with none of that context, so a fork spawn is never suitable
+    # for external delegation regardless of task type.
+    "fork",
+}
+
+_CODEX_SUITABLE_TASK_TYPES = {"research", "analyze", "code"}
+
+_MULTI_FILE_WRITE_SIGNALS = re.compile(
+    r"\b(?:across (?:multiple|all|every|several) files?|multi-file|"
+    r"refactor (?:the )?(?:entire|whole|full)(?:\s+(?:codebase|repo|repository|project))?|"
+    r"rewrite (?:the )?(?:entire|whole|full)|"
+    r"implement (?:this |it )?across|"
+    r"edit (?:multiple|several|many) files|"
+    r"large[- ]scale (?:refactor|migration)|"
+    r"migrate (?:the )?(?:entire|whole|full)?\s*codebase)\b",
+    re.IGNORECASE,
+)
+
+
+def _is_codex_suitable(subagent_type: str, task_type: str, prompt: str) -> bool:
+    """Suitable = research / code-reading / analysis that (a) does not need
+    the parent session's live conversational context and (b) is not a
+    write-heavy, multi-file edit. Codex CLI runs as its own subprocess with
+    its own toolchain — it can read/search/reason over files on disk, but it
+    is not a substitute for a real multi-file edit loop and it cannot see
+    anything the parent session holds only in memory."""
+    if subagent_type in _CODEX_UNSUITABLE_SUBAGENT_TYPES:
+        return False
+    if task_type not in _CODEX_SUITABLE_TASK_TYPES:
+        return False
+    if _MULTI_FILE_WRITE_SIGNALS.search(prompt):
+        return False
+    return True
+
+
+# Conservative default: 10% of the ~1000/day ChatGPT-Plus estimate that
+# quota_balance.get_codex_pressure()/config.codex_daily_limit already use
+# elsewhere in this codebase (that figure is itself a local, self-reported
+# counter — Codex CLI exposes no queryable rate-limit API; see `codex doctor`
+# and `~/.llm-router/codex_quota.json`). This lever gets its OWN dedicated
+# counter file (below), not a share of that existing one, so sub-agent
+# delegation cannot silently starve the Codex quota other llm_* routes draw
+# from, and vice versa.
+_CODEX_SUBAGENT_DEFAULT_DAILY_BUDGET = 100
+
+
+def _codex_subagent_daily_budget() -> int:
+    try:
+        return max(0, int(os.environ.get(
+            "LLM_ROUTER_AGENT_ROUTE_CODEX_DAILY_BUDGET",
+            str(_CODEX_SUBAGENT_DEFAULT_DAILY_BUDGET),
+        )))
+    except (TypeError, ValueError):
+        return _CODEX_SUBAGENT_DEFAULT_DAILY_BUDGET
+
+
+def _codex_subagent_budget_file() -> Path:
+    return _router_home() / "agent_route_codex_budget.json"
+
+
+def _codex_subagent_budget_remaining() -> int:
+    """Remaining Codex sub-agent delegations allowed today (UTC calendar day)."""
+    budget = _codex_subagent_daily_budget()
+    try:
+        data = json.loads(_codex_subagent_budget_file().read_text())
+    except (FileNotFoundError, json.JSONDecodeError):
+        return budget
+    today = datetime.now(timezone.utc).date().isoformat()
+    if data.get("date") != today:
+        return budget
+    try:
+        count = int(data.get("count", 0))
+    except (TypeError, ValueError):
+        count = 0
+    return max(0, budget - count)
+
+
+def _codex_subagent_budget_increment() -> None:
+    """Record one Codex sub-agent delegation attempt against today's budget.
+
+    Incremented before the call is made (not only on success): a dispatched
+    `codex exec` is a real request against the real ChatGPT-Plus rate limit
+    whether or not it succeeds, and the budget is meant to bound requests
+    made, not answers received.
+    """
+    f = _codex_subagent_budget_file()
+    today = datetime.now(timezone.utc).date().isoformat()
+    try:
+        data = json.loads(f.read_text())
+    except (FileNotFoundError, json.JSONDecodeError):
+        data = {}
+    if data.get("date") != today:
+        data = {"date": today, "count": 0}
+    data["count"] = int(data.get("count", 0)) + 1
+    data["date"] = today
+    try:
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text(json.dumps(data))
+    except OSError as exc:
+        try:
+            from llm_router import failopen
+            failopen.record("CHZ-FO-NS3-CODEX-BUDGET-WRITE", exc)
+        except Exception:
+            pass
+
+
+def _try_codex_subagent_delegation(
+    prompt: str, task_type: str, complexity: str, subagent_type: str, session_id: str,
+) -> str | None:
+    """NS3 — delegate a SUITABLE sub-agent spawn to Codex CLI before Claude
+    ever spawns anything for it.
+
+    Bounded by a dedicated daily budget (see ``_codex_subagent_daily_budget``)
+    so this lever cannot starve the Codex quota other llm_* routes already
+    draw from. Every decision this function makes — delegated, unsuitable,
+    budget-exhausted, unavailable, or a Codex failure — is recorded as a
+    North Star unit (``lever="agent_route_codex"``, see
+    ``_record_north_star_unit``) so this lever becomes measurable regardless
+    of which branch it takes.
+
+    Returns the Codex output (to be used verbatim as the subagent's result),
+    or ``None`` to fall through to the existing model-pinned-spawn / DIRECT /
+    CLI-delegation chain, unchanged.
+    """
+    if os.environ.get("LLM_ROUTER_AGENT_ROUTE_CODEX", "on").strip().lower() in (
+        "0", "off", "false", "no"):
+        return None  # feature fully disabled — no ledger row, nothing was attempted
+
+    if not _is_codex_suitable(subagent_type, task_type, prompt):
+        _record_north_star_unit(
+            "agent_route_codex", model="", outcome="unsuitable",
+            subagent_type=subagent_type, task_type=task_type,
+            complexity=complexity, session_id=session_id,
+        )
+        return None
+
+    remaining = _codex_subagent_budget_remaining()
+    if remaining <= 0:
+        _record_north_star_unit(
+            "agent_route_codex", model="", outcome="budget_exhausted",
+            subagent_type=subagent_type, task_type=task_type,
+            complexity=complexity, session_id=session_id,
+            reason=f"daily Codex sub-agent budget ({_codex_subagent_daily_budget()}/day) spent; falling back to Claude",
+        )
+        return None
+
+    try:
+        from llm_router.codex_agent import is_codex_available
+    except Exception as e:
+        _record_north_star_unit(
+            "agent_route_codex", model="", outcome="codex_unavailable",
+            subagent_type=subagent_type, task_type=task_type,
+            complexity=complexity, session_id=session_id,
+            reason=f"codex_agent import failed: {e}"[:200],
+        )
+        return None
+
+    if not is_codex_available():
+        _record_north_star_unit(
+            "agent_route_codex", model="", outcome="codex_unavailable",
+            subagent_type=subagent_type, task_type=task_type,
+            complexity=complexity, session_id=session_id,
+            reason="no Codex CLI binary found on this machine",
+        )
+        return None
+
+    timeout = 120
+    try:
+        timeout = max(15, int(os.environ.get("LLM_ROUTER_SUBAGENT_CLI_TIMEOUT", "120")))
+    except (TypeError, ValueError):
+        pass
+
+    # Reserve budget before dispatch — see _codex_subagent_budget_increment docstring.
+    _codex_subagent_budget_increment()
+
+    try:
+        import asyncio
+
+        from llm_router.codex_agent import run_codex
+        res = asyncio.run(run_codex(prompt, timeout=timeout))
+    except Exception as e:
+        _record_north_star_unit(
+            "agent_route_codex", model="", outcome="codex_failed",
+            subagent_type=subagent_type, task_type=task_type,
+            complexity=complexity, session_id=session_id,
+            reason=f"run_codex raised: {e}"[:200],
+        )
+        return None
+
+    if not res or not getattr(res, "success", False) or not (res.content or "").strip():
+        reason = getattr(res, "content", "") if res else "no CodexResult returned"
+        _record_north_star_unit(
+            "agent_route_codex", model=getattr(res, "model", ""), outcome="codex_failed",
+            subagent_type=subagent_type, task_type=task_type,
+            complexity=complexity, session_id=session_id,
+            reason=str(reason)[:200],
+        )
+        return None
+
+    if os.environ.get("LLM_ROUTER_ROUTE_BANNER", "on").strip().lower() not in ("0", "off", "false", "no"):
+        try:
+            sys.stderr.write(
+                f"🎯 subagent → Codex (NS3) · {res.model} · {task_type}/{complexity} "
+                f"· {res.duration_sec:.1f}s · budget {remaining - 1}/{_codex_subagent_daily_budget()} left today\n"
+            )
+        except Exception:
+            pass
+
+    _log_cli_savings(res.content, "codex", res.model, res.duration_sec,
+                      prompt, task_type, complexity, session_id)
+    _govern_run(subagent_type, "codex", res.model,
+                max(1, len(prompt) // 4), max(1, len(res.content) // 4), complexity)
+    _record_north_star_unit(
+        "agent_route_codex", model=res.model, outcome="delegated",
+        subagent_type=subagent_type, task_type=task_type,
+        complexity=complexity, session_id=session_id,
+        duration_sec=res.duration_sec,
+    )
+    return res.content
+
+
 def main() -> None:
     try:
         hook_input = json.load(sys.stdin)
@@ -1038,6 +1387,27 @@ def main() -> None:
     # ── Classify reasoning task ──────────────────────────────────────────────
     task_type = _classify_task_type(prompt)
     complexity = _classify_complexity(prompt)
+
+    # ── NS3: suitable spawns → Codex CLI FIRST (external, free from Claude quota) ──
+    # Must run before _allow_routed_spawn() below: that branch defaults to ON and
+    # returns unconditionally, which is why Codex delegation was unreachable before
+    # this change. See the NS3 docstring above _try_codex_subagent_delegation.
+    _codex_delegated = _try_codex_subagent_delegation(
+        prompt, task_type, complexity, subagent_type, session_id)
+    if _codex_delegated is not None:
+        _write_agent_depth(session_id, current_depth)  # roll back: no real spawn happened
+        _log_agent_call(subagent_type, prompt, "routed_codex_subagent")
+        json.dump({
+            "decision": "block",
+            "reason": (
+                "[llm_router] Subagent task was delegated to Codex CLI (external, "
+                "ChatGPT subscription — free from Claude quota); budget and outcome "
+                "logged (lever=agent_route_codex). Use this result directly as the "
+                "subagent's output — do not re-do the work:\n\n" + _codex_delegated +
+                "\n\n[NS1] agent_route_codex: result used verbatim as subagent output."
+            ),
+        }, sys.stdout)
+        return
 
     # ── llm_router multi-agent: ALLOW a real spawn on a cheap tier + inherit routing ─
     # (depth breaker above already bounds nesting; cheap model bounds cost). This

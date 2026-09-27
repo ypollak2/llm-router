@@ -342,7 +342,9 @@ class SavingsAnalytics:
             _s = _canonical_summary(_period_map.get(period, "all"))
             output.append(bold("CANONICAL (dashboard_data.summary — same figure as "
                                 "`status`/`savings-report`/the statusline)"))
-            output.append(f"  {_s.headline()}")
+            # 2026-09-27: display(), not headline() — one labelled estimate,
+            # never "verified"/"unverified" (Summary.display()'s docstring).
+            output.append(f"  {_s.display()}")
             output.append("")
         except Exception as exc:  # noqa: BLE001 — this panel must not break `gain`
             from llm_router import failopen

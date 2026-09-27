@@ -279,22 +279,48 @@ def test_statusline_probes_the_real_cli_name():
 def test_statusline_labels_the_money_as_saved():
     """A bare dollar figure beside a quota percentage reads as spend.
 
-    It is the opposite: savings versus an all-premium baseline, summed over
-    every session since local midnight.
+    It is the opposite: an estimate versus an all-premium baseline, summed
+    over every session since local midnight. The actual wording (the literal
+    string "est") is produced at RUNTIME by `Summary.compact()`, not present
+    as text in this shell source — so the invariant checked here is that the
+    render line delegates to `compact()` rather than composing its own money
+    string (2026-09-27 product decision: one implementation of the wording,
+    which by construction always carries "est" — see `Summary.compact()`'s
+    docstring/contract, pinned separately in
+    `tests/test_statusline_savings.py`'s end-to-end check).
+
+    Checked on the RENDER line (`parts+=(...` containing 💰), not the first
+    💰 mention anywhere in the file — the header comment also mentions 💰
+    and checking that instead would test documentation, not behaviour (the
+    exact "mention vs use" mistake
+    `tests/test_statusline_savings.py::test_the_savings_figure_is_labelled`
+    was written to avoid).
     """
     src = _statusline_source()
-    assert "saved" in src.split("💰")[1][:80], (
-        "the money segment must say 'saved' — an unlabelled figure next to a "
-        "quota percentage is read as money spent"
+    render = [
+        line for line in src.splitlines() if "parts+=(" in line and "💰" in line
+    ]
+    assert render, "no 💰 render line found in the statusline script"
+    assert ".compact()" in src, (
+        "the statusline no longer delegates its money wording to "
+        "Summary.compact() — every surface must call the ONE money-string "
+        "implementation, never format its own"
     )
 
 
 def test_statusline_reports_today_not_the_session():
-    """Today means every session since midnight, via the canonical union."""
+    """Today means every session since midnight, via the canonical union.
+
+    2026-09-27: the statusline calls `dashboard_data.summary("today", ...)`
+    rather than `query_window("today", ...)` directly — `summary()` composes
+    `query_window` internally (same five-table union), so this invariant
+    still holds; only the call site's name changed.
+    """
     src = _statusline_source()
-    assert 'query_window("today"' in src, (
-        "the statusline must use the canonical today-window aggregation, which "
-        "unions all five usage tables; a per-session figure under-reports"
+    assert 'summary("today"' in src, (
+        "the statusline must use the canonical today-window aggregation "
+        "(dashboard_data.summary(), which unions all five usage tables via "
+        "query_window internally); a per-session figure under-reports"
     )
 
 
@@ -304,10 +330,20 @@ def test_statusline_reports_today_not_the_session():
 def test_session_summary_labels_money_as_saved():
     """The most-screenshotted line this product produces must not read as spend.
 
-    The condensed summary renders `saved today $X · lifetime $Y · quota used
-    5h N%`. Before this, the money bits were bare (`today $32.85`) and sat
-    inches from a quota percentage — the identical inversion a user hit on the
-    statusline, where an unlabelled figure was read as money spent.
+    The condensed summary renders `today ~$X est · lifetime ~$Y est · quota
+    used 5h N%`. Before this, the money bits were bare (`today $32.85`) and
+    sat inches from a quota percentage — the identical inversion a user hit
+    on the statusline, where an unlabelled figure was read as money spent.
+
+    2026-09-27: the money itself moved from regex-parsing this rendered box
+    to `dashboard_data.summary()` (see `_condense`'s docstring) — a second,
+    real regression of the same shape, where the box's OWN money was VERIFIED
+    only and got printed as if it were the full lifetime figure. PR #178
+    then labelled the split explicitly ("verified $X · est +$Y"); this later
+    fix merges both into ONE always-labelled estimate per period
+    (`Summary.compact()`) — "verified"/"unverified" no longer reach this
+    line at all, which satisfies this test's actual invariant — a money
+    figure must say what it is — more precisely than either wording before it.
     """
     import importlib.util
 
@@ -330,8 +366,14 @@ def test_session_summary_labels_money_as_saved():
     )
     line = mod._condense(summary)
 
-    assert "saved today" in line, (
+    assert "today ~$" in line and "est" in line, (
         f"the money figure is unlabelled and will be read as spend: {line!r}"
+    )
+    assert "lifetime ~$" in line, (
+        f"the lifetime figure is unlabelled and will be read as spend: {line!r}"
+    )
+    assert "verified" not in line.lower(), (
+        f"'verified'/'unverified' must not reach a user-facing surface: {line!r}"
     )
     assert "quota used" in line, "quota label lost"
 

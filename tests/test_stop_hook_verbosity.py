@@ -33,7 +33,9 @@ Two properties that are easy to get wrong and are asserted below:
 from __future__ import annotations
 
 import importlib.util
+import sqlite3
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -45,6 +47,11 @@ _HOOK = Path(__file__).resolve().parents[1] / "src" / "llm_router" / "hooks" / "
 # BACKWARDS ("$1.23 lifetime" instead of "lifetime $1.23"). Every test passed
 # against it while _condense matched nothing in production and printed a bare
 # "682 routed" every turn. A fixture that is a guess tests the guess.
+#
+# 2026-09-27: this box's OWN "lifetime $2299.39" / "today $159.74" text is no
+# longer where the money in the condensed line comes from — see
+# `test_money_comes_from_dashboard_data_not_the_box` below. It still supplies
+# the routed count and the quota bars, which `_condense` still regex-extracts.
 _BOXED = '│  ROUTING  today  44 decisions           SAVINGS  all sessions      │\n│    🔄 fallback      16   36%              lifetime $2299.39        │\n│    🔨 build-fast     7   16%              today    $159.74         │\n│     5h ━━──────────────  16%                                       │\n│     weekly ━━━━━━──────────  39%                                   │'
 
 _EMPTY = "  " + "═" * 40 + "\n  No session activity detected\n  " + "═" * 40
@@ -57,6 +64,51 @@ def hook():
     sys.modules["_se"] = mod
     spec.loader.exec_module(mod)
     return mod
+
+
+def _seed_db(path, rows) -> None:
+    """A minimal `savings_stats` fixture. Each row is
+    (saved_usd, model, mode) — mode='block' is VERIFIED (PR6); mode=None is
+    UNVERIFIED. Timestamped "now" so every row lands inside both "today" and
+    "lifetime" windows.
+    """
+    conn = sqlite3.connect(path)
+    conn.execute("""CREATE TABLE savings_stats (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        timestamp TEXT NOT NULL,
+        session_id TEXT NOT NULL,
+        task_type TEXT NOT NULL,
+        estimated_claude_cost_saved REAL NOT NULL,
+        external_cost REAL NOT NULL DEFAULT 0,
+        model_used TEXT NOT NULL,
+        host TEXT NOT NULL DEFAULT 'claude_code',
+        is_simulated INTEGER,
+        mode TEXT
+    )""")
+    ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
+    conn.executemany(
+        "INSERT INTO savings_stats (timestamp, session_id, task_type, "
+        "estimated_claude_cost_saved, model_used, mode, is_simulated) "
+        "VALUES (?, 's1', 'code', ?, ?, ?, 0)",
+        [(ts, saved, model, mode) for saved, model, mode in rows],
+    )
+    conn.commit()
+    conn.close()
+
+
+@pytest.fixture
+def fixture_home(tmp_path, monkeypatch):
+    """Points `dashboard_data.summary()`'s default db-path resolution at an
+    isolated, seeded database — so these tests never read (or could be
+    confused by) the real machine's `~/.llm-router/usage.db`."""
+    monkeypatch.setenv("LLM_ROUTER_HOME", str(tmp_path))
+    monkeypatch.delenv("LLM_ROUTER_CLAUDE_SUBSCRIPTION", raising=False)
+    db = tmp_path / "usage.db"
+    _seed_db(db, [
+        (0.05, "ollama/a", "block"),   # verified
+        (0.30, "ollama/a", None),      # unverified
+    ])
+    return db
 
 
 def test_default_is_condensed(hook, monkeypatch):
@@ -84,22 +136,52 @@ def test_unknown_values_fall_back_instead_of_raising(hook, monkeypatch, value: s
     assert hook._stop_hook_mode() == "condensed"
 
 
-def test_condensed_reports_today_lifetime_and_quota(hook):
-    """The three numbers worth seeing every turn, each labelled.
+def test_condensed_reports_today_lifetime_and_quota(hook, fixture_home):
+    """The four numbers worth seeing every turn, each labelled.
 
-    Asserted against a CAPTURED fixture. The invented one had label/money the
-    wrong way round, so these assertions passed while production printed a bare
-    route count.
+    Routed count and quota against a CAPTURED box fixture (the invented one
+    had label/money the wrong way round, so these passed while production
+    printed a bare route count). Money against `dashboard_data.summary()` —
+    the ONE canonical figure this line, `llm-router status`,
+    `savings-report`, and `gain` all read (PR #173) — over a fixture DB, so
+    condensed and those other surfaces cannot disagree about the same rows.
+
+    2026-09-27: the money itself is `Summary.compact()` — ONE labelled
+    estimate (realized+unverified merged), not a separate "verified $X" /
+    "est +$Y" pair. See `Summary.estimated_usd`'s docstring for why.
     """
+    from llm_router import dashboard_data
+
+    today = dashboard_data.summary("today", db_path=fixture_home)
+    lifetime = dashboard_data.summary("lifetime", db_path=fixture_home)
+
     line = hook._condense(_BOXED)
     assert "44 routed" in line
-    assert "today $159.74" in line, "today's savings missing or unlabelled"
-    assert "lifetime $2299.39" in line, "lifetime savings missing or unlabelled"
+    assert f"today {today.compact()}" in line
+    assert f"lifetime {lifetime.compact()}" in line
     assert "quota used" in line, "quota missing"
     assert chr(10) not in line, "condensed must be ONE line — it prints every turn"
 
 
-def test_quota_matches_the_status_line_convention(hook):
+def test_money_never_shows_a_bare_unlabelled_figure(hook, fixture_home):
+    """The exact regression this fix closes: a savings figure must never be
+    printed as a bare, unlabelled `lifetime $X` / `today $X` — that reads as
+    realized money rather than an estimate.
+
+    2026-09-27: "verified"/"unverified" no longer reach this line at all —
+    every figure is a single merged estimate, always carrying the "est" /
+    "~" qualifier (Summary.compact())."""
+    line = hook._condense(_BOXED)
+    assert "lifetime $" not in line
+    assert "today $" not in line
+    assert "verified" not in line.lower(), (
+        f"'verified'/'unverified' must not reach a user-facing surface: {line!r}"
+    )
+    assert "lifetime ~$" in line and "est" in line
+    assert "today ~$" in line
+
+
+def test_quota_matches_the_status_line_convention(hook, tmp_path, monkeypatch):
     """CONSUMED, not remaining — the same direction the status line reports.
 
     This showed REMAINING for one revision. The arithmetic was right and the
@@ -107,16 +189,27 @@ def test_quota_matches_the_status_line_convention(hook):
     as 39% there and 61% here, and the first person to see both asked whether the
     numbers were real. Two surfaces agreeing beats either being individually
     better, so this asserts the DIRECTION, which is the part that regressed.
+
+    Isolated with an empty `LLM_ROUTER_HOME` (no seeded DB) — this test only
+    cares about the quota bits, not money, and must not read the real
+    machine's ledger.
     """
+    monkeypatch.setenv("LLM_ROUTER_HOME", str(tmp_path))
     line = hook._condense(_BOXED)
     assert "5h 16%" in line, "5h should report consumed, matching the status line"
     assert "wk 39%" in line, "weekly should report consumed, matching the status line"
     assert "84%" not in line and "61%" not in line, "inverted values leaked back in"
 
 
-
 def test_condensed_says_nothing_when_there_is_nothing(hook):
-    """A per-turn 'no activity' line is the same defect, one size smaller."""
+    """A per-turn 'no activity' line is the same defect, one size smaller.
+
+    No routes and no quota bar in the box means the money lookup is never
+    triggered either (see `_condense`'s gate) — otherwise a LIFETIME total,
+    which is nearly always nonzero on an established install, would print
+    every single turn regardless of whether anything happened, which is
+    exactly the noise CHZ-STOP-01 exists to suppress.
+    """
     assert hook._condense(_EMPTY) == ""
 
 
@@ -142,14 +235,21 @@ def test_condensed_omits_north_star_when_absent(hook):
     assert "north star" not in line
 
 
-def test_condensed_is_derived_from_the_rendered_summary(hook):
-    """Figures are extracted, not recomputed, so the two modes cannot disagree.
+def test_money_comes_from_dashboard_data_not_the_box(hook, fixture_home):
+    """2026-09-27 fix: money is recomputed from `dashboard_data.summary()`,
+    never regex-extracted from the rendered box.
 
-    If condensed ever recalculated spend independently, it could report a
-    different number than `full` for the same session — a reporting bug that
-    would be very hard to notice and impossible to trust.
+    Before the fix, this file's own `test_condensed_is_derived_from_the_
+    rendered_summary` asserted the OPPOSITE — that editing the box's dollar
+    text changed the line — because that IS how the money used to get there,
+    and how a VERIFIED-only figure ended up mislabelled as "lifetime". Now
+    editing the box's dollar text has NO effect; only the database does.
     """
-    altered = _BOXED.replace("$159.74", "$9.99")
+    from llm_router import dashboard_data
+
+    lifetime = dashboard_data.summary("lifetime", db_path=fixture_home)
+
+    altered = _BOXED.replace("$2299.39", "$9.99").replace("$159.74", "$1.11")
     line = hook._condense(altered)
-    assert "today $9.99" in line
-    assert "159.74" not in line
+    assert "9.99" not in line and "1.11" not in line
+    assert f"lifetime {lifetime.compact()}" in line
