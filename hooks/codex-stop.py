@@ -34,19 +34,23 @@ def _summary() -> str:
     # VERIFIED-only figure (PR6): a database with $112.84 of unverified
     # estimated savings and $0.00 verified printed "lifetime ~$0.00" here
     # while `llm-router status` on the SAME database showed "+$112.84
-    # unverified (n=9,229)". Both halves are shown now, each labelled, so
-    # neither can be read as the other.
+    # unverified (n=9,229)".
+    #
+    # 2026-09-27: PR #178 fixed that by labelling both halves ("verified $X
+    # · est +$Y"), which then showed "verified $0.00" on every machine where
+    # no routed answer has ever been confirmed to replace a Claude turn —
+    # still reading as "nothing saved" beside a real estimate. `compact()`
+    # merges both into ONE always-labelled estimate instead — see
+    # `Summary.compact()`'s docstring; the verified/unverified split is still
+    # on the `Summary` object (`.headline()`), just not shown here any more.
     today = summary("today", db_path=db)
     lifetime = summary("lifetime", db_path=db)
 
     def period(label: str, s) -> str:
-        # `:,.2f` throughout, matching the Claude Code Stop hook's
-        # `_condense()` — one money format across both surfaces so a screenshot
-        # from either reads the same way.
-        bit = f"{label}: verified ${s.realized_usd:,.2f}"
-        if s.unverified_usd:
-            bit += f" · est +${s.unverified_usd:,.2f} (n={s.unverified_n:,})"
-        return bit
+        # Summary.compact() — the ONE money-fragment implementation this
+        # line, session-end.py's `_condense()`, and the statusline all call,
+        # so a screenshot from any of them reads the same way.
+        return f"{label} {s.compact()}"
 
     return f"⚡ llm-router · {period('today', today)} · {period('lifetime', lifetime)}"
 

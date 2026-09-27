@@ -145,6 +145,10 @@ def test_condensed_reports_today_lifetime_and_quota(hook, fixture_home):
     the ONE canonical figure this line, `llm-router status`,
     `savings-report`, and `gain` all read (PR #173) — over a fixture DB, so
     condensed and those other surfaces cannot disagree about the same rows.
+
+    2026-09-27: the money itself is `Summary.compact()` — ONE labelled
+    estimate (realized+unverified merged), not a separate "verified $X" /
+    "est +$Y" pair. See `Summary.estimated_usd`'s docstring for why.
     """
     from llm_router import dashboard_data
 
@@ -153,23 +157,28 @@ def test_condensed_reports_today_lifetime_and_quota(hook, fixture_home):
 
     line = hook._condense(_BOXED)
     assert "44 routed" in line
-    assert f"today: verified ${today.realized_usd:,.2f}" in line
-    assert f"est +${today.unverified_usd:,.2f} (n={today.unverified_n:,})" in line
-    assert f"lifetime: verified ${lifetime.realized_usd:,.2f}" in line
-    assert f"est +${lifetime.unverified_usd:,.2f} (n={lifetime.unverified_n:,})" in line
+    assert f"today {today.compact()}" in line
+    assert f"lifetime {lifetime.compact()}" in line
     assert "quota used" in line, "quota missing"
     assert chr(10) not in line, "condensed must be ONE line — it prints every turn"
 
 
-def test_money_never_shows_a_verified_only_figure_unlabelled(hook, fixture_home):
-    """The exact regression this fix closes: a VERIFIED-only figure must
-    never be printed as a bare, unlabelled `lifetime $X` / `today $X` — that
-    reads as the full total when it is only the confirmed-used slice."""
+def test_money_never_shows_a_bare_unlabelled_figure(hook, fixture_home):
+    """The exact regression this fix closes: a savings figure must never be
+    printed as a bare, unlabelled `lifetime $X` / `today $X` — that reads as
+    realized money rather than an estimate.
+
+    2026-09-27: "verified"/"unverified" no longer reach this line at all —
+    every figure is a single merged estimate, always carrying the "est" /
+    "~" qualifier (Summary.compact())."""
     line = hook._condense(_BOXED)
     assert "lifetime $" not in line
     assert "today $" not in line
-    assert "lifetime: verified $" in line
-    assert "today: verified $" in line
+    assert "verified" not in line.lower(), (
+        f"'verified'/'unverified' must not reach a user-facing surface: {line!r}"
+    )
+    assert "lifetime ~$" in line and "est" in line
+    assert "today ~$" in line
 
 
 def test_quota_matches_the_status_line_convention(hook, tmp_path, monkeypatch):
@@ -221,4 +230,4 @@ def test_money_comes_from_dashboard_data_not_the_box(hook, fixture_home):
     altered = _BOXED.replace("$2299.39", "$9.99").replace("$159.74", "$1.11")
     line = hook._condense(altered)
     assert "9.99" not in line and "1.11" not in line
-    assert f"lifetime: verified ${lifetime.realized_usd:,.2f}" in line
+    assert f"lifetime {lifetime.compact()}" in line
