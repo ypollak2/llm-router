@@ -12,13 +12,19 @@ import sys
 
 def _summary() -> str:
     from llm_router.config import get_config
-    from llm_router.cost import import_savings_log, savings_log_path
+    from llm_router.cost import (
+        import_routing_quality_ledger, import_savings_log, savings_log_path,
+    )
     from llm_router.dashboard_data import query_window
 
     # Share the existing ledger and atomic importer with the other reporting
     # surfaces. Never maintain a second counter or archive the ongoing session.
     if savings_log_path().exists():
         asyncio.run(import_savings_log())
+    # Same flush for the North Star ledger (routing_quality.jsonl) — MCP/gateway
+    # calls write there and were otherwise invisible to every savings_stats
+    # reader, including this summary's own `unverified_saved_usd` figure below.
+    asyncio.run(import_routing_quality_ledger())
     db = get_config().llm_router_db_path
     today = query_window("today", db_path=db)
     lifetime = query_window("lifetime", db_path=db)
