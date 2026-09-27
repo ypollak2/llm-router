@@ -718,27 +718,46 @@ _REAL_HOME = __import__("pathlib").Path.home()
 # compared once at session end, so a change is caught even if it happens
 # between tests, from a background thread, or from a fixture this file does
 # not yet know to name.
-_REAL_CODEX_HOOKS_JSON = _REAL_HOME / ".codex" / "hooks.json"
+#
+# 2026-09-27 (later the same day): a full-suite run reported errors writing to
+# the real ~/.codex/config.toml too. `_install_codex_files` writes config.toml,
+# hooks.json AND AGENTS.md in the same unguarded-Path.home() call, so the same
+# defect class covers all three -- but this session belt only ever fingerprinted
+# hooks.json. Widened to all three files `_install_codex_files` actually writes,
+# so a leak into any of them is caught even if it happens between tests, from a
+# background thread, or via a call path `_no_repo_mutation`'s per-test snapshot
+# does not run for.
+_REAL_CODEX_HOME_TARGETS: tuple[tuple[str, Path], ...] = (
+    ("hooks.json", _REAL_HOME / ".codex" / "hooks.json"),
+    ("config.toml", _REAL_HOME / ".codex" / "config.toml"),
+    ("AGENTS.md", _REAL_HOME / ".codex" / "AGENTS.md"),
+)
 
 
-def _codex_hooks_json_fingerprint() -> tuple[int, str] | None:
-    if not _REAL_CODEX_HOOKS_JSON.is_file():
-        return None
+def _codex_home_fingerprint() -> dict[str, tuple[int, str] | None]:
     import hashlib
 
-    st = _REAL_CODEX_HOOKS_JSON.stat()
-    digest = hashlib.sha256(_REAL_CODEX_HOOKS_JSON.read_bytes()).hexdigest()
-    return (st.st_mtime_ns, digest)
+    out: dict[str, tuple[int, str] | None] = {}
+    for name, p in _REAL_CODEX_HOME_TARGETS:
+        if not p.is_file():
+            out[name] = None
+            continue
+        st = p.stat()
+        digest = hashlib.sha256(p.read_bytes()).hexdigest()
+        out[name] = (st.st_mtime_ns, digest)
+    return out
 
 
 @pytest.fixture(scope="session", autouse=True)
 def _codex_home_untouched_for_the_whole_session():
-    before = _codex_hooks_json_fingerprint()
+    before = _codex_home_fingerprint()
     yield
-    after = _codex_hooks_json_fingerprint()
-    assert before == after, (
-        "the real ~/.codex/hooks.json changed during this test session "
-        f"(before={before!r} after={after!r}) -- some test wrote to the "
+    after = _codex_home_fingerprint()
+    changed = [name for name in before if before[name] != after[name]]
+    assert not changed, (
+        f"the real ~/.codex/{{{', '.join(changed)}}} changed during this test "
+        f"session (before={ {k: before[k] for k in changed}!r} "
+        f"after={ {k: after[k] for k in changed}!r}) -- some test wrote to the "
         "operator's actual Codex home instead of an isolated sandbox"
     )
 
