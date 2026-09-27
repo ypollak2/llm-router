@@ -199,3 +199,81 @@ miss a right edit to an equivalent file. Reported with that caveat.
 continuation into the `@local` path (still opt-in). 40-70% -> report where it
 breaks, no build. < 40% -> not viable with this model. Every number is
 reported with n.
+
+### 8.1 Amendment before any scored run (2026-09-24)
+
+The first moment exposed a harness limit, not a result: moment 1's
+conversation was 64,749 tokens, and qwen3.8 took **572 s to read it once**
+(113 tok/s at that length; ~200 tok/s had been measured at 24K). With a 600 s
+budget every moment would fail on reading time alone, measuring the hardware
+rather than the model. (Its reply to "yes, do it" did name the right next
+steps from the conversation — "N1, N4, N6, then the six gated ones … merge
+PR #138" — which is why the test is worth running properly.)
+
+Changed, before scoring anything:
+- conversation cap **20K tokens** (80,000 chars): the first user prompt plus
+  the most recent prose, oldest dropped first (~3 min to read);
+- budget **900 s**;
+- moment 1's run is void (harness-limited) and is re-run under these settings.
+
+Unchanged: sample, ground truth, scoring, decision rule. A real local
+continuation would face the same limit — a turn that spends ten minutes
+reading before acting is not usable — so the cap is also the realistic setting.
+
+### 8.2 Run 1 result, and run 2 after a tool fix (2026-09-25)
+
+**Run 1 (§8.1 settings): PASS 0/20; 0 of 20 moments changed any file.**
+13 ended at the 15-step cap, 4 stopped on a repeated identical command, 3
+returned nothing. By the §8 rule that is "< 40% — not viable", *for the loop as
+it stood*. Harness checked before believing the zero: a known-positive
+("create hello.txt") was written and detected.
+
+A trace of one moment ("Great, go on") showed the model orienting as Claude
+would — reading the backlog, then `git log --oneline -12 && git status --short
+| head -20` — and the loop's shell-free `run_command` passing `&&` and `|` to
+git as literal arguments, and refusing read-only `git branch --show-current`.
+It retried variants until the 15 steps were gone. That is a tool defect, fixed
+in S (PR #149): sequences and pipes are tokenized and chained without a shell.
+
+**Run 2**: identical sample, context cap, budget, 15-step cap, scoring and
+decision rule; the only change is S. Reported separately from run 1; neither
+replaces the other.
+
+### 8.3 Run 2 result, and run 3 — the last harness-only change (2026-09-25)
+
+**Run 2 (after S): PASS 0/20; 1 of 20 moments changed a file (the wrong one).**
+16 ended at the 15-step cap, 2 on a repeated command. The command tool now
+worked; a trace showed the next defect was the harness's: each sandbox was a
+`git worktree` of the live repo, so `git log main` showed commits made AFTER the
+moment (e.g. today's PR #141 merge). The model paged back through history
+(-8, -20 … -200) reconciling the conversation with a repo it could not match.
+It also hit `2>&1`, now supported (S, 2dc87ae).
+
+**Run 3**: each moment runs in a clean-room clone whose only ref is `main` at
+the base commit, reflog expired and unreachable objects pruned (verified on
+moment 6: 868 reachable commits = the base's history; today's merge absent).
+Everything else as §8.1.
+
+**Run 3's score is the answer.** No further harness changes after it: whatever
+it scores is reported against the §8 rule, with the traces that explain it.
+Changing the setup until something passes would make the number meaningless.
+
+### 8.4 Result (final, run 3): PASS 0/20 — not viable as the loop stands
+
+**Run 3: 0/20; 1 of 20 moments changed a file (a scratch script, not Claude's
+files).** 16 ended at the 15-step cap, 2 on a repeated command, 2 returned
+nothing. By the §8 rule (< 40%): **not viable with qwen3.8 and the current loop.**
+
+What the traces show, now that the harness is clean (moment 6, "Great, go on"):
+the model oriented itself in ~5 steps, located the right code (`HOOK_POLICY` in
+`classify.py` — the file Claude changed), and was still reading it when the
+15-step cap ended the turn. It was not lost; it ran out of steps.
+
+Why 15 steps cannot hold these turns: Claude used a **median of 20 tool calls**
+in the same 20 windows (range 1–90); 13 of 20 needed more than 15. Claude also
+starts each turn holding the tool output of earlier turns; the local model gets
+prose only and spends ~5 steps re-orienting. Of the 7 windows Claude finished
+within 15 calls, 2 were `git push`, which the local agent may not run.
+
+Not tested (a new pre-registration would be needed): a Claude-comparable step
+budget (~60) — at ~20 s per local step that is a 20-minute "keep going" turn.

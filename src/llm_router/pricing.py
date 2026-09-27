@@ -260,6 +260,12 @@ _ALIASES: dict[str, str] = {
     "claude-haiku-4-5-20251001": "claude-haiku-4-5",
     "claude-opus-4-8-fast": "claude-opus-4-8",
     "claude-opus-5-fast": "claude-opus-5",
+    # Bare "claude-opus" (no version suffix) is the same "which one is current"
+    # question as the family alias "opus" above, just spelled with the vendor
+    # prefix kept on. Resolved through the single baseline policy so there is
+    # exactly one place that answers "which Opus is current" -- see WP-05 and
+    # SAVINGS_BASELINE_MODEL.
+    "claude-opus": SAVINGS_BASELINE_MODEL,
 }
 
 
@@ -280,6 +286,12 @@ def resolve(model: str) -> str | None:
     surface unknown as unknown rather than coercing it to zero — a zero price
     silently turns missing knowledge into a favourable number.
     """
+    raw = (model or "").strip().lower()
+    # Captured before _normalize() strips the "ollama/" prefix. A tag-less
+    # Ollama name ("ollama/llama3.2") has neither a surviving "ollama" prefix
+    # nor a ":tag" once normalized, so the fallback below has nothing left to
+    # recognize it by unless the prefix is remembered here first.
+    had_ollama_prefix = raw.startswith("ollama/")
     m = _normalize(model)
     if m in _PRICES:
         return m
@@ -296,8 +308,10 @@ def resolve(model: str) -> str | None:
             return tail
         if tail in _ALIASES:
             return _ALIASES[tail]
-    if m.startswith("ollama") or ":" in m:
-        # Ollama tags look like "qwen2.5-coder:7b" — local, and free.
+    if had_ollama_prefix or m.startswith("ollama") or ":" in m:
+        # Ollama tags look like "qwen2.5-coder:7b" — local, and free. A
+        # tag-less name is just as local; the prefix alone (caught above) is
+        # enough, the same as the colon is for a tagged one.
         return "ollama"
     return None
 

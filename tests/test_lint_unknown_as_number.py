@@ -117,10 +117,16 @@ def test_the_fixed_source_is_clean() -> None:
 
 # ── 2. The ratchet ────────────────────────────────────────────────────────
 
-#: Measured 2026-09-23 on src/llm_router. Lower this when you fix a site.
+#: Measured 2026-09-27 on src/llm_router. Lower this when you fix a site.
 #: Never raise it — a new coercion reaching a comparison is the defect this
 #: exists to stop.
-BASELINE = 113
+#: 113 -> 111: fixed the dead "critical pressure -> Opus override" in
+#: hooks/auto-route.py, which read `pressure.get("session_pct", 0)` /
+#: `"weekly_pct"` against `_get_pressure()`'s fraction-keyed dict — the key
+#: never matched, so a missing/mismatched reading silently coerced to 0 and
+#: compared as if it were a real, safe pressure level. Replaced with
+#: `_critical_pressure_reading()`, which treats an absent reading as unknown.
+BASELINE = 111
 
 
 def _current_count() -> int:

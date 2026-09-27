@@ -283,6 +283,10 @@ class SessionSpend:
         tokens_reclaimed: int,
         opus_equivalent_usd: float,
         gates_passed: bool,
+        *,
+        input_tokens: int = 0,
+        output_tokens: int = 0,
+        session_id: str | None = None,
     ) -> None:
         """Record tokens reclaimed by routing to a cheaper model.
 
@@ -290,6 +294,18 @@ class SessionSpend:
             tokens_reclaimed: Tokens that Opus would have consumed.
             opus_equivalent_usd: What Opus would have charged for this call.
             gates_passed: Whether verification gates passed on this call.
+            input_tokens: The real input/output split for this call, when the
+                caller has it (from the routed response). Recorded alongside
+                `tokens_reclaimed` — the Opus-equivalent estimate used for the
+                savings math — so `claude_usage` carries an honest split
+                rather than only the combined number. Measured 2026-09-27:
+                100% of claude_usage's 37,894 rows had input_tokens=0 AND
+                output_tokens=0 because this path never passed them.
+            output_tokens: See `input_tokens`.
+            session_id: The Claude Code session this call belongs to, when
+                resolvable. Recorded so a test-session filter can apply to
+                `claude_usage` at all — the table has never had a session_id
+                column before this.
         """
         self.tokens_reclaimed += tokens_reclaimed
         self.opus_equivalent_usd += opus_equivalent_usd
@@ -305,12 +321,22 @@ class SessionSpend:
         # the moment the session ends. The dashboard query joins this table
         # via _query_cumulative_savings to surface them.
         try:
-            self._persist_to_claude_usage(tokens_reclaimed, opus_equivalent_usd)
+            self._persist_to_claude_usage(
+                tokens_reclaimed, opus_equivalent_usd,
+                input_tokens=input_tokens, output_tokens=output_tokens,
+                session_id=session_id,
+            )
         except Exception:
             pass  # Tracking is best-effort — never crash the router.
 
     def _persist_to_claude_usage(
-        self, tokens_reclaimed: int, opus_equivalent_usd: float
+        self,
+        tokens_reclaimed: int,
+        opus_equivalent_usd: float,
+        *,
+        input_tokens: int = 0,
+        output_tokens: int = 0,
+        session_id: str | None = None,
     ) -> None:
         """Append a row to ~/.llm-router/usage.db claude_usage table."""
         import sqlite3
@@ -325,14 +351,36 @@ class SessionSpend:
             if self.per_model else "subscription"
         )
         with sqlite3.connect(str(db_path), timeout=2.0) as conn:
-            conn.execute(
-                # T-05: provenance stamped at write time.
-                "INSERT INTO claude_usage "
-                "(model, tokens_used, complexity, cost_saved_usd, is_simulated) "
-                "VALUES (?, ?, ?, ?, ?)",
-                (attribution_model, tokens_reclaimed, "auto", opus_equivalent_usd,
-                 1 if _detect_synthetic() else 0),
-            )
+            # `session_id` is the newest column here (this migration) — a DB
+            # this process hasn't reopened through `cost._get_db()` yet (which
+            # runs migrations) may still lack it. `input_tokens`/`output_tokens`
+            # predate it by months and are assumed present, same as the
+            # `is_simulated` column this insert already relied on unconditionally.
+            _cols = conn.execute("PRAGMA table_info(claude_usage)").fetchall()
+            has_session_id = any(row[1] == "session_id" for row in _cols)
+            if has_session_id:
+                conn.execute(
+                    # T-05: provenance stamped at write time. Split tokens and
+                    # session_id recorded alongside the combined tokens_reclaimed
+                    # so claude_usage carries the same detail the other ledgers do.
+                    "INSERT INTO claude_usage "
+                    "(model, tokens_used, complexity, cost_saved_usd, is_simulated, "
+                    " input_tokens, output_tokens, session_id) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (attribution_model, tokens_reclaimed, "auto", opus_equivalent_usd,
+                     1 if _detect_synthetic() else 0,
+                     input_tokens, output_tokens, session_id),
+                )
+            else:
+                conn.execute(
+                    "INSERT INTO claude_usage "
+                    "(model, tokens_used, complexity, cost_saved_usd, is_simulated, "
+                    " input_tokens, output_tokens) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (attribution_model, tokens_reclaimed, "auto", opus_equivalent_usd,
+                     1 if _detect_synthetic() else 0,
+                     input_tokens, output_tokens),
+                )
             conn.commit()
 
     @property
