@@ -196,6 +196,7 @@ ENV_REGISTRY: dict[str, tuple[str, str, int]] = {
     "LLM_ROUTER_OKF_MIN_SCORE": ("llm_router", "okf.py", 1),
     "LLM_ROUTER_OLLAMA_MODEL": ("llm_router", "model_discovery.py", 1),
     "LLM_ROUTER_OLLAMA_NUM_CTX": ("llm_router", "providers.py", 1),
+    "LLM_ROUTER_OLLAMA_THINK": ("llm_router", "providers.py", 1),
     "LLM_ROUTER_OLLAMA_TIMEOUT": ("llm_router", "hooks/auto-route.py", 1),
     "LLM_ROUTER_OLLAMA_URL": ("llm_router", "hooks/agent_loop.py", 3),
     "LLM_ROUTER_OLLAMA_WARMUP": ("llm_router", "hooks/session-start.py", 1),
