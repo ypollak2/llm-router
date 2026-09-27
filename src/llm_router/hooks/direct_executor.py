@@ -855,7 +855,7 @@ def execute_agent(
     chain = sorted(chain, key=_agent_rank)
 
     ollama_attempted = 0
-    for model in chain:
+    for _idx, model in enumerate(chain):
         if model.provider != "ollama":
             continue  # Only Ollama supports tool calling from the hook (for now)
 
@@ -869,6 +869,26 @@ def execute_agent(
             left = deadline_s - time.monotonic()
             if left <= _MIN_CALL_S:
                 break
+
+            # NS3 (2026-09-27): without a reserve, the FIRST ollama model in the
+            # chain — reliably the heaviest, e.g. qwen3-coder:30b, which sorts
+            # first via _AGENT_PRIORITY — was handed the entire remaining
+            # deadline for itself. `auto-route-debug.log` on the operator's
+            # machine shows this exact shape 8 times: a ~55s gap between
+            # "DIRECT: zone=..." and "READ-ONLY DRAFT LOOP: nothing, text chain
+            # next", immediately followed by every text-chain model logging
+            # "out of hook budget before the call". One slow/cold-load call to
+            # model #1 (a `stream: False` call — unlike call_ollama, it cannot
+            # return a truncated partial answer, only None on timeout) starved
+            # both the other agent-loop models AND execute_chain's fallback
+            # that runs after this function returns. Mirrors the reserve
+            # `execute_chain._call_budget` already applies for the identical
+            # reason — the pattern proven there is applied here too.
+            _remaining_ollama = sum(
+                1 for m in chain[_idx + 1:] if m.provider == "ollama"
+            )
+            _reserve = min(_remaining_ollama, 1) * _FALLBACK_RESERVE_S
+            left = max(_MIN_CALL_S, left - _reserve)
 
         ollama_attempted += 1
         t0 = time.monotonic()
@@ -896,6 +916,29 @@ def execute_agent(
                 files_read=tuple(dict.fromkeys(_reads)),
                 context_chars=len(context or ""),
             )
+
+        # NS3: this loop used to log NOTHING per-model — only the caller's one
+        # blanket "READ-ONLY DRAFT LOOP: nothing" line, which cannot tell a
+        # model that timed out after burning its whole `left` from one that
+        # answered instantly with an empty/refused response. `execute_chain`
+        # already names this precisely via `_give_up`; do the same here so a
+        # future read of the debug log doesn't need the same manual
+        # cross-referencing this investigation required.
+        _elapsed = time.monotonic() - t0
+        if not response:
+            _reason = (
+                f"timeout_{left:.1f}s" if left is not None and _elapsed >= left - 0.5
+                else "agent-loop drifted or gave no answer"
+            )
+        else:
+            _reason = f"quality gate rejected {len(response)} chars"
+        _log_direct_reason(f"{model.model}: {_reason}")
+        try:
+            from llm_router import attempt_log
+            outcome = attempt_log.TIMEOUT if _reason.startswith("timeout_") else attempt_log.EMPTY
+            attempt_log.record(model.model, outcome, int(_elapsed * 1000), reason=_reason)
+        except Exception:                                        # noqa: BLE001
+            pass
 
     # Loud failure (Fix #4): the whole chain drifted/failed. Surface it on
     # stderr (which Claude Code shows) instead of returning a silent None —

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 36
+# llm_router-hook-version: 37
 """UserPromptSubmit hook — scoring classifier with Ollama + API fallback chain.
 
 Classification chain (stops at first success):
@@ -175,7 +175,7 @@ def route_call(logical: str, *args: str) -> str:
 # Cursor/Windsurf/Codex never start the MCP server so check_and_update_hooks()
 # never fires. This check emits a stderr warning when the installed hook is
 # older than the bundled one. The user sees it in their IDE's output panel.
-_THIS_VERSION_LINE = "# llm_router-hook-version: 36"
+_THIS_VERSION_LINE = "# llm_router-hook-version: 37"
 try:
     _PKG_HOOK = Path(__file__).resolve()
     _INSTALLED_HOOK = Path.home() / ".claude" / "hooks" / "llm_router-auto-route.py"
@@ -2605,6 +2605,30 @@ def _loop_deadline() -> float:
     return min(time.monotonic() + _agent_loop_budget_s(), _hook_deadline())
 
 
+def _readonly_draft_deadline() -> float:
+    """Deadline for the read-only Q&A draft loop, leaving the text chain a turn.
+
+    NS3 (2026-09-27): this loop and `execute_chain` (the text-chain fallback
+    invoked right after it, same hook invocation, same deadline) both used to
+    read `_hook_deadline()` independently — no reservation between them. A
+    stuck or cold-loading first model in the read-only loop could burn the
+    ENTIRE hook budget and return nothing, at which point the text chain had
+    zero seconds left and every model in it logged "out of hook budget before
+    the call" without a single HTTP request being sent. Measured on
+    `auto-route-debug.log`: 8 invocations show exactly this — a ~55s gap ending
+    in "READ-ONLY DRAFT LOOP: nothing, text chain next" immediately followed by
+    3x "DIRECT MODEL SKIPPED: ... out of hook budget before the call". Reserving
+    one fallback's worth of time (`_FALLBACK_RESERVE_S`, the same constant
+    `execute_chain` already reserves for its own trailing model) guarantees the
+    text chain gets a real attempt instead of a foregone conclusion.
+    """
+    try:
+        from llm_router.hooks.direct_executor import _FALLBACK_RESERVE_S
+    except Exception:                                          # noqa: BLE001
+        _FALLBACK_RESERVE_S = 18.0
+    return max(time.monotonic() + 3.0, _hook_deadline() - _FALLBACK_RESERVE_S)
+
+
 def _tool_loop_rescue(prompt: str, task_type: str) -> bool:
     """Third rescue arm for a context-dependent prompt: give it the tools.
 
@@ -4424,7 +4448,7 @@ def main() -> None:
                     _direct_result = _execute_agent(
                         prompt, _direct_chain, project_root=_draft_root,
                         timeout=OLLAMA_TIMEOUT, context=_session_ctx,
-                        deadline_s=_hook_deadline(), read_only=True,
+                        deadline_s=_readonly_draft_deadline(), read_only=True,
                         session_id=session_id,
                     )
                     _debug_log(
