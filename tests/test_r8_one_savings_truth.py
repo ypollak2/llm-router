@@ -144,12 +144,15 @@ def test_by_model_reconciles_with_the_headline_when_nothing_is_simulated(fixture
 
 
 def _status_figures(db_path):
-    """(realized_usd, realized_n, unverified_usd, unverified_n, baseline) as
-    `llm-router status` renders them for the "Today" row — read straight off
-    the `rich.console.Group`'s `Text` renderables (`.plain`), not off
-    console-rendered/wrapped text, so a narrow terminal width can't corrupt
-    the parse."""
-    from llm_router.savings import label_money  # noqa: F401 (documents the format read below)
+    """(estimated_usd, estimated_n, baseline) as `llm-router status` renders
+    them for the "Today" row — read straight off the `rich.console.Group`'s
+    `Text` renderables (`.plain`), not off console-rendered/wrapped text, so
+    a narrow terminal width can't corrupt the parse.
+
+    2026-09-27: the panel shows ONE labelled estimate (`Summary.display()`),
+    not a separate verified/unverified pair — see `Summary.estimated_usd`'s
+    docstring for why "verified"/"unverified" no longer reach this surface.
+    """
     from llm_router.ui.status_premium import PremiumStatusCommand
 
     cmd = PremiumStatusCommand()
@@ -160,18 +163,14 @@ def _status_figures(db_path):
 
     import re
 
-    m_verified = re.search(
-        r"Today.*?\$([\d.]+) (?:real dollars avoided|baseline-equivalent avoided[^v]*) "
-        r"vs ([\w.-]+) \(n=(\d+)\)",
-        text, re.S,
+    m = re.search(
+        r"Today\s+est\. saved \$([\d,.]+) \(n=([\d,]+)\) vs (\S+)",
+        text,
     )
-    assert m_verified, f"could not find Today's verified figure in:\n{text}"
-    m_unverified = re.search(r"\+\s*\$([\d.]+) unverified, n=(\d+)", text)
-    assert m_unverified, f"could not find Today's unverified figure in:\n{text}"
+    assert m, f"could not find Today's estimate in:\n{text}"
     return (
-        float(m_verified.group(1)), int(m_verified.group(3)),
-        float(m_unverified.group(1)), int(m_unverified.group(2)),
-        m_verified.group(2),
+        float(m.group(1).replace(",", "")), int(m.group(2).replace(",", "")),
+        m.group(3),
     )
 
 
@@ -181,15 +180,11 @@ def _savings_report_figures(period="day"):
     from llm_router.commands.savings_report import render_savings_report
 
     text = render_savings_report(period)
-    m = re.search(
-        r"verified \$([\d.]+) \(n=(\d+)\) . unverified estimate \$([\d.]+) \(n=(\d+)\)"
-        r".*?baseline (\S+)",
-        text,
-    )
+    m = re.search(r"est\. saved \$([\d,.]+) \(n=([\d,]+)\) vs (\S+)", text)
     assert m, f"could not find the canonical headline in:\n{text}"
     return (
-        float(m.group(1)), int(m.group(2)), float(m.group(3)), int(m.group(4)),
-        m.group(5),
+        float(m.group(1).replace(",", "")), int(m.group(2).replace(",", "")),
+        m.group(3),
     )
 
 
@@ -199,27 +194,24 @@ def _gain_figures(period="today"):
     from llm_router.commands.gain import show_gain
 
     text = show_gain(period)
-    m = re.search(
-        r"verified \$([\d.]+) \(n=(\d+)\) . unverified estimate \$([\d.]+) \(n=(\d+)\)"
-        r".*?baseline (\S+)",
-        text,
-    )
+    m = re.search(r"est\. saved \$([\d,.]+) \(n=([\d,]+)\) vs (\S+)", text)
     assert m, f"could not find the canonical headline in gain's output:\n{text}"
     return (
-        float(m.group(1)), int(m.group(2)), float(m.group(3)), int(m.group(4)),
-        m.group(5),
+        float(m.group(1).replace(",", "")), int(m.group(2).replace(",", "")),
+        m.group(3),
     )
 
 
 def _statusline_figures(db_path):
-    """The exact two calls `hooks/statusline-command.sh` makes
-    (`query_window("today")` + fields `render_money` reads) — read as data,
-    not by shelling out to the bash script, since the script's job is only to
-    find a Python and pass this call's result through."""
+    """The two underlying numbers `Summary.compact()` merges for the
+    statusline/Stop line — read directly off `query_window` (which
+    `dashboard_data.summary()` composes internally), not by shelling out to
+    the bash script, since the script's job is only to find a Python and
+    pass `summary("today").compact()` through."""
     totals = dashboard_data.query_window("today", db_path=db_path)
     return (
-        totals.saved_usd, totals.verified_calls,
-        totals.unverified_saved_usd, totals.unverified_calls,
+        totals.saved_usd + totals.unverified_saved_usd,
+        totals.verified_calls + totals.unverified_calls,
     )
 
 
@@ -232,18 +224,14 @@ def test_four_surfaces_report_identical_figures(fixture_home):
     gain = _gain_figures("today")
     statusline = _statusline_figures(db)
 
-    for label, (v_usd, v_n, u_usd, u_n, *rest) in (
+    for label, (usd, n, baseline) in (
         ("status", status), ("savings-report", report), ("gain", gain),
     ):
-        assert v_usd == pytest.approx(canonical.realized_usd), label
-        assert v_n == canonical.realized_n, label
-        assert u_usd == pytest.approx(canonical.unverified_usd), label
-        assert u_n == canonical.unverified_n, label
-        assert rest[0] == canonical.baseline_model, label
+        assert usd == pytest.approx(canonical.estimated_usd), label
+        assert n == canonical.estimated_n, label
+        assert baseline == canonical.baseline_model, label
 
-    # statusline: same two underlying numbers, read directly off query_window
-    # (what render_money actually formats) rather than parsed text.
-    assert statusline[0] == pytest.approx(canonical.realized_usd)
-    assert statusline[1] == canonical.realized_n
-    assert statusline[2] == pytest.approx(canonical.unverified_usd)
-    assert statusline[3] == canonical.unverified_n
+    # statusline: same merged total, read directly off query_window (what
+    # Summary.compact() merges) rather than parsed text.
+    assert statusline[0] == pytest.approx(canonical.estimated_usd)
+    assert statusline[1] == canonical.estimated_n

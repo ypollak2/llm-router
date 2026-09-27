@@ -157,6 +157,45 @@ async def test_llm_router_session_dispatches_by_action(monkeypatch):
     assert "error" in await consolidated.llm_router_session("start")   # rich action → use direct tool
 
 
+async def test_llm_router_status_gain_view_shows_the_estimate_not_the_split(
+    tmp_path, monkeypatch
+):
+    """2026-09-27 product decision: every user-facing savings surface —
+    including the MCP `llm_router_status(view="gain")` door — shows ONE
+    labelled estimate, never "verified"/"unverified" wording. `gain` reaches
+    `dashboard_data.summary().display()` via `commands/gain.py`; this
+    exercises the real path end-to-end over a fixture DB, not a mock.
+    """
+    import sqlite3
+    from datetime import datetime, timezone
+
+    monkeypatch.setenv("LLM_ROUTER_HOME", str(tmp_path))
+    monkeypatch.delenv("LLM_ROUTER_CLAUDE_SUBSCRIPTION", raising=False)
+    db = tmp_path / "usage.db"
+    conn = sqlite3.connect(db)
+    conn.execute("""CREATE TABLE savings_stats (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp TEXT NOT NULL,
+        session_id TEXT, task_type TEXT,
+        estimated_claude_cost_saved REAL NOT NULL, external_cost REAL DEFAULT 0,
+        model_used TEXT, host TEXT, input_tokens INTEGER DEFAULT 0,
+        output_tokens INTEGER DEFAULT 0, mode TEXT, is_simulated INTEGER)""")
+    ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
+    conn.execute(
+        "INSERT INTO savings_stats (timestamp, session_id, task_type, "
+        "estimated_claude_cost_saved, model_used, host, mode, is_simulated) "
+        "VALUES (?, 's1', 'code', 1.25, 'ollama/a', 'claude_code', 'block', 0)",
+        (ts,),
+    )
+    conn.commit()
+    conn.close()
+
+    out = await consolidated.llm_router_status("gain", period="today")
+    assert "est. saved $1.25 (n=1) vs" in out, out
+    assert "verified" not in out.lower(), (
+        f"'verified'/'unverified' must not reach the MCP gain view: {out!r}"
+    )
+
+
 def test_deprecated_tools_registry_maps_to_real_doors():
     from llm_router.tools.consolidated import DEPRECATED_TOOLS, door_for_tool
     doors = {"llm", "llm_act", "llm_router_status", "llm_router_admin", "llm_router_session"}

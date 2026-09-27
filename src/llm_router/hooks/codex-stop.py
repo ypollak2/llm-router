@@ -15,7 +15,7 @@ def _summary() -> str:
     from llm_router.cost import (
         import_routing_quality_ledger, import_savings_log, savings_log_path,
     )
-    from llm_router.dashboard_data import query_window
+    from llm_router.dashboard_data import summary
 
     # Share the existing ledger and atomic importer with the other reporting
     # surfaces. Never maintain a second counter or archive the ongoing session.
@@ -23,25 +23,36 @@ def _summary() -> str:
         asyncio.run(import_savings_log())
     # Same flush for the North Star ledger (routing_quality.jsonl) — MCP/gateway
     # calls write there and were otherwise invisible to every savings_stats
-    # reader, including this summary's own `unverified_saved_usd` figure below.
+    # reader, including this summary's own unverified figure below.
     asyncio.run(import_routing_quality_ledger())
     db = get_config().llm_router_db_path
-    today = query_window("today", db_path=db)
-    lifetime = query_window("lifetime", db_path=db)
 
-    def money(value: float) -> str:
-        return f"~${value:,.2f}" if abs(value) >= 1 else f"~${value:.4f}"
+    # THE canonical dashboard_data.summary() — the same function `llm-router
+    # status`, `savings-report`, `gain`, and the Claude Code Stop hook all
+    # call (PR #173). This used to read `query_window(...).saved_usd` and
+    # print it as plain "lifetime {money}", but `saved_usd` is the
+    # VERIFIED-only figure (PR6): a database with $112.84 of unverified
+    # estimated savings and $0.00 verified printed "lifetime ~$0.00" here
+    # while `llm-router status` on the SAME database showed "+$112.84
+    # unverified (n=9,229)".
+    #
+    # 2026-09-27: PR #178 fixed that by labelling both halves ("verified $X
+    # · est +$Y"), which then showed "verified $0.00" on every machine where
+    # no routed answer has ever been confirmed to replace a Claude turn —
+    # still reading as "nothing saved" beside a real estimate. `compact()`
+    # merges both into ONE always-labelled estimate instead — see
+    # `Summary.compact()`'s docstring; the verified/unverified split is still
+    # on the `Summary` object (`.headline()`), just not shown here any more.
+    today = summary("today", db_path=db)
+    lifetime = summary("lifetime", db_path=db)
 
-    # Unverified money (MCP/gateway/agentic, incl. this host's pending_savings)
-    # stays out of both figures and is labelled beside them (savings.py).
-    from llm_router.savings import unverified_note
-    note = unverified_note(lifetime.unverified_saved_usd, lifetime.unverified_calls)
-    return (
-        f"⚡ llm-router · saved today {money(today.saved_usd)}"
-        f" · lifetime {money(lifetime.saved_usd)}"
-        " · estimated, all hosts"
-        + (f" · lifetime {note}" if note else "")
-    )
+    def period(label: str, s) -> str:
+        # Summary.compact() — the ONE money-fragment implementation this
+        # line, session-end.py's `_condense()`, and the statusline all call,
+        # so a screenshot from any of them reads the same way.
+        return f"{label} {s.compact()}"
+
+    return f"⚡ llm-router · {period('today', today)} · {period('lifetime', lifetime)}"
 
 
 def main() -> None:

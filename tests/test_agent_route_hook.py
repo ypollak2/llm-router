@@ -12,6 +12,7 @@ Tests verify:
 from __future__ import annotations
 
 import importlib.util
+import io
 import json
 import os
 import re
@@ -91,6 +92,12 @@ def _run(
     # decision, so disable it unless a test explicitly opts in.
     env["LLM_ROUTER_SUBAGENT_DIRECT"] = "on" if subagent_direct else "off"
     env["LLM_ROUTER_SUBAGENT_MODEL_PIN"] = "on" if model_pin else "off"
+    # NS3 Codex sub-agent delegation defaults to ON and, if this machine has a
+    # real Codex CLI on PATH, would otherwise make a real subprocess/network call
+    # for any suitable (research/analyze/code) prompt run through this subprocess
+    # helper. Gating tests for that feature use _load_hook_module() + monkeypatch
+    # instead (TestCodexSubagentDelegation), so it is disabled here unconditionally.
+    env["LLM_ROUTER_AGENT_ROUTE_CODEX"] = "off"
     if tmp_path is not None:
         llmr_dir = tmp_path / ".llm-router"
         llmr_dir.mkdir(parents=True, exist_ok=True)
@@ -552,3 +559,235 @@ class TestNonAgentTool:
         )
         assert result.returncode == 0
         assert result.stdout.strip() == ""  # No output (approved)
+
+
+def _north_star_rows(tmp_path: Path) -> list[dict]:
+    ledger = tmp_path / ".llm-router" / "north_star_units.jsonl"
+    if not ledger.exists():
+        return []
+    return [json.loads(line) for line in ledger.read_text().splitlines() if line.strip()]
+
+
+class TestCodexSubagentDelegation:
+    """NS3 — suitable sub-agent spawns are offered to Codex CLI before Claude
+    ever spawns anything for them. Root cause this covers: `_allow_routed_spawn()`
+    (default ON) used to return unconditionally before `_try_cli_delegation` —
+    the only existing caller of Codex — was ever reached, so Codex saw 0 calls
+    across 30 days despite the hook being "on". All tests here monkeypatch
+    `llm_router.codex_agent.{is_codex_available,run_codex}` — never a real
+    subprocess/network call.
+    """
+
+    def _fake_codex_result(self, monkeypatch, content="codex answer", success=True, model="gpt-5.5"):
+        from llm_router.codex_agent import CodexResult
+
+        async def _fake_run_codex(prompt, timeout=None, **kwargs):
+            return CodexResult(
+                content=content, model=model,
+                exit_code=0 if success else 1, duration_sec=1.5,
+            )
+
+        monkeypatch.setattr("llm_router.codex_agent.is_codex_available", lambda: True)
+        monkeypatch.setattr("llm_router.codex_agent.run_codex", _fake_run_codex)
+
+    def test_suitable_spawn_delegates_to_codex(self, tmp_path, monkeypatch):
+        """A suitable (analyze) task on a general-purpose subagent, with budget
+        and Codex available, is delegated — and recorded as a North Star unit."""
+        mod = _load_hook_module()
+        monkeypatch.setenv("LLM_ROUTER_HOME", str(tmp_path / ".llm-router"))
+        monkeypatch.setenv("LLM_ROUTER_AGENT_ROUTE_CODEX", "on")
+        self._fake_codex_result(monkeypatch, content="the root cause is X")
+
+        result = mod._try_codex_subagent_delegation(
+            "analyze the auth module for bugs", "analyze", "moderate",
+            "general-purpose", "sess-1",
+        )
+        assert result == "the root cause is X"
+
+        rows = _north_star_rows(tmp_path)
+        assert len(rows) == 1
+        assert rows[0]["lever"] == "agent_route_codex"
+        assert rows[0]["outcome"] == "delegated"
+        assert rows[0]["model"] == "gpt-5.5"
+        assert rows[0]["subagent_type"] == "general-purpose"
+        assert rows[0]["task_type"] == "analyze"
+
+    def test_fork_subagent_type_never_delegated(self, tmp_path, monkeypatch):
+        """A 'fork' subagent inherits the caller's live context — never suitable
+        for an external, context-free process, regardless of task type."""
+        mod = _load_hook_module()
+        monkeypatch.setenv("LLM_ROUTER_HOME", str(tmp_path / ".llm-router"))
+        monkeypatch.setenv("LLM_ROUTER_AGENT_ROUTE_CODEX", "on")
+
+        called = {"run_codex": False}
+
+        async def _should_not_run(*a, **k):
+            called["run_codex"] = True
+            from llm_router.codex_agent import CodexResult
+            return CodexResult(content="x", model="gpt-5.5", exit_code=0, duration_sec=0.1)
+
+        monkeypatch.setattr("llm_router.codex_agent.is_codex_available", lambda: True)
+        monkeypatch.setattr("llm_router.codex_agent.run_codex", _should_not_run)
+
+        result = mod._try_codex_subagent_delegation(
+            "analyze what we found so far in this conversation", "analyze",
+            "moderate", "fork", "sess-2",
+        )
+        assert result is None
+        assert called["run_codex"] is False
+
+        rows = _north_star_rows(tmp_path)
+        assert len(rows) == 1
+        assert rows[0]["outcome"] == "unsuitable"
+        assert rows[0]["subagent_type"] == "fork"
+
+    def test_write_heavy_multi_file_prompt_never_delegated(self, tmp_path, monkeypatch):
+        """A write-heavy, multi-file edit is not a Codex-suitable spawn."""
+        mod = _load_hook_module()
+        monkeypatch.setenv("LLM_ROUTER_HOME", str(tmp_path / ".llm-router"))
+        monkeypatch.setenv("LLM_ROUTER_AGENT_ROUTE_CODEX", "on")
+        self._fake_codex_result(monkeypatch)
+
+        result = mod._try_codex_subagent_delegation(
+            "refactor the entire codebase across multiple files to use the new API",
+            "code", "complex", "general-purpose", "sess-3",
+        )
+        assert result is None
+        rows = _north_star_rows(tmp_path)
+        assert rows[0]["outcome"] == "unsuitable"
+
+    def test_non_reasoning_task_type_never_delegated(self, tmp_path, monkeypatch):
+        """query/generate are outside this lever's suitable set (research/analyze/code)."""
+        mod = _load_hook_module()
+        monkeypatch.setenv("LLM_ROUTER_HOME", str(tmp_path / ".llm-router"))
+        monkeypatch.setenv("LLM_ROUTER_AGENT_ROUTE_CODEX", "on")
+        self._fake_codex_result(monkeypatch)
+
+        result = mod._try_codex_subagent_delegation(
+            "what is a closure", "query", "simple", "general-purpose", "sess-4",
+        )
+        assert result is None
+        rows = _north_star_rows(tmp_path)
+        assert rows[0]["outcome"] == "unsuitable"
+
+    def test_budget_exhausted_falls_back_with_logged_reason(self, tmp_path, monkeypatch):
+        """When today's Codex sub-agent budget is spent, delegation is skipped
+        and the fallback reason is recorded — Codex is never even probed."""
+        mod = _load_hook_module()
+        home = tmp_path / ".llm-router"
+        monkeypatch.setenv("LLM_ROUTER_HOME", str(home))
+        monkeypatch.setenv("LLM_ROUTER_AGENT_ROUTE_CODEX", "on")
+        monkeypatch.setenv("LLM_ROUTER_AGENT_ROUTE_CODEX_DAILY_BUDGET", "1")
+
+        probed = {"is_available": False}
+
+        def _should_not_probe():
+            probed["is_available"] = True
+            return True
+
+        monkeypatch.setattr("llm_router.codex_agent.is_codex_available", _should_not_probe)
+
+        # Pre-spend the (budget=1) daily allowance for today.
+        home.mkdir(parents=True, exist_ok=True)
+        today = mod.datetime.now(mod.timezone.utc).date().isoformat()
+        (home / "agent_route_codex_budget.json").write_text(
+            json.dumps({"date": today, "count": 1})
+        )
+
+        result = mod._try_codex_subagent_delegation(
+            "research the current best practice for X", "research", "moderate",
+            "general-purpose", "sess-5",
+        )
+        assert result is None
+        assert probed["is_available"] is False  # budget gate short-circuits before the probe
+
+        rows = _north_star_rows(tmp_path)
+        assert len(rows) == 1
+        assert rows[0]["outcome"] == "budget_exhausted"
+        assert "budget" in rows[0]["reason"].lower()
+
+    def test_codex_failure_falls_back(self, tmp_path, monkeypatch):
+        """A failed Codex run (non-zero exit / empty output) falls back cleanly
+        and the failure is recorded, not silently swallowed."""
+        mod = _load_hook_module()
+        monkeypatch.setenv("LLM_ROUTER_HOME", str(tmp_path / ".llm-router"))
+        monkeypatch.setenv("LLM_ROUTER_AGENT_ROUTE_CODEX", "on")
+        self._fake_codex_result(monkeypatch, content="codex: empty completion", success=False)
+
+        result = mod._try_codex_subagent_delegation(
+            "research recent papers on X", "research", "moderate",
+            "general-purpose", "sess-6",
+        )
+        assert result is None
+        rows = _north_star_rows(tmp_path)
+        assert rows[0]["outcome"] == "codex_failed"
+
+    def test_disabled_kill_switch_returns_none_without_ledger_row(self, tmp_path, monkeypatch):
+        """LLM_ROUTER_AGENT_ROUTE_CODEX=off — fully disabled, nothing attempted,
+        nothing logged (mirrors the existing DIRECT/CLI-delegation kill switches)."""
+        mod = _load_hook_module()
+        monkeypatch.setenv("LLM_ROUTER_HOME", str(tmp_path / ".llm-router"))
+        monkeypatch.setenv("LLM_ROUTER_AGENT_ROUTE_CODEX", "off")
+
+        result = mod._try_codex_subagent_delegation(
+            "analyze the auth module", "analyze", "moderate",
+            "general-purpose", "sess-7",
+        )
+        assert result is None
+        assert _north_star_rows(tmp_path) == []
+
+    def test_ledger_row_is_append_only_jsonl(self, tmp_path, monkeypatch):
+        """Two decisions in a row both land as separate JSON lines (not one
+        overwritten record) — the append-only shape NS1 depends on."""
+        mod = _load_hook_module()
+        monkeypatch.setenv("LLM_ROUTER_HOME", str(tmp_path / ".llm-router"))
+        monkeypatch.setenv("LLM_ROUTER_AGENT_ROUTE_CODEX", "on")
+        self._fake_codex_result(monkeypatch)
+
+        mod._try_codex_subagent_delegation(
+            "analyze module A", "analyze", "moderate", "general-purpose", "sess-8")
+        mod._try_codex_subagent_delegation(
+            "what is a closure", "query", "simple", "general-purpose", "sess-8")
+
+        rows = _north_star_rows(tmp_path)
+        assert len(rows) == 2
+        assert rows[0]["outcome"] == "delegated"
+        assert rows[1]["outcome"] == "unsuitable"
+
+
+class TestAgentRouteEndToEnd:
+    """In-process (not subprocess) test proving main() actually reaches the
+    NS3 Codex branch and returns its output as the subagent's block reason
+    with the NS1 attribution marker — the wiring, not just the gating logic."""
+
+    def test_main_uses_codex_result_as_subagent_output(self, tmp_path, monkeypatch, capsys):
+        mod = _load_hook_module()
+        (tmp_path / ".llm-router").mkdir(parents=True, exist_ok=True)
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("LLM_ROUTER_HOME", str(tmp_path / ".llm-router"))
+        monkeypatch.setenv("LLM_ROUTER_AGENT_ROUTE_CODEX", "on")
+        monkeypatch.setenv("LLM_ROUTER_SUBAGENT_DIRECT", "off")
+        monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
+
+        monkeypatch.setattr(
+            mod, "_try_codex_subagent_delegation",
+            lambda *a, **k: "codex says: fixed at line 42",
+        )
+
+        payload = json.dumps({
+            "hook_event_name": "PreToolUse",
+            "tool_name": "Agent",
+            "tool_input": {
+                "prompt": "analyze this bug and explain the root cause",
+                "subagent_type": "general-purpose",
+            },
+        })
+        monkeypatch.setattr(sys, "stdin", io.StringIO(payload))
+
+        mod.main()
+
+        out = json.loads(capsys.readouterr().out)
+        assert out["decision"] == "block"
+        assert "codex says: fixed at line 42" in out["reason"]
+        assert "agent_route_codex" in out["reason"]
+        assert "[NS1]" in out["reason"]
