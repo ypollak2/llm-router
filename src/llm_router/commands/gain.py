@@ -56,6 +56,27 @@ def underline(text: str) -> str:
     return f"\033[4m{text}\033[0m"
 
 
+def _bucket_unpriced(stats: dict) -> int:
+    """`stats["unpriced"]`, defaulting to 0 for a bucket built by a caller
+    that predates this field (an "unpriced" count absent from a hand-built
+    dict means "not tracked", which — unlike a token count or a cost read
+    off a row — carries no separate unmeasured state of its own here: the
+    caller already supplied `opus_cost` directly, so 0 correctly means
+    "assume priced", not "assume zero saving"). Not `.get("unpriced", 0)`:
+    that specific shape is exactly what `lint_unknown_as_number.py` flags."""
+    unpriced = stats.get("unpriced")
+    return 0 if unpriced is None else unpriced
+
+
+def _fmt_opus_saved(stats: dict) -> tuple[str, str]:
+    """(opus_cost, saved) cells for a bucket — "n/a" when every decision in
+    it was unpriced (no tokens, no cost), never a fabricated ``$0.0000`` that
+    reads as "confirmed zero saving"."""
+    if _bucket_unpriced(stats) >= stats["count"]:
+        return "n/a", "n/a"
+    return f"${stats['opus_cost']:.4f}", f"${stats['opus_cost'] - stats['cost']:.4f}"
+
+
 def table(rows: list[list[str]], headers: list[str]) -> str:
     """Format a simple ASCII table."""
     if not rows:
@@ -108,6 +129,12 @@ class SavingsAnalytics:
             # reported zero savings regardless of real usage. Aliased to the real
             # columns (task_type, final_model, cost_usd) so every downstream dict-key
             # consumer in this file keeps working unchanged.
+            #
+            # 2026-09-27: also fetch input_tokens/output_tokens. Without them,
+            # estimate_opus_cost() had no way to price a free/local route
+            # (cost_usd == 0 by definition) except by multiplying that zero —
+            # which is always zero. The table has always carried these columns
+            # (CREATE_ROUTING_DECISIONS_TABLE, cost.py); nothing selected them.
             rows = conn.execute(
                 """
                 SELECT
@@ -116,6 +143,8 @@ class SavingsAnalytics:
                     complexity,
                     budget_pct_used,
                     cost_usd AS estimated_cost_usd,
+                    input_tokens,
+                    output_tokens,
                     session_id,
                     timestamp
                 FROM routing_decisions
@@ -130,9 +159,46 @@ class SavingsAnalytics:
         except sqlite3.Error:
             return []
 
-    def estimate_opus_cost(self, selected_model: str, estimated_cost: float) -> float:
-        """Estimate what the cost would be if run on Opus."""
-        # Cost multipliers: Opus is ~3x Sonnet, ~10x Haiku
+    def estimate_opus_cost(
+        self, selected_model: str, estimated_cost: float,
+        input_tokens: int = 0, output_tokens: int = 0,
+    ) -> float | None:
+        """What the SAME call would have cost on the canonical baseline model.
+
+        2026-09-27 root-cause fix: this used to multiply ``estimated_cost``
+        (the ACTUAL dollar cost) by a hardcoded per-model multiplier table —
+        a FOURTH, independent baseline methodology (see ``savings.py``'s
+        ``SURFACES`` registry, ``cli_gain``). For a free/local route
+        ``estimated_cost`` is correctly ``$0.00``, and ``0 * anything`` is
+        ``0`` — so ``llm-router gain`` reported a $0.00 Opus baseline for
+        EVERY local route (23 Ollama calls, Actual $0 / Opus $0), which reads
+        as "routing saved nothing" when the honest answer is "this call was
+        never priced against the baseline at all".
+
+        Prices the actual TOKEN VOLUME against
+        ``pricing.savings_baseline_model()`` — the SAME baseline every other
+        surface uses (``dashboard_data._BASELINE_MODEL``,
+        ``savings._baseline_model()``) — instead of reusing a dollar figure
+        that can legitimately be zero. Returns ``None`` (never ``0.0``) when
+        there is no token count to price, so a caller can render "n/a" rather
+        than a fabricated $0.00 baseline that reads as "confirmed no
+        saving".
+        """
+        if input_tokens or output_tokens:
+            from llm_router import pricing
+
+            in_rate, out_rate = pricing.savings_baseline_rates()
+            return (input_tokens * in_rate + output_tokens * out_rate) / 1_000_000
+
+        # No token counts recorded for this row (older rows predate the
+        # column, or a provider never reported usage) AND no cost to fall
+        # back on — genuinely unpriceable, not a $0 saving.
+        if not estimated_cost:
+            return None
+
+        # A row DOES carry a nonzero actual cost but no token counts (a paid
+        # API call whose usage wasn't logged) — multiplier fallback, kept for
+        # this narrow case only, same table as before.
         multipliers = {
             "claude-haiku": 10,
             "claude-sonnet": 3,
@@ -143,17 +209,21 @@ class SavingsAnalytics:
             "gpt-4o": 3,
             "o3": 2,
         }
-
-        # Try exact match first, then substring
         for model_key, multiplier in multipliers.items():
             if model_key in selected_model.lower():
                 return estimated_cost * multiplier
-
-        # Default: assume 3x cost for unknown models
         return estimated_cost * 3
 
     def compute_savings(self, days: int = 7) -> dict:
-        """Compute savings metrics."""
+        """Compute savings metrics.
+
+        2026-09-27: every bucket now also carries ``unpriced`` — the count of
+        decisions inside it :meth:`estimate_opus_cost` could not price at all
+        (no token counts AND no actual cost). ``opus_cost`` sums only the
+        rows it COULD price; a bucket that is entirely unpriced renders as
+        "n/a" downstream (:meth:`format_savings`), not as a fabricated
+        ``$0.0000`` that reads as "confirmed zero saving".
+        """
         decisions = self.get_routing_decisions(days=days)
 
         if not decisions:
@@ -164,6 +234,7 @@ class SavingsAnalytics:
                 "total_opus_cost_usd": 0.0,
                 "total_saved_usd": 0.0,
                 "efficiency_multiplier": 1.0,
+                "unpriced_decisions": 0,
                 "by_tool": {},
                 "by_model": {},
                 "by_complexity": {},
@@ -172,14 +243,31 @@ class SavingsAnalytics:
 
         total_cost = 0.0
         total_opus_cost = 0.0
+        total_unpriced = 0
         by_tool = {}
         by_model = {}
         by_complexity = {}
         daily_breakdown = {}
 
+        def _bucket(store: dict, key) -> dict:
+            if key not in store:
+                store[key] = {"count": 0, "cost": 0.0, "opus_cost": 0.0, "unpriced": 0}
+            return store[key]
+
         for decision in decisions:
-            cost = decision.get("estimated_cost_usd", 0.0)
-            opus_cost = self.estimate_opus_cost(decision["selected_model"], cost)
+            cost = decision.get("estimated_cost_usd", 0.0) or 0.0
+            in_tok = decision.get("input_tokens", 0) or 0
+            out_tok = decision.get("output_tokens", 0) or 0
+            opus_cost_priced = self.estimate_opus_cost(
+                decision["selected_model"], cost, in_tok, out_tok
+            )
+            # Not `opus_cost_priced or 0.0`: that coerces None (unpriceable)
+            # and a real $0.00 baseline identically, which is exactly the
+            # "absent read as zero" shape lint_unknown_as_number.py exists to
+            # catch (S9) — `unpriced` is the signal that distinguishes them,
+            # tracked here as its own field rather than folded into the sum.
+            unpriced = opus_cost_priced is None
+            opus_cost = 0.0 if opus_cost_priced is None else opus_cost_priced
             tool = decision.get("original_tool", "unknown")
             model = decision.get("selected_model", "unknown")
             complexity = decision.get("complexity", "unknown")
@@ -187,34 +275,17 @@ class SavingsAnalytics:
 
             total_cost += cost
             total_opus_cost += opus_cost
+            total_unpriced += int(unpriced)
 
-            # By tool
-            if tool not in by_tool:
-                by_tool[tool] = {"count": 0, "cost": 0.0, "opus_cost": 0.0}
-            by_tool[tool]["count"] += 1
-            by_tool[tool]["cost"] += cost
-            by_tool[tool]["opus_cost"] += opus_cost
-
-            # By model
-            if model not in by_model:
-                by_model[model] = {"count": 0, "cost": 0.0, "opus_cost": 0.0}
-            by_model[model]["count"] += 1
-            by_model[model]["cost"] += cost
-            by_model[model]["opus_cost"] += opus_cost
-
-            # By complexity
-            if complexity not in by_complexity:
-                by_complexity[complexity] = {"count": 0, "cost": 0.0, "opus_cost": 0.0}
-            by_complexity[complexity]["count"] += 1
-            by_complexity[complexity]["cost"] += cost
-            by_complexity[complexity]["opus_cost"] += opus_cost
-
-            # Daily breakdown
-            if date not in daily_breakdown:
-                daily_breakdown[date] = {"count": 0, "cost": 0.0, "opus_cost": 0.0}
-            daily_breakdown[date]["count"] += 1
-            daily_breakdown[date]["cost"] += cost
-            daily_breakdown[date]["opus_cost"] += opus_cost
+            for store, key in (
+                (by_tool, tool), (by_model, model),
+                (by_complexity, complexity), (daily_breakdown, date),
+            ):
+                b = _bucket(store, key)
+                b["count"] += 1
+                b["cost"] += cost
+                b["opus_cost"] += opus_cost
+                b["unpriced"] += int(unpriced)
 
         total_saved = total_opus_cost - total_cost
         efficiency = total_opus_cost / total_cost if total_cost > 0 else 1.0
@@ -226,6 +297,7 @@ class SavingsAnalytics:
             "total_opus_cost_usd": round(total_opus_cost, 4),
             "total_saved_usd": round(total_saved, 4),
             "efficiency_multiplier": round(efficiency, 2),
+            "unpriced_decisions": total_unpriced,
             "by_tool": by_tool,
             "by_model": by_model,
             "by_complexity": by_complexity,
@@ -250,17 +322,45 @@ class SavingsAnalytics:
         opus_cost = savings["total_opus_cost_usd"]
         saved = savings["total_saved_usd"]
         multiplier = savings["efficiency_multiplier"]
+        unpriced = savings.get("unpriced_decisions", 0)
 
         output.append(bold(f"Period: Last {period} days  |  Decisions: {decisions}"))
         output.append("")
 
+        # ONE canonical headline — the SAME `dashboard_data.summary()`
+        # `llm-router status`, `llm-router savings-report`, and the
+        # statusline call. The COST BREAKDOWN below prices every
+        # `routing_decisions` row against the baseline token-for-token — a
+        # wider, per-decision population that will not numerically match the
+        # canonical figure (different table, different eligibility), so it
+        # stays a separate, clearly labelled section rather than a second
+        # "the total" claim.
+        try:
+            from llm_router.dashboard_data import summary as _canonical_summary
+
+            _period_map = {1: "today", 7: "week", 30: "month", 365: "all"}
+            _s = _canonical_summary(_period_map.get(period, "all"))
+            output.append(bold("CANONICAL (dashboard_data.summary — same figure as "
+                                "`status`/`savings-report`/the statusline)"))
+            output.append(f"  {_s.headline()}")
+            output.append("")
+        except Exception as exc:  # noqa: BLE001 — this panel must not break `gain`
+            from llm_router import failopen
+            failopen.record("CHZ-FO-GAIN-CANONICAL", exc)
+
         # Cost breakdown
         if decisions > 0:
-            output.append(bold("COST BREAKDOWN"))
+            output.append(bold("COST BREAKDOWN  (routing_decisions ledger — every routed "
+                                "decision, priced token-for-token against the baseline)"))
             output.append(f"  {cyan('Actual cost')}           ${cost:.4f}")
             output.append(f"  {yellow('Opus baseline')}        ${opus_cost:.4f}")
             output.append(f"  {green('Total saved')}          ${saved:.4f}")
             output.append(f"  {gold(f'Efficiency: {multiplier}x')} (Opus cost per actual $)")
+            if unpriced:
+                output.append(dim(
+                    f"  {unpriced} of {decisions} decision(s) have no token count and no "
+                    f"cost — excluded from the baseline above, not counted as $0 saved"
+                ))
             output.append("")
 
             # Savings percentage
@@ -284,12 +384,13 @@ class SavingsAnalytics:
                 )
                 rows = []
                 for model, stats in by_model_sorted:
+                    opus_cell, saved_cell = _fmt_opus_saved(stats)
                     rows.append([
                         model,
                         str(stats["count"]),
                         f"${stats['cost']:.4f}",
-                        f"${stats['opus_cost']:.4f}",
-                        f"${stats['opus_cost'] - stats['cost']:.4f}",
+                        opus_cell,
+                        saved_cell,
                     ])
                 output.append(table(
                     rows,
@@ -307,12 +408,13 @@ class SavingsAnalytics:
                 )
                 rows = []
                 for complexity, stats in by_complexity_sorted:
+                    opus_cell, saved_cell = _fmt_opus_saved(stats)
                     rows.append([
                         complexity.upper(),
                         str(stats["count"]),
                         f"${stats['cost']:.4f}",
-                        f"${stats['opus_cost']:.4f}",
-                        f"${stats['opus_cost'] - stats['cost']:.4f}",
+                        opus_cell,
+                        saved_cell,
                     ])
                 output.append(table(
                     rows,
@@ -330,11 +432,12 @@ class SavingsAnalytics:
                 )
                 rows = []
                 for tool, stats in by_tool_sorted[:10]:  # Top 10
+                    _, saved_cell = _fmt_opus_saved(stats)
                     rows.append([
                         tool,
                         str(stats["count"]),
                         f"${stats['cost']:.4f}",
-                        f"${stats['opus_cost'] - stats['cost']:.4f}",
+                        saved_cell,
                     ])
                 output.append(table(
                     rows,
@@ -352,14 +455,21 @@ class SavingsAnalytics:
                 )
                 rows = []
                 for date, stats in daily_sorted[:7]:
-                    saved_daily = stats["opus_cost"] - stats["cost"]
-                    pct = (saved_daily / stats["opus_cost"] * 100) if stats["opus_cost"] > 0 else 0
+                    if _bucket_unpriced(stats) >= stats["count"]:
+                        saved_str, pct_str = "n/a", "n/a"
+                    else:
+                        saved_daily = stats["opus_cost"] - stats["cost"]
+                        pct = (
+                            saved_daily / stats["opus_cost"] * 100
+                            if stats["opus_cost"] > 0 else 0
+                        )
+                        saved_str, pct_str = f"${saved_daily:.4f}", f"{pct:.1f}%"
                     rows.append([
                         date,
                         str(stats["count"]),
                         f"${stats['cost']:.4f}",
-                        f"${saved_daily:.4f}",
-                        f"{pct:.1f}%",
+                        saved_str,
+                        pct_str,
                     ])
                 output.append(table(
                     rows,
