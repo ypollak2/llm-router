@@ -12,6 +12,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — routing
+
+- **The read-only draft loop could burn the entire hook budget on one stuck
+  model, leaving nothing for any fallback.** `~/.llm-router/direct_samples.jsonl`
+  showed 20/20 recorded DIRECT failures at ~54-55s (the hook's own budget) —
+  `auto-route-debug.log` traced the mechanism: `execute_agent`'s first ollama
+  model (reliably the heaviest one) was handed the ENTIRE remaining deadline,
+  and `execute_chain`'s text-chain fallback that runs after it was ALSO given
+  the full, un-reserved hook deadline. When the first model stalled (cold
+  load, drift), both the rest of the agent-loop chain and the text-chain
+  fallback were skipped with "out of hook budget before the call" without a
+  single request being sent. Both call sites now reserve time for what runs
+  after them, mirroring the reserve `execute_chain` already applied to its own
+  chain. `execute_agent` also now logs a per-model reason (timeout vs.
+  drifted vs. quality-gate-rejected) instead of one blanket "nothing".
+
 ## [15.3.0] - 2026-09-25
 
 Local routing, rebuilt around what was measured. Before this release, on the
