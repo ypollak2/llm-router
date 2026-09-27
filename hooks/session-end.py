@@ -2077,10 +2077,19 @@ def _condense(summary: str) -> str:
     SAME database showed `lifetime +$112.84 unverified (n=9,229)`: one
     surface said "nothing saved," the other said real routing activity
     existed, and both were reading the same rows. Recomputing from
-    `dashboard_data.summary()` and labelling both halves ("verified" /
-    "est +...") is the fix — a bare, unlabelled `lifetime $X` may not appear
-    again, because an unverified figure must never be printed as if it were
-    the realized total.
+    `dashboard_data.summary()` fixed that (PR #178) — a bare, unlabelled
+    `lifetime $X` may not appear again.
+
+    2026-09-27 product decision: PR #178's fix labelled the two halves
+    explicitly ("verified $X · est +$Y"), which solved the unlabelled-bare-$
+    problem but then showed "verified $0.00" on every machine where no
+    routed answer has ever been confirmed to replace a Claude turn — reading
+    as "nothing was saved" beside a real, nonzero estimate. Every user-facing
+    surface (this line included) now shows ONE combined, always-labelled
+    estimate via `Summary.compact()` — "today ~$X est · lifetime ~$Y est" —
+    instead. The verified/unverified split still exists on the `Summary`
+    object (`Summary.headline()`, internal/`doctor` use); it just no longer
+    reaches this line.
     """
     plain = _ANSI_RE.sub("", summary)
 
@@ -2126,12 +2135,13 @@ def _condense(summary: str) -> str:
         try:
             from llm_router import dashboard_data as _dd
 
+            # 2026-09-27 product decision: ONE labelled estimate per window
+            # (realized+unverified merged), never "verified"/"unverified"
+            # wording — Summary.compact() is the single implementation this
+            # line, the statusline, and codex-stop.py all call.
             for label, window in (("today", "today"), ("lifetime", "lifetime")):
                 s = _dd.summary(window)
-                bit = f"{label}: verified ${s.realized_usd:,.2f}"
-                if s.unverified_usd:
-                    bit += f" · est +${s.unverified_usd:,.2f} (n={s.unverified_n:,})"
-                bits.append(bit)
+                bits.append(f"{label} {s.compact()}")
         except Exception:
             pass
 

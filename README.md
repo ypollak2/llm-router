@@ -96,7 +96,7 @@ workload. See [Savings](#savings) below.
 pip install llm-routing        # installs the `llm-router` command
 llm-router install             # wire up Claude Code (default host)
 llm-router doctor               # check provider connectivity and setup
-llm-router status               # verify it's routing — verified vs unverified savings
+llm-router status               # verify it's routing — est. savings vs baseline
 ```
 
 Works with **no API keys** on a Claude Pro/Max subscription — routing goes
