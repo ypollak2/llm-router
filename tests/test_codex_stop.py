@@ -72,11 +72,13 @@ def test_stop_reports_distinct_windows_and_preserves_session_on_repeated_turns(s
     session.write_text('{"content":"keep this conversation"}\n')
     before = session.read_bytes()
     first = run_stop(stop_env)
-    # Verified (mode='block') figures, each labelled — see the 2026-09-27 fix:
-    # both used to come from `query_window(...).saved_usd` and print as a bare
-    # "lifetime {money}", indistinguishable from an unverified estimate.
-    assert "today: verified $1.25" in first
-    assert "lifetime: verified $4.75" in first
+    # 2026-09-27: ONE labelled estimate per window (realized+unverified
+    # merged) — both used to come from `query_window(...).saved_usd` and
+    # print as a bare "lifetime {money}", indistinguishable from an
+    # unverified estimate; the PR #178 fix labelled the split, and this
+    # later fix merges it into a single always-estimate figure.
+    assert "today ~$1.25 est" in first
+    assert "lifetime ~$4.75 est" in first
     assert run_stop(stop_env) == first
     assert session.read_bytes() == before
 
@@ -94,21 +96,19 @@ def test_pending_savings_are_imported_once(stop_env):
     }) + "\n")
     first = run_stop(stop_env)
     # A31: a Codex pending saving comes from an MCP call nobody observed being
-    # used — imported once, kept out of the verified headline, labelled as an
-    # estimate beside it (never as "lifetime {money}" unlabelled).
-    assert "today: verified $0.00 · est +$0.12 (n=1)" in first
-    assert "lifetime: verified $0.00 · est +$0.12 (n=1)" in first
+    # used — imported once, and shown as part of the single estimate (2026-
+    # 09-27: no separate "verified $0.00 · est +$Y" pair any more — realized
+    # and unverified are merged into ONE always-labelled figure).
+    assert "today ~$0.12 est" in first
+    assert "lifetime ~$0.12 est" in first
     assert run_stop(stop_env) == first
     assert not (state / "savings_log.jsonl").exists()
 
 
 def test_new_install_reports_zero_without_creating_a_database(stop_env):
     line = run_stop(stop_env)
-    assert "today: verified $0.00" in line
-    assert "lifetime: verified $0.00" in line
-    # Nothing unverified either — a fresh install must not print an "est"
-    # bit with no data behind it.
-    assert "est +" not in line
+    assert "today ~$0.00 est" in line
+    assert "lifetime ~$0.00 est" in line
     assert not Path(stop_env["LLM_ROUTER_DB_PATH"]).exists()
 
 
@@ -138,16 +138,17 @@ def test_figures_match_dashboard_data_summary_exactly(stop_env):
     lifetime = dashboard_data.summary("lifetime", db_path=db)
 
     line = run_stop(stop_env)
-    assert f"today: verified ${today.realized_usd:,.2f}" in line
-    assert f"est +${today.unverified_usd:,.2f} (n={today.unverified_n:,})" in line
-    assert f"lifetime: verified ${lifetime.realized_usd:,.2f}" in line
-    assert f"est +${lifetime.unverified_usd:,.2f} (n={lifetime.unverified_n:,})" in line
+    # 2026-09-27: ONE labelled estimate (Summary.compact()), never a separate
+    # "verified $X" / "est +$Y" pair — see Summary.estimated_usd's docstring.
+    assert f"today {today.compact()}" in line
+    assert f"lifetime {lifetime.compact()}" in line
 
-    # Never show a verified-only figure unlabelled: "lifetime $" or "today $"
-    # must always be followed by "verified", never a bare dollar sign — the
-    # exact regression this fix closes.
+    # Never show a bare, unlabelled figure: "lifetime $" or "today $" must
+    # always carry the "~"/"est" qualifier — the exact regression this fix
+    # closes — and "verified"/"unverified" must never reach this surface.
     assert "lifetime $" not in line
     assert "today $" not in line
+    assert "verified" not in line.lower()
 
 
 def test_unreadable_ledger_reports_unavailable_instead_of_zero(stop_env):

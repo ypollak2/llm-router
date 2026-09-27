@@ -888,14 +888,25 @@ async def llm_edit(
     ctx: Context,
     context: str | None = None,
 ) -> str:
-    """Route code-edit reasoning to a cheap model and return exact edit instructions.
+    """Edit-shaped work FIRST CHOICE: route file edits to a cheap model, get back
+    exact old_string/new_string pairs, apply them as-is with your Edit tool.
 
-    Instead of Opus reasoning about what to change (expensive), a cheap model
-    reads the files, figures out the edits, and returns JSON ``{file, old_string,
-    new_string}`` pairs that Claude can apply mechanically via the Edit tool.
+    This is the preferred path for single-file and few-file edits — refactors,
+    bug fixes, small features — instead of reading the files yourself and
+    reasoning about the change on the expensive model. A cheap model reads the
+    files, figures out the edits, and returns validated JSON ``{file,
+    old_string, new_string}`` pairs. Validation happens BEFORE you see them:
+    every ``old_string`` is checked for an exact, unique match in the file and
+    the resulting file is syntax-checked (Python/JSON/YAML) — rejected
+    attempts are automatically retried with the rejection reason fed back to
+    the model, up to 3 tries. So when this returns edits, they are meant to be
+    applied exactly as given, not re-derived.
 
-    **How to use the result**: After calling this tool, apply each edit instruction
-    using the Edit tool with the exact old_string → new_string pairs provided.
+    **How to use the result**: Apply each edit instruction using the Edit tool
+    with the exact old_string → new_string pairs provided — do not paraphrase
+    or "improve" them; that defeats the point of routing this off the
+    expensive model. If validation failed after 3 attempts (rare — see the
+    Warnings section), fall back to editing directly.
 
     Best for: refactoring, bug fixes, adding small features to existing files.
 
@@ -908,11 +919,15 @@ async def llm_edit(
         context: Optional conversation context to help the model understand the task.
     """
     from llm_router.edit import (
+        EditResult,
+        MAX_EDIT_ATTEMPTS,
+        apply_edits,
         build_edit_prompt,
         format_edit_result,
         parse_edit_response,
         read_file_for_edit,
     )
+    from llm_router.edit_ledger import record_edit_outcome
 
     # Read all requested files
     file_contents: dict[str, str] = {}
@@ -923,28 +938,69 @@ async def llm_edit(
         if truncated:
             read_notes.append(f"{path}: truncated to 32 KB")
 
-    # Build the prompt and route to cheap code model
-    prompt = build_edit_prompt(task, file_contents)
-    if context:
-        prompt = f"{context}\n\n---\n\n{prompt}"
+    await _announce_routing(ctx, "code", "edit")
 
-    resp = await route_and_call(
-        TaskType.CODE,
-        prompt,
-        system_prompt=(
-            "You are a precise code editor. Return ONLY a JSON array of edit "
-            "instructions. No prose, no explanation outside the JSON."
-        ),
-        temperature=0.1,
-        ctx=ctx,
-        route_directive_id=_read_hook_route_directive(),
-    )
+    history: list[str] = []
+    resp = None
+    result = EditResult(edits=[], applied=False, rejected_reasons=[])
 
-    instructions, warnings = parse_edit_response(resp.content)
+    for attempt in range(1, MAX_EDIT_ATTEMPTS + 1):
+        feedback = history[-1] if history else None
+        prompt = build_edit_prompt(task, file_contents, feedback=feedback)
+        if context:
+            prompt = f"{context}\n\n---\n\n{prompt}"
+
+        resp = await route_and_call(
+            TaskType.CODE,
+            prompt,
+            system_prompt=(
+                "You are a precise code editor. Return ONLY a JSON array of edit "
+                "instructions. No prose, no explanation outside the JSON."
+            ),
+            temperature=0.1,
+            ctx=ctx,
+            route_directive_id=_read_hook_route_directive(),
+        )
+
+        instructions, parse_warnings = parse_edit_response(resp.content)
+        if not instructions:
+            reason = "; ".join(parse_warnings) or "no edit instructions in response"
+            history.append(reason)
+            result = EditResult(edits=[], applied=False, rejected_reasons=list(history), attempts=attempt)
+            continue
+
+        new_contents, reject_reasons = apply_edits(file_contents, instructions)
+        if new_contents is not None:
+            result = EditResult(edits=instructions, applied=True, rejected_reasons=[], attempts=attempt)
+            break
+
+        history.append("; ".join(reject_reasons))
+        result = EditResult(edits=instructions, applied=False, rejected_reasons=list(history), attempts=attempt)
+
+    for instr in result.edits:
+        record_edit_outcome(
+            file=instr.file,
+            model=(resp.model if resp else "unknown"),
+            applied=result.applied,
+        )
+    if not result.edits:
+        # Every attempt failed to even produce parseable instructions — still
+        # worth a ledger row per requested file so the "0 uses" signal this
+        # lever was built to fix is visible even on total failure.
+        for path in file_contents:
+            record_edit_outcome(file=path, model=(resp.model if resp else "unknown"), applied=False)
+
+    warnings = list(result.rejected_reasons)
     if read_notes:
         warnings = [f"File truncated: {n}" for n in read_notes] + warnings
 
-    return format_edit_result(instructions, warnings, resp.header())
+    return format_edit_result(
+        result.edits,
+        warnings,
+        resp.header() if resp else "no response",
+        applied=result.applied,
+        attempts=result.attempts,
+    )
 
 
 def register(mcp, should_register=None) -> None:
