@@ -253,8 +253,20 @@ def test_direct_replacement_followed_by_claude_reask_is_redo(tmp_path):
 # ── exclusions ───────────────────────────────────────────────────────────────
 
 def test_synthetic_session_is_excluded_entirely(tmp_path):
+    """The file-level ``is_synthetic_session`` skip in ``build_sessions``, not
+    just ``classify_drop``'s per-user-prompt check.
+
+    A fixture built only from user_prompt text is exonerated twice over:
+    ``classify_drop`` independently re-checks ``is_synthetic_session`` on
+    every user turn's text (``scripts/groundtruth/sources.py``), so it alone
+    empties the session even if the file-level skip in ``build_sessions`` is
+    disabled entirely. This assistant turn is NOT covered by that per-text
+    check (only user-type records go through ``classify_drop``), so it is
+    the thing that actually exercises the file-level skip.
+    """
     sid = "deadbee2-0000-0000-0000-000000000000"  # matches _HEX_FIXTURE_STEMS
     records = [_user(sid, "what is the capital of Portugal", 1_800_000_000)]
+    records.append(_assistant(sid, 1_800_000_001, text="an assistant turn"))
     records += _bulk_user_prompts(sid, 60, start_ts=1_800_000_100)
     proj = _project(tmp_path)
     _write_jsonl(proj / f"{sid}.jsonl", records)
@@ -265,8 +277,17 @@ def test_synthetic_session_is_excluded_entirely(tmp_path):
 
 
 def test_sandbox_workspace_is_excluded(tmp_path):
+    """The file-level ``sandbox`` skip in ``build_sessions``, not just
+    ``classify_drop``'s per-user-prompt ``workspace_is_sandbox`` check.
+
+    Same gap as ``test_synthetic_session_is_excluded_entirely``: a
+    user-prompt-only fixture is exonerated twice over, once here and once by
+    ``classify_drop``. The assistant turn is not covered by that per-text
+    check, so it is what actually exercises the file-level skip.
+    """
     sid = SID_MAIN
     records = [_user(sid, "what is the current value of MAX_VALUE", 1_800_000_000)]
+    records.append(_assistant(sid, 1_800_000_001, text="an assistant turn"))
     records += _bulk_user_prompts(sid, 60, start_ts=1_800_000_100)
     proj = _project(tmp_path, name="-private-tmp-bq-claude")
     _write_jsonl(proj / f"{sid}.jsonl", records)

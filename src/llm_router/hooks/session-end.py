@@ -2061,54 +2061,43 @@ def _condense(summary: str) -> str:
     Reports today's savings, lifetime savings, and remaining quota — the three
     numbers worth seeing every turn.
 
-    MATCHED AGAINST THE REAL RENDER, NOT A GUESS. The first version searched for
-    `$<amount>` FOLLOWED BY a label, because that is how the fixture in
-    tests/test_stop_hook_verbosity.py was written — by hand, from memory. The
-    actual box puts the label first (`lifetime $2299.39`), so the regex matched
-    nothing and the line printed `682 routed` and no money at all, every turn,
-    while its tests passed.
+    ROUTED COUNT AND QUOTA are still regex-extracted from the rendered box —
+    GH#53's "routed means EXECUTED" rule lives in that regex, unchanged.
+    MONEY IS NOT, as of 2026-09-27: it now comes from
+    `dashboard_data.summary()`, the one canonical figure `llm-router status`,
+    `savings-report`, `gain`, and the statusline all read (PR #173,
+    tests/economics/test_single_baseline_policy.py).
 
-    That is the exact failure the old docstring warned about — "green against
-    synthetic fixtures while doing nothing in production" — and writing the
-    warning did not prevent it, because the fixture was still invented. The
-    fixture is now a captured excerpt of real output.
+    WHY THE MONEY PATH CHANGED. The previous version regex-parsed
+    "today $X" / "lifetime $X" out of the rendered box and printed it as the
+    line's only money figures. Both numbers it found were the VERIFIED-only
+    total (`savings_stats` mode='block', PR6) — the box never rendered the
+    unverified estimate at all. On a real machine this produced
+    `saved today $0.00 · lifetime $0.00` while `llm-router status` on the
+    SAME database showed `lifetime +$112.84 unverified (n=9,229)`: one
+    surface said "nothing saved," the other said real routing activity
+    existed, and both were reading the same rows. Recomputing from
+    `dashboard_data.summary()` fixed that (PR #178) — a bare, unlabelled
+    `lifetime $X` may not appear again.
 
-    Figures are EXTRACTED, never recomputed, so condensed and full cannot
-    disagree about the same session.
+    2026-09-27 product decision: PR #178's fix labelled the two halves
+    explicitly ("verified $X · est +$Y"), which solved the unlabelled-bare-$
+    problem but then showed "verified $0.00" on every machine where no
+    routed answer has ever been confirmed to replace a Claude turn — reading
+    as "nothing was saved" beside a real, nonzero estimate. Every user-facing
+    surface (this line included) now shows ONE combined, always-labelled
+    estimate via `Summary.compact()` — "today ~$X est · lifetime ~$Y est" —
+    instead. The verified/unverified split still exists on the `Summary`
+    object (`Summary.headline()`, internal/`doctor` use); it just no longer
+    reaches this line.
     """
     plain = _ANSI_RE.sub("", summary)
-
-    _MONEY = r"~?\$[0-9][0-9,]*\.[0-9]{2}"
-
-    def _money(label: str) -> str | None:
-        """The savings figure for `label`, from the rendered cumulative panel.
-
-        The hero line puts the money BEFORE its label -- "~$64.80  lifetime
-        ~$8.97  today" -- so the long-standing label-then-money pattern matched
-        the figure that FOLLOWS the label, and `lifetime` returned today's
-        number. It read correctly only because an earlier line in the full
-        document happened to match first; in isolation it is simply wrong.
-        Money-then-label is tried first because that is what the panel actually
-        emits, with the label-then-money grid row as the fallback.
-
-        The tilde is captured, not dropped: it is the only mark distinguishing a
-        modelled saving from a measured spend, and this line prints inches from
-        "quota used NN%" where a bare dollar figure reads as money spent. It is
-        optional so a panel rendered before the tilde landed still matches.
-        """
-        m = re.search(r"(" + _MONEY + r")\s+" + label + r"\b", plain, re.I)
-        if m:
-            return m.group(1)
-        m = re.search(label + r"\s+(" + _MONEY + r")", plain, re.I)
-        return m.group(1) if m else None
 
     def _pct(label: str) -> int | None:
         # Real render: "5h ━━────────  16%" — a progress bar, then percent USED.
         m = re.search(label + r"[^\n%]*?(\d{1,3})%", plain, re.I)
         return int(m.group(1)) if m else None
 
-    today = _money("today")
-    lifetime = _money("lifetime")
     # GH#53: "routed" means EXECUTED, so this may only match counts that come
     # from the routing_decisions store. The old fallback matched a bare
     # "N calls", which the classifier-log line could supply the moment its
@@ -2131,15 +2120,31 @@ def _condense(summary: str) -> str:
     if routes:
         # Sourced from the decisions/routes count above, never from "classified".
         bits.append(f"{routes.group(1)} routed")
-    # "saved" is not decoration. These are savings against an all-premium
-    # baseline, and they render inches from "quota used NN%" — so an unlabelled
-    # `today $32.85` reads as money SPENT, the exact inversion a user hit on the
-    # statusline's identical figure. Say what the number is, once, in the line
-    # that gets screenshotted.
-    if today:
-        bits.append(f"saved today {today}")
-    if lifetime:
-        bits.append(f"lifetime {lifetime}")
+
+    # Money: THE canonical `dashboard_data.summary()`, never regex over the
+    # rendered box (see docstring). GATED on `routes or quota` — the same
+    # signal that used to come from finding money text IN the box — so the
+    # "nothing happened this turn" case (the box is the bare "No session
+    # activity" message, matched by neither) still returns "" instead of
+    # printing an always-nonzero LIFETIME total every turn regardless of
+    # session activity, which is the exact per-turn noise CHZ-STOP-01 exists
+    # to suppress. Fail open: a broken DB or import must not blank out the
+    # routed/quota bits that still work, so this is wrapped and runs without
+    # disturbing them.
+    if routes or used_5h is not None or used_wk is not None:
+        try:
+            from llm_router import dashboard_data as _dd
+
+            # 2026-09-27 product decision: ONE labelled estimate per window
+            # (realized+unverified merged), never "verified"/"unverified"
+            # wording — Summary.compact() is the single implementation this
+            # line, the statusline, and codex-stop.py all call.
+            for label, window in (("today", "today"), ("lifetime", "lifetime")):
+                s = _dd.summary(window)
+                bits.append(f"{label} {s.compact()}")
+        except Exception:
+            pass
+
     if used_5h is not None or used_wk is not None:
         used = []
         if used_5h is not None:
