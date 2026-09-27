@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 16
+# llm_router-hook-version: 17
 """Stop hook — unified session summary: CC subscription delta + external routing costs."""
 
 from __future__ import annotations
@@ -2153,6 +2153,13 @@ def _condense(summary: str) -> str:
             used.append(f"wk {used_wk}%")
         bits.append("quota used " + "/".join(used))
 
+    # NS1: extracted from the full render, never recomputed here — same
+    # "figures are EXTRACTED, never recomputed" rule as the money above, so
+    # condensed and full cannot disagree about the same session.
+    ns_match = re.search(r"(north star\b[^\n]*)", plain, re.I)
+    if ns_match:
+        bits.append(ns_match.group(1).strip())
+
     if not bits:
         return ""
     return "⚡ llm_router · " + " · ".join(bits) + "  ·  `llm-router summary` for detail"
@@ -2558,6 +2565,27 @@ def main() -> None:
         routing_section = format_routing_section()
         if routing_section:
             final_summary_output = final_summary_output.rstrip("  " + "═" * (WIDTH - 2)) + routing_section + "  " + "═" * (WIDTH - 2)
+    except Exception:
+        pass  # Graceful failure — never break session-end
+
+    # ── NS1: North Star line (routed-and-used share, this session) ───────────
+    # PR #178 changes this box's savings text and another PR retitles it to
+    # estimate-only; this block only APPENDS its own item, same pattern as the
+    # routing-efficiency block above, so those two land without touching this.
+    try:
+        from llm_router import northstar as _northstar
+        _ns_session_id = None
+        try:
+            with open(_session_id_file()) as f:
+                _ns_session_id = f.read().strip()
+        except Exception:
+            pass
+        if _ns_session_id:
+            _ns_line = _northstar.current_session_line(_ns_session_id)
+            final_summary_output = (
+                final_summary_output.rstrip("  " + "═" * (WIDTH - 2))
+                + f"\n  {_ns_line}\n" + "  " + "═" * (WIDTH - 2)
+            )
     except Exception:
         pass  # Graceful failure — never break session-end
 

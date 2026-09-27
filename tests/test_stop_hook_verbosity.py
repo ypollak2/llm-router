@@ -213,6 +213,28 @@ def test_condensed_says_nothing_when_there_is_nothing(hook):
     assert hook._condense(_EMPTY) == ""
 
 
+# ── NS1: north star item, extracted (never recomputed) from the full render ──
+
+def test_condensed_extracts_north_star_line(hook):
+    """The Stop line's NS1 item is a substring pulled from the full box, so
+    condensed and full cannot report two different numbers for one session."""
+    boxed = _BOXED + "\n  north star 12% (n=87)\n"
+    line = hook._condense(boxed)
+    assert "north star 12% (n=87)" in line
+
+
+def test_condensed_extracts_north_star_too_few_to_tell(hook):
+    boxed = _BOXED + "\n  north star: too few to tell (n=12)\n"
+    line = hook._condense(boxed)
+    assert "north star: too few to tell (n=12)" in line
+
+
+def test_condensed_omits_north_star_when_absent(hook):
+    """No NS1 data (e.g. session_id unresolved) must not fabricate a figure."""
+    line = hook._condense(_BOXED)
+    assert "north star" not in line
+
+
 def test_money_comes_from_dashboard_data_not_the_box(hook, fixture_home):
     """2026-09-27 fix: money is recomputed from `dashboard_data.summary()`,
     never regex-extracted from the rendered box.

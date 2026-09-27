@@ -159,6 +159,13 @@ ENV_REGISTRY: dict[str, tuple[str, str, int]] = {
     "LLM_ROUTER_GATEWAY_TOKEN": ("provider_credential", "gateway.py", 1),
     "LLM_ROUTER_HARNESS": ("llm_router", "scripts/routerarena/apply_divert_router.py", 1),
     "LLM_ROUTER_HOME": ("llm_router", "hooks/agent_writes.py", 2),
+    # NS1 (2026-09-27): override for Claude Code's transcript directory, read by
+    # northstar.py so a test (or a future multi-host build) can point the North
+    # Star metric at a fixture tree instead of the operator's real ~/.claude.
+    # Same override name scripts/groundtruth/sources.py already reads (out of
+    # this registry's declared scope, hence declared here where it FIRST
+    # enters src/llm_router/).
+    "CLAUDE_PROJECTS_DIR": ("llm_router", "northstar.py", 1),
     "LLM_ROUTER_SYMBOL_GROUNDING": ("llm_router", "hooks/auto-route.py", 1),
     "LLM_ROUTER_GATEWAY_HOST": ("llm_router", "presets.py", 1),
     "LLM_ROUTER_GATEWAY_PORT": ("llm_router", "presets.py", 1),
