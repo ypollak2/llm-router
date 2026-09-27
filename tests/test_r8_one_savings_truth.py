@@ -39,7 +39,7 @@ from datetime import datetime, timezone
 
 import pytest
 
-from llm_router import dashboard_data, pricing, savings
+from llm_router import dashboard_data, pricing
 
 
 def _now_iso() -> str:
