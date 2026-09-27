@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 35
+# llm_router-hook-version: 36
 """UserPromptSubmit hook — scoring classifier with Ollama + API fallback chain.
 
 Classification chain (stops at first success):
@@ -175,7 +175,7 @@ def route_call(logical: str, *args: str) -> str:
 # Cursor/Windsurf/Codex never start the MCP server so check_and_update_hooks()
 # never fires. This check emits a stderr warning when the installed hook is
 # older than the bundled one. The user sees it in their IDE's output panel.
-_THIS_VERSION_LINE = "# llm_router-hook-version: 35"
+_THIS_VERSION_LINE = "# llm_router-hook-version: 36"
 try:
     _PKG_HOOK = Path(__file__).resolve()
     _INSTALLED_HOOK = Path.home() / ".claude" / "hooks" / "llm_router-auto-route.py"
@@ -608,6 +608,73 @@ def _is_pressure_stale(max_age_seconds: int = 1800) -> bool:
     return (time.time() - usage_path.stat().st_mtime) > max_age_seconds
 
 
+# v7.6: `quota_snapshots.claude_{session,weekly,sonnet}_pct` were declared NOT
+# NULL, which is why the schema below drops that constraint on an upgrade.
+# CREATE TABLE IF NOT EXISTS is a no-op on a database that already has the
+# table with the OLD (NOT NULL) definition — SQLite does not retroactively
+# relax a constraint just because the CREATE statement changed — so
+# `_ensure_quota_snapshots_pct_nullable` below rebuilds the table in place the
+# first time this hook runs against an old database. Existing rows keep
+# whatever value they already hold (including any historical 0.0s): this is a
+# constraint fix, not a backfill.
+_QUOTA_SNAPSHOTS_SCHEMA_SQL = """
+CREATE TABLE IF NOT EXISTS quota_snapshots (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp TEXT DEFAULT (datetime('now')),
+    session_id TEXT NOT NULL,
+    prompt_sequence INTEGER NOT NULL,
+    prompt_hash TEXT,
+    claude_session_pct REAL,
+    claude_weekly_pct REAL,
+    claude_sonnet_pct REAL,
+    openai_spent_usd REAL NOT NULL DEFAULT 0,
+    gemini_spent_usd REAL NOT NULL DEFAULT 0,
+    ollama_available INTEGER NOT NULL DEFAULT 1,
+    cache_age_seconds REAL NOT NULL,
+    was_cache_fresh INTEGER NOT NULL,
+    routing_decision_id INTEGER,
+    final_model TEXT,
+    final_provider TEXT,
+    complexity_requested TEXT,
+    complexity_used TEXT,
+    was_downgraded INTEGER DEFAULT 0
+)
+"""
+
+_QUOTA_SNAPSHOTS_PCT_COLUMNS = (
+    "claude_session_pct", "claude_weekly_pct", "claude_sonnet_pct",
+)
+
+
+def _ensure_quota_snapshots_pct_nullable(conn) -> None:
+    """Rebuild ``quota_snapshots`` once so the pct columns accept NULL.
+
+    A quota reading that could not be obtained must be stored as NULL
+    (unknown), never as 0.0 (a fabricated "0% pressure"). The original schema
+    declared these columns NOT NULL, which made that impossible and forced
+    every unavailable reading to be written as a fail-open zero. This checks
+    `PRAGMA table_info` and, only if the legacy NOT NULL constraint is still
+    present, renames the old table, recreates it with nullable pct columns,
+    and copies every existing row across unchanged (no value is rewritten —
+    see the module docstring above for why that matters).
+    """
+    conn.execute(_QUOTA_SNAPSHOTS_SCHEMA_SQL)  # no-op if the table already exists
+    rows = conn.execute("PRAGMA table_info(quota_snapshots)").fetchall()
+    if not rows:
+        return  # unreachable after the CREATE above, but keeps this defensive
+    notnull_by_name = {r[1]: r[3] for r in rows}  # (cid, name, type, notnull, ...)
+    if not any(notnull_by_name.get(c) for c in _QUOTA_SNAPSHOTS_PCT_COLUMNS):
+        return  # already nullable — nothing to do
+    conn.execute("ALTER TABLE quota_snapshots RENAME TO quota_snapshots_pre_nullable_pct")
+    conn.execute(_QUOTA_SNAPSHOTS_SCHEMA_SQL)
+    columns = ", ".join(r[1] for r in rows)
+    conn.execute(
+        f"INSERT INTO quota_snapshots ({columns}) "
+        f"SELECT {columns} FROM quota_snapshots_pre_nullable_pct"
+    )
+    conn.execute("DROP TABLE quota_snapshots_pre_nullable_pct")
+
+
 def _log_quota_snapshot_sync(
     session_id: str,
     prompt_sequence: int,
@@ -622,14 +689,24 @@ def _log_quota_snapshot_sync(
     db_path: str,
 ) -> None:
     """Log per-prompt quota state to quota_snapshots table for audit trail.
-    
+
     Inline implementation for hook scripts (stdlib-only, no imports needed).
     Captures the quota pressure at the moment a prompt arrived.
+
+    `pressure` is whatever `_get_pressure()` returned: keys "session",
+    "weekly", "sonnet" (fractions 0.0-1.0), NOT "session_pct"/"weekly_pct"/
+    "sonnet_pct" — those are the *usage.json* dialect (0-100 percentages),
+    used by the statusline and by session-start/session-end. Reading the
+    wrong key here previously meant `.get(..., 0.0)` always missed and every
+    row stored a fabricated 0.0 regardless of real pressure. `.get()` is
+    called with NO default below: a genuinely unavailable reading (key
+    missing from `pressure`) must store NULL, not silently become 0.0.
     """
     try:
         import sqlite3
         conn = sqlite3.connect(db_path, timeout=5)
         try:
+            _ensure_quota_snapshots_pct_nullable(conn)
             conn.execute(
                 """INSERT INTO quota_snapshots (
                     session_id, prompt_sequence, prompt_hash,
@@ -643,9 +720,9 @@ def _log_quota_snapshot_sync(
                     session_id,
                     prompt_sequence,
                     prompt_hash,
-                    pressure.get("session_pct", 0.0),
-                    pressure.get("weekly_pct", 0.0),
-                    pressure.get("sonnet_pct", 0.0),
+                    pressure.get("session"),
+                    pressure.get("weekly"),
+                    pressure.get("sonnet"),
                     0.0,  # openai_spent_usd (would need separate query to usage table)
                     0.0,  # gemini_spent_usd (would need separate query to usage table)
                     1,    # ollama_available
