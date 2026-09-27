@@ -239,13 +239,13 @@ def test_reads_v93_per_platform_tables(fake_home):
     `usage` table and reported $0 on days with v9.3+ routing decisions.
 
     PR6: `claude_usage`/`codex_usage`/`gemini_usage` carry no "used" column,
-    so a row here can never say the draft replaced Claude's turn — it is
-    UNVERIFIED (dashboard_data.query_window). Reviewer-01 (North Star point
-    13): unverified money is shown BELOW verified, not deleted — silence
-    reads as "nothing happened" when the honest answer is "$0.70 happened,
-    nobody confirmed it replaced Claude's turn". So the previously-asserted
-    "$0.70 saved" (bare, as though certain) is correctly gone, replaced by
-    a labelled "+$0.70 unverified".
+    so a row here can never say the draft replaced Claude's turn — it would
+    have been UNVERIFIED under the old split (dashboard_data.query_window).
+    2026-09-27: the statusline shows ONE merged, always-labelled estimate
+    (`Summary.compact()`) instead of a separate verified/unverified pair —
+    "$0.70 happened, labelled as an estimate" is now "~$0.70 est.", never a
+    bare "$0.70 saved" (which would read as certain) and never "unverified"
+    wording (which no longer reaches this surface at all).
     """
     _seed_platform_tables(
         fake_home,
@@ -278,13 +278,17 @@ def test_reads_v93_per_platform_tables(fake_home):
         },
     )
     out = _run_statusline(fake_home)
-    # 0.50 + 0.15 + 0.05 = 0.70, all unverified (see docstring).
-    assert "💰" in out, f"expected a money segment (unverified), got: {out!r}"
-    assert "$0.70 unverified" in out, (
-        f"expected a labelled unverified figure, not a bare/missing one: {out!r}"
+    # 0.50 + 0.15 + 0.05 = 0.70, all from tables with no "used" signal (see
+    # docstring) — merged into the ONE estimate every surface shows.
+    assert "💰" in out, f"expected a money segment, got: {out!r}"
+    assert "~$0.70 est" in out, (
+        f"expected a labelled estimate, not a bare/missing one: {out!r}"
     )
     assert "$0.70 saved" not in out, (
         f"unconfirmed platform-table money must never render as certain 'saved': {out!r}"
+    )
+    assert "verified" not in out.lower(), (
+        f"'verified'/'unverified' must not reach the statusline: {out!r}"
     )
 
 
@@ -426,7 +430,10 @@ def test_statusline_delegates_rather_than_computing_savings():
     contract that replaced it: the script must not sum a savings column itself.
 
     Their shared intent — DIRECT routings must be counted — now holds by
-    construction, because query_window unions savings_stats where those land.
+    construction, because `dashboard_data.summary()` composes `query_window`
+    internally (2026-09-27: the statusline calls `summary()` directly, not
+    `query_window` — see `Summary.compact()`'s docstring), which unions
+    savings_stats where those land.
     """
     import re as _re
     from pathlib import Path as _P
@@ -434,8 +441,8 @@ def test_statusline_delegates_rather_than_computing_savings():
     script = (_P(__file__).resolve().parents[1]
               / "src" / "llm_router" / "hooks" / "statusline-command.sh").read_text()
 
-    assert "query_window" in script, (
-        "statusline no longer delegates to dashboard_data.query_window — it is "
+    assert "dashboard_data import" in script and "summary" in script, (
+        "statusline no longer delegates to dashboard_data.summary() — it is "
         "computing savings itself again, which under-reports by reading one "
         "table when the value spans five."
     )
@@ -451,6 +458,14 @@ def test_the_savings_figure_is_labelled():
     That ambiguity is what prompted this whole change: the number meant savings,
     looked like cost, and disagreed with two other surfaces. The label is not
     decoration.
+
+    2026-09-27: `render_money()` itself is UNCHANGED and still independently
+    tested here, but the live statusline no longer calls it — it calls
+    `dashboard_data.summary(...).compact()` instead (see
+    `test_statusline_delegates_rather_than_computing_savings` and
+    `test_reads_v93_per_platform_tables` for the CURRENT rendered wording).
+    This test still pins `render_money()`'s own contract for whatever else
+    may call it.
     """
     from pathlib import Path as _P
 
@@ -480,4 +495,32 @@ def test_the_savings_figure_is_labelled():
     assert line.index("saved") < line.index("today"), (
         f"the verb must precede the scope, else the scope modifies the wrong "
         f"clause: {line!r}"
+    )
+
+
+def test_statusline_never_shows_verified_or_unverified_wording(fake_home):
+    """2026-09-27 product decision: user-facing savings displays show ONLY
+    the labelled estimate. Fails before the fix (the live statusline used to
+    print "+$0.70 unverified") and passes after (it prints "~$0.70 est.").
+    """
+    _seed_platform_tables(
+        fake_home,
+        {
+            "claude_usage": [{
+                "timestamp": _today_utc_iso(),
+                "model": "claude-haiku-4-5",
+                "tokens_used": 1500,
+                "cost_saved_usd": 0.70,
+            }],
+        },
+    )
+    out = _run_statusline(fake_home)
+    assert "💰" in out, f"expected a money segment: {out!r}"
+    # Scoped to the money segment itself (between 💰 and the next separator),
+    # not the whole line — "suggest" (the enforce-mode segment) also contains
+    # the substring "est" and would make a whole-line check pass vacuously.
+    money_segment = out.split("💰", 1)[1].split("·", 1)[0]
+    assert "est" in money_segment, f"expected a labelled estimate: {money_segment!r}"
+    assert "verified" not in out.lower(), (
+        f"'verified'/'unverified' must not reach the statusline: {out!r}"
     )
