@@ -221,6 +221,16 @@ ENV_REGISTRY: dict[str, tuple[str, str, int]] = {
     "LLM_ROUTER_PXPIPE_ENABLED": ("llm_router", "hooks/session-start.py", 1),
     "LLM_ROUTER_PXPIPE_HEAVY_MODELS": ("llm_router", "hooks/session-start.py", 1),
     "LLM_ROUTER_PXPIPE_URL": ("llm_router", "hooks/session-start.py", 1),
+    # NS4 quality breaker — a class (lever, task_type[, model]) whose routed
+    # answers keep failing (northstar.units() redo/discarded) is un-routed
+    # automatically. See quality_breaker.py for the state machine.
+    "LLM_ROUTER_QUALITY_BREAKER_COOLDOWN_S": ("llm_router", "quality_breaker.py", 1),
+    "LLM_ROUTER_QUALITY_BREAKER_LOOKBACK_DAYS": ("llm_router", "quality_breaker.py", 1),
+    "LLM_ROUTER_QUALITY_BREAKER_MIN_N": ("llm_router", "quality_breaker.py", 1),
+    "LLM_ROUTER_QUALITY_BREAKER_PATH": ("llm_router", "quality_breaker.py", 1),
+    "LLM_ROUTER_QUALITY_BREAKER_PROBE_SIZE": ("llm_router", "quality_breaker.py", 1),
+    "LLM_ROUTER_QUALITY_BREAKER_THRESHOLD": ("llm_router", "quality_breaker.py", 1),
+    "LLM_ROUTER_QUALITY_BREAKER_WINDOW": ("llm_router", "quality_breaker.py", 1),
     "LLM_ROUTER_QUALITY_MIN_CALLS": ("llm_router", "quality_feedback.py", 1),
     "LLM_ROUTER_QUALITY_SKIP": ("llm_router", "quality_feedback.py", 1),
     "LLM_ROUTER_QUALITY_SKIP_THRESHOLD": ("llm_router", "quality_feedback.py", 1),
