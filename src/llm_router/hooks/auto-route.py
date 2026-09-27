@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 35
+# llm_router-hook-version: 36
 """UserPromptSubmit hook — scoring classifier with Ollama + API fallback chain.
 
 Classification chain (stops at first success):
@@ -175,7 +175,7 @@ def route_call(logical: str, *args: str) -> str:
 # Cursor/Windsurf/Codex never start the MCP server so check_and_update_hooks()
 # never fires. This check emits a stderr warning when the installed hook is
 # older than the bundled one. The user sees it in their IDE's output panel.
-_THIS_VERSION_LINE = "# llm_router-hook-version: 35"
+_THIS_VERSION_LINE = "# llm_router-hook-version: 36"
 try:
     _PKG_HOOK = Path(__file__).resolve()
     _INSTALLED_HOOK = Path.home() / ".claude" / "hooks" / "llm_router-auto-route.py"
@@ -490,6 +490,31 @@ def _get_pressure() -> dict[str, float]:
         pass
 
     return {"session": 0.0, "sonnet": 0.0, "weekly": 0.0}
+
+
+_CRITICAL_PRESSURE_THRESHOLD = 0.95  # fraction (0.0-1.0), NOT a 0-100 percent
+
+
+def _critical_pressure_reading(pressure: dict) -> tuple[str, float] | None:
+    """Return (bucket, fraction) for the first bucket at/above CRITICAL pressure.
+
+    `pressure` is `_get_pressure()`'s output: keys "session"/"weekly"/"sonnet"
+    as FRACTIONS 0.0-1.0 — NOT "session_pct"/"weekly_pct" (that `_pct`,
+    0-100 dialect belongs to usage.json and the statusline; reading it here
+    is the bug this function replaces — the lookup always missed and the
+    override never fired).
+
+    Checks "session" then "weekly", in the same unit the values are already
+    in (fractions), against `_CRITICAL_PRESSURE_THRESHOLD`. A missing/None
+    reading means "unknown", never 0 — treating an unavailable reading as 0
+    would fail-open into silently never overriding, which is exactly how
+    this went dead. Returns None when neither bucket is known to be critical.
+    """
+    for bucket in ("session", "weekly"):
+        value = pressure.get(bucket)
+        if value is not None and value >= _CRITICAL_PRESSURE_THRESHOLD:
+            return bucket, value
+    return None
 
 
 def _apply_pressure_downgrade(complexity: str, pressure: dict[str, float]) -> tuple[str, str]:
@@ -3843,15 +3868,17 @@ def main() -> None:
         requested_complexity = complexity  # Save original before pressure downgrade
         complexity, _pressure_suffix = _apply_pressure_downgrade(complexity, pressure)
         
-        # Only override routing to /model if pressure is CRITICAL (>95%)
-        # Otherwise always use MCP tools which have better cost optimization
-        if pressure.get("session_pct", 0) >= 95 or pressure.get("weekly_pct", 0) >= 95:
+        # Only override routing to /model if pressure is CRITICAL (>=95%).
+        # Otherwise always use MCP tools which have better cost optimization.
+        _critical = _critical_pressure_reading(pressure)
+        if _critical is not None:
             # Critical pressure: use direct subscription fallback
             if complexity == "complex":
                 # Complex tasks truly need Opus
+                _critical_bucket, _critical_value = _critical
                 directive = (
                     f"⚡ SUBSCRIPTION OVERRIDE: {task_type}/{complexity} → /model claude-opus-4-6"
-                    f" [CRITICAL PRESSURE: session={pressure.get('session_pct', 0):.0%}] "
+                    f" [CRITICAL PRESSURE: {_critical_bucket}={_critical_value:.0%}] "
                     f"| Handle directly (subscription included). Do NOT call llm_* tools."
                 )
                 _debug_log(f"[INVOCATION {invocation_id:.3f}] CRITICAL PRESSURE: routing to Opus")
