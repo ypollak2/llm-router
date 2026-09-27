@@ -450,6 +450,53 @@ async def _apply_provenance_cutover(db) -> int:
         return 0
 
 
+async def _relax_quota_snapshots_pct_notnull(db: aiosqlite.Connection) -> bool:
+    """Rebuild ``quota_snapshots`` once so the pct columns accept NULL.
+
+    Mirrors :func:`_ensure_quota_snapshots_pct_nullable` in
+    ``hooks/auto-route.py`` (the actual production writer, which connects
+    directly with stdlib ``sqlite3`` and cannot rely on this async migration
+    path having already run). Both must reach the same schema because both
+    can be the first process to touch a given ``usage.db``.
+
+    ``CREATE TABLE IF NOT EXISTS`` in ``CREATE_QUOTA_SNAPSHOTS_TABLE`` is a
+    no-op against a database that already has the table under the OLD
+    (NOT NULL) definition, so this checks ``PRAGMA table_info`` and, only if
+    the legacy constraint is still present, renames the old table, recreates
+    it from :data:`CREATE_QUOTA_SNAPSHOTS_TABLE`, and copies every existing
+    row across unchanged. No stored value is rewritten — this fixes the
+    constraint going forward, it does not backfill historical zeros.
+
+    Returns True if a rebuild happened, False if already nullable or the
+    table doesn't exist yet.
+    """
+    try:
+        cursor = await db.execute("PRAGMA table_info(quota_snapshots)")
+        rows = await cursor.fetchall()
+        if not rows:
+            return False  # table doesn't exist yet — next CREATE is already nullable
+        notnull_by_name = {r[1]: r[3] for r in rows}  # (cid, name, type, notnull, ...)
+        pct_cols = ("claude_session_pct", "claude_weekly_pct", "claude_sonnet_pct")
+        if not any(notnull_by_name.get(c) for c in pct_cols):
+            return False  # already nullable
+        await db.execute(
+            "ALTER TABLE quota_snapshots RENAME TO quota_snapshots_pre_nullable_pct"
+        )
+        await db.execute(CREATE_QUOTA_SNAPSHOTS_TABLE)
+        columns = ", ".join(r[1] for r in rows)
+        await db.execute(
+            f"INSERT INTO quota_snapshots ({columns}) "
+            f"SELECT {columns} FROM quota_snapshots_pre_nullable_pct"
+        )
+        await db.execute("DROP TABLE quota_snapshots_pre_nullable_pct")
+        await db.commit()
+        return True
+    except Exception as exc:  # noqa: BLE001 — a migration must never break routing
+        from llm_router import failopen as _fo
+        _fo.record("CHZ-FO-COST-QUOTA-SNAPSHOTS-NULLABLE", exc)
+        return False
+
+
 MIGRATE_USAGE_ADD_TEAM = [
     "ALTER TABLE usage ADD COLUMN user_id TEXT",
     "ALTER TABLE usage ADD COLUMN project_id TEXT",
@@ -715,10 +762,13 @@ CREATE TABLE IF NOT EXISTS quota_snapshots (
     session_id TEXT NOT NULL,
     prompt_sequence INTEGER NOT NULL,
     prompt_hash TEXT,
-    -- Quota state at the moment this prompt arrived
-    claude_session_pct REAL NOT NULL,
-    claude_weekly_pct REAL NOT NULL,
-    claude_sonnet_pct REAL NOT NULL,
+    -- Quota state at the moment this prompt arrived. Nullable: a reading
+    -- that could not be obtained is stored as NULL (unknown), never as a
+    -- fabricated 0.0 (see CHZ-FO-HOOK-QUOTA-SNAPSHOT-WRITE / auto-route.py
+    -- _log_quota_snapshot_sync for the incident this closes).
+    claude_session_pct REAL,
+    claude_weekly_pct REAL,
+    claude_sonnet_pct REAL,
     openai_spent_usd REAL NOT NULL DEFAULT 0,
     gemini_spent_usd REAL NOT NULL DEFAULT 0,
     ollama_available INTEGER NOT NULL DEFAULT 1,
@@ -794,9 +844,9 @@ MIGRATE_ADD_QUOTA_SNAPSHOTS_TABLE = [
         session_id TEXT NOT NULL,
         prompt_sequence INTEGER NOT NULL,
         prompt_hash TEXT,
-        claude_session_pct REAL NOT NULL,
-        claude_weekly_pct REAL NOT NULL,
-        claude_sonnet_pct REAL NOT NULL,
+        claude_session_pct REAL,
+        claude_weekly_pct REAL,
+        claude_sonnet_pct REAL,
         openai_spent_usd REAL NOT NULL DEFAULT 0,
         gemini_spent_usd REAL NOT NULL DEFAULT 0,
         ollama_available INTEGER NOT NULL DEFAULT 1,
@@ -1047,6 +1097,14 @@ async def _get_db() -> aiosqlite.Connection:
 
     # Phase 2: replace the DEFAULT-0 lie on historical rows with an honest NULL.
     await _apply_provenance_cutover(db)
+
+    # quota_snapshots.claude_{session,weekly,sonnet}_pct were declared NOT
+    # NULL on databases created before this fix, which forced every
+    # unavailable quota reading to be stored as a fabricated 0.0. Relax the
+    # constraint once so a genuinely unknown reading can be stored as NULL.
+    # Existing row VALUES are copied across unchanged — this is a constraint
+    # fix, not a backfill of the historical zeros.
+    await _relax_quota_snapshots_pct_notnull(db)
 
     # Idempotency guard for import_routing_quality_ledger: a route_id already
     # present must be rejected at the DB layer too, not just by the importer's
