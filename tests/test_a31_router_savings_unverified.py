@@ -170,9 +170,31 @@ def test_agentic_telemetry_no_longer_claims_the_hook_host(tmp_path, monkeypatch)
 
 
 def test_a_table_predating_host_counts_as_unverified_not_as_an_error(tmp_path):
-    """Old schemas cannot say who wrote a row: everything is unverified, and
-    the query still answers instead of failing (Codex Stop printed $0 for it)."""
+    """Old schemas cannot say who wrote a row, but CAN say it was production
+    (is_simulated=0): everything is unverified, and the query still answers
+    instead of failing (Codex Stop printed $0 for it)."""
     path = tmp_path / "old.db"
+    conn = sqlite3.connect(path)
+    conn.execute("CREATE TABLE savings_stats (timestamp TEXT, "
+                 "estimated_claude_cost_saved REAL, is_simulated INTEGER)")
+    conn.execute("INSERT INTO savings_stats VALUES (?, 1.25, 0)", (_NOW,))
+    conn.commit()
+    conn.close()
+    t = dashboard_data.query_window("lifetime", db_path=path)
+    assert (t.saved_usd, t.unverified_saved_usd, t.unverified_calls) == (0.0, 1.25, 1)
+    rows = dashboard_data.query_daily(14, db_path=path)
+    assert sum(r.unverified_saved_usd for r in rows) == 1.25
+
+
+def test_a_table_predating_provenance_too_contributes_nothing(tmp_path):
+    """Measured 2026-09-27: savings_stats was read with NO provenance filter
+    at all — the one gap `usage`/`claude_usage`/`codex_usage`/`gemini_usage`
+    didn't have. A savings_stats table with no `is_simulated` column at all
+    (predating even that) is now held to the SAME rule ACC-01 established for
+    every other table: unknown provenance is dropped from the money figure
+    entirely, not folded into "unverified" — a test-fixture row must not read
+    as a real, if unconfirmed, user saving."""
+    path = tmp_path / "no_provenance.db"
     conn = sqlite3.connect(path)
     conn.execute("CREATE TABLE savings_stats (timestamp TEXT, "
                  "estimated_claude_cost_saved REAL)")
@@ -180,9 +202,7 @@ def test_a_table_predating_host_counts_as_unverified_not_as_an_error(tmp_path):
     conn.commit()
     conn.close()
     t = dashboard_data.query_window("lifetime", db_path=path)
-    assert (t.saved_usd, t.unverified_saved_usd, t.unverified_calls) == (0.0, 1.25, 1)
-    rows = dashboard_data.query_daily(14, db_path=path)
-    assert sum(r.unverified_saved_usd for r in rows) == 1.25
+    assert (t.saved_usd, t.unverified_saved_usd, t.unverified_calls) == (0.0, 0.0, 0)
 
 
 def test_the_python_twin_agrees_with_the_sql_row_for_row(tmp_path):

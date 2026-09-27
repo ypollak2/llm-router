@@ -511,6 +511,13 @@ def test_real_instruction_is_not_mistaken_for_an_artefact(text: str) -> None:
 
 
 def test_pasted_output_rule_anchors_at_the_start() -> None:
-    """A paste the user wrapped in their own words is a legitimate prompt."""
-    assert classify_drop("npm error code E403 happened", "s1") == DROP_PASTED_TOOL_OUTPUT
-    assert classify_drop("why did I get npm error code E403?", "s1") is None
+    """A paste the user wrapped in their own words is a legitimate prompt.
+
+    Uses the same real-shaped id as the fixture above ("3e33e160", not "s1")
+    — this test exercises the pasted-output rule, not session-id provenance,
+    and "s1" is not hex-shaped so `is_synthetic_session` would (correctly,
+    per the structural widening) classify it as a fixture id and short-circuit
+    to DROP_TEST_SESSION before this rule ever runs.
+    """
+    assert classify_drop("npm error code E403 happened", "3e33e160") == DROP_PASTED_TOOL_OUTPUT
+    assert classify_drop("why did I get npm error code E403?", "3e33e160") is None

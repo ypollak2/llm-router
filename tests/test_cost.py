@@ -505,3 +505,83 @@ async def test_log_usage_unknown_baseline_still_writes_row(temp_db):
     row = await _last_usage_row(temp_db)
     assert row, "row must exist"
     assert row["baseline_model"]
+
+
+# ── claude_usage: split tokens, is_simulated, session_id ─────────────────────
+#
+# Measured 2026-09-27 on ~/.llm-router/usage.db (37,894 rows, 2026-07-08 to
+# 09-27): 100% had input_tokens=0 AND output_tokens=0 (only a combined
+# tokens_used), 99.94% had is_simulated NULL, and the table had no session_id
+# column at all — so no test-session filter could ever apply to it.
+
+async def _last_claude_usage_row(temp_db) -> dict:
+    import aiosqlite
+
+    async with aiosqlite.connect(temp_db) as conn:
+        conn.row_factory = aiosqlite.Row
+        cur = await conn.execute(
+            "SELECT model, tokens_used, input_tokens, output_tokens, "
+            "is_simulated, session_id FROM claude_usage ORDER BY id DESC LIMIT 1"
+        )
+        row = await cur.fetchone()
+    return dict(row) if row else {}
+
+
+@pytest.mark.asyncio
+async def test_log_claude_usage_writes_split_tokens_provenance_and_session(temp_db):
+    """A claude_usage write must carry the real input/output split (not just
+    the combined tokens_used), an explicit is_simulated (never NULL — pytest
+    sets PYTEST_CURRENT_TEST, so `_detect_synthetic()` correctly stamps 1
+    here), and the session it belongs to."""
+    await cost.log_claude_usage(
+        model="claude-sonnet-5",
+        tokens_used=0,
+        complexity="moderate",
+        input_tokens=321,
+        output_tokens=654,
+        session_id="b9f04425-6176-4bea-b46e-1cfdfd44785e",
+    )
+
+    row = await _last_claude_usage_row(temp_db)
+    assert row, "row must exist"
+    assert row["input_tokens"] == 321
+    assert row["output_tokens"] == 654
+    assert row["is_simulated"] is not None, (
+        "is_simulated must be stamped at write time, never left NULL"
+    )
+    assert row["is_simulated"] == 1, "pytest's own process must self-report as synthetic"
+    assert row["session_id"] == "b9f04425-6176-4bea-b46e-1cfdfd44785e"
+
+
+@pytest.mark.asyncio
+async def test_log_codex_usage_and_log_gemini_usage_also_carry_session_id(temp_db):
+    """codex_usage / gemini_usage share log_claude_usage's writer shape and
+    must carry the same session_id column."""
+    import aiosqlite
+
+    await cost.log_codex_usage(
+        model="gpt-5.4", tokens_used=0, complexity="moderate",
+        input_tokens=10, output_tokens=20, session_id="codex-session-abc",
+    )
+    await cost.log_gemini_usage(
+        model="gemini-2.5-flash", tokens_used=0, complexity="moderate",
+        input_tokens=30, output_tokens=40, session_id="gemini-session-abc",
+    )
+
+    async with aiosqlite.connect(temp_db) as conn:
+        conn.row_factory = aiosqlite.Row
+        codex_row = dict(await (await conn.execute(
+            "SELECT input_tokens, output_tokens, session_id FROM codex_usage "
+            "ORDER BY id DESC LIMIT 1"
+        )).fetchone())
+        gemini_row = dict(await (await conn.execute(
+            "SELECT input_tokens, output_tokens, session_id FROM gemini_usage "
+            "ORDER BY id DESC LIMIT 1"
+        )).fetchone())
+
+    assert codex_row == {
+        "input_tokens": 10, "output_tokens": 20, "session_id": "codex-session-abc",
+    }
+    assert gemini_row == {
+        "input_tokens": 30, "output_tokens": 40, "session_id": "gemini-session-abc",
+    }

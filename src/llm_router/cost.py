@@ -485,6 +485,23 @@ migration runs. The figures will read low until new, stamped rows accumulate. Th
 is a correction, not a regression — the previous totals included an unmeasured
 population."""
 
+MIGRATE_PLATFORM_TABLES_ADD_SESSION_ID = [
+    "ALTER TABLE claude_usage ADD COLUMN session_id TEXT",
+    "ALTER TABLE codex_usage ADD COLUMN session_id TEXT",
+    "ALTER TABLE gemini_usage ADD COLUMN session_id TEXT",
+]
+"""Give the three per-platform ledgers a `session_id` column, matching the one
+`savings_stats` has had since its schema was first declared.
+
+Measured 2026-09-27: `claude_usage` (37,894 rows) has no session_id column at
+all, so no test-session filter — not `is_synthetic_session`, not any future
+per-session audit — can ever apply to it. `codex_usage`/`gemini_usage` share
+the same writer shape (`log_codex_usage`/`log_gemini_usage`) and the same gap.
+
+NO DEFAULT, same reasoning as `is_simulated` above: every historical row was
+written before this column existed and genuinely has no session to report.
+NULL means "unknown", not "unattributed to session zero"."""
+
 MIGRATE_SAVINGS_STATS_ADD_HOST = [
     "ALTER TABLE savings_stats ADD COLUMN host TEXT NOT NULL DEFAULT 'claude_code'",
 ]
@@ -1003,6 +1020,7 @@ async def _get_db() -> aiosqlite.Connection:
         + MIGRATE_SAVINGS_STATS_ADD_MODE
         + MIGRATE_SAVINGS_STATS_ADD_ROUTE_ID
         + MIGRATE_SIBLING_TABLES_ADD_PROVENANCE
+        + MIGRATE_PLATFORM_TABLES_ADD_SESSION_ID
         + MIGRATE_ROUTING_DECISIONS_ADD_POLICY
         + MIGRATE_ADD_CORRELATION_ID
         + MIGRATE_ADD_CACHE_METRICS
@@ -2385,6 +2403,7 @@ async def log_claude_usage(
     cache_read_input_tokens: int = 0,
     routing_overhead_usd: float = 0.0,
     cost_saved_usd: float | None = None,
+    session_id: str | None = None,
 ) -> dict:
     """Log a Claude Code model invocation and its savings vs. the task-aware baseline.
 
@@ -2393,6 +2412,10 @@ async def log_claude_usage(
     (so callers with structured API responses can pass only the new kwargs).
     `cost_saved_usd` kwarg is accepted for backward compat with the router.py
     caller but is recomputed authoritatively from calc_savings.
+
+    `session_id` is optional and stamped as-is (no resolution here — the
+    caller already knows its own session, and re-resolving it here would risk
+    a second, drifting definition of "current session").
 
     Returns:
         Dict with ``cost_saved_usd`` (net) and ``time_saved_sec`` (net).
@@ -2439,8 +2462,8 @@ async def log_claude_usage(
             "  cost_saved_usd, time_saved_sec,"
             "  input_tokens, output_tokens,"
             "  cache_creation_input_tokens, cache_read_input_tokens,"
-            "  routing_overhead_usd, is_simulated"
-            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "  routing_overhead_usd, is_simulated, session_id"
+            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 model, tokens_used, complexity,
                 cost_saved, time_saved,
@@ -2448,6 +2471,7 @@ async def log_claude_usage(
                 cache_creation_input_tokens, cache_read_input_tokens,
                 routing_overhead_usd,
                 1 if _detect_synthetic() else 0,
+                session_id,
             ),
         )
         await db.commit()
@@ -2468,6 +2492,7 @@ async def log_codex_usage(
     cache_creation_input_tokens: int = 0,
     cache_read_input_tokens: int = 0,
     routing_overhead_usd: float = 0.0,
+    session_id: str | None = None,
 ) -> dict:
     """Log an OpenAI/Codex model invocation and its savings vs. the realistic baseline.
 
@@ -2544,8 +2569,8 @@ async def log_codex_usage(
             "  cost_saved_usd, time_saved_sec,"
             "  input_tokens, output_tokens,"
             "  cache_creation_input_tokens, cache_read_input_tokens,"
-            "  routing_overhead_usd, is_simulated"
-            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "  routing_overhead_usd, is_simulated, session_id"
+            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 model, tokens_used, complexity,
                 cost_saved, time_saved,
@@ -2553,6 +2578,7 @@ async def log_codex_usage(
                 cache_creation_input_tokens, cache_read_input_tokens,
                 routing_overhead_usd,
                 1 if _detect_synthetic() else 0,
+                session_id,
             ),
         )
         await db.commit()
@@ -2573,6 +2599,7 @@ async def log_gemini_usage(
     cache_creation_input_tokens: int = 0,
     cache_read_input_tokens: int = 0,
     routing_overhead_usd: float = 0.0,
+    session_id: str | None = None,
 ) -> dict:
     """Log a Gemini CLI model invocation and its savings vs. the realistic baseline.
 
@@ -2644,8 +2671,8 @@ async def log_gemini_usage(
             "  cost_saved_usd, time_saved_sec,"
             "  input_tokens, output_tokens,"
             "  cache_creation_input_tokens, cache_read_input_tokens,"
-            "  routing_overhead_usd, is_simulated"
-            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "  routing_overhead_usd, is_simulated, session_id"
+            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 model, tokens_used, complexity,
                 cost_saved, time_saved,
@@ -2653,6 +2680,7 @@ async def log_gemini_usage(
                 cache_creation_input_tokens, cache_read_input_tokens,
                 routing_overhead_usd,
                 1 if _detect_synthetic() else 0,
+                session_id,
             ),
         )
         await db.commit()
