@@ -707,6 +707,41 @@ async def _drain_judge_background_tasks():
 
 _REAL_HOME = __import__("pathlib").Path.home()
 
+# ── Session-wide belt for the per-test `_no_repo_mutation` suspenders ────────
+# 2026-09-27: the operator's real ~/.codex/hooks.json accumulated 84
+# UserPromptSubmit entries, ~82 of them pointing at deleted pytest tmp
+# directories -- `_install_codex_files` wrote into it every time a test called
+# it without patching Path.home() away from real (see `_hermetic_host_state`
+# below for the fix). `_no_repo_mutation` catches this per-test, restoring the
+# file if one test damages it; this fixture is the second, independent check
+# the task asked for -- a single fingerprint taken once at session start and
+# compared once at session end, so a change is caught even if it happens
+# between tests, from a background thread, or from a fixture this file does
+# not yet know to name.
+_REAL_CODEX_HOOKS_JSON = _REAL_HOME / ".codex" / "hooks.json"
+
+
+def _codex_hooks_json_fingerprint() -> tuple[int, str] | None:
+    if not _REAL_CODEX_HOOKS_JSON.is_file():
+        return None
+    import hashlib
+
+    st = _REAL_CODEX_HOOKS_JSON.stat()
+    digest = hashlib.sha256(_REAL_CODEX_HOOKS_JSON.read_bytes()).hexdigest()
+    return (st.st_mtime_ns, digest)
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _codex_home_untouched_for_the_whole_session():
+    before = _codex_hooks_json_fingerprint()
+    yield
+    after = _codex_hooks_json_fingerprint()
+    assert before == after, (
+        "the real ~/.codex/hooks.json changed during this test session "
+        f"(before={before!r} after={after!r}) -- some test wrote to the "
+        "operator's actual Codex home instead of an isolated sandbox"
+    )
+
 
 @pytest.fixture(autouse=True)
 def _no_live_agent_loop(monkeypatch):
@@ -795,6 +830,28 @@ def _hermetic_host_state(monkeypatch, tmp_path_factory):
         return _real_host_cleanup()
 
     monkeypatch.setattr(_install_module, "uninstall_host_integrations", _host_cleanup)
+    #    `_install_codex_files` is the INSTALL sibling of the cleanup above and
+    #    has the identical shape -- it edits ~/.codex/hooks.json and
+    #    config.toml directly, with no manifest gate before it -- but only the
+    #    uninstall side got the real-home-is-a-no-op rule. Evidence
+    #    2026-09-27: the operator's real ~/.codex/hooks.json had 84
+    #    UserPromptSubmit entries, ~82 of them pointing at deleted pytest tmp
+    #    directories. `_codex_hook_command()` builds its `command` from
+    #    `paths.state_path("hooks")`, which DOES honour LLM_ROUTER_HOME /
+    #    tmp_path (see `_isolate_llm_router_writes` above) -- but it writes
+    #    that command into `hooks_json = Path.home() / ".codex" / "hooks.json"`,
+    #    which does not. Any test that called it without separately patching
+    #    Path.home() away from real wrote one permanent entry into the real
+    #    file whose command pointed at a directory pytest deleted at teardown.
+    #    Same rule as above: real home -> no-op, patched home -> run.
+    _real_install_codex_files = _install_module._install_codex_files
+
+    def _install_codex_files_guarded(mode: str = "mcp"):
+        if _pathlib.Path.home() == _real_home:
+            return []
+        return _real_install_codex_files(mode=mode)
+
+    monkeypatch.setattr(_install_module, "_install_codex_files", _install_codex_files_guarded)
     # The LLM-first ensemble makes live Ollama classifier calls, which in unit
     # tests punch through host-state isolation — real model latency,
     # non-determinism, and background warmup threads that leak global state
@@ -1063,8 +1120,16 @@ _CWD_INSTALL_TARGETS = (
 # ~/.gemini/settings.json, ~/.config/opencode/config.json and Claude Desktop's
 # config were all modified by suite runs. Nothing reported it, because nothing
 # was looking outside the repo.
+#
+# 2026-09-27: this list still only named the pre-TOML `.codex/config.json`, not
+# the files `_install_codex_files` actually writes (`config.toml`, `hooks.json`,
+# `AGENTS.md` -- see commands/install.py), so this guard could not have caught
+# the hooks.json leak fixed the same day even though it ran on every test.
 _HOME_INSTALL_TARGETS = (
-    ".codex/config.json",
+    ".codex/config.json",  # legacy path; earlier installer versions wrote this
+    ".codex/config.toml",  # the file Codex 0.153+ actually reads (see codex_host.py)
+    ".codex/hooks.json",  # 2026-09-27: the leak this list never named (see below)
+    ".codex/AGENTS.md",
     ".cursor/mcp.json",
     ".gemini/settings.json",
     ".config/opencode/config.json",
@@ -1179,7 +1244,12 @@ def _claude_settings_slice(p: Path):
 @pytest.fixture(autouse=True)
 def _no_repo_mutation(request):
     """Fail any test that writes an installer artifact into the real checkout."""
-    real_home = Path(os.path.expanduser("~"))
+    # `_REAL_HOME` (captured once at conftest import, before any fixture in the
+    # session has had a chance to monkeypatch Path.home()/HOME) rather than a
+    # fresh `os.path.expanduser("~")` here: if a future autouse fixture patches
+    # HOME earlier in the same test's setup, a call made THIS LATE would silently
+    # start comparing the sandbox against itself and never detect a real leak.
+    real_home = _REAL_HOME
 
     def _targets():
         for rel in _CWD_INSTALL_TARGETS:
