@@ -1049,11 +1049,27 @@ def main() -> None:
         _emit_model_pin(_with_routing_note(tool_input), model)
         return
 
+    # ── NS4: don't route a class whose routed answers keep failing ───────────
+    # Checked before attempting the routed chain at all, so a class the
+    # breaker has opened never spends the latency on a doomed attempt.
+    _qb_allowed = True
+    _qb_decision = None
+    try:
+        from llm_router import quality_breaker as _quality_breaker
+        _qb_decision = _quality_breaker.should_route("agent_route", task_type)
+        _qb_allowed = _qb_decision.allowed
+    except Exception:
+        _qb_allowed, _qb_decision = True, None  # fail open — never block on a bug here
+
     # ── DIRECT subagent execution: route the work onto a cheap model ─────────
     # Instead of merely blocking with advice, actually run the task on the
     # routed chain and hand the result back as the subagent's output. Savings
     # are logged (host=claude_code_subagent). Falls through on any failure.
-    _routed = _try_direct_subagent(prompt, task_type, complexity, session_id, subagent_type)
+    _routed = (_try_direct_subagent(prompt, task_type, complexity, session_id, subagent_type)
+               if _qb_allowed else None)
+    if not _qb_allowed:
+        _log_agent_call(subagent_type, prompt,
+                         f"breaker_open:{_qb_decision.reason if _qb_decision else 'agent_route'}")
     if _routed is not None:
         _write_agent_depth(session_id, current_depth)  # roll back: no real spawn happened
         _log_agent_call(subagent_type, prompt, "routed_direct")

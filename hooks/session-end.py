@@ -2584,6 +2584,20 @@ def main() -> None:
     except Exception:
         pass  # Graceful failure — never break session-end
 
+    # ── NS4: quality breaker Stop-line item (only when something is open) ────
+    # T-07 rule again: a line that is always here and always empty is
+    # furniture, not a signal — so this only appends when a class is off.
+    try:
+        from llm_router import quality_breaker as _quality_breaker
+        _qb_line = _quality_breaker.stop_line_summary()
+        if _qb_line:
+            final_summary_output = (
+                final_summary_output.rstrip("  " + "═" * (WIDTH - 2))
+                + f"\n  {_qb_line}\n" + "  " + "═" * (WIDTH - 2)
+            )
+    except Exception:
+        pass  # Graceful failure — never break session-end
+
     # CHZ-STOP-01: honour the verbosity mode before emitting.
     _mode = _stop_hook_mode()
     if _mode == "disabled":

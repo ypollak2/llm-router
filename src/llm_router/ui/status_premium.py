@@ -262,6 +262,14 @@ class PremiumStatusCommand:
                 Panel(_degraded, border_style=PALETTE.warning, expand=False),
                 Text(""),
             ]
+        # NS4: same rule for the quality breaker — only shown when a class is
+        # actually open/half_open.
+        _breaker = self.render_quality_breaker()
+        if str(_breaker):
+            panels += [
+                Panel(_breaker, border_style=PALETTE.warning, expand=False),
+                Text(""),
+            ]
         panels += [
             Panel(
                 Text("🔧  Quick Actions", style=f"bold {PALETTE.accent}")
@@ -295,6 +303,31 @@ class PremiumStatusCommand:
                 else:
                     out.append(f"{line}\n", style=PALETTE.text_dim)
             out.append("run `llm-router doctor` for the full list", style=PALETTE.text_dim)
+        except Exception:  # noqa: BLE001 — status must still render
+            return Text()
+        return out
+
+    def render_quality_breaker(self) -> Text:
+        """NS4: classes currently open/half_open. Empty ``Text`` when none are
+        (same T-07 rule as ``render_degraded_operations`` — a panel that is
+        always there and always empty is furniture, not a signal)."""
+        out = Text()
+        try:
+            from llm_router import quality_breaker
+
+            rows = quality_breaker.open_classes()
+            if not rows:
+                return out
+            out.append("🔌  Quality breaker — classes off\n", style=f"bold {PALETTE.warning}")
+            for row in rows[:6]:
+                rate = row.get("failure_rate")
+                rate_s = f"{rate * 100:.0f}%" if rate is not None else "n/a"
+                out.append(
+                    f"  {row['key']:<28s} {row['state']:<10s} "
+                    f"failure_rate={rate_s} n={row.get('n', 0)}\n",
+                    style=PALETTE.text_dim,
+                )
+            out.append("run `llm-router northstar` for the full breakdown", style=PALETTE.text_dim)
         except Exception:  # noqa: BLE001 — status must still render
             return Text()
         return out

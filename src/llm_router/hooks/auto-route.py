@@ -4257,15 +4257,23 @@ def main() -> None:
             f"(task={task_type}; LLM_ROUTER_DRAFT_TASKS=all drafts everything)"
         )
 
-    # I5: drafting reverts itself after a streak of unused drafts
-    # (hooks/draft_usage.py). Checked only where a draft would otherwise run.
+    # I5 + NS4: drafting/direct reverts itself when its class keeps failing.
+    # quality_breaker.should_route("drafts", ...) DELEGATES to the existing I5
+    # streak-based auto-revert (hooks/draft_usage.py) unchanged; the "direct"
+    # (zero-Claude replacement) lever runs the generic failure-rate breaker.
+    # Checked only where a draft/direct call would otherwise run.
     _reverted = None
+    _qb_decision = None
     if _direct_enabled and _enforce_mode not in ("shadow", "off"):
         try:
-            from llm_router.hooks import draft_usage as _draft_usage
-            _reverted = _draft_usage.drafting_reverted()
+            from llm_router import quality_breaker as _quality_breaker
+            _qb_lever = "direct" if _zero_claude_enabled() else "drafts"
+            _qb_decision = _quality_breaker.should_route(_qb_lever, task_type)
+            if not _qb_decision.allowed:
+                _reverted = _qb_decision.n or 1
         except Exception:
             _reverted = None
+            _qb_decision = None
 
     if not _direct_env_on:
         _debug_log(
@@ -4280,9 +4288,11 @@ def main() -> None:
             f"disabled (mode={_enforce_mode})"
         )
     elif _reverted:
+        _reason = (_qb_decision.reason if _qb_decision is not None else
+                   f"auto-revert — the last {_reverted} drafts were all unused "
+                   f"(delete draft_streak.json to resume)")
         _debug_log(
-            f"[INVOCATION {invocation_id:.3f}] DIRECT SKIP: auto-revert — the last "
-            f"{_reverted} drafts were all unused (delete draft_streak.json to resume)"
+            f"[INVOCATION {invocation_id:.3f}] DIRECT SKIP: {_reason}"
         )
 
     if _direct_enabled and _enforce_mode not in ("shadow", "off") and not _reverted:
