@@ -147,6 +147,35 @@ _HEX_FIXTURE_STEMS = (
     "0ddba11", "abadcaf", "8badf00", "facefee", "baaaaaa", "beefbee",
 )
 
+# The router's OWN real, non-hex session ids. This is the opposite of a
+# fixture word list: not "words a human types by hand" (open-ended, always
+# one fixture behind) but the small, CLOSED set of ids this harness's own
+# production code emits for real traffic. The structural rule below is
+# correct — a human-typed fixture id needs a non-hex letter to be readable —
+# but two of our own writers ALSO emit a non-hex word on purpose, and without
+# this allowlist the structural rule would drop their real traffic from
+# every money figure. Extend this set only for an actual production writer,
+# named at its file:line, never for a fixture (that belongs in the structural
+# rule catching it, not here).
+#
+# Measured 2026-09-27 against ~/.llm-router/usage.db's savings_stats table:
+#   "gateway"  262 rows — src/llm_router/route_server.py:80
+#              `_log_route_savings(..., str(payload.get("host") or "gateway"))`
+#              stamps the OpenAI-compatible gateway's own calls with host
+#              "gateway"; that record is written to savings_log.jsonl as
+#              `"session_id": host` and later persisted into savings_stats by
+#              src/llm_router/cost.py's `import_savings_log()`
+#              (`entry.get("session_id", "unknown")`, ~line 3504).
+#   "sdk"       38 rows — src/llm_router/sdk.py:70
+#              `log_direct_savings(result=result, task_type=task_type,
+#              complexity=complexity, session_id="sdk", host="sdk")` — the
+#              in-process SDK's own metering call (sdk.py:68 makes the same
+#              stamp into `log_direct_to_db`).
+# Every other non-hex id found in that same table (wiring-sess, sess-flip-*,
+# phase0-*, finalsess, a01sess, tracedemo, smoketest-*, modetest, zctest,
+# unknown, ...) is a fixture or an unattributed row and must stay synthetic.
+_PRODUCTION_WRITER_SESSION_IDS = frozenset({"gateway", "sdk"})
+
 
 def is_synthetic_session(session_id: str | None) -> bool:
     """True when a session id was authored rather than generated.
@@ -173,10 +202,20 @@ def is_synthetic_session(session_id: str | None) -> bool:
     from these sessions. They are prompts written to exercise the router, so
     treating them as usage would have made the dataset measure its own test
     fixtures.
+
+    CHZ-176: the structural rule below is a false-positive hazard for the
+    router's OWN real traffic, not just a true-positive win over fixtures —
+    "gateway" and "sdk" are non-hex words too, but they are ids OUR code
+    writes for real calls, not something a human typed as a placeholder. Those
+    are checked against `_PRODUCTION_WRITER_SESSION_IDS` FIRST, before any
+    fixture rule runs, so a real writer's id can never be caught by a fixture
+    heuristic tightening underneath it.
     """
     if not session_id:
         return False
     sid = session_id.strip().lower()
+    if sid in _PRODUCTION_WRITER_SESSION_IDS:
+        return False
     if _TEST_SESSION.match(sid):
         return True
     if _FIXTURE_WORD.search(sid):
