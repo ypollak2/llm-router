@@ -12,6 +12,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **NS1 — the North Star metric**: `llm-router northstar [--session ID] [--days N] [--json]`
+  reports, per Claude Code session, the share of (user prompts + every LLM
+  call — main, folded sub-agent, and tool-driven) that was routed to a
+  non-Claude model AND used as-is. Reports the distribution across sessions
+  (median, p25, max, n), never a mean alone; sessions under 50 units say "too
+  few to tell". `llm_router.northstar.units()`/`.report()` are the library
+  entry points. The Stop line gains one item: `north star NN% (n=NNN)`.
+  See `llm_router/northstar.py`'s module docstring for the exact counting
+  rules and the outcome signals (draft hook verdict, transcript attribution,
+  MCP tool-result reuse, zero-Claude re-ask).
+
+### Fixed — routing
+
+- **The read-only draft loop could burn the entire hook budget on one stuck
+  model, leaving nothing for any fallback.** `~/.llm-router/direct_samples.jsonl`
+  showed 20/20 recorded DIRECT failures at ~54-55s (the hook's own budget) —
+  `auto-route-debug.log` traced the mechanism: `execute_agent`'s first ollama
+  model (reliably the heaviest one) was handed the ENTIRE remaining deadline,
+  and `execute_chain`'s text-chain fallback that runs after it was ALSO given
+  the full, un-reserved hook deadline. When the first model stalled (cold
+  load, drift), both the rest of the agent-loop chain and the text-chain
+  fallback were skipped with "out of hook budget before the call" without a
+  single request being sent. Both call sites now reserve time for what runs
+  after them, mirroring the reserve `execute_chain` already applied to its own
+  chain. `execute_agent` also now logs a per-model reason (timeout vs.
+  drifted vs. quality-gate-rejected) instead of one blanket "nothing".
+
 ## [15.3.0] - 2026-09-25
 
 Local routing, rebuilt around what was measured. Before this release, on the

@@ -117,12 +117,6 @@ class PremiumStatusCommand:
 
         try:
             from llm_router.dashboard_data import query_primary_metric, summary
-            from llm_router.savings import (
-                CanonicalSavings,
-                label_money,
-                under_subscription,
-                unverified_note,
-            )
 
             windows = [
                 ("Today", "today"),
@@ -131,45 +125,26 @@ class PremiumStatusCommand:
                 ("All time", "lifetime"),
             ]
 
-            sub = under_subscription()
             any_data = False
             for label, window in windows:
                 # ONE canonical function — the same `dashboard_data.summary()`
                 # `llm-router savings-report`, `llm-router gain`, and the
                 # statusline call, so this panel cannot print a different
-                # verified/unverified figure or a different baseline model
-                # than any of the other three surfaces on the same database.
+                # estimate or a different baseline model than any of the
+                # other three surfaces on the same database.
                 s = summary(window, db_path=str(self.db_path))
                 if s.routed_n == 0:
                     continue
 
                 any_data = True
-                # R7: no bare `$` — every money figure carries the subscription
-                # caveat (label_money), so "$0.20 saved" cannot be shown when
-                # under a subscription no cash actually changed hands.
-                # Reviewer-01 (live-reproduced): `n_rows` MUST be the row count
-                # BEHIND `saved` — savings_stats rows passing the verified
-                # predicate — never raw activity volume (unfiltered COUNT(*)
-                # across all five UNION'd sources). That mismatch is how
-                # "$0.00 … (n=47260)" happened with verified_n actually 0.
-                money_ctx = CanonicalSavings(
-                    window=window,
-                    baseline_equivalent_avoided_usd=s.realized_usd,
-                    routing_overhead_usd=0.0,
-                    real_dollars_avoided_usd=s.realized_usd,
-                    baseline_model=s.baseline_model,
-                    n_rows=s.realized_n,
-                    provenance_filtered=True,
-                    under_subscription=sub,
-                    source="dashboard_data.summary",
-                )
-                money = label_money(s.realized_usd, money_ctx)
-                line = f"  [{PALETTE.success}]{label:<15}[/]  [{PALETTE.success}]{money}[/]"
+                # 2026-09-27 product decision: ONE labelled estimate, never
+                # "verified"/"unverified" wording — Summary.display() is the
+                # single implementation every user-facing surface calls (see
+                # its docstring). `s.display()` already carries its own `n`
+                # and baseline; no separate label_money/unverified_note call
+                # is made here any more.
+                line = f"  [{PALETTE.success}]{label:<15}[/]  [{PALETTE.success}]{s.display()}[/]"
                 lines.append(Text.from_markup(line))
-                note = unverified_note(s.unverified_usd, s.unverified_n)
-                if note:
-                    # Text(), not from_markup: the note is data, not markup.
-                    lines.append(Text(f"  {'':<15}  {note}", style=PALETTE.text_dim))
 
             if not any_data:
                 lines.append(Text("  No external routing yet — route some tasks first"))
@@ -262,6 +237,14 @@ class PremiumStatusCommand:
                 Panel(_degraded, border_style=PALETTE.warning, expand=False),
                 Text(""),
             ]
+        # NS4: same rule for the quality breaker — only shown when a class is
+        # actually open/half_open.
+        _breaker = self.render_quality_breaker()
+        if str(_breaker):
+            panels += [
+                Panel(_breaker, border_style=PALETTE.warning, expand=False),
+                Text(""),
+            ]
         panels += [
             Panel(
                 Text("🔧  Quick Actions", style=f"bold {PALETTE.accent}")
@@ -295,6 +278,31 @@ class PremiumStatusCommand:
                 else:
                     out.append(f"{line}\n", style=PALETTE.text_dim)
             out.append("run `llm-router doctor` for the full list", style=PALETTE.text_dim)
+        except Exception:  # noqa: BLE001 — status must still render
+            return Text()
+        return out
+
+    def render_quality_breaker(self) -> Text:
+        """NS4: classes currently open/half_open. Empty ``Text`` when none are
+        (same T-07 rule as ``render_degraded_operations`` — a panel that is
+        always there and always empty is furniture, not a signal)."""
+        out = Text()
+        try:
+            from llm_router import quality_breaker
+
+            rows = quality_breaker.open_classes()
+            if not rows:
+                return out
+            out.append("🔌  Quality breaker — classes off\n", style=f"bold {PALETTE.warning}")
+            for row in rows[:6]:
+                rate = row.get("failure_rate")
+                rate_s = f"{rate * 100:.0f}%" if rate is not None else "n/a"
+                out.append(
+                    f"  {row['key']:<28s} {row['state']:<10s} "
+                    f"failure_rate={rate_s} n={row.get('n', 0)}\n",
+                    style=PALETTE.text_dim,
+                )
+            out.append("run `llm-router northstar` for the full breakdown", style=PALETTE.text_dim)
         except Exception:  # noqa: BLE001 — status must still render
             return Text()
         return out

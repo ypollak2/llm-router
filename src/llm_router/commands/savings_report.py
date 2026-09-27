@@ -25,6 +25,9 @@ The headline now comes from ``dashboard_data.summary()`` — the SAME function
 `llm-router status`, `llm-router gain`, and the statusline call — so this
 report can no longer print a different verified/unverified figure or a
 different baseline model than any other surface reading the same database.
+(2026-09-27: the headline itself calls ``Summary.display()``, which shows
+ONE labelled estimate — "verified"/"unverified" no longer reaches the user;
+see ``Summary.estimated_usd``'s docstring.)
 
 The per-model free/paid breakdown below still comes from `savings_stats` (the
 only table carrying it), via ``dashboard_data.query_model_savings`` — the
@@ -105,7 +108,10 @@ def _canonical_headline(period: str, db_path: Path) -> str:
     try:
         from llm_router.dashboard_data import summary
 
-        return summary(period, db_path=db_path).headline()
+        # 2026-09-27: display(), not headline() — user-facing surfaces show
+        # ONE labelled estimate, never "verified"/"unverified" (see
+        # Summary.display()'s docstring).
+        return summary(period, db_path=db_path).display()
     except Exception as exc:  # noqa: BLE001
         from llm_router import failopen
         failopen.record("CHZ-FO-SAVINGS-REPORT-CANONICAL", exc)

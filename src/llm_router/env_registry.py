@@ -58,6 +58,8 @@ ENV_REGISTRY: dict[str, tuple[str, str, int]] = {
     "LLM_ROUTER_AGENTS_CONFIG": ("llm_router", "tools/agents.py", 1),
     "LLM_ROUTER_AGENT_POLICY_MODE": ("llm_router", "router.py", 1),
     "LLM_ROUTER_AGENT_ROUTE_ALLOW": ("llm_router", "hooks/agent-route.py", 1),
+    "LLM_ROUTER_AGENT_ROUTE_CODEX": ("llm_router", "hooks/agent-route.py", 1),
+    "LLM_ROUTER_AGENT_ROUTE_CODEX_DAILY_BUDGET": ("llm_router", "hooks/agent-route.py", 1),
     "LLM_ROUTER_ALERT_WEBHOOK": ("llm_router", "alerts.py", 1),
     # T-09: the quality/cost exchange rate in the bandit's reward — what one
     # correct answer is worth, in dollars. 0 makes the bandit rank purely by
@@ -157,6 +159,13 @@ ENV_REGISTRY: dict[str, tuple[str, str, int]] = {
     "LLM_ROUTER_GATEWAY_TOKEN": ("provider_credential", "gateway.py", 1),
     "LLM_ROUTER_HARNESS": ("llm_router", "scripts/routerarena/apply_divert_router.py", 1),
     "LLM_ROUTER_HOME": ("llm_router", "hooks/agent_writes.py", 2),
+    # NS1 (2026-09-27): override for Claude Code's transcript directory, read by
+    # northstar.py so a test (or a future multi-host build) can point the North
+    # Star metric at a fixture tree instead of the operator's real ~/.claude.
+    # Same override name scripts/groundtruth/sources.py already reads (out of
+    # this registry's declared scope, hence declared here where it FIRST
+    # enters src/llm_router/).
+    "CLAUDE_PROJECTS_DIR": ("llm_router", "northstar.py", 1),
     "LLM_ROUTER_SYMBOL_GROUNDING": ("llm_router", "hooks/auto-route.py", 1),
     "LLM_ROUTER_GATEWAY_HOST": ("llm_router", "presets.py", 1),
     "LLM_ROUTER_GATEWAY_PORT": ("llm_router", "presets.py", 1),
@@ -212,6 +221,16 @@ ENV_REGISTRY: dict[str, tuple[str, str, int]] = {
     "LLM_ROUTER_PXPIPE_ENABLED": ("llm_router", "hooks/session-start.py", 1),
     "LLM_ROUTER_PXPIPE_HEAVY_MODELS": ("llm_router", "hooks/session-start.py", 1),
     "LLM_ROUTER_PXPIPE_URL": ("llm_router", "hooks/session-start.py", 1),
+    # NS4 quality breaker — a class (lever, task_type[, model]) whose routed
+    # answers keep failing (northstar.units() redo/discarded) is un-routed
+    # automatically. See quality_breaker.py for the state machine.
+    "LLM_ROUTER_QUALITY_BREAKER_COOLDOWN_S": ("llm_router", "quality_breaker.py", 1),
+    "LLM_ROUTER_QUALITY_BREAKER_LOOKBACK_DAYS": ("llm_router", "quality_breaker.py", 1),
+    "LLM_ROUTER_QUALITY_BREAKER_MIN_N": ("llm_router", "quality_breaker.py", 1),
+    "LLM_ROUTER_QUALITY_BREAKER_PATH": ("llm_router", "quality_breaker.py", 1),
+    "LLM_ROUTER_QUALITY_BREAKER_PROBE_SIZE": ("llm_router", "quality_breaker.py", 1),
+    "LLM_ROUTER_QUALITY_BREAKER_THRESHOLD": ("llm_router", "quality_breaker.py", 1),
+    "LLM_ROUTER_QUALITY_BREAKER_WINDOW": ("llm_router", "quality_breaker.py", 1),
     "LLM_ROUTER_QUALITY_MIN_CALLS": ("llm_router", "quality_feedback.py", 1),
     "LLM_ROUTER_QUALITY_SKIP": ("llm_router", "quality_feedback.py", 1),
     "LLM_ROUTER_QUALITY_SKIP_THRESHOLD": ("llm_router", "quality_feedback.py", 1),

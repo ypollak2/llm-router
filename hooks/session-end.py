@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 16
+# llm_router-hook-version: 17
 """Stop hook — unified session summary: CC subscription delta + external routing costs."""
 
 from __future__ import annotations
@@ -2077,10 +2077,19 @@ def _condense(summary: str) -> str:
     SAME database showed `lifetime +$112.84 unverified (n=9,229)`: one
     surface said "nothing saved," the other said real routing activity
     existed, and both were reading the same rows. Recomputing from
-    `dashboard_data.summary()` and labelling both halves ("verified" /
-    "est +...") is the fix — a bare, unlabelled `lifetime $X` may not appear
-    again, because an unverified figure must never be printed as if it were
-    the realized total.
+    `dashboard_data.summary()` fixed that (PR #178) — a bare, unlabelled
+    `lifetime $X` may not appear again.
+
+    2026-09-27 product decision: PR #178's fix labelled the two halves
+    explicitly ("verified $X · est +$Y"), which solved the unlabelled-bare-$
+    problem but then showed "verified $0.00" on every machine where no
+    routed answer has ever been confirmed to replace a Claude turn — reading
+    as "nothing was saved" beside a real, nonzero estimate. Every user-facing
+    surface (this line included) now shows ONE combined, always-labelled
+    estimate via `Summary.compact()` — "today ~$X est · lifetime ~$Y est" —
+    instead. The verified/unverified split still exists on the `Summary`
+    object (`Summary.headline()`, internal/`doctor` use); it just no longer
+    reaches this line.
     """
     plain = _ANSI_RE.sub("", summary)
 
@@ -2126,12 +2135,13 @@ def _condense(summary: str) -> str:
         try:
             from llm_router import dashboard_data as _dd
 
+            # 2026-09-27 product decision: ONE labelled estimate per window
+            # (realized+unverified merged), never "verified"/"unverified"
+            # wording — Summary.compact() is the single implementation this
+            # line, the statusline, and codex-stop.py all call.
             for label, window in (("today", "today"), ("lifetime", "lifetime")):
                 s = _dd.summary(window)
-                bit = f"{label}: verified ${s.realized_usd:,.2f}"
-                if s.unverified_usd:
-                    bit += f" · est +${s.unverified_usd:,.2f} (n={s.unverified_n:,})"
-                bits.append(bit)
+                bits.append(f"{label} {s.compact()}")
         except Exception:
             pass
 
@@ -2142,6 +2152,13 @@ def _condense(summary: str) -> str:
         if used_wk is not None:
             used.append(f"wk {used_wk}%")
         bits.append("quota used " + "/".join(used))
+
+    # NS1: extracted from the full render, never recomputed here — same
+    # "figures are EXTRACTED, never recomputed" rule as the money above, so
+    # condensed and full cannot disagree about the same session.
+    ns_match = re.search(r"(north star\b[^\n]*)", plain, re.I)
+    if ns_match:
+        bits.append(ns_match.group(1).strip())
 
     if not bits:
         return ""
@@ -2548,6 +2565,41 @@ def main() -> None:
         routing_section = format_routing_section()
         if routing_section:
             final_summary_output = final_summary_output.rstrip("  " + "═" * (WIDTH - 2)) + routing_section + "  " + "═" * (WIDTH - 2)
+    except Exception:
+        pass  # Graceful failure — never break session-end
+
+    # ── NS1: North Star line (routed-and-used share, this session) ───────────
+    # PR #178 changes this box's savings text and another PR retitles it to
+    # estimate-only; this block only APPENDS its own item, same pattern as the
+    # routing-efficiency block above, so those two land without touching this.
+    try:
+        from llm_router import northstar as _northstar
+        _ns_session_id = None
+        try:
+            with open(_session_id_file()) as f:
+                _ns_session_id = f.read().strip()
+        except Exception:
+            pass
+        if _ns_session_id:
+            _ns_line = _northstar.current_session_line(_ns_session_id)
+            final_summary_output = (
+                final_summary_output.rstrip("  " + "═" * (WIDTH - 2))
+                + f"\n  {_ns_line}\n" + "  " + "═" * (WIDTH - 2)
+            )
+    except Exception:
+        pass  # Graceful failure — never break session-end
+
+    # ── NS4: quality breaker Stop-line item (only when something is open) ────
+    # T-07 rule again: a line that is always here and always empty is
+    # furniture, not a signal — so this only appends when a class is off.
+    try:
+        from llm_router import quality_breaker as _quality_breaker
+        _qb_line = _quality_breaker.stop_line_summary()
+        if _qb_line:
+            final_summary_output = (
+                final_summary_output.rstrip("  " + "═" * (WIDTH - 2))
+                + f"\n  {_qb_line}\n" + "  " + "═" * (WIDTH - 2)
+            )
     except Exception:
         pass  # Graceful failure — never break session-end
 

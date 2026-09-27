@@ -1,7 +1,7 @@
 #!/bin/bash
 # Claude Code statusline — llm_router routing indicators
 #
-# Layout: 🤖 CC quota · ⏰ reset · 📂 cwd · 🧠 ctx [bar] · 💰 spent/saved · ⚖ mix · 🛡 mode · health · 🔀 last
+# Layout: 🤖 CC quota · ⏰ reset · 📂 cwd · 🧠 ctx [bar] · 💰 est. saved · ⚖ mix · 🛡 mode · health · 🔀 last
 #
 # v10.1.5: Catppuccin Mocha palette + emoji icons + context bar, inspired by
 # AwesomeJun/CC-statusline. Truecolor (24-bit) ANSI — falls back gracefully
@@ -348,29 +348,27 @@ if [ -f "$USAGE_DB" ]; then
     done
 
     # "today" is every session since local midnight, unioned across all five
-    # usage tables — not this session, and not spend. query_window does that
-    # union; the label has to say which of the two it is, because a bare dollar
-    # figure beside a quota percentage reads as money spent.
+    # usage tables via dashboard_data.summary() — not this session, and not
+    # spend (a bare dollar figure beside a quota percentage reads as money
+    # spent, which is why the figure below always carries "est").
+    #
     # Delegates the FORMAT as well as the total. INV-COST-004 said surfaces
     # delegate the aggregation; it did not say they delegate the rendering, so
     # every surface invented its own money format and the two that mattered
-    # disagreed. render_money() is now the only place a dollar figure is shaped:
-    # measured spend exact and only above a cent, modelled savings tilde-
-    # prefixed and rounded, both carrying a verb, coverage called out when the
-    # estimate is soft.
+    # disagreed. Summary.compact() is now the only place this dollar figure is
+    # shaped (2026-09-27 product decision: ONE labelled estimate, merging
+    # realized+unverified — never "verified"/"unverified" wording, which used
+    # to sit beside this segment via render_money()/unverified_note()).
     _money=""
     [ -n "$_chz_py" ] && _money=$(CHZ_DB="$USAGE_DB" "$_chz_py" -c '
 import os, pathlib
 try:
-    from llm_router.dashboard_data import (
-        query_window, render_money, session_spend_usd,
-    )
-    t = query_window("today", db_path=pathlib.Path(os.environ["CHZ_DB"]))
-    # Spend is deliberately omitted here: the statusline is about whether routing
-    # is working, and session spend answers a different question in a line that has
-    # no room for both. show_spend=False is a real flag because passing None falls
-    # back to totals.cost_usd rather than suppressing it.
-    print(render_money(t, session_spend_usd(), show_spend=False, show_coverage=False))
+    from llm_router.dashboard_data import SPEND_FLOOR_USD, summary
+    s = summary("today", db_path=pathlib.Path(os.environ["CHZ_DB"]))
+    # Below the floor there is nothing worth showing -- omit the segment
+    # entirely rather than print "~$0.00 est." every render. Compared
+    # numerically (estimated_usd), never by parsing the compact() string.
+    print(s.compact() + "." if s.estimated_usd >= SPEND_FLOOR_USD else "")
 except Exception:
     print("")            # never break the statusline over a reporting figure
 ' 2>/dev/null)

@@ -1142,7 +1142,15 @@ class Summary:
         """BOTH figures, side by side, so routing activity is visible instead
         of buried under a $0.00 verified headline (a window with real routing
         traffic but zero confirmed-used rows previously rendered as if
-        nothing had happened)."""
+        nothing had happened).
+
+        Internal/debug use only (``doctor``). 2026-09-27 product decision:
+        no user-facing surface prints "verified"/"unverified" any more — see
+        :meth:`display` / :meth:`compact`, which every user-facing surface
+        (status, savings-report, gain, the MCP gain view, the statusline,
+        the Stop line) calls instead. The verified/unverified split is still
+        computed here and stays available to ``doctor`` so nothing is lost,
+        it is just no longer shown to the user by default."""
         parts = [
             f"verified ${self.realized_usd:,.2f} (n={self.realized_n})",
             f"unverified estimate ${self.unverified_usd:,.2f} (n={self.unverified_n})",
@@ -1153,6 +1161,53 @@ class Summary:
             " · ".join(parts)
             + f" · baseline {self.baseline_model} · routed n={self.routed_n}"
         )
+
+    @property
+    def estimated_usd(self) -> float:
+        """The ONE dollar figure a user sees: realized + unverified, merged.
+
+        2026-09-27 product decision: on a machine where no routed answer has
+        ever been confirmed to replace a Claude turn, ``realized_usd`` is
+        structurally $0.00 and a "verified $0.00" headline reads as "nothing
+        was saved" beside a real ``unverified_usd`` estimate that says
+        otherwise (see PR #178's incident). Every user-facing surface now
+        shows this single combined figure, always labelled as an estimate
+        (never presented as realized money) via :meth:`display` /
+        :meth:`compact`. The split itself is not lost — ``realized_usd``/
+        ``unverified_usd`` remain on this object for ``doctor``/debug use.
+        """
+        return self.realized_usd + self.unverified_usd
+
+    @property
+    def estimated_n(self) -> int:
+        """Row count behind :attr:`estimated_usd` — ``realized_n +
+        unverified_n``, never ``routed_n`` (a wider activity count that can
+        include rows with no money attached at all; see ``routed_n``'s own
+        docstring)."""
+        return self.realized_n + self.unverified_n
+
+    def display(self) -> str:
+        """THE single user-facing money string for "longer" surfaces —
+        ``llm-router status``, ``savings-report``, ``gain``, and the MCP
+        ``llm_router_status`` gain view. One implementation; no surface
+        formats its own money string (2026-09-27 product decision — see
+        ``estimated_usd``'s docstring for why "verified"/"unverified" no
+        longer appears here)."""
+        return (
+            f"est. saved ${self.estimated_usd:,.2f} "
+            f"(n={self.estimated_n:,}) vs {self.baseline_model}"
+        )
+
+    def compact(self) -> str:
+        """THE single user-facing money FRAGMENT for space-constrained
+        surfaces — the statusline and the Stop line (``session-end.py`` /
+        ``codex-stop.py``). No row count, no baseline name, no trailing
+        punctuation: a caller that needs a period or an emoji prefix adds it
+        at the call site; the figure itself (amount + "est") is never
+        reformatted there. A caller that wants to omit the segment entirely
+        when there is nothing worth showing compares ``estimated_usd``
+        itself rather than parsing this string."""
+        return f"~${self.estimated_usd:,.2f} est"
 
 
 #: CLI/MCP period strings that don't already match a WindowLiteral.

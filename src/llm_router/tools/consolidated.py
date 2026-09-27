@@ -52,6 +52,22 @@ _TIER_TO_COMPLEXITY = {"fast": "simple", "balanced": "moderate", "best": "comple
 DEPRECATED_TOOLS: dict[str, str] = _DEPRECATED_TOOLS
 
 
+def _quality_breaker_block(lever: str, task_type: str) -> str | None:
+    """NS4: if this (lever, task_type) class's routed answers keep failing,
+    don't route it — return a message telling the caller to do the work
+    itself instead of paying for another miss. FAIL-OPEN: any error here
+    means "route normally" (a bug in the breaker must never block a tool)."""
+    try:
+        from llm_router import quality_breaker
+        decision = quality_breaker.should_route(lever, task_type)
+    except Exception:  # noqa: BLE001
+        return None
+    if decision.allowed:
+        return None
+    return (f"[llm_router] quality_breaker: {decision.reason}. "
+            f"Do this yourself instead of routing it.")
+
+
 def door_for_tool(name: str) -> str:
     """Return the consolidated front door for a legacy tool, or the name unchanged
     if it has no door (e.g. it's already a door, or stays as-is toward 1.0).
@@ -71,6 +87,9 @@ async def llm_act(task: str, budget_usd: float = 1.0, context: str = "") -> str:
     for agentic delegation; currently a thin alias of ``llm_delegate``.
 
     *context* is optional conversation context handed to the delegated agents."""
+    _blocked = _quality_breaker_block("mcp_llm_act", "agentic")
+    if _blocked:
+        return _blocked
     return await llm_delegate(task, budget_usd=budget_usd, context=context)
 
 
@@ -89,6 +108,9 @@ async def llm(
     llm_query/analyze/code/research/generate; those remain as aliases underneath."""
     complexity = _TIER_TO_COMPLEXITY.get((tier or "").lower(), "moderate")
     t = (task or "auto").lower()
+    _blocked = _quality_breaker_block("mcp_llm", t)
+    if _blocked:
+        return _blocked
     if t == "research":
         return await llm_research(prompt, ctx, system_prompt=system_prompt, context=context)
     if t == "analyze":
