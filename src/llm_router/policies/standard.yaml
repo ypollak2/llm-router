@@ -17,6 +17,7 @@ prefer_ollama: true
 # single source of truth at read time. Test enforces these match the
 # corresponding chains entries.
 workhorses:
+  - ollama/qwen3.5:latest
   - ollama/qwen3:32b
   - codex/gpt-4o
   - moonshot/moonshot-v1-128k
@@ -41,6 +42,7 @@ specialists: {}
 chains:
   budget:
     query:
+      - ollama/qwen3.5:latest
       - ollama/hermes3:8b
       - codex/gpt-4o-mini
       - moonshot/moonshot-v1-8k
@@ -93,6 +95,7 @@ chains:
 
   balanced:
     query:
+      - ollama/qwen3.5:latest
       - ollama/qwen3:32b
       - codex/gpt-4o
       - moonshot/moonshot-v1-128k
