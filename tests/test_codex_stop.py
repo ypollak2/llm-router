@@ -50,13 +50,19 @@ def test_stop_reports_distinct_windows_and_preserves_session_on_repeated_turns(s
         # PR5 follow-up: mode="block" is now also required — host+timestamp
         # alone is what an external review found reading a discarded echo
         # draft as verified.
+        # is_simulated=0: measured 2026-09-27, savings_stats was read with NO
+        # provenance filter at all — the fix that closed that gap treats a row
+        # with no is_simulated value the same fail-closed way every other
+        # money table already did, so these rows must say "production"
+        # explicitly to keep testing the Stop hook's window logic rather than
+        # its (separately-tested) provenance filtering.
         conn.execute("CREATE TABLE savings_stats (timestamp TEXT, "
                      "estimated_claude_cost_saved REAL, host TEXT, model_used TEXT, "
-                     "mode TEXT)")
+                     "mode TEXT, is_simulated INTEGER)")
         conn.execute("INSERT INTO savings_stats VALUES (strftime('%Y-%m-%dT%H:%M:%S','now'), "
-                     "1.25, 'claude_code', 'ollama/qwen3.5:latest', 'block')")
+                     "1.25, 'claude_code', 'ollama/qwen3.5:latest', 'block', 0)")
         conn.execute("INSERT INTO savings_stats VALUES (strftime('%Y-%m-%dT%H:%M:%S','now','-2 days'), "
-                     "3.5, 'claude_code', 'ollama/qwen3.5:latest', 'block')")
+                     "3.5, 'claude_code', 'ollama/qwen3.5:latest', 'block', 0)")
     session = db.parent / "sessions" / "project" / "ongoing-session.jsonl"
     session.parent.mkdir(parents=True)
     session.write_text('{"content":"keep this conversation"}\n')
@@ -74,6 +80,11 @@ def test_pending_savings_are_imported_once(stop_env):
     (state / "savings_log.jsonl").write_text(json.dumps({
         "estimated_saved": 0.125, "external_cost": 0, "model": "ollama/qwen3",
         "host": "codex", "session_id": "ongoing-session", "mode": "realized",
+        # Explicit production stamp: an absent is_simulated imports as NULL and
+        # (since the savings_stats provenance-filter fix) is dropped from every
+        # money figure, same as the other four ledgers — this test is about
+        # the Stop hook's pending-import display, not provenance filtering.
+        "is_simulated": 0,
     }) + "\n")
     first = run_stop(stop_env)
     # A31: a Codex pending saving comes from an MCP call nobody observed being

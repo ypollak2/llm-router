@@ -289,6 +289,9 @@ def log_direct_savings(
                     tokens_reclaimed=input_tokens + output_tokens,
                     opus_equivalent_usd=baseline,
                     gates_passed=True,
+                    input_tokens=input_tokens,
+                    output_tokens=output_tokens,
+                    session_id=session_id,
                 )
         except Exception:
             pass

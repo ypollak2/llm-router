@@ -151,10 +151,21 @@ _HEX_FIXTURE_STEMS = (
 def is_synthetic_session(session_id: str | None) -> bool:
     """True when a session id was authored rather than generated.
 
-    Real ids from this harness are UUIDs or 8-hex-character prefixes of one.
-    Fixtures are hand-typed and give themselves away two ways: they contain a
-    word ("modetest", "tracedemo"), or they have almost no entropy
-    ("a1a1a1a1", "deadbee2").
+    Real ids from this harness are UUIDs or 8-hex-character prefixes of one —
+    every character is a hex digit (0-9a-f) or a hyphen. Fixtures are
+    hand-typed and give themselves away structurally: a human types words, and
+    a word needs at least one letter outside a-f ('s', 't', 'w', ...) to be
+    readable at all. That single fact is why "wiring-sess", "phase0-quota-
+    sub-sess", "finalsess" and "a01sess" all slipped the word list this
+    function used to run instead: none of them is "test"/"demo"/"mock"/etc.,
+    but every one of them contains a letter no hex digit can be. A name list
+    will always be one fixture behind (see CLAUDE.md); checking the alphabet
+    a real id is drawn from does not need to be extended when the next
+    benchmark author picks a new word.
+
+    The one place a word-shaped id IS all hex is when it spells one on
+    purpose — "deadbeef", "cafebabe" — so that case still needs its own
+    check, handled below.
 
     Found on 2026-09-20 *after* the first filter passed them: the handful of
     corpus prompts that looked most gradable — "what is the capital of
@@ -180,6 +191,12 @@ def is_synthetic_session(session_id: str | None) -> bool:
     if len(core) >= 8 and all(c in "0123456789abcdef" for c in core):
         if len(set(core)) <= 4:
             return True
+    # Structural catch-all: a real id from this harness (UUID, or an 8-hex
+    # prefix of one) can only ever contain 0-9, a-f and hyphens. Any OTHER
+    # character means a person typed this string, whatever word they chose —
+    # this is the rule _FIXTURE_WORD's list was an incomplete proxy for.
+    if core and not all(c in "0123456789abcdef" for c in core):
+        return True
     return False
 
 # Free-standing slash commands and shell escapes: real input, but not a task.

@@ -117,18 +117,30 @@ def test_legacy_usage_table_is_split_too(tmp_path):
 def test_unverified_accumulates_across_every_table(tmp_path):
     """Regression: the savings_stats block ASSIGNED the unverified total, so a
     database with both a platform table and savings_stats silently lost the
-    platform's unverified money."""
+    platform's unverified money.
+
+    ``is_simulated`` is set explicitly to 0 (production) on the savings_stats
+    row: this table now gets the same provenance gate as every other table
+    (measured 2026-09-27 — it previously did not), so a row with no
+    provenance column/value at all is correctly dropped, not counted. This
+    test is about accumulation ACROSS tables, so its fixture must be
+    unambiguously production to isolate that from the provenance behaviour
+    ``test_a_table_without_a_provenance_column_contributes_nothing`` already
+    covers.
+    """
     path = _db(tmp_path)
     conn = sqlite3.connect(path)
     conn.execute("CREATE TABLE savings_stats (timestamp TEXT, host TEXT, model_used TEXT, "
-                 "estimated_claude_cost_saved REAL, input_tokens INTEGER, output_tokens INTEGER)")
+                 "estimated_claude_cost_saved REAL, input_tokens INTEGER, output_tokens INTEGER, "
+                 "is_simulated INTEGER)")
     conn.execute("INSERT INTO savings_stats VALUES (strftime('%Y-%m-%dT%H:%M:%S','now'), "
-                 "'router', 'ollama/x', 16.0, 1, 1)")
+                 "'router', 'ollama/x', 16.0, 1, 1, 0)")
     conn.commit()
     conn.close()
     t = dashboard_data.query_window("lifetime", db_path=path)
     # PR6: claude_usage's $1.00 production row (was verified pre-PR6) now
     # joins unverified too; its $3.00/$5.00 non-production twins are dropped.
-    # savings_stats's $16.00 (host='router', no mode) is unverified either way.
+    # savings_stats's $16.00 (host='router', no mode, is_simulated=0) is
+    # unverified either way, and now also passes the production gate.
     assert t.unverified_saved_usd == 1.0 + 16.0
     assert t.unverified_calls == 2

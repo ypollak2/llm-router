@@ -2077,10 +2077,23 @@ async def _finalize_successful_route(
                 cost_usd=response.cost_usd,
             )
             if receipt is not None:
+                # Resolved locally rather than reusing `_rt_sid` below: that
+                # identity block runs AFTER this one (it needs the ledger
+                # write's own ordering) and `resolve_session_id` is cheap and
+                # side-effect-free, so there is no reason to reorder either
+                # block just to share one string.
+                try:
+                    from llm_router.session_store import resolve_session_id
+                    _reclaimed_sid = resolve_session_id(None)
+                except Exception:
+                    _reclaimed_sid = None
                 _spend.record_reclaimed(
                     tokens_reclaimed=receipt.tokens_reclaimed,
                     opus_equivalent_usd=receipt.opus_equivalent_cost,
                     gates_passed=receipt.all_passed,
+                    input_tokens=response.input_tokens,
+                    output_tokens=response.output_tokens,
+                    session_id=_reclaimed_sid,
                 )
         except Exception as e:
             log.warning("session_spend_tracking_failed", error=str(e))
@@ -2363,6 +2376,7 @@ async def _finalize_successful_route(
                         output_tokens=response.output_tokens,
                         cache_creation_input_tokens=response.cache_creation_input_tokens,
                         cache_read_input_tokens=response.cache_read_input_tokens,
+                        session_id=_rt_sid,
                     )
                 except Exception as e:
                     log.debug("Failed to log claude_usage: %s", e)
@@ -2377,6 +2391,7 @@ async def _finalize_successful_route(
                         output_tokens=response.output_tokens,
                         cache_creation_input_tokens=response.cache_creation_input_tokens,
                         cache_read_input_tokens=response.cache_read_input_tokens,
+                        session_id=_rt_sid,
                     )
                 except Exception as e:
                     log.debug("Failed to log codex_usage: %s", e)
@@ -2391,6 +2406,7 @@ async def _finalize_successful_route(
                         output_tokens=response.output_tokens,
                         cache_creation_input_tokens=response.cache_creation_input_tokens,
                         cache_read_input_tokens=response.cache_read_input_tokens,
+                        session_id=_rt_sid,
                     )
                 except Exception as e:
                     log.debug("Failed to log gemini_usage: %s", e)

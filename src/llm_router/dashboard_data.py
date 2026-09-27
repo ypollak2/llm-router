@@ -517,6 +517,19 @@ def query_window(
                 if {"host", "model_used", "timestamp", "mode"} <= cols
                 else "0"
             )
+            # Measured 2026-09-27: 17% of savings_stats (1,559 of 9,057 rows)
+            # is test traffic, and unlike `usage`/`claude_usage`/`codex_usage`/
+            # `gemini_usage` above — which all gate their money sums through
+            # `_production_pred` — this block summed verified/unverified money
+            # with NO provenance filter at all. A test row could reach the
+            # headline through this table alone. `_production_pred` is applied
+            # the same way it is for every other table: it drops a row from
+            # the money figures, it never promotes one to verified.
+            prod = _production_pred(cols)
+            verified_sql = f"(CASE WHEN {prod} THEN ({verified_sql}) ELSE 0 END)"
+            unverified_sql = f"(CASE WHEN {prod} THEN ({unverified_sql}) ELSE 0 END)"
+            unverified_n_sql = f"(CASE WHEN {prod} THEN ({unverified_n_sql}) ELSE 0 END)"
+            verified_n_sql = f"(CASE WHEN {prod} THEN ({verified_n_sql}) ELSE 0 END)"
             row = conn.execute(  # nosec B608 — table/where are module constants & validated enum, not user input
                 f"SELECT COUNT(*), "
                 f"COALESCE(SUM({verified_sql}),0), "
@@ -700,8 +713,14 @@ def query_daily(
                 b["unverified"] += float(saved)
 
         if _table_exists(conn, _JSONL_TABLE):
-            verified_sql, unverified_sql, _ = savings_split_sql(
-                _columns(conn, _JSONL_TABLE))
+            _jsonl_cols = _columns(conn, _JSONL_TABLE)
+            verified_sql, unverified_sql, _ = savings_split_sql(_jsonl_cols)
+            # Same provenance gate as query_window's savings_stats block —
+            # without it a test row's money reaches the daily chart even
+            # though every other table's money here is already filtered.
+            _prod = _production_pred(_jsonl_cols)
+            verified_sql = f"(CASE WHEN {_prod} THEN ({verified_sql}) ELSE 0 END)"
+            unverified_sql = f"(CASE WHEN {_prod} THEN ({unverified_sql}) ELSE 0 END)"
             rows = conn.execute(
                 f"SELECT date(timestamp,'localtime'), "
                 f"COUNT(*), "
