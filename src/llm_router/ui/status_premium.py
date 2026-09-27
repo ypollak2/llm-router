@@ -116,8 +116,7 @@ class PremiumStatusCommand:
             return Group(*lines)
 
         try:
-            from llm_router import dashboard_data as _dd
-            from llm_router.dashboard_data import query_primary_metric, query_window
+            from llm_router.dashboard_data import query_primary_metric, summary
             from llm_router.savings import (
                 CanonicalSavings,
                 label_money,
@@ -135,36 +134,39 @@ class PremiumStatusCommand:
             sub = under_subscription()
             any_data = False
             for label, window in windows:
-                totals = query_window(window, db_path=str(self.db_path))
-                if totals.calls == 0:
+                # ONE canonical function — the same `dashboard_data.summary()`
+                # `llm-router savings-report`, `llm-router gain`, and the
+                # statusline call, so this panel cannot print a different
+                # verified/unverified figure or a different baseline model
+                # than any of the other three surfaces on the same database.
+                s = summary(window, db_path=str(self.db_path))
+                if s.routed_n == 0:
                     continue
 
                 any_data = True
-                saved = totals.saved_usd
                 # R7: no bare `$` — every money figure carries the subscription
                 # caveat (label_money), so "$0.20 saved" cannot be shown when
                 # under a subscription no cash actually changed hands.
                 # Reviewer-01 (live-reproduced): `n_rows` MUST be the row count
                 # BEHIND `saved` — savings_stats rows passing the verified
-                # predicate — never `totals.calls`, which is raw activity
-                # volume (unfiltered COUNT(*) across all five UNION'd
-                # sources). That mismatch is how "$0.00 … (n=47260)" happened
-                # with verified_n actually 0.
+                # predicate — never raw activity volume (unfiltered COUNT(*)
+                # across all five UNION'd sources). That mismatch is how
+                # "$0.00 … (n=47260)" happened with verified_n actually 0.
                 money_ctx = CanonicalSavings(
                     window=window,
-                    baseline_equivalent_avoided_usd=saved,
+                    baseline_equivalent_avoided_usd=s.realized_usd,
                     routing_overhead_usd=0.0,
-                    real_dollars_avoided_usd=saved,
-                    baseline_model=_dd._BASELINE_MODEL,
-                    n_rows=totals.verified_calls,
+                    real_dollars_avoided_usd=s.realized_usd,
+                    baseline_model=s.baseline_model,
+                    n_rows=s.realized_n,
                     provenance_filtered=True,
                     under_subscription=sub,
-                    source="dashboard_data.query_window",
+                    source="dashboard_data.summary",
                 )
-                money = label_money(saved, money_ctx)
+                money = label_money(s.realized_usd, money_ctx)
                 line = f"  [{PALETTE.success}]{label:<15}[/]  [{PALETTE.success}]{money}[/]"
                 lines.append(Text.from_markup(line))
-                note = unverified_note(totals.unverified_saved_usd, totals.unverified_calls)
+                note = unverified_note(s.unverified_usd, s.unverified_n)
                 if note:
                     # Text(), not from_markup: the note is data, not markup.
                     lines.append(Text(f"  {'':<15}  {note}", style=PALETTE.text_dim))

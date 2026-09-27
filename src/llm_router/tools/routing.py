@@ -503,10 +503,13 @@ async def llm_auto(
         system_prompt: Optional system instructions.
         context: Optional conversation context.
     """
-    from llm_router.cost import import_savings_log, get_lifetime_savings_summary
+    from llm_router.cost import (
+        import_routing_quality_ledger, import_savings_log, get_lifetime_savings_summary,
+    )
 
     # Flush any hook-written JSONL records into SQLite before we query or route
     await import_savings_log()
+    await import_routing_quality_ledger()
 
     # Classify complexity (or skip if profile_override forces a specific profile)
     try:
