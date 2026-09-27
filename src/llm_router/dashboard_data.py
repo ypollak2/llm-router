@@ -978,6 +978,196 @@ def query_realized_savings(
     )
 
 
+# ── ONE canonical summary (2026-09-27) ──────────────────────────────────────
+#
+# Four user-facing surfaces — ``llm-router status``, ``llm-router
+# savings-report``, ``llm-router gain``, and the statusline — each computed
+# their own "the savings figure" and disagreed: different all-time row counts
+# (9224 / 150 / 28, because each read a different subset of tables), different
+# baseline models (claude-opus-5 here, claude-opus-4 in ``savings.py``'s
+# now-fixed ``_baseline_model()``), and ``gain`` reported a $0.00 Opus
+# baseline for every local/free route because it multiplied the ACTUAL dollar
+# cost (correctly $0 for a free route) by a multiplier instead of pricing the
+# token volume.
+#
+# ``summary()`` is the ONE function every surface now calls for its headline.
+# It computes nothing new — it composes ``query_window`` (the UNION across
+# all five tables) and ``query_primary_metric`` (the North Star eligible/
+# verified/unmeasured split), and resolves the baseline model from
+# ``pricing.savings_baseline_model()`` — the single place that value lives.
+# A surface that still needs its own detail table (gain's per-decision
+# breakdown from ``routing_decisions``, savings-report's free/paid split)
+# keeps it, clearly labelled as a DIFFERENT, narrower population — but the
+# headline dollar figure is this function's, everywhere.
+
+
+def query_model_savings(
+    window: WindowLiteral,
+    *,
+    paid: bool | None = None,
+    db_path: Path | str | None = None,
+) -> dict:
+    """Per-model ``savings_stats`` breakdown, provenance-filtered and split
+    into verified/unverified using the SAME predicates :func:`query_window`
+    uses for its totals (``savings.savings_split_sql`` /
+    ``savings.VERIFIED_CALLS_SQL``).
+
+    ``paid=True`` restricts to externally-billed rows (``external_cost > 0``);
+    ``paid=False`` to free/local rows (0 or NULL); ``paid=None`` (default)
+    includes both. This is the single implementation behind both
+    ``commands/savings_report.py``'s free/paid sections and
+    :func:`summary`'s ``by_model`` — there was previously a second, unfiltered
+    copy of this query living in ``savings_report.py`` alone.
+    """
+    from llm_router.savings import (
+        UNVERIFIED_CALLS_SQL, UNVERIFIED_SAVED_SQL, VERIFIED_CALLS_SQL,
+        VERIFIED_SAVED_SQL,
+    )
+
+    stats = {
+        "calls": 0, "verified_calls": 0, "verified_saved": 0.0,
+        "unverified_saved": 0.0, "unverified_calls": 0, "cost": 0.0,
+        "by_model": {},
+    }
+    db = Path(db_path) if db_path else _default_db_path()
+    if not db.exists():
+        return stats
+
+    cond = "1=1"
+    if paid is True:
+        cond = "external_cost > 0"
+    elif paid is False:
+        cond = "(external_cost = 0 OR external_cost IS NULL)"
+    # T-05: same fail-closed provenance filter every savings_stats reader
+    # applies — a row with no is_simulated column/value was never confirmed
+    # production traffic.
+    where = _window_sql(window)
+    cond = f"({cond}) AND COALESCE(is_simulated, 1) = 0 AND {where}"
+
+    conn = sqlite3.connect(str(db))
+    conn.row_factory = sqlite3.Row
+    try:
+        if not _table_exists(conn, _JSONL_TABLE):
+            return stats
+        cols = _columns(conn, _JSONL_TABLE)
+        if {"host", "model_used", "timestamp", "mode"} <= cols:
+            v_sql, u_sql, uc_sql, vc_sql = (
+                VERIFIED_SAVED_SQL, UNVERIFIED_SAVED_SQL,
+                UNVERIFIED_CALLS_SQL, VERIFIED_CALLS_SQL,
+            )
+        else:
+            # A table predating host/model_used/mode cannot say a row was
+            # realized — see savings.savings_split_sql's docstring.
+            v_sql, u_sql, uc_sql, vc_sql = "0", "estimated_claude_cost_saved", "1", "0"
+        rows = conn.execute(  # nosec B608 — cond/sql fragments are module constants, not user input
+            f"""SELECT COUNT(*) AS calls,
+                       COALESCE(SUM({v_sql}),0) AS verified_saved,
+                       COALESCE(SUM({u_sql}),0) AS unverified_saved,
+                       COALESCE(SUM({uc_sql}),0) AS unverified_calls,
+                       COALESCE(SUM({vc_sql}),0) AS verified_calls,
+                       COALESCE(SUM(external_cost),0) AS cost,
+                       model_used AS model
+                FROM {_JSONL_TABLE}
+                WHERE {cond}
+                GROUP BY model_used
+                ORDER BY calls DESC"""
+        ).fetchall()
+    finally:
+        conn.close()
+
+    for r in rows:
+        stats["calls"] += r["calls"]
+        stats["verified_saved"] += r["verified_saved"] or 0.0
+        stats["unverified_saved"] += r["unverified_saved"] or 0.0
+        stats["unverified_calls"] += r["unverified_calls"] or 0
+        stats["verified_calls"] += r["verified_calls"] or 0
+        stats["cost"] += r["cost"] or 0.0
+        stats["by_model"][r["model"] or "unknown"] = {
+            "calls": r["calls"],
+            "verified_saved": r["verified_saved"] or 0.0,
+            "unverified_saved": r["unverified_saved"] or 0.0,
+            "cost": r["cost"] or 0.0,
+        }
+    return stats
+
+
+@dataclass(frozen=True)
+class Summary:
+    """THE savings figure for ``period``, with everything a surface needs to
+    render it identically to every other surface. See the module section
+    docstring above for why this exists.
+    """
+
+    period: str
+    baseline_model: str
+    #: Money confirmed to have replaced a Claude turn (savings_stats
+    #: mode='block'). This, and only this, is a "saving".
+    realized_usd: float
+    realized_n: int
+    #: Money routing MIGHT have saved, never confirmed used — MCP/gateway/sdk/
+    #: agentic rows, pre-gate rows, and every row from a table with no "used"
+    #: signal at all (usage/claude_usage/codex_usage/gemini_usage). Never
+    #: relabel this a "saving".
+    unverified_usd: float
+    unverified_n: int
+    #: Total routed calls this router OBSERVED across every UNION'd source —
+    #: NOT realized_n + unverified_n (those are savings_stats-only columns
+    #: forwarded from WindowTotals; routed_n is the wider activity count).
+    routed_n: int
+    #: Eligible Claude turns (see PrimaryMetric) whose outcome nobody
+    #: recorded at all — neither verified nor unverified, per S9.
+    unmeasured_n: int
+    by_model: dict = field(default_factory=dict)
+
+    def headline(self) -> str:
+        """BOTH figures, side by side, so routing activity is visible instead
+        of buried under a $0.00 verified headline (a window with real routing
+        traffic but zero confirmed-used rows previously rendered as if
+        nothing had happened)."""
+        parts = [
+            f"verified ${self.realized_usd:,.2f} (n={self.realized_n})",
+            f"unverified estimate ${self.unverified_usd:,.2f} (n={self.unverified_n})",
+        ]
+        if self.unmeasured_n:
+            parts.append(f"unmeasured n={self.unmeasured_n}")
+        return (
+            " · ".join(parts)
+            + f" · baseline {self.baseline_model} · routed n={self.routed_n}"
+        )
+
+
+#: CLI/MCP period strings that don't already match a WindowLiteral.
+_PERIOD_ALIASES = {"day": "today", "all": "lifetime"}
+
+
+def summary(period: str, *, db_path: Path | str | None = None) -> Summary:
+    """THE canonical summary. Every surface showing a savings headline calls
+    this — ``llm-router status``, ``llm-router savings-report``,
+    ``llm-router gain``, and the statusline hook.
+
+    ``period`` accepts any :data:`WindowLiteral` plus the CLI's own spellings
+    (``"day"`` -> ``"today"``, ``"all"`` -> ``"lifetime"``), so callers don't
+    have to translate their own vocabulary first.
+    """
+    window: WindowLiteral = _PERIOD_ALIASES.get(period, period)  # type: ignore[assignment]
+    totals = query_window(window, db_path=db_path)
+    metric = query_primary_metric(
+        "lifetime" if window == "lifetime" else window, db_path=db_path
+    )
+    model_stats = query_model_savings(window, db_path=db_path)
+    return Summary(
+        period=period,
+        baseline_model=_BASELINE_MODEL,
+        realized_usd=totals.saved_usd,
+        realized_n=totals.verified_calls,
+        unverified_usd=totals.unverified_saved_usd,
+        unverified_n=totals.unverified_calls,
+        routed_n=totals.calls,
+        unmeasured_n=metric.unmeasured_n,
+        by_model=model_stats["by_model"],
+    )
+
+
 # ── The money line ────────────────────────────────────────────────────────────
 #
 # Every surface that prints money renders it through here. INV-COST-004 already
