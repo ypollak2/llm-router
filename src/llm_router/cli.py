@@ -72,6 +72,7 @@ Usage:
     llm-router routing          — current routing configuration
     llm-router routing-report   — routing accuracy and share over a window
     llm-router routing-health   — reach, context, USED and latency per day, with n
+    llm-router northstar        — routed-and-used share, per session (NS1)
     llm-router sessions         — list recorded sessions
     llm-router config           — show the resolved configuration
     llm-router profile          — show or auto-generate the routing profile
@@ -859,6 +860,7 @@ _KNOWN_SUBCOMMANDS = frozenset(
         "routing",
         "routing-report",
         "routing-health",
+        "northstar",
         "broker",
         "gateway",
         "invoice",
@@ -1005,6 +1007,10 @@ def main() -> None:
         # Observability: deep-dive report of what routed (tokens / latency / savings).
         from llm_router.routing_report import main as report_main
         report_main()
+    elif args and args[0] == "northstar":
+        # NS1: the North Star metric — per-session routed-and-used share.
+        from llm_router.commands.northstar import cmd_northstar
+        sys.exit(cmd_northstar(args[1:]))
     elif args and args[0] == "invoice":
         from llm_router.commands.invoice import cmd_invoice
         sys.exit(cmd_invoice(args[1:]))
