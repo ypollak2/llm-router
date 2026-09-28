@@ -52,7 +52,7 @@ CATEGORIES = frozenset(
 
 #: name -> (category, first_module_that_reads_it, module_count_at_registration)
 ENV_REGISTRY: dict[str, tuple[str, str, int]] = {
-    # ── llm_router  (152) ──
+    # ── llm_router  (153) ──
     "LLM_ROUTER_ADMIN_ACTIONS_PATH": ("llm_router", "admin_actions.py", 1),
     "LLM_ROUTER_AGENTIC_MODEL": ("llm_router", "hooks/agent-route.py", 1),
     "LLM_ROUTER_AGENTS_CONFIG": ("llm_router", "tools/agents.py", 1),
@@ -60,6 +60,10 @@ ENV_REGISTRY: dict[str, tuple[str, str, int]] = {
     "LLM_ROUTER_AGENT_ROUTE_ALLOW": ("llm_router", "hooks/agent-route.py", 1),
     "LLM_ROUTER_AGENT_ROUTE_CODEX": ("llm_router", "hooks/agent-route.py", 1),
     "LLM_ROUTER_AGENT_ROUTE_CODEX_DAILY_BUDGET": ("llm_router", "hooks/agent-route.py", 1),
+    # 2026-09-28: opt-in override that keeps agent-route active (Codex/DIRECT
+    # routing) in a headless (CLAUDE_CODE_ENTRYPOINT=sdk-*) session. Default
+    # off — see the headless-guard note in hooks/agent-route.py.
+    "LLM_ROUTER_AGENT_ROUTE_HEADLESS": ("llm_router", "hooks/agent-route.py", 1),
     "LLM_ROUTER_ALERT_WEBHOOK": ("llm_router", "alerts.py", 1),
     # T-09: the quality/cost exchange rate in the bandit's reward — what one
     # correct answer is worth, in dollars. 0 makes the bandit rank purely by
@@ -330,9 +334,15 @@ ENV_REGISTRY: dict[str, tuple[str, str, int]] = {
     "OPENROUTER_API_KEY": ("provider_credential", "commands/doctor.py", 1),
     "PERPLEXITY_API_KEY": ("provider_credential", "commands/demo.py", 1),
     "VAULT_TOKEN": ("provider_credential", "org_policy.py", 1),
-    # ── external_tool  (19) ──
+    # ── external_tool  (20) ──
     "CLAUDE_CODE_PATH": ("external_tool", "claude_agent.py", 1),
     "CLAUDE_CODE_SESSION_ID": ("external_tool", "hooks/agent-depth-release.py", 3),
+    # 2026-09-28: Claude Code's own headless-vs-interactive signal ("cli" for an
+    # interactive session, "sdk-cli"/"sdk-py" for `-p`/SDK callers). Verified
+    # empirically against a real `claude -p ... --output-format json` run
+    # (see hooks/agent-route.py's headless-guard note) — not read from the
+    # PreToolUse hook payload itself, which carries no entrypoint field.
+    "CLAUDE_CODE_ENTRYPOINT": ("external_tool", "hooks/agent-route.py", 1),
     "CLAUDE_SESSION_ID": ("external_tool", "hooks/context-capture.py", 6),
     "CODEX_PATH": ("external_tool", "codex_agent.py", 1),
     "GEMINI_CLI_PATH": ("external_tool", "gemini_cli_agent.py", 1),
