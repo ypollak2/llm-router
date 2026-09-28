@@ -25,6 +25,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   rules and the outcome signals (draft hook verdict, transcript attribution,
   MCP tool-result reuse, zero-Claude re-ask).
 
+- **North Star now reads the `llm_edit` (#181) and Codex sub-agent (#184)
+  lever ledgers.** Two new unit kinds: `routed_edit` (lever `llm_edit`, one
+  per `edit_outcomes.jsonl` row — `used` when applied and, per
+  `scripts/northstar/edit_survival.py`'s git-history check, survived; `redo`
+  when a later commit touched the file; `discarded` when the edit was never
+  applied; `unknown` when survival can't be resolved) and `agent_route_codex`
+  (lever `agent_route_codex`, one per `north_star_units.jsonl` row recording
+  an actual Codex invocation — `used` on `delegated`, `discarded` on
+  `codex_failed`; decision-only rows like `unsuitable` produce no unit). A
+  ledger row for an `llm_edit` call is joined to that call's transcript
+  `routed_mcp` unit (nearest preceding `mcp__llm_router__llm_edit` tool_use
+  within 300s) and replaces it, so the same call is never counted twice.
+  `_load_agent_calls()` now also reads the 30-day `agent_calls_ledger.jsonl`
+  (unioned with the 50-cap `agent_calls.json`) when folding sub-agent
+  sessions into their parent, closing the gap where the 50-cap file had
+  already evicted the spawn the join needed.
+
 ### Fixed — routing
 
 - **The read-only draft loop could burn the entire hook budget on one stuck
