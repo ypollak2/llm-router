@@ -657,14 +657,77 @@ class TestCodexSubagentDelegation:
         assert rows[0]["outcome"] == "unsuitable"
 
     def test_non_reasoning_task_type_never_delegated(self, tmp_path, monkeypatch):
-        """query/generate are outside this lever's suitable set (research/analyze/code)."""
+        """`generate` (writing new content) is outside this lever's suitable
+        set (research/analyze/code/query — see test_query_task_type_now_
+        delegated below for why `query` moved IN: real production spawns
+        classify read-mostly general-purpose delegation that way, and it is
+        no more context-dependent than research/analyze/code)."""
         mod = _load_hook_module()
         monkeypatch.setenv("LLM_ROUTER_HOME", str(tmp_path / ".llm-router"))
         monkeypatch.setenv("LLM_ROUTER_AGENT_ROUTE_CODEX", "on")
         self._fake_codex_result(monkeypatch)
 
         result = mod._try_codex_subagent_delegation(
-            "what is a closure", "query", "simple", "general-purpose", "sess-4",
+            "write a short poem about closures", "generate", "simple",
+            "general-purpose", "sess-4",
+        )
+        assert result is None
+        rows = _north_star_rows(tmp_path)
+        assert rows[0]["outcome"] == "unsuitable"
+
+    def test_query_complex_general_purpose_spawn_now_delegated(self, tmp_path, monkeypatch):
+        """Real-shaped production case (~/.llm-router/north_star_units.jsonl,
+        2026-09-28): a general-purpose sub-agent classified task_type=query,
+        complexity=complex hit "unsuitable" here, so real traffic never
+        reached Codex even though the lever was "on". A query is a read-mostly
+        question, not a multi-file edit, and does not inherently need the
+        parent's live conversational context — it is now Codex-suitable."""
+        mod = _load_hook_module()
+        monkeypatch.setenv("LLM_ROUTER_HOME", str(tmp_path / ".llm-router"))
+        monkeypatch.setenv("LLM_ROUTER_AGENT_ROUTE_CODEX", "on")
+        self._fake_codex_result(monkeypatch, content="the answer is X")
+
+        result = mod._try_codex_subagent_delegation(
+            "what does this function do and is it thread-safe", "query",
+            "complex", "general-purpose", "sess-9",
+        )
+        assert result == "the answer is X"
+
+        rows = _north_star_rows(tmp_path)
+        assert rows[0]["outcome"] == "delegated"
+        assert rows[0]["task_type"] == "query"
+        assert rows[0]["subagent_type"] == "general-purpose"
+
+    def test_fork_subagent_type_still_excluded_for_query(self, tmp_path, monkeypatch):
+        """Widening task_type eligibility to include `query` must not undo
+        the `fork` exclusion — a fork inherits the caller's live context
+        regardless of task type."""
+        mod = _load_hook_module()
+        monkeypatch.setenv("LLM_ROUTER_HOME", str(tmp_path / ".llm-router"))
+        monkeypatch.setenv("LLM_ROUTER_AGENT_ROUTE_CODEX", "on")
+        self._fake_codex_result(monkeypatch)
+
+        result = mod._try_codex_subagent_delegation(
+            "what did we conclude earlier in this conversation", "query",
+            "simple", "fork", "sess-10",
+        )
+        assert result is None
+        rows = _north_star_rows(tmp_path)
+        assert rows[0]["outcome"] == "unsuitable"
+        assert rows[0]["subagent_type"] == "fork"
+
+    def test_write_heavy_query_prompt_still_excluded(self, tmp_path, monkeypatch):
+        """Widening task_type eligibility to include `query` must not undo
+        the write-heavy/multi-file-edit exclusion — the prompt content, not
+        just the task_type, decides that."""
+        mod = _load_hook_module()
+        monkeypatch.setenv("LLM_ROUTER_HOME", str(tmp_path / ".llm-router"))
+        monkeypatch.setenv("LLM_ROUTER_AGENT_ROUTE_CODEX", "on")
+        self._fake_codex_result(monkeypatch)
+
+        result = mod._try_codex_subagent_delegation(
+            "refactor the entire codebase across multiple files and tell me "
+            "what changed", "query", "complex", "general-purpose", "sess-11",
         )
         assert result is None
         rows = _north_star_rows(tmp_path)
@@ -747,7 +810,8 @@ class TestCodexSubagentDelegation:
         mod._try_codex_subagent_delegation(
             "analyze module A", "analyze", "moderate", "general-purpose", "sess-8")
         mod._try_codex_subagent_delegation(
-            "what is a closure", "query", "simple", "general-purpose", "sess-8")
+            "write a short poem about module A", "generate", "simple",
+            "general-purpose", "sess-8")
 
         rows = _north_star_rows(tmp_path)
         assert len(rows) == 2
