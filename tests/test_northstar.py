@@ -602,6 +602,63 @@ def test_edit_ledger_dedups_against_transcript_routed_mcp(tmp_path):
     assert edits[0]["outcome"] == ns.OUTCOME_DISCARDED
 
 
+def test_edit_ledger_null_session_id_falls_back_to_ts_and_file_join(tmp_path):
+    """Audit 2026-09-28: the MCP server's edit_ledger.record_edit_outcome
+    cannot always resolve a session id, so the row it writes carries
+    ``session_id: null`` (never "" — see edit_ledger.py). The strict,
+    session_id-keyed join above can never claim such a row (its filter is
+    ``row["session_id"] == sid``, and null matches no real sid). This is the
+    FALLBACK JOIN documented in the module docstring: match by ts (within
+    EDIT_LEDGER_JOIN_WINDOW_S) AND file path across the WHOLE corpus.
+
+    Two sessions exist so the test proves the row lands on the RIGHT one,
+    not just on the only one available: session B's llm_edit call touches a
+    different file at a close-by timestamp, and must NOT claim the row.
+    """
+    sid_a = SID_MAIN
+    sid_b = "bbbbbbbb-1111-2222-3333-444444444444"
+    call_ts_a = 1_800_000_001
+    call_ts_b = 1_800_000_002  # close in time to A's call — file must disambiguate
+    row_ts = call_ts_a + 5  # inside the 300s join window of A's call
+
+    _write_edit_outcomes(tmp_path, [
+        {"ts": row_ts, "session_id": None, "file": "/nonexistent/foo.py",
+         "model": "codex/gpt-5.5", "applied": False, "survived": None},
+    ])
+
+    records_a = [_user(sid_a, "please refactor this function", 1_800_000_000)]
+    records_a.append(_assistant(sid_a, call_ts_a, tool_uses=[
+        _tool_use("toolu_a", "mcp__llm_router__llm_edit",
+                   {"task": "refactor foo", "files": ["/nonexistent/foo.py"]}),
+    ]))
+    records_a += _bulk_user_prompts(sid_a, 60, start_ts=1_800_000_100)
+
+    records_b = [_user(sid_b, "please refactor a different function", 1_800_000_000)]
+    records_b.append(_assistant(sid_b, call_ts_b, tool_uses=[
+        _tool_use("toolu_b", "mcp__llm_router__llm_edit",
+                   {"task": "refactor bar", "files": ["/nonexistent/bar.py"]}),
+    ]))
+    records_b += _bulk_user_prompts(sid_b, 60, start_ts=1_800_000_100)
+
+    proj = _project(tmp_path)
+    _write_jsonl(proj / f"{sid_a}.jsonl", records_a)
+    _write_jsonl(proj / f"{sid_b}.jsonl", records_b)
+
+    rows_a = list(ns.units(days=None, session_id=sid_a, root=proj.parent))
+    rows_b = list(ns.units(days=None, session_id=sid_b, root=proj.parent))
+
+    edits_a = [u for u in rows_a if u["kind"] == ns.UNIT_ROUTED_EDIT]
+    edits_b = [u for u in rows_b if u["kind"] == ns.UNIT_ROUTED_EDIT]
+    mcp_a = [u for u in rows_a if u["kind"] == ns.UNIT_ROUTED_MCP]
+
+    assert len(edits_a) == 1  # attributed to A, the file's owner
+    assert edits_a[0]["outcome"] == ns.OUTCOME_DISCARDED
+    assert edits_a[0]["signal"] == "edit_ledger_not_applied"
+    assert edits_a[0]["session_id"] == sid_a
+    assert len(mcp_a) == 0  # the matched call's generic routed_mcp unit was dropped, same as the keyed join
+    assert len(edits_b) == 0  # NOT attributed to B, despite the close-by timestamp
+
+
 # ── NS3 lever 2: Codex sub-agent delegation ledger (#184) ───────────────────
 
 def _write_north_star_units(tmp_path, rows):

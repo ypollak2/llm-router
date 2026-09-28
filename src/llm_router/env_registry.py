@@ -283,6 +283,7 @@ ENV_REGISTRY: dict[str, tuple[str, str, int]] = {
     "LLM_ROUTER_WEEKLY_QUOTA_USD": ("llm_router", "quota_savings.py", 1),
     "LLM_ROUTER_WEEKLY_QUOTA_USD_OPUS_EQUIV": ("llm_router", "quota_savings.py", 1),
     "LLM_ROUTER_ZERO_CLAUDE": ("llm_router", "hooks/auto-route.py", 2),
+    "LLM_ROUTER_ZERO_CLAUDE_SCOPE": ("llm_router", "zero_claude_edit.py", 1),
     # ── indirect reads: DECLARED BY HAND, invisible to the AST scan ──
     # These are read through a VARIABLE, not a string literal:
     #     for env in (ALLOW_PUBLIC_ENV, LEGACY_SSE_ALLOW_PUBLIC_ENV):

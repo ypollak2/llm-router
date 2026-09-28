@@ -311,10 +311,15 @@ def test_status_verified_line_n_is_verified_rows_not_call_volume(
 # ── 8. the primary metric renders independent of the per-window money loop ──
 
 
-def test_primary_metric_renders_even_when_today_is_empty(tmp_path, importing_a_submodule):
-    """Reviewer-01, live-reproduced: on a real install "Today" is empty most
-    of the time, and the per-window money loop `continue`s straight past an
-    empty window — the North Star line must not be gated behind it."""
+def test_primary_metric_computation_unaffected_by_an_empty_today(tmp_path):
+    """Formerly `test_primary_metric_renders_even_when_today_is_empty`,
+    which pinned that the status PANEL rendered the North Star line even
+    when "Today" was empty (the per-window money loop `continue`s straight
+    past an empty window). 2026-09-27 (#182): the panel no longer prints
+    that line at all (see `test_status_panel_no_longer_shows_primary_metric`
+    below) — but the underlying computation this test protected is
+    unchanged and still lives in `dashboard_data.query_primary_metric` for
+    `doctor`/debug use, so it is checked here directly, bypassing the panel."""
     db = tmp_path / "usage.db"
     conn = sqlite3.connect(db)
     _savings_stats_ddl(conn)
@@ -331,6 +336,33 @@ def test_primary_metric_renders_even_when_today_is_empty(tmp_path, importing_a_s
     today_totals = dashboard_data.query_window("today", db_path=db)
     assert today_totals.calls == 0, "premise: today has no activity anywhere"
 
+    # The primary metric queries "lifetime", not "today" — it must still
+    # pick up yesterday's rows and render, independent of Today being empty.
+    m = dashboard_data.query_primary_metric("lifetime", db_path=db)
+    assert m.verified_n == 1 and m.eligible_n == 2
+    # n=2 is below TOO_FEW_THRESHOLD (50), so it prints "too few to tell" —
+    # the point here is that it renders AT ALL (covered exactly by
+    # test_primary_metric_render_percentage for the percentage wording).
+    assert m.render() == (
+        "Verified share of eligible Claude turns (all-time): too few to tell (n=2)"
+    )
+
+
+def test_status_panel_no_longer_shows_primary_metric(tmp_path, importing_a_submodule):
+    """#182 (2026-09-27): `llm-router status` no longer prints the North
+    Star primary-metric line ("Verified share of eligible Claude turns") —
+    the owner decided user-facing savings displays show only the ONE
+    labelled estimate (the per-window "est. saved ..." lines above). The
+    computation is untouched (see the previous test); only the panel print
+    is removed. Real data is seeded here specifically so the assertion is
+    "removed", not "coincidentally had nothing to show"."""
+    db = tmp_path / "usage.db"
+    conn = sqlite3.connect(db)
+    _savings_stats_ddl(conn)
+    _stats_row(conn, saved=2.0, mode="block")
+    conn.commit()
+    conn.close()
+
     from llm_router.ui import status_premium as sp
 
     cmd = sp.PremiumStatusCommand()
@@ -343,14 +375,10 @@ def test_primary_metric_renders_even_when_today_is_empty(tmp_path, importing_a_s
     Console(file=buf, width=120, force_terminal=False).print(group)
     text = buf.getvalue()
 
-    assert "Verified share of eligible Claude turns" in text, (
-        f"the North Star line must render even when Today is empty: {text!r}"
+    assert "verified" not in text.lower(), (
+        f"llm-router status must not print 'verified'/'Verified' anywhere any "
+        f"more (#182): {text!r}"
     )
-    # n=2 is below TOO_FEW_THRESHOLD (50), so it prints "too few to tell" —
-    # the point here is that it renders AT ALL, picking up yesterday's rows
-    # via the "all-time" window despite Today being empty, not the exact
-    # percentage wording (covered by test_primary_metric_render_percentage).
-    assert "too few to tell (n=2)" in text, text
 
 
 # ── 5. `llm-router status`'s savings panel has no bare `$` ───────────────────
@@ -367,6 +395,13 @@ def test_primary_metric_renders_even_when_today_is_empty(tmp_path, importing_a_s
 # half of the original assertions is intentionally dropped, not silently
 # broken, because `Summary.display()` structurally cannot print one (its
 # only qualifier is "est. saved ... vs BASELINE", subscription or not).
+#
+# #182 UPDATE: the money-lines scoping below used to carve out "the panel's
+# separate North Star line" as legitimately saying "verified". That line is
+# gone from the panel entirely now (see
+# test_status_panel_no_longer_shows_primary_metric) — there is no longer
+# anything to carve out, but the `money_lines`-only scoping is kept below
+# since it is still the more precise assertion.
 
 
 def test_status_savings_panel_has_no_bare_dollar(tmp_path, importing_a_submodule):
@@ -397,9 +432,11 @@ def test_status_savings_panel_has_no_bare_dollar(tmp_path, importing_a_submodule
     assert not re.search(r"\$\d[\d,]*\.\d{2}\s+saved\b", text), (
         f"found a bare-dollar 'saved' line with no qualifier: {text!r}"
     )
-    # Scoped to the MONEY lines only — the panel's separate North Star line
-    # ("Verified share of eligible Claude turns", a different metric, out of
-    # this task's scope) legitimately says "verified" and must not trip this.
+    # Scoped to the MONEY lines only. (Historically this carve-out existed
+    # because the panel's separate North Star line legitimately said
+    # "verified" — as of #182 that line is gone from the panel entirely,
+    # see test_status_panel_no_longer_shows_primary_metric, so this scoping
+    # is now belt-and-suspenders rather than load-bearing.)
     money_lines = [ln for ln in text.splitlines() if "est. saved" in ln]
     assert money_lines and not any("verified" in ln.lower() for ln in money_lines), (
         f"'verified'/'unverified' must not reach the money line: {money_lines!r}"
