@@ -178,6 +178,8 @@ ENV_REGISTRY: dict[str, tuple[str, str, int]] = {
     "LLM_ROUTER_PROXY_NUM_CTX": ("llm_router", "proxy/server.py", 1),
     "LLM_ROUTER_PROXY_UPSTREAM": ("llm_router", "proxy/server.py", 1),
     "LLM_ROUTER_PROXY_PORT": ("llm_router", "proxy/server.py", 1),
+    "LLM_ROUTER_PROXY_LOOP_MAX_CONSECUTIVE": ("llm_router", "proxy/server.py", 1),
+    "LLM_ROUTER_PROXY_LOOP_REPEAT_WINDOW": ("llm_router", "proxy/server.py", 1),
     "LLM_ROUTER_GEMINI_BASELINE": ("llm_router", "cost.py", 1),
     "LLM_ROUTER_GEMINI_SUBSCRIPTION": ("llm_router", "commands/demo.py", 3),
     "LLM_ROUTER_GEMINI_TIMEOUT": ("llm_router", "gemini_cli_agent.py", 1),
