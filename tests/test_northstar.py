@@ -8,6 +8,8 @@ CLAUDE.md's "assert the reason, not just the boolean."
 from __future__ import annotations
 
 import json
+import os
+import subprocess
 from datetime import datetime, timezone
 
 import pytest
@@ -403,3 +405,268 @@ def test_child_session_folds_into_parent_as_sidechain(tmp_path):
     user_prompts = [u for u in rows if u["kind"] == ns.UNIT_USER_PROMPT]
     assert len(user_prompts) == 56
     assert all(u["session_id"] == parent_sid for u in user_prompts)
+
+
+def test_child_session_folds_via_ledger_only_when_absent_from_agent_calls_json(tmp_path):
+    """The join #180 could only ever make against ``agent_calls.json``'s
+    50-cap rolling file. This spawn is recorded ONLY in the 30-day
+    ``agent_calls_ledger.jsonl`` companion (the realistic case once a busy
+    session has evicted it from the 50-cap file) — the fold must still
+    succeed via ``_load_agent_calls``'s union of the two.
+    """
+    parent_sid = "dddddddd-1111-2222-3333-444444444444"
+    child_sid = "eeeeeeee-1111-2222-3333-444444444444"
+    dispatch_prompt = "Audit the release checklist and report gaps. Work autonomously."
+
+    ledger_path = _home_dir(tmp_path) / "agent_calls_ledger.jsonl"
+    ledger_path.parent.mkdir(parents=True, exist_ok=True)
+    ledger_path.write_text(json.dumps({
+        "timestamp": 1_800_000_000.0, "subagent_type": "general-purpose",
+        "prompt": dispatch_prompt, "decision": "allowed_routed_spawn",
+        "session_id": parent_sid,
+    }) + "\n", encoding="utf-8")
+    # agent_calls.json deliberately absent/empty: this call has already rolled
+    # off the 50-cap file, which is exactly the gap #180 could not close.
+
+    proj = _project(tmp_path)
+    parent_records = [_user(parent_sid, "please delegate this to a sub-agent", 1_799_999_990)]
+    parent_records += _bulk_user_prompts(parent_sid, 55, start_ts=1_800_000_200)
+    _write_jsonl(proj / f"{parent_sid}.jsonl", parent_records)
+
+    child_records = [_user(child_sid, dispatch_prompt, 1_800_000_030)]
+    for i in range(3):
+        child_records.append(_assistant(child_sid, 1_800_000_031 + i, text=f"working step {i}"))
+    _write_jsonl(proj / f"{child_sid}.jsonl", child_records)
+
+    data = ns.report(days=None, root=proj.parent)
+    session_ids = {row["session_id"] for row in data["sessions"]}
+    assert parent_sid in session_ids
+    assert child_sid not in session_ids  # folded, not a standalone session
+
+    rows = list(ns.units(days=None, root=proj.parent))
+    sidechain = [u for u in rows if u["kind"] == ns.UNIT_SIDECHAIN and u["session_id"] == parent_sid]
+    assert len(sidechain) == 3
+
+
+# ── NS3 lever 1: llm_edit ledger (#181) → routed_edit units ─────────────────
+
+def _git(args, cwd, env=None):
+    subprocess.run(["git", *args], cwd=cwd, check=True,
+                    capture_output=True, text=True, env=env)
+
+
+def _init_repo(repo_dir):
+    repo_dir.mkdir(parents=True, exist_ok=True)
+    _git(["init", "-q"], cwd=repo_dir)
+    _git(["config", "user.email", "t@example.com"], cwd=repo_dir)
+    _git(["config", "user.name", "Test"], cwd=repo_dir)
+    return repo_dir
+
+
+def _commit_file(repo_dir, relpath, content, ts):
+    path = repo_dir / relpath
+    path.write_text(content, encoding="utf-8")
+    _git(["add", relpath], cwd=repo_dir)
+    iso = datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%S+00:00")
+    env = {
+        **os.environ,
+        "GIT_AUTHOR_DATE": iso, "GIT_COMMITTER_DATE": iso,
+        "GIT_AUTHOR_NAME": "Test", "GIT_AUTHOR_EMAIL": "t@example.com",
+        "GIT_COMMITTER_NAME": "Test", "GIT_COMMITTER_EMAIL": "t@example.com",
+    }
+    _git(["commit", "-q", "-m", "msg"], cwd=repo_dir, env=env)
+
+
+def _write_edit_outcomes(tmp_path, rows):
+    p = _home_dir(tmp_path) / "edit_outcomes.jsonl"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    with p.open("w", encoding="utf-8") as fh:
+        for r in rows:
+            fh.write(json.dumps(r) + "\n")
+
+
+def test_edit_ledger_applied_and_survived_is_used(tmp_path):
+    sid = SID_MAIN
+    repo = _init_repo(tmp_path / "repo")
+    _commit_file(repo, "foo.py", "def foo():\n    pass\n", 1_700_000_000)
+    row_ts = 1_700_000_100  # after the only commit; nothing touches it again
+    _write_edit_outcomes(tmp_path, [
+        {"ts": row_ts, "session_id": sid, "file": str(repo / "foo.py"),
+         "model": "ollama/qwen3.5", "applied": True, "survived": None},
+    ])
+    records = [_user(sid, "please add a docstring to foo", 1_800_000_000)]
+    records += _bulk_user_prompts(sid, 60, start_ts=1_800_000_100)
+    proj = _project(tmp_path)
+    _write_jsonl(proj / f"{sid}.jsonl", records)
+
+    rows = list(ns.units(days=None, session_id=sid, root=proj.parent))
+    edits = [u for u in rows if u["kind"] == ns.UNIT_ROUTED_EDIT]
+    assert len(edits) == 1
+    assert edits[0]["outcome"] == ns.OUTCOME_USED
+    assert edits[0]["signal"] == "edit_ledger_survived"
+    assert edits[0]["lever"] == "llm_edit"
+    assert edits[0]["task_type"] == "code"
+
+
+def test_edit_ledger_applied_and_rewritten_is_redo(tmp_path):
+    sid = SID_MAIN
+    repo = _init_repo(tmp_path / "repo")
+    _commit_file(repo, "foo.py", "def foo():\n    pass\n", 1_700_000_000)
+    row_ts = 1_700_000_100
+    # Claude (or anything) touches the file again AFTER the ledger row's ts —
+    # the conservative proxy edit_survival.py uses for "this got redone."
+    _commit_file(repo, "foo.py", "def foo():\n    return 42\n", 1_700_000_200)
+    _write_edit_outcomes(tmp_path, [
+        {"ts": row_ts, "session_id": sid, "file": str(repo / "foo.py"),
+         "model": "ollama/qwen3.5", "applied": True, "survived": None},
+    ])
+    records = [_user(sid, "please add a docstring to foo", 1_800_000_000)]
+    records += _bulk_user_prompts(sid, 60, start_ts=1_800_000_100)
+    proj = _project(tmp_path)
+    _write_jsonl(proj / f"{sid}.jsonl", records)
+
+    rows = list(ns.units(days=None, session_id=sid, root=proj.parent))
+    edits = [u for u in rows if u["kind"] == ns.UNIT_ROUTED_EDIT]
+    assert len(edits) == 1
+    assert edits[0]["outcome"] == ns.OUTCOME_REDO
+    assert edits[0]["signal"] == "edit_ledger_redone"
+
+
+def test_edit_ledger_not_applied_is_discarded(tmp_path):
+    sid = SID_MAIN
+    _write_edit_outcomes(tmp_path, [
+        {"ts": 1_700_000_100, "session_id": sid, "file": "/nonexistent/foo.py",
+         "model": "ollama/qwen3.5", "applied": False, "survived": None},
+    ])
+    records = [_user(sid, "please add a docstring to foo", 1_800_000_000)]
+    records += _bulk_user_prompts(sid, 60, start_ts=1_800_000_100)
+    proj = _project(tmp_path)
+    _write_jsonl(proj / f"{sid}.jsonl", records)
+
+    rows = list(ns.units(days=None, session_id=sid, root=proj.parent))
+    edits = [u for u in rows if u["kind"] == ns.UNIT_ROUTED_EDIT]
+    assert len(edits) == 1
+    assert edits[0]["outcome"] == ns.OUTCOME_DISCARDED
+    assert edits[0]["signal"] == "edit_ledger_not_applied"
+
+
+def test_edit_ledger_unresolved_survival_is_unknown(tmp_path):
+    sid = SID_MAIN
+    no_repo_dir = tmp_path / "no_repo"
+    no_repo_dir.mkdir(parents=True, exist_ok=True)
+    f = no_repo_dir / "foo.py"
+    f.write_text("def foo():\n    pass\n", encoding="utf-8")
+    _write_edit_outcomes(tmp_path, [
+        {"ts": 1_700_000_100, "session_id": sid, "file": str(f),
+         "model": "ollama/qwen3.5", "applied": True, "survived": None},
+    ])
+    records = [_user(sid, "please add a docstring to foo", 1_800_000_000)]
+    records += _bulk_user_prompts(sid, 60, start_ts=1_800_000_100)
+    proj = _project(tmp_path)
+    _write_jsonl(proj / f"{sid}.jsonl", records)
+
+    rows = list(ns.units(days=None, session_id=sid, root=proj.parent))
+    edits = [u for u in rows if u["kind"] == ns.UNIT_ROUTED_EDIT]
+    assert len(edits) == 1
+    assert edits[0]["outcome"] == ns.OUTCOME_UNKNOWN
+    assert edits[0]["signal"] == "edit_ledger_unresolved"
+
+
+def test_edit_ledger_dedups_against_transcript_routed_mcp(tmp_path):
+    """The mcp__llm_router__llm_edit tool_use call appears in the transcript
+    (would otherwise become a generic routed_mcp unit); the ledger row for
+    the SAME call, matched by the join key (nearest-preceding llm_edit call
+    within EDIT_LEDGER_JOIN_WINDOW_S), must replace it — never both.
+    """
+    sid = SID_MAIN
+    call_ts = 1_800_000_001
+    row_ts = call_ts + 5  # inside the 300s join window
+    _write_edit_outcomes(tmp_path, [
+        {"ts": row_ts, "session_id": sid, "file": "/nonexistent/foo.py",
+         "model": "ollama/qwen3.5", "applied": False, "survived": None},
+    ])
+    records = [_user(sid, "please refactor this function", 1_800_000_000)]
+    records.append(_assistant(sid, call_ts, tool_uses=[
+        _tool_use("toolu_1", "mcp__llm_router__llm_edit",
+                   {"task": "refactor foo", "files": ["/nonexistent/foo.py"]}),
+    ]))
+    records += _bulk_user_prompts(sid, 60, start_ts=1_800_000_100)
+    proj = _project(tmp_path)
+    _write_jsonl(proj / f"{sid}.jsonl", records)
+
+    rows = list(ns.units(days=None, session_id=sid, root=proj.parent))
+    mcp = [u for u in rows if u["kind"] == ns.UNIT_ROUTED_MCP]
+    edits = [u for u in rows if u["kind"] == ns.UNIT_ROUTED_EDIT]
+    assert len(mcp) == 0  # the ledger-backed unit replaced it — never both
+    assert len(edits) == 1
+    assert edits[0]["outcome"] == ns.OUTCOME_DISCARDED
+
+
+# ── NS3 lever 2: Codex sub-agent delegation ledger (#184) ───────────────────
+
+def _write_north_star_units(tmp_path, rows):
+    p = _home_dir(tmp_path) / "north_star_units.jsonl"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    with p.open("w", encoding="utf-8") as fh:
+        for r in rows:
+            fh.write(json.dumps(r) + "\n")
+
+
+def test_agent_route_codex_delegation_is_used(tmp_path):
+    sid = SID_MAIN
+    _write_north_star_units(tmp_path, [
+        {"ts": 1_800_000_050.0, "lever": "agent_route_codex", "model": "codex/gpt-5.5",
+         "outcome": "delegated", "subagent_type": "general-purpose", "task_type": "code",
+         "complexity": "moderate", "session_id": sid, "duration_sec": 12.3},
+    ])
+    records = [_user(sid, "please delegate this analysis", 1_800_000_000)]
+    records += _bulk_user_prompts(sid, 60, start_ts=1_800_000_100)
+    proj = _project(tmp_path)
+    _write_jsonl(proj / f"{sid}.jsonl", records)
+
+    rows = list(ns.units(days=None, session_id=sid, root=proj.parent))
+    codex = [u for u in rows if u["kind"] == ns.UNIT_AGENT_ROUTE_CODEX]
+    assert len(codex) == 1
+    assert codex[0]["outcome"] == ns.OUTCOME_USED
+    assert codex[0]["signal"] == "agent_route_codex_delegated"
+    assert codex[0]["lever"] == "agent_route_codex"
+    assert codex[0]["task_type"] == "code"
+    assert codex[0]["model"] == "codex/gpt-5.5"
+
+
+def test_agent_route_codex_failed_is_discarded(tmp_path):
+    sid = SID_MAIN
+    _write_north_star_units(tmp_path, [
+        {"ts": 1_800_000_050.0, "lever": "agent_route_codex", "model": "",
+         "outcome": "codex_failed", "subagent_type": "general-purpose", "task_type": "research",
+         "complexity": "complex", "session_id": sid, "reason": "run_codex raised: timeout"},
+    ])
+    records = [_user(sid, "please research this thoroughly", 1_800_000_000)]
+    records += _bulk_user_prompts(sid, 60, start_ts=1_800_000_100)
+    proj = _project(tmp_path)
+    _write_jsonl(proj / f"{sid}.jsonl", records)
+
+    rows = list(ns.units(days=None, session_id=sid, root=proj.parent))
+    codex = [u for u in rows if u["kind"] == ns.UNIT_AGENT_ROUTE_CODEX]
+    assert len(codex) == 1
+    assert codex[0]["outcome"] == ns.OUTCOME_DISCARDED
+    assert codex[0]["signal"] == "agent_route_codex_failed"
+
+
+def test_agent_route_codex_unsuitable_decision_is_not_a_unit(tmp_path):
+    """A decision NOT to invoke Codex is not an attempt — no unit at all,
+    same treatment as a drafting decision the router never made."""
+    sid = SID_MAIN
+    _write_north_star_units(tmp_path, [
+        {"ts": 1_800_000_050.0, "lever": "agent_route_codex", "model": "",
+         "outcome": "unsuitable", "subagent_type": "fork", "task_type": "code",
+         "complexity": "moderate", "session_id": sid},
+    ])
+    records = [_user(sid, "please help with this", 1_800_000_000)]
+    records += _bulk_user_prompts(sid, 60, start_ts=1_800_000_100)
+    proj = _project(tmp_path)
+    _write_jsonl(proj / f"{sid}.jsonl", records)
+
+    rows = list(ns.units(days=None, session_id=sid, root=proj.parent))
+    codex = [u for u in rows if u["kind"] == ns.UNIT_AGENT_ROUTE_CODEX]
+    assert len(codex) == 0
