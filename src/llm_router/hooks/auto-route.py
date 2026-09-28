@@ -970,6 +970,7 @@ def _is_introspection_task(prompt: str) -> bool:
 
 _COORDINATE_VERBS = re.compile(
     r"\b(coordinate|orchestrate|delegate(?:\s+to)?|dispatch|spawn|"
+    r"spin[\s-]?up|kick[\s-]?off|stand[\s-]?up|"
     r"fan[\s-]?out|parallel(?:ize|ise)|split\s+(?:the\s+)?work|"
     r"divide\s+(?:the\s+)?(?:work|tasks?))\b",
     re.IGNORECASE,
@@ -980,18 +981,123 @@ _COORDINATE_TARGETS = re.compile(
     re.IGNORECASE,
 )
 
+# Golden-probe finding (routing-golden-v1, 2026-09-28): the verb+target pair
+# above only catches literal "spawn agents"-style prompts — 11 of 12
+# constructed `coordinate` cases in that probe were routed and answered by a
+# local model anyway, because they don't mention "agents" at all. They fall
+# into three shapes a stateless routed model structurally cannot answer:
+#
+#   1. SESSION-STATE reference — "this session", "we discussed", "where we
+#      left off", "yesterday's session". The answer lives in the
+#      conversation itself, which the routed model never sees.
+#   2. RECENT-HISTORY reference — "my last three commits", "the last three
+#      PRs I opened", "before my last edit". Resolving "last three" means
+#      reading the user's actual git/GitHub state; a routed model would
+#      have to fabricate which commits/PRs those are.
+#   3. CONTINUATION anaphora — "do the same thing for the rest of the
+#      modules" — "the same thing" points at an antecedent action only
+#      visible earlier in the conversation.
+#   4. CROSS-SYSTEM / MULTI-STEP orchestration — "coordinate ... across the
+#      auth service, the billing service, and the frontend repo", "merge
+#      them and redeploy", "roll out ... to every environment ... and
+#      report back after each". Multiple real operations chained with
+#      "and", not a single answerable question.
+#   5. AMBIENT status/continuation checks — bare "status?", "keep going",
+#      "check the running agent". These ask about ongoing/background work;
+#      nothing in the bare text is enough for even a routed model with
+#      context to answer, since there IS no text-only context to hand it.
+#
+# Each pattern below is its own, narrowly-scoped signal (not merged into one
+# giant alternation) so a future false-positive can be traced to, and fixed
+# in, exactly one of them.
+
+_COORDINATE_SESSION_RE = re.compile(
+    # Bare "this/that/our session" is ambiguous with introspection ("what did
+    # I route this session" is a LOCAL routing-state question, not a
+    # reference to conversation content) — so "session" only counts here
+    # when it carries an explicit possessive, either on the session itself
+    # ("this session's approach") or on what precedes it ("yesterday's
+    # session"). "conversation" has no such local-state reading, so it
+    # counts bare.
+    r"\b(?:this|that|our)\s+session's\b|"
+    r"\b(?:this|that|our|yesterday|previous|earlier|prior|last)'s\s+"
+    r"(?:session|conversation)\b|"
+    r"\b(?:this|that|our)\s+conversation\b|"
+    r"\bwe (?:discussed|decided|agreed(?:\s+on)?)\b|"
+    r"\bwhere we left off\b",
+    re.IGNORECASE,
+)
+
+_COORDINATE_HISTORY_RE = re.compile(
+    r"\b(?:my|the) last (?:\d+|one|two|three|four|five|few|couple(?:\s+of)?)\s+"
+    r"(?:commits?|prs?|pull requests?|edits?|changes?|files?)\b|"
+    r"\bbefore my last (?:edit|change|commit)\b|"
+    r"\b(?:prs?|pull requests?) (?:i|I) (?:opened|made|created|submitted)\b",
+    re.IGNORECASE,
+)
+
+_COORDINATE_SAME_THING_RE = re.compile(
+    r"\b(?:the\s+)?same (?:thing|fix|change|approach|logic|pattern)\b", re.IGNORECASE
+)
+_COORDINATE_REMAINDER_RE = re.compile(
+    r"\b(?:the\s+)?(?:rest|other|others|remaining)\b", re.IGNORECASE
+)
+
+_COORDINATE_CROSS_SYSTEM_RE = re.compile(
+    r"\b(?:coordinate|orchestrate)\b(?:(?!\.).){0,80}?\bacross\b(?:(?!\.).){0,120}?"
+    r"\b(?:services?|repos?|repositories?|teams?|environments?)\b",
+    re.IGNORECASE | re.DOTALL,
+)
+
+_COORDINATE_MULTISTEP_RE = re.compile(
+    r"\b(?:merge|deploy|redeploy|release|rebase|roll(?:ing)?\s+out|push|publish)\b"
+    r"(?:(?!\.).){0,40}?\band\b(?:(?!\.).){0,40}?"
+    r"\b(?:redeploy|deploy|merge|release|report\s+back|resolve)\b",
+    re.IGNORECASE | re.DOTALL,
+)
+
+# Bare ambient status/continuation checks. Gated to <=6 WORDS (not just a
+# regex anchor) so a substantive prompt that happens to open with "status"
+# or "continue" ("continue refactoring the parser to support OAuth") is
+# never caught — only content-free fragments are.
+_COORDINATE_AMBIENT_RE = re.compile(
+    r"^(?:status\??|(?:what'?s|what\s+is)\s+(?:the\s+)?status\??|"
+    r"any\s+(?:updates?|progress)\??|how'?s\s+it\s+going\??|"
+    r"keep\s+(?:on\s+)?going\.?|"
+    r"check\s+(?:on\s+|in\s+on\s+)?(?:the\s+)?(?:running\s+)?agents?\.?|"
+    r"check\s+(?:the\s+)?agent'?s?\s+(?:status|progress)\.?)$",
+    re.IGNORECASE,
+)
+
 
 def _is_coordination_task(prompt: str) -> bool:
-    """Return True when the prompt asks for multi-agent orchestration.
+    """Return True when the prompt needs Claude's own session/local state
+    rather than a stateless routed model — multi-agent orchestration, or one
+    of the session-state / recent-history / continuation / cross-system /
+    ambient-status shapes documented above.
 
-    Requires an orchestration verb AND an agent-like target so that
-    "spawn a background process" (code) and "what's a subagent?" (query)
-    still route normally.
+    The original verb+target pairing requires BOTH signals so that "spawn a
+    background process" (code) and "what's a subagent?" (query) still route
+    normally. The newer shapes are each independently sufficient — they were
+    added because the golden probe showed the verb+target pair alone misses
+    the large majority of real "stay on Claude" prompts.
     """
-    return bool(
-        _COORDINATE_VERBS.search(prompt)
-        and _COORDINATE_TARGETS.search(prompt)
-    )
+    if _COORDINATE_VERBS.search(prompt) and _COORDINATE_TARGETS.search(prompt):
+        return True
+    if _COORDINATE_SESSION_RE.search(prompt):
+        return True
+    if _COORDINATE_HISTORY_RE.search(prompt):
+        return True
+    if _COORDINATE_SAME_THING_RE.search(prompt) and _COORDINATE_REMAINDER_RE.search(prompt):
+        return True
+    if _COORDINATE_CROSS_SYSTEM_RE.search(prompt):
+        return True
+    if _COORDINATE_MULTISTEP_RE.search(prompt):
+        return True
+    stripped = prompt.strip()
+    if len(stripped.split()) <= 6 and _COORDINATE_AMBIENT_RE.match(stripped):
+        return True
+    return False
 
 
 # ── Benchmark prompt fast-paths (Plan 07 Phase 3 C) ───────────────────────────

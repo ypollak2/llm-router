@@ -1099,6 +1099,19 @@ def main() -> None:
     # block they can't satisfy. Exit cleanly so native tools work.
     if pending is not None and pending.get("task_type") == "introspect":
         sys.exit(0)
+    # coordinate task type: multi-agent orchestration, or a prompt that needs
+    # THIS session's own state (conversation history, recent commits/PRs, a
+    # running background agent) — see auto-route.py's `_is_coordination_task`.
+    # TaskType.COORDINATE is advisory-only by design (types.py): no direct
+    # answer is ever generated for it because a stateless routed model has
+    # no subagents and no session memory to answer from. Holding the tool
+    # here would trap the user behind a block that routing can never
+    # satisfy — the golden-probe defect this guards against (routing-
+    # golden-v1, 2026-09-28: 11/12 constructed coordinate cases were routed
+    # and answered by a local model instead of staying with Claude). Exit
+    # cleanly, same as introspect, so native tools work.
+    if pending is not None and pending.get("task_type") == "coordinate":
+        sys.exit(0)
     # Uncertain classification methods downgrade to soft enforcement:
     #
     #   * ``heuristic-weak`` — classifier scored positive but below the
