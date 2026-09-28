@@ -56,6 +56,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   sessions into their parent, closing the gap where the 50-cap file had
   already evicted the spawn the join needed.
 
+### Fixed — agent-route headless sessions
+
+- **`hooks/agent-route.py` silently routed a headless benchmark run to `codex
+  exec`.** A `claude -p "..." --model sonnet --output-format json` run hit the
+  default `_allow_routed_spawn()` path on its first Task-tool call and turned a
+  ~40s task into 832s, contaminating the benchmark. Verified with a real `-p`
+  run (via a throwaway diagnostic hook) that the PreToolUse[Agent] payload
+  itself carries no entrypoint field (`cwd`, `hook_event_name`,
+  `permission_mode`, `prompt_id`, `session_id`, `tool_input`, `tool_name`,
+  `tool_use_id`, `transcript_path`); `CLAUDE_CODE_ENTRYPOINT` is the real
+  signal — `"sdk-cli"`/`"sdk-py"` for a headless (`-p`/SDK) session versus
+  `"cli"` for an interactive one. The hook now exits 0 with no decision (and
+  no session-state writes) whenever the entrypoint is headless, logging
+  `skipped_headless:entrypoint=<value>` to the agent-calls ledger. An unset
+  entrypoint and `"claude-desktop"` (the GUI app — a person is driving it) are
+  still treated as interactive. `LLM_ROUTER_AGENT_ROUTE_HEADLESS=on` opts back
+  into routing for anyone who wants it in a script/SDK session.
+
 ### Fixed — proxy cost accounting
 
 - **The proxy ledger's cost estimate did not match Claude Code's own

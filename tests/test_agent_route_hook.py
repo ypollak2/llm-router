@@ -63,6 +63,8 @@ def _run(
     tmp_path: Path | None = None,
     subagent_direct: bool = False,
     model_pin: bool = False,
+    entrypoint: str | None = None,
+    extra_env: dict[str, str] | None = None,
 ) -> tuple[int, dict | None]:
     """Run the agent-route hook with given parameters.
 
@@ -73,6 +75,14 @@ def _run(
         agent_depth: Current nesting depth to write to agent_depth.json.
         max_depth: Value for LLM_ROUTER_MAX_AGENT_DEPTH env var.
         tmp_path: Temp directory for HOME.
+        entrypoint: Value for CLAUDE_CODE_ENTRYPOINT. ``None`` (the default)
+            POPS it from the subprocess env — the headless guard must treat
+            "unset" as interactive, and every pre-existing test in this file
+            relies on that default so it stays unaffected by the ambient
+            shell's own CLAUDE_CODE_ENTRYPOINT (this repo's own dev sessions
+            run with it set to "cli").
+        extra_env: Additional env vars to set on the subprocess (e.g. the
+            LLM_ROUTER_AGENT_ROUTE_HEADLESS override).
 
     Returns:
         (exit_code, parsed_stdout_dict_or_None)
@@ -98,6 +108,12 @@ def _run(
     # helper. Gating tests for that feature use _load_hook_module() + monkeypatch
     # instead (TestCodexSubagentDelegation), so it is disabled here unconditionally.
     env["LLM_ROUTER_AGENT_ROUTE_CODEX"] = "off"
+    if entrypoint is None:
+        env.pop("CLAUDE_CODE_ENTRYPOINT", None)
+    else:
+        env["CLAUDE_CODE_ENTRYPOINT"] = entrypoint
+    if extra_env:
+        env.update(extra_env)
     if tmp_path is not None:
         llmr_dir = tmp_path / ".llm-router"
         llmr_dir.mkdir(parents=True, exist_ok=True)
@@ -559,6 +575,144 @@ class TestNonAgentTool:
         )
         assert result.returncode == 0
         assert result.stdout.strip() == ""  # No output (approved)
+
+
+def _agent_calls(tmp_path: Path) -> list[dict]:
+    calls_file = tmp_path / ".llm-router" / "agent_calls.json"
+    if not calls_file.exists():
+        return []
+    return json.loads(calls_file.read_text()).get("calls", [])
+
+
+class TestHeadlessGuard:
+    """2026-09-28 incident: a `claude -p ... --output-format json` benchmark
+    run was silently routed to `codex exec` by this hook (via the default
+    `_allow_routed_spawn()` model-pin path), turning a ~40s task into 832s.
+
+    Signal: CLAUDE_CODE_ENTRYPOINT is "sdk-cli"/"sdk-py" for a headless
+    (-p / SDK) session and "cli" for an interactive one — verified against a
+    real `claude -p ... --output-format json` run (see the guard note in
+    hooks/agent-route.py). The hook's own stdin payload carries no equivalent
+    field, so the guard reads the environment, not the payload.
+    """
+
+    def test_headless_sdk_cli_skips_with_no_decision(self, tmp_path):
+        """A reasoning prompt that would normally be blocked/routed is instead
+        approved silently (exit 0, no stdout) when the session is headless."""
+        code, out = _run(
+            "analyze the codebase for architectural issues",
+            subagent_type="general-purpose",
+            entrypoint="sdk-cli",
+            tmp_path=tmp_path,
+        )
+        assert code == 0
+        assert out is None
+
+    def test_headless_sdk_py_variant_also_skips(self, tmp_path):
+        """Any sdk-* entrypoint (not just sdk-cli) counts as headless."""
+        code, out = _run(
+            "analyze the codebase for architectural issues",
+            subagent_type="general-purpose",
+            entrypoint="sdk-py",
+            tmp_path=tmp_path,
+        )
+        assert code == 0
+        assert out is None
+
+    def test_headless_skip_writes_no_session_state(self, tmp_path):
+        """A headless skip takes NO routing decision and touches no session
+        state (budget/depth files) — it must be a true no-op, not merely an
+        'approve but keep tracking' path, or a benchmark run still pays the
+        hook's side effects."""
+        _run(
+            "analyze the codebase for architectural issues",
+            subagent_type="general-purpose",
+            session_id="test-headless-1",
+            entrypoint="sdk-cli",
+            tmp_path=tmp_path,
+        )
+        assert not (tmp_path / ".llm-router" / "session_budget.json").exists()
+        assert not _depth_path_for(tmp_path, "test-headless-1").exists()
+
+    def test_headless_skip_is_logged_with_reason(self, tmp_path):
+        """Every skip logs why (repo rule) — the agent_calls ledger records
+        the headless decision and the entrypoint value that caused it."""
+        _run(
+            "analyze the codebase for architectural issues",
+            subagent_type="general-purpose",
+            entrypoint="sdk-cli",
+            tmp_path=tmp_path,
+        )
+        calls = _agent_calls(tmp_path)
+        assert calls, "expected the skip to be logged in agent_calls.json"
+        assert "skipped_headless" in calls[-1]["decision"]
+        assert "entrypoint=sdk-cli" in calls[-1]["decision"]
+
+    def test_interactive_cli_entrypoint_is_not_skipped(self, tmp_path):
+        """entrypoint=cli (an ordinary interactive session) must still hit the
+        normal depth-breaker/routing logic — the guard is headless-only."""
+        code, out = _run(
+            "analyze",
+            subagent_type="general-purpose",
+            session_id="test-headless-2",
+            agent_depth=2,
+            max_depth="2",
+            entrypoint="cli",
+            tmp_path=tmp_path,
+        )
+        assert out is not None
+        assert out["decision"] == "block"
+        assert "circuit breaker" in out["reason"].lower()
+
+    def test_unset_entrypoint_is_treated_as_interactive(self, tmp_path):
+        """No CLAUDE_CODE_ENTRYPOINT at all (stripped-down environment) must
+        default to interactive behaviour, not silently disable routing."""
+        code, out = _run(
+            "analyze",
+            subagent_type="general-purpose",
+            session_id="test-headless-3",
+            agent_depth=2,
+            max_depth="2",
+            entrypoint=None,
+            tmp_path=tmp_path,
+        )
+        assert out is not None
+        assert out["decision"] == "block"
+        assert "circuit breaker" in out["reason"].lower()
+
+    def test_claude_desktop_entrypoint_is_not_skipped(self, tmp_path):
+        """The desktop app is interactive (a person is driving it), not a
+        script/benchmark — it must not be treated as headless."""
+        code, out = _run(
+            "analyze",
+            subagent_type="general-purpose",
+            session_id="test-headless-4",
+            agent_depth=2,
+            max_depth="2",
+            entrypoint="claude-desktop",
+            tmp_path=tmp_path,
+        )
+        assert out is not None
+        assert out["decision"] == "block"
+        assert "circuit breaker" in out["reason"].lower()
+
+    def test_headless_override_env_restores_routing(self, tmp_path):
+        """LLM_ROUTER_AGENT_ROUTE_HEADLESS=on is the opt-in escape hatch: a
+        headless session with the override set gets the normal decision
+        again instead of a silent skip."""
+        code, out = _run(
+            "analyze",
+            subagent_type="general-purpose",
+            session_id="test-headless-5",
+            agent_depth=2,
+            max_depth="2",
+            entrypoint="sdk-cli",
+            extra_env={"LLM_ROUTER_AGENT_ROUTE_HEADLESS": "on"},
+            tmp_path=tmp_path,
+        )
+        assert out is not None
+        assert out["decision"] == "block"
+        assert "circuit breaker" in out["reason"].lower()
 
 
 def _north_star_rows(tmp_path: Path) -> list[dict]:

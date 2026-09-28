@@ -768,6 +768,50 @@ def _complexity_to_profile(complexity: str, session: float, sonnet: float, weekl
     return {"simple": "budget", "moderate": "balanced", "complex": "premium"}[complexity]
 
 
+# ── Headless session guard ───────────────────────────────────────────────────
+# 2026-09-28 incident: `claude -p "..." --model sonnet --output-format json`
+# (a headless benchmark run) hit this hook's default routed-spawn path, which
+# shelled out to `codex exec` for a Task-tool call. A ~40s task became 832s
+# and the benchmark numbers were contaminated. Headless runs (scripts, CI,
+# SDK callers) must never get a surprise external-process fan-out.
+#
+# SIGNAL, verified empirically (not assumed) on 2026-09-28 with a real
+# `claude -p ... --output-format json` run that spawned a Task-tool subagent,
+# observed via a throwaway diagnostic PreToolUse[Agent] hook:
+#   - The hook's own stdin JSON payload carries NO entrypoint field at all.
+#     Its top-level keys were: cwd, hook_event_name, permission_mode,
+#     prompt_id, session_id, tool_input, tool_name, tool_use_id,
+#     transcript_path. There is nothing to read here.
+#   - The environment variable CLAUDE_CODE_ENTRYPOINT IS the signal: it was
+#     "sdk-cli" for that headless `-p` run, versus "cli" for an ordinary
+#     interactive session (confirmed against this process's own inherited
+#     env). This also matches what Claude Code records in session
+#     transcripts under the same field name for the same distinction.
+# "claude-desktop" (the desktop app) is deliberately NOT treated as headless —
+# a person is actively driving it, so a surprise Codex spawn there is a UX
+# question, not a benchmark-contamination one.
+
+def _headless_entrypoint() -> str:
+    """CLAUDE_CODE_ENTRYPOINT, lower-cased and stripped. See guard note above."""
+    return os.environ.get("CLAUDE_CODE_ENTRYPOINT", "").strip().lower()
+
+
+def _is_headless_entrypoint(entrypoint: str) -> bool:
+    """True for any programmatic entrypoint (sdk-cli, sdk-py, and any future
+    sdk-* variant). False for "" (unset — never observed for a real Claude
+    Code process; treated as interactive so a stripped environment doesn't
+    silently disable routing) and for "claude-desktop" (see guard note)."""
+    return entrypoint.startswith("sdk")
+
+
+def _headless_route_override_enabled() -> bool:
+    """LLM_ROUTER_AGENT_ROUTE_HEADLESS=on keeps agent-route active in headless
+    sessions — an explicit opt-in for anyone who WANTS Codex/DIRECT routing
+    from a script or SDK caller. Default off."""
+    return os.environ.get("LLM_ROUTER_AGENT_ROUTE_HEADLESS", "off").strip().lower() in (
+        "1", "on", "true", "yes")
+
+
 # ── Main ─────────────────────────────────────────────────────────────────────
 
 def _route_allowlist() -> set[str]:
@@ -1324,6 +1368,18 @@ def main() -> None:
     tool_input = hook_input.get("tool_input", {})
     prompt = tool_input.get("prompt", "").strip()
     subagent_type = tool_input.get("subagent_type", "general-purpose")
+
+    # ── Headless session guard — checked before anything else, including the
+    # empty-prompt short-circuit, so a headless run never takes a routing
+    # decision or writes session state (budget/depth files). See the guard
+    # note above _headless_entrypoint().
+    _entrypoint = _headless_entrypoint()
+    if _is_headless_entrypoint(_entrypoint) and not _headless_route_override_enabled():
+        _log_agent_call(
+            subagent_type, prompt,
+            f"skipped_headless:entrypoint={_entrypoint or 'unknown'}",
+        )
+        sys.exit(0)  # approve, no decision — headless session, routing skipped
 
     if not prompt:
         sys.exit(0)  # approve: nothing to classify
