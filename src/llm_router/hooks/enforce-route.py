@@ -1112,6 +1112,28 @@ def main() -> None:
     # cleanly, same as introspect, so native tools work.
     if pending is not None and pending.get("task_type") == "coordinate":
         sys.exit(0)
+    # NOT exempted: the SEPARATE, older ``"coordination"`` (no trailing "e")
+    # task type — a heuristic-scored bucket, unrelated to TaskType.COORDINATE
+    # above, that intentionally stays enforced and redirects to llm_act (see
+    # test_enf_coordination_bash_names_llm_act.py). This was considered and
+    # rejected 2026-09-28, with evidence: a held-out sample of real short
+    # prompts (n=251, scripts/groundtruth/extract_corpus.py, scrubbed, never
+    # committed) showed the broadened `_is_coordination_task` above already
+    # catches essentially every bare ambient-status/continuation shape
+    # ("status of the post-deploy run?", "keep going, report when X is
+    # done") via the "coordinate" fast-path BEFORE the heuristic scorer ever
+    # runs. What is left over and lands in old-bucket "coordination" instead
+    # is dominated by executable git/deploy operational commands with an
+    # ambiguous target ("merge the PRs in that order", "commit this and
+    # start on A0") — 8 of 8 sampled cases were exactly this shape, zero
+    # were bare status queries. Those are tool-capable-agent work, not
+    # advisory-only work: llm_act (with repo access) can plausibly resolve
+    # "the PRs"/"A0" from the actual repo state, so redirecting them there
+    # is the right behaviour, and blanket-exempting old-bucket
+    # "coordination" from enforcement would silently defeat that redirect
+    # for every one of them — the exact regression
+    # test_enf_coordination_bash_names_llm_act.py exists to prevent.
+    #
     # Uncertain classification methods downgrade to soft enforcement:
     #
     #   * ``heuristic-weak`` — classifier scored positive but below the
