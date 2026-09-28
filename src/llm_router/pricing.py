@@ -171,8 +171,16 @@ class Price:
 # meaningful instead of forcing it to be switched off here, which is the one
 # place it must never be switched off.
 _ANTHROPIC: dict[str, Price] = {
-    # $5/$25 across the current Opus line. The $15/$75 this replaces is Opus 3
-    # pricing, retired 2026-01-05 — see the module docstring.
+    # Opus 5.5 is the one Opus that is NOT $5/$25, and its cache read is NOT
+    # the standard 0.1x: "Cache hits and refreshes on Claude Opus 5.5 are priced
+    # at 0.05x the base input price" (pricing page footnote 2, re-checked
+    # 2026-09-28). $4 input -> $0.20 read, so it is stored explicitly; deriving
+    # it would give $0.40, double the real rate. Cache writes follow the
+    # standard ratios ($5 at 5m, $8 at 1h) and stay derived. Its absence from
+    # this table sent $308.93 of real Claude Code spend to a fallback rate.
+    "claude-opus-5-5": Price("claude-opus-5-5", 4.00, 20.00, cache_read=0.20),
+    # $5/$25 across the rest of the current Opus line. The $15/$75 this replaces
+    # is Opus 3 pricing, retired 2026-01-05 — see the module docstring.
     "claude-opus-5": Price("claude-opus-5", 5.00, 25.00),
     "claude-opus-4-8": Price("claude-opus-4-8", 5.00, 25.00),
     "claude-opus-4-7": Price("claude-opus-4-7", 5.00, 25.00),
@@ -185,6 +193,11 @@ _ANTHROPIC: dict[str, Price] = {
     "claude-sonnet-4-5": Price("claude-sonnet-4-5", 3.00, 15.00),
     # $1.00/$5.00. The 0.80, 0.25 and 0.25 values this replaces were all wrong.
     "claude-haiku-4-5": Price("claude-haiku-4-5", 1.00, 5.00),
+    "claude-sonnet-5-5": Price("claude-sonnet-5-5", 2.00, 10.00),
+    # Fable 5.1: same $10/$50 as Fable 5, but "Cache hits and refreshes on
+    # Claude Fable 5.1 ... are priced at 0.025x the base input price" (pricing
+    # page footnote 1, re-checked 2026-09-28): $0.25, not the derived $1.00.
+    "claude-fable-5-1": Price("claude-fable-5-1", 10.00, 50.00, cache_read=0.25),
     "claude-fable-5": Price("claude-fable-5", 10.00, 50.00),
     # Retired lines, kept so historical rows still price correctly — never a
     # default. `verified` because a retired line's list price is settled and
@@ -289,6 +302,30 @@ _ALIASES: dict[str, str] = {
 }
 
 
+# Claude Code's own cost tracker names long-context models "<id>[1m]" (e.g.
+# "claude-opus-5-5[1m]"). The pricing page, re-checked 2026-09-28: "Claude 4.6
+# and later models ... include the full 1M token context window at standard
+# pricing. (A 900k-token request is billed at the same per-token rate as a
+# 9k-token request.)" (platform.claude.com/docs/en/about-claude/pricing, "Long
+# context pricing"). So "[1m]" maps to the base model's rates with NO surcharge
+# — but only for 4.6+. Earlier models billed long context at a premium this
+# table does not carry, so a pre-4.6 "[1m]" id stays unknown rather than being
+# silently under-priced at base rates.
+_LONG_CONTEXT_SUFFIX = "[1m]"
+_LONG_CONTEXT_AT_STANDARD_RATES: frozenset[str] = frozenset({
+    "claude-fable-5-1", "claude-fable-5",
+    "claude-opus-5-5", "claude-opus-5", "claude-opus-4-8", "claude-opus-4-7", "claude-opus-4-6",
+    "claude-sonnet-5-5", "claude-sonnet-5", "claude-sonnet-4-6",
+})
+
+# Not handled: the 1.1x `inference_geo: "us"` multiplier (Claude 4.6+, pricing
+# page "Data residency pricing"). Claude Code transcripts do carry a
+# `usage.inference_geo` field, but across 28,246 usage records in
+# ~/.claude/projects (files modified in the 30 days to 2026-09-28) its value was
+# "not_available" (28,071) or "" (175) — never "us". A multiplier with no input
+# that ever triggers it would be untested code; add it when "us" is observed.
+
+
 def _normalize(model: str) -> str:
     """Strip provider prefixes and vendor decorations, lowercase."""
     m = (model or "").strip().lower()
@@ -307,6 +344,9 @@ def resolve(model: str) -> str | None:
     silently turns missing knowledge into a favourable number.
     """
     raw = (model or "").strip().lower()
+    if raw.endswith(_LONG_CONTEXT_SUFFIX):
+        base = resolve(raw[: -len(_LONG_CONTEXT_SUFFIX)])
+        return base if base in _LONG_CONTEXT_AT_STANDARD_RATES else None
     # Captured before _normalize() strips the "ollama/" prefix. A tag-less
     # Ollama name ("ollama/llama3.2") has neither a surviving "ollama" prefix
     # nor a ":tag" once normalized, so the fallback below has nothing left to
