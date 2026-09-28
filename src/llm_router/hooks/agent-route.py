@@ -1090,7 +1090,12 @@ _CODEX_UNSUITABLE_SUBAGENT_TYPES = {
     "fork",
 }
 
-_CODEX_SUITABLE_TASK_TYPES = {"research", "analyze", "code"}
+# Real production spawns can classify read-mostly general-purpose delegation as
+# task_type=query, which is Codex-suitable for the same reason as research,
+# analyze, and code-reading prompts. The fork subagent-type exclusion above and
+# the _MULTI_FILE_WRITE_SIGNALS write-heavy-prompt exclusion below still apply
+# regardless of task_type.
+_CODEX_SUITABLE_TASK_TYPES = {"research", "analyze", "code", "query"}
 
 _MULTI_FILE_WRITE_SIGNALS = re.compile(
     r"\b(?:across (?:multiple|all|every|several) files?|multi-file|"
@@ -1105,12 +1110,12 @@ _MULTI_FILE_WRITE_SIGNALS = re.compile(
 
 
 def _is_codex_suitable(subagent_type: str, task_type: str, prompt: str) -> bool:
-    """Suitable = research / code-reading / analysis that (a) does not need
-    the parent session's live conversational context and (b) is not a
-    write-heavy, multi-file edit. Codex CLI runs as its own subprocess with
-    its own toolchain — it can read/search/reason over files on disk, but it
-    is not a substitute for a real multi-file edit loop and it cannot see
-    anything the parent session holds only in memory."""
+    """Suitable = research / code-reading / analysis / read-mostly queries
+    that (a) does not need the parent session's live conversational context
+    and (b) is not a write-heavy, multi-file edit. Codex CLI runs as its own
+    subprocess with its own toolchain — it can read/search/reason over files
+    on disk, but it is not a substitute for a real multi-file edit loop and
+    it cannot see anything the parent session holds only in memory."""
     if subagent_type in _CODEX_UNSUITABLE_SUBAGENT_TYPES:
         return False
     if task_type not in _CODEX_SUITABLE_TASK_TYPES:
