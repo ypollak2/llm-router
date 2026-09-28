@@ -25,7 +25,11 @@ import pytest
 
 from llm_router import pricing
 
-# A date inside Sonnet 5's introductory window, and one after it.
+# Two arbitrary dates, used to check that Sonnet 5's rate no longer depends on
+# which one is passed. Anthropic's scheduled reversion to $3/$15 on
+# 2026-09-01 was cancelled (platform.claude.com/docs/en/about-claude/pricing,
+# footnote 3) — the $2/$10 launch price is now permanent. Kept named after the
+# old window for git-blame continuity with the bug this replaced.
 DURING_INTRO = dt.date(2026, 8, 11)
 AFTER_INTRO = dt.date(2026, 9, 15)
 
@@ -120,14 +124,27 @@ class TestCacheRatesAreDerived:
         assert pricing.cache_write_rate(model) == pytest.approx(rate * 1.25)
 
 
-class TestTimeDependentPricing:
-    def test_intro_rate_applies_during_the_window(self) -> None:
-        assert pricing.input_rate("claude-sonnet-5", as_of=DURING_INTRO) == 2.00
-        assert pricing.output_rate("claude-sonnet-5", as_of=DURING_INTRO) == 10.00
+class TestSonnet5PriceIsFlatNotTimeDependent:
+    """Regression for the cost-reconciliation bug (2026-09-28): this module
+    used to charge $3/$15 for claude-sonnet-5 from 2026-09-01 on, expecting a
+    price rise Anthropic explicitly cancelled. Three real proxied sessions
+    matched $2/$10 to the cent on 2026-09-28 and none matched $3/$15 — see
+    docs/proxy.md. The rate must not vary by date, in either direction."""
 
-    def test_standard_rate_applies_after(self) -> None:
-        assert pricing.input_rate("claude-sonnet-5", as_of=AFTER_INTRO) == 3.00
-        assert pricing.output_rate("claude-sonnet-5", as_of=AFTER_INTRO) == 15.00
+    def test_rate_is_2_10_regardless_of_as_of(self) -> None:
+        for as_of in (DURING_INTRO, AFTER_INTRO, None):
+            assert pricing.input_rate("claude-sonnet-5", as_of=as_of) == 2.00
+            assert pricing.output_rate("claude-sonnet-5", as_of=as_of) == 10.00
+
+    def test_the_cancelled_3_15_rate_is_gone(self) -> None:
+        """The specific regression: $3/$15 was never Sonnet 5's real rate."""
+        assert pricing.input_rate("claude-sonnet-5") != 3.00
+        assert pricing.output_rate("claude-sonnet-5") != 15.00
+
+    def test_cache_rates_derive_from_the_flat_2_10_rate(self) -> None:
+        assert pricing.cache_read_rate("claude-sonnet-5") == pytest.approx(0.20)
+        assert pricing.cache_write_rate("claude-sonnet-5") == pytest.approx(2.50)
+        assert pricing.cache_write_1h_rate("claude-sonnet-5") == pytest.approx(4.00)
 
 
 class TestCostArithmetic:

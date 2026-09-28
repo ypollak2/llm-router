@@ -7,7 +7,9 @@ served replies where the local model (``ollama/qwen3-coder:30b``) kept
 re-issuing the same ``Read`` of the same file rather than making progress.
 The task still finished — all golden tests passed at the end — but took
 195s, and the loop inflated the routed share (63/81 = 77.8%) and the
-"est. avoided $2.93" metric with calls that exist only because of the loop.
+"est. avoided $2.93" metric (the pre-2026-09-28 formula; see ``ledger``'s
+"NET AVOIDED" docstring for why it was replaced) with calls that exist only
+because of the loop.
 Two healthy sessions in the same trial never exceeded a served run of 6
 (``cf5ef91c``: runs of 2, 3, 1; ``d9743217``: runs of 1, 1, 1).
 

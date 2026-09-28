@@ -56,6 +56,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   sessions into their parent, closing the gap where the 50-cap file had
   already evicted the spawn the join needed.
 
+### Fixed — proxy cost accounting
+
+- **The proxy ledger's cost estimate did not match Claude Code's own
+  `total_cost_usd` for the same session.** Reconciling six real sessions
+  (`--output-format json`) against the ledger surfaced three bugs:
+  1. `normalize_usage` was not idempotent, and every row's stored `usage` is
+     already its output — `_record_usage` in `server.py` normalizes once
+     before `write_row`. Every reader that read a row back (`anthropic_cost`,
+     `stats`'s token totals) normalized it a *second* time, and the second
+     pass looked for Anthropic's raw nested `cache_creation` dict, which no
+     longer existed. It silently zeroed `cache_creation_1h` and folded the
+     real 1h-tier tokens into `cache_creation_5m` at the cheaper rate — on
+     every row ever read from `proxy_calls.jsonl`, not a corner case: that is
+     the only way any caller ever sees a row. `normalize_usage` now detects an
+     already-flat dict and returns it unchanged.
+  2. `pricing.py` charged Sonnet 5 the standard rate ($3/$15) from
+     2026-09-01 on, expecting a scheduled reversion off its $2/$10
+     introductory price. Anthropic cancelled that reversion — the pricing
+     page states outright that $2/$10 "is now the standard price" and the
+     increase "will not occur." On 2026-09-28 this overpriced every Sonnet 5
+     call by exactly 1.5x; three sessions matched $2/$10 to the cent and none
+     matched $3/$15. `claude-sonnet-5` is now priced flat, like every other
+     model, and `PRICES_AS_OF` reflects the re-check.
+  3. `est_avoided_usd` priced every served step at the median cost of a whole
+     *forwarded* continuation call in its session — repricing the entire
+     cached prefix once per served step, as if Anthropic would redo that work
+     from scratch each time. Renamed to `net_avoided_usd`: each served step is
+     now priced as the cache-read of the prefix established by the last real
+     Anthropic call before it, plus its own reply length, minus the extra
+     cache-write the next real Anthropic call paid to re-establish its cache
+     across the served gap. It **may be negative** — a served step is not a
+     saving if that gap cost more to close than the step would have cost.
+     See `docs/proxy.md` and the `ledger.py` module docstring ("NET AVOIDED").
+
+  Measured on a routing-off (pure pass-through) session, 8 real Anthropic
+  calls, 2026-09-28: ledger `est_cost_usd` matched `total_cost_usd` exactly
+  ($0.2176, ratio 1.000) after all three fixes, versus 1.156x before fix 2 and
+  0.771x with only fix 2 applied (fix 1 alone masked fix 3's undercount by
+  coincidence). On three routing-on sessions (1-4 served steps each) the
+  residual gap ranged 5%-27% and grew with served-step count — attributed to
+  Claude Code's own cost tracker billing a served step's local (Ollama)
+  token counts as Sonnet-5 usage, which this PR does not change (out of
+  scope: it is Claude Code's accounting of a reply it received, not the
+  ledger's).
+
 ### Fixed — proxy
 
 - **The per-call proxy (#197) had no defence against a served step that never

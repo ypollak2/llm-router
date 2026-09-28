@@ -31,6 +31,26 @@ Row fields:
 The metrics are kept separate on purpose (spike, 2026-09-28: half the calls
 routed saved about a fifth of the Anthropic cost, because cached re-reads are
 already cheap). A routed share is never reported as a saving.
+
+NET AVOIDED (redefined 2026-09-28)
+-----------------------------------
+The previous ``est_avoided_usd`` priced every served step at the *median full
+forwarded continuation call* of its session — i.e. it repriced the whole
+cached prefix, once per served step, as if Anthropic would have re-read (or
+re-written) it fresh each time. Reconciling against Claude Code's own
+``total_cost_usd`` for real sessions showed this overstates avoided cost by
+roughly an order of magnitude: a served step is a cheap cache *read* away from
+a real call, not a whole new call.
+
+The counterfactual priced now, per served step: the cached prefix it would
+have read (from the last real Anthropic call *before* it in the session, at
+the cache-read rate), its own reply length (from ``backend_usage``, priced as
+output), at whatever model the request named. Consecutive served steps
+between the same two real Anthropic calls share one such "run"; the run's
+cost is then reduced by the extra cache-write the *next* real Anthropic call
+paid to re-establish its cache across the served gap — the toll the proxied
+session, not the counterfactual, actually incurred. The result, ``net``
+avoided, may be negative: see :func:`_net_avoided`.
 """
 
 from __future__ import annotations
@@ -64,9 +84,29 @@ def auth_kind(headers) -> str:
     return "none"
 
 
+_NORMALIZED_KEYS = ("input_tokens", "output_tokens", "cache_read_input_tokens",
+                    "cache_creation_input_tokens", "cache_creation_1h", "cache_creation_5m")
+
+
 def normalize_usage(usage: dict | None) -> dict:
-    """Anthropic usage -> flat ints, with the 5m/1h cache-write split."""
+    """Anthropic usage -> flat ints, with the 5m/1h cache-write split.
+
+    Idempotent, on purpose: a row's ``usage`` is stored ALREADY normalized
+    (``_record_usage`` in ``server.py`` calls this once, before ``write_row``),
+    so every reader that gets a row back — from a fresh request or from
+    ``proxy_calls.jsonl`` — sees the flat shape, not Anthropic's raw one with
+    its nested ``cache_creation`` dict. Re-deriving the 1h/5m split from a
+    flat dict's (absent) ``cache_creation`` key used to silently zero
+    ``cache_creation_1h`` and fold every 1h write into ``cache_creation_5m``
+    at the cheaper rate — on every row read from disk, not a corner case,
+    because that is the only way any caller ever sees a row. Found
+    2026-09-28 reconciling the ledger against Claude Code's own
+    ``total_cost_usd``: the flat rate alone (see ``pricing.py``) accounted
+    for only part of the gap on a routing-off session with real 1h writes.
+    """
     u = usage or {}
+    if any(k in u for k in ("cache_creation_1h", "cache_creation_5m")):
+        return {k: int(u.get(k) or 0) for k in _NORMALIZED_KEYS}
     cc = u.get("cache_creation") if isinstance(u.get("cache_creation"), dict) else {}
     out = {
         "input_tokens": int(u.get("input_tokens") or 0),
@@ -129,20 +169,110 @@ def _median(values: list[float]) -> float | None:
     return round(statistics.median(values), 2) if values else None
 
 
-def anthropic_cost(row: dict) -> float | None:
-    """Estimated USD of the Anthropic side of one row, or None when unpriced."""
+def _price_tokens(model: str, *, input_tokens: int = 0, output_tokens: int = 0,
+                   cache_read_input_tokens: int = 0, cache_creation_5m: int = 0,
+                   cache_creation_1h: int = 0) -> float | None:
+    """USD for a call priced at ``model``'s rates, or ``None`` when unpriced.
+
+    The one place token counts turn into dollars, so :func:`anthropic_cost`
+    and :func:`_net_avoided`'s counterfactual pricing cannot drift apart."""
     from llm_router import pricing
 
-    model = row.get("requested_model") or ""
-    u = normalize_usage(row.get("usage"))
     rates = pricing.rates_per_m(model)
     rate_1h = pricing.cache_write_1h_rate(model)
     if rates is None or rate_1h is None:
         return None
-    return (u["input_tokens"] * rates["input"] + u["output_tokens"] * rates["output"]
-            + u["cache_read_input_tokens"] * rates["cache_read"]
-            + u["cache_creation_5m"] * rates["cache_write"]
-            + u["cache_creation_1h"] * rate_1h) / 1_000_000
+    return (input_tokens * rates["input"] + output_tokens * rates["output"]
+            + cache_read_input_tokens * rates["cache_read"]
+            + cache_creation_5m * rates["cache_write"]
+            + cache_creation_1h * rate_1h) / 1_000_000
+
+
+def anthropic_cost(row: dict) -> float | None:
+    """Estimated USD of the Anthropic side of one row, or None when unpriced."""
+    u = normalize_usage(row.get("usage"))
+    return _price_tokens(row.get("requested_model") or "", input_tokens=u["input_tokens"],
+                         output_tokens=u["output_tokens"],
+                         cache_read_input_tokens=u["cache_read_input_tokens"],
+                         cache_creation_5m=u["cache_creation_5m"], cache_creation_1h=u["cache_creation_1h"])
+
+
+def _served_runs(rows: list[dict]) -> list[tuple[list[dict], dict | None, dict | None]]:
+    """Group each session's rows, in ``ts`` order, into
+    ``(served_run, prefix_row, next_row)``.
+
+    ``served_run`` is a maximal run of consecutive served steps (a served row
+    whose ``reason`` is defensively not ``loop_guard`` — see :func:`stats`).
+    ``prefix_row`` is the last forwarded/fallback row *before* the run in this
+    session: the cache state its calls would have read. ``next_row`` is the
+    first forwarded/fallback row *after* it: the call that paid to
+    re-establish the cache across the served gap. Either is ``None`` at a
+    session's edge; rows without a ``ts`` sort first but keep their relative
+    (list) order, since a synthetic row set has no wall-clock time."""
+    by_session: dict[str, list[dict]] = {}
+    for r in rows:
+        by_session.setdefault(r.get("session_id") or "", []).append(r)
+    runs: list[tuple[list[dict], dict | None, dict | None]] = []
+    for srows in by_session.values():
+        ordered = sorted(srows, key=lambda r: r.get("ts") or 0)
+        prefix: dict | None = None
+        i, n = 0, len(ordered)
+        while i < n:
+            r = ordered[i]
+            is_to_anthropic = r.get("decision") in (DECISION_FORWARDED, DECISION_FALLBACK)
+            is_served = r.get("decision") == DECISION_SERVED and r.get("reason") != REASON_LOOP_GUARD
+            if is_to_anthropic:
+                prefix = r
+                i += 1
+            elif is_served:
+                run = [r]
+                j = i + 1
+                while (j < n and ordered[j].get("decision") == DECISION_SERVED
+                       and ordered[j].get("reason") != REASON_LOOP_GUARD):
+                    run.append(ordered[j])
+                    j += 1
+                nxt = ordered[j] if j < n and ordered[j].get("decision") in (
+                    DECISION_FORWARDED, DECISION_FALLBACK) else None
+                runs.append((run, prefix, nxt))
+                i = j
+            else:
+                i += 1
+    return runs
+
+
+def _net_avoided(rows: list[dict]) -> tuple[float, int]:
+    """``(net_avoided_usd, n)`` over every served step. May be negative — see
+    the module docstring ("NET AVOIDED"). ``n`` counts served steps that were
+    priceable (a known model); an unknown model is skipped, never zeroed."""
+    total = 0.0
+    n = 0
+    for run, prefix, nxt in _served_runs(rows):
+        prefix_u = normalize_usage(prefix.get("usage")) if prefix is not None else None
+        prefix_ctx = (prefix_u["cache_read_input_tokens"] + prefix_u["cache_creation_input_tokens"]
+                      if prefix_u is not None else 0)
+        run_would_have = 0.0
+        priced = 0
+        for r in run:
+            model = r.get("requested_model")
+            if not model:
+                continue
+            out_tokens = (r.get("backend_usage") or {}).get("output_tokens") or 0
+            c = _price_tokens(model, cache_read_input_tokens=prefix_ctx, output_tokens=out_tokens)
+            if c is None:
+                continue
+            run_would_have += c
+            priced += 1
+        if not priced:
+            continue
+        extra_write = 0.0
+        if nxt is not None:
+            nxt_u = normalize_usage(nxt.get("usage"))
+            extra_write = _price_tokens(nxt.get("requested_model") or "",
+                                        cache_creation_5m=nxt_u["cache_creation_5m"],
+                                        cache_creation_1h=nxt_u["cache_creation_1h"]) or 0.0
+        total += run_would_have - extra_write
+        n += priced
+    return total, n
 
 
 def stats(rows: list[dict]) -> dict:
@@ -188,23 +318,10 @@ def stats(rows: list[dict]) -> dict:
         else:
             cost += c
 
-    # Estimated avoided cost: each served call priced as the median forwarded
-    # CONTINUATION call of the same session (else of all sessions). An estimate
-    # with its n, never a measured saving.
-    by_session: dict[str, list[float]] = {}
-    all_cont: list[float] = []
-    for r in to_anthropic:
-        c = anthropic_cost(r)
-        if c is not None and r.get("step_class"):
-            by_session.setdefault(r.get("session_id") or "", []).append(c)
-            all_cont.append(c)
-    avoided = 0.0
-    avoided_n = 0
-    for r in served:
-        pool = by_session.get(r.get("session_id") or "") or all_cont
-        if pool:
-            avoided += statistics.median(pool)
-            avoided_n += 1
+    # Net avoided cost: see :func:`_net_avoided` and the module docstring
+    # ("NET AVOIDED"). An estimate with its n, never a measured saving, and it
+    # may be negative.
+    avoided, avoided_n = _net_avoided(rows)
 
     def _cc(rs: list[dict]) -> list[float]:
         return [normalize_usage(r.get("usage"))["cache_creation_input_tokens"] for r in rs]
@@ -241,7 +358,8 @@ def stats(rows: list[dict]) -> dict:
         "anthropic": {
             "calls": len(to_anthropic), "tokens": tokens,
             "est_cost_usd": round(cost, 4), "unpriced_calls": unpriced,
-            "est_avoided_usd": round(avoided, 4), "est_avoided_n": avoided_n,
+            # "net": may be negative — see the module docstring ("NET AVOIDED").
+            "net_avoided_usd": round(avoided, 4), "net_avoided_n": avoided_n,
             "cache_creation_median_after_served_turn": _median(_cc(mixed)), "after_served_n": len(mixed),
             "cache_creation_median_clean_history": _median(_cc(clean)), "clean_n": len(clean),
         },
@@ -266,7 +384,8 @@ def format_stats(s: dict) -> str:
         f"added total {lat['added_total_s']}s, thinking retries {lat['thinking_retries']}",
         f"Anthropic tokens: {an['tokens']}",
         f"Anthropic est. cost: ${an['est_cost_usd']} over {an['calls']} calls "
-        f"({an['unpriced_calls']} unpriced); est. avoided: ${an['est_avoided_usd']} (n={an['est_avoided_n']})",
+        f"({an['unpriced_calls']} unpriced); net avoided: ${an['net_avoided_usd']} (n={an['net_avoided_n']}, "
+        f"may be negative)",
         f"cache_creation median: after a served turn {an['cache_creation_median_after_served_turn']} "
         f"(n={an['after_served_n']}) vs clean history {an['cache_creation_median_clean_history']} (n={an['clean_n']})",
     ]
