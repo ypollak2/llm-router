@@ -125,6 +125,20 @@ tool_use is dropped from the session and replaced by the ledger-backed
 "same call" rule. A ledger row with no matching call in the window is kept as
 a standalone ``routed_edit`` unit (nothing to dedup against).
 
+FALLBACK JOIN: a row with no ``session_id`` (null or ``""`` — see
+``edit_ledger.record_edit_outcome``'s docstring for why an unresolved
+identity now writes null instead of the empty string that used to sink these
+rows silently, unattributable to any session) cannot use the JOIN KEY above,
+which is keyed on a session's OWN raw transcript. Such a row is instead
+matched, across EVERY loaded session's ``mcp__llm_router__llm_edit``
+tool_use calls, to the call whose ts is ``<=`` ``row["ts"]``, within
+``EDIT_LEDGER_JOIN_WINDOW_S`` of it, AND whose ``files`` tool input contains
+``row["file"]`` — the file-path check is required here because, without a
+session to scope the search to, ts alone is not a unique key across the
+whole corpus. Ties broken by the latest such call, same rule as the keyed
+join. A row matching no call anywhere is dropped as unattributable, never
+guessed into the wrong session. See ``_fold_orphan_edit_rows``.
+
 ────────────────────────────────────────────────────────────────────────────
 JOIN: folding sub-agent sessions into their parent
 ────────────────────────────────────────────────────────────────────────────
@@ -719,6 +733,64 @@ def _fold_edit_ledger(su: SessionUnits, edit_call_units: list[Unit], rows: list[
         su.units[:] = [u for u in su.units if id(u) not in matched_call_ids]
 
 
+def _fold_orphan_edit_rows(
+    per_session: dict[str, "SessionUnits"],
+    all_edit_calls: list[tuple[str, Unit, list[str]]],
+    orphan_rows: list[dict],
+) -> None:
+    """FALLBACK JOIN (module docstring) for ``routed_edit`` rows with no
+    ``session_id`` — the case ``_fold_edit_ledger``'s per-session, ts-only
+    join can never reach because it never sees a row outside its own
+    session's rows.
+
+    ``all_edit_calls`` is every ``mcp__llm_router__llm_edit`` tool_use call
+    across every LOADED session (not just one), each tagged with the
+    session it belongs to and the ``files`` list from its tool input. A row
+    is attributed to the call whose ts is ``<= row["ts"]``, within
+    ``EDIT_LEDGER_JOIN_WINDOW_S`` of it, AND whose ``files`` contains
+    ``row["file"]`` — ties broken by the latest such call, matching
+    ``_fold_edit_ledger``'s own tie-break. A row matching no call is
+    dropped: attributing it to the wrong session would be a worse error
+    than not counting it.
+
+    A call already consumed by a same-session, session_id-keyed row is
+    still eligible here: one ``llm_edit`` call can touch several files, and
+    the rows for those files can differ in whether ``session_id`` resolved
+    — they are still rows of the SAME call, so matching it again is
+    correct, not a double count of the call itself (each row is its own
+    unit, per the module docstring's ``routed_edit`` grain).
+    """
+    for row in orphan_rows:
+        row_ts = row.get("ts")
+        row_file = row.get("file")
+        if not isinstance(row_ts, (int, float)) or not row_file:
+            continue
+        best_sid: str | None = None
+        best_unit: Unit | None = None
+        for sid, call, files in all_edit_calls:
+            if call.ts is None or call.ts > row_ts:
+                continue
+            if row_ts - call.ts > EDIT_LEDGER_JOIN_WINDOW_S:
+                continue
+            if row_file not in files:
+                continue
+            if best_unit is None or call.ts > best_unit.ts:  # type: ignore[operator]
+                best_sid, best_unit = sid, call
+        if best_unit is None or best_sid is None:
+            continue
+        su = per_session.get(best_sid)
+        if su is None:
+            continue
+        outcome, signal = _judge_edit_row(row)
+        su.units.append(Unit(
+            kind=UNIT_ROUTED_EDIT, session_id=best_sid, ts=row_ts,
+            outcome=outcome, signal=signal,
+            confidence="high" if outcome != OUTCOME_UNKNOWN else "medium",
+            task_type="code", model=row.get("model"),
+        ))
+        su.units[:] = [u for u in su.units if u is not best_unit]
+
+
 # ── agent-route Codex delegation ledger (#184): agent_route_codex units ────
 
 def _north_star_units_path() -> Path:
@@ -895,6 +967,11 @@ def build_sessions(days: int | None, root: Path | None = None,
 
     per_session: dict[str, SessionUnits] = {}
     parent_of: dict[str, str] = {}  # child session_id -> parent session_id
+    # FALLBACK JOIN (module docstring): every llm_edit tool_use call across
+    # every loaded session, tagged (owning target_sid, the Unit, its `files`
+    # tool input) so a session_id-less ledger row can be matched by ts+file
+    # against the WHOLE corpus, not just one session's calls.
+    all_edit_calls: list[tuple[str, Unit, list[str]]] = []
 
     loaded: dict[str, list[dict]] = {}
     sandbox_of: dict[str, bool] = {}
@@ -970,6 +1047,9 @@ def build_sessions(days: int | None, root: Path | None = None,
                     su.units.append(mcp_unit)
                     if name == _LLM_EDIT_TOOL_NAME:
                         edit_call_units.append(mcp_unit)
+                        raw_files = tool_input.get("files") if isinstance(tool_input, dict) else None
+                        files_list = [f for f in raw_files if isinstance(f, str)] if isinstance(raw_files, list) else []
+                        all_edit_calls.append((target_sid, mcp_unit, files_list))
 
         _judge_routed_mcp(su, records)
 
@@ -983,6 +1063,14 @@ def build_sessions(days: int | None, root: Path | None = None,
         edit_rows_for_sid = [r for r in edit_outcome_rows if r.get("session_id") == sid]
         if edit_rows_for_sid:
             _fold_edit_ledger(su, edit_call_units, edit_rows_for_sid)
+
+    # FALLBACK JOIN: rows no session_id-keyed pass above could ever claim,
+    # because `r.get("session_id") == sid` is false for every real sid when
+    # the row's session_id is None or "" (edit_ledger.record_edit_outcome
+    # writes null when session_store.resolve_session_id() can't resolve one).
+    orphan_rows = [r for r in edit_outcome_rows if not r.get("session_id")]
+    if orphan_rows:
+        _fold_orphan_edit_rows(per_session, all_edit_calls, orphan_rows)
 
     if session_id:
         per_session = {k: v for k, v in per_session.items() if k == session_id}
