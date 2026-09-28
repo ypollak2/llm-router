@@ -47,7 +47,8 @@ def _print_breaker_dry_run(days: int) -> None:
     for row in dry:
         rate = row["failure_rate"]
         rate_s = f"{rate * 100:.0f}%" if rate is not None else "n/a"
-        print(f"  {row['lever']}/{row['task_type']:<12s} would_be={row['would_be']:<10s} "
+        task_type = row["task_type"] if row["task_type"] is not None else "-"
+        print(f"  {row['lever']}/{task_type:<12s} would_be={row['would_be']:<10s} "
               f"failure_rate={rate_s} n={row['n']} unknown={row['unknown']}")
 
 
