@@ -590,6 +590,31 @@ def test_upstream_must_be_anthropic_or_loopback():
             ps.validate_upstream(bad)
 
 
+def test_enable_hint_always_carries_both_env_vars():
+    """Measured 2026-09-28: a proxied session without ENABLE_TOOL_SEARCH=true
+    cost 3.5x the same 3 fixture tasks with no proxy, because Claude Code
+    disables Tool Search (dynamic MCP/skill tool loading) for any
+    non-first-party ANTHROPIC_BASE_URL and inlines every deferred tool schema
+    into every request instead. This proxy forwards /v1/messages bodies
+    byte-for-byte (see forward()), so it never breaks the resulting
+    tool_reference blocks and the override is always safe -- every place that
+    tells a user how to start a session must include it."""
+    hint = ps.enable_hint("127.0.0.1", 8787)
+    assert "ANTHROPIC_BASE_URL=http://127.0.0.1:8787" in hint
+    assert "ENABLE_TOOL_SEARCH=true" in hint
+    assert hint.rstrip().endswith("claude")
+    # ANTHROPIC_BASE_URL must precede ENABLE_TOOL_SEARCH so both are exported
+    # to the same `claude` invocation when the line is pasted as-is.
+    assert hint.index("ANTHROPIC_BASE_URL") < hint.index("ENABLE_TOOL_SEARCH") < hint.index("claude")
+
+
+def test_usage_and_startup_banner_include_tool_search_override(capsys):
+    assert "ENABLE_TOOL_SEARCH=true" in ps.USAGE
+    assert ps.cmd_proxy(["--help"]) == 0
+    out = capsys.readouterr().out
+    assert "ENABLE_TOOL_SEARCH=true" in out
+
+
 async def test_cross_origin_browser_request_is_refused(tmp_path):
     up = Upstream()
     r = await _post(_app(tmp_path, up), _first_call(), headers={"origin": "https://evil.example"})

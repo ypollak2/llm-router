@@ -12,12 +12,40 @@ set.
 ## Enable it for one session
 
 ```bash
-llm-router proxy                                   # terminal 1, binds 127.0.0.1:8787
-ANTHROPIC_BASE_URL=http://127.0.0.1:8787 claude    # terminal 2, this session only
+llm-router proxy                                                          # terminal 1, binds 127.0.0.1:8787
+ANTHROPIC_BASE_URL=http://127.0.0.1:8787 ENABLE_TOOL_SEARCH=true claude    # terminal 2, this session only
 ```
 
-Unset the variable, or close that terminal, to stop using it. Other sessions
-are not affected.
+Unset the variables, or close that terminal, to stop using it. Other sessions
+are not affected. `llm-router proxy`'s own startup line prints this exact
+command with your actual host/port (`server.enable_hint`) — copy it rather
+than retyping it, so the `ENABLE_TOOL_SEARCH` half is never dropped.
+
+### Cost parity: always set `ENABLE_TOOL_SEARCH=true`
+
+Measured 2026-09-28, same 3 fixture tasks, `claude -p` with and without the
+proxy: the proxied arm cost **3.5x** the no-proxy baseline ($2.44 vs $0.69)
+for the same tasks passing the same way. Root cause is in Claude Code, not
+this proxy: Claude Code disables its Tool Search / dynamic-tool-loading
+feature — which keeps most MCP and skill tool schemas out of the request
+until a step actually needs them — the instant `ANTHROPIC_BASE_URL` is not a
+first-party Anthropic host. It cannot tell that this proxy passes every
+`/v1/messages` body through byte-for-byte (`forward()` never inspects or
+rewrites it) when it isn't serving the step itself. With Tool Search off,
+every request inlines every deferred tool's full schema, which inflates the
+cacheable prefix (`Dynamic tool loading: 0/134 deferred tools included`
+becomes `134/134` in `claude --debug api` output) and, on a cache miss, is
+billed at the 1-hour cache-write rate — 2x the input rate. In a debug capture,
+the first Anthropic call of a proxied session went from ~50k tokens
+(input + cache write + cache read) with Tool Search on, to ~128k with it off.
+
+`ENABLE_TOOL_SEARCH=true` (or `auto` / `auto:N`) restores first-party
+behaviour. It is safe with this proxy specifically because `forward()` never
+touches the tools array: the `tool_reference` blocks Claude Code emits with
+Tool Search on reach Anthropic unchanged, exactly as they would without the
+proxy. `llm-router proxy`'s startup banner and `--help` both print the full
+command with this set; if you started a session without it, cost and cache
+behaviour will not match a no-proxy baseline.
 
 ## What gets routed
 
