@@ -941,6 +941,66 @@ def test_net_avoided_skips_a_run_whose_model_is_unknown():
     assert s["anthropic"]["net_avoided_usd"] == 0.0
 
 
+def test_net_avoided_prices_a_multi_step_run_once_not_per_step():
+    """Regression for the 2026-09-28 A/B overstatement: a 6-session interleaved
+    A/B (routing off vs on, same fixture tasks) found the summed net_avoided_usd
+    over the on-arm sessions was ~3x the realized dollar saving. The mechanism:
+    a served RUN of N consecutive steps is one point where a real Anthropic call
+    was deferred, not N — the local model's extra internal round trips inside the
+    run exist only because it needed more turns than one Claude call would have,
+    not because there were N separate opportunities to avoid a call. The old code
+    summed every step in the run, double/triple-counting those internal turns.
+
+    Three served steps between the same prefix and no next call: only the
+    FIRST is priced (as the one deferred call), not all three."""
+    rows = [
+        {"decision": "forwarded", "reason": "not_eligible", "step_class": None, "session_id": "s",
+         "requested_model": "claude-sonnet-5", "usage": {"cache_read_input_tokens": 1_000}},
+        {"decision": "served", "step_class": "continuation", "session_id": "s",
+         "requested_model": "claude-sonnet-5", "backend_usage": {"output_tokens": 10}},
+        {"decision": "served", "step_class": "continuation", "session_id": "s",
+         "requested_model": "claude-sonnet-5", "backend_usage": {"output_tokens": 20}},
+        {"decision": "served", "step_class": "continuation", "session_id": "s",
+         "requested_model": "claude-sonnet-5", "backend_usage": {"output_tokens": 30}},
+    ]
+    s = ledger.stats(rows)
+    an = s["anthropic"]
+    # Only the first step: (1_000 * 0.20 + 10 * 10) / 1e6 = 0.0003.
+    assert an["net_avoided_usd"] == pytest.approx(0.0003, abs=1e-6)
+    # Not the sum of all three steps (0.0012) -- that was the bug.
+    assert an["net_avoided_usd"] < 0.0006
+    # n counts the RUN (one deferred call), not the three served steps in it.
+    assert an["net_avoided_n"] == 1
+
+
+def test_paired_realized_saving_is_the_only_validated_ab_figure():
+    """net_avoided_usd is a per-session upper bound (see the module docstring);
+    the only number that can be checked against reality is a real paired A/B
+    run's actual Anthropic spend. paired_realized_saving computes exactly that
+    from two row sets for the same task, off vs on."""
+    off_rows = [
+        {"decision": "forwarded", "session_id": "off1", "requested_model": "claude-sonnet-5",
+         "usage": {"input_tokens": 100}},
+        {"decision": "forwarded", "session_id": "off1", "requested_model": "claude-sonnet-5",
+         "usage": {"input_tokens": 100}},
+    ]
+    on_rows = [
+        {"decision": "forwarded", "session_id": "on1", "requested_model": "claude-sonnet-5",
+         "usage": {"input_tokens": 100}},
+        {"decision": "served", "session_id": "on1", "requested_model": "claude-sonnet-5",
+         "backend_usage": {"output_tokens": 10}},
+    ]
+    result = ledger.paired_realized_saving(off_rows, on_rows)
+    off_cost = ledger.stats(off_rows)["anthropic"]["est_cost_usd"]
+    on_cost = ledger.stats(on_rows)["anthropic"]["est_cost_usd"]
+    assert result == {
+        "off_cost_usd": off_cost,
+        "on_cost_usd": on_cost,
+        "realized_saving_usd": round(off_cost - on_cost, 4),
+    }
+    assert result["realized_saving_usd"] > 0
+
+
 # ── ledger metrics ──────────────────────────────────────────────────────────
 
 

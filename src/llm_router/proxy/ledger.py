@@ -32,25 +32,56 @@ The metrics are kept separate on purpose (spike, 2026-09-28: half the calls
 routed saved about a fifth of the Anthropic cost, because cached re-reads are
 already cheap). A routed share is never reported as a saving.
 
-NET AVOIDED (redefined 2026-09-28)
------------------------------------
+NET AVOIDED (redefined 2026-09-28, twice)
+------------------------------------------
 The previous ``est_avoided_usd`` priced every served step at the *median full
 forwarded continuation call* of its session — i.e. it repriced the whole
 cached prefix, once per served step, as if Anthropic would have re-read (or
 re-written) it fresh each time. Reconciling against Claude Code's own
 ``total_cost_usd`` for real sessions showed this overstates avoided cost by
 roughly an order of magnitude: a served step is a cheap cache *read* away from
-a real call, not a whole new call.
+a real call, not a whole new call. Renamed to ``net_avoided_usd`` and
+redefined: the counterfactual, per served step, became the cached prefix it
+would have read (from the last real Anthropic call *before* it in the
+session, at the cache-read rate) plus its own reply length (from
+``backend_usage``, priced as output), at whatever model the request named.
 
-The counterfactual priced now, per served step: the cached prefix it would
-have read (from the last real Anthropic call *before* it in the session, at
-the cache-read rate), its own reply length (from ``backend_usage``, priced as
-output), at whatever model the request named. Consecutive served steps
-between the same two real Anthropic calls share one such "run"; the run's
-cost is then reduced by the extra cache-write the *next* real Anthropic call
-paid to re-establish its cache across the served gap — the toll the proxied
-session, not the counterfactual, actually incurred. The result, ``net``
-avoided, may be negative: see :func:`_net_avoided`.
+A same-day interleaved A/B (6 fixture tasks, routing off vs on, ``docs/proxy-
+ab-2026-09-28.md``) found THIS formula still overstated: summed over the
+on-arm sessions it predicted $0.2564 avoided against a realized (real
+Anthropic-dollar) saving of $0.0799 — about 3x. Per-session decomposition
+against the paired off-arm session showed the overstatement tracked one
+thing: whether a served RUN (consecutive served steps between two real
+Anthropic calls) was longer than one step. The two sessions where every run
+was exactly one step already tracked the realized saving reasonably; every
+session with a run of 2+ steps overstated it, worse the longer the run. The
+mechanism: routing to a local model does not just avoid calls, it can also
+CHANGE the trajectory — the on-arm sessions made 53 real+served calls against
+32 on the paired off-arm runs of the same tasks. A run of N consecutive
+served steps is one point where a real Anthropic call was deferred, not N:
+the local model's own extra internal round trips inside that run exist
+*because* it needed more turns than one Claude call would have there, not
+because there were N separate opportunities to avoid a call. Pricing every
+step in the run (the fix above) summed those internal turns as if each were
+its own avoided call.
+
+The counterfactual is now priced ONCE per run — the run's first priceable
+step only — not once per served step in it; see :func:`_net_avoided`. That
+structural fix (no fitted parameter; it follows from "a run is one deferred
+call") cut the same A/B's overstatement from ~3.2x to ~1.9x ($0.1512 predicted
+vs $0.0799 realized), confirmed on 2 pairs held out of the 4 used to find the
+mechanism. The run's cost is then reduced by the extra cache-write the *next*
+real Anthropic call paid to re-establish its cache across the served gap —
+the toll the proxied session, not the counterfactual, actually incurred.
+
+Even after that fix, ``net_avoided_usd`` is an UPPER BOUND, not a realized
+saving, and callers must render it as one: it prices only the local run's own
+immediate cache-write toll, not any *other* extra real Anthropic calls the
+changed trajectory induced elsewhere in the same session — a cost only a
+paired A/B run on the same task, off vs on, can actually measure. The result
+may also be negative: see :func:`_net_avoided`. :func:`paired_realized_saving`
+computes that measured figure from two row sets (off, on) for the same task;
+there is no single-arm substitute for it.
 """
 
 from __future__ import annotations
@@ -241,17 +272,20 @@ def _served_runs(rows: list[dict]) -> list[tuple[list[dict], dict | None, dict |
 
 
 def _net_avoided(rows: list[dict]) -> tuple[float, int]:
-    """``(net_avoided_usd, n)`` over every served step. May be negative — see
-    the module docstring ("NET AVOIDED"). ``n`` counts served steps that were
-    priceable (a known model); an unknown model is skipped, never zeroed."""
+    """``(net_avoided_usd, n)``, an UPPER BOUND over realized saving — see the
+    module docstring ("NET AVOIDED"). May be negative. ``n`` counts served
+    RUNS that were priceable (a known model on at least one step), not served
+    steps: a run of N consecutive served steps is priced ONCE, at its first
+    priceable step, because it is one point where a real Anthropic call was
+    deferred, not N — see the module docstring for why summing every step in
+    the run double/triple-counted the local model's own extra internal turns."""
     total = 0.0
     n = 0
     for run, prefix, nxt in _served_runs(rows):
         prefix_u = normalize_usage(prefix.get("usage")) if prefix is not None else None
         prefix_ctx = (prefix_u["cache_read_input_tokens"] + prefix_u["cache_creation_input_tokens"]
                       if prefix_u is not None else 0)
-        run_would_have = 0.0
-        priced = 0
+        run_would_have = None
         for r in run:
             model = r.get("requested_model")
             if not model:
@@ -260,9 +294,9 @@ def _net_avoided(rows: list[dict]) -> tuple[float, int]:
             c = _price_tokens(model, cache_read_input_tokens=prefix_ctx, output_tokens=out_tokens)
             if c is None:
                 continue
-            run_would_have += c
-            priced += 1
-        if not priced:
+            run_would_have = c
+            break  # the run's first priceable step is the one deferred call.
+        if run_would_have is None:
             continue
         extra_write = 0.0
         if nxt is not None:
@@ -271,8 +305,28 @@ def _net_avoided(rows: list[dict]) -> tuple[float, int]:
                                         cache_creation_5m=nxt_u["cache_creation_5m"],
                                         cache_creation_1h=nxt_u["cache_creation_1h"]) or 0.0
         total += run_would_have - extra_write
-        n += priced
+        n += 1
     return total, n
+
+
+def paired_realized_saving(off_rows: list[dict], on_rows: list[dict]) -> dict:
+    """The measured A/B figure: real Anthropic dollars actually spent with
+    routing off minus a paired routing-on arm, for the SAME task. This is the
+    only number ``net_avoided_usd`` is an upper bound *for* — see the module
+    docstring ("NET AVOIDED"). There is no single-arm substitute: it requires
+    an actual paired run, off and on, of the same task.
+
+    Both arms' real spend come from :func:`stats`'s ``anthropic.est_cost_usd``
+    (forwarded/fallback rows only — a served row costs Anthropic nothing),
+    which is reconciled against Claude Code's own ``total_cost_usd`` (see
+    ``normalize_usage`` and the #200 fix)."""
+    off_cost = stats(off_rows)["anthropic"]["est_cost_usd"]
+    on_cost = stats(on_rows)["anthropic"]["est_cost_usd"]
+    return {
+        "off_cost_usd": off_cost,
+        "on_cost_usd": on_cost,
+        "realized_saving_usd": round(off_cost - on_cost, 4),
+    }
 
 
 def stats(rows: list[dict]) -> dict:
@@ -319,8 +373,9 @@ def stats(rows: list[dict]) -> dict:
             cost += c
 
     # Net avoided cost: see :func:`_net_avoided` and the module docstring
-    # ("NET AVOIDED"). An estimate with its n, never a measured saving, and it
-    # may be negative.
+    # ("NET AVOIDED"). An UPPER BOUND with its n, never a measured saving —
+    # paired_realized_saving() is the only measured figure — and it may be
+    # negative.
     avoided, avoided_n = _net_avoided(rows)
 
     def _cc(rs: list[dict]) -> list[float]:
@@ -358,7 +413,8 @@ def stats(rows: list[dict]) -> dict:
         "anthropic": {
             "calls": len(to_anthropic), "tokens": tokens,
             "est_cost_usd": round(cost, 4), "unpriced_calls": unpriced,
-            # "net": may be negative — see the module docstring ("NET AVOIDED").
+            # UPPER BOUND, not a measured saving; may be negative — see the
+            # module docstring ("NET AVOIDED") and paired_realized_saving().
             "net_avoided_usd": round(avoided, 4), "net_avoided_n": avoided_n,
             "cache_creation_median_after_served_turn": _median(_cc(mixed)), "after_served_n": len(mixed),
             "cache_creation_median_clean_history": _median(_cc(clean)), "clean_n": len(clean),
@@ -384,8 +440,8 @@ def format_stats(s: dict) -> str:
         f"added total {lat['added_total_s']}s, thinking retries {lat['thinking_retries']}",
         f"Anthropic tokens: {an['tokens']}",
         f"Anthropic est. cost: ${an['est_cost_usd']} over {an['calls']} calls "
-        f"({an['unpriced_calls']} unpriced); net avoided: ${an['net_avoided_usd']} (n={an['net_avoided_n']}, "
-        f"may be negative)",
+        f"({an['unpriced_calls']} unpriced); net avoided (upper bound, not realized): "
+        f"${an['net_avoided_usd']} (n={an['net_avoided_n']}, may be negative)",
         f"cache_creation median: after a served turn {an['cache_creation_median_after_served_turn']} "
         f"(n={an['after_served_n']}) vs clean history {an['cache_creation_median_clean_history']} (n={an['clean_n']})",
     ]
