@@ -3744,6 +3744,38 @@ def main() -> None:
             pass
     zero_claude = _zero_claude_enabled()
 
+    # ── Scoped zero-Claude for edit-class prompts (LLM_ROUTER_ZERO_CLAUDE_SCOPE=edit) ──
+    # Independent of the global `zero_claude` flag above: LLM_ROUTER_ZERO_CLAUDE
+    # keeps its existing meaning (block every unrouted turn). This scope narrows
+    # the same fail-closed contract to prompts zero_claude_edit.classify_edit_prompt
+    # recognises as a concrete change to named files that already exist in the
+    # repo — everything else falls through to the rest of this function
+    # untouched, exactly as if the scope variable were unset. See
+    # zero_claude_edit.py's module docstring for why the replacement happens
+    # HERE (UserPromptSubmit) rather than as a PreToolUse deny: a deny can
+    # block a tool call but cannot DELIVER a result — the model treats
+    # substituted text as prompt injection and either refuses it or retries.
+    try:
+        from llm_router import zero_claude_edit as _zce
+        _zce_outcome = _zce.maybe_replace(
+            prompt=prompt,
+            cwd=hook_input.get("cwd") or os.getcwd(),
+            deadline_s=_readonly_draft_deadline(),
+        )
+    except Exception as _zce_exc:                                 # noqa: BLE001
+        _zce_outcome = None
+        from llm_router import failopen as _fo
+        _fo.record("CHZ-FO-ZERO-CLAUDE-EDIT", _zce_exc)
+    if _zce_outcome is not None:
+        _debug_log(f"[INVOCATION {invocation_id:.3f}] {_zce_outcome.log_reason}")
+        if _zce_outcome.action == "block":
+            _coverage_observed(
+                "zero_claude_edit_applied" if _zce_outcome.applied else "zero_claude_edit_failed"
+            )
+            json.dump({"decision": "block", "reason": _zce_outcome.message}, sys.stdout)
+            sys.exit(0)
+        # action == "fallthrough": continue to the rest of this function normally.
+
     # ── Mini-summary widget — every Nth routed prompt, inject a compact
     # 3-line stats block so users get periodic visibility into llm_router's
     # state without having to run `llm_router summary` themselves. Cadence
