@@ -115,23 +115,62 @@ _FILE_REF_RE = re.compile(
 # validate in one shot. Conservative rejection, not a hard technical limit.
 _MAX_TARGET_FILES = 3
 
+# ── identifier candidates (no literal path in the prompt) ────────────────────
+#
+# Real users name a function, class or module more often than a path
+# ("count_vowels ignores uppercase, fix it"). When no literal file is named,
+# the classifier hands on CODE-SHAPED identifiers only — backticked names,
+# call-shaped ``name()``, snake_case, camelCase/PascalCase — never a plain
+# English word, which could match anything. Resolution to a file happens
+# later against the repo (``resolve_symbol_targets``), and only on a unique
+# definition.
+_URL_RE = re.compile(r"\S+://\S+")
+_BACKTICK_IDENT_RE = re.compile(r"`([A-Za-z_][\w.]*?)(?:\(\))?`")
+_CALL_IDENT_RE = re.compile(r"\b([A-Za-z_]\w*)\(\)")
+_SNAKE_IDENT_RE = re.compile(r"(?<![\w./-])(_?[A-Za-z][A-Za-z0-9]*(?:_[A-Za-z0-9]+)+)(?![\w/-])")
+_CAMEL_IDENT_RE = re.compile(r"(?<![\w./-])([A-Z]?[a-z]+(?:[A-Z][a-z0-9]+)+)(?![\w/-])")
+# More distinct identifiers than this reads as pasted content (a traceback,
+# a spec) rather than "fix this one function" — conservative rejection.
+_MAX_SYMBOL_CANDIDATES = 5
+# Inferring a target (from an identifier, or a bare file name with no
+# directory) is only attempted on short prompts. Without this cap, one
+# machine's real edit-like prompts (2026-09-28, n=122 in a live repo) gained
+# 14 inferred targets, 11 of them wrong — every one of the 11 from a prompt
+# over 300 chars (a pasted log, a spec, or injected context whose markdown
+# carried a class name). The cap was chosen on that same sample; it is a
+# conservative guard, not a held-out-validated threshold.
+_MAX_INFER_PROMPT_CHARS = 300
+
 
 @dataclass(frozen=True)
 class EditClassification:
     is_edit: bool
     files: tuple[str, ...]
     reason: str
+    # Code-shaped identifiers, set only when ``files`` is empty: the caller
+    # resolves them to files against the repo (``resolve_symbol_targets``).
+    symbols: tuple[str, ...] = ()
+
+
+def _identifier_candidates(text: str) -> tuple[str, ...]:
+    stripped = _URL_RE.sub(" ", text)
+    found: list[str] = []
+    for m in _BACKTICK_IDENT_RE.finditer(stripped):
+        found.append(m.group(1).rsplit(".", 1)[-1])
+    for rx in (_CALL_IDENT_RE, _SNAKE_IDENT_RE, _CAMEL_IDENT_RE):
+        found.extend(m.group(1) for m in rx.finditer(stripped))
+    return tuple(dict.fromkeys(n for n in found if n and not n.isdigit()))
 
 
 def classify_edit_prompt(prompt: str) -> EditClassification:
     """Conservative edit-class classifier: a concrete change to named files.
 
     ``is_edit`` is True only when the prompt reads as an imperative change
-    AND names 1-3 real-looking source files. A prompt naming zero files
-    ("add a docstring to bar()" — no file, just a symbol) is NOT edit-class:
-    without a named file this module has nothing safe to resolve against,
-    and guessing which file ``bar()`` lives in is exactly the kind of
-    inference this classifier is deliberately conservative about.
+    AND either names 1-3 real-looking source files, or — with no path at
+    all — carries 1-5 code-shaped identifiers ("add a docstring to bar()")
+    and no question mark. Identifiers are only CANDIDATES: ``maybe_replace``
+    resolves them with ``resolve_symbol_targets``, which accepts a unique
+    definition and falls through on anything ambiguous.
     """
     text = (prompt or "").strip()
     if not text:
@@ -144,7 +183,26 @@ def classify_edit_prompt(prompt: str) -> EditClassification:
         m.group(1).lstrip("./") for m in _FILE_REF_RE.finditer(text)
     ))
     if not files:
-        return EditClassification(False, (), "no named file in the prompt")
+        # No literal path: fall back to code-shaped identifiers, resolved
+        # against the repo later. Stricter than the path branch: any "?"
+        # reads as a question ("could you fix count_vowels or is it fine?"),
+        # and a pile of identifiers reads as pasted content.
+        if "?" in text:
+            return EditClassification(False, (), "no named file, and the prompt contains a question mark")
+        if len(text) > _MAX_INFER_PROMPT_CHARS:
+            return EditClassification(
+                False, (), f"no named file, and the prompt is too long ({len(text)} chars) to infer a "
+                f"target from identifiers (max {_MAX_INFER_PROMPT_CHARS})",
+            )
+        symbols = _identifier_candidates(text)
+        if not symbols:
+            return EditClassification(False, (), "no named file or code identifier in the prompt")
+        if len(symbols) > _MAX_SYMBOL_CANDIDATES:
+            return EditClassification(
+                False, (), f"no named file and {len(symbols)} identifiers — too broad "
+                f"(max {_MAX_SYMBOL_CANDIDATES})",
+            )
+        return EditClassification(True, (), f"edit verb + {len(symbols)} identifier(s), no path", symbols)
     if len(files) > _MAX_TARGET_FILES:
         return EditClassification(
             False, files,
@@ -177,8 +235,31 @@ def _repo_root(cwd: str) -> Path | None:
     return Path(top) if top else None
 
 
-def resolve_target_files(files: tuple[str, ...], repo_root: Path) -> tuple[list[str], list[str]]:
+def _tracked_files(repo_root: Path) -> list[str] | None:
+    """``git ls-files`` for *repo_root*, or None when git cannot answer."""
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(repo_root), "ls-files", "-z"],
+            capture_output=True, text=True, timeout=5,
+            env=os.environ.copy(),  # hardcoded argv, no credential-leak risk (R4 scope)
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode != 0:
+        return None
+    return [p for p in result.stdout.split("\0") if p]
+
+
+def resolve_target_files(
+    files: tuple[str, ...], repo_root: Path, *, infer_bare: bool = True,
+) -> tuple[list[str], list[str]]:
     """Resolve prompt-named files against *repo_root*.
+
+    With *infer_bare*, a bare file name with no directory ("helpers.py")
+    that is not at the repo root resolves to the one TRACKED file with that
+    basename — only when exactly one exists; two ``helpers.py`` means we do
+    not know which was meant, and the name is dropped like any other
+    not-found name.
 
     Returns ``(resolved, problems)``. A name that does not exist on disk is
     simply dropped — not found is not a security issue, just nothing to act
@@ -190,6 +271,7 @@ def resolve_target_files(files: tuple[str, ...], repo_root: Path) -> tuple[list[
     root = repo_root.resolve()
     resolved: list[str] = []
     problems: list[str] = []
+    tracked: list[str] | None = None
     for raw in files:
         candidate = (root / raw).resolve()
         try:
@@ -198,9 +280,105 @@ def resolve_target_files(files: tuple[str, ...], repo_root: Path) -> tuple[list[
             problems.append(f"{raw}: resolves outside the repo root")
             continue
         if not candidate.is_file():
-            continue
+            if "/" in raw or not infer_bare:
+                continue
+            if tracked is None:
+                tracked = _tracked_files(root) or []
+            matches = [p for p in tracked if p.rsplit("/", 1)[-1] == raw]
+            if len(matches) != 1 or not (root / matches[0]).is_file():
+                continue
+            rel = Path(matches[0])
         resolved.append(str(rel))
     return resolved, problems
+
+
+# Definition shapes, per language, for a name already known to occur as a
+# whole word. A line that merely CALLS or imports the name (a test, a caller)
+# is not a definition, so it never makes a name look ambiguous — nor does it
+# become the edit target.
+_DEFINITION_TEMPLATES = (
+    r"^\s*(?:async\s+)?def\s+{n}\s*[\(\[]",                                  # Python
+    r"^\s*class\s+{n}\b",                                                     # Python/Ruby
+    r"^\s*(?:export\s+)?(?:default\s+)?(?:async\s+)?function\s*\*?\s+{n}\s*[\(<]",  # JS/TS
+    r"^\s*(?:export\s+)?(?:default\s+)?(?:abstract\s+)?(?:class|interface|type|enum)\s+{n}\b",
+    r"^\s*(?:export\s+)?(?:const|let|var)\s+{n}\s*=\s*(?:async\s*)?(?:function\b|\()",
+    r"^\s*func\s+(?:\([^)]*\)\s*)?{n}\s*[\(\[]",                               # Go
+    r"^\s*(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?(?:fn|struct|enum|trait)\s+{n}\b",  # Rust
+)
+# Code files only: a ``def foo():`` inside a Markdown example or a YAML string
+# is not the thing to edit.
+_DEFINITION_PATHSPECS = tuple(
+    f"*.{ext}" for ext in _CODE_EXTENSIONS
+    if ext not in ("md", "json", "yaml", "yml", "toml", "cfg", "ini")
+)
+
+
+def resolve_symbol_targets(symbols: tuple[str, ...], repo_root: Path) -> tuple[list[str], str]:
+    """Resolve prompt identifiers to the TRACKED files that define them.
+
+    Each identifier maps to the files where it is defined (a def/class/func
+    line, via ``git grep`` over tracked code files) plus any tracked code file
+    whose stem is that name (a bare module name, "the zero_claude_edit
+    module"). Conservative on purpose — a wrong-file edit is worse than a
+    fallthrough:
+
+    * an identifier that maps to MORE THAN ONE file makes the whole prompt
+      ambiguous -> ``[]``, even if another identifier is unique;
+    * identifiers that map to nothing are ignored (most candidates are
+      prose-adjacent names that are simply not in this repo);
+    * more than ``_MAX_TARGET_FILES`` files in total -> ``[]``.
+
+    Returns ``(files, reason)``; ``reason`` names each ``symbol -> file``
+    mapping on success, or why nothing was resolved.
+    """
+    if not symbols:
+        return [], "no identifiers to resolve"
+    argv = ["git", "-C", str(repo_root), "grep", "-I", "-n", "--null", "-w", "-F"]
+    for sym in symbols:
+        argv += ["-e", sym]
+    argv += ["--", *_DEFINITION_PATHSPECS]
+    try:
+        result = subprocess.run(
+            argv, capture_output=True, text=True, timeout=5,
+            env=os.environ.copy(),  # fixed argv shape, no credential-leak risk (R4 scope)
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return [], "git grep failed — cannot resolve identifiers safely"
+    if result.returncode not in (0, 1):  # 1 = no match
+        return [], "git grep failed — cannot resolve identifiers safely"
+
+    patterns = {
+        sym: [re.compile(t.format(n=re.escape(sym))) for t in _DEFINITION_TEMPLATES]
+        for sym in symbols
+    }
+    hits: dict[str, set[str]] = {sym: set() for sym in symbols}
+    for line in result.stdout.splitlines():
+        path, sep, rest = line.partition("\0")
+        if not sep:
+            continue
+        _lineno, _, content = rest.partition("\0")
+        for sym, rxs in patterns.items():
+            if sym in content and any(rx.search(content) for rx in rxs):
+                hits[sym].add(path)
+
+    code_exts = {p[2:] for p in _DEFINITION_PATHSPECS}
+    for path in _tracked_files(repo_root) or []:
+        base = path.rsplit("/", 1)[-1]
+        stem, dot, ext = base.rpartition(".")
+        if dot and ext in code_exts and stem in hits:
+            hits[stem].add(path)
+
+    ambiguous = {s: sorted(f) for s, f in hits.items() if len(f) > 1}
+    if ambiguous:
+        detail = "; ".join(f"{s} in {len(f)} files" for s, f in ambiguous.items())
+        return [], f"identifier ambiguous — {detail}"
+    mapping = {s: next(iter(f)) for s, f in hits.items() if f}
+    if not mapping:
+        return [], f"no definition of {list(symbols)} in tracked files"
+    files = list(dict.fromkeys(mapping.values()))
+    if len(files) > _MAX_TARGET_FILES:
+        return [], f"identifiers resolve to {len(files)} files — too broad (max {_MAX_TARGET_FILES})"
+    return files, ", ".join(f"{s} -> {f}" for s, f in mapping.items())
 
 
 def dirty_files(repo_root: Path, relpaths: list[str]) -> list[str]:
@@ -339,8 +517,11 @@ def short_diff(old: str, new: str, label: str, max_lines: int = 12) -> str:
     return "\n".join(diff_lines)
 
 
-def applied_message(model: str, changed_files: list[str], diffs: dict[str, str]) -> str:
-    lines = [f"ZERO_CLAUDE_EDIT APPLIED — model={model}", f"Files changed: {', '.join(changed_files)}", ""]
+def applied_message(model: str, changed_files: list[str], diffs: dict[str, str], inferred: str = "") -> str:
+    lines = [f"ZERO_CLAUDE_EDIT APPLIED — model={model}", f"Files changed: {', '.join(changed_files)}"]
+    if inferred:
+        lines.append(f"Target inferred from: {inferred}")
+    lines.append("")
     for f in changed_files:
         lines.append(f"--- {f} ---")
         lines.append(diffs[f])
@@ -417,7 +598,20 @@ def maybe_replace(
     if root is None:
         return ScopedEditOutcome("fallthrough", "ZERO_CLAUDE_EDIT: cwd is not inside a git repository")
 
-    resolved, problems = resolve_target_files(classification.files, root)
+    inferred = ""
+    targets = classification.files
+    if not targets:
+        # No literal path: the identifiers must resolve to a unique, small set
+        # of tracked files, else fall through (and log why).
+        sym_files, inferred = resolve_symbol_targets(classification.symbols, root)
+        if not sym_files:
+            return ScopedEditOutcome("fallthrough", f"ZERO_CLAUDE_EDIT: {inferred}")
+        targets = tuple(sym_files)
+
+    # Symbol-resolved paths go through the same containment check as named ones.
+    resolved, problems = resolve_target_files(
+        targets, root, infer_bare=len(prompt.strip()) <= _MAX_INFER_PROMPT_CHARS,
+    )
     if problems:
         reason = "; ".join(problems)
         return ScopedEditOutcome(
@@ -427,7 +621,7 @@ def maybe_replace(
     if not resolved:
         return ScopedEditOutcome(
             "fallthrough",
-            f"ZERO_CLAUDE_EDIT: none of {classification.files} exist in the repo",
+            f"ZERO_CLAUDE_EDIT: none of {targets} exist in the repo",
         )
 
     dirty = dirty_files(root, resolved)
@@ -479,9 +673,10 @@ def maybe_replace(
     for instr in instructions:
         _record_edit_ledger(instr.file, model, applied=True)
 
-    message = applied_message(model, changed_files, diffs)
+    message = applied_message(model, changed_files, diffs, inferred)
     return ScopedEditOutcome(
-        "block", f"ZERO_CLAUDE_EDIT APPLIED: model={model} files={changed_files}",
+        "block", f"ZERO_CLAUDE_EDIT APPLIED: model={model} files={changed_files}"
+        + (f" inferred=[{inferred}]" if inferred else ""),
         message=message, applied=True,
     )
 
