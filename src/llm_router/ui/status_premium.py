@@ -116,7 +116,7 @@ class PremiumStatusCommand:
             return Group(*lines)
 
         try:
-            from llm_router.dashboard_data import query_primary_metric, summary
+            from llm_router.dashboard_data import summary
 
             windows = [
                 ("Today", "today"),
@@ -149,20 +149,13 @@ class PremiumStatusCommand:
             if not any_data:
                 lines.append(Text("  No external routing yet — route some tasks first"))
 
-            # North Star (points 8+12): verified share of eligible Claude
-            # turns, numerator and denominator from the SAME table and
-            # window (savings_stats, see PrimaryMetric's docstring).
-            # Reviewer-01: rendered ONCE, independent of the per-window
-            # money loop above — that loop `continue`s past any window
-            # with zero activity in the five UNION'd tables, which on real
-            # installs is "Today" more often than not, and the North Star
-            # line must not disappear along with it. "All-time" so it
-            # still has something to say when today is empty.
-            metric = query_primary_metric("lifetime", db_path=str(self.db_path))
-            rendered = metric.render()
-            if rendered:
-                lines.append(Text(""))
-                lines.append(Text(rendered, style=PALETTE.text_dim))
+            # 2026-09-27 (#182): the North Star primary-metric line ("Verified
+            # share of eligible Claude turns") used to render here too. The
+            # owner decided user-facing savings displays show only the ONE
+            # labelled estimate above — the computation itself is unchanged
+            # and still lives in `dashboard_data.query_primary_metric` /
+            # `PrimaryMetric.render()` for `doctor`/debug use, it is just not
+            # printed in this panel any more.
 
             # Top models inline
             top_models_text = "  Top models:  "
