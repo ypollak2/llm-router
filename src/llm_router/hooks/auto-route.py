@@ -4050,6 +4050,7 @@ def main() -> None:
             prompt=prompt,
             cwd=hook_input.get("cwd") or os.getcwd(),
             deadline_s=_readonly_draft_deadline(),
+            transcript_path=hook_input.get("transcript_path", ""),
         )
     except Exception as _zce_exc:                                 # noqa: BLE001
         _zce_outcome = None

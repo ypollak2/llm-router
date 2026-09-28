@@ -49,6 +49,28 @@ Two outcome actions:
     choice, failure blocks rather than silently falling through, and never
     half-applies (``edit.apply_edits`` is already all-or-nothing).
 
+SESSION-CONTEXT RESOLUTION (2026-09-28)
+-----------------------------------------
+Measured after symbol resolution (#194) landed: only 6/122 real edit-like
+prompts on this machine entered the scope (was 4/122), because most short
+real edit prompts refer back to the conversation — "fix F-1", "apply that",
+"fix it" — with no path and no code identifier of their own.
+``classify_edit_prompt`` marks this shape ``EditClassification(anaphoric=True)``
+instead of dropping it, and ``maybe_replace`` tries
+``resolve_session_targets`` against the hook payload's ``transcript_path``:
+a labelled reference ("F-1") resolves against the file named next to that
+label in Claude's last reply; a bare pronoun ("fix it") resolves ONLY
+against files Claude itself recently Read/Edited/Wrote, never a file merely
+named in prose (measured 2026-09-28: the prose signal picked the file "it"
+REFERRED TO over the untouched file that was actually the edit target — the
+wrong-file risk this whole module exists to avoid). It resolves ONLY when
+the result is small (≤2 files) and unambiguous, and only when the
+transcript was written to recently — a stale transcript, an ambiguous set
+of recent files, or no transcript at all all fall through exactly as
+before. When it does resolve, the last assistant message is also
+handed to the local editor as context, so "fix it" and "fix F-1" mean
+something to the model that never saw the earlier turn.
+
 Every ``block`` message ends with the same escape hatch as full zero-Claude:
 prefix the prompt with ``claude:`` to redo the turn natively.
 """
@@ -56,6 +78,7 @@ prefix the prompt with ``claude:`` to redo the turn natively.
 from __future__ import annotations
 
 import difflib
+import json
 import os
 import re
 import subprocess
@@ -86,7 +109,7 @@ _EDIT_VERBS = (
     "rename", "add", "fix", "update", "remove", "delete", "replace",
     "insert", "refactor", "change", "modify", "append", "prepend",
     "correct", "implement", "extract", "inline", "split", "merge",
-    "reformat", "rewrite",
+    "reformat", "rewrite", "apply",
 )
 _EDIT_VERB_RE = re.compile(r"\b(?:" + "|".join(_EDIT_VERBS) + r")\b", re.IGNORECASE)
 
@@ -141,6 +164,54 @@ _MAX_SYMBOL_CANDIDATES = 5
 # conservative guard, not a held-out-validated threshold.
 _MAX_INFER_PROMPT_CHARS = 300
 
+# ── anaphoric references (no path, no code identifier) ───────────────────────
+#
+# Measured 2026-09-28: after symbol resolution (#194), only 6/122 real
+# edit-like prompts on this machine entered the scope (was 4/122). Most short
+# real edit prompts refer back to the conversation — "fix F-1", "apply that",
+# "fix it" — and carry neither a path nor a code-shaped identifier, so they
+# were dropped by classify_edit_prompt with no signal for the caller to act
+# on. These two patterns mark that specific case so ``maybe_replace`` can try
+# resolving the target from recent SESSION CONTEXT (recently touched files,
+# the last assistant message) instead of falling through immediately.
+# Resolution itself (``resolve_session_targets``) is conservative and separate
+# from this classifier — this only flags the shape as a CANDIDATE.
+_ANAPHORIC_PRONOUN_RE = re.compile(r"\b(?:it|that|this|them|those)\b", re.IGNORECASE)
+# A short label a prior turn could plausibly have assigned to a finding
+# ("F-1", "Finding 1", "issue 3", "#3") — resolved against the last assistant
+# message's text, never guessed at.
+# (?<!\S), not \b, before the label: \b requires a word/non-word transition,
+# which a leading "#" never gives against the space before it ("fix #7" has
+# space-then-# — both non-word — so \b silently never matches there).
+_LABEL_RE = re.compile(r"(?<!\S)([Ff]-\d+|[Ff]inding\s+\d+|[Ii]ssue\s+\d+|#\d+)\b")
+
+# Measured on this machine's real prompts (2026-09-28, n=2162 across 935
+# transcripts): the naive rule (any _EDIT_VERBS verb + any pronoun, prompt
+# <=300 chars) hit only 2-3/9 genuinely (precision ~30%) — the rest were
+# long, non-edit conversational asks that happened to contain a stray verb
+# and pronoun ("create an architectural audit ... add more agents and
+# tools", "Well, plan how to implement it ... prepare what tests",
+# "merge it into main"). Two tighter, evidence-driven guards close that:
+#   * a much shorter cap — every FALSE positive was >90 chars; every real
+#     anaphoric follow-up in the sample ("fix F-1", "fix the prompt file
+#     with those three changes", "add a link to it from the README") was
+#     under 50. 60 is a conservative margin, not a fitted boundary;
+#   * excluding verbs whose most common colloquial sense is NOT a file edit
+#     — "merge it into main" is a git operation, not a scoped file rewrite;
+#     "implement it" and "split it" read the same way ("implement the
+#     plan", "split the PR"); "extract" likewise ("extract this into a
+#     ticket"). Every other verb in _EDIT_VERBS held up in the sample.
+_MAX_ANAPHORIC_PROMPT_CHARS = 60
+_ANAPHORIC_VERB_EXCLUDE = frozenset({"merge", "implement", "split", "extract"})
+_ANAPHORIC_EDIT_VERB_RE = re.compile(
+    r"\b(?:" + "|".join(v for v in _EDIT_VERBS if v not in _ANAPHORIC_VERB_EXCLUDE) + r")\b",
+    re.IGNORECASE,
+)
+
+
+def find_label_references(text: str) -> tuple[str, ...]:
+    return tuple(dict.fromkeys(m.group(1) for m in _LABEL_RE.finditer(text)))
+
 
 @dataclass(frozen=True)
 class EditClassification:
@@ -150,6 +221,13 @@ class EditClassification:
     # Code-shaped identifiers, set only when ``files`` is empty: the caller
     # resolves them to files against the repo (``resolve_symbol_targets``).
     symbols: tuple[str, ...] = ()
+    # True only when ``is_edit`` is False AND the prompt reads as a reference
+    # back to the conversation (a bare pronoun or a "F-1"-shaped label) with
+    # no literal target of its own. The caller may attempt session-context
+    # resolution (``resolve_session_targets``); every other False case means
+    # exactly what it always meant — fall through, nothing to try.
+    anaphoric: bool = False
+    labels: tuple[str, ...] = ()
 
 
 def _identifier_candidates(text: str) -> tuple[str, ...]:
@@ -196,6 +274,17 @@ def classify_edit_prompt(prompt: str) -> EditClassification:
             )
         symbols = _identifier_candidates(text)
         if not symbols:
+            labels = find_label_references(text)
+            anaphoric_eligible = (
+                len(text) <= _MAX_ANAPHORIC_PROMPT_CHARS
+                and _ANAPHORIC_EDIT_VERB_RE.search(text)
+                and (labels or _ANAPHORIC_PRONOUN_RE.search(text))
+            )
+            if anaphoric_eligible:
+                return EditClassification(
+                    False, (), "anaphoric reference, no literal target — deferred to session context",
+                    anaphoric=True, labels=labels,
+                )
             return EditClassification(False, (), "no named file or code identifier in the prompt")
         if len(symbols) > _MAX_SYMBOL_CANDIDATES:
             return EditClassification(
@@ -412,6 +501,195 @@ def dirty_files(repo_root: Path, relpaths: list[str]) -> list[str]:
     return [p for p in relpaths if p in dirty]
 
 
+# ── session-context resolution (anaphoric prompts) ───────────────────────────
+#
+# "fix F-1", "fix it", "apply that" carry no path and no code identifier, so
+# classify_edit_prompt hands them here as EditClassification(anaphoric=True)
+# instead of dropping them. This resolves the target from the CC transcript
+# named by the hook payload's ``transcript_path`` — never from the prompt
+# text itself. Stays conservative on purpose (a wrong-file edit is worse than
+# a fallthrough):
+#   * the transcript must exist and have been written to RECENTLY
+#     (``_STALE_TRANSCRIPT_S``) — an old transcript's file mentions are not
+#     "what we were just doing", they are "what we were doing a while ago";
+#   * a labelled reference ("F-1") only resolves when the last assistant
+#     message names EXACTLY ONE file on the same line as that label — a
+#     deliberate pointer Claude wrote, "F-1: ... in foo.py";
+#   * a bare pronoun ("fix it") resolves ONLY against files Claude itself
+#     Read/Edited/Wrote (``recent_session_files``) — NEVER against a file
+#     merely named in Claude's prose. Measured 2026-09-28: the prose signal
+#     resolved "add a link to it from the README" to the file "it" REFERRED
+#     TO, not the (untouched) file to edit — backwards, and exactly the
+#     wrong-file risk this module exists to avoid. At most
+#     ``_SESSION_CONTEXT_MAX_FILES`` touched files — more than that is
+#     "which one?", not a resolvable reference.
+
+# A prompt this long after the transcript's last write is not "just now" —
+# using a file mentioned that long ago risks a wrong-file edit on a session
+# the user has moved on from. No held-out validation behind this number
+# (there is no timestamped corpus for it yet); it is a conservative guess,
+# named as one.
+_STALE_TRANSCRIPT_S = 15 * 60
+
+# Tool calls whose ``input`` names a file this lever should count as
+# "recently touched". Mirrors the write-shaped tools Claude Code itself
+# exposes; a Bash call is deliberately excluded — its "file" is a shell
+# argument, not a structured field, and guessing at it risks the wrong file.
+_FILE_TOOL_NAMES = ("Read", "Edit", "Write", "MultiEdit", "NotebookEdit")
+_TOOL_FILE_KEYS = ("file_path", "notebook_path")
+# How far back into the transcript (in raw JSONL entries, not conversation
+# turns) to look for tool-use file references. Measured 2026-09-28: a real
+# CC transcript interleaves ~10 non-conversational entries (attachment,
+# file-history-snapshot, mode, bridge-session, ...) per actual turn, so 30
+# raw entries — the original guess — covered barely one real exchange.
+# 150 covers roughly the last several turns without reaching into the whole
+# session; still a bounded, conservative window, not "all history".
+_SESSION_CONTEXT_MAX_MESSAGES = 150
+_SESSION_CONTEXT_MAX_FILES = 2
+
+
+def _iter_transcript_entries(transcript_path: str):
+    """Yield parsed JSON entries from a CC transcript, oldest first.
+
+    Best-effort: a missing/unreadable transcript or a malformed line yields
+    nothing for that line — never raises.
+    """
+    if not transcript_path:
+        return
+    try:
+        with open(transcript_path, encoding="utf-8") as fh:
+            lines = fh.readlines()
+    except OSError:
+        return
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            yield json.loads(line)
+        except json.JSONDecodeError:
+            continue
+
+
+def recent_session_files(
+    transcript_path: str, max_messages: int = _SESSION_CONTEXT_MAX_MESSAGES,
+) -> list[str]:
+    """Files named in recent Read/Edit/Write/MultiEdit/NotebookEdit tool
+    calls, most-recent-first, deduped. ``[]`` on any read failure.
+    """
+    entries = list(_iter_transcript_entries(transcript_path))
+    window = entries[-max_messages:] if max_messages else entries
+    files: list[str] = []
+    seen: set[str] = set()
+    for entry in reversed(window):
+        msg = entry.get("message") or {}
+        if msg.get("role") != "assistant":
+            continue
+        content = msg.get("content")
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            if not isinstance(block, dict) or block.get("type") != "tool_use":
+                continue
+            if block.get("name") not in _FILE_TOOL_NAMES:
+                continue
+            inp = block.get("input") or {}
+            for key in _TOOL_FILE_KEYS:
+                val = inp.get(key)
+                if isinstance(val, str) and val and val not in seen:
+                    seen.add(val)
+                    files.append(val)
+    return files
+
+
+def last_assistant_message(transcript_path: str) -> str:
+    """The most recent assistant text reply in the transcript, or "".
+
+    Used both to resolve a labelled reference ("F-1") and — passed to the
+    local editor as context — so it knows what "it"/"F-1" refers to.
+    """
+    for entry in reversed(list(_iter_transcript_entries(transcript_path))):
+        msg = entry.get("message") or {}
+        if msg.get("role") != "assistant":
+            continue
+        content = msg.get("content")
+        if isinstance(content, str):
+            if content.strip():
+                return content
+            continue
+        if isinstance(content, list):
+            parts = [
+                b.get("text", "") for b in content
+                if isinstance(b, dict) and b.get("type") == "text"
+            ]
+            text = "\n".join(p for p in parts if p)
+            if text.strip():
+                return text
+    return ""
+
+
+def _label_file_candidates(label: str, assistant_text: str) -> list[str]:
+    """Files named on the same line as *label* in *assistant_text*, deduped."""
+    label_norm = label.strip().lower()
+    candidates: list[str] = []
+    seen: set[str] = set()
+    for line in assistant_text.splitlines():
+        if label_norm not in line.lower():
+            continue
+        for m in _FILE_REF_RE.finditer(line):
+            f = m.group(1).lstrip("./")
+            if f not in seen:
+                seen.add(f)
+                candidates.append(f)
+    return candidates
+
+
+def resolve_session_targets(
+    classification: EditClassification, transcript_path: str,
+) -> tuple[list[str], str]:
+    """Resolve an anaphoric ``EditClassification`` against recent session
+    context. Returns ``(files, reason)``; ``files`` is ``[]`` on any
+    ambiguity, missing transcript, or staleness — the caller falls through.
+    """
+    if not transcript_path:
+        return [], "no transcript_path in the hook payload"
+    try:
+        mtime = os.path.getmtime(transcript_path)
+    except OSError:
+        return [], "transcript not readable"
+    age_s = time.time() - mtime
+    if age_s > _STALE_TRANSCRIPT_S:
+        return [], f"transcript stale ({int(age_s // 60)}m since last write, max {_STALE_TRANSCRIPT_S // 60}m)"
+
+    assistant_text = last_assistant_message(transcript_path)
+
+    if classification.labels:
+        for label in classification.labels:
+            label_files = _label_file_candidates(label, assistant_text)
+            if len(label_files) == 1:
+                return label_files, f"label {label!r} -> {label_files[0]} (last assistant message)"
+            if len(label_files) > 1:
+                return [], f"label {label!r} names {len(label_files)} files in the last assistant message"
+        return [], "labelled reference(s) not resolvable from the last assistant message"
+
+    # Bare pronoun, no label: deliberately NARROWER than the label path —
+    # ONLY files Claude itself Read/Edited/Wrote (recent_session_files), never
+    # a file merely NAMED in prose. Measured 2026-09-28 on this machine's real
+    # prompts: "add a link to it from the README" resolved (via the prose
+    # signal) to the file "it" REFERRED TO — which is exactly backwards, since
+    # the edit target was the README, a file that had NOT been touched. A
+    # prose mention answers "what did Claude just talk about", not "what is
+    # Claude editing" — the label path stays exempt because a "F-1: ... in
+    # foo.py" line is Claude's own deliberate pointer FROM the label TO the
+    # file, not an incidental mention.
+    combined = recent_session_files(transcript_path)
+    if not combined:
+        return [], "no recently touched files in the transcript"
+    if len(combined) > _SESSION_CONTEXT_MAX_FILES:
+        return [], f"{len(combined)} recently touched files — too ambiguous"
+    return combined, f"recent session file(s): {', '.join(combined)}"
+
+
 # ── model selection + generation loop ────────────────────────────────────────
 
 MAX_EDIT_ATTEMPTS = 3  # mirrors edit.MAX_EDIT_ATTEMPTS
@@ -559,6 +837,7 @@ def maybe_replace(
     prompt: str,
     cwd: str,
     deadline_s: float,
+    transcript_path: str = "",
 ) -> ScopedEditOutcome | None:
     """Entry point called from ``hooks/auto-route.py``'s ``main()``.
 
@@ -567,6 +846,11 @@ def maybe_replace(
     nothing further, exactly as if this module did not exist. Once the scope
     is on, always returns a :class:`ScopedEditOutcome` so every decision is
     logged, matching the rest of this hook's "every skip logs why" contract.
+
+    *transcript_path* is the CC transcript path from the hook payload — used
+    ONLY to resolve an anaphoric prompt ("fix it", "fix F-1") that names no
+    literal target of its own (``resolve_session_targets``). Every other
+    prompt shape ignores it entirely.
     """
     if not _scope_enabled():
         return None
@@ -575,8 +859,27 @@ def maybe_replace(
         return ScopedEditOutcome("fallthrough", "ZERO_CLAUDE_EDIT: explicit claude: prefix — native use")
 
     classification = classify_edit_prompt(prompt)
+    session_context_note = ""
     if not classification.is_edit:
-        return ScopedEditOutcome("fallthrough", f"ZERO_CLAUDE_EDIT: not edit-class — {classification.reason}")
+        if not classification.anaphoric:
+            return ScopedEditOutcome("fallthrough", f"ZERO_CLAUDE_EDIT: not edit-class — {classification.reason}")
+        session_files, session_reason = resolve_session_targets(classification, transcript_path)
+        if not session_files:
+            return ScopedEditOutcome(
+                "fallthrough",
+                f"ZERO_CLAUDE_EDIT: not edit-class — {classification.reason}; "
+                f"session context did not resolve it — {session_reason}",
+            )
+        # Promote: an anaphoric prompt with an unambiguous session-context
+        # target is now edit-class, targeting those files. Everything below
+        # (breaker, containment, dirty check, model call) runs exactly as it
+        # would for a literally-named file — session resolution only decides
+        # WHAT the target is, never bypasses how it is handled.
+        classification = EditClassification(
+            True, tuple(session_files),
+            f"session context resolved it — {session_reason}",
+        )
+        session_context_note = last_assistant_message(transcript_path)
 
     # Kill switch (quality breaker "zero_claude_edit"/"code"): checked before
     # any model call is attempted, same position the "direct" lever's check
@@ -598,7 +901,7 @@ def maybe_replace(
     if root is None:
         return ScopedEditOutcome("fallthrough", "ZERO_CLAUDE_EDIT: cwd is not inside a git repository")
 
-    inferred = ""
+    inferred = classification.reason if session_context_note else ""
     targets = classification.files
     if not targets:
         # No literal path: the identifiers must resolve to a unique, small set
@@ -656,7 +959,18 @@ def maybe_replace(
         content, _truncated = read_file_for_edit(str(root / rel))
         file_contents[rel] = content
 
-    new_contents, instructions, fail_reason = generate_edits(prompt, file_contents, model, deadline_s)
+    # An anaphoric prompt ("fix it", "fix F-1") means nothing to the local
+    # model on its own — it needs to know what "it"/"F-1" refers to. The
+    # session-resolved case is the only one that carries this note; a
+    # literally-named prompt is unambiguous without it.
+    task = prompt
+    if session_context_note:
+        task = (
+            "Context — Claude's last message to the user before this request:\n"
+            f"{session_context_note}\n\n"
+            f"User's request: {prompt}"
+        )
+    new_contents, instructions, fail_reason = generate_edits(task, file_contents, model, deadline_s)
 
     if new_contents is None:
         reason = fail_reason or "no edit instructions could be validated"
