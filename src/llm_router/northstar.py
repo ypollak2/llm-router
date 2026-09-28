@@ -23,7 +23,7 @@ and the aggregate view read it, so they cannot disagree with each other.
 COUNTING RULES — read this before changing a number here
 ────────────────────────────────────────────────────────────────────────────
 
-A **unit** is one of six kinds. All six sum to the denominator.
+A **unit** is one of eight kinds. All eight sum to the denominator.
 
   user_prompt     One human-authored prompt in a Claude Code transcript
                   (``~/.claude/projects/<proj>/<session>.jsonl``, ``type ==
@@ -71,11 +71,59 @@ A **unit** is one of six kinds. All six sum to the denominator.
                   well under 1% of days. Expect this bucket to be 0 on most
                   machines, honestly.
 
-``routed_mcp``, ``draft`` and ``direct`` are **attempted routing** whether or
-not they were used. ``claude_main_call``/``sidechain_call``/``user_prompt``
-are never "attempted" by definition, and their per-unit ``outcome`` is always
-``not_routed`` — they are the rest of the denominator the North Star insists
-on counting.
+  routed_edit     Lever ``llm_edit`` (#181). One unit per ROW in
+                  ``~/.llm-router/edit_outcomes.jsonl``
+                  (``llm_router.edit_ledger.record_edit_outcome``) — i.e. one
+                  per FILE an ``llm_edit`` call touched, not one per call: the
+                  ledger is written per file (a 3-file call writes 3 rows) and
+                  survival is judged per file, so that is the natural grain.
+                  See OUTCOME below and the DEDUP section for how this avoids
+                  double-counting the transcript's own ``routed_mcp`` unit for
+                  the same call.
+
+  agent_route_codex
+                  Lever ``agent_route_codex`` (#184). One unit per ROW in
+                  ``~/.llm-router/north_star_units.jsonl``
+                  (``hooks/agent-route.py``'s ``_record_north_star_unit``)
+                  whose recorded ``outcome`` reflects an actual Codex
+                  invocation: ``delegated`` (Codex ran and its output stood in
+                  for the sub-agent's result) or ``codex_failed`` (Codex was
+                  invoked but produced nothing usable). Rows recording a
+                  decision NOT to invoke Codex at all — ``unsuitable``,
+                  ``budget_exhausted``, ``codex_unavailable`` — are not
+                  attempts and produce no unit, the same way "the router chose
+                  not to draft" produces no ``draft`` unit above.
+
+``routed_mcp``, ``draft``, ``direct``, ``routed_edit`` and ``agent_route_codex``
+are **attempted routing** whether or not they were used.
+``claude_main_call``/``sidechain_call``/``user_prompt`` are never "attempted"
+by definition, and their per-unit ``outcome`` is always ``not_routed`` — they
+are the rest of the denominator the North Star insists on counting.
+
+────────────────────────────────────────────────────────────────────────────
+DEDUP: routed_edit vs. the transcript's own routed_mcp unit
+────────────────────────────────────────────────────────────────────────────
+
+An ``llm_edit`` call is BOTH a ``mcp__llm_router__llm_edit`` tool_use in the
+transcript (which ``routed_mcp`` construction, above, would otherwise count
+generically like any other MCP tool call) AND one-or-more rows in
+``edit_outcomes.jsonl`` (richer: ``applied``/``survived`` ground truth instead
+of the shingle-overlap heuristic). Counting both would double-count the same
+call.
+
+JOIN KEY: a ledger row is attributed to the LATEST ``mcp__llm_router__llm_edit``
+tool_use in the same (raw, pre-fold) session whose transcript timestamp is
+``<= row["ts"]`` and within ``EDIT_LEDGER_JOIN_WINDOW_S`` (300s) of it.
+``edit_ledger.record_edit_outcome`` writes ``ts = time.time()`` from inside
+the MCP call handler, strictly AFTER the tool_use block was already appended
+to the transcript (the assistant turn is written when Claude emits the call,
+before the call executes) — so the matching call's ts is always ``<=`` the
+row's ts, and "latest such call" is "the call this row's file result belongs
+to." When a match is found, the generic ``routed_mcp`` unit for that
+tool_use is dropped from the session and replaced by the ledger-backed
+``routed_edit`` row(s) — counted ONCE, as the richer unit, per the task's
+"same call" rule. A ledger row with no matching call in the window is kept as
+a standalone ``routed_edit`` unit (nothing to dedup against).
 
 ────────────────────────────────────────────────────────────────────────────
 JOIN: folding sub-agent sessions into their parent
@@ -88,11 +136,18 @@ each sub-agent (Agent tool spawn) writes its own top-level session file — one
 dispatch prompt followed by dozens of assistant turns — and the transcript
 schema carries no ``parentSessionId`` field.
 
-The only cross-session record that exists is ``~/.llm-router/agent_calls.json``
-(written by ``hooks/agent-route.py``): one entry per Agent-tool spawn,
-``{timestamp, subagent_type, prompt, decision, session_id}`` where
-``session_id`` is the PARENT's. It carries no child id either, so the join is
-a heuristic, best-effort match (``find_parent_session``):
+The cross-session record ``_load_agent_calls()`` builds the candidate pool
+from is the UNION of two files ``hooks/agent-route.py`` writes from the same
+entry at spawn time: ``~/.llm-router/agent_calls.json`` (rolling, capped at
+the last 50 calls — the #180 join's only source, and on a real machine that
+window turns over within hours of active use, ~24 rows measured 2026-09-27)
+and ``~/.llm-router/agent_calls_ledger.jsonl`` (append-only, pruned by AGE not
+count — every spawn for the last 30 days). Deduplicated on
+``(session_id, timestamp, prompt)`` since both files are written from the
+same dict and carry no other id. Each entry: ``{timestamp, subagent_type,
+prompt, decision, session_id}`` where ``session_id`` is the PARENT's. It
+carries no child id either, so the join is a heuristic, best-effort match
+(``find_parent_session``):
 
   a candidate child session C is the child of a logged spawn S iff
     * C's first user-turn text, normalised (whitespace-collapsed), starts
@@ -183,8 +238,11 @@ Public surface
 ``units(days=N, session_id=None, root=None) -> Iterator[dict]``
     One dict per unit: ``{"session_id", "ts" (iso8601 or None), "kind",
     "lever", "task_type", "model", "outcome", "signal"}``. ``lever`` is
-    "drafts" | "mcp_llm" | "direct" | "agent_route" | "none" (the mechanism
-    that produced the unit, for NS3/NS4 to slice by).
+    "drafts" | "mcp_llm" | "direct" | "agent_route" | "llm_edit" |
+    "agent_route_codex" | "none" (the mechanism that produced the unit, for
+    NS3/NS4 to slice by — NS4's quality breaker keys on ``(lever,
+    task_type)``, so every unit of every lever, including these two, carries
+    both fields).
 
 ``report(days=N, session_id=None, root=None) -> dict``
     Computed by aggregating ``units()`` — see the schema in its own
@@ -208,6 +266,7 @@ from llm_router import paths
 MIN_UNITS = 50
 TOOL_REUSE_THRESHOLD = 0.60
 _JOIN_WINDOW_S = 900.0  # 15 minutes: spawn -> child's first turn
+EDIT_LEDGER_JOIN_WINDOW_S = 300.0  # 5 minutes: llm_edit tool_use -> its ledger row(s)
 
 UNIT_USER_PROMPT = "user_prompt"
 UNIT_CLAUDE_MAIN = "claude_main_call"
@@ -215,11 +274,16 @@ UNIT_SIDECHAIN = "sidechain_call"
 UNIT_ROUTED_MCP = "routed_mcp"
 UNIT_DRAFT = "draft"
 UNIT_DIRECT = "direct"
+UNIT_ROUTED_EDIT = "routed_edit"
+UNIT_AGENT_ROUTE_CODEX = "agent_route_codex"
 ALL_KINDS = (
     UNIT_USER_PROMPT, UNIT_CLAUDE_MAIN, UNIT_SIDECHAIN,
     UNIT_ROUTED_MCP, UNIT_DRAFT, UNIT_DIRECT,
+    UNIT_ROUTED_EDIT, UNIT_AGENT_ROUTE_CODEX,
 )
-ATTEMPTED_KINDS = frozenset({UNIT_ROUTED_MCP, UNIT_DRAFT, UNIT_DIRECT})
+ATTEMPTED_KINDS = frozenset({
+    UNIT_ROUTED_MCP, UNIT_DRAFT, UNIT_DIRECT, UNIT_ROUTED_EDIT, UNIT_AGENT_ROUTE_CODEX,
+})
 
 _LEVER_OF_KIND = {
     UNIT_USER_PROMPT: "none",
@@ -228,7 +292,13 @@ _LEVER_OF_KIND = {
     UNIT_ROUTED_MCP: "mcp_llm",
     UNIT_DRAFT: "drafts",
     UNIT_DIRECT: "direct",
+    UNIT_ROUTED_EDIT: "llm_edit",
+    UNIT_AGENT_ROUTE_CODEX: "agent_route_codex",
 }
+
+# The MCP tool name llm_edit is registered under (server.py / tool_surface.py) —
+# the one routed_mcp tool_use name that the edit ledger can dedup against.
+_LLM_EDIT_TOOL_NAME = "mcp__llm_router__llm_edit"
 
 OUTCOME_USED = "used"
 OUTCOME_REDO = "redo"
@@ -278,6 +348,35 @@ def _load_sources_module():
 
 
 _SOURCES = _load_sources_module()
+
+
+# scripts/northstar/edit_survival.py is the repo's own owner of the
+# applied-row -> survived/redone/unknown git-history judgement (see its
+# module docstring's METHOD section). Imported by path for the same reason
+# as _load_sources_module above: it lives outside src/ and this module must
+# not re-derive its own copy of "did a later commit touch this file."
+def _load_edit_survival_module():
+    import importlib.util
+    import sys as _sys
+    here = Path(__file__).resolve().parents[2]  # repo root from src/llm_router/
+    cand = here / "scripts" / "northstar" / "edit_survival.py"
+    if not cand.exists():
+        return None
+    name = "_ns_edit_survival"
+    if name in _sys.modules:
+        return _sys.modules[name]
+    spec = importlib.util.spec_from_file_location(name, cand)
+    mod = importlib.util.module_from_spec(spec)
+    _sys.modules[name] = mod
+    try:
+        spec.loader.exec_module(mod)  # type: ignore[union-attr]
+    except Exception:  # noqa: BLE001 — never fail import over an optional reuse
+        _sys.modules.pop(name, None)
+        return None
+    return mod
+
+
+_EDIT_SURVIVAL = _load_edit_survival_module()
 
 
 @dataclass
@@ -538,16 +637,189 @@ def _judge_direct_units(units: list[Unit], records: list[dict]) -> None:
             u.outcome, u.signal, u.confidence = OUTCOME_USED, "zero_claude_stood", "medium"
 
 
+# ── llm_edit ledger (#181): richer routed_edit units ────────────────────────
+
+def _edit_outcomes_path() -> Path:
+    # Literal filename, same pattern as _debug_log_path above: LEDGER_FILENAME
+    # in edit_ledger.py is this string's own source of truth ("edit_outcomes.jsonl").
+    return paths.state_path("edit_outcomes.jsonl")
+
+
+def _load_edit_outcomes() -> list[dict]:
+    """All rows of ``edit_outcomes.jsonl`` (session/day filtering happens by
+    the caller, same pattern as ``_parse_debug_log``)."""
+    path = _edit_outcomes_path()
+    rows: list[dict] = []
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return rows
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(row, dict):
+            rows.append(row)
+    return rows
+
+
+def _judge_edit_row(row: dict) -> tuple[str, str]:
+    """(outcome, signal) for one edit_outcomes.jsonl row, using the SAME
+    applied/survived logic as ``scripts/northstar/edit_survival.py`` — not a
+    second copy of it (see ``_load_edit_survival_module``)."""
+    if not row.get("applied"):
+        return OUTCOME_DISCARDED, "edit_ledger_not_applied"
+    if _EDIT_SURVIVAL is None:
+        return OUTCOME_UNKNOWN, "edit_ledger_survival_unavailable"
+    verdict = _EDIT_SURVIVAL.judge_row(row)
+    if verdict.verdict == "survived":
+        return OUTCOME_USED, "edit_ledger_survived"
+    if verdict.verdict == "redone":
+        return OUTCOME_REDO, "edit_ledger_redone"
+    return OUTCOME_UNKNOWN, "edit_ledger_unresolved"  # verdict.verdict == "unknown"
+
+
+def _fold_edit_ledger(su: SessionUnits, edit_call_units: list[Unit], rows: list[dict]) -> None:
+    """Turn this session's edit_outcomes.jsonl rows into routed_edit units,
+    and drop the generic routed_mcp unit for any llm_edit tool_use a row
+    matched — see the module docstring's DEDUP section for the join key.
+
+    ``edit_call_units`` are the UNIT_ROUTED_MCP Unit objects already appended
+    to ``su.units`` for ``mcp__llm_router__llm_edit`` tool_use blocks in this
+    (raw, pre-fold) session's own transcript file.
+    """
+    matched_call_ids: set[int] = set()
+    for row in rows:
+        row_ts = row.get("ts")
+        if not isinstance(row_ts, (int, float)):
+            row_ts = None
+        best: Unit | None = None
+        if row_ts is not None:
+            for call in edit_call_units:
+                if call.ts is None or call.ts > row_ts:
+                    continue
+                if row_ts - call.ts > EDIT_LEDGER_JOIN_WINDOW_S:
+                    continue
+                if best is None or call.ts > best.ts:  # type: ignore[operator]
+                    best = call
+        outcome, signal = _judge_edit_row(row)
+        su.units.append(Unit(
+            kind=UNIT_ROUTED_EDIT, session_id=su.session_id, ts=row_ts,
+            outcome=outcome, signal=signal,
+            confidence="high" if outcome != OUTCOME_UNKNOWN else "medium",
+            task_type="code", model=row.get("model"),
+        ))
+        if best is not None:
+            matched_call_ids.add(id(best))
+    if matched_call_ids:
+        su.units[:] = [u for u in su.units if id(u) not in matched_call_ids]
+
+
+# ── agent-route Codex delegation ledger (#184): agent_route_codex units ────
+
+def _north_star_units_path() -> Path:
+    return paths.state_path("north_star_units.jsonl")
+
+
+def _load_north_star_ledger() -> list[dict]:
+    """All rows of ``north_star_units.jsonl`` (``hooks/agent-route.py``'s
+    ``_record_north_star_unit``). Same read pattern as ``_load_edit_outcomes``."""
+    path = _north_star_units_path()
+    rows: list[dict] = []
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return rows
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(row, dict):
+            rows.append(row)
+    return rows
+
+
+_CODEX_ATTEMPT_OUTCOMES = {
+    "delegated": (OUTCOME_USED, "agent_route_codex_delegated"),
+    "codex_failed": (OUTCOME_DISCARDED, "agent_route_codex_failed"),
+}
+
+
+def _agent_route_codex_units_for_session(sid: str, rows: list[dict]) -> list[Unit]:
+    """One unit per north_star_units.jsonl row for THIS session whose
+    recorded outcome reflects an actual Codex invocation (see the module
+    docstring's kind description for why decision-only rows — unsuitable,
+    budget_exhausted, codex_unavailable — are skipped, not counted)."""
+    units: list[Unit] = []
+    for row in rows:
+        if row.get("session_id") != sid or row.get("lever") != "agent_route_codex":
+            continue
+        mapped = _CODEX_ATTEMPT_OUTCOMES.get(row.get("outcome"))
+        if mapped is None:
+            continue
+        outcome, signal = mapped
+        units.append(Unit(
+            kind=UNIT_AGENT_ROUTE_CODEX, session_id=sid, ts=row.get("ts"),
+            outcome=outcome, signal=signal, confidence="high",
+            task_type=row.get("task_type"), model=row.get("model") or None,
+        ))
+    return units
+
+
 # ── sub-agent join ──────────────────────────────────────────────────────────
 
 def _load_agent_calls() -> list[dict]:
+    """Union of ``agent_calls.json`` (50-cap) and ``agent_calls_ledger.jsonl``
+    (30-day append-only) — see the module docstring's JOIN section for why
+    the ledger is unioned in. Deduplicated on ``(session_id, timestamp,
+    prompt)``: both files are appended from the identical entry dict at spawn
+    time (``hooks/agent-route.py``'s ``_log_agent_call``), and neither carries
+    any other id.
+    """
+    calls: list[dict] = []
+    seen: set[tuple] = set()
+
+    def _add_all(entries) -> None:
+        for c in entries:
+            if not isinstance(c, dict):
+                continue
+            key = (c.get("session_id"), c.get("timestamp"), c.get("prompt"))
+            if key in seen:
+                continue
+            seen.add(key)
+            calls.append(c)
+
     p = paths.state_path("agent_calls.json")
     try:
         data = json.loads(p.read_text(encoding="utf-8"))
+        _add_all(data.get("calls") if isinstance(data, dict) else [])
     except (OSError, ValueError):
-        return []
-    calls = data.get("calls") if isinstance(data, dict) else None
-    return calls if isinstance(calls, list) else []
+        pass
+
+    lp = paths.state_path("agent_calls_ledger.jsonl")
+    try:
+        lines = lp.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        lines = []
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        _add_all([row])
+
+    return calls
 
 
 def _norm(s: str) -> str:
@@ -618,6 +890,8 @@ def build_sessions(days: int | None, root: Path | None = None,
     files = _session_files(root)
     agent_calls = _load_agent_calls()
     debug_records = _parse_debug_log()
+    edit_outcome_rows = _load_edit_outcomes()
+    codex_ledger_rows = _load_north_star_ledger()
 
     per_session: dict[str, SessionUnits] = {}
     parent_of: dict[str, str] = {}  # child session_id -> parent session_id
@@ -664,6 +938,7 @@ def build_sessions(days: int | None, root: Path | None = None,
         skip_first_user = is_child  # dispatch prompt is not a human user_prompt
 
         first_user_seen = False
+        edit_call_units: list[Unit] = []
         for obj in records:
             if obj.get("type") == "user":
                 text, _results = _user_text_and_tool_results(obj)
@@ -687,11 +962,14 @@ def build_sessions(days: int | None, root: Path | None = None,
                     if not name.startswith("mcp__llm_router__"):
                         continue
                     tool_input = tu.get("input") if isinstance(tu.get("input"), dict) else {}
-                    su.units.append(Unit(
+                    mcp_unit = Unit(
                         kind=UNIT_ROUTED_MCP, session_id=target_sid, ts=_ts_of(obj),
                         outcome=OUTCOME_UNKNOWN,
                         task_type=tool_input.get("task") if isinstance(tool_input, dict) else None,
-                    ))
+                    )
+                    su.units.append(mcp_unit)
+                    if name == _LLM_EDIT_TOOL_NAME:
+                        edit_call_units.append(mcp_unit)
 
         _judge_routed_mcp(su, records)
 
@@ -699,6 +977,12 @@ def build_sessions(days: int | None, root: Path | None = None,
         _fill_unresolved_drafts_from_transcript(draft_units, assistant_turns)
         _judge_direct_units(draft_units, records)
         su.units.extend(draft_units)
+
+        su.units.extend(_agent_route_codex_units_for_session(sid, codex_ledger_rows))
+
+        edit_rows_for_sid = [r for r in edit_outcome_rows if r.get("session_id") == sid]
+        if edit_rows_for_sid:
+            _fold_edit_ledger(su, edit_call_units, edit_rows_for_sid)
 
     if session_id:
         per_session = {k: v for k, v in per_session.items() if k == session_id}
