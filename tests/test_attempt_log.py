@@ -70,11 +70,11 @@ def test_failure_reasons_map_to_outcomes(monkeypatch, reason, expected):
 
 
 def test_a_rejected_answer_is_not_counted_as_a_timeout(monkeypatch):
-    _patch_call(monkeypatch, lambda p, m, t, h, s: ("no", {}))
+    _patch_call(monkeypatch, lambda p, m, t, h, s: ("<think>hmm</think>", {}))
     execute_chain("q", [ModelSpec("ollama", "slow:latest")], "query", timeout=40)
     rows = _rows()
     assert rows and rows[0]["outcome"] == attempt_log.REJECTED, (
-        "a short answer is a quality problem, not a latency one; conflating them "
+        "a junk answer is a quality problem, not a latency one; conflating them "
         "would demote a fast model for the wrong reason"
     )
 

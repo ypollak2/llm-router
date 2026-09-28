@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
 import urllib.request
 from dataclasses import dataclass
@@ -432,9 +433,24 @@ def call_openai(
 
 # ── Quality Gate ─────────────────────────────────────────────────────────────
 
+# Reasoning blocks (closed, or left open by a truncated call) and bare markup tags.
+_THINK_RE = re.compile(r"<think>.*?(</think>|$)", re.DOTALL | re.IGNORECASE)
+_TAG_RE = re.compile(r"</?[A-Za-z][\w-]*[^>]*>")
+
+
 def quality_ok(response: str, task_type: str) -> bool:
-    """Basic quality gate — reject garbage responses before returning to user."""
-    if not response or len(response.strip()) < 10:
+    """Basic quality gate — reject garbage responses before returning to user.
+
+    The floor is "some real content survives once reasoning blocks and markup
+    are removed", not a length. A 10-char floor rejected every terse correct
+    answer ("42", "Indices.") — all 15 such queries in the 2026-09-28 golden
+    probe (n=150), on all 6 attempts each — while letting tag-only junk such as
+    "<think></think>" through.
+    """
+    if not response:
+        return False
+    visible = _TAG_RE.sub("", _THINK_RE.sub("", response))
+    if not any(ch.isalnum() for ch in visible):
         return False
     # Model refused or is confused
     refusal_phrases = ("i cannot", "i can't", "as an ai", "i don't have")

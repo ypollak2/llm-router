@@ -55,12 +55,52 @@ def test_classify_recognises_edit_shaped_prompts(prompt):
     assert result.files
 
 
-def test_classify_rejects_prompt_with_no_named_file():
-    """'add a docstring to bar()' names a symbol, not a file — conservative
-    by design: without a file this module has nothing safe to resolve."""
-    result = zce.classify_edit_prompt("add a docstring to bar()")
+def test_classify_rejects_prompt_with_no_named_file_or_identifier():
+    """No literal file AND no code-shaped identifier -> nothing to resolve."""
+    result = zce.classify_edit_prompt("fix the redis checkpoint first")
     assert not result.is_edit
     assert result.files == ()
+    assert result.symbols == ()
+
+
+@pytest.mark.parametrize(
+    "prompt, expected",
+    [
+        ("add a docstring to bar()", "bar"),
+        ("count_vowels ignores uppercase, fix it", "count_vowels"),
+        ("fix `normalize` so it strips whitespace", "normalize"),
+        ("the ScopedEditOutcome dataclass should be frozen, change it", "ScopedEditOutcome"),
+    ],
+)
+def test_classify_extracts_identifiers_when_no_file_is_named(prompt, expected):
+    """Real users name a function/class more often than a path: the
+    classifier hands those identifiers on for repo resolution."""
+    result = zce.classify_edit_prompt(prompt)
+    assert result.is_edit, result.reason
+    assert result.files == ()
+    assert expected in result.symbols
+
+
+def test_classify_ignores_plain_english_words_as_identifiers():
+    """Only code-shaped names (snake_case, camelCase, call-shaped, backticked)
+    are candidates — a plain word like 'checkpoint' is not."""
+    result = zce.classify_edit_prompt("fix the checkpoint logic please")
+    assert result.symbols == ()
+
+
+@pytest.mark.parametrize(
+    "prompt",
+    [
+        "what does count_vowels do?",
+        "why is count_vowels failing on uppercase input? should we fix it",
+        "I think count_vowels might be wrong - could you fix it or is it fine?",
+    ],
+)
+def test_classify_question_mentioning_function_is_not_edit(prompt):
+    """A question that mentions a function is a question, not a change
+    request — never resolved to a file and edited."""
+    result = zce.classify_edit_prompt(prompt)
+    assert not result.is_edit, result.reason
 
 
 def test_classify_rejects_questions():
@@ -160,6 +200,100 @@ def test_dirty_files_empty_for_clean_tree(tmp_path):
     _commit_all(repo, "init")
 
     assert zce.dirty_files(repo, ["foo.py"]) == []
+
+
+# ── unit tests: symbol / bare-filename resolution ────────────────────────────
+
+
+def _symbol_repo(tmp_path: Path, files: dict[str, str]) -> Path:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _init_repo(repo)
+    for rel, text in files.items():
+        (repo / rel).parent.mkdir(parents=True, exist_ok=True)
+        (repo / rel).write_text(text)
+    _commit_all(repo, "init")
+    return repo
+
+
+def test_resolve_symbol_unique_definition(tmp_path):
+    """The defining file wins; a test file that only CALLS the function is
+    not a definition and does not make it ambiguous."""
+    repo = _symbol_repo(tmp_path, {
+        "pkg/mod07.py": "def count_vowels(s):\n    return 0\n",
+        "tests/test_mod07.py": "from pkg.mod07 import count_vowels\nassert count_vowels('a') == 1\n",
+    })
+    files, reason = zce.resolve_symbol_targets(("count_vowels",), repo)
+    assert files == ["pkg/mod07.py"], reason
+    assert "count_vowels" in reason
+
+
+def test_resolve_symbol_class_definition(tmp_path):
+    repo = _symbol_repo(tmp_path, {"a/models.py": "class Widget:\n    pass\n"})
+    files, _ = zce.resolve_symbol_targets(("Widget",), repo)
+    assert files == ["a/models.py"]
+
+
+def test_resolve_symbol_ambiguous_falls_through(tmp_path):
+    """Defined in two files -> refuse to guess. A wrong-file edit is worse
+    than a fallthrough."""
+    repo = _symbol_repo(tmp_path, {
+        "a.py": "def normalize(x):\n    return x\n",
+        "b.py": "def normalize(y):\n    return y\n",
+    })
+    files, reason = zce.resolve_symbol_targets(("normalize",), repo)
+    assert files == []
+    assert "ambiguous" in reason
+
+
+def test_resolve_symbol_one_ambiguous_name_poisons_the_set(tmp_path):
+    """Even when another name is unique, one ambiguous name means we do not
+    know which file the user meant."""
+    repo = _symbol_repo(tmp_path, {
+        "a.py": "def normalize(x):\n    return x\n\ndef only_here():\n    pass\n",
+        "b.py": "def normalize(y):\n    return y\n",
+    })
+    files, reason = zce.resolve_symbol_targets(("only_here", "normalize"), repo)
+    assert files == []
+    assert "ambiguous" in reason
+
+
+def test_resolve_symbol_more_than_three_files_falls_through(tmp_path):
+    repo = _symbol_repo(tmp_path, {
+        f"m{i}.py": f"def fn_{i}():\n    pass\n" for i in range(4)
+    })
+    files, reason = zce.resolve_symbol_targets(tuple(f"fn_{i}" for i in range(4)), repo)
+    assert files == []
+    assert "too broad" in reason
+
+
+def test_resolve_symbol_not_defined_anywhere(tmp_path):
+    repo = _symbol_repo(tmp_path, {"a.py": "x = 1\n"})
+    files, reason = zce.resolve_symbol_targets(("count_vowels",), repo)
+    assert files == []
+    assert "no definition" in reason
+
+
+def test_resolve_symbol_ignores_untracked_files(tmp_path):
+    """git grep over TRACKED files only — a scratch file is not a target."""
+    repo = _symbol_repo(tmp_path, {"a.py": "x = 1\n"})
+    (repo / "scratch.py").write_text("def count_vowels(s):\n    return 0\n")
+    files, _ = zce.resolve_symbol_targets(("count_vowels",), repo)
+    assert files == []
+
+
+def test_resolve_bare_filename_to_unique_tracked_path(tmp_path):
+    repo = _symbol_repo(tmp_path, {"src/pkg/helpers.py": "x = 1\n"})
+    resolved, problems = zce.resolve_target_files(("helpers.py",), repo)
+    assert resolved == ["src/pkg/helpers.py"]
+    assert problems == []
+
+
+def test_resolve_bare_filename_ambiguous_is_dropped(tmp_path):
+    repo = _symbol_repo(tmp_path, {"a/helpers.py": "x = 1\n", "b/helpers.py": "y = 2\n"})
+    resolved, problems = zce.resolve_target_files(("helpers.py",), repo)
+    assert resolved == []
+    assert problems == []
 
 
 # ── end-to-end hook scenarios ────────────────────────────────────────────────
@@ -363,3 +497,58 @@ def test_claude_prefix_bypasses(tmp_path, repo, stub_ollama):
     )
     assert "ZERO_CLAUDE_EDIT" not in json.dumps(out)
     assert (repo / "foo.py").read_text() == before
+
+
+def test_symbol_only_prompt_is_resolved_applied_and_names_the_target(tmp_path, repo, stub_ollama):
+    """No path in the prompt: the function name resolves to foo.py (its unique
+    definition), the edit is applied, and the block message says which file
+    was inferred from which name."""
+    out = _run(
+        "old_name is a bad name, rename it to new_name", tmp_path, repo, stub_ollama,
+        extra_env={"LLM_ROUTER_ZERO_CLAUDE_SCOPE": "edit"},
+    )
+    assert out is not None and out.get("decision") == "block"
+    reason = out.get("reason", "")
+    assert "ZERO_CLAUDE_EDIT APPLIED" in reason
+    assert "old_name -> foo.py" in reason
+    assert (repo / "foo.py").read_text() == "def new_name():\n    pass\n"
+
+
+def test_symbol_only_prompt_ambiguous_falls_through(tmp_path, repo, stub_ollama):
+    (repo / "bar.py").write_text("def old_name():\n    return 1\n")
+    _commit_all(repo, "second definition")
+    before = (repo / "foo.py").read_text()
+    out = _run(
+        "old_name is a bad name, rename it to new_name", tmp_path, repo, stub_ollama,
+        extra_env={"LLM_ROUTER_ZERO_CLAUDE_SCOPE": "edit"},
+    )
+    assert "ZERO_CLAUDE_EDIT" not in json.dumps(out)
+    assert (repo / "foo.py").read_text() == before
+    assert not _StubOllama.calls
+    logs = list((tmp_path / ".llm-router").glob("auto-route-debug*.log"))
+    assert logs and "ambiguous" in "".join(p.read_text() for p in logs)
+
+
+def test_symbol_only_prompt_dirty_target_falls_through(tmp_path, repo, stub_ollama):
+    (repo / "foo.py").write_text("def old_name():\n    pass\n# wip\n")
+    out = _run(
+        "old_name is a bad name, rename it to new_name", tmp_path, repo, stub_ollama,
+        extra_env={"LLM_ROUTER_ZERO_CLAUDE_SCOPE": "edit"},
+    )
+    assert "ZERO_CLAUDE_EDIT" not in json.dumps(out)
+    assert (repo / "foo.py").read_text().endswith("# wip\n")
+
+
+def test_classify_long_prompt_does_not_infer_from_identifiers():
+    """A pasted spec/log that happens to contain a class name and an edit
+    verb is not a request to edit that class's file."""
+    prompt = "implement this, see ModelCapability notes. " + "context line. " * 30
+    result = zce.classify_edit_prompt(prompt)
+    assert not result.is_edit
+    assert "too long" in result.reason
+
+
+def test_resolve_bare_filename_not_inferred_when_disabled(tmp_path):
+    repo = _symbol_repo(tmp_path, {"src/pkg/helpers.py": "x = 1\n"})
+    resolved, _ = zce.resolve_target_files(("helpers.py",), repo, infer_bare=False)
+    assert resolved == []
