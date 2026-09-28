@@ -970,6 +970,7 @@ def _is_introspection_task(prompt: str) -> bool:
 
 _COORDINATE_VERBS = re.compile(
     r"\b(coordinate|orchestrate|delegate(?:\s+to)?|dispatch|spawn|"
+    r"spin[\s-]?up|kick[\s-]?off|stand[\s-]?up|"
     r"fan[\s-]?out|parallel(?:ize|ise)|split\s+(?:the\s+)?work|"
     r"divide\s+(?:the\s+)?(?:work|tasks?))\b",
     re.IGNORECASE,
@@ -980,18 +981,306 @@ _COORDINATE_TARGETS = re.compile(
     re.IGNORECASE,
 )
 
+# Golden-probe finding (routing-golden-v1, 2026-09-28): the verb+target pair
+# above only catches literal "spawn agents"-style prompts — 11 of 12
+# constructed `coordinate` cases in that probe were routed and answered by a
+# local model anyway, because they don't mention "agents" at all. They fall
+# into three shapes a stateless routed model structurally cannot answer:
+#
+#   1. SESSION-STATE reference — "this session", "we discussed", "where we
+#      left off", "yesterday's session". The answer lives in the
+#      conversation itself, which the routed model never sees.
+#   2. RECENT-HISTORY reference — "my last three commits", "the last three
+#      PRs I opened", "before my last edit". Resolving "last three" means
+#      reading the user's actual git/GitHub state; a routed model would
+#      have to fabricate which commits/PRs those are.
+#   3. CONTINUATION anaphora — "do the same thing for the rest of the
+#      modules" — "the same thing" points at an antecedent action only
+#      visible earlier in the conversation.
+#   4. CROSS-SYSTEM / MULTI-STEP orchestration — "coordinate ... across the
+#      auth service, the billing service, and the frontend repo", "merge
+#      them and redeploy", "roll out ... to every environment ... and
+#      report back after each". Multiple real operations chained with
+#      "and", not a single answerable question.
+#   5. AMBIENT status/continuation checks — bare "status?", "keep going",
+#      "check the running agent". These ask about ongoing/background work;
+#      nothing in the bare text is enough for even a routed model with
+#      context to answer, since there IS no text-only context to hand it.
+#
+# Each pattern below is its own, narrowly-scoped signal (not merged into one
+# giant alternation) so a future false-positive can be traced to, and fixed
+# in, exactly one of them.
+
+_COORDINATE_SESSION_RE = re.compile(
+    # Bare "this/that/our session" is ambiguous with introspection ("what did
+    # I route this session" is a LOCAL routing-state question, not a
+    # reference to conversation content) — so "session" only counts here
+    # when it carries an explicit possessive, either on the session itself
+    # ("this session's approach") or on what precedes it ("yesterday's
+    # session"). "conversation" has no such local-state reading, so it
+    # counts bare.
+    r"\b(?:this|that|our)\s+session's\b|"
+    r"\b(?:this|that|our|yesterday|previous|earlier|prior|last)'s\s+"
+    r"(?:session|conversation)\b|"
+    r"\b(?:this|that|our)\s+conversation\b|"
+    r"\bwe (?:discussed|decided|agreed(?:\s+on)?)\b|"
+    r"\bwhere we left off\b",
+    re.IGNORECASE,
+)
+
+_COORDINATE_HISTORY_RE = re.compile(
+    r"\b(?:my|the) last (?:\d+|one|two|three|four|five|few|couple(?:\s+of)?)\s+"
+    r"(?:commits?|prs?|pull requests?|edits?|changes?|files?)\b|"
+    r"\bbefore my last (?:edit|change|commit)\b|"
+    r"\b(?:prs?|pull requests?) (?:i|I) (?:opened|made|created|submitted)\b",
+    re.IGNORECASE,
+)
+
+_COORDINATE_SAME_THING_RE = re.compile(
+    r"\b(?:the\s+)?same (?:thing|fix|change|approach|logic|pattern)\b", re.IGNORECASE
+)
+_COORDINATE_REMAINDER_RE = re.compile(
+    r"\b(?:the\s+)?(?:rest|other|others|remaining)\b", re.IGNORECASE
+)
+
+_COORDINATE_CROSS_SYSTEM_RE = re.compile(
+    r"\b(?:coordinate|orchestrate)\b(?:(?!\.).){0,80}?\bacross\b(?:(?!\.).){0,120}?"
+    r"\b(?:services?|repos?|repositories?|teams?|environments?)\b",
+    re.IGNORECASE | re.DOTALL,
+)
+
+_COORDINATE_MULTISTEP_RE = re.compile(
+    r"\b(?:merge|deploy|redeploy|release|rebase|roll(?:ing)?\s+out|push|publish)\b"
+    r"(?:(?!\.).){0,40}?\band\b(?:(?!\.).){0,40}?"
+    r"\b(?:redeploy|deploy|merge|release|report\s+back|resolve)\b",
+    re.IGNORECASE | re.DOTALL,
+)
+
+# Bare ambient status/continuation checks. Gated to <=6 WORDS (not just a
+# regex anchor) so a substantive prompt that happens to open with "status"
+# or "continue" ("continue refactoring the parser to support OAuth") is
+# never caught — only content-free fragments are.
+_COORDINATE_AMBIENT_RE = re.compile(
+    r"^(?:status\??|(?:what'?s|what\s+is)\s+(?:the\s+)?status\??|"
+    r"any\s+(?:updates?|progress)\??|how'?s\s+it\s+going\??|"
+    r"keep\s+(?:on\s+)?going\.?|"
+    r"check\s+(?:on\s+|in\s+on\s+)?(?:the\s+)?(?:running\s+)?agents?\.?|"
+    r"check\s+(?:the\s+)?agent'?s?\s+(?:status|progress)\.?)$",
+    re.IGNORECASE,
+)
+
+# ── Held-out finding (2026-09-28, real traffic): the patterns above were
+# tuned against a 10-example CONSTRUCTED set and scored 0/63 recall on a
+# hand-labelled sample of this machine's own real short prompts (via
+# scripts/groundtruth/extract_corpus.py + triage.py, scrubbed). Real
+# session-status/continuation prompts almost never use the constructed set's
+# vocabulary ("keep going, report when the spike is done", "what's left for
+# me", "did you update the readme", "merge it when tests pass") — they are
+# terse and conversational, not the clean sentences a model writes when
+# asked to construct examples.
+#
+# scripts/groundtruth/triage.py already solves an adjacent problem — "can
+# this prompt stand alone without conversation history" — and its
+# SESSION_BOUND / CONTINUATION / DEICTIC regexes were themselves tuned
+# against this same real-traffic shape (see that module's docstring). The
+# three patterns below are ported from it (not imported: that script lives
+# outside the installable package and the plugin bundle ships only
+# hooks/*.py), because reusing empirically-validated patterns beats
+# re-deriving new ones from a handful of constructed examples — the exact
+# mistake being fixed here.
+#
+# Gated to <=12 words (the shape this was measured on); a long prompt that
+# happens to contain "what's left" or open with "so" is essentially never
+# one of these bare shapes.
+
+# Status/progress query with no independently resolvable subject: "what's
+# left", "what do we have left", "next steps", "did you push", "current
+# state", "phase/attempt/slice/option #N" (a session-local milestone name,
+# not a lookup), "where we/things at", "status of X", "the audit's
+# findings" (a specific-but-unnamed prior artefact).
+_COORDINATE_STATUS_RE = re.compile(
+    # "did/have/has (you/we)" only — NOT "do" and NOT "I". "did you push" /
+    # "have we finished" are reliably session-status questions on real
+    # traffic; "do I"/"do we" are not ("how DO I run this app?", "what DO
+    # we need to configure?" are ordinary, self-contained how-to questions
+    # and were a real regression here, caught by test_context_aware_routing
+    # .py's existing "how do I run this app" pin).
+    r"\b(?:did|have|has)\s+(?:you|we)\b"
+    r"|\byou\s+(?:already|just|earlier|previously|forgot|missed)\b"
+    r"|\bwhat(?:'s|\s+is|\s+are|\s+has|s)?\s+(?:left|next|missing|the\s+status|"
+    r"up\s+with|remain\w*|the\s+current\s+state)\b"
+    r"|\b(?:anything|something|what|how\s+much|how\s+many)\s+(?:else\s+)?"
+    r"(?:is\s+|do\s+we\s+|we\s+)?(?:have\s+)?(?:left|remain\w*|missing|to\s+(?:do|cover|go))\b"
+    # "current state" excludes a following "of <topic>" — "the current
+    # state" (bare, session-referential) vs "current state of AI in 2026"
+    # (a research topic; regression caught by test_gaps_phase1.py's
+    # existing temporal-research pin).
+    r"|\b(?:next\s+steps?|current\s+state(?!\s+of\b)|the\s+status|status\s+of|"
+    r"so\s+far|until\s+now|till\s+now|where\s+(?:we|things)\s+at)\b"
+    r"|\b(?:attempt|round|run|phase|step|slice|task|iteration|option)\s*#?\s*\d+\b",
+    re.IGNORECASE,
+)
+
+# Opens with an acknowledgement/discourse filler ("ok", "yes", "now", "so",
+# "let's", "keep going", ...). Ambient UNLESS the remainder both names a
+# concrete, independently-resolvable target (see _COORDINATE_CONCRETE_
+# ANCHOR_RE below) and is long enough to be a real task on its own —
+# mirrors triage.CONTINUATION's own remainder check.
+_COORDINATE_CONTINUATION_OPENER_RE = re.compile(
+    r"^(?:ok(?:ay)?|yes|yep|no|nope|sure|go|going|continue|cont|next|proceed|"
+    r"do\s+it|carry\s+on|keep\s+(?:on\s+)?going|now|then|also|and|but|so|"
+    r"great|perfect|cool|nice|good|thanks|thank\s+you|stop|wait|hold\s+on|"
+    r"again|more|another|let'?s|lets)\b[\s,.:;!?-]*",
+    re.IGNORECASE,
+)
+
+# A bare, unresolved pronoun/deictic subject with nothing else anchoring it:
+# "it", "them", "the rest", "the same", "the plan", "the audit/report/demo/
+# findings" (a specific-but-unnamed prior artefact), and "this"/"that"/
+# "these"/"those" ONLY when used as a standalone pronoun (followed by a
+# copula/auxiliary, punctuation, or end-of-string — "this IS...", "is that
+# it?") rather than as an ordinary determiner introducing a same-sentence
+# noun ("this LOOP", "that ORDER", "a function THAT serializes..."), which
+# real traffic (tune half, 2026-09-28) showed is by far the more common use
+# and cost precision for no matching recall gain when included unconditionally.
+_COORDINATE_DEMONSTRATIVE_BARE_RE = re.compile(
+    r"(?<![\w-])(?:this|that|these|those)(?=\s*(?:is\b|was\b|were\b|should\b|"
+    r"would\b|needs?\b|means?\b|works?\b|worked\b|helps?\b|happens?\b|"
+    r"happened\b|breaks?\b|broke\b|fail(?:s|ed)?\b|'s\b|,|\.|\?|!|$))",
+    re.IGNORECASE,
+)
+_COORDINATE_DEICTIC_RE = re.compile(
+    r"(?<![\w-])(?:it|its|it'?s|them|there"
+    r"|the\s+rest|the\s+same|the\s+above|the\s+below"
+    r"|(?:the|our|your)\s+(?:plan|audit|report|presentation|demo|results?|"
+    r"findings?))(?![\w-])",
+    re.IGNORECASE,
+)
+
+# A concretely-resolvable target: a multi-segment path, a filename with a
+# code/doc extension, a src/tests/docs path, a PR/issue number, or a version
+# tag. Its presence means the prompt names something a tool-capable agent —
+# routed or not — can look up directly, so a bare deictic/continuation
+# elsewhere in the SAME prompt no longer makes it unanswerable. Deliberately
+# does NOT include a bare number on its own ("101", "76") — measured on the
+# tune half of a real-prompt sample: an unrelated number (a percentage, a
+# score threshold) elsewhere in the sentence falsely anchored a genuinely
+# unresolved "it"/"that".
+_COORDINATE_CONCRETE_ANCHOR_RE = re.compile(
+    r"(?:/[\w.@-]+){2,}"
+    r"|\b[\w-]+\.(?:py|ts|tsx|js|jsx|md|json|ya?ml|toml|sh|sql|rs|go|txt|cfg|ini)\b"
+    r"|\b(?:src|tests?|scripts?|docs?)/[\w./-]+"
+    r"|#\d{1,6}\b"
+    r"|\bv?\d+\.\d+(?:\.\d+)?\b"
+    r"|\bREADME\b|\bCHANGELOG\b|\bPLAN\.\w+\b",
+    re.IGNORECASE,
+)
+
+# An operational verb applied to a bare pronoun with no named object of its
+# own: "merge it", "merge it when tests pass", "merge them and redeploy".
+# Deliberately narrow — just the verbs actually seen needing this in the
+# golden probe and the defect report. "commit it" / "push it" / "tag it" are
+# NOT included: real traffic showed these are ordinary git shorthand for
+# "whatever is currently staged", not a reference needing conversation
+# history (measured on the tune half of a real-prompt sample, 2026-09-28 —
+# including "commit/push it" cost 7 points of precision for one recall gain
+# that _COORDINATE_MULTISTEP_RE already covered).
+_COORDINATE_BARE_OP_PRONOUN_RE = re.compile(
+    r"\b(?:merge|deploy|redeploy)\s+(?:it|this|that|them|these|those)\b",
+    re.IGNORECASE,
+)
+
+# "commit"/"push" specifically. Their presence suppresses the generic
+# deictic check below: "commit it", "push it once the check passes", "commit
+# these too once the suite is clean" read as ambiguous in isolation, but
+# real traffic showed these are routine shorthand for "the currently
+# staged/discussed changes" — not a reference that needs conversation
+# history the way "what's left" or "merge it when tests pass" does.
+# Deliberately narrower than the full operational-verb set: "merge"/
+# "deploy"/"redeploy" are NOT here, because their bare-pronoun form ("merge
+# it") is exactly the ambient shape ``_COORDINATE_BARE_OP_PRONOUN_RE`` above
+# is meant to catch, and it is checked unconditionally before this branch.
+_COORDINATE_OP_VERB_RE = re.compile(r"\b(?:commit|push)\b", re.IGNORECASE)
+
+# States a real, self-sufficient task ("write the plan doc", "explain the
+# tradeoffs") — used only to decide whether a continuation opener's
+# remainder is a real task or still just filler.
+_COORDINATE_IMPERATIVE_OBJECT_RE = re.compile(
+    r"\b(?:write|create|build|implement|generate|summar\w+|translate|"
+    r"classify|explain|compare|analy[sz]e|calculate|compute|convert|extract|"
+    r"list|rewrite|draft|design|recommend|evaluate|rank|score|solve|prove)\b",
+    re.IGNORECASE,
+)
+
 
 def _is_coordination_task(prompt: str) -> bool:
-    """Return True when the prompt asks for multi-agent orchestration.
+    """Return True when the prompt needs Claude's own session/local state
+    rather than a stateless routed model — multi-agent orchestration, or one
+    of the session-state / recent-history / continuation / cross-system /
+    ambient-status shapes documented above.
 
-    Requires an orchestration verb AND an agent-like target so that
-    "spawn a background process" (code) and "what's a subagent?" (query)
-    still route normally.
+    The original verb+target pairing requires BOTH signals so that "spawn a
+    background process" (code) and "what's a subagent?" (query) still route
+    normally. The newer shapes are each independently sufficient — they were
+    added because the golden probe showed the verb+target pair alone misses
+    the large majority of real "stay on Claude" prompts.
     """
-    return bool(
-        _COORDINATE_VERBS.search(prompt)
-        and _COORDINATE_TARGETS.search(prompt)
-    )
+    if _COORDINATE_VERBS.search(prompt) and _COORDINATE_TARGETS.search(prompt):
+        return True
+    if _COORDINATE_SESSION_RE.search(prompt):
+        return True
+    if _COORDINATE_HISTORY_RE.search(prompt):
+        return True
+    if _COORDINATE_SAME_THING_RE.search(prompt) and _COORDINATE_REMAINDER_RE.search(prompt):
+        return True
+    if _COORDINATE_CROSS_SYSTEM_RE.search(prompt):
+        return True
+    if _COORDINATE_MULTISTEP_RE.search(prompt):
+        return True
+    if _COORDINATE_BARE_OP_PRONOUN_RE.search(prompt):
+        return True
+    stripped = prompt.strip()
+    words = stripped.split()
+    if len(words) <= 6 and _COORDINATE_AMBIENT_RE.match(stripped):
+        return True
+
+    # Real-traffic shapes (see the block comment above _COORDINATE_STATUS_RE):
+    # gated to <=12 words, matching what they were measured on. Excludes
+    # introspection-shaped prompts ("what did I route this session") —
+    # _COORDINATE_STATUS_RE's "did/do/have/has (you/we/i)" sub-pattern
+    # (ported from triage.py, tuned on real traffic where that shape is
+    # almost always a session-status question) also matches local-routing-
+    # state questions, which must stay on the introspection fast-path
+    # instead (checked later in classify_prompt, but this function is
+    # called standalone by tests too, so the exclusion lives here).
+    if len(words) <= 12 and not _is_introspection_task(stripped):
+        if _COORDINATE_STATUS_RE.search(stripped):
+            return True
+        opener = _COORDINATE_CONTINUATION_OPENER_RE.match(stripped)
+        if opener:
+            remainder = stripped[opener.end():].strip()
+            has_anchor = bool(_COORDINATE_CONCRETE_ANCHOR_RE.search(remainder))
+            # An imperative+object only counts as a real task when it is not
+            # itself pointing at an unnamed prior artefact ("write THE PLAN
+            # doc" still needs to know which plan).
+            unresolved_object = bool(
+                (_COORDINATE_DEICTIC_RE.search(remainder)
+                    or _COORDINATE_DEMONSTRATIVE_BARE_RE.search(remainder))
+                and not has_anchor
+            )
+            states_real_task = (
+                has_anchor
+                or (_COORDINATE_IMPERATIVE_OBJECT_RE.search(remainder)
+                    and not unresolved_object)
+            )
+            if not states_real_task:
+                return True
+        elif (not _COORDINATE_OP_VERB_RE.search(stripped)
+                and not _COORDINATE_CONCRETE_ANCHOR_RE.search(stripped)
+                and (_COORDINATE_DEICTIC_RE.search(stripped)
+                     or _COORDINATE_DEMONSTRATIVE_BARE_RE.search(stripped))):
+            return True
+    return False
 
 
 # ── Benchmark prompt fast-paths (Plan 07 Phase 3 C) ───────────────────────────
