@@ -123,6 +123,12 @@ tests/hook_rendering/
 !/docs/GROUNDING_API.md
 !/docs/decisions/
 !/docs/decisions/**
+# The opt-in per-call proxy: user-facing enablement page, and the spike that
+# is its design record (the numbers docs/proxy.md relies on).
+!/docs/proxy.md
+!/docs/spikes/
+/docs/spikes/*
+!/docs/spikes/per-call-proxy-2026-09-28.md
 # The North Star, its audit and the fix plan that comes out of it. Same
 # category as /docs/decisions/ above: a permanent record of what the repo
 # is supposed to do and where it currently doesn't, not a working note.

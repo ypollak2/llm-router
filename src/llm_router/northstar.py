@@ -94,6 +94,21 @@ A **unit** is one of eight kinds. All eight sum to the denominator.
                   attempts and produce no unit, the same way "the router chose
                   not to draft" produces no ``draft`` unit above.
 
+PROXY-SERVED TURNS (lever ``proxy``). With the opt-in per-call proxy
+(``llm_router.proxy``), Claude Code still writes every assistant turn to its
+transcript, including the ones a non-Claude model served. Those turns stay
+``claude_main_call`` (or ``sidechain_call``) units, so the denominator does not
+change, but the FIRST transcript record whose ``message.id`` matches a
+``decision == "served"`` row of ``~/.llm-router/proxy_calls.jsonl`` gets
+``lever = "proxy"``, counts as attempted, and is judged (Claude Code writes one
+record per content block; the other records of the same message stay plain
+turns, so one served call is one attempted unit) (confidence HIGH, the ids are exact):
+``used`` when every tool call it made got a non-error tool_result (or, for a
+text-only turn, the next human prompt is not an explicit ``claude:`` redo);
+``redo`` when a tool call errored or was rejected/interrupted, or the next
+human prompt is a ``claude:`` redo; ``unknown`` when a tool call has no
+result in the transcript.
+
 ``routed_mcp``, ``draft``, ``direct``, ``routed_edit`` and ``agent_route_codex``
 are **attempted routing** whether or not they were used.
 ``claude_main_call``/``sidechain_call``/``user_prompt`` are never "attempted"
@@ -403,6 +418,7 @@ class Unit:
     confidence: str | None = None
     task_type: str | None = None
     model: str | None = None
+    lever: str | None = None  # overrides the kind's lever (proxy-served turns)
 
     def to_dict(self) -> dict:
         return {
@@ -410,7 +426,7 @@ class Unit:
             "ts": (datetime.fromtimestamp(self.ts, tz=timezone.utc).isoformat()
                    if self.ts is not None else None),
             "kind": self.kind,
-            "lever": _LEVER_OF_KIND.get(self.kind, "none"),
+            "lever": self.lever or _LEVER_OF_KIND.get(self.kind, "none"),
             "task_type": self.task_type,
             "model": self.model,
             "outcome": self.outcome,
@@ -846,6 +862,55 @@ def _agent_route_codex_units_for_session(sid: str, rows: list[dict]) -> list[Uni
     return units
 
 
+def _load_proxy_served() -> dict[str, dict]:
+    """``msg_id -> row`` for every served row of the proxy ledger."""
+    path = paths.state_path("proxy_calls.jsonl")
+    out: dict[str, dict] = {}
+    for row in _iter_jsonl(path):
+        if row.get("decision") == "served" and isinstance(row.get("msg_id"), str):
+            out[row["msg_id"]] = row
+    return out
+
+
+_REJECTED_MARKERS = ("doesn't want to proceed", "[Request interrupted")
+
+
+def _judge_proxy_turn(msg_id: str, records: list[dict]) -> tuple[str, str]:
+    """(outcome, signal) for one proxy-served assistant message. See
+    PROXY-SERVED TURNS in the module docstring."""
+    use_ids: set[str] = set()
+    last_idx = -1
+    for i, obj in enumerate(records):
+        if obj.get("type") == "assistant" and (obj.get("message") or {}).get("id") == msg_id:
+            last_idx = i
+            use_ids |= {tu.get("id") for tu in _assistant_tool_uses(obj) if tu.get("id")}
+    results: dict[str, dict] = {}
+    next_human: str | None = None
+    for obj in records[last_idx + 1:]:
+        if obj.get("type") != "user":
+            continue
+        text, tool_results = _user_text_and_tool_results(obj)
+        for r in tool_results:
+            if r.get("tool_use_id") in use_ids:
+                results[r["tool_use_id"]] = r
+        if not tool_results and text is not None and next_human is None:
+            next_human = text
+            break
+    if next_human is not None and _EXPLICIT_CLAUDE_PREFIX_RE.match(next_human):
+        return OUTCOME_REDO, "proxy_explicit_claude_redo"
+    if not use_ids:
+        return OUTCOME_USED, "proxy_served_text"
+    if set(results) != use_ids:
+        return OUTCOME_UNKNOWN, "proxy_tool_result_missing"
+    for r in results.values():
+        text = _tool_result_text(r)
+        if any(m in text for m in _REJECTED_MARKERS):
+            return OUTCOME_REDO, "proxy_tool_rejected"
+        if r.get("is_error"):
+            return OUTCOME_REDO, "proxy_tool_error"
+    return OUTCOME_USED, "proxy_tool_result_ok"
+
+
 # ── sub-agent join ──────────────────────────────────────────────────────────
 
 def _load_agent_calls() -> list[dict]:
@@ -964,6 +1029,7 @@ def build_sessions(days: int | None, root: Path | None = None,
     debug_records = _parse_debug_log()
     edit_outcome_rows = _load_edit_outcomes()
     codex_ledger_rows = _load_north_star_ledger()
+    proxy_served = _load_proxy_served()
 
     per_session: dict[str, SessionUnits] = {}
     parent_of: dict[str, str] = {}  # child session_id -> parent session_id
@@ -1015,6 +1081,7 @@ def build_sessions(days: int | None, root: Path | None = None,
         skip_first_user = is_child  # dispatch prompt is not a human user_prompt
 
         first_user_seen = False
+        proxy_seen: set[str] = set()
         edit_call_units: list[Unit] = []
         for obj in records:
             if obj.get("type") == "user":
@@ -1033,7 +1100,21 @@ def build_sessions(days: int | None, root: Path | None = None,
                 su.units.append(Unit(kind=UNIT_USER_PROMPT, session_id=target_sid, ts=_ts_of(obj)))
             elif obj.get("type") == "assistant":
                 kind = UNIT_SIDECHAIN if is_child else UNIT_CLAUDE_MAIN
-                su.units.append(Unit(kind=kind, session_id=target_sid, ts=_ts_of(obj)))
+                turn = Unit(kind=kind, session_id=target_sid, ts=_ts_of(obj))
+                msg_id = (obj.get("message") or {}).get("id") or ""
+                served = proxy_served.get(msg_id)
+                # Claude Code writes one record per content block, all sharing
+                # message.id. Only the FIRST record of a served message is the
+                # routed unit; the rest stay plain turns, so one served call is
+                # one attempted unit, never two or three.
+                if served is not None and msg_id not in proxy_seen:
+                    proxy_seen.add(msg_id)
+                    turn.lever = "proxy"
+                    turn.outcome, turn.signal = _judge_proxy_turn(served["msg_id"], records)
+                    turn.confidence = "high"
+                    turn.task_type = served.get("task_type")
+                    turn.model = served.get("model")
+                su.units.append(turn)
                 for tu in _assistant_tool_uses(obj):
                     name = tu.get("name") or ""
                     if not name.startswith("mcp__llm_router__"):
@@ -1187,7 +1268,7 @@ def report(days: int | None = 30, session_id: str | None = None, root: Path | No
         kind = u["kind"]
         bk = by_kind[kind]
         bk["units"] += 1
-        if kind in ATTEMPTED_KINDS:
+        if kind in ATTEMPTED_KINDS or u["lever"] == "proxy":
             c["attempted"] += 1
             bk["attempted"] += 1
             outcome = u["outcome"]

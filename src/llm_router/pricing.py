@@ -54,6 +54,7 @@ __all__ = [
     "output_rate",
     "cache_read_rate",
     "cache_write_rate",
+    "cache_write_1h_rate",
     "cost_usd",
     "is_free",
     "known_models",
@@ -80,6 +81,7 @@ STALENESS_DAYS = 90
 # fixed multiples, so deriving them removes an entire class of drift.
 _CACHE_READ_RATIO = 0.10
 _CACHE_WRITE_RATIO = 1.25  # 5-minute TTL; the 1-hour TTL is 2.0x
+_CACHE_WRITE_1H_RATIO = 2.0  # 1-hour TTL (Claude Code writes its preamble with ttl=1h)
 
 # ── Savings baseline policy (WP-05) ───────────────────────────────────────────
 # THE counterfactual: what the same work would have cost had LLM Router not routed
@@ -352,6 +354,12 @@ def cache_read_rate(model: str, *, as_of: _dt.date | None = None) -> float | Non
 def cache_write_rate(model: str, *, as_of: _dt.date | None = None) -> float | None:
     p = price_for(model, as_of=as_of)
     return None if p is None else p.cache_write_rate
+
+
+def cache_write_1h_rate(model: str, *, as_of: _dt.date | None = None) -> float | None:
+    """Per-million rate for a 1-hour-TTL cache write (2x input), or ``None``."""
+    p = price_for(model, as_of=as_of)
+    return None if p is None else p.input * _CACHE_WRITE_1H_RATIO
 
 
 def cost_usd(
