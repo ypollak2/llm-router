@@ -31,6 +31,22 @@ Field notes:
   edit_survival.py`` answers it after the fact by reading git history / the
   file on disk, and NS1's metric build (branch ``feat/northstar-metric``)
   reads this ledger for its routed+used-as-is signal.
+* ``session_id`` — resolved via :func:`llm_router.session_store.resolve_session_id`,
+  NOT ``os.environ.get("CLAUDE_SESSION_ID")`` directly. This call runs inside
+  the MCP server, a long-lived stdio process shared by one Claude Code
+  session; unlike a hook (which receives ``session_id`` in its own payload
+  every invocation), the server process does not reliably see
+  ``CLAUDE_SESSION_ID``/``CLAUDE_CODE_SESSION_ID`` in its environment (audit
+  2026-09-28: a real ``llm_edit`` call wrote ``"session_id": ""``).
+  ``resolve_session_id`` falls back to the ``current_session.json`` pointer
+  a hook wrote for this session, which is how ``routing_quality.jsonl``'s
+  MCP-path rows already carry a real session id (``router.py``'s
+  ``_resolve_context_identity`` / ``stamp_trace`` call the same resolver).
+  When even that pointer is missing or stale, the row carries ``None``
+  (JSON ``null``) — never ``""``. ``""`` is indistinguishable from "resolved
+  to the empty string"; ``null`` means "unknown", which is what it is.
+  ``northstar.py``'s ``_fold_orphan_edit_rows`` documents the fallback join
+  for rows that still land here with ``null``.
 
 Fail-silent, matching every other best-effort telemetry writer in this
 codebase (``tools/text.py``'s ``_cache_result``, ``_record_quality``) — a
@@ -41,7 +57,6 @@ waiting on.
 from __future__ import annotations
 
 import json
-import os
 import time
 
 from llm_router import paths
@@ -49,11 +64,24 @@ from llm_router import paths
 LEDGER_FILENAME = "edit_outcomes.jsonl"
 
 
+def _resolve_session_id() -> str | None:
+    """Same resolver every other MCP-path writer uses (see module docstring).
+
+    Never raises: an identity-resolution failure must not break the
+    ``llm_edit`` call the user is waiting on.
+    """
+    try:
+        from llm_router.session_store import resolve_session_id
+        return resolve_session_id()
+    except Exception:
+        return None
+
+
 def record_edit_outcome(*, file: str, model: str, applied: bool) -> None:
     """Append one ledger row. Best-effort: never raises."""
     row = {
         "ts": time.time(),
-        "session_id": os.environ.get("CLAUDE_SESSION_ID", ""),
+        "session_id": _resolve_session_id(),
         "file": file,
         "model": model,
         "applied": bool(applied),
