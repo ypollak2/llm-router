@@ -34,8 +34,27 @@ class TestQualityGate:
     def test_empty_response_fails(self):
         assert quality_ok("", "query") is False
 
-    def test_too_short_fails(self):
-        assert quality_ok("ok", "query") is False
+    @pytest.mark.parametrize("terse", ["42", "Indices.", "ok", "Yes", "7"])
+    def test_terse_correct_answer_passes(self, terse):
+        # Regression 2026-09-28: a 10-char floor rejected all 15 "reply with
+        # just the number/word" golden-probe queries (n=150 probe), 6 attempts each.
+        assert quality_ok(terse, "query") is True
+
+    @pytest.mark.parametrize("junk", [
+        "   \n\t  ",
+        "<think>let me work this out step by step</think>",
+        "<think>unclosed reasoning that never answers",
+        "<think></think>\n",
+        "<answer></answer>",
+        "```\n```",
+        "...",
+        "**",
+    ])
+    def test_empty_or_junk_fails(self, junk):
+        assert quality_ok(junk, "query") is False
+
+    def test_answer_after_thinking_passes(self):
+        assert quality_ok("<think>2+2 is 4</think>4", "query") is True
 
     def test_none_fails(self):
         assert quality_ok(None, "query") is False
@@ -111,7 +130,7 @@ class TestExecuteChain:
             ModelSpec("gemini", "gemini-2.5-flash"),
         ]
         with patch("llm_router.hooks.direct_executor.ollama_is_alive", return_value=True), \
-             patch("llm_router.hooks.direct_executor.call_ollama", return_value=("ok", {})), \
+             patch("llm_router.hooks.direct_executor.call_ollama", return_value=("<think>...</think>", {})), \
              patch("llm_router.hooks.direct_executor.call_gemini", return_value=("Berlin is the capital of Germany.", {})):
             result = execute_chain("hello", chain, "query")
         assert result.model.provider == "gemini"
