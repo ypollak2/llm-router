@@ -72,7 +72,13 @@ __all__ = [
 # Date the Anthropic rates below were last confirmed against published pricing.
 # Bump this ONLY when the numbers are re-checked, never as a formality — a stale
 # date that says "fresh" is worse than an honest old one.
-PRICES_AS_OF = _dt.date(2026, 8, 11)
+#
+# Re-checked 2026-09-28 against platform.claude.com/docs/en/about-claude/pricing
+# while reconciling the proxy ledger's cost estimate against Claude Code's own
+# `total_cost_usd` for six real sessions: every component (input, output, cache
+# read, both cache-write tiers) for every Anthropic model this table prices
+# matched the published table to the cent — except Sonnet 5, see below.
+PRICES_AS_OF = _dt.date(2026, 9, 28)
 
 #: Age at which the table is considered stale and callers should warn.
 STALENESS_DAYS = 90
@@ -138,13 +144,23 @@ class Price:
         return self.cache_write if self.cache_write is not None else self.input * _CACHE_WRITE_RATIO
 
 
-# Sonnet 5 runs introductory pricing through 2026-08-31, then reverts. Encoded
-# rather than hardcoded to one side: picking "standard" understates cost today,
-# picking "intro" overstates it from September. Both are resolved by date, and
-# tests pass an explicit date so no test depends on the wall clock.
-_SONNET_5_INTRO_UNTIL = _dt.date(2026, 8, 31)
-_SONNET_5_INTRO = (2.00, 10.00)
-_SONNET_5_STANDARD = (3.00, 15.00)
+# Sonnet 5 launched at $2/$10 as introductory pricing "through August 31,
+# 2026", with a scheduled reversion to $3/$15 on September 1. This module used
+# to encode that reversion by date. It never happened: Anthropic's pricing page
+# now states outright that "the $2/$10 ... pricing for Claude Sonnet 5 ... is
+# now the standard price. The previously scheduled increase to $3/$15 ... on
+# September 1, 2026 will not occur." (platform.claude.com/docs/en/about-claude/
+# pricing, footnote 3, re-checked 2026-09-28.)
+#
+# The stale $3/$15 reversion was a real bug, not a hypothetical: on 2026-09-28
+# it overpriced every Sonnet 5 call in the proxy ledger by exactly 1.5x versus
+# what Claude Code's own `total_cost_usd` reported for the same sessions (three
+# fixture-repo sessions matched the $2/$10 rate to the cent; none matched
+# $3/$15). See docs/proxy.md and the cost-reconciliation notes in this PR.
+#
+# claude-sonnet-5 is priced flat below, like every other model in this table.
+# If Anthropic ever does raise it, that is a new, re-checked fact — not a timer
+# firing on a date this module guessed in advance.
 
 # The table is split by provider rather than written as one dict, and that is
 # load-bearing rather than cosmetic. lint_pricing.py checks for retired rate
@@ -162,7 +178,9 @@ _ANTHROPIC: dict[str, Price] = {
     "claude-opus-4-7": Price("claude-opus-4-7", 5.00, 25.00),
     "claude-opus-4-6": Price("claude-opus-4-6", 5.00, 25.00),
     "claude-opus-4-5": Price("claude-opus-4-5", 5.00, 25.00),
-    "claude-sonnet-5": Price("claude-sonnet-5", *_SONNET_5_STANDARD, note="intro pricing until 2026-08-31"),
+    "claude-sonnet-5": Price("claude-sonnet-5", 2.00, 10.00,
+                             note="launch price, made permanent 2026-09-01; the "
+                                  "scheduled $3/$15 reversion was cancelled"),
     "claude-sonnet-4-6": Price("claude-sonnet-4-6", 3.00, 15.00),
     "claude-sonnet-4-5": Price("claude-sonnet-4-5", 3.00, 15.00),
     # $1.00/$5.00. The 0.80, 0.25 and 0.25 values this replaces were all wrong.
@@ -321,19 +339,17 @@ def resolve(model: str) -> str | None:
 def price_for(model: str, *, as_of: _dt.date | None = None) -> Price | None:
     """:class:`Price` for ``model``, or ``None`` when unknown.
 
-    ``as_of`` selects time-dependent rates (currently only Sonnet 5's
-    introductory period). Pass it explicitly in tests so no assertion depends on
-    the wall clock.
+    ``as_of`` is accepted for callers that price historical rows against a
+    fixed date. No rate in this table currently varies by date — the one that
+    used to (Sonnet 5's now-cancelled reversion, see the module docstring) does
+    not anymore — so ``as_of`` has no effect today. Kept in the signature
+    rather than removed: dropping it would silently stop pricing historical
+    rows correctly the next time a rate genuinely does change on a known date.
     """
     key = resolve(model)
     if key is None:
         return None
-    price = _PRICES[key]
-    if key == "claude-sonnet-5":
-        today = as_of or _dt.date.today()
-        if today <= _SONNET_5_INTRO_UNTIL:
-            return Price(key, *_SONNET_5_INTRO, note=f"introductory pricing through {_SONNET_5_INTRO_UNTIL}")
-    return price
+    return _PRICES[key]
 
 
 def input_rate(model: str, *, as_of: _dt.date | None = None) -> float | None:

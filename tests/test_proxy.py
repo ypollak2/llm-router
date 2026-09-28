@@ -845,7 +845,7 @@ def test_stats_excludes_loop_guard_repeats_from_routed_share_and_avoided_cost():
     assert s["routed_share"] == {"served": 2, "calls": 4, "share": 0.5}
     rsx = s["routed_share_excl_repeats"]
     assert rsx == {"served": 2, "calls": 2, "repeats_excluded": 2, "share": 1.0}
-    assert s["anthropic"]["est_avoided_n"] == 2  # never the 2 loop_guard rows
+    assert s["anthropic"]["net_avoided_n"] == 2  # never the 2 loop_guard rows
     sess = s["sessions"]
     assert sess["n"] == 2
     assert sess["calls_per_session"] == {"ec919061": 3, "cf5ef91c": 1}
@@ -860,7 +860,60 @@ def test_stats_defensively_excludes_a_served_row_that_somehow_carries_the_loop_r
              "session_id": "s", "requested_model": "claude-sonnet-5"}]
     s = ledger.stats(rows)
     assert s["routed_share"]["served"] == 0
-    assert s["anthropic"]["est_avoided_n"] == 0
+    assert s["anthropic"]["net_avoided_n"] == 0
+
+
+def test_net_avoided_prices_a_cache_read_and_a_reply_not_a_whole_call():
+    """Regression for the 2026-09-28 fix: the old formula priced a served step
+    at a whole forwarded call's cost (median), inflating avoided cost by
+    roughly an order of magnitude. The new one prices only what the step
+    itself would have cost: a cache-read of the established prefix plus its
+    own reply."""
+    rows = [
+        {"decision": "forwarded", "reason": "not_eligible", "step_class": None, "session_id": "s",
+         "requested_model": "claude-sonnet-5",
+         "usage": {"input_tokens": 2, "cache_read_input_tokens": 40_000, "cache_creation_input_tokens": 1_000}},
+        {"decision": "served", "step_class": "continuation", "session_id": "s",
+         "requested_model": "claude-sonnet-5", "backend_usage": {"output_tokens": 100}},
+    ]
+    s = ledger.stats(rows)
+    an = s["anthropic"]
+    # (40_000 + 1_000) cache-read tokens @ $0.20/MTok + 100 output tokens @ $10/MTok.
+    assert an["net_avoided_usd"] == pytest.approx(0.0092, abs=1e-6)
+    assert an["net_avoided_n"] == 1
+    # Not the ~$0.20+ a whole forwarded call (with its own fresh cache write)
+    # would have cost — that was the bug.
+    assert an["net_avoided_usd"] < 0.02
+
+
+def test_net_avoided_subtracts_the_next_calls_extra_cache_write():
+    """A served run followed by a real call that had to re-establish a large
+    cache costs the session more than the step avoided: net goes negative."""
+    rows = [
+        {"decision": "forwarded", "reason": "not_eligible", "step_class": None, "session_id": "s",
+         "requested_model": "claude-sonnet-5", "usage": {"cache_read_input_tokens": 1_000}},
+        {"decision": "served", "step_class": "continuation", "session_id": "s",
+         "requested_model": "claude-sonnet-5", "backend_usage": {"output_tokens": 10}},
+        {"decision": "forwarded", "reason": "policy_kept", "step_class": "continuation", "session_id": "s",
+         "requested_model": "claude-sonnet-5",
+         "usage": {"cache_creation_input_tokens": 50_000,
+                   "cache_creation": {"ephemeral_1h_input_tokens": 50_000, "ephemeral_5m_input_tokens": 0}}},
+    ]
+    s = ledger.stats(rows)
+    an = s["anthropic"]
+    # would-have: (1_000 * 0.20 + 10 * 10) / 1e6 = 0.0003
+    # extra write: 50_000 * 4.00 (1h) / 1e6 = 0.2
+    assert an["net_avoided_usd"] == pytest.approx(0.0003 - 0.2, abs=1e-6)
+    assert an["net_avoided_usd"] < 0, "a served step is not counted as a saving when the gap cost more to close"
+    assert an["net_avoided_n"] == 1  # still counted: negative is a real answer, not "unpriced"
+
+
+def test_net_avoided_skips_a_run_whose_model_is_unknown():
+    rows = [{"decision": "served", "step_class": "continuation", "session_id": "s",
+             "requested_model": "no-such-model", "backend_usage": {"output_tokens": 10}}]
+    s = ledger.stats(rows)
+    assert s["anthropic"]["net_avoided_n"] == 0
+    assert s["anthropic"]["net_avoided_usd"] == 0.0
 
 
 # ── ledger metrics ──────────────────────────────────────────────────────────
@@ -889,7 +942,7 @@ def test_stats_keeps_share_fallbacks_latency_and_cost_separate():
     assert an["calls"] == 3 and an["tokens"]["cache_read_input_tokens"] == 120_000
     assert an["tokens"]["cache_creation_1h"] == 3000 and an["tokens"]["cache_creation_5m"] == 0
     assert an["unpriced_calls"] == 0 and an["est_cost_usd"] > 0
-    assert an["est_avoided_n"] == 1
+    assert an["net_avoided_n"] == 1
     assert an["after_served_n"] == 1 and an["clean_n"] == 1
     assert "routed share: 25.0%" in ledger.format_stats(s)
 
@@ -898,6 +951,40 @@ def test_unpriced_model_is_counted_not_zeroed():
     row = {"decision": "forwarded", "requested_model": "no-such-model", "usage": {"input_tokens": 5}}
     assert ledger.anthropic_cost(row) is None
     assert ledger.stats([row])["anthropic"]["unpriced_calls"] == 1
+
+
+def test_normalize_usage_is_idempotent():
+    """Regression for the 2026-09-28 fix: a row's ``usage`` is stored already
+    normalized (``_record_usage`` calls this once before ``write_row``), so
+    every reader of a row read back from ``proxy_calls.jsonl`` normalizes it
+    again. A second pass used to look for Anthropic's raw nested
+    ``cache_creation`` dict, find nothing (the flat shape has no such key),
+    and silently fold every real 1h-tier write into the cheaper 5m tier —
+    on every row ever read from disk."""
+    raw = {"input_tokens": 2, "output_tokens": 100, "cache_read_input_tokens": 40_000,
+           "cache_creation_input_tokens": 1_000,
+           "cache_creation": {"ephemeral_1h_input_tokens": 1_000, "ephemeral_5m_input_tokens": 0}}
+    once = ledger.normalize_usage(raw)
+    twice = ledger.normalize_usage(once)
+    assert once == twice == {
+        "input_tokens": 2, "output_tokens": 100, "cache_read_input_tokens": 40_000,
+        "cache_creation_input_tokens": 1_000, "cache_creation_1h": 1_000, "cache_creation_5m": 0,
+    }
+
+
+def test_anthropic_cost_prices_a_row_read_back_from_disk_correctly(tmp_path):
+    """The end-to-end version of the idempotency regression: a row written to
+    the ledger and read back must still price its 1h cache write at the 1h
+    rate, not the 5m one."""
+    raw = {"input_tokens": 2, "output_tokens": 100, "cache_read_input_tokens": 40_000,
+           "cache_creation_input_tokens": 1_000,
+           "cache_creation": {"ephemeral_1h_input_tokens": 1_000, "ephemeral_5m_input_tokens": 0}}
+    path = tmp_path / "proxy_calls.jsonl"
+    ledger.write_row({"decision": "forwarded", "requested_model": "claude-sonnet-5", "usage": raw}, path)
+    (row,) = ledger.read_rows(path)
+    # 2*2 + 100*10 + 40_000*0.2 + 1_000*4.00, all /1e6 (claude-sonnet-5: $2/$10,
+    # cache read $0.20, 1h cache write $4.00 per MTok).
+    assert ledger.anthropic_cost(row) == pytest.approx((2 * 2 + 100 * 10 + 40_000 * 0.2 + 1_000 * 4.00) / 1e6)
 
 
 def test_cli_stats_reads_the_state_ledger(tmp_path, monkeypatch, capsys):

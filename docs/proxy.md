@@ -147,13 +147,25 @@ The metrics are reported separately, because they diverge:
 - **latency**: served vs Anthropic medians, and the latency added before
   fallbacks;
 - **Anthropic tokens and est. cost**, split into input, cache read, cache write
-  5m / 1h and output. Also an est. avoided cost with its n — computed only over
-  calls that were actually served, so a loop-guard-flagged call is never
-  counted as a saving — and the cache writes after a served turn vs a clean
+  5m / 1h and output. Also a **net avoided** cost with its n — priced per
+  served step as the cached-prefix read plus its own reply, minus the extra
+  cache-write the next real Anthropic call paid to re-establish its cache
+  across the served gap. It is computed only over calls that were actually
+  served, so a loop-guard-flagged call is never counted as a saving, and it
+  **may be negative** — and the cache writes after a served turn vs a clean
   history.
 
 A high routed share is not a saving. In the spike, routing half the calls saved
 about a fifth of the Anthropic cost, because cached re-reads are already cheap.
+
+`est_cost_usd` reconciles against Claude Code's own `total_cost_usd` (from
+`claude -p ... --output-format json`) only when nothing was served locally:
+a served step's reply reports Ollama's own prompt/eval token counts as its
+`usage` (`translate.py`), and Claude Code's own cost tracker bills those as
+Sonnet-5 tokens even though Anthropic never saw the call. On a session with
+served steps, expect `total_cost_usd` to run ahead of `est_cost_usd` by
+roughly that much — it is Claude Code overcounting a reply it received, not
+the ledger undercounting one it sent.
 
 `llm-router northstar` joins served rows to transcript turns by `message.id`.
 Those turns stay `claude_main_call` units, with lever `proxy`, and are judged
