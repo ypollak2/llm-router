@@ -80,6 +80,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   only over rows that were actually served) and now excludes them
   defensively too.
 
+- **A proxied Claude Code session cost 3.5x an identical no-proxy session on
+  the Anthropic side.** Measured 2026-09-28, same 3 fixture tasks: $2.44
+  proxied vs $0.69 baseline, all tests passing both ways. Root cause is in
+  Claude Code, not this proxy: it disables Tool Search (dynamic MCP/skill tool
+  loading) whenever `ANTHROPIC_BASE_URL` is not a first-party Anthropic host,
+  because it cannot tell that `llm_router.proxy.server.forward()` passes every
+  `/v1/messages` body through byte-for-byte. With Tool Search off, every
+  request inlines every deferred tool's full schema instead of the few a step
+  needs (`claude --debug api` showed `Dynamic tool loading: 0/134 deferred
+  tools included` become `134/134`), which is what enlarges the cacheable
+  prefix and, on a cache miss, gets billed at the 1-hour cache-write rate (2x
+  input). `ENABLE_TOOL_SEARCH=true` restores first-party behaviour and is safe
+  with this proxy specifically, because it never inspects or rewrites the
+  tools array, so the resulting `tool_reference` blocks reach Anthropic
+  unchanged. `llm-router proxy`'s startup banner, `--help` (`USAGE`), and the
+  module docstring now all print the enable command via one shared
+  `server.enable_hint()`, which always includes `ENABLE_TOOL_SEARCH=true`
+  next to `ANTHROPIC_BASE_URL`. See `docs/proxy.md` ("Cost parity").
+
 ### Fixed — routing
 
 - **The read-only draft loop could burn the entire hook budget on one stuck

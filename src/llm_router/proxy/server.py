@@ -3,13 +3,28 @@
 Enable for ONE Claude Code session, never globally::
 
     llm-router proxy --port 8787            # terminal 1
-    ANTHROPIC_BASE_URL=http://127.0.0.1:8787 claude    # terminal 2
+    ANTHROPIC_BASE_URL=http://127.0.0.1:8787 ENABLE_TOOL_SEARCH=true claude    # terminal 2
 
 Auth: the client's ``authorization`` / ``x-api-key`` headers are forwarded to
 Anthropic unchanged and are never written anywhere. ``accept-encoding`` is
 forced to ``identity`` upstream: httpx otherwise asks for gzip, and relaying
 the raw gzip bytes without their header broke Claude Code with "JSON Parse
 error" in the spike.
+
+``ENABLE_TOOL_SEARCH=true`` matters as much as ``ANTHROPIC_BASE_URL`` and is
+not optional polish. Claude Code disables its Tool Search / dynamic-tool-
+loading feature the moment ``ANTHROPIC_BASE_URL`` is not a first-party
+Anthropic host — it cannot tell that THIS proxy forwards every ``/v1/messages``
+body byte-for-byte (see ``forward()`` below). With Tool Search off, Claude
+Code inlines every deferred MCP/skill tool schema into every request instead
+of the handful the step actually needs, which enlarges the cacheable prefix
+and, on a cache miss, is billed at the cache-write rate (2x input for the 1h
+TTL Claude Code uses). Measured 2026-09-28 on 3 fixture tasks: proxied
+sessions cost 3.5x a same-task baseline with no proxy, driven almost entirely
+by this (docs/proxy.md "Cost parity"). Because ``forward()`` never inspects or
+rewrites the tools array, it forwards the resulting ``tool_reference`` blocks
+unchanged, so setting ``ENABLE_TOOL_SEARCH=true`` is safe here and restores
+first-party token usage.
 
 Safety rules, each enforced here:
   * a served reply must pass ``translate.from_ollama`` validation;
@@ -395,7 +410,20 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None):
 
 # ── CLI ──────────────────────────────────────────────────────────────────────
 
-USAGE = """\
+
+def enable_hint(host: str, port: int | str) -> str:
+    """The one-liner a session runs to use the proxy, WITH the Tool Search
+    override. Without ``ENABLE_TOOL_SEARCH=true``, Claude Code sees a
+    non-first-party ``ANTHROPIC_BASE_URL`` and inlines every deferred
+    MCP/skill tool schema into every request instead of the few a step needs
+    -- a measured 3.5x Anthropic-side cost on 2026-09-28 (docs/proxy.md "Cost
+    parity"). This proxy forwards ``/v1/messages`` bodies unchanged, so the
+    resulting ``tool_reference`` blocks reach Anthropic exactly as Claude Code
+    made them and the override is safe."""
+    return f"ANTHROPIC_BASE_URL=http://{host}:{port} ENABLE_TOOL_SEARCH=true claude"
+
+
+USAGE = f"""\
 llm-router proxy [--port N] [--steps continuation|off] [--step-budget-s S]
                  [--hedge-s S|off] [--model ollama/TAG] [--trim NAME[,NAME]]
                  [--num-ctx N] [--ollama-url URL] [--keep-alive -1|5m] [--no-warm-up]
@@ -403,7 +431,7 @@ llm-router proxy [--port N] [--steps continuation|off] [--step-budget-s S]
 llm-router proxy stats [--days N] [--json]
 
 Opt-in, per session. Nothing is enabled until you point a session at it:
-    ANTHROPIC_BASE_URL=http://127.0.0.1:8787 claude
+    {enable_hint("127.0.0.1", DEFAULT_PORT)}
 """
 
 
@@ -466,6 +494,6 @@ def cmd_proxy(argv: list[str]) -> int:
     print(f"llm-router proxy -> http://{a.host}:{a.port}  steps={steps}  "
           f"hedge={cfg.hedge_s}s  budget={cfg.step_budget_s}s  trim={cfg.trim or 'fast'}  "
           f"loop_guard(max_consecutive={cfg.loop_max_consecutive}, repeat_window={cfg.loop_repeat_window})")
-    print(f"  enable per session: ANTHROPIC_BASE_URL=http://{a.host}:{a.port} claude")
+    print(f"  enable per session: {enable_hint(a.host, a.port)}")
     uvicorn.run(app, host=a.host, port=a.port, log_level="warning", access_log=False)
     return 0
