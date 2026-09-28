@@ -23,7 +23,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   falls back to Anthropic, and the fallback is recorded. It is off unless you
   start it; nothing installs it or changes settings. Per-call rows go to
   `proxy_calls.jsonl` (`llm-router proxy stats`), and `northstar` counts served
-  turns as routed `claude_main_call` units. See `docs/proxy.md`.
+  turns as routed `claude_main_call` units. Serving defaults follow the
+  local-speed spike: a condensed request with the step's tool subset, a
+  `num_predict` cap of 200/700, `keep_alive -1` plus a warm-up call, and an
+  8 s first-token hedge. See `docs/proxy.md`.
 
 - **NS1 — the North Star metric**: `llm-router northstar [--session ID] [--days N] [--json]`
   reports, per Claude Code session, the share of (user prompts + every LLM

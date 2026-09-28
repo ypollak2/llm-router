@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import json
 import os
 import sys
@@ -35,7 +36,17 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from llm_router.proxy import ledger
-from llm_router.proxy.backends import BACKENDS, apply_trims, choose_model, resolve_trims
+from llm_router.proxy.backends import (
+    BACKENDS,
+    DEFAULT_HEDGE_S,
+    DEFAULT_KEEP_ALIVE,
+    HedgeTimeout,
+    apply_trims,
+    choose_model,
+    policy_chain,
+    resolve_trims,
+    tool_capable,
+)
 from llm_router.proxy.steps import STEP_CLASSES, classify_text, prev_tools, session_id_of, step_class
 from llm_router.proxy.translate import (
     has_served_turn,
@@ -74,6 +85,9 @@ class ProxyConfig:
     upstream: str = ANTHROPIC_UPSTREAM
     ollama_url: str | None = None
     ledger_path: Path | None = None
+    hedge_s: float | None = DEFAULT_HEDGE_S
+    keep_alive: int | str | None = DEFAULT_KEEP_ALIVE
+    warm_up: bool = True
 
     @classmethod
     def from_env(cls) -> "ProxyConfig":
@@ -85,7 +99,23 @@ class ProxyConfig:
             trim=os.environ.get("LLM_ROUTER_PROXY_TRIM") or None,
             num_ctx=int(os.environ.get("LLM_ROUTER_PROXY_NUM_CTX", DEFAULT_NUM_CTX)),
             upstream=os.environ.get("LLM_ROUTER_PROXY_UPSTREAM") or ANTHROPIC_UPSTREAM,
+            hedge_s=parse_hedge(os.environ.get("LLM_ROUTER_PROXY_HEDGE_S", str(DEFAULT_HEDGE_S))),
         )
+
+
+def parse_hedge(raw: str) -> float | None:
+    """Seconds to the first token before falling back; ``0``/``off`` disables."""
+    if str(raw).strip().lower() in ("0", "off", "none", ""):
+        return None
+    return float(raw)
+
+
+def parse_keep_alive(raw: str) -> int | str:
+    """Ollama rejects a bare numeric STRING, so integers go as JSON numbers."""
+    try:
+        return int(raw)
+    except ValueError:
+        return raw
 
 
 def parse_steps(raw: str) -> frozenset:
@@ -116,10 +146,10 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None):
     http = client or httpx.AsyncClient(timeout=httpx.Timeout(600.0, connect=10.0))
 
     def _ollama_url() -> str:
-        if cfg.ollama_url:
-            return cfg.ollama_url
-        from llm_router.config import get_config
+        from llm_router.config import get_config, validate_ollama_url
 
+        if cfg.ollama_url:
+            return validate_ollama_url(cfg.ollama_url)
         return get_config().effective_ollama_base_url or "http://localhost:11434"
 
     def make_backend(model: str):
@@ -127,8 +157,27 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None):
             return backend_factory(model)
         for prefix, cls in BACKENDS.items():
             if model.startswith(prefix):
-                return cls(model, http, base_url=_ollama_url(), num_ctx=cfg.num_ctx)
+                return cls(model, http, base_url=_ollama_url(), num_ctx=cfg.num_ctx,
+                           hedge_s=cfg.hedge_s, keep_alive=cfg.keep_alive)
         raise ValueError(f"no backend for {model}")
+
+    async def warm_up() -> dict:
+        """One throwaway call so the first real step does not pay the cold
+        start (8-110 s in the local-speed spike). Never raises."""
+        t0 = time.monotonic()
+        try:
+            model = cfg.model
+            if not model:
+                _task, _cx, chain = await policy_chain("continue the coding task after a tool result")
+                model = next((m for m in chain if tool_capable(m)), None)
+            if not model:
+                return {"warm_up": "skipped", "reason": "no tool-capable model in chain"}
+            backend = make_backend(model)
+            seconds = await backend.warm_up() if hasattr(backend, "warm_up") else 0.0
+            return {"warm_up": "ok", "model": model, "seconds": seconds}
+        except Exception as exc:  # noqa: BLE001 - a failed warm-up only costs latency
+            return {"warm_up": "failed", "error": ledger.scrub_detail(f"{type(exc).__name__}: {exc}"),
+                    "seconds": round(time.monotonic() - t0, 2)}
 
     def write(row: dict) -> None:
         ledger.write_row(row, cfg.ledger_path)
@@ -156,6 +205,8 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None):
             row["backend_usage"] = backend_usage
             if err:
                 reason = "validation"
+        except HedgeTimeout as exc:
+            err, reason = str(exc), "hedge_timeout"
         except (asyncio.TimeoutError, httpx.TimeoutException):
             err, reason = f"exceeded step budget {cfg.step_budget_s}s", "budget_exceeded"
         except Exception as exc:  # noqa: BLE001 - any backend failure is a counted fallback
@@ -287,9 +338,24 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None):
                 return Response(json.dumps(message), media_type="application/json")
         return await forward(request, raw, body, row)
 
+    @contextlib.asynccontextmanager
+    async def lifespan(app):
+        task = None
+        if cfg.warm_up and cfg.steps:
+            async def _run() -> None:
+                result = await warm_up()
+                print(f"llm-router proxy warm-up: {result}", flush=True)
+            # In the background: the proxy serves (and hedges to Claude) while
+            # the model loads.
+            task = asyncio.create_task(_run())
+        yield
+        if task is not None and not task.done():
+            task.cancel()
+
     methods = ["GET", "POST", "PUT", "DELETE", "HEAD", "PATCH", "OPTIONS"]
-    app = Starlette(routes=[Route("/{path:path}", handle, methods=methods)])
+    app = Starlette(routes=[Route("/{path:path}", handle, methods=methods)], lifespan=lifespan)
     app.state.http = http
+    app.state.warm_up = warm_up
     return app
 
 
@@ -297,7 +363,8 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None):
 
 USAGE = """\
 llm-router proxy [--port N] [--steps continuation|off] [--step-budget-s S]
-                 [--model ollama/TAG] [--trim NAME[,NAME]] [--num-ctx N]
+                 [--hedge-s S|off] [--model ollama/TAG] [--trim NAME[,NAME]]
+                 [--num-ctx N] [--ollama-url URL] [--keep-alive -1|5m] [--no-warm-up]
 llm-router proxy stats [--days N] [--json]
 
 Opt-in, per session. Nothing is enabled until you point a session at it:
@@ -331,6 +398,10 @@ def cmd_proxy(argv: list[str]) -> int:
     ap.add_argument("--model", default=env.model)
     ap.add_argument("--trim", default=env.trim)
     ap.add_argument("--num-ctx", type=int, default=env.num_ctx)
+    ap.add_argument("--hedge-s", default=None, help="first-token deadline in seconds, or 'off'")
+    ap.add_argument("--ollama-url", default=None, help="e.g. a dedicated tuned `ollama serve` (docs/proxy.md)")
+    ap.add_argument("--keep-alive", default=str(DEFAULT_KEEP_ALIVE))
+    ap.add_argument("--no-warm-up", action="store_true")
     ap.add_argument("--ledger", default=None, help="write rows here instead of the state dir")
     a = ap.parse_args(argv)
 
@@ -340,7 +411,10 @@ def cmd_proxy(argv: list[str]) -> int:
     try:
         cfg = ProxyConfig(steps=parse_steps(a.steps), step_budget_s=a.step_budget_s, model=a.model,
                           trim=a.trim, num_ctx=a.num_ctx, upstream=env.upstream,
-                          ledger_path=Path(a.ledger) if a.ledger else None)
+                          ledger_path=Path(a.ledger) if a.ledger else None,
+                          hedge_s=parse_hedge(a.hedge_s) if a.hedge_s is not None else env.hedge_s,
+                          keep_alive=parse_keep_alive(a.keep_alive), warm_up=not a.no_warm_up,
+                          ollama_url=a.ollama_url)
         app = build_app(cfg)
     except ValueError as exc:
         sys.stderr.write(f"llm-router proxy: {exc}\n")
@@ -349,7 +423,8 @@ def cmd_proxy(argv: list[str]) -> int:
     import uvicorn
 
     steps = ",".join(sorted(cfg.steps)) or "off (pass-through only)"
-    print(f"llm-router proxy -> http://{a.host}:{a.port}  steps={steps}  budget={cfg.step_budget_s}s")
+    print(f"llm-router proxy -> http://{a.host}:{a.port}  steps={steps}  "
+          f"hedge={cfg.hedge_s}s  budget={cfg.step_budget_s}s  trim={cfg.trim or 'fast'}")
     print(f"  enable per session: ANTHROPIC_BASE_URL=http://{a.host}:{a.port} claude")
     uvicorn.run(app, host=a.host, port=a.port, log_level="warning", access_log=False)
     return 0

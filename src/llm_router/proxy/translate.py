@@ -113,15 +113,19 @@ def to_ollama_messages(body: dict) -> list[dict]:
     return out
 
 
-def to_ollama(body: dict, model: str, *, num_ctx: int, max_predict: int = 4096) -> dict:
+def to_ollama(body: dict, model: str, *, num_ctx: int, max_predict: int = 4096,
+              keep_alive: str | int | None = None, stream: bool = False) -> dict:
     """The ``/api/chat`` payload for ``model`` (bare Ollama tag, no ``ollama/``)."""
     options: dict = {"num_ctx": num_ctx,
                      "num_predict": min(int(body.get("max_tokens") or max_predict), max_predict)}
     if isinstance(body.get("temperature"), (int, float)):
         options["temperature"] = body["temperature"]
-    return {"model": model, "messages": to_ollama_messages(body),
-            "tools": ollama_tools(body.get("tools") or []),
-            "stream": False, "think": False, "options": options}
+    payload = {"model": model, "messages": to_ollama_messages(body),
+               "tools": ollama_tools(body.get("tools") or []),
+               "stream": stream, "think": False, "options": options}
+    if keep_alive is not None:
+        payload["keep_alive"] = keep_alive
+    return payload
 
 
 _TYPES = {"string": str, "integer": int, "number": (int, float), "boolean": bool,
@@ -191,12 +195,11 @@ def from_ollama(resp: dict, body: dict) -> tuple[dict | None, str | None]:
         blocks.append({"type": "tool_use", "id": new_tool_id(), "name": name, "input": args})
     if not blocks:
         return None, "empty response"
-    if any(b["type"] == "tool_use" for b in blocks):
-        stop = "tool_use"
-    elif resp.get("done_reason") == "length":
-        stop = "max_tokens"
-    else:
-        stop = "end_turn"
+    if resp.get("done_reason") == "length":
+        # Output hit the num_predict cap: a cut-off tool call or answer is
+        # never served, however plausible the part that arrived looks.
+        return None, "truncated at num_predict"
+    stop = "tool_use" if any(b["type"] == "tool_use" for b in blocks) else "end_turn"
     return {
         "id": new_msg_id(), "type": "message", "role": "assistant",
         # Echo the requested model: Claude Code renders it and checks nothing

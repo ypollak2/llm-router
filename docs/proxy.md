@@ -40,8 +40,10 @@ client tools are never routed.
   from the request, its arguments are a JSON object, required keys are present,
   and primitive types and enums match. Otherwise the original request goes to
   Anthropic.
-- **Latency budget.** Each step has a budget (`--step-budget-s`, default 30 s).
-  If the budget is exceeded, the proxy falls back to Anthropic.
+- **Hedge and latency budget.** If the local model's first token has not
+  arrived within 8 s (`--hedge-s`), the proxy falls back to Anthropic. The
+  whole step also has a budget (`--step-budget-s`, default 30 s). A reply cut
+  off at the output cap is never served.
 - **Errors.** Any backend or policy error falls back to Anthropic. Every
   fallback is recorded with its reason.
 - **No cache.** Served replies are never cached. This path has no semantic cache.
@@ -66,14 +68,49 @@ client tools are never routed.
 | `--port` | `LLM_ROUTER_PROXY_PORT` | `8787` |
 | `--steps` | `LLM_ROUTER_PROXY_STEPS` | `continuation` (`off` = pass-through only) |
 | `--step-budget-s` | `LLM_ROUTER_PROXY_STEP_BUDGET_S` | `30` |
+| `--hedge-s` | `LLM_ROUTER_PROXY_HEDGE_S` | `8` (first-token deadline; `off` disables) |
 | `--model` | `LLM_ROUTER_PROXY_MODEL` | from policy. A pin changes *which* tool-capable model serves, never *whether* a step is routed. |
-| `--trim` | `LLM_ROUTER_PROXY_TRIM` | `tool-desc-2000`. Comma list of named trims or `module:function`. |
+| `--trim` | `LLM_ROUTER_PROXY_TRIM` | `fast`. Comma list of named trims or `module:function`. |
 | `--num-ctx` | `LLM_ROUTER_PROXY_NUM_CTX` | `32768` |
+| `--keep-alive` | (none) | `-1`: the model stays loaded until Ollama restarts |
+| `--no-warm-up` | (none) | a warm-up call runs in the background at start |
+| `--ollama-url` | (none) | the router's configured Ollama (e.g. a dedicated server, below) |
 | (none) | `LLM_ROUTER_PROXY_UPSTREAM` | `https://api.anthropic.com` (only loopback overrides are accepted) |
 
 The model, the trims (`proxy/backends.py: TRIMS`) and the backends
 (`BACKENDS`) are plug points. A measured speed lever can be added as a named trim
 or a `module:function` without changing the server.
+
+### Defaults come from the local-speed spike
+
+`docs/spikes/local-speed-2026-09-28.md` measured 24 replayed continuation calls
+with `qwen3-coder:30b`: median 2.19 s, p90 3.59 s, 0/24 validation failures.
+That run used a dedicated tuned server. The proxy's defaults follow it:
+
+- **Trim `fast`.** A 366-character condensed system prompt, and only the tools
+  the step class needs (`Read`, `Edit`, `Write`, `Bash`), with names and schemas
+  unchanged. History is capped to the first user turn plus the last exchange.
+  That is about 3-5k prompt tokens instead of about 21k.
+- **Output cap.** `num_predict` is 200 after `Read`/`Bash`/no tool, and 700
+  otherwise.
+- **Warm.** `keep_alive: -1` is sent on every call, plus one warm-up call at
+  start. A cold load took 8-110 s in that spike.
+- **Hedge.** 8 s to the first token.
+
+### Optional: a dedicated tuned Ollama server (not auto-configured)
+
+The spike's numbers came from a hand-run server. Ollama.app discards these
+settings, so the proxy never starts or configures one for you:
+
+```bash
+OLLAMA_HOST=127.0.0.1:11500 OLLAMA_FLASH_ATTENTION=1 OLLAMA_KV_CACHE_TYPE=q8_0 \
+OLLAMA_KEEP_ALIVE=-1 OLLAMA_NUM_PARALLEL=1 OLLAMA_MAX_LOADED_MODELS=1 \
+OLLAMA_CONTEXT_LENGTH=32768 ollama serve
+llm-router proxy --ollama-url http://127.0.0.1:11500
+```
+
+Do not load the same 20 GB model in two servers at once on a 48 GB machine. In
+the spike, that produced empty or corrupted replies and a stuck runner.
 
 ## Metrics
 

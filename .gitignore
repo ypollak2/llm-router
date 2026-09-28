@@ -129,6 +129,7 @@ tests/hook_rendering/
 !/docs/spikes/
 /docs/spikes/*
 !/docs/spikes/per-call-proxy-2026-09-28.md
+!/docs/spikes/local-speed-2026-09-28.md
 # The North Star, its audit and the fix plan that comes out of it. Same
 # category as /docs/decisions/ above: a permanent record of what the repo
 # is supposed to do and where it currently doesn't, not a working note.

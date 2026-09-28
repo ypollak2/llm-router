@@ -154,11 +154,12 @@ def load_oracle(rec_dir: Path) -> tuple[dict, dict]:
                     stop = "tool_use" if any(b.get("type") == "tool_use" for b in content) else "end_turn"
                 else:
                     content, stop = [{"type": "text", "text": "Done. (final answer not recorded)"}], "end_turn"
-                entry = {"content": content, "usage": r.get("usage") or {}, "stop_reason": stop}
+                entry = {"content": content, "usage": r.get("usage") or {}, "stop_reason": stop, "tag": tag}
                 action, exact = step_key(r["body"])
                 slot = oracle.setdefault(case, {})
                 slot.setdefault(exact, entry)
                 slot.setdefault("A:" + action, entry)
+                slot.setdefault("ALL:" + exact, []).append(entry)
     return oracle, first
 
 
@@ -185,7 +186,8 @@ class Oracle:
         if entry is None:
             self.misses += 1
             self.match_kinds.append("miss")
-            return httpx.Response(599, json={"type": "error", "error": {"type": "oracle_miss", "message": action}})
+            miss = json.dumps({"type": "error", "error": {"type": "oracle_miss", "message": action}}).encode()
+            return httpx.Response(599, stream=httpx.ByteStream(miss), headers={"content-type": "application/json"})
         self.match_kinds.append(kind)
         self.usage.append(entry["usage"])
         content = json.loads(RUN_DIR_RE.sub(self.workdir, json.dumps(entry["content"])))
@@ -200,6 +202,23 @@ def _sse(m: dict) -> bytes:
 
     safe = dict(m, content=[b for b in m["content"] if b.get("type") in ("text", "tool_use")])
     return sse_from_message(safe)
+
+
+def tool_names(content: list) -> list[str]:
+    return [b.get("name") for b in content or [] if isinstance(b, dict) and b.get("type") == "tool_use"]
+
+
+def claude_self_agreement(oracle: dict) -> dict:
+    """The noise floor: at steps where Claude answered the SAME request twice
+    (base and routed recordings), how often it chose the same tools."""
+    agree = total = 0
+    for slot in oracle.values():
+        for key, entries in slot.items():
+            if not key.startswith("ALL:") or len(entries) < 2:
+                continue
+            total += 1
+            agree += tool_names(entries[0]["content"]) == tool_names(entries[1]["content"])
+    return {"agree": agree, "n": total}
 
 
 def message_from_sse(raw: bytes) -> dict:
@@ -315,8 +334,9 @@ async def run_task(case: dict, arm: str, args, oracle_table: dict, first: dict, 
                          num_ctx=args.num_ctx, upstream="http://127.0.0.1:9", ledger_path=rows_path)
     app = ps.build_app(cfg, client=httpx.AsyncClient(transport=httpx.MockTransport(oracle)),
                        backend_factory=lambda m: OllamaBackend(m, local, base_url=args.ollama_url,
-                                                               num_ctx=args.num_ctx))
+                                                               num_ctx=args.num_ctx, hedge_s=args.hedge_s))
     calls, status, t0 = 0, "max_calls", time.time()
+    agreement: list = []
     before = len(ledger.read_rows(rows_path))
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1:8787",
                                  timeout=httpx.Timeout(900.0)) as client:
@@ -332,6 +352,10 @@ async def run_task(case: dict, arm: str, args, oracle_table: dict, first: dict, 
                 status = f"http_{r.status_code}"
                 break
             msg = message_from_sse(r.content)
+            if str(msg.get("id", "")).startswith("msg_lr"):  # served by the local model
+                _action, exact = step_key(body, workdir)
+                ref = oracle_table.get(cid, {}).get(exact)
+                agreement.append(None if ref is None else tool_names(ref["content"]) == tool_names(msg["content"]))
             body["messages"].append({"role": "assistant", "content": msg["content"]})
             uses = [b for b in msg["content"] if b.get("type") == "tool_use"]
             if msg.get("stop_reason") != "tool_use" or not uses:
@@ -360,7 +384,7 @@ async def run_task(case: dict, arm: str, args, oracle_table: dict, first: dict, 
             "test_rc": test.returncode, "changed": changed,
             "passed": status != "oracle_miss" and test.returncode == 0 and only_target,
             "scored": status != "oracle_miss", "wall_s": round(time.time() - t0, 1),
-            "anthropic_usage": oracle.usage, "rows": rows}
+            "anthropic_usage": oracle.usage, "rows": rows, "agreement": agreement}
 
 
 # ── report ───────────────────────────────────────────────────────────────────
@@ -391,6 +415,7 @@ def summarize(results: list[dict]) -> dict:
             if row.get("decision") == "fallback":
                 fallbacks[row.get("reason")] = fallbacks.get(row.get("reason"), 0) + 1
         served_lat = [row["route_latency_s"] for row in rows if row.get("decision") == "served"]
+        agree = [a for r in rs for a in r.get("agreement", []) if a is not None]
         arms[arm] = {
             "tasks": len(rs), "scored": sum(r["scored"] for r in rs), "passed": sum(r["passed"] for r in rs),
             "calls": sum(r["calls"] for r in rs), "anthropic_calls": sum(r["anthropic_calls"] for r in rs),
@@ -401,6 +426,11 @@ def summarize(results: list[dict]) -> dict:
             "fallbacks_by_reason": fallbacks,
             "served_latency_median_s": round(statistics.median(served_lat), 1) if served_lat else None,
             "served_latency_max_s": max(served_lat) if served_lat else None,
+            "served_latency_p90_s": (round(statistics.quantiles(served_lat, n=10)[8], 1)
+                                     if len(served_lat) >= 2 else None),
+            "tool_choice_agreement_with_claude": {"agree": sum(agree), "n": len(agree),
+                                                  "unscored_served": sum(1 for r in rs for a in r.get("agreement", [])
+                                                                         if a is None)},
             "added_latency_total_s": round(sum(row.get("added_latency_s") or 0 for row in rows), 1),
             "wall_s": round(sum(r["wall_s"] for r in rs), 1),
             "by_prev_tool": by_prev,
@@ -428,6 +458,8 @@ def main() -> int:
     ap.add_argument("--num-ctx", type=int, default=ps.DEFAULT_NUM_CTX)
     ap.add_argument("--ollama-url", default=os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434"))
     ap.add_argument("--max-calls", type=int, default=14)
+    ap.add_argument("--hedge-s", type=float, default=ps.DEFAULT_HEDGE_S)
+    ap.add_argument("--no-warm-up", action="store_true")
     args = ap.parse_args()
 
     oracle, first = load_oracle(Path(args.recordings))
@@ -436,6 +468,15 @@ def main() -> int:
     cases = [c for c in cases if c["id"] in wanted and c["id"] in first]
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
+    warm = None
+    if "routed" in args.arms and not args.no_warm_up:
+        async def _warm():
+            async with httpx.AsyncClient() as c:
+                model = args.model or "ollama/qwen3-coder:30b"
+                return {"model": model, "seconds": await OllamaBackend(
+                    model, c, base_url=args.ollama_url, num_ctx=args.num_ctx).warm_up()}
+        warm = asyncio.run(_warm())
+        print(f"warm-up (cold start): {warm}", flush=True)
     results = []
     for arm in args.arms.split(","):
         rows_path = out / f"proxy_calls-{arm}.jsonl"
@@ -449,7 +490,9 @@ def main() -> int:
     summary = summarize(results)
     conditions = {"cases": [c["id"] for c in cases], "step_budget_s": args.step_budget_s,
                   "model_pin": args.model, "trim": args.trim or "default", "num_ctx": args.num_ctx,
-                  "max_calls": args.max_calls, "upstream": "recorded-oracle (spike 2026-09-28)"}
+                  "max_calls": args.max_calls, "upstream": "recorded-oracle (spike 2026-09-28)",
+                  "hedge_s": args.hedge_s, "ollama_url": args.ollama_url, "warm_up": warm,
+                  "claude_self_agreement_floor": claude_self_agreement(oracle)}
     (out / "report.json").write_text(json.dumps({"conditions": conditions, "summary": summary,
                                                  "results": results}, indent=1, default=str))
     print(json.dumps({"conditions": conditions, "summary": summary}, indent=1))

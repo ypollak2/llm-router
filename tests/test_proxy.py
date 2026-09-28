@@ -175,8 +175,9 @@ def test_from_ollama_empty_reply_is_rejected_and_text_reply_ends_turn():
     assert from_ollama(_ollama(""), _req()) == (None, "empty response")
     m, _ = from_ollama(_ollama("All tests pass."), _req())
     assert m["stop_reason"] == "end_turn"
-    m, _ = from_ollama(_ollama("cut", done_reason="length"), _req())
-    assert m["stop_reason"] == "max_tokens"
+    # a reply cut off at the num_predict cap is never served
+    assert from_ollama(_ollama("cut", done_reason="length"), _req()) == (None, "truncated at num_predict")
+    assert from_ollama(_ollama("", [_call("Bash", {"command": "ls"})], done_reason="length"), _req())[0] is None
 
 
 def _replay_sse(raw: bytes) -> dict:
@@ -381,12 +382,109 @@ async def test_non_streaming_request_gets_json(tmp_path, policy):
     assert r.json()["content"] == [{"type": "text", "text": "Done."}]
 
 
-async def test_default_trim_cuts_tool_descriptions_for_the_backend_only(tmp_path, policy):
+async def test_default_fast_trim_reaches_the_backend_only(tmp_path, policy):
     backend = FakeBackend(_ollama("Done."))
+    up = Upstream()
     body = _req()
-    body["tools"][0]["description"] = "x" * 5000
-    await _post(_app(tmp_path, Upstream(), backend), body)
-    assert len(backend.calls[0]["tools"][0]["description"]) == 2000
+    body["tools"].append({"name": "Agent", "description": "d", "input_schema": {"type": "object"}})
+    await _post(_app(tmp_path, up, backend), body)
+    sent = backend.calls[0]
+    assert sent["system"] == pb.CONDENSED_SYSTEM
+    # the step class's subset, in its order, schemas byte-identical
+    assert [t["name"] for t in sent["tools"]] == ["Read", "Edit", "Write", "Bash"]
+    by_name = {t["name"]: t for t in body["tools"]}
+    assert all(t == by_name[t["name"]] for t in sent["tools"])
+    turns = [m for m in sent["messages"] if m["role"] != "system"]
+    assert len(turns) == 3 and turns[0] == body["messages"][0]  # first ask + last exchange
+
+
+def test_fast_trim_keeps_short_histories_and_does_not_mutate():
+    body = _req()
+    body["messages"] = body["messages"][:4]
+    before = json.dumps(body)
+    out = pb.apply_trims(body, pb.resolve_trims(None))
+    assert out["messages"] == body["messages"] and json.dumps(body) == before
+
+
+def test_num_predict_caps_by_previous_tool():
+    body = _req()  # newest results answer an Edit
+    assert pb.num_predict_for(body) == pb.NUM_PREDICT_HARD == 700
+    read_step = copy.deepcopy(body)
+    for m in read_step["messages"]:
+        for b in m["content"] if isinstance(m["content"], list) else []:
+            if b.get("type") == "tool_use":
+                b["name"] = "Read"
+    assert pb.num_predict_for(read_step) == pb.NUM_PREDICT_EASY == 200
+
+
+def _ollama_stream(chunks, *, delay=0.0):
+    class Slow(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            if delay:
+                await asyncio.sleep(delay)
+            for c in chunks:
+                yield (json.dumps(c) + "\n").encode()
+
+    seen = []
+
+    def handler(request):
+        seen.append(json.loads(request.content))
+        return httpx.Response(200, stream=Slow())
+
+    return httpx.AsyncClient(transport=httpx.MockTransport(handler)), seen
+
+
+async def test_ollama_backend_streams_merges_tool_calls_and_sends_keep_alive():
+    client, seen = _ollama_stream([
+        {"message": {"content": "Run"}, "done": False},
+        {"message": {"content": "ning.", "tool_calls": [_call("Bash", {"command": "ls"})]}, "done": False},
+        {"message": {"content": ""}, "done": True, "done_reason": "stop",
+         "prompt_eval_count": 2900, "eval_count": 20},
+    ])
+    backend = pb.OllamaBackend("ollama/qwen3-coder:30b", client, base_url="http://127.0.0.1:1", num_ctx=32768)
+    m, err, usage = await backend.complete(_req(), 5.0)
+    assert err is None and m["content"][0]["text"] == "Running."
+    assert m["content"][1]["name"] == "Bash" and usage["prompt_tokens"] == 2900
+    assert usage["first_token_s"] is not None
+    payload = seen[0]
+    assert payload["stream"] is True and payload["keep_alive"] == -1 and payload["think"] is False
+    assert payload["model"] == "qwen3-coder:30b" and payload["options"]["num_predict"] == 700
+
+
+async def test_hedge_fires_when_first_token_is_late(tmp_path, policy):
+    client, _ = _ollama_stream([{"message": {"content": "late"}, "done": True}], delay=1.0)
+    backend = pb.OllamaBackend("ollama/x", client, base_url="http://127.0.0.1:1", num_ctx=1024, hedge_s=0.05)
+    with pytest.raises(pb.HedgeTimeout):
+        await backend.complete(_req(), 5.0)
+    up = Upstream()
+    await _post(_app(tmp_path, up, backend), _req())
+    (row,) = _rows(tmp_path)
+    assert row["decision"] == "fallback" and row["reason"] == "hedge_timeout" and len(up.requests) == 1
+
+
+async def test_warm_up_pins_the_policy_model_and_never_raises(tmp_path, monkeypatch):
+    async def _chain(text):
+        return "code", "moderate", ["ollama/qwen3-coder:30b"]
+
+    monkeypatch.setattr(ps, "policy_chain", _chain)
+    client, seen = _ollama_stream([{"message": {"content": "k"}, "done": True}])
+    cfg = ps.ProxyConfig(upstream="http://127.0.0.1:9", ledger_path=tmp_path / "l.jsonl",
+                         ollama_url="http://127.0.0.1:11434")
+    app = ps.build_app(cfg, client=client)
+    result = await app.state.warm_up()
+    assert result["warm_up"] == "ok" and result["model"] == "ollama/qwen3-coder:30b"
+    assert seen[0]["keep_alive"] == -1 and seen[0]["options"]["num_predict"] == 1
+
+    async def _boom(text):
+        raise RuntimeError("policy down")
+
+    monkeypatch.setattr(ps, "policy_chain", _boom)
+    assert (await app.state.warm_up())["warm_up"] == "failed"
+
+
+def test_hedge_and_keep_alive_parsing():
+    assert ps.parse_hedge("off") is None and ps.parse_hedge("8") == 8.0
+    assert ps.parse_keep_alive("-1") == -1 and ps.parse_keep_alive("5m") == "5m"
 
 
 async def test_validation_failure_falls_back_to_anthropic(tmp_path, policy):
