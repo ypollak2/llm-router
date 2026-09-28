@@ -47,6 +47,12 @@ from llm_router.proxy.backends import (
     resolve_trims,
     tool_capable,
 )
+from llm_router.proxy.loop_guard import (
+    DEFAULT_MAX_CONSECUTIVE,
+    DEFAULT_REPEAT_WINDOW,
+    REASON_LOOP_GUARD,
+    LoopGuard,
+)
 from llm_router.proxy.steps import STEP_CLASSES, classify_text, prev_tools, session_id_of, step_class
 from llm_router.proxy.translate import (
     has_served_turn,
@@ -88,6 +94,8 @@ class ProxyConfig:
     hedge_s: float | None = DEFAULT_HEDGE_S
     keep_alive: int | str | None = DEFAULT_KEEP_ALIVE
     warm_up: bool = True
+    loop_max_consecutive: int = DEFAULT_MAX_CONSECUTIVE
+    loop_repeat_window: int = DEFAULT_REPEAT_WINDOW
 
     @classmethod
     def from_env(cls) -> "ProxyConfig":
@@ -100,6 +108,10 @@ class ProxyConfig:
             num_ctx=int(os.environ.get("LLM_ROUTER_PROXY_NUM_CTX", DEFAULT_NUM_CTX)),
             upstream=os.environ.get("LLM_ROUTER_PROXY_UPSTREAM") or ANTHROPIC_UPSTREAM,
             hedge_s=parse_hedge(os.environ.get("LLM_ROUTER_PROXY_HEDGE_S", str(DEFAULT_HEDGE_S))),
+            loop_max_consecutive=int(os.environ.get("LLM_ROUTER_PROXY_LOOP_MAX_CONSECUTIVE",
+                                                      DEFAULT_MAX_CONSECUTIVE)),
+            loop_repeat_window=int(os.environ.get("LLM_ROUTER_PROXY_LOOP_REPEAT_WINDOW",
+                                                    DEFAULT_REPEAT_WINDOW)),
         )
 
 
@@ -144,6 +156,7 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None):
     upstream = validate_upstream(cfg.upstream)
     trims = resolve_trims(cfg.trim)
     http = client or httpx.AsyncClient(timeout=httpx.Timeout(600.0, connect=10.0))
+    guard = LoopGuard(cfg.loop_max_consecutive, cfg.loop_repeat_window)
 
     def _ollama_url() -> str:
         from llm_router.config import get_config, validate_ollama_url
@@ -184,9 +197,19 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None):
 
     async def try_serve(body: dict, row: dict) -> dict | None:
         t0 = time.monotonic()
+        session_id = row.get("session_id")
+        exhausted = guard.exhausted(session_id)
+        if exhausted is not None:
+            # Forced fallback: this session already hit the consecutive-served
+            # cap, so the streak is broken WITHOUT trying the backend at all.
+            guard.reset(session_id)
+            row.update(decision=ledger.DECISION_FALLBACK, reason=REASON_LOOP_GUARD,
+                       detail=exhausted, added_latency_s=round(time.monotonic() - t0, 3))
+            return None
         try:
             choice = await choose_model(classify_text(body), cfg.model)
         except Exception as exc:  # noqa: BLE001 - any policy failure forwards the call
+            guard.reset(session_id)
             row.update(decision=ledger.DECISION_FALLBACK, reason="policy_error",
                        detail=ledger.scrub_detail(f"{type(exc).__name__}: {exc}"))
             row["added_latency_s"] = round(time.monotonic() - t0, 3)
@@ -194,6 +217,7 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None):
         row.update(task_type=choice["task_type"], complexity=choice["complexity"],
                    chain_head=choice["chain_head"], model=choice["model"])
         if choice["model"] is None:
+            guard.reset(session_id)
             row.update(decision=ledger.DECISION_FORWARDED, reason="policy_kept")
             row["added_latency_s"] = round(time.monotonic() - t0, 3)
             return None
@@ -214,9 +238,19 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None):
         elapsed = round(time.monotonic() - t0, 3)
         row["route_latency_s"] = elapsed
         if err or message is None:
+            guard.reset(session_id)
             row.update(decision=ledger.DECISION_FALLBACK, reason=reason or "validation",
                        detail=ledger.scrub_detail(err or "no message"), added_latency_s=elapsed)
             return None
+        repeat = guard.repeat_reason(session_id, message)
+        if repeat is not None:
+            # The candidate is real (passed validation) but repeats a recent
+            # served step: served/avoided metrics must never see it.
+            guard.reset(session_id)
+            row.update(decision=ledger.DECISION_FALLBACK, reason=REASON_LOOP_GUARD,
+                       detail=repeat, added_latency_s=elapsed)
+            return None
+        guard.record_served(session_id, message)
         row.update(decision=ledger.DECISION_SERVED, reason=None, msg_id=message["id"],
                    added_latency_s=0.0,
                    served_blocks=[b["type"] + (":" + b["name"] if b.get("name") else "")
@@ -365,6 +399,7 @@ USAGE = """\
 llm-router proxy [--port N] [--steps continuation|off] [--step-budget-s S]
                  [--hedge-s S|off] [--model ollama/TAG] [--trim NAME[,NAME]]
                  [--num-ctx N] [--ollama-url URL] [--keep-alive -1|5m] [--no-warm-up]
+                 [--loop-max-consecutive N] [--loop-repeat-window N]
 llm-router proxy stats [--days N] [--json]
 
 Opt-in, per session. Nothing is enabled until you point a session at it:
@@ -403,6 +438,10 @@ def cmd_proxy(argv: list[str]) -> int:
     ap.add_argument("--keep-alive", default=str(DEFAULT_KEEP_ALIVE))
     ap.add_argument("--no-warm-up", action="store_true")
     ap.add_argument("--ledger", default=None, help="write rows here instead of the state dir")
+    ap.add_argument("--loop-max-consecutive", type=int, default=env.loop_max_consecutive,
+                     help="force a step to Anthropic after this many served-in-a-row for a session (0 disables)")
+    ap.add_argument("--loop-repeat-window", type=int, default=env.loop_repeat_window,
+                     help="reject a served tool call that repeats one of this many recent steps (0 disables)")
     a = ap.parse_args(argv)
 
     from llm_router.net_bind import refuse_public_bind_or_exit
@@ -414,7 +453,8 @@ def cmd_proxy(argv: list[str]) -> int:
                           ledger_path=Path(a.ledger) if a.ledger else None,
                           hedge_s=parse_hedge(a.hedge_s) if a.hedge_s is not None else env.hedge_s,
                           keep_alive=parse_keep_alive(a.keep_alive), warm_up=not a.no_warm_up,
-                          ollama_url=a.ollama_url)
+                          ollama_url=a.ollama_url, loop_max_consecutive=a.loop_max_consecutive,
+                          loop_repeat_window=a.loop_repeat_window)
         app = build_app(cfg)
     except ValueError as exc:
         sys.stderr.write(f"llm-router proxy: {exc}\n")
@@ -424,7 +464,8 @@ def cmd_proxy(argv: list[str]) -> int:
 
     steps = ",".join(sorted(cfg.steps)) or "off (pass-through only)"
     print(f"llm-router proxy -> http://{a.host}:{a.port}  steps={steps}  "
-          f"hedge={cfg.hedge_s}s  budget={cfg.step_budget_s}s  trim={cfg.trim or 'fast'}")
+          f"hedge={cfg.hedge_s}s  budget={cfg.step_budget_s}s  trim={cfg.trim or 'fast'}  "
+          f"loop_guard(max_consecutive={cfg.loop_max_consecutive}, repeat_window={cfg.loop_repeat_window})")
     print(f"  enable per session: ANTHROPIC_BASE_URL=http://{a.host}:{a.port} claude")
     uvicorn.run(app, host=a.host, port=a.port, log_level="warning", access_log=False)
     return 0

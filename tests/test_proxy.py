@@ -20,6 +20,7 @@ import pytest
 
 from llm_router.proxy import backends as pb
 from llm_router.proxy import ledger
+from llm_router.proxy import loop_guard
 from llm_router.proxy import server as ps
 from llm_router.proxy.steps import STEP_CONTINUATION, classify_text, session_id_of, step_class
 from llm_router.proxy.translate import (
@@ -296,6 +297,21 @@ class FakeBackend:
         if self.exc:
             raise self.exc
         m, err = from_ollama(self.reply, body)
+        return m, err, {"prompt_tokens": 10, "output_tokens": 2}
+
+
+class SeqBackend:
+    """Like FakeBackend, but a different ``reply`` per call — for loop-guard
+    tests, which need to control whether consecutive served candidates repeat
+    a tool call or not."""
+
+    def __init__(self, replies):
+        self.replies, self.calls = list(replies), []
+
+    async def complete(self, body, timeout_s):
+        self.calls.append(body)
+        reply = self.replies[min(len(self.calls) - 1, len(self.replies) - 1)]
+        m, err = from_ollama(reply, body)
         return m, err, {"prompt_tokens": 10, "output_tokens": 2}
 
 
@@ -621,6 +637,230 @@ async def test_auth_token_never_reaches_ledger_or_logs(tmp_path, policy, caplog,
     for haystack in (text, caplog.text, out.out, out.err):
         assert TOKEN not in haystack
         assert TOKEN[:24] not in haystack
+
+
+# ── loop guard ──────────────────────────────────────────────────────────────
+#
+# Synthetic rows/requests shaped like the ec919061 pattern from the 2026-09-28
+# live trial: a session where the served candidate kept repeating the same
+# tool call. No prompt text from that trial is used here — only the shape
+# (same session, same tool + input, consecutive served decisions).
+
+
+def _msg(*blocks):
+    return {"content": list(blocks)}
+
+
+def _tool_use(name, **input):
+    return {"type": "tool_use", "name": name, "input": input}
+
+
+def test_loop_guard_env_defaults(monkeypatch):
+    monkeypatch.delenv("LLM_ROUTER_PROXY_LOOP_MAX_CONSECUTIVE", raising=False)
+    monkeypatch.delenv("LLM_ROUTER_PROXY_LOOP_REPEAT_WINDOW", raising=False)
+    guard = loop_guard.LoopGuard()
+    assert guard.max_consecutive == loop_guard.DEFAULT_MAX_CONSECUTIVE == 8
+    assert guard.repeat_window == loop_guard.DEFAULT_REPEAT_WINDOW == 3
+
+
+def test_loop_guard_reads_env_when_not_passed_explicitly(monkeypatch):
+    monkeypatch.setenv("LLM_ROUTER_PROXY_LOOP_MAX_CONSECUTIVE", "2")
+    monkeypatch.setenv("LLM_ROUTER_PROXY_LOOP_REPEAT_WINDOW", "1")
+    guard = loop_guard.LoopGuard()
+    assert guard.max_consecutive == 2 and guard.repeat_window == 1
+
+
+def test_loop_guard_repeat_reason_catches_exact_tool_and_input_match():
+    guard = loop_guard.LoopGuard(max_consecutive=100, repeat_window=3)
+    assert guard.repeat_reason("s1", _msg(_tool_use("Read", file_path="a.py"))) is None
+    guard.record_served("s1", _msg(_tool_use("Read", file_path="a.py")))
+    reason = guard.repeat_reason("s1", _msg(_tool_use("Read", file_path="a.py")))
+    assert reason == "repeat:Read"
+
+
+def test_loop_guard_ignores_a_distinct_tool_call():
+    guard = loop_guard.LoopGuard(max_consecutive=100, repeat_window=3)
+    guard.record_served("s1", _msg(_tool_use("Read", file_path="a.py")))
+    assert guard.repeat_reason("s1", _msg(_tool_use("Read", file_path="b.py"))) is None
+    assert guard.repeat_reason("s1", _msg(_tool_use("Bash", command="ls"))) is None
+
+
+def test_loop_guard_repeat_window_limits_lookback():
+    guard = loop_guard.LoopGuard(max_consecutive=100, repeat_window=1)
+    guard.record_served("s1", _msg(_tool_use("Read", file_path="a.py")))
+    guard.record_served("s1", _msg(_tool_use("Read", file_path="b.py")))
+    # "a.py" fell out of a window of 1 (only "b.py" is still recent)
+    assert guard.repeat_reason("s1", _msg(_tool_use("Read", file_path="a.py"))) is None
+    assert guard.repeat_reason("s1", _msg(_tool_use("Read", file_path="b.py"))) == "repeat:Read"
+
+
+def test_loop_guard_zero_repeat_window_disables_the_check():
+    guard = loop_guard.LoopGuard(max_consecutive=100, repeat_window=0)
+    guard.record_served("s1", _msg(_tool_use("Read", file_path="a.py")))
+    assert guard.repeat_reason("s1", _msg(_tool_use("Read", file_path="a.py"))) is None
+
+
+def test_loop_guard_exhausted_after_max_consecutive_served():
+    guard = loop_guard.LoopGuard(max_consecutive=2, repeat_window=0)
+    assert guard.exhausted("s1") is None
+    guard.record_served("s1", _msg(_tool_use("Read", file_path="a.py")))
+    assert guard.exhausted("s1") is None
+    guard.record_served("s1", _msg(_tool_use("Read", file_path="b.py")))
+    assert guard.exhausted("s1") == "consecutive_served_exceeded:2"
+
+
+def test_loop_guard_zero_max_consecutive_disables_the_cap():
+    guard = loop_guard.LoopGuard(max_consecutive=0, repeat_window=0)
+    for _ in range(20):
+        guard.record_served("s1", _msg(_tool_use("Bash", command="ls")))
+    assert guard.exhausted("s1") is None
+
+
+def test_loop_guard_reset_clears_both_counters():
+    guard = loop_guard.LoopGuard(max_consecutive=1, repeat_window=3)
+    guard.record_served("s1", _msg(_tool_use("Read", file_path="a.py")))
+    assert guard.exhausted("s1") == "consecutive_served_exceeded:1"
+    guard.reset("s1")
+    assert guard.exhausted("s1") is None
+    assert guard.repeat_reason("s1", _msg(_tool_use("Read", file_path="a.py"))) is None
+
+
+def test_loop_guard_sessions_are_independent():
+    guard = loop_guard.LoopGuard(max_consecutive=1, repeat_window=3)
+    guard.record_served("s1", _msg(_tool_use("Read", file_path="a.py")))
+    assert guard.exhausted("s1") is not None
+    assert guard.exhausted("s2") is None
+
+
+def test_loop_guard_no_session_id_never_triggers():
+    guard = loop_guard.LoopGuard(max_consecutive=1, repeat_window=1)
+    guard.record_served(None, _msg(_tool_use("Read", file_path="a.py")))
+    assert guard.exhausted(None) is None
+    assert guard.repeat_reason(None, _msg(_tool_use("Read", file_path="a.py"))) is None
+
+
+# ── loop guard, through the proxy app ───────────────────────────────────────
+
+
+async def test_repeated_served_tool_call_falls_back_and_is_flagged(tmp_path, policy):
+    up = Upstream()
+    backend = SeqBackend([
+        _ollama("Reading.", [_call("Read", {"file_path": "a.py"})]),
+        _ollama("Reading again.", [_call("Read", {"file_path": "a.py"})]),  # the ec919061 pattern
+    ])
+    app = _app(tmp_path, up, backend, loop_repeat_window=3, loop_max_consecutive=8)
+    r1 = await _post(app, _req())
+    r2 = await _post(app, _req())
+    assert r1.status_code == 200 and r2.status_code == 200
+    assert len(backend.calls) == 2  # the repeat WAS tried — it fails only after validating
+    assert len(up.requests) == 1  # only the repeat is forwarded to Anthropic
+    row1, row2 = _rows(tmp_path)
+    assert row1["decision"] == "served"
+    assert row2["decision"] == "fallback" and row2["reason"] == "loop_guard"
+    assert row2["detail"] == "repeat:Read"
+
+
+async def test_distinct_served_tool_calls_are_never_flagged_as_repeats(tmp_path, policy):
+    up = Upstream()
+    backend = SeqBackend([
+        _ollama("Reading a.", [_call("Read", {"file_path": "a.py"})]),
+        _ollama("Reading b.", [_call("Read", {"file_path": "b.py"})]),
+        _ollama("Reading c.", [_call("Read", {"file_path": "c.py"})]),
+    ])
+    app = _app(tmp_path, up, backend, loop_repeat_window=3, loop_max_consecutive=8)
+    for _ in range(3):
+        await _post(app, _req())
+    assert up.requests == []
+    rows = _rows(tmp_path)
+    assert [r["decision"] for r in rows] == ["served", "served", "served"]
+
+
+async def test_consecutive_served_cap_forces_fallback_without_calling_the_backend(tmp_path, policy):
+    up = Upstream()
+    backend = SeqBackend([
+        _ollama(f"Reading {i}.", [_call("Read", {"file_path": f"f{i}.py"})]) for i in range(6)
+    ])
+    app = _app(tmp_path, up, backend, loop_repeat_window=0, loop_max_consecutive=3)
+    for _ in range(3):
+        await _post(app, _req())
+    assert len(backend.calls) == 3  # three served steps: the healthy-run size seen in the evidence
+    await _post(app, _req())  # the 4th step: forced to Anthropic before touching the backend
+    assert len(backend.calls) == 3  # NOT 4 — the backend was never tried
+    assert len(up.requests) == 1
+    rows = _rows(tmp_path)
+    assert [r["decision"] for r in rows] == ["served", "served", "served", "fallback"]
+    assert rows[-1]["reason"] == "loop_guard"
+    assert rows[-1]["detail"] == "consecutive_served_exceeded:3"
+
+
+async def test_loop_guard_resets_after_forcing_a_fallback(tmp_path, policy):
+    up = Upstream()
+    backend = SeqBackend([
+        _ollama(f"Reading {i}.", [_call("Read", {"file_path": f"f{i}.py"})]) for i in range(6)
+    ])
+    app = _app(tmp_path, up, backend, loop_repeat_window=0, loop_max_consecutive=2)
+    for _ in range(2):
+        await _post(app, _req())
+    await _post(app, _req())  # 3rd: forced fallback, resets the streak
+    r = await _post(app, _req())  # 4th: served again, not blocked by the OLD streak
+    assert r.headers["content-type"].startswith("text/event-stream")
+    rows = _rows(tmp_path)
+    assert [r["decision"] for r in rows] == ["served", "served", "fallback", "served"]
+
+
+async def test_loop_guard_resets_when_policy_keeps_a_step_on_claude(tmp_path, policy):
+    up = Upstream()
+    backend = SeqBackend([
+        _ollama(f"Reading {i}.", [_call("Read", {"file_path": f"f{i}.py"})]) for i in range(6)
+    ])
+    app = _app(tmp_path, up, backend, loop_repeat_window=0, loop_max_consecutive=2)
+    await _post(app, _req())  # served, consecutive=1
+    policy["model"] = None
+    await _post(app, _req())  # policy_kept: forwarded, streak reset
+    policy["model"] = "ollama/fake:1"
+    await _post(app, _req())  # served, consecutive=1 again (not 2 -> not exhausted)
+    r = await _post(app, _req())  # served, consecutive=2, still under the cap of 2
+    rows = _rows(tmp_path)
+    assert [r["decision"] for r in rows] == ["served", "forwarded", "served", "served"]
+    assert r.headers["content-type"].startswith("text/event-stream")
+
+
+def test_stats_excludes_loop_guard_repeats_from_routed_share_and_avoided_cost():
+    u = {"input_tokens": 2, "output_tokens": 100, "cache_read_input_tokens": 40_000}
+    rows = [
+        {"decision": "served", "step_class": "continuation", "session_id": "ec919061",
+         "requested_model": "claude-sonnet-5", "route_latency_s": 1.0},
+        # 44-deep runaway pattern, collapsed to 2 rows for the test: repeats the
+        # proxy now catches and forwards instead of serving.
+        {"decision": "fallback", "reason": "loop_guard", "step_class": "continuation",
+         "session_id": "ec919061", "requested_model": "claude-sonnet-5", "usage": u,
+         "upstream_latency_s": 2.0, "detail": "repeat:Read"},
+        {"decision": "fallback", "reason": "loop_guard", "step_class": "continuation",
+         "session_id": "ec919061", "requested_model": "claude-sonnet-5", "usage": u,
+         "upstream_latency_s": 2.0, "detail": "consecutive_served_exceeded:8"},
+        {"decision": "served", "step_class": "continuation", "session_id": "cf5ef91c",
+         "requested_model": "claude-sonnet-5", "route_latency_s": 1.0},
+    ]
+    s = ledger.stats(rows)
+    assert s["routed_share"] == {"served": 2, "calls": 4, "share": 0.5}
+    rsx = s["routed_share_excl_repeats"]
+    assert rsx == {"served": 2, "calls": 2, "repeats_excluded": 2, "share": 1.0}
+    assert s["anthropic"]["est_avoided_n"] == 2  # never the 2 loop_guard rows
+    sess = s["sessions"]
+    assert sess["n"] == 2
+    assert sess["calls_per_session"] == {"ec919061": 3, "cf5ef91c": 1}
+    assert sess["max_calls_per_session"] == 3
+
+
+def test_stats_defensively_excludes_a_served_row_that_somehow_carries_the_loop_reason():
+    """decision=served should never carry reason=loop_guard in practice (the
+    server clears `reason` on every served row) — this pins that the metric
+    does not trust that invariant blindly."""
+    rows = [{"decision": "served", "reason": "loop_guard", "step_class": "continuation",
+             "session_id": "s", "requested_model": "claude-sonnet-5"}]
+    s = ledger.stats(rows)
+    assert s["routed_share"]["served"] == 0
+    assert s["anthropic"]["est_avoided_n"] == 0
 
 
 # ── ledger metrics ──────────────────────────────────────────────────────────

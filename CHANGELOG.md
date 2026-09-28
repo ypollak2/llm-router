@@ -56,6 +56,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   sessions into their parent, closing the gap where the 50-cap file had
   already evicted the spawn the join needed.
 
+### Fixed — proxy
+
+- **The per-call proxy (#197) had no defence against a served step that never
+  makes progress.** A live trial (2026-09-28, 3 real `claude -p` tasks) showed
+  one session with a run of 44 CONSECUTIVE served replies from
+  `ollama/qwen3-coder:30b`, each re-issuing the same `Read` of the same file:
+  the task still finished, but the loop took 195s and inflated the routed
+  share (63/81 = 77.8%) and "est. avoided $2.93" with calls that only existed
+  because of the loop. Two healthy sessions in the same trial never exceeded a
+  served run of 6. `llm_router.proxy.loop_guard` now tracks, per Claude Code
+  session, in-memory only: a served tool call that exactly repeats one of the
+  session's last `LLM_ROUTER_PROXY_LOOP_REPEAT_WINDOW` (default 3) served tool
+  calls, or a session that has served `LLM_ROUTER_PROXY_LOOP_MAX_CONSECUTIVE`
+  (default 8) steps in a row — set above the largest healthy run (6) with
+  margin, well below the runaway one (44) — is handed to Anthropic instead,
+  with `reason: "loop_guard"` in the ledger row and a `detail` naming which
+  check fired. Any non-served step for a session (a real Anthropic call, or a
+  policy decision to keep the step on Anthropic) clears that session's streak.
+  `llm-router proxy stats` now reports calls per session and a
+  `routed_share_excl_repeats` that drops loop-guard-flagged calls from both
+  sides of the share; `est_avoided_usd` never counted them (it is computed
+  only over rows that were actually served) and now excludes them
+  defensively too.
+
 ### Fixed — routing
 
 - **The read-only draft loop could burn the entire hook budget on one stuck

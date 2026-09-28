@@ -60,6 +60,17 @@ client tools are never routed.
   streamed tool call cannot be taken back.
 - **Binding.** Loopback only unless you opt in explicitly. Browser cross-origin
   requests are refused.
+- **Loop guard.** A live trial (2026-09-28) found one session with 44
+  consecutive served replies re-issuing the same `Read` of the same file —
+  correct in the end, but 195s and an inflated routed share/avoided-cost. Per
+  session, in-memory only (`llm_router.proxy.loop_guard`): a served tool call
+  that exactly repeats one of the session's last `LLM_ROUTER_PROXY_LOOP_REPEAT_WINDOW`
+  served tool calls, or a session that has served `LLM_ROUTER_PROXY_LOOP_MAX_CONSECUTIVE`
+  steps in a row (the cap is checked BEFORE the backend is tried), is handed to
+  Anthropic instead, recorded as `reason: "loop_guard"` with a `detail` naming
+  the repeated call or the cap. Any non-served step for that session (a real
+  Anthropic call, or a policy decision to keep the step on Anthropic) clears
+  the streak.
 
 ## Settings
 
@@ -76,6 +87,8 @@ client tools are never routed.
 | `--no-warm-up` | (none) | a warm-up call runs in the background at start |
 | `--ollama-url` | (none) | the router's configured Ollama (e.g. a dedicated server, below) |
 | (none) | `LLM_ROUTER_PROXY_UPSTREAM` | `https://api.anthropic.com` (only loopback overrides are accepted) |
+| `--loop-max-consecutive` | `LLM_ROUTER_PROXY_LOOP_MAX_CONSECUTIVE` | `8` (served-in-a-row per session before the next step is forced to Anthropic; `0` disables) |
+| `--loop-repeat-window` | `LLM_ROUTER_PROXY_LOOP_REPEAT_WINDOW` | `3` (recent served tool calls a new one is checked against for an exact repeat; `0` disables) |
 
 The model, the trims (`proxy/backends.py: TRIMS`) and the backends
 (`BACKENDS`) are plug points. A measured speed lever can be added as a named trim
@@ -123,13 +136,21 @@ llm-router proxy stats [--days N] [--json]
 
 The metrics are reported separately, because they diverge:
 
-- **routed share**: calls served by non-Claude over all calls;
-- **fallbacks**: count, and why each call was not served;
+- **calls per session**: `n` sessions, calls per session (median and max) — a
+  runaway loop shows up here as one session far above the rest;
+- **routed share**: calls served by non-Claude over all calls, and a second
+  figure, **routed share excl. loop-guard repeats**, that drops calls the loop
+  guard flagged (`reason: "loop_guard"`) from both sides of the fraction, so a
+  runaway session cannot inflate it;
+- **fallbacks**: count, and why each call was not served (`loop_guard` is one
+  reason among the others);
 - **latency**: served vs Anthropic medians, and the latency added before
   fallbacks;
 - **Anthropic tokens and est. cost**, split into input, cache read, cache write
-  5m / 1h and output. Also an est. avoided cost with its n, and the cache writes
-  after a served turn vs a clean history.
+  5m / 1h and output. Also an est. avoided cost with its n — computed only over
+  calls that were actually served, so a loop-guard-flagged call is never
+  counted as a saving — and the cache writes after a served turn vs a clean
+  history.
 
 A high routed share is not a saving. In the spike, routing half the calls saved
 about a fifth of the Anthropic cost, because cached re-reads are already cheap.

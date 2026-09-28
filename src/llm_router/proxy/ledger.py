@@ -41,6 +41,7 @@ import time
 from pathlib import Path
 
 from llm_router import paths
+from llm_router.proxy.loop_guard import REASON_LOOP_GUARD
 
 LEDGER_NAME = "proxy_calls.jsonl"
 
@@ -145,9 +146,18 @@ def anthropic_cost(row: dict) -> float | None:
 
 
 def stats(rows: list[dict]) -> dict:
-    """The four proxy metrics, each with its own n. See the module docstring."""
+    """The four proxy metrics, each with its own n. See the module docstring.
+
+    A call the loop guard flags (``reason == "loop_guard"``, see
+    ``proxy.loop_guard``) is a repeat or a forced-fallback of one, never a
+    saving: it is excluded from ``served`` defensively (a served row should
+    never carry that reason, but the exclusion is explicit rather than
+    assumed) and reported separately so a routed share or an avoided-cost
+    total cannot be inflated by a runaway session's repeats.
+    """
     calls = len(rows)
-    served = [r for r in rows if r.get("decision") == DECISION_SERVED]
+    loop_flagged = [r for r in rows if r.get("reason") == REASON_LOOP_GUARD]
+    served = [r for r in rows if r.get("decision") == DECISION_SERVED and r.get("reason") != REASON_LOOP_GUARD]
     fallback = [r for r in rows if r.get("decision") == DECISION_FALLBACK]
     to_anthropic = [r for r in rows if r.get("decision") in (DECISION_FORWARDED, DECISION_FALLBACK)]
     attempted = served + fallback
@@ -156,6 +166,13 @@ def stats(rows: list[dict]) -> dict:
     for r in rows:
         if r.get("decision") != DECISION_SERVED:
             reasons[r.get("reason") or "unknown"] = reasons.get(r.get("reason") or "unknown", 0) + 1
+
+    calls_excl_repeats = calls - len(loop_flagged)
+    sessions: dict[str, int] = {}
+    for r in rows:
+        sid = r.get("session_id") or "unknown"
+        sessions[sid] = sessions.get(sid, 0) + 1
+    session_counts = sorted(sessions.values())
 
     tokens = {k: 0 for k in ("input_tokens", "output_tokens", "cache_read_input_tokens",
                              "cache_creation_5m", "cache_creation_1h")}
@@ -198,8 +215,16 @@ def stats(rows: list[dict]) -> dict:
 
     return {
         "calls": calls,
+        "sessions": {"n": len(sessions), "calls_per_session": dict(sorted(sessions.items(),
+                                                                            key=lambda kv: -kv[1])),
+                     "median_calls_per_session": _median([float(c) for c in session_counts]),
+                     "max_calls_per_session": max(session_counts) if session_counts else None},
         "routed_share": {"served": len(served), "calls": calls,
                          "share": round(len(served) / calls, 4) if calls else None},
+        "routed_share_excl_repeats": {
+            "served": len(served), "calls": calls_excl_repeats, "repeats_excluded": len(loop_flagged),
+            "share": round(len(served) / calls_excl_repeats, 4) if calls_excl_repeats else None,
+        },
         "fallbacks": {"n": len(fallback), "attempted": len(attempted),
                       "rate": round(len(fallback) / len(attempted), 4) if attempted else None,
                       "not_served_by_reason": dict(sorted(reasons.items()))},
@@ -224,11 +249,17 @@ def stats(rows: list[dict]) -> dict:
 
 
 def format_stats(s: dict) -> str:
-    rs, fb, lat, an = s["routed_share"], s["fallbacks"], s["latency"], s["anthropic"]
+    rs, rsx, fb, lat, an = (s["routed_share"], s["routed_share_excl_repeats"], s["fallbacks"],
+                            s["latency"], s["anthropic"])
+    sess = s["sessions"]
     share = f"{rs['share'] * 100:.1f}%" if rs["share"] is not None else "n/a"
+    share_x = f"{rsx['share'] * 100:.1f}%" if rsx["share"] is not None else "n/a"
     lines = [
-        f"calls through proxy: {s['calls']}",
+        f"calls through proxy: {s['calls']}  across {sess['n']} session(s) "
+        f"(median {sess['median_calls_per_session']}/session, max {sess['max_calls_per_session']})",
         f"routed share: {share}  ({rs['served']} served by non-Claude / {rs['calls']} calls)",
+        f"routed share excl. loop-guard repeats: {share_x}  "
+        f"({rsx['served']} served / {rsx['calls']} calls, {rsx['repeats_excluded']} repeat(s) excluded)",
         f"fallbacks: {fb['n']} of {fb['attempted']} attempts; not served by reason: {fb['not_served_by_reason']}",
         f"latency: served median {lat['served_median_s']}s (n={lat['served_n']}), "
         f"Anthropic median {lat['anthropic_median_s']}s (n={lat['anthropic_n']}), "

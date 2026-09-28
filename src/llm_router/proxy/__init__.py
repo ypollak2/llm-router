@@ -15,6 +15,7 @@ Modules:
   translate  Anthropic <-> Ollama request/response translation, validation, SSE
   backends   pluggable serving backends and request trims
   ledger     per-call rows (never headers, never content) and ``stats()``
+  loop_guard per-session guard against a served step repeating without progress
   server     the Starlette app, pass-through, fallback, and ``main()``
 
 Design record: ``docs/spikes/per-call-proxy-2026-09-28.md`` and
