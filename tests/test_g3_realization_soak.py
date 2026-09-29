@@ -86,7 +86,8 @@ def test_realization_telemetry_complete(tmp_path):
     ledger = home / "ledger.db"
     env = _env(home, ledger)
 
-    # Honor: routed tool call → enforce-route writes verified_used.
+    # Honor: routed tool call → enforce-route writes route_acknowledged (Phase
+    # 0.2b: a door call is acknowledgement, not proof of use).
     for i in range(HONORS):
         sid = f"honor-{i}"
         _seed_pending(home, sid)
@@ -109,9 +110,12 @@ def test_realization_telemetry_complete(tmp_path):
         f"CHZ-EXT-204: {len(null_realization)} realization rows have NULL status"
     )
 
-    used = sum(1 for r in realization_rows if r["realization_status"] == "verified_used")
+    used = sum(1 for r in realization_rows if r["realization_status"] == "route_acknowledged")
     overridden = sum(1 for r in realization_rows if r["realization_status"] == "verified_overridden")
-    assert used >= 1, "honor path wrote no verified_used"
+    assert used >= 1, "honor path wrote no route_acknowledged"
+    assert not any(r["realization_status"] == "verified_used" for r in realization_rows), (
+        "Phase 0.2b: a door call must never be recorded as verified_used"
+    )
     assert overridden >= 1, "override path wrote no verified_overridden"
 
     # Bypass rate is computable (the whole point of populating the ledger).
@@ -121,20 +125,20 @@ def test_realization_telemetry_complete(tmp_path):
     assert all(r["session_id"] for r in realization_rows), "realization row missing session_id"
 
     # Phase 0 (Step 4, Gap 3): the real enforce-route.py honor path stamps
-    # adoption_method="door_call" on every verified_used row it writes; the real
+    # adoption_method="door_call" on every route_acknowledged row it writes; the real
     # stop-enforce.py override path stamps adoption_method=None explicitly (an
     # override is never "adopted" — it must not count toward realized savings).
-    used_rows = [r for r in realization_rows if r["realization_status"] == "verified_used"]
+    used_rows = [r for r in realization_rows if r["realization_status"] == "route_acknowledged"]
     overridden_rows = [r for r in realization_rows if r["realization_status"] == "verified_overridden"]
     assert used_rows and all(r["adoption_method"] == "door_call" for r in used_rows)
     assert overridden_rows and all(r["adoption_method"] is None for r in overridden_rows)
 
 
 def test_adoption_method_gates_realized_savings_end_to_end(tmp_path, monkeypatch):
-    """Gating: a verified_used row written by the REAL hook (adoption_method=
-    "door_call") must flow through _aggregate() and count toward
-    realized_savings_usd; a verified_overridden row (adoption_method=None) must
-    not. Drives the real subprocess hooks, then reads back via the canonical
+    """Gating: the row the REAL hook writes on a door call (route_acknowledged,
+    adoption_method="door_call") must flow through _aggregate() as potential and
+    acknowledged but NOT realized (Phase 0.2b, audit 2026-09-29 C8); a
+    verified_overridden row (adoption_method=None) must not count either. Drives the real subprocess hooks, then reads back via the canonical
     get_session_accounting() aggregation — proving the write-site and the
     aggregation-side gating (_COUNTS_AS_REALIZED) are wired together correctly,
     not just independently correct in isolation."""
@@ -168,8 +172,10 @@ def test_adoption_method_gates_realized_savings_end_to_end(tmp_path, monkeypatch
     _run(STOP_HOOK, {"session_id": override_sid}, env)
 
     honor_acc = get_session_accounting(honor_sid, path=ledger)
-    assert honor_acc.realized_savings_usd == pytest.approx(0.009)  # 0.01 - 0.001
-    assert honor_acc.realized_by_adoption_method == {"door_call": pytest.approx(0.009)}
+    assert honor_acc.potential_savings_usd == pytest.approx(0.009)  # 0.01 - 0.001
+    assert honor_acc.realized_savings_usd == 0.0
+    assert honor_acc.realized_by_adoption_method == {}
+    assert honor_acc.acknowledged_routes == 1
 
     override_acc = get_session_accounting(override_sid, path=ledger)
     assert override_acc.realized_savings_usd == 0.0

@@ -56,9 +56,12 @@ def test_honored_route_writes_non_null_realization(tmp_path, monkeypatch) -> Non
     rows = _rows(db)
     assert len(rows) == 1
     r = rows[0]
-    assert r["realization_status"] == "verified_used", "honor must write verified_used"
-    assert r["used_by_host"] == 1, "used_by_host must be non-NULL / true"
-    assert r["accepted"] == 1, "accepted must be non-NULL / true"
+    # Phase 0.2b (audit 2026-09-29, C8): a door call is acknowledgement, not
+    # proof of use — so the status is route_acknowledged and whether the host
+    # used the output stays unknown (NULL), never asserted true.
+    assert r["realization_status"] == "route_acknowledged", "honor must write route_acknowledged"
+    assert r["used_by_host"] is None, "a door call does not prove use"
+    assert r["accepted"] is None, "a door call does not prove acceptance"
     assert r["session_id"] == "sess-A", "direct rows must carry session_id (CHZ-PRV-06)"
 
 
@@ -85,7 +88,7 @@ def test_bypass_rate_is_computable_from_telemetry(tmp_path, monkeypatch) -> None
     rows = _rows(db)
     total = len(rows)
     null_realization = sum(1 for r in rows if r["realization_status"] is None)
-    used = sum(1 for r in rows if r["realization_status"] == "verified_used")
+    used = sum(1 for r in rows if r["realization_status"] == "route_acknowledged")
     overridden = sum(1 for r in rows if r["realization_status"] == "verified_overridden")
 
     assert total == 10

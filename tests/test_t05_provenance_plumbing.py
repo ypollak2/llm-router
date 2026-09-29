@@ -125,6 +125,7 @@ async def test_agentic_savings_row_survives_on_a_fresh_database(tmp_path, monkey
     await telemetry._default_recorder({
         "session_id": "sess-fresh", "task_type": "code",
         "saved_usd": 1.25, "actual_usd": 0.05, "model": "qwen",
+        "persisted": True,  # Phase 0.2b: only measured payloads are written
     })
 
     db = tmp_path / "usage.db"
