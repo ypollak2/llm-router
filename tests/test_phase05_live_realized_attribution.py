@@ -163,13 +163,17 @@ async def _drive_route_and_call(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("provider,expected_quota", [("openai", 150), ("anthropic", 0)])
+@pytest.mark.parametrize("provider", ["openai", "anthropic"])
 async def test_realized_savings_flips_zero_to_positive_on_matching_route_id(
-    temp_db, tmp_path, monkeypatch, provider, expected_quota
+    temp_db, tmp_path, monkeypatch, provider
 ):
-    """THE decisive Phase 0.5 proof: realized_savings_usd goes from 0 (wrong
-    route_id — the pre-fix bug) to >0 (matching route_id — Option A) against
-    the SAME billable row, varying only the route_id the adoption writer uses.
+    """THE decisive Phase 0.5 proof: the door-call row joins the billable row
+    (acknowledged_routes goes 0 -> 1) only when its route_id matches (Option A),
+    varying only the route_id the adoption writer uses.
+
+    Phase 0.2b (audit 2026-09-29, C8): a door call is acknowledgement, not use,
+    so the join no longer flips realized_savings_usd — it stays 0 and the
+    route's saving stays potential only. The test name is kept for history.
     """
     ledger_db = tmp_path / "ledger.db"
     session_id = f"sess-flip-{provider}"
@@ -202,6 +206,7 @@ async def test_realized_savings_flips_zero_to_positive_on_matching_route_id(
         "this route's realized savings — this is the bug Phase 0.5 fixes"
     )
     assert acc_wrong.potential_savings_usd == acc_before.potential_savings_usd
+    assert acc_wrong.acknowledged_routes == 0
 
     # THE FIX (Option A): realization recorded against the MATCHING
     # route_id — the hook-minted directive id threaded through
@@ -211,13 +216,15 @@ async def test_realized_savings_flips_zero_to_positive_on_matching_route_id(
     )
     acc_after = execution_ledger.get_route_accounting(did, path=ledger_db)
 
-    assert acc_after.realized_savings_usd > 0.0, (
-        "THE decisive proof: realized_savings_usd must flip from 0 to >0 once "
-        "the adoption row's route_id matches the billable row's route_id"
+    assert acc_after.acknowledged_routes == 1, (
+        "THE decisive proof: the door-call row must join once its route_id "
+        "matches the billable row's route_id"
     )
-    assert acc_after.realized_savings_usd == pytest.approx(acc_after.potential_savings_usd)
-    assert acc_after.realized_quota_tokens_saved == expected_quota
-    assert acc_after.realized_by_adoption_method == {"door_call": acc_after.realized_savings_usd}
+    assert acc_after.potential_savings_usd == acc_before.potential_savings_usd
+    assert acc_after.realized_savings_usd == 0.0
+    assert acc_after.realized_routes == 0
+    assert acc_after.realized_quota_tokens_saved == 0
+    assert acc_after.realized_by_adoption_method == {}
     assert acc_after.net_realized_savings_usd == pytest.approx(
         acc_after.realized_savings_usd
         - acc_after.classifier_cost_usd_total
@@ -230,7 +237,9 @@ async def test_realized_savings_flips_zero_to_positive_on_matching_route_id(
     # own ledger_db so no other route pollutes the sum.
     now = time.time()
     acc_period = execution_ledger.get_period_accounting(now - 3600, now + 3600, path=ledger_db)
-    assert acc_period.realized_savings_usd == pytest.approx(acc_after.realized_savings_usd)
+    assert acc_period.realized_savings_usd == 0.0
+    # Both door-call rows (mismatched and matching route_id) are in the period.
+    assert acc_period.acknowledged_routes == 2
     assert acc_period.potential_savings_usd == pytest.approx(acc_after.potential_savings_usd)
 
 
@@ -348,8 +357,9 @@ async def test_advise_mode_end_to_end_realizes_savings_via_hook_subprocess(
     subprocess hook run under LLM_ROUTER_ENFORCE=advise that HONORS the pending
     directive. Proves: (1) advise NEVER emits a blocking decision, (2) one
     door_call realization row lands at DID via the real hook subprocess (not
-    a mocked writer), (3) pending is cleared, and (4) realized_savings_usd
-    flips positive on the SAME route the billable row used."""
+    a mocked writer), (3) pending is cleared, and (4) the row joins the SAME
+    route the billable row used — as route_acknowledged, which since Phase
+    0.2b (audit 2026-09-29, C8) never counts as realized savings."""
     ledger_db = tmp_path / "ledger.db"
     session_id = "sess-advise-e2e"
     did = f"{session_id}:1785000000:llm_query:advise001"
@@ -378,7 +388,8 @@ async def test_advise_mode_end_to_end_realizes_savings_via_hook_subprocess(
     assert not pending_path.exists(), "pending must be cleared once honored"
 
     acc_after = execution_ledger.get_route_accounting(did, path=ledger_db)
-    assert acc_after.realized_routes == 1
-    assert acc_after.realized_savings_usd > 0.0
-    assert acc_after.realized_savings_usd == pytest.approx(acc_after.potential_savings_usd)
-    assert acc_after.realized_by_adoption_method == {"door_call": acc_after.realized_savings_usd}
+    assert acc_after.acknowledged_routes == 1
+    assert acc_after.realized_routes == 0
+    assert acc_after.realized_savings_usd == 0.0
+    assert acc_after.potential_savings_usd == pytest.approx(acc_before.potential_savings_usd)
+    assert acc_after.realized_by_adoption_method == {}

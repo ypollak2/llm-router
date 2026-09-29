@@ -16,7 +16,7 @@ downstream — then still unconditionally exits 0. This test proves:
 
 1. Advise never blocks (empty stdout / exit 0) regardless of match.
 2. On a MATCHING tool call, the pending file is cleared and a
-   route_realized / verified_used / door_call ledger row lands at the
+   route_realized / route_acknowledged / door_call ledger row lands at the
    pending's route_id.
 3. On a NON-matching tool call, nothing is recorded and pending survives
    (negative control — proves the predicate actually gates the write,
@@ -116,10 +116,13 @@ def test_advise_never_blocks_on_matching_tool(tmp_path, ledger_db):
     )
 
     acc = get_route_accounting(route_id, path=ledger_db)
-    assert acc.realized_routes == 1, (
-        "advise-mode adoption must write a verified_used route_realized row "
+    # Phase 0.2b (audit 2026-09-29, C8): the door call is recorded as
+    # route_acknowledged — acknowledgement, not proof of use.
+    assert acc.acknowledged_routes == 1, (
+        "advise-mode adoption must write a route_acknowledged route_realized row "
         "when the host calls the routed door — this is the whole point of T6"
     )
+    assert acc.realized_routes == 0
     assert acc.overridden_routes == 0
     assert acc.realization_unknown_routes == 0
 
@@ -154,6 +157,7 @@ def test_advise_never_blocks_on_nonmatching_tool_and_records_nothing(
 
     acc = get_route_accounting(route_id, path=ledger_db)
     assert acc.realized_routes == 0
+    assert acc.acknowledged_routes == 0
     assert acc.overridden_routes == 0
 
 
@@ -200,7 +204,7 @@ def test_advise_matches_via_expected_tool_exact_name(tmp_path, ledger_db):
     assert result.stdout.strip() == ""
 
     acc = get_route_accounting(route_id, path=ledger_db)
-    assert acc.realized_routes == 1
+    assert acc.acknowledged_routes == 1
 
 
 def test_advise_dedups_via_stable_event_id_on_retry(tmp_path, ledger_db):
@@ -227,7 +231,7 @@ def test_advise_dedups_via_stable_event_id_on_retry(tmp_path, ledger_db):
         assert result.stdout.strip() == ""
 
     acc = get_route_accounting(route_id, path=ledger_db)
-    assert acc.realized_routes == 1, (
+    assert acc.acknowledged_routes == 1, (
         "two honored calls for the identical route_id must dedup to one "
-        "realized route, not double-count"
+        "acknowledged route, not double-count"
     )

@@ -76,19 +76,35 @@ _BILLABLE_EVENTS: frozenset[str] = frozenset(
 TerminalState = Literal[
     "accepted", "rejected", "failed", "cancelled", "bypassed", "overridden", "unknown",
 ]
-RealizationStatus = Literal["verified_used", "verified_overridden", "unknown"]
-# Phase 0: how a `verified_used` row's usage was actually confirmed.
-# door_call = host called back through the enforcement door (strongest signal);
-# agent_marked = the (currently soak-only) agent-side adoption marker; content_match
-# = output-similarity heuristic (enum value only in Phase 0, not implemented as a
-# writer yet — see soak/replay.py); unknown = no adoption evidence. Only door_call
-# and agent_marked count toward realized savings (`_COUNTS_AS_REALIZED` below).
+RealizationStatus = Literal[
+    "verified_used", "verified_overridden", "route_acknowledged", "unknown",
+]
+# Phase 0.2b: `route_acknowledged` = the host called back through the
+# enforcement door (any `llm_*` tool while a PreToolUse hold was pending). That
+# proves the route was ACKNOWLEDGED, not that its output was USED. The audit of
+# 2026-09-29 (~/.rsi/research/audit-2026-09-29/verification.md, claim C8)
+# traced 176 of 176 organic `verified_used` rows in 30 days to this door-call
+# path, including throwaway `llm()` calls made only to release the hold. So a
+# door call is recorded as `route_acknowledged` and never counts as realized.
+#
+# How a `verified_used` row's usage was confirmed: agent_marked = the
+# (currently soak-only) agent-side adoption marker; content_match =
+# output-similarity heuristic (enum value only, no writer yet — see
+# soak/replay.py); door_call = the enforcement-door call above, which is
+# acknowledgement only; unknown = no adoption evidence.
 AdoptionMethod = Literal["door_call", "agent_marked", "content_match", "unknown"]
 
 # Adoption methods strong enough to count a verified_used route's saving as
 # REALIZED (as opposed to merely "likely" — see Accounting.likely_used_routes).
 # content_match is corroborating evidence, not proof, so it does NOT count here.
-_COUNTS_AS_REALIZED: frozenset[str] = frozenset({"door_call", "agent_marked"})
+# door_call is NOT here: it is acknowledgement, not use (C8 above).
+_COUNTS_AS_REALIZED: frozenset[str] = frozenset({"agent_marked"})
+
+# Legacy rows that must be read as `route_acknowledged`, not `verified_used`:
+# before Phase 0.2b the door-call writer stamped `verified_used` +
+# `door_call`, and before Phase 0 it stamped `verified_used` with a NULL
+# adoption_method. Both are the same throwaway-capable door call (C8).
+_ACKNOWLEDGED_ONLY_ADOPTION: frozenset[str | None] = frozenset({"door_call", None})
 
 # Phase 0.1: provider strings that identify a response as served by Claude on
 # the user's subscription quota (as opposed to a metered/external model).
@@ -509,14 +525,17 @@ class Accounting:
     # if the routed result was verifiably used by the host. Routes whose
     # realization is `verified_overridden` (host went its own way) or `unknown`
     # (couldn't verify) must NOT be counted as realized savings.
-    realized_routes: int = 0                     # realization_status == verified_used
+    realized_routes: int = 0                     # realization_status == verified_used, excluding
+                                                   # legacy door_call / NULL-adoption rows (Phase 0.2b)
+    acknowledged_routes: int = 0                 # route_acknowledged, incl. legacy door_call /
+                                                   # NULL-adoption verified_used rows — never realized
     overridden_routes: int = 0                   # verified_overridden
     realization_unknown_routes: int = 0          # unknown (or never verified)
     potential_savings_usd: float = 0.0           # Σ max(0, baseline_eq − actual) over ALL routes
     realized_savings_usd: float = 0.0            # Σ that saving ONLY on verified_used routes,
                                                    # ADOPTION-GATED (adoption_method in
-                                                   # _COUNTS_AS_REALIZED; NULL on a verified_used
-                                                   # row is back-compat-treated as door_call)
+                                                   # _COUNTS_AS_REALIZED; door_call and NULL
+                                                   # never count — see route_acknowledged)
 
     # ── Phase 0 (realized-savings ledger: Gaps 1/2/3) ────────────────────────
     classifier_cost_usd_total: float = 0.0        # Σ classifier spend over accepted attempts
@@ -672,20 +691,27 @@ def _aggregate(scope: str, scope_id: str, rows: list[dict[str, Any]]) -> Account
     # so an unverified saving can never be reported as realized.
     #
     # Phase 0 adoption gating: within verified_used routes, realized_savings_usd
-    # additionally requires adoption_method in _COUNTS_AS_REALIZED (door_call or
-    # agent_marked). A verified_used row with NO adoption_method (NULL) predates
-    # Phase 0 and is back-compat-treated as door_call — the strongest signal —
-    # rather than silently dropping every pre-migration verified_used route from
-    # realized savings. content_match is evidence but not proof: it lands in
-    # likely_used_routes instead of realized_savings_usd.
+    # additionally requires adoption_method in _COUNTS_AS_REALIZED (agent_marked).
+    # Phase 0.2b: a door call is acknowledgement, not use (verification.md C8:
+    # 176 of 176 organic verified_used rows were door calls, including
+    # throwaway calls made only to release a hold). Legacy verified_used rows
+    # carrying door_call or a NULL adoption_method (both written by that same
+    # door-call path) are read as route_acknowledged, so they stay out of
+    # realized_savings_usd, realized_routes and every surface built on them.
+    # content_match is evidence but not proof: it lands in likely_used_routes
+    # instead of realized_savings_usd.
+    for rid, status in list(route_realization.items()):
+        if (
+            status == "verified_used"
+            and route_adoption.get(rid) in _ACKNOWLEDGED_ONLY_ADOPTION
+        ):
+            route_realization[rid] = "route_acknowledged"
     for rid, delta in route_potential.items():
         saving = max(0.0, delta)
         acc.potential_savings_usd += saving
         if route_realization.get(rid) != "verified_used":
             continue
         adoption = route_adoption.get(rid)
-        if adoption is None:
-            adoption = "door_call"  # pre-migration back-compat ONLY
         host_mode = route_host_mode.get(rid, "unknown")
         if adoption in _COUNTS_AS_REALIZED:
             acc.realized_savings_usd += saving
@@ -725,6 +751,8 @@ def _aggregate(scope: str, scope_id: str, rows: list[dict[str, Any]]) -> Account
     for rs in route_realization.values():
         if rs == "verified_used":
             acc.realized_routes += 1
+        elif rs == "route_acknowledged":
+            acc.acknowledged_routes += 1
         elif rs == "verified_overridden":
             acc.overridden_routes += 1
         elif rs == "unknown":

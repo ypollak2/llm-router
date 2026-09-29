@@ -118,14 +118,36 @@ ELIGIBLE_TURN_PRED_SQL = (
     " AND model_used NOT LIKE 'llm_router-agentic%'"
     f" AND timestamp >= '{REALIZED_GATE_SINCE}')"
 )
-_VERIFIED_PRED = f"({ELIGIBLE_TURN_PRED_SQL} AND mode = '{REALIZED_MODE}')"
+#: Phase 0.2b (audit 2026-09-29, claim C3): writers whose rows are NOT an
+#: estimate of anything and are kept out of every savings figure, verified or
+#: unverified. `llm_router-agentic-router` is agentic/telemetry.py's legacy flat
+#: credit — `milestones x $0.20`, zero token counts, written whatever the
+#: outcome: 529 rows, $110.20, 91% of the $121.06 all-time savings_stats sum.
+#: A READ-TIME filter: the rows stay in the table, untouched. Measured agentic
+#: rows are written as `llm_router-agentic-measured` and are not filtered.
+EXCLUDED_SAVINGS_MODELS: tuple[str, ...] = ("llm_router-agentic-router",)
+#: NULL-safe: a row with no model_used is not excluded (it stays unverified).
+EXCLUDED_SAVINGS_PRED_SQL = (
+    "(LOWER(COALESCE(model_used, '')) IN ("
+    + ", ".join(f"'{m}'" for m in EXCLUDED_SAVINGS_MODELS)
+    + "))"
+)
+# An excluded row can never be verified either, whatever its host says.
+_VERIFIED_PRED = (
+    f"({ELIGIBLE_TURN_PRED_SQL} AND mode = '{REALIZED_MODE}'"
+    f" AND NOT {EXCLUDED_SAVINGS_PRED_SQL})"
+)
 VERIFIED_SAVED_SQL = (
     f"CASE WHEN {_VERIFIED_PRED} THEN estimated_claude_cost_saved ELSE 0 END"
 )
 UNVERIFIED_SAVED_SQL = (
-    f"CASE WHEN {_VERIFIED_PRED} THEN 0 ELSE estimated_claude_cost_saved END"
+    f"CASE WHEN {_VERIFIED_PRED} THEN 0 WHEN {EXCLUDED_SAVINGS_PRED_SQL} THEN 0 "
+    "ELSE estimated_claude_cost_saved END"
 )
-UNVERIFIED_CALLS_SQL = f"CASE WHEN {_VERIFIED_PRED} THEN 0 ELSE 1 END"
+UNVERIFIED_CALLS_SQL = (
+    f"CASE WHEN {_VERIFIED_PRED} THEN 0 WHEN {EXCLUDED_SAVINGS_PRED_SQL} THEN 0 "
+    "ELSE 1 END"
+)
 #: Row COUNT behind `VERIFIED_SAVED_SQL`'s dollar figure — NOT derivable from
 #: summing `VERIFIED_SAVED_SQL` and checking for zero, because a genuinely
 #: verified row can itself have saved $0.00 (equal-cost routing). A `$` figure
@@ -154,7 +176,15 @@ def is_verified_saving(host, model, timestamp, mode) -> bool:
         return False
     if mode != REALIZED_MODE:
         return False
+    if is_excluded_saving(model):
+        return False
     return str(timestamp) >= REALIZED_GATE_SINCE
+
+
+def is_excluded_saving(model) -> bool:
+    """Python twin of EXCLUDED_SAVINGS_PRED_SQL: True for a row that belongs in
+    no savings figure at all (neither verified nor unverified)."""
+    return model is not None and str(model).lower() in EXCLUDED_SAVINGS_MODELS
 
 
 def savings_split_sql(columns) -> tuple[str, str, str]:

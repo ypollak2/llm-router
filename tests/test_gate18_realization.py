@@ -35,6 +35,9 @@ def _completed(route, *, cost, baseline, realization=None, session_id="s1"):
         measured_cost_usd=cost,
         baseline_equivalent_cost_usd=baseline,
         realization_status=realization,
+        # Phase 0.2b: a verified_used row counts only with adoption evidence;
+        # agent_marked is the one method in COUNTS_AS_REALIZED.
+        adoption_method="agent_marked" if realization == "verified_used" else None,
     )
 
 

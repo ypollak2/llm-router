@@ -300,11 +300,14 @@ def compute_status(host: str, now: Optional[float] = None) -> SurfaceStatus:
     unverified_today = 0.0
     unverified_total = 0.0
     tokens_today = 0
-    from llm_router.savings import is_verified_saving
+    from llm_router.savings import is_excluded_saving, is_verified_saving
     for rec in host_recs:
         try:
             saved = float(rec.get("estimated_saved", 0.0) or 0.0)
         except (ValueError, TypeError):
+            saved = 0.0
+        # Phase 0.2b: legacy flat agentic credits are in no savings figure.
+        if is_excluded_saving(rec.get("model")):
             saved = 0.0
         verified = rec["verified"] if "verified" in rec else is_verified_saving(
             rec.get("host"), rec.get("model"), rec.get("timestamp"), rec.get("mode"))

@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import sqlite3
 
+import pytest
+
 from llm_router.agentic.telemetry import (
     record_delegation_savings,
     savings_payload,
@@ -12,12 +14,21 @@ _RESULT = {
     "outcome": "complete",
     "task_type": "code",
     "savings": {"actual_usd": 0.0, "baseline_usd": 0.6, "saved_usd": 0.6, "efficiency": None},
+    # Phase 0.2b: the saving is priced from measured tokens, never from the
+    # flat milestones x $0.20 `saved_usd` above.
+    "usage": {"input_tokens": 10_000, "output_tokens": 2_000},
 }
+
+
+def _expected_saved() -> float:
+    from llm_router import pricing
+    return pricing.cost_usd(pricing.savings_baseline_model(), 10_000, 2_000)
 
 
 def test_savings_payload_from_result_dict():
     p = savings_payload(_RESULT, model="m", session_id="s1")
-    assert p["saved_usd"] == 0.6 and p["actual_usd"] == 0.0
+    assert p["saved_usd"] == pytest.approx(_expected_saved()) and p["actual_usd"] == 0.0
+    assert p["persisted"] is True
     assert p["model"] == "m" and p["session_id"] == "s1" and p["task_type"] == "code"
 
 
@@ -28,7 +39,7 @@ async def test_record_dispatches_to_injected_recorder():
         seen.append(payload)
 
     p = await record_delegation_savings(_RESULT, recorder=fake_recorder)
-    assert seen and seen[0]["saved_usd"] == 0.6
+    assert seen and seen[0]["saved_usd"] == pytest.approx(_expected_saved())
     assert p == seen[0]
 
 
@@ -38,15 +49,18 @@ async def test_record_is_fail_open():
 
     # must NOT raise — telemetry can never break a delegation
     p = await record_delegation_savings(_RESULT, recorder=boom)
-    assert p["saved_usd"] == 0.6
+    assert p["saved_usd"] == pytest.approx(_expected_saved())
 
 
 async def test_default_recorder_writes_savings_stats_row(tmp_path, monkeypatch):
     db = tmp_path / "usage.db"
     monkeypatch.setenv("LLM_ROUTER_DB_PATH", str(db))
-    await record_delegation_savings(_RESULT, model="llm_router-agentic-router", session_id="sess")
+    await record_delegation_savings(_RESULT, session_id="sess")
     rows = sqlite3.connect(str(db)).execute(
-        "SELECT estimated_claude_cost_saved, external_cost, model_used, session_id "
-        "FROM savings_stats"
+        "SELECT estimated_claude_cost_saved, external_cost, model_used, session_id, "
+        "input_tokens, output_tokens FROM savings_stats"
     ).fetchall()
-    assert rows == [(0.6, 0.0, "llm_router-agentic-router", "sess")]
+    assert len(rows) == 1
+    saved, *rest = rows[0]
+    assert saved == pytest.approx(_expected_saved())
+    assert rest == [0.0, "llm_router-agentic-measured", "sess", 10_000, 2_000]

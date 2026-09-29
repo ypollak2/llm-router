@@ -87,8 +87,11 @@ A **unit** is one of eight kinds. All eight sum to the denominator.
                   (``hooks/agent-route.py``'s ``_record_north_star_unit``)
                   whose recorded ``outcome`` reflects an actual Codex
                   invocation: ``delegated`` (Codex ran and its output stood in
-                  for the sub-agent's result) or ``codex_failed`` (Codex was
-                  invoked but produced nothing usable). Rows recording a
+                  for the sub-agent's result; outcome ``unknown``, because
+                  dispatch is not evidence the result was kept, and the
+                  used/redone verdict is left to the release-time outcome
+                  audit) or ``codex_failed`` (Codex was invoked but produced
+                  nothing usable). Rows recording a
                   decision NOT to invoke Codex at all — ``unsuitable``,
                   ``budget_exhausted``, ``codex_unavailable`` — are not
                   attempts and produce no unit, the same way "the router chose
@@ -835,8 +838,13 @@ def _load_north_star_ledger() -> list[dict]:
     return rows
 
 
+# `delegated` means Codex was dispatched and returned, NOT that its result was
+# kept (audit C6: all 16 "used" codex rows were bare dispatch records). The
+# used/redone verdict for this kind belongs to the release-time outcome audit
+# (PLAN Phase 0.1); at runtime it stays `unknown`, still counted as attempted
+# so the dispatch rate remains measurable.
 _CODEX_ATTEMPT_OUTCOMES = {
-    "delegated": (OUTCOME_USED, "agent_route_codex_delegated"),
+    "delegated": (OUTCOME_UNKNOWN, "agent_route_codex_delegated"),
     "codex_failed": (OUTCOME_DISCARDED, "agent_route_codex_failed"),
 }
 
@@ -1049,6 +1057,11 @@ def build_sessions(days: int | None, root: Path | None = None,
             continue
         if sandbox:
             continue
+        # Cheap pre-filter only. A file's mtime is its LAST write, so an
+        # mtime before the cutoff proves every record in it is older too, and
+        # skipping it can never drop an in-window unit. The converse does not
+        # hold (a file touched today can hold units from last month), so the
+        # authoritative window is the per-unit ts filter at the end.
         mtime = path.stat().st_mtime if path.exists() else None
         if cutoff is not None and mtime is not None and mtime < cutoff:
             continue
@@ -1152,6 +1165,17 @@ def build_sessions(days: int | None, root: Path | None = None,
     orphan_rows = [r for r in edit_outcome_rows if not r.get("session_id")]
     if orphan_rows:
         _fold_orphan_edit_rows(per_session, all_edit_calls, orphan_rows)
+
+    if cutoff is not None:
+        # The window is per UNIT, on its own ts (audit C7: filtering by file
+        # mtime alone let every unit of any recently-touched file through, so
+        # the 1-, 7- and 30-day "used" counts were identical). A unit with no
+        # ts cannot be shown to fall inside the window, so it is left out.
+        for sid in list(per_session):
+            su = per_session[sid]
+            su.units = [u for u in su.units if u.ts is not None and u.ts >= cutoff]
+            if not su.units:
+                del per_session[sid]
 
     if session_id:
         per_session = {k: v for k, v in per_session.items() if k == session_id}

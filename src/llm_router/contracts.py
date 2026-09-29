@@ -102,15 +102,19 @@ TerminalState = Literal[
 ]
 # Exactly 7 values.
 
-RealizationStatus = Literal["verified_used", "verified_overridden", "unknown"]
-# Exactly 3 values.
+RealizationStatus = Literal[
+    "verified_used", "verified_overridden", "route_acknowledged", "unknown",
+]
+# Exactly 4 values. route_acknowledged (Phase 0.2b): a door call through the
+# enforcement hook — acknowledgement, not use; see execution_ledger.
 
 AdoptionMethod = Literal["door_call", "agent_marked", "content_match", "unknown"]
 # Exactly 4 values.
 
 # Adoption methods that count a route's savings as "realized" (as opposed to
-# merely "potential").
-COUNTS_AS_REALIZED: frozenset[str] = frozenset({"door_call", "agent_marked"})
+# merely "potential"). door_call is excluded since Phase 0.2b: it fires on
+# throwaway calls made only to release a hold (audit 2026-09-29, claim C8).
+COUNTS_AS_REALIZED: frozenset[str] = frozenset({"agent_marked"})
 
 # Provider identifiers that represent the Claude subscription lane (as opposed
 # to a metered API provider) for cost-accounting purposes.

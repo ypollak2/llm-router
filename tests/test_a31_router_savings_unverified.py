@@ -92,13 +92,19 @@ def test_premise_the_pre_gate_row_is_before_the_gate():
 def test_only_the_gated_hook_row_is_verified(tmp_path):
     verified, unverified, n = _sums(_db(tmp_path))
     assert verified == 0.5
-    assert unverified == 1 + 2 + 4 + 8 + 16 + 32
-    assert n == 6
+    # Phase 0.2b: the agentic flat credit (16) is in NEITHER figure.
+    assert unverified == 1 + 2 + 4 + 8 + 32
+    assert n == 5
 
 
-def test_verified_and_unverified_partition_the_ledger(tmp_path):
+def test_verified_unverified_and_excluded_partition_the_ledger(tmp_path):
+    """Every row lands in exactly one bucket: verified, unverified, or — since
+    Phase 0.2b — excluded (the legacy flat agentic credit, read-time only)."""
+    from llm_router.savings import is_excluded_saving
     verified, unverified, _ = _sums(_db(tmp_path))
-    assert verified + unverified == sum(r[4] for r in _ROWS)
+    excluded = sum(r[4] for r in _ROWS if is_excluded_saving(r[3]))
+    assert excluded == 16
+    assert verified + unverified + excluded == sum(r[4] for r in _ROWS)
 
 
 def test_an_unknown_host_is_unverified_not_dropped_and_not_verified(tmp_path):
@@ -114,8 +120,8 @@ def test_an_unknown_host_is_unverified_not_dropped_and_not_verified(tmp_path):
 def test_query_window_keeps_unverified_out_of_the_headline(tmp_path):
     t = dashboard_data.query_window("lifetime", db_path=_db(tmp_path))
     assert t.saved_usd == 0.5
-    assert t.unverified_saved_usd == 63.0
-    assert t.unverified_calls == 6
+    assert t.unverified_saved_usd == 47.0
+    assert t.unverified_calls == 5
     # The existing invariant still holds over the verified figure.
     assert t.saved_usd == sum(s["saved_usd"] for s in t.by_source.values())
 
@@ -124,7 +130,7 @@ def test_query_daily_keeps_unverified_out_of_the_chart(tmp_path):
     recent = [r for r in _ROWS if r[1] == _NOW]
     rows = dashboard_data.query_daily(14, db_path=_db(tmp_path, recent))
     assert sum(r.saved_usd for r in rows) == 0.5
-    assert sum(r.unverified_saved_usd for r in rows) == 1 + 2 + 4 + 8 + 16
+    assert sum(r.unverified_saved_usd for r in rows) == 1 + 2 + 4 + 8
 
 
 def test_the_savings_report_labels_unverified_beside_the_verified_total(
@@ -144,9 +150,10 @@ def test_the_savings_report_labels_unverified_beside_the_verified_total(
     from llm_router.commands import savings_report
     monkeypatch.setattr(savings_report, "_get_db_path", lambda: _db(tmp_path))
     out = savings_report.render_savings_report("all")
-    # 0.50 (verified) + 63.00 (unverified: 1+2+4+8 = router/gateway/sdk/NULL
-    # host, agentic and pre-gate rows excluded) = 63.50, n = 1 + 6 = 7.
-    assert "est. saved $63.50 (n=7)" in out
+    # 0.50 (verified) + 47.00 (unverified: 1+2+4+8 = router/gateway/sdk/NULL
+    # host, plus the 32 pre-gate row) = 47.50, n = 1 + 5 = 6. The agentic
+    # flat credit (16) is excluded entirely since Phase 0.2b.
+    assert "est. saved $47.50 (n=6)" in out
     assert "verified" not in out.lower()
 
 
@@ -178,8 +185,10 @@ def test_agentic_telemetry_no_longer_claims_the_hook_host(tmp_path, monkeypatch)
     from llm_router.agentic import telemetry
     db = tmp_path / "agentic.db"
     monkeypatch.setenv("LLM_ROUTER_DB_PATH", str(db))
+    # Phase 0.2b: only a completed delegation with measured tokens is written.
     asyncio.run(telemetry.record_delegation_savings(
-        {"savings": {"saved_usd": 0.2, "actual_usd": 0.0}}))
+        {"outcome": "complete", "savings": {"saved_usd": 0.2, "actual_usd": 0.0},
+         "usage": {"input_tokens": 1000, "output_tokens": 200}}))
     conn = sqlite3.connect(db)
     try:
         rows = conn.execute("SELECT host FROM savings_stats").fetchall()

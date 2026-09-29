@@ -109,9 +109,9 @@ class TestExecutionLedgerContracts:
         assert len(expected) == 7
 
     def test_realization_status_values(self):
-        expected = ("verified_used", "verified_overridden", "unknown")
+        expected = ("verified_used", "verified_overridden", "route_acknowledged", "unknown")
         assert _literal_values(contracts.RealizationStatus) == expected
-        assert len(expected) == 3
+        assert len(expected) == 4
 
     def test_adoption_method_values(self):
         expected = ("door_call", "agent_marked", "content_match", "unknown")
@@ -119,7 +119,8 @@ class TestExecutionLedgerContracts:
         assert len(expected) == 4
 
     def test_counts_as_realized(self):
-        assert contracts.COUNTS_AS_REALIZED == frozenset({"door_call", "agent_marked"})
+        # Phase 0.2b: door_call is acknowledgement, not use (audit C8).
+        assert contracts.COUNTS_AS_REALIZED == frozenset({"agent_marked"})
 
     def test_claude_providers(self):
         assert contracts.CLAUDE_PROVIDERS == frozenset(

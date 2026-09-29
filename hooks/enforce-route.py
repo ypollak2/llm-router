@@ -656,13 +656,21 @@ def _clear_pending(session_id: str) -> None:
 
 
 def _record_realization_used(session_id: str, pending: dict | None) -> None:
-    """CHZ-EXT-204: record that a routed directive was HONORED by the host.
+    """CHZ-EXT-204 / Phase 0.2b: record that a routed directive was ACKNOWLEDGED.
 
     Parity with stop-enforce._record_override (which writes verified_overridden
-    when the host answers in plain text). Without this positive counterpart,
-    every execution_events row stayed realization_status=NULL, so a run where
-    97.7% of directives were bypassed looked identical in telemetry to a perfect
-    one — the product could not measure its own bypass rate. Fully fail-open.
+    when the host answers in plain text). Without a positive counterpart every
+    execution_events row stayed realization_status=NULL, so the product could
+    not measure its own bypass rate.
+
+    Phase 0.2b: this fires the moment ANY llm_* tool is called while a hold is
+    pending — including throwaway calls made only to release the hold. The
+    2026-09-29 audit (~/.rsi/research/audit-2026-09-29/verification.md, C8)
+    traced 176 of 176 organic `verified_used` rows in 30 days to this path, with
+    no check that the tool's output was used. So it now writes
+    `route_acknowledged`, never `verified_used`, and `used_by_host` stays
+    unknown (None). Only content evidence may promote a route to used.
+    Fully fail-open.
     """
     try:
         pending = pending or {}
@@ -683,10 +691,8 @@ def _record_realization_used(session_id: str, pending: dict | None) -> None:
             turn_id=pending.get("turn_id"),
             event_type="route_realized",
             task_type=pending.get("task_type"),
-            realization_status="verified_used",
-            adoption_method="door_call",  # Phase 0: hook-observed PreToolUse door call
-            used_by_host=True,
-            accepted=True,
+            realization_status="route_acknowledged",
+            adoption_method="door_call",  # hook-observed PreToolUse door call
         ))
     except Exception:  # noqa: BLE001 — realization accounting must never break routing
         pass
@@ -699,8 +705,9 @@ def _record_agent_marked(session_id: str, pending: dict | None) -> None:
     where the agent (not the PreToolUse door-call hook) is the one asserting the
     routed directive was honored. Only exercised inside soak/replay.py for Phase 0;
     the production agent-marks-adoption transport is Phase 1. Fully fail-open,
-    identical event shape to _record_realization_used aside from adoption_method
-    and the event_id salt (kept distinct so the two never collide/dedup together).
+    same event shape as _record_realization_used aside from realization_status
+    (verified_used, not route_acknowledged), adoption_method, used_by_host and
+    the event_id salt (kept distinct so the two never collide/dedup together).
     """
     try:
         pending = pending or {}
