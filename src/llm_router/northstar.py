@@ -65,8 +65,9 @@ A **unit** is one of eight kinds. All eight sum to the denominator.
   direct          One per ``DIRECT SUCCESS`` invocation that ran with
                   zero-Claude replacement active (``LLM_ROUTER_ZERO_CLAUDE``)
                   — the routed answer stood in for Claude's turn entirely,
-                  detected from the debug log carrying a ``ZERO_CLAUDE *``
-                  annotation in the same invocation. Rare: zero-Claude is off
+                  detected ONLY from a ``ZERO_CLAUDE REPLACED:`` line in the
+                  same invocation (``_REPLACED_MARKERS``); decline and
+                  failure ZERO_CLAUDE* lines leave the unit a ``draft``. Rare: zero-Claude is off
                   by default and the 2026-09 workload study found it firing on
                   well under 1% of days. Expect this bucket to be 0 on most
                   machines, honestly.
@@ -583,6 +584,27 @@ def _parse_debug_log(path: Path | None = None) -> dict[str, dict]:
     return records
 
 
+# The ONLY debug-log lines that mean the routed answer replaced Claude's turn.
+# Every other ZERO_CLAUDE* line is a decline, a fallthrough or a failure:
+# ``ZERO_CLAUDE_EDIT: <reason>`` (scoped edit fell through, logged on EVERY
+# prompt while LLM_ROUTER_ZERO_CLAUDE_SCOPE=edit is set), ``ZERO_CLAUDE_EDIT
+# BLOCKED`` (failure message, no answer), ``ZERO_CLAUDE DIRECT_FAILED`` /
+# ``BLOCKED_*`` / ``EXPLICIT_NATIVE``. Matching the bare substring
+# "ZERO_CLAUDE" labelled advisory drafts ``direct`` -- all 9 "used" direct
+# units in the 2026-09-29 release outcome audit (#212) were such drafts.
+#   ZERO_CLAUDE REPLACED   hooks/auto-route.py, block output carrying the answer
+#   ZERO_CLAUDE_EDIT APPLIED  zero_claude_edit.maybe_replace, edit applied
+# A ZERO_CLAUDE_EDIT APPLIED invocation exits before DIRECT SUCCESS, so it
+# never becomes a draft/direct unit here; its edit is already counted as a
+# ``routed_edit`` unit via edit_outcomes.jsonl.
+_REPLACED_MARKERS = ("ZERO_CLAUDE REPLACED:", "ZERO_CLAUDE_EDIT APPLIED:")
+
+
+def _invocation_replaced_turn(msgs: list[str]) -> bool:
+    """True only when one of this invocation's lines records a replacement."""
+    return any(m.startswith(_REPLACED_MARKERS) for m in msgs)
+
+
 def _debug_units_for_session(session_id: str, debug_records: dict[str, dict]) -> list[Unit]:
     prefix = session_id[:8]
     items = sorted(
@@ -595,8 +617,7 @@ def _debug_units_for_session(session_id: str, debug_records: dict[str, dict]) ->
         has_success = any("DIRECT SUCCESS" in m for m in msgs)
         if not has_success:
             continue
-        zero_claude = any("ZERO_CLAUDE" in m for m in msgs)
-        kind = UNIT_DIRECT if zero_claude else UNIT_DRAFT
+        kind = UNIT_DIRECT if _invocation_replaced_turn(msgs) else UNIT_DRAFT
         joined = "\n".join(msgs)
         tm = _TASK_RE.search(joined)
         mm = _MODEL_RE.search(joined)
