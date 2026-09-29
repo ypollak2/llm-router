@@ -3810,7 +3810,7 @@ async def get_model_latency_stats(window_days: int = 7) -> dict[str, dict]:
 # Opus-4.1-and-earlier tier; Opus 4.5 onward (incl. 4.6/4.7/4.8) is $5/$25 per
 # million tokens. Every historical `saved_usd` was therefore ~3x inflated.
 
-LATEST_OPUS_MODEL = "claude-opus-5"
+LATEST_OPUS_MODEL = "claude-opus-5-5"
 """The current host Opus model. Bump when a newer Opus ships.
 
 This lagged at claude-opus-4-8 while llm_router.pricing already priced claude-opus-5
@@ -3824,6 +3824,7 @@ answers "which Opus is current"."""
 # release; the values can also be refreshed at runtime via
 # refresh_baseline_pricing_from_api().
 _OPUS_MODELS: tuple[str, ...] = (
+    "claude-opus-5-5",
     "claude-opus-5",
     "claude-opus-4-8",
     "claude-opus-4-7",

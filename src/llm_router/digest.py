@@ -25,8 +25,8 @@ log = logging.getLogger("llm_router.digest")
 # Fail-open fallback only. The authoritative host (frontier Claude) prices live
 # in cost.py's single canonical source and are read at call time below (AC-4:
 # no independent, drifting price copies per surface).
-_HOST_IN_PER_M_FALLBACK  = 5.0
-_HOST_OUT_PER_M_FALLBACK = 25.0
+_HOST_IN_PER_M_FALLBACK  = 4.0
+_HOST_OUT_PER_M_FALLBACK = 20.0
 
 
 def _host_baseline(in_tok: int, out_tok: int) -> float:

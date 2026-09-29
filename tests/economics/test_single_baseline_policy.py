@@ -35,10 +35,10 @@ from llm_router import pricing
 _SRC = Path(__file__).resolve().parent.parent.parent / "src" / "llm_router"
 
 
-def test_policy_symbol_exists_and_is_opus_5():
-    assert pricing.savings_baseline_model() == "claude-opus-5"
+def test_policy_symbol_exists_and_is_opus_5_5():
+    assert pricing.savings_baseline_model() == "claude-opus-5-5"
     in_rate, out_rate = pricing.savings_baseline_rates()
-    assert (in_rate, out_rate) == (5.0, 25.0)
+    assert (in_rate, out_rate) == (4.0, 20.0)
 
 
 def test_env_override_still_resolves_through_the_policy(monkeypatch):
@@ -65,15 +65,15 @@ def test_env_override_still_resolves_through_the_policy(monkeypatch):
     )
     assert pricing.savings_baseline_rates() == expected
     # And it is genuinely resolving the override, not the default baseline.
-    assert pricing.savings_baseline_rates() != (5.0, 25.0)
+    assert pricing.savings_baseline_rates() != (4.0, 20.0)
 
 
 def test_unknown_override_falls_back_rather_than_pricing_at_zero(monkeypatch):
     """A typo'd baseline must not silently resolve to a 0.0 rate -- that would
     render every routed call as saving nothing, the RED2-02 failure shape."""
     monkeypatch.setenv("LLM_ROUTER_SAVINGS_BASELINE", "not-a-real-model")
-    assert pricing.savings_baseline_model() == "claude-opus-5"
-    assert pricing.savings_baseline_rates() == (5.0, 25.0)
+    assert pricing.savings_baseline_model() == "claude-opus-5-5"
+    assert pricing.savings_baseline_rates() == (4.0, 20.0)
 
 
 def test_no_claude_model_costs_nothing():
@@ -117,7 +117,7 @@ def test_savings_logger_has_no_private_baseline():
     assert not hasattr(savings_logger, "_BASELINE_MODEL_BY_COMPLEXITY")
     for complexity in ("simple", "moderate", "complex"):
         cost_at = savings_logger._baseline_cost(complexity, 1_000_000, 0)
-        assert cost_at == pytest.approx(5.0), complexity
+        assert cost_at == pytest.approx(4.0), complexity
 
 
 def test_dashboard_delegates_to_the_policy():
@@ -152,7 +152,7 @@ def test_session_end_hook_delegates_to_the_policy():
 
     assert (mod.HOST_INPUT_PER_M, mod.HOST_OUTPUT_PER_M) == pricing.savings_baseline_rates()
     # 1M input tokens against the one baseline.
-    assert mod._host_baseline(1_000_000, 0) == pytest.approx(5.0)
+    assert mod._host_baseline(1_000_000, 0) == pytest.approx(4.0)
 
 
 def test_tiered_policy_is_gone():

@@ -99,7 +99,9 @@ async def test_team_savings_real_zero_on_subscription(temp_db, monkeypatch):
     data = await cost.get_team_savings(period="week", include_simulated=True)
     assert data["baseline_equivalent_avoided_usd"] > 0.0        # counterfactual is real
     assert data["real_dollars_avoided_usd"] == 0.0             # but no cash on subscription
-    assert data["saved_usd"] == data["baseline_equivalent_avoided_usd"]  # back-compat alias
+    # approx: the two figures are summed along different paths and differ in the
+    # last float bit at the Opus 5.5 rate (0.036000000000000004 vs 0.036).
+    assert data["saved_usd"] == pytest.approx(data["baseline_equivalent_avoided_usd"])  # back-compat alias
 
 
 @pytest.mark.asyncio

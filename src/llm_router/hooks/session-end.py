@@ -81,11 +81,11 @@ try:
     HOST_INPUT_PER_M  = float(_CI)
     HOST_OUTPUT_PER_M = float(_CO)
 except Exception:
-    # D8: fall open to the CURRENT host list price (5/25), matching digest/dashboard.
-    # The old 15/75 fallback was ~3x inflated and diverged from every sibling surface
-    # on the rare import failure.
-    HOST_INPUT_PER_M  = 5.0
-    HOST_OUTPUT_PER_M = 25.0
+    # D8: fall open to the CURRENT host list price (Opus 5.5, 4/20), matching
+    # digest/dashboard. The old 15/75 fallback was ~3x inflated and diverged from
+    # every sibling surface on the rare import failure.
+    HOST_INPUT_PER_M  = 4.0
+    HOST_OUTPUT_PER_M = 20.0
 WIDTH = 50
 
 # Model names that indicate test/mock data — never show in production reports.

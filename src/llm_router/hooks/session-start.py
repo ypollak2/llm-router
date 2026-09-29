@@ -86,8 +86,8 @@ def _weekly_digest_file():
 # "saved last 7 days" figure disagreed with the llm_savings weekly bucket
 # (RETROSPECTIVE B-6). Resolved lazily at use-site (see _weekly_digest) to keep
 # this hook import-light; the fallback below is the current Opus rate.
-_HOST_IN_PER_M_FALLBACK  = 5.0
-_HOST_OUT_PER_M_FALLBACK = 25.0
+_HOST_IN_PER_M_FALLBACK  = 4.0
+_HOST_OUT_PER_M_FALLBACK = 20.0
 _FREE_PROVIDERS   = {"ollama", "codex", "gemini_cli"}
 
 # ── .env loader ───────────────────────────────────────────────────────────────

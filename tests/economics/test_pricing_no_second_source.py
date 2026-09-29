@@ -151,7 +151,7 @@ def test_blended_and_per_1k_views_agree_with_the_canonical_rate() -> None:
         assert types.MODEL_COST_PER_1K[family] == pytest.approx(
             (price.input + price.output) / 2 / 1000
         )
-    opus = pricing.price_for("opus")
+    opus = pricing.price_for("claude-opus-5")
     assert benchmarks._MODEL_COST_PER_1K["anthropic/claude-opus-5"] == pytest.approx(
         (opus.input + opus.output) / 2 / 1000
     )
