@@ -217,8 +217,8 @@ def test_direct_replacement_with_no_reask_is_used(tmp_path):
     sid = SID_MAIN
     _write_debug_log(tmp_path, [
         f"[2026-09-27 10:00:00] [INVOCATION 1800000000.000] prompt_len=20 session_id={sid[:8]}",
-        "[2026-09-27 10:00:00] [INVOCATION 1800000000.000] ZERO_CLAUDE ROUTE_ATTEMPT",
         "[2026-09-27 10:00:00] [INVOCATION 1800000000.000] DIRECT SUCCESS: model=codex/gpt-5.5 latency=900ms",
+        "[2026-09-27 10:00:00] [INVOCATION 1800000000.000] ZERO_CLAUDE REPLACED: render_mode=block model=codex/gpt-5.5",
     ])
     records = [_user(sid, "what year did apollo 11 land", 1_800_000_000)]
     records.append(_user(sid, "thanks, what about apollo 12", 1_800_000_050))
@@ -237,8 +237,8 @@ def test_direct_replacement_followed_by_claude_reask_is_redo(tmp_path):
     sid = SID_MAIN
     _write_debug_log(tmp_path, [
         f"[2026-09-27 10:00:00] [INVOCATION 1800000000.000] prompt_len=20 session_id={sid[:8]}",
-        "[2026-09-27 10:00:00] [INVOCATION 1800000000.000] ZERO_CLAUDE ROUTE_ATTEMPT",
         "[2026-09-27 10:00:00] [INVOCATION 1800000000.000] DIRECT SUCCESS: model=codex/gpt-5.5 latency=900ms",
+        "[2026-09-27 10:00:00] [INVOCATION 1800000000.000] ZERO_CLAUDE REPLACED: render_mode=block model=codex/gpt-5.5",
     ])
     records = [_user(sid, "what year did apollo 11 land", 1_800_000_000)]
     records.append(_user(sid, "claude: no really, what year", 1_800_000_050))
@@ -250,6 +250,62 @@ def test_direct_replacement_followed_by_claude_reask_is_redo(tmp_path):
     direct = [u for u in rows if u["kind"] == ns.UNIT_DIRECT][0]
     assert direct["outcome"] == ns.OUTCOME_REDO
     assert direct["signal"] == "zero_claude_stood"
+
+
+# ── DIRECT only when the turn was actually replaced (#212 audit) ──────────
+# Line shapes copied from ~/.llm-router/auto-route-debug.log (prompt text
+# paraphrased). Before this fix any "ZERO_CLAUDE" substring made the unit
+# direct, so the scoped-edit DECLINE lines -- logged on every prompt when
+# LLM_ROUTER_ZERO_CLAUDE_SCOPE=edit is set -- turned ordinary advisory drafts
+# into "direct / used". All 9 used direct units in the 2026-09-29 audit were
+# this.
+
+_DECLINE_LINES = [
+    "ZERO_CLAUDE_EDIT: not edit-class — no imperative edit verb (fix/change/rename/add ...)",
+    "ZERO_CLAUDE_EDIT: not edit-class — names 8 files; scoped edit handles at most 3",
+    "ZERO_CLAUDE_EDIT: explicit claude: prefix — native use",
+    "ZERO_CLAUDE_EDIT: target file(s) have uncommitted changes — ['pkg/mod01.py']",
+    "ZERO_CLAUDE_EDIT: cwd is not inside a git repository",
+    "ZERO_CLAUDE_EDIT: quality breaker open — edit class failing",
+    "ZERO_CLAUDE_EDIT BLOCKED: model output failed validation",
+    "ZERO_CLAUDE DIRECT_FAILED",
+    "ZERO_CLAUDE BLOCKED_EXTERNAL_FAILURE",
+    "ZERO_CLAUDE BLOCKED_EMPTY_PROMPT",
+    "ZERO_CLAUDE EXPLICIT_NATIVE",
+]
+
+
+@pytest.mark.parametrize("decline", _DECLINE_LINES)
+def test_zero_claude_decline_line_does_not_make_a_draft_direct(tmp_path, decline):
+    sid = SID_MAIN
+    _write_debug_log(tmp_path, [
+        f"[2026-09-27 10:00:00] [INVOCATION 1800000000.000] prompt_len=20 session_id={sid[:8]}",
+        f"[2026-09-27 10:00:00] [INVOCATION 1800000000.000] {decline}",
+        "[2026-09-27 10:00:09] [INVOCATION 1800000000.000] DIRECT SUCCESS: model=ollama/qwen3-coder:30b latency=9878ms files_read=0",
+        f"[2026-09-27 10:00:30] [INVOCATION 1800000030.000] prompt_len=10 session_id={sid[:8]}",
+        "[2026-09-27 10:00:30] [INVOCATION 1800000030.000] DRAFT UNUSED: the draft from invocation 1800000000.0 (ollama/qwen3-coder:30b) was discarded; Claude answered instead",
+    ])
+    records = [_user(sid, "how does the cache key get built", 1_800_000_000)]
+    records += _bulk_user_prompts(sid, 60, start_ts=1_800_000_100)
+    proj = _project(tmp_path)
+    _write_jsonl(proj / f"{sid}.jsonl", records)
+
+    rows = list(ns.units(days=None, session_id=sid, root=proj.parent))
+    assert [u for u in rows if u["kind"] == ns.UNIT_DIRECT] == []
+    drafts = [u for u in rows if u["kind"] == ns.UNIT_DRAFT]
+    assert len(drafts) == 1
+    assert drafts[0]["outcome"] == ns.OUTCOME_DISCARDED
+    assert drafts[0]["signal"] == "draft_verdict"
+
+
+@pytest.mark.parametrize("line,replaced", [
+    ("ZERO_CLAUDE REPLACED: render_mode=block model=ollama/qwen3.5:latest", True),
+    ("ZERO_CLAUDE_EDIT APPLIED: model=qwen3.5:latest files=['pkg/mod01.py']", True),
+] + [(d, False) for d in _DECLINE_LINES] + [
+    ("DIRECT SUCCESS: model=ollama/qwen3.5:latest latency=500ms files_read=0", False),
+])
+def test_invocation_replaced_turn_recognises_only_replacement_lines(line, replaced):
+    assert ns._invocation_replaced_turn([line]) is replaced
 
 
 # ── exclusions ───────────────────────────────────────────────────────────────

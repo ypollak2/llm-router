@@ -5116,6 +5116,15 @@ def main() -> None:
                         _output["reason"] = _violation_notice + "\n" + _output["reason"]
                     if _mini_summary_block:
                         _output["reason"] = _output["reason"] + "\n\n" + _mini_summary_block
+                    # The ONLY debug-log record that this turn was replaced by the
+                    # routed answer (block emitted, Claude not invoked). northstar
+                    # keys `direct` units on it; the other ZERO_CLAUDE* lines are
+                    # declines/failures and must not count (#212 audit).
+                    _debug_log(
+                        f"[INVOCATION {invocation_id:.3f}] ZERO_CLAUDE REPLACED: "
+                        f"render_mode={_render_mode} "
+                        f"model={_direct_result.model.provider}/{_direct_result.model.model}"
+                    )
                 _coverage_observed(str(tool))
                 json.dump(_normalize_output_for_platform(_output, hook_input), sys.stdout)
                 sys.exit(0)
