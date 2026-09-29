@@ -177,3 +177,49 @@ def test_native_mcp_tool_request_blocks_before_host_execution(tmp_path: Path) ->
     assert out["decision"] == "block"
     assert "requires native host tool execution" in out["reason"]
     assert "Claude was not invoked" in out["reason"]
+
+
+def _hook_debug_log(home_dir: Path) -> Path:
+    # Under pytest the hook writes the .test.log sibling (_debug_log_path).
+    return home_dir / ".llm-router" / "auto-route-debug.test.log"
+
+
+def _replaced_flags(home_dir: Path) -> list[bool]:
+    """Per-invocation northstar verdict for the hook's own debug log."""
+    from llm_router import northstar as ns
+    records = ns._parse_debug_log(_hook_debug_log(home_dir))
+    return [ns._invocation_replaced_turn(r["msgs"]) for r in records.values()]
+
+
+def test_replaced_turn_is_logged_so_northstar_counts_it_direct(
+    tmp_path: Path, fake_ollama: tuple[str, list[dict]]
+) -> None:
+    """#212: the block that carries the answer must leave the one debug-log
+    line northstar keys ``direct`` on; nothing else may."""
+    endpoint, _requests = fake_ollama
+    out = _run_zero_claude_hook(
+        "What is the quick definition of a REST API?",
+        tmp_path,
+        extra_env={"LLM_ROUTER_OLLAMA_URL": endpoint, "LLM_ROUTER_RENDER_MODE": "block"},
+    )
+    assert out is not None and out["decision"] == "block"
+    assert "An external provider completed this answer without Claude." in out["reason"]
+    log = _hook_debug_log(tmp_path).read_text()
+    assert "ZERO_CLAUDE REPLACED: render_mode=block" in log
+    assert _replaced_flags(tmp_path) == [True]
+
+
+def test_echo_draft_is_not_logged_as_replaced(
+    tmp_path: Path, fake_ollama: tuple[str, list[dict]]
+) -> None:
+    endpoint, _requests = fake_ollama
+    out = _run_zero_claude_hook(
+        "What is the quick definition of a REST API?",
+        tmp_path,
+        extra_env={"LLM_ROUTER_OLLAMA_URL": endpoint, "LLM_ROUTER_RENDER_MODE": "echo"},
+    )
+    assert out is not None and out.get("decision") != "block"
+    log = _hook_debug_log(tmp_path).read_text()
+    assert "DIRECT SUCCESS" in log
+    assert "ZERO_CLAUDE REPLACED" not in log
+    assert _replaced_flags(tmp_path) == [False]
