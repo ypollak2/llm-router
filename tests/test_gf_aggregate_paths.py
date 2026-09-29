@@ -93,7 +93,7 @@ class TestRealizationUnknownEventType:
         record_event(LedgerEvent(session_id="s-agg2", route_id="r-u3",
                                  event_type="route_realized",
                                  realization_status="verified_used",
-                                 adoption_method="door_call", used_by_host=True,
+                                 adoption_method="agent_marked", used_by_host=True,
                                  accepted=True), path=db)
         record_event(LedgerEvent(session_id="s-agg2", route_id="r-u3",
                                  event_type="realization_unknown"), path=db)
@@ -254,7 +254,7 @@ class TestQuotaAndProviderDefaults:
         record_event(LedgerEvent(session_id="s-agg2", route_id=rid,
                                  event_type="route_realized",
                                  realization_status="verified_used",
-                                 adoption_method="door_call", used_by_host=True,
+                                 adoption_method="agent_marked", used_by_host=True,
                                  accepted=True), path=db)
 
     def test_a_route_with_no_provider_saves_no_quota(self, db):

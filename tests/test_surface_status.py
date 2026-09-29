@@ -118,9 +118,12 @@ def test_only_realized_gated_hook_savings_are_headline(state_dir):
     day_start = now - (now % 86400)
     _write_log(state_dir, [
         _rec(host="claude_code", saved=0.02, ts=day_start + 100, mode="block"),
-        _rec(host="claude_code", model="llm_router-agentic-router",
+        _rec(host="claude_code", model="llm_router-agentic-measured",
              saved=0.2, ts=day_start + 200),                       # agentic
         _rec(host="claude_code", saved=0.05, ts=1_700_000_000.0),  # pre-gate
+        # Phase 0.2b: a legacy flat agentic credit is in NO figure at all.
+        _rec(host="claude_code", model="llm_router-agentic-router",
+             saved=1.0, ts=day_start + 300),
     ])
     s = ss.compute_status("claude_code", now=now)
     assert s.saved_session == pytest.approx(0.02)

@@ -77,23 +77,87 @@ def _db_path() -> Path:
     return paths.state_path("usage.db")
 
 
+#: model_used of the legacy flat-credit rows (milestones x $0.20, zero tokens,
+#: written whatever the outcome). Read-time filtered out of every headline via
+#: ``savings.EXCLUDED_SAVINGS_MODELS``; the rows themselves are kept.
+LEGACY_FLAT_MODEL = "llm_router-agentic-router"
+#: model_used of a row this module persists now: a completed delegation priced
+#: from its own measured token counts. A distinct name so the read-time filter
+#: on the legacy rows can never swallow a measured one.
+MEASURED_MODEL = "llm_router-agentic-measured"
+
+
+def _measured_tokens(result: dict[str, Any]) -> tuple[int, int] | None:
+    """(input, output) tokens the delegation actually consumed, or None.
+
+    Only ``result["usage"]`` counts as a measurement. ``compute_savings``'s
+    ``baseline_usd`` is ``len(milestones) * baseline_cost_per_milestone`` — a
+    constant times a count — so it is never treated as one.
+    """
+    usage = result.get("usage")
+    if not isinstance(usage, dict):
+        return None
+    raw_in, raw_out = usage.get("input_tokens"), usage.get("output_tokens")
+    if raw_in is None or raw_out is None:  # absent is unmeasured, not zero
+        return None
+    try:
+        in_tok, out_tok = int(raw_in), int(raw_out)
+    except (TypeError, ValueError):
+        return None
+    if in_tok < 0 or out_tok < 0 or in_tok + out_tok == 0:
+        return None
+    return in_tok, out_tok
+
+
 def savings_payload(
-    result: dict[str, Any], *, model: str = "llm_router-agentic-router", session_id: str = ""
+    result: dict[str, Any], *, model: str = MEASURED_MODEL, session_id: str = ""
 ) -> dict[str, Any]:
-    """Build the telemetry row from a serialized delegation result dict."""
+    """Build the telemetry row from a serialized delegation result dict.
+
+    Phase 0.2b (audit 2026-09-29, claim C3): the old payload copied
+    ``savings.saved_usd`` — a flat ``milestones x $0.20`` credit — for every
+    delegation whatever its outcome: 529 rows, $110.20, 91% of the all-time
+    ``savings_stats`` total. A row is now persisted ONLY when the delegation
+    completed AND reported real token counts; its saving is the counterfactual
+    cost of those tokens on the savings baseline model minus what was actually
+    spent. Anything else yields ``persisted=False`` and ``saved_usd=0.0`` and is
+    skipped, not written as a $0 row: a $0 row would still add to the ``n``
+    beside every "est. saved" figure while carrying no measurement, and the
+    delegation's outcome is already recorded by ``routing_quality.record_delegation``.
+    """
     sv = result.get("savings", {}) or {}
+    actual = float(sv.get("actual_usd", 0.0) or 0.0)
+    outcome = result.get("outcome", "unknown")
+    tokens = _measured_tokens(result) if outcome == "complete" else None
+    saved = 0.0
+    if tokens is not None:
+        from llm_router import pricing
+        baseline = pricing.cost_usd(pricing.savings_baseline_model(), *tokens)
+        if baseline is None:  # unpriced baseline: no counterfactual, no row
+            tokens = None
+        else:
+            saved = baseline - actual
     return {
         "model": model,
         "session_id": session_id,
         "task_type": result.get("task_type", "code"),
-        "outcome": result.get("outcome", "unknown"),
-        "saved_usd": float(sv.get("saved_usd", 0.0)),
-        "actual_usd": float(sv.get("actual_usd", 0.0)),
+        "outcome": outcome,
+        "saved_usd": saved,
+        "actual_usd": actual,
+        "input_tokens": tokens[0] if tokens else 0,
+        "output_tokens": tokens[1] if tokens else 0,
+        "persisted": tokens is not None,
     }
 
 
 async def _default_recorder(payload: dict[str, Any]) -> None:
-    """Append a savings_stats row. Fail-open — never raises."""
+    """Append a savings_stats row. Fail-open — never raises.
+
+    Skips a payload that carries no measured outcome (``persisted`` False) —
+    see :func:`savings_payload`.
+    """
+    if not payload.get("persisted"):
+        return
     try:
         path = _db_path()
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -105,19 +169,22 @@ async def _default_recorder(payload: dict[str, Any]) -> None:
                 # lands NULL and silently leaves every savings figure.
                 "INSERT INTO savings_stats "
                 "(timestamp, session_id, task_type, estimated_claude_cost_saved, "
-                " external_cost, model_used, host, is_simulated) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                " external_cost, model_used, host, input_tokens, output_tokens, "
+                " is_simulated) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     time.strftime("%Y-%m-%d %H:%M:%S"),
                     payload.get("session_id", ""),
                     payload.get("task_type", "code"),
                     payload.get("saved_usd", 0.0),
                     payload.get("actual_usd", 0.0),
-                    payload.get("model", "llm_router-agentic-router"),
+                    payload.get("model", MEASURED_MODEL),
                     # Not 'claude_code': that host is how savings.VERIFIED_SAVED_SQL
                     # recognises the hook's realized-gated rows, and this saving
-                    # is a flat estimate recorded whatever the outcome.
+                    # is an estimate nobody observed replacing a Claude turn.
                     "agentic",
+                    payload.get("input_tokens", 0),
+                    payload.get("output_tokens", 0),
                     1 if _detect_synthetic() else 0,
                 ),
             )
@@ -140,10 +207,14 @@ async def record_delegation_savings(
     result: dict[str, Any],
     *,
     recorder: Recorder | None = None,
-    model: str = "llm_router-agentic-router",
+    model: str = MEASURED_MODEL,
     session_id: str = "",
 ) -> dict[str, Any]:
-    """Record a delegation's savings via ``recorder`` (default: savings_stats)."""
+    """Record a delegation's savings via ``recorder`` (default: savings_stats).
+
+    An injected ``recorder`` still receives every payload (including
+    ``persisted=False`` ones); the default recorder skips those.
+    """
     payload = savings_payload(result, model=model, session_id=session_id)
     rec = recorder or _default_recorder
     try:

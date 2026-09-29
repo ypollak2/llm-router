@@ -251,8 +251,10 @@ async def test_delegation_savings_counted_once_not_twice(rq_env):
             "(timestamp, session_id, task_type, estimated_claude_cost_saved, "
             "external_cost, model_used, host, is_simulated) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            # Phase 0.2b: the direct write is now a measured row; the legacy
+            # `llm_router-agentic-router` flat credit is read-time excluded.
             ("2026-09-28 20:17:32", "", "code", 0.20, 0.0,
-             "llm_router-agentic-router", "agentic", 0),
+             "llm_router-agentic-measured", "agentic", 0),
         )
         conn.commit()
     finally:

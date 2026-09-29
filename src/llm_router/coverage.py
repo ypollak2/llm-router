@@ -82,6 +82,11 @@ class Reason(Enum):
     CLASSIFY_FAILED = "classify_failed"
     #: main() raised and the fail-open handler exited 0. THE incident path.
     UNHANDLED_EXCEPTION = "unhandled_exception"
+    #: stdin did not parse as JSON (empty, malformed, or non-UTF-8). A
+    #: deliberate, well-understood branch (CHZ-AUD-A-04 / P0.3, 2026-09-29) —
+    #: kept separate from UNHANDLED_EXCEPTION so a caught, expected parse
+    #: failure is never counted as if the hook had crashed.
+    PARSE_FAILURE = "parse_failure"
 
 
 @dataclass(frozen=True)
