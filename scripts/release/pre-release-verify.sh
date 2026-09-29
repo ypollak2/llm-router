@@ -2,7 +2,11 @@
 # Pre-release verification checklist
 # Prevents common issues before releasing new versions
 #
-# Usage: bash scripts/release/pre-release-verify.sh [--skip-quality "<reason>"]
+# Usage: bash scripts/release/pre-release-verify.sh [--skip-quality "<reason>"] [--skip-outcome "<reason>"]
+#
+# --skip-outcome is forwarded to step 13 (the outcome audit gate). It only
+# excuses "nothing / too few units to audit" on this machine; an inflated
+# source in the headline fails the release regardless.
 #
 # --skip-quality is forwarded to step 12 (the answer-quality bench). It is
 # NOT a way to skip step 11 (the classifier regression gate) -- that one runs
@@ -16,12 +20,21 @@ YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
 
 SKIP_QUALITY_REASON=""
+SKIP_OUTCOME_REASON=""
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --skip-quality)
             SKIP_QUALITY_REASON="${2:-}"
             if [[ -z "$SKIP_QUALITY_REASON" ]]; then
                 echo -e "${RED}--skip-quality requires a reason${NC}"
+                exit 1
+            fi
+            shift 2
+            ;;
+        --skip-outcome)
+            SKIP_OUTCOME_REASON="${2:-}"
+            if [[ -z "$SKIP_OUTCOME_REASON" ]]; then
+                echo -e "${RED}--skip-outcome requires a reason${NC}"
                 exit 1
             fi
             shift 2
@@ -205,6 +218,28 @@ fi
 if ! uv run python scripts/release/quality_gate.py "${QUALITY_ARGS[@]}"; then
     echo -e "${RED}❌ Answer-quality bench failed, or the local backend is "
     echo -e "   unavailable and no --skip-quality reason was given.${NC}"
+    exit 1
+fi
+echo ""
+
+# 13. Outcome audit (Phase 0.1): was routed work actually USED? Reads the
+# owner's organic transcripts and ledgers read-only, labels every routed unit
+# used/corrected/redone/unused/unknown from content-bearing evidence only, and
+# writes release-artifacts/outcome-audit/ (git-ignored, no prompt text). The
+# gate fails on any inflated source in the headline (door_call, dispatch
+# flags, flat agentic credits) or a used rate below the previous release's
+# recorded value. Release-time only: nothing under src/ imports either script.
+echo "1️⃣3️⃣ Running the outcome audit and its gate..."
+if ! uv run python scripts/release/outcome_audit.py --days 30; then
+    echo -e "${RED}❌ Outcome audit could not run${NC}"
+    exit 1
+fi
+OUTCOME_ARGS=()
+if [[ -n "$SKIP_OUTCOME_REASON" ]]; then
+    OUTCOME_ARGS+=(--skip-outcome "$SKIP_OUTCOME_REASON")
+fi
+if ! uv run python scripts/release/outcome_gate.py "${OUTCOME_ARGS[@]}"; then
+    echo -e "${RED}❌ Outcome gate failed${NC}"
     exit 1
 fi
 echo ""
