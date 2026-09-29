@@ -12,9 +12,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [15.4.0] - 2026-09-29
+
+No savings claim is made for this release. The headline item — an opt-in,
+off-by-default proxy that routes some Claude Code steps to a local model —
+has not shown a net saving in any measurement run so far: an untrimmed
+proxied run was 17.7x slower than baseline (938s vs 53s, n=6 golden tasks,
+`docs/spikes/per-call-proxy-2026-09-28.md`), and the metric built to estimate
+its avoided cost (`net_avoided_usd`) was found to overstate a paired-session's
+real saving by ~1.9x at n=6 and is now documented as an upper bound, not a
+realized figure (#201). See `docs/proxy.md` and the "Known issues" section
+below before enabling it.
+
 ### Added
 
-- **Opt-in per-call proxy** (`llm-router proxy`, `llm_router.proxy`). Point one
+- **Opt-in per-call proxy** (`llm-router proxy`, `llm_router.proxy`, #197-#201).
+  **Off by default, experimental.** Point one
   Claude Code session at it with `ANTHROPIC_BASE_URL=http://127.0.0.1:8787`.
   Every call passes through to Anthropic unchanged, except "continuation" steps
   (the newest turn is only tool results). The router's own policy may send those
@@ -28,7 +41,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `num_predict` cap of 200/700, `keep_alive -1` plus a warm-up call, and an
   8 s first-token hedge. See `docs/proxy.md`.
 
-- **NS1 — the North Star metric**: `llm-router northstar [--session ID] [--days N] [--json]`
+- **NS1 — the North Star metric** (#180): `llm-router northstar [--session ID] [--days N] [--json]`
   reports, per Claude Code session, the share of (user prompts + every LLM
   call — main, folded sub-agent, and tool-driven) that was routed to a
   non-Claude model AND used as-is. Reports the distribution across sessions
@@ -37,10 +50,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   entry points. The Stop line gains one item: `north star NN% (n=NNN)`.
   See `llm_router/northstar.py`'s module docstring for the exact counting
   rules and the outcome signals (draft hook verdict, transcript attribution,
-  MCP tool-result reuse, zero-Claude re-ask).
+  MCP tool-result reuse, zero-Claude re-ask). The target is documented as
+  >=50% (aim 70%) of prompts + LLM calls per session, baseline ~0% (n=300
+  sessions, 30 days) (#183).
 
 - **North Star now reads the `llm_edit` (#181) and Codex sub-agent (#184)
-  lever ledgers.** Two new unit kinds: `routed_edit` (lever `llm_edit`, one
+  lever ledgers** (#188). Two new unit kinds: `routed_edit` (lever `llm_edit`, one
   per `edit_outcomes.jsonl` row — `used` when applied and, per
   `scripts/northstar/edit_survival.py`'s git-history check, survived; `redo`
   when a later commit touched the file; `discarded` when the edit was never
@@ -55,6 +70,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (unioned with the 50-cap `agent_calls.json`) when folding sub-agent
   sessions into their parent, closing the gap where the 50-cap file had
   already evicted the spawn the join needed.
+
+- **`LLM_ROUTER_ZERO_CLAUDE_SCOPE=edit`** (#190, #194): a narrower zero-Claude
+  mode for prompts that name a concrete change to existing files, instead of
+  the full fail-closed contract. `zero_claude_edit.py` classifies the prompt
+  conservatively (imperative edit verb + 1-3 named, real-looking source
+  files; rejects questions and repo-wide requests), resolves targets against
+  the repo root (refusing anything outside it), skips dirty targets or an
+  open quality-breaker class, then generates and validates the edit with the
+  local model and applies it all-or-nothing. #194 extends target resolution
+  to prompts that name no literal path: a backticked/`snake_case`/`camelCase`
+  identifier maps to the tracked file that defines it, and a bare file name
+  maps to the one tracked file with that basename — falling through (reason
+  logged) whenever an identifier is defined in more than one file, more than
+  3 files are implicated, or the prompt looks like a question. Not enabled by
+  default; `LLM_ROUTER_ZERO_CLAUDE_SCOPE` is unset until an operator opts in.
+
+- **NS4 — quality breaker**: `src/llm_router/quality_breaker.py` auto-unroutes
+  a `(lever, task_type[, model])` class whose routed answers keep failing.
+  Closed → open → half-open per class, computed from `northstar.units()`:
+  opens when `(redo + discarded) / (used + redo + discarded) >= 0.5` with at
+  least 20 classified units in a rolling window of 50 (unknown units excluded
+  from the rate on both sides); a half-open probe of 5 routed units closes it
+  again or reopens it. Wired into `auto-route.py`'s direct/draft chain,
+  `agent-route.py`'s Codex sub-agent delegation, and the MCP `llm()`/
+  `llm_act()` tools; every skip logs its reason. `llm-router status` shows an
+  open-classes panel (quiet when nothing is open); `llm-router northstar
+  --breaker-dry-run` reports what would be open, read-only. On the
+  maintainer's own 30-day history the `drafts` lever would already be open
+  (100% failure rate, n=35); every `mcp_llm` split stayed closed only because
+  none yet clears the 20-unit minimum (#186).
+
+- Widened the Codex sub-agent lever (#184) to accept `task_type=query`, not
+  only `research`/`analyze`/`code` — real spawns on the maintainer's machine
+  were classified `query` and always fell through as "unsuitable" (n=5
+  observed spawns, 3 `query` / 2 `analyze`) (#192).
+
+- `agent-route.py`'s Codex sub-agent lever can now resolve the MCP-path
+  `llm_edit` ledger's session id via the shared session store instead of a
+  bare environment read that the long-lived MCP server process does not
+  reliably have, fixing a case where `edit_outcomes.jsonl` rows carried
+  `session_id: ""` and were invisible to `northstar` (#191).
+
+- Added `ollama/qwen3.5:latest` as a local route for `query`-task requests
+  (#167).
 
 ### Changed — savings baseline is Opus 5.5
 
@@ -74,7 +133,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   verified, n=0). The whole change comes from the 629-row legacy `usage` table,
   the one source that is recomputed from tokens.
 
-### Fixed — fast-mode pricing
+### Changed — pricing catalogue and savings display
+
+- **Added pricing for `claude-opus-5-5` ($4/$20, cache read $0.20), `claude-fable-5-1`
+  ($10/$50, cache read $0.25) and `claude-sonnet-5-5` ($2/$10, standard
+  ratios).** Before this, on the maintainer's real usage, the absence of an
+  Opus 5.5 entry sent $308.93 of real Claude Code spend to a fallback rate.
+  `"<id>[1m]"` now resolves to its base model's rate for Claude 4.6+ ids only
+  (no long-context surcharge, per the pricing page); earlier `[1m]` ids stay
+  unknown rather than being under-priced. Rates checked against
+  `platform.claude.com/docs/en/about-claude/pricing.md` on 2026-09-28 (#202).
+
+- **Savings displays now show one estimate, never a verified/unverified
+  split.** `llm-router status`, `savings-report`, `gain`, the statusline and
+  the Stop line all changed from e.g. `verified $0.00 (n=0) · unverified
+  estimate $0.43 (n=62)` to `est. saved $0.43 (n=62) vs claude-opus-5-5` (or
+  `~$0.43 est.` on space-constrained surfaces) — on a machine where no routed
+  answer has ever replaced a Claude turn, `realized_usd` is always $0.00, and
+  the old wording read as "nothing was saved" next to a nonzero estimate. The
+  underlying verified/unverified split is unchanged and still available to
+  `doctor`/`explain-dashboard`; it no longer reaches the default view (#182).
+
+### Fixed — fast-mode pricing (#205)
 
 - **Fast-mode ids were priced at their base model's rate, half the real one.**
   `claude-opus-5-fast` and `claude-opus-4-8-fast` were aliases to
@@ -87,7 +167,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   against the raw `platform.claude.com/docs/en/about-claude/pricing.md` on
   2026-09-29.
 
-### Fixed — agent-route headless sessions
+### Fixed — agent-route headless sessions (#203)
 
 - **`hooks/agent-route.py` silently routed a headless benchmark run to `codex
   exec`.** A `claude -p "..." --model sonnet --output-format json` run hit the
@@ -105,7 +185,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   still treated as interactive. `LLM_ROUTER_AGENT_ROUTE_HEADLESS=on` opts back
   into routing for anyone who wants it in a script/SDK session.
 
-### Fixed — proxy cost accounting
+### Fixed — proxy cost accounting (#200, #201)
 
 - **The proxy ledger's cost estimate did not match Claude Code's own
   `total_cost_usd` for the same session.** Reconciling six real sessions
@@ -153,7 +233,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed — proxy
 
 - **The per-call proxy (#197) had no defence against a served step that never
-  makes progress.** A live trial (2026-09-28, 3 real `claude -p` tasks) showed
+  makes progress (#198).** A live trial (2026-09-28, 3 real `claude -p` tasks) showed
   one session with a run of 44 CONSECUTIVE served replies from
   `ollama/qwen3-coder:30b`, each re-issuing the same `Read` of the same file:
   the task still finished, but the loop took 195s and inflated the routed
@@ -175,7 +255,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   defensively too.
 
 - **A proxied Claude Code session cost 3.5x an identical no-proxy session on
-  the Anthropic side.** Measured 2026-09-28, same 3 fixture tasks: $2.44
+  the Anthropic side (#199).** Measured 2026-09-28, same 3 fixture tasks: $2.44
   proxied vs $0.69 baseline, all tests passing both ways. Root cause is in
   Claude Code, not this proxy: it disables Tool Search (dynamic MCP/skill tool
   loading) whenever `ANTHROPIC_BASE_URL` is not a first-party Anthropic host,
@@ -208,6 +288,196 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   after them, mirroring the reserve `execute_chain` already applied to its own
   chain. `execute_agent` also now logs a per-model reason (timeout vs.
   drifted vs. quality-gate-rejected) instead of one blanket "nothing".
+
+### Fixed — enforce hook
+
+- **The PreToolUse enforce hook held `Bash` behind a routing call for
+  one-word follow-ups like "merge them."** `detect_execution` requires an
+  execution verb AND a repo object, but "merge" appears in both lists, so
+  "merge them" matched `verb='merge' obj='merge'` and was held. It also
+  matched verbs written inside double quotes, where the user is naming a
+  phrase, not giving an instruction. The object must now be a different span
+  from the verb, and double-quoted spans are ignored (single quotes and
+  backticks unchanged). Evidence: `~/.llm-router/enforcement.log`
+  2026-09-25, two real holds this pattern caused (#165).
+
+### Fixed — classifier
+
+- **The direct-executor quality gate rejected every short correct answer.**
+  `quality_ok()` required at least 10 stripped characters; on the 2026-09-28
+  golden probe (n=150), all 15 "reply with just the number/word" queries were
+  rejected on all 6 attempts each (~30s per case) and fell through unrouted,
+  even though answers like "42" or "Indices." were correct. The floor is now
+  "real content survives": strip `<think>` blocks and markup tags, then
+  require at least one alphanumeric character — `"<think></think>"` and
+  similar tag-only replies, which the old length floor let through, now fail
+  correctly too (#193).
+
+- **`COORDINATE` classification (session-state/history/ambient prompts) only
+  fired on literal "spawn agents" phrasing**, so a coordination-shaped prompt
+  ("what's the status?", "do the same thing for the rest of the files",
+  "merge X and redeploy") was misclassified and had its tools held pending a
+  throwaway routing call. Broadened `_is_coordination_task` to also catch
+  session/history references, continuation anaphora, cross-system
+  orchestration, multi-step operational chains, and short ambient
+  status/continuation checks (<=6 words); `enforce-route.py` now exempts
+  `coordinate` from PreToolUse holding, matching the existing `introspect`
+  exemption. On the 150-case golden set: coordinate recall 0/12 → 10/12
+  (83.3%), constructed-only recall 0/10 → 10/10, 0 false positives across all
+  138 non-coordinate cases (#196).
+
+- **The `COORDINATE` fast path still missed several status/continuation
+  shapes**: "status on X", "X's status", "is/did X done/land", "how's X
+  going", a mid-sentence "keep going", and a pre-existing leak where "what's
+  the current state of X" matched the wrong alternative. Widened the pattern
+  set and added determiner guards so noun uses of verbs don't count as tasks.
+  On a real-traffic split (449 prompts of <=12 words, seed 20260929): holdout
+  (n=225) recall unchanged at 87/109, precision 87/108 → 87/107; tune (n=224)
+  recall 88/110 → 107/110 (the tune gain did not transfer to holdout — one
+  holdout item changed). A broader ~30-verb list was tried and reverted: it
+  cost 3 holdout recall points (#206).
+
+### Fixed — savings ledger
+
+- **A delegation's saved amount was written twice** — once directly by
+  `agentic.telemetry.record_delegation_savings`, and again when
+  `import_routing_quality_ledger` (#171) imported the same event's
+  `routing_quality.jsonl` parent row. On 2026-09-28, 12 real delegations were
+  double-counted this way, inflating the lifetime estimate by $13.60.
+  `import_routing_quality_ledger` now excludes `route_kind` in `{"delegate",
+  "bounded_operational", "delegate_substep"}`, since those already have a
+  savings_stats row from the direct write. Verified against the real
+  `~/.llm-router/usage.db`: all-time estimate $22.19 (n=953) before, $15.39
+  (n=953) after repair — a $6.80 drop, the routing_quality-side half of the
+  $13.60 double count. Adds `scripts/repair_savings_double_count.py`, an
+  idempotent, **dry-run-by-default** repair for the 12 rows already written
+  before the fix: it zeroes the duplicate side's estimate while preserving
+  the original value in a new `corrected_from`/`correction_reason` column
+  pair, rather than deleting anything (#207).
+
+- `routing_quality.jsonl` (the ledger `llm(task=...)` and other MCP-routed
+  calls write to) is now imported into `savings_stats` via
+  `cost.import_routing_quality_ledger()`, so MCP-routed savings show up in
+  `status`/`savings-report` at all — previously nothing drained this ledger
+  into the tables those commands read. Idempotent (`route_id`-keyed, backed
+  by a partial UNIQUE index), read-only against the source ledger, and rows
+  are always written `mode=NULL` (the MCP tool has no "was this answer used"
+  signal, so they can never read as verified). Dry run against the real
+  `~/.llm-router` store: of 24,214 rows, 27 would import, summing $0.4121
+  (#171).
+
+- **`llm-router status`, `savings-report`, `gain` and the statusline
+  disagreed at the same instant on the same machine** — different row
+  counts, different baseline models, and `gain` reported a fabricated $0.00
+  Opus baseline for every free/local call (multiplying an actual $0 cost by a
+  multiplier instead of pricing the token volume). All four now call one
+  `dashboard_data.summary(period)` for their headline figure and baseline
+  policy; `gain` now renders `n/a` rather than a fabricated $0.00 when there
+  is nothing to price (#173).
+
+- The Stop hook's condensed line and Codex's Stop reporter printed an
+  unlabelled, verified-only `"lifetime $X"` figure that could read as "$0.00"
+  on a machine `llm-router status` showed real routing activity on for the
+  same rows. Both now call the one canonical `dashboard_data.summary()` and
+  label each half explicitly (superseded by the one-estimate display, #182,
+  above) (#178).
+
+- `is_synthetic_session()`'s "any character outside `[0-9a-f-]` means a
+  human-typed fixture id" rule (#176) was also flagging the router's own
+  production writers: "gateway" (`route_server.py`, 262 rows measured) and
+  "sdk" (`sdk.py`, 38 rows measured) are real, non-hex session ids this
+  code itself emits. Added a small, closed allowlist of ids the router's own
+  writers use, checked before the fixture-word rule so it can't be caught by
+  a future tightening underneath it (#179).
+
+- `quota_snapshots.claude_*_pct` was stuck at 0.0 on every row (3,402 rows
+  measured) — the writer read the pressure dict with `usage.json`'s key
+  names (`session_pct`/`weekly_pct`) but was handed `_get_pressure()`'s
+  dict, which uses different keys and 0.0-1.0 fractions; the lookup always
+  missed and its `, 0.0` fallback fabricated a "0% pressure" reading every
+  time. Now reads the correct keys with no default, so a genuinely missing
+  reading stores NULL (#175).
+
+- The "critical pressure → Opus override" in `auto-route.py`'s `main()` was
+  dead for the same reason: it read `session_pct`/`weekly_pct` against a
+  dict keyed `session`/`weekly` as fractions, so the lookup always missed
+  and the override never fired regardless of real pressure. Extracted into
+  `_critical_pressure_reading()`, which reads the correct keys and treats a
+  missing reading as unknown rather than a fail-open "safe" (#177).
+
+- `claude_usage` rows (37,894 measured) all carried `input_tokens=0` /
+  `output_tokens=0` and no `session_id`, because the writer never threaded
+  the real token split or a session id through even though the columns have
+  existed since v9.2.2; fixed by threading them from the two call sites that
+  already have the values in scope, and added a `session_id` column to
+  `claude_usage`/`codex_usage`/`gemini_usage`. Separately, `savings_stats`
+  queries in `dashboard_data.py` had no test-traffic filter while every
+  other usage table did — 17% of `savings_stats` (1,559 of 9,057 rows
+  measured) was test traffic; the same filter now applies there too (#176).
+
+### Fixed — pricing
+
+- Resolved 1,374 `claude_usage` rows priced as "unknown": tag-less
+  `ollama/*` names (e.g. `ollama/llama3.2`, no `:tag`) lost their `ollama/`
+  prefix during normalization before the ollama fallback check ran, and bare
+  `claude-opus` (no version suffix) was missing from the alias table.
+  Verified: unresolved rows dropped from 1,374 to 57, all of which are a
+  synthetic `openai/some-model` test fixture (#174).
+
+### Fixed — local routing
+
+- **`qwen3.5:latest`, a hybrid-reasoning model, burned entire calls on
+  `<think>` output via the LiteLLM `ollama/` provider path** (the one the MCP
+  `llm()` tool and `providers.call_llm`/`call_llm_stream_events` use), unlike
+  every direct-HTTP Ollama caller in the repo, which already hard-codes
+  `"think": false`. Evidence 2026-09-27: a `routing_quality.jsonl` row that
+  timed out at 78s, and a separate 120s `litellm.Timeout`. Both LiteLLM call
+  paths now send `think: false` by default (`LLM_ROUTER_OLLAMA_THINK=1`
+  restores Ollama's own default); the streaming path also gained an
+  empty-content check so a reply that streamed only reasoning and no content
+  now raises instead of completing as a silent success (#172).
+
+### Fixed — Codex integration
+
+- **A Codex CLI status banner ("Reading additional input from stdin...")
+  was reported as a successful answer** when no real `item.completed` text
+  ever arrived — `run_codex()` always returned success for any non-JSON
+  stdout/stderr fallback. A live regression on 2026-09-26 had a routed
+  `llm(task="analyze")` call return the banner as a "successful" 205-token,
+  $0 completion. Fixed: success now requires real answer text to have
+  arrived; without it, the exit code is forced to a failure so the router's
+  existing fallback path takes over (#169).
+
+- Guarded the Codex installer (`_install_codex_files`) against writing to a
+  real, non-test `~/.codex` when it is exercised without an isolated
+  `Path.home()` — it was resolving the home directory with a bare
+  `pathlib.Path.home()`, unlike its already-guarded uninstall sibling (#170).
+
+### Docs
+
+- README redesign: restructured to lead with the quota problem and the
+  routing story; a follow-up restored 5 disclosures/pointers the redesign
+  had dropped (#166, #168).
+
+### Known issues
+
+`llm-router doctor` on the owner's machine currently reports three red
+measurements (read 2026-09-29, against the installed v15.3.0 — this
+worktree's 15.4.0 changes are not installed/running, so these figures
+predate and are unrelated to this release):
+
+- `unterminated_invocations=1031` — a routing branch that skips without
+  logging a reason.
+- `interception_gaps=1132` — tool output that passed the allowlist and was
+  still not compressed.
+- `draft_acceptance=0` — 0 drafts relayed; the routing rate still counts
+  drafts as work routed even though none have been used.
+
+None of this release's commits (v15.3.0..15.4.0) touch the draft hook,
+`hooks/context-capture.py`'s interception path, or the invocation-logging
+call sites `doctor` flags — see the `### Fixed` sections above for what did
+change. These three are pre-existing and open; no PR in this release claims
+to fix them.
 
 ## [15.3.0] - 2026-09-25
 
