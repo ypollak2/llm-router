@@ -669,7 +669,11 @@ def _write_north_star_units(tmp_path, rows):
             fh.write(json.dumps(r) + "\n")
 
 
-def test_agent_route_codex_delegation_is_used(tmp_path):
+def test_agent_route_codex_delegation_is_unknown_not_used(tmp_path):
+    """Dispatch is not adoption: a bare `delegated` row says Codex ran, not that
+    its result was kept. The used/redone verdict belongs to the release-time
+    outcome audit (PLAN Phase 0.1); at runtime the unit stays `unknown` but is
+    still an attempt, so the dispatch rate stays measurable (audit C6)."""
     sid = SID_MAIN
     _write_north_star_units(tmp_path, [
         {"ts": 1_800_000_050.0, "lever": "agent_route_codex", "model": "codex/gpt-5.5",
@@ -684,7 +688,8 @@ def test_agent_route_codex_delegation_is_used(tmp_path):
     rows = list(ns.units(days=None, session_id=sid, root=proj.parent))
     codex = [u for u in rows if u["kind"] == ns.UNIT_AGENT_ROUTE_CODEX]
     assert len(codex) == 1
-    assert codex[0]["outcome"] == ns.OUTCOME_USED
+    assert codex[0]["outcome"] == ns.OUTCOME_UNKNOWN
+    assert codex[0]["outcome"] != ns.OUTCOME_USED
     assert codex[0]["signal"] == "agent_route_codex_delegated"
     assert codex[0]["lever"] == "agent_route_codex"
     assert codex[0]["task_type"] == "code"
@@ -727,3 +732,72 @@ def test_agent_route_codex_unsuitable_decision_is_not_a_unit(tmp_path):
     rows = list(ns.units(days=None, session_id=sid, root=proj.parent))
     codex = [u for u in rows if u["kind"] == ns.UNIT_AGENT_ROUTE_CODEX]
     assert len(codex) == 0
+
+
+def test_agent_route_codex_delegated_counts_as_attempted_not_used_in_report(tmp_path):
+    sid = SID_MAIN
+    _write_north_star_units(tmp_path, [
+        {"ts": 1_800_000_050.0, "lever": "agent_route_codex", "model": "codex/gpt-5.5",
+         "outcome": "delegated", "task_type": "code", "session_id": sid},
+    ])
+    records = [_user(sid, "please delegate this analysis", 1_800_000_000)]
+    records += _bulk_user_prompts(sid, 60, start_ts=1_800_000_100)
+    proj = _project(tmp_path)
+    _write_jsonl(proj / f"{sid}.jsonl", records)
+
+    bk = ns.report(days=None, session_id=sid, root=proj.parent)["by_kind"][ns.UNIT_AGENT_ROUTE_CODEX]
+    assert bk == {"units": 1, "attempted": 1, "used": 0, "redo": 0, "unknown": 1}
+
+
+# ── --days window: filter by each unit's own ts, not the file mtime (audit C7) ─
+
+def test_days_window_excludes_old_units_in_a_file_touched_today(tmp_path):
+    """A session file whose mtime is now, holding only units from 3 days ago,
+    contributes nothing to a 1-day window: not its prompts, not its turns, not
+    its Codex ledger rows. Before the fix the whole file passed on mtime alone."""
+    import time
+    sid = SID_MAIN
+    old = time.time() - 3 * 86400
+    _write_north_star_units(tmp_path, [
+        {"ts": old + 50, "lever": "agent_route_codex", "model": "codex/gpt-5.5",
+         "outcome": "delegated", "task_type": "code", "session_id": sid},
+    ])
+    records = [_user(sid, "please look into this", old), _assistant(sid, old + 1, text="ok")]
+    records += _bulk_user_prompts(sid, 60, start_ts=old + 100)
+    proj = _project(tmp_path)
+    path = proj / f"{sid}.jsonl"
+    _write_jsonl(path, records)
+    os.utime(path, None)  # touched today
+
+    assert list(ns.units(days=1, root=proj.parent)) == []
+    rep = ns.report(days=1, root=proj.parent)
+    assert rep["sessions"] == []
+    assert all(v["units"] == 0 for v in rep["by_kind"].values())
+    # Sanity: the same file is fully visible to a window that covers it.
+    assert len(list(ns.units(days=7, root=proj.parent))) == 63
+
+
+def test_days_window_keeps_only_in_window_units_of_a_mixed_file(tmp_path):
+    import time
+    sid = SID_MAIN
+    now = time.time()
+    old = now - 3 * 86400
+    _write_north_star_units(tmp_path, [
+        {"ts": old + 5, "lever": "agent_route_codex", "model": "codex/gpt-5.5",
+         "outcome": "codex_failed", "task_type": "code", "session_id": sid},
+        {"ts": now - 60, "lever": "agent_route_codex", "model": "codex/gpt-5.5",
+         "outcome": "delegated", "task_type": "code", "session_id": sid},
+    ])
+    records = _bulk_user_prompts(sid, 10, start_ts=old)
+    records += _bulk_user_prompts(sid, 4, start_ts=now - 600)
+    proj = _project(tmp_path)
+    _write_jsonl(proj / f"{sid}.jsonl", records)
+
+    rows = list(ns.units(days=1, root=proj.parent))
+    cutoff = now - 86400
+    assert rows, "the in-window units must still be found (an empty set passes everything)"
+    assert sum(1 for u in rows if u["kind"] == ns.UNIT_USER_PROMPT) == 4
+    codex = [u for u in rows if u["kind"] == ns.UNIT_AGENT_ROUTE_CODEX]
+    assert [u["signal"] for u in codex] == ["agent_route_codex_delegated"]
+    for u in rows:
+        assert datetime.fromisoformat(u["ts"]).timestamp() >= cutoff
