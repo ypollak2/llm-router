@@ -283,9 +283,10 @@ class TestCacheAwareCost:
         WP-03: the previous expectation, $0.06375, was computed from $15/$75 —
         the retired Opus 3 tier. This test therefore asserted a 3x overstatement
         was correct, and any fix to the rate would have been reported as the
-        regression. Current Opus is $5/$25 with cache derived at 0.1x / 1.25x:
-            1000 in × 5 + 500 out × 25 + 200 cw × 6.25 + 5000 cr × 0.50
-          = 5_000 + 12_500 + 1_250 + 2_500 = 21_250 / 1_000_000 = $0.02125
+        regression. "opus" is Opus 5.5 since 2026-09-29: $4/$20, 5m write 1.25x,
+        cache read 0.05x (pricing page footnote 2):
+            1000 in × 4 + 500 out × 20 + 200 cw × 5 + 5000 cr × 0.20
+          = 4_000 + 10_000 + 1_000 + 1_000 = 16_000 / 1_000_000 = $0.016
         Kept as a literal on purpose: this is one of the assertions the Opus
         mutation gate relies on.
         """
@@ -294,7 +295,7 @@ class TestCacheAwareCost:
             "opus", input_t=1000, output_t=500,
             cache_write_t=200, cache_read_t=5000,
         )
-        assert abs(cost_usd - 0.02125) < 1e-6
+        assert abs(cost_usd - 0.016) < 1e-6
 
     def test_claude_cost_unknown_model_returns_zero(self):
         from llm_router.cost import _claude_cost
@@ -337,7 +338,7 @@ class TestSingleSavingsBaseline:
         from llm_router import pricing
 
         baseline = pricing.savings_baseline_model()
-        assert baseline == "claude-opus-5"
+        assert baseline == "claude-opus-5-5"
         # The shape of the old bug: these four used to yield three answers.
         assert len({baseline for _ in ("query", "code", "analyze", "research")}) == 1
 
@@ -369,7 +370,7 @@ class TestSingleSavingsBaseline:
         table and price at 0.0, silently producing NEGATIVE savings."""
         from llm_router.cost import _claude_cost
 
-        assert _claude_cost("claude-opus-5", 500, 500) == pytest.approx(
+        assert _claude_cost("claude-opus-5-5", 500, 500) == pytest.approx(
             _claude_cost("opus", 500, 500)
         )
         # Non-Claude routes must still cost nothing on this path.

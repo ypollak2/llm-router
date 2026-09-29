@@ -56,6 +56,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   sessions into their parent, closing the gap where the 50-cap file had
   already evicted the spawn the join needed.
 
+### Changed — savings baseline is Opus 5.5
+
+- **Every savings figure is now measured against `claude-opus-5-5` ($4/$20),
+  not `claude-opus-5` ($5/$25).** `pricing.SAVINGS_BASELINE_MODEL`, the `opus`
+  and `claude-opus` aliases (which the statusline and session-end hook price
+  the host with), `cost.LATEST_OPUS_MODEL`, and the fail-open fallback rates in
+  `digest.py`, `session-start.py` and `session-end.py` all move together. The
+  counterfactual cost of a given token volume drops by exactly 20%. Only
+  figures recomputed from tokens at read time move; savings already written to
+  `savings_stats` and the per-platform tables keep the rate they were written
+  with. `LLM_ROUTER_SAVINGS_BASELINE` still overrides it.
+  Measured on the maintainer's own `~/.llm-router/usage.db`, opened read-only,
+  lifetime window (earliest row 2026-07-08, latest 2026-09-29T06:16Z), 47,995
+  routed rows: the all-time estimate went from $22.12 to $21.47 (n=949
+  production rows carrying a saving, identical before and after; $0.00
+  verified, n=0). The whole change comes from the 629-row legacy `usage` table,
+  the one source that is recomputed from tokens.
+
+### Fixed — fast-mode pricing
+
+- **Fast-mode ids were priced at their base model's rate, half the real one.**
+  `claude-opus-5-fast` and `claude-opus-4-8-fast` were aliases to
+  `claude-opus-5` / `claude-opus-4-8` ($5/$25). They are now priced at the
+  published fast rate, $10/$50, and `claude-opus-5-5-fast` is added at $8/$40
+  (it previously did not resolve at all). The pricing page says prompt-caching
+  multipliers apply on top of fast-mode rates, so each keeps its base model's
+  cache ratios: Opus 5.5 fast reads cache at 0.05x ($0.40), the other two at
+  0.1x ($1.00); 5-minute writes are 1.25x and 1-hour writes 2x. Rates checked
+  against the raw `platform.claude.com/docs/en/about-claude/pricing.md` on
+  2026-09-29.
+
 ### Fixed — agent-route headless sessions
 
 - **`hooks/agent-route.py` silently routed a headless benchmark run to `codex

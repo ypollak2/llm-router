@@ -586,6 +586,14 @@ wrote it. A unique partial index (``idx_savings_stats_route_id``, created once
 this column exists — see ``_get_db``) makes that check a DB invariant rather
 than a hope."""
 
+# Found 2026-09-29. `route_kind` values that `tools/agentic.llm_delegate`
+# ALSO writes straight into `savings_stats` via
+# `agentic.telemetry.record_delegation_savings` (host="agentic"). A row
+# carrying one of these `route_kind`s in `routing_quality.jsonl` is the same
+# delegation event, not a second one — see
+# `import_routing_quality_ledger`'s rule 4 for the incident this closes.
+DELEGATION_ROUTE_KINDS = frozenset({"delegate", "bounded_operational", "delegate_substep"})
+
 MIGRATE_ROUTING_DECISIONS_ADD_POLICY = [
     "ALTER TABLE routing_decisions ADD COLUMN policy_applied TEXT",
 ]
@@ -3639,6 +3647,25 @@ async def import_routing_quality_ledger() -> int:
        (a partial UNIQUE index, see ``_get_db``) is the actual invariant, so
        a race between two importers fails the INSERT rather than duplicates
        the row.
+    4. **``route_kind`` of ``delegate``/``bounded_operational`` is excluded.**
+       (Found 2026-09-29.) Unlike a plain ``llm(task=...)`` call, an
+       ``llm_delegate`` invocation is recorded on TWO ledgers by design:
+       ``agentic.telemetry.record_delegation_savings`` writes the parent
+       delegation's ``saved_usd`` straight into ``savings_stats`` (``host=
+       "agentic"``) for cost tracking, and ``routing_quality.record_delegation``
+       (called right after it, in ``tools/agentic.llm_delegate``) writes the
+       SAME ``saved_usd`` as this ledger's parent row, for North Star quality
+       measurement — never intended as a second savings source. Once this
+       importer existed, that second write became reachable from here too:
+       on 2026-09-28 twelve real delegations were counted twice this way —
+       once as ``host="agentic"``, once as ``host="routing_quality",
+       task_type="delegate"`` — inflating the lifetime estimate by $13.60
+       (route_id-matched, timestamp-matched, ``saved_usd``-matched pairs;
+       see the PR). Excluding ``route_kind in {"delegate",
+       "bounded_operational", "delegate_substep"}`` here is the fix: the
+       parent delegation keeps its one existing route via the direct write,
+       and this importer goes back to doing only what its docstring says —
+       surfacing calls that have NO OTHER savings_stats row.
 
     Fail-open in spirit like ``routing_quality.record_route``: any row this
     function cannot safely interpret is skipped, never guessed at.
@@ -3668,6 +3695,12 @@ async def import_routing_quality_ledger() -> int:
             # never went through is_evaluable's synthetic gate).
             continue
         if not _rq.is_evaluable(row):
+            continue
+        if row.get("route_kind") in DELEGATION_ROUTE_KINDS:
+            # Rule 4 above: the delegation parent row already has a
+            # savings_stats row from agentic.telemetry.record_delegation_savings
+            # (host="agentic"). Importing it again here from routing_quality.jsonl
+            # would double-count the same saved_usd under a second host.
             continue
         candidates.append(row)
 
@@ -3810,7 +3843,7 @@ async def get_model_latency_stats(window_days: int = 7) -> dict[str, dict]:
 # Opus-4.1-and-earlier tier; Opus 4.5 onward (incl. 4.6/4.7/4.8) is $5/$25 per
 # million tokens. Every historical `saved_usd` was therefore ~3x inflated.
 
-LATEST_OPUS_MODEL = "claude-opus-5"
+LATEST_OPUS_MODEL = "claude-opus-5-5"
 """The current host Opus model. Bump when a newer Opus ships.
 
 This lagged at claude-opus-4-8 while llm_router.pricing already priced claude-opus-5
@@ -3824,6 +3857,7 @@ answers "which Opus is current"."""
 # release; the values can also be refreshed at runtime via
 # refresh_baseline_pricing_from_api().
 _OPUS_MODELS: tuple[str, ...] = (
+    "claude-opus-5-5",
     "claude-opus-5",
     "claude-opus-4-8",
     "claude-opus-4-7",

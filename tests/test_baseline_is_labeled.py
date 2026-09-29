@@ -33,7 +33,7 @@ def test_dashboard_surfaces_both_figures():
 def test_no_stale_15_75_host_rate_literal_in_cost():
     # The corrected rates live in _OPUS_PRICING; the stale tier must not be the
     # active host rate anywhere in cost.py.
-    assert (cost._HOST_INPUT_PER_M, cost._HOST_OUTPUT_PER_M) == (5.0, 25.0)
+    assert (cost._HOST_INPUT_PER_M, cost._HOST_OUTPUT_PER_M) == (4.0, 20.0)
     txt = (_SRC / "cost.py").read_text()
     # A stray "$15/$75" *documented as history* is fine; an active rate literal
     # is not. The active assignment derives from _OPUS_PRICING, so no bare

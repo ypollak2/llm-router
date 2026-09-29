@@ -193,6 +193,90 @@ async def test_unknown_provenance_row_is_not_imported(rq_env):
 # ── 5. a route already present via the hook/savings_log path is not
 #      double-counted ────────────────────────────────────────────────────────
 
+# ── 6. a delegation's routing_quality parent row is not re-imported ─────────
+#
+# Bug (found 2026-09-29): `tools/agentic.llm_delegate` writes a delegation's
+# `saved_usd` to `savings_stats` TWICE for the same event — once directly via
+# `agentic.telemetry.record_delegation_savings` (host="agentic"), and once as
+# this ledger's `route_kind="delegate"`/"bounded_operational" parent row,
+# which this importer used to happily pick up too (host="routing_quality").
+# On 2026-09-28, twelve real delegations were counted twice this way, adding
+# $13.60 to the lifetime estimate. The fix: this importer must skip
+# `route_kind` values that `agentic.telemetry` already accounts for.
+
+@pytest.mark.asyncio
+async def test_delegate_route_kind_is_not_imported(rq_env):
+    db, ledger = rq_env
+    row = _row("r6", saved_usd=0.20, task_type="delegate")
+    row["route_kind"] = "delegate"
+    row["session_id"] = None
+    row["chosen_model"] = None
+    row["final_model"] = None
+    _write_ledger(ledger, row)
+
+    imported = await cost.import_routing_quality_ledger()
+    assert imported == 0
+    assert _savings_rows(db) == []
+
+
+@pytest.mark.asyncio
+async def test_bounded_operational_route_kind_is_not_imported(rq_env):
+    db, ledger = rq_env
+    row = _row("r7", saved_usd=0.40, task_type="bounded_operational")
+    row["route_kind"] = "bounded_operational"
+    row["session_id"] = None
+    row["chosen_model"] = None
+    row["final_model"] = None
+    _write_ledger(ledger, row)
+
+    imported = await cost.import_routing_quality_ledger()
+    assert imported == 0
+    assert _savings_rows(db) == []
+
+
+@pytest.mark.asyncio
+async def test_delegation_savings_counted_once_not_twice(rq_env):
+    """The regression this bug actually produced: the direct `host="agentic"`
+    write survives (delegation savings still show up), but the SAME event's
+    routing_quality parent row must not add a second, duplicate figure."""
+    db, ledger = rq_env
+
+    # 1. The direct write agentic.telemetry.record_delegation_savings makes.
+    _bootstrap = await cost._get_db()  # create + migrate the schema
+    await _bootstrap.close()
+    conn = sqlite3.connect(str(db))
+    try:
+        conn.execute(
+            "INSERT INTO savings_stats "
+            "(timestamp, session_id, task_type, estimated_claude_cost_saved, "
+            "external_cost, model_used, host, is_simulated) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            ("2026-09-28 20:17:32", "", "code", 0.20, 0.0,
+             "llm_router-agentic-router", "agentic", 0),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    # 2. The SAME delegation's routing_quality parent row (route_id differs
+    #    from anything in savings_stats — the two writers never shared a key,
+    #    which is exactly why the old dedup-by-route_id logic could not catch
+    #    this pair).
+    row = _row("r8", saved_usd=0.20, task_type="delegate")
+    row["route_kind"] = "delegate"
+    row["session_id"] = None
+    row["chosen_model"] = None
+    row["final_model"] = None
+    _write_ledger(ledger, row)
+
+    imported = await cost.import_routing_quality_ledger()
+    assert imported == 0  # the routing_quality parent row must not land
+
+    from llm_router import dashboard_data
+    totals = dashboard_data.query_window("lifetime", db_path=db)
+    assert totals.unverified_saved_usd == pytest.approx(0.20)  # once, not 0.40
+
+
 @pytest.mark.asyncio
 async def test_route_already_present_is_not_double_counted(rq_env):
     db, ledger = rq_env

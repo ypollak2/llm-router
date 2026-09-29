@@ -109,8 +109,9 @@ def test_sessionend_free_section_not_mislabeled_sonnet_and_fallback_is_current()
     # D8: fallback host price is the current 5/25, not the stale 15/75.
     assert "HOST_INPUT_PER_M  = 15.0" not in txt
     assert "HOST_OUTPUT_PER_M = 75.0" not in txt
-    assert "HOST_INPUT_PER_M  = 5.0" in txt
-    assert "HOST_OUTPUT_PER_M = 25.0" in txt
+    # Opus 5.5 (4/20) since the 2026-09-29 baseline move.
+    assert "HOST_INPUT_PER_M  = 4.0" in txt
+    assert "HOST_OUTPUT_PER_M = 20.0" in txt
 
 
 def test_sessionend_session_panels_carry_window_label():

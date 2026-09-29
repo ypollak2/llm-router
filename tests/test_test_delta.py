@@ -189,9 +189,9 @@ def test_opus_baseline_pricing_constants():
 
 
 def test_opus_baseline_for_routed_uses_token_arithmetic(tmp_path):
-    """1M input + 1M output tokens at the Opus baseline = $5 + $25 = $30.
+    """1M input + 1M output tokens at the Opus 5.5 baseline = $4 + $20 = $24.
 
-    WP-03: was $90, computed from the retired $15/$75 tier.
+    WP-03: was $90, computed from the retired $15/$75 tier; $30 at Opus 5.
     """
     db = _seed_db(tmp_path)
     before = snapshot(db)
@@ -205,11 +205,11 @@ def test_opus_baseline_for_routed_uses_token_arithmetic(tmp_path):
     conn.close()
     after = snapshot(db)
     report = diff(before, after)
-    assert report.opus_baseline_for_routed == pytest.approx(30.0)
-    # The routed call cost $5.00, so the saving is $30 - $5 = $25 (was $85 when
+    assert report.opus_baseline_for_routed == pytest.approx(24.0)
+    # The routed call cost $5.00, so the saving is $24 - $5 = $19 (was $85 when
     # the baseline was inflated 3x — the overstatement lands entirely in the
     # headline savings number, which is the point of the finding).
-    assert report.savings_usd_vs_opus == pytest.approx(25.0)
+    assert report.savings_usd_vs_opus == pytest.approx(19.0)
 
 
 def test_simple_share_proportional(tmp_path):

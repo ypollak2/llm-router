@@ -79,12 +79,12 @@ class TestOneRatePerModel:
         assert rates == {1.00}, f"Haiku priced {len(rates)} different ways: {rates}"
 
     def test_opus_has_exactly_one_price_across_every_spelling(self) -> None:
-        rates = {pricing.input_rate(s) for s in ["opus", "claude-opus-5", "anthropic/claude-opus-5"]}
-        assert rates == {5.00}
+        rates = {pricing.input_rate(s) for s in ["opus", "claude-opus-5-5", "anthropic/claude-opus-5-5"]}
+        assert rates == {4.00}
 
     def test_aliases_resolve_to_a_model_id_and_carry_no_price(self) -> None:
         """An alias that carries its own price is how families drift apart."""
-        assert pricing.resolve("opus") == "claude-opus-5"
+        assert pricing.resolve("opus") == "claude-opus-5-5"
         assert pricing.resolve("opus") in pricing.known_models()
         assert "opus" not in pricing.known_models()
 
