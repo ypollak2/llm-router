@@ -173,7 +173,12 @@ _AGENT_TOOLS = ("Agent", "Task")
 _SANDBOX_CWD = re.compile(r"^/(private/)?(tmp|var/folders)/")
 
 
-# ── reused scripts/ modules (stdlib-only, outside src/) ──────────────────────
+# ── reused rule modules (stdlib-only leaves, loaded by path) ─────────────────
+# Both moved from scripts/ into src/llm_router/ in Phase 0.2d (the wheel ships
+# no scripts/, so northstar lost them when installed). They are still loaded by
+# PATH, never imported as llm_router: that keeps llm_router/__init__ and every
+# product reader out of this process. tests/test_outcome_audit_import_boundary.py
+# allows exactly these two paths and pins that they import nothing from llm_router.
 
 def _load_script(rel: str, name: str):
     path = ROOT / rel
@@ -192,10 +197,10 @@ def _load_script(rel: str, name: str):
     return mod
 
 
-_SOURCES = _load_script("scripts/groundtruth/sources.py", "_oa_groundtruth_sources")
-_EDIT_SURVIVAL = _load_script("scripts/northstar/edit_survival.py", "_oa_edit_survival")
+_SOURCES = _load_script("src/llm_router/groundtruth_sources.py", "_oa_groundtruth_sources")
+_EDIT_SURVIVAL = _load_script("src/llm_router/edit_survival.py", "_oa_edit_survival")
 if _SOURCES is None:  # the prompt rules are not optional for a release number
-    raise ImportError("scripts/groundtruth/sources.py is required by the outcome audit")
+    raise ImportError("the outcome audit requires the groundtruth_sources rule module")
 
 
 # ── small pure helpers ───────────────────────────────────────────────────────

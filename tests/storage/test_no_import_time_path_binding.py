@@ -350,8 +350,17 @@ GT = pathlib.Path(__file__).resolve().parents[2] / "scripts" / "groundtruth"
 
 
 def _load_gt(modname: str):
-    """Import a scripts/groundtruth module by path (the dir is not a package)."""
+    """Import a scripts/groundtruth module by path (the dir is not a package).
+
+    ``sources`` moved into the package (Phase 0.2d: northstar needs it at
+    runtime and the wheel ships no scripts/); scripts/groundtruth/sources.py
+    is now only an import alias, so the module under test is the package one.
+    """
     import importlib.util
+
+    if modname == "sources":
+        from llm_router import groundtruth_sources
+        return groundtruth_sources
 
     name = f"_gt_{modname}"
     spec = importlib.util.spec_from_file_location(name, GT / f"{modname}.py")
