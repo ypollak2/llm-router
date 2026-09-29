@@ -6,7 +6,7 @@
   * classifier/failed-attempt-cost totals and net_realized_savings_usd,
   * hook_overhead_usd gated on row-level host_mode (marginal-$0 on subscription),
   * adoption-method gating of realized_savings_usd (door_call/agent_marked count;
-    content_match → likely_used_routes; NULL on verified_used → door_call back-compat),
+    content_match → likely_used_routes; door_call / NULL on verified_used → acknowledged only),
   * host-mode split of realized savings + quota-tokens-saved,
   * overhead_as_pct_of_gross guarded for a zero-gross route.
 """
@@ -65,7 +65,7 @@ def test_net_realized_savings_subtracts_classifier_failed_and_hook_overhead(tmp_
         ),
         path=db_path,
     )
-    record_event(_realized(rid, adoption_method="door_call"), path=db_path)
+    record_event(_realized(rid, adoption_method="agent_marked"), path=db_path)
 
     acc = get_route_accounting(rid, path=db_path)
     assert acc.realized_savings_usd == pytest.approx(0.04)  # 0.05 - 0.01
@@ -93,7 +93,7 @@ def test_hook_overhead_is_zero_on_subscription_host_mode(tmp_path, monkeypatch):
         ),
         path=db_path,
     )
-    record_event(_realized(rid, adoption_method="door_call"), path=db_path)
+    record_event(_realized(rid, adoption_method="agent_marked"), path=db_path)
 
     acc = get_route_accounting(rid, path=db_path)
     assert acc.hook_overhead_usd == 0.0  # marginal-$0 rule — never fabricate a $ figure
@@ -128,10 +128,11 @@ def test_agent_marked_counts_as_realized(tmp_path, monkeypatch):
     assert acc.realized_by_adoption_method == {"agent_marked": pytest.approx(0.04)}
 
 
-def test_null_adoption_on_verified_used_backcompat_treated_as_door_call(tmp_path, monkeypatch):
-    """Pre-migration rows: verified_used with adoption_method=None must still count
-    as realized (treated as door_call) — otherwise every existing verified_used
-    route silently drops out of realized_savings_usd on upgrade."""
+def test_null_adoption_on_verified_used_is_acknowledged_not_realized(tmp_path, monkeypatch):
+    """Pre-migration rows: verified_used with adoption_method=None were written by
+    the enforcement-door hook — the same throwaway-capable door call that Phase
+    0.2b relabels route_acknowledged (audit 2026-09-29, C8). They used to be
+    back-filled as door_call and counted as realized; they no longer count."""
     db_path = tmp_path / "usage.db"
     monkeypatch.setenv("LLM_ROUTER_EXECUTION_LEDGER_DB", str(db_path))
 
@@ -140,8 +141,9 @@ def test_null_adoption_on_verified_used_backcompat_treated_as_door_call(tmp_path
     record_event(_realized(rid, adoption_method=None), path=db_path)
 
     acc = get_route_accounting(rid, path=db_path)
-    assert acc.realized_savings_usd == pytest.approx(0.04)
-    assert acc.realized_by_adoption_method == {"door_call": pytest.approx(0.04)}
+    assert acc.realized_savings_usd == 0.0
+    assert acc.realized_by_adoption_method == {}
+    assert acc.acknowledged_routes == 1
 
 
 def test_quota_tokens_saved_only_on_realized_routes_bucketed_by_host_mode(tmp_path, monkeypatch):
@@ -162,7 +164,7 @@ def test_quota_tokens_saved_only_on_realized_routes_bucketed_by_host_mode(tmp_pa
                  provider="openai"),
         path=db_path,
     )
-    record_event(_realized(r1, adoption_method="door_call"), path=db_path)
+    record_event(_realized(r1, adoption_method="agent_marked"), path=db_path)
     # r2: content_match (NOT realized) — quota must NOT accrue even though the
     # route was also served by a non-Claude model.
     record_event(
@@ -196,7 +198,7 @@ def test_quota_tokens_saved_zero_when_final_model_is_claude(tmp_path, monkeypatc
                  provider="anthropic"),
         path=db_path,
     )
-    record_event(_realized(rid, adoption_method="door_call"), path=db_path)
+    record_event(_realized(rid, adoption_method="agent_marked"), path=db_path)
 
     acc = get_route_accounting(rid, path=db_path)
     assert acc.realized_quota_tokens_saved == 0
@@ -216,7 +218,7 @@ def test_quota_tokens_saved_zero_when_provider_unknown(tmp_path, monkeypatch):
                  input_tokens=200, output_tokens=100, host_mode="subscription"),
         path=db_path,
     )
-    record_event(_realized(rid, adoption_method="door_call"), path=db_path)
+    record_event(_realized(rid, adoption_method="agent_marked"), path=db_path)
 
     acc = get_route_accounting(rid, path=db_path)
     assert acc.realized_quota_tokens_saved == 0

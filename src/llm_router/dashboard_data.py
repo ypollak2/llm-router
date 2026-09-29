@@ -277,7 +277,9 @@ class RealizedSavingsTotals:
     ``cost_saved_usd`` for the per-platform tables). This one reads
     ``execution_ledger``'s accounting, where a route's *potential* saving only
     becomes *realized* when its ``realization_status`` is ``verified_used``
-    AND its ``adoption_method`` is in ``COUNTS_AS_REALIZED``.
+    AND its ``adoption_method`` is in ``COUNTS_AS_REALIZED``. A door call
+    (``route_acknowledged``) is counted in ``acknowledged_routes`` and never
+    as realized (Phase 0.2b).
 
     Routes that were verified as overridden (the host went its own way) or
     never verified at all contribute to ``potential_savings_usd`` only. Keeping
@@ -302,6 +304,7 @@ class RealizedSavingsTotals:
     realization_unknown_routes: int
     likely_used_routes: int
     cost_unknown_attempts: int
+    acknowledged_routes: int = 0
 
 
 @dataclass(frozen=True)
@@ -994,6 +997,7 @@ def query_realized_savings(
         realization_unknown_routes=accounting.realization_unknown_routes,
         likely_used_routes=accounting.likely_used_routes,
         cost_unknown_attempts=accounting.cost_unknown_attempts,
+        acknowledged_routes=accounting.acknowledged_routes,
     )
 
 
@@ -1039,8 +1043,8 @@ def query_model_savings(
     copy of this query living in ``savings_report.py`` alone.
     """
     from llm_router.savings import (
-        UNVERIFIED_CALLS_SQL, UNVERIFIED_SAVED_SQL, VERIFIED_CALLS_SQL,
-        VERIFIED_SAVED_SQL,
+        EXCLUDED_SAVINGS_PRED_SQL, UNVERIFIED_CALLS_SQL, UNVERIFIED_SAVED_SQL,
+        VERIFIED_CALLS_SQL, VERIFIED_SAVED_SQL,
     )
 
     stats = {
@@ -1074,6 +1078,9 @@ def query_model_savings(
                 VERIFIED_SAVED_SQL, UNVERIFIED_SAVED_SQL,
                 UNVERIFIED_CALLS_SQL, VERIFIED_CALLS_SQL,
             )
+            # Phase 0.2b: legacy flat agentic credits are in no savings
+            # figure, so they get no per-model row either (read-time only).
+            cond = f"{cond} AND NOT {EXCLUDED_SAVINGS_PRED_SQL}"
         else:
             # A table predating host/model_used/mode cannot say a row was
             # realized — see savings.savings_split_sql's docstring.

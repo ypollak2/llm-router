@@ -80,7 +80,7 @@ def _attempt(
 
 
 def _realized(route_id: str, *, turn_id: str = "", status: str = "verified_used",
-              adoption_method: str | None = "door_call") -> LedgerEvent:
+              adoption_method: str | None = "agent_marked") -> LedgerEvent:
     return LedgerEvent(
         session_id="s-c6",
         turn_id=turn_id,
