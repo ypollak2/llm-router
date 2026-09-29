@@ -1,0 +1,62 @@
+# Claude-tier routing for the per-call proxy (llm_router.proxy.tiers).
+#
+# Opt-in: nothing here is read unless the proxy runs with --tiers or
+# LLM_ROUTER_PROXY_TIERS=on. Point LLM_ROUTER_PROXY_TIER_POLICY at your own
+# copy of this file to change it; model ids live here, never in code.
+#
+# Why tiers save Max quota (Phase 0.4 probe, 2026-09-29, n=5 calls per model):
+# one shared weekly pool drains in proportion to per-call cost, and Opus cost
+# 1.68x Sonnet and 6.15x Haiku per call on the same prompt.
+
+# Ranked cheapest -> most capable. `model` is the id a rewrite sends;
+# `also` lists other ids that count as this tier when a request names them.
+# `thinking` lists the request `thinking.type` values this tier accepts, and
+# `effort: false` marks a tier that rejects `output_config.effort`: a request is
+# never moved to a tier that would refuse it. Haiku 4.5 takes only
+# budget_tokens thinking and errors on effort, while Sonnet 5, Opus 5.5 and
+# Fable 5.1 reject budget_tokens (Anthropic API docs, checked 2026-09-29); Claude Code sends adaptive thinking plus effort on main-loop
+# calls, so those stay on Sonnet or above.
+tiers:
+  - name: haiku
+    model: claude-haiku-4-5
+    thinking: [enabled]
+    effort: false
+  - name: sonnet
+    model: claude-sonnet-5-5
+    also: [claude-sonnet-5]
+    thinking: [adaptive]
+  - name: opus
+    model: claude-opus-5-5
+    thinking: [adaptive]
+  - name: fable
+    model: claude-fable-5-1
+    thinking: [adaptive]
+
+# (task_type, complexity) -> tier. `default` applies to every task type; a
+# task-type key (e.g. `code:`) overrides individual complexities for that type.
+# Complexity comes from the router's own classifier (classify_signals with
+# GATEWAY_POLICY) over the conversation's newest human prompt.
+route:
+  default:
+    simple: haiku
+    moderate: sonnet
+    complex: opus
+    deep_reasoning: opus
+
+# false: a request is only ever moved DOWN from the tier it asked for, never up.
+allow_upgrade: false
+
+# Requested model ids that are never rewritten (e.g. the model you pass with
+# `claude --model`, which the proxy cannot tell apart from the default).
+pinned_models: []
+
+stickiness:
+  # Seconds without a call after which a conversation's prompt cache is
+  # treated as cold, so a tier switch costs nothing extra. Claude Code writes
+  # its cache with the 1-hour TTL.
+  cold_gap_s: 3600
+  # Move to the policy tier on the call right after the conversation's first
+  # call (plan on the requested model, execute on the cheaper one). Off: it
+  # measured net negative on short tasks, because the switch re-writes the
+  # whole prompt cache on the new tier (see proxy/cache_cost.py).
+  switch_after_first_call: false

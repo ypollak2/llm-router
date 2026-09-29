@@ -306,3 +306,19 @@ def parse_sse_usage(buf: bytes) -> tuple[dict, str | None, str | None]:
             usage.update({k: v for k, v in (d.get("usage") or {}).items() if v is not None})
             stop = (d.get("delta") or {}).get("stop_reason")
     return usage, stop, msg_id
+
+
+def sse_response_model(buf: bytes) -> str | None:
+    """The ``model`` Anthropic reports in ``message_start``: which model
+    actually answered, so a tier rewrite can be checked, not assumed."""
+    for line in buf.decode("utf-8", "replace").splitlines():
+        if not line.startswith("data: "):
+            continue
+        try:
+            d = json.loads(line[6:])
+        except ValueError:
+            continue
+        if isinstance(d, dict) and d.get("type") == "message_start":
+            model = (d.get("message") or {}).get("model")
+            return model if isinstance(model, str) else None
+    return None

@@ -12,6 +12,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Proxy: opt-in Claude-tier rewrite (`llm-router proxy --tiers on`). Each
+  forwarded call can move to a cheaper Claude tier (Haiku 4.5 / Sonnet 5.5 /
+  Opus 5.5 / Fable 5.1, set in `proxy/claude_tiers.yaml`). It follows
+  no-downgrade rules (user `/model`, first call, thinking/effort support) and
+  cache-aware stickiness. Any decision error or 4xx on a rewritten call
+  forwards unchanged. `proxy stats` shows the tier mix, the switch rate, and
+  an **estimated** cost against the all-requested-model counterfactual. No
+  savings claim: on the one live smoke (3 tasks, 23 calls) the
+  switch-after-first-call variant cost more than all-Opus, so it ships off.
+
 ## [15.4.0] - 2026-09-29
 
 No savings claim is made for this release. The headline item — an opt-in,

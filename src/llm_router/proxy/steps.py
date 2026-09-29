@@ -19,6 +19,7 @@ them faithfully, and a pass-through costs nothing.
 from __future__ import annotations
 
 import json
+import re
 from typing import Callable
 
 STEP_CONTINUATION = "continuation"
@@ -112,6 +113,49 @@ def classify_text(body: dict, limit: int = 1500) -> str:
             inner = block.get("content")
             outputs.append(inner if isinstance(inner, str) else _text_of(inner))
     return (first[-limit:] + "\n" + "\n".join(outputs)[:limit]).strip()
+
+
+_REMINDER_RE = re.compile(r"<system-reminder>.*?</system-reminder>", re.S)
+_MODEL_COMMAND = "<command-name>/model</command-name>"
+
+
+def _human_text(content) -> str:
+    """A user turn's own text: tool results and Claude Code's
+    ``<system-reminder>`` blocks removed."""
+    return _REMINDER_RE.sub("", _text_of(content)).strip()
+
+
+def tier_text(body: dict, limit: int = 3000) -> str:
+    """What the tier decision classifies: the conversation's newest human
+    prompt. Tool output is left out on purpose, so the class (and with it the
+    tier) holds steady through a tool loop instead of moving with each
+    result's length, which would re-write the prompt cache mid-task."""
+    for m in reversed(non_system(body.get("messages") or [])):
+        if m.get("role") != "user":
+            continue
+        text = _human_text(m.get("content"))
+        if text:
+            return text[-limit:]
+    return ""
+
+
+def user_pinned_model(body: dict) -> bool:
+    """True when the conversation shows the user ran ``/model``: Claude Code
+    records a local command in the transcript it sends, so the model in the
+    request is the user's explicit choice and is never downgraded."""
+    for m in non_system(body.get("messages") or []):
+        if m.get("role") == "user" and _MODEL_COMMAND in _text_of(m.get("content")):
+            return True
+    return False
+
+
+def is_first_call(body: dict) -> bool:
+    """The conversation's first model call: one user turn, no reply yet."""
+    return len(non_system(body.get("messages") or [])) == 1
+
+
+def has_client_tools(body: dict) -> bool:
+    return _has_client_tools(body)
 
 
 def session_id_of(body: dict) -> str | None:

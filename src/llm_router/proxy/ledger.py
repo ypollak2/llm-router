@@ -25,6 +25,20 @@ Row fields:
                   proxy retried once with thinking off
   auth            oauth | api_key | none   (kind only; never the value)
 
+Claude-tier rewrite fields (only when the proxy runs with ``--tiers on``):
+  served_model          the model the call was sent to (== requested_model
+                        unless rewritten; the requested one again after a
+                        rejected rewrite was retried)
+  response_model        the model Anthropic's reply names: the rewrite checked
+  tier, tier_reason     the tier chosen and why (``proxy.tiers`` REASON_*)
+  tier_task_type, tier_complexity   the classifier's view of the newest prompt
+  tier_switch           the conversation moved to a different model
+  tier_switch_cost_usd  estimated cache re-write that move cost (``cache_cost``)
+  tier_retry            {status, detail}: Anthropic refused the rewritten call
+                        and it was resent unchanged
+  tier_detail           scrubbed error text when the decision itself failed
+  tier_decision_s       time the decision added
+
 ``northstar`` joins ``msg_id`` of served rows to transcript assistant records
 (``message.id``) to count those turns as routed.
 
@@ -220,9 +234,11 @@ def _price_tokens(model: str, *, input_tokens: int = 0, output_tokens: int = 0,
 
 
 def anthropic_cost(row: dict) -> float | None:
-    """Estimated USD of the Anthropic side of one row, or None when unpriced."""
+    """Estimated USD of the Anthropic side of one row, or None when unpriced.
+    Priced at the model the call was actually sent to."""
     u = normalize_usage(row.get("usage"))
-    return _price_tokens(row.get("requested_model") or "", input_tokens=u["input_tokens"],
+    return _price_tokens(row.get("served_model") or row.get("requested_model") or "",
+                         input_tokens=u["input_tokens"],
                          output_tokens=u["output_tokens"],
                          cache_read_input_tokens=u["cache_read_input_tokens"],
                          cache_creation_5m=u["cache_creation_5m"], cache_creation_1h=u["cache_creation_1h"])
@@ -309,6 +325,81 @@ def _net_avoided(rows: list[dict]) -> tuple[float, int]:
     return total, n
 
 
+def tier_counterfactual_cost(row: dict) -> float | None:
+    """What one tier-routed row would have cost on the model it REQUESTED:
+    the same tokens at the requested model's rates. On a row where the
+    conversation switched tier, the cache writes are priced as cache reads,
+    since the requested model already held that cache; that also prices any
+    genuinely new content as a read, so the counterfactual leans low and the
+    estimated saving leans small. An ESTIMATE: a switched tier can change the
+    trajectory (more or fewer calls), which only a paired A/B measures."""
+    u = normalize_usage(row.get("usage"))
+    write_5m, write_1h, read = u["cache_creation_5m"], u["cache_creation_1h"], u["cache_read_input_tokens"]
+    if row.get("tier_switch"):
+        read, write_5m, write_1h = read + write_5m + write_1h, 0, 0
+    return _price_tokens(row.get("requested_model") or "", input_tokens=u["input_tokens"],
+                         output_tokens=u["output_tokens"], cache_read_input_tokens=read,
+                         cache_creation_5m=write_5m, cache_creation_1h=write_1h)
+
+
+def tier_stats(rows: list[dict]) -> dict | None:
+    """Tier mix, switch rate and the Anthropic cost of tier-routed calls
+    against the all-requested-model counterfactual. ``None`` when no row
+    carries a tier decision. Every dollar figure is an ESTIMATE; the
+    validated number is a paired A/B (:func:`paired_realized_saving`)."""
+    tiered = [r for r in rows if r.get("tier_reason")
+              and r.get("decision") in (DECISION_FORWARDED, DECISION_FALLBACK)]
+    if not tiered:
+        return None
+    mix: dict[str, int] = {}
+    reasons: dict[str, int] = {}
+    for r in tiered:
+        served = r.get("served_model") or r.get("requested_model") or "unknown"
+        mix[served] = mix.get(served, 0) + 1
+        reasons[r["tier_reason"]] = reasons.get(r["tier_reason"], 0) + 1
+    rewritten = [r for r in tiered if (r.get("served_model") or r.get("requested_model"))
+                 != r.get("requested_model")]
+    switches = [r for r in tiered if r.get("tier_switch")]
+    mismatched = [r for r in rewritten if r.get("response_model")
+                  and not str(r["response_model"]).startswith(str(r.get("served_model")))]
+    actual = counterfactual = 0.0
+    priced = 0
+    for r in tiered:
+        a, c = anthropic_cost(r), tier_counterfactual_cost(r)
+        if a is None or c is None:
+            continue
+        actual += a
+        counterfactual += c
+        priced += 1
+    switch_cost = [r["tier_switch_cost_usd"] for r in switches if isinstance(r.get("tier_switch_cost_usd"), (int, float))]
+    # What the switched calls actually paid in cache writes (from Anthropic's
+    # own usage), next to the estimate: the estimate assumes the whole prefix
+    # is re-written, while a prefix another conversation already cached on the
+    # target tier (Claude Code's shared system prompt and tools) is only read.
+    observed_write = 0.0
+    for r in switches:
+        u = normalize_usage(r.get("usage"))
+        observed_write += _price_tokens(r.get("served_model") or r.get("requested_model") or "",
+                                        cache_creation_5m=u["cache_creation_5m"],
+                                        cache_creation_1h=u["cache_creation_1h"]) or 0.0
+    return {
+        "calls": len(tiered),
+        "served_model_mix": dict(sorted(mix.items(), key=lambda kv: -kv[1])),
+        "reasons": dict(sorted(reasons.items())),
+        "rewritten": len(rewritten),
+        "rewrite_retried_unchanged": sum(1 for r in tiered if r.get("tier_retry")),
+        "response_model_mismatch": len(mismatched),
+        "switches": len(switches),
+        "switch_rate": round(len(switches) / len(tiered), 4),
+        "est_switch_cost_usd": round(sum(switch_cost), 4), "est_switch_cost_n": len(switch_cost),
+        "switch_calls_cache_write_usd": round(observed_write, 4),
+        "est_cost_usd": round(actual, 4),
+        "est_counterfactual_requested_usd": round(counterfactual, 4),
+        "est_saving_usd": round(counterfactual - actual, 4),
+        "priced_n": priced,
+    }
+
+
 def paired_realized_saving(off_rows: list[dict], on_rows: list[dict]) -> dict:
     """The measured A/B figure: real Anthropic dollars actually spent with
     routing off minus a paired routing-on arm, for the SAME task. This is the
@@ -387,6 +478,7 @@ def stats(rows: list[dict]) -> dict:
 
     return {
         "calls": calls,
+        "tiers": tier_stats(rows),
         "sessions": {"n": len(sessions), "calls_per_session": dict(sorted(sessions.items(),
                                                                             key=lambda kv: -kv[1])),
                      "median_calls_per_session": _median([float(c) for c in session_counts]),
@@ -445,4 +537,17 @@ def format_stats(s: dict) -> str:
         f"cache_creation median: after a served turn {an['cache_creation_median_after_served_turn']} "
         f"(n={an['after_served_n']}) vs clean history {an['cache_creation_median_clean_history']} (n={an['clean_n']})",
     ]
+    t = s.get("tiers")
+    if t:
+        lines += [
+            f"claude tiers: {t['calls']} tier-decided calls; served mix {t['served_model_mix']}",
+            f"  reasons {t['reasons']}; rewritten {t['rewritten']} "
+            f"(retried unchanged {t['rewrite_retried_unchanged']}, reply model mismatch "
+            f"{t['response_model_mismatch']}); switches {t['switches']} (rate {t['switch_rate']}), "
+            f"est. switch cache cost ${t['est_switch_cost_usd']} (n={t['est_switch_cost_n']}; "
+            f"cache writes those calls actually paid ${t['switch_calls_cache_write_usd']})",
+            f"  est. Anthropic cost ${t['est_cost_usd']} vs ${t['est_counterfactual_requested_usd']} "
+            f"had every call run on its requested model: est. saving ${t['est_saving_usd']} "
+            f"(n={t['priced_n']}; an ESTIMATE, the validated number is a paired A/B)",
+        ]
     return "\n".join(lines)

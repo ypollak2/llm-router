@@ -68,12 +68,15 @@ from llm_router.proxy.loop_guard import (
     REASON_LOOP_GUARD,
     LoopGuard,
 )
+from llm_router.proxy.cache_cost import Stickiness, conversation_key
 from llm_router.proxy.steps import STEP_CLASSES, classify_text, prev_tools, session_id_of, step_class
+from llm_router.proxy.tiers import REASON_DECISION_ERROR, ClaudeTierPolicy
 from llm_router.proxy.translate import (
     has_served_turn,
     is_thinking_rejection,
     parse_sse_usage,
     sse_from_message,
+    sse_response_model,
     without_thinking,
 )
 
@@ -111,6 +114,8 @@ class ProxyConfig:
     warm_up: bool = True
     loop_max_consecutive: int = DEFAULT_MAX_CONSECUTIVE
     loop_repeat_window: int = DEFAULT_REPEAT_WINDOW
+    tiers: bool = False
+    tier_policy: str | None = None
 
     @classmethod
     def from_env(cls) -> "ProxyConfig":
@@ -127,7 +132,18 @@ class ProxyConfig:
                                                       DEFAULT_MAX_CONSECUTIVE)),
             loop_repeat_window=int(os.environ.get("LLM_ROUTER_PROXY_LOOP_REPEAT_WINDOW",
                                                     DEFAULT_REPEAT_WINDOW)),
+            tiers=parse_on_off(os.environ.get("LLM_ROUTER_PROXY_TIERS", "off")),
+            tier_policy=os.environ.get("LLM_ROUTER_PROXY_TIER_POLICY") or None,
         )
+
+
+def parse_on_off(raw: str) -> bool:
+    value = str(raw or "").strip().lower()
+    if value in ("1", "on", "true", "yes"):
+        return True
+    if value in ("", "0", "off", "false", "no"):
+        return False
+    raise ValueError(f"expected on/off, got {raw!r}")
 
 
 def parse_hedge(raw: str) -> float | None:
@@ -172,6 +188,10 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None):
     trims = resolve_trims(cfg.trim)
     http = client or httpx.AsyncClient(timeout=httpx.Timeout(600.0, connect=10.0))
     guard = LoopGuard(cfg.loop_max_consecutive, cfg.loop_repeat_window)
+    # Claude-tier rewrite (opt-in). A bad policy file fails here, at startup,
+    # never per call.
+    tier_policy = ClaudeTierPolicy.load(cfg.tier_policy) if cfg.tiers else None
+    sticky = Stickiness(tier_policy.cold_gap_s) if tier_policy is not None else None
 
     def _ollama_url() -> str:
         from llm_router.config import get_config, validate_ollama_url
@@ -273,7 +293,30 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None):
                    served_stop_reason=message["stop_reason"])
         return message
 
-    async def forward(request: Request, raw: bytes, body: dict | None, row: dict | None):
+    async def decide_tier(body: dict, row: dict):
+        """The tier rewrite's decision, written onto ``row``. Any error forwards
+        the call unchanged and says why: this path must never cost a call."""
+        t0 = time.monotonic()
+        try:
+            decision = await tier_policy.decide(body, row.get("session_id"), sticky)
+        except Exception as exc:  # noqa: BLE001 - fail-safe: forward unchanged
+            row.update(served_model=body.get("model"), tier=None, tier_reason=REASON_DECISION_ERROR,
+                       tier_switch=False, tier_switch_cost_usd=None,
+                       tier_detail=ledger.scrub_detail(f"{type(exc).__name__}: {exc}"),
+                       tier_decision_s=round(time.monotonic() - t0, 3))
+            return None
+        row.update(served_model=decision.served_model, tier=decision.tier, tier_reason=decision.reason,
+                   tier_switch=decision.switched, tier_switch_cost_usd=decision.switch_cost_usd,
+                   tier_task_type=decision.task_type, tier_complexity=decision.complexity,
+                   tier_decision_s=round(time.monotonic() - t0, 3))
+        return decision
+
+    async def forward(request: Request, raw: bytes, body: dict | None, row: dict | None, *,
+                      original: tuple[bytes, dict] | None = None, on_retry=None, on_usage=None):
+        """``original``: when ``raw`` is a tier-rewritten body, the client's own
+        (bytes, body). A 4xx on the rewritten call (a parameter the target tier
+        does not take, a model the account cannot use) is retried once with
+        it, so a rewrite can never turn a working call into a failed one."""
         headers = {k: v for k, v in request.headers.items() if k.lower() not in _HOP}
         headers["accept-encoding"] = "identity"
         url = upstream + request.url.path + (("?" + request.url.query) if request.url.query else "")
@@ -285,6 +328,16 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None):
 
         try:
             up = await send(raw)
+            if original is not None and 400 <= up.status_code < 500 and up.status_code not in (401, 413):
+                text = (await up.aread()).decode("utf-8", "replace")
+                await up.aclose()
+                if row is not None:
+                    row["tier_retry"] = {"status": up.status_code, "detail": ledger.scrub_detail(text)}
+                    row["served_model"] = row.get("requested_model")
+                if on_retry is not None:
+                    on_retry()
+                raw, body = original
+                up = await send(raw)
             if (row is not None and body is not None and up.status_code == 400
                     and row.get("mixed_history") and "thinking" in body):
                 text = (await up.aread()).decode("utf-8", "replace")
@@ -321,6 +374,8 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None):
                 if row is not None:
                     row["upstream_latency_s"] = round(time.monotonic() - t0, 3)
                     _record_usage(row, bytes(buf), up.headers.get("content-type", ""))
+                    if on_usage is not None and up.status_code == 200:
+                        on_usage(row.get("usage"))
                     write(row)
 
         return StreamingResponse(relay(), status_code=up.status_code, headers=resp_headers)
@@ -335,6 +390,7 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None):
     def _record_usage(row: dict, buf: bytes, ctype: str) -> None:
         if "event-stream" in ctype:
             usage, stop, msg_id = parse_sse_usage(buf)
+            response_model = sse_response_model(buf)
         else:
             try:
                 data = json.loads(buf or b"{}")
@@ -343,6 +399,9 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None):
             usage = data.get("usage") if isinstance(data, dict) else None
             stop = data.get("stop_reason") if isinstance(data, dict) else None
             msg_id = data.get("id") if isinstance(data, dict) else None
+            response_model = data.get("model") if isinstance(data, dict) else None
+        if isinstance(response_model, str):
+            row["response_model"] = response_model
         row["usage"] = ledger.normalize_usage(usage)
         row["stop_reason"] = stop
         if msg_id and not row.get("msg_id"):
@@ -385,7 +444,25 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None):
                 if body.get("stream"):
                     return Response(sse_from_message(message), media_type="text/event-stream")
                 return Response(json.dumps(message), media_type="application/json")
-        return await forward(request, raw, body, row)
+        if tier_policy is None:
+            return await forward(request, raw, body, row)
+        decision = await decide_tier(body, row)
+        if decision is None:
+            return await forward(request, raw, body, row)
+        key = conversation_key(body, row.get("session_id"))
+
+        def _on_usage(usage) -> None:
+            sticky.record_usage(key, usage)
+
+        if not decision.rewritten:
+            return await forward(request, raw, body, row, on_usage=_on_usage)
+        sent = dict(body, model=decision.served_model)
+
+        def _on_retry() -> None:
+            sticky.record(key, body.get("model"), decision.complexity, "tier_rejected")
+
+        return await forward(request, json.dumps(sent).encode(), sent, row, original=(raw, body),
+                             on_retry=_on_retry, on_usage=_on_usage)
 
     @contextlib.asynccontextmanager
     async def lifespan(app):
@@ -428,6 +505,7 @@ llm-router proxy [--port N] [--steps continuation|off] [--step-budget-s S]
                  [--hedge-s S|off] [--model ollama/TAG] [--trim NAME[,NAME]]
                  [--num-ctx N] [--ollama-url URL] [--keep-alive -1|5m] [--no-warm-up]
                  [--loop-max-consecutive N] [--loop-repeat-window N]
+                 [--tiers on|off] [--tier-policy FILE.yaml]
 llm-router proxy stats [--days N] [--json]
 
 Opt-in, per session. Nothing is enabled until you point a session at it:
@@ -470,6 +548,10 @@ def cmd_proxy(argv: list[str]) -> int:
                      help="force a step to Anthropic after this many served-in-a-row for a session (0 disables)")
     ap.add_argument("--loop-repeat-window", type=int, default=env.loop_repeat_window,
                      help="reject a served tool call that repeats one of this many recent steps (0 disables)")
+    ap.add_argument("--tiers", default="on" if env.tiers else "off",
+                    help="Claude-tier rewrite: move easy calls to a cheaper Claude tier (opt-in)")
+    ap.add_argument("--tier-policy", default=env.tier_policy,
+                    help="tier policy YAML (default: the bundled proxy/claude_tiers.yaml)")
     a = ap.parse_args(argv)
 
     from llm_router.net_bind import refuse_public_bind_or_exit
@@ -482,9 +564,10 @@ def cmd_proxy(argv: list[str]) -> int:
                           hedge_s=parse_hedge(a.hedge_s) if a.hedge_s is not None else env.hedge_s,
                           keep_alive=parse_keep_alive(a.keep_alive), warm_up=not a.no_warm_up,
                           ollama_url=a.ollama_url, loop_max_consecutive=a.loop_max_consecutive,
-                          loop_repeat_window=a.loop_repeat_window)
+                          loop_repeat_window=a.loop_repeat_window, tiers=parse_on_off(a.tiers),
+                          tier_policy=a.tier_policy)
         app = build_app(cfg)
-    except ValueError as exc:
+    except (ValueError, OSError) as exc:
         sys.stderr.write(f"llm-router proxy: {exc}\n")
         return 2
 
@@ -493,7 +576,8 @@ def cmd_proxy(argv: list[str]) -> int:
     steps = ",".join(sorted(cfg.steps)) or "off (pass-through only)"
     print(f"llm-router proxy -> http://{a.host}:{a.port}  steps={steps}  "
           f"hedge={cfg.hedge_s}s  budget={cfg.step_budget_s}s  trim={cfg.trim or 'fast'}  "
-          f"loop_guard(max_consecutive={cfg.loop_max_consecutive}, repeat_window={cfg.loop_repeat_window})")
+          f"loop_guard(max_consecutive={cfg.loop_max_consecutive}, repeat_window={cfg.loop_repeat_window})  "
+          f"tiers={'on (' + (cfg.tier_policy or 'bundled policy') + ')' if cfg.tiers else 'off'}")
     print(f"  enable per session: {enable_hint(a.host, a.port)}")
     uvicorn.run(app, host=a.host, port=a.port, log_level="warning", access_log=False)
     return 0
