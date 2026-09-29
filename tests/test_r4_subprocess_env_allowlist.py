@@ -145,7 +145,10 @@ def test_the_broader_inheritance_count_is_recorded():
     without pretending every one of them is a defect.
     """
     inheriting = [s for s in _subprocess_sites() if not s[3]]
-    assert len(inheriting) <= 55, (
+    # 55 -> 57 (Phase 0.2d): llm_router/edit_survival.py's two hardcoded
+    # `git rev-parse` / `git log` calls moved in from scripts/northstar/;
+    # neither runs caller-supplied argv. Same headroom as before the move.
+    assert len(inheriting) <= 57, (
         f"{len(inheriting)} subprocess sites inherit the environment, up from "
         "51. If a new one runs caller-supplied argv, add it to "
         "MODEL_ARGV_SITES; if not, raise this number deliberately."

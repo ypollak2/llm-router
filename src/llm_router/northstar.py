@@ -27,7 +27,7 @@ A **unit** is one of eight kinds. All eight sum to the denominator.
 
   user_prompt     One human-authored prompt in a Claude Code transcript
                   (``~/.claude/projects/<proj>/<session>.jsonl``, ``type ==
-                  "user"``). Uses ``scripts/groundtruth/sources.py`` verbatim
+                  "user"``). Uses ``llm_router.groundtruth_sources`` verbatim
                   for what counts as "human-authored": ``classify_drop``
                   excludes tool-result echoes, harness/system-reminder
                   injections, bare attachments, pasted tool output, and
@@ -296,6 +296,17 @@ from typing import Iterator
 
 from llm_router import paths
 
+# Ground-truth exclusion rules, reused rather than re-implemented.
+# ``groundtruth_sources`` owns what counts as a human prompt and which sessions
+# are dropped (CLAUDE.md: "Do not re-implement them"); ``edit_survival`` owns
+# the applied-row -> survived/redone/unknown git-history judgement. Both used
+# to live in scripts/ and were loaded by path relative to this file, which the
+# wheel does not ship: an installed northstar silently ran with no exclusions
+# (Phase 0.2d, 653 sessions against 295). They are package modules now, so a
+# missing one is an ImportError, never a quiet None.
+from llm_router import edit_survival as _edit_survival
+from llm_router import groundtruth_sources as _sources
+
 MIN_UNITS = 50
 TOOL_REUSE_THRESHOLD = 0.60
 _JOIN_WINDOW_S = 900.0  # 15 minutes: spawn -> child's first turn
@@ -353,63 +364,6 @@ def claude_projects_dir() -> Path:
     return Path(os.environ.get("CLAUDE_PROJECTS_DIR", "").strip()
                 or Path.home() / ".claude" / "projects")
 
-
-# ── ground-truth exclusion rules, reused rather than re-implemented ─────────
-# scripts/groundtruth/sources.py is the repo's own owner of these rules
-# (CLAUDE.md: "Do not re-implement them"). It lives outside src/ so it is
-# imported by path, matching how scripts/routing_rate.py imports its sibling
-# package module.
-def _load_sources_module():
-    import importlib.util
-    import sys as _sys
-    here = Path(__file__).resolve().parents[2]  # repo root from src/llm_router/
-    cand = here / "scripts" / "groundtruth" / "sources.py"
-    if not cand.exists():
-        return None
-    name = "_ns_groundtruth_sources"
-    if name in _sys.modules:
-        return _sys.modules[name]
-    spec = importlib.util.spec_from_file_location(name, cand)
-    mod = importlib.util.module_from_spec(spec)
-    _sys.modules[name] = mod  # dataclasses' postponed-annotation resolution needs this
-    try:
-        spec.loader.exec_module(mod)  # type: ignore[union-attr]
-    except Exception:  # noqa: BLE001 — never fail import over an optional reuse
-        _sys.modules.pop(name, None)
-        return None
-    return mod
-
-
-_SOURCES = _load_sources_module()
-
-
-# scripts/northstar/edit_survival.py is the repo's own owner of the
-# applied-row -> survived/redone/unknown git-history judgement (see its
-# module docstring's METHOD section). Imported by path for the same reason
-# as _load_sources_module above: it lives outside src/ and this module must
-# not re-derive its own copy of "did a later commit touch this file."
-def _load_edit_survival_module():
-    import importlib.util
-    import sys as _sys
-    here = Path(__file__).resolve().parents[2]  # repo root from src/llm_router/
-    cand = here / "scripts" / "northstar" / "edit_survival.py"
-    if not cand.exists():
-        return None
-    name = "_ns_edit_survival"
-    if name in _sys.modules:
-        return _sys.modules[name]
-    spec = importlib.util.spec_from_file_location(name, cand)
-    mod = importlib.util.module_from_spec(spec)
-    _sys.modules[name] = mod
-    try:
-        spec.loader.exec_module(mod)  # type: ignore[union-attr]
-    except Exception:  # noqa: BLE001 — never fail import over an optional reuse
-        _sys.modules.pop(name, None)
-        return None
-    return mod
-
-
-_EDIT_SURVIVAL = _load_edit_survival_module()
 
 
 @dataclass
@@ -723,13 +677,11 @@ def _load_edit_outcomes() -> list[dict]:
 
 def _judge_edit_row(row: dict) -> tuple[str, str]:
     """(outcome, signal) for one edit_outcomes.jsonl row, using the SAME
-    applied/survived logic as ``scripts/northstar/edit_survival.py`` — not a
-    second copy of it (see ``_load_edit_survival_module``)."""
+    applied/survived logic as ``llm_router.edit_survival`` — not a
+    second copy of it."""
     if not row.get("applied"):
         return OUTCOME_DISCARDED, "edit_ledger_not_applied"
-    if _EDIT_SURVIVAL is None:
-        return OUTCOME_UNKNOWN, "edit_ledger_survival_unavailable"
-    verdict = _EDIT_SURVIVAL.judge_row(row)
+    verdict = _edit_survival.judge_row(row)
     if verdict.verdict == "survived":
         return OUTCOME_USED, "edit_ledger_survived"
     if verdict.verdict == "redone":
@@ -1072,9 +1024,9 @@ def build_sessions(days: int | None, root: Path | None = None,
     sandbox_of: dict[str, bool] = {}
     for path in files:
         sid = path.stem
-        sandbox = bool(_SOURCES and _SOURCES._SANDBOX_PROJECT.match(path.parent.name))
+        sandbox = bool(_sources._SANDBOX_PROJECT.match(path.parent.name))
         sandbox_of[sid] = sandbox
-        if _SOURCES and _SOURCES.is_synthetic_session(sid):
+        if _sources.is_synthetic_session(sid):
             continue
         if sandbox:
             continue
@@ -1126,10 +1078,7 @@ def build_sessions(days: int | None, root: Path | None = None,
                 first_user_seen = True
                 if is_dispatch:
                     continue
-                drop_reason = None
-                if _SOURCES:
-                    drop_reason = _SOURCES.classify_drop(text, sid, sandbox_of.get(sid, False))
-                if drop_reason:
+                if _sources.classify_drop(text, sid, sandbox_of.get(sid, False)):
                     continue
                 su.units.append(Unit(kind=UNIT_USER_PROMPT, session_id=target_sid, ts=_ts_of(obj)))
             elif obj.get("type") == "assistant":

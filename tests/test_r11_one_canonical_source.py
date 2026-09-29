@@ -48,6 +48,12 @@ STATE_PATH_ALLOWED = {
     # paths.state_path() otherwise. Verified 2026-09-22.
     "llm_router/direct_diagnostics.py": "explicit home= override branch only",
     "llm_router/seats.py": "explicit home= override branch only",
+    # Stdlib-only rule leaves moved from scripts/ in Phase 0.2d. The release
+    # outcome audit path-loads them and must not import llm_router (see
+    # tests/test_outcome_audit_import_boundary.py), so they cannot use paths.
+    # Both resolve LLM_ROUTER_HOME per call, same as paths.state_path().
+    "llm_router/groundtruth_sources.py": "stdlib leaf, path-loaded by the release audit",
+    "llm_router/edit_survival.py": "stdlib leaf, path-loaded by the release audit",
     # Hook processes that must resolve state before the package is importable.
     "llm_router/hooks/agent_writes.py": "standalone hook, pre-import resolution",
     "llm_router/hooks/direct_executor.py": "standalone hook, pre-import resolution",
