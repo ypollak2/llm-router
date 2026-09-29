@@ -11,7 +11,11 @@ Row fields:
   prev_tools      names of the tool calls the newest tool results answer
   decision        served | forwarded | fallback
   reason          why not served: routing_off | not_eligible | policy_kept |
-                  budget_exceeded | backend_error | validation   (None if served)
+                  budget_exceeded | backend_error | validation |
+                  edit_to_claude (an Edit/Write reply from the raw tool-call
+                  loop, never served) and, with ``--local-agent``,
+                  task_type_unsuitable | multi_file_write | breaker_open |
+                  edit_protocol_failed                      (None if served)
   detail          short scrubbed error text for a fallback
   task_type, complexity, model      the policy's view and the serving model
   route_latency_s     time spent on the non-Claude attempt (served or not)
@@ -24,6 +28,14 @@ Row fields:
   thinking_retry  Anthropic rejected the mixed history over thinking and the
                   proxy retried once with thinking off
   auth            oauth | api_key | none   (kind only; never the value)
+  local_agent     with ``--local-agent``: the capability decision
+                  ({route, reason, detail}) and, after the local call, the
+                  verdict on its reply ({reply: {route, reason}})
+  compaction      with ``--local-agent``: tool counts and names kept, the
+                  retrieval method, estimated prompt tokens in/out (the real
+                  count is backend_usage.prompt_tokens)
+  edit_protocol, served_via   an edit-shaped step run through ``edit.py``'s
+                  protocol: attempts and rejection kinds; ``edit_protocol``
 
 Claude-tier rewrite fields (only when the proxy runs with ``--tiers on``):
   served_model          the model the call was sent to (== requested_model

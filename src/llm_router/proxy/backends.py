@@ -67,10 +67,15 @@ def _trim_tool_descriptions(limit: int) -> Trim:
     return trim
 
 
-def _trim_unused_tools(body: dict) -> dict:
-    """Keep only tools the conversation has already used plus the core file and
-    shell tools. Unmeasured; offered as a lever, off by default."""
-    core = {"Read", "Edit", "Write", "Bash", "Glob", "Grep"}
+def _trim_unused_tools(body: dict, keep: set[str] | frozenset[str] | None = None) -> dict:
+    """Keep only tools the conversation has already used plus ``keep``.
+
+    ``keep`` defaults to the core file and shell tools (the ``unused-tools``
+    trim, unmeasured, off by default). ``local_agent.compact`` passes its
+    embedding-retrieval result instead, which replaces ``STEP_TOOLS`` on that
+    path. Kept tools are the request's own dicts: names and schemas unchanged,
+    request order kept."""
+    core = set(keep) if keep is not None else {"Read", "Edit", "Write", "Bash", "Glob", "Grep"}
     used = set()
     for m in body.get("messages") or []:
         if isinstance(m, dict) and m.get("role") == "assistant" and isinstance(m.get("content"), list):
