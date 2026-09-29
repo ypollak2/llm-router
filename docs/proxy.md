@@ -117,6 +117,8 @@ client tools are never routed.
 | (none) | `LLM_ROUTER_PROXY_UPSTREAM` | `https://api.anthropic.com` (only loopback overrides are accepted) |
 | `--loop-max-consecutive` | `LLM_ROUTER_PROXY_LOOP_MAX_CONSECUTIVE` | `8` (served-in-a-row per session before the next step is forced to Anthropic; `0` disables) |
 | `--loop-repeat-window` | `LLM_ROUTER_PROXY_LOOP_REPEAT_WINDOW` | `3` (recent served tool calls a new one is checked against for an exact repeat; `0` disables) |
+| `--tiers` | `LLM_ROUTER_PROXY_TIERS` | `off`. `on` enables the Claude-tier rewrite (below). |
+| `--tier-policy` | `LLM_ROUTER_PROXY_TIER_POLICY` | the bundled `proxy/claude_tiers.yaml` |
 
 The model, the trims (`proxy/backends.py: TRIMS`) and the backends
 (`BACKENDS`) are plug points. A measured speed lever can be added as a named trim
@@ -199,10 +201,58 @@ the ledger undercounting one it sent.
 Those turns stay `claude_main_call` units, with lever `proxy`, and are judged
 `used` / `redo` / `unknown` from what happened to their tool calls.
 
+## Claude-tier rewrite (opt-in, `--tiers on`)
+
+A forwarded call can be sent to a cheaper Claude tier by rewriting
+`body["model"]`. All Claude tiers share one API schema, so client tools stay
+native. The Phase 0.4 probe (2026-09-29, n=5 calls per model) found Max quota
+is one shared weekly pool that drains in proportion to per-call cost. Moving a
+call down a tier therefore drains the pool more slowly, **but only if the
+conversation is not paying to re-write its prompt cache on the new tier**.
+
+- **Decision** (`proxy/tiers.py`): the router's own classifier (`choose_model`,
+  i.e. `classify_signals(GATEWAY_POLICY)` plus `router._build_and_filter_chain`)
+  runs over the newest human prompt. `ClaudeTierPolicy` then maps
+  (task_type, complexity) to a tier. Model ids come from the YAML file, never
+  from code.
+- **Never downgraded:** a requested model that is not a configured tier; ids in
+  `pinned_models`; calls with no client tools; a conversation whose transcript
+  shows `/model`; the conversation's first call. A call is never moved above
+  the tier it requested (`allow_upgrade: false`), and never to a tier that
+  rejects its `thinking.type` or `output_config.effort`. Claude Code sends
+  adaptive thinking plus effort, which Haiku 4.5 takes neither of, so
+  main-loop calls stay on Sonnet or above.
+- **Cache stickiness** (`proxy/cache_cost.py`): a conversation stays on its
+  last model. It moves only when the complexity class changes, or at a cold
+  point (no call for `cold_gap_s`). Each move is recorded with an estimated
+  cache re-write cost.
+- **Fail-safe:** an error in the decision forwards the call unchanged
+  (`tier_reason: decision_error`, with the scrubbed error text). If Anthropic
+  refuses a rewritten call with a 4xx (other than 401 or 413), the client's own
+  bytes are sent once more, unchanged (`tier_retry`).
+- **Stats:** `llm-router proxy stats` adds the served-model mix, the reasons,
+  the switch rate, and the Anthropic cost against a counterfactual in which
+  every call ran on its requested model. That comparison is an **estimate**.
+  The validated number is a paired A/B.
+
+Measured so far: the live smoke of 2026-09-29 (3 golden fixture tasks, real
+`claude -p --model opus`, 23 calls) ran with `switch_after_first_call: true`
+(execute on Sonnet after an Opus first call). All 3 tasks passed. Anthropic
+replied with the rewritten model on 8 of 8 rewritten calls. The estimated cost
+was **$1.07 against $0.78 on all-Opus**, a net loss: each of the 3 switches
+re-wrote 25-34k prefix tokens on Sonnet, and Opus 5.5 and Sonnet 5.5 read cache
+at the same rate. That handoff is therefore off by default. With the default
+policy, a single-prompt task stays on its first-call model (replay: 22/22
+calls on Opus, 0 switches), so the rewrite only takes effect after a cold gap
+or a complexity change.
+
 ## Benchmark
 
 `scripts/bench_proxy_steps.py` replays the golden fixture tasks through the
 proxy. The serving model is real. The upstream is Claude's own replies recorded
 by the spike. The script reports tasks passing, extra calls vs baseline and
 validation failures, per step class. Its docstring states what it does and does
-not measure.
+not measure. The `tiered` arm (`--arms tiered [--tier-policy F]
+[--requested-model M]`) runs the tier rewrite with no local serving. It reports
+the tier decisions; the oracle replays recorded replies whatever model is
+named, so it cannot say how a cheaper tier would have answered.

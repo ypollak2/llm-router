@@ -32,6 +32,12 @@ tool-execution layer, or the extra cache writes a mixed history costs on real
 Anthropic (the oracle replays recorded usage; the spike measured about +600
 cache-creation tokens per call after a routed turn).
 
+Arms: ``baseline`` (pass-through), ``routed`` (local serving of continuation
+steps) and ``tiered`` (no local serving; the Claude-tier rewrite on, with
+``--tier-policy`` or the bundled policy). The oracle answers whatever model a
+request names, so ``tiered`` measures the decisions (tier mix, switches,
+estimated cost), not how a cheaper tier would have answered.
+
 Recordings: produced by the spike (branch ``spike/per-call-proxy``,
 ``scripts/spikes/per_call_proxy.py --dump-dir``). They contain request bodies
 with user identity fields and stay out of the repository. Expected layout::
@@ -326,12 +332,16 @@ async def run_task(case: dict, arm: str, args, oracle_table: dict, first: dict, 
     workdir = str(wd)
     body = _rewrite(first[cid], workdir)
     body["stream"] = True
+    if args.requested_model:
+        body["model"] = args.requested_model
 
     oracle = Oracle(oracle_table, cid, workdir)
     local = httpx.AsyncClient(timeout=httpx.Timeout(600.0, connect=10.0))
-    steps = frozenset() if arm == "baseline" else frozenset({"continuation"})
+    # "tiered": no local serving, Claude-tier rewrite on (proxy.tiers).
+    steps = frozenset() if arm in ("baseline", "tiered") else frozenset({"continuation"})
     cfg = ps.ProxyConfig(steps=steps, step_budget_s=args.step_budget_s, model=args.model, trim=args.trim,
-                         num_ctx=args.num_ctx, upstream="http://127.0.0.1:9", ledger_path=rows_path)
+                         num_ctx=args.num_ctx, upstream="http://127.0.0.1:9", ledger_path=rows_path,
+                         tiers=arm == "tiered", tier_policy=args.tier_policy)
     app = ps.build_app(cfg, client=httpx.AsyncClient(transport=httpx.MockTransport(oracle)),
                        backend_factory=lambda m: OllamaBackend(m, local, base_url=args.ollama_url,
                                                                num_ctx=args.num_ctx, hedge_s=args.hedge_s))
@@ -434,6 +444,7 @@ def summarize(results: list[dict]) -> dict:
             "added_latency_total_s": round(sum(row.get("added_latency_s") or 0 for row in rows), 1),
             "wall_s": round(sum(r["wall_s"] for r in rs), 1),
             "by_prev_tool": by_prev,
+            "tiers": ledger.tier_stats(rows),
             "anthropic_cost_usd_recorded_usage": round(sum(
                 ledger.anthropic_cost({"requested_model": "claude-sonnet-5", "usage": u}) or 0
                 for r in rs for u in r["anthropic_usage"]), 4),
@@ -460,6 +471,9 @@ def main() -> int:
     ap.add_argument("--max-calls", type=int, default=14)
     ap.add_argument("--hedge-s", type=float, default=ps.DEFAULT_HEDGE_S)
     ap.add_argument("--no-warm-up", action="store_true")
+    ap.add_argument("--tier-policy", default=None, help="tier policy YAML for the `tiered` arm")
+    ap.add_argument("--requested-model", default=None,
+                    help="replace the recorded request's model (e.g. to replay an Opus session)")
     args = ap.parse_args()
 
     oracle, first = load_oracle(Path(args.recordings))
@@ -492,6 +506,8 @@ def main() -> int:
                   "model_pin": args.model, "trim": args.trim or "default", "num_ctx": args.num_ctx,
                   "max_calls": args.max_calls, "upstream": "recorded-oracle (spike 2026-09-28)",
                   "hedge_s": args.hedge_s, "ollama_url": args.ollama_url, "warm_up": warm,
+                  "tier_policy": args.tier_policy or ("bundled" if "tiered" in args.arms else None),
+                  "requested_model": args.requested_model,
                   "claude_self_agreement_floor": claude_self_agreement(oracle)}
     (out / "report.json").write_text(json.dumps({"conditions": conditions, "summary": summary,
                                                  "results": results}, indent=1, default=str))

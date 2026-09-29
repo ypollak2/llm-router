@@ -20,7 +20,8 @@ server:
 
 ``BACKENDS``      provider prefix -> backend class. Only ``ollama/`` speaks tool
                   calls today; ``codex/`` is a subprocess CLI with no tool
-                  channel and ``anthropic/`` is the pass-through path itself.
+                  channel and ``anthropic/`` is the pass-through path itself
+                  (a valid target only for the Claude-tier rewrite).
 
 DEFAULTS come from the local-speed spike (``docs/spikes/local-speed-2026-09-28.md``,
 2026-09-28, qwen3-coder:30b, n=24 replayed continuation calls: median 2.19 s,
@@ -245,8 +246,17 @@ def merge_stream(objs: list[dict]) -> dict:
 
 BACKENDS: dict[str, type] = {"ollama/": OllamaBackend}
 
+# Claude tiers are served by the pass-through itself, with ``body["model"]``
+# rewritten (``proxy.tiers``): every tier speaks the same Anthropic schema, so
+# client tools stay native. They are valid targets only where a caller asks
+# for them (``anthropic=True``); the local-serving path never gets one, since
+# it has no backend object to hand them to.
+ANTHROPIC_PREFIX = "anthropic/"
 
-def tool_capable(model: str) -> bool:
+
+def tool_capable(model: str, *, anthropic: bool = False) -> bool:
+    if anthropic and model.startswith(ANTHROPIC_PREFIX):
+        return True
     return any(model.startswith(prefix) for prefix in BACKENDS)
 
 
@@ -271,13 +281,14 @@ async def policy_chain(text: str) -> tuple[str, str, list[str]]:
     return key[0], key[1], _chain_cache[key]
 
 
-async def choose_model(text: str, pinned: str | None) -> dict:
+async def choose_model(text: str, pinned: str | None, *, anthropic: bool = False) -> dict:
     """``{"task_type", "complexity", "chain_head", "model"}``; ``model`` is None
-    when the policy keeps the call on Claude."""
+    when the policy keeps the call on Claude. With ``anthropic=True`` an
+    ``anthropic/*`` chain entry is a valid target too (the tier rewrite)."""
     task, cx, chain = await policy_chain(text)
-    model = next((m for m in chain if tool_capable(m)), None)
+    model = next((m for m in chain if tool_capable(m, anthropic=anthropic)), None)
     # A pin changes WHICH model serves, never WHETHER: the policy's decision to
     # keep a step on Claude (no tool-capable entry) stands.
     if model is not None and pinned:
-        model = pinned if tool_capable(pinned) else None
+        model = pinned if tool_capable(pinned, anthropic=anthropic) else None
     return {"task_type": task, "complexity": cx, "chain_head": chain[:4], "model": model}
