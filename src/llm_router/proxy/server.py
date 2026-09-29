@@ -333,7 +333,9 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None):
                 await up.aclose()
                 if row is not None:
                     row["tier_retry"] = {"status": up.status_code, "detail": ledger.scrub_detail(text)}
-                    row["served_model"] = row.get("requested_model")
+                    # The rewrite never ran, so neither did its switch.
+                    row.update(served_model=row.get("requested_model"), tier_switch=False,
+                               tier_switch_cost_usd=None)
                 if on_retry is not None:
                     on_retry()
                 raw, body = original

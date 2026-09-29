@@ -94,6 +94,9 @@ def test_policy_file_errors_fail_at_load_not_per_call(tmp_path):
     bad.write_text("- just a list\n")
     with pytest.raises(ValueError):
         pt.ClaudeTierPolicy.load(bad)
+    bad.write_text("tiers: [unclosed\n")
+    with pytest.raises(ValueError, match="not valid YAML"):
+        pt.ClaudeTierPolicy.load(bad)
 
 
 def test_task_type_table_overrides_the_default(policy):
@@ -180,6 +183,14 @@ async def test_by_default_a_conversation_stays_on_its_first_call_model_until_col
     clock.t += policy.cold_gap_s + 1
     d = await policy.decide(_req(), SID, sticky, classify=_classify("moderate"))
     assert (d.served_model, d.switched, d.switch_cost_usd) == (SONNET, True, 0.0)
+
+
+async def test_unseen_mid_conversation_stays_on_requested_model(policy):
+    """After a proxy restart the conversation is unknown: it must not switch at
+    once (that is the measured net-negative mid-task switch)."""
+    sticky = Stickiness()
+    d = await policy.decide(_req(), SID, sticky, classify=_classify("moderate"))
+    assert (d.served_model, d.reason, d.switched) == (OPUS, pt.REASON_STICKY, False)
 
 
 async def test_same_class_sticks_and_a_class_change_switches(policy):
@@ -381,6 +392,8 @@ async def test_rejected_rewrite_is_resent_unchanged_once(tmp_path, moderate):
     row = _rows(tmp_path)[-1]
     assert row["tier_retry"]["status"] == 400 and "effort" in row["tier_retry"]["detail"]
     assert row["served_model"] == OPUS and row["response_model"] == OPUS
+    assert row["tier_switch"] is False and row["tier_switch_cost_usd"] is None
+    assert ledger.stats(_rows(tmp_path))["tiers"]["switches"] == 0
 
 
 async def test_auth_failure_on_a_rewrite_is_not_retried(tmp_path, moderate):

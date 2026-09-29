@@ -34,10 +34,11 @@ or the file ``--tier-policy`` / ``LLM_ROUTER_PROXY_TIER_POLICY`` names), never f
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from llm_router.proxy.cache_cost import Stickiness, conversation_key, switch_cost_usd
+from llm_router.proxy.cache_cost import ConvState, Stickiness, conversation_key, switch_cost_usd
 from llm_router.proxy.steps import has_client_tools, is_first_call, tier_text, user_pinned_model
 
 DEFAULT_POLICY_PATH = Path(__file__).with_name("claude_tiers.yaml")
@@ -52,6 +53,7 @@ REASON_POLICY = "policy"
 REASON_THINKING_FLOOR = "thinking_floor"
 REASON_STICKY = "sticky"
 REASON_DECISION_ERROR = "decision_error"
+REASON_UNSEEN = "unseen"  # internal state marker, never a row's tier_reason
 
 
 @dataclass(frozen=True)
@@ -141,7 +143,10 @@ class ClaudeTierPolicy:
         import yaml
 
         target = Path(path or DEFAULT_POLICY_PATH)
-        data = yaml.safe_load(target.expanduser().read_text(encoding="utf-8"))
+        try:
+            data = yaml.safe_load(target.expanduser().read_text(encoding="utf-8"))
+        except yaml.YAMLError as exc:
+            raise ValueError(f"tier policy {target} is not valid YAML: {exc}") from None
         if not isinstance(data, dict):
             raise ValueError(f"tier policy {target} is not a mapping")
         return cls.from_dict(data)
@@ -214,7 +219,12 @@ class ClaudeTierPolicy:
             reason = REASON_THINKING_FLOOR
 
         state = sticky.get(key)
-        prev_model = state.model if state is not None else requested
+        if state is None:
+            # Mid-conversation but unseen (e.g. the proxy restarted): treat it as
+            # last served on the requested model, class unknown, cache warm, so
+            # the stickiness rules below apply instead of an immediate switch.
+            state = ConvState(requested, None, time.time(), REASON_UNSEEN)
+        prev_model = state.model
         served = target.model
         cold = state is not None and sticky.is_cold(state)
         # A first-call state carries no class (it was never classified), so it
