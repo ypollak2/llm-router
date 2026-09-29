@@ -257,6 +257,138 @@ def test_real_traffic_shapes_do_not_over_fire(auto_route, prompt):
         )
 
 
+# ── Coordinate-status generalization (2026-09-28 follow-up) ──────────────
+#
+# Live defect: "status of the loop guard PR?" was sometimes caught and
+# sometimes not — the shape only worked with the literal word "of" and no
+# possessive form. A held-out sample of this machine's own real short
+# prompts (tune half, 50/50 fixed-seed split, scored once on the disjoint
+# holdout half — see the PR description for n and the before/after numbers)
+# showed several closely-related status/progress/continuation shapes were
+# also missed. Every example below is a hand-written paraphrase in the
+# same shape as a real miss, not the captured text itself.
+
+
+@pytest.mark.parametrize("prompt", [
+    # "status of/on X" — "on" was missing entirely.
+    "status on the loop guard PR?",
+    "status of the deploy PR?",
+    # A possessive status ("X's status"), not "the status"/"status of".
+    "what's the migration PR's status?",
+    # "how's/how is X going/doing/coming along" with a NAMED subject in
+    # between — only the bare "how's it going?" shape was covered before.
+    "how's the loop guard PR going?",
+    "how is the release train coming along?",
+    # "is/was X done/finished/ready/merged/landed/shipped" with a named
+    # subject — only the bare-pronoun form ("is it done?") was covered.
+    "is the loop guard PR done?",
+    "was the hotfix deploy successful",
+    # "did X land/ship/merge/finish/complete" with a named subject.
+    "did the loop guard PR land?",
+    "did the release ship yet?",
+    # An explicit "still waiting/pending/open/..." — a real-traffic status
+    # phrase distinct from the generic "what's left" shape.
+    "the fixes are still pending review",
+    # A bare "the X failed/broke" status report.
+    "the build failed again",
+    # References Claude's own prior turn, not external knowledge.
+    "what are you proposing for the rollout order?",
+    # An explicit continuation phrase ANYWHERE in the prompt, not just as
+    # the opening word — "keep going" mid-sentence was previously missed.
+    "don't wait between tasks, just keep going",
+    "merge it when green and keep going",
+    # A bare re-check or background-process ping with no named target.
+    "please check again",
+    "are you running anything?",
+])
+def test_status_generalization_classifies(auto_route, prompt):
+    """Status/progress/continuation shapes closely related to the ones the
+    fast-path already covered, in the phrasing real traffic actually uses."""
+    assert auto_route._is_coordination_task(prompt), (
+        f"prompt should be flagged coordination: {prompt!r}"
+    )
+
+
+@pytest.mark.parametrize("prompt", [
+    # "current state of <topic>" stays excluded (pre-existing regression
+    # guard, in BOTH places the phrase can match — see the fix's comment):
+    # the new "status of/on" broadening must not widen this hole.
+    "what's the current state of quantum computing research",
+    "give me the current state of the art in fusion energy",
+])
+def test_status_generalization_does_not_over_fire(auto_route, prompt):
+    result = auto_route.classify_prompt(prompt)
+    if result is not None:
+        assert result.get("task_type") != "coordinate", (
+            f"classifier chain mislabelled as coordinate: {prompt!r}"
+        )
+
+
+@pytest.mark.parametrize("prompt", [
+    # An "[Image #N]" attachment tag must not falsely anchor a genuinely
+    # bare, unresolved "it" elsewhere in the same prompt.
+    "are you sure you fixed it? it happens again [Image #6]",
+    # "this/that/these/those" as a determiner on the same nouns already
+    # covered for "the/our/your" — was previously only recognized with
+    # those three determiners.
+    "use this plan and get started",
+    "why weren't those drafts used?",
+    # "your recommendation(s)" joins the existing plan/audit/report/... list.
+    "just go with your recommendation",
+    # "the last things we('ve) worked on" — a history reference without a
+    # numeric quantifier, unlike the existing "my last three commits" shape.
+    "can you pick up the last things we've worked on?",
+])
+def test_deictic_and_history_generalization_classifies(auto_route, prompt):
+    assert auto_route._is_coordination_task(prompt), (
+        f"prompt should be flagged coordination: {prompt!r}"
+    )
+
+
+@pytest.mark.parametrize("prompt", [
+    # A noun reading of a word that is ALSO in the imperative-verb list
+    # ("score", "list", "design", ...) must not be read as a verb just
+    # because it follows a continuation opener — the determiner-guard fix.
+    "so, what's the score?",
+    "ok, what's on the list?",
+])
+def test_imperative_verb_noun_collision_still_classifies(auto_route, prompt):
+    assert auto_route._is_coordination_task(prompt), (
+        f"prompt should be flagged coordination: {prompt!r}"
+    )
+
+
+def test_multistep_operational_chain_still_classifies(auto_route):
+    """Two recognized op verbs joined by "and" (an existing, pre-existing
+    positive shape) stays on the multi-step path unaffected by the
+    broadened imperative-verb list."""
+    assert auto_route._is_coordination_task("push and create a release")
+
+
+@pytest.mark.parametrize("prompt", [
+    # A continuation opener whose remainder now correctly resolves as a
+    # real, self-sufficient task with the two verbs added to close a
+    # precision gap ("release", "start") — these must NOT be swept into
+    # coordinate just because they follow a discourse-filler opener.
+    "so use the token to release the package",
+    "then start the falsifying experiment",
+])
+def test_imperative_verb_precision_fixes_do_not_over_fire(auto_route, prompt):
+    """The determiner-guarded, narrowly-expanded imperative-verb list
+    ("release", "start") fixes real precision misses without re-opening the
+    ones a broader, unproven verb list was found (on the held-out half) to
+    break — see the verb list's own comment for the specific regression and
+    why it was reverted."""
+    assert not auto_route._is_coordination_task(prompt), (
+        f"false positive — should NOT be coordination: {prompt!r}"
+    )
+    result = auto_route.classify_prompt(prompt)
+    if result is not None:
+        assert result.get("task_type") != "coordinate", (
+            f"classifier chain mislabelled as coordinate: {prompt!r}"
+        )
+
+
 # ── The OLD "coordination" (no trailing "e") bucket is a different thing ──
 #
 # Decision (2026-09-28, with evidence — see enforce-route.py's comment next

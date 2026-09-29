@@ -1032,7 +1032,11 @@ _COORDINATE_HISTORY_RE = re.compile(
     r"\b(?:my|the) last (?:\d+|one|two|three|four|five|few|couple(?:\s+of)?)\s+"
     r"(?:commits?|prs?|pull requests?|edits?|changes?|files?)\b|"
     r"\bbefore my last (?:edit|change|commit)\b|"
-    r"\b(?:prs?|pull requests?) (?:i|I) (?:opened|made|created|submitted)\b",
+    r"\b(?:prs?|pull requests?) (?:i|I) (?:opened|made|created|submitted)\b|"
+    # "the last things we('ve) worked on" — same history reference, but
+    # without a numeric/noun quantifier (real-traffic shape, tune half,
+    # 2026-09-28: "can you bring the last things we've worked on").
+    r"\bthe last things? we(?:'ve| have)? work(?:ed)? on\b",
     re.IGNORECASE,
 )
 
@@ -1065,7 +1069,12 @@ _COORDINATE_AMBIENT_RE = re.compile(
     r"any\s+(?:updates?|progress)\??|how'?s\s+it\s+going\??|"
     r"keep\s+(?:on\s+)?going\.?|"
     r"check\s+(?:on\s+|in\s+on\s+)?(?:the\s+)?(?:running\s+)?agents?\.?|"
-    r"check\s+(?:the\s+)?agent'?s?\s+(?:status|progress)\.?)$",
+    r"check\s+(?:the\s+)?agent'?s?\s+(?:status|progress)\.?|"
+    # Real-traffic additions (tune half, 2026-09-28): a bare re-check
+    # ("please check again") and a bare is-anything-happening ping ("are
+    # you running anything?") — both content-free, no named target.
+    r"(?:please\s+)?check\s+(?:it\s+)?again\.?|"
+    r"are\s+you\s+running(?:\s+anything)?\??)$",
     re.IGNORECASE,
 )
 
@@ -1107,17 +1116,53 @@ _COORDINATE_STATUS_RE = re.compile(
     # .py's existing "how do I run this app" pin).
     r"\b(?:did|have|has)\s+(?:you|we)\b"
     r"|\byou\s+(?:already|just|earlier|previously|forgot|missed)\b"
+    # "the current state" excludes a following "of <topic>" here too — pre-
+    # existing gap found while adding the generalized status patterns
+    # below: this branch's "the current state" lacked the same "(?!of)"
+    # guard the standalone "current state" alternative already had, so
+    # "what's the current state OF quantum computing research" (a research
+    # question) matched via THIS branch instead. Same fix, same reason.
     r"|\bwhat(?:'s|\s+is|\s+are|\s+has|s)?\s+(?:left|next|missing|the\s+status|"
-    r"up\s+with|remain\w*|the\s+current\s+state)\b"
-    r"|\b(?:anything|something|what|how\s+much|how\s+many)\s+(?:else\s+)?"
+    r"up\s+with|remain\w*|the\s+current\s+state(?!\s+of\b))\b"
+    r"|\b(?:anything|something|what|how\s+much|how\s+many)\s+(?:else\s+|more\s+)?"
     r"(?:is\s+|do\s+we\s+|we\s+)?(?:have\s+)?(?:left|remain\w*|missing|to\s+(?:do|cover|go))\b"
     # "current state" excludes a following "of <topic>" — "the current
     # state" (bare, session-referential) vs "current state of AI in 2026"
     # (a research topic; regression caught by test_gaps_phase1.py's
     # existing temporal-research pin).
-    r"|\b(?:next\s+steps?|current\s+state(?!\s+of\b)|the\s+status|status\s+of|"
+    r"|\b(?:next\s+steps?|current\s+state(?!\s+of\b)|the\s+status|status\s+(?:of|on)|"
     r"so\s+far|until\s+now|till\s+now|where\s+(?:we|things)\s+at)\b"
-    r"|\b(?:attempt|round|run|phase|step|slice|task|iteration|option)\s*#?\s*\d+\b",
+    r"|\b(?:attempt|round|run|phase|step|slice|task|iteration|option)\s*#?\s*\d+\b"
+    # Real-traffic additions (tune half, 2026-09-28) — a possessive status
+    # ("the loop guard PR's status", not "status of/the status"); "how's X
+    # going/doing/coming along" with a named subject in between; "is/was X
+    # done/finished/..." and "did X land/ship/..." with a named subject
+    # (the bare-pronoun forms, "is it done?", are already covered by
+    # ``_COORDINATE_DEICTIC_RE``); an explicit "still waiting/pending/...";
+    # a bare "the PR/build/... failed" report; and "what are you
+    # proposing/suggesting/recommending" (references Claude's own prior
+    # turn, not external knowledge).
+    r"|\b[\w.-]+'s\s+status\b"
+    r"|\bhow(?:'s|\s+is|\s+are)\b(?:(?!\.).){0,40}?\b(?:going|doing|coming\s+along)\b"
+    r"|\b(?:is|was)\s+(?:the\s+|this\s+|that\s+)?[\w.'-]+(?:\s+[\w.'-]+){0,4}\s+"
+    r"(?:done|finished|complete[d]?|ready|live|merged|landed|shipped|successful)\b"
+    r"|\bdid\s+(?:the\s+|this\s+|that\s+)?[\w.'-]+(?:\s+[\w.'-]+){0,4}\s+"
+    r"(?:land|ship|merge|finish|complete|go\s+out|go\s+live)\b"
+    r"|\bstill\s+(?:waiting|pending|open|broken|failing|blocked)\b"
+    r"|\bthe\s+(?:pr|build|deploy(?:ment)?|run|job|test|suite|pipeline)\s+"
+    r"(?:failed|broke|is\s+down|is\s+broken)\b"
+    r"|\bwhat\s+(?:are\s+you|do\s+you)\s+(?:proposing|suggesting|recommending)\b",
+    re.IGNORECASE,
+)
+
+# An explicit continuation phrase ANYWHERE in a short prompt, not just as
+# the opening word(s) — real-traffic miss (tune half, 2026-09-28):
+# "don't wait between tasks, just keep going" and "merge 89 when green and
+# keep going" both say "keep going" mid-sentence, not at position 0, so
+# ``_COORDINATE_CONTINUATION_OPENER_RE`` (anchored to the start) never saw
+# it. Gated to the same <=12-word window as the other real-traffic checks.
+_COORDINATE_EXPLICIT_CONTINUE_RE = re.compile(
+    r"\bkeep\s+(?:on\s+)?going\b|\bcarry\s+on\b|\bkeep\s+at\s+it\b",
     re.IGNORECASE,
 )
 
@@ -1128,7 +1173,8 @@ _COORDINATE_STATUS_RE = re.compile(
 # mirrors triage.CONTINUATION's own remainder check.
 _COORDINATE_CONTINUATION_OPENER_RE = re.compile(
     r"^(?:ok(?:ay)?|yes|yep|no|nope|sure|go|going|continue|cont|next|proceed|"
-    r"do\s+it|carry\s+on|keep\s+(?:on\s+)?going|now|then|also|and|but|so|"
+    r"do\s+it|do\s+also|done|carry\s+on|keep\s+(?:on\s+)?going|now|then|also|"
+    r"and|but|so|"
     r"great|perfect|cool|nice|good|thanks|thank\s+you|stop|wait|hold\s+on|"
     r"again|more|another|let'?s|lets)\b[\s,.:;!?-]*",
     re.IGNORECASE,
@@ -1152,8 +1198,14 @@ _COORDINATE_DEMONSTRATIVE_BARE_RE = re.compile(
 _COORDINATE_DEICTIC_RE = re.compile(
     r"(?<![\w-])(?:it|its|it'?s|them|there"
     r"|the\s+rest|the\s+same|the\s+above|the\s+below"
-    r"|(?:the|our|your)\s+(?:plan|audit|report|presentation|demo|results?|"
-    r"findings?))(?![\w-])",
+    # Determiner set widened from "the|our|your" to also cover "this/that/
+    # these/those" ("use this plan and start work"), and the noun set
+    # widened with "draft(s)"/"recommendation(s)" — both real-traffic misses
+    # (tune half, 2026-09-28): "why those drafts weren't used", "do as your
+    # recommendations".
+    r"|(?:the|our|your|this|that|these|those)\s+(?:plan|audit|report|"
+    r"presentation|demo|results?|findings?|drafts?|recommendations?))"
+    r"(?![\w-])",
     re.IGNORECASE,
 )
 
@@ -1165,12 +1217,16 @@ _COORDINATE_DEICTIC_RE = re.compile(
 # does NOT include a bare number on its own ("101", "76") — measured on the
 # tune half of a real-prompt sample: an unrelated number (a percentage, a
 # score threshold) elsewhere in the sentence falsely anchored a genuinely
-# unresolved "it"/"that".
+# unresolved "it"/"that". Also excludes a chat UI's own image-attachment
+# marker ("[Image #6]") from the PR/issue-number alternative — real-traffic
+# miss (tune half, 2026-09-28): "are you sure you fixed it????? it happens
+# again [Image #6]" falsely anchored on "#6" and suppressed the genuinely
+# bare "it".
 _COORDINATE_CONCRETE_ANCHOR_RE = re.compile(
     r"(?:/[\w.@-]+){2,}"
     r"|\b[\w-]+\.(?:py|ts|tsx|js|jsx|md|json|ya?ml|toml|sh|sql|rs|go|txt|cfg|ini)\b"
     r"|\b(?:src|tests?|scripts?|docs?)/[\w./-]+"
-    r"|#\d{1,6}\b"
+    r"|(?<!\bimage\s)#\d{1,6}\b"
     r"|\bv?\d+\.\d+(?:\.\d+)?\b"
     r"|\bREADME\b|\bCHANGELOG\b|\bPLAN\.\w+\b",
     re.IGNORECASE,
@@ -1205,10 +1261,41 @@ _COORDINATE_OP_VERB_RE = re.compile(r"\b(?:commit|push)\b", re.IGNORECASE)
 # States a real, self-sufficient task ("write the plan doc", "explain the
 # tradeoffs") — used only to decide whether a continuation opener's
 # remainder is a real task or still just filler.
+#
+# 2026-09-28 real-traffic follow-up: this list was missing some ordinary
+# operational verbs, so an opener + real instruction using one of them
+# ("push and create a release", "then start §5") fell through to the
+# thin-remainder branch and was swept into coordinate — a precision
+# regression, not a recall gain. Added "release" and "start" — the two
+# verbs actually seen doing this on the tune half.
+#
+# A broader first pass also added ~30 more operational verbs (use, resolve,
+# fix, run, deploy, ...), reasoning by analogy rather than evidence. Scored
+# against the (disjoint) holdout half, it COST 3 points of recall: real
+# continuation prompts that name a session-local verb-shaped word — "let's
+# resolve 45" (a bare task number, not a resolved reference), "continue
+# with the next slice and use agenticgraphs with llm-router" (the real ask
+# is "continue with the next slice"; "use agenticgraphs" is incidental) —
+# were reclassified as real tasks and dropped out of coordinate. Reverted
+# to only the two verbs the tune half actually required; "check", "run",
+# and "continue" are deliberately still excluded ("check again" is an
+# ambient recheck handled by ``_COORDINATE_AMBIENT_RE``; "run" collides
+# with "re-run", a real continuation shape, since ``\brun\b`` also matches
+# inside it with no word boundary to stop it; "continue" IS the
+# continuation signal, not a real task).
+#
+# The negative lookbehinds guard the pre-existing "list"/"draft"/"design"/
+# "score" words, which are also ordinary nouns: "what's THE SCORE" was a
+# real miss (tune half, 2026-09-28) because "score" matched as a verb.
+# Requiring the match NOT be immediately preceded by a determiner rules out
+# the noun reading without dropping the words entirely.
 _COORDINATE_IMPERATIVE_OBJECT_RE = re.compile(
+    r"(?<!\bthe\s)(?<!\ba\s)(?<!\ban\s)(?<!\bthis\s)(?<!\bthat\s)"
+    r"(?<!\bmy\s)(?<!\byour\s)(?<!\bour\s)(?<!\bits\s)"
     r"\b(?:write|create|build|implement|generate|summar\w+|translate|"
     r"classify|explain|compare|analy[sz]e|calculate|compute|convert|extract|"
-    r"list|rewrite|draft|design|recommend|evaluate|rank|score|solve|prove)\b",
+    r"list|rewrite|draft|design|recommend|evaluate|rank|score|solve|prove|"
+    r"release|start)\b",
     re.IGNORECASE,
 )
 
@@ -1254,6 +1341,8 @@ def _is_coordination_task(prompt: str) -> bool:
     # instead (checked later in classify_prompt, but this function is
     # called standalone by tests too, so the exclusion lives here).
     if len(words) <= 12 and not _is_introspection_task(stripped):
+        if _COORDINATE_EXPLICIT_CONTINUE_RE.search(stripped):
+            return True
         if _COORDINATE_STATUS_RE.search(stripped):
             return True
         opener = _COORDINATE_CONTINUATION_OPENER_RE.match(stripped)
@@ -1272,6 +1361,12 @@ def _is_coordination_task(prompt: str) -> bool:
                 has_anchor
                 or (_COORDINATE_IMPERATIVE_OBJECT_RE.search(remainder)
                     and not unresolved_object)
+                # "commit"/"push" are ordinary git shorthand even with a
+                # bare pronoun object (see ``_COORDINATE_OP_VERB_RE``'s own
+                # comment) — mirrors the elif branch's exclusion below.
+                # Needed once "done"/"do also" joined the opener list:
+                # "done, commit and push it" must stay off this path too.
+                or bool(_COORDINATE_OP_VERB_RE.search(remainder))
             )
             if not states_real_task:
                 return True
