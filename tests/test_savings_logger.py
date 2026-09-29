@@ -207,9 +207,9 @@ def test_records_use_opus_baseline_for_all_complexities(savings_log_path):
         == records["moderate"]["estimated_saved"]
         == records["complex"]["estimated_saved"]
     )
-    # opus-4-8 @ $5/$25 per 1M: 1000 in + 500 out on a free local model
-    # → baseline (and savings) = 0.005 + 0.0125 = $0.0175
-    assert abs(records["simple"]["estimated_saved"] - 0.0175) < 1e-9
+    # opus-5-5 @ $4/$20 per 1M: 1000 in + 500 out on a free local model
+    # → baseline (and savings) = 0.004 + 0.010 = $0.014
+    assert abs(records["simple"]["estimated_saved"] - 0.014) < 1e-9
 
 
 # ── DIRECT → usage / routing_decisions table persistence ─────────────────────

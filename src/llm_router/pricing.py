@@ -111,7 +111,13 @@ _CACHE_WRITE_1H_RATIO = 2.0  # 1-hour TTL (Claude Code writes its preamble with 
 # This yields the larger number, so it carries the heavier burden: every surface
 # reporting it must label WHAT it is measured against, and quota runway must
 # never be added to a cash figure.
-SAVINGS_BASELINE_MODEL = "claude-opus-5"
+# Moved claude-opus-5 -> claude-opus-5-5 on 2026-09-29 (owner decision): Opus
+# 5.5 is the model Claude Code subscribers now run, and at $4/$20 it is also the
+# cheaper Opus: the counterfactual cost of any token volume is exactly 20% lower
+# than at the $5/$25 Opus 5 rate. Savings already written to the ledger
+# (savings_stats, the per-platform tables) keep the rate they were written
+# with; only figures recomputed from tokens at read time move.
+SAVINGS_BASELINE_MODEL = "claude-opus-5-5"
 
 #: Env override, retained for back-compat. Routed through this module so no
 #: surface reads it directly -- per-surface reads are how the policies diverged.
@@ -199,6 +205,16 @@ _ANTHROPIC: dict[str, Price] = {
     # page footnote 1, re-checked 2026-09-28): $0.25, not the derived $1.00.
     "claude-fable-5-1": Price("claude-fable-5-1", 10.00, 50.00, cache_read=0.25),
     "claude-fable-5": Price("claude-fable-5", 10.00, 50.00),
+    # Fast mode (research preview, Claude API first-party only). Pricing page
+    # "Fast mode pricing", re-checked 2026-09-29 against the raw .md: Opus 5.5
+    # $8/$40; Opus 5 / Opus 4.8 $10/$50 — "Prompt caching multipliers apply on
+    # top of fast mode pricing". So each keeps its base model's cache ratios:
+    # Opus 5.5 fast reads at 0.05x ($0.40, explicit), the other two derive the
+    # standard 0.1x. These used to be aliases to the base ids, which priced a
+    # fast-mode call at half its real rate.
+    "claude-opus-5-5-fast": Price("claude-opus-5-5-fast", 8.00, 40.00, cache_read=0.40),
+    "claude-opus-5-fast": Price("claude-opus-5-fast", 10.00, 50.00),
+    "claude-opus-4-8-fast": Price("claude-opus-4-8-fast", 10.00, 50.00),
     # Retired lines, kept so historical rows still price correctly — never a
     # default. `verified` because a retired line's list price is settled and
     # cannot drift again. That is the opposite of the $15/$75 defect, which was
@@ -286,13 +302,11 @@ _PRICES: dict[str, Price] = {**_ANTHROPIC, **_OPENAI, **_GOOGLE, **_OPEN_WEIGHT,
 # to the current member of that family, so "opus" tracks the ladder instead of
 # freezing at whichever version was current when someone typed it.
 _ALIASES: dict[str, str] = {
-    "opus": "claude-opus-5",
+    "opus": "claude-opus-5-5",
     "sonnet": "claude-sonnet-5",
     "haiku": "claude-haiku-4-5",
     "fable": "claude-fable-5",
     "claude-haiku-4-5-20251001": "claude-haiku-4-5",
-    "claude-opus-4-8-fast": "claude-opus-4-8",
-    "claude-opus-5-fast": "claude-opus-5",
     # Bare "claude-opus" (no version suffix) is the same "which one is current"
     # question as the family alias "opus" above, just spelled with the vendor
     # prefix kept on. Resolved through the single baseline policy so there is

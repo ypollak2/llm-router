@@ -75,11 +75,11 @@ MUTATIONS: list[Mutation] = [
     # ── money ────────────────────────────────────────────────────────────────
     Mutation(
         "M1", "money", "src/llm_router/pricing.py",
-        '"claude-opus-5": Price("claude-opus-5", 5.00, 25.00)',
-        '"claude-opus-5": Price("claude-opus-5", 999.00, 25.00)',
+        '"claude-opus-5-5": Price("claude-opus-5-5", 4.00, 20.00, cache_read=0.20)',
+        '"claude-opus-5-5": Price("claude-opus-5-5", 999.00, 20.00, cache_read=0.20)',
         ["tests/economics/"],
         "Stale baseline price. The audit's own Q3(b) ran this and every test passed.",
-        probe="__import__('llm_router.pricing', fromlist=['x']).rates_per_m('claude-opus-5')",
+        probe="__import__('llm_router.pricing', fromlist=['x']).rates_per_m('claude-opus-5-5')",
     ),
     Mutation(
         "M2", "money", "src/llm_router/cost.py",
@@ -107,7 +107,7 @@ MUTATIONS: list[Mutation] = [
     ),
     Mutation(
         "M4", "money", "src/llm_router/pricing.py",
-        'SAVINGS_BASELINE_MODEL = "claude-opus-5"',
+        'SAVINGS_BASELINE_MODEL = "claude-opus-5-5"',
         'SAVINGS_BASELINE_MODEL = "claude-haiku-4-5"',
         ["tests/economics/"],
         "Silently understates every savings figure by choosing a cheaper counterfactual.",
