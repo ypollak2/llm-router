@@ -126,7 +126,10 @@ def test_the_fixed_source_is_clean() -> None:
 #: never matched, so a missing/mismatched reading silently coerced to 0 and
 #: compared as if it were a real, safe pressure level. Replaced with
 #: `_critical_pressure_reading()`, which treats an absent reading as unknown.
-BASELINE = 111
+# 111 -> 112 (Phase 0.2d): edit_survival.py moved from scripts/ into src/, and
+# its CLI-only load_rows() `float(row.get('ts', 0.0))` is now in the scan. Not
+# new code; northstar does not call load_rows.
+BASELINE = 112
 
 
 def _current_count() -> int:
