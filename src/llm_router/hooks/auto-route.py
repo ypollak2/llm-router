@@ -4014,20 +4014,65 @@ def main() -> None:
             _debug_log(f"[INVOCATION {invocation_id:.3f}] liveness setup failed")
 
     try:
-        hook_input = json.load(sys.stdin)
-    except (json.JSONDecodeError, EOFError) as _parse_err:
+        # sys.stdin.buffer gives raw bytes for the real (subprocess) hook
+        # invocation, which is what lets a non-UTF-8 byte be caught below
+        # instead of raising past this function. Many tests monkeypatch
+        # sys.stdin with an io.StringIO to run main() in-process, and that has
+        # no .buffer — fall back to the text read and re-encode so both paths
+        # produce the same bytes-in, reasoned-diagnostic-out shape.
+        _stdin_buffer = getattr(sys.stdin, "buffer", None)
+        _raw_stdin = (
+            _stdin_buffer.read()
+            if _stdin_buffer is not None
+            else sys.stdin.read().encode("utf-8", errors="surrogateescape")
+        )
+    except Exception as _read_exc:  # pragma: no cover - defensive, stdin itself unreadable
+        _raw_stdin = b""
+        _stdin_read_exc: Exception | None = _read_exc
+    else:
+        _stdin_read_exc = None
+
+    try:
+        if _stdin_read_exc is not None:
+            raise EOFError(f"stdin unreadable: {_stdin_read_exc}") from _stdin_read_exc
+        hook_input = json.loads(_raw_stdin.decode("utf-8"))
+    except (json.JSONDecodeError, EOFError, UnicodeDecodeError) as _parse_err:
         # CHZ-AUD-A-04: malformed/empty stdin must NOT be a SILENT total bypass.
         # Under zero-Claude/strict enforcement, silently exiting 0 lets an
         # unrouted turn proceed to Claude — the exact leak "strict" mode exists to
         # prevent (same class as the empty-prompt case handled below). Fail CLOSED
         # there; in non-enforcing modes pass through, but log VISIBLY to stderr
         # (never a debug-only, invisible skip).
+        #
+        # P0.3 (2026-09-29 audit of 572/9,152 = 6% "JSON parse failed" runs over
+        # 30 days): the dominant cause was tests that deliberately exercise this
+        # branch (tests/test_a04_malformed_hook_stdin.py and siblings), which —
+        # before the write-time debug-log split in c16c0c8 (2026-09-13) — wrote
+        # straight into the PRODUCTION log (~/.llm-router/auto-route-debug.log),
+        # not ~/.llm-router/auto-route-debug.test.log. That split already
+        # brought the real-log rate to 0 for the 16 days since (2026-09-14
+        # through 2026-09-29). A real invocation can still land here — a
+        # truncated read, a non-UTF-8 byte (not caught by the old
+        # `except (JSONDecodeError, EOFError)`, so it used to fall through to
+        # the generic top-level fail-open catch-all and get logged as
+        # "unhandled exception in main()" instead of this specific reason), or
+        # a future payload dialect change — so this branch stays and now
+        # records WHY instead of a bare "JSON parse failed".
+        if not _raw_stdin:
+            _parse_reason = "empty stdin"
+        elif isinstance(_parse_err, UnicodeDecodeError):
+            _parse_reason = f"non-utf8 byte at offset {_parse_err.start}"
+        else:
+            _parse_reason = f"{type(_parse_err).__name__}: {_parse_err}"
         print(
             f"llm_router auto-route: could not parse hook stdin ({_parse_err}); "
             f"this turn was NOT routed.",
             file=sys.stderr,
         )
-        _debug_log(f"[INVOCATION {invocation_id:.3f}] JSON parse failed")
+        _debug_log(
+            f"[INVOCATION {invocation_id:.3f}] JSON parse failed "
+            f"bytes={len(_raw_stdin)} reason={_parse_reason}"
+        )
         if _zero_claude_enabled():
             print(json.dumps({
                 "decision": "block",
@@ -4040,9 +4085,12 @@ def main() -> None:
             }))
             _coverage_observed("zero_claude_parse_failure")
         else:
-            # Normal mode: an unparseable payload is traffic we could not route
-            # and, until now, did not record. Exactly the I-1 blind spot.
-            _coverage_unobserved("UNHANDLED_EXCEPTION")
+            # Normal mode: a deliberate, reasoned no-decision — not an
+            # unhandled exception. PARSE_FAILURE is its own reason code
+            # (coverage.py) so this well-understood, expected branch is never
+            # conflated with a genuine crash; that conflation is what made a
+            # test-fixture artifact read as a 6% production defect rate.
+            _coverage_unobserved("PARSE_FAILURE")
         sys.exit(0)
 
     prompt = hook_input.get("prompt", "")
