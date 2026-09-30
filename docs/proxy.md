@@ -117,7 +117,7 @@ client tools are never routed.
 | (none) | `LLM_ROUTER_PROXY_UPSTREAM` | `https://api.anthropic.com` (only loopback overrides are accepted) |
 | `--loop-max-consecutive` | `LLM_ROUTER_PROXY_LOOP_MAX_CONSECUTIVE` | `8` (served-in-a-row per session before the next step is forced to Anthropic; `0` disables) |
 | `--loop-repeat-window` | `LLM_ROUTER_PROXY_LOOP_REPEAT_WINDOW` | `3` (recent served tool calls a new one is checked against for an exact repeat; `0` disables) |
-| `--tiers` | `LLM_ROUTER_PROXY_TIERS` | `off`. `on` enables the Claude-tier rewrite (below). |
+| `--tiers` | `LLM_ROUTER_PROXY_TIERS` | `off`. `on` enables the per-turn Claude-tier rewrite; `conversation` enables the conversation-level rewrite (below). |
 | `--tier-policy` | `LLM_ROUTER_PROXY_TIER_POLICY` | the bundled `proxy/claude_tiers.yaml` |
 
 The model, the trims (`proxy/backends.py: TRIMS`) and the backends
@@ -257,7 +257,7 @@ the ledger undercounting one it sent.
 Those turns stay `claude_main_call` units, with lever `proxy`, and are judged
 `used` / `redo` / `unknown` from what happened to their tool calls.
 
-## Claude-tier rewrite (opt-in, `--tiers on`)
+## Claude-tier rewrite (opt-in, `--tiers on` or `--tiers conversation`)
 
 A forwarded call can be sent to a cheaper Claude tier by rewriting
 `body["model"]`. All Claude tiers share one API schema, so client tools stay
@@ -270,18 +270,32 @@ conversation is not paying to re-write its prompt cache on the new tier**.
   i.e. `classify_signals(GATEWAY_POLICY)` plus `router._build_and_filter_chain`)
   runs over the newest human prompt. `ClaudeTierPolicy` then maps
   (task_type, complexity) to a tier. Model ids come from the YAML file, never
-  from code.
+  from code. A future Phase 2 kNN scorer replaces only this classifier call
+  (`classify=` on `decide()`, or a `ClaudeTierPolicy(..., classify=...)`
+  constructor argument) -- no `server.py` callsite changes.
 - **Never downgraded:** a requested model that is not a configured tier; ids in
   `pinned_models`; calls with no client tools; a conversation whose transcript
-  shows `/model`; the conversation's first call. A call is never moved above
-  the tier it requested (`allow_upgrade: false`), and never to a tier that
-  rejects its `thinking.type` or `output_config.effort`. Claude Code sends
-  adaptive thinking plus effort, which Haiku 4.5 takes neither of, so
-  main-loop calls stay on Sonnet or above.
+  shows `/model`. A call is never moved above the tier it requested
+  (`allow_upgrade: false`), and never to a tier that rejects its
+  `thinking.type` or `output_config.effort`. Claude Code sends adaptive
+  thinking plus effort, which Haiku 4.5 takes neither of, so main-loop calls
+  stay on Sonnet or above.
+- **The first call, two ways:**
+  - `--tiers on` (per-turn, PR #215): the conversation's first call is exempt
+    (unchanged) -- rewriting it would re-write a prompt cache that does not
+    exist yet.
+  - `--tiers conversation` (Phase 1.2b): the first call is classified and
+    rewritten like any other call. This is the point of conversation mode --
+    see "Key finding (1.2)" below for why a mid-task switch is the wrong place
+    to make this decision, and the conversation's start is the right one.
 - **Cache stickiness** (`proxy/cache_cost.py`): a conversation stays on its
-  last model. It moves only when the complexity class changes, or at a cold
-  point (no call for `cold_gap_s`). Each move is recorded with an estimated
-  cache re-write cost.
+  last model. In `on` mode it moves when the complexity class changes in
+  either direction, or at a cold point (no call for `cold_gap_s`). In
+  `conversation` mode it moves only when the class change is an
+  **escalation** (the new class ranks a higher tier than the one the
+  conversation is already on) or at a cold point -- a class that would rank
+  the same or a cheaper tier never pulls a committed conversation back down.
+  Each move is recorded with an estimated cache re-write cost.
 - **Fail-safe:** an error in the decision forwards the call unchanged
   (`tier_reason: decision_error`, with the scrubbed error text). If Anthropic
   refuses a rewritten call with a 4xx (other than 401 or 413), the client's own
@@ -289,18 +303,35 @@ conversation is not paying to re-write its prompt cache on the new tier**.
 - **Stats:** `llm-router proxy stats` adds the served-model mix, the reasons,
   the switch rate, and the Anthropic cost against a counterfactual in which
   every call ran on its requested model. That comparison is an **estimate**.
-  The validated number is a paired A/B.
+  The validated number is a paired A/B. Every row also carries `tier_mode`
+  (`off` / `on` / `conversation`), so a ledger spanning both A/B arms can be
+  split without relying on the port a session ran on.
 
-Measured so far: the live smoke of 2026-09-29 (3 golden fixture tasks, real
-`claude -p --model opus`, 23 calls) ran with `switch_after_first_call: true`
-(execute on Sonnet after an Opus first call). All 3 tasks passed. Anthropic
-replied with the rewritten model on 8 of 8 rewritten calls. The estimated cost
-was **$1.07 against $0.78 on all-Opus**, a net loss: each of the 3 switches
-re-wrote 25-34k prefix tokens on Sonnet, and Opus 5.5 and Sonnet 5.5 read cache
-at the same rate. That handoff is therefore off by default. With the default
-policy, a single-prompt task stays on its first-call model (replay: 22/22
-calls on Opus, 0 switches), so the rewrite only takes effect after a cold gap
-or a complexity change.
+Measured so far (per-turn mode, `on`): the live smoke of 2026-09-29 (3 golden
+fixture tasks, real `claude -p --model opus`, 23 calls) ran with
+`switch_after_first_call: true` (execute on Sonnet after an Opus first call).
+All 3 tasks passed. Anthropic replied with the rewritten model on 8 of 8
+rewritten calls. The estimated cost was **$1.07 against $0.78 on all-Opus**, a
+net loss: each of the 3 switches re-wrote 25-34k prefix tokens on Sonnet, and
+Opus 5.5 and Sonnet 5.5 read cache at the same rate. That handoff is therefore
+off by default. With the default policy, a single-prompt task stays on its
+first-call model (replay: 22/22 calls on Opus, 0 switches), so the rewrite
+only takes effect after a cold gap or a complexity change.
+
+### Key finding (1.2): per-turn switching does not pay; conversation-level might
+
+Per-turn tier switching loses money under prompt caching: a switch mid-task
+re-writes the whole cached prefix (25-34k tokens in the smoke above), and
+Opus 5.5 and Sonnet 5.5 read cache at the SAME rate ($0.20/M), so only output
+and genuinely new content get cheaper after a switch -- a few tenths of a
+cent a call, never enough to earn back a 3-6 call task's re-write. The
+conclusion was not "tiering doesn't work," it was "tiering pays only when the
+tier is chosen once, at the conversation's start" -- which is what
+`--tiers conversation` (Phase 1.2b) does: classify the first human prompt,
+pick the tier for the whole conversation, and hold it via stickiness,
+escalating only at a cold point or a clear rise in complexity. See
+`~/.rsi/research/llm-router-cursor-parity/p12b-conversation-tiers-ab.md` for
+the paired A/B that gates making this the default.
 
 ## Benchmark
 

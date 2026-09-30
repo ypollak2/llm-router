@@ -1,8 +1,10 @@
 # Claude-tier routing for the per-call proxy (llm_router.proxy.tiers).
 #
-# Opt-in: nothing here is read unless the proxy runs with --tiers or
-# LLM_ROUTER_PROXY_TIERS=on. Point LLM_ROUTER_PROXY_TIER_POLICY at your own
-# copy of this file to change it; model ids live here, never in code.
+# Opt-in: nothing here is read unless the proxy runs with --tiers on
+# (per-turn, PR #215) or --tiers conversation (Phase 1.2b: the tier is chosen
+# once, from the conversation's first prompt, and held via stickiness -- see
+# proxy/tiers.py's module docstring). Point LLM_ROUTER_PROXY_TIER_POLICY at
+# your own copy of this file to change it; model ids live here, never in code.
 #
 # Why tiers save Max quota (Phase 0.4 probe, 2026-09-29, n=5 calls per model):
 # one shared weekly pool drains in proportion to per-call cost, and Opus cost

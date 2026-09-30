@@ -26,14 +26,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   proxy steps** (`llm-router proxy --local-agent`, off by default). No savings
   claim: a 15-pair A/B (2026-09-30) measured −1.1% realized cost change, 95% CI
   −6.4% to +4.3%, with 9/24 healthy local attempts served. See `docs/proxy.md`.
-
-### Changed
-
-- **The proxy never serves an Edit/Write/MultiEdit/NotebookEdit reply from the
-  raw tool-call loop**, with or without `--local-agent`. Such a step falls back to
-  Claude (`reason: edit_to_claude`). With `--local-agent` it can instead go through
-  `llm_router.edit`'s validated protocol. Edits through the raw loop passed 0/20
-  on fixtures.
+- Proxy: opt-in conversation-level Claude-tier rewrite
+  (`llm-router proxy --tiers conversation`, Phase 1.2b). The per-turn rewrite
+  above measured a net loss from switching tiers mid-task (a switch re-writes
+  the whole prompt cache, and Opus 5.5 / Sonnet 5.5 read cache at the same
+  rate); this mode instead classifies the conversation's first human prompt,
+  picks the tier once for the whole conversation, and holds it via
+  stickiness, escalating only at a cold point or a clear rise in complexity.
+  Every proxy ledger row now carries `tier_mode` (`off` / `on` /
+  `conversation`). No default-on claim: this ships behind the flag pending a
+  pre-registered paired A/B (see
+  `~/.rsi/research/llm-router-cursor-parity/p12b-conversation-tiers-ab.md`).
 
 ## [15.4.0] - 2026-09-29
 
