@@ -1,11 +1,11 @@
 {
-  "version": 2,
-  "generated_at": "2026-03-30T15:30:35.036737+00:00",
+  "version": 3,
+  "generated_at": "2026-09-28T12:40:56.651317+00:00",
   "sources": {
-    "lmsys_fetched_at": "2026-03-30T15:30:35.036737+00:00",
-    "aider_fetched_at": "2026-03-30T15:30:35.036737+00:00",
+    "lmsys_fetched_at": "2026-09-28T12:40:56.651317+00:00",
+    "aider_fetched_at": "2026-09-28T12:40:56.651317+00:00",
     "huggingface_fetched_at": null,
-    "litellm_fetched_at": "2026-03-30T15:30:35.036737+00:00"
+    "litellm_fetched_at": "2026-09-28T12:40:56.651317+00:00"
   },
   "raw_scores": {
     "anthropic/claude-haiku-4-5-20251001": {
@@ -67,8 +67,8 @@
   },
   "task_scores": {
     "code": {
-      "deepseek/deepseek-chat": 0.9995264404104183,
-      "deepseek/deepseek-reasoner": 0.9995264404104183,
+      "deepseek/deepseek-v4-flash": 0.9739542225730071,
+      "deepseek/deepseek-v4-pro": 0.8385161799526442,
       "claude-haiku-4-5-20251001": 0.8208366219415943,
       "anthropic/claude-sonnet-4-6": 0.8030836621941595,
       "openai/gpt-4o": 0.774281132875887,
@@ -81,10 +81,10 @@
       "anthropic/claude-haiku-4-5-20251001": 0.29624999999999996
     },
     "analyze": {
-      "deepseek/deepseek-chat": 0.9995264404104183,
-      "deepseek/deepseek-reasoner": 0.9995264404104183,
+      "deepseek/deepseek-v4-flash": 0.9739542225730071,
       "openai/gpt-4o-mini": 0.9223864836325237,
       "openai/gpt-4o": 0.8615192411711805,
+      "deepseek/deepseek-v4-pro": 0.8385161799526442,
       "claude-haiku-4-5-20251001": 0.8208366219415943,
       "anthropic/claude-sonnet-4-6": 0.803472770323599,
       "gemini/gemini-2.5-pro": 0.753654973806426,
@@ -95,10 +95,10 @@
       "anthropic/claude-haiku-4-5-20251001": 0.0
     },
     "query": {
-      "deepseek/deepseek-chat": 0.9995264404104183,
-      "deepseek/deepseek-reasoner": 0.9995264404104183,
+      "deepseek/deepseek-v4-flash": 0.9739542225730071,
       "openai/gpt-4o-mini": 0.9223864836325237,
       "openai/gpt-4o": 0.8615192411711805,
+      "deepseek/deepseek-v4-pro": 0.8385161799526442,
       "claude-haiku-4-5-20251001": 0.8208366219415943,
       "anthropic/claude-sonnet-4-6": 0.803472770323599,
       "gemini/gemini-2.5-pro": 0.753654973806426,
@@ -109,10 +109,10 @@
       "anthropic/claude-haiku-4-5-20251001": 0.0
     },
     "generate": {
-      "deepseek/deepseek-chat": 0.9995264404104183,
-      "deepseek/deepseek-reasoner": 0.9995264404104183,
+      "deepseek/deepseek-v4-flash": 0.9739542225730071,
       "openai/gpt-4o-mini": 0.916842661034847,
       "openai/gpt-4o": 0.8807742236136143,
+      "deepseek/deepseek-v4-pro": 0.8385161799526442,
       "anthropic/claude-sonnet-4-6": 0.8315480888487992,
       "claude-haiku-4-5-20251001": 0.8208366219415943,
       "gemini/gemini-2.5-pro": 0.7609771551015407,
@@ -123,9 +123,9 @@
       "anthropic/claude-haiku-4-5-20251001": 0.0
     },
     "research": {
-      "deepseek/deepseek-chat": 0.9995264404104183,
-      "deepseek/deepseek-reasoner": 0.9995264404104183,
+      "deepseek/deepseek-v4-flash": 0.9739542225730071,
       "openai/gpt-4o-mini": 0.9301478352692715,
+      "deepseek/deepseek-v4-pro": 0.8385161799526442,
       "openai/gpt-4o": 0.8345622657517737,
       "claude-haiku-4-5-20251001": 0.8208366219415943,
       "anthropic/claude-sonnet-4-6": 0.7641673243883189,
@@ -140,8 +140,8 @@
   "tiers": {
     "code": {
       "premium": [
-        "deepseek/deepseek-chat",
-        "deepseek/deepseek-reasoner",
+        "deepseek/deepseek-v4-flash",
+        "deepseek/deepseek-v4-pro",
         "claude-haiku-4-5-20251001"
       ],
       "balanced": [
@@ -160,12 +160,12 @@
     },
     "analyze": {
       "premium": [
-        "deepseek/deepseek-chat",
-        "deepseek/deepseek-reasoner",
-        "openai/gpt-4o-mini"
+        "deepseek/deepseek-v4-flash",
+        "openai/gpt-4o-mini",
+        "openai/gpt-4o"
       ],
       "balanced": [
-        "openai/gpt-4o",
+        "deepseek/deepseek-v4-pro",
         "claude-haiku-4-5-20251001",
         "anthropic/claude-sonnet-4-6",
         "gemini/gemini-2.5-pro"
@@ -180,12 +180,12 @@
     },
     "query": {
       "premium": [
-        "deepseek/deepseek-chat",
-        "deepseek/deepseek-reasoner",
-        "openai/gpt-4o-mini"
+        "deepseek/deepseek-v4-flash",
+        "openai/gpt-4o-mini",
+        "openai/gpt-4o"
       ],
       "balanced": [
-        "openai/gpt-4o",
+        "deepseek/deepseek-v4-pro",
         "claude-haiku-4-5-20251001",
         "anthropic/claude-sonnet-4-6",
         "gemini/gemini-2.5-pro"
@@ -200,12 +200,12 @@
     },
     "generate": {
       "premium": [
-        "deepseek/deepseek-chat",
-        "deepseek/deepseek-reasoner",
-        "openai/gpt-4o-mini"
+        "deepseek/deepseek-v4-flash",
+        "openai/gpt-4o-mini",
+        "openai/gpt-4o"
       ],
       "balanced": [
-        "openai/gpt-4o",
+        "deepseek/deepseek-v4-pro",
         "anthropic/claude-sonnet-4-6",
         "claude-haiku-4-5-20251001",
         "gemini/gemini-2.5-pro"
@@ -220,9 +220,9 @@
     },
     "research": {
       "premium": [
-        "deepseek/deepseek-chat",
-        "deepseek/deepseek-reasoner",
-        "openai/gpt-4o-mini"
+        "deepseek/deepseek-v4-flash",
+        "openai/gpt-4o-mini",
+        "deepseek/deepseek-v4-pro"
       ],
       "balanced": [
         "openai/gpt-4o",
