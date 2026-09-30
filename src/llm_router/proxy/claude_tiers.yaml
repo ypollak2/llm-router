@@ -48,6 +48,14 @@ route:
 # false: a request is only ever moved DOWN from the tier it asked for, never up.
 allow_upgrade: false
 
+# true: after the classifier, the learned complexity score (complexity_knn,
+# Phase 2.1) moves the complexity across the frontier boundary: P(needs
+# frontier) >= threshold lifts it to at least `complex`, below the threshold
+# lowers `complex`/`deep_reasoning` to `moderate`. Needs an artifact built by
+# scripts/build_complexity_knn.py; without one it abstains. Off: it has not
+# been measured on real Claude Code prompts (0 labelled owner turns).
+complexity_knn: false
+
 # Requested model ids that are never rewritten (e.g. the model you pass with
 # `claude --model`, which the proxy cannot tell apart from the default).
 pinned_models: []

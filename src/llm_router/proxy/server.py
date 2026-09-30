@@ -404,13 +404,14 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
             decision = await tier_policy.decide(body, row.get("session_id"), sticky)
         except Exception as exc:  # noqa: BLE001 - fail-safe: forward unchanged
             row.update(served_model=body.get("model"), tier=None, tier_reason=REASON_DECISION_ERROR,
-                       tier_switch=False, tier_switch_cost_usd=None,
+                       tier_switch=False, tier_switch_cost_usd=None, tier_complexity_score=None,
                        tier_detail=ledger.scrub_detail(f"{type(exc).__name__}: {exc}"),
                        tier_decision_s=round(time.monotonic() - t0, 3))
             return None
         row.update(served_model=decision.served_model, tier=decision.tier, tier_reason=decision.reason,
                    tier_switch=decision.switched, tier_switch_cost_usd=decision.switch_cost_usd,
                    tier_task_type=decision.task_type, tier_complexity=decision.complexity,
+                   tier_complexity_score=decision.complexity_score,
                    tier_decision_s=round(time.monotonic() - t0, 3))
         return decision
 

@@ -607,3 +607,64 @@ def test_tier_stats_mix_switch_rate_and_labelled_estimate():
 
 def test_stats_without_tier_rows_has_no_tier_block():
     assert ledger.stats([{"decision": "forwarded", "requested_model": OPUS}])["tiers"] is None
+
+
+# ── complexity_knn on the classify= hook (Phase 2.1) ─────────────────────────
+
+
+def _score(score, thr=0.5, calls=None):
+    from llm_router.complexity_knn import ComplexityScore
+
+    async def fn(text):
+        if calls is not None:
+            calls.append(text)
+        return None if score is None else ComplexityScore(score, score >= thr, 0.9, thr)
+    return fn
+
+
+def _knn_policy(on: bool, cx: str):
+    raw = _raw_policy()
+    raw["stickiness"] = dict(raw.get("stickiness") or {}, switch_after_first_call=True)
+    raw["complexity_knn"] = on
+    return pt.ClaudeTierPolicy.from_dict(raw, classify=_classify(cx))
+
+
+async def _second_call(policy):
+    sticky = Stickiness()
+    await policy.decide(_first(), SID, sticky)
+    return await policy.decide(_req(), SID, sticky)
+
+
+def test_bundled_policy_ships_the_knn_hook_off():
+    assert pt.ClaudeTierPolicy.load().complexity_knn is False
+
+
+async def test_knn_off_never_consults_the_score(monkeypatch):
+    from llm_router import complexity_knn
+
+    calls = []
+    monkeypatch.setattr(complexity_knn, "complexity_score", _score(0.99, calls=calls))
+    d = await _second_call(_knn_policy(False, "moderate"))
+    assert (d.tier, d.complexity, d.complexity_score, calls) == ("sonnet", "moderate", None, [])
+
+
+@pytest.mark.parametrize("cx,score,want_cx,want_tier", [
+    ("simple", 0.2, "simple", "sonnet"),  # unchanged; haiku refuses adaptive thinking -> sonnet
+    ("simple", 0.9, "complex", "opus"),
+    ("complex", 0.1, "moderate", "sonnet"),
+])
+async def test_knn_on_wraps_the_classify_hook_and_moves_across_the_frontier(monkeypatch, cx, score,
+                                                                             want_cx, want_tier):
+    from llm_router import complexity_knn
+
+    monkeypatch.setattr(complexity_knn, "complexity_score", _score(score))
+    d = await _second_call(_knn_policy(True, cx))
+    assert (d.complexity, d.complexity_score, d.tier) == (want_cx, score, want_tier)
+
+
+async def test_knn_on_but_abstaining_keeps_the_classifier_complexity(monkeypatch):
+    from llm_router import complexity_knn
+
+    monkeypatch.setattr(complexity_knn, "complexity_score", _score(None))
+    d = await _second_call(_knn_policy(True, "moderate"))
+    assert (d.complexity, d.complexity_score, d.tier) == ("moderate", None, "sonnet")
