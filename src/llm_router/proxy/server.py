@@ -53,6 +53,12 @@ from urllib.parse import urlsplit
 from llm_router.local_agent import LocalAgentConfig, enabled_from_env
 from llm_router.local_agent import capability as la_capability
 from llm_router.proxy import ledger
+from llm_router.proxy.backend_health import (
+    DEFAULT_COOLDOWN_S,
+    DEFAULT_FAIL_N,
+    REASON_BACKEND_UNHEALTHY,
+    BackendHealth,
+)
 from llm_router.proxy.backends import (
     BACKENDS,
     DEFAULT_HEDGE_S,
@@ -135,6 +141,8 @@ class ProxyConfig:
     tier_policy: str | None = None
     # Capability gating + compaction (llm_router.local_agent); None = off.
     local_agent: LocalAgentConfig | None = None
+    backend_fail_n: int = DEFAULT_FAIL_N
+    backend_cooldown_s: float = DEFAULT_COOLDOWN_S
 
     @classmethod
     def from_env(cls) -> "ProxyConfig":
@@ -154,6 +162,9 @@ class ProxyConfig:
             tiers=parse_tiers_mode(os.environ.get("LLM_ROUTER_PROXY_TIERS", "off")),
             tier_policy=os.environ.get("LLM_ROUTER_PROXY_TIER_POLICY") or None,
             local_agent=LocalAgentConfig.from_env() if enabled_from_env() else None,
+            backend_fail_n=int(os.environ.get("LLM_ROUTER_PROXY_BACKEND_FAIL_N", DEFAULT_FAIL_N)),
+            backend_cooldown_s=float(os.environ.get("LLM_ROUTER_PROXY_BACKEND_COOLDOWN_S",
+                                                    DEFAULT_COOLDOWN_S)),
         )
 
 
@@ -209,9 +220,10 @@ def _error_json(message: str) -> bytes:
     return json.dumps({"type": "error", "error": {"type": "api_error", "message": message}}).encode()
 
 
-def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None):
-    """The Starlette app. ``client`` (an ``httpx.AsyncClient``) and
-    ``backend_factory(model) -> Backend`` are injectable for tests."""
+def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clock=None):
+    """The Starlette app. ``client`` (an ``httpx.AsyncClient``),
+    ``backend_factory(model) -> Backend`` and the backend-health breaker's
+    ``health_clock`` are injectable for tests."""
     import httpx
     from starlette.applications import Starlette
     from starlette.requests import Request
@@ -222,6 +234,8 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None):
     trims = resolve_trims(cfg.trim)
     http = client or httpx.AsyncClient(timeout=httpx.Timeout(600.0, connect=10.0))
     guard = LoopGuard(cfg.loop_max_consecutive, cfg.loop_repeat_window)
+    # Stops sending steps to a crashed local backend (proxy.backend_health).
+    health = BackendHealth(cfg.backend_fail_n, cfg.backend_cooldown_s, clock=health_clock)
     # Claude-tier rewrite (opt-in). A bad policy file fails here, at startup,
     # never per call.
     tier_policy = (ClaudeTierPolicy.load(cfg.tier_policy, conversation_level=(cfg.tiers == TIERS_CONVERSATION))
@@ -306,18 +320,33 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None):
                 row["added_latency_s"] = round(time.monotonic() - t0, 3)
                 return None
         message, err, reason = None, None, None
+        backend_t0, backend_outcome = None, None
         try:
             backend = make_backend(choice["model"])
+            admitted, health_info = await health.admit(choice["model"], backend)
+            if health_info is not None:
+                row["backend_health"] = health_info
+            if not admitted:
+                # Skipped without an attempt (and before compaction's embedding
+                # call): the backend is known to be broken.
+                guard.reset(session_id)
+                row.update(decision=ledger.DECISION_FORWARDED, reason=REASON_BACKEND_UNHEALTHY,
+                           added_latency_s=round(time.monotonic() - t0, 3))
+                return None
             if local_agent is not None:
                 send, row["compaction"] = await local_agent.prepare(body)
             else:
                 send = apply_trims(body, trims)
+            backend_t0 = time.monotonic()
             message, err, backend_usage = await asyncio.wait_for(
                 backend.complete(send, cfg.step_budget_s), timeout=cfg.step_budget_s)
             row["backend_usage"] = backend_usage
             if err:
                 reason = "validation"
-            elif message is not None:
+            # The backend's own outcome and time, captured before the capability
+            # check below reuses ``err`` and the edit protocol adds its own calls.
+            backend_outcome = (err, reason, time.monotonic() - backend_t0)
+            if not err and message is not None:
                 # The hard rule: an edit from the raw tool-call loop is never
                 # served; it goes to the validated edit protocol or to Claude.
                 verdict = la_capability.check_reply(
@@ -339,6 +368,11 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None):
             err, reason = f"exceeded step budget {cfg.step_budget_s}s", "budget_exceeded"
         except Exception as exc:  # noqa: BLE001 - any backend failure is a counted fallback
             err, reason = f"{type(exc).__name__}: {exc}", "backend_error"
+        if backend_t0 is not None:
+            tripped = health.record(choice["model"], *(backend_outcome
+                                                       or (err, reason, time.monotonic() - backend_t0)))
+            if tripped is not None:
+                row["backend_health"] = dict(row.get("backend_health") or {}, **tripped)
         elapsed = round(time.monotonic() - t0, 3)
         row["route_latency_s"] = elapsed
         if err or message is None:
@@ -578,6 +612,7 @@ llm-router proxy [--port N] [--steps continuation|off] [--step-budget-s S]
                  [--num-ctx N] [--ollama-url URL] [--keep-alive -1|5m] [--no-warm-up]
                  [--loop-max-consecutive N] [--loop-repeat-window N]
                  [--tiers off|on|conversation] [--tier-policy FILE.yaml] [--local-agent]
+                 [--backend-fail-n N] [--backend-cooldown-s S]
 llm-router proxy stats [--days N] [--json]
 
 Opt-in, per session. Nothing is enabled until you point a session at it:
@@ -628,6 +663,11 @@ def cmd_proxy(argv: list[str]) -> int:
     ap.add_argument("--local-agent", action="store_true",
                     help="capability gating + tool retrieval/compaction for local steps "
                          "(llm_router.local_agent; also LLM_ROUTER_LOCAL_AGENT=on). Off by default")
+    ap.add_argument("--backend-fail-n", type=int, default=env.backend_fail_n,
+                    help="stop sending steps to the local backend after this many consecutive empty "
+                         "or sub-second invalid replies (a crash signature stops it at once; 0 disables)")
+    ap.add_argument("--backend-cooldown-s", type=float, default=env.backend_cooldown_s,
+                    help="seconds before a one-token probe checks whether the backend recovered")
     a = ap.parse_args(argv)
 
     from llm_router.net_bind import refuse_public_bind_or_exit
@@ -642,7 +682,8 @@ def cmd_proxy(argv: list[str]) -> int:
                           ollama_url=a.ollama_url, loop_max_consecutive=a.loop_max_consecutive,
                           loop_repeat_window=a.loop_repeat_window, tiers=parse_tiers_mode(a.tiers),
                           tier_policy=a.tier_policy,
-                          local_agent=(LocalAgentConfig.from_env() if a.local_agent else env.local_agent))
+                          local_agent=(LocalAgentConfig.from_env() if a.local_agent else env.local_agent),
+                          backend_fail_n=a.backend_fail_n, backend_cooldown_s=a.backend_cooldown_s)
         app = build_app(cfg)
     except (ValueError, OSError) as exc:
         sys.stderr.write(f"llm-router proxy: {exc}\n")
@@ -656,7 +697,8 @@ def cmd_proxy(argv: list[str]) -> int:
           f"trim={'compact (local agent)' if cfg.local_agent else (cfg.trim or 'fast')}  "
           f"loop_guard(max_consecutive={cfg.loop_max_consecutive}, repeat_window={cfg.loop_repeat_window})  "
           f"tiers={cfg.tiers + ' (' + (cfg.tier_policy or 'bundled policy') + ')' if cfg.tiers != TIERS_OFF else 'off'}  "
-          f"local_agent={'on' if cfg.local_agent else 'off'}")
+          f"local_agent={'on' if cfg.local_agent else 'off'}  "
+          f"backend_health(fail_n={cfg.backend_fail_n}, cooldown={cfg.backend_cooldown_s:g}s)")
     print(f"  enable per session: {enable_hint(a.host, a.port)}")
     uvicorn.run(app, host=a.host, port=a.port, log_level="warning", access_log=False)
     return 0

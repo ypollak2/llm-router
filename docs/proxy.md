@@ -99,6 +99,27 @@ client tools are never routed.
   the repeated call or the cap. Any non-served step for that session (a real
   Anthropic call, or a policy decision to keep the step on Anthropic) clears
   the streak.
+- **Backend health.** On 2026-09-30 the dedicated Ollama server's Metal
+  backend ran out of GPU memory under swap pressure (`command buffer 0 failed
+  with status 5`, `kIOGPUCommandBufferCallbackErrorOutOfMemory`). Until it was
+  restarted, every step got an empty reply in ~0.1 s (29/29 empties in that
+  A/B came from those windows; 0/24 while healthy), and every one fell back.
+  Per proxy process, per serving model (`llm_router.proxy.backend_health`):
+  `LLM_ROUTER_PROXY_BACKEND_FAIL_N` consecutive empty or sub-second invalid
+  replies, or one crash signature in an Ollama error, stop local serving for
+  `LLM_ROUTER_PROXY_BACKEND_COOLDOWN_S`. Those steps go to Anthropic without an
+  attempt, recorded as `reason: "backend_unhealthy"`, and one warning goes to
+  stderr. After the cooldown, a one-token probe (same `num_ctx`, so the model
+  is not reloaded) decides whether serving resumes. Timeouts neither count
+  nor reset the streak.
+- **Step-budget cancel.** A step that misses the budget closes its Ollama
+  connection and Ollama cancels the request. The Metal faults were checked
+  against this: in the 2026-09-30 logs 2 of 12 budget cancels were followed by
+  a fault, and both cancelled requests had processed only 650 of ~4.4k prompt
+  tokens in 30 s, so the GPU was already starved; the 2026-09-28 fault began
+  mid-prefill with no cancel before it. The fault is GPU memory, not the
+  cancel, so the cancel is unchanged. Letting a cancelled request finish would
+  keep a starved GPU busy and queue the next step behind it.
 
 ## Settings
 
@@ -119,6 +140,8 @@ client tools are never routed.
 | `--loop-repeat-window` | `LLM_ROUTER_PROXY_LOOP_REPEAT_WINDOW` | `3` (recent served tool calls a new one is checked against for an exact repeat; `0` disables) |
 | `--tiers` | `LLM_ROUTER_PROXY_TIERS` | `off`. `on` enables the per-turn Claude-tier rewrite; `conversation` enables the conversation-level rewrite (below). |
 | `--tier-policy` | `LLM_ROUTER_PROXY_TIER_POLICY` | the bundled `proxy/claude_tiers.yaml` |
+| `--backend-fail-n` | `LLM_ROUTER_PROXY_BACKEND_FAIL_N` | `3` (consecutive empty or sub-second invalid replies before local serving pauses; a crash signature pauses at once; `0` disables) |
+| `--backend-cooldown-s` | `LLM_ROUTER_PROXY_BACKEND_COOLDOWN_S` | `60` (pause before a one-token probe checks the backend) |
 
 The model, the trims (`proxy/backends.py: TRIMS`) and the backends
 (`BACKENDS`) are plug points. A measured speed lever can be added as a named trim

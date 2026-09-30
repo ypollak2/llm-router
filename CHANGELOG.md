@@ -13,6 +13,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Proxy: backend-health circuit breaker for the local Ollama path
+  (`proxy/backend_health.py`). Three consecutive empty or sub-second invalid
+  replies, or a crash signature in an Ollama error, pause local serving for 60 s
+  (`--backend-fail-n`, `--backend-cooldown-s`, or the matching
+  `LLM_ROUTER_PROXY_BACKEND_*` env vars). Skipped steps go to Claude with
+  `reason: "backend_unhealthy"`. A one-token probe decides when serving
+  resumes. Evidence: after a Metal out-of-memory fault on 2026-09-30, 29/29
+  empty replies in one A/B came from the crashed windows, and each one
+  fell back to Claude. The Ollama backend now also reports a streamed `error`
+  line and the body of an HTTP error, which it used to drop.
 - Proxy: opt-in Claude-tier rewrite (`llm-router proxy --tiers on`). Each
   forwarded call can move to a cheaper Claude tier (Haiku 4.5 / Sonnet 5.5 /
   Opus 5.5 / Fable 5.1, set in `proxy/claude_tiers.yaml`). It follows
