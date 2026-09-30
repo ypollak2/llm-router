@@ -34,7 +34,16 @@ ROOT = Path(__file__).resolve().parents[1]
 #: so a change that was entirely an improvement still went 88 -> 89. Restruct-
 #: uring the cleanup to run only on failure and having the outer handler record
 #: `CHZ-FO-ATTEMPTLOG-ROTATE` took it to 87.
-MAX_SILENT_PERSISTENCE_SITES = 87
+# 88 after feat/proxy-default-escalation: proxy_default.py's remove_sentinel()
+# does `sentinel_path().unlink(missing_ok=True)` under `except OSError: pass`
+# — the same idiom install_manifest.clear() already uses for its own manifest
+# file (a pre-existing site in this same census). The sentinel is a
+# regenerable marker (`llm-router doctor`/the SessionStart hook re-derive
+# their own state from it, never the other way around), not money or ledger
+# data, so this is fail-open by the same reasoning as that existing site, not
+# a new class of silent loss — raised deliberately rather than adding a
+# failopen counter for a cosmetic cleanup.
+MAX_SILENT_PERSISTENCE_SITES = 88
 
 
 def _census_count() -> int:

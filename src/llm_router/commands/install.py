@@ -144,6 +144,10 @@ Usage:
   llm-router install --no-hosts          Claude Code only; skip other detected hosts (Codex)
   llm-router install --project           Write AGENTS.md + CLAUDE.md (link) into the current
                                      repository so both agents read one set of rules
+  llm-router install --proxy-default     Make the per-call proxy the DEFAULT ANTHROPIC_BASE_URL
+                                     for every Claude Code session (docs/proxy.md).
+                                     Verifies the proxy answers before touching settings.json.
+  llm-router install --proxy-default off Revert it (same as `llm-router uninstall`)
   llm-router install --help, -h          Show this help and exit (no changes made)
 """
 
@@ -155,6 +159,15 @@ def cmd_install(args: list[str]) -> int:
     if any(a in ("--help", "-h", "help") for a in args):
         print(_INSTALL_HELP)
         return 0
+    if "--proxy-default" in args:
+        # Handled here, not inside `_run_install`, so a refused install (the
+        # proxy never answered — see commands/proxy_default.py) can actually
+        # exit non-zero; `_run_install` returns None throughout and every
+        # other path here discards it.
+        idx = args.index("--proxy-default")
+        sub = args[idx + 1].strip().lower() if idx + 1 < len(args) and not args[idx + 1].startswith("--") else "on"
+        from llm_router.commands.proxy_default import cmd_proxy_default
+        return cmd_proxy_default(sub)
     _run_install(args)
     return 0
 

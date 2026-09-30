@@ -1489,6 +1489,40 @@ def _run_doctor(host: Optional[str] = None) -> tuple[int, list[str]]:
         print(f"    {_red(f'instrumentation counters unavailable: {exc}')}")
         issues.append(f"instrumentation counters unavailable: {exc}")
 
+    # ── Proxy-default (commands/proxy_default.py) ───────────────────────────
+    # Every Claude Code session depends on this proxy if it's installed — a
+    # dead port fails every session's first API call, not just an opted-in
+    # one. The sentinel is the source of truth for "is this on" (see
+    # proxy_default.py's module docstring for why settings.json alone can't
+    # tell "llm-router set this" apart from a corporate proxy or pxpipe).
+    print()
+    print(_bold("  Proxy-default (ANTHROPIC_BASE_URL)"))
+    try:
+        from llm_router import proxy_default as _pd
+
+        _sentinel = _pd.read_sentinel()
+        if _sentinel is None:
+            print(f"    {_dim('not installed — llm-router install --proxy-default to enable')}")
+        else:
+            _port = _sentinel.get("port", _pd.DEFAULT_PORT)
+            if _pd.proxy_health("127.0.0.1", _port, timeout=1.0):
+                print(_ok(f"answering on 127.0.0.1:{_port}  (tiers={_sentinel.get('tiers')})"))
+            else:
+                print(
+                    _fail(
+                        f"NOT answering on 127.0.0.1:{_port} — every new Claude Code "
+                        f"session's first call will fail",
+                        fix=(
+                            "launchctl kickstart -k gui/$(id -u)/com.llm_router.proxy   "
+                            "(macOS)  or  systemctl --user restart llm_router-proxy  (Linux); "
+                            "logs: ~/.llm-router/logs/proxy.err.log"
+                        ),
+                    )
+                )
+                issues.append(f"proxy-default is installed but not answering on port {_port}")
+    except Exception as exc:  # noqa: BLE001 — doctor must still finish
+        print(f"    {_dim(f'proxy-default check unavailable: {exc}')}")
+
     # ── Provenance exclusions (T-21) ───────────────────────────────────────
     # The cutover's count was written to `provenance_meta` and read by nothing,
     # so "my lifetime savings dropped to $0 after upgrading" had no in-product

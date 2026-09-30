@@ -12,7 +12,19 @@ The decision, per call, in order (the first that applies wins):
 ``unknown_model``   the requested model is not a configured tier: unchanged.
 ``config_pinned``   the requested id is in ``pinned_models``: unchanged.
 ``side_call``       no client tools (titles, probes): unchanged.
+``explicit_opus_pin`` the newest human turn starts with ``opus:``
+                    (``proxy/escalation.py``): pinned to the Opus tier,
+                    bypassing ``allow_upgrade`` the same way ``config_pinned``
+                    does. Checked BEFORE ``user_pinned`` so it can still
+                    escalate a conversation that ran ``/model`` earlier.
 ``user_pinned``     the transcript shows the user ran ``/model``: unchanged.
+``long_first_prompt_floor`` the conversation's first call, and the prompt is
+                    long or multi-part (``proxy/escalation.py``,
+                    ``is_long_or_multi_part``): unchanged, in EVERY mode
+                    (unlike ``first_call`` below, this applies in conversation
+                    mode too). Safety default paraphrasing the trial's one
+                    unacceptable answer (t7-northstar) -- see that module's
+                    docstring.
 ``first_call``      the conversation's first call, **in per-turn mode only**
                     (``--tiers on``): unchanged. In conversation mode
                     (``--tiers conversation``, ``conversation_level=True``)
@@ -36,6 +48,15 @@ The decision, per call, in order (the first that applies wins):
                     the request's ``thinking.type`` and, if it sets one,
                     ``output_config.effort`` (Haiku 4.5 takes neither adaptive
                     thinking nor effort; Claude Code sends both).
+``escalation``      checked after ``thinking_floor``, on EVERY call (not just
+                    the first): ``escalation.correction_signal`` found a
+                    contradiction, a ``claude:`` re-ask, or a run of failed
+                    tool calls in the newest turn. Forces the Opus tier and is
+                    treated as a class change so the ``sticky`` branch below
+                    cannot immediately pull it back down; ``detail`` carries
+                    which signal fired. Runs on every call, so it fires the
+                    moment the signal appears -- "immediately", a superset of
+                    "at the next cold point".
 ``sticky``          the policy wanted a different tier, but the conversation
                     stays where it was (``cache_cost``): same complexity
                     class and the cache is warm.
@@ -58,6 +79,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from llm_router.proxy import escalation
 from llm_router.proxy.cache_cost import ConvState, Stickiness, conversation_key, switch_cost_usd
 from llm_router.proxy.steps import has_client_tools, is_first_call, tier_text, user_pinned_model
 
@@ -74,6 +96,12 @@ REASON_THINKING_FLOOR = "thinking_floor"
 REASON_STICKY = "sticky"
 REASON_DECISION_ERROR = "decision_error"
 REASON_UNSEEN = "unseen"  # internal state marker, never a row's tier_reason
+# Phase "proxy-default": explicit/automatic escalation (proxy/escalation.py)
+# and the long-first-prompt safety floor. See that module's docstring for the
+# trial evidence behind each one.
+REASON_EXPLICIT_OPUS_PIN = "explicit_opus_pin"
+REASON_ESCALATION = "escalation"  # detail carries escalation.REASON_* (contradiction/claude_reask/tool_failures)
+REASON_LONG_FIRST_PROMPT = "long_first_prompt_floor"
 
 
 @dataclass(frozen=True)
@@ -97,6 +125,7 @@ class TierDecision:
     complexity: str | None = None
     chain_head: list = field(default_factory=list)
     complexity_score: float | None = None  # complexity_knn P(needs frontier), when consulted
+    detail: str | None = None  # e.g. escalation.REASON_* when reason == REASON_ESCALATION
 
     @property
     def rewritten(self) -> bool:
@@ -254,10 +283,29 @@ class ClaudeTierPolicy:
             return keep(REASON_CONFIG_PINNED)
         if not has_client_tools(body):
             return keep(REASON_SIDE_CALL)
+        key = conversation_key(body, session_id)
+        opus_tier = self.by_name.get("opus")
+        if opus_tier is not None and escalation.explicit_opus_pin(body):
+            # `opus:` — an explicit pin, never subject to the no-upgrade rule
+            # (config_pinned/pinned_models bypass it the same way): the user
+            # asked for Opus by name, so this call and, via stickiness, the
+            # rest of the conversation go there regardless of what the
+            # classifier would have said.
+            sticky.record(key, opus_tier.model, None, REASON_EXPLICIT_OPUS_PIN)
+            return TierDecision(requested, opus_tier.model, opus_tier.name, REASON_EXPLICIT_OPUS_PIN,
+                                switched=_canonical(opus_tier.model) != _canonical(requested))
         if user_pinned_model(body):
             return keep(REASON_USER_PINNED)
-        key = conversation_key(body, session_id)
         first = is_first_call(body)
+        if first and escalation.first_prompt_is_long_or_multi_part(body):
+            # Safety default: a first prompt that reads as a multi-part brief
+            # rather than a quick question is exactly the shape the trial's
+            # own tiering got wrong once (proxy/escalation.py docstring,
+            # t7-northstar). Skip the rewrite for THIS call and keep whatever
+            # model Claude Code itself requested; the policy still applies
+            # normally to every later call in the conversation.
+            sticky.record(key, requested, None, REASON_LONG_FIRST_PROMPT)
+            return keep(REASON_LONG_FIRST_PROMPT)
         if first and not self.conversation_level:
             # Per-turn mode: the first call is exempt (the switch cost of a
             # rewrite on the not-yet-cached prefix is the whole prompt).
@@ -286,6 +334,19 @@ class ClaudeTierPolicy:
             target = floor or req_tier
             reason = REASON_THINKING_FLOOR
 
+        detail = None
+        if opus_tier is not None and self.rank[opus_tier.name] >= self.rank[target.name]:
+            # Automatic escalation (proxy/escalation.py): a contradiction, a
+            # `claude:` re-ask, or a run of failed tool calls means the prior
+            # answer needs redoing. Applied AFTER the no-upgrade cap above —
+            # like the explicit `opus:` pin, this is a deliberate bypass of
+            # "policy only ever moves down", not a bug in it. Runs on every
+            # call (not just the first), so it fires the moment the signal
+            # appears rather than waiting for a cold point.
+            signal = escalation.correction_signal(body)
+            if signal is not None and self._accepts(opus_tier, thinking, effort):
+                target, reason, detail = opus_tier, REASON_ESCALATION, signal
+
         state = sticky.get(key)
         if state is None and not first:
             # Mid-conversation but unseen (e.g. the proxy restarted): treat it as
@@ -307,6 +368,13 @@ class ClaudeTierPolicy:
             # tier breaks stickiness); a class that would rank the same or a
             # cheaper tier never pulls a committed conversation back down.
             class_changed = self.rank[target.name] > self.rank[prev_tier.name]
+        if detail is not None:
+            # A correction-signal escalation must not be pulled back down by
+            # the "no class change -> stay sticky" branch below just because
+            # the CLASSIFIED complexity of this turn happens to match the
+            # conversation's last one — the signal is an escalation event in
+            # its own right, independent of what the classifier said.
+            class_changed = True
         handoff = state is not None and self.switch_after_first_call and state.reason == REASON_FIRST_CALL
         if (state is not None and _canonical(prev_model) != _canonical(served)
                 and not class_changed and not cold and not handoff):
@@ -324,4 +392,4 @@ class ClaudeTierPolicy:
         sticky.record(key, served, cx, reason)
         return TierDecision(requested, served, target.name, reason, switched=switched, switch_cost_usd=cost,
                             task_type=task, complexity=cx, chain_head=list(choice.get("chain_head") or [])[:4],
-                            complexity_score=choice.get("complexity_score"))
+                            complexity_score=choice.get("complexity_score"), detail=detail)

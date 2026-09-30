@@ -366,3 +366,127 @@ not measure. The `tiered` arm (`--arms tiered [--tier-policy F]
 [--requested-model M]`) runs the tier rewrite with no local serving. It reports
 the tier decisions; the oracle replays recorded replies whatever model is
 named, so it cannot say how a cheaper tier would have answered.
+
+## Proxy-default: making the proxy the DEFAULT for every session
+
+Everything above is opt-in, one session at a time. `llm-router install
+--proxy-default` is the opposite risk profile: it makes this proxy the
+`ANTHROPIC_BASE_URL` for **every** Claude Code session on the machine, which
+means a dead proxy fails every session's first API call, not just one that
+opted in. Owner-approved 2026-09-30 after a trial on real prompts
+(`~/.rsi/research/llm-router-cursor-parity/trial-real-prompts.md`, n=6):
+72-80% lower cost, every conversation landed on Sonnet (the classifier never
+picked Opus), and 1 of 6 routed answers was unacceptable — a moderate,
+investigation-heavy first prompt Sonnet answered shallowly. Everything below
+exists because of that last finding as much as the first two.
+
+### Install / uninstall
+
+```bash
+llm-router install --proxy-default        # on
+llm-router install --proxy-default off    # off (same as `llm-router uninstall`)
+```
+
+Implemented in `llm_router.proxy_default` (service rendering + health probe)
+and `llm_router.commands.proxy_default` (orchestration). The install:
+
+1. writes a supervised service — a macOS LaunchAgent (`KeepAlive`) or a Linux
+   systemd user unit (`Restart=on-failure`), running
+   `llm-router proxy --steps off --tiers conversation`;
+2. **reuses** a proxy already answering on the target port instead of
+   installing a second one that would fight it for the port — this is how it
+   stays compatible with a proxy the owner already runs by hand
+   (`com.ypollak2.llm-router-proxy` on :8787) without assuming that exact
+   label;
+3. polls the proxy's health (a raw TCP connect — see `proxy_health()`'s own
+   docstring for why not an HTTP probe) before doing anything else;
+4. only once healthy, backs up `~/.claude/settings.json`
+   (`install_hooks._backup_before_overwrite`) and sets `env.ANTHROPIC_BASE_URL`
+   / `env.ENABLE_TOOL_SEARCH=true`, recording the WHOLE previous `env` value
+   in the install manifest (`install_manifest`, kind `json_key`) so uninstall
+   restores it exactly rather than deleting keys blindly;
+5. **refuses** — no settings.json write at all — if the proxy never answers.
+   Nothing in `~/.claude/settings.json` changes on a refused install.
+
+`llm-router uninstall` (or `install --proxy-default off`) stops and removes
+the service, removes the sentinel (`~/.llm-router/proxy_default.json`), and
+restores `env` via the manifest replay — all three happen whether or not the
+proxy is currently up.
+
+### Fail-safe: what happens when the proxy is down
+
+Because every session depends on it once installed:
+
+- **KeepAlive/`Restart=on-failure`** restarts a crashed process in place — the
+  supervisor IS the watchdog. A separate polling watchdog process was
+  considered and not built: it would duplicate what the health checks below
+  already do on every doctor run, every statusline render and every session
+  start, for a failure mode (hung-but-not-crashed) KeepAlive already doesn't
+  cover either, and this project's own working agreement asks for the
+  smallest thing that works.
+- **`llm-router doctor`** has a "Proxy-default" section: reads the sentinel,
+  TCP-probes the port, and prints the exact recovery command
+  (`launchctl kickstart -k gui/$(id -u)/com.llm_router.proxy` /
+  `systemctl --user restart llm_router-proxy`) plus the log path on failure.
+- **The statusline** shows `🔌 proxy down:<port>` in red the instant the probe
+  fails — gated on the sentinel, so a user who never installed proxy-default
+  pays nothing extra here.
+- **The SessionStart hook** (`_check_proxy_default_health` in
+  `hooks/session-start.py`) warns at the start of every session with the same
+  recovery command. It cannot fix the session already starting: **investigated
+  2026-09-30 — there is no SessionStart hook mechanism that overrides the base
+  URL for the session already in flight.** `settings.json`'s
+  `env.ANTHROPIC_BASE_URL` is read by Claude Code before constructing its API
+  client, and every hook (including this one) only runs after that. This is
+  the same timing `_sync_pxpipe_anthropic_base_url` already documents for its
+  own self-heal ("takes effect next session, not this one") — proxy-default's
+  hook only warns rather than also rewriting settings.json, because unlike
+  pxpipe there is no dynamically-reachable fallback endpoint to switch to;
+  the fix genuinely is "go start the proxy."
+- **Tested for real, 2026-09-30**: started a real `llm-router proxy` process on
+  a test port, confirmed `doctor`/statusline/SessionStart hook all report it
+  healthy, killed the process, and confirmed all three immediately and
+  consistently report it down with the exact recovery command above (see
+  `tests/test_proxy_default_orchestration.py`,
+  `tests/test_session_start_proxy_default.py`,
+  `tests/test_statusline_proxy_default.py`).
+
+### Escalation to Opus (`proxy/escalation.py`)
+
+Directly motivated by the trial's one unacceptable answer:
+
+- **Explicit: `opus:`.** A prompt starting with `opus:` pins the conversation
+  to the Opus tier for the rest of the conversation (via the existing
+  stickiness mechanism), bypassing classification. Matches only the literal
+  `opus:` prefix — the owner's own `claude:` convention is a different,
+  narrower signal (below) and is never touched, stripped, or treated as a
+  routing keyword by this check.
+- **Automatic.** A contradiction opening a prompt ("no,", "that's wrong",
+  "you missed", …), a re-ask starting with `claude:`, or two or more
+  consecutive tool calls coming back as errors, escalates the conversation to
+  Opus on the call where the signal appears — since the tier decision runs on
+  every call, this is "immediately", a strict superset of "at the next cold
+  point". Stickiness then holds it on Opus (a correction-signal escalation is
+  treated as a class-change event so it cannot be pulled back down by the
+  normal "same class, stay sticky" branch — see the `detail is not None`
+  block in `ClaudeTierPolicy.decide()`).
+- **Logged.** Every escalation's reason (`explicit_opus_pin`, `escalation` +
+  `detail` = `contradiction`/`claude_reask`/`tool_failures`) is written to the
+  proxy ledger's `tier_reason`/`tier_detail` columns.
+- **Never downgraded:**
+  - a request naming a model that isn't a configured tier, or a `pinned_models`
+    id, or a conversation whose transcript shows `/model` — all pre-existing
+    `ClaudeTierPolicy` guarantees, unchanged;
+  - a first prompt that is long (≥120 words, `LLM_ROUTER_PROXY_LONG_PROMPT_WORDS`)
+    or multi-part (≥3 bullet/numbered items, `LLM_ROUTER_PROXY_LONG_PROMPT_PARTS`)
+    skips the rewrite for that call entirely and keeps whatever model Claude
+    Code itself requested — a paraphrase of the trial's own failure
+    (t7-northstar: a moderate-classified investigation-heavy first prompt) is
+    a regression test for this
+    (`test_long_first_prompt_never_rewritten` in `tests/test_proxy_escalation.py`).
+
+| Env var | Default |
+|---|---|
+| `LLM_ROUTER_PROXY_ESCALATION_TOOL_FAIL_N` | `2` consecutive failed tool turns before escalating |
+| `LLM_ROUTER_PROXY_LONG_PROMPT_WORDS` | `120` |
+| `LLM_ROUTER_PROXY_LONG_PROMPT_PARTS` | `3` |

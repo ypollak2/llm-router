@@ -142,6 +142,17 @@ def _run_uninstall(flags: list[str] | None = None) -> None:
         actions.extend(_remove_derived_state())
     except Exception as e:
         actions.append(f"derived-state cleanup skipped: {e}")
+    # Proxy-default (commands/proxy_default.py): stops and removes the
+    # supervised proxy service and its sentinel. settings.json's
+    # ANTHROPIC_BASE_URL/ENABLE_TOOL_SEARCH are already reverted above by the
+    # manifest replay (a json_key record for the whole `env` block) — this
+    # only tears down the OS-level service, which the manifest's generic
+    # "file" record does not stop/unload, only delete.
+    try:
+        from llm_router.commands.proxy_default import uninstall_proxy_default
+        actions.extend(uninstall_proxy_default())
+    except Exception as e:
+        actions.append(f"proxy-default cleanup skipped: {e}")
     for a in actions:
         print(f"  {a}")
 
