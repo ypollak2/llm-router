@@ -200,7 +200,7 @@ class OllamaBackend:
         t0 = loop.time()
         async with self.client.stream("POST", self.base_url + "/api/chat", json=payload,
                                       timeout=timeout_s) as resp:
-            resp.raise_for_status()
+            await _raise_with_body(resp)
             lines = resp.aiter_lines()
             try:
                 first = await asyncio.wait_for(lines.__anext__(), timeout=self.hedge_s)
@@ -216,6 +216,11 @@ class OllamaBackend:
                     objs.append(json.loads(line))
         if not objs:
             return None, "empty response", {"first_token_s": first_token_s}
+        stream_error = next((o["error"] for o in objs if o.get("error")), None)
+        if stream_error:
+            # A runner failure mid-stream arrives as an ``error`` line; read as
+            # a reply it would look merely empty and hide the crash signature.
+            return None, f"ollama error: {str(stream_error)[:200]}", {"first_token_s": first_token_s}
         data = merge_stream(objs)
         usage = {"prompt_tokens": data.get("prompt_eval_count"), "output_tokens": data.get("eval_count"),
                  "prompt_eval_s": round((data.get("prompt_eval_duration") or 0) / 1e9, 2),
@@ -238,6 +243,47 @@ class OllamaBackend:
         r = await self.client.post(self.base_url + "/api/chat", json=payload, timeout=timeout_s)
         r.raise_for_status()
         return round(loop.time() - t0, 2)
+
+
+    async def probe(self, timeout_s: float) -> tuple[bool, str]:
+        """The breaker's cheap health request (``proxy.backend_health``): one
+        token, streamed, with the serving ``num_ctx`` so it never reloads the
+        model. A crashed runner answers it with no lines at all (the 2026-09-30
+        post-crash shape), an ``error`` line or an HTTP error."""
+        payload = {"model": self.model, "messages": [{"role": "user", "content": "ok"}],
+                   "stream": True, "think": False,
+                   "options": {"num_ctx": self.num_ctx, "num_predict": 1}}
+        if self.keep_alive is not None:
+            payload["keep_alive"] = self.keep_alive
+        objs: list[dict] = []
+        async with self.client.stream("POST", self.base_url + "/api/chat", json=payload,
+                                      timeout=timeout_s) as resp:
+            if resp.status_code >= 400:
+                body = (await resp.aread()).decode("utf-8", "replace")
+                return False, f"HTTP {resp.status_code}: {body[:200]}"
+            async for line in resp.aiter_lines():
+                if line.strip():
+                    objs.append(json.loads(line))
+        if not objs:
+            return False, "empty reply"
+        err = next((o["error"] for o in objs if o.get("error")), None)
+        if err:
+            return False, f"ollama error: {str(err)[:200]}"
+        text = "".join((o.get("message") or {}).get("content") or "" for o in objs)
+        generated = objs[-1].get("eval_count")  # absent is unmeasured, not zero
+        if text or (isinstance(generated, int) and generated >= 1):
+            return True, "ok"
+        return False, "no token generated"
+
+
+async def _raise_with_body(resp) -> None:
+    """``raise_for_status`` with the start of the error body in the message:
+    Ollama puts the runner's failure text there, and the backend-health
+    breaker matches crash signatures in it."""
+    if resp.status_code < 400:
+        return
+    body = (await resp.aread()).decode("utf-8", "replace")
+    raise RuntimeError(f"HTTP {resp.status_code}: {body[:200]}")
 
 
 def merge_stream(objs: list[dict]) -> dict:

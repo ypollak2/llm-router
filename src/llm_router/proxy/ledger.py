@@ -12,10 +12,14 @@ Row fields:
   decision        served | forwarded | fallback
   reason          why not served: routing_off | not_eligible | policy_kept |
                   budget_exceeded | backend_error | validation |
+                  backend_unhealthy (skipped, no attempt: see backend_health) |
                   edit_to_claude (an Edit/Write reply from the raw tool-call
                   loop, never served) and, with ``--local-agent``,
                   task_type_unsuitable | multi_file_write | breaker_open |
                   edit_protocol_failed                      (None if served)
+  backend_health  the backend-health breaker (``proxy.backend_health``), only
+                  when it acted: {state: tripped|open|recovered|trial, trigger,
+                  retry_in_s, probe_ok, probe_detail, probe_s}
   detail          short scrubbed error text for a fallback
   task_type, complexity, model      the policy's view and the serving model
   route_latency_s     time spent on the non-Claude attempt (served or not)
